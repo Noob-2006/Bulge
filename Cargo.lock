@@ -75,6 +75,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "bulge-cli"
+version = "0.1.0"
+dependencies = [
+ "bulge-core",
+ "bulge-guard",
+ "bulge-harness",
+ "bulge-llm",
+ "bulge-store",
+ "bulge-vm",
+ "futures",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-util",
+]
+
+[[package]]
 name = "bulge-core"
 version = "0.1.0"
 dependencies = [
