@@ -103,6 +103,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "bulge-store"
+version = "0.1.0"
+dependencies = [
+ "bulge-llm",
+ "getrandom 0.4.3",
+ "serde",
+ "serde_json",
+ "thiserror",
+]
+
+[[package]]
 name = "bulge-vm"
 version = "0.1.0"
 dependencies = [

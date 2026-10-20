@@ -1,0 +1,18 @@
+[package]
+name = "bulge-store"
+description = "Durable job state: append-only JSONL event log, state reduction, crash recovery"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+bulge-llm = { path = "../bulge-llm" }
+getrandom.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+
+[lints]
+workspace = true
