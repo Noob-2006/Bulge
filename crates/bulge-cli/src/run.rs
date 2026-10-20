@@ -143,8 +143,17 @@ fn flush_new_lines(path: &Path, offset: usize) -> usize {
     offset + last_newline + 1
 }
 
-/// Run one job end to end. Returns the loop outcome.
-pub async fn run(config: RunConfig) -> Result<LoopOutcome, String> {
+/// What a completed run produced.
+pub struct RunOutcome {
+    pub outcome: LoopOutcome,
+    pub status: bulge_store::JobStatus,
+    pub job_dir: PathBuf,
+    /// The collected workspace diff, if any changes were made.
+    pub diff: Option<String>,
+}
+
+/// Run one job end to end.
+pub async fn run(config: RunConfig) -> Result<RunOutcome, String> {
     let backend = backend::build(&config.backend)?;
     let system_prompt = build_system_prompt(&config.harness_dir, &config.goal);
 
@@ -205,15 +214,17 @@ pub async fn run(config: RunConfig) -> Result<LoopOutcome, String> {
     let _ = tail.await;
 
     // Collect workspace changes and write the diff out (the host is not touched).
+    let mut diff: Option<String> = None;
     if let Ok(pending) = changes::collect(&vm).await {
         if pending.is_empty() {
             eprintln!("no workspace changes");
         } else {
-            let diff = changes::render_diff(&config.workspace, &pending);
+            let rendered = changes::render_diff(&config.workspace, &pending);
             let diff_path = job.dir().join("changes.diff");
-            if std::fs::write(&diff_path, &diff).is_ok() {
+            if std::fs::write(&diff_path, &rendered).is_ok() {
                 eprintln!("{} change(s) written to {}", pending.len(), diff_path.display());
             }
+            diff = Some(rendered);
         }
     }
 
@@ -228,7 +239,7 @@ pub async fn run(config: RunConfig) -> Result<LoopOutcome, String> {
     improve(backend.as_ref(), &mut job, &config).await;
 
     eprintln!("outcome: {outcome:?}  status: {:?}  summary: {:?}  steps: {}  tokens: {}", job.state().status, job.state().summary, job.state().steps, job.state().usage.total());
-    Ok(outcome)
+    Ok(RunOutcome { outcome, status: job.state().status, job_dir: job.dir().to_path_buf(), diff })
 }
 
 /// Ask the model for durable lessons from this job and save them to memory.
