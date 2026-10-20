@@ -9,7 +9,7 @@ use std::time::Duration;
 use bulge_proto::frame::{PeerRole, SessionKey};
 use bulge_proto::msg::{BOOTSTRAP_PATH, Bootstrap, CONTROL_VSOCK_PORT, GuestMessage, HostMessage};
 use bulge_proto::session::{SessionParams, establish};
-use sandboxd::commands;
+use sandboxd::{commands, tools};
 use sandboxd::runtime::{CommandRuntime, Invocation};
 use tokio::sync::mpsc;
 use tokio_vsock::{VMADDR_CID_ANY, VsockAddr, VsockListener};
@@ -30,6 +30,12 @@ async fn run() -> Result<(), String> {
         .command("ping", |_| async { Ok(serde_json::json!("pong")) })
         .command("exec", commands::exec)
         .command("changes", commands::changes)
+        .command("export_changes", tools::handlers::export_changes)
+        .command("read", tools::handlers::read)
+        .command("write", tools::handlers::write)
+        .command("edit", tools::handlers::edit)
+        .command("glob", tools::handlers::glob)
+        .command("grep", tools::handlers::grep)
         .max_timeout(Duration::from_secs(30 * 60))
         .build()
         .map_err(|e| format!("runtime: {e}"))?;
