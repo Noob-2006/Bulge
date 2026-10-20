@@ -18,7 +18,7 @@ pub struct Observation {
     pub tool: String,
     /// Canonical arguments (object key order does not matter).
     pub arguments: Value,
-    /// True if the call errored or made no observable change.
+    /// True when the call succeeded and produced an observable change.
     pub ok: bool,
     /// Structured result (for outcome hashing); volatile fields are stripped.
     pub result: Value,
@@ -84,11 +84,10 @@ struct ChurnStreak {
     variants: usize,
 }
 
-/// Result of the ping-pong scan. `count` includes the call about to run.
+/// Result of the ping-pong scan.
 struct PingPongStreak {
     count: usize,
     no_progress_evidence: bool,
-    paired_tool: String,
 }
 
 impl LoopDetector {
@@ -118,8 +117,7 @@ impl LoopDetector {
             }
         }
 
-        let (no_progress_count, _latest_outcome) =
-            self.no_progress_streak(tool, signature);
+        let no_progress_count = self.no_progress_streak(tool, signature);
 
         if no_progress_count >= GLOBAL_CIRCUIT_BREAKER_THRESHOLD {
             return Some(Verdict {
@@ -156,53 +154,51 @@ impl LoopDetector {
             });
         }
 
-        if let Some(ping_pong) = self.ping_pong_streak(signature) {
-            if ping_pong.count >= WARNING_THRESHOLD {
-                let critical =
-                    ping_pong.count >= CRITICAL_THRESHOLD && ping_pong.no_progress_evidence;
-                let level = if critical {
-                    Level::Critical
-                } else {
-                    Level::Warning
-                };
-                let prefix = if critical { "CRITICAL" } else { "WARNING" };
-                let evidence = if critical {
-                    " with no progress"
-                } else {
-                    ""
-                };
-                return Some(Verdict {
-                    level,
-                    detector: Detector::PingPong,
-                    count: ping_pong.count,
-                    message: format!(
-                        "{prefix}: `{tool}` is alternating between `{tool}` and `{}` \
-                         ({}{evidence}, {} consecutive calls). Stop retrying; change \
-                         to a bounded alternative with an explicit stop condition, or \
-                         report the task as failed.",
-                        ping_pong.paired_tool,
-                        ping_pong.count,
-                        ping_pong.count,
-                    ),
-                });
-            }
+        if let Some(ping_pong) = self.ping_pong_streak()
+            && ping_pong.count >= WARNING_THRESHOLD
+        {
+            let critical =
+                ping_pong.count >= CRITICAL_THRESHOLD && ping_pong.no_progress_evidence;
+            let level = if critical {
+                Level::Critical
+            } else {
+                Level::Warning
+            };
+            let prefix = if critical { "CRITICAL" } else { "WARNING" };
+            let evidence = if critical {
+                " with no progress"
+            } else {
+                ""
+            };
+            return Some(Verdict {
+                level,
+                detector: Detector::PingPong,
+                count: ping_pong.count,
+                message: format!(
+                    "{prefix}: `{tool}` is alternating between two tool-call signatures\
+                     {evidence} ({} consecutive calls). Stop retrying; change to a \
+                     bounded alternative with an explicit stop condition, or report \
+                     the task as failed.",
+                    ping_pong.count,
+                ),
+            });
         }
 
-        if let Some(churn) = self.argument_churn_streak(tool) {
-            if churn.count >= WARNING_THRESHOLD {
-                return Some(Verdict {
-                    level: Level::Warning,
-                    detector: Detector::ArgumentChurn,
-                    count: churn.count,
-                    message: format!(
-                        "WARNING: `{tool}` produced the same no-progress outcome across \
-                         {} different argument patterns for {} calls in a row. Change to \
-                         a bounded alternative with an explicit stop condition, or report \
-                         the task as failed.",
-                        churn.variants, churn.count,
-                    ),
-                });
-            }
+        if let Some(churn) = self.argument_churn_streak(tool)
+            && churn.count >= WARNING_THRESHOLD
+        {
+            return Some(Verdict {
+                level: Level::Warning,
+                detector: Detector::ArgumentChurn,
+                count: churn.count,
+                message: format!(
+                    "WARNING: `{tool}` produced the same no-progress outcome across \
+                     {} different argument patterns for {} calls in a row. Change to \
+                     a bounded alternative with an explicit stop condition, or report \
+                     the task as failed.",
+                    churn.variants, churn.count,
+                ),
+            });
         }
 
         let error_count = self.identical_error_streak(tool, signature);
@@ -250,7 +246,7 @@ impl LoopDetector {
 
     /// Consecutive completed calls with the same signature and outcome. Returns
     /// zero once the most recent call made progress (a changed outcome).
-    fn no_progress_streak(&self, tool: &str, signature: u64) -> (usize, Option<u64>) {
+    fn no_progress_streak(&self, tool: &str, signature: u64) -> usize {
         let mut latest_outcome = None;
         let mut count = 0;
         let mut latest_no_progress = false;
@@ -270,11 +266,7 @@ impl LoopDetector {
             count += 1;
         }
 
-        if latest_no_progress {
-            (count, latest_outcome)
-        } else {
-            (0, latest_outcome)
-        }
+        if latest_no_progress { count } else { 0 }
     }
 
     /// Consecutive prior calls to `tool`; the check is for the next call to the
@@ -325,18 +317,14 @@ impl LoopDetector {
         }
     }
 
-    /// A stable A,B,A,B tail. The call about to run is the next member of the
-    /// pattern, so it is counted too.
-    fn ping_pong_streak(&self, current_signature: u64) -> Option<PingPongStreak> {
+    /// A stable A,B,A,B tail over the recorded calls.
+    fn ping_pong_streak(&self) -> Option<PingPongStreak> {
         let last = self.history.back()?;
         let other = self
             .history
             .iter()
             .rev()
             .find(|record| record.signature != last.signature)?;
-        if current_signature != other.signature {
-            return None;
-        }
 
         let mut alternating_tail = 0;
         for record in self.history.iter().rev() {
@@ -371,9 +359,8 @@ impl LoopDetector {
         }
 
         Some(PingPongStreak {
-            count: alternating_tail + 1,
+            count: alternating_tail,
             no_progress_evidence: stable && outcomes.len() >= 2,
-            paired_tool: last.tool.clone(),
         })
     }
 
@@ -420,12 +407,19 @@ fn is_volatile_key(key: &str, value: &Value) -> bool {
         | "time"
         | "duration"
         | "durationMs"
+        | "duration_ms"
         | "elapsed"
+        | "elapsedMs"
+        | "elapsed_ms"
         | "pid"
         | "requestId"
+        | "request_id"
         | "startedAt"
+        | "started_at"
         | "finishedAt"
-        | "at_ms" => true,
+        | "finished_at"
+        | "at_ms"
+        | "atMs" => true,
         "id" => looks_random(value),
         _ => false,
     }
@@ -439,7 +433,8 @@ fn looks_random(value: &Value) -> bool {
     };
     let has_digit = text.chars().any(|c| c.is_ascii_digit());
     let has_alpha = text.chars().any(|c| c.is_ascii_alphabetic());
-    text.len() >= 8 && has_digit && has_alpha
+    let all_hex = text.chars().all(|c| c.is_ascii_hexdigit());
+    text.len() >= 8 && ((has_digit && has_alpha) || all_hex)
 }
 
 /// Recursively drop volatile keys from a result value.
@@ -543,6 +538,9 @@ fn result_is_error(result: &Value) -> bool {
         return true;
     }
     if object.get("isError").and_then(Value::as_bool) == Some(true) {
+        return true;
+    }
+    if object.get("error").is_some_and(|error| !error.is_null()) {
         return true;
     }
     matches!(
@@ -731,7 +729,7 @@ mod tests {
             .expect("alternating calls should warn");
         assert_eq!(verdict.level, Level::Warning);
         assert_eq!(verdict.detector, Detector::PingPong);
-        assert!(verdict.count >= WARNING_THRESHOLD);
+        assert_eq!(verdict.count, WARNING_THRESHOLD);
         assert!(verdict.message.contains("alternating"));
     }
 
@@ -760,7 +758,7 @@ mod tests {
             .expect("long alternating calls should be critical");
         assert_eq!(verdict.level, Level::Critical);
         assert_eq!(verdict.detector, Detector::PingPong);
-        assert!(verdict.count >= CRITICAL_THRESHOLD);
+        assert_eq!(verdict.count, CRITICAL_THRESHOLD);
         assert!(verdict.message.contains("no progress"));
     }
 
