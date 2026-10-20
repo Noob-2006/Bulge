@@ -32,3 +32,4 @@
 | M15 | crates/bulge-store/src/log.rs | DSH session-persistence-jsonl |
 | M16 | crates/bulge-core/src/schedule.rs | DSH agent-loop tool-calls.ts |
 | M17 | crates/bulge-guard/src/loop_detect.rs | openclaw tool-loop-detection.ts |
+| M18 | crates/bulge-core/src/context.rs | DSH token-meter+compaction, openclaw pruning, opencode compaction |
