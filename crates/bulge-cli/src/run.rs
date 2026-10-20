@@ -188,7 +188,10 @@ pub async fn run(config: RunConfig) -> Result<RunOutcome, String> {
             runtime_root: PathBuf::from(std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| "/tmp".into())).join("bulge"),
             cpus: config.cpus,
             ram_mib: config.ram_mib,
-            network: config.network,
+            // Never attach the raw NIC; outbound access, when enabled, is the
+            // two-key gateway restricted to the allowlisted package/source hosts.
+            network: false,
+            egress_allow: if config.network { bulge_guard::netgate::allowlist_suffixes() } else { Vec::new() },
         })
         .await
         .map_err(|e| format!("launch VM: {e}"))?,

@@ -19,6 +19,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         cpus: 2,
         ram_mib: 1024,
         network: false,
+        egress_allow: Vec::new(),
     })
     .await?;
     let calls = [

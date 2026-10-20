@@ -31,7 +31,8 @@ fn bad_params(error: impl std::fmt::Display) -> HandlerError {
 pub async fn exec(cx: InvocationContext) -> Result<Value, HandlerError> {
     let params: ExecParams = serde_json::from_value(cx.invocation.params.clone()).map_err(bad_params)?;
     let cwd = params.cwd.unwrap_or_else(|| WORKSPACE.to_owned());
-    let mut child = Command::new("/bin/sh")
+    let mut command = Command::new("/bin/sh");
+    command
         .arg("-c")
         .arg(&params.command)
         .current_dir(&cwd)
@@ -41,9 +42,12 @@ pub async fn exec(cx: InvocationContext) -> Result<Value, HandlerError> {
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .kill_on_drop(true)
-        .spawn()
-        .map_err(|e| HandlerError::new("SPAWN_FAILED", e.to_string()))?;
+        .kill_on_drop(true);
+    // Outbound access, if any, is only through the two-key egress proxy.
+    if let Some(proxy) = crate::EGRESS_PROXY.get() {
+        command.env("HTTPS_PROXY", proxy).env("https_proxy", proxy).env("ALL_PROXY", proxy);
+    }
+    let mut child = command.spawn().map_err(|e| HandlerError::new("SPAWN_FAILED", e.to_string()))?;
     let stdout = child.stdout.take().ok_or_else(|| HandlerError::new("SPAWN_FAILED", "no stdout"))?;
     let stderr = child.stderr.take().ok_or_else(|| HandlerError::new("SPAWN_FAILED", "no stderr"))?;
     let collect = async {

@@ -9,6 +9,9 @@ use serde_json::Value;
 
 /// vsock port the guest daemon listens on for the control channel.
 pub const CONTROL_VSOCK_PORT: u32 = 1024;
+/// vsock port the guest dials outbound for the two-key egress gateway (the host
+/// listens on the bridged socket).
+pub const GATEWAY_VSOCK_PORT: u32 = 1025;
 
 /// Path (inside the guest) of the one-shot virtual file that carries the
 /// session bootstrap. The guest reads it once at startup; it can never be read
@@ -30,6 +33,12 @@ pub struct Bootstrap {
     pub host_uid: u32,
     #[serde(default)]
     pub host_gid: u32,
+    /// The two egress-gateway secrets (hex). The guest must present both to open
+    /// any outbound connection. Empty means the guest has no egress at all.
+    #[serde(default)]
+    pub gateway_token: String,
+    #[serde(default)]
+    pub gateway_key: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

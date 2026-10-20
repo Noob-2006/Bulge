@@ -50,6 +50,15 @@ struct Share {
 struct VsockPort {
     port: u32,
     host_socket: PathBuf,
+    /// true: the guest listens, the host connects via `host_socket` (control).
+    /// false: the host listens on `host_socket`, the guest connects to `port`
+    /// (used for the guest's outbound egress gateway).
+    #[serde(default = "default_true")]
+    listen: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 #[derive(Debug, Deserialize)]
@@ -153,7 +162,7 @@ fn run() -> Result<(), String> {
         check("krun_add_vsock", krun_add_vsock(ctx, 0))?;
         for port in &config.vsock_listen {
             let path = hold(path_cstr(&port.host_socket)?);
-            check("krun_add_vsock_port2", krun_add_vsock_port2(ctx, port.port, path, true))?;
+            check("krun_add_vsock_port2", krun_add_vsock_port2(ctx, port.port, path, port.listen))?;
         }
 
         for file in &config.one_shot_files {

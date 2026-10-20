@@ -26,12 +26,14 @@ use tokio::net::UnixStream;
 use tokio::process::{Child, Command};
 use tokio::sync::{Mutex, oneshot};
 
+use crate::net::gateway::GATEWAY_VSOCK_PORT;
 use crate::net::{EgressPolicy, RelayHandle, spawn_relay};
 
 /// passt's DNS forwarder address handed to the guest. A documentation range
 /// (never routed); the egress policy allows it on port 53 only.
 const DNS_FORWARDER: &str = "198.51.100.53";
 const CONTROL_SOCKET: &str = "control.sock";
+const GATEWAY_SOCKET: &str = "gateway.sock";
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Debug, Clone)]
@@ -46,7 +48,13 @@ pub struct VmConfig {
     pub runtime_root: PathBuf,
     pub cpus: u8,
     pub ram_mib: u32,
+    /// Raw NIC egress (legacy, unauthenticated; the guest gets a passt-backed
+    /// interface filtered only by IP). Prefer `egress_allow` instead.
     pub network: bool,
+    /// Two-key egress gateway: allowed destination host suffixes. When non-empty
+    /// the guest gets no raw NIC — its only way out is the authenticated gateway,
+    /// which permits only these hosts. Empty means no gateway egress.
+    pub egress_allow: Vec<String>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -65,6 +73,9 @@ pub struct Vm {
     vmm: Child,
     passt: Option<Child>,
     relay: Option<RelayHandle>,
+    /// The egress gateway's accept loop; aborted on teardown.
+    gateway: Option<tokio::task::JoinHandle<()>>,
+    gateway_stats: Option<Arc<crate::net::GatewayStats>>,
     sender: Mutex<bulge_proto::session::Sender<UnixStream>>,
     pending: Pending,
     next_id: AtomicU64,
@@ -90,12 +101,38 @@ impl Vm {
         // The runtime dir we just created is owned by whoever runs bulge; the
         // guest drops to this uid/gid so it never runs tools as root.
         let owner = std::fs::metadata(&runtime_dir)?;
+
+        // Two-key egress gateway: mint both secrets, start the host side, and
+        // hand the secrets to the guest through the sealed bootstrap.
+        let (mut gateway, mut gateway_stats) = (None, None);
+        let (mut gateway_token, mut gateway_key) = (String::new(), String::new());
+        if !config.egress_allow.is_empty() {
+            gateway_token = random_hex(32)?;
+            gateway_key = random_hex(32)?;
+            let socket_path = runtime_dir.join(GATEWAY_SOCKET);
+            let listener = crate::net::gateway::bind(&socket_path)?;
+            let stats = Arc::new(crate::net::GatewayStats::default());
+            let handle = crate::net::gateway::serve(
+                listener,
+                crate::net::GatewayConfig {
+                    token: gateway_token.clone(),
+                    key: gateway_key.clone(),
+                    allow_suffixes: config.egress_allow.clone(),
+                    stats: stats.clone(),
+                },
+            );
+            gateway = Some(handle);
+            gateway_stats = Some(stats);
+        }
+
         let bootstrap = Bootstrap {
             session_key_hex: key.iter().map(|b| format!("{b:02x}")).collect(),
             session_id: session_id.clone(),
             generation: 1,
             host_uid: owner.uid(),
             host_gid: owner.gid(),
+            gateway_token,
+            gateway_key,
         };
 
         // Network: VMM <-> relay (filter) <-> passt.
@@ -119,13 +156,23 @@ impl Vm {
         }
 
         let control_path = runtime_dir.join(CONTROL_SOCKET);
+        // Control port: the guest listens, the host connects. Gateway port (only
+        // when egress is on): the host listens, the guest connects out.
+        let mut vsock_ports = vec![json!({ "port": CONTROL_VSOCK_PORT, "host_socket": control_path, "listen": true })];
+        if gateway.is_some() {
+            vsock_ports.push(json!({
+                "port": GATEWAY_VSOCK_PORT,
+                "host_socket": runtime_dir.join(GATEWAY_SOCKET),
+                "listen": false,
+            }));
+        }
         let vmm_config = json!({
             "rootfs": config.rootfs,
             "cpus": config.cpus,
             "ram_mib": config.ram_mib,
             "net_fd": vm_net.as_ref().map(|_| 3),
             "shares": [{ "tag": "workspace", "host_path": config.workspace }],
-            "vsock_listen": [{ "port": CONTROL_VSOCK_PORT, "host_socket": control_path }],
+            "vsock_listen": vsock_ports,
             "one_shot_files": [{
                 "path": BOOTSTRAP_PATH.trim_start_matches('/'),
                 "contents": serde_json::to_string(&bootstrap).map_err(|e| VmError::Other(e.to_string()))?,
@@ -179,7 +226,7 @@ impl Vm {
             }
         });
 
-        Ok(Self { vmm, passt, relay, sender: Mutex::new(sender), pending, next_id: AtomicU64::new(1), commands, runtime_dir })
+        Ok(Self { vmm, passt, relay, gateway, gateway_stats, sender: Mutex::new(sender), pending, next_id: AtomicU64::new(1), commands, runtime_dir })
     }
 
     pub fn commands(&self) -> &[String] {
@@ -188,6 +235,11 @@ impl Vm {
 
     pub fn runtime_dir(&self) -> &Path {
         &self.runtime_dir
+    }
+
+    /// Egress-gateway counters (allowed / denied / failed), when the gateway is on.
+    pub fn gateway_stats(&self) -> Option<Arc<crate::net::GatewayStats>> {
+        self.gateway_stats.clone()
     }
 
     pub fn network_stats(&self) -> Option<Arc<crate::net::RelayStats>> {
@@ -232,6 +284,9 @@ impl Drop for Vm {
         let _ = self.vmm.start_kill();
         if let Some(passt) = self.passt.as_mut() {
             let _ = passt.start_kill();
+        }
+        if let Some(gateway) = self.gateway.take() {
+            gateway.abort();
         }
         let _ = std::fs::remove_dir_all(&self.runtime_dir);
     }

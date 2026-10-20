@@ -57,6 +57,12 @@ pub fn is_allowlisted(domain: &str) -> bool {
     ALLOWLIST.iter().any(|s| domain_matches_suffix(domain, s))
 }
 
+/// The built-in allowlist suffixes (package registries, source hosts,
+/// toolchains), for configuring the egress gateway.
+pub fn allowlist_suffixes() -> Vec<String> {
+    ALLOWLIST.iter().map(|s| (*s).to_string()).collect()
+}
+
 #[derive(Debug, Default)]
 pub struct NetGate {
     /// domain → the IPs it has resolved to so far.

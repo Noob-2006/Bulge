@@ -13,7 +13,7 @@ futures = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
-tokio = { workspace = true, features = ["process", "fs", "rt-multi-thread", "macros"] }
+tokio = { workspace = true, features = ["process", "fs", "rt-multi-thread", "macros", "net", "io-util"] }
 tokio-vsock = "0.7"
 base64 = "0.22"
 nix = { version = "0.30", features = ["user", "process"] }

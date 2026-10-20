@@ -21,6 +21,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         cpus: 2,
         ram_mib: 1024,
         network: true,
+        egress_allow: Vec::new(),
     };
     let started = std::time::Instant::now();
     let vm = Vm::launch(config).await?;

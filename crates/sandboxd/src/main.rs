@@ -30,6 +30,17 @@ async fn run() -> Result<(), String> {
     sandboxd::setup::lock_down(uid, gid).map_err(|e| format!("setup: {e}"))?;
     sandboxd::setup::drop_privileges(uid, gid).map_err(|e| format!("drop privileges: {e}"))?;
 
+    // Start the egress bridge if the host armed the gateway (both secrets present).
+    // Tools reach the outside world only through it; otherwise the guest is
+    // air-gapped.
+    let (gateway_token, gateway_key) = (bootstrap.5.clone(), bootstrap.6.clone());
+    if !gateway_token.is_empty() && !gateway_key.is_empty() {
+        let _ = sandboxd::EGRESS_PROXY.set(sandboxd::bridge::PROXY_URL.to_string());
+        tokio::spawn(async move {
+            let _ = sandboxd::bridge::serve(gateway_token, gateway_key).await;
+        });
+    }
+
     let runtime = CommandRuntime::builder()
         .command("ping", |_| async { Ok(serde_json::json!("pong")) })
         .command("exec", commands::exec)
@@ -103,9 +114,9 @@ fn target_ids(host_uid: u32, host_gid: u32) -> (u32, u32) {
     (uid, gid)
 }
 
-/// Returns (key, session id, generation, host uid, host gid). The file is
-/// one-shot: a second read fails.
-fn read_bootstrap() -> Result<(SessionKey, String, u64, u32, u32), String> {
+/// Returns (key, session id, generation, host uid, host gid, gateway token,
+/// gateway key). The file is one-shot: a second read fails.
+fn read_bootstrap() -> Result<(SessionKey, String, u64, u32, u32, String, String), String> {
     let raw = std::fs::read_to_string(BOOTSTRAP_PATH).map_err(|e| format!("bootstrap: {e}"))?;
     let bootstrap: Bootstrap = serde_json::from_str(&raw).map_err(|e| format!("bootstrap: {e}"))?;
     let hex = bootstrap.session_key_hex.as_bytes();
@@ -117,5 +128,5 @@ fn read_bootstrap() -> Result<(SessionKey, String, u64, u32, u32), String> {
         let text = std::str::from_utf8(pair).map_err(|_| "bootstrap: bad hex")?;
         key[i] = u8::from_str_radix(text, 16).map_err(|_| "bootstrap: bad hex")?;
     }
-    Ok((SessionKey::from_bytes(key), bootstrap.session_id, bootstrap.generation, bootstrap.host_uid, bootstrap.host_gid))
+    Ok((SessionKey::from_bytes(key), bootstrap.session_id, bootstrap.generation, bootstrap.host_uid, bootstrap.host_gid, bootstrap.gateway_token, bootstrap.gateway_key))
 }
