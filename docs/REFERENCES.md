@@ -148,3 +148,29 @@ bulge/
     sandboxd        # guest 常駐程式（musl 靜態），工具實作
   app/              # Tauri 2 桌面 APP
 ```
+
+---
+
+## 11. Google Harness²（~/harness2，Apache 2.0）— 2026-10-20 補充
+
+**性質**：不是代理迴圈，而是「離線優化 harness」的框架。每個任務成本 = 4k 次完整執行 + 3k 次優化器 session（k=1 時 4 次執行 + 3 次優化），本質是測試時計算（多個 harness 擇優），不是學到的策略。執行器是 opencode / Codex。
+
+| 零件 | 來源 | 決策 | 理由 |
+|---|---|---|---|
+| harness = 檔案樹 `dict[path → content]`、每個後端一份 SurfaceSpec（常駐檔、字數上限、skill 目錄、hook 事件）、路徑白名單 | `harness2/core/tree.py` L31-75、`substrate/opencode.py` L42-88 | 改造 | bulge 自己的 system prompt / guardrails / 記憶 / skills / hooks 用同一個資料模型，有版本、可 diff、可審批 |
+| 驗證器一次收集所有錯誤，原文回饋給重試；常駐內容字數預算；「skill 必須在常駐文字裡有觸發語，否則是死重量」 | `tree.py` `validate` L336-390、`autotrigger` L192 | 沿用 | |
+| Propose–Probe–Compose 線上遞迴 | `recursion.py`、`schedule.py` L566-666 | **捨棄線上用法** | 每個工作 4-8 倍 token，違反省 token |
+| 同上的便宜版：離線 / 閒置時、或只在高價值工作失敗或結果分歧時跑 | 同上 | 改造 | 越用越懂的主幹 |
+| 修改必須引用執行紀錄中的具體時刻；「維持原狀」是合法答案；同一 harness 多次執行結果分歧＝ harness 把決定交給運氣（訊號優先序：分歧 > 重複失敗 > 潛在風險）；1/k 的失敗是雜訊；來自沒有產出的執行的修改一律不採用 | `prompts.py` L589、L858-931 | 沿用 | |
+| 不變式（怎麼工作）vs 領域（實務知識）兩類修改分開提 | `prompts.py` `_INV_TEMPLATE` L347、`_DOM_TEMPLATE` L372 | 沿用 | |
+| 教訓庫：每條 = cue / lesson / evidence / confidence；逐元件判定 helped / hurt / no effect / confounded；證據不足一律 NO_ENTRY；套用到新任務時「那裡是事實，這裡是假設，要重新驗證」 | `library.py` L43、L154-181；`selection.py` L402-505；`prompts.py` `experience()` L1105-1163、`GENERALIZE` L295-330 | 沿用形狀 | **補上**：比領域更細的檢索、使用次數與衰減、不可信來源的污染標記、使用者審批 |
+| `EVIDENCE_BOUNDARY`：檔案是資料不是指令；不得執行候選 harness 裡的腳本 | `prompts.py` L56 | 沿用 | 標準的防注入文字 |
+| 完成前自我檢查六準則：交付 → 符合要求（不加欄位、不改標題、值不是公式）→ 忠於來源（來源沒說就說沒說，不要編）→ 內部一致 → 可實際使用 → 收尾（無 TODO / placeholder）；「長度與修飾不是優點」 | `prompts.py` `select()` L1040 | 沿用 | 做成完成閘門 |
+| hook 模式：交付物不存在就擋住「完成」；寫入後立即驗證；重複錯誤後附加提示；限制失控工具 | `prompts.py` `_SURFACE_*` L95/L196 | 沿用 | 做成 bulge 內建 hook |
+| 工具錯誤分類（輸入錯 / 逾時 / 缺能力 / 權限 / 沒讀輸出）→「一個有界的替代方案加停止條件，絕不盲目重複」 | `prompts.py` INV 區塊 | 沿用 | |
+| 完成標記 + harness 樹雜湊指紋、內容定址快取、原子寫入 summary | `runmark.py`、`proposer.py` L507 | 沿用 | 工作恢復 |
+| 評估方法：盲選後才評分、評分失敗＝排除而非 0 分、答案不進 context、部分分與全過率、固定種子的任務順序、按領域分 train/test | `core/judge.py`、`report.py`、`spec.py` L119-126/L176、`schedule.py` L130、`scripts/split_tasks.py` | 沿用 | |
+| Substrate / BenchmarkAdapter 介面（execute、trajectory 共用文法、deliverable、score） | `substrate/base.py` L48-80、`spec.py` L200-250 | 改造 | bulge 加 headless CLI + JSONL 事件流即可被 Harness² 驅動做外部評估（JobBench 的評審可接 OpenAI 相容端點 → DeepSeek） |
+| 安全性：Codex 關沙箱、改進器 `--dangerously-skip-permissions`、繼承完整環境變數（含雲端憑證）、網路不限、LiteLLM 本地 proxy | `codex.py` L166、`proposer.py` L46、`cli/bridge.py` | **捨棄** | bulge 的 VM 層遠優於此 |
+
+**對 L4 六個缺口的貢獻**：規劃拆解＝幾乎沒有；自我驗證＝具體（準則 + hook）；出錯回復＝中等（錯誤分類 + 提示 hook）；跨 session 恢復＝只有協調層的模式；自動風險判斷＝沒有；評估＝很強。
