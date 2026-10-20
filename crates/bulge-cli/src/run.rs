@@ -107,25 +107,30 @@ fn build_system_prompt(harness_dir: &Path, goal: &str) -> String {
     prompt
 }
 
-/// Stream newly-appended complete lines of a JSONL file to stdout until `stop`
+/// Receives each complete JSONL log line as it is committed (one call per line,
+/// newline stripped). The CLI prints to stdout; the desktop app forwards each
+/// line to the webview. `Send` so it can live in the tailing task.
+pub type LineSink = Box<dyn FnMut(&str) + Send>;
+
+/// Stream newly-appended complete lines of a JSONL file to `sink` until `stop`
 /// is cancelled, then flush once more. The store writes the log atomically with
 /// fsync, so reading committed bytes is safe from this separate reader.
-async fn tail_jsonl(path: PathBuf, stop: CancellationToken) {
+async fn tail_jsonl(path: PathBuf, stop: CancellationToken, mut sink: LineSink) {
     let mut offset = 0_usize;
     loop {
-        offset = flush_new_lines(&path, offset);
+        offset = flush_new_lines(&path, offset, &mut sink);
         tokio::select! {
             () = stop.cancelled() => break,
             () = tokio::time::sleep(Duration::from_millis(120)) => {}
         }
     }
     // Final flush: the last events were appended just before the loop ended.
-    flush_new_lines(&path, offset);
+    flush_new_lines(&path, offset, &mut sink);
 }
 
-/// Print complete lines starting at `offset`; return the new offset (end of the
-/// last newline printed).
-fn flush_new_lines(path: &Path, offset: usize) -> usize {
+/// Hand each complete line starting at `offset` to `sink`; return the new offset
+/// (end of the last newline consumed).
+fn flush_new_lines(path: &Path, offset: usize, sink: &mut LineSink) -> usize {
     let Ok(bytes) = std::fs::read(path) else { return offset };
     if bytes.len() <= offset {
         return offset;
@@ -136,11 +141,22 @@ fn flush_new_lines(path: &Path, offset: usize) -> usize {
     };
     let printable = &fresh[..=last_newline];
     if let Ok(text) = std::str::from_utf8(printable) {
-        print!("{text}");
-        use std::io::Write;
-        let _ = std::io::stdout().flush();
+        for line in text.lines() {
+            if !line.is_empty() {
+                sink(line);
+            }
+        }
     }
     offset + last_newline + 1
+}
+
+/// The default sink: print each line to stdout, as the headless CLI does.
+fn stdout_sink() -> LineSink {
+    Box::new(|line: &str| {
+        use std::io::Write;
+        println!("{line}");
+        let _ = std::io::stdout().flush();
+    })
 }
 
 /// What a completed run produced.
@@ -148,12 +164,27 @@ pub struct RunOutcome {
     pub outcome: LoopOutcome,
     pub status: bulge_store::JobStatus,
     pub job_dir: PathBuf,
+    /// The host workspace the job ran against (where approved changes are applied).
+    pub workspace: PathBuf,
     /// The collected workspace diff, if any changes were made.
     pub diff: Option<String>,
+    /// The structured changes behind the diff, kept so a caller (the app) can
+    /// apply the approved subset to the host after review. The host is never
+    /// modified by the run itself.
+    pub changes: Vec<changes::Change>,
 }
 
-/// Run one job end to end.
+/// Run one job end to end, printing its event log to stdout (the headless CLI
+/// path). Equivalent to [`run_streaming`] with a stdout sink and a fresh,
+/// never-cancelled token.
 pub async fn run(config: RunConfig) -> Result<RunOutcome, String> {
+    run_streaming(config, CancellationToken::new(), stdout_sink()).await
+}
+
+/// Run one job end to end, streaming each committed log line to `sink` and
+/// honouring `cancel` as an emergency stop. Workspace changes stay in the VM
+/// overlay; the collected diff and structured changes are returned for review.
+pub async fn run_streaming(config: RunConfig, cancel: CancellationToken, sink: LineSink) -> Result<RunOutcome, String> {
     let backend = backend::build(&config.backend)?;
     let system_prompt = build_system_prompt(&config.harness_dir, &config.goal);
 
@@ -209,15 +240,16 @@ pub async fn run(config: RunConfig) -> Result<RunOutcome, String> {
 
     // Stream events while the loop runs.
     let stop = CancellationToken::new();
-    let tail = tokio::spawn(tail_jsonl(log_path.clone(), stop.clone()));
+    let tail = tokio::spawn(tail_jsonl(log_path.clone(), stop.clone(), sink));
 
-    let outcome = driver.run(&mut job, CancellationToken::new()).await.map_err(|e| format!("run: {e}"))?;
+    let outcome = driver.run(&mut job, cancel).await.map_err(|e| format!("run: {e}"))?;
 
     stop.cancel();
     let _ = tail.await;
 
     // Collect workspace changes and write the diff out (the host is not touched).
     let mut diff: Option<String> = None;
+    let mut collected: Vec<changes::Change> = Vec::new();
     if let Ok(pending) = changes::collect(&vm).await {
         if pending.is_empty() {
             eprintln!("no workspace changes");
@@ -228,6 +260,7 @@ pub async fn run(config: RunConfig) -> Result<RunOutcome, String> {
                 eprintln!("{} change(s) written to {}", pending.len(), diff_path.display());
             }
             diff = Some(rendered);
+            collected = pending;
         }
     }
 
@@ -242,7 +275,14 @@ pub async fn run(config: RunConfig) -> Result<RunOutcome, String> {
     improve(backend.as_ref(), &mut job, &config).await;
 
     eprintln!("outcome: {outcome:?}  status: {:?}  summary: {:?}  steps: {}  tokens: {}", job.state().status, job.state().summary, job.state().steps, job.state().usage.total());
-    Ok(RunOutcome { outcome, status: job.state().status, job_dir: job.dir().to_path_buf(), diff })
+    Ok(RunOutcome {
+        outcome,
+        status: job.state().status,
+        job_dir: job.dir().to_path_buf(),
+        workspace: config.workspace.clone(),
+        diff,
+        changes: collected,
+    })
 }
 
 /// Ask the model for durable lessons from this job and save them to memory.

@@ -1,0 +1,99 @@
+<!doctype html>
+<html lang="zh-Hant">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Bulge</title>
+    <link rel="stylesheet" href="style.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="brand">
+        <span class="dot"></span>
+        <div>
+          <div class="brand-name">Bulge</div>
+          <div class="brand-sub">謹慎的 AI 代理 · 在沙箱虛擬機裡做事,改動需你核准才寫回</div>
+        </div>
+      </div>
+      <button id="toggle-settings" class="ghost">設定</button>
+    </header>
+
+    <section id="settings" class="card hidden">
+      <h2>設定</h2>
+      <div class="grid">
+        <label>模型 <input id="model" type="text" /></label>
+        <label>API 位址 <input id="base-url" type="text" /></label>
+        <label>協定
+          <select id="protocol">
+            <option value="openai">openai（DeepSeek / OpenAI 相容）</option>
+            <option value="anthropic">anthropic</option>
+          </select>
+        </label>
+        <label>自主模式
+          <select id="autonomy">
+            <option value="autonomous">autonomous（自動做,寫回仍需核准）</option>
+            <option value="collaborative">collaborative（較保守）</option>
+            <option value="full-auto">full-auto（最放手)</option>
+          </select>
+        </label>
+        <label>vCPU <input id="cpus" type="number" min="1" max="16" /></label>
+        <label>記憶體 (MiB) <input id="ram" type="number" min="256" step="256" /></label>
+      </div>
+
+      <div class="key-row">
+        <div>
+          <div class="key-label">API 金鑰 <span id="key-status" class="badge">檢查中…</span></div>
+          <div class="hint">金鑰只存在本機 <code>~/.bulge/keys/&lt;host&gt;</code>（權限 600),不會外傳、不會進對話。</div>
+        </div>
+        <div class="key-input">
+          <input id="api-key" type="password" placeholder="貼上金鑰後按儲存" autocomplete="off" />
+          <button id="save-key" class="primary">儲存金鑰</button>
+        </div>
+      </div>
+      <div id="key-msg" class="msg"></div>
+    </section>
+
+    <section class="card">
+      <h2>交辦任務</h2>
+      <label class="full">工作區(代理只能動這個資料夾)
+        <div class="row">
+          <input id="workspace" type="text" placeholder="尚未選擇資料夾" readonly />
+          <button id="pick-ws" class="ghost">選擇資料夾</button>
+        </div>
+      </label>
+      <label class="full">目標
+        <textarea id="goal" rows="4" placeholder="例如:讀取 data.csv,算出每月營收,寫成 report.md"></textarea>
+      </label>
+      <label class="check"><input id="network" type="checkbox" /> 允許對外網路(僅限白名單的套件/原始碼來源,經雙鑰閘道)</label>
+      <div class="row">
+        <button id="start" class="primary big">開始</button>
+        <button id="stop" class="danger big hidden">緊急停止</button>
+        <span id="run-status" class="run-status"></span>
+      </div>
+      <div id="start-msg" class="msg"></div>
+    </section>
+
+    <section class="card">
+      <h2>執行過程 <span id="token-count" class="badge subtle"></span></h2>
+      <div id="log" class="log"><div class="log-empty">尚未開始。選好工作區、寫下目標,按「開始」。</div></div>
+    </section>
+
+    <section id="review" class="card hidden">
+      <h2>審批寫回 <span id="review-status" class="badge"></span></h2>
+      <p class="hint">以下是代理在虛擬機裡做出的改動,<b>目前都還沒碰你的電腦</b>。勾選要套用的項目,按下按鈕才會寫入工作區。</p>
+      <div class="review-actions">
+        <button id="select-all" class="ghost">全選</button>
+        <button id="select-none" class="ghost">全不選</button>
+        <button id="apply" class="primary">套用勾選的變更到工作區</button>
+      </div>
+      <div id="change-list" class="change-list"></div>
+      <details class="diff-wrap">
+        <summary>查看完整 diff</summary>
+        <pre id="diff" class="diff"></pre>
+      </details>
+      <div id="apply-msg" class="msg"></div>
+    </section>
+
+    <script src="app.js"></script>
+  </body>
+</html>

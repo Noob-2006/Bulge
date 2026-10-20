@@ -6,16 +6,12 @@
 //! stderr. Workspace changes stay in the VM overlay and are written as a diff for
 //! review — the host is never modified.
 
-mod backend;
-mod eval;
-mod run;
-
 use std::path::PathBuf;
 
-use backend::{BackendSpec, Protocol};
+use bulge_cli::backend::{BackendSpec, Protocol};
+use bulge_cli::eval::{self, EvalConfig};
+use bulge_cli::run::{self, RunConfig};
 use bulge_store::{Autonomy, Budget};
-use eval::EvalConfig;
-use run::RunConfig;
 
 const USAGE: &str = "\
 bulge — headless sandboxed agent

@@ -7,6 +7,10 @@ rust-version.workspace = true
 license.workspace = true
 publish.workspace = true
 
+[lib]
+name = "bulge_cli"
+path = "src/lib.rs"
+
 [[bin]]
 name = "bulge"
 path = "src/main.rs"
