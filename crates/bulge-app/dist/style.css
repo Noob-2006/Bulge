@@ -253,6 +253,14 @@ body {
 .msg-assistant { padding: var(--space-1) 0; }
 .msg-assistant .md { color: var(--text); }
 
+/* user turn bubble (right-aligned) */
+.msg-user { display: flex; justify-content: flex-end; margin: var(--space-3) 0 var(--space-2); }
+.msg-user-bubble {
+  background: var(--accent-subtle); border: 0.5px solid color-mix(in srgb, var(--accent) 35%, transparent);
+  color: var(--text-strong); border-radius: var(--radius-lg) var(--radius-lg) 4px var(--radius-lg);
+  padding: var(--space-2) var(--space-3); max-width: 80%; white-space: pre-wrap; font-size: var(--t-md);
+}
+
 /* markdown */
 .md { font-size: var(--t-md); line-height: 1.6; overflow-wrap: anywhere; }
 .md > *:first-child { margin-top: 0; }
@@ -272,13 +280,24 @@ body {
 .md th, .md td { border: 0.5px solid var(--border); padding: 5px 10px; }
 .md hr { border: none; border-top: 0.5px solid var(--border); margin: 1em 0; }
 
-/* reasoning / thinking block */
-.msg-thinking {
+/* reasoning / thinking block — collapsible, hidden by default */
+.think { margin: var(--space-1) 0; }
+.think > summary {
+  list-style: none; cursor: pointer; display: inline-flex; align-items: center; gap: 6px;
+  color: var(--muted); font-size: var(--t-sm); padding: 2px 2px;
+}
+.think > summary::-webkit-details-marker { display: none; }
+.think > summary::before { content: "▸"; font-size: 10px; transition: transform var(--duration-normal) var(--ease-out); display: inline-block; }
+.think[open] > summary::before { transform: rotate(90deg); }
+.think-body {
   border: 1px dashed color-mix(in srgb, var(--text) 18%, transparent);
   background: color-mix(in srgb, var(--text) 4%, transparent);
-  color: var(--muted); font-size: var(--t-13); line-height: 1.4;
-  border-radius: var(--radius-md); padding: var(--space-2) var(--space-3); margin: var(--space-1) 0;
+  color: var(--muted); font-size: var(--t-13); line-height: 1.45; white-space: pre-wrap;
+  border-radius: var(--radius-md); padding: var(--space-2) var(--space-3); margin-top: 4px;
 }
+
+/* usage breakdown popover under the token meter */
+.usage-detail { font-size: var(--t-sm); color: var(--muted); font-variant-numeric: tabular-nums; }
 
 /* tool rows — flat, no card chrome; detail on expand */
 .tool { border-radius: var(--radius-sm); }
@@ -321,18 +340,15 @@ body {
 
 /* ===== Review / approval ===== */
 .review {
-  margin: 0 var(--space-5) var(--space-4); max-width: 820px;
+  margin: 0 var(--space-5) var(--space-3); max-width: 820px;
   align-self: center; width: calc(100% - var(--space-5) * 2);
-  background: color-mix(in srgb, var(--warn) 5%, var(--card));
-  border-left: 3px solid var(--warn); border-radius: 4px var(--radius-lg) var(--radius-lg) 4px;
-  box-shadow: var(--shadow-lg); padding: var(--space-4); overflow: hidden;
+  background: var(--card);
+  border: 0.5px solid var(--border); border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-sm); padding: var(--space-3) var(--space-4); overflow: hidden;
 }
-.review.ok { background: color-mix(in srgb, var(--ok) 5%, var(--card)); border-left-color: var(--ok); }
-.review.bad { background: color-mix(in srgb, var(--danger) 5%, var(--card)); border-left-color: var(--danger); }
 .review-head { display: flex; align-items: center; gap: var(--space-3); }
-.review-eyebrow { font-family: var(--mono); font-weight: 700; letter-spacing: .11em; text-transform: uppercase; font-size: var(--t-xs); color: var(--warn); }
-.review.ok .review-eyebrow { color: var(--ok); }
-.review.bad .review-eyebrow { color: var(--danger); }
+.review-eyebrow { font-weight: 500; font-size: var(--t-13); color: var(--text-strong); }
+.review-eyebrow::before { content: "✎ "; color: var(--muted); }
 .review-head .btn-icon { margin-left: auto; }
 .review-hint { color: var(--muted); font-size: var(--t-13); margin: var(--space-2) 0 var(--space-3); }
 .review-actions { display: flex; align-items: center; gap: var(--space-2); margin-bottom: var(--space-3); }
@@ -425,6 +441,15 @@ body {
   padding: 7px 10px; min-width: 260px;
 }
 .control:focus-visible { outline: none; border-color: var(--accent); box-shadow: var(--focus-ring); }
+/* Native <select> on WebKitGTK ignores our bg/color and renders white-on-white.
+   Reset appearance and draw our own chevron so the value is always visible. */
+select.control {
+  -webkit-appearance: none; appearance: none; cursor: pointer;
+  padding-right: 30px;
+  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'><path d='M2 4l4 4 4-4' fill='none' stroke='%238b8b94' stroke-width='1.5'/></svg>");
+  background-repeat: no-repeat; background-position: right 10px center;
+}
+select.control option { background: var(--bg-elevated); color: var(--text-strong); }
 .control-num { min-width: 100px; }
 .key-control { display: flex; gap: var(--space-2); align-items: center; }
 .dot-status { font-size: var(--t-xs); color: var(--muted); font-weight: 400; }

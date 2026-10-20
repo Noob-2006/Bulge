@@ -53,6 +53,9 @@ struct Defaults {
 /// Everything the UI sends to start a job. Fixed budgets/limits match the CLI.
 #[derive(Deserialize)]
 struct StartArgs {
+    /// Present → continue that conversation (a follow-up turn); absent → new job.
+    #[serde(default)]
+    job_id: Option<String>,
     goal: String,
     workspace: String,
     model: String,
@@ -99,6 +102,9 @@ impl ChangeDto {
 #[derive(Clone, Serialize)]
 struct DoneEvent {
     handle: String,
+    /// The real store job id, so the UI can send a follow-up turn on this same
+    /// conversation instead of starting a new one.
+    job_id: String,
     status: String,
     outcome: String,
     diff: Option<String>,
@@ -192,10 +198,20 @@ async fn pick_workspace(app: AppHandle) -> Option<String> {
 /// diff. Events stream back as `job-line`; completion arrives as `job-done`.
 #[tauri::command]
 async fn start_job(app: AppHandle, state: State<'_, AppState>, args: StartArgs) -> Result<String, String> {
-    let workspace = PathBuf::from(&args.workspace);
-    if !workspace.is_dir() {
-        return Err(format!("工作區不是資料夾:{}", workspace.display()));
-    }
+    let home = PathBuf::from(std::env::var("HOME").map_err(|_| "HOME 未設定".to_string())?);
+    // No folder chosen → use an ephemeral scratch workspace (the agent still works
+    // in the VM; nothing lands on the user's real files unless they later pick one).
+    let workspace = if args.workspace.trim().is_empty() {
+        let dir = home.join(".bulge/scratch").join(format!("ws-{}", now_ms()));
+        std::fs::create_dir_all(&dir).map_err(|e| format!("建立暫存工作區失敗:{e}"))?;
+        dir
+    } else {
+        let w = PathBuf::from(&args.workspace);
+        if !w.is_dir() {
+            return Err(format!("工作區不是資料夾:{}", w.display()));
+        }
+        w
+    };
     let protocol = parse_protocol(&args.protocol)?;
     let autonomy = parse_autonomy(&args.autonomy)?;
 
@@ -208,11 +224,11 @@ async fn start_job(app: AppHandle, state: State<'_, AppState>, args: StartArgs) 
         ));
     }
 
-    let home = PathBuf::from(std::env::var("HOME").map_err(|_| "HOME 未設定".to_string())?);
     let title: String = args.goal.lines().next().unwrap_or("job").chars().take(80).collect();
     let host = host_of(&args.base_url);
 
     let config = RunConfig {
+        job_id: args.job_id.clone(),
         goal: args.goal.clone(),
         title,
         workspace: workspace.clone(),
@@ -261,6 +277,7 @@ async fn start_job(app: AppHandle, state: State<'_, AppState>, args: StartArgs) 
                         "job-done",
                         DoneEvent {
                             handle: done_handle.clone(),
+                            job_id: String::new(),
                             status: "Failed".into(),
                             outcome: "Error".into(),
                             diff: None,
@@ -292,6 +309,7 @@ async fn job_thread(config: RunConfig, cancel: CancellationToken, sink: bulge_cl
                 }
                 DoneEvent {
                     handle: handle.clone(),
+                    job_id: outcome.job_dir.file_name().and_then(|n| n.to_str()).unwrap_or("").to_string(),
                     status: format!("{:?}", outcome.status),
                     outcome: format!("{:?}", outcome.outcome),
                     diff: outcome.diff,
@@ -302,6 +320,7 @@ async fn job_thread(config: RunConfig, cancel: CancellationToken, sink: bulge_cl
             }
             Err(error) => DoneEvent {
                 handle: handle.clone(),
+                job_id: String::new(),
                 status: "Failed".into(),
                 outcome: "Error".into(),
                 diff: None,

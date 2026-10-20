@@ -12,7 +12,7 @@ use bulge_core::{VmDispatcher, builtin_tools, plan_tool};
 use bulge_guard::{Effect, Rule};
 use bulge_harness::{SurfaceSpec, Tree};
 use bulge_llm::{GenerateRequest, LlmBackend, Message, Purpose, Role};
-use bulge_store::{Autonomy, Budget, JobEvent, JobSpec, JobStore, ModelRef};
+use bulge_store::{Autonomy, Budget, JobEvent, JobSpec, JobStatus, JobStore, ModelRef};
 use bulge_vm::changes;
 use bulge_vm::vm::{Vm, VmConfig};
 use futures::StreamExt;
@@ -32,6 +32,9 @@ stop calling tools and state plainly what you produced and how you verified it."
 const LESSON_COUNT: usize = 5;
 
 pub struct RunConfig {
+    /// `Some(id)` continues an existing conversation (a follow-up turn on that job);
+    /// `None` starts a fresh job.
+    pub job_id: Option<String>,
     pub goal: String,
     pub title: String,
     pub workspace: PathBuf,
@@ -115,8 +118,8 @@ pub type LineSink = Box<dyn FnMut(&str) + Send>;
 /// Stream newly-appended complete lines of a JSONL file to `sink` until `stop`
 /// is cancelled, then flush once more. The store writes the log atomically with
 /// fsync, so reading committed bytes is safe from this separate reader.
-async fn tail_jsonl(path: PathBuf, stop: CancellationToken, mut sink: LineSink) {
-    let mut offset = 0_usize;
+async fn tail_jsonl(path: PathBuf, stop: CancellationToken, mut sink: LineSink, start_offset: usize) {
+    let mut offset = start_offset;
     loop {
         offset = flush_new_lines(&path, offset, &mut sink);
         tokio::select! {
@@ -188,24 +191,44 @@ pub async fn run_streaming(config: RunConfig, cancel: CancellationToken, sink: L
     let backend = backend::build(&config.backend)?;
     let system_prompt = build_system_prompt(&config.harness_dir, &config.goal);
 
-    // Create the job and seed the goal.
+    // New job, or a follow-up turn on an existing conversation.
     let store = JobStore::new(&config.store_root);
-    let job_id = bulge_store::new_job_id().map_err(|e| format!("job id: {e}"))?;
-    let mut job = store
-        .create(JobSpec {
-            id: job_id.clone(),
-            title: config.title.clone(),
-            goal: config.goal.clone(),
-            workspace: config.workspace.clone(),
-            autonomy: config.autonomy,
-            budget: config.budget.clone(),
-            model: ModelRef { backend: config.backend.id.clone(), model: config.backend.model.clone() },
-        })
-        .map_err(|e| format!("create job: {e}"))?;
-    job.append(vec![JobEvent::Message { message: Message::text(Role::User, config.goal.clone()) }])
-        .map_err(|e| format!("seed goal: {e}"))?;
+    let resuming = config.job_id.is_some();
+    let mut job = match &config.job_id {
+        // Follow-up: reopen the conversation, append the new user turn, and (best
+        // effort) flip a finished job back to Running for this turn. History is
+        // replayed by the driver, so the agent remembers the whole conversation.
+        Some(id) => {
+            let (mut job, _recovery) = store.open(id).map_err(|e| format!("open job: {e}"))?;
+            job.append(vec![JobEvent::Message { message: Message::text(Role::User, config.goal.clone()) }])
+                .map_err(|e| format!("append turn: {e}"))?;
+            let _ = job.append(vec![JobEvent::StatusChanged { status: JobStatus::Running, summary: None }]);
+            job
+        }
+        None => {
+            let job_id = bulge_store::new_job_id().map_err(|e| format!("job id: {e}"))?;
+            let mut job = store
+                .create(JobSpec {
+                    id: job_id.clone(),
+                    title: config.title.clone(),
+                    goal: config.goal.clone(),
+                    workspace: config.workspace.clone(),
+                    autonomy: config.autonomy,
+                    budget: config.budget.clone(),
+                    model: ModelRef { backend: config.backend.id.clone(), model: config.backend.model.clone() },
+                })
+                .map_err(|e| format!("create job: {e}"))?;
+            job.append(vec![JobEvent::Message { message: Message::text(Role::User, config.goal.clone()) }])
+                .map_err(|e| format!("seed goal: {e}"))?;
+            job
+        }
+    };
 
     let log_path = job.dir().join("job.jsonl");
+    // On a follow-up, the log already holds the previous turns; stream only the new
+    // events (start the tail at the current end of file) so the UI doesn't duplicate
+    // the transcript it already shows.
+    let tail_start = if resuming { std::fs::metadata(&log_path).map(|m| m.len() as usize).unwrap_or(0) } else { 0 };
 
     // Launch the sandbox VM.
     let home = PathBuf::from(std::env::var("HOME").map_err(|_| "HOME is not set".to_string())?);
@@ -219,10 +242,12 @@ pub async fn run_streaming(config: RunConfig, cancel: CancellationToken, sink: L
             runtime_root: PathBuf::from(std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| "/tmp".into())).join("bulge"),
             cpus: config.cpus,
             ram_mib: config.ram_mib,
-            // Never attach the raw NIC; outbound access, when enabled, is the
-            // two-key gateway restricted to the allowlisted package/source hosts.
+            // Never attach the raw NIC. When the user enables network, outbound goes
+            // through the two-key gateway which allows any PUBLIC host ("*") while the
+            // gateway still blocks private/LAN/cloud-metadata addresses (DNS-rebind
+            // safe). The roadmap's stance: allow public internet, block the host/LAN.
             network: false,
-            egress_allow: if config.network { bulge_guard::netgate::allowlist_suffixes() } else { Vec::new() },
+            egress_allow: if config.network { vec!["*".to_string()] } else { Vec::new() },
         })
         .await
         .map_err(|e| format!("launch VM: {e}"))?,
@@ -240,7 +265,7 @@ pub async fn run_streaming(config: RunConfig, cancel: CancellationToken, sink: L
 
     // Stream events while the loop runs.
     let stop = CancellationToken::new();
-    let tail = tokio::spawn(tail_jsonl(log_path.clone(), stop.clone(), sink));
+    let tail = tokio::spawn(tail_jsonl(log_path.clone(), stop.clone(), sink, tail_start));
 
     let outcome = driver.run(&mut job, cancel).await.map_err(|e| format!("run: {e}"))?;
 

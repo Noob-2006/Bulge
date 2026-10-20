@@ -61,6 +61,7 @@ pub async fn run_eval(config: EvalConfig) -> Result<EvalSummary, String> {
         }
 
         let run_config = RunConfig {
+            job_id: None,
             goal: task.goal.clone(),
             title: format!("eval:{}", task.id),
             workspace: workspace.clone(),

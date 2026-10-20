@@ -98,14 +98,16 @@ pub fn authorized(request: &Request, token: &str, key: &str) -> bool {
 
 /// A host is allowed when it matches an allowlist suffix on a label boundary
 /// (`github.com` matches `github.com` and `api.github.com`, not `evilgithub.com`
-/// nor `github.com.attacker.net`). An empty allowlist allows nothing.
+/// nor `github.com.attacker.net`). The single entry `"*"` means "any public host"
+/// (the roadmap's allow-public mode); resolved IPs are still filtered for
+/// private/LAN/metadata ranges separately. An empty allowlist allows nothing.
 pub fn host_allowed(host: &str, allow_suffixes: &[String]) -> bool {
     let host = host.trim_end_matches('.').to_ascii_lowercase();
     // A bare IP literal is never "allowlisted by name"; it must be an explicit
     // entry. (Resolved IPs are filtered separately for special-use ranges.)
     allow_suffixes.iter().any(|suffix| {
         let suffix = suffix.trim().trim_end_matches('.').to_ascii_lowercase();
-        !suffix.is_empty() && (host == suffix || host.ends_with(&format!(".{suffix}")))
+        suffix == "*" || (!suffix.is_empty() && (host == suffix || host.ends_with(&format!(".{suffix}"))))
     })
 }
 
@@ -248,6 +250,9 @@ mod tests {
         assert!(!host_allowed("github.com.attacker.net", &allow));
         assert!(!host_allowed("example.com", &allow));
         assert!(!host_allowed("anything", &[]), "empty allowlist allows nothing");
+        let any = vec!["*".to_string()];
+        assert!(host_allowed("example.com", &any), "'*' allows any public host");
+        assert!(host_allowed("deep.sub.example.org", &any));
     }
 
     #[test]

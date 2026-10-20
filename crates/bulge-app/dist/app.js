@@ -20,9 +20,11 @@ function renderMarkdown(text) {
 
 /* ---- state ---- */
 let currentHandle = null;   // the live run we started
+let currentJobId = null;    // the store job id of the current conversation (for follow-ups)
 let running = false;
 let workspacePath = "";
 let runningTokens = 0;
+const usage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, reasoning: 0 };
 let stepCount = 0;
 let elapsedTimer = null;
 let elapsedStart = 0;
@@ -61,6 +63,7 @@ function resetTranscript() {
   $("empty-state").classList.remove("hidden");
   for (const k of Object.keys(toolEls)) delete toolEls[k];
   stepCount = 0; runningTokens = 0;
+  usage.input = usage.output = usage.cacheRead = usage.cacheWrite = usage.reasoning = 0;
   $("tokens-wrap").classList.add("hidden");
   $("steps").classList.add("hidden");
 }
@@ -143,7 +146,12 @@ function renderEvent(ev) {
             box.appendChild(mdv);
             appendBlock(box);
           } else if (b.type === "reasoning" && b.text && b.text.trim()) {
-            appendBlock(el("div", "msg-thinking", b.text.trim()));
+            const d = document.createElement("details");
+            d.className = "think";
+            const sum = el("summary", null, "思考");
+            const body = el("div", "think-body", b.text.trim());
+            d.append(sum, body);
+            appendBlock(d);
           }
         }
       }
@@ -179,7 +187,12 @@ function renderEvent(ev) {
     }
     case "usage": {
       const u = ev.usage || {};
-      runningTokens += (u.input_tokens || 0) + (u.output_tokens || 0) + (u.cache_read_tokens || 0) + (u.cache_write_tokens || 0);
+      usage.input += u.input_tokens || 0;
+      usage.output += u.output_tokens || 0;
+      usage.cacheRead += u.cache_read_tokens || 0;
+      usage.cacheWrite += u.cache_write_tokens || 0;
+      usage.reasoning += u.reasoning_tokens || 0;
+      runningTokens = usage.input + usage.output + usage.cacheRead + usage.cacheWrite;
       updateMeter();
       break;
     }
@@ -205,6 +218,12 @@ function argSummary(name, args) {
   return JSON.stringify(args);
 }
 
+function renderUserMessage(text) {
+  const box = el("div", "msg-user");
+  box.appendChild(el("div", "msg-user-bubble", text));
+  appendBlock(box);
+}
+
 function renderPlan(items) {
   const card = el("div", "plan");
   card.appendChild(el("div", "plan-label", "計畫"));
@@ -224,6 +243,13 @@ function updateMeter() {
   if (runningTokens <= 0) return;
   $("tokens-wrap").classList.remove("hidden");
   $("tokens").textContent = runningTokens.toLocaleString() + " tok";
+  const hitRate = usage.input > 0 ? Math.round((usage.cacheRead / (usage.input + usage.cacheRead)) * 100) : 0;
+  $("tokens-wrap").title =
+    "輸入 " + usage.input.toLocaleString() +
+    " · 輸出 " + usage.output.toLocaleString() +
+    " · 快取讀 " + usage.cacheRead.toLocaleString() + " (命中 " + hitRate + "%)" +
+    " · 快取寫 " + usage.cacheWrite.toLocaleString() +
+    (usage.reasoning ? " · 推理 " + usage.reasoning.toLocaleString() : "");
   const frac = Math.min(1, runningTokens / contextWindow);
   const fill = $("meter-fill");
   fill.style.width = (frac * 100).toFixed(1) + "%";
@@ -312,7 +338,8 @@ async function viewJob(id, title) {
   if (running) { toast("有任務執行中,無法切換", "err"); return; }
   let data;
   try { data = await invoke("load_job", { id }); } catch (e) { toast("讀取失敗:" + e, "err"); return; }
-  currentHandle = null; // past job: read-only, no apply
+  currentHandle = null;        // no live run yet (apply is for in-session runs)
+  currentJobId = id;           // but you can send a follow-up to continue this conversation
   resetTranscript();
   $("job-title").textContent = title || id;
   $("status-badge").classList.add("hidden");
@@ -329,6 +356,7 @@ async function viewJob(id, title) {
 function newTask() {
   if (running) { toast("有任務執行中", "err"); return; }
   currentHandle = null;
+  currentJobId = null;
   resetTranscript();
   $("review").classList.add("hidden");
   $("status-badge").classList.add("hidden");
@@ -342,15 +370,20 @@ function newTask() {
 async function startJob() {
   const goal = $("goal").value.trim();
   const msg = $("start-msg"); msg.textContent = ""; msg.className = "inline-msg";
-  if (!workspacePath) { msg.textContent = "請先選擇工作區資料夾(左下角 📁)。"; msg.className = "inline-msg err"; return; }
   if (!goal) { msg.textContent = "請寫下目標。"; msg.className = "inline-msg err"; return; }
+  if (running) return;
 
-  resetTranscript();
+  const continuing = !!currentJobId;
+  if (!continuing) {
+    resetTranscript();
+    $("job-title").textContent = clip(goal.split("\n")[0], 60);
+    contextWindow = 128000;
+  }
   $("review").classList.add("hidden");
-  $("job-title").textContent = clip(goal.split("\n")[0], 60);
-  contextWindow = 128000;
+  renderUserMessage(goal);
 
   const args = {
+    job_id: continuing ? currentJobId : null,
     goal, workspace: workspacePath,
     model: $("model").value.trim(), base_url: $("base-url").value.trim(),
     protocol: $("protocol").value, autonomy: $("autonomy").value,
@@ -373,14 +406,20 @@ function kindLabel(k) { return ({ file: "檔案", deleted: "刪除", dir: "資�
 
 function showReview(ev) {
   const review = $("review");
-  review.className = "review " + (ev.readonly ? "" : ev.status === "Succeeded" ? "ok" : "bad");
+  const changes = ev.changes || [];
+  const hasDiff = ev.diff && ev.diff.trim() && ev.diff.trim() !== "(無文字 diff)";
+  // Don't show an empty box for a past job that changed nothing.
+  if (ev.readonly && changes.length === 0 && !hasDiff) { review.classList.add("hidden"); return; }
+
+  review.className = "review";
+  const eyebrow = review.querySelector(".review-eyebrow");
+  if (eyebrow) eyebrow.textContent = ev.readonly ? "這個任務的變更" : (changes.length ? "待寫回的變更 · " + changes.length + " 項" : "沒有變更");
   const badge = $("review-status");
   badge.textContent = ev.error ? "錯誤" : ev.status;
   badge.className = "badge " + (ev.readonly ? "" : ev.status === "Succeeded" ? "ok" : "bad");
 
   const list = $("change-list");
   list.innerHTML = "";
-  const changes = ev.changes || [];
   const applyBtn = $("apply");
   const hint = $("review-hint-text");
   if (ev.readonly) {
@@ -476,6 +515,7 @@ listen("job-done", (e) => {
   const p = e.payload;
   if (!currentHandle || p.handle !== currentHandle) return;
   setRunning(false);
+  if (p.job_id) currentJobId = p.job_id; // enable follow-up turns on this conversation
   const ok = p.status === "Succeeded";
   setStatusBadge(p.error ? "失敗" : p.status, ok ? true : false);
   showReview(p);

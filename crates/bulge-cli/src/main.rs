@@ -161,6 +161,7 @@ fn parse_run(args: &[String]) -> Result<RunConfig, String> {
     let backend_host = base_url.trim_start_matches("https://").trim_start_matches("http://").split('/').next().unwrap_or("backend").to_string();
 
     Ok(RunConfig {
+        job_id: None,
         goal,
         title,
         workspace,
