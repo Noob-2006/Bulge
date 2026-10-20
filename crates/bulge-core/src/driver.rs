@@ -28,6 +28,16 @@ pub enum LoopOutcome {
     BudgetExhausted,
     Cancelled,
     Failed,
+    /// A runaway loop was detected and the job was stopped (recorded Incomplete).
+    Stuck,
+}
+
+/// Guard configuration enabled by `Driver::with_guard`.
+#[derive(Clone)]
+pub struct GuardConfig {
+    pub rules: bulge_guard::Ruleset,
+    pub autonomy: bulge_guard::Autonomy,
+    pub loop_detection: bool,
 }
 
 pub struct Driver {
@@ -36,17 +46,37 @@ pub struct Driver {
     tools: Vec<ToolSchema>,
     system_prompt: String,
     max_parallel: usize,
+    guard: Option<GuardConfig>,
 }
 
 impl Driver {
     pub fn new(backend: Arc<dyn LlmBackend>, dispatcher: Arc<dyn ToolDispatcher>, tools: Vec<ToolSchema>, system_prompt: String) -> Self {
-        Self { backend, dispatcher, tools, system_prompt, max_parallel: crate::schedule::DEFAULT_MAX_PARALLEL }
+        Self { backend, dispatcher, tools, system_prompt, max_parallel: crate::schedule::DEFAULT_MAX_PARALLEL, guard: None }
+    }
+
+    /// Enable the cautious guard: permission rules (deny → the tool is blocked
+    /// and the model is told), and runaway-loop detection (critical → stop).
+    pub fn with_guard(mut self, guard: GuardConfig) -> Self {
+        self.guard = Some(guard);
+        self
+    }
+
+    /// The set of registered tool names (for unknown-tool loop detection).
+    fn tool_names(&self) -> std::collections::HashSet<String> {
+        self.tools.iter().map(|t| t.name.clone()).collect()
     }
 
     pub async fn run(&self, job: &mut JobHandle, cancel: CancellationToken) -> Result<LoopOutcome, StoreError> {
         let spec = job.state().spec.clone();
         let mut budget = BudgetTracker::with_spent(spec.budget.clone(), job.state().steps, job.state().usage.total());
         let mut wind_down_announced = false;
+        // Loop detector is per-run (history restarts on resume).
+        let mut detector = self
+            .guard
+            .as_ref()
+            .filter(|g| g.loop_detection)
+            .map(|_| bulge_guard::LoopDetector::new());
+        let mut warned: std::collections::HashSet<String> = std::collections::HashSet::new();
 
         loop {
             if cancel.is_cancelled() {
@@ -78,7 +108,9 @@ impl Driver {
                 return self.finish(job, LoopOutcome::Stopped, JobStatus::Succeeded, summary).await;
             }
 
-            self.dispatch_calls(job, tool_calls, &cancel).await?;
+            if let Some(outcome) = self.dispatch_calls(job, tool_calls, &cancel, &mut detector, &mut warned).await? {
+                return Ok(outcome);
+            }
         }
     }
 
@@ -130,9 +162,44 @@ impl Driver {
         }
     }
 
-    /// Write-ahead claim every call durably, run them (ordered results), then
-    /// log each completion and the tool-result message the model will see.
-    async fn dispatch_calls(&self, job: &mut JobHandle, calls: Vec<ExtractedCall>, cancel: &CancellationToken) -> Result<(), StoreError> {
+    /// Claim calls, consult the guard, run the allowed ones, and log results.
+    /// Returns `Some(outcome)` when a critical loop requires stopping the job.
+    async fn dispatch_calls(
+        &self,
+        job: &mut JobHandle,
+        calls: Vec<ExtractedCall>,
+        cancel: &CancellationToken,
+        detector: &mut Option<bulge_guard::LoopDetector>,
+        warned: &mut std::collections::HashSet<String>,
+    ) -> Result<Option<LoopOutcome>, StoreError> {
+        // Loop detection (before anything runs): critical → stop; warning → remind once.
+        if let Some(detector) = detector.as_ref() {
+            let known = self.tool_names();
+            for call in &calls {
+                let args = parse_lenient(&call.arguments);
+                if let Some(verdict) = detector.check(&call.name, &args, !known.contains(&call.name)) {
+                    match verdict.level {
+                        bulge_guard::Level::Critical => {
+                            job.append(vec![JobEvent::Message { message: Message::text(Role::User, verdict.message.clone()) }])?;
+                            return Ok(Some(self.finish(job, LoopOutcome::Stuck, JobStatus::Incomplete, Some(verdict.message)).await?));
+                        }
+                        bulge_guard::Level::Warning => {
+                            let key = format!("{:?}:{}", verdict.detector, call.name);
+                            if warned.insert(key) {
+                                job.append(vec![JobEvent::Message { message: Message::text(Role::User, verdict.message) }])?;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Permission: a denied call is never run; the model is told so it adapts.
+        let denied: std::collections::HashMap<String, String> = calls
+            .iter()
+            .filter_map(|c| self.permission_denial(c).map(|reason| (c.id.clone(), reason)))
+            .collect();
+
         let claims = calls
             .iter()
             .map(|c| JobEvent::ToolClaimed { call_id: c.id.clone(), name: c.name.clone(), arguments: parse_lenient(&c.arguments) })
@@ -141,6 +208,7 @@ impl Driver {
 
         let planned: Vec<PlannedCall> = calls
             .iter()
+            .filter(|c| !denied.contains_key(&c.id))
             .map(|c| PlannedCall {
                 call_id: c.id.clone(),
                 name: c.name.clone(),
@@ -150,7 +218,7 @@ impl Driver {
             .collect();
 
         let dispatcher = self.dispatcher.clone();
-        let results = run_tool_calls(
+        let mut results = run_tool_calls(
             planned,
             self.max_parallel,
             cancel,
@@ -162,14 +230,37 @@ impl Driver {
         )
         .await;
 
-        let mut events = Vec::with_capacity(results.len() * 2);
-        for result in results {
-            let (ok, value, text) = render_outcome(result.outcome);
-            events.push(JobEvent::ToolCompleted { call_id: result.call_id.clone(), ok, result: value });
-            events.push(JobEvent::Message { message: Message::tool_result(result.call_id, text, !ok) });
+        // Fold in blocked calls as errors, preserving model order.
+        let by_id: std::collections::HashMap<String, CallOutcome> = results.drain(..).map(|r| (r.call_id, r.outcome)).collect();
+        let mut events = Vec::with_capacity(calls.len() * 2);
+        for call in &calls {
+            let outcome = if let Some(reason) = denied.get(&call.id) {
+                CallOutcome::Err { code: "PERMISSION_DENIED".into(), message: reason.clone() }
+            } else {
+                by_id.get(&call.id).cloned().unwrap_or(CallOutcome::Skipped)
+            };
+            if let Some(detector) = detector.as_mut() {
+                let ok = matches!(outcome, CallOutcome::Ok(_));
+                let result = outcome_value(&outcome);
+                detector.observe(bulge_guard::Observation { tool: call.name.clone(), arguments: parse_lenient(&call.arguments), ok, result });
+            }
+            let (ok, value, text) = render_outcome(outcome);
+            events.push(JobEvent::ToolCompleted { call_id: call.id.clone(), ok, result: value });
+            events.push(JobEvent::Message { message: Message::tool_result(call.id.clone(), text, !ok) });
         }
         job.append(events)?;
-        Ok(())
+        Ok(None)
+    }
+
+    /// If the guard's rules deny this call, the reason; otherwise `None`
+    /// (allow/ask both proceed in the default autonomous mode).
+    fn permission_denial(&self, call: &ExtractedCall) -> Option<String> {
+        let guard = self.guard.as_ref()?;
+        let resource = call_resource(call);
+        match bulge_guard::evaluate(&call.name, &resource, &[&guard.rules]) {
+            bulge_guard::Effect::Deny => Some(format!("blocked by policy: {} on {resource}", call.name)),
+            bulge_guard::Effect::Allow | bulge_guard::Effect::Ask => None,
+        }
     }
 
     /// Budget spent: one final tool-less call asking for a summary, then stop Incomplete.
@@ -233,6 +324,27 @@ fn assistant_text(message: &Message) -> Option<String> {
 
 fn parse_lenient(raw: &str) -> Value {
     serde_json::from_str(raw).unwrap_or_else(|_| Value::String(raw.to_owned()))
+}
+
+/// The primary resource a permission rule matches against for this tool.
+fn call_resource(call: &ExtractedCall) -> String {
+    let args = parse_lenient(&call.arguments);
+    let field = match call.name.as_str() {
+        "exec" => "command",
+        "glob" | "grep" => "pattern",
+        _ => "path",
+    };
+    args.get(field).and_then(Value::as_str).unwrap_or("").to_owned()
+}
+
+/// Structured value for loop-detection outcome hashing.
+fn outcome_value(outcome: &CallOutcome) -> Value {
+    match outcome {
+        CallOutcome::Ok(value) => value.clone(),
+        CallOutcome::Err { code, message } => serde_json::json!({ "error": code, "message": message }),
+        CallOutcome::InvalidArguments(detail) => serde_json::json!({ "error": "INVALID_ARGUMENTS", "message": detail }),
+        CallOutcome::Skipped => serde_json::json!({ "error": "SKIPPED" }),
+    }
 }
 
 fn error_summary(error: &LlmError) -> String {

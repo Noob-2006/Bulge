@@ -78,6 +78,7 @@ dependencies = [
 name = "bulge-core"
 version = "0.1.0"
 dependencies = [
+ "bulge-guard",
  "bulge-llm",
  "bulge-proto",
  "bulge-store",

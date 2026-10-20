@@ -10,6 +10,7 @@ publish.workspace = true
 [dependencies]
 bulge-llm = { path = "../bulge-llm" }
 bulge-proto = { path = "../bulge-proto" }
+bulge-guard = { path = "../bulge-guard" }
 bulge-store = { path = "../bulge-store" }
 bulge-vm = { path = "../bulge-vm" }
 futures.workspace = true
