@@ -27,6 +27,11 @@ pub trait WireProtocol: Send + Sync {
     /// Path appended to the configured base URL, e.g. `/v1/messages`.
     fn endpoint_path(&self) -> &'static str;
 
+    /// Path for listing available models (OpenAI-compatible `/models`).
+    fn models_path(&self) -> &'static str {
+        "/models"
+    }
+
     /// Credential headers for an API key.
     fn auth_headers(&self, api_key: &str) -> Vec<(&'static str, String)>;
 

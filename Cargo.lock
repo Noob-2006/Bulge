@@ -225,6 +225,7 @@ name = "bulge-app"
 version = "0.1.0"
 dependencies = [
  "bulge-cli",
+ "bulge-llm",
  "bulge-store",
  "bulge-vm",
  "serde",

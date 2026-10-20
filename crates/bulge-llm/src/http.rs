@@ -16,6 +16,34 @@ use crate::retry::RetryPolicy;
 use crate::sse::SseParser;
 use crate::types::{FinishReason, GenerateRequest, ModelInfo, StreamChunk};
 
+/// Discover the models a provider currently offers: `GET {base_url}{models_path}`
+/// with the protocol's auth headers, parsing the OpenAI/Anthropic shape
+/// `{ "data": [ { "id": ... }, ... ] }`. Returns the model ids. Used to replace a
+/// hardcoded model list with what the key can actually reach.
+pub async fn list_models(base_url: &str, api_key: &str, protocol: &dyn WireProtocol) -> Result<Vec<String>, LlmError> {
+    let url = format!("{}{}", base_url.trim_end_matches('/'), protocol.models_path());
+    let client = reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(30))
+        .build()
+        .map_err(|e| LlmError::new(ErrorCode::Network, e.to_string()))?;
+    let mut req = client.get(&url);
+    for (name, value) in protocol.auth_headers(api_key) {
+        req = req.header(name, value);
+    }
+    let resp = req.send().await.map_err(|e| LlmError::new(ErrorCode::Network, e.to_string()))?;
+    let status = resp.status();
+    let body: serde_json::Value = resp.json().await.map_err(|e| LlmError::new(ErrorCode::MalformedResponse, e.to_string()))?;
+    if !status.is_success() {
+        return Err(protocol.classify_error(Some(status.as_u16()), &body, None, None));
+    }
+    let ids = body
+        .get("data")
+        .and_then(|d| d.as_array())
+        .map(|arr| arr.iter().filter_map(|m| m.get("id").and_then(|i| i.as_str()).map(String::from)).collect::<Vec<_>>())
+        .unwrap_or_default();
+    Ok(ids)
+}
+
 #[derive(Debug, Clone)]
 pub struct HttpBackendConfig {
     pub id: String,

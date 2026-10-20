@@ -183,6 +183,25 @@ fn save_key(base_url: String, key: String) -> Result<(), String> {
     Ok(())
 }
 
+/// Detect the models this provider currently offers, using the saved key. Replaces
+/// a hardcoded list with what the endpoint+key can actually reach. The key is read
+/// here only to make the request; it is never returned or logged.
+#[tauri::command]
+async fn detect_models(base_url: String, protocol: String) -> Result<Vec<String>, String> {
+    use bulge_llm::protocol::WireProtocol;
+    use bulge_llm::protocol::anthropic::AnthropicMessages;
+    use bulge_llm::protocol::openai_chat::OpenAiChat;
+    let proto = parse_protocol(&protocol)?;
+    let key = bulge_cli::backend::load_api_key(&base_url)?;
+    let wire: Box<dyn WireProtocol> = match proto {
+        Protocol::OpenAiChat => Box::new(OpenAiChat),
+        Protocol::Anthropic => Box::new(AnthropicMessages),
+    };
+    let mut models = bulge_llm::http::list_models(&base_url, &key, wire.as_ref()).await.map_err(|e| e.to_string())?;
+    models.sort();
+    Ok(models)
+}
+
 /// Native folder picker for choosing the workspace. Runs on the GTK main loop
 /// (Linux requires it) via the dialog plugin's callback, awaited here.
 #[tauri::command]
@@ -421,6 +440,7 @@ fn main() {
             apply_changes,
             list_jobs,
             load_job,
+            detect_models,
         ])
         .run(tauri::generate_context!())
         .expect("error while running bulge-app");

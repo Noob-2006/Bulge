@@ -103,8 +103,12 @@
         <div class="settings-section-label">模型</div>
         <div class="settings-group">
           <div class="settings-row">
-            <div><div class="row-title">模型</div><div class="row-desc">要用哪個模型</div></div>
-            <input id="model" type="text" class="control" />
+            <div><div class="row-title">模型</div><div class="row-desc">按「偵測」自動列出此 API 可用的模型</div></div>
+            <div class="model-control">
+              <input id="model" type="text" class="control" list="model-list" placeholder="模型 id" />
+              <datalist id="model-list"></datalist>
+              <button id="detect-models" class="btn btn-sm">偵測</button>
+            </div>
           </div>
           <div class="settings-row">
             <div><div class="row-title">API 位址</div><div class="row-desc">模型服務的網址</div></div>

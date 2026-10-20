@@ -20,6 +20,10 @@ impl WireProtocol for AnthropicMessages {
         "/v1/messages"
     }
 
+    fn models_path(&self) -> &'static str {
+        "/v1/models"
+    }
+
     fn auth_headers(&self, api_key: &str) -> Vec<(&'static str, String)> {
         vec![
             ("x-api-key", api_key.to_owned()),

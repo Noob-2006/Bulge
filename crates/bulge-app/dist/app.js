@@ -297,6 +297,21 @@ async function refreshKeyStatus() {
   const s = $("key-status"); s.textContent = has ? "已設定" : "未設定"; s.className = "dot-status " + (has ? "ok" : "bad");
   const chip = $("key-chip"); chip.textContent = has ? "金鑰 ✓" : "金鑰未設定"; chip.className = "chip-hint " + (has ? "ok" : "bad");
 }
+async function detectModels() {
+  const btn = $("detect-models");
+  const old = btn.textContent;
+  btn.textContent = "偵測中…"; btn.disabled = true;
+  try {
+    const models = await invoke("detect_models", { baseUrl: $("base-url").value.trim(), protocol: $("protocol").value });
+    const dl = $("model-list"); dl.innerHTML = "";
+    for (const m of models) { const o = document.createElement("option"); o.value = m; dl.appendChild(o); }
+    toast(models.length ? ("偵測到 " + models.length + " 個模型,點模型欄可選") : "沒有回傳模型", models.length ? "ok" : "err");
+    if (models.length && !$("model").value.trim()) $("model").value = models[0];
+  } catch (e) {
+    toast("偵測失敗:" + e, "err");
+  } finally { btn.textContent = old; btn.disabled = false; }
+}
+
 async function saveKey() {
   const key = $("api-key").value;
   const msg = $("key-msg");
@@ -532,6 +547,7 @@ window.addEventListener("DOMContentLoaded", () => {
   $("settings-overlay").addEventListener("click", (e) => { if (e.target === $("settings-overlay")) closeSettings(); });
   $("base-url").addEventListener("change", refreshKeyStatus);
   $("save-key").addEventListener("click", saveKey);
+  $("detect-models").addEventListener("click", detectModels);
   $("pick-ws").addEventListener("click", pickWorkspace);
   $("network").addEventListener("change", () => {});
   $("start").addEventListener("click", startJob);
