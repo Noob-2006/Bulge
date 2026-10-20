@@ -91,6 +91,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "bulge-guard"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "bulge-llm"
 version = "0.1.0"
 dependencies = [
