@@ -166,7 +166,7 @@ pub fn bound_output(text: &str, limits: Limits, spill_dir: &Path) -> std::io::Re
     if text.ends_with('\n') {
         lines.pop();
     }
-    let total_lines = lines.len();
+    let total_lines = if text.is_empty() { 0 } else { lines.len() };
 
     if total_lines <= limits.max_lines && total_bytes <= limits.max_bytes {
         return Ok(Bounded {

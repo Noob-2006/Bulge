@@ -2,7 +2,7 @@
 //! must fail; the controls must succeed (so a dead network or broken probe
 //! cannot masquerade as "blocked").
 //!
-//! usage: BULGE_API_KEY=sk-canary-<random> escape_probe <host-lan-ip> <host-control-port>
+//! usage: BULGE_API_KEY=sk-canary-<random> escape_probe <host-ip>... <host-control-port>
 //! The caller runs a TCP listener on 0.0.0.0:<port> as the positive control.
 
 use std::path::PathBuf;
@@ -30,7 +30,7 @@ async fn sh(vm: &Vm, command: &str) -> (i64, String) {
     match vm.invoke("exec", json!({ "command": command }), Some(Duration::from_secs(120))).await {
         Outcome::Ok { value } => (
             value["exit_code"].as_i64().unwrap_or(-1),
-            format!("{}{}", value["stdout"].as_str().unwrap_or(""), value["stderr"].as_str().unwrap_or("")),
+            format!("{}{}", value["stdout"]["text"].as_str().unwrap_or(""), value["stderr"]["text"].as_str().unwrap_or("")),
         ),
         Outcome::Err { code, message } => (-1, format!("{code}: {message}")),
     }
@@ -45,7 +45,10 @@ fn token() -> String {
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let [lan_ip, port] = args.as_slice() else { return Err("usage: escape_probe <host-lan-ip> <port>".into()) };
+    let Some((port, host_ips)) = args.split_last() else { return Err("usage: escape_probe <host-ip>... <port>".into()) };
+    if host_ips.is_empty() {
+        return Err("usage: escape_probe <host-ip>... <port>".into());
+    }
     let home = PathBuf::from(std::env::var("HOME")?);
     let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
     let rootfs = home.join(".bulge/rootfs/current");
@@ -97,8 +100,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Network isolation (with controls).
     let (code, out) = sh(&vm, "curl -sS -o /dev/null -w '%{http_code}' https://example.com").await;
     r.check("CONTROL: public HTTPS reachable", code == 0 && out.trim() == "200", &out);
-    let (code, _) = sh(&vm, &format!("nc -z -w3 {lan_ip} {port}")).await;
-    r.check("host LAN IP blocked (listener is live)", code != 0, "connected");
+    // passt gives the guest the host's primary address; connecting to that one
+    // only reaches the guest itself, so test every other host address.
+    let (_, guest_ip) = sh(&vm, "ip -4 addr show eth0 | awk '/inet /{print $2}' | cut -d/ -f1").await;
+    let targets: Vec<&String> = host_ips.iter().filter(|ip| ip.as_str() != guest_ip.trim()).collect();
+    r.check("CONTROL: at least one host address differs from the guest's", !targets.is_empty(), &guest_ip);
+    for ip in targets {
+        let (code, _) = sh(&vm, &format!("nc -z -w3 {ip} {port}")).await;
+        r.check(&format!("host address {ip} blocked (listener is live)"), code != 0, "connected");
+    }
     let (code, _) = sh(&vm, &format!("nc -z -w3 127.0.0.1 {port}")).await;
     r.check("guest loopback does not reach host", code != 0, "connected");
     let (code, _) = sh(&vm, "nc -z -w3 169.254.169.254 80").await;

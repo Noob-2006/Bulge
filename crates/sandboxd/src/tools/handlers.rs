@@ -23,7 +23,10 @@ const MAX_EXPORT_FILE_BYTES: u64 = 4 * 1024 * 1024;
 const MAX_GLOB_RESULTS: usize = 1000;
 
 fn resolve(path: &str) -> PathBuf {
-    let path = Path::new(path);
+    let path = Path::new(path.trim_start_matches("./"));
+    if path.as_os_str().is_empty() || path == Path::new(".") {
+        return PathBuf::from(WORKSPACE);
+    }
     if path.is_absolute() { path.to_path_buf() } else { Path::new(WORKSPACE).join(path) }
 }
 
