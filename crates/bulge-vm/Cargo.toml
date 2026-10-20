@@ -12,6 +12,8 @@ bulge-proto = { path = "../bulge-proto" }
 command-fds = { version = "0.3", features = ["tokio"] }
 getrandom.workspace = true
 if-addrs = "0.15"
+base64 = "0.22"
+similar = "3"
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

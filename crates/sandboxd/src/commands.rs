@@ -11,8 +11,9 @@ use tokio::process::Command;
 use crate::runtime::{HandlerError, InvocationContext};
 use crate::setup::{WORKSPACE, WORKSPACE_LOWER, WORKSPACE_UPPER};
 
-/// Per-stream cap; the remainder is reported as truncated (spill comes later).
-const MAX_STREAM_BYTES: usize = 96 * 1024;
+/// Hard per-stream read cap (memory bound); what the model sees is further
+/// bounded by `tools::handlers::bounded`, which spills the full text to a file.
+const MAX_STREAM_BYTES: usize = 8 * 1024 * 1024;
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -53,8 +54,10 @@ pub async fn exec(cx: InvocationContext) -> Result<Value, HandlerError> {
     let status = status.map_err(|e| HandlerError::new("WAIT_FAILED", e.to_string()))?;
     Ok(json!({
         "exit_code": status.code(),
-        "stdout": out.0, "stdout_truncated_bytes": out.1,
-        "stderr": err.0, "stderr_truncated_bytes": err.1,
+        "stdout": crate::tools::handlers::bounded(&out.0)?,
+        "stdout_dropped_bytes": out.1,
+        "stderr": crate::tools::handlers::bounded(&err.0)?,
+        "stderr_dropped_bytes": err.1,
     }))
 }
 
@@ -98,6 +101,9 @@ fn walk(upper: &Path, rel: &Path, out: &mut Vec<Value>) -> std::io::Result<()> {
         let path = rel_path.to_string_lossy().into_owned();
         let ft = meta.file_type();
         if ft.is_char_device() && meta.rdev() == 0 {
+            if !lower.exists() {
+                continue; // already deleted on the host
+            }
             out.push(json!({ "path": path, "kind": "deleted" }));
         } else if ft.is_dir() {
             if !lower.exists() {
@@ -107,9 +113,19 @@ fn walk(upper: &Path, rel: &Path, out: &mut Vec<Value>) -> std::io::Result<()> {
         } else if ft.is_symlink() {
             out.push(json!({ "path": path, "kind": "symlink" }));
         } else if ft.is_file() {
+            if lower.is_file() && same_contents(&upper.join(&rel_path), &lower) {
+                continue; // already applied on the host
+            }
             let kind = if lower.exists() { "modified" } else { "added" };
             out.push(json!({ "path": path, "kind": kind, "size": meta.len() }));
         }
     }
     Ok(())
+}
+
+fn same_contents(a: &Path, b: &Path) -> bool {
+    match (std::fs::metadata(a), std::fs::metadata(b)) {
+        (Ok(ma), Ok(mb)) if ma.len() == mb.len() => std::fs::read(a).ok() == std::fs::read(b).ok(),
+        _ => false,
+    }
 }

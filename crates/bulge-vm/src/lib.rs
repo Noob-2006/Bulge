@@ -7,4 +7,5 @@
 //! (DHCP, IPv6 neighbour discovery) and DNS to passt's forwarder.
 
 pub mod net;
+pub mod changes;
 pub mod vm;
