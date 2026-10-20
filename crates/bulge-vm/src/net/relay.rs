@@ -51,14 +51,25 @@ pub struct RelayHandle {
 }
 
 impl RelayHandle {
-    /// Stop relaying and wait for both directions to finish.
-    pub fn shutdown(mut self) {
+    /// Stop relaying and wait for both directions to finish. The real work lives
+    /// in `Drop`, so a `RelayHandle` that is simply dropped (an error path, a
+    /// panic) is cleaned up exactly the same way — no leaked relay threads.
+    pub fn shutdown(self) {}
+
+    fn stop_and_join(&mut self) {
         self.stop.store(true, Ordering::Relaxed);
+        // Closing both sockets unblocks the threads' blocking reads so they exit.
         let _ = self.vm.shutdown(Shutdown::Both);
         let _ = self.net.shutdown(Shutdown::Both);
         for thread in self.threads.drain(..) {
             let _ = thread.join();
         }
+    }
+}
+
+impl Drop for RelayHandle {
+    fn drop(&mut self) {
+        self.stop_and_join();
     }
 }
 

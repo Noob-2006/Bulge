@@ -206,16 +206,27 @@ impl Vm {
         rx.await.unwrap_or(Outcome::Err { code: "CHANNEL_CLOSED".into(), message: "guest channel closed".into() })
     }
 
+    /// Graceful shutdown: ask the guest to stop and give the VMM up to 5s to exit
+    /// on its own. Whatever is left — the VMM, passt, the relay threads, the
+    /// runtime directory — is then force-cleaned by `Drop` as `self` falls out of
+    /// scope, so cleanup happens on every path, not just this one.
     pub async fn shutdown(mut self) {
         let _ = self.sender.lock().await.send(&HostMessage::Shutdown).await;
-        if tokio::time::timeout(Duration::from_secs(5), self.vmm.wait()).await.is_err() {
-            let _ = self.vmm.kill().await;
-        }
-        if let Some(relay) = self.relay.take() {
-            relay.shutdown();
-        }
-        if let Some(mut passt) = self.passt.take() {
-            let _ = passt.kill().await;
+        let _ = tokio::time::timeout(Duration::from_secs(5), self.vmm.wait()).await;
+    }
+}
+
+impl Drop for Vm {
+    /// Last line of defence against leaked child processes (security gap: a
+    /// dropped `Vm` on an error path must not leave a live sandbox or an open
+    /// network path behind). Synchronous because `Drop` cannot await:
+    /// `start_kill` sends SIGKILL without waiting, the relay's own `Drop` stops
+    /// its threads when the `relay` field drops, and the runtime directory (with
+    /// its control socket, logs, and bootstrap file) is removed.
+    fn drop(&mut self) {
+        let _ = self.vmm.start_kill();
+        if let Some(passt) = self.passt.as_mut() {
+            let _ = passt.start_kill();
         }
         let _ = std::fs::remove_dir_all(&self.runtime_dir);
     }
