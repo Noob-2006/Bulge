@@ -22,6 +22,14 @@ pub struct Bootstrap {
     pub session_key_hex: String,
     pub session_id: String,
     pub generation: u64,
+    /// Host uid/gid that owns the shared workspace. The guest drops its own
+    /// privileges to this id (or to `nobody` when the host runs as root) so the
+    /// sandbox never executes anything with CAP_SYS_ADMIN. Older hosts that did
+    /// not send these default to 0, which the guest maps to `nobody`.
+    #[serde(default)]
+    pub host_uid: u32,
+    #[serde(default)]
+    pub host_gid: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

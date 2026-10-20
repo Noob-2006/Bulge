@@ -16,6 +16,7 @@ thiserror = { workspace = true }
 tokio = { workspace = true, features = ["process", "fs", "rt-multi-thread", "macros"] }
 tokio-vsock = "0.7"
 base64 = "0.22"
+nix = { version = "0.30", features = ["user", "process"] }
 
 [lints]
 workspace = true

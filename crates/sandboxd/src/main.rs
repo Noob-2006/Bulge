@@ -24,7 +24,11 @@ async fn main() {
 
 async fn run() -> Result<(), String> {
     let bootstrap = read_bootstrap()?;
-    sandboxd::setup::lock_down().map_err(|e| format!("setup: {e}"))?;
+    // Pick the unprivileged id to run as. If the host runs bulge as root we have
+    // no matching non-root owner, so fall back to `nobody`.
+    let (uid, gid) = target_ids(bootstrap.3, bootstrap.4);
+    sandboxd::setup::lock_down(uid, gid).map_err(|e| format!("setup: {e}"))?;
+    sandboxd::setup::drop_privileges(uid, gid).map_err(|e| format!("drop privileges: {e}"))?;
 
     let runtime = CommandRuntime::builder()
         .command("ping", |_| async { Ok(serde_json::json!("pong")) })
@@ -90,8 +94,18 @@ async fn run() -> Result<(), String> {
     Ok(())
 }
 
-/// Returns (key, session id, generation). The file is one-shot: a second read fails.
-fn read_bootstrap() -> Result<(SessionKey, String, u64), String> {
+/// The unprivileged id to run as: the host owner, or `nobody` (65534) when the
+/// host runs as root (uid 0) and there is no non-root owner to match.
+fn target_ids(host_uid: u32, host_gid: u32) -> (u32, u32) {
+    const NOBODY: u32 = 65534;
+    let uid = if host_uid == 0 { NOBODY } else { host_uid };
+    let gid = if host_gid == 0 { NOBODY } else { host_gid };
+    (uid, gid)
+}
+
+/// Returns (key, session id, generation, host uid, host gid). The file is
+/// one-shot: a second read fails.
+fn read_bootstrap() -> Result<(SessionKey, String, u64, u32, u32), String> {
     let raw = std::fs::read_to_string(BOOTSTRAP_PATH).map_err(|e| format!("bootstrap: {e}"))?;
     let bootstrap: Bootstrap = serde_json::from_str(&raw).map_err(|e| format!("bootstrap: {e}"))?;
     let hex = bootstrap.session_key_hex.as_bytes();
@@ -103,5 +117,5 @@ fn read_bootstrap() -> Result<(SessionKey, String, u64), String> {
         let text = std::str::from_utf8(pair).map_err(|_| "bootstrap: bad hex")?;
         key[i] = u8::from_str_radix(text, 16).map_err(|_| "bootstrap: bad hex")?;
     }
-    Ok((SessionKey::from_bytes(key), bootstrap.session_id, bootstrap.generation))
+    Ok((SessionKey::from_bytes(key), bootstrap.session_id, bootstrap.generation, bootstrap.host_uid, bootstrap.host_gid))
 }

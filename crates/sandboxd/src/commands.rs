@@ -35,6 +35,9 @@ pub async fn exec(cx: InvocationContext) -> Result<Value, HandlerError> {
         .arg("-c")
         .arg(&params.command)
         .current_dir(&cwd)
+        // The daemon already runs unprivileged; give commands a writable HOME on
+        // the tmpfs so tools that need one (git, pip, npm) work without root.
+        .env("HOME", crate::setup::AGENT_HOME)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

@@ -9,7 +9,7 @@
 
 use std::collections::HashMap;
 use std::os::fd::OwnedFd;
-use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
 use std::os::unix::net::UnixStream as StdUnixStream;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -87,10 +87,15 @@ impl Vm {
 
         let mut key = [0u8; 32];
         getrandom::fill(&mut key).map_err(|e| VmError::Other(format!("getrandom: {e}")))?;
+        // The runtime dir we just created is owned by whoever runs bulge; the
+        // guest drops to this uid/gid so it never runs tools as root.
+        let owner = std::fs::metadata(&runtime_dir)?;
         let bootstrap = Bootstrap {
             session_key_hex: key.iter().map(|b| format!("{b:02x}")).collect(),
             session_id: session_id.clone(),
             generation: 1,
+            host_uid: owner.uid(),
+            host_gid: owner.gid(),
         };
 
         // Network: VMM <-> relay (filter) <-> passt.
