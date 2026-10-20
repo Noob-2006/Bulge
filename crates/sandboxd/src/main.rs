@@ -26,18 +26,18 @@ async fn run() -> Result<(), String> {
     let bootstrap = read_bootstrap()?;
     // Pick the unprivileged id to run as. If the host runs bulge as root we have
     // no matching non-root owner, so fall back to `nobody`.
-    let (uid, gid) = target_ids(bootstrap.3, bootstrap.4);
+    let (uid, gid) = target_ids(bootstrap.host_uid, bootstrap.host_gid);
     sandboxd::setup::lock_down(uid, gid).map_err(|e| format!("setup: {e}"))?;
     sandboxd::setup::drop_privileges(uid, gid).map_err(|e| format!("drop privileges: {e}"))?;
 
     // Start the egress bridge if the host armed the gateway (both secrets present).
     // Tools reach the outside world only through it; otherwise the guest is
     // air-gapped.
-    let (gateway_token, gateway_key) = (bootstrap.5.clone(), bootstrap.6.clone());
-    if !gateway_token.is_empty() && !gateway_key.is_empty() {
+    if !bootstrap.gateway_token.is_empty() && !bootstrap.gateway_key.is_empty() {
         let _ = sandboxd::EGRESS_PROXY.set(sandboxd::bridge::PROXY_URL.to_string());
+        let (token, key) = (bootstrap.gateway_token.clone(), bootstrap.gateway_key.clone());
         tokio::spawn(async move {
-            let _ = sandboxd::bridge::serve(gateway_token, gateway_key).await;
+            let _ = sandboxd::bridge::serve(token, key).await;
         });
     }
 
@@ -60,9 +60,9 @@ async fn run() -> Result<(), String> {
     drop(listener);
 
     let params = SessionParams {
-        key: bootstrap.0,
-        session_id: bootstrap.1,
-        generation: bootstrap.2,
+        key: bootstrap.key,
+        session_id: bootstrap.session_id,
+        generation: bootstrap.generation,
         name: "sandboxd".into(),
         version: env!("CARGO_PKG_VERSION").into(),
         artifact_identity: concat!("sandboxd-", env!("CARGO_PKG_VERSION")).into(),
@@ -114,9 +114,19 @@ fn target_ids(host_uid: u32, host_gid: u32) -> (u32, u32) {
     (uid, gid)
 }
 
-/// Returns (key, session id, generation, host uid, host gid, gateway token,
-/// gateway key). The file is one-shot: a second read fails.
-fn read_bootstrap() -> Result<(SessionKey, String, u64, u32, u32, String, String), String> {
+/// Everything the guest needs from the one-shot bootstrap file.
+struct BootstrapInfo {
+    key: SessionKey,
+    session_id: String,
+    generation: u64,
+    host_uid: u32,
+    host_gid: u32,
+    gateway_token: String,
+    gateway_key: String,
+}
+
+/// Read the one-shot bootstrap (a second read fails).
+fn read_bootstrap() -> Result<BootstrapInfo, String> {
     let raw = std::fs::read_to_string(BOOTSTRAP_PATH).map_err(|e| format!("bootstrap: {e}"))?;
     let bootstrap: Bootstrap = serde_json::from_str(&raw).map_err(|e| format!("bootstrap: {e}"))?;
     let hex = bootstrap.session_key_hex.as_bytes();
@@ -128,5 +138,13 @@ fn read_bootstrap() -> Result<(SessionKey, String, u64, u32, u32, String, String
         let text = std::str::from_utf8(pair).map_err(|_| "bootstrap: bad hex")?;
         key[i] = u8::from_str_radix(text, 16).map_err(|_| "bootstrap: bad hex")?;
     }
-    Ok((SessionKey::from_bytes(key), bootstrap.session_id, bootstrap.generation, bootstrap.host_uid, bootstrap.host_gid, bootstrap.gateway_token, bootstrap.gateway_key))
+    Ok(BootstrapInfo {
+        key: SessionKey::from_bytes(key),
+        session_id: bootstrap.session_id,
+        generation: bootstrap.generation,
+        host_uid: bootstrap.host_uid,
+        host_gid: bootstrap.host_gid,
+        gateway_token: bootstrap.gateway_token,
+        gateway_key: bootstrap.gateway_key,
+    })
 }
