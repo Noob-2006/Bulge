@@ -320,3 +320,64 @@ async fn gate_stops_incomplete_when_a_deliverable_is_missing() {
     let summary = job.state().summary.clone().unwrap_or_default();
     assert!(summary.contains("report.md"), "summary names the missing deliverable: {summary}");
 }
+
+// ---- plan tool (C5) ----
+
+fn driver_with_plan(backend: Arc<FakeBackend>, dispatcher: Arc<FakeDispatcher>) -> Driver {
+    let mut tools = bulge_core::builtin_tools();
+    tools.push(bulge_core::plan_tool());
+    Driver::new(backend, dispatcher, tools, "You are bulge.".into())
+}
+
+#[tokio::test]
+async fn plan_tool_is_handled_on_the_host_not_the_vm() {
+    let plan_call = ContentBlock::ToolCall {
+        id: "p1".into(),
+        name: bulge_core::PLAN_TOOL.into(),
+        arguments: json!({ "items": [
+            { "text": "collect sources", "status": "done" },
+            { "text": "write report", "status": "in_progress" }
+        ] })
+        .to_string(),
+    };
+    let backend = FakeBackend::new(vec![vec![plan_call], vec![text("done")]]);
+    let dispatcher = Arc::new(FakeDispatcher::default());
+    let mut job = job(Budget { max_steps: 50, max_tokens: 100_000, max_wall_secs: 3600 });
+
+    let outcome = driver_with_plan(backend, dispatcher.clone()).run(&mut job, CancellationToken::new()).await.unwrap();
+    assert_eq!(outcome, LoopOutcome::Stopped);
+
+    // The plan was recorded into state...
+    assert_eq!(job.state().plan.len(), 2);
+    assert_eq!(job.state().plan[0].text, "collect sources");
+    // ...and the plan call never reached the VM dispatcher.
+    assert!(dispatcher.seen.lock().unwrap().iter().all(|c| c.name != bulge_core::PLAN_TOOL));
+}
+
+#[tokio::test]
+async fn a_stalled_plan_gets_one_nudge() {
+    // One plan with an item that never finishes, then many tool steps with no
+    // progress: the driver should nudge about the stall.
+    let plan_call = ContentBlock::ToolCall {
+        id: "p1".into(),
+        name: bulge_core::PLAN_TOOL.into(),
+        arguments: json!({ "items": [{ "text": "the hard part", "status": "in_progress" }] }).to_string(),
+    };
+    let mut turns = vec![vec![plan_call]];
+    for i in 0..10 {
+        turns.push(vec![tool(&format!("r{i}"), "read", json!({ "path": "a.txt" }))]);
+    }
+    let backend = FakeBackend::new(turns);
+    let dispatcher = Arc::new(FakeDispatcher::default());
+    let mut job = job(Budget { max_steps: 50, max_tokens: 100_000, max_wall_secs: 3600 });
+
+    driver_with_plan(backend, dispatcher).run(&mut job, CancellationToken::new()).await.unwrap();
+
+    let nudges = job
+        .state()
+        .history
+        .iter()
+        .filter(|m| m.content.iter().any(|b| matches!(b, ContentBlock::Text { text } if text.contains("no plan progress"))))
+        .count();
+    assert_eq!(nudges, 1, "the stall nudge should fire exactly once");
+}

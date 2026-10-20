@@ -76,3 +76,35 @@ pub fn builtin_tools() -> Vec<ToolSchema> {
 pub fn builtin_concurrency_safe(name: &str) -> bool {
     matches!(name, "read" | "glob" | "grep")
 }
+
+/// Name of the host-side planning tool (handled by the driver, never the VM).
+pub const PLAN_TOOL: &str = "update_plan";
+
+/// Schema for the planning tool. Callers append it to `builtin_tools()` when they
+/// want the model to keep a visible plan; the driver intercepts its calls,
+/// records the plan, and watches for a stall. Status is one of
+/// `pending` | `in_progress` | `done` | `dropped` (default `pending`).
+pub fn plan_tool() -> ToolSchema {
+    ToolSchema {
+        name: PLAN_TOOL.into(),
+        description: "Replace your working plan with an ordered checklist. Call it when the plan changes and mark items done as you finish them, so progress is visible and a stall can be caught.".into(),
+        parameters: json!({
+            "type": "object",
+            "properties": {
+                "items": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "text": { "type": "string" },
+                            "status": { "type": "string", "enum": ["pending", "in_progress", "done", "dropped"] }
+                        },
+                        "required": ["text"]
+                    }
+                }
+            },
+            "required": ["items"]
+        }),
+        defer_loading: false,
+    }
+}

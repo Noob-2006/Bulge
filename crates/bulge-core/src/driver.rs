@@ -12,7 +12,7 @@ use std::sync::Arc;
 
 use bulge_llm::assemble::Assembler;
 use bulge_llm::{ContentBlock, FinishReason, GenerateRequest, LlmBackend, LlmError, Message, Purpose, Role, TokenUsage, ToolSchema};
-use bulge_store::{JobEvent, JobHandle, JobStatus, StoreError};
+use bulge_store::{JobEvent, JobHandle, JobStatus, PlanItem, PlanStatus, StoreError};
 use futures::StreamExt;
 use serde_json::Value;
 use tokio_util::sync::CancellationToken;
@@ -20,8 +20,12 @@ use tokio_util::sync::CancellationToken;
 use crate::budget::{BudgetState, BudgetTracker};
 use crate::complete::{self, Check, GateReport};
 use crate::context::{self, PruneConfig};
-use crate::dispatch::{ToolCall, ToolDispatcher};
+use crate::dispatch::{PLAN_TOOL, ToolCall, ToolDispatcher};
 use crate::schedule::{CallOutcome, PlannedCall, run_tool_calls};
+
+/// Steps with a non-empty plan and no item reaching `done` before the driver
+/// nudges the model to make progress or re-plan.
+const PLAN_STALL_THRESHOLD: u64 = 8;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LoopOutcome {
@@ -152,6 +156,11 @@ impl Driver {
             .map(|_| bulge_guard::LoopDetector::new());
         let mut warned: std::collections::HashSet<String> = std::collections::HashSet::new();
         let mut gate_attempts: u32 = 0;
+        // Plan-stall tracking: the step a plan item last reached `done`, and
+        // whether the model has already been nudged about the current stall.
+        let mut prev_done = plan_done_count(&job.state().plan);
+        let mut last_progress_step = job.state().steps;
+        let mut stall_warned = false;
 
         loop {
             if cancel.is_cancelled() {
@@ -195,6 +204,22 @@ impl Driver {
 
             if let Some(outcome) = self.dispatch_calls(job, tool_calls, &cancel, &mut detector, &mut warned).await? {
                 return Ok(outcome);
+            }
+
+            // Plan-stall nudge: if the model keeps a plan but no item has reached
+            // `done` for a while (and it is not already settled), remind it once.
+            let plan = &job.state().plan;
+            if !plan.is_empty() && !plan_settled(plan) {
+                let done = plan_done_count(plan);
+                if done > prev_done {
+                    prev_done = done;
+                    last_progress_step = step;
+                    stall_warned = false;
+                } else if !stall_warned && complete::plan_stalled(step.saturating_sub(last_progress_step), PLAN_STALL_THRESHOLD) {
+                    stall_warned = true;
+                    let note = "You have made no plan progress for several steps. Re-check your plan: finish or drop the stuck item, or change approach — do not keep repeating the same step.";
+                    job.append(vec![JobEvent::Message { message: Message::text(Role::User, note) }])?;
+                }
             }
         }
     }
@@ -372,9 +397,28 @@ impl Driver {
             }
         }
 
+        // Host-side tools (the plan tool) are handled here, never sent to the VM.
+        let mut host: std::collections::HashMap<String, CallOutcome> = std::collections::HashMap::new();
+        let mut plan_update: Option<Vec<PlanItem>> = None;
+        for call in &calls {
+            if call.name == PLAN_TOOL {
+                match parse_plan(&call.arguments) {
+                    Ok(items) => {
+                        let outcome = CallOutcome::Ok(serde_json::json!({ "ok": true, "items": items.len() }));
+                        plan_update = Some(items);
+                        host.insert(call.id.clone(), outcome);
+                    }
+                    Err(message) => {
+                        host.insert(call.id.clone(), CallOutcome::Err { code: "BAD_PLAN".into(), message });
+                    }
+                }
+            }
+        }
+
         // Permission: a denied call is never run; the model is told so it adapts.
         let denied: std::collections::HashMap<String, String> = calls
             .iter()
+            .filter(|c| !host.contains_key(&c.id))
             .filter_map(|c| self.permission_denial(c).map(|reason| (c.id.clone(), reason)))
             .collect();
 
@@ -383,10 +427,14 @@ impl Driver {
             .map(|c| JobEvent::ToolClaimed { call_id: c.id.clone(), name: c.name.clone(), arguments: parse_lenient(&c.arguments) })
             .collect();
         job.append(claims)?;
+        // Record the plan update (if any) between claim and completion.
+        if let Some(items) = plan_update {
+            job.append(vec![JobEvent::Plan { items }])?;
+        }
 
         let planned: Vec<PlannedCall> = calls
             .iter()
-            .filter(|c| !denied.contains_key(&c.id))
+            .filter(|c| !denied.contains_key(&c.id) && !host.contains_key(&c.id))
             .map(|c| PlannedCall {
                 call_id: c.id.clone(),
                 name: c.name.clone(),
@@ -412,7 +460,9 @@ impl Driver {
         let by_id: std::collections::HashMap<String, CallOutcome> = results.drain(..).map(|r| (r.call_id, r.outcome)).collect();
         let mut events = Vec::with_capacity(calls.len() * 2);
         for call in &calls {
-            let outcome = if let Some(reason) = denied.get(&call.id) {
+            let outcome = if let Some(outcome) = host.get(&call.id) {
+                outcome.clone()
+            } else if let Some(reason) = denied.get(&call.id) {
                 CallOutcome::Err { code: "PERMISSION_DENIED".into(), message: reason.clone() }
             } else {
                 by_id.get(&call.id).cloned().unwrap_or(CallOutcome::Skipped)
@@ -577,6 +627,39 @@ impl Driver {
         job.append(vec![JobEvent::StatusChanged { status, summary }])?;
         Ok(outcome)
     }
+}
+
+/// Parse the plan tool's arguments into plan items. Lenient on status (defaults
+/// to `pending`, unknown values rejected); requires a non-empty `text` per item.
+fn parse_plan(raw: &str) -> Result<Vec<PlanItem>, String> {
+    let value = serde_json::from_str::<Value>(raw).map_err(|e| format!("arguments are not JSON: {e}"))?;
+    let items = value.get("items").and_then(Value::as_array).ok_or("expected an `items` array")?;
+    let mut plan = Vec::with_capacity(items.len());
+    for (index, item) in items.iter().enumerate() {
+        let text = item.get("text").and_then(Value::as_str).unwrap_or("").trim();
+        if text.is_empty() {
+            return Err(format!("item {index} has an empty `text`"));
+        }
+        let status = match item.get("status").and_then(Value::as_str) {
+            None | Some("pending") => PlanStatus::Pending,
+            Some("in_progress") => PlanStatus::InProgress,
+            Some("done") => PlanStatus::Done,
+            Some("dropped") => PlanStatus::Dropped,
+            Some(other) => return Err(format!("item {index} has an unknown status {other:?}")),
+        };
+        plan.push(PlanItem { text: text.to_string(), status });
+    }
+    Ok(plan)
+}
+
+/// Count of items the plan has finished (used for stall detection).
+fn plan_done_count(plan: &[PlanItem]) -> usize {
+    plan.iter().filter(|item| item.status == PlanStatus::Done).count()
+}
+
+/// A plan is settled when every item is done or dropped (nothing left to stall on).
+fn plan_settled(plan: &[PlanItem]) -> bool {
+    !plan.is_empty() && plan.iter().all(|item| matches!(item.status, PlanStatus::Done | PlanStatus::Dropped))
 }
 
 /// A one-string-argument tool call (for the gate's own read/exec checks).
