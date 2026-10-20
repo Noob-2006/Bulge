@@ -1,6 +1,7 @@
 //! bulge-core: the agent loop.
 
 pub mod budget;
+pub mod complete;
 pub mod context;
 pub mod dispatch;
 pub mod driver;
