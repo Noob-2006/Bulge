@@ -26,3 +26,6 @@
 | M8 | crates/bulge-llm/src/repair/* | openclaw tool-call-repair |
 | M10 | crates/bulge-vm/src/net/policy.rs `is_forbidden_destination` | openclaw net-policy ip.ts + ipaddr.js 範圍表 |
 | M11 | crates/sandboxd/src/runtime.rs | openclaw node-host runtime.rs |
+| M12 | crates/sandboxd/src/tools/edit.rs | opencode edit.ts |
+| M13 | crates/sandboxd/src/tools/truncate.rs | DSH spill + opencode tool-output |
+| M14 | crates/sandboxd/src/tools/read.rs | opencode read-filesystem.ts |
