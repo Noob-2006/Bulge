@@ -18,19 +18,45 @@ use serde_json::Value;
 use tokio_util::sync::CancellationToken;
 
 use crate::budget::{BudgetState, BudgetTracker};
+use crate::complete::{self, Check, GateReport};
 use crate::context::{self, PruneConfig};
 use crate::dispatch::{ToolCall, ToolDispatcher};
 use crate::schedule::{CallOutcome, PlannedCall, run_tool_calls};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LoopOutcome {
-    /// The model produced no tool calls (recorded as Succeeded; see scope note).
+    /// The model stopped calling tools and the completion gate accepted the work
+    /// (recorded Succeeded). Without a gate, any stop ends here.
     Stopped,
     BudgetExhausted,
     Cancelled,
     Failed,
     /// A runaway loop was detected and the job was stopped (recorded Incomplete).
     Stuck,
+    /// The completion gate kept failing; the job stopped with work unfinished
+    /// (recorded Incomplete, with the outstanding items in the summary).
+    Incomplete,
+}
+
+/// Completion-gate configuration enabled by `Driver::with_completion_gate`.
+#[derive(Debug, Clone)]
+pub struct CompletionConfig {
+    /// Run the model self-review (SELF_REVIEW_CRITERIA) when it stops.
+    pub self_review: bool,
+    /// Failed-gate retries before the job is accepted as Incomplete.
+    pub max_attempts: u32,
+}
+
+impl Default for CompletionConfig {
+    fn default() -> Self {
+        Self { self_review: true, max_attempts: 2 }
+    }
+}
+
+/// Whether the completion gate accepted the stop or wants another step.
+enum GateDecision {
+    Done(LoopOutcome),
+    Continue,
 }
 
 /// Guard configuration enabled by `Driver::with_guard`.
@@ -70,6 +96,7 @@ pub struct Driver {
     max_parallel: usize,
     guard: Option<GuardConfig>,
     context: ContextConfig,
+    completion: Option<CompletionConfig>,
 }
 
 impl Driver {
@@ -82,6 +109,7 @@ impl Driver {
             max_parallel: crate::schedule::DEFAULT_MAX_PARALLEL,
             guard: None,
             context: ContextConfig::default(),
+            completion: None,
         }
     }
 
@@ -96,6 +124,14 @@ impl Driver {
     /// pruning). Defaults suit a ~128k model.
     pub fn with_context(mut self, context: ContextConfig) -> Self {
         self.context = context;
+        self
+    }
+
+    /// Enable the completion gate: when the model stops, verify the deliverable
+    /// contract in the VM and run a self-review before accepting the job as done.
+    /// Without this, any stop is accepted as Succeeded (the C2 behaviour).
+    pub fn with_completion_gate(mut self, completion: CompletionConfig) -> Self {
+        self.completion = Some(completion);
         self
     }
 
@@ -115,6 +151,7 @@ impl Driver {
             .filter(|g| g.loop_detection)
             .map(|_| bulge_guard::LoopDetector::new());
         let mut warned: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut gate_attempts: u32 = 0;
 
         loop {
             if cancel.is_cancelled() {
@@ -150,7 +187,10 @@ impl Driver {
             let tool_calls = extract_tool_calls(&assembled.message);
             if tool_calls.is_empty() {
                 let summary = assistant_text(&assembled.message);
-                return self.finish(job, LoopOutcome::Stopped, JobStatus::Succeeded, summary).await;
+                match self.completion_gate(job, summary, &cancel, &mut gate_attempts, &mut budget).await? {
+                    GateDecision::Done(outcome) => return Ok(outcome),
+                    GateDecision::Continue => continue,
+                }
             }
 
             if let Some(outcome) = self.dispatch_calls(job, tool_calls, &cancel, &mut detector, &mut warned).await? {
@@ -422,10 +462,137 @@ impl Driver {
         self.finish(job, LoopOutcome::BudgetExhausted, JobStatus::Incomplete, summary).await
     }
 
+    /// The completion gate (C5). With no gate configured, a stop is accepted as
+    /// Succeeded (C2 behaviour). Otherwise verify the contract mechanically and
+    /// run a self-review: pass → Succeeded; fail → feed back and continue, or, once
+    /// `max_attempts` is spent, stop Incomplete with the outstanding items.
+    async fn completion_gate(
+        &self,
+        job: &mut JobHandle,
+        summary: Option<String>,
+        cancel: &CancellationToken,
+        attempts: &mut u32,
+        budget: &mut BudgetTracker,
+    ) -> Result<GateDecision, StoreError> {
+        let Some(config) = self.completion.clone() else {
+            let outcome = self.finish(job, LoopOutcome::Stopped, JobStatus::Succeeded, summary).await?;
+            return Ok(GateDecision::Done(outcome));
+        };
+        *attempts += 1;
+
+        let checks = self.run_contract_checks(job, cancel).await;
+        let self_review_passed = if config.self_review {
+            self.self_review(job, cancel, budget).await?
+        } else {
+            None
+        };
+        let report = GateReport { checks, self_review_passed };
+
+        if report.passed() {
+            let outcome = self.finish(job, LoopOutcome::Stopped, JobStatus::Succeeded, summary).await?;
+            return Ok(GateDecision::Done(outcome));
+        }
+
+        let feedback = report.failure_feedback();
+        if *attempts > config.max_attempts {
+            let note = format!("{feedback}\n\n(Completion gate still failing after {attempts} attempts; stopping with work unfinished.)");
+            let outcome = self.finish(job, LoopOutcome::Incomplete, JobStatus::Incomplete, Some(note)).await?;
+            return Ok(GateDecision::Done(outcome));
+        }
+        job.append(vec![JobEvent::Message { message: Message::text(Role::User, feedback) }])?;
+        Ok(GateDecision::Continue)
+    }
+
+    /// Mechanical contract checks, run in the VM: each deliverable must be
+    /// readable, each acceptance command must exit 0. No contract → no checks.
+    async fn run_contract_checks(&self, job: &JobHandle, cancel: &CancellationToken) -> Vec<Check> {
+        let Some(contract) = job.state().contract.clone() else {
+            return Vec::new();
+        };
+        let mut checks = Vec::new();
+        for deliverable in &contract.deliverables {
+            let outcome = self.dispatcher.dispatch(string_call("read", "path", &deliverable.path), cancel.clone()).await;
+            let (passed, detail) = match outcome {
+                CallOutcome::Ok(_) => (true, "present".to_string()),
+                CallOutcome::Err { message, .. } => (false, format!("missing or unreadable: {message}")),
+                other => (false, format!("check did not run: {other:?}")),
+            };
+            checks.push(Check { what: format!("deliverable `{}` exists", deliverable.path), passed, detail });
+        }
+        for command in &contract.acceptance {
+            let outcome = self.dispatcher.dispatch(string_call("exec", "command", command), cancel.clone()).await;
+            let (passed, detail) = match outcome {
+                CallOutcome::Ok(value) => {
+                    let code = value.get("exit_code").and_then(Value::as_i64);
+                    if code == Some(0) {
+                        (true, "exit 0".to_string())
+                    } else {
+                        let stderr = value.get("stderr").and_then(Value::as_str).unwrap_or("");
+                        (false, format!("exit {code:?}: {}", truncate(stderr.trim(), 300)))
+                    }
+                }
+                CallOutcome::Err { message, .. } => (false, format!("failed to run: {message}")),
+                other => (false, format!("check did not run: {other:?}")),
+            };
+            checks.push(Check { what: format!("acceptance `{}`", truncate(command, 60)), passed, detail });
+        }
+        checks
+    }
+
+    /// Ask the model to review its own work against the fixed criteria. The
+    /// criteria and the reply are logged as ordinary turns (model-visible ⟺
+    /// logged). Returns the parsed verdict, or `None` if the model errored or gave
+    /// no verdict — a missing verdict never blocks completion on its own.
+    async fn self_review(&self, job: &mut JobHandle, cancel: &CancellationToken, budget: &mut BudgetTracker) -> Result<Option<bool>, StoreError> {
+        job.append(vec![JobEvent::Message { message: Message::text(Role::User, complete::SELF_REVIEW_CRITERIA) }])?;
+        let model = job.state().spec.model.model.clone();
+        let request = GenerateRequest {
+            model: model.clone(),
+            messages: self.build_request_messages(job),
+            tools: Vec::new(),
+            max_tokens: None,
+            temperature: None,
+            stop: Vec::new(),
+            reasoning_effort: None,
+            purpose: Purpose::Conversation,
+        };
+        let mut stream = self.backend.stream(request, cancel.clone());
+        let mut assembler = Assembler::new();
+        while let Some(chunk) = stream.next().await {
+            assembler.push(&chunk);
+        }
+        let assembled = assembler.finish(&model);
+        job.append(vec![
+            JobEvent::Message { message: assembled.message.clone() },
+            JobEvent::Usage { model, usage: assembled.usage },
+        ])?;
+        budget.record_tokens(assembled.usage.total());
+        if matches!(assembled.finish, FinishReason::Error(_) | FinishReason::Aborted) {
+            return Ok(None);
+        }
+        Ok(assistant_text(&assembled.message).and_then(|text| complete::parse_verdict(&text)))
+    }
+
     async fn finish(&self, job: &mut JobHandle, outcome: LoopOutcome, status: JobStatus, summary: Option<String>) -> Result<LoopOutcome, StoreError> {
         job.append(vec![JobEvent::StatusChanged { status, summary }])?;
         Ok(outcome)
     }
+}
+
+/// A one-string-argument tool call (for the gate's own read/exec checks).
+fn string_call(name: &str, key: &str, value: &str) -> ToolCall {
+    let mut arguments = serde_json::Map::new();
+    arguments.insert(key.to_string(), Value::String(value.to_string()));
+    ToolCall { name: name.to_string(), arguments }
+}
+
+/// Truncate on a char boundary for a short, safe diagnostic snippet.
+fn truncate(text: &str, max_chars: usize) -> String {
+    if text.chars().count() <= max_chars {
+        return text.to_string();
+    }
+    let kept: String = text.chars().take(max_chars).collect();
+    format!("{kept}…")
 }
 
 struct ExtractedCall {

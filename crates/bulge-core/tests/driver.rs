@@ -214,3 +214,109 @@ async fn overflowing_history_is_compacted_before_the_next_call() {
     // the fake emits 10 output tokens per call, so a compaction + a step is >= 20.
     assert!(job.state().usage.output_tokens >= 20, "both the compaction call and the step should log usage");
 }
+
+// ---- completion gate (C5) ----
+
+/// Gate-aware dispatcher: `read` reports whether a deliverable exists, `exec`
+/// reports a fixed acceptance exit code; everything else is a bland Ok.
+struct GateDispatcher {
+    read_ok: bool,
+    exec_exit: i64,
+}
+
+impl ToolDispatcher for GateDispatcher {
+    fn dispatch(&self, call: ToolCall, _cancel: CancellationToken) -> BoxFuture<'static, bulge_core::schedule::CallOutcome> {
+        let name = call.name.clone();
+        let read_ok = self.read_ok;
+        let exec_exit = self.exec_exit;
+        async move {
+            use bulge_core::schedule::CallOutcome;
+            match name.as_str() {
+                "read" if !read_ok => CallOutcome::Err { code: "ENOENT".into(), message: "no such file".into() },
+                "exec" => CallOutcome::Ok(json!({
+                    "exit_code": exec_exit,
+                    "stdout": "",
+                    "stderr": if exec_exit == 0 { "" } else { "assertion failed" },
+                })),
+                _ => CallOutcome::Ok(json!({ "ok": true })),
+            }
+        }
+        .boxed()
+    }
+    fn concurrency_safe(&self, name: &str) -> bool {
+        bulge_core::builtin_concurrency_safe(name)
+    }
+}
+
+fn contract(paths: &[&str], acceptance: &[&str]) -> JobEvent {
+    JobEvent::Contract {
+        contract: bulge_store::Contract {
+            deliverables: paths.iter().map(|p| bulge_store::Deliverable { path: (*p).into(), description: "d".into() }).collect(),
+            acceptance: acceptance.iter().map(|a| (*a).to_string()).collect(),
+        },
+    }
+}
+
+#[tokio::test]
+async fn gate_accepts_when_deliverables_exist_and_self_review_passes() {
+    use bulge_core::driver::CompletionConfig;
+
+    let mut job = job(Budget { max_steps: 50, max_tokens: 100_000, max_wall_secs: 3600 });
+    job.append(vec![contract(&["report.md"], &[])]).unwrap();
+
+    // turn 0: model stops; turn 1: self-review passes.
+    let backend = FakeBackend::new(vec![vec![text("I believe it is done.")], vec![text("1..6 all good.\nVERDICT: PASS")]]);
+    let dispatcher = Arc::new(GateDispatcher { read_ok: true, exec_exit: 0 });
+    let driver = Driver::new(backend, dispatcher, bulge_core::builtin_tools(), "You are bulge.".into())
+        .with_completion_gate(CompletionConfig::default());
+
+    let outcome = driver.run(&mut job, CancellationToken::new()).await.unwrap();
+    assert_eq!(outcome, LoopOutcome::Stopped);
+    assert_eq!(job.state().status, JobStatus::Succeeded);
+}
+
+#[tokio::test]
+async fn gate_fails_then_passes_after_more_work() {
+    use bulge_core::driver::CompletionConfig;
+
+    let mut job = job(Budget { max_steps: 50, max_tokens: 100_000, max_wall_secs: 3600 });
+    job.append(vec![contract(&["report.md"], &[])]).unwrap();
+
+    // step1 stop -> review FAIL -> feedback, continue;
+    // step2 stop -> review PASS -> succeed.
+    let backend = FakeBackend::new(vec![
+        vec![text("done?")],
+        vec![text("point 6 has a stub.\nVERDICT: FAIL")],
+        vec![text("fixed it, done.")],
+        vec![text("all addressed.\nVERDICT: PASS")],
+    ]);
+    let dispatcher = Arc::new(GateDispatcher { read_ok: true, exec_exit: 0 });
+    let driver = Driver::new(backend, dispatcher, bulge_core::builtin_tools(), "You are bulge.".into())
+        .with_completion_gate(CompletionConfig { self_review: true, max_attempts: 2 });
+
+    let outcome = driver.run(&mut job, CancellationToken::new()).await.unwrap();
+    assert_eq!(outcome, LoopOutcome::Stopped);
+    assert_eq!(job.state().status, JobStatus::Succeeded);
+    // The failure feedback was fed back into the conversation.
+    assert!(job.state().history.iter().any(|m| m.content.iter().any(|b| matches!(b, ContentBlock::Text { text } if text.contains("not complete yet")))));
+}
+
+#[tokio::test]
+async fn gate_stops_incomplete_when_a_deliverable_is_missing() {
+    use bulge_core::driver::CompletionConfig;
+
+    let mut job = job(Budget { max_steps: 50, max_tokens: 100_000, max_wall_secs: 3600 });
+    job.append(vec![contract(&["report.md"], &["test -f report.md"])]).unwrap();
+
+    // Only one stop turn is needed: no self-review, attempt 1 > max_attempts 0.
+    let backend = FakeBackend::new(vec![vec![text("done (but the file is not there)")]]);
+    let dispatcher = Arc::new(GateDispatcher { read_ok: false, exec_exit: 1 });
+    let driver = Driver::new(backend, dispatcher, bulge_core::builtin_tools(), "You are bulge.".into())
+        .with_completion_gate(CompletionConfig { self_review: false, max_attempts: 0 });
+
+    let outcome = driver.run(&mut job, CancellationToken::new()).await.unwrap();
+    assert_eq!(outcome, LoopOutcome::Incomplete);
+    assert_eq!(job.state().status, JobStatus::Incomplete);
+    let summary = job.state().summary.clone().unwrap_or_default();
+    assert!(summary.contains("report.md"), "summary names the missing deliverable: {summary}");
+}
