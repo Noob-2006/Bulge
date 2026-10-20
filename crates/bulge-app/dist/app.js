@@ -2,342 +2,508 @@
 
 const { invoke } = window.__TAURI__.core;
 const { listen } = window.__TAURI__.event;
-
 const $ = (id) => document.getElementById(id);
 
-let currentHandle = null; // the run we started and are watching
+/* ---- markdown (safe) ---- */
+const md = window.markdownit({ html: false, linkify: true, breaks: true, typographer: false });
+const defaultLink = md.renderer.rules.link_open || ((t, i, o, e, s) => s.renderToken(t, i, o));
+md.renderer.rules.link_open = (tokens, idx, options, env, self) => {
+  const href = tokens[idx].attrGet("href") || "";
+  if (!/^https?:\/\//i.test(href)) tokens[idx].attrSet("href", "#");
+  tokens[idx].attrSet("target", "_blank");
+  tokens[idx].attrSet("rel", "noopener noreferrer");
+  return defaultLink(tokens, idx, options, env, self);
+};
+function renderMarkdown(text) {
+  return DOMPurify.sanitize(md.render(text || ""), { ADD_ATTR: ["target", "rel"] });
+}
+
+/* ---- state ---- */
+let currentHandle = null;   // the live run we started
 let running = false;
-
-// ---- settings / key ----------------------------------------------------------
-
-async function loadDefaults() {
-  try {
-    const d = await invoke("defaults");
-    $("model").value = d.model;
-    $("base-url").value = d.base_url;
-    $("protocol").value = d.protocol;
-    $("autonomy").value = d.autonomy;
-    $("cpus").value = d.cpus;
-    $("ram").value = d.ram_mib;
-  } catch (e) {
-    /* keep whatever is in the HTML */
-  }
-  await refreshKeyStatus();
-}
-
-async function refreshKeyStatus() {
-  const badge = $("key-status");
-  try {
-    const has = await invoke("key_status", { baseUrl: $("base-url").value.trim() });
-    badge.textContent = has ? "已設定" : "未設定";
-    badge.className = "badge " + (has ? "ok" : "bad");
-  } catch (e) {
-    badge.textContent = "無法檢查";
-    badge.className = "badge bad";
-  }
-}
-
-async function saveKey() {
-  const msg = $("key-msg");
-  const key = $("api-key").value;
-  if (!key.trim()) { msg.textContent = "請先貼上金鑰"; msg.className = "msg err"; return; }
-  try {
-    await invoke("save_key", { baseUrl: $("base-url").value.trim(), key });
-    $("api-key").value = "";
-    msg.textContent = "已儲存(權限 600)。";
-    msg.className = "msg ok";
-    await refreshKeyStatus();
-  } catch (e) {
-    msg.textContent = "儲存失敗:" + e;
-    msg.className = "msg err";
-  }
-}
-
-// ---- workspace ---------------------------------------------------------------
-
-async function pickWorkspace() {
-  try {
-    const dir = await invoke("pick_workspace");
-    if (dir) $("workspace").value = dir;
-  } catch (e) {
-    $("start-msg").textContent = "選擇資料夾失敗:" + e;
-    $("start-msg").className = "msg err";
-  }
-}
-
-// ---- running a job -----------------------------------------------------------
-
-function setRunning(on) {
-  running = on;
-  $("start").classList.toggle("hidden", on);
-  $("stop").classList.toggle("hidden", !on);
-  $("run-status").textContent = on ? "執行中…（代理在沙箱虛擬機裡工作)" : "";
-}
-
-async function startJob() {
-  const goal = $("goal").value.trim();
-  const workspace = $("workspace").value.trim();
-  const msg = $("start-msg");
-  msg.textContent = ""; msg.className = "msg";
-  if (!workspace) { msg.textContent = "請先選擇工作區資料夾。"; msg.className = "msg err"; return; }
-  if (!goal) { msg.textContent = "請寫下目標。"; msg.className = "msg err"; return; }
-
-  clearLog();
-  $("review").classList.add("hidden");
-  $("token-count").textContent = "";
-
-  const args = {
-    goal,
-    workspace,
-    model: $("model").value.trim(),
-    base_url: $("base-url").value.trim(),
-    protocol: $("protocol").value,
-    autonomy: $("autonomy").value,
-    network: $("network").checked,
-    cpus: Number($("cpus").value) || 2,
-    ram_mib: Number($("ram").value) || 1024,
-  };
-
-  try {
-    currentHandle = await invoke("start_job", { args });
-    setRunning(true);
-  } catch (e) {
-    msg.textContent = "無法開始:" + e;
-    msg.className = "msg err";
-  }
-}
-
-async function stopJob() {
-  if (!currentHandle) return;
-  try {
-    await invoke("stop_job", { handle: currentHandle });
-    $("run-status").textContent = "正在停止…";
-  } catch (e) {
-    /* ignore */
-  }
-}
-
-// ---- log rendering -----------------------------------------------------------
-
-function clearLog() { $("log").innerHTML = ""; }
-
-function appendLog(node) {
-  const log = $("log");
-  const atBottom = log.scrollHeight - log.scrollTop - log.clientHeight < 40;
-  log.appendChild(node);
-  if (atBottom) log.scrollTop = log.scrollHeight;
-}
-
-function line(cls, text) {
-  const div = document.createElement("div");
-  div.className = "ev " + cls;
-  div.textContent = text;
-  return div;
-}
-
-function clip(s, n) {
-  s = String(s);
-  return s.length > n ? s.slice(0, n) + "…" : s;
-}
-
+let workspacePath = "";
 let runningTokens = 0;
+let stepCount = 0;
+let elapsedTimer = null;
+let elapsedStart = 0;
+const toolEls = {};         // call_id -> tool element
+let contextWindow = 128000;
 
+/* ---- helpers ---- */
+function el(tag, cls, text) {
+  const n = document.createElement(tag);
+  if (cls) n.className = cls;
+  if (text != null) n.textContent = text;
+  return n;
+}
+function clip(s, n) { s = String(s); return s.length > n ? s.slice(0, n) + "…" : s; }
+
+function toast(message, kind) {
+  const t = el("div", "toast" + (kind ? " " + kind : ""), message);
+  $("toast-root").appendChild(t);
+  setTimeout(() => { t.style.opacity = "0"; setTimeout(() => t.remove(), 250); }, 3200);
+}
+
+/* ---- transcript container ---- */
+function inner() {
+  let i = $("transcript").querySelector(".transcript-inner");
+  if (!i) {
+    i = el("div", "transcript-inner");
+    $("transcript").appendChild(i);
+  }
+  $("empty-state").classList.add("hidden");
+  return i;
+}
+function resetTranscript() {
+  const t = $("transcript");
+  const existing = t.querySelector(".transcript-inner");
+  if (existing) existing.remove();
+  $("empty-state").classList.remove("hidden");
+  for (const k of Object.keys(toolEls)) delete toolEls[k];
+  stepCount = 0; runningTokens = 0;
+  $("tokens-wrap").classList.add("hidden");
+  $("steps").classList.add("hidden");
+}
+function appendBlock(node) {
+  const i = inner();
+  const t = $("transcript");
+  const atBottom = t.scrollHeight - t.scrollTop - t.clientHeight < 60;
+  i.appendChild(node);
+  if (atBottom) t.scrollTop = t.scrollHeight;
+}
+
+/* ---- long output collapse (head + expand) ---- */
+function collapsiblePre(text, maxLines) {
+  maxLines = maxLines || 16;
+  const wrap = el("div");
+  const pre = el("pre", "tool-pre");
+  const lines = String(text).replace(/\s+$/, "").split("\n");
+  if (lines.length <= maxLines) {
+    pre.textContent = lines.join("\n");
+    wrap.appendChild(pre);
+    return wrap;
+  }
+  const head = lines.slice(0, 12).join("\n");
+  pre.textContent = head;
+  const btn = el("button", "tool-expand", `展開其餘 ${lines.length - 12} 行`);
+  let expanded = false;
+  btn.addEventListener("click", () => {
+    expanded = !expanded;
+    pre.textContent = expanded ? lines.join("\n") : head;
+    btn.textContent = expanded ? "收合" : `展開其餘 ${lines.length - 12} 行`;
+  });
+  wrap.append(pre, btn);
+  return wrap;
+}
+
+/* ---- format a tool result into a node ---- */
+function formatToolResult(ok, result) {
+  if (result == null) return el("div", "tool-pre", ok ? "(完成)" : "(失敗)");
+  if (typeof result === "object") {
+    if (result.error) return el("div", "tool-pre", "錯誤:" + String(result.error));
+    // exec-shaped
+    const parts = [];
+    if (typeof result.exit_code === "number") parts.push("exit " + result.exit_code);
+    const out = result.stdout && typeof result.stdout === "object" ? result.stdout.text : undefined;
+    const err = result.stderr && typeof result.stderr === "object" ? result.stderr.text : undefined;
+    if (out !== undefined || err !== undefined) {
+      const wrap = el("div");
+      if (parts.length) wrap.appendChild(el("div", "ev-sys", parts.join(" · ")));
+      if (out && out.trim()) wrap.appendChild(collapsiblePre(out));
+      if (err && err.trim()) { const e = collapsiblePre(err); e.firstChild.style.color = "var(--danger)"; wrap.appendChild(e); }
+      if ((!out || !out.trim()) && (!err || !err.trim())) wrap.appendChild(el("div", "ev-sys", "(無輸出)"));
+      return wrap;
+    }
+    // generic: a 'text'/'content' field or pretty JSON
+    if (typeof result.text === "string") return collapsiblePre(result.text);
+    if (typeof result.content === "string") return collapsiblePre(result.content);
+    return collapsiblePre(JSON.stringify(result, null, 2));
+  }
+  return collapsiblePre(String(result));
+}
+
+/* ---- event rendering ---- */
 function renderEvent(ev) {
   switch (ev.type) {
-    case "step_started":
-      appendLog(line("ev-step", `— 第 ${ev.step} 步 —`));
+    case "step_started": {
+      stepCount = ev.step;
+      $("steps").textContent = "第 " + ev.step + " 步";
+      $("steps").classList.remove("hidden");
+      appendBlock(el("div", "ev-step", "第 " + ev.step + " 步"));
       break;
+    }
     case "message": {
       const m = ev.message || {};
       if (m.role === "assistant") {
         for (const b of m.content || []) {
-          if (b.type === "text" && b.text.trim()) appendLog(line("ev-assistant", b.text.trim()));
-        }
-      } else if (m.role === "tool") {
-        const b = (m.content || [])[0];
-        if (b && b.type === "text") {
-          const bad = m.is_error ? " ev-tool-bad" : "";
-          appendLog(line("ev-dim" + bad, "↳ " + clip(b.text.replace(/\s+/g, " "), 200)));
+          if (b.type === "text" && b.text && b.text.trim()) {
+            const box = el("div", "msg-assistant");
+            const mdv = el("div", "md");
+            mdv.innerHTML = renderMarkdown(b.text);
+            box.appendChild(mdv);
+            appendBlock(box);
+          } else if (b.type === "reasoning" && b.text && b.text.trim()) {
+            appendBlock(el("div", "msg-thinking", b.text.trim()));
+          }
         }
       }
+      // tool-role result messages are shown inside the tool row (via tool_completed)
       break;
     }
     case "tool_claimed": {
-      const args = ev.arguments ? clip(JSON.stringify(ev.arguments), 160) : "";
-      const el = line("ev-tool", `🔧 ${ev.name}`);
-      if (args) { const a = document.createElement("span"); a.className = "ev-args"; a.textContent = "  " + args; el.appendChild(a); }
-      appendLog(el);
+      const tool = el("div", "tool");
+      const sum = el("button", "tool-summary");
+      sum.append(el("span", "tool-chev", "▾"), el("span", "tool-name", ev.name));
+      const argPreview = ev.arguments ? clip(argSummary(ev.name, ev.arguments), 90) : "";
+      if (argPreview) sum.appendChild(el("span", "tool-arg", argPreview));
+      const mark = el("span", "tool-mark", "…");
+      sum.appendChild(mark);
+      const body = el("div", "tool-body");
+      sum.addEventListener("click", () => tool.classList.toggle("open"));
+      tool.append(sum, body);
+      tool._mark = mark; tool._body = body;
+      toolEls[ev.call_id] = tool;
+      appendBlock(tool);
       break;
     }
-    case "tool_completed":
-      appendLog(line(ev.ok ? "ev-tool-ok" : "ev-tool-bad", `${ev.ok ? "✓" : "✗"} ${shortResult(ev)}`));
-      break;
-    case "usage":
-      if (ev.usage) {
-        const u = ev.usage;
-        runningTokens += (u.input_tokens || 0) + (u.output_tokens || 0) + (u.cache_read_tokens || 0) + (u.cache_write_tokens || 0);
-        $("token-count").textContent = runningTokens ? `${runningTokens} tokens` : "";
+    case "tool_completed": {
+      const tool = toolEls[ev.call_id];
+      if (tool) {
+        tool._mark.textContent = ev.ok ? "✓" : "✗";
+        tool._mark.className = "tool-mark " + (ev.ok ? "ok" : "bad");
+        tool._body.innerHTML = "";
+        tool._body.appendChild(formatToolResult(ev.ok, ev.result));
+        if (!ev.ok) tool.classList.add("open");
       }
       break;
-    case "plan":
-      renderPlan(ev.items || []);
+    }
+    case "usage": {
+      const u = ev.usage || {};
+      runningTokens += (u.input_tokens || 0) + (u.output_tokens || 0) + (u.cache_read_tokens || 0) + (u.cache_write_tokens || 0);
+      updateMeter();
       break;
-    case "net_domain":
-      appendLog(line("ev-net", `🌐 ${ev.domain} → ${ev.decision}`));
-      break;
-    case "status_changed":
-      appendLog(line("ev-dim", `狀態:${ev.status}${ev.summary ? " — " + ev.summary : ""}`));
-      break;
-    case "vm_started":
-      appendLog(line("ev-dim", "虛擬機已啟動"));
-      break;
-    case "vm_stopped":
-      appendLog(line("ev-dim", `虛擬機已關閉(${ev.reason})`));
-      break;
-    case "compacted":
-      appendLog(line("ev-dim", "(壓縮上下文以省 token)"));
-      break;
-    case "budget_warning":
-      appendLog(line("ev-net", `⚠ 預算接近上限:${ev.kind} ${ev.used}/${ev.limit}`));
-      break;
-    case "approval_asked":
-      appendLog(line("ev-net", `⏸ 等待核准:${ev.kind}`));
-      break;
-    case "created":
-    case "contract":
-      break;
-    default:
-      appendLog(line("ev-dim", ev.type));
+    }
+    case "plan": renderPlan(ev.items || []); break;
+    case "net_domain": appendBlock(el("div", "ev-net", "🌐 " + ev.domain + " → " + ev.decision)); break;
+    case "status_changed": appendBlock(el("div", "ev-sys", "狀態:" + ev.status + (ev.summary ? " — " + ev.summary : ""))); break;
+    case "vm_started": appendBlock(el("div", "ev-sys", "虛擬機已啟動")); break;
+    case "vm_stopped": appendBlock(el("div", "ev-sys", "虛擬機已關閉" + (ev.reason ? " (" + ev.reason + ")" : ""))); break;
+    case "compacted": appendBlock(el("div", "ev-sys", "(壓縮上下文以省 token)")); break;
+    case "budget_warning": appendBlock(el("div", "ev-net", "⚠ 預算接近上限:" + ev.kind + " " + ev.used + "/" + ev.limit)); break;
+    case "approval_asked": appendBlock(el("div", "ev-net", "⏸ 等待核准:" + ev.kind)); break;
+    case "created": case "contract": break;
+    default: appendBlock(el("div", "ev-sys", ev.type));
   }
 }
 
-function shortResult(ev) {
-  if (ev.result && typeof ev.result === "object" && ev.result.error) {
-    return clip(String(ev.result.error).replace(/\s+/g, " "), 180);
-  }
-  return "完成";
+function argSummary(name, args) {
+  if (!args || typeof args !== "object") return "";
+  if (name === "exec" && args.command) return args.command;
+  if (args.path) return args.path;
+  if (args.pattern) return args.pattern;
+  if (args.file) return args.file;
+  return JSON.stringify(args);
 }
 
 function renderPlan(items) {
-  const wrap = document.createElement("div");
-  wrap.className = "ev ev-dim";
-  wrap.textContent = "📋 計畫:";
+  const card = el("div", "plan");
+  card.appendChild(el("div", "plan-label", "計畫"));
   for (const it of items) {
-    const row = document.createElement("div");
-    const mark = it.status === "done" ? "✓" : it.status === "in_progress" || it.status === "doing" ? "▸" : "·";
-    row.textContent = `   ${mark} ${it.title || it.text || ""}`;
-    wrap.appendChild(row);
+    const st = (it.status || "").toLowerCase();
+    const cls = st === "done" ? "done" : (st === "in_progress" || st === "doing" ? "doing" : "");
+    const row = el("div", "plan-item" + (cls ? " " + cls : ""));
+    const mark = st === "done" ? "✓" : (cls === "doing" ? "▸" : "○");
+    row.append(el("span", "plan-mark", mark), el("span", "plan-text", it.title || it.text || ""));
+    card.appendChild(row);
   }
-  appendLog(wrap);
+  appendBlock(card);
 }
 
-// ---- diff review / apply -----------------------------------------------------
+/* ---- meter / elapsed ---- */
+function updateMeter() {
+  if (runningTokens <= 0) return;
+  $("tokens-wrap").classList.remove("hidden");
+  $("tokens").textContent = runningTokens.toLocaleString() + " tok";
+  const frac = Math.min(1, runningTokens / contextWindow);
+  const fill = $("meter-fill");
+  fill.style.width = (frac * 100).toFixed(1) + "%";
+  fill.className = "meter-fill" + (frac > 0.9 ? " danger" : frac > 0.7 ? " warn" : "");
+}
+function startElapsed() {
+  elapsedStart = Date.now();
+  $("elapsed").classList.remove("hidden");
+  elapsedTimer = setInterval(() => {
+    const s = Math.floor((Date.now() - elapsedStart) / 1000);
+    $("elapsed").textContent = s < 60 ? s + "s" : Math.floor(s / 60) + "m" + (s % 60) + "s";
+  }, 1000);
+}
+function stopElapsed() { if (elapsedTimer) { clearInterval(elapsedTimer); elapsedTimer = null; } }
+
+/* ---- running state ---- */
+function setRunning(on) {
+  running = on;
+  $("start").disabled = on;
+  $("goal").disabled = on;
+  $("stop").classList.toggle("hidden", !on);
+  $("working").classList.toggle("hidden", !on);
+  if (on) { startElapsed(); } else { stopElapsed(); }
+}
+function setStatusBadge(status, ok) {
+  const b = $("status-badge");
+  b.textContent = status;
+  b.className = "badge " + (ok === true ? "ok" : ok === false ? "bad" : "run");
+  b.classList.remove("hidden");
+}
+
+/* ---- settings / key ---- */
+async function loadDefaults() {
+  try {
+    const d = await invoke("defaults");
+    $("model").value = d.model; $("base-url").value = d.base_url;
+    $("protocol").value = d.protocol; $("autonomy").value = d.autonomy;
+    $("cpus").value = d.cpus; $("ram").value = d.ram_mib;
+  } catch (e) { /* keep html defaults */ }
+  await refreshKeyStatus();
+}
+async function refreshKeyStatus() {
+  let has = false;
+  try { has = await invoke("key_status", { baseUrl: $("base-url").value.trim() }); } catch (e) {}
+  const s = $("key-status"); s.textContent = has ? "已設定" : "未設定"; s.className = "dot-status " + (has ? "ok" : "bad");
+  const chip = $("key-chip"); chip.textContent = has ? "金鑰 ✓" : "金鑰未設定"; chip.className = "chip-hint " + (has ? "ok" : "bad");
+}
+async function saveKey() {
+  const key = $("api-key").value;
+  const msg = $("key-msg");
+  if (!key.trim()) { msg.textContent = "請先貼上金鑰"; msg.className = "inline-msg settings-msg err"; return; }
+  try {
+    await invoke("save_key", { baseUrl: $("base-url").value.trim(), key });
+    $("api-key").value = "";
+    msg.textContent = "已儲存(權限 600)。"; msg.className = "inline-msg settings-msg ok";
+    await refreshKeyStatus();
+  } catch (e) { msg.textContent = "儲存失敗:" + e; msg.className = "inline-msg settings-msg err"; }
+}
+
+/* ---- workspace ---- */
+async function pickWorkspace() {
+  try {
+    const dir = await invoke("pick_workspace");
+    if (dir) { workspacePath = dir; $("ws-label").textContent = dir.split("/").pop() || dir; $("pick-ws").title = dir; }
+  } catch (e) { toast("選擇資料夾失敗:" + e, "err"); }
+}
+
+/* ---- sidebar job history ---- */
+async function loadJobs() {
+  let jobs = [];
+  try { jobs = await invoke("list_jobs"); } catch (e) {}
+  const list = $("job-list");
+  list.innerHTML = "";
+  if (!jobs.length) { list.appendChild(el("div", "side-empty", "還沒有任務")); return; }
+  for (const j of jobs.slice(0, 40)) {
+    const item = el("button", "job-item");
+    item.dataset.id = j.id;
+    const ok = j.status === "Succeeded";
+    const bad = j.status === "Failed" || j.status === "Stuck";
+    item.append(el("span", "ji-dot" + (ok ? " ok" : bad ? " bad" : "")), el("span", "ji-title", j.title || j.id));
+    item.addEventListener("click", () => viewJob(j.id, j.title));
+    list.appendChild(item);
+  }
+}
+async function viewJob(id, title) {
+  if (running) { toast("有任務執行中,無法切換", "err"); return; }
+  let data;
+  try { data = await invoke("load_job", { id }); } catch (e) { toast("讀取失敗:" + e, "err"); return; }
+  currentHandle = null; // past job: read-only, no apply
+  resetTranscript();
+  $("job-title").textContent = title || id;
+  $("status-badge").classList.add("hidden");
+  $("review").classList.add("hidden");
+  for (const ln of data.jsonl.split("\n")) {
+    if (!ln.trim()) continue;
+    try { renderEvent(JSON.parse(ln)); } catch (e) {}
+  }
+  if (data.diff) showReview({ status: "(過去任務)", diff: data.diff, changes: [], readonly: true });
+  document.querySelectorAll(".job-item").forEach((n) => n.classList.toggle("active", n.dataset.id === id));
+}
+
+/* ---- new task ---- */
+function newTask() {
+  if (running) { toast("有任務執行中", "err"); return; }
+  currentHandle = null;
+  resetTranscript();
+  $("review").classList.add("hidden");
+  $("status-badge").classList.add("hidden");
+  $("job-title").textContent = "新任務";
+  $("steps").classList.add("hidden"); $("elapsed").classList.add("hidden"); $("tokens-wrap").classList.add("hidden");
+  document.querySelectorAll(".job-item").forEach((n) => n.classList.remove("active"));
+  $("goal").focus();
+}
+
+/* ---- start / stop ---- */
+async function startJob() {
+  const goal = $("goal").value.trim();
+  const msg = $("start-msg"); msg.textContent = ""; msg.className = "inline-msg";
+  if (!workspacePath) { msg.textContent = "請先選擇工作區資料夾(左下角 📁)。"; msg.className = "inline-msg err"; return; }
+  if (!goal) { msg.textContent = "請寫下目標。"; msg.className = "inline-msg err"; return; }
+
+  resetTranscript();
+  $("review").classList.add("hidden");
+  $("job-title").textContent = clip(goal.split("\n")[0], 60);
+  contextWindow = 128000;
+
+  const args = {
+    goal, workspace: workspacePath,
+    model: $("model").value.trim(), base_url: $("base-url").value.trim(),
+    protocol: $("protocol").value, autonomy: $("autonomy").value,
+    network: $("network").checked, cpus: Number($("cpus").value) || 2, ram_mib: Number($("ram").value) || 1024,
+  };
+  try {
+    currentHandle = await invoke("start_job", { args });
+    setRunning(true);
+    setStatusBadge("執行中", null);
+    $("goal").value = ""; autoGrow();
+  } catch (e) { msg.textContent = "無法開始:" + e; msg.className = "inline-msg err"; }
+}
+async function stopJob() {
+  if (!currentHandle) return;
+  try { await invoke("stop_job", { handle: currentHandle }); setStatusBadge("停止中…", null); } catch (e) {}
+}
+
+/* ---- review / apply ---- */
+function kindLabel(k) { return ({ file: "檔案", deleted: "刪除", dir: "資料夾", symlink: "連結", too_large: "過大" })[k] || k; }
 
 function showReview(ev) {
   const review = $("review");
+  review.className = "review " + (ev.readonly ? "" : ev.status === "Succeeded" ? "ok" : "bad");
   const badge = $("review-status");
-  const ok = ev.status === "Succeeded";
-  badge.textContent = ev.error ? ("錯誤:" + ev.error) : `${ev.status}`;
-  badge.className = "badge " + (ok ? "ok" : "bad");
+  badge.textContent = ev.error ? "錯誤" : ev.status;
+  badge.className = "badge " + (ev.readonly ? "" : ev.status === "Succeeded" ? "ok" : "bad");
 
   const list = $("change-list");
   list.innerHTML = "";
   const changes = ev.changes || [];
-  if (changes.length === 0) {
-    $("diff").textContent = ev.diff || "";
-    const none = document.createElement("div");
-    none.className = "hint";
-    none.textContent = ev.error ? "" : "這次沒有對工作區做任何改動。";
-    list.appendChild(none);
-    $("apply").disabled = true;
+  const applyBtn = $("apply");
+  const hint = $("review-hint-text");
+  if (ev.readonly) {
+    if (hint) hint.classList.add("hidden");
+    applyBtn.classList.add("hidden");
+    $("select-all").classList.add("hidden"); $("select-none").classList.add("hidden");
   } else {
-    $("apply").disabled = false;
-    for (const c of changes) {
-      const row = document.createElement("label");
-      row.className = "change" + (c.kind === "deleted" ? " danger-k" : "");
-      const cb = document.createElement("input");
-      cb.type = "checkbox";
-      cb.checked = true;
-      cb.dataset.path = c.path;
-      cb.disabled = c.kind === "too_large";
-      if (cb.disabled) cb.checked = false;
-      const ck = document.createElement("span");
-      ck.className = "ck";
-      ck.textContent = kindLabel(c.kind);
-      const path = document.createElement("span");
-      path.className = "path";
-      path.textContent = c.path;
-      const detail = document.createElement("span");
-      detail.className = "detail";
-      detail.textContent = c.detail;
-      row.append(cb, ck, path, detail);
-      list.appendChild(row);
-    }
-    $("diff").textContent = ev.diff || "(無文字 diff)";
+    if (hint) hint.classList.remove("hidden");
+    applyBtn.classList.remove("hidden"); $("select-all").classList.remove("hidden"); $("select-none").classList.remove("hidden");
   }
 
-  $("apply-msg").textContent = "";
-  $("apply-msg").className = "msg";
+  if (changes.length === 0) {
+    list.appendChild(el("div", "review-hint", ev.error ? ("這次沒有完成改動。" + (ev.error || "")) : (ev.readonly ? "" : "這次沒有對工作區做任何改動。")));
+    applyBtn.disabled = true;
+  } else {
+    applyBtn.disabled = false;
+    for (const c of changes) {
+      const row = el("label", "change" + (c.kind === "deleted" ? " del" : ""));
+      const cb = el("input"); cb.type = "checkbox"; cb.checked = true; cb.dataset.path = c.path;
+      if (c.kind === "too_large") { cb.disabled = true; cb.checked = false; }
+      row.append(cb, el("span", "ck", kindLabel(c.kind)), el("span", "cpath", c.path), el("span", "cdetail", c.detail || ""));
+      list.appendChild(row);
+    }
+  }
+  // diff
+  const diffBox = $("diff"); diffBox.innerHTML = "";
+  renderDiffInto(diffBox, ev.diff || "(無文字 diff)");
+  $("apply-msg").textContent = ""; $("apply-msg").className = "inline-msg";
   review.classList.remove("hidden");
-  review.scrollIntoView({ behavior: "smooth", block: "start" });
 }
 
-function kindLabel(kind) {
-  return { file: "檔案", deleted: "刪除", dir: "資料夾", symlink: "連結", too_large: "過大" }[kind] || kind;
+function renderDiffInto(box, text) {
+  for (const raw of String(text).split("\n")) {
+    let cls = "dl-ctx";
+    if (raw.startsWith("+++") || raw.startsWith("---") || raw.startsWith("@@") || raw.startsWith("diff ") ||
+        raw.startsWith("new ") || raw.startsWith("deleted") || raw.startsWith("symlink") || raw.startsWith("Binary") || raw.startsWith("too large")) cls = "dl-meta";
+    else if (raw.startsWith("+")) cls = "dl-add";
+    else if (raw.startsWith("-")) cls = "dl-del";
+    const span = el("span", cls, raw || " ");
+    box.appendChild(span);
+  }
 }
 
-function setAll(checked) {
-  $("change-list").querySelectorAll("input[type=checkbox]").forEach((cb) => { if (!cb.disabled) cb.checked = checked; });
+function setAllChecks(on) {
+  $("change-list").querySelectorAll("input[type=checkbox]").forEach((cb) => { if (!cb.disabled) cb.checked = on; });
 }
-
 async function applyChanges() {
-  if (!currentHandle) return;
+  if (!currentHandle) { toast("這是過去的任務,無法再套用", "err"); return; }
   const approved = [];
   $("change-list").querySelectorAll("input[type=checkbox]").forEach((cb) => { if (cb.checked) approved.push(cb.dataset.path); });
   const msg = $("apply-msg");
-  if (approved.length === 0) { msg.textContent = "沒有勾選任何項目。"; msg.className = "msg err"; return; }
+  if (!approved.length) { msg.textContent = "沒有勾選任何項目。"; msg.className = "inline-msg err"; return; }
   $("apply").disabled = true;
   try {
     const report = await invoke("apply_changes", { handle: currentHandle, approved });
-    const parts = [`已套用 ${report.applied.length} 項到工作區。`];
-    if (report.skipped.length) parts.push(`略過 ${report.skipped.length} 項:` + report.skipped.map((s) => `${s[0]}(${s[1]})`).join("、"));
-    msg.textContent = parts.join(" ");
-    msg.className = report.skipped.length ? "msg err" : "msg ok";
-  } catch (e) {
-    msg.textContent = "套用失敗:" + e;
-    msg.className = "msg err";
-  } finally {
-    $("apply").disabled = false;
-  }
+    let txt = "已套用 " + report.applied.length + " 項到工作區。";
+    if (report.skipped.length) txt += " 略過 " + report.skipped.length + " 項:" + report.skipped.map((s) => s[0] + "(" + s[1] + ")").join("、");
+    msg.textContent = txt; msg.className = "inline-msg " + (report.skipped.length ? "err" : "ok");
+    toast(report.skipped.length ? "部分套用完成" : "已套用到工作區", report.skipped.length ? "err" : "ok");
+  } catch (e) { msg.textContent = "套用失敗:" + e; msg.className = "inline-msg err"; }
+  finally { $("apply").disabled = false; }
 }
 
-// ---- wire up -----------------------------------------------------------------
+/* ---- composer auto-grow ---- */
+function autoGrow() {
+  const t = $("goal");
+  t.style.height = "auto";
+  t.style.height = Math.min(200, t.scrollHeight) + "px";
+}
 
+/* ---- settings + theme ---- */
+function openSettings() { $("settings-overlay").classList.remove("hidden"); }
+function closeSettings() { $("settings-overlay").classList.add("hidden"); }
+function toggleTheme() {
+  const cur = document.documentElement.getAttribute("data-theme") === "light" ? "dark" : "light";
+  document.documentElement.setAttribute("data-theme", cur);
+  try { localStorage.setItem("bulge.theme", cur); } catch (e) {}
+}
+function loadTheme() {
+  let t = "dark";
+  try { t = localStorage.getItem("bulge.theme") || "dark"; } catch (e) {}
+  document.documentElement.setAttribute("data-theme", t);
+}
+
+/* ---- events from backend ---- */
 listen("job-line", (e) => {
   const p = e.payload;
   if (!currentHandle || p.handle !== currentHandle) return;
-  let ev;
-  try { ev = JSON.parse(p.line); } catch { return; }
+  let ev; try { ev = JSON.parse(p.line); } catch { return; }
   renderEvent(ev);
 });
-
 listen("job-done", (e) => {
   const p = e.payload;
   if (!currentHandle || p.handle !== currentHandle) return;
   setRunning(false);
-  $("run-status").textContent = p.error ? "已結束(有錯誤)" : "已完成";
+  const ok = p.status === "Succeeded";
+  setStatusBadge(p.error ? "失敗" : p.status, ok ? true : false);
   showReview(p);
+  loadJobs();
 });
 
+/* ---- wire up ---- */
 window.addEventListener("DOMContentLoaded", () => {
-  $("toggle-settings").addEventListener("click", () => $("settings").classList.toggle("hidden"));
+  loadTheme();
+  $("new-task").addEventListener("click", newTask);
+  $("theme-toggle").addEventListener("click", toggleTheme);
+  $("open-settings").addEventListener("click", openSettings);
+  $("close-settings").addEventListener("click", closeSettings);
+  $("settings-overlay").addEventListener("click", (e) => { if (e.target === $("settings-overlay")) closeSettings(); });
   $("base-url").addEventListener("change", refreshKeyStatus);
   $("save-key").addEventListener("click", saveKey);
   $("pick-ws").addEventListener("click", pickWorkspace);
+  $("network").addEventListener("change", () => {});
   $("start").addEventListener("click", startJob);
   $("stop").addEventListener("click", stopJob);
-  $("select-all").addEventListener("click", () => setAll(true));
-  $("select-none").addEventListener("click", () => setAll(false));
+  $("review-close").addEventListener("click", () => $("review").classList.add("hidden"));
+  $("select-all").addEventListener("click", () => setAllChecks(true));
+  $("select-none").addEventListener("click", () => setAllChecks(false));
   $("apply").addEventListener("click", applyChanges);
+  $("goal").addEventListener("input", autoGrow);
+  $("goal").addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) { e.preventDefault(); startJob(); }
+  });
   loadDefaults();
+  loadJobs();
 });

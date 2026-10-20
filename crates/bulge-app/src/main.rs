@@ -14,7 +14,7 @@ use std::sync::Mutex;
 
 use bulge_cli::backend::{BackendSpec, Protocol};
 use bulge_cli::run::{RunConfig, run_streaming};
-use bulge_store::{Autonomy, Budget};
+use bulge_store::{Autonomy, Budget, JobStore};
 use bulge_vm::changes::{self, Change};
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager, State};
@@ -339,6 +339,48 @@ fn apply_changes(state: State<'_, AppState>, handle: String, approved: Vec<Strin
     Ok(ApplyReportDto { applied: report.applied, skipped: report.skipped })
 }
 
+#[derive(Serialize)]
+struct JobSummaryDto {
+    id: String,
+    title: String,
+    status: String,
+    created_ms: u64,
+}
+
+/// Recent jobs for the sidebar history, newest first.
+#[tauri::command]
+fn list_jobs() -> Vec<JobSummaryDto> {
+    let Ok(home) = std::env::var("HOME") else { return Vec::new() };
+    let store = JobStore::new(PathBuf::from(home).join(".bulge/jobs"));
+    store
+        .list()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|s| JobSummaryDto { id: s.id, title: s.title, status: format!("{:?}", s.status), created_ms: s.created_ms })
+        .collect()
+}
+
+#[derive(Serialize)]
+struct LoadedJobDto {
+    jsonl: String,
+    diff: Option<String>,
+}
+
+/// Read a past job's event log (and diff, if any) for read-only viewing. Changes
+/// from an earlier run cannot be re-applied — the VM overlay is gone — so the
+/// viewer shows the transcript and diff only.
+#[tauri::command]
+fn load_job(id: String) -> Result<LoadedJobDto, String> {
+    if id.is_empty() || !id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') {
+        return Err("無效的任務 id".into());
+    }
+    let home = PathBuf::from(std::env::var("HOME").map_err(|_| "HOME 未設定".to_string())?);
+    let dir = home.join(".bulge/jobs").join(&id);
+    let jsonl = std::fs::read_to_string(dir.join("job.jsonl")).map_err(|e| format!("讀取任務失敗:{e}"))?;
+    let diff = std::fs::read_to_string(dir.join("changes.diff")).ok();
+    Ok(LoadedJobDto { jsonl, diff })
+}
+
 fn now_ms() -> u128 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -358,6 +400,8 @@ fn main() {
             start_job,
             stop_job,
             apply_changes,
+            list_jobs,
+            load_job,
         ])
         .run(tauri::generate_context!())
         .expect("error while running bulge-app");

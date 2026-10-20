@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="zh-Hant">
+<html lang="zh-Hant" data-theme="dark">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
@@ -7,93 +7,159 @@
     <link rel="stylesheet" href="style.css" />
   </head>
   <body>
-    <header class="topbar">
-      <div class="brand">
-        <span class="dot"></span>
-        <div>
-          <div class="brand-name">Bulge</div>
-          <div class="brand-sub">謹慎的 AI 代理 · 在沙箱虛擬機裡做事,改動需你核准才寫回</div>
+    <div class="shell">
+      <!-- ===== Sidebar ===== -->
+      <aside class="sidebar">
+        <div class="brand">
+          <span class="brand-dot"></span>
+          <span class="brand-name">Bulge</span>
+        </div>
+        <button id="new-task" class="btn btn-primary btn-block">＋ 新任務</button>
+
+        <div class="side-section-label">最近任務</div>
+        <div id="job-list" class="job-list">
+          <div class="side-empty">還沒有任務</div>
+        </div>
+
+        <div class="sidebar-footer">
+          <button id="theme-toggle" class="btn btn-ghost btn-icon" title="切換深／淺色">◐</button>
+          <button id="open-settings" class="btn btn-ghost btn-block-min">設定</button>
+        </div>
+      </aside>
+
+      <!-- ===== Main ===== -->
+      <main class="main">
+        <header class="topbar">
+          <div class="topbar-title">
+            <span id="job-title" class="job-title">新任務</span>
+            <span id="status-badge" class="badge hidden"></span>
+          </div>
+          <div class="topbar-meta">
+            <span id="working" class="working hidden"><i></i><i></i><i></i></span>
+            <span id="elapsed" class="meta-num hidden">0s</span>
+            <span id="steps" class="meta-num hidden"></span>
+            <span id="tokens-wrap" class="meter-wrap hidden" title="已用 token">
+              <span class="meter"><span id="meter-fill" class="meter-fill"></span></span>
+              <span id="tokens" class="meta-num"></span>
+            </span>
+            <button id="stop" class="btn btn-danger hidden">■ 停止</button>
+          </div>
+        </header>
+
+        <section id="transcript" class="transcript">
+          <div id="empty-state" class="empty-state">
+            <div class="empty-icon">▣</div>
+            <div class="empty-title">交辦一個任務</div>
+            <div class="empty-desc">代理會在隔離的沙箱虛擬機裡完成工作,過程即時顯示在這裡。它的任何改動都要你審核後才會寫回你的電腦。</div>
+          </div>
+        </section>
+
+        <!-- ===== Approval / diff review (appears on completion) ===== -->
+        <section id="review" class="review hidden">
+          <div class="review-head">
+            <span class="review-eyebrow">審批寫回</span>
+            <span id="review-status" class="badge"></span>
+            <button id="review-close" class="btn btn-ghost btn-icon" title="收起">✕</button>
+          </div>
+          <p id="review-hint-text" class="review-hint">以下改動目前都還<b>只在沙箱裡</b>,沒碰你的電腦。勾選要保留的,按下套用才會寫回工作區。</p>
+          <div class="review-actions">
+            <button id="select-all" class="btn btn-ghost btn-sm">全選</button>
+            <button id="select-none" class="btn btn-ghost btn-sm">全不選</button>
+            <span class="spacer"></span>
+            <button id="apply" class="btn btn-primary">套用勾選的變更</button>
+          </div>
+          <div id="change-list" class="change-list"></div>
+          <details class="diff-wrap">
+            <summary>查看完整 diff</summary>
+            <div id="diff" class="diff"></div>
+          </details>
+          <div id="apply-msg" class="inline-msg"></div>
+        </section>
+
+        <!-- ===== Composer ===== -->
+        <footer id="composer" class="composer">
+          <div class="composer-row">
+            <button id="pick-ws" class="chip" title="選擇工作區資料夾">📁 <span id="ws-label">選擇工作區</span></button>
+            <label class="chip chip-check"><input id="network" type="checkbox" /> 允許上網</label>
+            <span class="chip-hint" id="key-chip">金鑰:檢查中…</span>
+          </div>
+          <div class="composer-input">
+            <textarea id="goal" rows="1" placeholder="交辦任務… 例如:讀 data.csv,算每月營收,寫成 report.md"></textarea>
+            <button id="start" class="btn btn-primary btn-send" title="開始">↑</button>
+          </div>
+          <div id="start-msg" class="inline-msg"></div>
+        </footer>
+      </main>
+    </div>
+
+    <!-- ===== Settings overlay ===== -->
+    <div id="settings-overlay" class="overlay hidden">
+      <div class="settings-panel">
+        <div class="settings-head">
+          <h2>設定</h2>
+          <button id="close-settings" class="btn btn-ghost btn-icon">✕</button>
+        </div>
+
+        <div class="settings-section-label">模型</div>
+        <div class="settings-group">
+          <div class="settings-row">
+            <div><div class="row-title">模型</div><div class="row-desc">要用哪個模型</div></div>
+            <input id="model" type="text" class="control" />
+          </div>
+          <div class="settings-row">
+            <div><div class="row-title">API 位址</div><div class="row-desc">模型服務的網址</div></div>
+            <input id="base-url" type="text" class="control" />
+          </div>
+          <div class="settings-row">
+            <div><div class="row-title">協定</div><div class="row-desc">API 格式</div></div>
+            <select id="protocol" class="control">
+              <option value="openai">openai（DeepSeek / OpenAI 相容）</option>
+              <option value="anthropic">anthropic</option>
+            </select>
+          </div>
+        </div>
+
+        <div class="settings-section-label">API 金鑰</div>
+        <div class="settings-group">
+          <div class="settings-row">
+            <div>
+              <div class="row-title">金鑰 <span id="key-status" class="dot-status">檢查中…</span></div>
+              <div class="row-desc">只存在本機 <code>~/.bulge/keys/&lt;host&gt;</code>(權限 600),不外傳、不進對話。</div>
+            </div>
+            <div class="key-control">
+              <input id="api-key" type="password" class="control" placeholder="貼上金鑰" autocomplete="off" />
+              <button id="save-key" class="btn btn-primary btn-sm">儲存</button>
+            </div>
+          </div>
+          <div id="key-msg" class="inline-msg settings-msg"></div>
+        </div>
+
+        <div class="settings-section-label">執行</div>
+        <div class="settings-group">
+          <div class="settings-row">
+            <div><div class="row-title">自主模式</div><div class="row-desc">代理放手的程度</div></div>
+            <select id="autonomy" class="control">
+              <option value="autonomous">autonomous(自動做,寫回仍須核准)</option>
+              <option value="collaborative">collaborative(較保守)</option>
+              <option value="full-auto">full-auto(最放手)</option>
+            </select>
+          </div>
+          <div class="settings-row">
+            <div><div class="row-title">vCPU</div><div class="row-desc">虛擬機處理器數</div></div>
+            <input id="cpus" type="number" min="1" max="16" class="control control-num" />
+          </div>
+          <div class="settings-row">
+            <div><div class="row-title">記憶體</div><div class="row-desc">虛擬機記憶體 (MiB)</div></div>
+            <input id="ram" type="number" min="256" step="256" class="control control-num" />
+          </div>
         </div>
       </div>
-      <button id="toggle-settings" class="ghost">設定</button>
-    </header>
+    </div>
 
-    <section id="settings" class="card hidden">
-      <h2>設定</h2>
-      <div class="grid">
-        <label>模型 <input id="model" type="text" /></label>
-        <label>API 位址 <input id="base-url" type="text" /></label>
-        <label>協定
-          <select id="protocol">
-            <option value="openai">openai（DeepSeek / OpenAI 相容）</option>
-            <option value="anthropic">anthropic</option>
-          </select>
-        </label>
-        <label>自主模式
-          <select id="autonomy">
-            <option value="autonomous">autonomous（自動做,寫回仍需核准）</option>
-            <option value="collaborative">collaborative（較保守）</option>
-            <option value="full-auto">full-auto（最放手)</option>
-          </select>
-        </label>
-        <label>vCPU <input id="cpus" type="number" min="1" max="16" /></label>
-        <label>記憶體 (MiB) <input id="ram" type="number" min="256" step="256" /></label>
-      </div>
+    <div id="toast-root" class="toast-root"></div>
 
-      <div class="key-row">
-        <div>
-          <div class="key-label">API 金鑰 <span id="key-status" class="badge">檢查中…</span></div>
-          <div class="hint">金鑰只存在本機 <code>~/.bulge/keys/&lt;host&gt;</code>（權限 600),不會外傳、不會進對話。</div>
-        </div>
-        <div class="key-input">
-          <input id="api-key" type="password" placeholder="貼上金鑰後按儲存" autocomplete="off" />
-          <button id="save-key" class="primary">儲存金鑰</button>
-        </div>
-      </div>
-      <div id="key-msg" class="msg"></div>
-    </section>
-
-    <section class="card">
-      <h2>交辦任務</h2>
-      <label class="full">工作區(代理只能動這個資料夾)
-        <div class="row">
-          <input id="workspace" type="text" placeholder="尚未選擇資料夾" readonly />
-          <button id="pick-ws" class="ghost">選擇資料夾</button>
-        </div>
-      </label>
-      <label class="full">目標
-        <textarea id="goal" rows="4" placeholder="例如:讀取 data.csv,算出每月營收,寫成 report.md"></textarea>
-      </label>
-      <label class="check"><input id="network" type="checkbox" /> 允許對外網路(僅限白名單的套件/原始碼來源,經雙鑰閘道)</label>
-      <div class="row">
-        <button id="start" class="primary big">開始</button>
-        <button id="stop" class="danger big hidden">緊急停止</button>
-        <span id="run-status" class="run-status"></span>
-      </div>
-      <div id="start-msg" class="msg"></div>
-    </section>
-
-    <section class="card">
-      <h2>執行過程 <span id="token-count" class="badge subtle"></span></h2>
-      <div id="log" class="log"><div class="log-empty">尚未開始。選好工作區、寫下目標,按「開始」。</div></div>
-    </section>
-
-    <section id="review" class="card hidden">
-      <h2>審批寫回 <span id="review-status" class="badge"></span></h2>
-      <p class="hint">以下是代理在虛擬機裡做出的改動,<b>目前都還沒碰你的電腦</b>。勾選要套用的項目,按下按鈕才會寫入工作區。</p>
-      <div class="review-actions">
-        <button id="select-all" class="ghost">全選</button>
-        <button id="select-none" class="ghost">全不選</button>
-        <button id="apply" class="primary">套用勾選的變更到工作區</button>
-      </div>
-      <div id="change-list" class="change-list"></div>
-      <details class="diff-wrap">
-        <summary>查看完整 diff</summary>
-        <pre id="diff" class="diff"></pre>
-      </details>
-      <div id="apply-msg" class="msg"></div>
-    </section>
-
+    <script src="vendor/markdown-it.min.js"></script>
+    <script src="vendor/purify.min.js"></script>
     <script src="app.js"></script>
   </body>
 </html>
