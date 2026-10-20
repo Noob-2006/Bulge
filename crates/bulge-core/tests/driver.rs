@@ -173,3 +173,44 @@ async fn plain_answer_with_no_tools_stops() {
     assert_eq!(outcome, LoopOutcome::Stopped);
     assert_eq!(job.state().summary.as_deref(), Some("the answer is 42"));
 }
+
+#[tokio::test]
+async fn overflowing_history_is_compacted_before_the_next_call() {
+    use bulge_core::context::PruneConfig;
+    use bulge_core::driver::ContextConfig;
+
+    // A history large enough to overflow a deliberately tiny window.
+    let mut job = job(Budget { max_steps: 50, max_tokens: 100_000, max_wall_secs: 3600 });
+    for i in 0..10 {
+        let role = if i % 2 == 0 { Role::Assistant } else { Role::User };
+        job.append(vec![JobEvent::Message { message: Message::text(role, "x".repeat(400)) }]).unwrap();
+    }
+    let history_len_before = job.state().history.len();
+
+    // Turn 0 is consumed by the compaction summary call, turn 1 by the step.
+    let backend = FakeBackend::new(vec![vec![text("BRIEFING: earlier work")], vec![text("done")]]);
+    let dispatcher = Arc::new(FakeDispatcher::default());
+    let driver = driver(backend, dispatcher).with_context(ContextConfig {
+        window: 400,
+        reserve: 0,
+        retain_ratio: 0.5,
+        keep_recent: 2,
+        prune: PruneConfig::default(),
+    });
+
+    let outcome = driver.run(&mut job, CancellationToken::new()).await.unwrap();
+    assert_eq!(outcome, LoopOutcome::Stopped);
+
+    // A checkpoint was recorded and rebuilt into state.
+    let compaction = job.state().compaction.clone().expect("history should have been compacted");
+    assert_eq!(compaction.summary, "BRIEFING: earlier work");
+    assert!(compaction.kept_from > 0, "kept_from must advance past the oldest messages");
+    assert!(compaction.kept_from <= history_len_before, "kept_from stays within the real history");
+
+    // The full history is never discarded — it stays in the log for replay.
+    assert!(job.state().history.len() >= history_len_before);
+
+    // The compaction call's tokens were logged as usage (charged to the budget):
+    // the fake emits 10 output tokens per call, so a compaction + a step is >= 20.
+    assert!(job.state().usage.output_tokens >= 20, "both the compaction call and the step should log usage");
+}

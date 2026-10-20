@@ -11,13 +11,14 @@
 use std::sync::Arc;
 
 use bulge_llm::assemble::Assembler;
-use bulge_llm::{ContentBlock, FinishReason, GenerateRequest, LlmBackend, LlmError, Message, Purpose, Role, ToolSchema};
+use bulge_llm::{ContentBlock, FinishReason, GenerateRequest, LlmBackend, LlmError, Message, Purpose, Role, TokenUsage, ToolSchema};
 use bulge_store::{JobEvent, JobHandle, JobStatus, StoreError};
 use futures::StreamExt;
 use serde_json::Value;
 use tokio_util::sync::CancellationToken;
 
 use crate::budget::{BudgetState, BudgetTracker};
+use crate::context::{self, PruneConfig};
 use crate::dispatch::{ToolCall, ToolDispatcher};
 use crate::schedule::{CallOutcome, PlannedCall, run_tool_calls};
 
@@ -40,6 +41,27 @@ pub struct GuardConfig {
     pub loop_detection: bool,
 }
 
+/// Context-window limits for pruning and compaction. The window is measured in
+/// the same heuristic tokens `context::estimate_tokens` produces.
+#[derive(Debug, Clone, Copy)]
+pub struct ContextConfig {
+    /// The model's usable context window, in estimated tokens.
+    pub window: u64,
+    /// Tokens held back for the reply and tool schemas when deciding to compact.
+    pub reserve: u64,
+    /// Fraction of the window kept verbatim after a compaction.
+    pub retain_ratio: f64,
+    /// Tail messages pruning must never touch.
+    pub keep_recent: usize,
+    pub prune: PruneConfig,
+}
+
+impl Default for ContextConfig {
+    fn default() -> Self {
+        Self { window: 120_000, reserve: 8_192, retain_ratio: 0.5, keep_recent: 6, prune: PruneConfig::default() }
+    }
+}
+
 pub struct Driver {
     backend: Arc<dyn LlmBackend>,
     dispatcher: Arc<dyn ToolDispatcher>,
@@ -47,17 +69,33 @@ pub struct Driver {
     system_prompt: String,
     max_parallel: usize,
     guard: Option<GuardConfig>,
+    context: ContextConfig,
 }
 
 impl Driver {
     pub fn new(backend: Arc<dyn LlmBackend>, dispatcher: Arc<dyn ToolDispatcher>, tools: Vec<ToolSchema>, system_prompt: String) -> Self {
-        Self { backend, dispatcher, tools, system_prompt, max_parallel: crate::schedule::DEFAULT_MAX_PARALLEL, guard: None }
+        Self {
+            backend,
+            dispatcher,
+            tools,
+            system_prompt,
+            max_parallel: crate::schedule::DEFAULT_MAX_PARALLEL,
+            guard: None,
+            context: ContextConfig::default(),
+        }
     }
 
     /// Enable the cautious guard: permission rules (deny → the tool is blocked
     /// and the model is told), and runaway-loop detection (critical → stop).
     pub fn with_guard(mut self, guard: GuardConfig) -> Self {
         self.guard = Some(guard);
+        self
+    }
+
+    /// Override the context-window limits (window size, compaction reserve/ratio,
+    /// pruning). Defaults suit a ~128k model.
+    pub fn with_context(mut self, context: ContextConfig) -> Self {
+        self.context = context;
         self
     }
 
@@ -96,6 +134,13 @@ impl Driver {
             budget.record_step();
             job.append(vec![JobEvent::StepStarted { step }])?;
 
+            // Roll the context forward if it would overflow: summarize the oldest
+            // messages into one checkpoint. Best-effort — a failed summary just
+            // leaves the history as-is (pruning still caps request size).
+            if let Some(usage) = self.maybe_compact(job, &cancel).await? {
+                budget.record_tokens(usage.total());
+            }
+
             let assembled = match self.one_call(job, self.tools.clone(), cancel.clone()).await? {
                 Ok(assembled) => assembled,
                 Err(outcome) => return Ok(outcome),
@@ -123,9 +168,7 @@ impl Driver {
         cancel: CancellationToken,
     ) -> Result<Result<bulge_llm::assemble::Assembled, LoopOutcome>, StoreError> {
         let model = job.state().spec.model.model.clone();
-        let mut messages = Vec::with_capacity(job.state().history.len() + 1);
-        messages.push(Message::text(Role::System, self.system_prompt.clone()));
-        messages.extend(job.state().history.iter().cloned());
+        let messages = self.build_request_messages(job);
         let request = GenerateRequest {
             model: model.clone(),
             messages,
@@ -160,6 +203,101 @@ impl Driver {
             }
             _ => Ok(Ok(assembled)),
         }
+    }
+
+    /// Build the request messages from logged state: the system prompt, then the
+    /// latest compaction summary (if any) in place of the messages it replaced,
+    /// then the live history tail — finally pruned so long old tool results are
+    /// trimmed. The system prefix stays byte-stable for the provider's cache.
+    fn build_request_messages(&self, job: &JobHandle) -> Vec<Message> {
+        let state = job.state();
+        let mut messages = Vec::with_capacity(state.history.len() + 2);
+        messages.push(Message::text(Role::System, self.system_prompt.clone()));
+        let base = match &state.compaction {
+            Some(compaction) => {
+                messages.push(context::summary_message(&compaction.summary));
+                compaction.kept_from.min(state.history.len())
+            }
+            None => 0,
+        };
+        messages.extend(state.history[base..].iter().cloned());
+        context::prune(&messages, self.context.window, self.context.keep_recent, &self.context.prune)
+    }
+
+    /// When the live context would overflow the window, summarize its oldest span
+    /// into one checkpoint and log a `Compacted` event. Returns the summary call's
+    /// token usage (also logged as a `Usage` event) so the caller can charge the
+    /// budget. Returns `None` when no compaction was needed or the summary failed.
+    async fn maybe_compact(&self, job: &mut JobHandle, cancel: &CancellationToken) -> Result<Option<TokenUsage>, StoreError> {
+        let model = job.state().spec.model.model.clone();
+
+        // The view the model currently sees: system, the existing summary (if
+        // any), then the live tail. Compaction ranges are indices into this view.
+        let (view, base, tail_start) = {
+            let state = job.state();
+            let mut view = Vec::with_capacity(state.history.len() + 2);
+            view.push(Message::text(Role::System, self.system_prompt.clone()));
+            let (base, tail_start) = match &state.compaction {
+                Some(compaction) => {
+                    view.push(context::summary_message(&compaction.summary));
+                    (compaction.kept_from.min(state.history.len()), 2)
+                }
+                None => (0, 1),
+            };
+            view.extend(state.history[base..].iter().cloned());
+            (view, base, tail_start)
+        };
+
+        let Some(range) = context::compaction_range(&view, self.context.window, self.context.reserve, self.context.retain_ratio) else {
+            return Ok(None);
+        };
+
+        let to_summarize: Vec<Message> = view[range.start..range.kept_from].to_vec();
+        let Some((summary, usage)) = self.summarize(to_summarize, &model, cancel.clone()).await else {
+            return Ok(None);
+        };
+
+        // Map the view index back to an absolute index into the stored history.
+        let new_kept_from = base + range.kept_from.saturating_sub(tail_start);
+        job.append(vec![
+            JobEvent::Compacted { kept_from: new_kept_from, summary },
+            JobEvent::Usage { model, usage },
+        ])?;
+        Ok(Some(usage))
+    }
+
+    /// Run one non-tool model call that condenses `slice` into a briefing using
+    /// the fixed summary template. Returns the summary text and its token usage,
+    /// or `None` if the model errored or produced no text.
+    async fn summarize(&self, slice: Vec<Message>, model: &str, cancel: CancellationToken) -> Option<(String, TokenUsage)> {
+        let mut messages = Vec::with_capacity(slice.len() + 2);
+        messages.push(Message::text(Role::System, "You compact a long agent transcript into a briefing that lets the agent continue."));
+        messages.extend(slice);
+        messages.push(Message::text(Role::User, context::SUMMARY_TEMPLATE));
+        let request = GenerateRequest {
+            model: model.to_string(),
+            messages,
+            tools: Vec::new(),
+            max_tokens: None,
+            temperature: None,
+            stop: Vec::new(),
+            reasoning_effort: None,
+            purpose: Purpose::Compaction,
+        };
+        let mut stream = self.backend.stream(request, cancel);
+        let mut assembler = Assembler::new();
+        while let Some(chunk) = stream.next().await {
+            assembler.push(&chunk);
+        }
+        let assembled = assembler.finish(model);
+        if matches!(assembled.finish, FinishReason::Error(_) | FinishReason::Aborted) {
+            return None;
+        }
+        let summary = assistant_text(&assembled.message)?;
+        if summary.trim().is_empty() {
+            return None;
+        }
+        Some((summary, assembled.usage))
     }
 
     /// Claim calls, consult the guard, run the allowed ones, and log results.
