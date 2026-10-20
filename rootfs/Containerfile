@@ -1,0 +1,13 @@
+# Guest root filesystem for bulge. Built rootless with podman, exported as a
+# plain directory that libkrun serves to the guest (the guest remounts it ro).
+FROM docker.io/library/alpine:3.22
+RUN apk add --no-cache \
+      bash coreutils findutils grep sed gawk diffutils patch file less \
+      tar gzip xz unzip zstd \
+      ca-certificates curl wget openssl \
+      git ripgrep jq \
+      python3 py3-pip nodejs npm \
+      build-base
+RUN mkdir -p /workspace /usr/local/share/bulge
+COPY udhcpc.script /usr/local/share/bulge/udhcpc.script
+COPY sandboxd /usr/local/bin/sandboxd

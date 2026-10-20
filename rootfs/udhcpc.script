@@ -1,0 +1,16 @@
+#!/bin/sh
+# bulge udhcpc hook: configure eth0 from the passt lease. DNS goes to tmpfs
+# (/etc/resolv.conf is a symlink to it) so the shared rootfs is never written.
+case "$1" in
+  deconfig)
+    ip -4 addr flush dev "$interface"
+    ;;
+  bound|renew)
+    ip -4 addr flush dev "$interface"
+    ip -4 addr add "$ip/${mask:-24}" dev "$interface"
+    for r in $router; do ip -4 route replace default via "$r" dev "$interface"; break; done
+    : > /run/bulge/resolv.conf
+    for ns in $dns; do echo "nameserver $ns" >> /run/bulge/resolv.conf; done
+    ;;
+esac
+exit 0

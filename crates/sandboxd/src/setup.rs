@@ -20,9 +20,14 @@ fn mount(args: &[&str]) -> io::Result<()> {
 }
 
 pub fn lock_down() -> io::Result<()> {
-    for dir in ["/tmp", "/root", "/home", "/run/bulge"] {
+    network_up()?;
+    for dir in ["/tmp", "/root", "/home"] {
         std::fs::create_dir_all(dir)?;
         mount(&["-t", "tmpfs", "-o", "nosuid,nodev,mode=0755", "tmpfs", dir])?;
+    }
+    if !is_mountpoint("/run/bulge") {
+        std::fs::create_dir_all("/run/bulge")?;
+        mount(&["-t", "tmpfs", "-o", "mode=0755", "tmpfs", "/run/bulge"])?;
     }
     for dir in [WORKSPACE_LOWER, "/run/bulge/rw"] {
         std::fs::create_dir_all(dir)?;
@@ -37,4 +42,30 @@ pub fn lock_down() -> io::Result<()> {
     // Last: nothing below may write to the rootfs afterwards.
     mount(&["-o", "remount,ro", "/"])?;
     Ok(())
+}
+
+fn run(program: &str, args: &[&str]) -> io::Result<()> {
+    let status = Command::new(program).args(args).status()?;
+    if status.success() { Ok(()) } else { Err(io::Error::other(format!("{program} {args:?} failed: {status}"))) }
+}
+
+/// Bring up the passt-backed NIC (if the host attached one) and lease an
+/// address. /etc/resolv.conf in the image is a symlink into /run/bulge (tmpfs),
+/// so the shared rootfs on the host is never written.
+fn network_up() -> io::Result<()> {
+    run("/sbin/ip", &["link", "set", "lo", "up"])?;
+    if !std::path::Path::new("/sys/class/net/eth0").exists() {
+        return Ok(());
+    }
+    std::fs::create_dir_all("/run/bulge")?;
+    mount(&["-t", "tmpfs", "-o", "mode=0755", "tmpfs", "/run/bulge"])?;
+    std::fs::write("/run/bulge/resolv.conf", "")?;
+    run("/sbin/ip", &["link", "set", "eth0", "up"])?;
+    run("/sbin/udhcpc", &["-i", "eth0", "-n", "-q", "-t", "5", "-S", "-s", "/usr/local/share/bulge/udhcpc.script"])
+}
+
+fn is_mountpoint(path: &str) -> bool {
+    std::fs::read_to_string("/proc/mounts")
+        .map(|mounts| mounts.lines().any(|line| line.split_whitespace().nth(1) == Some(path)))
+        .unwrap_or(false)
 }
