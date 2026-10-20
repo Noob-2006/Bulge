@@ -1,0 +1,23 @@
+[package]
+name = "bulge-core"
+description = "The bulge agent loop: steps, tool dispatch into the guest VM, budgets"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+bulge-llm = { path = "../bulge-llm" }
+bulge-proto = { path = "../bulge-proto" }
+bulge-store = { path = "../bulge-store" }
+bulge-vm = { path = "../bulge-vm" }
+futures.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
+tokio-util.workspace = true
+
+[lints]
+workspace = true

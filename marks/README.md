@@ -30,3 +30,4 @@
 | M13 | crates/sandboxd/src/tools/truncate.rs | DSH spill + opencode tool-output |
 | M14 | crates/sandboxd/src/tools/read.rs | opencode read-filesystem.ts |
 | M15 | crates/bulge-store/src/log.rs | DSH session-persistence-jsonl |
+| M16 | crates/bulge-core/src/schedule.rs | DSH agent-loop tool-calls.ts |
