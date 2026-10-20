@@ -24,3 +24,5 @@
 | M6 | crates/bulge-llm/src/protocol/openai_chat.rs | opencode openai-chat.ts |
 | M7 | crates/bulge-llm/src/retry.rs | DSH llm-retry |
 | M8 | crates/bulge-llm/src/repair/* | openclaw tool-call-repair |
+| M10 | crates/bulge-vm/src/net/policy.rs `is_forbidden_destination` | openclaw net-policy ip.ts + ipaddr.js 範圍表 |
+| M11 | crates/sandboxd/src/runtime.rs | openclaw node-host runtime.rs |

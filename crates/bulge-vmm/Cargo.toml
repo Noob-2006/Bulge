@@ -1,0 +1,20 @@
+[package]
+name = "bulge-vmm"
+description = "Launch one libkrun microVM from a JSON config on stdin; the process becomes the VM"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+build = "build.rs"
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+# The only crate allowed to use `unsafe`: it is the FFI boundary to libkrun.
+[lints.rust]
+unsafe_code = "allow"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
