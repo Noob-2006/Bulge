@@ -118,11 +118,81 @@ fn check(step: &str, code: i32) -> Result<(), String> {
     if code < 0 { Err(format!("{step} failed: errno {}", -code)) } else { Ok(()) }
 }
 
+/// Restrict this process to only the filesystem paths the microVM needs. Best
+/// effort: on a kernel without Landlock it prints a note and continues (the VM
+/// still runs, just without this extra cage). Paths that do not exist are skipped.
+fn apply_landlock(config: &VmmConfig) {
+    use landlock::{
+        ABI, Access, AccessFs, CompatLevel, Compatible, PathBeneath, PathFd, Ruleset, RulesetAttr, RulesetCreatedAttr, RulesetError,
+    };
+    use std::path::PathBuf;
+
+    let abi = ABI::V2;
+    let read = AccessFs::ReadFile | AccessFs::ReadDir;
+    let read_exec = read | AccessFs::Execute;
+    let rw_file = AccessFs::ReadFile | AccessFs::WriteFile;
+    let full = AccessFs::from_all(abi);
+
+    // (path, access) pairs. System and library trees are read+execute (libkrun
+    // dlopens shared objects); rootfs and shares are read-only; the per-VM runtime
+    // dir needs to create sockets; /dev/kvm needs read+write.
+    let mut rules: Vec<(PathBuf, landlock::BitFlags<AccessFs>)> = Vec::new();
+    for dir in ["/usr", "/lib", "/lib64", "/bin", "/sbin"] {
+        rules.push((PathBuf::from(dir), read_exec));
+    }
+    if let Ok(ld) = std::env::var("LD_LIBRARY_PATH") {
+        for dir in ld.split(':').filter(|s| !s.is_empty()) {
+            rules.push((PathBuf::from(dir), read_exec));
+        }
+    }
+    for dir in ["/etc", "/proc", "/sys", "/dev"] {
+        rules.push((PathBuf::from(dir), read));
+    }
+    rules.push((PathBuf::from("/dev/kvm"), rw_file));
+    rules.push((config.rootfs.clone(), read));
+    for share in &config.shares {
+        rules.push((share.host_path.clone(), read));
+    }
+    let mut runtime_dirs: std::collections::BTreeSet<PathBuf> = std::collections::BTreeSet::new();
+    for port in &config.vsock_listen {
+        if let Some(parent) = port.host_socket.parent() {
+            runtime_dirs.insert(parent.to_path_buf());
+        }
+    }
+    for dir in runtime_dirs {
+        rules.push((dir, full));
+    }
+
+    // Open each existing path; skip ones that are absent on this host.
+    let beneath: Vec<Result<PathBeneath<PathFd>, RulesetError>> = rules
+        .into_iter()
+        .filter_map(|(path, access)| PathFd::new(&path).ok().map(|fd| Ok(PathBeneath::new(fd, access))))
+        .collect();
+
+    let result = Ruleset::default()
+        .set_compatibility(CompatLevel::BestEffort)
+        .handle_access(full)
+        .and_then(|r| r.create())
+        .and_then(|r| r.add_rules(beneath))
+        .and_then(|r| r.restrict_self());
+
+    match result {
+        Ok(_) => {}
+        Err(error) => eprintln!("bulge-vmm: landlock not applied ({error}); continuing without the extra cage"),
+    }
+}
+
 fn run() -> Result<(), String> {
     let mut input = String::new();
     std::io::stdin().read_to_string(&mut input).map_err(|e| format!("read config: {e}"))?;
     let config: VmmConfig = serde_json::from_str(&input).map_err(|e| format!("parse config: {e}"))?;
     drop(input);
+
+    // Cage this process in a Landlock filesystem sandbox BEFORE touching libkrun.
+    // If the guest ever escapes into this (the only unsafe/FFI) process, it is
+    // still confined to the handful of paths the VM genuinely needs — never the
+    // user's home, SSH keys, API keys, or other projects.
+    apply_landlock(&config);
 
     // Keep every CString alive until krun_start_enter: libkrun may keep pointers.
     let mut keep: Vec<CString> = Vec::new();
