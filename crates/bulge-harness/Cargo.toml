@@ -1,0 +1,16 @@
+[package]
+name = "bulge-harness"
+description = "The evolvable harness tree: system prompt, guardrails, memory, skills; versioned and validated"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+
+[lints]
+workspace = true

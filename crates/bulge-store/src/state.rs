@@ -25,11 +25,19 @@ pub struct PendingCall {
     pub arguments: Value,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Compaction {
+    pub kept_from: usize,
+    pub summary: String,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct JobState {
     pub spec: JobSpec,
     pub contract: Option<Contract>,
     pub plan: Vec<PlanItem>,
+    /// Latest context checkpoint, if any.
+    pub compaction: Option<Compaction>,
     /// Model-visible history in order.
     pub history: Vec<Message>,
     /// Claimed but not completed tool calls (in-flight, or interrupted by a crash).
@@ -52,6 +60,7 @@ impl JobState {
             spec: spec.clone(),
             contract: None,
             plan: Vec::new(),
+            compaction: None,
             history: Vec::new(),
             pending_calls: BTreeMap::new(),
             usage: TokenUsage::default(),
@@ -77,6 +86,7 @@ impl JobState {
             JobEvent::Created { .. } => return Err(StateError::MissingCreated),
             JobEvent::Contract { contract } => self.contract = Some(contract.clone()),
             JobEvent::Plan { items } => self.plan = items.clone(),
+            JobEvent::Compacted { kept_from, summary } => self.compaction = Some(Compaction { kept_from: *kept_from, summary: summary.clone() }),
             JobEvent::StepStarted { step } => self.steps = self.steps.max(*step),
             JobEvent::Message { message } => self.history.push(message.clone()),
             JobEvent::ToolClaimed { call_id, name, arguments } => {

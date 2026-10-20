@@ -124,6 +124,9 @@ pub enum JobEvent {
     /// Written on resume for calls that were claimed but never completed.
     Recovered { interrupted_calls: Vec<String> },
     StatusChanged { status: JobStatus, summary: Option<String> },
+    /// A context checkpoint: messages before `kept_from` are replaced, for
+    /// request-building, by one summary. The full history stays in the log.
+    Compacted { kept_from: usize, summary: String },
 }
 
 /// One log record.
