@@ -33,6 +33,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         ram_mib: 1024,
         network: false,
         egress_allow: vec!["example.com".into(), "example.org".into()],
+        egress_approvals: None,
     })
     .await?;
 

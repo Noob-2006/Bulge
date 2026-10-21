@@ -61,6 +61,10 @@ pub struct RunConfig {
     /// Optional override of the agent's system prompt / persona. When set it
     /// replaces the harness surface (memory lessons are still appended).
     pub system_prompt: Option<String>,
+    /// When set (and the job is collaborative with network on), egress to a host
+    /// outside the package/dev allowlist raises an approval prompt on this channel
+    /// instead of being allowed outright. `None` → allow any public host.
+    pub egress_approvals: Option<bulge_vm::net::EgressApprovalTx>,
 }
 
 /// Map the store's autonomy onto the guard's equivalent (no shared type).
@@ -197,11 +201,39 @@ pub struct RunOutcome {
     pub changes: Vec<changes::Change>,
 }
 
+/// Decide the egress shape. Outbound never uses the raw NIC — it goes through the
+/// two-key gateway, which always blocks private/LAN/cloud-metadata addresses
+/// (DNS-rebind safe). The roadmap's stance: allow public internet, block the
+/// host/LAN. On top of that:
+///   - network off → no egress at all;
+///   - collaborative + an approval channel → auto-allow package/dev sources, and
+///     ASK before the agent reaches any other host (the "only prompt when data
+///     leaves to a non-model API" rule — the model API is a host-side call and
+///     never comes through here);
+///   - otherwise → allow any public host without prompting.
+fn egress_setup(network: bool, autonomy: Autonomy, approvals: Option<bulge_vm::net::EgressApprovalTx>) -> (Vec<String>, Option<bulge_vm::net::EgressApprovalTx>) {
+    if !network {
+        return (Vec::new(), None);
+    }
+    match (autonomy, approvals) {
+        (Autonomy::Collaborative, Some(tx)) => (bulge_guard::netgate::allowlist_suffixes(), Some(tx)),
+        _ => (vec!["*".to_string()], None),
+    }
+}
+
 /// Build the `VmConfig` for this run from the environment plus the mutable shape
 /// (cpus / ram / network) a session may later restart with.
-fn vm_config_for(workspace: &Path, cpus: u8, ram_mib: u32, network: bool) -> Result<VmConfig, String> {
+fn vm_config_for(
+    workspace: &Path,
+    cpus: u8,
+    ram_mib: u32,
+    network: bool,
+    autonomy: Autonomy,
+    approvals: Option<bulge_vm::net::EgressApprovalTx>,
+) -> Result<VmConfig, String> {
     let home = PathBuf::from(std::env::var("HOME").map_err(|_| "HOME is not set".to_string())?);
     let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let (egress_allow, egress_approvals) = egress_setup(network, autonomy, approvals);
     Ok(VmConfig {
         vmm_binary: repo.join("target/debug/bulge-vmm"),
         libkrun_dir: home.join(".local/lib"),
@@ -210,12 +242,9 @@ fn vm_config_for(workspace: &Path, cpus: u8, ram_mib: u32, network: bool) -> Res
         runtime_root: PathBuf::from(std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| "/tmp".into())).join("bulge"),
         cpus,
         ram_mib,
-        // Never attach the raw NIC. When the user enables network, outbound goes
-        // through the two-key gateway which allows any PUBLIC host ("*") while the
-        // gateway still blocks private/LAN/cloud-metadata addresses (DNS-rebind
-        // safe). The roadmap's stance: allow public internet, block the host/LAN.
         network: false,
-        egress_allow: if network { vec!["*".to_string()] } else { Vec::new() },
+        egress_allow,
+        egress_approvals,
     })
 }
 
@@ -232,6 +261,8 @@ pub struct Session {
     autonomy: Autonomy,
     sampling: Sampling,
     system_prompt: Option<String>,
+    /// Egress approval channel (used when restarting with network on, collaborative).
+    egress_approvals: Option<bulge_vm::net::EgressApprovalTx>,
     /// The VM shape last launched with; restart tweaks these.
     vm_config: VmConfig,
 }
@@ -264,7 +295,7 @@ impl Session {
             }
         };
 
-        let vm_config = vm_config_for(&config.workspace, config.cpus, config.ram_mib, config.network)?;
+        let vm_config = vm_config_for(&config.workspace, config.cpus, config.ram_mib, config.network, config.autonomy, config.egress_approvals.clone())?;
         let vm = Arc::new(Vm::launch(vm_config.clone()).await.map_err(|e| format!("launch VM: {e}"))?);
 
         Ok(Self {
@@ -277,6 +308,7 @@ impl Session {
             autonomy: config.autonomy,
             sampling: config.sampling,
             system_prompt: config.system_prompt,
+            egress_approvals: config.egress_approvals,
             vm_config,
         })
     }
@@ -361,10 +393,12 @@ impl Session {
     /// replaced, so this resets in-VM files but never the agent's memory. Used
     /// when the user changes execution settings mid-conversation.
     pub async fn restart_vm(&mut self, cpus: u8, ram_mib: u32, network: bool) -> Result<(), String> {
+        let (egress_allow, egress_approvals) = egress_setup(network, self.autonomy, self.egress_approvals.clone());
         let mut cfg = self.vm_config.clone();
         cfg.cpus = cpus;
         cfg.ram_mib = ram_mib;
-        cfg.egress_allow = if network { vec!["*".to_string()] } else { Vec::new() };
+        cfg.egress_allow = egress_allow;
+        cfg.egress_approvals = egress_approvals;
 
         // Launch the replacement before tearing down the old one, so a failed
         // relaunch leaves the running VM intact.

@@ -17,6 +17,7 @@
 //! page, a downloaded script — has no interface and no keys, so it cannot phone
 //! home; the agent's own fetches can only reach approved hosts.
 
+use std::collections::HashSet;
 use std::net::{SocketAddr, ToSocketAddrs};
 use std::path::Path;
 use std::sync::Arc;
@@ -24,6 +25,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpStream, UnixListener, UnixStream};
+use tokio::sync::Mutex;
 
 use crate::net::policy::is_forbidden_destination;
 
@@ -111,12 +113,35 @@ pub fn host_allowed(host: &str, allow_suffixes: &[String]) -> bool {
     })
 }
 
+/// A request for the user to approve egress to a host the auto-allowlist does not
+/// cover (collaborative mode). The gateway blocks the connection until `reply` is
+/// answered: `true` opens it (and the host is remembered for the rest of the
+/// session), `false` refuses it. This is the hook behind the roadmap's "only ask
+/// when data egresses a non-model API": package/dev sources are auto-allowed, the
+/// model API never comes through here (it is a host-side call), so what remains is
+/// the agent reaching an arbitrary third-party host from inside the VM.
+#[derive(Debug)]
+pub struct EgressApproval {
+    pub host: String,
+    pub port: u16,
+    pub reply: tokio::sync::oneshot::Sender<bool>,
+}
+
+/// Channel the gateway asks egress approval on. The app owns the receiver,
+/// surfaces each prompt, and answers its `reply`.
+pub type EgressApprovalTx = tokio::sync::mpsc::UnboundedSender<EgressApproval>;
+
 #[derive(Clone)]
 pub struct GatewayConfig {
     pub token: String,
     pub key: String,
     pub allow_suffixes: Vec<String>,
     pub stats: Arc<GatewayStats>,
+    /// When set, a host not covered by `allow_suffixes` raises an approval request
+    /// here instead of an outright deny. `None` keeps the plain allow/deny gateway.
+    pub approvals: Option<EgressApprovalTx>,
+    /// Hosts the user has already approved this session (so repeats don't re-ask).
+    pub approved: Arc<Mutex<HashSet<String>>>,
 }
 
 /// Serve the gateway on `socket_path` (the host end of the bridged vsock port)
@@ -153,7 +178,23 @@ async fn handle(mut stream: UnixStream, config: GatewayConfig) -> std::io::Resul
         return deny(&mut stream, &config.stats.denied_auth, "ERR unauthorized").await;
     }
     if !host_allowed(&request.host, &config.allow_suffixes) {
-        return deny(&mut stream, &config.stats.denied_policy, "ERR host not allowed").await;
+        // Not on the auto-allow list. Without an approval channel this is a plain
+        // deny; with one, ask the user (once per host per session).
+        let Some(tx) = &config.approvals else {
+            return deny(&mut stream, &config.stats.denied_policy, "ERR host not allowed").await;
+        };
+        let host_key = request.host.trim_end_matches('.').to_ascii_lowercase();
+        if !config.approved.lock().await.contains(&host_key) {
+            let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+            if tx.send(EgressApproval { host: request.host.clone(), port: request.port, reply: reply_tx }).is_err() {
+                return deny(&mut stream, &config.stats.denied_policy, "ERR egress approval unavailable").await;
+            }
+            // Block this connection until the user decides (or the prompt is dropped).
+            if !reply_rx.await.unwrap_or(false) {
+                return deny(&mut stream, &config.stats.denied_policy, "ERR egress denied by user").await;
+            }
+            config.approved.lock().await.insert(host_key);
+        }
     }
     // Resolve and reject any address in a forbidden (private/metadata/…) range.
     let targets = resolve_allowed(&request.host, request.port);
@@ -259,5 +300,79 @@ mod tests {
     fn resolve_rejects_forbidden_addresses() {
         // localhost resolves only to loopback, which is forbidden.
         assert!(resolve_allowed("localhost", 80).is_empty());
+    }
+
+    fn gw(approvals: Option<EgressApprovalTx>) -> GatewayConfig {
+        GatewayConfig {
+            token: "t".into(),
+            key: "k".into(),
+            allow_suffixes: vec!["github.com".into()],
+            stats: Arc::new(GatewayStats::default()),
+            approvals,
+            approved: Arc::new(Mutex::new(HashSet::new())),
+        }
+    }
+
+    async fn run_request(config: GatewayConfig, req: &str) -> String {
+        let (mut client, server) = UnixStream::pair().unwrap();
+        let task = tokio::spawn(async move {
+            let _ = handle(server, config).await;
+        });
+        client.write_all(req.as_bytes()).await.unwrap();
+        let mut buf = Vec::new();
+        let mut byte = [0u8; 1];
+        loop {
+            match client.read(&mut byte).await {
+                Ok(0) => break,
+                Ok(_) => {
+                    if byte[0] == b'\n' {
+                        break;
+                    }
+                    buf.push(byte[0]);
+                }
+                Err(_) => break,
+            }
+        }
+        let _ = task.await;
+        String::from_utf8(buf).unwrap()
+    }
+
+    #[tokio::test]
+    async fn unlisted_host_denied_by_user_is_refused() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<EgressApproval>();
+        tokio::spawn(async move {
+            while let Some(req) = rx.recv().await {
+                let _ = req.reply.send(false);
+            }
+        });
+        // example.com is not on the allowlist → asked → user denies → refused
+        // (before any DNS resolution, so no network is touched).
+        assert_eq!(run_request(gw(Some(tx)), "t k example.com 443\n").await, "ERR egress denied by user");
+    }
+
+    #[tokio::test]
+    async fn approved_unlisted_host_is_remembered() {
+        use std::sync::atomic::AtomicU64;
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<EgressApproval>();
+        let asks = Arc::new(AtomicU64::new(0));
+        let counter = asks.clone();
+        tokio::spawn(async move {
+            while let Some(req) = rx.recv().await {
+                counter.fetch_add(1, Ordering::Relaxed);
+                let _ = req.reply.send(true);
+            }
+        });
+        let config = gw(Some(tx));
+        // localhost isn't allowlisted and resolves only to loopback (forbidden), so
+        // after approval the connection is refused at resolution — but approval DID
+        // happen, and the host is remembered so the second request does not re-ask.
+        assert_eq!(run_request(config.clone(), "t k localhost 80\n").await, "ERR unresolved or forbidden");
+        assert_eq!(run_request(config.clone(), "t k localhost 80\n").await, "ERR unresolved or forbidden");
+        assert_eq!(asks.load(Ordering::Relaxed), 1, "second request must not re-ask an approved host");
+    }
+
+    #[tokio::test]
+    async fn unlisted_host_without_approver_is_denied() {
+        assert_eq!(run_request(gw(None), "t k example.com 443\n").await, "ERR host not allowed");
     }
 }

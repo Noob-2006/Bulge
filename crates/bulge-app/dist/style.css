@@ -480,3 +480,18 @@ code { font-family: var(--mono); font-size: .9em; background: var(--bg-hover); p
   .shell { grid-template-columns: 1fr; }
   .sidebar { display: none; }
 }
+
+/* ===== Egress approval prompt (collaborative network) ===== */
+.egress-ask {
+  border: 0.5px solid var(--warn); border-left: 3px solid var(--warn);
+  background: var(--bg-elevated); border-radius: var(--radius-md);
+  padding: var(--space-3) var(--space-4); margin: var(--space-2) 0;
+  animation: toast-in var(--duration-normal) var(--ease-out);
+}
+.egress-head { display: flex; align-items: center; gap: var(--space-2); font-size: var(--t-md); color: var(--text-strong); }
+.egress-icon { flex: none; }
+.egress-sub { color: var(--muted); font-size: var(--t-sm); margin: var(--space-1) 0 var(--space-2); }
+.egress-actions { display: flex; align-items: center; gap: var(--space-2); }
+.egress-status { font-size: var(--t-sm); color: var(--muted); }
+.egress-status.ok { color: var(--ok); }
+.egress-status.bad { color: var(--danger); }

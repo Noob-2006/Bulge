@@ -55,6 +55,11 @@ pub struct VmConfig {
     /// the guest gets no raw NIC — its only way out is the authenticated gateway,
     /// which permits only these hosts. Empty means no gateway egress.
     pub egress_allow: Vec<String>,
+    /// When set, a destination not on `egress_allow` raises an approval prompt on
+    /// this channel instead of being denied (collaborative mode: ask before the
+    /// agent reaches an arbitrary host from inside the VM). `None` keeps egress
+    /// strictly to `egress_allow`.
+    pub egress_approvals: Option<crate::net::gateway::EgressApprovalTx>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -119,6 +124,8 @@ impl Vm {
                     key: gateway_key.clone(),
                     allow_suffixes: config.egress_allow.clone(),
                     stats: stats.clone(),
+                    approvals: config.egress_approvals.clone(),
+                    approved: Arc::new(tokio::sync::Mutex::new(std::collections::HashSet::new())),
                 },
             );
             gateway = Some(handle);

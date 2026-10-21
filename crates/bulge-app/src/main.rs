@@ -12,6 +12,7 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
@@ -19,6 +20,7 @@ use bulge_cli::backend::{BackendSpec, Protocol};
 use bulge_cli::run::{RunConfig, Sampling, Session};
 use bulge_store::{Autonomy, Budget, JobStore};
 use bulge_vm::changes::{self, Change};
+use bulge_vm::net::EgressApproval;
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager, State};
 use tauri_plugin_dialog::DialogExt;
@@ -60,7 +62,13 @@ struct DoneInfo {
 #[derive(Default)]
 struct AppState {
     sessions: Mutex<HashMap<String, SessionEntry>>,
+    /// Egress approval prompts awaiting the user's answer, by request id. Each
+    /// value is the gateway's reply channel; answering it unblocks the connection.
+    pending_egress: Mutex<HashMap<String, oneshot::Sender<bool>>>,
 }
+
+/// Monotonic counter for unique egress-approval ids (ms alone can collide).
+static EGRESS_SEQ: AtomicU64 = AtomicU64::new(1);
 
 /// Defaults the UI pre-fills (mirrors the CLI's defaults).
 #[derive(Serialize)]
@@ -101,6 +109,16 @@ struct StartArgs {
 struct LineEvent {
     handle: String,
     line: String,
+}
+
+/// An egress-approval prompt pushed to the UI: the agent inside this session's VM
+/// is trying to reach `host:port` and (collaborative mode) needs the user's OK.
+#[derive(Clone, Serialize)]
+struct EgressAskEvent {
+    handle: String,
+    id: String,
+    host: String,
+    port: u16,
 }
 
 /// A single workspace change, for the review list. The full unified diff is sent
@@ -292,6 +310,8 @@ fn build_config(args: &StartArgs) -> Result<RunConfig, String> {
         ram_mib: args.ram_mib,
         sampling: Sampling::default(),
         system_prompt: None,
+        // Filled in by start_job with the session's egress-approval channel.
+        egress_approvals: None,
     })
 }
 
@@ -319,7 +339,13 @@ async fn start_job(app: AppHandle, state: State<'_, AppState>, args: StartArgs) 
         // stored conversation if a job_id was supplied).
     }
 
-    let config = build_config(&args)?;
+    let mut config = build_config(&args)?;
+
+    // Egress approvals: in collaborative mode with network on, the gateway asks
+    // before the agent reaches a host outside the package/dev allowlist. The
+    // session drains these and surfaces them to the UI.
+    let (egress_tx, egress_rx) = mpsc::unbounded_channel::<EgressApproval>();
+    config.egress_approvals = Some(egress_tx);
 
     let sid = format!("s-{}", now_ms());
     let cancel = CancellationToken::new();
@@ -331,7 +357,7 @@ async fn start_job(app: AppHandle, state: State<'_, AppState>, args: StartArgs) 
         sessions.insert(sid.clone(), SessionEntry { job_id: String::new(), cmd_tx, current_cancel, done: None, last_used: Instant::now() });
     }
 
-    spawn_session(app, sid.clone(), config, cancel, cmd_rx).map_err(|e| {
+    spawn_session(app, sid.clone(), config, cancel, cmd_rx, egress_rx).map_err(|e| {
         state.sessions.lock().unwrap().remove(&sid);
         format!("無法啟動工作執行緒:{e}")
     })?;
@@ -358,6 +384,7 @@ fn spawn_session(
     config: RunConfig,
     first_cancel: CancellationToken,
     cmd_rx: mpsc::UnboundedReceiver<SessionCmd>,
+    egress_rx: mpsc::UnboundedReceiver<EgressApproval>,
 ) -> std::io::Result<()> {
     std::thread::Builder::new().name(format!("bulge-{sid}")).spawn(move || {
         let rt = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
@@ -368,7 +395,7 @@ fn spawn_session(
                 return;
             }
         };
-        rt.block_on(session_loop(app, sid, config, first_cancel, cmd_rx));
+        rt.block_on(session_loop(app, sid, config, first_cancel, cmd_rx, egress_rx));
     })?;
     Ok(())
 }
@@ -381,6 +408,7 @@ async fn session_loop(
     config: RunConfig,
     first_cancel: CancellationToken,
     mut cmd_rx: mpsc::UnboundedReceiver<SessionCmd>,
+    egress_rx: mpsc::UnboundedReceiver<EgressApproval>,
 ) {
     let first_goal = config.goal.clone();
     let mut session = match Session::launch(config).await {
@@ -396,6 +424,10 @@ async fn session_loop(
     if let Some(entry) = app.state::<AppState>().sessions.lock().unwrap().get_mut(&sid) {
         entry.job_id = session.job_id().to_string();
     }
+
+    // Drain egress-approval requests concurrently with the turns: a network call
+    // the agent makes mid-turn blocks in the gateway until the user answers here.
+    tokio::spawn(egress_drain(app.clone(), sid.clone(), egress_rx));
 
     run_turn_and_emit(&app, &sid, &mut session, first_goal, first_cancel).await;
 
@@ -457,6 +489,16 @@ async fn run_turn_and_emit(app: &AppHandle, sid: &str, session: &mut Session, go
     let _ = app.emit("job-done", event);
 }
 
+/// Forward each egress-approval request to the UI and park its reply channel until
+/// the user answers via `approve_egress`. Ends when the session's sender drops.
+async fn egress_drain(app: AppHandle, sid: String, mut rx: mpsc::UnboundedReceiver<EgressApproval>) {
+    while let Some(req) = rx.recv().await {
+        let id = format!("eg-{}", EGRESS_SEQ.fetch_add(1, Ordering::Relaxed));
+        app.state::<AppState>().pending_egress.lock().unwrap().insert(id.clone(), req.reply);
+        let _ = app.emit("egress-ask", EgressAskEvent { handle: sid.clone(), id, host: req.host, port: req.port });
+    }
+}
+
 fn emit_launch_error(app: &AppHandle, sid: &str, error: String) {
     let _ = app.emit(
         "job-done",
@@ -501,6 +543,20 @@ async fn restart_vm(state: State<'_, AppState>, handle: String, cpus: u8, ram_mi
             .map_err(|_| "工作階段已結束".to_string())?;
     }
     reply_rx.await.map_err(|_| "重啟無回應".to_string())?
+}
+
+/// Answer an egress-approval prompt: `true` opens the connection (and the host is
+/// remembered for the rest of the session), `false` refuses it.
+#[tauri::command]
+fn approve_egress(state: State<'_, AppState>, id: String, allow: bool) -> Result<(), String> {
+    let reply = state.pending_egress.lock().unwrap().remove(&id);
+    match reply {
+        Some(tx) => {
+            let _ = tx.send(allow);
+            Ok(())
+        }
+        None => Err("這個連線請求已處理或已過期".into()),
+    }
 }
 
 /// End a conversation and shut its VM down (e.g. when the user starts a new task
@@ -587,6 +643,7 @@ fn main() {
             stop_job,
             restart_vm,
             end_session,
+            approve_egress,
             apply_changes,
             list_jobs,
             load_job,

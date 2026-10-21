@@ -218,6 +218,30 @@ function argSummary(name, args) {
   return JSON.stringify(args);
 }
 
+function renderEgressAsk(id, host, port) {
+  const card = el("div", "egress-ask");
+  const head = el("div", "egress-head");
+  head.append(el("span", "egress-icon", "🌐"), el("span", "egress-q", "代理想連線到 " + host + ":" + port + " — 允許嗎?"));
+  const sub = el("div", "egress-sub", "這是沙箱內代理要連到的外部主機(不是模型 API)。允許後本次工作階段會記住這個主機。");
+  const actions = el("div", "egress-actions");
+  const allow = el("button", "btn btn-primary btn-sm", "允許");
+  const deny = el("button", "btn btn-ghost btn-sm", "拒絕");
+  const status = el("span", "egress-status", "");
+  async function decide(ok) {
+    allow.disabled = deny.disabled = true;
+    try {
+      await invoke("approve_egress", { id, allow: ok });
+      status.textContent = ok ? "已允許" : "已拒絕";
+      status.className = "egress-status " + (ok ? "ok" : "bad");
+    } catch (e) { status.textContent = "失敗:" + e; status.className = "egress-status bad"; allow.disabled = deny.disabled = false; }
+  }
+  allow.addEventListener("click", () => decide(true));
+  deny.addEventListener("click", () => decide(false));
+  actions.append(allow, deny, status);
+  card.append(head, sub, actions);
+  appendBlock(card);
+}
+
 function renderUserMessage(text) {
   const box = el("div", "msg-user");
   box.appendChild(el("div", "msg-user-bubble", text));
@@ -550,6 +574,11 @@ listen("job-line", (e) => {
   if (!currentHandle || p.handle !== currentHandle) return;
   let ev; try { ev = JSON.parse(p.line); } catch { return; }
   renderEvent(ev);
+});
+listen("egress-ask", (e) => {
+  const p = e.payload;
+  if (!currentHandle || p.handle !== currentHandle) return;
+  renderEgressAsk(p.id, p.host, p.port);
 });
 listen("job-done", (e) => {
   const p = e.payload;

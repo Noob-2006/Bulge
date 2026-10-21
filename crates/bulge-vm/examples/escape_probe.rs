@@ -77,6 +77,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         ram_mib: 1024,
         network: true,
         egress_allow: Vec::new(),
+        egress_approvals: None,
     })
     .await?;
     let mut r = Report { failures: 0 };

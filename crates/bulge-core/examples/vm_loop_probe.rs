@@ -67,6 +67,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             ram_mib: 1024,
             network: false,
             egress_allow: Vec::new(),
+            egress_approvals: None,
         })
         .await?,
     );
