@@ -95,12 +95,49 @@ fn score_text(text: &str, query_tokens: &[String], wanted: &HashSet<&str>) -> Op
 
 /// The first line containing a query token, flattened and clipped, char-safe.
 fn snippet_for(text: &str, wanted: &HashSet<&str>) -> String {
+    // Prefer the job's own conclusion: the last `"summary":"…"` (a StatusChanged
+    // event) carries what the job actually produced — the useful recall payload,
+    // not a metadata line. Fall back to the first query-matching line.
+    if let Some(summary) = extract_summary(text) {
+        let clipped = clip_line(&summary);
+        if !clipped.is_empty() {
+            return clipped;
+        }
+    }
     for line in text.lines() {
         if tokens(line).iter().any(|token| wanted.contains(token.as_str())) {
             return clip_line(line);
         }
     }
     String::new()
+}
+
+/// Extract the last `"summary":"…"` JSON string value from the raw log text, with
+/// the common escapes decoded. Best-effort and schema-agnostic: it scans for the
+/// key and reads until the closing unescaped quote.
+fn extract_summary(text: &str) -> Option<String> {
+    let key = "\"summary\":\"";
+    let pos = text.rfind(key)? + key.len();
+    let mut out = String::new();
+    let mut chars = text[pos..].chars();
+    while let Some(c) = chars.next() {
+        if c == '\\' {
+            match chars.next() {
+                Some('n') | Some('t') | Some('r') => out.push(' '),
+                Some('"') => out.push('"'),
+                Some('\\') => out.push('\\'),
+                Some(other) => out.push(other),
+                None => break,
+            }
+            continue;
+        }
+        if c == '"' {
+            break;
+        }
+        out.push(c);
+    }
+    let trimmed = out.trim();
+    (!trimmed.is_empty()).then(|| trimmed.to_string())
 }
 
 /// Collapse a log line to one trimmed line and clip it to [`SNIPPET_CHARS`].
