@@ -880,7 +880,11 @@ window.addEventListener("DOMContentLoaded", () => {
   $("apply").addEventListener("click", applyChanges);
   $("goal").addEventListener("input", autoGrow);
   $("goal").addEventListener("keydown", (e) => {
-    if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) { e.preventDefault(); startJob(); }
+    // Enter sends; Shift+Enter inserts a newline. `isComposing` guards IME input
+    // (e.g. confirming a Chinese candidate with Enter must NOT send). Ctrl/Cmd+Enter
+    // also sends, as a habit-friendly fallback.
+    const composing = e.isComposing || e.keyCode === 229;
+    if (e.key === "Enter" && !e.shiftKey && !composing) { e.preventDefault(); startJob(); }
   });
   loadDefaults();
   loadJobs();
