@@ -67,6 +67,10 @@ pub struct RunConfig {
     /// outside the package/dev allowlist raises an approval prompt on this channel
     /// instead of being allowed outright. `None` → allow any public host.
     pub egress_approvals: Option<bulge_vm::net::EgressApprovalTx>,
+    /// Skip the offline learning loop (lessons/profile/skill proposals) when the
+    /// session shuts down. Set for autonomous scheduled runs, where a ~30K-token
+    /// review fork with no human in the loop is not worth it (matches Hermes).
+    pub skip_review: bool,
 }
 
 /// Current wall-clock time in Unix seconds (0 before the epoch, which never happens).
@@ -292,6 +296,8 @@ pub struct Session {
     mcp: McpBundle,
     /// User-declared lifecycle hooks (`~/.bulge/hooks.json`), shared across turns.
     hooks: Arc<HookRunner>,
+    /// Skip the offline learning loop on shutdown (autonomous scheduled runs).
+    skip_review: bool,
     /// The VM shape last launched with; restart tweaks these.
     vm_config: VmConfig,
 }
@@ -376,6 +382,7 @@ impl Session {
             egress_approvals: config.egress_approvals,
             mcp,
             hooks,
+            skip_review: config.skip_review,
             vm_config,
         })
     }
@@ -495,7 +502,9 @@ impl Session {
     /// Finish the conversation: propose durable lessons offline, then shut the VM
     /// down (and clean up its runtime directory).
     pub async fn shutdown(mut self) {
-        improve(self.backend.as_ref(), &mut self.job, &self.harness_dir, &self.backend_spec.model).await;
+        if !self.skip_review {
+            improve(self.backend.as_ref(), &mut self.job, &self.harness_dir, &self.backend_spec.model).await;
+        }
         let Session { vm, .. } = self;
         if let Ok(vm) = Arc::try_unwrap(vm) {
             vm.shutdown().await;

@@ -20,6 +20,18 @@ USAGE:
     bulge run  --goal <TEXT> --workspace <DIR> [OPTIONS]
     bulge eval --tasks <FILE.json> [OPTIONS]
     bulge acp  (ACP agent server over stdio; editors spawn this)
+    bulge schedule add|list|remove|tick   (scheduled tasks; see below)
+
+`schedule` runs a saved task later or on a recurring basis:
+    bulge schedule add --goal <T> --workspace <DIR> <SELECTOR> [run options]
+    bulge schedule list
+    bulge schedule remove --id <ID>
+    bulge schedule tick     (run every due task once; drive from cron/systemd)
+  SELECTOR (exactly one): --after <secs> | --at <unix> | --every <secs>
+    | --daily HH:MM | --weekly mon,wed,fri:HH:MM | --cron \"m h dom mon dow\"
+  Wall-clock selectors use --offset-min <N> (fixed UTC offset in minutes).
+  A scheduled run is autonomous, skips the learning loop, and leaves its changes
+  as a reviewable diff in the job store (never written back without approval).
 
 `eval` runs each task (a JSON array of {id, goal, rubric, setup?}) in a fresh
 workspace and scores it with a blind judge model, reporting the completion rate.
@@ -100,6 +112,10 @@ fn main() {
                 eprintln!("error: {error}");
                 std::process::exit(1);
             }
+        }
+        Some("schedule") => {
+            // Scheduled tasks: add/list/remove/tick. `tick` runs its own runtime.
+            std::process::exit(bulge_cli::cron::dispatch(&args[1..]));
         }
         Some("-h") | Some("--help") | Some("help") | None => {
             print!("{USAGE}");
@@ -193,6 +209,7 @@ fn parse_run(args: &[String]) -> Result<RunConfig, String> {
         sampling: bulge_cli::run::Sampling::default(),
         system_prompt: None,
         egress_approvals: None,
+        skip_review: false,
     })
 }
 

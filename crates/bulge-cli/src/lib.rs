@@ -6,5 +6,6 @@
 
 pub mod acp;
 pub mod backend;
+pub mod cron;
 pub mod eval;
 pub mod run;

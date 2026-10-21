@@ -152,6 +152,7 @@ fn acp_run_config(workspace: PathBuf) -> Result<RunConfig, String> {
         sampling: Sampling::default(),
         system_prompt: None,
         egress_approvals: None,
+        skip_review: false,
     })
 }
 
