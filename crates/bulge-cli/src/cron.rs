@@ -61,6 +61,10 @@ pub struct SavedTask {
     pub last_run_at: Option<u64>,
     #[serde(default)]
     pub runs: u32,
+    /// For an `OnPathChange` schedule: the watched path's mtime last seen by a
+    /// tick. The task is due when the path's current mtime differs from this.
+    #[serde(default)]
+    pub watch_mtime: Option<u64>,
 }
 
 fn default_true() -> bool {
@@ -160,7 +164,29 @@ fn describe(s: &Schedule) -> String {
         Schedule::Daily { hour, minute } => format!("daily {hour:02}:{minute:02}"),
         Schedule::Weekly { weekdays, hour, minute } => format!("weekly {} {hour:02}:{minute:02}", weekdays.len()),
         Schedule::Cron { expr } => format!("cron {expr}"),
+        Schedule::OnPathChange { path } => format!("on change: {path}"),
     }
+}
+
+/// Whether a task should fire now: a time-based task once its next run has passed;
+/// an event task once its watched path's mtime differs from the last-seen value.
+fn task_is_due(task: &SavedTask, now: u64) -> bool {
+    match &task.schedule {
+        Schedule::OnPathChange { path } => match path_mtime(path) {
+            Some(mtime) => task.watch_mtime != Some(mtime),
+            None => false, // path gone/unreadable: nothing to react to
+        },
+        _ => task.next_run_at.is_some_and(|at| at <= now),
+    }
+}
+
+/// The mtime of `path` in Unix seconds, or `None` if it cannot be read.
+fn path_mtime(path: &str) -> Option<u64> {
+    std::fs::metadata(path)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_secs())
 }
 
 /// All saved tasks, summarised (desktop settings view). Empty on any error.
@@ -261,6 +287,7 @@ fn add(args: &[String]) -> Result<(), String> {
     let mut daily: Option<String> = None;
     let mut weekly: Option<String> = None;
     let mut cron: Option<String> = None;
+    let mut on_change: Option<String> = None;
 
     let mut iter = args.iter();
     while let Some(flag) = iter.next() {
@@ -290,11 +317,12 @@ fn add(args: &[String]) -> Result<(), String> {
             "--daily" => daily = Some(value()?),
             "--weekly" => weekly = Some(value()?),
             "--cron" => cron = Some(value()?),
+            "--on-change" => on_change = Some(value()?),
             other => return Err(format!("unknown flag {other:?}")),
         }
     }
 
-    let schedule = build_schedule(after, at, every, daily.as_deref(), weekly.as_deref(), cron.as_deref())?;
+    let schedule = build_schedule(after, at, every, daily.as_deref(), weekly.as_deref(), cron.as_deref(), on_change.as_deref())?;
     let goal = goal.ok_or("--goal is required")?;
     let workspace = workspace.ok_or("--workspace is required")?;
     if !workspace.is_dir() {
@@ -308,10 +336,18 @@ fn add(args: &[String]) -> Result<(), String> {
     let backend_host = host_of(&base_url);
     let title = title.unwrap_or_else(|| goal.lines().next().unwrap_or("task").chars().take(80).collect());
     let id = format!("sched-{now:x}-{:x}", std::process::id());
-    let next_run_at = next_occurrence(&schedule, now, now, offset_minutes);
-    if next_run_at.is_none() {
-        return Err("that schedule has no future occurrence (a past one-shot, or an invalid cron expression)".into());
-    }
+    // Event tasks have no time-based next run; they fire when the path changes, so
+    // seed watch_mtime with the current mtime (only future changes trigger a run).
+    let (next_run_at, watch_mtime) = match &schedule {
+        Schedule::OnPathChange { path } => (None, Some(path_mtime(path).unwrap_or(0))),
+        other => {
+            let next = next_occurrence(other, now, now, offset_minutes);
+            if next.is_none() {
+                return Err("that schedule has no future occurrence (a past one-shot, or an invalid cron expression)".into());
+            }
+            (next, None)
+        }
+    };
 
     let task = SavedTask {
         id: id.clone(),
@@ -339,13 +375,17 @@ fn add(args: &[String]) -> Result<(), String> {
         next_run_at,
         last_run_at: None,
         runs: 0,
+        watch_mtime,
     };
 
     let path = store_path(&home);
     let mut store = TaskStore::load(&path)?;
     store.tasks.push(task);
     store.save(&path)?;
-    println!("added {id} (next run at unix {})", next_run_at.unwrap_or(0));
+    match next_run_at {
+        Some(at) => println!("added {id} (next run at unix {at})"),
+        None => println!("added {id} (event-driven; fires on change)"),
+    }
     Ok(())
 }
 
@@ -408,11 +448,13 @@ fn tick() -> Result<(), String> {
 
     let now = now_unix();
     let mut store = TaskStore::load(&path)?;
-    // Snapshot the ids that are due, so we don't hold borrows across the run.
+    // Snapshot the ids that are due, so we don't hold borrows across the run. A
+    // time-based task is due when its next_run_at has passed; an event task is due
+    // when its watched path's mtime differs from what the last tick recorded.
     let due: Vec<String> = store
         .tasks
         .iter()
-        .filter(|t| t.enabled && t.next_run_at.is_some_and(|at| at <= now))
+        .filter(|t| t.enabled && task_is_due(t, now))
         .map(|t| t.id.clone())
         .collect();
     if due.is_empty() {
@@ -433,17 +475,24 @@ fn tick() -> Result<(), String> {
 
         // Reschedule: bump counters, disable one-shots, advance recurring ones to
         // the next occurrence strictly after now (latest-missed coalescing — we do
-        // not backfill occurrences skipped while the machine was off).
+        // not backfill occurrences skipped while the machine was off); for an event
+        // task, record the path's current mtime so it only fires on the next change.
         if let Some(task) = store.tasks.iter_mut().find(|t| t.id == id) {
             task.runs = task.runs.saturating_add(1);
             task.last_run_at = Some(now);
-            if task.schedule.is_one_shot() {
-                task.enabled = false;
-                task.next_run_at = None;
-            } else {
-                task.next_run_at = next_occurrence(&task.schedule, now, task.anchor, task.offset_minutes);
-                if task.next_run_at.is_none() {
+            match &task.schedule {
+                Schedule::OnPathChange { path } => {
+                    task.watch_mtime = Some(path_mtime(path).unwrap_or(0));
+                }
+                s if s.is_one_shot() => {
                     task.enabled = false;
+                    task.next_run_at = None;
+                }
+                _ => {
+                    task.next_run_at = next_occurrence(&task.schedule, now, task.anchor, task.offset_minutes);
+                    if task.next_run_at.is_none() {
+                        task.enabled = false;
+                    }
                 }
             }
         }
@@ -462,6 +511,7 @@ fn build_schedule(
     daily: Option<&str>,
     weekly: Option<&str>,
     cron: Option<&str>,
+    on_change: Option<&str>,
 ) -> Result<Schedule, String> {
     let mut chosen: Vec<Schedule> = Vec::new();
     if let Some(s) = after {
@@ -484,9 +534,12 @@ fn build_schedule(
     if let Some(expr) = cron {
         chosen.push(Schedule::Cron { expr: expr.to_string() });
     }
+    if let Some(path) = on_change {
+        chosen.push(Schedule::OnPathChange { path: path.to_string() });
+    }
     match chosen.len() {
         1 => Ok(chosen.into_iter().next().unwrap()),
-        0 => Err("a schedule selector is required (--after|--at|--every|--daily|--weekly|--cron)".into()),
+        0 => Err("a schedule selector is required (--after|--at|--every|--daily|--weekly|--cron|--on-change)".into()),
         _ => Err("pick exactly one schedule selector".into()),
     }
 }
@@ -566,9 +619,10 @@ mod tests {
 
     #[test]
     fn exactly_one_selector() {
-        assert!(build_schedule(Some(60), None, None, None, None, None).is_ok());
-        assert!(build_schedule(None, None, None, None, None, None).is_err());
-        assert!(build_schedule(Some(60), Some(10), None, None, None, None).is_err());
+        assert!(build_schedule(Some(60), None, None, None, None, None, None).is_ok());
+        assert!(build_schedule(None, None, None, None, None, None, None).is_err());
+        assert!(build_schedule(Some(60), Some(10), None, None, None, None, None).is_err());
+        assert!(build_schedule(None, None, None, None, None, None, Some("/tmp/x")).is_ok());
     }
 
     #[test]
@@ -603,6 +657,7 @@ mod tests {
             next_run_at: Some(2000),
             last_run_at: None,
             runs: 0,
+            watch_mtime: None,
         });
         store.save(&path).unwrap();
         let loaded = TaskStore::load(&path).unwrap();

@@ -64,6 +64,11 @@ pub enum Schedule {
     },
     /// 5-field Vixie cron expression `"min hour dom mon dow"`.
     Cron { expr: String },
+    /// Event-driven: fire whenever a watched filesystem path changes. This has no
+    /// time-based next occurrence (so [`next_occurrence`] returns `None`); the
+    /// scheduler decides it is due by comparing the path's mtime to what it last
+    /// saw. Recurring (never a one-shot).
+    OnPathChange { path: String },
 }
 
 impl Schedule {
@@ -264,6 +269,8 @@ pub fn next_occurrence(
             let spec = CronSpec::parse(expr)?;
             scan_minutes(after, offset_minutes, |wall| spec.matches(wall))
         }
+        // Event-driven: no time-based occurrence; the scheduler polls the path.
+        Schedule::OnPathChange { .. } => None,
     }
 }
 

@@ -30,6 +30,7 @@ USAGE:
     bulge schedule tick     (run every due task once; drive from cron/systemd)
   SELECTOR (exactly one): --after <secs> | --at <unix> | --every <secs>
     | --daily HH:MM | --weekly mon,wed,fri:HH:MM | --cron \"m h dom mon dow\"
+    | --on-change <PATH>  (event-driven: run when PATH's mtime changes)
   Wall-clock selectors use --offset-min <N> (fixed UTC offset in minutes).
   A scheduled run is autonomous, skips the learning loop, and leaves its changes
   as a reviewable diff in the job store (never written back without approval).
