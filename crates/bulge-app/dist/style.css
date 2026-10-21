@@ -433,7 +433,11 @@ body {
 .settings-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: var(--space-2); }
 .settings-head h2 { margin: 0; font-size: var(--t-lg); font-weight: 500; color: var(--text-strong); }
 .settings-section-label { font-size: var(--t-xs); text-transform: uppercase; letter-spacing: .08em; color: var(--muted); margin: var(--space-4) 0 var(--space-2); }
-.settings-group { background: var(--card); border: 0.5px solid var(--border); border-radius: var(--radius-lg); overflow: hidden; }
+/* flex-shrink:0 — the panel is a column flex with max-height; without this a
+   group (overflow:hidden gives it automatic min-height:0) gets shrunk to ~2px
+   on WebKitGTK, clipping all its rows. Let the panel scroll instead. */
+.settings-group { flex-shrink: 0; background: var(--card); border: 0.5px solid var(--border); border-radius: var(--radius-lg); overflow: hidden; }
+.settings-section-label { flex-shrink: 0; }
 .settings-row { display: flex; align-items: center; justify-content: space-between; gap: var(--space-4); padding: var(--space-3) var(--space-4); }
 .settings-row + .settings-row { border-top: 0.5px solid var(--border); }
 .row-title { font-weight: 500; color: var(--text-strong); font-size: var(--t-md); }
