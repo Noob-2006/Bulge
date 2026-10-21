@@ -4,6 +4,7 @@
 //! desktop app (`bulge-app`) reuses the exact same orchestration through
 //! [`run::run_streaming`] so there is one code path for a job, not two.
 
+pub mod acp;
 pub mod backend;
 pub mod eval;
 pub mod run;

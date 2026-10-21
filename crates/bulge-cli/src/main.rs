@@ -19,6 +19,7 @@ bulge — headless sandboxed agent
 USAGE:
     bulge run  --goal <TEXT> --workspace <DIR> [OPTIONS]
     bulge eval --tasks <FILE.json> [OPTIONS]
+    bulge acp  (ACP agent server over stdio; editors spawn this)
 
 `eval` runs each task (a JSON array of {id, goal, rubric, setup?}) in a fresh
 workspace and scores it with a blind judge model, reporting the completion rate.
@@ -92,6 +93,14 @@ fn main() {
                 std::process::exit(2);
             }
         },
+        Some("acp") => {
+            // Expose bulge as an ACP agent server over stdio (editors spawn this).
+            let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
+            if let Err(error) = rt.block_on(bulge_cli::acp::serve()) {
+                eprintln!("error: {error}");
+                std::process::exit(1);
+            }
+        }
         Some("-h") | Some("--help") | Some("help") | None => {
             print!("{USAGE}");
         }
