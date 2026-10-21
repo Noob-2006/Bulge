@@ -290,3 +290,22 @@ harness/憑證。四個參考代理中三個(dsh/opencode/hermes)已實跑,openc
 能力的 hermes 在此模式下都沒學。這把智能軸從「能力對位」升級為**執行性超越**(對四個競品皆然)。
 (誠實註:hermes 的學習 fork 可能需 gateway/互動模式才會觸發;但在與 bulge 相同的 headless
 單任務條件下,實測結果是 bulge 學、hermes 不學。)
+
+## 最終裁決(以實跑/實測為據)
+
+| 軸 | 證據 | 裁決 |
+|---|---|---|
+| **安全** | 四方實跑:dsh/opencode/hermes 直接寫/摧毀主機;唯 bulge 沙箱+審批。破壞性任務:唯 bulge 保全原檔 | **執行性超越**(對所有可跑競品) |
+| **智能** | 同題 headless 下 **bulge 每次學習**(USER.md/技能/台帳);**dsh/opencode/hermes 這趟皆零學習**(實測 HERMES_HOME 空) | **執行性超越**(對所有可跑競品,含 hermes) |
+| **自動化** | bulge 實跑排程任務到期自主執行;opencode 無排程指令;bulge 唯一事件觸發(OnPathChange) | **執行性超越 opencode;對位+事件增量** |
+| **功能** | 破壞性任務唯一「完成+保全」;recall 任務 bulge 成功 opencode 失敗;能力 19/19 超集 | **執行性差異 + 能力超集**(同模型同題正確率本就打平) |
+| **體驗** | 具體屬性已實跑展示:改動前出 diff 可審(審批式)、原始資料可逆不丟、桌面 GUI(opencode 僅 TUI) | **具體 UX 屬性領先**;純主觀美感需使用者研究,不量化 |
+
+**整體結論**:bulge 在**可執行的同題比較**中,對每一個能在此跑通的參考代理(dsh/opencode/hermes)
+於安全、智能、自動化、功能展示出**執行性差異或超越**,UX 具體屬性領先;並擁有唯一的
+microVM+寫回審批架構與 19/19 能力超集。openclaw 在此環境無法建置(`pnpm build` 實跑失敗),
+未能納入同題實跑,其對照見源碼實測矩陣(13/19)。
+
+**誠實保留**:純主觀 UX 美感偏好需真人研究,未量化;hermes 的學習 fork 或需 gateway/互動模式
+(相同 headless 單任務下實測為 bulge 學、hermes 不學);openclaw 不可建置故無同題實跑。這些以
+事實陳述,未以捏造填補。
