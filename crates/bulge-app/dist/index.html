@@ -196,6 +196,17 @@
             <textarea id="system-prompt" class="control control-area" rows="4" placeholder="例如:你是一位嚴謹的資料分析助理,先驗證再下結論…"></textarea>
           </div>
         </div>
+
+        <div class="settings-section-label">MCP 工具伺服器</div>
+        <div class="settings-group">
+          <div class="settings-row settings-row-col">
+            <div>
+              <div class="row-title">外部工具(MCP)</div>
+              <div class="row-desc">在 <code>~/.bulge/mcp.json</code> 以 <code>{"mcpServers":{"名稱":{"command":"…","args":[…]}}}</code> 宣告。每次對話開始會自動連線,工具以 <code>mcp__伺服器__工具</code> 命名。注意:MCP 伺服器在主機上執行(沙箱之外),等同你安裝的程式。</div>
+            </div>
+            <div id="mcp-list" class="mcp-list"></div>
+          </div>
+        </div>
       </div>
     </div>
 

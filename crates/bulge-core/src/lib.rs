@@ -5,6 +5,7 @@ pub mod complete;
 pub mod context;
 pub mod dispatch;
 pub mod driver;
+pub mod mcp;
 pub mod schedule;
 pub mod vm_dispatch;
 

@@ -322,6 +322,24 @@ async function refreshKeyStatus() {
   const s = $("key-status"); s.textContent = has ? "已設定" : "未設定"; s.className = "dot-status " + (has ? "ok" : "bad");
   const chip = $("key-chip"); chip.textContent = has ? "金鑰 ✓" : "金鑰未設定"; chip.className = "chip-hint " + (has ? "ok" : "bad");
 }
+async function loadMcpServers() {
+  const box = $("mcp-list");
+  if (!box) return;
+  let servers = [];
+  try { servers = await invoke("mcp_servers"); } catch (e) {}
+  box.innerHTML = "";
+  if (!servers.length) { box.appendChild(el("div", "mcp-empty", "尚未設定任何 MCP 伺服器。")); return; }
+  for (const s of servers) {
+    const row = el("div", "mcp-item" + (s.disabled ? " off" : ""));
+    row.append(
+      el("span", "mcp-dot" + (s.disabled ? "" : " on")),
+      el("span", "mcp-name", s.name),
+      el("span", "mcp-cmd", s.command + (s.disabled ? " · 已停用" : "")),
+    );
+    box.appendChild(row);
+  }
+}
+
 async function detectModels() {
   const btn = $("detect-models");
   const old = btn.textContent;
@@ -563,7 +581,7 @@ function autoGrow() {
 }
 
 /* ---- settings + theme ---- */
-function openSettings() { $("settings-overlay").classList.remove("hidden"); }
+function openSettings() { $("settings-overlay").classList.remove("hidden"); loadMcpServers(); }
 function closeSettings() { $("settings-overlay").classList.add("hidden"); }
 function toggleTheme() {
   const cur = document.documentElement.getAttribute("data-theme") === "light" ? "dark" : "light";

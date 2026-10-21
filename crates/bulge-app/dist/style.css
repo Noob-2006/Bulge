@@ -502,3 +502,13 @@ code { font-family: var(--mono); font-size: .9em; background: var(--bg-hover); p
   width: 100%; resize: vertical; min-height: 72px; font-family: inherit;
   font-size: var(--t-13); line-height: 1.5; padding: var(--space-2) var(--space-3);
 }
+
+/* ===== MCP server list (settings, read-only) ===== */
+.mcp-list { display: flex; flex-direction: column; gap: var(--space-1); width: 100%; }
+.mcp-empty { color: var(--muted); font-size: var(--t-sm); }
+.mcp-item { display: flex; align-items: center; gap: var(--space-2); font-size: var(--t-13); padding: 4px 0; }
+.mcp-item.off { opacity: 0.55; }
+.mcp-dot { width: 7px; height: 7px; border-radius: var(--radius-full); flex: none; background: var(--muted); }
+.mcp-dot.on { background: var(--ok); }
+.mcp-name { color: var(--text-strong); font-weight: 600; }
+.mcp-cmd { color: var(--muted); font-family: ui-monospace, monospace; font-size: var(--t-xs); }

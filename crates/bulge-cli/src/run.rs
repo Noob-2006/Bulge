@@ -17,7 +17,8 @@ use std::time::Duration;
 
 use bulge_core::driver::{CompletionConfig, ContextConfig, Driver, GuardConfig, LoopOutcome};
 pub use bulge_core::driver::Sampling;
-use bulge_core::{VmDispatcher, builtin_tools, plan_tool};
+use bulge_core::mcp::{self, CompositeDispatcher, McpBundle};
+use bulge_core::{ToolDispatcher, VmDispatcher, builtin_tools, plan_tool};
 use bulge_guard::{Effect, Rule};
 use bulge_harness::{SurfaceSpec, Tree};
 use bulge_llm::{GenerateRequest, LlmBackend, Message, Purpose, Role};
@@ -263,6 +264,8 @@ pub struct Session {
     system_prompt: Option<String>,
     /// Egress approval channel (used when restarting with network on, collaborative).
     egress_approvals: Option<bulge_vm::net::EgressApprovalTx>,
+    /// Connected MCP servers (kept alive for the session) plus their tool routing.
+    mcp: McpBundle,
     /// The VM shape last launched with; restart tweaks these.
     vm_config: VmConfig,
 }
@@ -298,6 +301,26 @@ impl Session {
         let vm_config = vm_config_for(&config.workspace, config.cpus, config.ram_mib, config.network, config.autonomy, config.egress_approvals.clone())?;
         let vm = Arc::new(Vm::launch(vm_config.clone()).await.map_err(|e| format!("launch VM: {e}"))?);
 
+        // Connect any user-declared MCP servers (~/.bulge/mcp.json). Best-effort: a
+        // broken server only loses its tools, it never blocks the run.
+        let home = PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| ".".into()));
+        let mcp = match mcp::McpConfig::load(&home.join(".bulge/mcp.json")) {
+            Ok(cfg) => {
+                let bundle = mcp::connect_all(&cfg).await;
+                for err in &bundle.errors {
+                    eprintln!("mcp: {err}");
+                }
+                if !bundle.tools.is_empty() {
+                    eprintln!("mcp: {} tool(s) from {} server(s)", bundle.tools.len(), bundle.clients.len());
+                }
+                bundle
+            }
+            Err(e) => {
+                eprintln!("mcp: {e}");
+                McpBundle::default()
+            }
+        };
+
         Ok(Self {
             backend,
             vm,
@@ -309,6 +332,7 @@ impl Session {
             sampling: config.sampling,
             system_prompt: config.system_prompt,
             egress_approvals: config.egress_approvals,
+            mcp,
             vm_config,
         })
     }
@@ -340,10 +364,17 @@ impl Session {
         let tail_start = std::fs::metadata(&log_path).map(|m| m.len() as usize).unwrap_or(0);
 
         // Rebuild the per-turn dispatcher/driver against the current VM (so a
-        // restarted VM is picked up) — cheap; the VM is the expensive part.
-        let dispatcher = Arc::new(VmDispatcher::new(self.vm.clone(), Duration::from_secs(120)));
+        // restarted VM is picked up) — cheap; the VM is the expensive part. MCP
+        // tools (if any) route to their server; everything else goes to the VM.
+        let vm_dispatcher = Arc::new(VmDispatcher::new(self.vm.clone(), Duration::from_secs(120)));
+        let dispatcher: Arc<dyn ToolDispatcher> = if self.mcp.routes.is_empty() {
+            vm_dispatcher
+        } else {
+            Arc::new(CompositeDispatcher::new(vm_dispatcher, self.mcp.routes.clone()))
+        };
         let mut tools = builtin_tools();
         tools.push(plan_tool());
+        tools.extend(self.mcp.tools.iter().cloned());
         let context = ContextConfig { window: self.backend_spec.context_window as u64, ..ContextConfig::default() };
         let driver = Driver::new(self.backend.clone(), dispatcher.clone(), tools, system_prompt)
             .with_guard(GuardConfig { rules: default_ruleset(), autonomy: guard_autonomy(self.autonomy), loop_detection: true })

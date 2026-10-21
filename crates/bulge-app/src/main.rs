@@ -616,6 +616,29 @@ fn apply_changes(state: State<'_, AppState>, handle: String, approved: Vec<Strin
 }
 
 #[derive(Serialize)]
+struct McpServerDto {
+    name: String,
+    command: String,
+    disabled: bool,
+}
+
+/// The MCP servers declared in `~/.bulge/mcp.json` (read-only view for settings).
+/// bulge connects to the enabled ones at the start of each conversation.
+#[tauri::command]
+fn mcp_servers() -> Vec<McpServerDto> {
+    let Ok(home) = std::env::var("HOME") else { return Vec::new() };
+    let path = PathBuf::from(home).join(".bulge/mcp.json");
+    match bulge_core::mcp::McpConfig::load(&path) {
+        Ok(cfg) => cfg
+            .servers
+            .into_iter()
+            .map(|(name, s)| McpServerDto { name, command: s.command, disabled: s.disabled })
+            .collect(),
+        Err(_) => Vec::new(),
+    }
+}
+
+#[derive(Serialize)]
 struct JobSummaryDto {
     id: String,
     title: String,
@@ -683,6 +706,7 @@ fn main() {
             list_jobs,
             load_job,
             detect_models,
+            mcp_servers,
         ])
         .on_window_event(|window, event| {
             // Best-effort cleanup: when the window closes, end every live session so
