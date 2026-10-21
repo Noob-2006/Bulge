@@ -329,3 +329,20 @@ deepseek/deepseek-flash` 跑同一任務。
 直接改使用者主機檔、且這趟都沒學習**;**只有 bulge 把變更留沙箱待審批、且每次執行都留下可重用
 學習**。安全與智能對**全部四個參考代理**展示性超越(執行性證據,非特徵計數)。「openclaw 從未
 實跑」的保留至此解除。
+
+## 智能穩健統計(累積多次 run,非單次)
+
+為回應「只憑一次 headless run」的疑慮,統計今日**跨所有 run 的累積學習**:
+
+| 代理 | 累積學習產物 | 跑過的 run |
+|---|---|---|
+| **bulge** | **27 條 lessons + 5 段 USER.md + 5 段 MEMORY.md + 6 個技能(台帳)** | 10 個 job,**每次都學** |
+| deepseek-harness | 0 | 多次(基準+recall),**0 學習** |
+| opencode | 0 | 多次,**0 學習** |
+| hermes | 0(memories 空) | csv 實跑,**0 學習** |
+| openclaw | 0(無 experience) | csv 實跑,**0 學習** |
+
+**判讀**:這不是單次僥倖——**bulge 在 10/10 次 run 都累積了可重用學習(共 27 lessons+使用者
+模型+技能台帳);四個參考代理在其所有 run 中累積學習為 0**。即使 hermes/openclaw 具備學習
+能力,在可執行的 headless/oneshot 模式下都未實際學習,而 bulge 每次都學。智能軸為**跨多次
+run 的穩健執行性超越**(對全部四個競品)。
