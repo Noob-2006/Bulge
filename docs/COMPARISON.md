@@ -185,3 +185,29 @@ bulge run --goal "Read data.csv and write the total revenue (sum of the revenue 
 此即「展示而非斷言」:安全(沙箱+審批)、智能(學習/使用者模型/技能台帳)、功能(正確完成任務)
 在單次真實執行中同時被量測到。參考代理的同題端到端需各自金鑰/環境,無法在此並列,故以
 「bulge 實跑量測 + 能力矩陣(bulge 18/18 vs 參考 ≤14)」作為可執行的對照證據。
+
+## 已執行的 head-to-head(bulge vs deepseek-harness,同題同後端)
+
+真正跑了兩個代理做**同一任務**(非特徵比對)。dsh 與 bulge 都能在此以同一 DeepSeek
+後端執行(hermes/opencode 需各自的 model/provider 設定,headless 無法在此環境直接跑:
+`hermes --help` 於 activate 階段逾時)。
+
+任務(相同):`data.csv`(Jan 100/Feb 150/Mar 200)→ 把營收總和寫入 `result.txt`。
+
+| 量測項 | bulge | deepseek-harness (dsh) |
+|---|---|---|
+| 結果正確(=450) | ✅ 450(讀回驗證) | ✅ 450 |
+| **安全:主機檔案** | **未改主機**;`result.txt` 留 VM overlay,僅產 `changes.diff(+450)` **待人核准** | **直接寫入主機** `result.txt`(無沙箱、無審批) |
+| **智能:學習產物** | 產生 `USER.md`、`MEMORY.md`、技能 `SKILL.md`、`.usage.json`(越用越懂) | **無任何學習/記憶產物**(find 證實) |
+| 狀態 | Succeeded | Succeeded |
+
+**實跑判讀(demonstrated,非斷言)**:
+- **安全 — 展示性超越**:同一題下 dsh **自主改了使用者的真實檔案**,bulge **要求審批才寫回**。
+  這是「VM 為真邊界 + 審批」設計在真實執行中的直接量測。
+- **智能 — 展示性超越**:同一題下 bulge **留下可重用的學習**(使用者模型 + 技能 + 台帳),
+  dsh 這一趟**什麼都沒學到**。
+- **功能**:正確性對位(皆 450);bulge 另有沙箱/審批/學習的整合行為。
+
+> 界限誠實交代:hermes 與 opencode 需各自的 provider/key 設定,無法在此環境 headless 直接跑,
+> 故未納入本次實跑;其能力對照見上方「對實際源碼的實測矩陣」。bulge vs dsh 是本環境可執行的
+> 真實 head-to-head,已就安全與智能展示出同題下的行為差異。
