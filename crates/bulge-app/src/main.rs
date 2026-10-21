@@ -1,32 +1,55 @@
 //! Bulge desktop app.
 //!
 //! One window, no network ports: the webview talks to this process over Tauri's
-//! in-process IPC (the roadmap's "Tauri 程序內 IPC"). A job runs through the exact
-//! same orchestration as the headless CLI (`bulge_cli::run::run_streaming`), so
-//! there is one code path for an agent run. Workspace changes stay in the VM
-//! overlay; nothing is written to the host until the user reviews the diff and
-//! approves it here.
+//! in-process IPC (the roadmap's "Tauri 程序內 IPC"). A conversation runs as a
+//! long-lived [`Session`] (one VM + the store job it serves) on its own thread;
+//! follow-up turns are fed to that same session over a channel, so the VM — and
+//! the files inside it — persist across turns. The VM can also be restarted on
+//! its own (after a settings change) without disturbing the conversation.
+//! Workspace changes stay in the VM overlay; nothing is written to the host until
+//! the user reviews the diff and approves it here.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 use bulge_cli::backend::{BackendSpec, Protocol};
-use bulge_cli::run::{RunConfig, run_streaming};
+use bulge_cli::run::{RunConfig, Sampling, Session};
 use bulge_store::{Autonomy, Budget, JobStore};
 use bulge_vm::changes::{self, Change};
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager, State};
 use tauri_plugin_dialog::DialogExt;
-use tokio::sync::oneshot;
+use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
-/// Per-run bookkeeping: its cancel handle (emergency stop) and, once finished,
-/// the structured changes to apply on approval.
-struct RunEntry {
-    cancel: CancellationToken,
+/// At most this many live VMs at once; starting another evicts the least-recently
+/// used conversation (its VM is shut down; the stored conversation can be resumed,
+/// which launches a fresh VM).
+const MAX_LIVE_SESSIONS: usize = 3;
+
+/// A command sent to a running session's thread.
+enum SessionCmd {
+    /// Run another turn on this conversation (reuses the live VM).
+    Turn { goal: String, cancel: CancellationToken },
+    /// Restart just the VM with a new shape; the conversation is untouched.
+    RestartVm { cpus: u8, ram_mib: u32, network: bool, reply: oneshot::Sender<Result<(), String>> },
+}
+
+/// Host-side bookkeeping for one live conversation (keyed by a session id).
+struct SessionEntry {
+    /// The real store job id (filled in once the session has launched).
+    job_id: String,
+    /// Feeds turns / restarts to the session thread. Dropping it ends the session
+    /// (the thread shuts the VM down and exits).
+    cmd_tx: mpsc::UnboundedSender<SessionCmd>,
+    /// The current turn's cancel token (emergency stop targets this).
+    current_cancel: Arc<Mutex<CancellationToken>>,
+    /// The latest finished turn's changes, for the approval step.
     done: Option<DoneInfo>,
+    last_used: Instant,
 }
 
 struct DoneInfo {
@@ -36,7 +59,7 @@ struct DoneInfo {
 
 #[derive(Default)]
 struct AppState {
-    runs: Mutex<HashMap<String, RunEntry>>,
+    sessions: Mutex<HashMap<String, SessionEntry>>,
 }
 
 /// Defaults the UI pre-fills (mirrors the CLI's defaults).
@@ -50,10 +73,16 @@ struct Defaults {
     ram_mib: u32,
 }
 
-/// Everything the UI sends to start a job. Fixed budgets/limits match the CLI.
+/// Everything the UI sends to start (or continue) a job. Fixed budgets/limits
+/// match the CLI.
 #[derive(Deserialize)]
 struct StartArgs {
-    /// Present → continue that conversation (a follow-up turn); absent → new job.
+    /// Present and still live → feed this turn to that session's VM (full
+    /// continuity). Absent or no longer live → start a fresh session.
+    #[serde(default)]
+    session: Option<String>,
+    /// Present → resume this stored conversation when starting a fresh session
+    /// (history is replayed; a new VM is launched). Absent → brand-new job.
     #[serde(default)]
     job_id: Option<String>,
     goal: String,
@@ -67,7 +96,7 @@ struct StartArgs {
     ram_mib: u32,
 }
 
-/// One streamed log line, tagged with the run it belongs to.
+/// One streamed log line, tagged with the session it belongs to.
 #[derive(Clone, Serialize)]
 struct LineEvent {
     handle: String,
@@ -213,13 +242,10 @@ async fn pick_workspace(app: AppHandle) -> Option<String> {
     rx.await.ok().flatten().map(|p| p.to_string())
 }
 
-/// Start a job. Returns a handle the UI uses to stop it and later apply its
-/// diff. Events stream back as `job-line`; completion arrives as `job-done`.
-#[tauri::command]
-async fn start_job(app: AppHandle, state: State<'_, AppState>, args: StartArgs) -> Result<String, String> {
+/// Build the per-run config from the UI args, resolving the workspace (an empty
+/// path means an ephemeral scratch workspace inside the VM home).
+fn build_config(args: &StartArgs) -> Result<RunConfig, String> {
     let home = PathBuf::from(std::env::var("HOME").map_err(|_| "HOME 未設定".to_string())?);
-    // No folder chosen → use an ephemeral scratch workspace (the agent still works
-    // in the VM; nothing lands on the user's real files unless they later pick one).
     let workspace = if args.workspace.trim().is_empty() {
         let dir = home.join(".bulge/scratch").join(format!("ws-{}", now_ms()));
         std::fs::create_dir_all(&dir).map_err(|e| format!("建立暫存工作區失敗:{e}"))?;
@@ -237,20 +263,17 @@ async fn start_job(app: AppHandle, state: State<'_, AppState>, args: StartArgs) 
     // Fail early with a clear message if there is no key, rather than deep in the
     // run. This only checks presence; it does not read the key here.
     if !bulge_cli::backend::key_path(&host_of(&args.base_url)).exists() {
-        return Err(format!(
-            "找不到 {} 的 API 金鑰。請先在「設定」裡填入並儲存。",
-            host_of(&args.base_url)
-        ));
+        return Err(format!("找不到 {} 的 API 金鑰。請先在「設定」裡填入並儲存。", host_of(&args.base_url)));
     }
 
     let title: String = args.goal.lines().next().unwrap_or("job").chars().take(80).collect();
     let host = host_of(&args.base_url);
 
-    let config = RunConfig {
+    Ok(RunConfig {
         job_id: args.job_id.clone(),
         goal: args.goal.clone(),
         title,
-        workspace: workspace.clone(),
+        workspace,
         store_root: home.join(".bulge/jobs"),
         harness_dir: home.join(".bulge/harness"),
         autonomy,
@@ -267,111 +290,235 @@ async fn start_job(app: AppHandle, state: State<'_, AppState>, args: StartArgs) 
         network: args.network,
         cpus: args.cpus,
         ram_mib: args.ram_mib,
-    };
-
-    // A short, unique-enough handle for this run.
-    let handle = format!("run-{}", now_ms());
-    let cancel = CancellationToken::new();
-    state.runs.lock().unwrap().insert(handle.clone(), RunEntry { cancel: cancel.clone(), done: None });
-
-    // Stream each committed log line to the webview.
-    let app_for_sink = app.clone();
-    let sink_handle = handle.clone();
-    let sink = Box::new(move |line: &str| {
-        let _ = app_for_sink.emit("job-line", LineEvent { handle: sink_handle.clone(), line: line.to_string() });
-    });
-
-    // The agent loop's internal scheduler is not `Send`, so it cannot live on a
-    // shared worker. Give it its own thread with a single-threaded runtime; the
-    // sink and app handle are `Send + Sync` and cross the boundary fine.
-    let app_for_done = app.clone();
-    let done_handle = handle.clone();
-    std::thread::Builder::new()
-        .name(format!("bulge-{handle}"))
-        .spawn(move || {
-            let rt = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
-                Ok(rt) => rt,
-                Err(e) => {
-                    let _ = app_for_done.emit(
-                        "job-done",
-                        DoneEvent {
-                            handle: done_handle.clone(),
-                            job_id: String::new(),
-                            status: "Failed".into(),
-                            outcome: "Error".into(),
-                            diff: None,
-                            changes: Vec::new(),
-                            job_dir: String::new(),
-                            error: Some(format!("無法建立執行緒 runtime:{e}")),
-                        },
-                    );
-                    return;
-                }
-            };
-            rt.block_on(job_thread(config, cancel, sink, app_for_done, done_handle));
-        })
-        .map_err(|e| format!("無法啟動工作執行緒:{e}"))?;
-
-    Ok(handle)
+        sampling: Sampling::default(),
+        system_prompt: None,
+    })
 }
 
-/// Run one job to completion on its own runtime, then publish the result.
-async fn job_thread(config: RunConfig, cancel: CancellationToken, sink: bulge_cli::run::LineSink, app: AppHandle, handle: String) {
+/// Start a new job, or feed a follow-up turn to a live session. Returns the
+/// session id the UI uses to stop it, continue it, and apply its diff. Events
+/// stream back as `job-line`; each turn's completion arrives as `job-done`.
+#[tauri::command]
+async fn start_job(app: AppHandle, state: State<'_, AppState>, args: StartArgs) -> Result<String, String> {
+    // Live follow-up: the named session is still running — hand it the next turn
+    // so it reuses the same VM (in-VM files carry over).
+    if let Some(sid) = args.session.clone() {
+        let mut sessions = state.sessions.lock().unwrap();
+        if let Some(entry) = sessions.get_mut(&sid) {
+            let cancel = CancellationToken::new();
+            *entry.current_cancel.lock().unwrap() = cancel.clone();
+            entry.last_used = Instant::now();
+            entry.done = None;
+            entry
+                .cmd_tx
+                .send(SessionCmd::Turn { goal: args.goal.clone(), cancel })
+                .map_err(|_| "工作階段已結束,請重試".to_string())?;
+            return Ok(sid);
+        }
+        // Session gone (evicted) → fall through and start a fresh one (resuming the
+        // stored conversation if a job_id was supplied).
+    }
+
+    let config = build_config(&args)?;
+
+    let sid = format!("s-{}", now_ms());
+    let cancel = CancellationToken::new();
+    let current_cancel = Arc::new(Mutex::new(cancel.clone()));
+    let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
     {
-        let result = run_streaming(config, cancel, sink).await;
-        let event = match result {
-            Ok(outcome) => {
-                let changes_dto: Vec<ChangeDto> = outcome.changes.iter().map(ChangeDto::from_change).collect();
-                // Keep the structured changes for the approval step.
-                if let Some(entry) = app.state::<AppState>().runs.lock().unwrap().get_mut(&handle) {
-                    entry.done = Some(DoneInfo { workspace: outcome.workspace.clone(), changes: outcome.changes });
-                }
-                DoneEvent {
-                    handle: handle.clone(),
-                    job_id: outcome.job_dir.file_name().and_then(|n| n.to_str()).unwrap_or("").to_string(),
-                    status: format!("{:?}", outcome.status),
-                    outcome: format!("{:?}", outcome.outcome),
-                    diff: outcome.diff,
-                    changes: changes_dto,
-                    job_dir: outcome.job_dir.display().to_string(),
-                    error: None,
-                }
-            }
-            Err(error) => DoneEvent {
-                handle: handle.clone(),
-                job_id: String::new(),
-                status: "Failed".into(),
-                outcome: "Error".into(),
-                diff: None,
-                changes: Vec::new(),
-                job_dir: String::new(),
-                error: Some(error),
-            },
-        };
-        let _ = app.emit("job-done", event);
+        let mut sessions = state.sessions.lock().unwrap();
+        evict_if_needed(&mut sessions);
+        sessions.insert(sid.clone(), SessionEntry { job_id: String::new(), cmd_tx, current_cancel, done: None, last_used: Instant::now() });
+    }
+
+    spawn_session(app, sid.clone(), config, cancel, cmd_rx).map_err(|e| {
+        state.sessions.lock().unwrap().remove(&sid);
+        format!("無法啟動工作執行緒:{e}")
+    })?;
+
+    Ok(sid)
+}
+
+/// Evict least-recently-used live sessions until there is room for one more.
+fn evict_if_needed(sessions: &mut HashMap<String, SessionEntry>) {
+    while sessions.len() >= MAX_LIVE_SESSIONS {
+        let Some(oldest) = sessions.iter().min_by_key(|(_, e)| e.last_used).map(|(k, _)| k.clone()) else { break };
+        // Dropping the entry drops its sender; the session thread then shuts its VM
+        // down and exits.
+        sessions.remove(&oldest);
     }
 }
 
-/// Emergency stop: cancel the running loop. The VM is torn down as the run unwinds.
+/// Spawn the session thread. The agent loop's scheduler is not `Send`, so the VM
+/// and driver live entirely on this one thread with a current-thread runtime; the
+/// app handle and channels cross the boundary fine.
+fn spawn_session(
+    app: AppHandle,
+    sid: String,
+    config: RunConfig,
+    first_cancel: CancellationToken,
+    cmd_rx: mpsc::UnboundedReceiver<SessionCmd>,
+) -> std::io::Result<()> {
+    std::thread::Builder::new().name(format!("bulge-{sid}")).spawn(move || {
+        let rt = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
+            Ok(rt) => rt,
+            Err(e) => {
+                emit_launch_error(&app, &sid, format!("無法建立執行緒 runtime:{e}"));
+                app.state::<AppState>().sessions.lock().unwrap().remove(&sid);
+                return;
+            }
+        };
+        rt.block_on(session_loop(app, sid, config, first_cancel, cmd_rx));
+    })?;
+    Ok(())
+}
+
+/// The session's lifetime: launch the VM, run the first turn, then serve turns
+/// and restarts until the channel closes, then shut the VM down.
+async fn session_loop(
+    app: AppHandle,
+    sid: String,
+    config: RunConfig,
+    first_cancel: CancellationToken,
+    mut cmd_rx: mpsc::UnboundedReceiver<SessionCmd>,
+) {
+    let first_goal = config.goal.clone();
+    let mut session = match Session::launch(config).await {
+        Ok(session) => session,
+        Err(error) => {
+            emit_launch_error(&app, &sid, error);
+            app.state::<AppState>().sessions.lock().unwrap().remove(&sid);
+            return;
+        }
+    };
+
+    // Record the real store job id now that the session exists.
+    if let Some(entry) = app.state::<AppState>().sessions.lock().unwrap().get_mut(&sid) {
+        entry.job_id = session.job_id().to_string();
+    }
+
+    run_turn_and_emit(&app, &sid, &mut session, first_goal, first_cancel).await;
+
+    while let Some(cmd) = cmd_rx.recv().await {
+        match cmd {
+            SessionCmd::Turn { goal, cancel } => {
+                run_turn_and_emit(&app, &sid, &mut session, goal, cancel).await;
+            }
+            SessionCmd::RestartVm { cpus, ram_mib, network, reply } => {
+                let result = session.restart_vm(cpus, ram_mib, network).await;
+                let _ = reply.send(result);
+            }
+        }
+    }
+
+    session.shutdown().await;
+    app.state::<AppState>().sessions.lock().unwrap().remove(&sid);
+}
+
+/// Run one turn, streaming its log to the webview, then publish the result and
+/// stash the changes for approval.
+async fn run_turn_and_emit(app: &AppHandle, sid: &str, session: &mut Session, goal: String, cancel: CancellationToken) {
+    let sink = {
+        let app = app.clone();
+        let sid = sid.to_string();
+        Box::new(move |line: &str| {
+            let _ = app.emit("job-line", LineEvent { handle: sid.clone(), line: line.to_string() });
+        }) as bulge_cli::run::LineSink
+    };
+
+    let event = match session.run_turn(goal, cancel, sink).await {
+        Ok(outcome) => {
+            let changes_dto: Vec<ChangeDto> = outcome.changes.iter().map(ChangeDto::from_change).collect();
+            if let Some(entry) = app.state::<AppState>().sessions.lock().unwrap().get_mut(sid) {
+                entry.done = Some(DoneInfo { workspace: outcome.workspace.clone(), changes: outcome.changes });
+            }
+            DoneEvent {
+                handle: sid.to_string(),
+                job_id: outcome.job_id,
+                status: format!("{:?}", outcome.status),
+                outcome: format!("{:?}", outcome.outcome),
+                diff: outcome.diff,
+                changes: changes_dto,
+                job_dir: outcome.job_dir.display().to_string(),
+                error: None,
+            }
+        }
+        Err(error) => DoneEvent {
+            handle: sid.to_string(),
+            job_id: session.job_id().to_string(),
+            status: "Failed".into(),
+            outcome: "Error".into(),
+            diff: None,
+            changes: Vec::new(),
+            job_dir: String::new(),
+            error: Some(error),
+        },
+    };
+    let _ = app.emit("job-done", event);
+}
+
+fn emit_launch_error(app: &AppHandle, sid: &str, error: String) {
+    let _ = app.emit(
+        "job-done",
+        DoneEvent {
+            handle: sid.to_string(),
+            job_id: String::new(),
+            status: "Failed".into(),
+            outcome: "Error".into(),
+            diff: None,
+            changes: Vec::new(),
+            job_dir: String::new(),
+            error: Some(error),
+        },
+    );
+}
+
+/// Emergency stop: cancel the running turn. The VM stays alive for another turn.
 #[tauri::command]
 fn stop_job(state: State<'_, AppState>, handle: String) -> Result<(), String> {
-    let runs = state.runs.lock().unwrap();
-    match runs.get(&handle) {
+    let sessions = state.sessions.lock().unwrap();
+    match sessions.get(&handle) {
         Some(entry) => {
-            entry.cancel.cancel();
+            entry.current_cancel.lock().unwrap().cancel();
             Ok(())
         }
         None => Err("找不到這個工作".into()),
     }
 }
 
-/// Apply the approved subset of a finished run's changes to the host workspace.
+/// Restart just this conversation's VM with a new shape (cpus / ram / network).
+/// The conversation is untouched — only the machine is replaced, so in-VM files
+/// reset but the agent's memory does not. Used by the settings "apply" button.
+#[tauri::command]
+async fn restart_vm(state: State<'_, AppState>, handle: String, cpus: u8, ram_mib: u32, network: bool) -> Result<(), String> {
+    let (reply_tx, reply_rx) = oneshot::channel();
+    {
+        let sessions = state.sessions.lock().unwrap();
+        let entry = sessions.get(&handle).ok_or("沒有執行中的工作階段可重啟")?;
+        entry
+            .cmd_tx
+            .send(SessionCmd::RestartVm { cpus, ram_mib, network, reply: reply_tx })
+            .map_err(|_| "工作階段已結束".to_string())?;
+    }
+    reply_rx.await.map_err(|_| "重啟無回應".to_string())?
+}
+
+/// End a conversation and shut its VM down (e.g. when the user starts a new task
+/// or closes the window). Resuming it later from history launches a fresh VM.
+#[tauri::command]
+fn end_session(state: State<'_, AppState>, handle: String) -> Result<(), String> {
+    // Dropping the entry drops its sender; the session thread shuts the VM down.
+    state.sessions.lock().unwrap().remove(&handle);
+    Ok(())
+}
+
+/// Apply the approved subset of a finished turn's changes to the host workspace.
 /// Paths not in `approved` are left untouched; symlink and traversal defences
 /// live in `bulge_vm::changes::apply`.
 #[tauri::command]
 fn apply_changes(state: State<'_, AppState>, handle: String, approved: Vec<String>) -> Result<ApplyReportDto, String> {
-    let runs = state.runs.lock().unwrap();
-    let entry = runs.get(&handle).ok_or("找不到這個工作")?;
+    let sessions = state.sessions.lock().unwrap();
+    let entry = sessions.get(&handle).ok_or("找不到這個工作")?;
     let done = entry.done.as_ref().ok_or("這個工作還沒完成,沒有可套用的變更")?;
     let report = changes::apply(&done.workspace, &done.changes, &approved);
     Ok(ApplyReportDto { applied: report.applied, skipped: report.skipped })
@@ -406,7 +553,8 @@ struct LoadedJobDto {
 
 /// Read a past job's event log (and diff, if any) for read-only viewing. Changes
 /// from an earlier run cannot be re-applied — the VM overlay is gone — so the
-/// viewer shows the transcript and diff only.
+/// viewer shows the transcript and diff only. A follow-up turn resumes the
+/// conversation in a fresh VM.
 #[tauri::command]
 fn load_job(id: String) -> Result<LoadedJobDto, String> {
     if id.is_empty() || !id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') {
@@ -437,11 +585,22 @@ fn main() {
             pick_workspace,
             start_job,
             stop_job,
+            restart_vm,
+            end_session,
             apply_changes,
             list_jobs,
             load_job,
             detect_models,
         ])
+        .on_window_event(|window, event| {
+            // Best-effort cleanup: when the window closes, end every live session so
+            // their VMs are shut down rather than orphaned.
+            if let tauri::WindowEvent::CloseRequested { .. } = event
+                && let Some(state) = window.app_handle().try_state::<AppState>()
+            {
+                state.sessions.lock().unwrap().clear();
+            }
+        })
         .run(tauri::generate_context!())
         .expect("error while running bulge-app");
 }

@@ -2,12 +2,21 @@
 //! completion, stream every logged event as JSONL, then (offline) propose
 //! lessons for next time. Workspace changes stay in the VM overlay; the host is
 //! never modified — the collected diff is written out for the user to review.
+//!
+//! The run is structured around a [`Session`]: a live VM plus the store job it
+//! serves. A session outlives a single turn, so a follow-up turn on the same
+//! conversation reuses the *same* VM — in-VM file edits carry across turns — and
+//! its VM can be restarted on its own (e.g. after a settings change) without
+//! disturbing the conversation. The headless CLI runs exactly one turn and then
+//! shuts the session down; the desktop app keeps a session alive and feeds it
+//! more turns.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
 use bulge_core::driver::{CompletionConfig, ContextConfig, Driver, GuardConfig, LoopOutcome};
+pub use bulge_core::driver::Sampling;
 use bulge_core::{VmDispatcher, builtin_tools, plan_tool};
 use bulge_guard::{Effect, Rule};
 use bulge_harness::{SurfaceSpec, Tree};
@@ -46,6 +55,12 @@ pub struct RunConfig {
     pub network: bool,
     pub cpus: u8,
     pub ram_mib: u32,
+    /// Sampling controls threaded into the driver (temperature / reasoning effort /
+    /// per-call output cap). `Default` means "let the provider decide".
+    pub sampling: Sampling,
+    /// Optional override of the agent's system prompt / persona. When set it
+    /// replaces the harness surface (memory lessons are still appended).
+    pub system_prompt: Option<String>,
 }
 
 /// Map the store's autonomy onto the guard's equivalent (no shared type).
@@ -88,14 +103,17 @@ fn read_tree(root: &Path) -> Tree {
     tree
 }
 
-/// Build the system prompt: the harness surface (or the default prompt), plus the
-/// most relevant memory lessons for this goal.
-fn build_system_prompt(harness_dir: &Path, goal: &str) -> String {
-    let tree = read_tree(harness_dir);
-    let spec = SurfaceSpec::default();
-    let mut prompt = {
-        let surfaced = bulge_harness::materialize(&tree, &spec);
-        if surfaced.trim().is_empty() { DEFAULT_SYSTEM_PROMPT.to_string() } else { surfaced }
+/// Build the system prompt: the harness surface (or the explicit persona, or the
+/// default prompt), plus the most relevant memory lessons for this goal.
+fn build_system_prompt(harness_dir: &Path, goal: &str, persona: Option<&str>) -> String {
+    let mut prompt = match persona {
+        Some(text) if !text.trim().is_empty() => text.to_string(),
+        _ => {
+            let tree = read_tree(harness_dir);
+            let spec = SurfaceSpec::default();
+            let surfaced = bulge_harness::materialize(&tree, &spec);
+            if surfaced.trim().is_empty() { DEFAULT_SYSTEM_PROMPT.to_string() } else { surfaced }
+        }
     };
 
     let memory_root = harness_dir.join("memory");
@@ -162,11 +180,13 @@ fn stdout_sink() -> LineSink {
     })
 }
 
-/// What a completed run produced.
+/// What a completed turn produced.
 pub struct RunOutcome {
     pub outcome: LoopOutcome,
     pub status: bulge_store::JobStatus,
     pub job_dir: PathBuf,
+    /// The real store job id (stable across turns of one conversation).
+    pub job_id: String,
     /// The host workspace the job ran against (where approved changes are applied).
     pub workspace: PathBuf,
     /// The collected workspace diff, if any changes were made.
@@ -177,6 +197,205 @@ pub struct RunOutcome {
     pub changes: Vec<changes::Change>,
 }
 
+/// Build the `VmConfig` for this run from the environment plus the mutable shape
+/// (cpus / ram / network) a session may later restart with.
+fn vm_config_for(workspace: &Path, cpus: u8, ram_mib: u32, network: bool) -> Result<VmConfig, String> {
+    let home = PathBuf::from(std::env::var("HOME").map_err(|_| "HOME is not set".to_string())?);
+    let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    Ok(VmConfig {
+        vmm_binary: repo.join("target/debug/bulge-vmm"),
+        libkrun_dir: home.join(".local/lib"),
+        rootfs: home.join(".bulge/rootfs/current"),
+        workspace: workspace.to_path_buf(),
+        runtime_root: PathBuf::from(std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| "/tmp".into())).join("bulge"),
+        cpus,
+        ram_mib,
+        // Never attach the raw NIC. When the user enables network, outbound goes
+        // through the two-key gateway which allows any PUBLIC host ("*") while the
+        // gateway still blocks private/LAN/cloud-metadata addresses (DNS-rebind
+        // safe). The roadmap's stance: allow public internet, block the host/LAN.
+        network: false,
+        egress_allow: if network { vec!["*".to_string()] } else { Vec::new() },
+    })
+}
+
+/// A live conversation: one VM plus the store job it serves. Outlives a single
+/// turn so that follow-up turns reuse the same VM (in-VM files persist) and so
+/// the VM can be restarted on its own.
+pub struct Session {
+    backend: Arc<dyn LlmBackend>,
+    vm: Arc<Vm>,
+    job: bulge_store::JobHandle,
+    harness_dir: PathBuf,
+    workspace: PathBuf,
+    backend_spec: BackendSpec,
+    autonomy: Autonomy,
+    sampling: Sampling,
+    system_prompt: Option<String>,
+    /// The VM shape last launched with; restart tweaks these.
+    vm_config: VmConfig,
+}
+
+impl Session {
+    /// Open (or create) the conversation's store job and launch its VM. No turn
+    /// is run yet — call [`Session::run_turn`].
+    pub async fn launch(config: RunConfig) -> Result<Self, String> {
+        let backend = backend::build(&config.backend)?;
+        let store = JobStore::new(&config.store_root);
+        let job = match &config.job_id {
+            // Reopen an existing conversation; the driver replays its full history.
+            Some(id) => {
+                let (job, _recovery) = store.open(id).map_err(|e| format!("open job: {e}"))?;
+                job
+            }
+            None => {
+                let job_id = bulge_store::new_job_id().map_err(|e| format!("job id: {e}"))?;
+                store
+                    .create(JobSpec {
+                        id: job_id,
+                        title: config.title.clone(),
+                        goal: config.goal.clone(),
+                        workspace: config.workspace.clone(),
+                        autonomy: config.autonomy,
+                        budget: config.budget.clone(),
+                        model: ModelRef { backend: config.backend.id.clone(), model: config.backend.model.clone() },
+                    })
+                    .map_err(|e| format!("create job: {e}"))?
+            }
+        };
+
+        let vm_config = vm_config_for(&config.workspace, config.cpus, config.ram_mib, config.network)?;
+        let vm = Arc::new(Vm::launch(vm_config.clone()).await.map_err(|e| format!("launch VM: {e}"))?);
+
+        Ok(Self {
+            backend,
+            vm,
+            job,
+            harness_dir: config.harness_dir,
+            workspace: config.workspace,
+            backend_spec: config.backend,
+            autonomy: config.autonomy,
+            sampling: config.sampling,
+            system_prompt: config.system_prompt,
+            vm_config,
+        })
+    }
+
+    /// The real store job id (stable across turns).
+    pub fn job_id(&self) -> &str {
+        self.job
+            .dir()
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("")
+    }
+
+    /// Run one turn: append the user message, drive the loop to a stop against the
+    /// *persistent* VM, and collect the (cumulative) workspace diff for review.
+    /// The VM is left running for the next turn.
+    pub async fn run_turn(&mut self, goal: String, cancel: CancellationToken, sink: LineSink) -> Result<RunOutcome, String> {
+        let system_prompt = build_system_prompt(&self.harness_dir, &goal, self.system_prompt.as_deref());
+
+        // Append the user turn; flip a finished job back to Running (best effort).
+        self.job
+            .append(vec![JobEvent::Message { message: Message::text(Role::User, goal.clone()) }])
+            .map_err(|e| format!("append turn: {e}"))?;
+        let _ = self.job.append(vec![JobEvent::StatusChanged { status: JobStatus::Running, summary: None }]);
+
+        let log_path = self.job.dir().join("job.jsonl");
+        // Stream only the newly-appended events (start at the current EOF) so the
+        // UI doesn't duplicate the transcript it already shows.
+        let tail_start = std::fs::metadata(&log_path).map(|m| m.len() as usize).unwrap_or(0);
+
+        // Rebuild the per-turn dispatcher/driver against the current VM (so a
+        // restarted VM is picked up) — cheap; the VM is the expensive part.
+        let dispatcher = Arc::new(VmDispatcher::new(self.vm.clone(), Duration::from_secs(120)));
+        let mut tools = builtin_tools();
+        tools.push(plan_tool());
+        let context = ContextConfig { window: self.backend_spec.context_window as u64, ..ContextConfig::default() };
+        let driver = Driver::new(self.backend.clone(), dispatcher.clone(), tools, system_prompt)
+            .with_guard(GuardConfig { rules: default_ruleset(), autonomy: guard_autonomy(self.autonomy), loop_detection: true })
+            .with_completion_gate(CompletionConfig::default())
+            .with_context(context)
+            .with_sampling(self.sampling.clone());
+
+        let stop = CancellationToken::new();
+        let tail = tokio::spawn(tail_jsonl(log_path.clone(), stop.clone(), sink, tail_start));
+
+        let outcome = driver.run(&mut self.job, cancel).await.map_err(|e| format!("run: {e}"))?;
+
+        stop.cancel();
+        let _ = tail.await;
+
+        // Collect workspace changes and write the diff out (the host is not touched).
+        let mut diff: Option<String> = None;
+        let mut collected: Vec<changes::Change> = Vec::new();
+        if let Ok(pending) = changes::collect(&self.vm).await
+            && !pending.is_empty()
+        {
+            let rendered = changes::render_diff(&self.workspace, &pending);
+            let diff_path = self.job.dir().join("changes.diff");
+            let _ = std::fs::write(&diff_path, &rendered);
+            diff = Some(rendered);
+            collected = pending;
+        }
+
+        // The driver/dispatcher drop here, releasing their VM clones; `self.vm`
+        // keeps the VM alive for the next turn.
+        drop(driver);
+        drop(dispatcher);
+
+        Ok(RunOutcome {
+            outcome,
+            status: self.job.state().status,
+            job_dir: self.job.dir().to_path_buf(),
+            job_id: self.job_id().to_string(),
+            workspace: self.workspace.clone(),
+            diff,
+            changes: collected,
+        })
+    }
+
+    /// Restart the VM on its own with a new shape (cpus / ram / network). The
+    /// conversation (store job, history) is untouched; only the machine is
+    /// replaced, so this resets in-VM files but never the agent's memory. Used
+    /// when the user changes execution settings mid-conversation.
+    pub async fn restart_vm(&mut self, cpus: u8, ram_mib: u32, network: bool) -> Result<(), String> {
+        let mut cfg = self.vm_config.clone();
+        cfg.cpus = cpus;
+        cfg.ram_mib = ram_mib;
+        cfg.egress_allow = if network { vec!["*".to_string()] } else { Vec::new() };
+
+        // Launch the replacement before tearing down the old one, so a failed
+        // relaunch leaves the running VM intact.
+        let new_vm = Vm::launch(cfg.clone()).await.map_err(|e| format!("restart VM: {e}"))?;
+        let old = std::mem::replace(&mut self.vm, Arc::new(new_vm));
+        if let Ok(vm) = Arc::try_unwrap(old) {
+            vm.shutdown().await;
+        }
+        self.vm_config = cfg;
+        Ok(())
+    }
+
+    /// Finish the conversation: propose durable lessons offline, then shut the VM
+    /// down (and clean up its runtime directory).
+    pub async fn shutdown(mut self) {
+        improve(self.backend.as_ref(), &mut self.job, &self.harness_dir, &self.backend_spec.model).await;
+        let Session { vm, .. } = self;
+        if let Ok(vm) = Arc::try_unwrap(vm) {
+            vm.shutdown().await;
+        }
+    }
+
+    /// Shut the VM down without the offline-improvement pass (e.g. on eviction).
+    pub async fn shutdown_quietly(self) {
+        let Session { vm, .. } = self;
+        if let Ok(vm) = Arc::try_unwrap(vm) {
+            vm.shutdown().await;
+        }
+    }
+}
+
 /// Run one job end to end, printing its event log to stdout (the headless CLI
 /// path). Equivalent to [`run_streaming`] with a stdout sink and a fresh,
 /// never-cancelled token.
@@ -184,141 +403,39 @@ pub async fn run(config: RunConfig) -> Result<RunOutcome, String> {
     run_streaming(config, CancellationToken::new(), stdout_sink()).await
 }
 
-/// Run one job end to end, streaming each committed log line to `sink` and
-/// honouring `cancel` as an emergency stop. Workspace changes stay in the VM
-/// overlay; the collected diff and structured changes are returned for review.
+/// Run exactly one turn end to end and then shut the session down (the headless
+/// CLI path): launch a session, run the turn, print the footer, tear down.
 pub async fn run_streaming(config: RunConfig, cancel: CancellationToken, sink: LineSink) -> Result<RunOutcome, String> {
-    let backend = backend::build(&config.backend)?;
-    let system_prompt = build_system_prompt(&config.harness_dir, &config.goal);
+    let goal = config.goal.clone();
+    let mut session = Session::launch(config).await?;
+    let outcome = session.run_turn(goal, cancel, sink).await?;
 
-    // New job, or a follow-up turn on an existing conversation.
-    let store = JobStore::new(&config.store_root);
-    let resuming = config.job_id.is_some();
-    let mut job = match &config.job_id {
-        // Follow-up: reopen the conversation, append the new user turn, and (best
-        // effort) flip a finished job back to Running for this turn. History is
-        // replayed by the driver, so the agent remembers the whole conversation.
-        Some(id) => {
-            let (mut job, _recovery) = store.open(id).map_err(|e| format!("open job: {e}"))?;
-            job.append(vec![JobEvent::Message { message: Message::text(Role::User, config.goal.clone()) }])
-                .map_err(|e| format!("append turn: {e}"))?;
-            let _ = job.append(vec![JobEvent::StatusChanged { status: JobStatus::Running, summary: None }]);
-            job
-        }
-        None => {
-            let job_id = bulge_store::new_job_id().map_err(|e| format!("job id: {e}"))?;
-            let mut job = store
-                .create(JobSpec {
-                    id: job_id.clone(),
-                    title: config.title.clone(),
-                    goal: config.goal.clone(),
-                    workspace: config.workspace.clone(),
-                    autonomy: config.autonomy,
-                    budget: config.budget.clone(),
-                    model: ModelRef { backend: config.backend.id.clone(), model: config.backend.model.clone() },
-                })
-                .map_err(|e| format!("create job: {e}"))?;
-            job.append(vec![JobEvent::Message { message: Message::text(Role::User, config.goal.clone()) }])
-                .map_err(|e| format!("seed goal: {e}"))?;
-            job
-        }
-    };
-
-    let log_path = job.dir().join("job.jsonl");
-    // On a follow-up, the log already holds the previous turns; stream only the new
-    // events (start the tail at the current end of file) so the UI doesn't duplicate
-    // the transcript it already shows.
-    let tail_start = if resuming { std::fs::metadata(&log_path).map(|m| m.len() as usize).unwrap_or(0) } else { 0 };
-
-    // Launch the sandbox VM.
-    let home = PathBuf::from(std::env::var("HOME").map_err(|_| "HOME is not set".to_string())?);
-    let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
-    let vm = Arc::new(
-        Vm::launch(VmConfig {
-            vmm_binary: repo.join("target/debug/bulge-vmm"),
-            libkrun_dir: home.join(".local/lib"),
-            rootfs: home.join(".bulge/rootfs/current"),
-            workspace: config.workspace.clone(),
-            runtime_root: PathBuf::from(std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| "/tmp".into())).join("bulge"),
-            cpus: config.cpus,
-            ram_mib: config.ram_mib,
-            // Never attach the raw NIC. When the user enables network, outbound goes
-            // through the two-key gateway which allows any PUBLIC host ("*") while the
-            // gateway still blocks private/LAN/cloud-metadata addresses (DNS-rebind
-            // safe). The roadmap's stance: allow public internet, block the host/LAN.
-            network: false,
-            egress_allow: if config.network { vec!["*".to_string()] } else { Vec::new() },
-        })
-        .await
-        .map_err(|e| format!("launch VM: {e}"))?,
+    match &outcome.diff {
+        Some(diff) => eprintln!("{} change(s) collected ({} bytes of diff)", outcome.changes.len(), diff.len()),
+        None => eprintln!("no workspace changes"),
+    }
+    eprintln!(
+        "outcome: {:?}  status: {:?}  summary: {:?}  steps: {}  tokens: {}",
+        outcome.outcome,
+        session.job.state().status,
+        session.job.state().summary,
+        session.job.state().steps,
+        session.job.state().usage.total()
     );
 
-    // Assemble the driver.
-    let dispatcher = Arc::new(VmDispatcher::new(vm.clone(), Duration::from_secs(120)));
-    let mut tools = builtin_tools();
-    tools.push(plan_tool());
-    let context = ContextConfig { window: config.backend.context_window as u64, ..ContextConfig::default() };
-    let driver = Driver::new(backend.clone(), dispatcher.clone(), tools, system_prompt)
-        .with_guard(GuardConfig { rules: default_ruleset(), autonomy: guard_autonomy(config.autonomy), loop_detection: true })
-        .with_completion_gate(CompletionConfig::default())
-        .with_context(context);
-
-    // Stream events while the loop runs.
-    let stop = CancellationToken::new();
-    let tail = tokio::spawn(tail_jsonl(log_path.clone(), stop.clone(), sink, tail_start));
-
-    let outcome = driver.run(&mut job, cancel).await.map_err(|e| format!("run: {e}"))?;
-
-    stop.cancel();
-    let _ = tail.await;
-
-    // Collect workspace changes and write the diff out (the host is not touched).
-    let mut diff: Option<String> = None;
-    let mut collected: Vec<changes::Change> = Vec::new();
-    if let Ok(pending) = changes::collect(&vm).await {
-        if pending.is_empty() {
-            eprintln!("no workspace changes");
-        } else {
-            let rendered = changes::render_diff(&config.workspace, &pending);
-            let diff_path = job.dir().join("changes.diff");
-            if std::fs::write(&diff_path, &rendered).is_ok() {
-                eprintln!("{} change(s) written to {}", pending.len(), diff_path.display());
-            }
-            diff = Some(rendered);
-            collected = pending;
-        }
-    }
-
-    // Release VM handles and shut it down.
-    drop(driver);
-    drop(dispatcher);
-    if let Ok(vm) = Arc::try_unwrap(vm) {
-        vm.shutdown().await;
-    }
-
-    // Offline improvement: propose lessons from the finished job. Best-effort.
-    improve(backend.as_ref(), &mut job, &config).await;
-
-    eprintln!("outcome: {outcome:?}  status: {:?}  summary: {:?}  steps: {}  tokens: {}", job.state().status, job.state().summary, job.state().steps, job.state().usage.total());
-    Ok(RunOutcome {
-        outcome,
-        status: job.state().status,
-        job_dir: job.dir().to_path_buf(),
-        workspace: config.workspace.clone(),
-        diff,
-        changes: collected,
-    })
+    session.shutdown().await;
+    Ok(outcome)
 }
 
 /// Ask the model for durable lessons from this job and save them to memory.
-async fn improve(backend: &dyn LlmBackend, job: &mut bulge_store::JobHandle, config: &RunConfig) {
+async fn improve(backend: &dyn LlmBackend, job: &mut bulge_store::JobHandle, harness_dir: &Path, model: &str) {
     let mut messages = Vec::with_capacity(job.state().history.len() + 1);
     messages.push(Message::text(Role::System, "You review a finished job and extract durable lessons."));
     messages.extend(job.state().history.iter().cloned());
     messages.push(Message::text(Role::User, bulge_harness::PROPOSE_LESSONS_PROMPT));
 
     let request = GenerateRequest {
-        model: config.backend.model.clone(),
+        model: model.to_string(),
         messages,
         tools: Vec::new(),
         max_tokens: None,
@@ -332,14 +449,14 @@ async fn improve(backend: &dyn LlmBackend, job: &mut bulge_store::JobHandle, con
     while let Some(chunk) = stream.next().await {
         assembler.push(&chunk);
     }
-    let assembled = assembler.finish(&config.backend.model);
+    let assembled = assembler.finish(model);
     let reply = assembled.message.content.iter().find_map(|b| match b {
         bulge_llm::ContentBlock::Text { text } => Some(text.clone()),
         _ => None,
     });
     let Some(reply) = reply else { return };
 
-    let memory_root = config.harness_dir.join("memory");
+    let memory_root = harness_dir.join("memory");
     let existing_ids: Vec<String> = bulge_harness::memory::load(&memory_root)
         .map(|(lessons, _)| lessons.into_iter().map(|l| l.id).collect())
         .unwrap_or_default();

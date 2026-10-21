@@ -73,6 +73,8 @@ pub async fn run_eval(config: EvalConfig) -> Result<EvalSummary, String> {
             network: config.network,
             cpus: config.cpus,
             ram_mib: config.ram_mib,
+            sampling: crate::run::Sampling::default(),
+            system_prompt: None,
         };
 
         let result = match run(run_config).await {

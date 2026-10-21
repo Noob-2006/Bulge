@@ -156,6 +156,11 @@
             <div><div class="row-title">記憶體</div><div class="row-desc">虛擬機記憶體 (MiB)</div></div>
             <input id="ram" type="number" min="256" step="256" class="control control-num" />
           </div>
+          <div class="settings-row">
+            <div><div class="row-title">套用到進行中的工作階段</div><div class="row-desc">依新的 vCPU／記憶體／上網設定單獨重啟 VM;對話與記憶保留。沒有進行中的工作階段時,新設定會在下一個任務自動生效。</div></div>
+            <button id="apply-exec" class="btn btn-sm">套用並重啟 VM</button>
+          </div>
+          <div id="exec-msg" class="inline-msg settings-msg"></div>
         </div>
       </div>
     </div>

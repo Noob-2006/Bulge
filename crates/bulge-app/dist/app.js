@@ -324,6 +324,26 @@ async function saveKey() {
   } catch (e) { msg.textContent = "儲存失敗:" + e; msg.className = "inline-msg settings-msg err"; }
 }
 
+async function applyExecSettings() {
+  const msg = $("exec-msg");
+  const cpus = Number($("cpus").value) || 2, ram = Number($("ram").value) || 1024, network = $("network").checked;
+  if (!currentHandle) {
+    msg.textContent = "目前沒有進行中的工作階段;新設定會在下一個任務自動生效。"; msg.className = "inline-msg settings-msg";
+    return;
+  }
+  if (running) { msg.textContent = "任務執行中,請先停止或等它結束再重啟 VM。"; msg.className = "inline-msg settings-msg err"; return; }
+  const btn = $("apply-exec"); const old = btn.textContent; btn.textContent = "重啟中…"; btn.disabled = true;
+  msg.textContent = ""; msg.className = "inline-msg settings-msg";
+  try {
+    await invoke("restart_vm", { handle: currentHandle, cpus, ramMib: ram, network });
+    msg.textContent = "VM 已依新設定重啟,對話保留。"; msg.className = "inline-msg settings-msg ok";
+    toast("VM 已重啟(對話保留)", "ok");
+  } catch (e) {
+    msg.textContent = "重啟失敗:" + e; msg.className = "inline-msg settings-msg err";
+    toast("重啟失敗:" + e, "err");
+  } finally { btn.textContent = old; btn.disabled = false; }
+}
+
 /* ---- workspace ---- */
 async function pickWorkspace() {
   try {
@@ -353,7 +373,8 @@ async function viewJob(id, title) {
   if (running) { toast("有任務執行中,無法切換", "err"); return; }
   let data;
   try { data = await invoke("load_job", { id }); } catch (e) { toast("讀取失敗:" + e, "err"); return; }
-  currentHandle = null;        // no live run yet (apply is for in-session runs)
+  if (currentHandle) { invoke("end_session", { handle: currentHandle }).catch(() => {}); }
+  currentHandle = null;        // no live run yet; a follow-up resumes in a fresh VM
   currentJobId = id;           // but you can send a follow-up to continue this conversation
   resetTranscript();
   $("job-title").textContent = title || id;
@@ -370,6 +391,7 @@ async function viewJob(id, title) {
 /* ---- new task ---- */
 function newTask() {
   if (running) { toast("有任務執行中", "err"); return; }
+  if (currentHandle) { invoke("end_session", { handle: currentHandle }).catch(() => {}); }
   currentHandle = null;
   currentJobId = null;
   resetTranscript();
@@ -388,7 +410,9 @@ async function startJob() {
   if (!goal) { msg.textContent = "請寫下目標。"; msg.className = "inline-msg err"; return; }
   if (running) return;
 
-  const continuing = !!currentJobId;
+  const liveSession = currentHandle;   // continue the live VM if we still have one
+  const resumeJob = currentJobId;      // else resume this stored conversation
+  const continuing = !!liveSession || !!resumeJob;
   if (!continuing) {
     resetTranscript();
     $("job-title").textContent = clip(goal.split("\n")[0], 60);
@@ -398,7 +422,8 @@ async function startJob() {
   renderUserMessage(goal);
 
   const args = {
-    job_id: continuing ? currentJobId : null,
+    session: liveSession || null,
+    job_id: resumeJob || null,
     goal, workspace: workspacePath,
     model: $("model").value.trim(), base_url: $("base-url").value.trim(),
     protocol: $("protocol").value, autonomy: $("autonomy").value,
@@ -548,6 +573,7 @@ window.addEventListener("DOMContentLoaded", () => {
   $("base-url").addEventListener("change", refreshKeyStatus);
   $("save-key").addEventListener("click", saveKey);
   $("detect-models").addEventListener("click", detectModels);
+  $("apply-exec").addEventListener("click", applyExecSettings);
   $("pick-ws").addEventListener("click", pickWorkspace);
   $("network").addEventListener("change", () => {});
   $("start").addEventListener("click", startJob);

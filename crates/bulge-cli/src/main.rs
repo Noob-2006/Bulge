@@ -181,6 +181,8 @@ fn parse_run(args: &[String]) -> Result<RunConfig, String> {
         network,
         cpus,
         ram_mib,
+        sampling: bulge_cli::run::Sampling::default(),
+        system_prompt: None,
     })
 }
 

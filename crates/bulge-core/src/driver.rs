@@ -11,7 +11,7 @@
 use std::sync::Arc;
 
 use bulge_llm::assemble::Assembler;
-use bulge_llm::{ContentBlock, FinishReason, GenerateRequest, LlmBackend, LlmError, Message, Purpose, Role, TokenUsage, ToolSchema};
+use bulge_llm::{ContentBlock, FinishReason, GenerateRequest, LlmBackend, LlmError, Message, Purpose, ReasoningEffort, Role, TokenUsage, ToolSchema};
 use bulge_store::{JobEvent, JobHandle, JobStatus, PlanItem, PlanStatus, StoreError};
 use futures::StreamExt;
 use serde_json::Value;
@@ -92,6 +92,17 @@ impl Default for ContextConfig {
     }
 }
 
+/// Sampling controls threaded into every *agent* model call (the step loop and
+/// self-review). `None` fields mean "let the provider decide" — its own default.
+/// Internal calls (compaction, memory) are left at provider defaults on purpose.
+#[derive(Debug, Clone, Default)]
+pub struct Sampling {
+    pub temperature: Option<f32>,
+    pub reasoning_effort: Option<ReasoningEffort>,
+    /// Per-call output cap. `None` lets the backend apply its model default.
+    pub max_tokens: Option<u32>,
+}
+
 pub struct Driver {
     backend: Arc<dyn LlmBackend>,
     dispatcher: Arc<dyn ToolDispatcher>,
@@ -101,6 +112,7 @@ pub struct Driver {
     guard: Option<GuardConfig>,
     context: ContextConfig,
     completion: Option<CompletionConfig>,
+    sampling: Sampling,
 }
 
 impl Driver {
@@ -114,7 +126,15 @@ impl Driver {
             guard: None,
             context: ContextConfig::default(),
             completion: None,
+            sampling: Sampling::default(),
         }
+    }
+
+    /// Thread sampling controls (temperature / reasoning effort / output cap) into
+    /// every agent model call. Defaults leave everything to the provider.
+    pub fn with_sampling(mut self, sampling: Sampling) -> Self {
+        self.sampling = sampling;
+        self
     }
 
     /// Enable the cautious guard: permission rules (deny → the tool is blocked
@@ -238,10 +258,10 @@ impl Driver {
             model: model.clone(),
             messages,
             tools,
-            max_tokens: None,
-            temperature: None,
+            max_tokens: self.sampling.max_tokens,
+            temperature: self.sampling.temperature,
             stop: Vec::new(),
-            reasoning_effort: None,
+            reasoning_effort: self.sampling.reasoning_effort,
             purpose: Purpose::Conversation,
         };
 
@@ -600,10 +620,10 @@ impl Driver {
             model: model.clone(),
             messages: self.build_request_messages(job),
             tools: Vec::new(),
-            max_tokens: None,
-            temperature: None,
+            max_tokens: self.sampling.max_tokens,
+            temperature: self.sampling.temperature,
             stop: Vec::new(),
-            reasoning_effort: None,
+            reasoning_effort: self.sampling.reasoning_effort,
             purpose: Purpose::Conversation,
         };
         let mut stream = self.backend.stream(request, cancel.clone());
