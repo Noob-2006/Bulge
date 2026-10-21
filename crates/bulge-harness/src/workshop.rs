@@ -8,19 +8,26 @@
 //! are the caller's. A proposal that would not pass `tree::validate` is rejected
 //! here, so the workshop never dirties the surface.
 
-use crate::improve::slug;
+use crate::improve::{do_not_capture, slug};
 use crate::tree::{self, SurfaceSpec, Tree};
 
 /// Instruction to propose one skill from a finished job. The model answers with a
 /// single JSON object or `null` when nothing is worth saving.
-pub const PROPOSE_SKILL_PROMPT: &str = "\
-If this job used a procedure worth reusing on FUTURE, similar jobs, propose ONE skill. \
+pub const PROPOSE_SKILL_PROMPT: &str = concat!(
+    "\
+A successful, repeatable procedure usually IS worth a skill. If this job used one that would \
+work again on FUTURE, similar jobs, propose ONE skill. \
 A skill is a named, general, multi-step procedure — not a one-off and not a single fact \
 (small facts are lessons, not skills). Give:\n\
 - name: a short kebab-case name\n\
-- description: one line saying when to use it (this is how it is triggered)\n\
-- body: the steps, in Markdown\n\
-Answer with ONLY a JSON object {name, description, body}, or null if there is nothing worth saving.";
+- description: one line saying when to use it; it MUST be at most 60 characters \
+(the skill index truncates at 60, and anything past it never routes)\n\
+- body: the steps, in Markdown",
+    "\n\n",
+    do_not_capture!(),
+    "\n\n",
+    "Answer with ONLY a JSON object {name, description, body}, or null if there is nothing worth saving."
+);
 
 /// A proposed skill, already named, before it is written into a tree.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -49,6 +56,7 @@ impl SkillDraft {
 
 /// Parse the model's reply into a draft. `null`, missing fields, or non-JSON all
 /// yield `None`. The name is slugged so it is a valid single directory level.
+/// The description is capped at 60 chars (the index truncation point), char-safely.
 pub fn parse_proposed_skill(reply: &str) -> Option<SkillDraft> {
     let object = extract_json_object(reply)?;
     let value: serde_json::Value = serde_json::from_str(&object).ok()?;
@@ -59,6 +67,11 @@ pub fn parse_proposed_skill(reply: &str) -> Option<SkillDraft> {
     if name.is_empty() || description.is_empty() || body.is_empty() {
         return None;
     }
+    let description = if description.chars().count() > 60 {
+        description.chars().take(60).collect()
+    } else {
+        description
+    };
     Some(SkillDraft { name: slug(&name), description, body })
 }
 
@@ -143,6 +156,15 @@ mod tests {
         assert!(parse_proposed_skill("null").is_none());
         assert!(parse_proposed_skill(r#"{"name": "x", "description": "y"}"#).is_none());
         assert!(parse_proposed_skill("not json").is_none());
+    }
+
+    #[test]
+    fn truncates_a_long_description_to_sixty_chars() {
+        let long = "é".repeat(61);
+        let reply = format!(r#"{{"name": "x", "description": "{long}", "body": "steps"}}"#);
+        let draft = parse_proposed_skill(&reply).expect("parses");
+        assert_eq!(draft.description.chars().count(), 60);
+        assert_eq!(draft.description, "é".repeat(60));
     }
 
     #[test]

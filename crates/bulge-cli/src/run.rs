@@ -611,5 +611,12 @@ async fn propose_skill(backend: &dyn LlmBackend, job: &bulge_store::JobHandle, h
     }
     if std::fs::write(&path, draft.to_source()).is_ok() {
         eprintln!("proposed skill `{}` → {}", draft.name, path.display());
+        // Record authorship in the skill usage ledger (created by the agent), so a
+        // later curator can see which skills the agent authored and how they age.
+        let skills_root = harness_dir.join(spec.skill_dir.trim_end_matches('/'));
+        let ledger_path = skills_root.join(bulge_harness::usage::USAGE_FILE);
+        let mut ledger = bulge_harness::UsageLedger::load(&ledger_path).unwrap_or_default();
+        ledger.record_created(&draft.name, bulge_harness::Author::Agent);
+        let _ = ledger.save(&ledger_path);
     }
 }

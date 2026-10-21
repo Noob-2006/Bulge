@@ -9,17 +9,45 @@
 
 use crate::memory::Lesson;
 
+/// The guardrail text as a macro, so `concat!` can splice it into prompt
+/// constants while `DO_NOT_CAPTURE` remains a plain `&str`.
+macro_rules! do_not_capture {
+    () => {
+        "\
+Do NOT record any of the following — they poison future runs:\n\
+- Environment-specific failures (a missing binary, a path that only exists here, a flaky network).\n\
+- Negative tool claims (\"tool X is broken\", \"the API doesn't work\") — they are usually transient or local.\n\
+- Transient errors you recovered from, or dead-ends you never resolved, dressed up as advice.\n\
+- Anything tied to this one task: specific file names, IDs, dates, PR numbers, or quoted output.\n\
+When you do record something, state the rule procedurally and, for a pitfall, give the rule plus ONE short why-clause. \
+Fix knowledge in place — never append \"UPDATE: actually …\" to an existing item. \
+If the user expressed a preference or frustration (\"stop doing X\", \"too verbose\", \"always do Y\"), \
+that is FIRST-CLASS signal worth capturing."
+    };
+}
+pub(crate) use do_not_capture;
+
+/// Guardrail appended to every "propose durable knowledge" prompt. Keeps the
+/// self-improvement loop from poisoning its own memory with things that will
+/// not generalise. Adapted from Hermes' background-review DO-NOT-CAPTURE block.
+pub const DO_NOT_CAPTURE: &str = do_not_capture!();
+
 /// Instruction appended after a finished job's transcript to elicit lessons.
 /// The model must answer with a JSON array (possibly empty) and nothing else.
-pub const PROPOSE_LESSONS_PROMPT: &str = "\
+pub const PROPOSE_LESSONS_PROMPT: &str = concat!(
+    "\
 The job above is finished. Propose at most three DURABLE lessons for future jobs \
 — only things that will generalise, never facts specific to this one task. For each, give:\n\
 - cue: the situation it applies to (short, keyword-rich; this is how it is found later)\n\
 - lesson: what to do, concretely\n\
 - evidence: what in this job shows it (a step, a file, an error, a result)\n\
 - confidence: a number in [0,1]\n\
-Drop anything you are not sure generalises. If there is nothing durable, return [].\n\
-Answer with ONLY a JSON array of objects {cue, lesson, evidence, confidence}, no prose.";
+Drop anything you are not sure generalises. If there is nothing durable, return [].",
+    "\n\n",
+    do_not_capture!(),
+    "\n\n",
+    "Answer with ONLY a JSON array of objects {cue, lesson, evidence, confidence}, no prose."
+);
 
 /// A slug derived from a cue: lowercase, alphanumerics kept, runs of anything
 /// else collapsed to one `-`, trimmed, capped. Empty cue → "lesson".
