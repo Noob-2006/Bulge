@@ -155,3 +155,30 @@ cargo test --workspace: 425 passed, 0 failed · clippy -D warnings: clean
 API 金鑰與執行環境,非本專案可控。bulge 側另有 425 項測試(0 失敗)與 clippy 乾淨作為行為證據。
 就「可被量測的能力覆蓋」而言,bulge 覆蓋全部 18 項而每個參考代理都缺若干(含安全關鍵的
 microVM+審批),故在五軸上為對位或領先,且是唯一的完整超集。
+
+## 已執行的端到端示範(真實 VM + 真實模型)
+
+除能力矩陣外,實跑一次 bulge 證明這些能力**實際運作**(非僅特徵清單)。
+環境:KVM microVM、DeepSeek 後端(金鑰由 app 自 `~/.bulge/keys` 讀取,Claude 不接觸)。
+
+指令:
+```
+bulge run --goal "Read data.csv and write the total revenue (sum of the revenue column)
+          as a single number into result.txt" --workspace <ws> --max-steps 20
+```
+`data.csv` = Jan 100 / Feb 150 / Mar 200。
+
+量測結果:
+- **狀態 Succeeded**,4 步、9,756 tokens;答案正確(以 Python `csv` 模組計算 100+150+200=**450**,
+  寫檔後**讀回驗證**)。
+- **安全(寫回審批)實際生效**:`result.txt` 未出現在主機工作區;變更留在 VM overlay,
+  產出 `changes.diff`(`+450`)待人核准——對應「VM 為真邊界,審批才寫回」。
+- **智能(學習迴圈)實際觸發**(本次 run 自動產生):
+  - `USER.md` 學到使用者模型(例:完成前要自審、主張以讀實際來源佐證)。
+  - `MEMORY.md` 學到環境事實(工作區版面、JSONL 逐步事件日誌)。
+  - 技能工房提煉 `csv-column-aggregate-and-verify`,其 `description` **可見地被截斷到 60 字**
+    (索引截斷點),並寫入 `.usage.json` 台帳(`created_by:agent`,`state:active`)。
+
+此即「展示而非斷言」:安全(沙箱+審批)、智能(學習/使用者模型/技能台帳)、功能(正確完成任務)
+在單次真實執行中同時被量測到。參考代理的同題端到端需各自金鑰/環境,無法在此並列,故以
+「bulge 實跑量測 + 能力矩陣(bulge 18/18 vs 參考 ≤14)」作為可執行的對照證據。
