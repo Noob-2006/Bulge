@@ -100,7 +100,7 @@
   --ease-in-out: cubic-bezier(0.4, 0, 0.2, 1);
   --mono: ui-monospace, "SF Mono", "JetBrains Mono", "Cascadia Code", Menlo, Consolas, monospace;
   --sans: -apple-system, "Noto Sans CJK TC", "PingFang TC", "Microsoft JhengHei", system-ui, sans-serif;
-  --sidebar-w: 260px;
+  --sidebar-w: clamp(160px, 22vw, 280px);
 }
 
 * { box-sizing: border-box; }
@@ -445,7 +445,7 @@ body {
 .control {
   font-family: inherit; font-size: var(--t-13); color: var(--text-strong);
   background: var(--bg-elevated); border: 0.5px solid var(--border-strong); border-radius: var(--radius-md);
-  padding: 7px 10px; min-width: 260px;
+  padding: 7px 10px; min-width: 0; width: 260px; max-width: 100%;
 }
 .control:focus-visible { outline: none; border-color: var(--accent); box-shadow: var(--focus-ring); }
 /* Native <select> on WebKitGTK ignores our bg/color and renders white-on-white.
@@ -457,9 +457,9 @@ select.control {
   background-repeat: no-repeat; background-position: right 10px center;
 }
 select.control option { background: var(--bg-elevated); color: var(--text-strong); }
-.control-num { min-width: 100px; }
+.control-num { width: 100px; min-width: 0; }
 .model-control { display: flex; gap: var(--space-2); align-items: center; }
-.model-control .control { min-width: 200px; }
+.model-control .control { width: 200px; min-width: 0; }
 .key-control { display: flex; gap: var(--space-2); align-items: center; }
 .dot-status { font-size: var(--t-xs); color: var(--muted); font-weight: 400; }
 .dot-status.ok { color: var(--ok); } .dot-status.bad { color: var(--danger); }
@@ -486,6 +486,15 @@ code { font-family: var(--mono); font-size: .9em; background: var(--bg-hover); p
 @media (max-width: 720px) {
   .shell { grid-template-columns: 1fr; }
   .sidebar { display: none; }
+}
+
+/* Narrow windows: stack each settings row (label over a full-width control) so
+   nothing is clipped or forced to overflow, whatever the window's aspect. */
+@media (max-width: 620px) {
+  .settings-row { flex-direction: column; align-items: stretch; gap: var(--space-2); }
+  .control, .control-num, .model-control, .model-control .control, .key-control, .model-control .control { width: 100%; }
+  .model-control, .key-control { display: flex; flex-wrap: wrap; gap: var(--space-2); }
+  .settings-panel { padding: var(--space-4); }
 }
 
 /* ===== Egress approval prompt (collaborative network) ===== */
