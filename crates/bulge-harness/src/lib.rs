@@ -17,4 +17,4 @@ pub use memory::{Lesson, brief, retrieve};
 pub use profile::{Profile, Section};
 pub use workshop::{PROPOSE_SKILL_PROMPT, SkillDraft, install as install_skill, parse_proposed_skill};
 pub use tree::{Problem, Skill, SurfaceSpec, Tree, materialize, skills, validate};
-pub use usage::{Author, Lifecycle, SkillUsage, UsageLedger};
+pub use usage::{Author, CuratePolicy, Lifecycle, SkillUsage, UsageLedger};

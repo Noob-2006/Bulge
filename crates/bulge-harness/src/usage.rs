@@ -45,17 +45,25 @@ pub struct SkillUsage {
     pub state: Lifecycle,
     /// Pinned skills are never auto-transitioned by a curator.
     pub pinned: bool,
+    /// When the skill was first recorded, in Unix seconds.
+    #[serde(default)]
+    pub created_at: Option<u64>,
+    /// When the skill was last used, in Unix seconds.
+    #[serde(default)]
+    pub last_used_at: Option<u64>,
 }
 
 impl SkillUsage {
     /// A fresh, active, unpinned entry authored by `by`.
-    fn new(by: Author) -> Self {
+    fn new(by: Author, now: u64) -> Self {
         Self {
             created_by: by,
             uses: 0,
             patches: 0,
             state: Lifecycle::Active,
             pinned: false,
+            created_at: Some(now),
+            last_used_at: None,
         }
     }
 }
@@ -67,7 +75,35 @@ pub struct UsageLedger {
     pub entries: BTreeMap<String, SkillUsage>,
 }
 
+/// Inactivity thresholds for automatic lifecycle transitions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CuratePolicy {
+    /// Active -> Stale after this many seconds without a use.
+    pub stale_after_secs: u64,
+    /// Stale -> Archived after this many seconds without a use.
+    pub archive_after_secs: u64,
+}
+
+impl Default for CuratePolicy {
+    fn default() -> Self {
+        Self {
+            stale_after_secs: 14 * 24 * 3600,
+            archive_after_secs: 60 * 24 * 3600,
+        }
+    }
+}
+
 impl UsageLedger {
+    /// Find an entry, creating one when missing. `now` is the creation time for
+    /// events that count as a use; non-use events pass `None` (unknown age).
+    fn entry_or_insert(&mut self, name: &str, now: Option<u64>) -> &mut SkillUsage {
+        self.entries.entry(name.to_string()).or_insert_with(|| {
+            let mut entry = SkillUsage::new(Author::Agent, now.unwrap_or_default());
+            entry.created_at = now;
+            entry
+        })
+    }
+
     /// Load the ledger at `path`. A missing file is an empty ledger; a malformed
     /// one is an error, so a corrupt ledger is never silently overwritten.
     pub fn load(path: &Path) -> Result<Self, String> {
@@ -105,27 +141,22 @@ impl UsageLedger {
     }
 
     /// Record a newly created skill. An existing entry is left untouched.
-    pub fn record_created(&mut self, name: &str, by: Author) {
+    pub fn record_created(&mut self, name: &str, by: Author, now: u64) {
         self.entries
             .entry(name.to_string())
-            .or_insert_with(|| SkillUsage::new(by));
+            .or_insert_with(|| SkillUsage::new(by, now));
     }
 
     /// Count one use, creating an active agent entry when the skill is unknown.
-    pub fn bump_use(&mut self, name: &str) {
-        let entry = self
-            .entries
-            .entry(name.to_string())
-            .or_insert_with(|| SkillUsage::new(Author::Agent));
+    pub fn bump_use(&mut self, name: &str, now: u64) {
+        let entry = self.entry_or_insert(name, Some(now));
         entry.uses = entry.uses.saturating_add(1);
+        entry.last_used_at = Some(now);
     }
 
     /// Count one patch, creating an active agent entry when the skill is unknown.
-    pub fn bump_patch(&mut self, name: &str) {
-        let entry = self
-            .entries
-            .entry(name.to_string())
-            .or_insert_with(|| SkillUsage::new(Author::Agent));
+    pub fn bump_patch(&mut self, name: &str, now: u64) {
+        let entry = self.entry_or_insert(name, Some(now));
         entry.patches = entry.patches.saturating_add(1);
     }
 
@@ -136,23 +167,59 @@ impl UsageLedger {
 
     /// Pin or unpin a skill, creating an active agent entry when it is unknown.
     pub fn set_pinned(&mut self, name: &str, pinned: bool) {
-        let entry = self
-            .entries
-            .entry(name.to_string())
-            .or_insert_with(|| SkillUsage::new(Author::Agent));
+        let entry = self.entry_or_insert(name, None);
         entry.pinned = pinned;
     }
 
     /// Move a skill through its lifecycle, creating an active agent entry when it
     /// is unknown. A pinned skill's state is deliberately left alone.
     pub fn set_state(&mut self, name: &str, state: Lifecycle) {
-        let entry = self
-            .entries
-            .entry(name.to_string())
-            .or_insert_with(|| SkillUsage::new(Author::Agent));
+        let entry = self.entry_or_insert(name, None);
         if !entry.pinned {
             entry.state = state;
         }
+    }
+
+    /// Move unused skills along their lifecycle. For each non-pinned entry,
+    /// measure idle from the last use, falling back to creation time; an entry
+    /// with neither timestamp has unknown age and is left alone. Transitions
+    /// never move backwards, pinned entries are skipped, and nothing is removed.
+    /// Returns the `(name, new_state)` pairs that actually changed.
+    pub fn curate(&mut self, now: u64, policy: CuratePolicy) -> Vec<(String, Lifecycle)> {
+        let mut changed = Vec::new();
+        for (name, entry) in &mut self.entries {
+            if entry.pinned {
+                continue;
+            }
+            let Some(last_activity) = entry.last_used_at.or(entry.created_at) else {
+                continue;
+            };
+            let idle = now.saturating_sub(last_activity);
+            let next = if idle >= policy.archive_after_secs {
+                Lifecycle::Archived
+            } else if idle >= policy.stale_after_secs {
+                Lifecycle::Stale
+            } else {
+                continue;
+            };
+            if next == Lifecycle::Archived && entry.state != Lifecycle::Archived {
+                entry.state = Lifecycle::Archived;
+                changed.push((name.clone(), Lifecycle::Archived));
+            } else if next == Lifecycle::Stale && entry.state == Lifecycle::Active {
+                entry.state = Lifecycle::Stale;
+                changed.push((name.clone(), Lifecycle::Stale));
+            }
+        }
+        changed
+    }
+
+    /// Convenience: names currently in a given state (sorted).
+    pub fn in_state(&self, state: Lifecycle) -> Vec<String> {
+        self.entries
+            .iter()
+            .filter(|(_, entry)| entry.state == state)
+            .map(|(name, _)| name.clone())
+            .collect()
     }
 }
 
@@ -171,29 +238,42 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
 
         let mut ledger = UsageLedger::default();
-        ledger.record_created("release-checklist", Author::User);
-        ledger.bump_use("release-checklist");
-        ledger.bump_patch("release-checklist");
+        ledger.record_created("release-checklist", Author::User, 100);
+        ledger.bump_use("release-checklist", 200);
+        ledger.bump_patch("release-checklist", 300);
         ledger.set_state("release-checklist", Lifecycle::Stale);
         ledger.save(&path).expect("saves");
 
         let loaded = UsageLedger::load(&path).expect("loads");
         assert_eq!(loaded, ledger);
         assert_eq!(loaded.entries["release-checklist"].created_by, Author::User);
+        assert_eq!(loaded.entries["release-checklist"].created_at, Some(100));
+        assert_eq!(loaded.entries["release-checklist"].last_used_at, Some(200));
 
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
+    fn old_ledgers_without_timestamps_load() {
+        let source = r#"{"entries":{"a":{"created_by":"agent","uses":2,"patches":1,"state":"active","pinned":false}}}"#;
+        let ledger: UsageLedger = serde_json::from_str(source).expect("old ledger loads");
+
+        let entry = &ledger.entries["a"];
+        assert_eq!(entry.created_at, None);
+        assert_eq!(entry.last_used_at, None);
+    }
+
+    #[test]
     fn record_created_is_idempotent() {
         let mut ledger = UsageLedger::default();
-        ledger.record_created("a", Author::User);
-        ledger.bump_use("a");
-        ledger.bump_patch("a");
-        ledger.record_created("a", Author::Agent);
+        ledger.record_created("a", Author::User, 100);
+        ledger.bump_use("a", 200);
+        ledger.bump_patch("a", 300);
+        ledger.record_created("a", Author::Agent, 400);
 
         let entry = &ledger.entries["a"];
         assert_eq!(entry.created_by, Author::User);
+        assert_eq!(entry.created_at, Some(100));
         assert_eq!(entry.uses, 1);
         assert_eq!(entry.patches, 1);
     }
@@ -201,12 +281,14 @@ mod tests {
     #[test]
     fn bump_use_and_patch_create_then_increment() {
         let mut ledger = UsageLedger::default();
-        ledger.bump_use("a");
-        ledger.bump_use("a");
-        ledger.bump_patch("a");
+        ledger.bump_use("a", 100);
+        ledger.bump_use("a", 200);
+        ledger.bump_patch("a", 300);
 
         let entry = &ledger.entries["a"];
         assert_eq!(entry.created_by, Author::Agent);
+        assert_eq!(entry.created_at, Some(100));
+        assert_eq!(entry.last_used_at, Some(200));
         assert_eq!(entry.uses, 2);
         assert_eq!(entry.patches, 1);
         assert_eq!(entry.state, Lifecycle::Active);
@@ -227,6 +309,102 @@ mod tests {
         ledger.set_pinned("a", false);
         ledger.set_state("a", Lifecycle::Archived);
         assert_eq!(ledger.entries["a"].state, Lifecycle::Archived);
+    }
+
+    #[test]
+    fn curate_ages_entries_along_the_lifecycle() {
+        let policy = CuratePolicy {
+            stale_after_secs: 100,
+            archive_after_secs: 1_000,
+        };
+        let mut ledger = UsageLedger::default();
+        ledger.record_created("archive-me", Author::Agent, 0);
+        ledger.record_created("stale-me", Author::Agent, 900);
+        ledger.record_created("young", Author::Agent, 1_000);
+
+        let changed = ledger.curate(1_050, policy);
+
+        assert_eq!(
+            changed,
+            vec![
+                ("archive-me".to_string(), Lifecycle::Archived),
+                ("stale-me".to_string(), Lifecycle::Stale),
+            ]
+        );
+        assert_eq!(ledger.entries["archive-me"].state, Lifecycle::Archived);
+        assert_eq!(ledger.entries["stale-me"].state, Lifecycle::Stale);
+        assert_eq!(ledger.entries["young"].state, Lifecycle::Active);
+        assert!(
+            ledger.curate(1_050, policy).is_empty(),
+            "already-curated entries do not change again"
+        );
+    }
+
+    #[test]
+    fn curate_skips_pinned_entries() {
+        let policy = CuratePolicy {
+            stale_after_secs: 10,
+            archive_after_secs: 20,
+        };
+        let mut ledger = UsageLedger::default();
+        ledger.record_created("pinned", Author::Agent, 0);
+        ledger.set_pinned("pinned", true);
+
+        let changed = ledger.curate(1_000, policy);
+
+        assert!(changed.is_empty());
+        assert_eq!(ledger.entries["pinned"].state, Lifecycle::Active);
+    }
+
+    #[test]
+    fn curate_leaves_entries_with_unknown_age_alone() {
+        let policy = CuratePolicy {
+            stale_after_secs: 10,
+            archive_after_secs: 20,
+        };
+        let mut ledger = UsageLedger::default();
+        let mut entry = SkillUsage::new(Author::Agent, 0);
+        entry.created_at = None;
+        ledger.entries.insert("unknown".to_string(), entry);
+
+        let changed = ledger.curate(1_000, policy);
+
+        assert!(changed.is_empty());
+        assert_eq!(ledger.entries["unknown"].state, Lifecycle::Active);
+    }
+
+    #[test]
+    fn a_recent_use_keeps_an_old_skill_active() {
+        let policy = CuratePolicy {
+            stale_after_secs: 100,
+            archive_after_secs: 1_000,
+        };
+        let mut ledger = UsageLedger::default();
+        ledger.record_created("a", Author::Agent, 0);
+        ledger.bump_use("a", 900);
+
+        let changed = ledger.curate(950, policy);
+
+        assert!(changed.is_empty());
+        assert_eq!(ledger.entries["a"].last_used_at, Some(900));
+        assert_eq!(ledger.entries["a"].state, Lifecycle::Active);
+    }
+
+    #[test]
+    fn in_state_returns_sorted_names() {
+        let mut ledger = UsageLedger::default();
+        ledger.record_created("zulu", Author::Agent, 0);
+        ledger.record_created("alpha", Author::Agent, 0);
+        ledger.record_created("mike", Author::Agent, 0);
+        ledger.set_state("mike", Lifecycle::Archived);
+        ledger.set_state("alpha", Lifecycle::Archived);
+
+        assert_eq!(
+            ledger.in_state(Lifecycle::Archived),
+            vec!["alpha".to_string(), "mike".to_string()]
+        );
+        assert_eq!(ledger.in_state(Lifecycle::Active), vec!["zulu".to_string()]);
+        assert!(ledger.in_state(Lifecycle::Stale).is_empty());
     }
 
     #[test]

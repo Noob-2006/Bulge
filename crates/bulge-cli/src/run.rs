@@ -69,6 +69,14 @@ pub struct RunConfig {
     pub egress_approvals: Option<bulge_vm::net::EgressApprovalTx>,
 }
 
+/// Current wall-clock time in Unix seconds (0 before the epoch, which never happens).
+pub(crate) fn now_unix() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
 /// Map the store's autonomy onto the guard's equivalent (no shared type).
 fn guard_autonomy(autonomy: Autonomy) -> bulge_guard::Autonomy {
     match autonomy {
@@ -634,7 +642,7 @@ async fn propose_skill(backend: &dyn LlmBackend, job: &bulge_store::JobHandle, h
         let skills_root = harness_dir.join(spec.skill_dir.trim_end_matches('/'));
         let ledger_path = skills_root.join(bulge_harness::usage::USAGE_FILE);
         let mut ledger = bulge_harness::UsageLedger::load(&ledger_path).unwrap_or_default();
-        ledger.record_created(&draft.name, bulge_harness::Author::Agent);
+        ledger.record_created(&draft.name, bulge_harness::Author::Agent, now_unix());
         let _ = ledger.save(&ledger_path);
     }
 }
