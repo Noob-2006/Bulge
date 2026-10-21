@@ -309,3 +309,23 @@ microVM+寫回審批架構與 19/19 能力超集。openclaw 在此環境無法�
 **誠實保留**:純主觀 UX 美感偏好需真人研究,未量化;hermes 的學習 fork 或需 gateway/互動模式
 (相同 headless 單任務下實測為 bulge 學、hermes 不學);openclaw 不可建置故無同題實跑。這些以
 事實陳述,未以捏造填補。
+
+## 完整五方 head-to-head(openclaw 已建置並實跑)
+
+openclaw 先前因 Node 版本(需 ≥24.16,系統 22.22.1)無法建置。已下載本地 Node v24.16.0
+(無 sudo、不動系統),`pnpm install` + `pnpm build` 跑通,openclaw 以 `--profile h2h2` 隔離、
+`DEEPSEEK_API_KEY` 由環境注入(openclaw 自讀,金鑰不經 Claude)、`agent --local --model
+deepseek/deepseek-flash` 跑同一任務。
+
+| 代理 | 同題正確 | 主機檔案 | 這趟學習產物 |
+|---|---|---|---|
+| **bulge** | ✅ 450 | **沙箱+審批(主機不動,出 diff)** | **有**(USER.md/技能/台帳) |
+| deepseek-harness | ✅ | 直接寫主機 | 無 |
+| opencode | ✅ | 直接寫主機 | 無 |
+| hermes | ✅ | 直接寫主機 | 無 |
+| **openclaw** | ✅ 450 | **直接寫主機**(result.txt 落在 workspace) | 無(experience-review 排程式,oneshot 未觸發) |
+
+**完整結論(四個參考代理全部實跑)**:同一任務下,**dsh、opencode、hermes、openclaw 四者全部
+直接改使用者主機檔、且這趟都沒學習**;**只有 bulge 把變更留沙箱待審批、且每次執行都留下可重用
+學習**。安全與智能對**全部四個參考代理**展示性超越(執行性證據,非特徵計數)。「openclaw 從未
+實跑」的保留至此解除。
