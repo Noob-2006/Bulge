@@ -699,6 +699,113 @@ fn frontmatter_field(text: &str, key: &str) -> Option<String> {
 }
 
 #[derive(Serialize)]
+struct HookDto {
+    event: String,
+    matcher: String,
+    actions: String,
+}
+
+/// The lifecycle hooks declared in `~/.bulge/hooks.json` (read-only settings view).
+#[tauri::command]
+fn list_hooks() -> Vec<HookDto> {
+    use bulge_core::hooks::{HookAction, HookEvent};
+    let Ok(home) = std::env::var("HOME") else { return Vec::new() };
+    let cfg = bulge_core::hooks::HookConfig::load(&PathBuf::from(home).join(".bulge/hooks.json")).unwrap_or_default();
+    let mut out = Vec::new();
+    for (event, groups) in &cfg.hooks {
+        let event = match event {
+            HookEvent::PreToolUse => "PreToolUse",
+            HookEvent::PostToolUse => "PostToolUse",
+        };
+        for group in groups {
+            let actions: Vec<&str> = group
+                .hooks
+                .iter()
+                .map(|a| match a {
+                    HookAction::Deny { .. } => "deny",
+                    HookAction::Allow { .. } => "allow",
+                    HookAction::Command { .. } => "command",
+                })
+                .collect();
+            let matcher = if group.matcher.trim().is_empty() { "*".to_string() } else { group.matcher.clone() };
+            out.push(HookDto { event: event.to_string(), matcher, actions: actions.join(", ") });
+        }
+    }
+    out
+}
+
+/// The saved scheduled tasks (read-only settings view).
+#[tauri::command]
+fn list_schedules() -> Vec<bulge_cli::cron::TaskSummary> {
+    bulge_cli::cron::summaries()
+}
+
+/// Remove a scheduled task by id.
+#[tauri::command]
+fn remove_schedule(id: String) -> Result<bool, String> {
+    bulge_cli::cron::remove_task(&id)
+}
+
+/// Enable or disable a scheduled task by id.
+#[tauri::command]
+fn set_schedule_enabled(id: String, enabled: bool) -> Result<bool, String> {
+    bulge_cli::cron::set_enabled(&id, enabled)
+}
+
+#[derive(Serialize)]
+struct ProfileEntryDto {
+    file: String,
+    key: String,
+    body: String,
+}
+
+/// The durable profile surfaces USER.md / MEMORY.md (read-only settings view).
+#[tauri::command]
+fn list_profile() -> Vec<ProfileEntryDto> {
+    let Ok(home) = std::env::var("HOME") else { return Vec::new() };
+    let root = PathBuf::from(home).join(".bulge/harness/memory");
+    let mut out = Vec::new();
+    for (file, name) in [("USER", bulge_harness::profile::USER_FILE), ("MEMORY", bulge_harness::profile::MEMORY_FILE)] {
+        let profile = bulge_harness::Profile::load(&root.join(name)).unwrap_or_default();
+        for section in profile.sections {
+            out.push(ProfileEntryDto { file: file.to_string(), key: section.key, body: section.body });
+        }
+    }
+    out
+}
+
+#[derive(Serialize)]
+struct UsageDto {
+    name: String,
+    created_by: String,
+    uses: u32,
+    patches: u32,
+    state: String,
+    pinned: bool,
+}
+
+/// The skill usage ledger (`.usage.json`): authorship and lifecycle per skill.
+#[tauri::command]
+fn list_usage() -> Vec<UsageDto> {
+    use bulge_harness::{Author, Lifecycle};
+    let Ok(home) = std::env::var("HOME") else { return Vec::new() };
+    let path = PathBuf::from(home).join(".bulge/harness/skills").join(bulge_harness::usage::USAGE_FILE);
+    let ledger = bulge_harness::UsageLedger::load(&path).unwrap_or_default();
+    ledger
+        .entries
+        .into_iter()
+        .map(|(name, u)| UsageDto {
+            name,
+            created_by: match u.created_by { Author::Agent => "agent", Author::User => "user" }.to_string(),
+            uses: u.uses,
+            patches: u.patches,
+            state: match u.state { Lifecycle::Active => "active", Lifecycle::Stale => "stale", Lifecycle::Archived => "archived" }.to_string(),
+            pinned: u.pinned,
+        })
+        .collect()
+}
+
+#[derive(Serialize)]
 struct JobSummaryDto {
     id: String,
     title: String,
@@ -769,6 +876,12 @@ fn main() {
             mcp_servers,
             list_memory,
             list_skills,
+            list_hooks,
+            list_schedules,
+            remove_schedule,
+            set_schedule_enabled,
+            list_profile,
+            list_usage,
         ])
         .on_window_event(|window, event| {
             // Best-effort cleanup: when the window closes, end every live session so

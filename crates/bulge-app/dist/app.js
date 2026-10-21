@@ -396,6 +396,86 @@ async function loadSkills() {
   }
 }
 
+async function loadHooks() {
+  const box = $("hook-list");
+  if (!box) return;
+  let items = [];
+  try { items = await invoke("list_hooks"); } catch (e) {}
+  box.innerHTML = "";
+  if (!items.length) { box.appendChild(el("div", "mcp-empty", "尚未設定任何鉤子(~/.bulge/hooks.json)。")); return; }
+  for (const h of items) {
+    const row = el("div", "mcp-item");
+    row.append(
+      el("span", "mcp-name", h.event),
+      el("span", "mcp-cmd", h.matcher + " → " + h.actions),
+    );
+    box.appendChild(row);
+  }
+}
+
+async function loadSchedules() {
+  const box = $("schedule-list");
+  if (!box) return;
+  let items = [];
+  try { items = await invoke("list_schedules"); } catch (e) {}
+  box.innerHTML = "";
+  if (!items.length) { box.appendChild(el("div", "mcp-empty", "沒有排程任務(用 CLI:bulge schedule add …)。")); return; }
+  for (const t of items) {
+    const row = el("div", "mcp-item" + (t.enabled ? "" : " off"));
+    const toggle = el("input");
+    toggle.type = "checkbox"; toggle.checked = t.enabled; toggle.title = "啟用／停用";
+    toggle.addEventListener("change", async () => {
+      try { await invoke("set_schedule_enabled", { id: t.id, enabled: toggle.checked }); loadSchedules(); }
+      catch (e) { toast("操作失敗:" + e, "err"); }
+    });
+    const rm = el("button", "btn btn-ghost btn-sm", "移除");
+    rm.addEventListener("click", async () => {
+      try { await invoke("remove_schedule", { id: t.id }); loadSchedules(); toast("已移除", "ok"); }
+      catch (e) { toast("移除失敗:" + e, "err"); }
+    });
+    const next = t.next_run_at ? new Date(t.next_run_at * 1000).toLocaleString() : "—";
+    row.append(
+      toggle,
+      el("span", "mcp-name", t.title),
+      el("span", "mcp-cmd", t.schedule + " · 下次 " + next + " · 已跑 " + t.runs),
+      rm,
+    );
+    box.appendChild(row);
+  }
+}
+
+async function loadProfile() {
+  const box = $("profile-list");
+  if (!box) return;
+  let items = [];
+  try { items = await invoke("list_profile"); } catch (e) {}
+  box.innerHTML = "";
+  if (!items.length) { box.appendChild(el("div", "mcp-empty", "還沒有使用者模型或環境記憶。")); return; }
+  for (const p of items) {
+    const row = el("div", "mem-item");
+    row.appendChild(el("div", "mem-cue", "[" + p.file + "] " + (p.key || "")));
+    row.appendChild(el("div", "mem-lesson", p.body || ""));
+    box.appendChild(row);
+  }
+}
+
+async function loadUsage() {
+  const box = $("usage-list");
+  if (!box) return;
+  let items = [];
+  try { items = await invoke("list_usage"); } catch (e) {}
+  box.innerHTML = "";
+  if (!items.length) { box.appendChild(el("div", "mcp-empty", "還沒有技能使用記錄。")); return; }
+  for (const u of items) {
+    const row = el("div", "mcp-item" + (u.state === "active" ? "" : " off"));
+    row.append(
+      el("span", "mcp-name", u.name + (u.pinned ? " 📌" : "")),
+      el("span", "mcp-cmd", u.state + " · " + u.created_by + " · 用 " + u.uses + " 修 " + u.patches),
+    );
+    box.appendChild(row);
+  }
+}
+
 async function detectModels() {
   const btn = $("detect-models");
   const old = btn.textContent;
@@ -637,7 +717,7 @@ function autoGrow() {
 }
 
 /* ---- settings + theme ---- */
-function openSettings() { $("settings-overlay").classList.remove("hidden"); loadMcpServers(); loadMemory(); loadSkills(); }
+function openSettings() { $("settings-overlay").classList.remove("hidden"); loadMcpServers(); loadMemory(); loadSkills(); loadHooks(); loadSchedules(); loadProfile(); loadUsage(); }
 function closeSettings() { $("settings-overlay").classList.add("hidden"); }
 function toggleTheme() {
   const cur = document.documentElement.getAttribute("data-theme") === "light" ? "dark" : "light";

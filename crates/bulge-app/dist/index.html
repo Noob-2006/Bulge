@@ -223,6 +223,38 @@
             <div id="skill-list" class="mem-list"></div>
           </div>
         </div>
+
+        <div class="settings-section-label">技能使用(生命週期)</div>
+        <div class="settings-group">
+          <div class="settings-row settings-row-col">
+            <div><div class="row-title">使用台帳</div><div class="row-desc">每個技能的作者、使用／修訂次數與生命週期(active／stale／archived);久未使用會自動老化,📌 為釘選(不自動轉移)。存於 <code>.usage.json</code>。</div></div>
+            <div id="usage-list" class="mcp-list"></div>
+          </div>
+        </div>
+
+        <div class="settings-section-label">生命週期鉤子</div>
+        <div class="settings-group">
+          <div class="settings-row settings-row-col">
+            <div><div class="row-title">鉤子(Pre／PostToolUse)</div><div class="row-desc">在 <code>~/.bulge/hooks.json</code> 宣告:工具呼叫前可封鎖／改寫,呼叫後可注入內容。<code>command</code> 鉤子在主機執行(沙箱外,等同你安裝的程式)。</div></div>
+            <div id="hook-list" class="mcp-list"></div>
+          </div>
+        </div>
+
+        <div class="settings-section-label">排程任務</div>
+        <div class="settings-group">
+          <div class="settings-row settings-row-col">
+            <div><div class="row-title">排程</div><div class="row-desc">定時或週期自動執行的任務。以 CLI 新增:<code>bulge schedule add --goal … --workspace … --daily HH:MM</code>(或 --cron 等)。執行結果以可審核的 diff 進入任務列表,不會自動寫回主機。</div></div>
+            <div id="schedule-list" class="mcp-list"></div>
+          </div>
+        </div>
+
+        <div class="settings-section-label">使用者模型與環境記憶</div>
+        <div class="settings-group">
+          <div class="settings-row settings-row-col">
+            <div><div class="row-title">USER.md ／ MEMORY.md</div><div class="row-desc">代理跨工作累積的使用者偏好(USER)與環境事實(MEMORY),每次對話自動帶入提示;寫入前經威脅掃描與秘密遮蔽。</div></div>
+            <div id="profile-list" class="mem-list"></div>
+          </div>
+        </div>
       </div>
     </div>
 

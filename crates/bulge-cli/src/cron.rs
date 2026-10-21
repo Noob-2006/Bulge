@@ -138,6 +138,84 @@ fn store_path(home: &Path) -> PathBuf {
     home.join(".bulge").join(STORE_FILE)
 }
 
+/// A read-only summary of one scheduled task (for the desktop settings view).
+#[derive(Debug, Clone, Serialize)]
+pub struct TaskSummary {
+    pub id: String,
+    pub title: String,
+    pub enabled: bool,
+    pub next_run_at: Option<u64>,
+    pub last_run_at: Option<u64>,
+    pub runs: u32,
+    /// A short human description of the schedule (e.g. `daily 09:00`).
+    pub schedule: String,
+}
+
+/// Describe a schedule compactly for display.
+fn describe(s: &Schedule) -> String {
+    match s {
+        Schedule::AfterSeconds { seconds } => format!("once, +{seconds}s"),
+        Schedule::At { unix } => format!("once at unix:{unix}"),
+        Schedule::EverySeconds { seconds } => format!("every {seconds}s"),
+        Schedule::Daily { hour, minute } => format!("daily {hour:02}:{minute:02}"),
+        Schedule::Weekly { weekdays, hour, minute } => format!("weekly {} {hour:02}:{minute:02}", weekdays.len()),
+        Schedule::Cron { expr } => format!("cron {expr}"),
+    }
+}
+
+/// All saved tasks, summarised (desktop settings view). Empty on any error.
+pub fn summaries() -> Vec<TaskSummary> {
+    let Ok(home) = bulge_home() else { return Vec::new() };
+    let Ok(store) = TaskStore::load(&store_path(&home)) else { return Vec::new() };
+    store
+        .tasks
+        .into_iter()
+        .map(|t| TaskSummary {
+            id: t.id,
+            title: t.title,
+            enabled: t.enabled,
+            next_run_at: t.next_run_at,
+            last_run_at: t.last_run_at,
+            runs: t.runs,
+            schedule: describe(&t.schedule),
+        })
+        .collect()
+}
+
+/// Remove a task by id (desktop view). Returns whether anything was removed.
+pub fn remove_task(id: &str) -> Result<bool, String> {
+    let home = bulge_home()?;
+    let path = store_path(&home);
+    let mut store = TaskStore::load(&path)?;
+    let before = store.tasks.len();
+    store.tasks.retain(|t| t.id != id);
+    if store.tasks.len() == before {
+        return Ok(false);
+    }
+    store.save(&path)?;
+    Ok(true)
+}
+
+/// Enable or disable a task by id. Re-enabling recomputes its next run from now.
+pub fn set_enabled(id: &str, enabled: bool) -> Result<bool, String> {
+    let home = bulge_home()?;
+    let path = store_path(&home);
+    let mut store = TaskStore::load(&path)?;
+    let now = now_unix();
+    let Some(task) = store.tasks.iter_mut().find(|t| t.id == id) else {
+        return Ok(false);
+    };
+    task.enabled = enabled;
+    if enabled {
+        task.next_run_at = next_occurrence(&task.schedule, now, task.anchor, task.offset_minutes);
+        if task.next_run_at.is_none() {
+            task.enabled = false; // nothing left to run (past one-shot)
+        }
+    }
+    store.save(&path)?;
+    Ok(true)
+}
+
 /// Entry point for `bulge schedule <sub> …`. Returns a process exit code.
 pub fn dispatch(args: &[String]) -> i32 {
     let result = match args.first().map(String::as_str) {
