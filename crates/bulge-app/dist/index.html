@@ -150,6 +150,10 @@
             </select>
           </div>
           <div class="settings-row">
+            <div><div class="row-title">二次審查</div><div class="row-desc">每個會改東西的工具呼叫前,用模型再審一次;deny 就擋下。</div></div>
+            <label class="chip chip-check"><input id="auto-review" type="checkbox" /> LLM 二次審查每個變動型工具呼叫(較慢、較安全)</label>
+          </div>
+          <div class="settings-row">
             <div><div class="row-title">vCPU</div><div class="row-desc">虛擬機處理器數</div></div>
             <input id="cpus" type="number" min="1" max="16" class="control control-num" />
           </div>
@@ -244,7 +248,23 @@
         <div class="settings-section-label">排程任務</div>
         <div class="settings-group">
           <div class="settings-row settings-row-col">
-            <div><div class="row-title">排程</div><div class="row-desc">定時或週期自動執行的任務。以 CLI 新增:<code>bulge schedule add --goal … --workspace … --daily HH:MM</code>(或 --cron 等)。執行結果以可審核的 diff 進入任務列表,不會自動寫回主機。</div></div>
+            <div><div class="row-title">排程</div><div class="row-desc">定時或週期自動執行的任務。可在下方新增,或以 CLI:<code>bulge schedule add --goal … --workspace … --daily HH:MM</code>(或 --cron 等)。執行結果以可審核的 diff 進入任務列表,不會自動寫回主機。</div></div>
+            <div class="mcp-list">
+              <input id="sched-goal" class="control" placeholder="目標(例:整理下載資料夾)" autocomplete="off" />
+              <input id="sched-workspace" class="control" placeholder="工作區路徑(例:/home/me/project)" autocomplete="off" />
+              <select id="sched-kind" class="control">
+                <option value="daily">daily(HH:MM)</option>
+                <option value="every">every(秒)</option>
+                <option value="cron">cron(5 欄)</option>
+                <option value="after">after(幾秒後一次)</option>
+                <option value="at">at(Unix 秒一次)</option>
+                <option value="weekly">weekly(DAYS:HH:MM)</option>
+                <option value="on_change">on_change(路徑變更)</option>
+              </select>
+              <input id="sched-value" class="control" placeholder="HH:MM(例 09:30)" autocomplete="off" />
+              <input id="sched-offset" type="number" class="control control-num" value="0" placeholder="UTC 偏移分鐘" />
+              <button id="sched-add" class="btn btn-primary btn-sm">新增排程</button>
+            </div>
             <div id="schedule-list" class="mcp-list"></div>
           </div>
         </div>

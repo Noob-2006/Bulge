@@ -115,6 +115,9 @@ struct StartArgs {
     context_window: Option<u32>,
     #[serde(default)]
     system_prompt: Option<String>,
+    /// Enable the LLM review gate: a cheap reviewer vets each mutating tool call.
+    #[serde(default)]
+    auto_review: bool,
 }
 
 /// One streamed log line, tagged with the session it belongs to.
@@ -348,7 +351,7 @@ fn build_config(args: &StartArgs) -> Result<RunConfig, String> {
         // Filled in by start_job with the session's egress-approval channel.
         egress_approvals: None,
         skip_review: false,
-        auto_review: false,
+        auto_review: args.auto_review,
     })
 }
 
@@ -741,6 +744,23 @@ fn list_schedules() -> Vec<bulge_cli::cron::TaskSummary> {
     bulge_cli::cron::summaries()
 }
 
+/// Create a scheduled task from the settings form.
+#[expect(clippy::too_many_arguments, reason = "the form posts one field per argument")]
+#[tauri::command]
+fn add_schedule(
+    goal: String,
+    workspace: String,
+    autonomy: String,
+    model: String,
+    base_url: String,
+    protocol: String,
+    kind: String,
+    value: String,
+    offset_minutes: i32,
+) -> Result<String, String> {
+    bulge_cli::cron::add_task(&goal, &workspace, &autonomy, &model, &base_url, &protocol, &kind, &value, offset_minutes)
+}
+
 /// Remove a scheduled task by id.
 #[tauri::command]
 fn remove_schedule(id: String) -> Result<bool, String> {
@@ -775,6 +795,44 @@ fn list_profile() -> Vec<ProfileEntryDto> {
     out
 }
 
+/// Resolve a profile file name (`USER` / `MEMORY`) to its path and char budget.
+fn profile_target(file: &str) -> Result<(PathBuf, usize), String> {
+    use bulge_harness::profile::{MEMORY_FILE, MEMORY_LIMIT, USER_FILE, USER_LIMIT};
+    let home = std::env::var("HOME").map_err(|_| "HOME 未設定".to_string())?;
+    let root = PathBuf::from(home).join(".bulge/harness/memory");
+    match file {
+        "USER" => Ok((root.join(USER_FILE), USER_LIMIT)),
+        "MEMORY" => Ok((root.join(MEMORY_FILE), MEMORY_LIMIT)),
+        other => Err(format!("未知的 profile 檔案 {other:?}(應為 USER 或 MEMORY)")),
+    }
+}
+
+/// Add or replace one section of USER.md / MEMORY.md after threat scanning and
+/// secret redaction.
+#[tauri::command]
+fn save_profile_entry(file: String, key: String, body: String) -> Result<(), String> {
+    let (path, limit) = profile_target(&file)?;
+    if key.trim().is_empty() {
+        return Err("章節名稱是空的".into());
+    }
+    if bulge_guard::is_threat(&body, bulge_guard::Scope::Strict) {
+        return Err("內容含提示注入或外洩模式,已拒絕寫入".into());
+    }
+    let body = bulge_guard::redact_secrets(&body);
+    let mut profile = bulge_harness::Profile::load(&path)?;
+    profile.upsert(&key, &body);
+    profile.save(&path, limit)
+}
+
+/// Remove one section from USER.md / MEMORY.md.
+#[tauri::command]
+fn remove_profile_entry(file: String, key: String) -> Result<(), String> {
+    let (path, limit) = profile_target(&file)?;
+    let mut profile = bulge_harness::Profile::load(&path)?;
+    profile.remove(&key);
+    profile.save(&path, limit)
+}
+
 #[derive(Serialize)]
 struct UsageDto {
     name: String,
@@ -804,6 +862,46 @@ fn list_usage() -> Vec<UsageDto> {
             pinned: u.pinned,
         })
         .collect()
+}
+
+/// The skill usage ledger path (`~/.bulge/harness/skills/.usage.json`).
+fn skill_usage_path() -> Result<PathBuf, String> {
+    let home = std::env::var("HOME").map_err(|_| "HOME 未設定".to_string())?;
+    Ok(PathBuf::from(home).join(".bulge/harness/skills").join(bulge_harness::usage::USAGE_FILE))
+}
+
+/// Pin or unpin a skill so curators leave it alone.
+#[tauri::command]
+fn set_skill_pinned(name: String, pinned: bool) -> Result<(), String> {
+    let path = skill_usage_path()?;
+    let mut ledger = bulge_harness::UsageLedger::load(&path)?;
+    ledger.set_pinned(&name, pinned);
+    ledger.save(&path)
+}
+
+/// Move a skill through its lifecycle (active / stale / archived).
+#[tauri::command]
+fn set_skill_state(name: String, state: String) -> Result<(), String> {
+    use bulge_harness::Lifecycle;
+    let state = match state.as_str() {
+        "active" => Lifecycle::Active,
+        "stale" => Lifecycle::Stale,
+        "archived" => Lifecycle::Archived,
+        other => return Err(format!("未知的技能狀態 {other:?}(應為 active|stale|archived)")),
+    };
+    let path = skill_usage_path()?;
+    let mut ledger = bulge_harness::UsageLedger::load(&path)?;
+    ledger.set_state(&name, state);
+    ledger.save(&path)
+}
+
+/// Drop a skill from the usage ledger entirely.
+#[tauri::command]
+fn forget_skill(name: String) -> Result<(), String> {
+    let path = skill_usage_path()?;
+    let mut ledger = bulge_harness::UsageLedger::load(&path)?;
+    ledger.forget(&name);
+    ledger.save(&path)
 }
 
 /// Keyword search over past job transcripts (for the sidebar history search).
@@ -885,10 +983,16 @@ fn main() {
             list_skills,
             list_hooks,
             list_schedules,
+            add_schedule,
             remove_schedule,
             set_schedule_enabled,
             list_profile,
+            save_profile_entry,
+            remove_profile_entry,
             list_usage,
+            set_skill_pinned,
+            set_skill_state,
+            forget_skill,
             search_jobs,
         ])
         .on_window_event(|window, event| {

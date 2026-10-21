@@ -244,6 +244,47 @@ pub fn set_enabled(id: &str, enabled: bool) -> Result<bool, String> {
     Ok(true)
 }
 
+/// Add a scheduled task from the desktop UI. `kind` selects the schedule shape
+/// (`after`, `at`, `every`, `daily`, `weekly`, `cron`, `on_change`) and `value`
+/// is interpreted accordingly. Uses the same fixed run defaults as the app.
+#[expect(clippy::too_many_arguments, reason = "mirrors the desktop form's fields so each UI input maps to one argument")]
+pub fn add_task(
+    goal: &str,
+    workspace: &str,
+    autonomy: &str,
+    model: &str,
+    base_url: &str,
+    protocol: &str,
+    kind: &str,
+    value: &str,
+    offset_minutes: i32,
+) -> Result<String, String> {
+    let schedule = build_schedule_for_kind(kind, value)?;
+    let autonomy = parse_autonomy(autonomy)?;
+    let (id, _next_run_at) = save_task(TaskDraft {
+        goal: goal.to_string(),
+        title: None,
+        workspace: PathBuf::from(workspace),
+        autonomy,
+        model: model.to_string(),
+        base_url: base_url.to_string(),
+        protocol: protocol.to_string(),
+        backend_id: None,
+        context_window: 128_000,
+        max_tokens: 8_192,
+        reasoning: false,
+        max_steps: 200,
+        max_model_tokens: 2_000_000,
+        max_secs: 14_400,
+        network: false,
+        cpus: 2,
+        ram_mib: 1_024,
+        offset_minutes,
+        schedule,
+    })?;
+    Ok(id)
+}
+
 /// Entry point for `bulge schedule <sub> …`. Returns a process exit code.
 pub fn dispatch(args: &[String]) -> i32 {
     let result = match args.first().map(String::as_str) {
@@ -259,6 +300,115 @@ pub fn dispatch(args: &[String]) -> i32 {
             eprintln!("error: {e}");
             2
         }
+    }
+}
+
+/// The fields that differ between a CLI-created task and a UI-created one. Both
+/// paths go through [`save_task`], so validation and persistence stay identical.
+struct TaskDraft {
+    goal: String,
+    title: Option<String>,
+    workspace: PathBuf,
+    autonomy: Autonomy,
+    model: String,
+    base_url: String,
+    protocol: String,
+    backend_id: Option<String>,
+    context_window: u32,
+    max_tokens: u32,
+    reasoning: bool,
+    max_steps: u64,
+    max_model_tokens: u64,
+    max_secs: u64,
+    network: bool,
+    cpus: u8,
+    ram_mib: u32,
+    offset_minutes: i32,
+    schedule: Schedule,
+}
+
+/// Build, validate, and persist a new task; returns its id and next run time.
+fn save_task(draft: TaskDraft) -> Result<(String, Option<u64>), String> {
+    if !draft.workspace.is_dir() {
+        return Err(format!("workspace {} is not a directory", draft.workspace.display()));
+    }
+    // Validate the backend protocol now, so `tick` never fails on a bad value.
+    Protocol::parse(&draft.protocol)?;
+
+    let home = bulge_home()?;
+    let now = now_unix();
+    let backend_host = host_of(&draft.base_url);
+    let title = draft.title.unwrap_or_else(|| draft.goal.lines().next().unwrap_or("task").chars().take(80).collect());
+    let id = format!("sched-{now:x}-{:x}", std::process::id());
+    let (next_run_at, watch_mtime) = initial_run_state(&draft.schedule, now, draft.offset_minutes)?;
+
+    let task = SavedTask {
+        id: id.clone(),
+        title,
+        goal: draft.goal,
+        workspace: draft.workspace,
+        autonomy: draft.autonomy,
+        model: draft.model,
+        base_url: draft.base_url,
+        protocol: draft.protocol,
+        backend_id: draft.backend_id.unwrap_or(backend_host),
+        context_window: draft.context_window,
+        max_tokens: draft.max_tokens,
+        reasoning: draft.reasoning,
+        max_steps: draft.max_steps,
+        max_model_tokens: draft.max_model_tokens,
+        max_secs: draft.max_secs,
+        network: draft.network,
+        cpus: draft.cpus,
+        ram_mib: draft.ram_mib,
+        schedule: draft.schedule,
+        offset_minutes: draft.offset_minutes,
+        anchor: now,
+        enabled: true,
+        next_run_at,
+        last_run_at: None,
+        runs: 0,
+        watch_mtime,
+    };
+
+    let path = store_path(&home);
+    let mut store = TaskStore::load(&path)?;
+    store.tasks.push(task);
+    store.save(&path)?;
+    Ok((id, next_run_at))
+}
+
+/// The first run time and, for an event task, the mtime to compare against.
+fn initial_run_state(schedule: &Schedule, now: u64, offset_minutes: i32) -> Result<(Option<u64>, Option<u64>), String> {
+    match schedule {
+        Schedule::OnPathChange { path } => Ok((None, Some(path_mtime(path).unwrap_or(0)))),
+        other => {
+            let next = next_occurrence(other, now, now, offset_minutes);
+            match next {
+                Some(at) => Ok((Some(at), None)),
+                None => Err("that schedule has no future occurrence (a past one-shot, or an invalid cron expression)".into()),
+            }
+        }
+    }
+}
+
+/// Build a schedule from the desktop form's `kind` + `value` pair.
+fn build_schedule_for_kind(kind: &str, value: &str) -> Result<Schedule, String> {
+    match kind {
+        "after" => Ok(Schedule::AfterSeconds { seconds: parse_num(value, "after")? }),
+        "at" => Ok(Schedule::At { unix: parse_num(value, "at")? }),
+        "every" => Ok(Schedule::every(parse_num(value, "every")?)),
+        "daily" => {
+            let (hour, minute) = parse_hm(value)?;
+            Ok(Schedule::Daily { hour, minute })
+        }
+        "weekly" => {
+            let (weekdays, hour, minute) = parse_weekly(value)?;
+            Ok(Schedule::Weekly { weekdays, hour, minute })
+        }
+        "cron" => Ok(Schedule::Cron { expr: value.to_string() }),
+        "on_change" => Ok(Schedule::OnPathChange { path: value.to_string() }),
+        other => Err(format!("unknown schedule kind {other:?} (after|at|every|daily|weekly|cron|on_change)")),
     }
 }
 
@@ -327,40 +477,15 @@ fn add(args: &[String]) -> Result<(), String> {
     let schedule = build_schedule(after, at, every, daily.as_deref(), weekly.as_deref(), cron.as_deref(), on_change.as_deref())?;
     let goal = goal.ok_or("--goal is required")?;
     let workspace = workspace.ok_or("--workspace is required")?;
-    if !workspace.is_dir() {
-        return Err(format!("workspace {} is not a directory", workspace.display()));
-    }
-    // Validate the backend protocol now, so `tick` never fails on a bad value.
-    Protocol::parse(&protocol)?;
-
-    let home = bulge_home()?;
-    let now = now_unix();
-    let backend_host = host_of(&base_url);
-    let title = title.unwrap_or_else(|| goal.lines().next().unwrap_or("task").chars().take(80).collect());
-    let id = format!("sched-{now:x}-{:x}", std::process::id());
-    // Event tasks have no time-based next run; they fire when the path changes, so
-    // seed watch_mtime with the current mtime (only future changes trigger a run).
-    let (next_run_at, watch_mtime) = match &schedule {
-        Schedule::OnPathChange { path } => (None, Some(path_mtime(path).unwrap_or(0))),
-        other => {
-            let next = next_occurrence(other, now, now, offset_minutes);
-            if next.is_none() {
-                return Err("that schedule has no future occurrence (a past one-shot, or an invalid cron expression)".into());
-            }
-            (next, None)
-        }
-    };
-
-    let task = SavedTask {
-        id: id.clone(),
-        title,
+    let (id, next_run_at) = save_task(TaskDraft {
         goal,
+        title,
         workspace,
         autonomy,
         model,
         base_url,
         protocol,
-        backend_id: backend_id.unwrap_or(backend_host),
+        backend_id,
         context_window,
         max_tokens,
         reasoning,
@@ -370,20 +495,9 @@ fn add(args: &[String]) -> Result<(), String> {
         network,
         cpus,
         ram_mib,
-        schedule,
         offset_minutes,
-        anchor: now,
-        enabled: true,
-        next_run_at,
-        last_run_at: None,
-        runs: 0,
-        watch_mtime,
-    };
-
-    let path = store_path(&home);
-    let mut store = TaskStore::load(&path)?;
-    store.tasks.push(task);
-    store.save(&path)?;
+        schedule,
+    })?;
     match next_run_at {
         Some(at) => println!("added {id} (next run at unix {at})"),
         None => println!("added {id} (event-driven; fires on change)"),

@@ -413,13 +413,54 @@ async function loadHooks() {
   }
 }
 
+const schedHints = {
+  daily: "HH:MM(例 09:30)",
+  every: "秒數(最少 60,例 3600)",
+  cron: "5 欄 cron(例 0 9 * * 1-5)",
+  after: "幾秒後執行一次(例 600)",
+  at: "Unix 時間秒數(例 1792544400)",
+  weekly: "mon,wed,fri:HH:MM",
+  on_change: "要監看變更的路徑",
+};
+function updateScheduleHint() {
+  const kind = $("sched-kind").value;
+  $("sched-value").placeholder = schedHints[kind] || "";
+}
+async function addSchedule() {
+  const goal = $("sched-goal").value.trim();
+  const workspace = $("sched-workspace").value.trim();
+  const value = $("sched-value").value.trim();
+  if (!goal) { toast("請填寫排程目標", "err"); return; }
+  if (!workspace) { toast("請填寫工作區路徑", "err"); return; }
+  if (!value) { toast("請填寫排程設定值", "err"); return; }
+  const btn = $("sched-add");
+  btn.disabled = true;
+  try {
+    await invoke("add_schedule", {
+      goal, workspace,
+      autonomy: $("autonomy").value,
+      model: $("model").value.trim(),
+      baseUrl: $("base-url").value.trim(),
+      protocol: $("protocol").value,
+      kind: $("sched-kind").value,
+      value,
+      offsetMinutes: Number($("sched-offset").value) || 0,
+    });
+    $("sched-goal").value = "";
+    $("sched-value").value = "";
+    loadSchedules();
+    toast("已新增排程", "ok");
+  } catch (e) { toast("新增排程失敗:" + e, "err"); }
+  finally { btn.disabled = false; }
+}
+
 async function loadSchedules() {
   const box = $("schedule-list");
   if (!box) return;
   let items = [];
   try { items = await invoke("list_schedules"); } catch (e) {}
   box.innerHTML = "";
-  if (!items.length) { box.appendChild(el("div", "mcp-empty", "沒有排程任務(用 CLI:bulge schedule add …)。")); return; }
+  if (!items.length) { box.appendChild(el("div", "mcp-empty", "沒有排程任務。")); return; }
   for (const t of items) {
     const row = el("div", "mcp-item" + (t.enabled ? "" : " off"));
     const toggle = el("input");
@@ -444,17 +485,39 @@ async function loadSchedules() {
   }
 }
 
+async function saveProfileEntryPrompt() {
+  const file = (prompt("要編輯哪個檔案?(USER 或 MEMORY)", "USER") || "").trim().toUpperCase();
+  if (!file) return;
+  if (file !== "USER" && file !== "MEMORY") { toast("檔案必須是 USER 或 MEMORY", "err"); return; }
+  const key = (prompt("章節名稱") || "").trim();
+  if (!key) return;
+  const body = prompt("內容") || "";
+  try {
+    await invoke("save_profile_entry", { file, key, body });
+    loadProfile();
+    toast("已儲存", "ok");
+  } catch (e) { toast("儲存失敗:" + e, "err"); }
+}
 async function loadProfile() {
   const box = $("profile-list");
   if (!box) return;
   let items = [];
   try { items = await invoke("list_profile"); } catch (e) {}
   box.innerHTML = "";
+  const add = el("button", "btn btn-primary btn-sm", "＋ 新增/編輯");
+  add.addEventListener("click", saveProfileEntryPrompt);
+  box.appendChild(add);
   if (!items.length) { box.appendChild(el("div", "mcp-empty", "還沒有使用者模型或環境記憶。")); return; }
   for (const p of items) {
     const row = el("div", "mem-item");
     row.appendChild(el("div", "mem-cue", "[" + p.file + "] " + (p.key || "")));
     row.appendChild(el("div", "mem-lesson", p.body || ""));
+    const rm = el("button", "btn btn-ghost btn-sm", "刪除");
+    rm.addEventListener("click", async () => {
+      try { await invoke("remove_profile_entry", { file: p.file, key: p.key }); loadProfile(); toast("已刪除", "ok"); }
+      catch (e) { toast("刪除失敗:" + e, "err"); }
+    });
+    row.appendChild(rm);
     box.appendChild(row);
   }
 }
@@ -468,9 +531,25 @@ async function loadUsage() {
   if (!items.length) { box.appendChild(el("div", "mcp-empty", "還沒有技能使用記錄。")); return; }
   for (const u of items) {
     const row = el("div", "mcp-item" + (u.state === "active" ? "" : " off"));
+    const pin = el("button", "btn btn-ghost btn-sm", u.pinned ? "取消釘選" : "釘選");
+    pin.addEventListener("click", async () => {
+      try { await invoke("set_skill_pinned", { name: u.name, pinned: !u.pinned }); loadUsage(); }
+      catch (e) { toast("操作失敗:" + e, "err"); }
+    });
+    const archive = el("button", "btn btn-ghost btn-sm", "封存");
+    archive.addEventListener("click", async () => {
+      try { await invoke("set_skill_state", { name: u.name, state: "archived" }); loadUsage(); }
+      catch (e) { toast("封存失敗:" + e, "err"); }
+    });
+    const forget = el("button", "btn btn-ghost btn-sm", "移除");
+    forget.addEventListener("click", async () => {
+      try { await invoke("forget_skill", { name: u.name }); loadUsage(); toast("已移除", "ok"); }
+      catch (e) { toast("移除失敗:" + e, "err"); }
+    });
     row.append(
       el("span", "mcp-name", u.name + (u.pinned ? " 📌" : "")),
       el("span", "mcp-cmd", u.state + " · " + u.created_by + " · 用 " + u.uses + " 修 " + u.patches),
+      pin, archive, forget,
     );
     box.appendChild(row);
   }
@@ -626,6 +705,7 @@ async function startJob() {
     model: $("model").value.trim(), base_url: $("base-url").value.trim(),
     protocol: $("protocol").value, autonomy: $("autonomy").value,
     network: $("network").checked, cpus: Number($("cpus").value) || 2, ram_mib: Number($("ram").value) || 1024,
+    auto_review: $("auto-review")?.checked || false,
     temperature: temp === "" ? null : Number(temp),
     reasoning_effort: $("reasoning").value || null,
     max_tokens: Number($("max-tokens").value) || 8192,
@@ -789,6 +869,9 @@ window.addEventListener("DOMContentLoaded", () => {
   $("apply-exec").addEventListener("click", applyExecSettings);
   $("pick-ws").addEventListener("click", pickWorkspace);
   $("network").addEventListener("change", () => {});
+  $("sched-kind").addEventListener("change", updateScheduleHint);
+  $("sched-add").addEventListener("click", addSchedule);
+  updateScheduleHint();
   $("start").addEventListener("click", startJob);
   $("stop").addEventListener("click", stopJob);
   $("review-close").addEventListener("click", () => $("review").classList.add("hidden"));

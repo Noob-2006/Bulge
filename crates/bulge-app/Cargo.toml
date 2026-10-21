@@ -15,6 +15,7 @@ path = "src/main.rs"
 [dependencies]
 bulge-cli = { path = "../bulge-cli" }
 bulge-core = { path = "../bulge-core" }
+bulge-guard = { path = "../bulge-guard" }
 bulge-harness = { path = "../bulge-harness" }
 bulge-vm = { path = "../bulge-vm" }
 bulge-store = { path = "../bulge-store" }
