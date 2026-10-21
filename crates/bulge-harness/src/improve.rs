@@ -49,6 +49,44 @@ Drop anything you are not sure generalises. If there is nothing durable, return 
     "Answer with ONLY a JSON array of objects {cue, lesson, evidence, confidence}, no prose."
 );
 
+/// Which profile surface an update targets.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProfileTarget {
+    User,
+    Env,
+}
+
+/// One proposed change to a profile file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProfileUpdate {
+    /// `"user"` -> `USER.md`, `"env"` -> `MEMORY.md`.
+    pub target: ProfileTarget,
+    /// The section title.
+    pub key: String,
+    /// The section body ("" together with `remove = true` means delete).
+    pub body: String,
+    pub remove: bool,
+}
+
+/// Instruction appended after a finished job's transcript to elicit durable
+/// profile updates. The model must answer with a JSON array (possibly empty) and
+/// nothing else, routing each fact to exactly one surface.
+pub const PROPOSE_PROFILE_PROMPT: &str = concat!(
+    "\
+From the finished job above, update what you durably know. TWO surfaces:\n\
+- USER.md (target \"user\"): who the user is and how they want you to work — role, preferences,\n\
+recurring instructions, things they told you to always/never do. One fact per section.\n\
+- MEMORY.md (target \"env\"): durable facts about THIS environment — tools, paths, conventions,\n\
+how the project is built/tested. Not user preferences.\n\
+Route each fact to exactly ONE surface, never both. Keep each section title short and keyword-rich,\n\
+each body one or two sentences. To delete an obsolete section, set remove=true.",
+    "\n\n",
+    do_not_capture!(),
+    "\n\n",
+    "Answer with ONLY a JSON array of {target, key, body, remove} objects (remove optional, default false),\n\
+or [] if there is nothing durable. No prose."
+);
+
 /// A slug derived from a cue: lowercase, alphanumerics kept, runs of anything
 /// else collapsed to one `-`, trimmed, capped. Empty cue → "lesson".
 pub fn slug(cue: &str) -> String {
@@ -97,6 +135,45 @@ pub fn parse_proposed_lessons(reply: &str, existing_ids: &[String]) -> Vec<Lesso
         lessons.push(Lesson::new(id, cue, lesson_text, evidence, confidence));
     }
     lessons
+}
+
+/// Parse the model's reply into profile updates. Tolerant like
+/// `parse_proposed_lessons`: the first top-level `[...]` array is extracted and
+/// parsed. Each item is `{target, key, body, remove?}`; an unknown target, an
+/// empty key, or an empty body without `remove` drops the item.
+pub fn parse_proposed_profile(reply: &str) -> Vec<ProfileUpdate> {
+    let Some(array) = extract_json_array(reply) else {
+        return Vec::new();
+    };
+    let Ok(values) = serde_json::from_str::<Vec<serde_json::Value>>(&array) else {
+        return Vec::new();
+    };
+
+    let mut updates = Vec::new();
+    for value in values {
+        let target = match string_field(&value, "target").as_str() {
+            "user" => ProfileTarget::User,
+            "env" => ProfileTarget::Env,
+            _ => continue, // unknown surface
+        };
+        let key = string_field(&value, "key");
+        if key.is_empty() {
+            continue; // a section needs a title
+        }
+        let body = string_field(&value, "body");
+        let remove = value
+            .get("remove")
+            .and_then(|v| {
+                v.as_bool()
+                    .or_else(|| v.as_str().and_then(|s| s.trim().parse::<bool>().ok()))
+            })
+            .unwrap_or(false);
+        if body.is_empty() && !remove {
+            continue; // nothing to add and nothing to delete
+        }
+        updates.push(ProfileUpdate { target, key, body, remove });
+    }
+    updates
 }
 
 fn string_field(value: &serde_json::Value, key: &str) -> String {
@@ -223,5 +300,44 @@ mod tests {
         let lessons = parse_proposed_lessons(reply, &[]);
         assert_eq!(lessons.len(), 1);
         assert_eq!(lessons[0].cue, "arrays [like this]");
+    }
+
+    #[test]
+    fn profile_updates_route_to_the_right_surface() {
+        let reply = r#"Here you go:
+        [
+            {"target": "user", "key": "Communication", "body": "Prefers terse answers."},
+            {"target": "env", "key": "Build", "body": "Use cargo test --workspace."}
+        ]"#;
+        let updates = parse_proposed_profile(reply);
+        assert_eq!(updates.len(), 2);
+        assert_eq!(updates[0].target, ProfileTarget::User);
+        assert_eq!(updates[0].key, "Communication");
+        assert_eq!(updates[0].body, "Prefers terse answers.");
+        assert!(!updates[0].remove);
+        assert_eq!(updates[1].target, ProfileTarget::Env);
+        assert_eq!(updates[1].key, "Build");
+    }
+
+    #[test]
+    fn profile_updates_honour_remove_and_drop_bad_items() {
+        let reply = r#"[
+            {"target": "user", "key": "Old", "body": "", "remove": true},
+            {"target": "env", "key": "", "body": "x"},
+            {"target": "other", "key": "K", "body": "x"},
+            {"target": "user", "key": "Empty", "body": ""}
+        ]"#;
+        let updates = parse_proposed_profile(reply);
+        assert_eq!(updates.len(), 1, "only the well-formed delete survives");
+        assert_eq!(updates[0].target, ProfileTarget::User);
+        assert_eq!(updates[0].key, "Old");
+        assert!(updates[0].remove);
+    }
+
+    #[test]
+    fn profile_updates_from_non_json_are_empty() {
+        assert!(parse_proposed_profile("no json here").is_empty());
+        assert!(parse_proposed_profile("[not, valid, json").is_empty());
+        assert!(parse_proposed_profile("[]").is_empty());
     }
 }

@@ -123,6 +123,21 @@ fn build_system_prompt(harness_dir: &Path, goal: &str, persona: Option<&str>) ->
     };
 
     let memory_root = harness_dir.join("memory");
+
+    // Durable profile surfaces (always injected, in full): who the user is and
+    // how they want the agent to work, plus durable environment facts. Kept
+    // bounded by the save-time char limits, so they never bloat the prompt.
+    let user = bulge_harness::Profile::load(&memory_root.join(bulge_harness::profile::USER_FILE)).unwrap_or_default();
+    if !user.sections.is_empty() {
+        prompt.push_str("\n\n# About the user\n");
+        prompt.push_str(&user.render());
+    }
+    let env = bulge_harness::Profile::load(&memory_root.join(bulge_harness::profile::MEMORY_FILE)).unwrap_or_default();
+    if !env.sections.is_empty() {
+        prompt.push_str("\n\n# Environment notes\n");
+        prompt.push_str(&env.render());
+    }
+
     if let Ok((lessons, _problems)) = bulge_harness::memory::load(&memory_root) {
         let hits = bulge_harness::retrieve(&lessons, goal, LESSON_COUNT);
         let brief = bulge_harness::brief(&hits);
@@ -563,6 +578,9 @@ async fn improve(backend: &dyn LlmBackend, job: &mut bulge_store::JobHandle, har
         eprintln!("learned {saved} lesson(s) into {}", memory_root.join("lessons").display());
     }
 
+    // Update the durable profile surfaces (USER.md / MEMORY.md) from this job.
+    propose_profile(backend, job, harness_dir, model).await;
+
     // Also look for a reusable skill from this job (the skill workshop). Candidates
     // are written to the harness skills dir; they become active once an always-on
     // file references them (promotion is left manual by design, so the always-on
@@ -618,5 +636,86 @@ async fn propose_skill(backend: &dyn LlmBackend, job: &bulge_store::JobHandle, h
         let mut ledger = bulge_harness::UsageLedger::load(&ledger_path).unwrap_or_default();
         ledger.record_created(&draft.name, bulge_harness::Author::Agent);
         let _ = ledger.save(&ledger_path);
+    }
+}
+
+/// Ask the model to update the durable profile surfaces (USER.md / MEMORY.md) from
+/// this job, then apply the updates. Every stored body is threat-scanned (these
+/// files are auto-injected into every future system prompt, so a prompt-injection
+/// here would persist) and secret-redacted before it is written. Best-effort.
+async fn propose_profile(backend: &dyn LlmBackend, job: &bulge_store::JobHandle, harness_dir: &Path, model: &str) {
+    let mut messages = Vec::with_capacity(job.state().history.len() + 2);
+    messages.push(Message::text(Role::System, "You review a finished job and update what you durably know about the user and the environment."));
+    messages.extend(job.state().history.iter().cloned());
+    messages.push(Message::text(Role::User, bulge_harness::PROPOSE_PROFILE_PROMPT));
+
+    let request = GenerateRequest {
+        model: model.to_string(),
+        messages,
+        tools: Vec::new(),
+        max_tokens: None,
+        temperature: None,
+        stop: Vec::new(),
+        reasoning_effort: None,
+        purpose: Purpose::Memory,
+    };
+    let mut stream = backend.stream(request, CancellationToken::new());
+    let mut assembler = bulge_llm::assemble::Assembler::new();
+    while let Some(chunk) = stream.next().await {
+        assembler.push(&chunk);
+    }
+    let assembled = assembler.finish(model);
+    let Some(reply) = assembled.message.content.iter().find_map(|b| match b {
+        bulge_llm::ContentBlock::Text { text } => Some(text.clone()),
+        _ => None,
+    }) else {
+        return;
+    };
+    let updates = bulge_harness::parse_proposed_profile(&reply);
+    if updates.is_empty() {
+        return;
+    }
+
+    let memory_root = harness_dir.join("memory");
+    let user_path = memory_root.join(bulge_harness::profile::USER_FILE);
+    let env_path = memory_root.join(bulge_harness::profile::MEMORY_FILE);
+    let mut user = bulge_harness::Profile::load(&user_path).unwrap_or_default();
+    let mut env = bulge_harness::Profile::load(&env_path).unwrap_or_default();
+    let (mut user_dirty, mut env_dirty) = (false, false);
+
+    for update in updates {
+        let (profile, dirty) = match update.target {
+            bulge_harness::ProfileTarget::User => (&mut user, &mut user_dirty),
+            bulge_harness::ProfileTarget::Env => (&mut env, &mut env_dirty),
+        };
+        if update.remove {
+            if profile.remove(&update.key) {
+                *dirty = true;
+            }
+            continue;
+        }
+        // These files re-enter the system prompt every session, so treat an
+        // incoming body as untrusted: refuse anything that reads like an
+        // injection, and redact any secret that slipped into it.
+        if bulge_guard::is_threat(&update.body, bulge_guard::Scope::Strict) {
+            eprintln!("profile: rejected `{}` (threat pattern)", update.key);
+            continue;
+        }
+        let body = bulge_guard::redact_secrets(&update.body);
+        profile.upsert(&update.key, &body);
+        *dirty = true;
+    }
+
+    if user_dirty {
+        match user.save(&user_path, bulge_harness::profile::USER_LIMIT) {
+            Ok(()) => eprintln!("updated {}", user_path.display()),
+            Err(e) => eprintln!("profile: {e} (USER.md left unchanged)"),
+        }
+    }
+    if env_dirty {
+        match env.save(&env_path, bulge_harness::profile::MEMORY_LIMIT) {
+            Ok(()) => eprintln!("updated {}", env_path.display()),
+            Err(e) => eprintln!("profile: {e} (MEMORY.md left unchanged)"),
+        }
     }
 }
