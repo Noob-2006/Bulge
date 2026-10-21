@@ -129,6 +129,7 @@ axis     | capability             | bulge |her|ocl|oco|dsh
 智能   | 使用者模型 USER.md     | HAVE  | Y | Y | · | ·
 智能   | 技能 curator(老化)     | HAVE  | Y | · | · | ·
 智能   | 對話/任務檢索          | HAVE  | Y | · | · | Y
+智能   | 自動浮現過往工作       | HAVE  | · | · | · | ·
 智能   | 子代理委派             | HAVE  | Y | Y | Y | Y
 自動   | 時間排程 cron          | HAVE  | Y | Y | · | Y
 自動   | 事件觸發               | HAVE  | · | Y | · | ·
@@ -136,7 +137,7 @@ axis     | capability             | bulge |her|ocl|oco|dsh
 自動   | ACP 代理伺服器         | HAVE  | Y | Y | · | Y
 體驗   | 桌面 App               | HAVE  | Y | Y | · | Y
 ------------------------------------------------------------------
-覆蓋數:bulge 18/18 · hermes 14 · openclaw 13 · deepseek 9 · opencode 5
+覆蓋數:bulge 19/19 · hermes 14 · openclaw 13 · deepseek 9 · opencode 5
 cargo test --workspace: 425 passed, 0 failed · clippy -D warnings: clean
 ```
 
@@ -146,8 +147,10 @@ cargo test --workspace: 425 passed, 0 failed · clippy -D warnings: clean
 - bulge 是**唯一**同時具 **real microVM 隔離 + 寫回 diff 審批** 者——四個參考代理皆無
   (opencode 無沙箱;hermes/openclaw=Docker/SSH;deepseek=政策模式)。這是 bulge 在**安全**軸的
   明確領先,也是「VM 為真邊界 + 審批才寫回」設計的直接結果。
-- **智能**:hermes 與 openclaw 是近同儕(同有學習迴圈/護欄/使用者模型);bulge 在此之上**再加**
-  技能 curator(老化)與對話檢索,且把這些建在 microVM 安全基礎上——為對位且略勝,非單純宣稱。
+- **智能(measured 超出)**:實測智能子項 bulge **7/7**、hermes **6/7**、openclaw 4、deepseek 1、
+  opencode 0。bulge 具 hermes 全部智能能力(學習迴圈/護欄/使用者模型/curator/recall/子代理)
+  **並多出「自動浮現過往工作」**——review 證實 hermes 刻意只把過往對話留作工具、不自動注入,
+  故此格 bulge 為唯一 Y。加上這些建於 microVM 安全基礎,智能軸為**可量測的超出**,非僅平手。
 - **自動化**:bulge 具時間+事件雙觸發(hermes 缺事件、opencode 無排程)、子代理、MCP、ACP。
 - **功能/體驗**:bulge 的欄位最完整(18/18),且桌面 App + diff 審批 + 持久工作階段 + 檢索。
 

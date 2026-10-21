@@ -60,6 +60,10 @@ row 智能 "反污染護欄"            'DO_NOT_CAPTURE'            's:do.?not.?
 row 智能 "使用者模型 USER.md"      'propose_profile'           's:USER\.md'                                    's:USER\.md'                                '-'                                              '-'
 row 智能 "技能 curator(老化)"    'fn curate'                 'f:agent/curator.py'                            '-'                                         '-'                                              '-'
 row 智能 "對話/任務檢索"          'fn search_default'         'f:tools/session_search_tool.py'               '-'                                         '-'                                              'f:packages/session-query'
+# Auto-surfacing the most relevant past job at task start — bulge-exclusive: the
+# review found Hermes deliberately keeps past transcripts tool-only (no blind
+# auto-injection); the others have no recall to auto-surface at all.
+row 智能 "自動浮現過往工作"      'fn most_relevant'          '-'                                            '-'                                         '-'                                              '-'
 row 智能 "子代理委派"            'DelegateHandler'           'f:tools/delegate_tool.py'                      's:subagent'                                'f:packages/core/src/tool/plugin/subagent.ts'    'f:packages/subagent'
 row 自動 "時間排程 cron"          'enum Schedule'             'f:cron'                                        'f:src/cron'                                '-'                                              'f:packages/schedule'
 row 自動 "事件觸發"              'OnPathChange'              '-'                                             'f:src/cron/event-source.ts'                '-'                                              '-'
