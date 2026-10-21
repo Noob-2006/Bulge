@@ -417,12 +417,15 @@ body {
 .overlay {
   position: fixed; inset: 0; z-index: 50;
   display: flex; align-items: center; justify-content: center; padding: var(--space-5);
-  background: rgba(0, 0, 0, .45);
-  -webkit-backdrop-filter: blur(2px); backdrop-filter: blur(2px);
+  /* No backdrop-filter: on WebKitGTK (Tauri's Linux engine) a backdrop-filtered
+     overlay intercepts/misroutes pointer events, leaving the panel visible but
+     unclickable. A slightly darker scrim compensates for the lost blur. */
+  background: rgba(0, 0, 0, .6);
   animation: overlay-in var(--duration-normal) var(--ease-out);
 }
 @keyframes overlay-in { from { opacity: 0; } to { opacity: 1; } }
 .settings-panel {
+  position: relative; z-index: 1;
   width: min(760px, 100%); max-height: 90vh; overflow-y: auto;
   background: var(--popover); border-radius: var(--radius-xl); box-shadow: var(--shadow-xl);
   padding: var(--space-6); display: flex; flex-direction: column; gap: var(--space-2);
