@@ -243,3 +243,11 @@ Claude 之手**(先前 401 是把 key_cmd 放錯層級/用到保留 provider 名
 對照:`opencode` **無任何 schedule/cron 指令**(量測到的缺席),無法做時間自動化;dsh/hermes 有
 時間排程(對位),但**事件觸發(OnPathChange)為 bulge 所有、三者皆無**。故自動化軸:對 opencode
 為執行性超越,對 dsh/hermes 為對位加事件觸發的增量。
+
+## openclaw 建置嘗試(事實更新)
+
+為補第五方,對 openclaw 實際執行 `pnpm build`(node_modules 已安裝)。結果**失敗**:
+`ERR_UNKNOWN_FILE_EXTENSION`(其 `scripts/build-all.mts` 的 tsx loader 在此 Node 版本下無法
+載入),未產出 `dist/entry.mjs`,`node openclaw.mjs` 仍報 `unbuilt source tree`。因此 openclaw
+在此環境**已實際嘗試建置並失敗**(非含糊略過),無法端到端跑同題;縱使建成仍需 gateway/
+harness/憑證。四個參考代理中三個(dsh/opencode/hermes)已實跑,openclaw 為已驗證的不可建置。
