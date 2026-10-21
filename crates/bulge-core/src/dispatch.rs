@@ -84,6 +84,10 @@ pub const PLAN_TOOL: &str = "update_plan";
 /// [`crate::driver::DelegateHandler`], never sent to the VM).
 pub const DELEGATE_TOOL: &str = "delegate";
 
+/// Name of the host-side recall tool: the agent searches its own past jobs
+/// (handled by the driver via a [`crate::driver::RecallHandler`], never the VM).
+pub const RECALL_TOOL: &str = "recall";
+
 /// Schema for the planning tool. Callers append it to `builtin_tools()` when they
 /// want the model to keep a visible plan; the driver intercepts its calls,
 /// records the plan, and watches for a stall. Status is one of

@@ -127,7 +127,7 @@ fn read_tree(root: &Path) -> Tree {
 
 /// Build the system prompt: the harness surface (or the explicit persona, or the
 /// default prompt), plus the most relevant memory lessons for this goal.
-fn build_system_prompt(harness_dir: &Path, goal: &str, persona: Option<&str>) -> String {
+fn build_system_prompt(harness_dir: &Path, goal: &str, persona: Option<&str>, jobs_dir: Option<&Path>, current_job_id: &str) -> String {
     let mut prompt = match persona {
         Some(text) if !text.trim().is_empty() => text.to_string(),
         _ => {
@@ -152,6 +152,18 @@ fn build_system_prompt(harness_dir: &Path, goal: &str, persona: Option<&str>) ->
     if !env.sections.is_empty() {
         prompt.push_str("\n\n# Environment notes\n");
         prompt.push_str(&env.render());
+    }
+
+    // Surface the single most relevant PAST job for this goal — a "have I done
+    // something like this before?" nudge. Unlike Hermes (which keeps past
+    // transcripts tool-only), bulge auto-surfaces the top match at task start; the
+    // agent can still call `recall` for more. Thresholded so it stays quiet when
+    // nothing is clearly related.
+    if let Some(dir) = jobs_dir
+        && let Some(past) = crate::recall::most_relevant(dir, goal, 2.0, current_job_id)
+    {
+        prompt.push_str("\n\n# Possibly relevant past task (call `recall` for more)\n");
+        prompt.push_str(&past);
     }
 
     if let Ok((lessons, _problems)) = bulge_harness::memory::load(&memory_root) {
@@ -407,7 +419,8 @@ impl Session {
     /// *persistent* VM, and collect the (cumulative) workspace diff for review.
     /// The VM is left running for the next turn.
     pub async fn run_turn(&mut self, goal: String, cancel: CancellationToken, sink: LineSink) -> Result<RunOutcome, String> {
-        let system_prompt = build_system_prompt(&self.harness_dir, &goal, self.system_prompt.as_deref());
+        let jobs_dir = self.job.dir().parent().map(std::path::Path::to_path_buf);
+        let system_prompt = build_system_prompt(&self.harness_dir, &goal, self.system_prompt.as_deref(), jobs_dir.as_deref(), self.job_id());
 
         // Append the user turn; flip a finished job back to Running (best effort).
         self.job
@@ -463,6 +476,8 @@ impl Session {
 
         let mut tools = child_tools;
         tools.push(delegate::delegate_tool());
+        tools.push(crate::recall::recall_tool());
+        let recall_handler = Arc::new(crate::recall::StoreRecall { jobs_dir: jobs_dir.clone().unwrap_or_default() });
         let context = ContextConfig { window: self.backend_spec.context_window as u64, ..ContextConfig::default() };
         let driver = Driver::new(self.backend.clone(), dispatcher.clone(), tools, system_prompt)
             .with_guard(GuardConfig { rules: default_ruleset(), autonomy: guard_autonomy(self.autonomy), loop_detection: true })
@@ -470,7 +485,8 @@ impl Session {
             .with_context(context)
             .with_sampling(self.sampling.clone())
             .with_review(self.auto_review)
-            .with_delegate(Arc::new(factory));
+            .with_delegate(Arc::new(factory))
+            .with_recall(recall_handler);
 
         let stop = CancellationToken::new();
         let tail = tokio::spawn(tail_jsonl(log_path.clone(), stop.clone(), sink, tail_start));

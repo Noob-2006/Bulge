@@ -21,7 +21,7 @@ use tokio_util::sync::CancellationToken;
 use crate::budget::{BudgetState, BudgetTracker};
 use crate::complete::{self, Check, GateReport};
 use crate::context::{self, PruneConfig};
-use crate::dispatch::{DELEGATE_TOOL, PLAN_TOOL, ToolCall, ToolDispatcher};
+use crate::dispatch::{DELEGATE_TOOL, PLAN_TOOL, RECALL_TOOL, ToolCall, ToolDispatcher};
 use crate::schedule::{CallOutcome, PlannedCall, run_tool_calls};
 
 /// Runs a delegated sub-task on behalf of the driver and returns its summary.
@@ -31,6 +31,12 @@ use crate::schedule::{CallOutcome, PlannedCall, run_tool_calls};
 /// itself is `Send + Sync` so it can live in the `Arc`-shared [`Driver`].
 pub trait DelegateHandler: Send + Sync {
     fn run<'a>(&'a self, goal: String, context: Option<String>, cancel: CancellationToken) -> LocalBoxFuture<'a, Result<String, String>>;
+}
+
+/// Searches the agent's own past jobs and returns a short, model-ready digest.
+/// Pure host-side (file search), so it is synchronous.
+pub trait RecallHandler: Send + Sync {
+    fn recall(&self, query: &str, limit: usize) -> String;
 }
 
 /// Steps with a non-empty plan and no item reaching `done` before the driver
@@ -129,6 +135,8 @@ pub struct Driver {
     /// Handles `delegate` tool calls (runs a sub-agent). `None` → the tool, if the
     /// model calls it at all, is treated as an unknown tool.
     delegate: Option<Arc<dyn DelegateHandler>>,
+    /// Handles `recall` tool calls (searches past jobs). `None` → unknown tool.
+    recall: Option<Arc<dyn RecallHandler>>,
 }
 
 impl Driver {
@@ -145,6 +153,7 @@ impl Driver {
             sampling: Sampling::default(),
             review: false,
             delegate: None,
+            recall: None,
         }
     }
 
@@ -160,6 +169,13 @@ impl Driver {
     /// sub-agent (handled here on the host, never sent to the VM).
     pub fn with_delegate(mut self, handler: Arc<dyn DelegateHandler>) -> Self {
         self.delegate = Some(handler);
+        self
+    }
+
+    /// Install a recall handler so the model's `recall` tool calls search past
+    /// jobs (handled here on the host, never sent to the VM).
+    pub fn with_recall(mut self, handler: Arc<dyn RecallHandler>) -> Self {
+        self.recall = Some(handler);
         self
     }
 
@@ -469,6 +485,22 @@ impl Driver {
                         Ok(summary) => CallOutcome::Ok(serde_json::json!({ "summary": summary })),
                         Err(message) => CallOutcome::Err { code: "DELEGATE_FAILED".into(), message },
                     }
+                };
+                host.insert(call.id.clone(), outcome);
+            }
+        }
+        if let Some(handler) = self.recall.clone() {
+            for call in &calls {
+                if call.name != RECALL_TOOL {
+                    continue;
+                }
+                let args = parse_lenient(&call.arguments);
+                let query = args.get("query").and_then(Value::as_str).unwrap_or("").trim().to_string();
+                let outcome = if query.is_empty() {
+                    CallOutcome::Err { code: "BAD_RECALL".into(), message: "recall needs a non-empty `query`".into() }
+                } else {
+                    let limit = args.get("limit").and_then(Value::as_u64).unwrap_or(5).clamp(1, 20) as usize;
+                    CallOutcome::Ok(serde_json::json!({ "results": handler.recall(&query, limit) }))
                 };
                 host.insert(call.id.clone(), outcome);
             }

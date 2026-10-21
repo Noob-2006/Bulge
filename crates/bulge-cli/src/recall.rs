@@ -250,6 +250,54 @@ fn recall(args: &[String]) -> Result<(), String> {
     Ok(())
 }
 
+// ---- agent-facing recall tool (host-handled by the driver) ----
+
+/// Schema for the `recall` tool the model may call to search its own past jobs.
+pub fn recall_tool() -> bulge_llm::ToolSchema {
+    bulge_llm::ToolSchema {
+        name: bulge_core::dispatch::RECALL_TOOL.into(),
+        description: "Search your OWN past jobs (their transcripts) by keyword and get back a short \
+            digest of the most relevant ones. Use it to reuse earlier work or decisions on a similar \
+            task instead of starting from scratch. Supports English and Chinese queries."
+            .into(),
+        parameters: serde_json::json!({
+            "type": "object",
+            "properties": {
+                "query": { "type": "string", "description": "Keywords describing what to recall." },
+                "limit": { "type": "integer", "description": "Max results (default 5)." }
+            },
+            "required": ["query"]
+        }),
+        defer_loading: false,
+    }
+}
+
+/// A [`bulge_core::driver::RecallHandler`] over a job store directory.
+pub struct StoreRecall {
+    pub jobs_dir: PathBuf,
+}
+
+impl bulge_core::driver::RecallHandler for StoreRecall {
+    fn recall(&self, query: &str, limit: usize) -> String {
+        let hits = search(&self.jobs_dir, query, limit);
+        if hits.is_empty() {
+            return "No matching past jobs.".to_string();
+        }
+        let mut out = String::new();
+        for h in hits {
+            out.push_str(&format!("- [{}] {} (score {:.1})\n    {}\n", h.job_id, h.title, h.score, h.snippet));
+        }
+        out
+    }
+}
+
+/// The single most relevant past job for `goal` above `min_score`, as a one-line
+/// digest for auto-injection into the system prompt — a lightweight "have I done
+/// something like this before?" nudge. `None` when nothing is clearly relevant.
+pub fn most_relevant(jobs_dir: &Path, goal: &str, min_score: f32, exclude_id: &str) -> Option<String> {
+    let hit = search(jobs_dir, goal, 4).into_iter().find(|h| h.job_id != exclude_id && h.score >= min_score)?;
+    Some(format!("[{}] {} — {}", hit.job_id, hit.title, hit.snippet))
+}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -343,3 +391,4 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 }
+
