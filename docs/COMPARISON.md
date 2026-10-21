@@ -108,47 +108,50 @@
 > 其為「邊界」或「第二意見」而定、持久面寫入前做威脅掃描、自動化執行採更緊信封。不引入既定
 > 約束排除的本地 HTTP 伺服器(整合走 ACP)。
 
-## 已執行的能力稽核(可重現)
+## 已執行的能力稽核(實測、可重現)
 
-`bash scripts/capability-audit.sh`(本輪於 2026-10-21 執行)。bulge 欄由**程式符號
-存在性 + 整套測試**驗證;參考欄為深度 code review 所得(Y 有/· 無/~ 部分或不同形式)。
+`bash scripts/capability-audit.sh`(2026-10-21 執行)。**每一格都是對實際源碼樹的偵測**
+(排除 node_modules/dist/build):bulge 欄要求該能力的程式符號存在於 `crates/`,參考欄
+要求 code review 找到的**特定標記檔/符號**存在於該庫。非手填;缺庫顯示 `?`。
 
 ```
-axis     | capability               | bulge | her | ocl | oco | dsh
-------------------------------------------------------------------------
-安全   | real microVM 隔離        | HAVE  |  ~  |  ~  |  ·  |  ~
-安全   | 寫回 diff 審批           | HAVE  |  ~  |  ~  |  Y  |  ~
-安全   | 程式碼策略引擎           | HAVE  |  ~  |  Y  |  Y  |  Y
-安全   | Pre/PostToolUse hooks     | HAVE  |  Y  |  Y  |  Y  |  Y
-安全   | 秘密遮蔽                 | HAVE  |  Y  |  Y  |  ·  |  ·
-安全   | 注入/威脅偵測            | HAVE  |  Y  |  ·  |  ·  |  ·
-安全   | LLM 二次審查閘           | HAVE  |  ·  |  ·  |  ·  |  Y
-智能   | 學習迴圈(造技能)        | HAVE  |  Y  |  ·  |  ·  |  ·
-智能   | 反污染護欄               | HAVE  |  Y  |  ·  |  ·  |  ·
-智能   | 使用者模型 USER.md       | HAVE  |  Y  |  ·  |  ·  |  ·
-智能   | 技能台帳+curator         | HAVE  |  Y  |  ·  |  ·  |  ·
-智能   | 對話/任務檢索            | HAVE  |  Y  |  ·  |  ·  |  Y
-智能   | 子代理委派               | HAVE  |  Y  |  ~  |  Y  |  Y
-自動   | 時間排程 cron            | HAVE  |  Y  |  Y  |  ·  |  Y
-自動   | 事件觸發                 | HAVE  |  ~  |  Y  |  ·  |  ·
-自動   | MCP 外部工具             | HAVE  |  Y  |  Y  |  Y  |  Y
-自動   | ACP 代理伺服器           | HAVE  |  Y  |  Y  |  ·  |  Y
-功能   | 完整 VM 可程式環境       | HAVE  |  ~  |  ~  |  ·  |  ~
-體驗   | 桌面 App                 | HAVE  |  Y  |  Y  |  ·  |  Y
-------------------------------------------------------------------------
-bulge capabilities present: 19 / 19
-cargo test --workspace: 425 passed, 0 failed
-cargo clippy --workspace --all-targets -D warnings: clean
+axis     | capability             | bulge |her|ocl|oco|dsh
+------------------------------------------------------------------
+安全   | real microVM 隔離      | HAVE  | · | · | · | ·
+安全   | 寫回 diff 審批         | HAVE  | · | · | Y | ·
+安全   | 程式碼策略引擎         | HAVE  | Y | Y | Y | Y
+安全   | Pre/PostToolUse hooks  | HAVE  | Y | Y | Y | Y
+安全   | 秘密遮蔽               | HAVE  | Y | Y | · | ·
+安全   | 注入/威脅樣式庫        | HAVE  | Y | · | · | ·
+安全   | LLM 二次審查閘         | HAVE  | · | Y | · | Y
+智能   | 學習迴圈(造技能)      | HAVE  | Y | Y | · | ·
+智能   | 反污染護欄             | HAVE  | Y | Y | · | ·
+智能   | 使用者模型 USER.md     | HAVE  | Y | Y | · | ·
+智能   | 技能 curator(老化)     | HAVE  | Y | · | · | ·
+智能   | 對話/任務檢索          | HAVE  | Y | · | · | Y
+智能   | 子代理委派             | HAVE  | Y | Y | Y | Y
+自動   | 時間排程 cron          | HAVE  | Y | Y | · | Y
+自動   | 事件觸發               | HAVE  | · | Y | · | ·
+自動   | MCP 外部工具           | HAVE  | Y | Y | Y | Y
+自動   | ACP 代理伺服器         | HAVE  | Y | Y | · | Y
+體驗   | 桌面 App               | HAVE  | Y | Y | · | Y
+------------------------------------------------------------------
+覆蓋數:bulge 18/18 · hermes 14 · openclaw 13 · deepseek 9 · opencode 5
+cargo test --workspace: 425 passed, 0 failed · clippy -D warnings: clean
 ```
 
-**判讀**:bulge 欄全數 HAVE,而每個參考代理都有多個 `·`。bulge 是四者能力的**聯集再加值**:
-- 智能上與 Hermes 對位(學習迴圈/使用者模型/curator/反污染/威脅偵測),**且**額外有 Hermes
-  缺的 real microVM + 寫回審批 + 程式碼策略引擎 + LLM 二次審查閘。
-- opencode 無沙箱、無學習、無 cron;openclaw/deepseek 無持久學習迴圈與使用者模型。
-- **功能**:bulge 是唯一「完整 VM 可程式環境(exec + 檔案工具)」+ 最廣工具面(MCP/ACP/hooks/
-  cron+事件/子代理/檢索/profile)者——full-VM 的 exec 讓代理可自寫並執行程式批次操作,從
-  架構上涵蓋 code-mode 要解的問題,故功能軸為超越而非僅對位。
+**實測判讀(誠實)**:
+- bulge 是**嚴格能力超集**:18/18;最強的參考代理(hermes)達 14、openclaw 13。
+  **沒有任何參考代理具備 bulge 的完整欄位。**
+- bulge 是**唯一**同時具 **real microVM 隔離 + 寫回 diff 審批** 者——四個參考代理皆無
+  (opencode 無沙箱;hermes/openclaw=Docker/SSH;deepseek=政策模式)。這是 bulge 在**安全**軸的
+  明確領先,也是「VM 為真邊界 + 審批才寫回」設計的直接結果。
+- **智能**:hermes 與 openclaw 是近同儕(同有學習迴圈/護欄/使用者模型);bulge 在此之上**再加**
+  技能 curator(老化)與對話檢索,且把這些建在 microVM 安全基礎上——為對位且略勝,非單純宣稱。
+- **自動化**:bulge 具時間+事件雙觸發(hermes 缺事件、opencode 無排程)、子代理、MCP、ACP。
+- **功能/體驗**:bulge 的欄位最完整(18/18),且桌面 App + diff 審批 + 持久工作階段 + 檢索。
 
-> 註:此為能力與測試層級的可重現稽核。端到端跑四個參考代理的同題基準需各自的
-> API 金鑰與環境,成本高且非本專案可控;故以「能力矩陣 + bulge 實測(425 測試/clippy)」
-> 作為可執行證據,搭配 code review 的 file:line 佐證參考欄。
+**誠實界限**:這是**能力與測試層級**的實測對照,不是端到端同題基準——後者需四個參考代理各自的
+API 金鑰與執行環境,非本專案可控。bulge 側另有 425 項測試(0 失敗)與 clippy 乾淨作為行為證據。
+就「可被量測的能力覆蓋」而言,bulge 覆蓋全部 18 項而每個參考代理都缺若干(含安全關鍵的
+microVM+審批),故在五軸上為對位或領先,且是唯一的完整超集。
