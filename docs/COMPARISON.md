@@ -233,3 +233,13 @@ Claude 之手**(先前 401 是把 key_cmd 放錯層級/用到保留 provider 名
 真實檔案**;**只有 bulge 把變更留沙箱、要求審批才寫回**。這是「VM 為真邊界 + 寫回審批」在真實
 執行中、對**每一個能在此跑通的參考代理**的安全展示性超越。(openclaw 需其 gateway/provider
 設定,無法在此環境跑通,未納入;其能力對照見源碼實測矩陣。)
+
+## 已執行的自動化量測(非能力計數)
+
+真正跑了 bulge 的排程:`bulge schedule add --after 3 --goal "write DONE into auto.txt"` → `bulge schedule tick`。
+量測結果:到期後 bulge **自主執行該任務**(status Succeeded、寫出 `auto.txt`=`DONE`、**輸出留沙箱
+的 changes.diff**、one-shot 自動停用 `runs=1`)——自動化在真實執行中完成,且仍保有寫回審批。
+
+對照:`opencode` **無任何 schedule/cron 指令**(量測到的缺席),無法做時間自動化;dsh/hermes 有
+時間排程(對位),但**事件觸發(OnPathChange)為 bulge 所有、三者皆無**。故自動化軸:對 opencode
+為執行性超越,對 dsh/hermes 為對位加事件觸發的增量。
