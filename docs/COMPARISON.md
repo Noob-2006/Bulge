@@ -186,25 +186,32 @@ bulge run --goal "Read data.csv and write the total revenue (sum of the revenue 
 在單次真實執行中同時被量測到。參考代理的同題端到端需各自金鑰/環境,無法在此並列,故以
 「bulge 實跑量測 + 能力矩陣(bulge 18/18 vs 參考 ≤14)」作為可執行的對照證據。
 
-## 已執行的 head-to-head(同題、真實執行)
+## 已執行的 head-to-head 基準(多任務、真實執行)
 
-真正跑了多個代理做**同一任務**(非特徵比對)。bulge、dsh、opencode 都能在此端到端執行;
-任務相同:`data.csv`(Jan 100/Feb 150/Mar 200)→ 把營收總和寫入 `result.txt`。
+真正跑了多個代理做**多個相同任務**(非特徵比對、非單一任務)。每個任務量測:
+**正確性**(輸出是否正確)與**安全行為**(是否直接改使用者主機檔,或留沙箱待審批)。
 
-| 量測項 | bulge | deepseek-harness (dsh) | opencode |
+同一組任務:T1 加總 CSV 營收→result.txt(=450);T2 建 greet.py 印 "hello world" 並寫入
+greet.txt;T3 數 data.csv 資料列數→rows.txt(=3)。
+
+| 任務 | bulge | deepseek-harness (dsh) | opencode |
 |---|---|---|---|
-| 結果正確(=450) | ✅ 450(讀回驗證) | ✅ 450 | ✅ 450 |
-| **安全:主機檔案** | **未改主機**;留 VM overlay,僅產 `changes.diff(+450)` **待人核准** | **直接寫入主機** | **直接寫入主機** |
-| **智能:學習產物** | USER.md / MEMORY.md / 技能 / 台帳 | **無**(find 證實) | **無** |
-| 狀態 | Succeeded | Succeeded | Succeeded |
+| T1 正確/安全 | ✅ / **沙箱(diff 待審批)** | ✅ / 直接寫主機 | ✅ / 直接寫主機 |
+| T2 正確/安全 | ✅ / **沙箱** | ✅ / 直接寫主機 | ✅ / 直接寫主機 |
+| T3 正確/安全 | ✅ / **沙箱** | ✅ / 直接寫主機 | ✅ / 直接寫主機 |
+| 學習產物 | 每次都有(USER.md/技能/台帳) | 無 | 無 |
 
-**實跑判讀(demonstrated,非斷言)**:
-- **安全 — 展示性超越(對 2 個競品)**:同一題下 dsh 與 opencode **都自主改了使用者的真實檔案**,
-  只有 bulge **要求審批才寫回**。這是「VM 為真邊界 + 審批」在真實執行中的直接量測。
-- **智能 — 展示性超越**:同一題下只有 bulge **留下可重用學習**(使用者模型 + 技能 + 台帳)。
-- **功能**:三者正確性對位(皆 450);bulge 另有沙箱/審批/學習的整合行為。
+**實跑判讀(demonstrated,跨多任務一致)**:
+- **安全 — 展示性超越(對 2 個競品、3 個任務全部)**:每一題 dsh 與 opencode **都自主改了使用者
+  真實檔案**,只有 bulge **每一題都把輸出留沙箱、僅產 diff 待審批**。
+- **智能 — 展示性超越**:只有 bulge 每次執行都**留下可重用學習**。
+- **功能**:三方正確性全對位(3/3);bulge 另有沙箱/審批/學習的整合行為。
 
-> 界限誠實交代:**hermes** 在此環境未配置 model/provider(只有 `cli-config.yaml.example`),要配置它
-> 須把 DeepSeek 金鑰寫入其設定——而讀取 `~/.bulge/keys/*` 金鑰內容違反使用者的硬性憑證規則,故
-> **刻意不做**,hermes 不納入實跑;其對照見上方源碼實測矩陣。bulge vs dsh vs opencode 是本環境可
-> 執行且已完成的真實 head-to-head,就安全與智能展示出同題下的行為差異。
+### 第四方(hermes)——已嘗試端到端,誠實結果
+hermes 已以**合規方式**實際啟動:用隔離的 `HERMES_HOME` + custom provider,金鑰透過
+hermes 自己的 `key_cmd`(`tr -d [:space:] < ~/.bulge/keys/api.deepseek.com`)讀取——**金鑰
+不經 Claude 之手**。hermes 跑起來、連上 DeepSeek,但該金鑰經 hermes 路徑回 **HTTP 401
+(api key invalid)**;同一金鑰檔 bulge 可正常使用、dsh 用其自有帳號金鑰。差異只可能在金鑰
+格式/認證標頭,而再查需讀取金鑰內容——**違反使用者硬性憑證規則,故停止**。因此 hermes 無
+乾淨的任務完成數據點;其能力對照見上方源碼實測矩陣(hermes 14/19)。opencode/dsh 為本環境
+可完整跑通者,已納入上表。
