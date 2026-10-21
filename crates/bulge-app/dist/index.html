@@ -162,6 +162,40 @@
           </div>
           <div id="exec-msg" class="inline-msg settings-msg"></div>
         </div>
+
+        <div class="settings-section-label">取樣</div>
+        <div class="settings-group">
+          <div class="settings-row">
+            <div><div class="row-title">溫度</div><div class="row-desc">0 最穩定、數值越高越發散。留空用模型預設。</div></div>
+            <input id="temperature" type="number" min="0" max="2" step="0.1" class="control control-num" placeholder="預設" />
+          </div>
+          <div class="settings-row">
+            <div><div class="row-title">推理強度</div><div class="row-desc">支援推理的模型才有效(如 DeepSeek Reasoner)。</div></div>
+            <select id="reasoning" class="control">
+              <option value="">預設(不指定)</option>
+              <option value="off">關閉</option>
+              <option value="low">低</option>
+              <option value="high">高</option>
+              <option value="max">最高</option>
+            </select>
+          </div>
+          <div class="settings-row">
+            <div><div class="row-title">單次輸出上限</div><div class="row-desc">每次回覆的最大 token 數。</div></div>
+            <input id="max-tokens" type="number" min="256" step="256" class="control control-num" />
+          </div>
+          <div class="settings-row">
+            <div><div class="row-title">上下文長度</div><div class="row-desc">模型可用的上下文 token;也決定何時壓縮與計量條滿格。</div></div>
+            <input id="context-window" type="number" min="8192" step="1024" class="control control-num" />
+          </div>
+        </div>
+
+        <div class="settings-section-label">人設</div>
+        <div class="settings-group">
+          <div class="settings-row settings-row-col">
+            <div><div class="row-title">系統提示 / 人設</div><div class="row-desc">留空則用內建謹慎代理提示。填寫會取代它(記憶中的教訓仍會附加)。</div></div>
+            <textarea id="system-prompt" class="control control-area" rows="4" placeholder="例如:你是一位嚴謹的資料分析助理,先驗證再下結論…"></textarea>
+          </div>
+        </div>
       </div>
     </div>
 

@@ -312,6 +312,7 @@ async function loadDefaults() {
     $("model").value = d.model; $("base-url").value = d.base_url;
     $("protocol").value = d.protocol; $("autonomy").value = d.autonomy;
     $("cpus").value = d.cpus; $("ram").value = d.ram_mib;
+    $("context-window").value = d.context_window; $("max-tokens").value = d.max_tokens;
   } catch (e) { /* keep html defaults */ }
   await refreshKeyStatus();
 }
@@ -437,14 +438,16 @@ async function startJob() {
   const liveSession = currentHandle;   // continue the live VM if we still have one
   const resumeJob = currentJobId;      // else resume this stored conversation
   const continuing = !!liveSession || !!resumeJob;
+  const ctx = Number($("context-window").value) || 128000;
   if (!continuing) {
     resetTranscript();
     $("job-title").textContent = clip(goal.split("\n")[0], 60);
-    contextWindow = 128000;
+    contextWindow = ctx;
   }
   $("review").classList.add("hidden");
   renderUserMessage(goal);
 
+  const temp = $("temperature").value.trim();
   const args = {
     session: liveSession || null,
     job_id: resumeJob || null,
@@ -452,6 +455,11 @@ async function startJob() {
     model: $("model").value.trim(), base_url: $("base-url").value.trim(),
     protocol: $("protocol").value, autonomy: $("autonomy").value,
     network: $("network").checked, cpus: Number($("cpus").value) || 2, ram_mib: Number($("ram").value) || 1024,
+    temperature: temp === "" ? null : Number(temp),
+    reasoning_effort: $("reasoning").value || null,
+    max_tokens: Number($("max-tokens").value) || 8192,
+    context_window: ctx,
+    system_prompt: $("system-prompt").value.trim() || null,
   };
   try {
     currentHandle = await invoke("start_job", { args });

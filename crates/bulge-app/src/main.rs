@@ -79,6 +79,8 @@ struct Defaults {
     autonomy: String,
     cpus: u8,
     ram_mib: u32,
+    context_window: u32,
+    max_tokens: u32,
 }
 
 /// Everything the UI sends to start (or continue) a job. Fixed budgets/limits
@@ -102,6 +104,17 @@ struct StartArgs {
     network: bool,
     cpus: u8,
     ram_mib: u32,
+    /// Sampling / persona (all optional; absent means the provider/app default).
+    #[serde(default)]
+    temperature: Option<f32>,
+    #[serde(default)]
+    reasoning_effort: Option<String>,
+    #[serde(default)]
+    max_tokens: Option<u32>,
+    #[serde(default)]
+    context_window: Option<u32>,
+    #[serde(default)]
+    system_prompt: Option<String>,
 }
 
 /// One streamed log line, tagged with the session it belongs to.
@@ -199,6 +212,20 @@ fn defaults() -> Defaults {
         autonomy: "autonomous".into(),
         cpus: 2,
         ram_mib: 1024,
+        context_window: 128_000,
+        max_tokens: 8_192,
+    }
+}
+
+/// Parse the optional reasoning-effort selector into the LLM enum.
+fn parse_reasoning(value: Option<&str>) -> Option<bulge_llm::ReasoningEffort> {
+    use bulge_llm::ReasoningEffort::{High, Low, Max, Off};
+    match value {
+        Some("off") => Some(Off),
+        Some("low") => Some(Low),
+        Some("high") => Some(High),
+        Some("max") => Some(Max),
+        _ => None,
     }
 }
 
@@ -287,6 +314,14 @@ fn build_config(args: &StartArgs) -> Result<RunConfig, String> {
     let title: String = args.goal.lines().next().unwrap_or("job").chars().take(80).collect();
     let host = host_of(&args.base_url);
 
+    let reasoning_effort = parse_reasoning(args.reasoning_effort.as_deref());
+    // A reasoning effort is only sent when the model is treated as a reasoning
+    // model, so selecting low/high/max turns that on; "off"/unset leaves it off.
+    let reasoning = matches!(reasoning_effort, Some(bulge_llm::ReasoningEffort::Low | bulge_llm::ReasoningEffort::High | bulge_llm::ReasoningEffort::Max));
+    let context_window = args.context_window.unwrap_or(128_000).max(8_192);
+    let out_cap = args.max_tokens.unwrap_or(8_192).clamp(256, 200_000);
+    let system_prompt = args.system_prompt.as_ref().map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
+
     Ok(RunConfig {
         job_id: args.job_id.clone(),
         goal: args.goal.clone(),
@@ -301,15 +336,15 @@ fn build_config(args: &StartArgs) -> Result<RunConfig, String> {
             base_url: args.base_url.clone(),
             protocol,
             model: args.model.clone(),
-            context_window: 128_000,
-            max_tokens: 8_192,
-            reasoning: false,
+            context_window,
+            max_tokens: out_cap,
+            reasoning,
         },
         network: args.network,
         cpus: args.cpus,
         ram_mib: args.ram_mib,
-        sampling: Sampling::default(),
-        system_prompt: None,
+        sampling: Sampling { temperature: args.temperature, reasoning_effort, max_tokens: Some(out_cap) },
+        system_prompt,
         // Filled in by start_job with the session's egress-approval channel.
         egress_approvals: None,
     })
