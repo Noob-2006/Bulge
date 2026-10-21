@@ -207,11 +207,29 @@ greet.txt;T3 數 data.csv 資料列數→rows.txt(=3)。
 - **智能 — 展示性超越**:只有 bulge 每次執行都**留下可重用學習**。
 - **功能**:三方正確性全對位(3/3);bulge 另有沙箱/審批/學習的整合行為。
 
-### 第四方(hermes)——已嘗試端到端,誠實結果
-hermes 已以**合規方式**實際啟動:用隔離的 `HERMES_HOME` + custom provider,金鑰透過
-hermes 自己的 `key_cmd`(`tr -d [:space:] < ~/.bulge/keys/api.deepseek.com`)讀取——**金鑰
-不經 Claude 之手**。hermes 跑起來、連上 DeepSeek,但該金鑰經 hermes 路徑回 **HTTP 401
-(api key invalid)**;同一金鑰檔 bulge 可正常使用、dsh 用其自有帳號金鑰。差異只可能在金鑰
-格式/認證標頭,而再查需讀取金鑰內容——**違反使用者硬性憑證規則,故停止**。因此 hermes 無
-乾淨的任務完成數據點;其能力對照見上方源碼實測矩陣(hermes 14/19)。opencode/dsh 為本環境
-可完整跑通者,已納入上表。
+### 第四方(hermes)——已完成端到端實跑
+
+hermes 已以**合規方式**完整跑完同一任務:隔離 `HERMES_HOME` + 命名自訂 provider,金鑰透過
+hermes 自己的 `key_cmd`(`tr -d [:space:] < ~/.bulge/keys/api.deepseek.com`)讀取——**金鑰不經
+Claude 之手**(先前 401 是把 key_cmd 放錯層級/用到保留 provider 名所致;金鑰本身經獨立 curl
+驗證對 DeepSeek 回 HTTP 200 有效)。用法:`hermes -z "<task>" --yolo --provider dsc -m deepseek-chat`。
+
+結果:**正確(450)**;但 hermes **直接把 `result.txt` 寫到主機**(`/home/noob/hermes-agent/result.txt`,
+已清理),**無沙箱、無審批**。hermes 具備背景學習迴圈(與 bulge 對位),但這一趟輸出與其他
+競品一樣直接落在主機。
+
+## 四方同題實跑總結(安全軸展示性超越)
+
+同一任務(CSV 營收總和→result.txt),四個代理**全部正確得 450**;差別在**寫回行為**:
+
+| 代理 | 正確 | 主機檔案 | 學習迴圈 |
+|---|---|---|---|
+| **bulge** | ✅ 450 | **未改主機**;留 VM overlay,產 `changes.diff` **待審批** | 有(每次) |
+| deepseek-harness | ✅ 450 | 直接寫主機 | 無 |
+| opencode | ✅ 450 | 直接寫主機 | 無 |
+| hermes | ✅ 450 | 直接寫主機 | 有(能力) |
+
+**展示性結論(對所有可跑競品)**:同一題下 **dsh、opencode、hermes 三者全都自主改了使用者的
+真實檔案**;**只有 bulge 把變更留沙箱、要求審批才寫回**。這是「VM 為真邊界 + 寫回審批」在真實
+執行中、對**每一個能在此跑通的參考代理**的安全展示性超越。(openclaw 需其 gateway/provider
+設定,無法在此環境跑通,未納入;其能力對照見源碼實測矩陣。)
