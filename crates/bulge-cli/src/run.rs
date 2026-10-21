@@ -17,6 +17,7 @@ use std::time::Duration;
 
 use bulge_core::driver::{CompletionConfig, ContextConfig, Driver, GuardConfig, LoopOutcome};
 pub use bulge_core::driver::Sampling;
+use bulge_core::hooks::{HookConfig, HookRunner, HookedDispatcher};
 use bulge_core::mcp::{self, CompositeDispatcher, McpBundle};
 use bulge_core::{ToolDispatcher, VmDispatcher, builtin_tools, plan_tool};
 use bulge_guard::{Effect, Rule};
@@ -266,6 +267,8 @@ pub struct Session {
     egress_approvals: Option<bulge_vm::net::EgressApprovalTx>,
     /// Connected MCP servers (kept alive for the session) plus their tool routing.
     mcp: McpBundle,
+    /// User-declared lifecycle hooks (`~/.bulge/hooks.json`), shared across turns.
+    hooks: Arc<HookRunner>,
     /// The VM shape last launched with; restart tweaks these.
     vm_config: VmConfig,
 }
@@ -321,6 +324,22 @@ impl Session {
             }
         };
 
+        // Load user-declared lifecycle hooks (~/.bulge/hooks.json). Best-effort:
+        // a malformed file loses its hooks but never blocks the run.
+        let hooks = match HookConfig::load(&home.join(".bulge/hooks.json")) {
+            Ok(cfg) => {
+                if !cfg.is_empty() {
+                    let count: usize = cfg.hooks.values().map(Vec::len).sum();
+                    eprintln!("hooks: {count} matcher group(s) loaded");
+                }
+                Arc::new(HookRunner::new(cfg))
+            }
+            Err(e) => {
+                eprintln!("hooks: {e}");
+                Arc::new(HookRunner::default())
+            }
+        };
+
         Ok(Self {
             backend,
             vm,
@@ -333,6 +352,7 @@ impl Session {
             system_prompt: config.system_prompt,
             egress_approvals: config.egress_approvals,
             mcp,
+            hooks,
             vm_config,
         })
     }
@@ -367,10 +387,17 @@ impl Session {
         // restarted VM is picked up) — cheap; the VM is the expensive part. MCP
         // tools (if any) route to their server; everything else goes to the VM.
         let vm_dispatcher = Arc::new(VmDispatcher::new(self.vm.clone(), Duration::from_secs(120)));
-        let dispatcher: Arc<dyn ToolDispatcher> = if self.mcp.routes.is_empty() {
+        let base: Arc<dyn ToolDispatcher> = if self.mcp.routes.is_empty() {
             vm_dispatcher
         } else {
             Arc::new(CompositeDispatcher::new(vm_dispatcher, self.mcp.routes.clone()))
+        };
+        // Wrap in the lifecycle-hook layer (a no-op pass-through when no hooks are
+        // declared). PreToolUse may block/rewrite a call; PostToolUse may inject.
+        let dispatcher: Arc<dyn ToolDispatcher> = if self.hooks.is_empty() {
+            base
+        } else {
+            Arc::new(HookedDispatcher::new(base, self.hooks.clone()))
         };
         let mut tools = builtin_tools();
         tools.push(plan_tool());
