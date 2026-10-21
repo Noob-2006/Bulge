@@ -18,7 +18,7 @@
 //! home; the agent's own fetches can only reach approved hosts.
 
 use std::collections::HashSet;
-use std::net::{SocketAddr, ToSocketAddrs};
+use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -142,6 +142,10 @@ pub struct GatewayConfig {
     pub approvals: Option<EgressApprovalTx>,
     /// Hosts the user has already approved this session (so repeats don't re-ask).
     pub approved: Arc<Mutex<HashSet<String>>>,
+    /// The host's own interface addresses. A destination that resolves to one of
+    /// these is refused even when it is a public IP, so an allowlisted/approved
+    /// name can't be pointed back at a service on this machine.
+    pub host_addrs: Arc<HashSet<IpAddr>>,
 }
 
 /// Serve the gateway on `socket_path` (the host end of the bridged vsock port)
@@ -196,8 +200,9 @@ async fn handle(mut stream: UnixStream, config: GatewayConfig) -> std::io::Resul
             config.approved.lock().await.insert(host_key);
         }
     }
-    // Resolve and reject any address in a forbidden (private/metadata/…) range.
-    let targets = resolve_allowed(&request.host, request.port);
+    // Resolve and reject any address in a forbidden (private/metadata/…) range
+    // or belonging to this host itself.
+    let targets = resolve_allowed(&request.host, request.port, &config.host_addrs);
     if targets.is_empty() {
         return deny(&mut stream, &config.stats.denied_policy, "ERR unresolved or forbidden").await;
     }
@@ -248,11 +253,17 @@ async fn read_header_line(stream: &mut UnixStream) -> Option<String> {
     String::from_utf8(buf).ok()
 }
 
-/// Resolve `host:port`, returning every address that is NOT in a forbidden
-/// range. Empty if resolution fails or every address is forbidden.
-fn resolve_allowed(host: &str, port: u16) -> Vec<SocketAddr> {
+/// Whether an address must never be connected to: a special-use/private/metadata
+/// range, or one of the host's own interface addresses (including its public IP).
+fn addr_forbidden(ip: IpAddr, host_addrs: &HashSet<IpAddr>) -> bool {
+    is_forbidden_destination(ip) || host_addrs.contains(&ip)
+}
+
+/// Resolve `host:port`, returning every address that is NOT forbidden. Empty if
+/// resolution fails or every address is forbidden.
+fn resolve_allowed(host: &str, port: u16, host_addrs: &HashSet<IpAddr>) -> Vec<SocketAddr> {
     match (host, port).to_socket_addrs() {
-        Ok(addrs) => addrs.filter(|addr| !is_forbidden_destination(addr.ip())).collect(),
+        Ok(addrs) => addrs.filter(|addr| !addr_forbidden(addr.ip(), host_addrs)).collect(),
         Err(_) => Vec::new(),
     }
 }
@@ -299,7 +310,20 @@ mod tests {
     #[test]
     fn resolve_rejects_forbidden_addresses() {
         // localhost resolves only to loopback, which is forbidden.
-        assert!(resolve_allowed("localhost", 80).is_empty());
+        assert!(resolve_allowed("localhost", 80, &HashSet::new()).is_empty());
+    }
+
+    #[test]
+    fn addr_forbidden_covers_special_ranges_and_host_own_ip() {
+        use std::net::Ipv4Addr;
+        // A public IP is normally fine...
+        let public = IpAddr::V4(Ipv4Addr::new(93, 184, 216, 34));
+        assert!(!addr_forbidden(public, &HashSet::new()));
+        // ...but not if it is one of this host's own addresses.
+        let host_addrs: HashSet<IpAddr> = [public].into_iter().collect();
+        assert!(addr_forbidden(public, &host_addrs), "host's own public IP must be refused");
+        // Special-use ranges are always forbidden regardless of host set.
+        assert!(addr_forbidden(IpAddr::V4(Ipv4Addr::new(169, 254, 169, 254)), &HashSet::new()));
     }
 
     fn gw(approvals: Option<EgressApprovalTx>) -> GatewayConfig {
@@ -310,6 +334,7 @@ mod tests {
             stats: Arc::new(GatewayStats::default()),
             approvals,
             approved: Arc::new(Mutex::new(HashSet::new())),
+            host_addrs: Arc::new(HashSet::new()),
         }
     }
 

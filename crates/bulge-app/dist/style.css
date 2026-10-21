@@ -512,3 +512,24 @@ code { font-family: var(--mono); font-size: .9em; background: var(--bg-hover); p
 .mcp-dot.on { background: var(--ok); }
 .mcp-name { color: var(--text-strong); font-weight: 600; }
 .mcp-cmd { color: var(--muted); font-family: ui-monospace, monospace; font-size: var(--t-xs); }
+
+/* ===== Contract card (deliverables + acceptance) ===== */
+.contract {
+  border: 0.5px solid var(--border-strong); border-left: 3px solid var(--accent-2);
+  background: var(--bg-elevated); border-radius: var(--radius-md);
+  padding: var(--space-3) var(--space-4); margin: var(--space-2) 0;
+}
+.contract-label { font-size: var(--t-xs); text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); margin-bottom: var(--space-2); }
+.contract-sec { margin-top: var(--space-2); }
+.contract-sub { font-size: var(--t-sm); font-weight: 600; color: var(--text-strong); margin-bottom: var(--space-1); }
+.contract-item { display: flex; gap: var(--space-2); font-size: var(--t-13); padding: 2px 0; }
+.contract-path { font-family: ui-monospace, monospace; color: var(--accent-2); flex: none; }
+.contract-desc { color: var(--muted); }
+.contract-accept { font-size: var(--t-13); color: var(--text); padding: 2px 0; }
+
+/* ===== Memory / skills read-only list (settings) ===== */
+.mem-list { display: flex; flex-direction: column; gap: var(--space-2); width: 100%; max-height: 260px; overflow-y: auto; }
+.mem-item { border: 0.5px solid var(--border); border-radius: var(--radius-sm); padding: var(--space-2) var(--space-3); }
+.mem-cue { font-size: var(--t-13); font-weight: 600; color: var(--text-strong); }
+.mem-lesson { font-size: var(--t-sm); color: var(--text); margin-top: 2px; }
+.mem-evidence { font-size: var(--t-xs); color: var(--muted); margin-top: 2px; }

@@ -204,7 +204,8 @@ function renderEvent(ev) {
     case "compacted": appendBlock(el("div", "ev-sys", "(壓縮上下文以省 token)")); break;
     case "budget_warning": appendBlock(el("div", "ev-net", "⚠ 預算接近上限:" + ev.kind + " " + ev.used + "/" + ev.limit)); break;
     case "approval_asked": appendBlock(el("div", "ev-net", "⏸ 等待核准:" + ev.kind)); break;
-    case "created": case "contract": break;
+    case "contract": renderContract(ev.contract || {}); break;
+    case "created": break;
     default: appendBlock(el("div", "ev-sys", ev.type));
   }
 }
@@ -246,6 +247,31 @@ function renderUserMessage(text) {
   const box = el("div", "msg-user");
   box.appendChild(el("div", "msg-user-bubble", text));
   appendBlock(box);
+}
+
+function renderContract(c) {
+  const deliverables = c.deliverables || [];
+  const acceptance = c.acceptance || [];
+  if (!deliverables.length && !acceptance.length) return;
+  const card = el("div", "contract");
+  card.appendChild(el("div", "contract-label", "交付契約"));
+  if (deliverables.length) {
+    const sec = el("div", "contract-sec");
+    sec.appendChild(el("div", "contract-sub", "交付物"));
+    for (const d of deliverables) {
+      const row = el("div", "contract-item");
+      row.append(el("span", "contract-path", d.path || ""), el("span", "contract-desc", d.description || ""));
+      sec.appendChild(row);
+    }
+    card.appendChild(sec);
+  }
+  if (acceptance.length) {
+    const sec = el("div", "contract-sec");
+    sec.appendChild(el("div", "contract-sub", "驗收條件"));
+    for (const a of acceptance) sec.appendChild(el("div", "contract-accept", "✓ " + a));
+    card.appendChild(sec);
+  }
+  appendBlock(card);
 }
 
 function renderPlan(items) {
@@ -336,6 +362,36 @@ async function loadMcpServers() {
       el("span", "mcp-name", s.name),
       el("span", "mcp-cmd", s.command + (s.disabled ? " · 已停用" : "")),
     );
+    box.appendChild(row);
+  }
+}
+
+async function loadMemory() {
+  const box = $("memory-list");
+  if (!box) return;
+  let items = [];
+  try { items = await invoke("list_memory"); } catch (e) {}
+  box.innerHTML = "";
+  if (!items.length) { box.appendChild(el("div", "mcp-empty", "還沒有學到的教訓。")); return; }
+  for (const m of items.slice(0, 50)) {
+    const row = el("div", "mem-item");
+    row.appendChild(el("div", "mem-cue", m.cue || ""));
+    row.appendChild(el("div", "mem-lesson", m.lesson || ""));
+    if (m.evidence) row.appendChild(el("div", "mem-evidence", "依據:" + m.evidence));
+    box.appendChild(row);
+  }
+}
+async function loadSkills() {
+  const box = $("skill-list");
+  if (!box) return;
+  let items = [];
+  try { items = await invoke("list_skills"); } catch (e) {}
+  box.innerHTML = "";
+  if (!items.length) { box.appendChild(el("div", "mcp-empty", "還沒有提案的技能。")); return; }
+  for (const s of items) {
+    const row = el("div", "mem-item");
+    row.appendChild(el("div", "mem-cue", s.name || ""));
+    row.appendChild(el("div", "mem-lesson", s.description || ""));
     box.appendChild(row);
   }
 }
@@ -581,7 +637,7 @@ function autoGrow() {
 }
 
 /* ---- settings + theme ---- */
-function openSettings() { $("settings-overlay").classList.remove("hidden"); loadMcpServers(); }
+function openSettings() { $("settings-overlay").classList.remove("hidden"); loadMcpServers(); loadMemory(); loadSkills(); }
 function closeSettings() { $("settings-overlay").classList.add("hidden"); }
 function toggleTheme() {
   const cur = document.documentElement.getAttribute("data-theme") === "light" ? "dark" : "light";

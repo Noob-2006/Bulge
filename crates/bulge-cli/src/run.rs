@@ -535,4 +535,54 @@ async fn improve(backend: &dyn LlmBackend, job: &mut bulge_store::JobHandle, har
     if saved > 0 {
         eprintln!("learned {saved} lesson(s) into {}", memory_root.join("lessons").display());
     }
+
+    // Also look for a reusable skill from this job (the skill workshop). Candidates
+    // are written to the harness skills dir; they become active once an always-on
+    // file references them (promotion is left manual by design, so the always-on
+    // prompt never grows on its own).
+    propose_skill(backend, job, harness_dir, model).await;
+}
+
+/// Ask the model for one reusable skill from this job and, if any, write it to the
+/// harness skills dir (unless a skill of that name already exists). Best-effort.
+async fn propose_skill(backend: &dyn LlmBackend, job: &bulge_store::JobHandle, harness_dir: &Path, model: &str) {
+    let mut messages = Vec::with_capacity(job.state().history.len() + 2);
+    messages.push(Message::text(Role::System, "You review a finished job and extract at most one reusable skill."));
+    messages.extend(job.state().history.iter().cloned());
+    messages.push(Message::text(Role::User, bulge_harness::PROPOSE_SKILL_PROMPT));
+
+    let request = GenerateRequest {
+        model: model.to_string(),
+        messages,
+        tools: Vec::new(),
+        max_tokens: None,
+        temperature: None,
+        stop: Vec::new(),
+        reasoning_effort: None,
+        purpose: Purpose::Memory,
+    };
+    let mut stream = backend.stream(request, CancellationToken::new());
+    let mut assembler = bulge_llm::assemble::Assembler::new();
+    while let Some(chunk) = stream.next().await {
+        assembler.push(&chunk);
+    }
+    let assembled = assembler.finish(model);
+    let reply = assembled.message.content.iter().find_map(|b| match b {
+        bulge_llm::ContentBlock::Text { text } => Some(text.clone()),
+        _ => None,
+    });
+    let Some(reply) = reply else { return };
+    let Some(draft) = bulge_harness::parse_proposed_skill(&reply) else { return };
+
+    let spec = SurfaceSpec::default();
+    let path = harness_dir.join(draft.path(&spec));
+    if path.exists() {
+        return;
+    }
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    if std::fs::write(&path, draft.to_source()).is_ok() {
+        eprintln!("proposed skill `{}` → {}", draft.name, path.display());
+    }
 }

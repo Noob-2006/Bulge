@@ -226,6 +226,7 @@ version = "0.1.0"
 dependencies = [
  "bulge-cli",
  "bulge-core",
+ "bulge-harness",
  "bulge-llm",
  "bulge-store",
  "bulge-vm",

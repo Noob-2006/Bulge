@@ -639,6 +639,65 @@ fn mcp_servers() -> Vec<McpServerDto> {
 }
 
 #[derive(Serialize)]
+struct MemoryDto {
+    cue: String,
+    lesson: String,
+    evidence: String,
+    confidence: f32,
+}
+
+/// The durable lessons the agent has learned (read-only view for settings).
+#[tauri::command]
+fn list_memory() -> Vec<MemoryDto> {
+    let Ok(home) = std::env::var("HOME") else { return Vec::new() };
+    let root = PathBuf::from(home).join(".bulge/harness/memory");
+    match bulge_harness::memory::load(&root) {
+        Ok((lessons, _problems)) => lessons
+            .into_iter()
+            .map(|l| MemoryDto { cue: l.cue, lesson: l.lesson, evidence: l.evidence, confidence: l.confidence })
+            .collect(),
+        Err(_) => Vec::new(),
+    }
+}
+
+#[derive(Serialize)]
+struct SkillDto {
+    name: String,
+    description: String,
+}
+
+/// The reusable skills the agent has proposed (read-only view for settings). Reads
+/// `~/.bulge/harness/skills/<name>/SKILL.md` frontmatter.
+#[tauri::command]
+fn list_skills() -> Vec<SkillDto> {
+    let Ok(home) = std::env::var("HOME") else { return Vec::new() };
+    let dir = PathBuf::from(home).join(".bulge/harness/skills");
+    let Ok(entries) = std::fs::read_dir(&dir) else { return Vec::new() };
+    let mut skills = Vec::new();
+    for entry in entries.flatten() {
+        let md = entry.path().join("SKILL.md");
+        let Ok(text) = std::fs::read_to_string(&md) else { continue };
+        let name = frontmatter_field(&text, "name").unwrap_or_else(|| entry.file_name().to_string_lossy().into_owned());
+        let description = frontmatter_field(&text, "description").unwrap_or_default();
+        skills.push(SkillDto { name, description });
+    }
+    skills.sort_by(|a, b| a.name.cmp(&b.name));
+    skills
+}
+
+/// Pull one `key: value` line from a leading `---` frontmatter block.
+fn frontmatter_field(text: &str, key: &str) -> Option<String> {
+    let body = text.strip_prefix("---")?;
+    let end = body.find("\n---")?;
+    for line in body[..end].lines() {
+        if let Some(rest) = line.strip_prefix(&format!("{key}:")) {
+            return Some(rest.trim().to_string());
+        }
+    }
+    None
+}
+
+#[derive(Serialize)]
 struct JobSummaryDto {
     id: String,
     title: String,
@@ -707,6 +766,8 @@ fn main() {
             load_job,
             detect_models,
             mcp_servers,
+            list_memory,
+            list_skills,
         ])
         .on_window_event(|window, event| {
             // Best-effort cleanup: when the window closes, end every live session so
