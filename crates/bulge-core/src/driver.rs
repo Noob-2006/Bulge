@@ -113,6 +113,9 @@ pub struct Driver {
     context: ContextConfig,
     completion: Option<CompletionConfig>,
     sampling: Sampling,
+    /// When true, a cheap LLM reviewer vets every mutating (barrier) tool call
+    /// before it runs; a deny verdict blocks the call. Off by default.
+    review: bool,
 }
 
 impl Driver {
@@ -127,7 +130,16 @@ impl Driver {
             context: ContextConfig::default(),
             completion: None,
             sampling: Sampling::default(),
+            review: false,
         }
+    }
+
+    /// Enable the LLM review gate: before any mutating tool call runs, a bounded
+    /// reviewer model call decides allow/deny; a deny blocks the call and tells the
+    /// model why. A second opinion on top of the sandbox, static policy, and hooks.
+    pub fn with_review(mut self, review: bool) -> Self {
+        self.review = review;
+        self
     }
 
     /// Thread sampling controls (temperature / reasoning effort / output cap) into
@@ -436,11 +448,24 @@ impl Driver {
         }
 
         // Permission: a denied call is never run; the model is told so it adapts.
-        let denied: std::collections::HashMap<String, String> = calls
+        let mut denied: std::collections::HashMap<String, String> = calls
             .iter()
             .filter(|c| !host.contains_key(&c.id))
             .filter_map(|c| self.permission_denial(c).map(|reason| (c.id.clone(), reason)))
             .collect();
+
+        // LLM review gate: a second opinion on every mutating (barrier) call that
+        // policy did not already block. Runs sequentially before anything executes.
+        if self.review {
+            for call in &calls {
+                if host.contains_key(&call.id) || denied.contains_key(&call.id) || self.dispatcher.concurrency_safe(&call.name) {
+                    continue;
+                }
+                if let Some(reason) = self.review_denial(job, call, cancel).await {
+                    denied.insert(call.id.clone(), reason);
+                }
+            }
+        }
 
         let claims = calls
             .iter()
@@ -509,6 +534,37 @@ impl Driver {
             bulge_guard::Effect::Deny => Some(format!("blocked by policy: {} on {resource}", call.name)),
             bulge_guard::Effect::Allow | bulge_guard::Effect::Ask => None,
         }
+    }
+
+    /// A bounded LLM review of one mutating call. Returns `Some(reason)` to block.
+    /// The reviewer sees ONLY the proposed call (never prior tool output), so a
+    /// prompt-injection in earlier results cannot talk it into approving. Any
+    /// error, timeout, or malformed reply fails OPEN (returns `None`) — the review
+    /// is a second opinion, not the primary boundary (the sandbox is).
+    async fn review_denial(&self, job: &JobHandle, call: &ExtractedCall, cancel: &CancellationToken) -> Option<String> {
+        let model = job.state().spec.model.model.clone();
+        let proposal = format!("Tool: {}\nArguments: {}", call.name, call.arguments);
+        let request = GenerateRequest {
+            model: model.clone(),
+            messages: vec![
+                Message::text(Role::System, complete::REVIEW_POLICY),
+                Message::text(Role::User, proposal),
+            ],
+            tools: Vec::new(),
+            max_tokens: Some(200),
+            temperature: Some(0.0),
+            stop: Vec::new(),
+            reasoning_effort: None,
+            purpose: Purpose::Memory,
+        };
+        let mut stream = self.backend.stream(request, cancel.clone());
+        let mut assembler = Assembler::new();
+        while let Some(chunk) = stream.next().await {
+            assembler.push(&chunk);
+        }
+        let assembled = assembler.finish(&model);
+        let text = assistant_text(&assembled.message)?;
+        complete::parse_review_denial(&text)
     }
 
     /// Budget spent: one final tool-less call asking for a summary, then stop Incomplete.

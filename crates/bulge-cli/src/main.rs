@@ -55,6 +55,7 @@ OPTIONS:
     --context-window <N>   Context window in tokens (default: 128000)
     --max-tokens <N>       Max output tokens per call (default: 8192)
     --reasoning            Advertise reasoning support to the backend
+    --review               LLM-review every mutating tool call before it runs
     --max-steps <N>        Step budget (default: 200)
     --max-model-tokens <N> Token budget (default: 2000000)
     --max-secs <N>         Wall-clock budget in seconds (default: 14400)
@@ -148,6 +149,7 @@ fn parse_run(args: &[String]) -> Result<RunConfig, String> {
     let mut context_window: u32 = 128_000;
     let mut max_tokens: u32 = 8_192;
     let mut reasoning = false;
+    let mut auto_review = false;
     let mut max_steps: u64 = 200;
     let mut max_model_tokens: u64 = 2_000_000;
     let mut max_secs: u64 = 14_400;
@@ -172,6 +174,7 @@ fn parse_run(args: &[String]) -> Result<RunConfig, String> {
             "--context-window" => context_window = parse_num(&value()?, flag)?,
             "--max-tokens" => max_tokens = parse_num(&value()?, flag)?,
             "--reasoning" => reasoning = true,
+            "--review" => auto_review = true,
             "--max-steps" => max_steps = parse_num(&value()?, flag)?,
             "--max-model-tokens" => max_model_tokens = parse_num(&value()?, flag)?,
             "--max-secs" => max_secs = parse_num(&value()?, flag)?,
@@ -216,6 +219,7 @@ fn parse_run(args: &[String]) -> Result<RunConfig, String> {
         system_prompt: None,
         egress_approvals: None,
         skip_review: false,
+        auto_review,
     })
 }
 

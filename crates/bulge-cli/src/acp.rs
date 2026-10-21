@@ -153,6 +153,7 @@ fn acp_run_config(workspace: PathBuf) -> Result<RunConfig, String> {
         system_prompt: None,
         egress_approvals: None,
         skip_review: false,
+        auto_review: false,
     })
 }
 

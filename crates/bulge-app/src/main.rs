@@ -348,6 +348,7 @@ fn build_config(args: &StartArgs) -> Result<RunConfig, String> {
         // Filled in by start_job with the session's egress-approval channel.
         egress_approvals: None,
         skip_review: false,
+        auto_review: false,
     })
 }
 

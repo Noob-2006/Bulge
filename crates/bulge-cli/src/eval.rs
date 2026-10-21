@@ -77,6 +77,7 @@ pub async fn run_eval(config: EvalConfig) -> Result<EvalSummary, String> {
             system_prompt: None,
             egress_approvals: None,
             skip_review: false,
+            auto_review: false,
         };
 
         let result = match run(run_config).await {

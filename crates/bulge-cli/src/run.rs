@@ -71,6 +71,9 @@ pub struct RunConfig {
     /// session shuts down. Set for autonomous scheduled runs, where a ~30K-token
     /// review fork with no human in the loop is not worth it (matches Hermes).
     pub skip_review: bool,
+    /// Enable the LLM review gate: a cheap reviewer model vets every mutating tool
+    /// call before it runs. Extra latency/cost for a second safety opinion.
+    pub auto_review: bool,
 }
 
 /// Current wall-clock time in Unix seconds (0 before the epoch, which never happens).
@@ -298,6 +301,8 @@ pub struct Session {
     hooks: Arc<HookRunner>,
     /// Skip the offline learning loop on shutdown (autonomous scheduled runs).
     skip_review: bool,
+    /// Enable the LLM review gate on mutating tool calls.
+    auto_review: bool,
     /// The VM shape last launched with; restart tweaks these.
     vm_config: VmConfig,
 }
@@ -383,6 +388,7 @@ impl Session {
             mcp,
             hooks,
             skip_review: config.skip_review,
+            auto_review: config.auto_review,
             vm_config,
         })
     }
@@ -437,7 +443,8 @@ impl Session {
             .with_guard(GuardConfig { rules: default_ruleset(), autonomy: guard_autonomy(self.autonomy), loop_detection: true })
             .with_completion_gate(CompletionConfig::default())
             .with_context(context)
-            .with_sampling(self.sampling.clone());
+            .with_sampling(self.sampling.clone())
+            .with_review(self.auto_review);
 
         let stop = CancellationToken::new();
         let tail = tokio::spawn(tail_jsonl(log_path.clone(), stop.clone(), sink, tail_start));

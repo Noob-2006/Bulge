@@ -100,6 +100,8 @@ impl SavedTask {
             egress_approvals: None,
             // A scheduled run has no human to read a review fork.
             skip_review: true,
+            // Unattended automation gets the tighter envelope: vet mutating calls.
+            auto_review: true,
         })
     }
 }
