@@ -14,14 +14,24 @@ use bulge_llm::assemble::Assembler;
 use bulge_llm::{ContentBlock, FinishReason, GenerateRequest, LlmBackend, LlmError, Message, Purpose, ReasoningEffort, Role, TokenUsage, ToolSchema};
 use bulge_store::{JobEvent, JobHandle, JobStatus, PlanItem, PlanStatus, StoreError};
 use futures::StreamExt;
+use futures::future::LocalBoxFuture;
 use serde_json::Value;
 use tokio_util::sync::CancellationToken;
 
 use crate::budget::{BudgetState, BudgetTracker};
 use crate::complete::{self, Check, GateReport};
 use crate::context::{self, PruneConfig};
-use crate::dispatch::{PLAN_TOOL, ToolCall, ToolDispatcher};
+use crate::dispatch::{DELEGATE_TOOL, PLAN_TOOL, ToolCall, ToolDispatcher};
 use crate::schedule::{CallOutcome, PlannedCall, run_tool_calls};
+
+/// Runs a delegated sub-task on behalf of the driver and returns its summary.
+///
+/// The future is `!Send` on purpose: the implementor runs a nested driver, which
+/// (like this one) schedules tool calls on the current thread. The handler object
+/// itself is `Send + Sync` so it can live in the `Arc`-shared [`Driver`].
+pub trait DelegateHandler: Send + Sync {
+    fn run<'a>(&'a self, goal: String, context: Option<String>, cancel: CancellationToken) -> LocalBoxFuture<'a, Result<String, String>>;
+}
 
 /// Steps with a non-empty plan and no item reaching `done` before the driver
 /// nudges the model to make progress or re-plan.
@@ -116,6 +126,9 @@ pub struct Driver {
     /// When true, a cheap LLM reviewer vets every mutating (barrier) tool call
     /// before it runs; a deny verdict blocks the call. Off by default.
     review: bool,
+    /// Handles `delegate` tool calls (runs a sub-agent). `None` → the tool, if the
+    /// model calls it at all, is treated as an unknown tool.
+    delegate: Option<Arc<dyn DelegateHandler>>,
 }
 
 impl Driver {
@@ -131,6 +144,7 @@ impl Driver {
             completion: None,
             sampling: Sampling::default(),
             review: false,
+            delegate: None,
         }
     }
 
@@ -139,6 +153,13 @@ impl Driver {
     /// model why. A second opinion on top of the sandbox, static policy, and hooks.
     pub fn with_review(mut self, review: bool) -> Self {
         self.review = review;
+        self
+    }
+
+    /// Install a delegation handler so the model's `delegate` tool calls run a
+    /// sub-agent (handled here on the host, never sent to the VM).
+    pub fn with_delegate(mut self, handler: Arc<dyn DelegateHandler>) -> Self {
+        self.delegate = Some(handler);
         self
     }
 
@@ -429,8 +450,29 @@ impl Driver {
             }
         }
 
-        // Host-side tools (the plan tool) are handled here, never sent to the VM.
+        // Host-side tools are handled here, never sent to the VM. `delegate` runs a
+        // sub-agent on this thread (its future is !Send), so it is awaited before
+        // the remaining calls are dispatched.
         let mut host: std::collections::HashMap<String, CallOutcome> = std::collections::HashMap::new();
+        if let Some(handler) = self.delegate.clone() {
+            for call in &calls {
+                if call.name != DELEGATE_TOOL {
+                    continue;
+                }
+                let args = parse_lenient(&call.arguments);
+                let goal = args.get("goal").and_then(Value::as_str).unwrap_or("").trim().to_string();
+                let outcome = if goal.is_empty() {
+                    CallOutcome::Err { code: "BAD_DELEGATE".into(), message: "delegate needs a non-empty `goal`".into() }
+                } else {
+                    let context = args.get("context").and_then(Value::as_str).map(str::to_string);
+                    match handler.run(goal, context, cancel.clone()).await {
+                        Ok(summary) => CallOutcome::Ok(serde_json::json!({ "summary": summary })),
+                        Err(message) => CallOutcome::Err { code: "DELEGATE_FAILED".into(), message },
+                    }
+                };
+                host.insert(call.id.clone(), outcome);
+            }
+        }
         let mut plan_update: Option<Vec<PlanItem>> = None;
         for call in &calls {
             if call.name == PLAN_TOOL {

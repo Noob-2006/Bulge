@@ -80,6 +80,10 @@ pub fn builtin_concurrency_safe(name: &str) -> bool {
 /// Name of the host-side planning tool (handled by the driver, never the VM).
 pub const PLAN_TOOL: &str = "update_plan";
 
+/// Name of the host-side delegation tool (handled by the driver via a
+/// [`crate::driver::DelegateHandler`], never sent to the VM).
+pub const DELEGATE_TOOL: &str = "delegate";
+
 /// Schema for the planning tool. Callers append it to `builtin_tools()` when they
 /// want the model to keep a visible plan; the driver intercepts its calls,
 /// records the plan, and watches for a stall. Status is one of

@@ -17,6 +17,7 @@ use std::time::Duration;
 
 use bulge_core::driver::{CompletionConfig, ContextConfig, Driver, GuardConfig, LoopOutcome};
 pub use bulge_core::driver::Sampling;
+use crate::delegate;
 use bulge_core::hooks::{HookConfig, HookRunner, HookedDispatcher};
 use bulge_core::mcp::{self, CompositeDispatcher, McpBundle};
 use bulge_core::{ToolDispatcher, VmDispatcher, builtin_tools, plan_tool};
@@ -85,7 +86,7 @@ pub(crate) fn now_unix() -> u64 {
 }
 
 /// Map the store's autonomy onto the guard's equivalent (no shared type).
-fn guard_autonomy(autonomy: Autonomy) -> bulge_guard::Autonomy {
+pub(crate) fn guard_autonomy(autonomy: Autonomy) -> bulge_guard::Autonomy {
     match autonomy {
         Autonomy::Collaborative => bulge_guard::Autonomy::Collaborative,
         Autonomy::Autonomous => bulge_guard::Autonomy::Autonomous,
@@ -95,7 +96,7 @@ fn guard_autonomy(autonomy: Autonomy) -> bulge_guard::Autonomy {
 
 /// A modest baseline ruleset. The VM sandbox is the real boundary; these denies
 /// are a second line against obviously destructive guest commands.
-fn default_ruleset() -> Vec<Rule> {
+pub(crate) fn default_ruleset() -> Vec<Rule> {
     vec![
         Rule::new("*", "*", Effect::Allow),
         Rule::new("exec", "rm -rf /*", Effect::Deny),
@@ -430,21 +431,46 @@ impl Session {
         };
         // Wrap in the lifecycle-hook layer (a no-op pass-through when no hooks are
         // declared). PreToolUse may block/rewrite a call; PostToolUse may inject.
-        let dispatcher: Arc<dyn ToolDispatcher> = if self.hooks.is_empty() {
+        let hooked: Arc<dyn ToolDispatcher> = if self.hooks.is_empty() {
             base
         } else {
             Arc::new(HookedDispatcher::new(base, self.hooks.clone()))
         };
-        let mut tools = builtin_tools();
-        tools.push(plan_tool());
-        tools.extend(self.mcp.tools.iter().cloned());
+
+        // Child tools are everything the parent has EXCEPT `delegate`, so a
+        // sub-agent cannot delegate further (delegation is capped at one level).
+        let mut child_tools = builtin_tools();
+        child_tools.push(plan_tool());
+        child_tools.extend(self.mcp.tools.iter().cloned());
+
+        // Wrap in the delegation layer: `delegate` spawns a child agent sharing
+        // this VM (and the hook/review stack), reporting back only its summary.
+        let factory = delegate::ChildFactory {
+            backend: self.backend.clone(),
+            inner: hooked.clone(),
+            child_tools: child_tools.clone(),
+            store_root: self.job.dir().parent().map(std::path::Path::to_path_buf).unwrap_or_default(),
+            workspace: self.workspace.clone(),
+            autonomy: self.autonomy,
+            guard_rules: default_ruleset(),
+            model: self.backend_spec.model.clone(),
+            backend_id: self.backend_spec.id.clone(),
+            context_window: self.backend_spec.context_window,
+            sampling: self.sampling.clone(),
+            auto_review: self.auto_review,
+        };
+        let dispatcher: Arc<dyn ToolDispatcher> = hooked;
+
+        let mut tools = child_tools;
+        tools.push(delegate::delegate_tool());
         let context = ContextConfig { window: self.backend_spec.context_window as u64, ..ContextConfig::default() };
         let driver = Driver::new(self.backend.clone(), dispatcher.clone(), tools, system_prompt)
             .with_guard(GuardConfig { rules: default_ruleset(), autonomy: guard_autonomy(self.autonomy), loop_detection: true })
             .with_completion_gate(CompletionConfig::default())
             .with_context(context)
             .with_sampling(self.sampling.clone())
-            .with_review(self.auto_review);
+            .with_review(self.auto_review)
+            .with_delegate(Arc::new(factory));
 
         let stop = CancellationToken::new();
         let tail = tokio::spawn(tail_jsonl(log_path.clone(), stop.clone(), sink, tail_start));
