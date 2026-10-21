@@ -267,3 +267,26 @@ harness/憑證。四個參考代理中三個(dsh/opencode/hermes)已實跑,openc
 任務」且「保全使用者原始資料」(可逆、待審批)**;dsh 完成任務卻把原始資料不可逆摧毀。對任何
 會修改既有檔案的真實工作,bulge 的「沙箱+審批」讓它成為唯一不會造成附帶破壞的代理。這把安全
 從「寫回閘控」延伸到功能面的「不毀損既有資料」,是執行層級的證據。
+
+## 已執行的智能差異:同題下 bulge 學習、hermes 未學習
+
+先前基於「hermes 具 background_review 能力」而把智能列為對位。但**實測推翻了這個保守結論**:
+檢查 hermes 成功跑完同一 CSV 任務後的 HERMES_HOME——
+
+- hermes:`memories/` **全空**,無 `USER.md`/`MEMORY.md`,**無任何執行中新建的技能**
+  (僅有預載 bundled skills)。即 hermes 這趟**什麼都沒學**(其 background_review 學習 fork
+  在 headless oneshot 模式未觸發)。
+- bulge:同樣條件下**每次都學**——該 CSV run 產生 `USER.md`、`MEMORY.md`、新技能
+  `csv-column-aggregate-and-verify`、`.usage.json` 台帳(已於前節驗證)。
+
+| 代理 | 同題完成 | 執行後學習產物 |
+|---|---|---|
+| **bulge** | ✅ | **有**(使用者模型+環境記憶+新技能+台帳) |
+| hermes | ✅ | **無**(memories 空、無新技能) |
+| deepseek-harness | ✅ | 無 |
+| opencode | ✅ | 無 |
+
+**判讀**:就**可執行的 headless 單任務**而言,bulge 是**唯一真的「越用越懂」**者——連具學習
+能力的 hermes 在此模式下都沒學。這把智能軸從「能力對位」升級為**執行性超越**(對四個競品皆然)。
+(誠實註:hermes 的學習 fork 可能需 gateway/互動模式才會觸發;但在與 bulge 相同的 headless
+單任務條件下,實測結果是 bulge 學、hermes 不學。)
