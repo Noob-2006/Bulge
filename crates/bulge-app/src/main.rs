@@ -805,6 +805,12 @@ fn list_usage() -> Vec<UsageDto> {
         .collect()
 }
 
+/// Keyword search over past job transcripts (for the sidebar history search).
+#[tauri::command]
+fn search_jobs(query: String) -> Vec<bulge_cli::recall::RecallHit> {
+    bulge_cli::recall::search_default(&query, 20)
+}
+
 #[derive(Serialize)]
 struct JobSummaryDto {
     id: String,
@@ -882,6 +888,7 @@ fn main() {
             set_schedule_enabled,
             list_profile,
             list_usage,
+            search_jobs,
         ])
         .on_window_event(|window, event| {
             // Best-effort cleanup: when the window closes, end every live session so

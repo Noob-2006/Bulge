@@ -548,6 +548,23 @@ async function loadJobs() {
     list.appendChild(item);
   }
 }
+async function searchJobs() {
+  const q = ($("job-search")?.value || "").trim();
+  if (!q) { loadJobs(); return; }
+  let hits = [];
+  try { hits = await invoke("search_jobs", { query: q }); } catch (e) {}
+  const list = $("job-list");
+  list.innerHTML = "";
+  if (!hits.length) { list.appendChild(el("div", "side-empty", "找不到相符的任務")); return; }
+  for (const h of hits) {
+    const item = el("button", "job-item");
+    item.dataset.id = h.job_id;
+    item.append(el("span", "ji-dot"), el("span", "ji-title", h.title || h.job_id));
+    item.title = h.snippet || "";
+    item.addEventListener("click", () => viewJob(h.job_id, h.title));
+    list.appendChild(item);
+  }
+}
 async function viewJob(id, title) {
   if (running) { toast("有任務執行中,無法切換", "err"); return; }
   let data;
@@ -757,6 +774,11 @@ listen("job-done", (e) => {
 window.addEventListener("DOMContentLoaded", () => {
   loadTheme();
   $("new-task").addEventListener("click", newTask);
+  {
+    let t = null;
+    const search = $("job-search");
+    if (search) search.addEventListener("input", () => { clearTimeout(t); t = setTimeout(searchJobs, 250); });
+  }
   $("theme-toggle").addEventListener("click", toggleTheme);
   $("open-settings").addEventListener("click", openSettings);
   $("close-settings").addEventListener("click", closeSettings);

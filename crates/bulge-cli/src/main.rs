@@ -21,6 +21,7 @@ USAGE:
     bulge eval --tasks <FILE.json> [OPTIONS]
     bulge acp  (ACP agent server over stdio; editors spawn this)
     bulge schedule add|list|remove|tick   (scheduled tasks; see below)
+    bulge recall <query> [--limit N]      (keyword search over past jobs)
 
 `schedule` runs a saved task later or on a recurring basis:
     bulge schedule add --goal <T> --workspace <DIR> <SELECTOR> [run options]
@@ -116,6 +117,10 @@ fn main() {
         Some("schedule") => {
             // Scheduled tasks: add/list/remove/tick. `tick` runs its own runtime.
             std::process::exit(bulge_cli::cron::dispatch(&args[1..]));
+        }
+        Some("recall") => {
+            // Keyword search over past job transcripts.
+            std::process::exit(bulge_cli::recall::dispatch(&args[1..]));
         }
         Some("-h") | Some("--help") | Some("help") | None => {
             print!("{USAGE}");
