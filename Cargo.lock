@@ -222,7 +222,7 @@ dependencies = [
 
 [[package]]
 name = "bulge-app"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "bulge-cli",
  "bulge-core",
@@ -242,7 +242,7 @@ dependencies = [
 
 [[package]]
 name = "bulge-cli"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "bulge-core",
  "bulge-guard",
@@ -259,7 +259,7 @@ dependencies = [
 
 [[package]]
 name = "bulge-core"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "bulge-guard",
  "bulge-llm",
@@ -276,7 +276,7 @@ dependencies = [
 
 [[package]]
 name = "bulge-guard"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -284,7 +284,7 @@ dependencies = [
 
 [[package]]
 name = "bulge-harness"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -293,7 +293,7 @@ dependencies = [
 
 [[package]]
 name = "bulge-llm"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "bytes",
  "futures",
@@ -307,7 +307,7 @@ dependencies = [
 
 [[package]]
 name = "bulge-proto"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "getrandom 0.4.3",
  "hmac",
@@ -321,7 +321,7 @@ dependencies = [
 
 [[package]]
 name = "bulge-store"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "bulge-llm",
  "getrandom 0.4.3",
@@ -332,7 +332,7 @@ dependencies = [
 
 [[package]]
 name = "bulge-vm"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "base64 0.22.1",
  "bulge-proto",
@@ -348,7 +348,7 @@ dependencies = [
 
 [[package]]
 name = "bulge-vmm"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "landlock",
  "serde",
@@ -3186,7 +3186,7 @@ dependencies = [
 
 [[package]]
 name = "sandboxd"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "base64 0.22.1",
  "bulge-proto",
