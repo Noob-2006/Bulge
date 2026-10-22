@@ -9,7 +9,7 @@ use super::{EncodeContext, SseEvent, StreamDecoder, WireProtocol};
 use crate::error::{ErrorCode, LlmError};
 use crate::types::{
     BlockKind, ContentBlock, FinishReason, GenerateRequest, Message, ReasoningEffort, Role,
-    StreamChunk, SystemPromptUpdate, TokenUsage, ToolChoice,
+    StreamChunk, SystemPromptUpdate, TokenUsage,
 };
 
 #[derive(Debug, Clone, Default)]
@@ -154,9 +154,6 @@ impl WireProtocol for AnthropicMessages {
                 })
                 .collect();
             body["tools"] = json!(tools);
-            if request.tool_choice == ToolChoice::None {
-                body["tool_choice"] = json!({ "type": "none" });
-            }
         }
         Ok(body)
     }
@@ -875,7 +872,6 @@ mod tests {
             model: "test-model".to_owned(),
             messages,
             tools: Vec::new(),
-            tool_choice: ToolChoice::Auto,
             max_tokens: None,
             temperature: None,
             stop: Vec::new(),

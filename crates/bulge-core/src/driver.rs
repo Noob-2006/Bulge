@@ -10,8 +10,8 @@
 
 use std::sync::Arc;
 
-use bulge_llm::assemble::Assembler;
-use bulge_llm::{ContentBlock, FinishReason, GenerateRequest, LlmBackend, LlmError, Message, Purpose, ReasoningEffort, Role, TokenUsage, ToolChoice, ToolSchema};
+use bulge_llm::assemble::{Assembled, Assembler};
+use bulge_llm::{ContentBlock, FinishReason, GenerateRequest, LlmBackend, LlmError, Message, Purpose, ReasoningEffort, Role, TokenUsage, ToolSchema};
 use bulge_store::{JobEvent, JobHandle, JobStatus, PlanItem, PlanStatus, StoreError};
 use futures::StreamExt;
 use futures::future::LocalBoxFuture;
@@ -146,10 +146,10 @@ fn request_messages(system_prompt: &str, context: &ContextConfig, job: &JobHandl
     context::prune(&messages, context.window, context.keep_recent, &context.prune)
 }
 
-/// A no-tool side call over a job (e.g. post-job learning): exactly the loop's
-/// request prefix — same system prompt, same tools (calls forbidden), same
-/// pruned/compacted history — plus `instruction` as the final user message, so
-/// only the instruction and the reply are uncached.
+/// A text-only side call over a job (e.g. post-job learning): exactly the loop's
+/// request prefix — same system prompt, same tools, same pruned/compacted
+/// history — plus `instruction` as the final user message, so only the
+/// instruction and the reply are uncached. Send it with [`stream_toolless`].
 pub fn side_request(prefix: &RequestPrefix, job: &JobHandle, instruction: &str, purpose: Purpose) -> GenerateRequest {
     let mut messages = request_messages(&prefix.system_prompt, &prefix.context, job);
     messages.push(Message::text(Role::User, instruction.to_string()));
@@ -157,12 +157,53 @@ pub fn side_request(prefix: &RequestPrefix, job: &JobHandle, instruction: &str, 
         model: job.state().spec.model.model.clone(),
         messages,
         tools: prefix.tools.clone(),
-        tool_choice: ToolChoice::None,
         max_tokens: None,
         temperature: None,
         stop: Vec::new(),
         reasoning_effort: None,
         purpose,
+    }
+}
+
+async fn collect(backend: &dyn LlmBackend, request: GenerateRequest, cancel: CancellationToken) -> Assembled {
+    let model = request.model.clone();
+    let mut stream = backend.stream(request, cancel);
+    let mut assembler = Assembler::new();
+    while let Some(chunk) = stream.next().await {
+        assembler.push(&chunk);
+    }
+    assembler.finish(&model)
+}
+
+/// Send a request that must be answered in text, while keeping its tool list.
+///
+/// The tool definitions are part of the provider's cached prefix (DeepSeek
+/// renders them right after the system prompt), and dropping them — or sending
+/// `tool_choice: "none"`, which DeepSeek treats the same way (measured: 0 cache
+/// hits) — invalidates everything after the system prompt. So the request goes
+/// out byte-identical to a loop request, the instruction says not to call tools,
+/// and any tool call the model makes anyway is stripped (it never ran, so it must
+/// not reach the log unanswered). Only if nothing but tool calls came back is the
+/// request retried without tools; the returned usage covers both attempts.
+pub async fn stream_toolless(backend: &dyn LlmBackend, request: GenerateRequest, cancel: CancellationToken) -> Assembled {
+    let retry = (!request.tools.is_empty()).then(|| GenerateRequest { tools: Vec::new(), ..request.clone() });
+    let mut assembled = collect(backend, request, cancel.clone()).await;
+    let before = assembled.message.content.len();
+    assembled.message.content.retain(|block| !matches!(block, ContentBlock::ToolCall { .. }));
+    if assembled.message.content.len() == before {
+        return assembled;
+    }
+    if assembled.finish == FinishReason::ToolCalls {
+        assembled.finish = FinishReason::Stop;
+    }
+    match retry {
+        Some(retry) if assistant_text(&assembled.message).is_none() => {
+            let first = assembled.usage;
+            let mut second = collect(backend, retry, cancel).await;
+            second.usage = first.plus(second.usage);
+            second
+        }
+        _ => assembled,
     }
 }
 
@@ -307,7 +348,7 @@ impl Driver {
                 budget.record_tokens(usage.total());
             }
 
-            let assembled = match self.one_call(job, ToolChoice::Auto, cancel.clone()).await? {
+            let assembled = match self.one_call(job, false, cancel.clone()).await? {
                 Ok(assembled) => assembled,
                 Err(outcome) => return Ok(outcome),
             };
@@ -349,7 +390,7 @@ impl Driver {
     async fn one_call(
         &self,
         job: &mut JobHandle,
-        tool_choice: ToolChoice,
+        toolless: bool,
         cancel: CancellationToken,
     ) -> Result<Result<bulge_llm::assemble::Assembled, LoopOutcome>, StoreError> {
         let model = job.state().spec.model.model.clone();
@@ -357,10 +398,9 @@ impl Driver {
         let request = GenerateRequest {
             model: model.clone(),
             messages,
-            // Always the full tool list, even when calls are forbidden: the tool
+            // Always the full tool list, even for a text-only turn: the tool
             // definitions are part of the provider's cached prefix.
             tools: self.tools.clone(),
-            tool_choice,
             max_tokens: self.sampling.max_tokens,
             temperature: self.sampling.temperature,
             stop: Vec::new(),
@@ -368,12 +408,11 @@ impl Driver {
             purpose: Purpose::Conversation,
         };
 
-        let mut stream = self.backend.stream(request, cancel);
-        let mut assembler = Assembler::new();
-        while let Some(chunk) = stream.next().await {
-            assembler.push(&chunk);
-        }
-        let assembled = assembler.finish(&model);
+        let assembled = if toolless {
+            stream_toolless(self.backend.as_ref(), request, cancel).await
+        } else {
+            collect(self.backend.as_ref(), request, cancel).await
+        };
 
         job.append(vec![
             JobEvent::Message { message: assembled.message.clone() },
@@ -458,19 +497,13 @@ impl Driver {
             model: model.to_string(),
             messages,
             tools: self.tools.clone(),
-            tool_choice: ToolChoice::None,
             max_tokens: None,
             temperature: None,
             stop: Vec::new(),
             reasoning_effort: None,
             purpose: Purpose::Compaction,
         };
-        let mut stream = self.backend.stream(request, cancel);
-        let mut assembler = Assembler::new();
-        while let Some(chunk) = stream.next().await {
-            assembler.push(&chunk);
-        }
-        let assembled = assembler.finish(model);
+        let assembled = stream_toolless(self.backend.as_ref(), request, cancel).await;
         if matches!(assembled.finish, FinishReason::Error(_) | FinishReason::Aborted) {
             return None;
         }
@@ -672,7 +705,6 @@ impl Driver {
                 Message::text(Role::User, proposal),
             ],
             tools: Vec::new(),
-            tool_choice: ToolChoice::Auto,
             max_tokens: Some(200),
             temperature: Some(0.0),
             stop: Vec::new(),
@@ -702,7 +734,7 @@ impl Driver {
         job.append(vec![JobEvent::StepStarted { step: job.state().steps + 1 }, JobEvent::Message { message: Message::text(Role::User, note) }])?;
         budget.record_step();
 
-        let assembled = match self.one_call(job, ToolChoice::None, CancellationToken::new()).await? {
+        let assembled = match self.one_call(job, true, CancellationToken::new()).await? {
             Ok(assembled) => assembled,
             Err(outcome) => return Ok(outcome),
         };
@@ -798,19 +830,13 @@ impl Driver {
             model: model.clone(),
             messages: self.build_request_messages(job),
             tools: self.tools.clone(),
-            tool_choice: ToolChoice::None,
             max_tokens: self.sampling.max_tokens,
             temperature: self.sampling.temperature,
             stop: Vec::new(),
             reasoning_effort: self.sampling.reasoning_effort,
             purpose: Purpose::Conversation,
         };
-        let mut stream = self.backend.stream(request, cancel.clone());
-        let mut assembler = Assembler::new();
-        while let Some(chunk) = stream.next().await {
-            assembler.push(&chunk);
-        }
-        let assembled = assembler.finish(&model);
+        let assembled = stream_toolless(self.backend.as_ref(), request, cancel.clone()).await;
         job.append(vec![
             JobEvent::Message { message: assembled.message.clone() },
             JobEvent::Usage { model, usage: assembled.usage },

@@ -110,19 +110,6 @@ pub enum ReasoningEffort {
     Max,
 }
 
-/// Whether the model may call the declared tools on this request.
-///
-/// `None` keeps the tool list in the request (so the provider's cached prefix —
-/// which includes the tool definitions — still matches the main loop) while
-/// forbidding calls. Dropping `tools` instead would invalidate that prefix.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum ToolChoice {
-    #[default]
-    Auto,
-    None,
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Purpose {
@@ -138,8 +125,6 @@ pub struct GenerateRequest {
     pub messages: Vec<Message>,
     #[serde(default)]
     pub tools: Vec<ToolSchema>,
-    #[serde(default)]
-    pub tool_choice: ToolChoice,
     #[serde(default)]
     pub max_tokens: Option<u32>,
     #[serde(default)]
@@ -193,6 +178,17 @@ pub struct TokenUsage {
 impl TokenUsage {
     pub fn total(&self) -> u64 {
         self.input_tokens + self.output_tokens + self.cache_read_tokens + self.cache_write_tokens
+    }
+
+    /// Field-wise sum (e.g. a call plus its retry).
+    pub fn plus(self, other: TokenUsage) -> TokenUsage {
+        TokenUsage {
+            input_tokens: self.input_tokens + other.input_tokens,
+            output_tokens: self.output_tokens + other.output_tokens,
+            cache_read_tokens: self.cache_read_tokens + other.cache_read_tokens,
+            cache_write_tokens: self.cache_write_tokens + other.cache_write_tokens,
+            reasoning_tokens: self.reasoning_tokens + other.reasoning_tokens,
+        }
     }
 }
 

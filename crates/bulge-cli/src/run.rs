@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use bulge_core::driver::{CompletionConfig, ContextConfig, Driver, GuardConfig, LoopOutcome, RequestPrefix, side_request};
+use bulge_core::driver::{CompletionConfig, ContextConfig, Driver, GuardConfig, LoopOutcome, RequestPrefix, side_request, stream_toolless};
 pub use bulge_core::driver::Sampling;
 use crate::delegate;
 use bulge_core::hooks::{HookConfig, HookRunner, HookedDispatcher};
@@ -27,7 +27,6 @@ use bulge_llm::{GenerateRequest, LlmBackend, Message, Purpose, Role};
 use bulge_store::{Autonomy, Budget, JobEvent, JobSpec, JobStatus, JobStore, ModelRef};
 use bulge_vm::changes;
 use bulge_vm::vm::{Vm, VmConfig};
-use futures::StreamExt;
 use tokio_util::sync::CancellationToken;
 
 use crate::backend::{self, BackendSpec};
@@ -43,8 +42,9 @@ Every extra model round-trip resends the whole conversation, so economise on tur
 on care: issue independent tool calls together in one turn (they run in parallel); chain \
 dependent shell steps you would not need to inspect in between into one `exec` (e.g. \
 create a file and run its check in the same command); trust tool results (a successful \
-`write` landed — do not read it back); and run each verification once, re-running only \
-after you change something.";
+`write` landed — do not read it back). Save turns only by batching, never by checking \
+less: given examples rarely cover a spec's edge cases, so test the cases the wording \
+implies too — in the same `exec`.";
 
 /// How many memory lessons to retrieve into the prompt.
 const LESSON_COUNT: usize = 5;
@@ -724,12 +724,7 @@ const LEARNING_PREAMBLE: &str = "The job above is finished; stop working on it a
 /// Run one post-job learning call and log its usage on the job (so a job's token
 /// total includes the learning it paid for).
 async fn learning_call(backend: &dyn LlmBackend, job: &mut bulge_store::JobHandle, request: GenerateRequest, model: &str) -> bulge_llm::assemble::Assembled {
-    let mut stream = backend.stream(request, CancellationToken::new());
-    let mut assembler = bulge_llm::assemble::Assembler::new();
-    while let Some(chunk) = stream.next().await {
-        assembler.push(&chunk);
-    }
-    let assembled = assembler.finish(model);
+    let assembled = stream_toolless(backend, request, CancellationToken::new()).await;
     let _ = job.append(vec![JobEvent::Usage { model: model.to_string(), usage: assembled.usage }]);
     assembled
 }

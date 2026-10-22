@@ -9,7 +9,8 @@ use serde::{Deserialize, Serialize};
 /// The self-review a model must pass before declaring completion. Ordered so the
 /// cheap, objective checks come first.
 pub const SELF_REVIEW_CRITERIA: &str = "\
-Review your own work against the request before declaring it done. For EACH point, \
+Review your own work against the request before declaring it done. Answer in text \
+only; do not call tools. For EACH point, \
 answer and justify briefly:\n\
 1. DELIVERY: does every requested deliverable exist?\n\
 2. CONFORMANCE: does each match the requested shape (format, columns, names) with no extras?\n\

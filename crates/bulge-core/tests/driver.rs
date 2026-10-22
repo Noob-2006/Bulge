@@ -407,8 +407,7 @@ async fn toolless_final_step_keeps_the_cached_prefix() {
 
     let requests = backend.requests.lock().unwrap();
     assert_eq!(requests.len(), 2);
-    assert_eq!(requests[0].tool_choice, bulge_llm::ToolChoice::Auto);
-    assert_eq!(requests[1].tool_choice, bulge_llm::ToolChoice::None, "tools stay declared but calls are forbidden");
+    assert_eq!(requests[1].tools, requests[0].tools, "a text-only turn still declares the tools");
     assert_prefix_chain(&requests);
 }
 
@@ -428,8 +427,31 @@ async fn self_review_and_side_requests_keep_the_cached_prefix() {
     let side = side_request(&driver.prefix(), &job, "extract lessons", bulge_llm::Purpose::Memory);
     let mut requests = backend.requests.lock().unwrap().clone();
     assert_eq!(requests.len(), 2, "loop call + self-review");
-    assert_eq!(requests[1].tool_choice, bulge_llm::ToolChoice::None);
-    assert_eq!(side.tool_choice, bulge_llm::ToolChoice::None);
     requests.push(side);
     assert_prefix_chain(&requests);
+}
+
+#[tokio::test]
+async fn a_stray_tool_call_in_a_text_only_turn_is_stripped_then_retried_without_tools() {
+    // Budget runs out after one step; the forced final summary first answers with
+    // only a tool call (ignored instruction), so the driver strips it and retries
+    // once without tools; the log never holds an unanswered call.
+    let backend = FakeBackend::new(vec![
+        vec![tool("c1", "exec", json!({ "command": "true" }))],
+        vec![tool("c2", "exec", json!({ "command": "ls" }))],
+        vec![text("final summary")],
+    ]);
+    let dispatcher = Arc::new(FakeDispatcher::default());
+    let mut job = job(Budget { max_steps: 1, max_tokens: 100_000, max_wall_secs: 3600 });
+    let outcome = driver(backend.clone(), dispatcher.clone()).run(&mut job, CancellationToken::new()).await.unwrap();
+
+    assert_eq!(outcome, LoopOutcome::BudgetExhausted);
+    assert_eq!(job.state().summary.as_deref(), Some("final summary"));
+    let requests = backend.requests.lock().unwrap();
+    assert_eq!(requests.len(), 3);
+    assert!(!requests[1].tools.is_empty(), "first attempt keeps the cached prefix");
+    assert!(requests[2].tools.is_empty(), "retry drops tools only after a tool-only reply");
+    assert_eq!(dispatcher.seen.lock().unwrap().len(), 1, "the stray call never ran");
+    let calls = job.state().history.iter().flat_map(|m| m.content.iter()).filter(|b| matches!(b, ContentBlock::ToolCall { .. })).count();
+    assert_eq!(calls, 1, "only the answered loop call is in the log");
 }
