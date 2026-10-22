@@ -35,7 +35,7 @@ pub fn builtin_tools() -> Vec<ToolSchema> {
         },
         ToolSchema {
             name: "write".into(),
-            description: "Create or overwrite a workspace file with exact content.".into(),
+            description: "Create or overwrite a workspace file with exact content. A success result means the file was written exactly; no need to read it back.".into(),
             parameters: obj(json!({ "path": { "type": "string" }, "content": { "type": "string" } }), json!(["path", "content"])),
             defer_loading: false,
         },
@@ -65,7 +65,7 @@ pub fn builtin_tools() -> Vec<ToolSchema> {
         },
         ToolSchema {
             name: "exec".into(),
-            description: "Run a shell command in the workspace. Output is captured; large output is saved to a file you can read.".into(),
+            description: "Run a shell command in the workspace. Output is captured; large output is saved to a file you can read. Chain related steps (`&&`, heredocs) into one command when you do not need to inspect the output in between.".into(),
             parameters: obj(json!({ "command": { "type": "string" }, "cwd": { "type": "string" } }), json!(["command"])),
             defer_loading: false,
         },

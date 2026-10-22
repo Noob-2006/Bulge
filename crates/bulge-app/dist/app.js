@@ -243,7 +243,17 @@ function renderEgressAsk(id, host, port) {
   appendBlock(card);
 }
 
+// The engine prefixes a user turn with a persisted <turn-context> block (profile,
+// lessons, workspace snapshot) for the model; the user only sees what they typed.
+const TURN_CONTEXT_CLOSE = "</turn-context>";
+function stripTurnContext(text) {
+  if (!text.startsWith("<turn-context>")) return text;
+  const end = text.indexOf(TURN_CONTEXT_CLOSE);
+  return end < 0 ? text : text.slice(end + TURN_CONTEXT_CLOSE.length).trimStart();
+}
+
 function renderUserMessage(text) {
+  text = stripTurnContext(text);
   const box = el("div", "msg-user");
   box.appendChild(el("div", "msg-user-bubble", text));
   appendBlock(box);

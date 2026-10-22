@@ -72,6 +72,7 @@ fn anthropic_stream_assembles_into_a_replayable_tool_turn() {
             Message::tool_result("call-1", "hello", false),
         ],
         tools: vec![],
+        tool_choice: ToolChoice::Auto,
         max_tokens: None,
         temperature: None,
         stop: vec![],

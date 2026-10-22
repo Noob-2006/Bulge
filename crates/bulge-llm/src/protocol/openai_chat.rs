@@ -10,7 +10,7 @@ use super::{EncodeContext, SseEvent, StreamDecoder, WireProtocol};
 use crate::error::{ErrorCode, LlmError};
 use crate::types::{
     BlockKind, ContentBlock, FinishReason, GenerateRequest, Message, ReasoningEffort, Role,
-    StreamChunk, TokenUsage,
+    StreamChunk, TokenUsage, ToolChoice,
 };
 
 #[derive(Debug, Clone, Default)]
@@ -93,6 +93,9 @@ impl WireProtocol for OpenAiChat {
                 })
                 .collect();
             body["tools"] = json!(tools);
+            if request.tool_choice == ToolChoice::None {
+                body["tool_choice"] = json!("none");
+            }
         }
         Ok(body)
     }
@@ -797,6 +800,7 @@ mod tests {
             model: "test-model".to_owned(),
             messages,
             tools: Vec::new(),
+            tool_choice: ToolChoice::Auto,
             max_tokens: None,
             temperature: None,
             stop: Vec::new(),
@@ -1027,6 +1031,23 @@ mod tests {
         req.reasoning_effort = Some(ReasoningEffort::High);
         let body = encode(&req, &off);
         assert!(body.get("reasoning_effort").is_none());
+    }
+
+    #[test]
+    fn tool_choice_none_keeps_tools_and_forbids_calls() {
+        let mut req = request(vec![Message::text(Role::User, "hi")]);
+        req.tools = vec![ToolSchema {
+            name: "lookup".to_owned(),
+            description: "find a thing".to_owned(),
+            parameters: json!({"type": "object"}),
+            defer_loading: false,
+        }];
+        let auto = encode(&req, &model(false));
+        assert!(auto.get("tool_choice").is_none());
+        req.tool_choice = ToolChoice::None;
+        let none = encode(&req, &model(false));
+        assert_eq!(none["tools"], auto["tools"], "tool list must stay byte-identical");
+        assert_eq!(none["tool_choice"], "none");
     }
 
     #[test]

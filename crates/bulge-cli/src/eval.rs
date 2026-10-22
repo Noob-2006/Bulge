@@ -6,7 +6,7 @@
 use std::path::PathBuf;
 
 use bulge_harness::{EvalSummary, EvalTask, judge_prompt, parse_judgment};
-use bulge_llm::{GenerateRequest, LlmBackend, Message, Purpose, Role};
+use bulge_llm::{GenerateRequest, LlmBackend, Message, Purpose, Role, ToolChoice};
 use bulge_store::{Autonomy, Budget, JobStatus};
 use futures::StreamExt;
 use tokio_util::sync::CancellationToken;
@@ -143,6 +143,7 @@ async fn judge_task(backend: &dyn LlmBackend, model: &str, task: &EvalTask, arti
             Message::text(Role::User, judge_prompt(task, artifacts)),
         ],
         tools: Vec::new(),
+        tool_choice: ToolChoice::Auto,
         max_tokens: None,
         temperature: None,
         stop: Vec::new(),

@@ -11,7 +11,7 @@
 use std::sync::Arc;
 
 use bulge_llm::assemble::Assembler;
-use bulge_llm::{ContentBlock, FinishReason, GenerateRequest, LlmBackend, LlmError, Message, Purpose, ReasoningEffort, Role, TokenUsage, ToolSchema};
+use bulge_llm::{ContentBlock, FinishReason, GenerateRequest, LlmBackend, LlmError, Message, Purpose, ReasoningEffort, Role, TokenUsage, ToolChoice, ToolSchema};
 use bulge_store::{JobEvent, JobHandle, JobStatus, PlanItem, PlanStatus, StoreError};
 use futures::StreamExt;
 use futures::future::LocalBoxFuture;
@@ -118,6 +118,57 @@ pub struct Sampling {
     /// Per-call output cap. `None` lets the backend apply its model default.
     pub max_tokens: Option<u32>,
 }
+
+/// Everything that determines a loop request's leading bytes. Side calls built
+/// from it (see [`side_request`]) reuse the provider's cached prefix.
+#[derive(Debug, Clone)]
+pub struct RequestPrefix {
+    pub system_prompt: String,
+    pub tools: Vec<ToolSchema>,
+    pub context: ContextConfig,
+}
+
+/// The messages a loop request carries: the system prompt, the latest compaction
+/// summary (if any) in place of the messages it replaced, then the live history
+/// tail — pruned so long old tool results are trimmed.
+fn request_messages(system_prompt: &str, context: &ContextConfig, job: &JobHandle) -> Vec<Message> {
+    let state = job.state();
+    let mut messages = Vec::with_capacity(state.history.len() + 2);
+    messages.push(Message::text(Role::System, system_prompt.to_string()));
+    let base = match &state.compaction {
+        Some(compaction) => {
+            messages.push(context::summary_message(&compaction.summary));
+            compaction.kept_from.min(state.history.len())
+        }
+        None => 0,
+    };
+    messages.extend(state.history[base..].iter().cloned());
+    context::prune(&messages, context.window, context.keep_recent, &context.prune)
+}
+
+/// A no-tool side call over a job (e.g. post-job learning): exactly the loop's
+/// request prefix — same system prompt, same tools (calls forbidden), same
+/// pruned/compacted history — plus `instruction` as the final user message, so
+/// only the instruction and the reply are uncached.
+pub fn side_request(prefix: &RequestPrefix, job: &JobHandle, instruction: &str, purpose: Purpose) -> GenerateRequest {
+    let mut messages = request_messages(&prefix.system_prompt, &prefix.context, job);
+    messages.push(Message::text(Role::User, instruction.to_string()));
+    GenerateRequest {
+        model: job.state().spec.model.model.clone(),
+        messages,
+        tools: prefix.tools.clone(),
+        tool_choice: ToolChoice::None,
+        max_tokens: None,
+        temperature: None,
+        stop: Vec::new(),
+        reasoning_effort: None,
+        purpose,
+    }
+}
+
+/// Leads the compaction request's final user message (the summarizer now shares
+/// the loop's system prompt, so its role is stated here instead).
+const COMPACT_INSTRUCTION: &str = "Stop working on the task for a moment: you are compacting this long agent transcript into a briefing that lets the agent continue. Do not call tools.";
 
 pub struct Driver {
     backend: Arc<dyn LlmBackend>,
@@ -256,7 +307,7 @@ impl Driver {
                 budget.record_tokens(usage.total());
             }
 
-            let assembled = match self.one_call(job, self.tools.clone(), cancel.clone()).await? {
+            let assembled = match self.one_call(job, ToolChoice::Auto, cancel.clone()).await? {
                 Ok(assembled) => assembled,
                 Err(outcome) => return Ok(outcome),
             };
@@ -298,7 +349,7 @@ impl Driver {
     async fn one_call(
         &self,
         job: &mut JobHandle,
-        tools: Vec<ToolSchema>,
+        tool_choice: ToolChoice,
         cancel: CancellationToken,
     ) -> Result<Result<bulge_llm::assemble::Assembled, LoopOutcome>, StoreError> {
         let model = job.state().spec.model.model.clone();
@@ -306,7 +357,10 @@ impl Driver {
         let request = GenerateRequest {
             model: model.clone(),
             messages,
-            tools,
+            // Always the full tool list, even when calls are forbidden: the tool
+            // definitions are part of the provider's cached prefix.
+            tools: self.tools.clone(),
+            tool_choice,
             max_tokens: self.sampling.max_tokens,
             temperature: self.sampling.temperature,
             stop: Vec::new(),
@@ -344,18 +398,13 @@ impl Driver {
     /// then the live history tail — finally pruned so long old tool results are
     /// trimmed. The system prefix stays byte-stable for the provider's cache.
     fn build_request_messages(&self, job: &JobHandle) -> Vec<Message> {
-        let state = job.state();
-        let mut messages = Vec::with_capacity(state.history.len() + 2);
-        messages.push(Message::text(Role::System, self.system_prompt.clone()));
-        let base = match &state.compaction {
-            Some(compaction) => {
-                messages.push(context::summary_message(&compaction.summary));
-                compaction.kept_from.min(state.history.len())
-            }
-            None => 0,
-        };
-        messages.extend(state.history[base..].iter().cloned());
-        context::prune(&messages, self.context.window, self.context.keep_recent, &self.context.prune)
+        request_messages(&self.system_prompt, &self.context, job)
+    }
+
+    /// The prefix this driver sends (system prompt, tools, context policy), for
+    /// side calls made after the loop — see [`side_request`].
+    pub fn prefix(&self) -> RequestPrefix {
+        RequestPrefix { system_prompt: self.system_prompt.clone(), tools: self.tools.clone(), context: self.context }
     }
 
     /// When the live context would overflow the window, summarize its oldest span
@@ -367,25 +416,20 @@ impl Driver {
 
         // The view the model currently sees: system, the existing summary (if
         // any), then the live tail. Compaction ranges are indices into this view.
-        let (view, base, tail_start) = {
-            let state = job.state();
-            let mut view = Vec::with_capacity(state.history.len() + 2);
-            view.push(Message::text(Role::System, self.system_prompt.clone()));
-            let (base, tail_start) = match &state.compaction {
-                Some(compaction) => {
-                    view.push(context::summary_message(&compaction.summary));
-                    (compaction.kept_from.min(state.history.len()), 2)
-                }
-                None => (0, 1),
-            };
-            view.extend(state.history[base..].iter().cloned());
-            (view, base, tail_start)
+        // This is exactly the request the loop sends (pruning keeps the message
+        // count), so the summary call reuses the provider's cached prefix.
+        let view = self.build_request_messages(job);
+        let (base, tail_start) = match &job.state().compaction {
+            Some(compaction) => (compaction.kept_from.min(job.state().history.len()), 2),
+            None => (0, 1),
         };
 
         let Some(range) = context::compaction_range(&view, self.context.window, self.context.reserve, self.context.retain_ratio) else {
             return Ok(None);
         };
 
+        // `range.start` is the first message after the system prompt, so
+        // system + this span is a byte-exact prefix of the last loop request.
         let to_summarize: Vec<Message> = view[range.start..range.kept_from].to_vec();
         let Some((summary, usage)) = self.summarize(to_summarize, &model, cancel.clone()).await else {
             return Ok(None);
@@ -405,13 +449,16 @@ impl Driver {
     /// or `None` if the model errored or produced no text.
     async fn summarize(&self, slice: Vec<Message>, model: &str, cancel: CancellationToken) -> Option<(String, TokenUsage)> {
         let mut messages = Vec::with_capacity(slice.len() + 2);
-        messages.push(Message::text(Role::System, "You compact a long agent transcript into a briefing that lets the agent continue."));
+        // Same system prompt and tools as the loop (calls forbidden) so the
+        // provider's cached prefix covers the whole span being summarized.
+        messages.push(Message::text(Role::System, self.system_prompt.clone()));
         messages.extend(slice);
-        messages.push(Message::text(Role::User, context::SUMMARY_TEMPLATE));
+        messages.push(Message::text(Role::User, format!("{COMPACT_INSTRUCTION}\n\n{}", context::SUMMARY_TEMPLATE)));
         let request = GenerateRequest {
             model: model.to_string(),
             messages,
-            tools: Vec::new(),
+            tools: self.tools.clone(),
+            tool_choice: ToolChoice::None,
             max_tokens: None,
             temperature: None,
             stop: Vec::new(),
@@ -625,6 +672,7 @@ impl Driver {
                 Message::text(Role::User, proposal),
             ],
             tools: Vec::new(),
+            tool_choice: ToolChoice::Auto,
             max_tokens: Some(200),
             temperature: Some(0.0),
             stop: Vec::new(),
@@ -654,7 +702,7 @@ impl Driver {
         job.append(vec![JobEvent::StepStarted { step: job.state().steps + 1 }, JobEvent::Message { message: Message::text(Role::User, note) }])?;
         budget.record_step();
 
-        let assembled = match self.one_call(job, Vec::new(), CancellationToken::new()).await? {
+        let assembled = match self.one_call(job, ToolChoice::None, CancellationToken::new()).await? {
             Ok(assembled) => assembled,
             Err(outcome) => return Ok(outcome),
         };
@@ -749,7 +797,8 @@ impl Driver {
         let request = GenerateRequest {
             model: model.clone(),
             messages: self.build_request_messages(job),
-            tools: Vec::new(),
+            tools: self.tools.clone(),
+            tool_choice: ToolChoice::None,
             max_tokens: self.sampling.max_tokens,
             temperature: self.sampling.temperature,
             stop: Vec::new(),

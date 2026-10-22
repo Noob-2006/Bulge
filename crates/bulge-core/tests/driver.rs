@@ -22,12 +22,15 @@ use tokio_util::sync::CancellationToken;
 struct FakeBackend {
     turns: Mutex<VecDeque<Vec<ContentBlock>>>,
     models: Vec<ModelInfo>,
+    /// Every request the driver sent, in order (for prefix-stability checks).
+    requests: Mutex<Vec<bulge_llm::GenerateRequest>>,
 }
 
 impl FakeBackend {
     fn new(turns: Vec<Vec<ContentBlock>>) -> Arc<Self> {
         Arc::new(Self {
             turns: Mutex::new(turns.into()),
+            requests: Mutex::new(Vec::new()),
             models: vec![ModelInfo {
                 id: "m".into(),
                 context_window: 100_000,
@@ -48,7 +51,8 @@ impl LlmBackend for FakeBackend {
     fn models(&self) -> &[ModelInfo] {
         &self.models
     }
-    fn stream(&self, _request: bulge_llm::GenerateRequest, _cancel: CancellationToken) -> BoxStream<'static, StreamChunk> {
+    fn stream(&self, request: bulge_llm::GenerateRequest, _cancel: CancellationToken) -> BoxStream<'static, StreamChunk> {
+        self.requests.lock().unwrap().push(request);
         let blocks = self.turns.lock().unwrap().pop_front().unwrap_or_else(|| vec![ContentBlock::Text { text: "(no script left)".into() }]);
         let has_tools = blocks.iter().any(|b| matches!(b, ContentBlock::ToolCall { .. }));
         let mut chunks: Vec<StreamChunk> = blocks.into_iter().enumerate().map(|(i, block)| StreamChunk::BlockEnd { index: i, block }).collect();
@@ -380,4 +384,52 @@ async fn a_stalled_plan_gets_one_nudge() {
         .filter(|m| m.content.iter().any(|b| matches!(b, ContentBlock::Text { text } if text.contains("no plan progress"))))
         .count();
     assert_eq!(nudges, 1, "the stall nudge should fire exactly once");
+}
+
+/// Every request after the first must extend the previous one byte-for-byte
+/// (same system prompt, same tools, earlier messages unchanged): that is what
+/// lets the provider's prefix cache cover the whole conversation so far.
+fn assert_prefix_chain(requests: &[bulge_llm::GenerateRequest]) {
+    for pair in requests.windows(2) {
+        let (prev, next) = (&pair[0], &pair[1]);
+        assert_eq!(prev.tools, next.tools, "tool list changed between requests");
+        assert!(next.messages.len() >= prev.messages.len());
+        assert_eq!(prev.messages[..], next.messages[..prev.messages.len()], "earlier messages were rewritten");
+    }
+}
+
+#[tokio::test]
+async fn toolless_final_step_keeps_the_cached_prefix() {
+    let backend = FakeBackend::new(vec![vec![tool("c1", "exec", json!({ "command": "true" }))], vec![text("summary")]]);
+    let dispatcher = Arc::new(FakeDispatcher::default());
+    let mut job = job(Budget { max_steps: 1, max_tokens: 100_000, max_wall_secs: 3600 });
+    driver(backend.clone(), dispatcher).run(&mut job, CancellationToken::new()).await.unwrap();
+
+    let requests = backend.requests.lock().unwrap();
+    assert_eq!(requests.len(), 2);
+    assert_eq!(requests[0].tool_choice, bulge_llm::ToolChoice::Auto);
+    assert_eq!(requests[1].tool_choice, bulge_llm::ToolChoice::None, "tools stay declared but calls are forbidden");
+    assert_prefix_chain(&requests);
+}
+
+#[tokio::test]
+async fn self_review_and_side_requests_keep_the_cached_prefix() {
+    use bulge_core::driver::{CompletionConfig, side_request};
+
+    let mut job = job(Budget { max_steps: 50, max_tokens: 100_000, max_wall_secs: 3600 });
+    job.append(vec![contract(&["report.md"], &[])]).unwrap();
+    let backend = FakeBackend::new(vec![vec![text("I believe it is done.")], vec![text("VERDICT: PASS")]]);
+    let dispatcher = Arc::new(GateDispatcher { read_ok: true, exec_exit: 0 });
+    let driver = Driver::new(backend.clone(), dispatcher, bulge_core::builtin_tools(), "You are bulge.".into())
+        .with_completion_gate(CompletionConfig::default());
+    driver.run(&mut job, CancellationToken::new()).await.unwrap();
+
+    // A post-job side call (e.g. learning) built from the driver's prefix.
+    let side = side_request(&driver.prefix(), &job, "extract lessons", bulge_llm::Purpose::Memory);
+    let mut requests = backend.requests.lock().unwrap().clone();
+    assert_eq!(requests.len(), 2, "loop call + self-review");
+    assert_eq!(requests[1].tool_choice, bulge_llm::ToolChoice::None);
+    assert_eq!(side.tool_choice, bulge_llm::ToolChoice::None);
+    requests.push(side);
+    assert_prefix_chain(&requests);
 }

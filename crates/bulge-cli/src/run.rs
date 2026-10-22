@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use bulge_core::driver::{CompletionConfig, ContextConfig, Driver, GuardConfig, LoopOutcome};
+use bulge_core::driver::{CompletionConfig, ContextConfig, Driver, GuardConfig, LoopOutcome, RequestPrefix, side_request};
 pub use bulge_core::driver::Sampling;
 use crate::delegate;
 use bulge_core::hooks::{HookConfig, HookRunner, HookedDispatcher};
@@ -38,7 +38,13 @@ You are bulge, a careful general-purpose agent working inside a sandboxed Linux 
 The workspace is yours; the host and the wider machine are not reachable. Work toward \
 the user's goal with the provided tools. Prefer small, verifiable steps. Keep a plan \
 with the plan tool and mark items done as you go. When you believe the work is complete, \
-stop calling tools and state plainly what you produced and how you verified it.";
+stop calling tools and state plainly what you produced and how you verified it.\n\n\
+Every extra model round-trip resends the whole conversation, so economise on turns, not \
+on care: issue independent tool calls together in one turn (they run in parallel); chain \
+dependent shell steps you would not need to inspect in between into one `exec` (e.g. \
+create a file and run its check in the same command); trust tool results (a successful \
+`write` landed — do not read it back); and run each verification once, re-running only \
+after you change something.";
 
 /// How many memory lessons to retrieve into the prompt.
 const LESSON_COUNT: usize = 5;
@@ -125,10 +131,12 @@ fn read_tree(root: &Path) -> Tree {
     tree
 }
 
-/// Build the system prompt: the harness surface (or the explicit persona, or the
-/// default prompt), plus the most relevant memory lessons for this goal.
-fn build_system_prompt(harness_dir: &Path, goal: &str, persona: Option<&str>, jobs_dir: Option<&Path>, current_job_id: &str) -> String {
-    let mut prompt = match persona {
+/// Build the system prompt: the harness surface, the explicit persona, or the
+/// default prompt. Only content that is identical across jobs and turns belongs
+/// here — the provider's prefix cache covers system + tools, so anything that
+/// varies per job (profile, lessons, past tasks) goes in [`build_turn_context`].
+fn build_system_prompt(harness_dir: &Path, persona: Option<&str>) -> String {
+    match persona {
         Some(text) if !text.trim().is_empty() => text.to_string(),
         _ => {
             let tree = read_tree(harness_dir);
@@ -136,45 +144,136 @@ fn build_system_prompt(harness_dir: &Path, goal: &str, persona: Option<&str>, jo
             let surfaced = bulge_harness::materialize(&tree, &spec);
             if surfaced.trim().is_empty() { DEFAULT_SYSTEM_PROMPT.to_string() } else { surfaced }
         }
-    };
+    }
+}
 
+/// Wraps the per-turn context block inside a user turn. The block is logged as
+/// part of the user message (so later requests replay identical bytes); the app
+/// hides it from the user bubble and recall skips it when scoring past jobs.
+pub const TURN_CONTEXT_OPEN: &str = "<turn-context>";
+pub const TURN_CONTEXT_CLOSE: &str = "</turn-context>";
+
+/// Most entries listed in the start-of-task workspace snapshot.
+const WORKSPACE_LIST_LIMIT: usize = 80;
+/// Directory depth of the workspace snapshot (1 = top level only).
+const WORKSPACE_LIST_DEPTH: usize = 2;
+
+/// The volatile context for one user turn: the durable profile (USER/MEMORY),
+/// the most relevant past job, the retrieved lessons for this goal, and — on a
+/// job's first turn — a bounded listing of the workspace. Empty when there is
+/// nothing to add. Rendered once and persisted, never recomputed for a turn.
+fn build_turn_context(harness_dir: &Path, goal: &str, jobs_dir: Option<&Path>, current_job_id: &str, workspace: Option<&Path>) -> String {
+    let mut context = String::new();
     let memory_root = harness_dir.join("memory");
 
-    // Durable profile surfaces (always injected, in full): who the user is and
-    // how they want the agent to work, plus durable environment facts. Kept
-    // bounded by the save-time char limits, so they never bloat the prompt.
+    // Durable profile surfaces: who the user is and how they want the agent to
+    // work, plus durable environment facts. Bounded by the save-time char limits.
     let user = bulge_harness::Profile::load(&memory_root.join(bulge_harness::profile::USER_FILE)).unwrap_or_default();
     if !user.sections.is_empty() {
-        prompt.push_str("\n\n# About the user\n");
-        prompt.push_str(&user.render());
+        context.push_str("\n\n# About the user\n");
+        context.push_str(&user.render());
     }
     let env = bulge_harness::Profile::load(&memory_root.join(bulge_harness::profile::MEMORY_FILE)).unwrap_or_default();
     if !env.sections.is_empty() {
-        prompt.push_str("\n\n# Environment notes\n");
-        prompt.push_str(&env.render());
+        context.push_str("\n\n# Environment notes\n");
+        context.push_str(&env.render());
     }
 
     // Surface the single most relevant PAST job for this goal — a "have I done
     // something like this before?" nudge. Unlike Hermes (which keeps past
-    // transcripts tool-only), bulge auto-surfaces the top match at task start; the
-    // agent can still call `recall` for more. Thresholded so it stays quiet when
-    // nothing is clearly related.
+    // transcripts tool-only), bulge auto-surfaces the top match at task start.
+    // Thresholded so it stays quiet when nothing is clearly related.
     if let Some(dir) = jobs_dir
         && let Some(past) = crate::recall::most_relevant(dir, goal, 2.0, current_job_id)
     {
-        prompt.push_str("\n\n# Possibly relevant past task (call `recall` for more)\n");
-        prompt.push_str(&past);
+        context.push_str("\n\n# Possibly relevant past task\n");
+        context.push_str(&past);
+        context.push_str("\n(This is the best match already; call `recall` only if you need a different or fuller past result.)");
     }
 
     if let Ok((lessons, _problems)) = bulge_harness::memory::load(&memory_root) {
         let hits = bulge_harness::retrieve(&lessons, goal, LESSON_COUNT);
         let brief = bulge_harness::brief(&hits);
         if !brief.is_empty() {
-            prompt.push_str("\n\n");
-            prompt.push_str(&brief);
+            context.push_str("\n\n");
+            context.push_str(&brief);
         }
     }
-    prompt
+
+    if let Some(dir) = workspace {
+        context.push_str("\n\n# Workspace at task start (/workspace; no need to list it again)\n");
+        context.push_str(&workspace_listing(dir));
+    }
+
+    let body = context.trim();
+    if body.is_empty() { String::new() } else { format!("{TURN_CONTEXT_OPEN}\n{body}\n{TURN_CONTEXT_CLOSE}") }
+}
+
+/// A sorted, bounded listing of `dir` (relative paths, `/` after directories),
+/// skipping hidden entries and well-known dependency/build directories.
+fn workspace_listing(dir: &Path) -> String {
+    const SKIP: [&str; 4] = ["node_modules", "target", "__pycache__", ".git"];
+    let mut lines = Vec::new();
+    let mut truncated = false;
+    let mut stack = vec![(dir.to_path_buf(), 1_usize)];
+    let mut entries_seen = Vec::new();
+    while let Some((path, depth)) = stack.pop() {
+        let Ok(read) = std::fs::read_dir(&path) else { continue };
+        let mut names: Vec<(String, bool)> = read
+            .flatten()
+            .filter_map(|e| {
+                let name = e.file_name().to_string_lossy().into_owned();
+                let is_dir = e.file_type().map(|t| t.is_dir()).unwrap_or(false);
+                (!name.starts_with('.') && !SKIP.contains(&name.as_str())).then_some((name, is_dir))
+            })
+            .collect();
+        names.sort();
+        for (name, is_dir) in names.into_iter().rev() {
+            let full = path.join(&name);
+            entries_seen.push((full.clone(), is_dir));
+            if is_dir && depth < WORKSPACE_LIST_DEPTH {
+                stack.push((full, depth + 1));
+            }
+        }
+    }
+    entries_seen.sort();
+    for (full, is_dir) in entries_seen {
+        if lines.len() == WORKSPACE_LIST_LIMIT {
+            truncated = true;
+            break;
+        }
+        let rel = full.strip_prefix(dir).unwrap_or(&full).to_string_lossy().into_owned();
+        lines.push(if is_dir { format!("{rel}/") } else { rel });
+    }
+    if lines.is_empty() {
+        return "(empty)".to_string();
+    }
+    if truncated {
+        lines.push(format!("… (listing capped at {WORKSPACE_LIST_LIMIT} entries)"));
+    }
+    lines.join("\n")
+}
+
+/// Remove every `<turn-context>…</turn-context>` block from `text` (used by
+/// recall so injected context never counts as a past job's own content).
+pub fn strip_turn_context(text: &str) -> std::borrow::Cow<'_, str> {
+    if !text.contains(TURN_CONTEXT_OPEN) {
+        return std::borrow::Cow::Borrowed(text);
+    }
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(start) = rest.find(TURN_CONTEXT_OPEN) {
+        out.push_str(&rest[..start]);
+        match rest[start..].find(TURN_CONTEXT_CLOSE) {
+            Some(end) => rest = &rest[start + end + TURN_CONTEXT_CLOSE.len()..],
+            None => {
+                rest = "";
+                break;
+            }
+        }
+    }
+    out.push_str(rest);
+    std::borrow::Cow::Owned(out)
 }
 
 /// Receives each complete JSONL log line as it is committed (one call per line,
@@ -318,6 +417,9 @@ pub struct Session {
     auto_review: bool,
     /// The VM shape last launched with; restart tweaks these.
     vm_config: VmConfig,
+    /// The last turn's request prefix; post-job learning calls replay it so they
+    /// hit the provider's prefix cache instead of resending the job uncached.
+    prefix: Option<RequestPrefix>,
 }
 
 impl Session {
@@ -403,6 +505,7 @@ impl Session {
             skip_review: config.skip_review,
             auto_review: config.auto_review,
             vm_config,
+            prefix: None,
         })
     }
 
@@ -420,11 +523,21 @@ impl Session {
     /// The VM is left running for the next turn.
     pub async fn run_turn(&mut self, goal: String, cancel: CancellationToken, sink: LineSink) -> Result<RunOutcome, String> {
         let jobs_dir = self.job.dir().parent().map(std::path::Path::to_path_buf);
-        let system_prompt = build_system_prompt(&self.harness_dir, &goal, self.system_prompt.as_deref(), jobs_dir.as_deref(), self.job_id());
+        let system_prompt = build_system_prompt(&self.harness_dir, self.system_prompt.as_deref());
+        // The workspace snapshot is only true before the first turn touches it.
+        let first_turn = self.job.state().history.is_empty();
+        let turn_context = build_turn_context(
+            &self.harness_dir,
+            &goal,
+            jobs_dir.as_deref(),
+            self.job_id(),
+            first_turn.then_some(self.workspace.as_path()),
+        );
+        let user_turn = if turn_context.is_empty() { goal.clone() } else { format!("{turn_context}\n\n{goal}") };
 
         // Append the user turn; flip a finished job back to Running (best effort).
         self.job
-            .append(vec![JobEvent::Message { message: Message::text(Role::User, goal.clone()) }])
+            .append(vec![JobEvent::Message { message: Message::text(Role::User, user_turn) }])
             .map_err(|e| format!("append turn: {e}"))?;
         let _ = self.job.append(vec![JobEvent::StatusChanged { status: JobStatus::Running, summary: None }]);
 
@@ -511,6 +624,7 @@ impl Session {
 
         // The driver/dispatcher drop here, releasing their VM clones; `self.vm`
         // keeps the VM alive for the next turn.
+        self.prefix = Some(driver.prefix());
         drop(driver);
         drop(dispatcher);
 
@@ -551,8 +665,10 @@ impl Session {
     /// Finish the conversation: propose durable lessons offline, then shut the VM
     /// down (and clean up its runtime directory).
     pub async fn shutdown(mut self) {
-        if !self.skip_review {
-            improve(self.backend.as_ref(), &mut self.job, &self.harness_dir, &self.backend_spec.model).await;
+        if !self.skip_review
+            && let Some(prefix) = self.prefix.take()
+        {
+            improve(self.backend.as_ref(), &mut self.job, &self.harness_dir, &self.backend_spec.model, &prefix).await;
         }
         let Session { vm, .. } = self;
         if let Ok(vm) = Arc::try_unwrap(vm) {
@@ -601,28 +717,27 @@ pub async fn run_streaming(config: RunConfig, cancel: CancellationToken, sink: L
 }
 
 /// Ask the model for durable lessons from this job and save them to memory.
-async fn improve(backend: &dyn LlmBackend, job: &mut bulge_store::JobHandle, harness_dir: &Path, model: &str) {
-    let mut messages = Vec::with_capacity(job.state().history.len() + 1);
-    messages.push(Message::text(Role::System, "You review a finished job and extract durable lessons."));
-    messages.extend(job.state().history.iter().cloned());
-    messages.push(Message::text(Role::User, bulge_harness::PROPOSE_LESSONS_PROMPT));
+/// Opens every post-job learning instruction (the learning calls share the loop's
+/// system prompt for cache reuse, so the reviewer role is stated here).
+const LEARNING_PREAMBLE: &str = "The job above is finished; stop working on it and do not call tools.";
 
-    let request = GenerateRequest {
-        model: model.to_string(),
-        messages,
-        tools: Vec::new(),
-        max_tokens: None,
-        temperature: None,
-        stop: Vec::new(),
-        reasoning_effort: None,
-        purpose: Purpose::Memory,
-    };
+/// Run one post-job learning call and log its usage on the job (so a job's token
+/// total includes the learning it paid for).
+async fn learning_call(backend: &dyn LlmBackend, job: &mut bulge_store::JobHandle, request: GenerateRequest, model: &str) -> bulge_llm::assemble::Assembled {
     let mut stream = backend.stream(request, CancellationToken::new());
     let mut assembler = bulge_llm::assemble::Assembler::new();
     while let Some(chunk) = stream.next().await {
         assembler.push(&chunk);
     }
     let assembled = assembler.finish(model);
+    let _ = job.append(vec![JobEvent::Usage { model: model.to_string(), usage: assembled.usage }]);
+    assembled
+}
+
+async fn improve(backend: &dyn LlmBackend, job: &mut bulge_store::JobHandle, harness_dir: &Path, model: &str, prefix: &RequestPrefix) {
+    let instruction = format!("{LEARNING_PREAMBLE} You review a finished job and extract durable lessons.\n\n{}", bulge_harness::PROPOSE_LESSONS_PROMPT);
+    let request = side_request(prefix, job, &instruction, Purpose::Memory);
+    let assembled = learning_call(backend, job, request, model).await;
     let reply = assembled.message.content.iter().find_map(|b| match b {
         bulge_llm::ContentBlock::Text { text } => Some(text.clone()),
         _ => None,
@@ -645,39 +760,21 @@ async fn improve(backend: &dyn LlmBackend, job: &mut bulge_store::JobHandle, har
     }
 
     // Update the durable profile surfaces (USER.md / MEMORY.md) from this job.
-    propose_profile(backend, job, harness_dir, model).await;
+    propose_profile(backend, job, harness_dir, model, prefix).await;
 
     // Also look for a reusable skill from this job (the skill workshop). Candidates
     // are written to the harness skills dir; they become active once an always-on
     // file references them (promotion is left manual by design, so the always-on
     // prompt never grows on its own).
-    propose_skill(backend, job, harness_dir, model).await;
+    propose_skill(backend, job, harness_dir, model, prefix).await;
 }
 
 /// Ask the model for one reusable skill from this job and, if any, write it to the
 /// harness skills dir (unless a skill of that name already exists). Best-effort.
-async fn propose_skill(backend: &dyn LlmBackend, job: &bulge_store::JobHandle, harness_dir: &Path, model: &str) {
-    let mut messages = Vec::with_capacity(job.state().history.len() + 2);
-    messages.push(Message::text(Role::System, "You review a finished job and extract at most one reusable skill."));
-    messages.extend(job.state().history.iter().cloned());
-    messages.push(Message::text(Role::User, bulge_harness::PROPOSE_SKILL_PROMPT));
-
-    let request = GenerateRequest {
-        model: model.to_string(),
-        messages,
-        tools: Vec::new(),
-        max_tokens: None,
-        temperature: None,
-        stop: Vec::new(),
-        reasoning_effort: None,
-        purpose: Purpose::Memory,
-    };
-    let mut stream = backend.stream(request, CancellationToken::new());
-    let mut assembler = bulge_llm::assemble::Assembler::new();
-    while let Some(chunk) = stream.next().await {
-        assembler.push(&chunk);
-    }
-    let assembled = assembler.finish(model);
+async fn propose_skill(backend: &dyn LlmBackend, job: &mut bulge_store::JobHandle, harness_dir: &Path, model: &str, prefix: &RequestPrefix) {
+    let instruction = format!("{LEARNING_PREAMBLE} You review a finished job and extract at most one reusable skill.\n\n{}", bulge_harness::PROPOSE_SKILL_PROMPT);
+    let request = side_request(prefix, job, &instruction, Purpose::Memory);
+    let assembled = learning_call(backend, job, request, model).await;
     let reply = assembled.message.content.iter().find_map(|b| match b {
         bulge_llm::ContentBlock::Text { text } => Some(text.clone()),
         _ => None,
@@ -709,28 +806,10 @@ async fn propose_skill(backend: &dyn LlmBackend, job: &bulge_store::JobHandle, h
 /// this job, then apply the updates. Every stored body is threat-scanned (these
 /// files are auto-injected into every future system prompt, so a prompt-injection
 /// here would persist) and secret-redacted before it is written. Best-effort.
-async fn propose_profile(backend: &dyn LlmBackend, job: &bulge_store::JobHandle, harness_dir: &Path, model: &str) {
-    let mut messages = Vec::with_capacity(job.state().history.len() + 2);
-    messages.push(Message::text(Role::System, "You review a finished job and update what you durably know about the user and the environment."));
-    messages.extend(job.state().history.iter().cloned());
-    messages.push(Message::text(Role::User, bulge_harness::PROPOSE_PROFILE_PROMPT));
-
-    let request = GenerateRequest {
-        model: model.to_string(),
-        messages,
-        tools: Vec::new(),
-        max_tokens: None,
-        temperature: None,
-        stop: Vec::new(),
-        reasoning_effort: None,
-        purpose: Purpose::Memory,
-    };
-    let mut stream = backend.stream(request, CancellationToken::new());
-    let mut assembler = bulge_llm::assemble::Assembler::new();
-    while let Some(chunk) = stream.next().await {
-        assembler.push(&chunk);
-    }
-    let assembled = assembler.finish(model);
+async fn propose_profile(backend: &dyn LlmBackend, job: &mut bulge_store::JobHandle, harness_dir: &Path, model: &str, prefix: &RequestPrefix) {
+    let instruction = format!("{LEARNING_PREAMBLE} You review a finished job and update what you durably know about the user and the environment.\n\n{}", bulge_harness::PROPOSE_PROFILE_PROMPT);
+    let request = side_request(prefix, job, &instruction, Purpose::Memory);
+    let assembled = learning_call(backend, job, request, model).await;
     let Some(reply) = assembled.message.content.iter().find_map(|b| match b {
         bulge_llm::ContentBlock::Text { text } => Some(text.clone()),
         _ => None,
@@ -783,5 +862,53 @@ async fn propose_profile(backend: &dyn LlmBackend, job: &bulge_store::JobHandle,
             Ok(()) => eprintln!("updated {}", env_path.display()),
             Err(e) => eprintln!("profile: {e} (MEMORY.md left unchanged)"),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn strip_turn_context_removes_only_the_injected_blocks() {
+        let text = format!("a {TURN_CONTEXT_OPEN}lesson about csv{TURN_CONTEXT_CLOSE} b {TURN_CONTEXT_OPEN}x{TURN_CONTEXT_CLOSE}c");
+        assert_eq!(strip_turn_context(&text), "a  b c");
+        assert_eq!(strip_turn_context("plain"), "plain");
+        // An unterminated block drops the rest rather than leaking it.
+        assert_eq!(strip_turn_context(&format!("keep{TURN_CONTEXT_OPEN}dangling")), "keep");
+    }
+
+    #[test]
+    fn workspace_listing_is_sorted_bounded_and_skips_noise() {
+        let dir = std::env::temp_dir().join(format!("bulge-ws-list-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("src/deep/deeper")).unwrap();
+        std::fs::create_dir_all(dir.join("node_modules/pkg")).unwrap();
+        std::fs::create_dir_all(dir.join(".git")).unwrap();
+        std::fs::write(dir.join("b.txt"), "").unwrap();
+        std::fs::write(dir.join("a.py"), "").unwrap();
+        std::fs::write(dir.join("src/main.rs"), "").unwrap();
+        let listing = workspace_listing(&dir);
+        assert_eq!(listing, "a.py\nb.txt\nsrc/\nsrc/deep/\nsrc/main.rs");
+
+        let empty = dir.join("empty");
+        std::fs::create_dir_all(&empty).unwrap();
+        assert_eq!(workspace_listing(&empty), "(empty)");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn turn_context_is_wrapped_and_lists_the_workspace() {
+        let dir = std::env::temp_dir().join(format!("bulge-turn-ctx-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("harness")).unwrap();
+        std::fs::create_dir_all(dir.join("ws")).unwrap();
+        std::fs::write(dir.join("ws/data.csv"), "x").unwrap();
+        let ctx = build_turn_context(&dir.join("harness"), "sum the csv", None, "j-1", Some(&dir.join("ws")));
+        assert!(ctx.starts_with(TURN_CONTEXT_OPEN) && ctx.ends_with(TURN_CONTEXT_CLOSE));
+        assert!(ctx.contains("data.csv"));
+        // Nothing to add (no profile, lessons, or workspace) → no block at all.
+        assert!(build_turn_context(&dir.join("harness"), "sum the csv", None, "j-1", None).is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

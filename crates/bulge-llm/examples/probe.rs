@@ -78,6 +78,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             model: model.clone(),
             messages: messages.clone(),
             tools: tools.clone(),
+            tool_choice: ToolChoice::Auto,
             max_tokens: None,
             temperature: None,
             stop: vec![],

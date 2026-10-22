@@ -63,6 +63,11 @@ pub struct PruneConfig {
     pub head_chars: usize,
     /// Kept tail chars when trimming.
     pub tail_chars: usize,
+    /// The prune boundary (end of the trimmable span) only advances in multiples
+    /// of this many messages. A boundary that slid by one message every turn would
+    /// rewrite a message just behind the cached prefix on every request; stepping
+    /// it breaks the prefix once per `boundary_step` turns instead. `1` = slide.
+    pub boundary_step: usize,
 }
 
 impl Default for PruneConfig {
@@ -72,6 +77,7 @@ impl Default for PruneConfig {
             max_tool_result_chars: 8192,
             head_chars: 4096,
             tail_chars: 1024,
+            boundary_step: 8,
         }
     }
 }
@@ -79,7 +85,8 @@ impl Default for PruneConfig {
 /// Return a pruned copy of `messages` when over pressure, else the input as-is.
 /// Never touches the last `keep_recent` messages, never the leading system
 /// message, and never a tool-call/tool-result pairing. A trimmed result keeps
-/// head + a marker (with the omitted char count) + tail.
+/// head + a marker (with the omitted char count) + tail. The trimmable span ends
+/// at a multiple of `boundary_step`, so successive requests share their prefix.
 pub fn prune(
     messages: &[Message],
     window: u64,
@@ -98,7 +105,8 @@ pub fn prune(
             .first()
             .is_some_and(|message| message.role == Role::System),
     );
-    let end = messages.len().saturating_sub(keep_recent);
+    let step = config.boundary_step.max(1);
+    let end = messages.len().saturating_sub(keep_recent) / step * step;
     if start >= end {
         return pruned;
     }
@@ -280,6 +288,7 @@ mod tests {
             max_tool_result_chars: 100,
             head_chars: 20,
             tail_chars: 10,
+            boundary_step: 1,
         }
     }
 
@@ -385,6 +394,7 @@ mod tests {
             max_tool_result_chars: 10,
             head_chars: 5,
             tail_chars: 3,
+            boundary_step: 1,
         };
 
         let pruned = prune(&messages, 100, 1, &config);
@@ -399,6 +409,34 @@ mod tests {
             5 + "\n[... 92 chars pruned ...]\n".chars().count() + 3
         );
         assert!(pruned[2] == messages[2]);
+    }
+
+    #[test]
+    fn stepped_boundary_keeps_successive_requests_prefix_stable() {
+        // Growing history: each turn appends a long tool result. With a sliding
+        // boundary every turn trims one more message; with a stepped boundary the
+        // previous request stays a byte-exact prefix of the next one except at
+        // step crossings.
+        let config = PruneConfig { boundary_step: 4, ..prune_config() };
+        let mut messages = vec![Message::text(Role::System, "sys")];
+        let mut previous: Vec<Message> = Vec::new();
+        let mut breaks = 0;
+        for turn in 0..16 {
+            messages.push(Message::tool_result(format!("call-{turn}"), "a".repeat(400), false));
+            let pruned = prune(&messages, 100, 2, &config);
+            let end = (messages.len() - 2) / 4 * 4;
+            for (index, message) in pruned.iter().enumerate() {
+                let trimmed = text_of(&message.content[0]).contains("chars pruned");
+                assert_eq!(trimmed, index >= 1 && index < end, "turn {turn} index {index}");
+            }
+            if !previous.is_empty() && pruned[..previous.len()] != previous[..] {
+                breaks += 1;
+            }
+            previous = pruned;
+        }
+        // 16 turns, boundary at len 6, 10, 14 (end = 4, 8, 12): three breaks, where a
+        // sliding boundary would break on every turn past the first.
+        assert_eq!(breaks, 3, "prefix should break only when the boundary steps");
     }
 
     #[test]

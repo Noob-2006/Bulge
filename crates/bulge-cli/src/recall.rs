@@ -204,9 +204,10 @@ pub fn search(jobs_dir: &Path, query: &str, limit: usize) -> Vec<RecallHit> {
             continue;
         };
         let job_file = path.join(JOB_FILE);
-        let Ok(text) = std::fs::read_to_string(&job_file) else {
+        let Ok(raw) = std::fs::read_to_string(&job_file) else {
             continue;
         };
+        let text = crate::run::strip_turn_context(&raw);
         let Some((score, snippet)) = score_text(&text, &query_tokens, &wanted) else {
             continue;
         };
