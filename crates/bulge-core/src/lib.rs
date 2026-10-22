@@ -5,6 +5,7 @@ pub mod complete;
 pub mod context;
 pub mod cron;
 pub mod dispatch;
+pub mod cache_watch;
 pub mod driver;
 pub mod hooks;
 pub mod mcp;

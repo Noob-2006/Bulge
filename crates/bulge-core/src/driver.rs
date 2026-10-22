@@ -8,10 +8,11 @@
 //! (verify the deliverable contract before declaring success) arrives in C5
 //! and will replace that final transition.
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use bulge_llm::assemble::{Assembled, Assembler};
 use bulge_llm::{ContentBlock, FinishReason, GenerateRequest, LlmBackend, LlmError, Message, Purpose, ReasoningEffort, Role, TokenUsage, ToolSchema};
+use crate::cache_watch::{self, CacheBreak, CacheWatch, Fingerprint};
 use bulge_store::{JobEvent, JobHandle, JobStatus, PlanItem, PlanStatus, StoreError};
 use futures::StreamExt;
 use futures::future::LocalBoxFuture;
@@ -126,6 +127,20 @@ pub struct RequestPrefix {
     pub system_prompt: String,
     pub tools: Vec<ToolSchema>,
     pub context: ContextConfig,
+    /// The conversation's cache-break watcher, shared with the driver so side
+    /// calls are compared against the loop's last request.
+    pub cache: Arc<Mutex<CacheWatch>>,
+}
+
+/// The job event for a detected cache break.
+pub fn cache_break_event(found: &CacheBreak) -> JobEvent {
+    JobEvent::CacheBreak { expected: found.expected, cached: found.cached, cause: found.cause.tag().to_string(), detail: found.cause.describe() }
+}
+
+/// Record one call against `cache`; the event to log if it broke the prefix.
+pub fn watch_call(cache: &Mutex<CacheWatch>, print: Fingerprint, usage: &TokenUsage) -> Option<JobEvent> {
+    let found = cache.lock().unwrap_or_else(std::sync::PoisonError::into_inner).record(print, usage)?;
+    Some(cache_break_event(&found))
 }
 
 /// The messages a loop request carries: the system prompt, the latest compaction
@@ -229,6 +244,8 @@ pub struct Driver {
     delegate: Option<Arc<dyn DelegateHandler>>,
     /// Handles `recall` tool calls (searches past jobs). `None` → unknown tool.
     recall: Option<Arc<dyn RecallHandler>>,
+    /// Compares each request with the previous one to explain cache misses.
+    cache: Arc<Mutex<CacheWatch>>,
 }
 
 impl Driver {
@@ -246,6 +263,7 @@ impl Driver {
             review: false,
             delegate: None,
             recall: None,
+            cache: Arc::new(Mutex::new(CacheWatch::new())),
         }
     }
 
@@ -408,16 +426,19 @@ impl Driver {
             purpose: Purpose::Conversation,
         };
 
+        let print = cache_watch::fingerprint(&request);
         let assembled = if toolless {
             stream_toolless(self.backend.as_ref(), request, cancel).await
         } else {
             collect(self.backend.as_ref(), request, cancel).await
         };
 
-        job.append(vec![
+        let mut events = vec![
             JobEvent::Message { message: assembled.message.clone() },
             JobEvent::Usage { model, usage: assembled.usage },
-        ])?;
+        ];
+        events.extend(watch_call(&self.cache, print, &assembled.usage));
+        job.append(events)?;
 
         match &assembled.finish {
             FinishReason::Error(error) => {
@@ -443,7 +464,7 @@ impl Driver {
     /// The prefix this driver sends (system prompt, tools, context policy), for
     /// side calls made after the loop — see [`side_request`].
     pub fn prefix(&self) -> RequestPrefix {
-        RequestPrefix { system_prompt: self.system_prompt.clone(), tools: self.tools.clone(), context: self.context }
+        RequestPrefix { system_prompt: self.system_prompt.clone(), tools: self.tools.clone(), context: self.context, cache: self.cache.clone() }
     }
 
     /// When the live context would overflow the window, summarize its oldest span
@@ -470,23 +491,22 @@ impl Driver {
         // `range.start` is the first message after the system prompt, so
         // system + this span is a byte-exact prefix of the last loop request.
         let to_summarize: Vec<Message> = view[range.start..range.kept_from].to_vec();
-        let Some((summary, usage)) = self.summarize(to_summarize, &model, cancel.clone()).await else {
+        let Some((summary, usage, broke)) = self.summarize(to_summarize, &model, cancel.clone()).await else {
             return Ok(None);
         };
 
         // Map the view index back to an absolute index into the stored history.
         let new_kept_from = base + range.kept_from.saturating_sub(tail_start);
-        job.append(vec![
-            JobEvent::Compacted { kept_from: new_kept_from, summary },
-            JobEvent::Usage { model, usage },
-        ])?;
+        let mut events = vec![JobEvent::Compacted { kept_from: new_kept_from, summary }, JobEvent::Usage { model, usage }];
+        events.extend(broke);
+        job.append(events)?;
         Ok(Some(usage))
     }
 
     /// Run one non-tool model call that condenses `slice` into a briefing using
     /// the fixed summary template. Returns the summary text and its token usage,
     /// or `None` if the model errored or produced no text.
-    async fn summarize(&self, slice: Vec<Message>, model: &str, cancel: CancellationToken) -> Option<(String, TokenUsage)> {
+    async fn summarize(&self, slice: Vec<Message>, model: &str, cancel: CancellationToken) -> Option<(String, TokenUsage, Option<JobEvent>)> {
         let mut messages = Vec::with_capacity(slice.len() + 2);
         // Same system prompt and tools as the loop (calls forbidden) so the
         // provider's cached prefix covers the whole span being summarized.
@@ -503,7 +523,9 @@ impl Driver {
             reasoning_effort: None,
             purpose: Purpose::Compaction,
         };
+        let print = cache_watch::fingerprint(&request);
         let assembled = stream_toolless(self.backend.as_ref(), request, cancel).await;
+        let broke = watch_call(&self.cache, print, &assembled.usage);
         if matches!(assembled.finish, FinishReason::Error(_) | FinishReason::Aborted) {
             return None;
         }
@@ -511,7 +533,7 @@ impl Driver {
         if summary.trim().is_empty() {
             return None;
         }
-        Some((summary, assembled.usage))
+        Some((summary, assembled.usage, broke))
     }
 
     /// Claim calls, consult the guard, run the allowed ones, and log results.
@@ -836,11 +858,14 @@ impl Driver {
             reasoning_effort: self.sampling.reasoning_effort,
             purpose: Purpose::Conversation,
         };
+        let print = cache_watch::fingerprint(&request);
         let assembled = stream_toolless(self.backend.as_ref(), request, cancel.clone()).await;
-        job.append(vec![
+        let mut events = vec![
             JobEvent::Message { message: assembled.message.clone() },
             JobEvent::Usage { model, usage: assembled.usage },
-        ])?;
+        ];
+        events.extend(watch_call(&self.cache, print, &assembled.usage));
+        job.append(events)?;
         budget.record_tokens(assembled.usage.total());
         if matches!(assembled.finish, FinishReason::Error(_) | FinishReason::Aborted) {
             return Ok(None);

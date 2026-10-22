@@ -127,6 +127,11 @@ pub enum JobEvent {
     /// A context checkpoint: messages before `kept_from` are replaced, for
     /// request-building, by one summary. The full history stays in the log.
     Compacted { kept_from: usize, summary: String },
+    /// A request got materially fewer prefix-cache hits than its predecessor's
+    /// prompt size: `expected` tokens should have hit, `cached` did. `cause` is a
+    /// tag (`system_changed`, `tools_changed`, `pruned`, `message_rewritten`,
+    /// `messages_dropped`, `provider`), `detail` a one-line explanation.
+    CacheBreak { expected: u64, cached: u64, cause: String, detail: String },
 }
 
 /// One log record.

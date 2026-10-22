@@ -114,6 +114,7 @@ impl JobState {
             JobEvent::ApprovalAsked { .. }
             | JobEvent::ApprovalDecided { .. }
             | JobEvent::NetDomain { .. }
+            | JobEvent::CacheBreak { .. }
             | JobEvent::BudgetWarning { .. }
             | JobEvent::VmStarted { .. }
             | JobEvent::VmStopped { .. }

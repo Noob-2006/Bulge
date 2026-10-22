@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use bulge_core::driver::{CompletionConfig, ContextConfig, Driver, GuardConfig, LoopOutcome, RequestPrefix, side_request, stream_toolless};
+use bulge_core::driver::{CompletionConfig, ContextConfig, Driver, GuardConfig, LoopOutcome, RequestPrefix, side_request, stream_toolless, watch_call};
 pub use bulge_core::driver::Sampling;
 use crate::delegate;
 use bulge_core::hooks::{HookConfig, HookRunner, HookedDispatcher};
@@ -131,17 +131,17 @@ fn read_tree(root: &Path) -> Tree {
     tree
 }
 
-/// Build the system prompt: the harness surface, the explicit persona, or the
-/// default prompt. Only content that is identical across jobs and turns belongs
-/// here — the provider's prefix cache covers system + tools, so anything that
-/// varies per job (profile, lessons, past tasks) goes in [`build_turn_context`].
+/// Build the system prompt: the explicit persona, else the user-authored
+/// always-on harness files, else the default prompt. Only content that is
+/// identical across jobs and turns belongs here — the provider's prefix cache
+/// covers system + tools, so anything the agent itself rewrites (skills catalog,
+/// profile) or that varies per job (lessons, past tasks) goes in
+/// [`build_turn_context`].
 fn build_system_prompt(harness_dir: &Path, persona: Option<&str>) -> String {
     match persona {
         Some(text) if !text.trim().is_empty() => text.to_string(),
         _ => {
-            let tree = read_tree(harness_dir);
-            let spec = SurfaceSpec::default();
-            let surfaced = bulge_harness::materialize(&tree, &spec);
+            let surfaced = bulge_harness::always_on(&read_tree(harness_dir), &SurfaceSpec::default());
             if surfaced.trim().is_empty() { DEFAULT_SYSTEM_PROMPT.to_string() } else { surfaced }
         }
     }
@@ -165,6 +165,14 @@ const WORKSPACE_LIST_DEPTH: usize = 2;
 fn build_turn_context(harness_dir: &Path, goal: &str, jobs_dir: Option<&Path>, current_job_id: &str, workspace: Option<&Path>) -> String {
     let mut context = String::new();
     let memory_root = harness_dir.join("memory");
+
+    // Most stable first (changes only when the workshop installs a skill), so
+    // consecutive jobs share the longest possible cached prefix.
+    let catalog = bulge_harness::skills_catalog(&read_tree(harness_dir), &SurfaceSpec::default());
+    if !catalog.is_empty() {
+        context.push_str("\n\n");
+        context.push_str(&catalog);
+    }
 
     // Durable profile surfaces: who the user is and how they want the agent to
     // work, plus durable environment facts. Bounded by the save-time char limits.
@@ -711,6 +719,11 @@ pub async fn run_streaming(config: RunConfig, cancel: CancellationToken, sink: L
         session.job.state().steps,
         session.job.state().usage.total()
     );
+    let usage = session.job.state().usage;
+    let prompt = usage.input_tokens + usage.cache_read_tokens;
+    if prompt > 0 {
+        eprintln!("prompt cache: {}/{} input tokens hit ({:.1}%)", usage.cache_read_tokens, prompt, 100.0 * usage.cache_read_tokens as f64 / prompt as f64);
+    }
 
     session.shutdown().await;
     Ok(outcome)
@@ -723,16 +736,19 @@ const LEARNING_PREAMBLE: &str = "The job above is finished; stop working on it a
 
 /// Run one post-job learning call and log its usage on the job (so a job's token
 /// total includes the learning it paid for).
-async fn learning_call(backend: &dyn LlmBackend, job: &mut bulge_store::JobHandle, request: GenerateRequest, model: &str) -> bulge_llm::assemble::Assembled {
+async fn learning_call(backend: &dyn LlmBackend, job: &mut bulge_store::JobHandle, request: GenerateRequest, model: &str, prefix: &RequestPrefix) -> bulge_llm::assemble::Assembled {
+    let print = bulge_core::cache_watch::fingerprint(&request);
     let assembled = stream_toolless(backend, request, CancellationToken::new()).await;
-    let _ = job.append(vec![JobEvent::Usage { model: model.to_string(), usage: assembled.usage }]);
+    let mut events = vec![JobEvent::Usage { model: model.to_string(), usage: assembled.usage }];
+    events.extend(watch_call(&prefix.cache, print, &assembled.usage));
+    let _ = job.append(events);
     assembled
 }
 
 async fn improve(backend: &dyn LlmBackend, job: &mut bulge_store::JobHandle, harness_dir: &Path, model: &str, prefix: &RequestPrefix) {
     let instruction = format!("{LEARNING_PREAMBLE} You review a finished job and extract durable lessons.\n\n{}", bulge_harness::PROPOSE_LESSONS_PROMPT);
     let request = side_request(prefix, job, &instruction, Purpose::Memory);
-    let assembled = learning_call(backend, job, request, model).await;
+    let assembled = learning_call(backend, job, request, model, prefix).await;
     let reply = assembled.message.content.iter().find_map(|b| match b {
         bulge_llm::ContentBlock::Text { text } => Some(text.clone()),
         _ => None,
@@ -769,7 +785,7 @@ async fn improve(backend: &dyn LlmBackend, job: &mut bulge_store::JobHandle, har
 async fn propose_skill(backend: &dyn LlmBackend, job: &mut bulge_store::JobHandle, harness_dir: &Path, model: &str, prefix: &RequestPrefix) {
     let instruction = format!("{LEARNING_PREAMBLE} You review a finished job and extract at most one reusable skill.\n\n{}", bulge_harness::PROPOSE_SKILL_PROMPT);
     let request = side_request(prefix, job, &instruction, Purpose::Memory);
-    let assembled = learning_call(backend, job, request, model).await;
+    let assembled = learning_call(backend, job, request, model, prefix).await;
     let reply = assembled.message.content.iter().find_map(|b| match b {
         bulge_llm::ContentBlock::Text { text } => Some(text.clone()),
         _ => None,
@@ -804,7 +820,7 @@ async fn propose_skill(backend: &dyn LlmBackend, job: &mut bulge_store::JobHandl
 async fn propose_profile(backend: &dyn LlmBackend, job: &mut bulge_store::JobHandle, harness_dir: &Path, model: &str, prefix: &RequestPrefix) {
     let instruction = format!("{LEARNING_PREAMBLE} You review a finished job and update what you durably know about the user and the environment.\n\n{}", bulge_harness::PROPOSE_PROFILE_PROMPT);
     let request = side_request(prefix, job, &instruction, Purpose::Memory);
-    let assembled = learning_call(backend, job, request, model).await;
+    let assembled = learning_call(backend, job, request, model, prefix).await;
     let Some(reply) = assembled.message.content.iter().find_map(|b| match b {
         bulge_llm::ContentBlock::Text { text } => Some(text.clone()),
         _ => None,

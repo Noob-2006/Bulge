@@ -202,6 +202,9 @@ function renderEvent(ev) {
     case "vm_started": appendBlock(el("div", "ev-sys", "虛擬機已啟動")); break;
     case "vm_stopped": appendBlock(el("div", "ev-sys", "虛擬機已關閉" + (ev.reason ? " (" + ev.reason + ")" : ""))); break;
     case "compacted": appendBlock(el("div", "ev-sys", "(壓縮上下文以省 token)")); break;
+    case "cache_break":
+      appendBlock(el("div", "ev-sys", "(快取斷點:應命中 " + ev.expected + "、實得 " + ev.cached + " token — " + ev.detail + ")"));
+      break;
     case "budget_warning": appendBlock(el("div", "ev-net", "⚠ 預算接近上限:" + ev.kind + " " + ev.used + "/" + ev.limit)); break;
     case "approval_asked": appendBlock(el("div", "ev-net", "⏸ 等待核准:" + ev.kind)); break;
     case "contract": renderContract(ev.contract || {}); break;

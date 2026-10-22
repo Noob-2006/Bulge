@@ -22,7 +22,10 @@ pub struct SurfaceSpec {
 impl Default for SurfaceSpec {
     fn default() -> Self {
         Self {
-            always_on: vec!["systemprompt.md".into(), "guardrails.md".into(), "memory/MEMORY.md".into(), "tool_guidance.md".into()],
+            // User-authored files only. The agent-written profile (memory/MEMORY.md,
+            // memory/USER.md) is injected per turn by the runner, not here: it
+            // changes after jobs, and the always-on text is the cached prefix.
+            always_on: vec!["systemprompt.md".into(), "guardrails.md".into(), "tool_guidance.md".into()],
             always_on_max: 24_000,
             skill_dir: "skills/".into(),
         }
@@ -264,16 +267,32 @@ pub fn validate(tree: &Tree, spec: &SurfaceSpec) -> Vec<Problem> {
 /// `<available_skills>` index of `name: description` lines (bodies load on
 /// demand). Missing always-on files are skipped.
 pub fn materialize(tree: &Tree, spec: &SurfaceSpec) -> String {
-    let mut out = always_on_text(tree, spec);
-    if let Ok(found) = skills(tree, spec)
-        && !found.is_empty()
-    {
+    let mut out = always_on(tree, spec);
+    let catalog = skills_catalog(tree, spec);
+    if !catalog.is_empty() {
         if !out.is_empty() {
             out.push_str("\n\n");
         }
-        out.push_str(&skills_block(&found));
+        out.push_str(&catalog);
     }
     out
+}
+
+/// The always-on files concatenated in surface order (empty if none exist).
+/// This part only changes when the user edits those files, so a runner can use
+/// it as the stable system prompt.
+pub fn always_on(tree: &Tree, spec: &SurfaceSpec) -> String {
+    always_on_text(tree, spec)
+}
+
+/// The `<available_skills>` catalog (empty when there are no valid skills). It
+/// grows as the skill workshop installs skills, so a runner that cares about the
+/// provider prefix cache should place it after the stable system prompt.
+pub fn skills_catalog(tree: &Tree, spec: &SurfaceSpec) -> String {
+    match skills(tree, spec) {
+        Ok(found) if !found.is_empty() => skills_block(&found),
+        _ => String::new(),
+    }
 }
 
 #[cfg(test)]

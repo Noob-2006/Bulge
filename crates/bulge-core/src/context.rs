@@ -52,6 +52,10 @@ pub fn estimate_tokens(messages: &[Message]) -> u64 {
     messages.iter().map(message_tokens).sum()
 }
 
+/// The fixed tail of the marker a trimmed tool result carries
+/// (`[... N chars pruned ...]`); recognised by cache-break diagnosis.
+pub const PRUNE_MARKER_TAIL: &str = " chars pruned ...]";
+
 /// Pruning configuration.
 #[derive(Debug, Clone, Copy)]
 pub struct PruneConfig {
@@ -145,7 +149,7 @@ fn trim_tool_text(text: &str, config: &PruneConfig) -> Option<String> {
     let head_text: String = text.chars().take(head).collect();
     let tail_text: String = text.chars().skip(total - tail).collect();
     Some(format!(
-        "{head_text}\n[... {omitted} chars pruned ...]\n{tail_text}"
+        "{head_text}\n[... {omitted}{PRUNE_MARKER_TAIL}\n{tail_text}"
     ))
 }
 
