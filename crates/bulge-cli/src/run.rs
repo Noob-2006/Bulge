@@ -196,7 +196,7 @@ fn build_turn_context(harness_dir: &Path, goal: &str, jobs_dir: Option<&Path>, c
     {
         context.push_str("\n\n# Possibly relevant past task\n");
         context.push_str(&past);
-        context.push_str("\n(This is the best match already; call `recall` only if you need a different or fuller past result.)");
+        context.push_str("\n(Call `recall` with a query about it if its result would help; otherwise ignore it.)");
     }
 
     if let Ok((lessons, _problems)) = bulge_harness::memory::load(&memory_root) {
@@ -732,7 +732,7 @@ pub async fn run_streaming(config: RunConfig, cancel: CancellationToken, sink: L
 /// Ask the model for durable lessons from this job and save them to memory.
 /// Opens every post-job learning instruction (the learning calls share the loop's
 /// system prompt for cache reuse, so the reviewer role is stated here).
-const LEARNING_PREAMBLE: &str = "The job above is finished; stop working on it and do not call tools.";
+const LEARNING_PREAMBLE: &str = "Stop working on the task and do not call tools: you now review it to learn from it.";
 
 /// Run one post-job learning call and log its usage on the job (so a job's token
 /// total includes the learning it paid for).
@@ -746,7 +746,9 @@ async fn learning_call(backend: &dyn LlmBackend, job: &mut bulge_store::JobHandl
 }
 
 async fn improve(backend: &dyn LlmBackend, job: &mut bulge_store::JobHandle, harness_dir: &Path, model: &str, prefix: &RequestPrefix) {
-    let instruction = format!("{LEARNING_PREAMBLE} You review a finished job and extract durable lessons.\n\n{}", bulge_harness::PROPOSE_LESSONS_PROMPT);
+    // One call proposes lessons, profile updates, and a skill together: the
+    // instruction is the only uncached text, so it is sent once, not three times.
+    let instruction = format!("{LEARNING_PREAMBLE}\n\n{}", bulge_harness::PROPOSE_LEARNING_PROMPT);
     let request = side_request(prefix, job, &instruction, Purpose::Memory);
     let assembled = learning_call(backend, job, request, model, prefix).await;
     let reply = assembled.message.content.iter().find_map(|b| match b {
@@ -759,7 +761,8 @@ async fn improve(backend: &dyn LlmBackend, job: &mut bulge_store::JobHandle, har
     let existing_ids: Vec<String> = bulge_harness::memory::load(&memory_root)
         .map(|(lessons, _)| lessons.into_iter().map(|l| l.id).collect())
         .unwrap_or_default();
-    let proposed = bulge_harness::parse_proposed_lessons(&reply, &existing_ids);
+    let learned = bulge_harness::parse_proposed_learning(&reply, &existing_ids);
+    let proposed = learned.lessons;
     let mut saved = 0_usize;
     for lesson in &proposed {
         if bulge_harness::memory::save(&memory_root, lesson).is_ok() {
@@ -771,28 +774,20 @@ async fn improve(backend: &dyn LlmBackend, job: &mut bulge_store::JobHandle, har
     }
 
     // Update the durable profile surfaces (USER.md / MEMORY.md) from this job.
-    propose_profile(backend, job, harness_dir, model, prefix).await;
+    apply_profile(harness_dir, learned.profile);
 
     // Also look for a reusable skill from this job (the skill workshop). Candidates
     // are written to the harness skills dir; they become active once an always-on
     // file references them (promotion is left manual by design, so the always-on
     // prompt never grows on its own).
-    propose_skill(backend, job, harness_dir, model, prefix).await;
+    if let Some(draft) = learned.skill {
+        save_skill(harness_dir, &draft);
+    }
 }
 
-/// Ask the model for one reusable skill from this job and, if any, write it to the
-/// harness skills dir (unless a skill of that name already exists). Best-effort.
-async fn propose_skill(backend: &dyn LlmBackend, job: &mut bulge_store::JobHandle, harness_dir: &Path, model: &str, prefix: &RequestPrefix) {
-    let instruction = format!("{LEARNING_PREAMBLE} You review a finished job and extract at most one reusable skill.\n\n{}", bulge_harness::PROPOSE_SKILL_PROMPT);
-    let request = side_request(prefix, job, &instruction, Purpose::Memory);
-    let assembled = learning_call(backend, job, request, model, prefix).await;
-    let reply = assembled.message.content.iter().find_map(|b| match b {
-        bulge_llm::ContentBlock::Text { text } => Some(text.clone()),
-        _ => None,
-    });
-    let Some(reply) = reply else { return };
-    let Some(draft) = bulge_harness::parse_proposed_skill(&reply) else { return };
-
+/// Write a proposed skill to the harness skills dir (unless a skill of that name
+/// already exists). Best-effort.
+fn save_skill(harness_dir: &Path, draft: &bulge_harness::SkillDraft) {
     let spec = SurfaceSpec::default();
     let path = harness_dir.join(draft.path(&spec));
     if path.exists() {
@@ -813,21 +808,11 @@ async fn propose_skill(backend: &dyn LlmBackend, job: &mut bulge_store::JobHandl
     }
 }
 
-/// Ask the model to update the durable profile surfaces (USER.md / MEMORY.md) from
-/// this job, then apply the updates. Every stored body is threat-scanned (these
-/// files are auto-injected into every future system prompt, so a prompt-injection
-/// here would persist) and secret-redacted before it is written. Best-effort.
-async fn propose_profile(backend: &dyn LlmBackend, job: &mut bulge_store::JobHandle, harness_dir: &Path, model: &str, prefix: &RequestPrefix) {
-    let instruction = format!("{LEARNING_PREAMBLE} You review a finished job and update what you durably know about the user and the environment.\n\n{}", bulge_harness::PROPOSE_PROFILE_PROMPT);
-    let request = side_request(prefix, job, &instruction, Purpose::Memory);
-    let assembled = learning_call(backend, job, request, model, prefix).await;
-    let Some(reply) = assembled.message.content.iter().find_map(|b| match b {
-        bulge_llm::ContentBlock::Text { text } => Some(text.clone()),
-        _ => None,
-    }) else {
-        return;
-    };
-    let updates = bulge_harness::parse_proposed_profile(&reply);
+/// Apply proposed updates to the durable profile surfaces (USER.md / MEMORY.md).
+/// Every stored body is threat-scanned (these files are auto-injected into every
+/// future job, so a prompt-injection here would persist) and secret-redacted
+/// before it is written. Best-effort.
+fn apply_profile(harness_dir: &Path, updates: Vec<bulge_harness::ProfileUpdate>) {
     if updates.is_empty() {
         return;
     }

@@ -8,26 +8,8 @@
 //! are the caller's. A proposal that would not pass `tree::validate` is rejected
 //! here, so the workshop never dirties the surface.
 
-use crate::improve::{do_not_capture, slug};
+use crate::improve::slug;
 use crate::tree::{self, SurfaceSpec, Tree};
-
-/// Instruction to propose one skill from a finished job. The model answers with a
-/// single JSON object or `null` when nothing is worth saving.
-pub const PROPOSE_SKILL_PROMPT: &str = concat!(
-    "\
-A successful, repeatable procedure usually IS worth a skill. If this job used one that would \
-work again on FUTURE, similar jobs, propose ONE skill. \
-A skill is a named, general, multi-step procedure — not a one-off and not a single fact \
-(small facts are lessons, not skills). Give:\n\
-- name: a short kebab-case name\n\
-- description: one line saying when to use it; it MUST be at most 60 characters \
-(the skill index truncates at 60, and anything past it never routes)\n\
-- body: the steps, in Markdown",
-    "\n\n",
-    do_not_capture!(),
-    "\n\n",
-    "Answer with ONLY a JSON object {name, description, body}, or null if there is nothing worth saving."
-);
 
 /// A proposed skill, already named, before it is written into a tree.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -98,7 +80,7 @@ pub fn install(tree: &Tree, spec: &SurfaceSpec, draft: &SkillDraft) -> Result<(T
 }
 
 /// Extract the first balanced top-level `{...}` from text, honouring strings.
-fn extract_json_object(text: &str) -> Option<String> {
+pub(crate) fn extract_json_object(text: &str) -> Option<String> {
     let bytes = text.as_bytes();
     let start = text.find('{')?;
     let mut depth = 0_i32;

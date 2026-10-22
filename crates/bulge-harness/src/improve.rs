@@ -25,29 +25,67 @@ If the user expressed a preference or frustration (\"stop doing X\", \"too verbo
 that is FIRST-CLASS signal worth capturing."
     };
 }
-pub(crate) use do_not_capture;
+
 
 /// Guardrail appended to every "propose durable knowledge" prompt. Keeps the
 /// self-improvement loop from poisoning its own memory with things that will
 /// not generalise. Adapted from Hermes' background-review DO-NOT-CAPTURE block.
 pub const DO_NOT_CAPTURE: &str = do_not_capture!();
 
-/// Instruction appended after a finished job's transcript to elicit lessons.
-/// The model must answer with a JSON array (possibly empty) and nothing else.
-pub const PROPOSE_LESSONS_PROMPT: &str = concat!(
+/// One post-job learning call does all three proposals (lessons, profile,
+/// skill): its instruction is new, uncached text on every job, so asking once
+/// instead of three times sends it — and the shared transcript prefix — once.
+/// The model answers with ONE JSON object; [`parse_proposed_learning`] splits it
+/// and hands each part to the existing per-kind parser.
+pub const PROPOSE_LEARNING_PROMPT: &str = concat!(
     "\
-The job above is finished. Propose at most three DURABLE lessons for future jobs \
-— only things that will generalise, never facts specific to this one task. For each, give:\n\
-- cue: the situation it applies to (short, keyword-rich; this is how it is found later)\n\
-- lesson: what to do, concretely\n\
-- evidence: what in this job shows it (a step, a file, an error, a result)\n\
-- confidence: a number in [0,1]\n\
-Drop anything you are not sure generalises. If there is nothing durable, return [].",
+The job above is finished. Review it once and answer three questions.\n\n\
+1. LESSONS — at most three DURABLE lessons for future jobs: only things that will generalise, \
+never facts specific to this one task. Each: cue (the situation it applies to; short, \
+keyword-rich — this is how it is found later), lesson (what to do, concretely), evidence (what \
+in this job shows it: a step, a file, an error, a result), confidence (a number in [0,1]). \
+Drop anything you are not sure generalises.\n\n\
+2. PROFILE — what you now durably know, on TWO surfaces: USER.md (target \"user\": who the user \
+is and how they want you to work — role, preferences, recurring instructions, things they told \
+you to always/never do; one fact per section) and MEMORY.md (target \"env\": durable facts about \
+THIS environment — tools, paths, conventions, how the project is built/tested; not user \
+preferences). Route each fact to exactly ONE surface. Short keyword-rich section titles, one- or \
+two-sentence bodies; to delete an obsolete section set remove=true.\n\n\
+3. SKILL — a successful, repeatable procedure usually IS worth a skill. If this job used one \
+that would work again on FUTURE, similar jobs, propose ONE: a named, general, multi-step \
+procedure (not a one-off, not a single fact — small facts are lessons). name: short kebab-case; \
+description: one line saying when to use it, at most 60 characters (the skill index truncates \
+at 60 and anything past it never routes); body: the steps, in Markdown.",
     "\n\n",
     do_not_capture!(),
     "\n\n",
-    "Answer with ONLY a JSON array of objects {cue, lesson, evidence, confidence}, no prose."
+    "Answer with ONLY one JSON object, no prose: {\"lessons\": [{cue, lesson, evidence, confidence}], \
+\"profile\": [{target, key, body, remove}], \"skill\": {name, description, body} or null}. \
+Use [] / null for anything with nothing durable."
 );
+
+/// The three proposals parsed from one [`PROPOSE_LEARNING_PROMPT`] reply.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Learning {
+    pub lessons: Vec<Lesson>,
+    pub profile: Vec<ProfileUpdate>,
+    pub skill: Option<crate::workshop::SkillDraft>,
+}
+
+/// Parse a combined learning reply. Tolerant of prose around the object; a
+/// missing or malformed part just yields nothing for that part (each part goes
+/// through its own validating parser).
+pub fn parse_proposed_learning(reply: &str, existing_ids: &[String]) -> Learning {
+    let Some(value) = crate::workshop::extract_json_object(reply).and_then(|o| serde_json::from_str::<serde_json::Value>(&o).ok()) else {
+        return Learning::default();
+    };
+    let part = |key: &str| value.get(key).map(serde_json::Value::to_string).unwrap_or_default();
+    Learning {
+        lessons: parse_proposed_lessons(&part("lessons"), existing_ids),
+        profile: parse_proposed_profile(&part("profile")),
+        skill: crate::workshop::parse_proposed_skill(&part("skill")),
+    }
+}
 
 /// Which profile surface an update targets.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -67,25 +105,6 @@ pub struct ProfileUpdate {
     pub body: String,
     pub remove: bool,
 }
-
-/// Instruction appended after a finished job's transcript to elicit durable
-/// profile updates. The model must answer with a JSON array (possibly empty) and
-/// nothing else, routing each fact to exactly one surface.
-pub const PROPOSE_PROFILE_PROMPT: &str = concat!(
-    "\
-From the finished job above, update what you durably know. TWO surfaces:\n\
-- USER.md (target \"user\"): who the user is and how they want you to work — role, preferences,\n\
-recurring instructions, things they told you to always/never do. One fact per section.\n\
-- MEMORY.md (target \"env\"): durable facts about THIS environment — tools, paths, conventions,\n\
-how the project is built/tested. Not user preferences.\n\
-Route each fact to exactly ONE surface, never both. Keep each section title short and keyword-rich,\n\
-each body one or two sentences. To delete an obsolete section, set remove=true.",
-    "\n\n",
-    do_not_capture!(),
-    "\n\n",
-    "Answer with ONLY a JSON array of {target, key, body, remove} objects (remove optional, default false),\n\
-or [] if there is nothing durable. No prose."
-);
 
 /// A slug derived from a cue: lowercase, alphanumerics kept, runs of anything
 /// else collapsed to one `-`, trimmed, capped. Empty cue → "lesson".
@@ -234,6 +253,27 @@ fn extract_json_array(text: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn combined_learning_reply_splits_into_the_three_parsers() {
+        let reply = r#"Here you go:
+{"lessons": [{"cue": "cargo tests", "lesson": "use --workspace", "evidence": "step 4", "confidence": 0.8}],
+ "profile": [{"target": "env", "key": "Build", "body": "cargo build -p x"}],
+ "skill": {"name": "Release Checklist", "description": "when cutting a release", "body": "1. test"}}"#;
+        let learned = parse_proposed_learning(reply, &[]);
+        assert_eq!(learned.lessons.len(), 1);
+        assert_eq!(learned.lessons[0].id, "cargo-tests");
+        assert_eq!(learned.profile, vec![ProfileUpdate { target: ProfileTarget::Env, key: "Build".into(), body: "cargo build -p x".into(), remove: false }]);
+        assert_eq!(learned.skill.expect("skill").name, "release-checklist");
+
+        let nothing = parse_proposed_learning(r#"{"lessons": [], "profile": [], "skill": null}"#, &[]);
+        assert_eq!(nothing, Learning::default());
+        assert_eq!(parse_proposed_learning("not json", &[]), Learning::default());
+        // A malformed part does not take the others down with it.
+        let partial = parse_proposed_learning(r#"{"lessons": "oops", "profile": [{"target": "user", "key": "Tone", "body": "terse"}], "skill": null}"#, &[]);
+        assert!(partial.lessons.is_empty());
+        assert_eq!(partial.profile.len(), 1);
+    }
 
     #[test]
     fn slug_is_url_safe_and_bounded() {

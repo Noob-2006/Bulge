@@ -330,11 +330,14 @@ impl bulge_core::driver::RecallHandler for StoreRecall {
 }
 
 /// The single most relevant past job for `goal` above `min_score`, as a one-line
-/// digest for auto-injection into the system prompt — a lightweight "have I done
-/// something like this before?" nudge. `None` when nothing is clearly relevant.
+/// pointer (id + title) for auto-injection at task start — a lightweight "have I
+/// done something like this before?" nudge. Only the pointer is injected: the
+/// snippet is new, uncached text on every job and is often a fragment of an
+/// unrelated job's ending, so the agent pulls details with `recall` when it
+/// actually wants them. `None` when nothing is clearly relevant.
 pub fn most_relevant(jobs_dir: &Path, goal: &str, min_score: f32, exclude_id: &str) -> Option<String> {
     let hit = search(jobs_dir, goal, 4).into_iter().find(|h| h.job_id != exclude_id && h.score >= min_score)?;
-    Some(format!("[{}] {} — {}", hit.job_id, hit.title, hit.snippet))
+    Some(format!("[{}] {}", hit.job_id, hit.title))
 }
 #[cfg(test)]
 mod tests {
