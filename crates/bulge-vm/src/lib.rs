@@ -8,4 +8,5 @@
 
 pub mod net;
 pub mod changes;
+pub mod slots;
 pub mod vm;

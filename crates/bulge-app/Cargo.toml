@@ -20,6 +20,7 @@ bulge-harness = { path = "../bulge-harness" }
 bulge-vm = { path = "../bulge-vm" }
 bulge-store = { path = "../bulge-store" }
 bulge-llm = { path = "../bulge-llm" }
+bulge-org = { path = "../bulge-org" }
 
 serde = { workspace = true }
 serde_json = { workspace = true }

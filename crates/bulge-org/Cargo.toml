@@ -1,0 +1,17 @@
+[package]
+name = "bulge-org"
+description = "Flat-organization core: role charters, ticket board, and org message bus"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+bulge-guard = { path = "../bulge-guard" }
+bulge-llm = { path = "../bulge-llm" }
+
+[lints]
+workspace = true

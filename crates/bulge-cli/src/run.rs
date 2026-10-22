@@ -12,7 +12,7 @@
 //! more turns.
 
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
 use bulge_core::driver::{CompletionConfig, ContextConfig, Driver, GuardConfig, LoopOutcome, RequestPrefix, side_request, stream_toolless, watch_call};
@@ -20,10 +20,14 @@ pub use bulge_core::driver::Sampling;
 use crate::delegate;
 use bulge_core::hooks::{HookConfig, HookRunner, HookedDispatcher};
 use bulge_core::mcp::{self, CompositeDispatcher, McpBundle};
-use bulge_core::{ToolDispatcher, VmDispatcher, builtin_tools, plan_tool};
+use bulge_core::dispatch::DELEGATE_TOOL;
+use bulge_core::{
+    ORG_STATUS_TOOL, ToolDispatcher, VmDispatcher, builtin_tools, plan_tool, propose_role_tool,
+};
 use bulge_guard::{Effect, Rule};
 use bulge_harness::{SurfaceSpec, Tree};
 use bulge_llm::{GenerateRequest, LlmBackend, Message, Purpose, Role};
+use bulge_org::RoleLibrary;
 use bulge_store::{Autonomy, Budget, JobEvent, JobSpec, JobStatus, JobStore, ModelRef};
 use bulge_vm::changes;
 use bulge_vm::vm::{Vm, VmConfig};
@@ -46,7 +50,15 @@ dependent shell steps you would not need to inspect in between into one `exec` (
 create a file and run its check in the same command); trust tool results (a successful \
 `write` landed — do not read it back). Save turns only by batching, never by checking \
 less: given examples rarely cover a spec's edge cases, so test the cases the wording \
-implies too — in the same `exec`.";
+implies too — in the same `exec`.\n\n\
+You lead an organization of role-based sub-agents. Match the work to the shape of the goal: \
+do a small, self-contained task yourself, but when the goal has several independent parts, or \
+is large or multi-step, act as the chief — break it into missions, `delegate` each to a `lead` \
+(who runs its own team) or a worker role, give every ticket acceptance criteria up front, and \
+delegate independent parts in one turn so they run in parallel. Anything that changes files is \
+independently reviewed before you integrate it. Do not hand a whole multi-part job to one \
+worker, and do not do a lead's coordinating or a reviewer's checking as the same agent that did \
+the work. `org_status` shows the org; integrate only accepted results.";
 
 /// How many memory lessons to retrieve into the prompt.
 const LESSON_COUNT: usize = 5;
@@ -110,6 +122,30 @@ pub(crate) fn default_ruleset() -> Vec<Rule> {
         Rule::new("exec", "rm -rf /*", Effect::Deny),
         Rule::new("exec", "rm -fr /*", Effect::Deny),
     ]
+}
+
+/// Tools for workers and reviewers: the built-ins and the plan tool, never
+/// `delegate`/`org_status` (they do not recruit) and never `mcp__*` (MCP servers
+/// run on the host, outside every VM workspace slot).
+fn child_tool_list(mcp: &[bulge_llm::ToolSchema]) -> Vec<bulge_llm::ToolSchema> {
+    let mut tools = builtin_tools();
+    tools.push(plan_tool());
+    tools.extend(mcp.iter().cloned());
+    tools.retain(|tool| tool.name != DELEGATE_TOOL && tool.name != ORG_STATUS_TOOL && !tool.name.starts_with("mcp__"));
+    tools
+}
+
+/// Tools for the head: everything a child has, plus the user's MCP tools (the
+/// head runs on the main workspace and its calls are routed to the servers),
+/// plus delegation, recall, the situation report and role proposals.
+fn head_tool_list(child: &[bulge_llm::ToolSchema], mcp: &[bulge_llm::ToolSchema], delegate: bulge_llm::ToolSchema) -> Vec<bulge_llm::ToolSchema> {
+    let mut tools = child.to_vec();
+    tools.extend(mcp.iter().cloned());
+    tools.push(delegate);
+    tools.push(crate::recall::recall_tool());
+    tools.push(bulge_core::org_status_tool());
+    tools.push(propose_role_tool());
+    tools
 }
 
 /// Read a directory tree into an in-memory `Tree` (relative path → UTF-8 text).
@@ -384,6 +420,7 @@ fn vm_config_for(
     network: bool,
     autonomy: Autonomy,
     approvals: Option<bulge_vm::net::EgressApprovalTx>,
+    real_world: Arc<bulge_guard::RealWorldPolicy>,
 ) -> Result<VmConfig, String> {
     let home = PathBuf::from(std::env::var("HOME").map_err(|_| "HOME is not set".to_string())?);
     let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
@@ -399,6 +436,7 @@ fn vm_config_for(
         network: false,
         egress_allow,
         egress_approvals,
+        real_world,
     })
 }
 
@@ -408,6 +446,8 @@ fn vm_config_for(
 pub struct Session {
     backend: Arc<dyn LlmBackend>,
     vm: Arc<Vm>,
+    /// VM workspace slots shared by every child of this session.
+    vm_slots: Arc<delegate::VmSlots>,
     job: bulge_store::JobHandle,
     harness_dir: PathBuf,
     workspace: PathBuf,
@@ -427,6 +467,15 @@ pub struct Session {
     auto_review: bool,
     /// The VM shape last launched with; restart tweaks these.
     vm_config: VmConfig,
+    /// The role library loaded once for this session, shared so a role
+    /// installed through governance is usable in the same session.
+    roles: Arc<RwLock<RoleLibrary>>,
+    /// The persistent performance book shared by every child of this session.
+    perf: Arc<Mutex<bulge_org::PerformanceBook>>,
+    /// Where the performance book is saved after every verdict.
+    perf_path: PathBuf,
+    /// The head's ticket board and message bus, persisted under the job directory.
+    org: Arc<Mutex<delegate::OrgState>>,
     /// The last turn's request prefix; post-job learning calls replay it so they
     /// hit the provider's prefix cache instead of resending the job uncached.
     prefix: Option<RequestPrefix>,
@@ -463,12 +512,51 @@ impl Session {
             }
         };
 
-        let vm_config = vm_config_for(&config.workspace, config.cpus, config.ram_mib, config.network, config.autonomy, config.egress_approvals.clone())?;
+        // Load the role library once per session. A broken charter is reported
+        // and skipped; its built-ins remain available.
+        let (roles, problems) = RoleLibrary::load(&config.harness_dir.join("org").join("roles"));
+        for problem in problems {
+            eprintln!("org: role {}: {}", problem.path, problem.message);
+        }
+
+        // Load the performance book once per session. A malformed book is a
+        // session start error: silently replacing it would forget who is reliable.
+        let perf_path = config.harness_dir.join("org").join("performance.json");
+        let perf = bulge_org::PerformanceBook::load(&perf_path)
+            .map_err(|error| format!("load performance book {}: {error}", perf_path.display()))?;
+
+        // The head's board and bus live with the job so they survive follow-up
+        // turns. There is no in-memory fallback: without persistence the
+        // organization cannot be resumed correctly.
+        let org = match delegate::OrgState::open(&job.dir().join("org")) {
+            Ok(org) => org,
+            Err(error) => {
+                eprintln!("org: {error}");
+                return Err(format!("open org state: {error}"));
+            }
+        };
+
+        let home = PathBuf::from(std::env::var("HOME").map_err(|_| "HOME is not set".to_string())?);
+        let real_world_path = home.join(".bulge/real_world.json");
+        let real_world = Arc::new(
+            bulge_guard::RealWorldPolicy::load(&real_world_path)
+                .map_err(|error| format!("load real-world policy {}: {error}", real_world_path.display()))?,
+        );
+
+        let vm_config = vm_config_for(
+            &config.workspace,
+            config.cpus,
+            config.ram_mib,
+            config.network,
+            config.autonomy,
+            config.egress_approvals.clone(),
+            real_world,
+        )?;
         let vm = Arc::new(Vm::launch(vm_config.clone()).await.map_err(|e| format!("launch VM: {e}"))?);
+        let vm_slots = delegate::VmSlots::new(delegate::MAX_CONCURRENT_SUBAGENTS);
 
         // Connect any user-declared MCP servers (~/.bulge/mcp.json). Best-effort: a
         // broken server only loses its tools, it never blocks the run.
-        let home = PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| ".".into()));
         let mcp = match mcp::McpConfig::load(&home.join(".bulge/mcp.json")) {
             Ok(cfg) => {
                 let bundle = mcp::connect_all(&cfg).await;
@@ -505,6 +593,7 @@ impl Session {
         Ok(Self {
             backend,
             vm,
+            vm_slots,
             job,
             harness_dir: config.harness_dir,
             workspace: config.workspace,
@@ -518,6 +607,10 @@ impl Session {
             skip_review: config.skip_review,
             auto_review: config.auto_review,
             vm_config,
+            roles: Arc::new(RwLock::new(roles)),
+            perf: Arc::new(Mutex::new(perf)),
+            perf_path,
+            org: Arc::new(Mutex::new(org)),
             prefix: None,
             turns: 0,
         })
@@ -564,7 +657,8 @@ impl Session {
         // Rebuild the per-turn dispatcher/driver against the current VM (so a
         // restarted VM is picked up) — cheap; the VM is the expensive part. MCP
         // tools (if any) route to their server; everything else goes to the VM.
-        let vm_dispatcher = Arc::new(VmDispatcher::new(self.vm.clone(), Duration::from_secs(120)));
+        let tool_timeout = Duration::from_secs(120);
+        let vm_dispatcher = Arc::new(VmDispatcher::new(self.vm.clone(), tool_timeout));
         let base: Arc<dyn ToolDispatcher> = if self.mcp.routes.is_empty() {
             vm_dispatcher
         } else {
@@ -578,43 +672,90 @@ impl Session {
             Arc::new(HookedDispatcher::new(base, self.hooks.clone()))
         };
 
-        // Child tools are everything the parent has EXCEPT `delegate`, so a
-        // sub-agent cannot delegate further (delegation is capped at one level).
-        let mut child_tools = builtin_tools();
-        child_tools.push(plan_tool());
-        child_tools.extend(self.mcp.tools.iter().cloned());
+        // Child tools are everything the parent has EXCEPT `delegate` and
+        // `org_status` (workers and reviewers do not recruit), and EXCEPT
+        // `mcp__*` tools: MCP servers run on the host, outside any VM workspace
+        // slot. Sub-leads get the same list plus delegation and status.
+        let child_tools = child_tool_list(&self.mcp.tools);
 
-        // Wrap in the delegation layer: `delegate` spawns a child agent sharing
-        // this VM (and the hook/review stack), reporting back only its summary.
+        // One budget tree per turn: the parent and every sub-agent draw from it, so
+        // delegating can never spend past the job's own limit.
+        let budget = self.job.state().spec.budget.clone();
+        let spent = self.job.state().usage.total();
+        let ledger = bulge_core::ledger::Ledger::root_with_total(
+            budget.max_tokens.saturating_sub(spent),
+            Some(budget.max_wall_secs),
+            delegate::MAX_CONCURRENT_SUBAGENTS,
+            bulge_core::ledger::DEFAULT_TOTAL_AGENTS,
+        );
+
+        let roles = self.roles.clone();
+        let org = self.org.clone();
+        let head = self.job_id().to_string();
+        // Build the role-aware delegate schema from a short read lock; no lock is
+        // held while the agent runs.
+        let delegate_schema = {
+            let roles = roles.read().unwrap_or_else(std::sync::PoisonError::into_inner);
+            delegate::delegate_tool(&roles)
+        };
+        let mut lead_tools = child_tools.clone();
+        lead_tools.push(delegate_schema.clone());
+        lead_tools.push(bulge_core::org_status_tool());
+        lead_tools.push(propose_role_tool());
+
+        // Wrap in the delegation layer: `delegate` spawns a child agent in its
+        // own VM workspace slot (still under the hook/review stack), playing a
+        // role and reporting back its structured report through the org bus.
+        // Real-world rules go LAST so they override the allow-all baseline for the
+        // head, every child, reviewer, and auditor.
+        let mut guard_rules = default_ruleset();
+        guard_rules.extend(self.vm_config.real_world.rules());
         let factory = delegate::ChildFactory {
             backend: self.backend.clone(),
-            inner: hooked.clone(),
+            vm: self.vm.clone(),
+            vm_slots: self.vm_slots.clone(),
+            hooks: self.hooks.clone(),
+            tool_timeout,
             child_tools: child_tools.clone(),
+            lead_tools,
             store_root: self.job.dir().parent().map(std::path::Path::to_path_buf).unwrap_or_default(),
             workspace: self.workspace.clone(),
             autonomy: self.autonomy,
-            guard_rules: default_ruleset(),
+            guard_rules: guard_rules.clone(),
             model: self.backend_spec.model.clone(),
             backend_id: self.backend_spec.id.clone(),
             context_window: self.backend_spec.context_window,
             sampling: self.sampling.clone(),
             auto_review: self.auto_review,
+            ledger: ledger.clone(),
+            roles: roles.clone(),
+            perf: self.perf.clone(),
+            perf_path: self.perf_path.clone(),
+            org: org.clone(),
+            head,
+            depth: 0,
+            parent_ticket: None,
+            merged_accumulator: None,
+            roles_dir: self.harness_dir.join("org").join("roles"),
+            governance_path: self.harness_dir.join("org").join("governance.jsonl"),
         };
+        let governance = Arc::new(factory.governance());
         let dispatcher: Arc<dyn ToolDispatcher> = hooked;
 
-        let mut tools = child_tools;
-        tools.push(delegate::delegate_tool());
-        tools.push(crate::recall::recall_tool());
+        let tools = head_tool_list(&child_tools, &self.mcp.tools, delegate_schema);
         let recall_handler = Arc::new(crate::recall::StoreRecall { jobs_dir: jobs_dir.clone().unwrap_or_default() });
         let context = ContextConfig { window: self.backend_spec.context_window as u64, ..ContextConfig::default() };
         let driver = Driver::new(self.backend.clone(), dispatcher.clone(), tools, system_prompt)
-            .with_guard(GuardConfig { rules: default_ruleset(), autonomy: guard_autonomy(self.autonomy), loop_detection: true })
+            .with_guard(GuardConfig { rules: guard_rules, autonomy: guard_autonomy(self.autonomy), loop_detection: true })
             .with_completion_gate(CompletionConfig::default())
             .with_context(context)
             .with_sampling(self.sampling.clone())
             .with_review(self.auto_review)
             .with_delegate(Arc::new(factory))
-            .with_recall(recall_handler);
+            .with_propose_role(governance)
+            .with_recall(recall_handler)
+            .with_org_status(Arc::new(delegate::OrgStatus { org, ledger: ledger.clone(), scope: None }))
+            .with_ledger(ledger);
 
         let stop = CancellationToken::new();
         let tail = tokio::spawn(tail_jsonl(log_path.clone(), stop.clone(), sink, tail_start));
@@ -674,6 +815,8 @@ impl Session {
             vm.shutdown().await;
         }
         self.vm_config = cfg;
+        // The replacement VM has no open slots, so its lease pool starts empty.
+        self.vm_slots = delegate::VmSlots::new(delegate::MAX_CONCURRENT_SUBAGENTS);
         Ok(())
     }
 
@@ -946,6 +1089,18 @@ mod tests {
         assert_eq!(learning_skip_reason(unreviewed.state(), 1), None);
         let vague = finished_job("vague", Some("LEARN: maybe\nVERDICT: PASS"), JobStatus::Succeeded);
         assert_eq!(learning_skip_reason(vague.state(), 1), None);
+    }
+
+    #[test]
+    fn the_head_keeps_mcp_tools_and_children_never_get_them() {
+        let mcp = vec![bulge_llm::ToolSchema { name: "mcp__shop__create_order".into(), description: "d".into(), parameters: serde_json::json!({}), defer_loading: false }];
+        let child = child_tool_list(&mcp);
+        assert!(child.iter().all(|t| !t.name.starts_with("mcp__") && t.name != DELEGATE_TOOL && t.name != ORG_STATUS_TOOL));
+        let delegate = bulge_llm::ToolSchema { name: DELEGATE_TOOL.into(), description: "d".into(), parameters: serde_json::json!({}), defer_loading: false };
+        let head = head_tool_list(&child, &mcp, delegate);
+        for name in ["mcp__shop__create_order", DELEGATE_TOOL, ORG_STATUS_TOOL] {
+            assert!(head.iter().any(|t| t.name == name), "head is missing {name}");
+        }
     }
 
     #[test]

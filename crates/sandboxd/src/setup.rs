@@ -26,37 +26,48 @@ fn mount(args: &[&str]) -> io::Result<()> {
 /// that id, `/tmp` is the usual sticky world-writable tmpfs, and the rootfs is
 /// read-only. Must run as root (it mounts); privileges are dropped afterwards.
 pub fn lock_down(uid: u32, gid: u32) -> io::Result<()> {
-    network_up()?;
+    step("bring up network", network_up())?;
     // /root stays root-only; /home holds the agent's writable home; /tmp is the
     // standard sticky 1777 so non-root tools can use it.
     for dir in ["/root", "/home"] {
-        std::fs::create_dir_all(dir)?;
-        mount(&["-t", "tmpfs", "-o", "nosuid,nodev,mode=0755", "tmpfs", dir])?;
+        step(&format!("create {dir}"), std::fs::create_dir_all(dir))?;
+        step(&format!("mount tmpfs on {dir}"), mount(&["-t", "tmpfs", "-o", "nosuid,nodev,mode=0755", "tmpfs", dir]))?;
     }
-    std::fs::create_dir_all("/tmp")?;
-    mount(&["-t", "tmpfs", "-o", "nosuid,nodev,mode=1777", "tmpfs", "/tmp"])?;
-    std::fs::create_dir_all(AGENT_HOME)?;
-    chown(AGENT_HOME, uid, gid)?;
+    step("create /tmp", std::fs::create_dir_all("/tmp"))?;
+    step("mount tmpfs on /tmp", mount(&["-t", "tmpfs", "-o", "nosuid,nodev,mode=1777", "tmpfs", "/tmp"]))?;
+    step("create agent home", std::fs::create_dir_all(AGENT_HOME))?;
+    step("chown agent home", chown(AGENT_HOME, uid, gid))?;
+    // The egress bridge's unix socket lives here (see bridge::UNIX_PROXY): on the
+    // /home tmpfs, so it is visible in workspace slots, which hide /run/bulge.
+    step("create egress socket dir", std::fs::create_dir_all(crate::bridge::UNIX_PROXY_DIR))?;
+    step("chown egress socket dir", chown(crate::bridge::UNIX_PROXY_DIR, uid, gid))?;
+    step(
+        "chmod egress socket dir",
+        std::fs::set_permissions(crate::bridge::UNIX_PROXY_DIR, std::os::unix::fs::PermissionsExt::from_mode(0o700)),
+    )?;
     if !is_mountpoint("/run/bulge") {
-        std::fs::create_dir_all("/run/bulge")?;
-        mount(&["-t", "tmpfs", "-o", "mode=0755", "tmpfs", "/run/bulge"])?;
+        step("create /run/bulge", std::fs::create_dir_all("/run/bulge"))?;
+        step("mount tmpfs on /run/bulge", mount(&["-t", "tmpfs", "-o", "mode=0755", "tmpfs", "/run/bulge"]))?;
     }
     for dir in [WORKSPACE_LOWER, "/run/bulge/rw"] {
-        std::fs::create_dir_all(dir)?;
+        step(&format!("create {dir}"), std::fs::create_dir_all(dir))?;
     }
-    mount(&["-t", "virtiofs", "-o", "ro", "workspace", WORKSPACE_LOWER])?;
-    mount(&["-t", "tmpfs", "-o", "mode=0755", "tmpfs", "/run/bulge/rw"])?;
-    std::fs::create_dir_all(WORKSPACE_UPPER)?;
-    std::fs::create_dir_all(WORKSPACE_WORK)?;
-    std::fs::create_dir_all(WORKSPACE).or_else(|e| if e.kind() == io::ErrorKind::ReadOnlyFilesystem { Ok(()) } else { Err(e) })?;
+    step("mount workspace share", mount(&["-t", "virtiofs", "-o", "ro", "workspace", WORKSPACE_LOWER]))?;
+    step("mount tmpfs on /run/bulge/rw", mount(&["-t", "tmpfs", "-o", "mode=0755", "tmpfs", "/run/bulge/rw"]))?;
+    step("create workspace upper", std::fs::create_dir_all(WORKSPACE_UPPER))?;
+    step("create workspace work", std::fs::create_dir_all(WORKSPACE_WORK))?;
+    step(
+        "create /workspace",
+        std::fs::create_dir_all(WORKSPACE).or_else(|e| if e.kind() == io::ErrorKind::ReadOnlyFilesystem { Ok(()) } else { Err(e) }),
+    )?;
     let options = format!("lowerdir={WORKSPACE_LOWER},upperdir={WORKSPACE_UPPER},workdir={WORKSPACE_WORK}");
-    mount(&["-t", "overlay", "-o", &options, "overlay", WORKSPACE])?;
+    step("mount workspace overlay", mount(&["-t", "overlay", "-o", &options, "overlay", WORKSPACE]))?;
     // The agent (non-root) must be able to create files in the overlay; the upper
     // dir is where its writes land. Owning the mountpoint and upper is enough.
-    chown(WORKSPACE_UPPER, uid, gid)?;
-    chown(WORKSPACE, uid, gid)?;
+    step("chown workspace upper", chown(WORKSPACE_UPPER, uid, gid))?;
+    step("chown /workspace", chown(WORKSPACE, uid, gid))?;
     // Last: nothing below may write to the rootfs afterwards.
-    mount(&["-o", "remount,ro", "/"])?;
+    step("remount rootfs read-only", mount(&["-o", "remount,ro", "/"]))?;
     Ok(())
 }
 
@@ -68,6 +79,10 @@ pub fn lock_down(uid: u32, gid: u32) -> io::Result<()> {
 pub fn drop_privileges(uid: u32, gid: u32) -> io::Result<()> {
     use nix::unistd::{Gid, Uid, setgroups, setresgid, setresuid};
     nix::sys::prctl::set_no_new_privs().map_err(errno)?;
+    // Non-dumpable: other processes of the same uid (the agent's commands) can
+    // neither ptrace sandboxd nor open its /proc fds — e.g. the pipes to the
+    // privileged slot helper. Credential changes usually imply this; be explicit.
+    nix::sys::prctl::set_dumpable(false).map_err(errno)?;
     setgroups(&[Gid::from_raw(gid)]).map_err(errno)?;
     let gid = Gid::from_raw(gid);
     setresgid(gid, gid, gid).map_err(errno)?;
@@ -106,6 +121,11 @@ fn network_up() -> io::Result<()> {
     std::fs::write("/run/bulge/resolv.conf", "")?;
     run("/sbin/ip", &["link", "set", "eth0", "up"])?;
     run("/sbin/udhcpc", &["-i", "eth0", "-n", "-q", "-t", "5", "-S", "-s", "/usr/local/share/bulge/udhcpc.script"])
+}
+
+/// Name the lock-down step an error came from (boot failures are otherwise opaque).
+fn step<T>(what: &str, result: io::Result<T>) -> io::Result<T> {
+    result.map_err(|error| io::Error::new(error.kind(), format!("{what}: {error}")))
 }
 
 fn is_mountpoint(path: &str) -> bool {

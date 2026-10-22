@@ -9,16 +9,69 @@ use std::time::Duration;
 use bulge_proto::frame::{PeerRole, SessionKey};
 use bulge_proto::msg::{BOOTSTRAP_PATH, Bootstrap, CONTROL_VSOCK_PORT, GuestMessage, HostMessage};
 use bulge_proto::session::{SessionParams, establish};
-use sandboxd::{commands, tools};
 use sandboxd::runtime::{CommandRuntime, Invocation};
+use sandboxd::{commands, slots, tools};
 use tokio::sync::mpsc;
 use tokio_vsock::{VMADDR_CID_ANY, VsockAddr, VsockListener};
 
-#[tokio::main]
-async fn main() {
-    if let Err(message) = run().await {
-        eprintln!("sandboxd: {message}");
-        std::process::exit(1);
+fn main() {
+    let mut args = std::env::args();
+    let _program = args.next();
+    match args.next().as_deref() {
+        Some("--slot-helper") => {
+            if let Err(message) = slots::helper_main() {
+                eprintln!("sandboxd: slot helper: {message}");
+                std::process::exit(1);
+            }
+        }
+        Some("--slot-holder") => {
+            let slot = args.next().and_then(|slot| slot.parse::<u8>().ok());
+            let Some(slot) = slot else {
+                eprintln!("sandboxd: --slot-holder needs a slot number");
+                std::process::exit(2);
+            };
+            if let Err(message) = slots::holder_main(slot) {
+                eprintln!("sandboxd: slot holder: {message}");
+                std::process::exit(1);
+            }
+        }
+        Some("--slot-server") => {
+            let Some(slot) = args.next() else {
+                eprintln!("sandboxd: --slot-server needs a slot number");
+                std::process::exit(2);
+            };
+            let slot: u8 = match slot.parse() {
+                Ok(slot) => slot,
+                Err(error) => {
+                    eprintln!("sandboxd: invalid slot {slot}: {error}");
+                    std::process::exit(2);
+                }
+            };
+            let runtime = match tokio::runtime::Builder::new_multi_thread().enable_all().build() {
+                Ok(runtime) => runtime,
+                Err(error) => {
+                    eprintln!("sandboxd: tokio: {error}");
+                    std::process::exit(2);
+                }
+            };
+            if let Err(message) = runtime.block_on(slots::slot_server_main(slot)) {
+                eprintln!("sandboxd: slot server: {message}");
+                std::process::exit(1);
+            }
+        }
+        _ => {
+            let runtime = match tokio::runtime::Builder::new_multi_thread().enable_all().build() {
+                Ok(runtime) => runtime,
+                Err(error) => {
+                    eprintln!("sandboxd: tokio: {error}");
+                    std::process::exit(2);
+                }
+            };
+            if let Err(message) = runtime.block_on(run()) {
+                eprintln!("sandboxd: {message}");
+                std::process::exit(1);
+            }
+        }
     }
 }
 
@@ -28,13 +81,25 @@ async fn run() -> Result<(), String> {
     // no matching non-root owner, so fall back to `nobody`.
     let (uid, gid) = target_ids(bootstrap.host_uid, bootstrap.host_gid);
     sandboxd::setup::lock_down(uid, gid).map_err(|e| format!("setup: {e}"))?;
+
+    // The helper needs the egress URL before it starts, and it must be started
+    // before we drop privileges (it does all root-only slot setup).
+    let egress_proxy = if !bootstrap.gateway_token.is_empty() && !bootstrap.gateway_key.is_empty() {
+        Some(sandboxd::bridge::PROXY_URL)
+    } else {
+        None
+    };
+    if let Some(proxy) = egress_proxy {
+        let _ = sandboxd::EGRESS_PROXY.set(proxy.to_string());
+    }
+    let helper = slots::HelperClient::spawn(uid, gid, egress_proxy).map_err(|e| format!("slot helper: {e}"))?;
+    slots::install_helper(helper)?;
     sandboxd::setup::drop_privileges(uid, gid).map_err(|e| format!("drop privileges: {e}"))?;
 
     // Start the egress bridge if the host armed the gateway (both secrets present).
     // Tools reach the outside world only through it; otherwise the guest is
     // air-gapped.
-    if !bootstrap.gateway_token.is_empty() && !bootstrap.gateway_key.is_empty() {
-        let _ = sandboxd::EGRESS_PROXY.set(sandboxd::bridge::PROXY_URL.to_string());
+    if egress_proxy.is_some() {
         let (token, key) = (bootstrap.gateway_token.clone(), bootstrap.gateway_key.clone());
         tokio::spawn(async move {
             let _ = sandboxd::bridge::serve(token, key).await;
@@ -51,6 +116,13 @@ async fn run() -> Result<(), String> {
         .command("edit", tools::handlers::edit)
         .command("glob", tools::handlers::glob)
         .command("grep", tools::handlers::grep)
+        .command("slot_open", slots::slot_open)
+        .command("slot_changes", slots::slot_changes)
+        .command("slot_export", slots::slot_export)
+        .command("slot_merge", slots::slot_merge)
+        .command("slot_stage", slots::slot_stage)
+        .command("slot_close", slots::slot_close)
+        .command("slot_run", slots::slot_run)
         .max_timeout(Duration::from_secs(30 * 60))
         .build()
         .map_err(|e| format!("runtime: {e}"))?;

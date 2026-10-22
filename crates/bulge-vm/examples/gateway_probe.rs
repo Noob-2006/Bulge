@@ -34,6 +34,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         network: false,
         egress_allow: vec!["example.com".into(), "example.org".into()],
         egress_approvals: None,
+        real_world: std::sync::Arc::new(bulge_guard::RealWorldPolicy::defaults()),
     })
     .await?;
 

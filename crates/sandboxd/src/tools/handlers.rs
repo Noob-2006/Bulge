@@ -19,7 +19,7 @@ use crate::setup::{WORKSPACE, WORKSPACE_LOWER, WORKSPACE_UPPER};
 
 pub const SPILL_DIR: &str = "/run/bulge/spill";
 /// Largest single file `export_changes` will carry back to the host.
-const MAX_EXPORT_FILE_BYTES: u64 = 4 * 1024 * 1024;
+pub(crate) const MAX_EXPORT_FILE_BYTES: u64 = 4 * 1024 * 1024;
 const MAX_GLOB_RESULTS: usize = 1000;
 
 fn resolve(path: &str) -> PathBuf {

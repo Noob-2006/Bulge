@@ -27,6 +27,8 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpStream, UnixListener, UnixStream};
 use tokio::sync::Mutex;
 
+use bulge_guard::RealWorldPolicy;
+
 use crate::net::policy::is_forbidden_destination;
 
 /// Vsock port the guest dials for the egress gateway (host listens on the bridged
@@ -42,6 +44,9 @@ pub struct GatewayStats {
     pub allowed: AtomicU64,
     pub denied_auth: AtomicU64,
     pub denied_policy: AtomicU64,
+    /// Real-world hosts refused because there was no human to ask (or the human
+    /// declined). Kept separate so the UI can show the boundary doing its job.
+    pub denied_real_world: AtomicU64,
     pub connect_failed: AtomicU64,
 }
 
@@ -146,6 +151,9 @@ pub struct GatewayConfig {
     /// these is refused even when it is a public IP, so an allowlisted/approved
     /// name can't be pointed back at a service on this machine.
     pub host_addrs: Arc<HashSet<IpAddr>>,
+    /// Payment/checkout/wallet hosts. Even an allow-public `"*"` cannot reach
+    /// these without a human: without an approval channel they are denied.
+    pub real_world: Arc<RealWorldPolicy>,
 }
 
 /// Serve the gateway on `socket_path` (the host end of the bridged vsock port)
@@ -181,7 +189,24 @@ async fn handle(mut stream: UnixStream, config: GatewayConfig) -> std::io::Resul
     if !authorized(&request, &config.token, &config.key) {
         return deny(&mut stream, &config.stats.denied_auth, "ERR unauthorized").await;
     }
-    if !host_allowed(&request.host, &config.allow_suffixes) {
+    if config.real_world.host_is_real_world(&request.host) {
+        // Real-world hosts (payments, checkout, wallets) are a separate boundary
+        // that sits BEFORE the allowlist: allow-public `"*"` does not reach them.
+        // With a human channel ask every time (never remember approval); without
+        // one, fail closed.
+        let Some(tx) = &config.approvals else {
+            return deny(&mut stream, &config.stats.denied_real_world, "ERR real-world host requires a human").await;
+        };
+        let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+        if tx.send(EgressApproval { host: request.host.clone(), port: request.port, reply: reply_tx }).is_err() {
+            return deny(&mut stream, &config.stats.denied_real_world, "ERR egress approval unavailable").await;
+        }
+        // Block this connection until the user decides (or the prompt is dropped).
+        // Deliberately NOT added to `approved`: every real-world connection asks.
+        if !reply_rx.await.unwrap_or(false) {
+            return deny(&mut stream, &config.stats.denied_real_world, "ERR egress denied by user").await;
+        }
+    } else if !host_allowed(&request.host, &config.allow_suffixes) {
         // Not on the auto-allow list. Without an approval channel this is a plain
         // deny; with one, ask the user (once per host per session).
         let Some(tx) = &config.approvals else {
@@ -327,14 +352,19 @@ mod tests {
     }
 
     fn gw(approvals: Option<EgressApprovalTx>) -> GatewayConfig {
+        gw_with(approvals, RealWorldPolicy::defaults(), vec!["github.com".into()])
+    }
+
+    fn gw_with(approvals: Option<EgressApprovalTx>, real_world: RealWorldPolicy, allow_suffixes: Vec<String>) -> GatewayConfig {
         GatewayConfig {
             token: "t".into(),
             key: "k".into(),
-            allow_suffixes: vec!["github.com".into()],
+            allow_suffixes,
             stats: Arc::new(GatewayStats::default()),
             approvals,
             approved: Arc::new(Mutex::new(HashSet::new())),
             host_addrs: Arc::new(HashSet::new()),
+            real_world: Arc::new(real_world),
         }
     }
 
@@ -399,5 +429,38 @@ mod tests {
     #[tokio::test]
     async fn unlisted_host_without_approver_is_denied() {
         assert_eq!(run_request(gw(None), "t k example.com 443\n").await, "ERR host not allowed");
+    }
+
+    #[tokio::test]
+    async fn real_world_host_without_approver_is_denied_even_when_allow_public() {
+        let config = gw_with(None, RealWorldPolicy::defaults(), vec!["*".into()]);
+        let stats = config.stats.clone();
+        // `"*"` normally allows any public host; real-world hosts are checked first.
+        assert_eq!(run_request(config, "t k api.stripe.com 443\n").await, "ERR real-world host requires a human");
+        assert_eq!(stats.denied_real_world.load(Ordering::Relaxed), 1);
+        assert_eq!(stats.denied_policy.load(Ordering::Relaxed), 0);
+    }
+
+    #[tokio::test]
+    async fn real_world_host_with_approver_asks_every_time_and_is_not_remembered() {
+        use std::sync::atomic::AtomicU64;
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<EgressApproval>();
+        let asks = Arc::new(AtomicU64::new(0));
+        let counter = asks.clone();
+        tokio::spawn(async move {
+            while let Some(req) = rx.recv().await {
+                counter.fetch_add(1, Ordering::Relaxed);
+                let _ = req.reply.send(true);
+            }
+        });
+        // A real-world host that resolves only to loopback: approval happens, then
+        // resolution refuses it (no network is touched). Every request asks again.
+        let mut policy = RealWorldPolicy::defaults();
+        policy.hosts = vec!["localhost".into()];
+        let config = gw_with(Some(tx), policy, vec!["*".into()]);
+        assert_eq!(run_request(config.clone(), "t k localhost 80\n").await, "ERR unresolved or forbidden");
+        assert_eq!(run_request(config.clone(), "t k localhost 80\n").await, "ERR unresolved or forbidden");
+        assert_eq!(asks.load(Ordering::Relaxed), 2, "real-world hosts are never remembered");
+        assert!(config.approved.lock().await.is_empty(), "real-world approval must not enter the session allowlist");
     }
 }

@@ -8,13 +8,17 @@ pub mod dispatch;
 pub mod cache_watch;
 pub mod driver;
 pub mod hooks;
+pub mod ledger;
 pub mod mcp;
 pub mod schedule;
 pub mod vm_dispatch;
 
 pub use budget::{BudgetState, BudgetTracker};
 pub use cron::{Schedule, ScheduledJob, ScheduleStore, Weekday, next_occurrence};
-pub use dispatch::{PLAN_TOOL, ToolCall, ToolDispatcher, builtin_concurrency_safe, builtin_tools, plan_tool};
-pub use driver::{Driver, LoopOutcome};
+pub use dispatch::{
+    ORG_STATUS_TOOL, PLAN_TOOL, PROPOSE_ROLE_TOOL, ToolCall, ToolDispatcher,
+    builtin_concurrency_safe, builtin_tools, org_status_tool, plan_tool, propose_role_tool,
+};
+pub use driver::{DelegateRequest, Driver, LoopOutcome, ProposeRoleHandler};
 pub use hooks::{HookConfig, HookEvent, HookRunner, HookedDispatcher};
 pub use vm_dispatch::VmDispatcher;

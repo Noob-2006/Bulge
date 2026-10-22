@@ -229,6 +229,7 @@ dependencies = [
  "bulge-guard",
  "bulge-harness",
  "bulge-llm",
+ "bulge-org",
  "bulge-store",
  "bulge-vm",
  "serde",
@@ -248,6 +249,7 @@ dependencies = [
  "bulge-guard",
  "bulge-harness",
  "bulge-llm",
+ "bulge-org",
  "bulge-store",
  "bulge-vm",
  "futures",
@@ -306,6 +308,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "bulge-org"
+version = "0.1.1"
+dependencies = [
+ "bulge-guard",
+ "bulge-llm",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "bulge-proto"
 version = "0.1.1"
 dependencies = [
@@ -335,6 +347,7 @@ name = "bulge-vm"
 version = "0.1.1"
 dependencies = [
  "base64 0.22.1",
+ "bulge-guard",
  "bulge-proto",
  "command-fds",
  "getrandom 0.4.3",

@@ -23,6 +23,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         network: true,
         egress_allow: Vec::new(),
         egress_approvals: None,
+        real_world: std::sync::Arc::new(bulge_guard::RealWorldPolicy::defaults()),
     };
     let started = std::time::Instant::now();
     let vm = Vm::launch(config).await?;

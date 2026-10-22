@@ -8,6 +8,9 @@ RUN apk add --no-cache \
       git ripgrep jq \
       python3 py3-pip nodejs npm \
       build-base
-RUN mkdir -p /workspace /usr/local/share/bulge
+# Mount points the guest uses at boot must exist in the image: the rootfs is
+# served read-only (the VMM's Landlock grants it read access only), so the guest
+# cannot create them itself.
+RUN mkdir -p /workspace /usr/local/share/bulge /run/bulge
 COPY udhcpc.script /usr/local/share/bulge/udhcpc.script
 COPY sandboxd /usr/local/bin/sandboxd

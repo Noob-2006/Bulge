@@ -75,16 +75,15 @@ fn value(outcome: Outcome) -> Result<serde_json::Value, ChangeError> {
     }
 }
 
-/// Ask the guest for every pending workspace change and its content.
-pub async fn collect(vm: &Vm) -> Result<Vec<Change>, ChangeError> {
-    let listing: Listing =
-        serde_json::from_value(value(vm.invoke("changes", json!(null), None).await)?).map_err(|e| ChangeError::Malformed(e.to_string()))?;
-    if listing.changes.is_empty() {
-        return Ok(Vec::new());
-    }
-    let paths: Vec<String> = listing.changes.into_iter().map(|c| c.path).collect();
-    let export: Export = serde_json::from_value(value(vm.invoke("export_changes", json!({ "paths": paths }), None).await)?)
-        .map_err(|e| ChangeError::Malformed(e.to_string()))?;
+/// Parse the guest's change listing into the paths it names.
+pub(crate) fn parse_listing(value: serde_json::Value) -> Result<Vec<String>, ChangeError> {
+    let listing: Listing = serde_json::from_value(value).map_err(|e| ChangeError::Malformed(e.to_string()))?;
+    Ok(listing.changes.into_iter().map(|c| c.path).collect())
+}
+
+/// Parse the guest's export reply into changes with content.
+pub(crate) fn parse_export(value: serde_json::Value) -> Result<Vec<Change>, ChangeError> {
+    let export: Export = serde_json::from_value(value).map_err(|e| ChangeError::Malformed(e.to_string()))?;
     export
         .files
         .into_iter()
@@ -101,6 +100,17 @@ pub async fn collect(vm: &Vm) -> Result<Vec<Change>, ChangeError> {
             })
         })
         .collect()
+}
+
+/// Ask the guest for every pending workspace change and its content.
+pub async fn collect(vm: &Vm) -> Result<Vec<Change>, ChangeError> {
+    let listing = value(vm.invoke("changes", json!(null), None).await)?;
+    let paths = parse_listing(listing)?;
+    if paths.is_empty() {
+        return Ok(Vec::new());
+    }
+    let export = value(vm.invoke("export_changes", json!({ "paths": paths }), None).await)?;
+    parse_export(export)
 }
 
 /// Unified diff of every change against the current host workspace.

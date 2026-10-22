@@ -28,8 +28,11 @@ const usage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, reasoning: 0 }
 let stepCount = 0;
 let elapsedTimer = null;
 let elapsedStart = 0;
-const toolEls = {};         // call_id -> tool element
+let toolEls = {};           // call_id -> tool element (main transcript)
 let contextWindow = 128000;
+let renderView = null;      // while replaying a loaded job: { root, tools, quiet }
+let orgJobId = null;        // job currently shown in the organization panel
+let orgRefreshTimer = null; // debounce timer for live org refreshes
 
 /* ---- helpers ---- */
 function el(tag, cls, text) {
@@ -47,13 +50,15 @@ function toast(message, kind) {
 }
 
 /* ---- transcript container ---- */
+function transcriptRoot() { return renderView ? renderView.root : $("transcript"); }
 function inner() {
-  let i = $("transcript").querySelector(".transcript-inner");
+  const root = transcriptRoot();
+  let i = root.querySelector(".transcript-inner");
   if (!i) {
     i = el("div", "transcript-inner");
-    $("transcript").appendChild(i);
+    root.appendChild(i);
   }
-  $("empty-state").classList.add("hidden");
+  if (!renderView) $("empty-state").classList.add("hidden");
   return i;
 }
 function resetTranscript() {
@@ -69,7 +74,7 @@ function resetTranscript() {
 }
 function appendBlock(node) {
   const i = inner();
-  const t = $("transcript");
+  const t = transcriptRoot();
   const atBottom = t.scrollHeight - t.scrollTop - t.clientHeight < 60;
   i.appendChild(node);
   if (atBottom) t.scrollTop = t.scrollHeight;
@@ -130,8 +135,10 @@ function renderEvent(ev) {
   switch (ev.type) {
     case "step_started": {
       stepCount = ev.step;
-      $("steps").textContent = "第 " + ev.step + " 步";
-      $("steps").classList.remove("hidden");
+      if (!(renderView && renderView.quiet)) {
+        $("steps").textContent = "第 " + ev.step + " 步";
+        $("steps").classList.remove("hidden");
+      }
       appendBlock(el("div", "ev-step", "第 " + ev.step + " 步"));
       break;
     }
@@ -170,12 +177,12 @@ function renderEvent(ev) {
       sum.addEventListener("click", () => tool.classList.toggle("open"));
       tool.append(sum, body);
       tool._mark = mark; tool._body = body;
-      toolEls[ev.call_id] = tool;
+      (renderView ? renderView.tools : toolEls)[ev.call_id] = tool;
       appendBlock(tool);
       break;
     }
     case "tool_completed": {
-      const tool = toolEls[ev.call_id];
+      const tool = (renderView ? renderView.tools : toolEls)[ev.call_id];
       if (tool) {
         tool._mark.textContent = ev.ok ? "✓" : "✗";
         tool._mark.className = "tool-mark " + (ev.ok ? "ok" : "bad");
@@ -186,6 +193,7 @@ function renderEvent(ev) {
       break;
     }
     case "usage": {
+      if (renderView && renderView.quiet) break;
       const u = ev.usage || {};
       usage.input += u.input_tokens || 0;
       usage.output += u.output_tokens || 0;
@@ -674,6 +682,232 @@ async function viewJob(id, title) {
   }
   if (data.diff) showReview({ status: "(過去任務)", diff: data.diff, changes: [], readonly: true });
   document.querySelectorAll(".job-item").forEach((n) => n.classList.toggle("active", n.dataset.id === id));
+  if (!$("org-panel").classList.contains("hidden") || !$("subagent-view").classList.contains("hidden")) {
+    orgJobId = id;
+    $("subagent-view").classList.add("hidden");
+    $("org-panel").classList.remove("hidden");
+    $("transcript").classList.add("hidden");
+    $("org-toggle").classList.add("active");
+    loadOrg(id);
+  }
+}
+
+/* ---- organization panel (read-only observer surface) ---- */
+const ORG_ATTENTION = new Set(["blocked", "rejected", "reassigned", "failed"]);
+const ORG_STATUS_TONE = {
+  posted: "neutral", claimed: "neutral", started: "neutral", working: "neutral",
+  submitted: "info", accepted: "ok", merged: "ok",
+  rejected: "warn", reassigned: "warn", blocked: "warn",
+  failed: "danger", cancelled: "danger",
+};
+function orgTone(status) { return ORG_STATUS_TONE[status] || "neutral"; }
+
+// Depth is derived by walking parent links, so a ticket can never be indented
+// by a stale or cyclic position in the log.
+function orgDepth(ticket, byId) {
+  let depth = 0;
+  const seen = new Set();
+  let parent = ticket.parent;
+  while (parent && byId.has(parent) && !seen.has(parent)) {
+    seen.add(parent);
+    depth += 1;
+    parent = byId.get(parent).parent;
+  }
+  return depth;
+}
+function orderOrgTickets(tickets) {
+  const byId = new Map(tickets.map((t) => [t.id, t]));
+  const children = new Map();
+  const roots = [];
+  for (const t of tickets) {
+    if (t.parent && byId.has(t.parent)) {
+      if (!children.has(t.parent)) children.set(t.parent, []);
+      children.get(t.parent).push(t);
+    } else {
+      roots.push(t);
+    }
+  }
+  const ordered = [];
+  const seen = new Set();
+  function visit(ticket) {
+    if (seen.has(ticket.id)) return;
+    seen.add(ticket.id);
+    ordered.push({ ticket, depth: orgDepth(ticket, byId) });
+    for (const child of children.get(ticket.id) || []) visit(child);
+  }
+  for (const root of roots) visit(root);
+  // A malformed board could contain a parent cycle; show every ticket anyway.
+  for (const ticket of tickets) if (!seen.has(ticket.id)) visit(ticket);
+  return ordered;
+}
+
+function orgRow(ticket, depth) {
+  const row = el("div", "org-row" + (ticket.job_available ? " clickable" : ""));
+  const indent = el("span", "org-indent");
+  indent.style.width = (depth * 16 + 4) + "px";
+  if (depth) indent.title = "第 " + depth + " 層";
+  row.appendChild(indent);
+  row.appendChild(el("span", "org-role", ticket.role || "—"));
+  row.appendChild(el("span", "org-chip " + orgTone(ticket.status), ticket.status));
+  row.appendChild(el("span", "org-id", ticket.id));
+  const owner = el("span", "org-owner" + (ticket.job_available ? " link" : ""), ticket.owner ? "@" + ticket.owner : "無負責人");
+  if (ticket.owner) owner.title = ticket.owner;
+  row.appendChild(owner);
+  row.appendChild(el("span", "org-tokens", Number(ticket.budget_tokens || 0).toLocaleString() + " tok"));
+  if (ticket.rejections > 0) row.appendChild(el("span", "org-reject", "(退回 " + ticket.rejections + ")"));
+  const goal = el("span", "org-goal", ticket.goal || "");
+  goal.title = ticket.goal || "";
+  row.appendChild(goal);
+  if (ticket.job_available && ticket.owner) {
+    row.tabIndex = 0;
+    row.setAttribute("role", "button");
+    row.title = "開啟 " + ticket.owner + " 的逐字稿";
+    const open = () => openSubagent(ticket.owner);
+    row.addEventListener("click", open);
+    row.addEventListener("keydown", (e) => {
+      if (e.key === "Enter" || e.key === " ") { e.preventDefault(); open(); }
+    });
+  }
+  return row;
+}
+
+function renderOrg(data) {
+  const body = $("org-body");
+  body.innerHTML = "";
+  if (!data.exists) {
+    body.appendChild(el("div", "org-empty", "這個任務沒有組織(沒有委派)。"));
+    return;
+  }
+  const tickets = data.tickets || [];
+
+  const attention = el("section", "org-section");
+  attention.appendChild(el("div", "org-section-label", "需要關注"));
+  const needs = tickets.filter((t) => ORG_ATTENTION.has(t.status));
+  if (!needs.length) {
+    attention.appendChild(el("div", "org-att-empty", "沒有需要關注的項目"));
+  } else {
+    for (const t of needs) {
+      const line = el("div", "org-att-item");
+      line.append(
+        el("span", "org-chip " + orgTone(t.status), t.status),
+        el("span", "org-att-role", t.role || "—"),
+        el("span", "org-att-id", t.id),
+        el("span", "org-att-goal", t.goal || ""),
+      );
+      line.title = t.goal || "";
+      attention.appendChild(line);
+    }
+  }
+  body.appendChild(attention);
+
+  const tree = el("section", "org-section");
+  tree.appendChild(el("div", "org-section-label", "工單樹"));
+  if (!tickets.length) {
+    tree.appendChild(el("div", "org-att-empty", "這個任務還沒有工單。"));
+  } else {
+    const list = el("div", "org-tree");
+    for (const row of orderOrgTickets(tickets)) list.appendChild(orgRow(row.ticket, row.depth));
+    tree.appendChild(list);
+  }
+  body.appendChild(tree);
+
+  const details = document.createElement("details");
+  details.className = "org-report";
+  details.appendChild(el("summary", null, "戰情摘要"));
+  details.appendChild(el("pre", "org-report-text", data.report || "(沒有摘要)"));
+  body.appendChild(details);
+}
+
+async function loadOrg(id, opts) {
+  opts = opts || {};
+  if (!opts.silent) {
+    const body = $("org-body");
+    body.innerHTML = "";
+    body.appendChild(el("div", "org-empty", "載入組織…"));
+  }
+  try {
+    const data = await invoke("org_chart", { jobId: id });
+    if (orgJobId !== id) return;
+    $("org-job").textContent = id;
+    renderOrg(data);
+  } catch (e) {
+    if (opts.silent || orgJobId !== id) return;
+    const body = $("org-body");
+    body.innerHTML = "";
+    body.appendChild(el("div", "org-empty", "讀取組織失敗:" + e));
+  }
+}
+
+function showOrgPanel() {
+  $("subagent-view").classList.add("hidden");
+  $("transcript").classList.add("hidden");
+  $("org-panel").classList.remove("hidden");
+  $("org-toggle").classList.add("active");
+}
+function hideOrgPanel() {
+  $("org-panel").classList.add("hidden");
+  $("subagent-view").classList.add("hidden");
+  $("transcript").classList.remove("hidden");
+  $("org-toggle").classList.remove("active");
+  const t = $("transcript");
+  t.scrollTop = t.scrollHeight;
+}
+async function openOrgPanel() {
+  if (!currentJobId) { toast("還沒有可顯示的組織(任務尚未建立)", "err"); return; }
+  orgJobId = currentJobId;
+  showOrgPanel();
+  await loadOrg(orgJobId);
+}
+async function toggleOrgPanel() {
+  if (!$("org-panel").classList.contains("hidden")) { hideOrgPanel(); return; }
+  await openOrgPanel();
+}
+
+// Replay a sub-agent's stored job log into its own transcript container. The
+// main transcript keeps receiving live events untouched; only this synchronous
+// replay borrows the renderer (and its tool map).
+async function openSubagent(owner) {
+  if (!owner) return;
+  let data;
+  try { data = await invoke("load_job", { id: owner }); }
+  catch (e) { toast("讀取子代理逐字稿失敗:" + e, "err"); return; }
+  const root = $("subagent-transcript");
+  const existing = root.querySelector(".transcript-inner");
+  if (existing) existing.remove();
+  const previous = renderView;
+  renderView = { root, tools: {}, quiet: true };
+  try {
+    for (const ln of String(data.jsonl || "").split("\n")) {
+      if (!ln.trim()) continue;
+      try { renderEvent(JSON.parse(ln)); } catch (e) {}
+    }
+  } finally {
+    renderView = previous;
+  }
+  $("subagent-title").textContent = owner;
+  $("org-panel").classList.add("hidden");
+  $("transcript").classList.add("hidden");
+  $("subagent-view").classList.remove("hidden");
+  $("org-toggle").classList.add("active");
+  root.scrollTop = 0;
+}
+function backToOrg() {
+  $("subagent-view").classList.add("hidden");
+  $("transcript").classList.add("hidden");
+  $("org-panel").classList.remove("hidden");
+  $("org-toggle").classList.add("active");
+}
+
+function scheduleOrgRefresh() {
+  if ($("org-panel").classList.contains("hidden")) return;
+  if (!orgJobId || orgJobId !== currentJobId) return;
+  if (orgRefreshTimer) return;
+  orgRefreshTimer = setTimeout(() => {
+    orgRefreshTimer = null;
+    if (!$("org-panel").classList.contains("hidden") && orgJobId && orgJobId === currentJobId) {
+      loadOrg(orgJobId, { silent: true });
+    }
+  }, 1500);
 }
 
 /* ---- new task ---- */
@@ -682,6 +916,8 @@ function newTask() {
   if (currentHandle) { invoke("end_session", { handle: currentHandle }).catch(() => {}); }
   currentHandle = null;
   currentJobId = null;
+  orgJobId = null;
+  hideOrgPanel();
   resetTranscript();
   $("review").classList.add("hidden");
   $("status-badge").classList.add("hidden");
@@ -846,6 +1082,9 @@ listen("job-line", (e) => {
   if (!currentHandle || p.handle !== currentHandle) return;
   let ev; try { ev = JSON.parse(p.line); } catch { return; }
   renderEvent(ev);
+  if (ev.type === "tool_completed" || ev.type === "status_changed" || ev.type === "approval_asked") {
+    scheduleOrgRefresh();
+  }
 });
 listen("egress-ask", (e) => {
   const p = e.payload;
@@ -861,12 +1100,17 @@ listen("job-done", (e) => {
   setStatusBadge(p.error ? "失敗" : p.status, ok ? true : false);
   showReview(p);
   loadJobs();
+  scheduleOrgRefresh();
 });
 
 /* ---- wire up ---- */
 window.addEventListener("DOMContentLoaded", () => {
   loadTheme();
   $("new-task").addEventListener("click", newTask);
+  $("org-toggle").addEventListener("click", toggleOrgPanel);
+  $("org-close").addEventListener("click", hideOrgPanel);
+  $("org-refresh").addEventListener("click", () => { if (orgJobId) loadOrg(orgJobId); });
+  $("subagent-back").addEventListener("click", backToOrg);
   {
     let t = null;
     const search = $("job-search");

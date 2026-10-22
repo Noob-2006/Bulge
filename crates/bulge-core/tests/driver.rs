@@ -4,16 +4,21 @@
 use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
-use bulge_core::dispatch::{ToolCall, ToolDispatcher};
-use bulge_core::driver::{Driver, LoopOutcome};
+use bulge_core::dispatch::{ORG_STATUS_TOOL, ToolCall, ToolDispatcher};
+use bulge_core::driver::{
+    DelegateHandler, DelegateReport, DelegateRequest, Driver, LoopOutcome, OrgStatusHandler,
+    ProposeRoleHandler,
+};
 use bulge_llm::{ContentBlock, FinishReason, LlmBackend, Message, ModelInfo, Role, StreamChunk, TokenUsage};
 use bulge_store::{Autonomy, Budget, JobEvent, JobHandle, JobSpec, JobStatus, JobStore, ModelRef};
 use futures::FutureExt;
 use futures::StreamExt;
-use futures::future::BoxFuture;
+use futures::future::{BoxFuture, LocalBoxFuture};
 use futures::stream::BoxStream;
 use serde_json::json;
+use tokio::sync::Barrier;
 use tokio_util::sync::CancellationToken;
 
 // ---- fakes ----
@@ -127,6 +132,55 @@ async fn tool_call_then_stop_round_trips_and_balances_the_log() {
     assert_eq!(dispatcher.seen.lock().unwrap().len(), 1);
     // A tool-result message for c1 is visible to the model.
     assert!(job.state().history.iter().any(|m| m.tool_call_id.as_deref() == Some("c1")));
+}
+
+#[tokio::test]
+async fn guard_ask_fails_closed_and_is_logged_as_an_approval_request() {
+    use bulge_core::driver::GuardConfig;
+    use bulge_guard::{Effect, Rule};
+
+    let backend = FakeBackend::new(vec![vec![tool("c1", "exec", json!({ "command": "touch pwned" }))], vec![text("I need a human for that.")]]);
+    let dispatcher = Arc::new(FakeDispatcher::default());
+    let mut job = job(Budget { max_steps: 50, max_tokens: 100_000, max_wall_secs: 3600 });
+    let driver = driver(backend, dispatcher.clone()).with_guard(GuardConfig {
+        rules: vec![Rule::new("*", "*", Effect::Allow), Rule::new("exec", "*", Effect::Ask)],
+        autonomy: bulge_guard::Autonomy::Autonomous,
+        loop_detection: false,
+    });
+
+    let outcome = driver.run(&mut job, CancellationToken::new()).await.unwrap();
+    assert_eq!(outcome, LoopOutcome::Stopped);
+    assert!(dispatcher.seen.lock().unwrap().is_empty(), "an asked call must never reach the dispatcher");
+
+    let scan = bulge_store::log::JsonlLog::read(&job.dir().join("job.jsonl")).unwrap();
+    let asked = scan
+        .records
+        .iter()
+        .find_map(|record| match serde_json::from_value::<JobEvent>(record.clone()).ok()? {
+            JobEvent::ApprovalAsked { id, kind, detail } => Some((id, kind, detail)),
+            _ => None,
+        })
+        .expect("the job log must contain ApprovalAsked");
+    assert_eq!(asked.0, "c1");
+    assert_eq!(asked.1, "tool");
+    assert_eq!(
+        asked.2,
+        json!({ "tool": "exec", "resource": "touch pwned", "reason": "this action requires a human" })
+    );
+
+    let result = job.state().history.iter().find(|m| m.tool_call_id.as_deref() == Some("c1")).expect("tool result");
+    let text: String = result
+        .content
+        .iter()
+        .filter_map(|block| match block {
+            ContentBlock::Text { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        text,
+        "REQUIRES_HUMAN: exec on touch pwned needs a human; it was not run. Do not retry it or work around it — finish what you can and say in your answer exactly what the human must do."
+    );
 }
 
 #[tokio::test]
@@ -454,4 +508,282 @@ async fn a_stray_tool_call_in_a_text_only_turn_is_stripped_then_retried_without_
     assert_eq!(dispatcher.seen.lock().unwrap().len(), 1, "the stray call never ran");
     let calls = job.state().history.iter().flat_map(|m| m.content.iter()).filter(|b| matches!(b, ContentBlock::ToolCall { .. })).count();
     assert_eq!(calls, 1, "only the answered loop call is in the log");
+}
+
+// ---- concurrent delegation and the shared ledger ----
+
+/// Waits on a two-party barrier before reporting: only concurrent execution can
+/// release it, so sequential delegation deadlocks (and the test times out).
+struct FakeDelegate {
+    barrier: Arc<Barrier>,
+}
+
+impl DelegateHandler for FakeDelegate {
+    fn run<'a>(&'a self, request: DelegateRequest, _cancel: CancellationToken) -> LocalBoxFuture<'a, Result<DelegateReport, String>> {
+        Box::pin(async move {
+            self.barrier.wait().await;
+            Ok(DelegateReport {
+                status: "succeeded".into(),
+                outcome: "stopped".into(),
+                role: request.role.unwrap_or_else(|| "implementer".into()),
+                ticket: "t-1".into(),
+                summary: request.goal,
+                truncated: false,
+                tokens: 0,
+                steps: 1,
+                job_id: "child".into(),
+                changed: Vec::new(),
+                merged: Vec::new(),
+                conflicts: Vec::new(),
+                reviewed: false,
+                accepted: None,
+                feedback: String::new(),
+                attempts: 1,
+                models: Vec::new(),
+            })
+        })
+    }
+}
+
+#[tokio::test]
+async fn delegates_in_one_turn_run_concurrently() {
+    let backend = FakeBackend::new(vec![
+        vec![tool("d1", "delegate", json!({ "goal": "a" })), tool("d2", "delegate", json!({ "goal": "b" }))],
+        vec![text("done")],
+    ]);
+    let dispatcher = Arc::new(FakeDispatcher::default());
+    let mut job = job(Budget { max_steps: 50, max_tokens: 100_000, max_wall_secs: 3600 });
+    let barrier = Arc::new(Barrier::new(2));
+    let driver = driver(backend, dispatcher).with_delegate(Arc::new(FakeDelegate { barrier }));
+
+    let outcome = tokio::time::timeout(Duration::from_secs(5), driver.run(&mut job, CancellationToken::new()))
+        .await
+        .expect("delegates must run concurrently, not one after another")
+        .unwrap();
+    assert_eq!(outcome, LoopOutcome::Stopped);
+
+    for (id, goal) in [("d1", "a"), ("d2", "b")] {
+        let result = job.state().history.iter().find(|m| m.tool_call_id.as_deref() == Some(id)).expect("delegate result");
+        let text: String = result.content.iter().filter_map(|b| match b {
+            ContentBlock::Text { text } => Some(text.as_str()),
+            _ => None,
+        }).collect();
+        assert!(text.contains(&format!("\"summary\":\"{goal}\"")), "result for {id}: {text}");
+    }
+}
+
+// ---- host-side delegation parsing and org status ----
+
+#[derive(Default)]
+struct RecordingDelegate {
+    requests: Mutex<Vec<DelegateRequest>>,
+}
+
+impl DelegateHandler for RecordingDelegate {
+    fn run<'a>(&'a self, request: DelegateRequest, _cancel: CancellationToken) -> LocalBoxFuture<'a, Result<DelegateReport, String>> {
+        let recorded = request.clone();
+        self.requests.lock().unwrap().push(recorded);
+        Box::pin(async move {
+            Ok(DelegateReport {
+                status: "succeeded".into(),
+                outcome: "stopped".into(),
+                role: request.role.unwrap_or_else(|| "implementer".into()),
+                ticket: "t-1".into(),
+                summary: request.goal,
+                truncated: false,
+                tokens: 0,
+                steps: 1,
+                job_id: "child".into(),
+                changed: Vec::new(),
+                merged: Vec::new(),
+                conflicts: Vec::new(),
+                reviewed: false,
+                accepted: None,
+                feedback: String::new(),
+                attempts: 1,
+                models: Vec::new(),
+            })
+        })
+    }
+}
+
+#[tokio::test]
+async fn delegate_arguments_are_parsed_into_a_request() {
+    let backend = FakeBackend::new(vec![
+        vec![tool(
+            "d1",
+            "delegate",
+            json!({ "goal": "g", "role": "explorer", "model": "alt-model", "acceptance": ["a", "b"], "context": "c" }),
+        )],
+        vec![tool("d2", "delegate", json!({ "goal": "g", "model": "", "acceptance": "one" }))],
+        vec![text("done")],
+    ]);
+    let dispatcher = Arc::new(FakeDispatcher::default());
+    let mut job = job(Budget { max_steps: 50, max_tokens: 100_000, max_wall_secs: 3600 });
+    let recorder = Arc::new(RecordingDelegate::default());
+    let driver = driver(backend, dispatcher).with_delegate(recorder.clone());
+
+    let outcome = driver.run(&mut job, CancellationToken::new()).await.unwrap();
+    assert_eq!(outcome, LoopOutcome::Stopped);
+
+    let requests = recorder.requests.lock().unwrap();
+    assert_eq!(
+        requests[0],
+        DelegateRequest {
+            goal: "g".into(),
+            context: Some("c".into()),
+            role: Some("explorer".into()),
+            model: Some("alt-model".into()),
+            acceptance: vec!["a".into(), "b".into()],
+        }
+    );
+    assert_eq!(
+        requests[1],
+        DelegateRequest {
+            goal: "g".into(),
+            context: None,
+            role: None,
+            model: None,
+            acceptance: vec!["one".into()],
+        }
+    );
+}
+
+struct FakeOrgStatus;
+
+impl OrgStatusHandler for FakeOrgStatus {
+    fn status(&self) -> String {
+        "REPORT".into()
+    }
+}
+
+#[tokio::test]
+async fn org_status_is_answered_on_the_host() {
+    let backend = FakeBackend::new(vec![
+        vec![tool("o1", ORG_STATUS_TOOL, json!({}))],
+        vec![text("done")],
+    ]);
+    let dispatcher = Arc::new(FakeDispatcher::default());
+    let mut job = job(Budget { max_steps: 50, max_tokens: 100_000, max_wall_secs: 3600 });
+    let mut tools = bulge_core::builtin_tools();
+    tools.push(bulge_core::org_status_tool());
+    let driver = Driver::new(backend, dispatcher.clone(), tools, "You are bulge.".into())
+        .with_org_status(Arc::new(FakeOrgStatus));
+
+    let outcome = driver.run(&mut job, CancellationToken::new()).await.unwrap();
+    assert_eq!(outcome, LoopOutcome::Stopped);
+
+    let result = job.state().history.iter().find(|m| m.tool_call_id.as_deref() == Some("o1")).expect("org status result");
+    let text: String = result
+        .content
+        .iter()
+        .filter_map(|b| match b {
+            ContentBlock::Text { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert!(text.contains("REPORT"), "org status result: {text}");
+    assert!(dispatcher.seen.lock().unwrap().is_empty(), "org_status must never reach the VM dispatcher");
+}
+
+#[derive(Default)]
+struct FakeProposeRole {
+    calls: Mutex<Vec<(String, String)>>,
+}
+
+impl ProposeRoleHandler for FakeProposeRole {
+    fn propose<'a>(
+        &'a self,
+        charter: String,
+        reason: String,
+        _cancel: CancellationToken,
+    ) -> LocalBoxFuture<'a, Result<serde_json::Value, String>> {
+        self.calls.lock().unwrap().push((charter, reason));
+        Box::pin(async move {
+            Ok(json!({
+                "installed": true,
+                "role": "fact-checker",
+                "trial": true,
+                "budget_share": 0.10,
+            }))
+        })
+    }
+}
+
+#[tokio::test]
+async fn propose_role_is_answered_on_the_host() {
+    let backend = FakeBackend::new(vec![
+        vec![tool(
+            "p1",
+            bulge_core::PROPOSE_ROLE_TOOL,
+            json!({ "charter": "---\nname: fact-checker\npurpose: check facts\ntools: [read]\n---\n", "reason": "we need a checker" }),
+        )],
+        vec![text("done")],
+    ]);
+    let dispatcher = Arc::new(FakeDispatcher::default());
+    let mut job = job(Budget { max_steps: 50, max_tokens: 100_000, max_wall_secs: 3600 });
+    let mut tools = bulge_core::builtin_tools();
+    tools.push(bulge_core::propose_role_tool());
+    let handler = Arc::new(FakeProposeRole::default());
+    let driver = Driver::new(backend, dispatcher.clone(), tools, "You are bulge.".into())
+        .with_propose_role(handler.clone());
+
+    let outcome = driver.run(&mut job, CancellationToken::new()).await.unwrap();
+    assert_eq!(outcome, LoopOutcome::Stopped);
+
+    let calls = handler.calls.lock().unwrap();
+    assert_eq!(calls.len(), 1);
+    assert!(calls[0].0.contains("name: fact-checker"));
+    assert_eq!(calls[0].1, "we need a checker");
+
+    let result = job
+        .state()
+        .history
+        .iter()
+        .find(|m| m.tool_call_id.as_deref() == Some("p1"))
+        .expect("propose_role result");
+    let text: String = result
+        .content
+        .iter()
+        .filter_map(|b| match b {
+            ContentBlock::Text { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert!(text.contains("\"installed\":true"), "propose_role result: {text}");
+    assert!(text.contains("fact-checker"), "propose_role result: {text}");
+    assert!(
+        dispatcher.seen.lock().unwrap().is_empty(),
+        "propose_role must never reach the VM dispatcher"
+    );
+}
+
+#[tokio::test]
+async fn tokens_are_charged_to_the_ledger() {
+    use bulge_core::ledger::Ledger;
+
+    let root = Ledger::root(1_000_000, None, 8);
+    let backend = FakeBackend::new(vec![vec![text("done")]]);
+    let mut job = job(Budget { max_steps: 50, max_tokens: 100_000, max_wall_secs: 3600 });
+    let driver = driver(backend, Arc::new(FakeDispatcher::default())).with_ledger(root.clone());
+
+    driver.run(&mut job, CancellationToken::new()).await.unwrap();
+
+    assert!(root.spent() > 0, "the model call's tokens must be charged to the root ledger");
+}
+
+#[tokio::test]
+async fn an_exhausted_ledger_stops_the_loop() {
+    use bulge_core::ledger::Ledger;
+
+    let limit = 100;
+    let root = Ledger::root(limit, None, 8);
+    root.charge(limit);
+    let backend = FakeBackend::new(vec![vec![text("final summary")]]);
+    let mut job = job(Budget { max_steps: 50, max_tokens: 100_000, max_wall_secs: 3600 });
+    let driver = driver(backend, Arc::new(FakeDispatcher::default())).with_ledger(root);
+
+    let outcome = driver.run(&mut job, CancellationToken::new()).await.unwrap();
+
+    assert_eq!(outcome, LoopOutcome::BudgetExhausted);
 }

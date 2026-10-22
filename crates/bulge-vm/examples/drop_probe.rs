@@ -52,6 +52,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             network: true,
             egress_allow: Vec::new(),
             egress_approvals: None,
+            real_world: std::sync::Arc::new(bulge_guard::RealWorldPolicy::defaults()),
         })
         .await?;
         let runtime_dir = vm.runtime_dir().to_path_buf();

@@ -43,17 +43,41 @@
               <span class="meter"><span id="meter-fill" class="meter-fill"></span></span>
               <span id="tokens" class="meta-num"></span>
             </span>
+            <button id="org-toggle" class="btn btn-ghost btn-sm" title="檢視這個任務的組織圖">組織</button>
             <button id="stop" class="btn btn-danger hidden">■ 停止</button>
           </div>
         </header>
 
-        <section id="transcript" class="transcript">
-          <div id="empty-state" class="empty-state">
-            <div class="empty-icon">▣</div>
-            <div class="empty-title">交辦一個任務</div>
-            <div class="empty-desc">代理會在隔離的沙箱虛擬機裡完成工作,過程即時顯示在這裡。它的任何改動都要你審核後才會寫回你的電腦。</div>
-          </div>
-        </section>
+        <div class="content">
+          <section id="transcript" class="transcript">
+            <div id="empty-state" class="empty-state">
+              <div class="empty-icon">▣</div>
+              <div class="empty-title">交辦一個任務</div>
+              <div class="empty-desc">代理會在隔離的沙箱虛擬機裡完成工作,過程即時顯示在這裡。它的任何改動都要你審核後才會寫回你的電腦。</div>
+            </div>
+          </section>
+
+          <!-- ===== Organization / observer panel (read-only) ===== -->
+          <section id="org-panel" class="org-panel hidden" aria-label="組織">
+            <div class="org-head">
+              <div class="org-head-title">組織 <span id="org-job" class="org-job"></span></div>
+              <div class="org-head-actions">
+                <button id="org-refresh" class="btn btn-ghost btn-sm">重新整理</button>
+                <button id="org-close" class="btn btn-ghost btn-icon" title="收起">✕</button>
+              </div>
+            </div>
+            <div id="org-body" class="org-body"></div>
+          </section>
+
+          <!-- ===== A sub-agent's transcript, opened from the org tree ===== -->
+          <section id="subagent-view" class="subagent-view hidden" aria-label="子代理逐字稿">
+            <div class="subagent-head">
+              <button id="subagent-back" class="btn btn-ghost btn-sm">← 回到組織</button>
+              <span id="subagent-title" class="subagent-title"></span>
+            </div>
+            <div id="subagent-transcript" class="transcript subagent-transcript"></div>
+          </section>
+        </div>
 
         <!-- ===== Approval / diff review (appears on completion) ===== -->
         <section id="review" class="review hidden">

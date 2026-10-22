@@ -10,8 +10,8 @@
 //! registries, git-over-https, APIs). Plain-HTTP proxying is intentionally not
 //! supported.
 
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{TcpListener, TcpStream};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use tokio::net::{TcpListener, UnixListener};
 use tokio_vsock::{VsockAddr, VsockStream};
 
 use bulge_proto::msg::GATEWAY_VSOCK_PORT;
@@ -22,11 +22,33 @@ const HOST_CID: u32 = 2;
 pub const PROXY_ADDR: &str = "127.0.0.1:3128";
 /// Value to export as HTTPS_PROXY / HTTP_PROXY.
 pub const PROXY_URL: &str = "http://127.0.0.1:3128";
+/// The same proxy on a unix socket. Workspace slots run in their own network
+/// namespaces (they cannot reach this loopback), so each slot relays its own
+/// 127.0.0.1:3128 here; a filesystem socket crosses network namespaces. The
+/// directory is created by `setup::lock_down` (owner: the agent uid, 0700).
+pub const UNIX_PROXY_DIR: &str = "/home/.bulge-egress";
+pub const UNIX_PROXY: &str = "/home/.bulge-egress/proxy.sock";
 
 /// Start the loopback CONNECT proxy. `token`/`key` are the two egress secrets the
 /// host gateway will check. Runs until the listener errors.
 pub async fn serve(token: String, key: String) -> std::io::Result<()> {
     let listener = TcpListener::bind(PROXY_ADDR).await?;
+    let _ = std::fs::remove_file(UNIX_PROXY);
+    let unix = UnixListener::bind(UNIX_PROXY)?;
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(UNIX_PROXY, std::fs::Permissions::from_mode(0o600))?;
+    }
+    let (unix_token, unix_key) = (token.clone(), key.clone());
+    tokio::spawn(async move {
+        loop {
+            let Ok((client, _)) = unix.accept().await else { continue };
+            let (token, key) = (unix_token.clone(), unix_key.clone());
+            tokio::spawn(async move {
+                let _ = handle(client, token, key).await;
+            });
+        }
+    });
     loop {
         let (client, _) = match listener.accept().await {
             Ok(pair) => pair,
@@ -39,7 +61,24 @@ pub async fn serve(token: String, key: String) -> std::io::Result<()> {
     }
 }
 
-async fn handle(mut client: TcpStream, token: String, key: String) -> std::io::Result<()> {
+/// Inside a workspace slot (its own network namespace): accept on the slot's
+/// loopback 127.0.0.1:3128 and relay every connection byte-for-byte to the
+/// main bridge's unix socket. The slot never holds the egress secrets.
+pub async fn relay_to_unix() -> std::io::Result<()> {
+    let listener = TcpListener::bind(PROXY_ADDR).await?;
+    loop {
+        let Ok((mut client, _)) = listener.accept().await else { continue };
+        tokio::spawn(async move {
+            if let Ok(mut upstream) = tokio::net::UnixStream::connect(UNIX_PROXY).await {
+                let _ = tokio::io::copy_bidirectional(&mut client, &mut upstream).await;
+            } else {
+                let _ = client.write_all(b"HTTP/1.1 502 Bad Gateway\r\n\r\n").await;
+            }
+        });
+    }
+}
+
+async fn handle<S: AsyncRead + AsyncWrite + Unpin>(mut client: S, token: String, key: String) -> std::io::Result<()> {
     let head = read_head(&mut client).await?;
     let Some((host, port)) = parse_connect(&head) else {
         let _ = client.write_all(b"HTTP/1.1 405 Method Not Allowed\r\n\r\n").await;
@@ -67,7 +106,7 @@ async fn handle(mut client: TcpStream, token: String, key: String) -> std::io::R
 }
 
 /// Read the request head up to the blank line that ends it (bounded).
-async fn read_head(client: &mut TcpStream) -> std::io::Result<String> {
+async fn read_head<S: AsyncRead + Unpin>(client: &mut S) -> std::io::Result<String> {
     let mut buf = Vec::with_capacity(256);
     let mut byte = [0u8; 1];
     while client.read(&mut byte).await? == 1 {

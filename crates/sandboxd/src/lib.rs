@@ -4,6 +4,7 @@ pub mod bridge;
 pub mod commands;
 pub mod runtime;
 pub mod setup;
+pub mod slots;
 pub mod tools;
 
 /// The egress proxy URL to export to executed commands, set once the egress

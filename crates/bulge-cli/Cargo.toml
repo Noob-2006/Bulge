@@ -20,6 +20,7 @@ bulge-core = { path = "../bulge-core" }
 bulge-guard = { path = "../bulge-guard" }
 bulge-harness = { path = "../bulge-harness" }
 bulge-llm = { path = "../bulge-llm" }
+bulge-org = { path = "../bulge-org" }
 bulge-store = { path = "../bulge-store" }
 bulge-vm = { path = "../bulge-vm" }
 

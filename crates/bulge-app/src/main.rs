@@ -954,6 +954,78 @@ fn load_job(id: String) -> Result<LoadedJobDto, String> {
     Ok(LoadedJobDto { jsonl, diff })
 }
 
+/// One ticket in the read-only organization view.
+#[derive(Serialize)]
+struct OrgTicketDto {
+    id: String,
+    parent: Option<String>,
+    role: String,
+    status: String,
+    owner: Option<String>,
+    goal: String,
+    budget_tokens: u64,
+    rejections: u32,
+    updated_ms: u64,
+    /// The sub-agent job that served this ticket (== owner) if its log exists on
+    /// disk, so the UI can offer "open transcript".
+    job_available: bool,
+}
+
+#[derive(Serialize)]
+struct OrgChartDto {
+    tickets: Vec<OrgTicketDto>,
+    report: String,
+    exists: bool,
+}
+
+/// Read one job's organization without changing how it runs: replay the ticket
+/// board and render the same model-free situation report the agents see. A job
+/// that never delegated has no `org/board.jsonl`, so `exists` is false.
+#[tauri::command]
+fn org_chart(job_id: String) -> Result<OrgChartDto, String> {
+    if job_id.is_empty() || !job_id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') {
+        return Err("無效的任務 id".into());
+    }
+    let home = PathBuf::from(std::env::var("HOME").map_err(|_| "HOME 未設定".to_string())?);
+    let jobs = home.join(".bulge/jobs");
+    let board_path = jobs.join(&job_id).join("org").join("board.jsonl");
+    if !board_path.exists() {
+        return Ok(OrgChartDto { tickets: Vec::new(), report: String::new(), exists: false });
+    }
+    // `BoardLog::open` is the crate's replay path; opening an existing board also
+    // lets it repair a torn final newline, so we never duplicate the state machine.
+    let (_log, board) = bulge_org::BoardLog::open(&board_path)
+        .map_err(|error| format!("讀取組織失敗:{error}"))?;
+    let tickets = board
+        .tickets()
+        .into_iter()
+        .map(|ticket| {
+            let job_available = ticket.owner.as_deref().is_some_and(|owner| {
+                !owner.is_empty()
+                    && owner.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+                    && jobs.join(owner).join("job.jsonl").is_file()
+            });
+            OrgTicketDto {
+                id: ticket.id.clone(),
+                parent: ticket.parent.clone(),
+                role: ticket.role.clone(),
+                status: ticket.status.to_string(),
+                owner: ticket.owner.clone(),
+                goal: ticket.goal.clone(),
+                budget_tokens: ticket.budget_tokens,
+                rejections: ticket.rejections,
+                updated_ms: ticket.updated_ms,
+                job_available,
+            }
+        })
+        .collect();
+    // Ledger counts are live-only and not persisted with the board; the report's
+    // ticket section is what an observer needs from a past run.
+    let ledger = bulge_org::LedgerView { spent: 0, limit: 0, slots_used: 0, slots_max: 0 };
+    let report = bulge_org::situation_report(&board, &ledger, 50);
+    Ok(OrgChartDto { tickets, report, exists: true })
+}
+
 fn now_ms() -> u128 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -978,6 +1050,7 @@ fn main() {
             apply_changes,
             list_jobs,
             load_job,
+            org_chart,
             detect_models,
             mcp_servers,
             list_memory,

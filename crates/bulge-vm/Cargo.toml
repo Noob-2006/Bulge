@@ -8,6 +8,7 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
+bulge-guard = { path = "../bulge-guard" }
 bulge-proto = { path = "../bulge-proto" }
 command-fds = { version = "0.3", features = ["tokio"] }
 getrandom.workspace = true

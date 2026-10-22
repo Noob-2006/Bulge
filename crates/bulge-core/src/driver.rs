@@ -22,22 +22,93 @@ use tokio_util::sync::CancellationToken;
 use crate::budget::{BudgetState, BudgetTracker};
 use crate::complete::{self, Check, GateReport};
 use crate::context::{self, PruneConfig};
-use crate::dispatch::{DELEGATE_TOOL, PLAN_TOOL, RECALL_TOOL, ToolCall, ToolDispatcher};
+use crate::dispatch::{DELEGATE_TOOL, ORG_STATUS_TOOL, PLAN_TOOL, PROPOSE_ROLE_TOOL, RECALL_TOOL, ToolCall, ToolDispatcher};
 use crate::schedule::{CallOutcome, PlannedCall, run_tool_calls};
 
-/// Runs a delegated sub-task on behalf of the driver and returns its summary.
+/// One `delegate` tool call, parsed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DelegateRequest {
+    pub goal: String,
+    pub context: Option<String>,
+    /// Role from the organization's role library; `None` lets the handler pick its default.
+    pub role: Option<String>,
+    /// Model the head named for this ticket; `None` lets the handler choose.
+    pub model: Option<String>,
+    /// Acceptance criteria the deliverable must meet (may be empty).
+    pub acceptance: Vec<String>,
+}
+
+/// Runs a delegated sub-task on behalf of the driver and returns a structured
+/// report of what the child did.
 ///
 /// The future is `!Send` on purpose: the implementor runs a nested driver, which
 /// (like this one) schedules tool calls on the current thread. The handler object
 /// itself is `Send + Sync` so it can live in the `Arc`-shared [`Driver`].
 pub trait DelegateHandler: Send + Sync {
-    fn run<'a>(&'a self, goal: String, context: Option<String>, cancel: CancellationToken) -> LocalBoxFuture<'a, Result<String, String>>;
+    fn run<'a>(&'a self, request: DelegateRequest, cancel: CancellationToken) -> LocalBoxFuture<'a, Result<DelegateReport, String>>;
+}
+
+/// What a finished sub-agent reports back to its parent (sent to the model as JSON).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct DelegateReport {
+    /// The child job's final status, e.g. "succeeded", "incomplete", "failed", "cancelled".
+    pub status: String,
+    /// Why the child's loop ended, e.g. "stopped", "budget_exhausted", "stuck".
+    pub outcome: String,
+    /// The role the child ran as.
+    pub role: String,
+    /// The board ticket id for this delegation.
+    pub ticket: String,
+    /// The child's final answer, possibly shortened (see `truncated`).
+    pub summary: String,
+    /// True when `summary` was shortened to fit; the full text stays in the child's job log.
+    pub truncated: bool,
+    /// Tokens the child spent (already charged to the parent's budget).
+    pub tokens: u64,
+    pub steps: u64,
+    /// The child's job id (its full transcript is stored under that id).
+    pub job_id: String,
+    /// Workspace paths the child changed in its private VM slot.
+    pub changed: Vec<String>,
+    /// Paths the child's changes were merged back into the main workspace.
+    pub merged: Vec<String>,
+    /// Changes not applied because the main workspace moved, as `"{path}: {reason}"`.
+    pub conflicts: Vec<String>,
+    /// Whether an independent reviewer checked the work before any merge.
+    pub reviewed: bool,
+    /// The final review verdict; `None` when the work was not reviewed or no verdict was produced.
+    pub accepted: Option<bool>,
+    /// The last reviewer feedback (empty when there was none).
+    pub feedback: String,
+    /// Number of worker runs for this ticket, including reworks.
+    pub attempts: u32,
+    /// Models the worker ran with, in order.
+    pub models: Vec<String>,
 }
 
 /// Searches the agent's own past jobs and returns a short, model-ready digest.
 /// Pure host-side (file search), so it is synchronous.
 pub trait RecallHandler: Send + Sync {
     fn recall(&self, query: &str, limit: usize) -> String;
+}
+
+/// Produces the organization's situation report for the `org_status` tool
+/// (model-free, synchronous).
+pub trait OrgStatusHandler: Send + Sync {
+    fn status(&self) -> String;
+}
+
+/// Handles a `propose_role` tool call: validates and audits a proposed role,
+/// then installs it on trial if both pass. Async because the audit runs an
+/// independent agent; the future is `!Send` for the same reason as
+/// [`DelegateHandler`].
+pub trait ProposeRoleHandler: Send + Sync {
+    fn propose<'a>(
+        &'a self,
+        charter: String,
+        reason: String,
+        cancel: CancellationToken,
+    ) -> LocalBoxFuture<'a, Result<Value, String>>;
 }
 
 /// Steps with a non-empty plan and no item reaching `done` before the driver
@@ -244,6 +315,15 @@ pub struct Driver {
     delegate: Option<Arc<dyn DelegateHandler>>,
     /// Handles `recall` tool calls (searches past jobs). `None` → unknown tool.
     recall: Option<Arc<dyn RecallHandler>>,
+    /// Handles `org_status` tool calls (model-free situation report). `None` →
+    /// unknown tool.
+    org_status: Option<Arc<dyn OrgStatusHandler>>,
+    /// Handles `propose_role` tool calls (validate, audit, install on trial).
+    /// `None` → unknown tool.
+    propose_role: Option<Arc<dyn ProposeRoleHandler>>,
+    /// The shared budget tree this agent draws from; every recorded token is
+    /// charged to it and its exhaustion stops the loop.
+    ledger: Option<Arc<crate::ledger::Ledger>>,
     /// Compares each request with the previous one to explain cache misses.
     cache: Arc<Mutex<CacheWatch>>,
 }
@@ -263,6 +343,9 @@ impl Driver {
             review: false,
             delegate: None,
             recall: None,
+            org_status: None,
+            propose_role: None,
+            ledger: None,
             cache: Arc::new(Mutex::new(CacheWatch::new())),
         }
     }
@@ -287,6 +370,35 @@ impl Driver {
     pub fn with_recall(mut self, handler: Arc<dyn RecallHandler>) -> Self {
         self.recall = Some(handler);
         self
+    }
+
+    /// Install an organization-status handler so the model's `org_status` calls
+    /// return a cheap, model-free situation report (handled here on the host,
+    /// never sent to the VM).
+    pub fn with_org_status(mut self, handler: Arc<dyn OrgStatusHandler>) -> Self {
+        self.org_status = Some(handler);
+        self
+    }
+
+    /// Install a governance handler so the model's `propose_role` calls are
+    /// validated, audited, and installed on trial (handled here on the host,
+    /// never sent to the VM).
+    pub fn with_propose_role(mut self, handler: Arc<dyn ProposeRoleHandler>) -> Self {
+        self.propose_role = Some(handler);
+        self
+    }
+
+    /// Attach this agent's node of a shared budget tree: every recorded token is
+    /// charged to the node (and its ancestors), and the tree's exhaustion stops
+    /// the loop. Defaults to no ledger (the job budget alone bounds the run).
+    pub fn with_ledger(mut self, ledger: Arc<crate::ledger::Ledger>) -> Self {
+        self.ledger = Some(ledger);
+        self
+    }
+
+    /// The shared budget-tree node this driver charges, if one is attached.
+    pub fn ledger(&self) -> Option<&Arc<crate::ledger::Ledger>> {
+        self.ledger.as_ref()
     }
 
     /// Thread sampling controls (temperature / reasoning effort / output cap) into
@@ -326,6 +438,9 @@ impl Driver {
     pub async fn run(&self, job: &mut JobHandle, cancel: CancellationToken) -> Result<LoopOutcome, StoreError> {
         let spec = job.state().spec.clone();
         let mut budget = BudgetTracker::with_spent(spec.budget.clone(), job.state().steps, job.state().usage.total());
+        if let Some(ledger) = &self.ledger {
+            budget = budget.with_ledger(ledger.clone());
+        }
         let mut wind_down_announced = false;
         // Loop detector is per-run (history restarts on resume).
         let mut detector = self
@@ -568,27 +683,58 @@ impl Driver {
             }
         }
 
-        // Host-side tools are handled here, never sent to the VM. `delegate` runs a
-        // sub-agent on this thread (its future is !Send), so it is awaited before
-        // the remaining calls are dispatched.
+        // Host-side tools are handled here, never sent to the VM. All `delegate`
+        // calls of this turn run concurrently on this thread (their futures are
+        // `!Send`, so concurrency is cooperative, not multi-threaded): one future
+        // per call, then join them all before the remaining calls are dispatched.
         let mut host: std::collections::HashMap<String, CallOutcome> = std::collections::HashMap::new();
         if let Some(handler) = self.delegate.clone() {
+            let mut pending: Vec<(String, LocalBoxFuture<'_, CallOutcome>)> = Vec::new();
             for call in &calls {
                 if call.name != DELEGATE_TOOL {
                     continue;
                 }
                 let args = parse_lenient(&call.arguments);
                 let goal = args.get("goal").and_then(Value::as_str).unwrap_or("").trim().to_string();
-                let outcome = if goal.is_empty() {
-                    CallOutcome::Err { code: "BAD_DELEGATE".into(), message: "delegate needs a non-empty `goal`".into() }
-                } else {
-                    let context = args.get("context").and_then(Value::as_str).map(str::to_string);
-                    match handler.run(goal, context, cancel.clone()).await {
-                        Ok(summary) => CallOutcome::Ok(serde_json::json!({ "summary": summary })),
-                        Err(message) => CallOutcome::Err { code: "DELEGATE_FAILED".into(), message },
-                    }
+                if goal.is_empty() {
+                    pending.push((
+                        call.id.clone(),
+                        Box::pin(async {
+                            CallOutcome::Err { code: "BAD_DELEGATE".into(), message: "delegate needs a non-empty `goal`".into() }
+                        }),
+                    ));
+                    continue;
+                }
+                let context = args.get("context").and_then(Value::as_str).map(str::to_string);
+                let role = args.get("role").and_then(Value::as_str).map(str::to_string);
+                let model = args
+                    .get("model")
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|model| !model.is_empty())
+                    .map(str::to_string);
+                let acceptance = match args.get("acceptance") {
+                    Some(Value::Array(items)) => items.iter().filter_map(Value::as_str).map(str::to_string).collect(),
+                    Some(Value::String(one)) => vec![one.clone()],
+                    _ => Vec::new(),
                 };
-                host.insert(call.id.clone(), outcome);
+                // Cancelling the parent cancels every child.
+                let child_cancel = cancel.child_token();
+                let handler = handler.clone();
+                pending.push((
+                    call.id.clone(),
+                    Box::pin(async move {
+                        match handler.run(DelegateRequest { goal, context, role, model, acceptance }, child_cancel).await {
+                            Ok(report) => CallOutcome::Ok(serde_json::to_value(&report).unwrap_or_default()),
+                            Err(message) => CallOutcome::Err { code: "DELEGATE_FAILED".into(), message },
+                        }
+                    }),
+                ));
+            }
+            let ids: Vec<String> = pending.iter().map(|(id, _)| id.clone()).collect();
+            let outcomes = futures::future::join_all(pending.into_iter().map(|(_, future)| future)).await;
+            for (id, outcome) in ids.into_iter().zip(outcomes) {
+                host.insert(id, outcome);
             }
         }
         if let Some(handler) = self.recall.clone() {
@@ -603,6 +749,56 @@ impl Driver {
                 } else {
                     let limit = args.get("limit").and_then(Value::as_u64).unwrap_or(5).clamp(1, 20) as usize;
                     CallOutcome::Ok(serde_json::json!({ "results": handler.recall(&query, limit) }))
+                };
+                host.insert(call.id.clone(), outcome);
+            }
+        }
+        if let Some(handler) = self.org_status.clone() {
+            for call in &calls {
+                if call.name != ORG_STATUS_TOOL {
+                    continue;
+                }
+                let outcome = CallOutcome::Ok(serde_json::json!({ "report": handler.status() }));
+                host.insert(call.id.clone(), outcome);
+            }
+        }
+        if let Some(handler) = self.propose_role.clone() {
+            for call in &calls {
+                if call.name != PROPOSE_ROLE_TOOL {
+                    continue;
+                }
+                let args = parse_lenient(&call.arguments);
+                let charter = args
+                    .get("charter")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .trim()
+                    .to_string();
+                let reason = args
+                    .get("reason")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .trim()
+                    .to_string();
+                let outcome = if charter.is_empty() {
+                    CallOutcome::Err {
+                        code: "BAD_PROPOSE_ROLE".into(),
+                        message: "propose_role needs a non-empty `charter`".into(),
+                    }
+                } else if reason.is_empty() {
+                    CallOutcome::Err {
+                        code: "BAD_PROPOSE_ROLE".into(),
+                        message: "propose_role needs a non-empty `reason`".into(),
+                    }
+                } else {
+                    let child_cancel = cancel.child_token();
+                    match handler.propose(charter, reason, child_cancel).await {
+                        Ok(value) => CallOutcome::Ok(value),
+                        Err(message) => CallOutcome::Err {
+                            code: "PROPOSE_ROLE_FAILED".into(),
+                            message,
+                        },
+                    }
                 };
                 host.insert(call.id.clone(), outcome);
             }
@@ -623,22 +819,23 @@ impl Driver {
             }
         }
 
-        // Permission: a denied call is never run; the model is told so it adapts.
-        let mut denied: std::collections::HashMap<String, String> = calls
+        // Permission: a blocked call is never run; the model is told so it adapts.
+        // `Ask` fails closed too — there is no tool approval channel here.
+        let mut blocked: std::collections::HashMap<String, PermissionBlock> = calls
             .iter()
             .filter(|c| !host.contains_key(&c.id))
-            .filter_map(|c| self.permission_denial(c).map(|reason| (c.id.clone(), reason)))
+            .filter_map(|c| self.permission_block(c).map(|block| (c.id.clone(), block)))
             .collect();
 
         // LLM review gate: a second opinion on every mutating (barrier) call that
         // policy did not already block. Runs sequentially before anything executes.
         if self.review {
             for call in &calls {
-                if host.contains_key(&call.id) || denied.contains_key(&call.id) || self.dispatcher.concurrency_safe(&call.name) {
+                if host.contains_key(&call.id) || blocked.contains_key(&call.id) || self.dispatcher.concurrency_safe(&call.name) {
                     continue;
                 }
                 if let Some(reason) = self.review_denial(job, call, cancel).await {
-                    denied.insert(call.id.clone(), reason);
+                    blocked.insert(call.id.clone(), PermissionBlock::Deny(reason));
                 }
             }
         }
@@ -648,6 +845,26 @@ impl Driver {
             .map(|c| JobEvent::ToolClaimed { call_id: c.id.clone(), name: c.name.clone(), arguments: parse_lenient(&c.arguments) })
             .collect();
         job.append(claims)?;
+        // Every asked call is recorded as awaiting a human before it is failed
+        // closed, so the log preserves what the guard wanted to ask.
+        let approvals: Vec<JobEvent> = calls
+            .iter()
+            .filter_map(|call| match blocked.get(&call.id) {
+                Some(PermissionBlock::Ask { resource }) => Some(JobEvent::ApprovalAsked {
+                    id: call.id.clone(),
+                    kind: "tool".into(),
+                    detail: serde_json::json!({
+                        "tool": call.name,
+                        "resource": resource,
+                        "reason": "this action requires a human",
+                    }),
+                }),
+                _ => None,
+            })
+            .collect();
+        if !approvals.is_empty() {
+            job.append(approvals)?;
+        }
         // Record the plan update (if any) between claim and completion.
         if let Some(items) = plan_update {
             job.append(vec![JobEvent::Plan { items }])?;
@@ -655,7 +872,7 @@ impl Driver {
 
         let planned: Vec<PlannedCall> = calls
             .iter()
-            .filter(|c| !denied.contains_key(&c.id) && !host.contains_key(&c.id))
+            .filter(|c| !blocked.contains_key(&c.id) && !host.contains_key(&c.id))
             .map(|c| PlannedCall {
                 call_id: c.id.clone(),
                 name: c.name.clone(),
@@ -683,8 +900,17 @@ impl Driver {
         for call in &calls {
             let outcome = if let Some(outcome) = host.get(&call.id) {
                 outcome.clone()
-            } else if let Some(reason) = denied.get(&call.id) {
-                CallOutcome::Err { code: "PERMISSION_DENIED".into(), message: reason.clone() }
+            } else if let Some(block) = blocked.get(&call.id) {
+                match block {
+                    PermissionBlock::Deny(reason) => CallOutcome::Err { code: "PERMISSION_DENIED".into(), message: reason.clone() },
+                    PermissionBlock::Ask { resource } => CallOutcome::Err {
+                        code: "REQUIRES_HUMAN".into(),
+                        message: format!(
+                            "{} on {resource} needs a human; it was not run. Do not retry it or work around it — finish what you can and say in your answer exactly what the human must do.",
+                            call.name
+                        ),
+                    },
+                }
             } else {
                 by_id.get(&call.id).cloned().unwrap_or(CallOutcome::Skipped)
             };
@@ -701,14 +927,15 @@ impl Driver {
         Ok(None)
     }
 
-    /// If the guard's rules deny this call, the reason; otherwise `None`
-    /// (allow/ask both proceed in the default autonomous mode).
-    fn permission_denial(&self, call: &ExtractedCall) -> Option<String> {
+    /// If the guard's rules block this call, why. `Ask` is a block: without a
+    /// human approval channel the only safe reading of "ask" is "do not run".
+    fn permission_block(&self, call: &ExtractedCall) -> Option<PermissionBlock> {
         let guard = self.guard.as_ref()?;
         let resource = call_resource(call);
         match bulge_guard::evaluate(&call.name, &resource, &[&guard.rules]) {
-            bulge_guard::Effect::Deny => Some(format!("blocked by policy: {} on {resource}", call.name)),
-            bulge_guard::Effect::Allow | bulge_guard::Effect::Ask => None,
+            bulge_guard::Effect::Deny => Some(PermissionBlock::Deny(format!("blocked by policy: {} on {resource}", call.name))),
+            bulge_guard::Effect::Ask => Some(PermissionBlock::Ask { resource }),
+            bulge_guard::Effect::Allow => None,
         }
     }
 
@@ -932,6 +1159,13 @@ struct ExtractedCall {
     id: String,
     name: String,
     arguments: String,
+}
+
+/// Why a call is not dispatched. `Ask` is failed closed until a human channel
+/// exists; it is still logged as an approval request for the UI.
+enum PermissionBlock {
+    Deny(String),
+    Ask { resource: String },
 }
 
 fn extract_tool_calls(message: &Message) -> Vec<ExtractedCall> {

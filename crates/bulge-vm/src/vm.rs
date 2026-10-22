@@ -60,6 +60,8 @@ pub struct VmConfig {
     /// agent reaches an arbitrary host from inside the VM). `None` keeps egress
     /// strictly to `egress_allow`.
     pub egress_approvals: Option<crate::net::gateway::EgressApprovalTx>,
+    /// Payment/checkout/wallet hosts the gateway refuses without a human.
+    pub real_world: Arc<bulge_guard::RealWorldPolicy>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -132,6 +134,7 @@ impl Vm {
                     approvals: config.egress_approvals.clone(),
                     approved: Arc::new(tokio::sync::Mutex::new(std::collections::HashSet::new())),
                     host_addrs: Arc::new(host_addrs),
+                    real_world: config.real_world.clone(),
                 },
             );
             gateway = Some(handle);

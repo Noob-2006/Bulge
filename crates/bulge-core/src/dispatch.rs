@@ -88,6 +88,51 @@ pub const DELEGATE_TOOL: &str = "delegate";
 /// (handled by the driver via a [`crate::driver::RecallHandler`], never the VM).
 pub const RECALL_TOOL: &str = "recall";
 
+/// Name of the host-side organization status tool: a model-free digest of the
+/// ticket board, budget, and running sub-agents (handled by the driver via a
+/// [`crate::driver::OrgStatusHandler`], never the VM).
+pub const ORG_STATUS_TOOL: &str = "org_status";
+
+/// Schema for the organization situation-report tool. It takes no parameters.
+pub fn org_status_tool() -> ToolSchema {
+    ToolSchema {
+        name: ORG_STATUS_TOOL.into(),
+        description: "Get a model-free situation report of the organization: budget used, sub-agents running, and every ticket with its role and status. Cheap; call it before planning more work or when a delegation failed.".into(),
+        parameters: json!({ "type": "object", "properties": {} }),
+        defer_loading: false,
+    }
+}
+
+
+/// Name of the host-side role-proposal tool (handled by the driver via a
+/// [`crate::driver::ProposeRoleHandler`], never sent to the VM).
+pub const PROPOSE_ROLE_TOOL: &str = "propose_role";
+
+/// Schema for the governance proposal tool. A lead submits a full Markdown
+/// charter; the host validates it, audits it independently, and installs it on
+/// trial if both pass. The user can veto the role afterwards.
+pub fn propose_role_tool() -> ToolSchema {
+    ToolSchema {
+        name: PROPOSE_ROLE_TOOL.into(),
+        description: "Propose a new role for the organization when no existing role fits. Supply the full Markdown charter (with `---` frontmatter, the same format as <harness>/org/roles/*.md) and why you need it. The proposal is checked mechanically and audited independently; if both pass it is installed as a TRIAL role with a small budget share until it has a track record. The user can veto the role at any time.".into(),
+        parameters: json!({
+            "type": "object",
+            "properties": {
+                "charter": {
+                    "type": "string",
+                    "description": "The full Markdown charter, frontmatter included, in the same format as <harness>/org/roles/*.md."
+                },
+                "reason": {
+                    "type": "string",
+                    "description": "Why the organization needs this role."
+                }
+            },
+            "required": ["charter", "reason"]
+        }),
+        defer_loading: false,
+    }
+}
+
 /// Schema for the planning tool. Callers append it to `builtin_tools()` when they
 /// want the model to keep a visible plan; the driver intercepts its calls,
 /// records the plan, and watches for a stall. Status is one of
