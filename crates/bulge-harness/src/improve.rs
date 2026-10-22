@@ -44,7 +44,8 @@ The job above is finished. Review it once and answer three questions.\n\n\
 never facts specific to this one task. Each: cue (the situation it applies to; short, \
 keyword-rich — this is how it is found later), lesson (what to do, concretely), evidence (what \
 in this job shows it: a step, a file, an error, a result), confidence (a number in [0,1]). \
-Drop anything you are not sure generalises.\n\n\
+Drop anything you are not sure generalises, and anything an entry in <lessons> above \
+already says (even in other words) — repeats bloat memory and teach nothing new.\n\n\
 2. PROFILE — what you now durably know, on TWO surfaces: USER.md (target \"user\": who the user \
 is and how they want you to work — role, preferences, recurring instructions, things they told \
 you to always/never do; one fact per section) and MEMORY.md (target \"env\": durable facts about \
@@ -53,7 +54,8 @@ preferences). Route each fact to exactly ONE surface. Short keyword-rich section
 two-sentence bodies; to delete an obsolete section set remove=true.\n\n\
 3. SKILL — a successful, repeatable procedure usually IS worth a skill. If this job used one \
 that would work again on FUTURE, similar jobs, propose ONE: a named, general, multi-step \
-procedure (not a one-off, not a single fact — small facts are lessons). name: short kebab-case; \
+procedure (not a one-off, not a single fact — small facts are lessons). Return null if a \
+skill in <available_skills> above already covers it. name: short kebab-case; \
 description: one line saying when to use it, at most 60 characters (the skill index truncates \
 at 60 and anything past it never routes); body: the steps, in Markdown.",
     "\n\n",
@@ -61,7 +63,8 @@ at 60 and anything past it never routes); body: the steps, in Markdown.",
     "\n\n",
     "Answer with ONLY one JSON object, no prose: {\"lessons\": [{cue, lesson, evidence, confidence}], \
 \"profile\": [{target, key, body, remove}], \"skill\": {name, description, body} or null}. \
-Use [] / null for anything with nothing durable."
+Use [] / null for anything with nothing durable. Be terse: each lesson, evidence and \
+profile body is one sentence; a skill body is at most ten short numbered steps."
 );
 
 /// The three proposals parsed from one [`PROPOSE_LEARNING_PROMPT`] reply.

@@ -319,8 +319,9 @@ fn build_config(args: &StartArgs) -> Result<RunConfig, String> {
 
     let reasoning_effort = parse_reasoning(args.reasoning_effort.as_deref());
     // A reasoning effort is only sent when the model is treated as a reasoning
-    // model, so selecting low/high/max turns that on; "off"/unset leaves it off.
-    let reasoning = matches!(reasoning_effort, Some(bulge_llm::ReasoningEffort::Low | bulge_llm::ReasoningEffort::High | bulge_llm::ReasoningEffort::Max));
+    // model, so choosing any effort — including "off", which must be sent to stop
+    // a model that thinks by default — turns that on; unset sends nothing.
+    let reasoning = reasoning_effort.is_some();
     let context_window = args.context_window.unwrap_or(128_000).max(8_192);
     let out_cap = args.max_tokens.unwrap_or(8_192).clamp(256, 200_000);
     let system_prompt = args.system_prompt.as_ref().map(|s| s.trim().to_string()).filter(|s| !s.is_empty());

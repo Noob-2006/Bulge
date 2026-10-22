@@ -10,8 +10,8 @@ use serde::{Deserialize, Serialize};
 /// cheap, objective checks come first.
 pub const SELF_REVIEW_CRITERIA: &str = "\
 Review your own work against the request before declaring it done. Answer in text \
-only; do not call tools. For EACH point, \
-answer and justify briefly:\n\
+only; do not call tools. For EACH point give ONE short line: yes/no and the key evidence \
+(no restating of code or output):\n\
 1. DELIVERY: does every requested deliverable exist?\n\
 2. CONFORMANCE: does each match the requested shape (format, columns, names) with no extras?\n\
 3. FIDELITY: is every claim supported by the sources? If a source is silent, say so — do not invent.\n\

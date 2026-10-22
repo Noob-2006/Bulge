@@ -66,7 +66,9 @@ impl WireProtocol for OpenAiChat {
             "stream_options": { "include_usage": true },
             "max_tokens": max_tokens,
         });
-        if cx.model.reasoning && effort != ReasoningEffort::Off {
+        // On a reasoning model the effort is always explicit: providers whose
+        // default is to think (DeepSeek V4.x) only stop when told `none`.
+        if cx.model.reasoning {
             body["reasoning_effort"] = json!(effort_name(effort));
         }
         if let Some(temperature) = request.temperature {
@@ -335,8 +337,8 @@ fn validate_tool_pairing(messages: &[Message]) -> Result<(), LlmError> {
 
 fn effort_name(effort: ReasoningEffort) -> &'static str {
     match effort {
-        // Off is never encoded; keep a total mapping for exhaustiveness.
-        ReasoningEffort::Off => "off",
+        // The OpenAI-compatible spelling for "do not think" (`off` is rejected).
+        ReasoningEffort::Off => "none",
         ReasoningEffort::Low => "low",
         ReasoningEffort::High | ReasoningEffort::Max => "high",
     }
@@ -1009,7 +1011,7 @@ mod tests {
             (ReasoningEffort::Low, Some("low")),
             (ReasoningEffort::High, Some("high")),
             (ReasoningEffort::Max, Some("high")),
-            (ReasoningEffort::Off, None),
+            (ReasoningEffort::Off, Some("none")),
         ] {
             let mut req = request(vec![Message::text(Role::User, "hi")]);
             req.reasoning_effort = Some(effort);
