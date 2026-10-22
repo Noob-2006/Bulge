@@ -430,6 +430,9 @@ pub struct Session {
     /// The last turn's request prefix; post-job learning calls replay it so they
     /// hit the provider's prefix cache instead of resending the job uncached.
     prefix: Option<RequestPrefix>,
+    /// User turns run in this session; a follow-up turn usually carries a
+    /// correction, so a multi-turn conversation always goes through learning.
+    turns: usize,
 }
 
 impl Session {
@@ -516,6 +519,7 @@ impl Session {
             auto_review: config.auto_review,
             vm_config,
             prefix: None,
+            turns: 0,
         })
     }
 
@@ -532,6 +536,7 @@ impl Session {
     /// *persistent* VM, and collect the (cumulative) workspace diff for review.
     /// The VM is left running for the next turn.
     pub async fn run_turn(&mut self, goal: String, cancel: CancellationToken, sink: LineSink) -> Result<RunOutcome, String> {
+        self.turns += 1;
         let jobs_dir = self.job.dir().parent().map(std::path::Path::to_path_buf);
         let system_prompt = build_system_prompt(&self.harness_dir, self.system_prompt.as_deref());
         // The workspace snapshot is only true before the first turn touches it.
@@ -678,7 +683,10 @@ impl Session {
         if !self.skip_review
             && let Some(prefix) = self.prefix.take()
         {
-            improve(self.backend.as_ref(), &mut self.job, &self.harness_dir, &self.backend_spec.model, &prefix).await;
+            match learning_skip_reason(self.job.state(), self.turns) {
+                Some(reason) => eprintln!("learning skipped: {reason}"),
+                None => improve(self.backend.as_ref(), &mut self.job, &self.harness_dir, &self.backend_spec.model, &prefix).await,
+            }
         }
         let Session { vm, .. } = self;
         if let Ok(vm) = Arc::try_unwrap(vm) {
@@ -732,6 +740,35 @@ pub async fn run_streaming(config: RunConfig, cancel: CancellationToken, sink: L
 }
 
 /// Ask the model for durable lessons from this job and save them to memory.
+/// Why the post-job learning call can be skipped, or `None` to run it.
+///
+/// Learning is skipped only when every signal says the job was routine: it
+/// succeeded, it was a single user turn (no follow-up corrections), and its last
+/// self-review answered point 7 (novelty) with `LEARN: no` — the reviewer had
+/// the current <lessons> and <available_skills> in view. Anything else (a
+/// failed or incomplete job, a missing or unparsable review line) runs
+/// learning, so uncertainty never costs the agent what it could have learned.
+fn learning_skip_reason(state: &bulge_store::JobState, turns: usize) -> Option<&'static str> {
+    if state.status != JobStatus::Succeeded || turns > 1 {
+        return None;
+    }
+    let review_at = state.history.iter().rposition(|m| {
+        m.role == Role::User
+            && m.content.iter().any(|b| matches!(b, bulge_llm::ContentBlock::Text { text } if text.starts_with(bulge_core::complete::SELF_REVIEW_OPENING)))
+    })?;
+    let reply = state.history[review_at + 1..].iter().find(|m| m.role == Role::Assistant)?;
+    let text: String = reply
+        .content
+        .iter()
+        .filter_map(|b| match b {
+            bulge_llm::ContentBlock::Text { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    (bulge_core::complete::parse_learn(&text) == Some(false)).then_some("routine success; self-review found nothing new (LEARN: no)")
+}
+
 /// Opens every post-job learning instruction (the learning calls share the loop's
 /// system prompt for cache reuse, so the reviewer role is stated here).
 const LEARNING_PREAMBLE: &str = "Stop working on the task and do not call tools: you now review it to learn from it.";
@@ -866,6 +903,50 @@ fn apply_profile(harness_dir: &Path, updates: Vec<bulge_harness::ProfileUpdate>)
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn finished_job(label: &str, review_reply: Option<&str>, status: JobStatus) -> bulge_store::JobHandle {
+        let root = std::env::temp_dir().join(format!("bulge-learn-gate-{label}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let spec = JobSpec {
+            id: "j".into(),
+            title: "t".into(),
+            goal: "g".into(),
+            workspace: PathBuf::from("/tmp/ws"),
+            autonomy: Autonomy::default(),
+            budget: Budget { max_steps: 5, max_tokens: 1000, max_wall_secs: 60 },
+            model: ModelRef { backend: "fake".into(), model: "m".into() },
+        };
+        let mut job = JobStore::new(root).create(spec).unwrap();
+        let mut events = vec![
+            JobEvent::Message { message: Message::text(Role::User, "do the thing") },
+            JobEvent::Message { message: Message::text(Role::Assistant, "done") },
+        ];
+        if let Some(reply) = review_reply {
+            events.push(JobEvent::Message { message: Message::text(Role::User, bulge_core::complete::SELF_REVIEW_CRITERIA) });
+            events.push(JobEvent::Message { message: Message::text(Role::Assistant, reply) });
+        }
+        events.push(JobEvent::StatusChanged { status, summary: None });
+        job.append(events).unwrap();
+        job
+    }
+
+    #[test]
+    fn learning_is_skipped_only_for_a_routine_single_turn_success() {
+        let routine = finished_job("routine", Some("1. yes\n**LEARN:** no\nVERDICT: PASS"), JobStatus::Succeeded);
+        assert!(learning_skip_reason(routine.state(), 1).is_some());
+        // A follow-up turn (likely a correction) always learns.
+        assert_eq!(learning_skip_reason(routine.state(), 2), None);
+        // The reviewer saw something new.
+        let novel = finished_job("novel", Some("LEARN: yes\nVERDICT: PASS"), JobStatus::Succeeded);
+        assert_eq!(learning_skip_reason(novel.state(), 1), None);
+        // Failure, a missing review, or an unparsable line all fail open (learn).
+        let failed = finished_job("failed", Some("LEARN: no\nVERDICT: FAIL"), JobStatus::Incomplete);
+        assert_eq!(learning_skip_reason(failed.state(), 1), None);
+        let unreviewed = finished_job("unreviewed", None, JobStatus::Succeeded);
+        assert_eq!(learning_skip_reason(unreviewed.state(), 1), None);
+        let vague = finished_job("vague", Some("LEARN: maybe\nVERDICT: PASS"), JobStatus::Succeeded);
+        assert_eq!(learning_skip_reason(vague.state(), 1), None);
+    }
 
     #[test]
     fn strip_turn_context_removes_only_the_injected_blocks() {

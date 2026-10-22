@@ -18,7 +18,13 @@ only; do not call tools. For EACH point give ONE short line: yes/no and the key 
 4. CONSISTENCY: are the parts internally consistent?\n\
 5. USABILITY: would the deliverable actually work / run / open?\n\
 6. FINISH: no TODOs, placeholders, or stubs left.\n\
-Length and polish are not merits. End with exactly one line: `VERDICT: PASS` or `VERDICT: FAIL`.";
+7. NOVELTY: did this job reveal anything the <lessons> and <available_skills> above do not \
+already cover — a pitfall you hit, a correction from the user, a new reusable procedure?\n\
+Length and polish are not merits. End with exactly two lines: `LEARN: yes` or `LEARN: no` \
+(point 7), then `VERDICT: PASS` or `VERDICT: FAIL`.";
+
+/// The opening of [`SELF_REVIEW_CRITERIA`], for finding the review turn in a log.
+pub const SELF_REVIEW_OPENING: &str = "Review your own work against the request";
 
 /// The policy a reviewer model applies to one proposed tool call (the LLM review
 /// gate). It sees only the call, never prior output, and must answer with a single
@@ -106,6 +112,22 @@ pub fn parse_verdict(text: &str) -> Option<bool> {
     })
 }
 
+/// Parse the `LEARN: yes|no` line of a self-review reply (point 7): whether the
+/// job showed something memory does not already hold. `None` when absent.
+pub fn parse_learn(text: &str) -> Option<bool> {
+    text.lines().rev().find_map(|line| {
+        // Tolerate markdown decoration (`LEARN: no`, **LEARN:** No., - LEARN: yes).
+        let decoration = |c: char| c == '`' || c == '*' || c == '-' || c.is_whitespace();
+        let upper = line.trim_matches(decoration).to_ascii_uppercase();
+        let rest = upper.strip_prefix("LEARN:")?.trim_matches(|c: char| !c.is_ascii_alphabetic());
+        match rest {
+            "YES" => Some(true),
+            "NO" => Some(false),
+            _ => None,
+        }
+    })
+}
+
 /// A plan is stalled when several steps pass with no item moving to done and no
 /// new in-progress item. The driver tracks `steps_since_progress`.
 pub fn plan_stalled(steps_since_progress: u64, threshold: u64) -> bool {
@@ -118,6 +140,17 @@ mod tests {
 
     fn check(passed: bool) -> Check {
         Check { what: "deliverable report.md exists".into(), passed, detail: "…".into() }
+    }
+
+    #[test]
+    fn learn_line_is_parsed_and_absent_means_unknown() {
+        assert_eq!(parse_learn("7. no\nLEARN: no\nVERDICT: PASS"), Some(false));
+        assert_eq!(parse_learn("`LEARN: yes`\n`VERDICT: PASS`"), Some(true));
+        assert_eq!(parse_learn("**LEARN:** No.\nVERDICT: PASS"), Some(false));
+        assert_eq!(parse_learn("- LEARN: yes"), Some(true));
+        assert_eq!(parse_learn("LEARN: No.\nVERDICT: PASS"), Some(false));
+        assert_eq!(parse_learn("VERDICT: PASS"), None);
+        assert_eq!(parse_learn("LEARN: maybe"), None);
     }
 
     #[test]
