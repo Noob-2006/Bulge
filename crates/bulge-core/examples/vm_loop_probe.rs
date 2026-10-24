@@ -81,7 +81,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             vec![call("c4", "exec", json!({ "command": "ls -1 && wc -l report.md" }))],
             vec![ContentBlock::Text { text: "Report written and verified.".into() }],
         ])),
-        models: vec![ModelInfo { id: "script".into(), context_window: 100_000, max_tokens: 4096, system_prompt_update: Default::default(), deferred_tools: false, images: false, reasoning: false }],
+        models: vec![ModelInfo { id: "script".into(), context_window: 100_000, max_tokens: 4096, system_prompt_update: Default::default(), deferred_tools: false, images: false, reasoning: false , default_effort: None}],
     });
     let dispatcher = Arc::new(VmDispatcher::new(vm.clone(), Duration::from_secs(60)));
 

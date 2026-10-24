@@ -13,23 +13,29 @@
 //! keys the target host must match the allowlist, and every resolved IP is passed
 //! through the same special-use/host filter as the packet path, so an allowlisted
 //! name that resolves to a private or metadata address is still refused (DNS
-//! rebinding defence). The upshot: content the agent pulls into the VM — a web
-//! page, a downloaded script — has no interface and no keys, so it cannot phone
-//! home; the agent's own fetches can only reach approved hosts.
+//! rebinding defence). The upshot: the VM has no network of its own, and what
+//! leaves it goes only to hosts the allowlist and the real-world policy permit.
+//!
+//! Note what the two keys do NOT do: sandboxd runs a local proxy for the guest
+//! (`HTTPS_PROXY`) that adds them, so every program in the VM — including a
+//! script the agent downloaded and ran — can reach whatever the allowlist
+//! allows. The keys stop anything that is not this VM's sandboxd; the
+//! allowlist is what limits where the VM itself can go.
 
 use std::collections::HashSet;
-use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
+use std::net::{IpAddr, SocketAddr};
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpStream, UnixListener, UnixStream};
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, Semaphore};
 
 use bulge_guard::RealWorldPolicy;
 
-use crate::net::policy::is_forbidden_destination;
+use crate::net::policy::{HostNetworks, is_forbidden_destination};
 
 /// Vsock port the guest dials for the egress gateway (host listens on the bridged
 /// unix socket). Distinct from the control port (1024). Shared with the guest via
@@ -39,11 +45,32 @@ pub use bulge_proto::msg::GATEWAY_VSOCK_PORT;
 /// Largest request header we will read before the target (keys + host:port).
 const MAX_HEADER: usize = 1024;
 
+/// Resource bounds on what one guest can make the host hold open: the
+/// roadmap's "abnormal volume" guard. A guest past either bound is refused,
+/// never queued.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GatewayLimits {
+    /// Concurrent tunnels (including requests still waiting on a human).
+    pub max_connections: usize,
+    /// Time allowed for the guest to send its one request line.
+    pub header_timeout: Duration,
+}
+
+impl Default for GatewayLimits {
+    fn default() -> Self {
+        // A busy package install opens tens of parallel fetches; a few hundred
+        // leaves room for that while keeping host fds well under ulimits.
+        Self { max_connections: 256, header_timeout: Duration::from_secs(10) }
+    }
+}
+
 #[derive(Debug, Default)]
 pub struct GatewayStats {
     pub allowed: AtomicU64,
     pub denied_auth: AtomicU64,
     pub denied_policy: AtomicU64,
+    /// Refused because the guest already held `max_connections` tunnels.
+    pub denied_limit: AtomicU64,
     /// Real-world hosts refused because there was no human to ask (or the human
     /// declined). Kept separate so the UI can show the boundary doing its job.
     pub denied_real_world: AtomicU64,
@@ -147,10 +174,8 @@ pub struct GatewayConfig {
     pub approvals: Option<EgressApprovalTx>,
     /// Hosts the user has already approved this session (so repeats don't re-ask).
     pub approved: Arc<Mutex<HashSet<String>>>,
-    /// The host's own interface addresses. A destination that resolves to one of
-    /// these is refused even when it is a public IP, so an allowlisted/approved
-    /// name can't be pointed back at a service on this machine.
-    pub host_addrs: Arc<HashSet<IpAddr>>,
+    /// Connection and header bounds for this VM.
+    pub limits: GatewayLimits,
     /// Payment/checkout/wallet hosts. Even an allow-public `"*"` cannot reach
     /// these without a human: without an approval channel they are denied.
     pub real_world: Arc<RealWorldPolicy>,
@@ -161,10 +186,18 @@ pub struct GatewayConfig {
 /// policy-checked, and — if approved — spliced to the real destination.
 pub fn serve(listener: UnixListener, config: GatewayConfig) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
-        while let Ok((stream, _)) = listener.accept().await {
+        let slots = Arc::new(Semaphore::new(config.limits.max_connections));
+        while let Ok((mut stream, _)) = listener.accept().await {
             let config = config.clone();
+            let Ok(permit) = slots.clone().try_acquire_owned() else {
+                tokio::spawn(async move {
+                    let _ = deny(&mut stream, &config.stats.denied_limit, "ERR too many connections").await;
+                });
+                continue;
+            };
             tokio::spawn(async move {
                 let _ = handle(stream, config).await;
+                drop(permit);
             });
         }
     })
@@ -178,9 +211,10 @@ pub fn bind(socket_path: &Path) -> std::io::Result<UnixListener> {
 }
 
 async fn handle(mut stream: UnixStream, config: GatewayConfig) -> std::io::Result<()> {
-    let line = match read_header_line(&mut stream).await {
-        Some(line) => line,
-        None => return Ok(()),
+    let line = match tokio::time::timeout(config.limits.header_timeout, read_header_line(&mut stream)).await {
+        Ok(Some(line)) => line,
+        Ok(None) => return Ok(()),
+        Err(_) => return deny(&mut stream, &config.stats.denied_policy, "ERR header timeout").await,
     };
     let request = match parse_request(&line) {
         Ok(request) => request,
@@ -188,6 +222,12 @@ async fn handle(mut stream: UnixStream, config: GatewayConfig) -> std::io::Resul
     };
     if !authorized(&request, &config.token, &config.key) {
         return deny(&mut stream, &config.stats.denied_auth, "ERR unauthorized").await;
+    }
+    // Connections go only to addresses the host itself resolved from a name
+    // (CORE.md §3): an IP literal would skip every name-based check below —
+    // the real-world list, the allowlist, the per-host approval.
+    if is_ip_literal(&request.host) {
+        return deny(&mut stream, &config.stats.denied_policy, "ERR connect by host name, not IP address").await;
     }
     if config.real_world.host_is_real_world(&request.host) {
         // Real-world hosts (payments, checkout, wallets) are a separate boundary
@@ -225,9 +265,14 @@ async fn handle(mut stream: UnixStream, config: GatewayConfig) -> std::io::Resul
             config.approved.lock().await.insert(host_key);
         }
     }
-    // Resolve and reject any address in a forbidden (private/metadata/…) range
-    // or belonging to this host itself.
-    let targets = resolve_allowed(&request.host, request.port, &config.host_addrs);
+    // Resolve and reject any address in a forbidden (private/metadata/…) range,
+    // belonging to this host, or on one of its links. The host's networks are
+    // read per connection so an address acquired after launch is covered; if
+    // they cannot be read, refuse (an unknown LAN looks like the internet).
+    let Ok(host_networks) = HostNetworks::current() else {
+        return deny(&mut stream, &config.stats.denied_policy, "ERR host network state unavailable").await;
+    };
+    let targets = resolve_allowed(&request.host, request.port, &host_networks).await;
     if targets.is_empty() {
         return deny(&mut stream, &config.stats.denied_policy, "ERR unresolved or forbidden").await;
     }
@@ -278,17 +323,22 @@ async fn read_header_line(stream: &mut UnixStream) -> Option<String> {
     String::from_utf8(buf).ok()
 }
 
-/// Whether an address must never be connected to: a special-use/private/metadata
-/// range, or one of the host's own interface addresses (including its public IP).
-fn addr_forbidden(ip: IpAddr, host_addrs: &HashSet<IpAddr>) -> bool {
-    is_forbidden_destination(ip) || host_addrs.contains(&ip)
+/// `1.2.3.4`, `::1`, or bracketed `[::1]`.
+fn is_ip_literal(host: &str) -> bool {
+    host.trim_start_matches('[').trim_end_matches(']').parse::<IpAddr>().is_ok()
 }
 
-/// Resolve `host:port`, returning every address that is NOT forbidden. Empty if
-/// resolution fails or every address is forbidden.
-fn resolve_allowed(host: &str, port: u16, host_addrs: &HashSet<IpAddr>) -> Vec<SocketAddr> {
-    match (host, port).to_socket_addrs() {
-        Ok(addrs) => addrs.filter(|addr| !addr_forbidden(addr.ip(), host_addrs)).collect(),
+/// Whether an address must never be connected to: a special-use/private/metadata
+/// range, the host itself, or a neighbour on one of the host's links.
+fn addr_forbidden(ip: IpAddr, host: &HostNetworks) -> bool {
+    is_forbidden_destination(ip) || host.contains(ip)
+}
+
+/// Resolve `host:port` (off the async workers), returning every address that is
+/// NOT forbidden. Empty if resolution fails or every address is forbidden.
+async fn resolve_allowed(host: &str, port: u16, networks: &HostNetworks) -> Vec<SocketAddr> {
+    match tokio::net::lookup_host((host, port)).await {
+        Ok(addrs) => addrs.filter(|addr| !addr_forbidden(addr.ip(), networks)).collect(),
         Err(_) => Vec::new(),
     }
 }
@@ -332,23 +382,65 @@ mod tests {
         assert!(host_allowed("deep.sub.example.org", &any));
     }
 
-    #[test]
-    fn resolve_rejects_forbidden_addresses() {
+    #[tokio::test]
+    async fn resolve_rejects_forbidden_addresses() {
         // localhost resolves only to loopback, which is forbidden.
-        assert!(resolve_allowed("localhost", 80, &HashSet::new()).is_empty());
+        assert!(resolve_allowed("localhost", 80, &HostNetworks::default()).await.is_empty());
     }
 
     #[test]
-    fn addr_forbidden_covers_special_ranges_and_host_own_ip() {
+    fn addr_forbidden_covers_special_ranges_host_and_lan() {
         use std::net::Ipv4Addr;
         // A public IP is normally fine...
         let public = IpAddr::V4(Ipv4Addr::new(93, 184, 216, 34));
-        assert!(!addr_forbidden(public, &HashSet::new()));
+        assert!(!addr_forbidden(public, &HostNetworks::default()));
         // ...but not if it is one of this host's own addresses.
-        let host_addrs: HashSet<IpAddr> = [public].into_iter().collect();
-        assert!(addr_forbidden(public, &host_addrs), "host's own public IP must be refused");
+        let host = HostNetworks::from_nets([(public, 32), ("2001:db8:1:2::9".parse().unwrap(), 64)]);
+        assert!(addr_forbidden(public, &host), "host's own public IP must be refused");
+        // A LAN neighbour's global IPv6 address is not special-use but is on-link.
+        assert!(addr_forbidden("2001:db8:1:2::77".parse().unwrap(), &host));
         // Special-use ranges are always forbidden regardless of host set.
-        assert!(addr_forbidden(IpAddr::V4(Ipv4Addr::new(169, 254, 169, 254)), &HashSet::new()));
+        assert!(addr_forbidden(IpAddr::V4(Ipv4Addr::new(169, 254, 169, 254)), &HostNetworks::default()));
+    }
+
+    #[tokio::test]
+    async fn ip_literals_are_refused_before_any_name_check() {
+        for host in ["93.184.216.34", "2606:2800:220:1::1", "[2606:2800:220:1::1]"] {
+            let reply = run_request(gw_with(None, RealWorldPolicy::defaults(), vec!["*".into()]), &format!("t k {host} 443\n")).await;
+            assert!(reply.starts_with("ERR connect by host name"), "{host}: {reply}");
+        }
+    }
+
+    #[tokio::test]
+    async fn silent_guest_times_out() {
+        let mut config = gw(None);
+        config.limits.header_timeout = Duration::from_millis(50);
+        let (mut client, server) = UnixStream::pair().unwrap();
+        let task = tokio::spawn(async move { handle(server, config).await });
+        let mut reply = String::new();
+        client.read_to_string(&mut reply).await.unwrap();
+        task.await.unwrap().unwrap();
+        assert_eq!(reply, "ERR header timeout\n");
+    }
+
+    #[tokio::test]
+    async fn connections_past_the_limit_are_refused() {
+        let dir = std::env::temp_dir().join(format!("bulge-gw-limit-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("gw.sock");
+        let mut config = gw(None);
+        config.limits = GatewayLimits { max_connections: 1, header_timeout: Duration::from_secs(5) };
+        let stats = config.stats.clone();
+        let server = serve(bind(&path).unwrap(), config);
+        let _held = UnixStream::connect(&path).await.unwrap(); // occupies the only slot
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let mut second = UnixStream::connect(&path).await.unwrap();
+        let mut reply = String::new();
+        second.read_to_string(&mut reply).await.unwrap();
+        assert_eq!(reply, "ERR too many connections\n");
+        assert_eq!(stats.denied_limit.load(Ordering::Relaxed), 1);
+        server.abort();
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     fn gw(approvals: Option<EgressApprovalTx>) -> GatewayConfig {
@@ -363,7 +455,7 @@ mod tests {
             stats: Arc::new(GatewayStats::default()),
             approvals,
             approved: Arc::new(Mutex::new(HashSet::new())),
-            host_addrs: Arc::new(HashSet::new()),
+            limits: GatewayLimits::default(),
             real_world: Arc::new(real_world),
         }
     }

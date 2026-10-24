@@ -1,0 +1,28 @@
+[package]
+name = "bulge-runtime"
+description = "Runs a bulge job end to end: sandbox VM, agents, delegation, write-back, learning"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+bulge-util = { path = "../bulge-util" }
+bulge-core = { path = "../bulge-core" }
+bulge-guard = { path = "../bulge-guard" }
+bulge-harness = { path = "../bulge-harness" }
+bulge-llm = { path = "../bulge-llm" }
+bulge-org = { path = "../bulge-org" }
+bulge-store = { path = "../bulge-store" }
+bulge-vm = { path = "../bulge-vm" }
+
+futures.workspace = true
+serde = { workspace = true }
+serde_json.workspace = true
+tokio = { workspace = true, features = ["io-std", "signal"] }
+reqwest.workspace = true
+tokio-util.workspace = true
+
+[lints]
+workspace = true

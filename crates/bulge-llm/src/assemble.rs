@@ -13,6 +13,8 @@ pub struct Assembled {
 pub struct Assembler {
     blocks: Vec<Option<ContentBlock>>,
     usage: TokenUsage,
+    /// Usage reported by attempts that were later restarted (still billed).
+    restarted_usage: TokenUsage,
     finish: Option<FinishReason>,
 }
 
@@ -30,6 +32,10 @@ impl Assembler {
                 self.blocks[*index] = Some(block.clone());
             }
             StreamChunk::Usage(usage) => self.usage = *usage,
+            StreamChunk::Restart => {
+                self.blocks.clear();
+                self.restarted_usage = self.restarted_usage.plus(std::mem::take(&mut self.usage));
+            }
             StreamChunk::Finish(reason) => self.finish = Some(reason.clone()),
             _ => {}
         }
@@ -63,7 +69,7 @@ impl Assembler {
                 is_error: None,
                 source_model: Some(model.to_owned()),
             },
-            usage: self.usage,
+            usage: self.restarted_usage.plus(self.usage),
             finish,
         }
     }

@@ -43,6 +43,8 @@ pub struct JobState {
     /// Claimed but not completed tool calls (in-flight, or interrupted by a crash).
     pub pending_calls: BTreeMap<String, PendingCall>,
     pub usage: TokenUsage,
+    /// Tokens spent by delegated sub-agents (see `JobEvent::DelegatedUsage`).
+    pub delegated_tokens: u64,
     pub steps: u64,
     pub status: JobStatus,
     pub summary: Option<String>,
@@ -52,6 +54,12 @@ pub struct JobState {
 }
 
 impl JobState {
+    /// Every token this job has cost: its own model calls plus its sub-agents.
+    /// This is what the job's token budget is measured against.
+    pub fn tokens_spent(&self) -> u64 {
+        self.usage.total() + self.delegated_tokens
+    }
+
     pub fn from_events<'a>(events: impl IntoIterator<Item = &'a Envelope>) -> Result<Self, StateError> {
         let mut events = events.into_iter();
         let first = events.next().ok_or(StateError::MissingCreated)?;
@@ -64,6 +72,7 @@ impl JobState {
             history: Vec::new(),
             pending_calls: BTreeMap::new(),
             usage: TokenUsage::default(),
+            delegated_tokens: 0,
             steps: 0,
             status: JobStatus::Running,
             summary: None,
@@ -107,6 +116,7 @@ impl JobState {
                 self.usage.cache_write_tokens += usage.cache_write_tokens;
                 self.usage.reasoning_tokens += usage.reasoning_tokens;
             }
+            JobEvent::DelegatedUsage { tokens } => self.delegated_tokens += tokens,
             JobEvent::StatusChanged { status, summary } => {
                 self.status = *status;
                 self.summary.clone_from(summary);

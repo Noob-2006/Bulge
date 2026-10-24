@@ -1,6 +1,7 @@
 //! sandboxd: the bulge guest daemon.
 
 pub mod bridge;
+pub mod browser;
 pub mod commands;
 pub mod runtime;
 pub mod setup;

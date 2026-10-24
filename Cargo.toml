@@ -1,9 +1,9 @@
 [workspace]
 resolver = "3"
-members = ["crates/bulge-proto", "crates/bulge-llm", "crates/bulge-vm", "crates/sandboxd", "crates/bulge-vmm", "crates/bulge-store", "crates/bulge-core", "crates/bulge-guard", "crates/bulge-harness", "crates/bulge-org", "crates/bulge-cli", "crates/bulge-app"]
+members = ["crates/bulge-proto", "crates/bulge-llm", "crates/bulge-vm", "crates/sandboxd", "crates/bulge-vmm", "crates/bulge-store", "crates/bulge-core", "crates/bulge-guard", "crates/bulge-harness", "crates/bulge-org", "crates/bulge-cli", "crates/bulge-app", "crates/bulge-channels", "crates/bulge-remote", "crates/bulge-mobile", "crates/bulge-util", "crates/bulge-channel-api", "crates/bulge-runtime"]
 
 [workspace.package]
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 rust-version = "1.90"
 license = "MIT"

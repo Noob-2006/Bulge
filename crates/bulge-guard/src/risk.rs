@@ -15,12 +15,17 @@ pub enum Risk {
     High,
 }
 
-/// The autonomy mode of the job (mirrors `bulge_store::Autonomy` without the
-/// dependency).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// The autonomy mode of a job: how much it may do without asking. Stored
+/// with the job (`bulge_store` re-exports this type).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Autonomy {
+    /// Approve the plan and every write-back to the host.
     Collaborative,
+    /// Approve only the final diff; high-risk gates may still interrupt.
+    #[default]
     Autonomous,
+    /// Low-risk diffs apply automatically (snapshot kept); high risk still asks.
     FullAuto,
 }
 
@@ -40,13 +45,36 @@ pub enum ChangeKind {
 }
 
 /// Classify one change. `sensitive_path` marks executables, dotfiles, and
-/// known config/credential locations.
-pub fn classify_change(kind: ChangeKind, sensitive_path: bool) -> Risk {
+/// known config/credential locations; `host_runs` marks paths the owner's
+/// own tools execute on the host without being asked (see [`runs_on_host`]).
+///
+/// High is what crosses the VM boundary in effect: a change there turns the
+/// next `git status` or opened folder on the host into running code the VM
+/// wrote. Symlinks are High too: whatever they point at, later writes and
+/// reads through them happen on the host.
+pub fn classify_change(kind: ChangeKind, sensitive_path: bool, host_runs: bool) -> Risk {
     match kind {
-        ChangeKind::Delete | ChangeKind::Symlink => Risk::Medium,
+        ChangeKind::Symlink => Risk::High,
+        _ if host_runs => Risk::High,
+        ChangeKind::Delete => Risk::Medium,
         ChangeKind::Add | ChangeKind::Modify | ChangeKind::Dir if sensitive_path => Risk::Medium,
         ChangeKind::Add | ChangeKind::Modify | ChangeKind::Dir => Risk::Low,
     }
+}
+
+/// Paths that tools on the host act on by themselves: version-control
+/// internals (git hooks and config run commands on `git status`/`commit`),
+/// direnv's `.envrc`, IDE task and workspace settings, dev-container and
+/// git-hook managers, desktop launchers.
+pub fn runs_on_host(path: &str) -> bool {
+    let parts: Vec<&str> = path.split('/').filter(|p| !p.is_empty()).collect();
+    let dirs = [".git", ".hg", ".svn", ".vscode", ".idea", ".devcontainer", ".husky", ".fleet", ".zed"];
+    if parts.iter().any(|part| dirs.contains(&part.to_ascii_lowercase().as_str())) {
+        return true;
+    }
+    let name = parts.last().map(|n| n.to_ascii_lowercase()).unwrap_or_default();
+    matches!(name.as_str(), ".envrc" | ".gitmodules" | ".gitattributes" | ".pre-commit-config.yaml" | ".lefthook.yml" | "lefthook.yml")
+        || name.ends_with(".desktop")
 }
 
 /// A path is sensitive if it is hidden, looks like config/credentials, or is a
@@ -92,15 +120,26 @@ mod tests {
     use super::*;
 
     #[test]
-    fn deletion_and_symlink_are_medium() {
-        assert_eq!(classify_change(ChangeKind::Delete, false), Risk::Medium);
-        assert_eq!(classify_change(ChangeKind::Symlink, false), Risk::Medium);
+    fn deletion_is_medium_and_symlinks_are_high() {
+        assert_eq!(classify_change(ChangeKind::Delete, false, false), Risk::Medium);
+        assert_eq!(classify_change(ChangeKind::Symlink, false, false), Risk::High);
     }
 
     #[test]
     fn plain_text_add_modify_is_low_but_sensitive_is_medium() {
-        assert_eq!(classify_change(ChangeKind::Modify, false), Risk::Low);
-        assert_eq!(classify_change(ChangeKind::Modify, true), Risk::Medium);
+        assert_eq!(classify_change(ChangeKind::Modify, false, false), Risk::Low);
+        assert_eq!(classify_change(ChangeKind::Modify, true, false), Risk::Medium);
+    }
+
+    #[test]
+    fn what_the_host_runs_by_itself_is_high_and_never_auto_applied() {
+        for p in [".git/hooks/pre-commit", ".git/config", "sub/.git/config", ".envrc", ".vscode/tasks.json", ".idea/workspace.xml", ".gitmodules", ".devcontainer/devcontainer.json", ".husky/pre-push", "x/launch.desktop", ".GIT/config"] {
+            assert!(runs_on_host(p), "{p}");
+            assert_eq!(gate(classify_change(ChangeKind::Add, true, runs_on_host(p)), Autonomy::FullAuto), Effect::Ask, "{p}");
+        }
+        for p in ["src/main.rs", "deploy.sh", ".env", "notes/.gitkeep", "my.git.notes"] {
+            assert!(!runs_on_host(p), "{p}");
+        }
     }
 
     #[test]

@@ -53,6 +53,16 @@ pub enum ContentBlock {
     },
 }
 
+impl ContentBlock {
+    /// The text of a `Text` block.
+    pub fn as_text(&self) -> Option<&str> {
+        match self {
+            Self::Text { text } => Some(text),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Message {
     pub role: Role,
@@ -77,6 +87,12 @@ impl Message {
             is_error: None,
             source_model: None,
         }
+    }
+
+    /// The message's text blocks, joined by newlines (reasoning, tool calls
+    /// and images left out).
+    pub fn joined_text(&self) -> String {
+        self.content.iter().filter_map(ContentBlock::as_text).collect::<Vec<_>>().join("\n")
     }
 
     pub fn tool_result(call_id: impl Into<String>, text: impl Into<String>, is_error: bool) -> Self {
@@ -106,8 +122,23 @@ pub struct ToolSchema {
 pub enum ReasoningEffort {
     Off,
     Low,
+    Medium,
     High,
     Max,
+}
+
+impl ReasoningEffort {
+    /// `off` (or `none`), `low`, `medium`, `high`, `max`.
+    pub fn parse(name: &str) -> Option<Self> {
+        Some(match name.trim().to_ascii_lowercase().as_str() {
+            "off" | "none" => Self::Off,
+            "low" => Self::Low,
+            "medium" => Self::Medium,
+            "high" => Self::High,
+            "max" => Self::Max,
+            _ => return None,
+        })
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -163,6 +194,10 @@ pub struct ModelInfo {
     pub images: bool,
     #[serde(default)]
     pub reasoning: bool,
+    /// The effort for calls that do not set one (reasoning models only);
+    /// `None` keeps the protocol's default.
+    #[serde(default)]
+    pub default_effort: Option<ReasoningEffort>,
 }
 
 /// Disjoint counts: `input_tokens` excludes cached input.
@@ -221,5 +256,8 @@ pub enum StreamChunk {
     /// Carries the assembled block (with final signature / arguments).
     BlockEnd { index: usize, block: ContentBlock },
     Usage(TokenUsage),
+    /// The attempt failed mid-stream and is being retried: discard every block
+    /// received so far; the response starts over from the next chunk.
+    Restart,
     Finish(FinishReason),
 }

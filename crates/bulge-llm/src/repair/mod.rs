@@ -58,15 +58,165 @@ pub fn repair(text: &str, options: &RepairOptions) -> (Vec<RepairedCall>, String
         Some(options.allowed_tools.as_slice()),
         options.max_payload_bytes,
     );
-    let calls = blocks
-        .into_iter()
-        .map(|block| RepairedCall {
-            name: block.name,
-            arguments: block.arguments,
-            span: block.start..block.end,
-        })
-        .collect();
-    (calls, output)
+    if !blocks.is_empty() {
+        let calls = blocks
+            .into_iter()
+            .map(|block| RepairedCall {
+                name: block.name,
+                arguments: block.arguments,
+                span: block.start..block.end,
+            })
+            .collect();
+        return (calls, output);
+    }
+    match repair_structured(text, options) {
+        Some((calls, rest)) => (calls, rest),
+        None => (Vec::new(), output),
+    }
+}
+
+/// The whole-message call shapes that [`looks_like_tool_call`] recognizes but
+/// the block scanner does not parse: `<tool_call>` / `<tool_calls>` /
+/// `<function_call>` wrappers (one or several, around JSON or `<function=…>`),
+/// JSON call objects and arrays, `<invoke name="…">` with `<parameter>`s, ReAct
+/// `Action:` / `Action Input:`, and `[TOOL_CALL]`. The call is either the whole
+/// text or follows one announcement line ("I'll call read:"); fenced code is
+/// never repaired. Every call must be allowlisted and have object arguments,
+/// or nothing is repaired.
+fn repair_structured(text: &str, options: &RepairOptions) -> Option<(Vec<RepairedCall>, String)> {
+    let trimmed_start = text.len() - text.trim_start().len();
+    let trimmed = text.trim();
+    let (prefix, body) = if is_structured_call(trimmed) {
+        ("", trimmed)
+    } else {
+        let (prefix, body) = split_trailing(trimmed)?;
+        if !accepted_prefix(prefix.trim()) {
+            return None;
+        }
+        (prefix, body.trim())
+    };
+    if body.len() > options.max_payload_bytes {
+        return None;
+    }
+    let calls = structured_calls(body)?;
+    if calls.iter().any(|(name, _)| !options.allowed_tools.iter().any(|allowed| allowed == name)) {
+        return None;
+    }
+    let body_start = trimmed_start + (body.as_ptr() as usize - trimmed.as_ptr() as usize);
+    let span = body_start..body_start + body.len();
+    let calls = calls.into_iter().map(|(name, arguments)| RepairedCall { name, arguments, span: span.clone() }).collect();
+    Some((calls, prefix.trim().to_owned()))
+}
+
+/// Parse a whole call body into `(name, compact JSON object arguments)` pairs.
+fn structured_calls(body: &str) -> Option<Vec<(String, String)>> {
+    let body = body.trim();
+    if let Some(parts) = split_wrapped(body) {
+        let mut calls = Vec::new();
+        for part in parts {
+            calls.extend(structured_calls(part)?);
+        }
+        return (!calls.is_empty()).then_some(calls);
+    }
+    if let Ok(value) = serde_json::from_str::<Value>(body) {
+        return json_calls(&value);
+    }
+    if let Some(blocks) = parse_standalone_plain_text_tool_call_blocks(body, None, usize::MAX) {
+        return Some(blocks.into_iter().map(|block| (block.name, block.arguments)).collect());
+    }
+    if let Some((name, inner)) = parse_invoke_call(body) {
+        return Some(vec![(name.to_owned(), invoke_arguments(inner)?)]);
+    }
+    if let Some((name, input)) = parse_action_call(body) {
+        return Some(vec![(name.to_owned(), object_arguments(&serde_json::from_str(input.trim()).ok()?)?)]);
+    }
+    let (name, arguments) = parse_legacy_call(body)?;
+    Some(vec![(name.to_owned(), object_arguments(&arguments)?)])
+}
+
+/// Split a run of `<tool_call>…</tool_call>` (or `tool_calls` /
+/// `function_call`) elements into their bodies. `None` unless the text is
+/// nothing but such elements.
+fn split_wrapped(text: &str) -> Option<Vec<&str>> {
+    const TAGS: [&str; 3] = ["tool_calls", "tool_call", "function_call"];
+    let mut parts = Vec::new();
+    let mut cursor = 0;
+    while cursor < text.len() {
+        let rest = &text[cursor..];
+        let (tag, after_open) = TAGS.iter().find_map(|tag| strip_prefix_ci(rest, &format!("<{tag}>")).map(|after| (*tag, after)))?;
+        let close = format!("</{tag}>");
+        let inner_len = after_open.to_ascii_lowercase().find(&close)?;
+        parts.push(after_open[..inner_len].trim());
+        let consumed = rest.len() - after_open.len() + inner_len + close.len();
+        cursor = skip_whitespace(text, cursor + consumed);
+    }
+    (!parts.is_empty()).then_some(parts)
+}
+
+/// Calls in a JSON value: an array of calls, `{"tool_calls": [...]}`, a call
+/// object, or `{"function": {...}}`. Tool definitions (schemas) are not calls.
+fn json_calls(value: &Value) -> Option<Vec<(String, String)>> {
+    match value {
+        Value::Array(items) => {
+            let calls: Vec<_> = items.iter().map(json_calls).collect::<Option<Vec<_>>>()?.into_iter().flatten().collect();
+            (!calls.is_empty()).then_some(calls)
+        }
+        Value::Object(record) => {
+            if let Some(Value::Array(items)) = record.get("tool_calls").or_else(|| record.get("toolCalls")) {
+                return json_calls(&Value::Array(items.clone()));
+            }
+            let name = classify_json_record(record)?;
+            let function = record.get("function").or_else(|| record.get("function_call")).or_else(|| record.get("functionCall"));
+            let source = match function {
+                Some(Value::Object(function)) if read_tool_name(function).is_some() => function,
+                _ => record,
+            };
+            let arguments = ["arguments", "args", "input", "parameters"]
+                .iter()
+                .find_map(|key| source.get(*key))
+                .map_or(Some("{}".to_owned()), object_arguments)?;
+            Some(vec![(name, arguments)])
+        }
+        _ => None,
+    }
+}
+
+/// Compact JSON object text from an object, or from a string holding one.
+fn object_arguments(value: &Value) -> Option<String> {
+    match value {
+        Value::Object(_) => serde_json::to_string(value).ok(),
+        Value::String(text) => match serde_json::from_str::<Value>(text).ok()? {
+            object @ Value::Object(_) => serde_json::to_string(&object).ok(),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// Arguments from `<parameter name="p">value</parameter>` children; values are
+/// strings (one leading/trailing line break trimmed). Anything else inside the
+/// element means it is not a call.
+fn invoke_arguments(inner: &str) -> Option<String> {
+    let mut arguments = serde_json::Map::new();
+    let mut rest = inner.trim();
+    while !rest.is_empty() {
+        let after = strip_prefix_ci(rest, "<parameter")?;
+        let after = after.trim_start();
+        let after = strip_prefix_ci(after, "name=")?;
+        let quote = after.chars().next().filter(|q| matches!(q, '"' | '\''))?;
+        let name_end = after[1..].find(quote)? + 1;
+        let name = &after[1..name_end];
+        let after = after[name_end + 1..].trim_start().strip_prefix('>')?;
+        let close = after.to_ascii_lowercase().find("</parameter>")?;
+        let value = after[..close].strip_prefix("\r\n").or_else(|| after[..close].strip_prefix('\n')).unwrap_or(&after[..close]);
+        let value = value.strip_suffix("\r\n").or_else(|| value.strip_suffix('\n')).unwrap_or(value);
+        if name.is_empty() {
+            return None;
+        }
+        arguments.insert(name.to_owned(), Value::String(value.to_owned()));
+        rest = after[close + "</parameter>".len()..].trim_start();
+    }
+    serde_json::to_string(&Value::Object(arguments)).ok()
 }
 
 fn is_plain_text_tool_call_attempt(text: &str) -> bool {
@@ -77,17 +227,20 @@ fn is_plain_text_tool_call_attempt(text: &str) -> bool {
         return false;
     };
     let prefix = prefix.trim();
-    if body.is_empty() {
-        return false;
-    }
-    let announcement = parse_announcement(prefix);
-    let announced_tool = announcement.and_then(parse_announced_tool);
-    let file_announcement = announcement.is_some_and(is_file_announcement);
-    let tool_label = is_plausible_tool_label(prefix);
-    if !prefix.is_empty() && !tool_label && announced_tool.is_none() && !file_announcement {
+    if body.is_empty() || !accepted_prefix(prefix) {
         return false;
     }
     is_structured_call(body.trim())
+}
+
+/// Text allowed before a call: nothing, a bare tool label, or an announcement
+/// such as "I'll call read:" / "Let me read the file.".
+fn accepted_prefix(prefix: &str) -> bool {
+    if prefix.is_empty() || is_plausible_tool_label(prefix) {
+        return true;
+    }
+    let announcement = parse_announcement(prefix);
+    announcement.and_then(parse_announced_tool).is_some() || announcement.is_some_and(is_file_announcement)
 }
 
 fn strip_prefix_ci<'a>(text: &'a str, prefix: &str) -> Option<&'a str> {
@@ -239,7 +392,9 @@ fn is_tool_name(text: &str) -> bool {
 
 fn is_structured_call(text: &str) -> bool {
     let body = text.trim();
-    let body = strip_xml_wrapper(body).unwrap_or(body);
+    if let Some(parts) = split_wrapped(body) {
+        return parts.into_iter().all(is_structured_call);
+    }
 
     if classify_json_tool_name(body).is_some() {
         return true;
@@ -267,21 +422,6 @@ fn is_structured_call(text: &str) -> bool {
         }
     }
     parse_legacy_call(body).is_some()
-}
-
-fn strip_xml_wrapper(text: &str) -> Option<&str> {
-    const TAGS: [&str; 3] = ["tool_call", "tool_calls", "function_call"];
-    for tag in TAGS {
-        let open = format!("<{tag}>");
-        let Some(inner) = strip_prefix_ci(text, &open) else {
-            continue;
-        };
-        let close = format!("</{tag}>");
-        if let Some(inner) = strip_suffix_ci(inner, &close) {
-            return Some(inner.trim());
-        }
-    }
-    None
 }
 
 fn classify_json_tool_name(text: &str) -> Option<String> {
@@ -370,7 +510,7 @@ fn is_tool_call_type(kind: &str) -> bool {
     )
 }
 
-fn parse_invoke_call(text: &str) -> Option<&str> {
+fn parse_invoke_call(text: &str) -> Option<(&str, &str)> {
     const TAGS: [&str; 3] = ["invoke", "tool_call", "function_call"];
     for tag in TAGS {
         let open = format!("<{tag}");
@@ -406,8 +546,10 @@ fn parse_invoke_call(text: &str) -> Option<&str> {
             continue;
         };
         let close = format!("</{tag}>");
-        if strip_suffix_ci(after_open, &close).is_some() && is_tool_name(name) {
-            return Some(name);
+        if let Some(inner) = strip_suffix_ci(after_open, &close)
+            && is_tool_name(name)
+        {
+            return Some((name, inner));
         }
     }
     None
@@ -454,7 +596,7 @@ fn take_ci(text: &str, cursor: usize, literal: &str) -> Option<usize> {
     candidate.eq_ignore_ascii_case(literal).then_some(end)
 }
 
-fn parse_legacy_call(text: &str) -> Option<&str> {
+fn parse_legacy_call(text: &str) -> Option<(&str, Value)> {
     let mut cursor = 0;
     cursor = take_ci(text, cursor, "[")?;
     cursor = skip_whitespace(text, cursor);
@@ -512,255 +654,8 @@ fn parse_legacy_call(text: &str) -> Option<&str> {
     cursor = take_ci(text, cursor, "TOOL_CALL")?;
     cursor = skip_whitespace(text, cursor);
     cursor = take_ci(text, cursor, "]")?;
-    text.get(cursor..)?.trim().is_empty().then_some(name)
+    text.get(cursor..)?.trim().is_empty().then_some((name, arguments))
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn options(names: &[&str], max_payload_bytes: usize) -> RepairOptions {
-        RepairOptions {
-            allowed_tools: names.iter().map(|name| (*name).to_owned()).collect(),
-            max_payload_bytes,
-        }
-    }
-
-    fn repaired(text: &str) -> (Vec<RepairedCall>, String) {
-        repair(text, &options(&["read", "write"], 256_000))
-    }
-
-    #[test]
-    fn recognizes_structured_attempts() {
-        let call = r#"{"name":"write","arguments":{"path":"proof.txt","content":"OK"}}"#;
-        let fenced = format!("```json\n{call}\n```");
-        let wrapped_xml = "<tool_call><function=read><parameter=path>proof.txt</parameter></function></tool_call>";
-        let react = "Action: read\nAction Input: {\"path\":\"proof.txt\"}";
-        let legacy = r#"[TOOL_CALL]{tool => "read", args => {"path":"proof.txt"}}[/TOOL_CALL]"#;
-
-        for text in [
-            call.to_owned(),
-            format!(r#"{{"function_call":{call}}}"#),
-            format!(r#"{{"functionCall":{call}}}"#),
-            r#"{"name":"write","parameters":{"path":"proof.txt","content":"OK"}}"#.to_owned(),
-            fenced.clone(),
-            format!("I'll call write now.\n{fenced}"),
-            format!("Let me invoke the write tool.\n{call}"),
-            format!("I'll create the file now.\n{fenced}"),
-            r#"[{"function":{"name":"read","arguments":"{}"}}]"#.to_owned(),
-            r#"{"tool_calls":[{"function":{"name":"read","arguments":{}}}]}"#.to_owned(),
-            format!(r#"[{{"name":"unregistered","arguments":{{}}}},{call}]"#),
-            format!(r#"[{{"tool_calls":[]}},{call}]"#),
-            r#"<invoke name="read"><parameter name="path">proof.txt</parameter></invoke>"#
-                .to_owned(),
-            format!("read\n{}", r#"<invoke name="read"><parameter name="path">proof.txt</parameter></invoke>"#),
-            format!("<tool_call>{call}</tool_call>"),
-            "```xml\n<function=read><parameter=path>proof.txt</parameter></function>\n```"
-                .to_owned(),
-            wrapped_xml.to_owned(),
-            r#"<tool_calls><invoke name="read"><parameter name="path">proof.txt</parameter></invoke></tool_calls>"#.to_owned(),
-            "<function_call><function=read><parameter=path>proof.txt</parameter></function></function_call>".to_owned(),
-            react.to_owned(),
-            "Action: read\nAction Input: {\n  \"path\": \"proof.txt\"\n}".to_owned(),
-            "Action: read\r\nAction Input: proof.txt".to_owned(),
-            format!("I'll call read now.\n{react}"),
-            format!("```\n{react}\n```"),
-            legacy.to_owned(),
-            format!("Let me use read.\n{legacy}"),
-            format!("```\n{legacy}\n```"),
-        ] {
-            assert!(looks_like_tool_call(&text), "expected a tool call: {text}");
-        }
-    }
-
-    #[test]
-    fn preserves_prose_examples_and_definitions() {
-        let call = r#"{"name":"write","arguments":{"path":"proof.txt","content":"OK"}}"#;
-        let fenced = format!("```json\n{call}\n```");
-        let definition = r#"{"name":"write","description":"Write a file","parameters":{"type":"object","properties":{"path":{"type":"string"},"content":{"type":"string"}}}}"#;
-        let wrapped_xml = "<tool_call><function=read><parameter=path>proof.txt</parameter></function></tool_call>";
-        let react = "Action: read\nAction Input: {\"path\":\"proof.txt\"}";
-        let legacy = r#"[TOOL_CALL]{tool => "read", args => {"path":"proof.txt"}}[/TOOL_CALL]"#;
-
-        for text in [
-            "I will call write to create the file.",
-            r#"{"name":"write","description":"an available tool"}"#,
-            definition,
-            r#"{"name":"write","description":"Write a file","parameters":{"type":"object"}}"#,
-            r#"{"name":"write","parameters":{"type":"object"}}"#,
-            r#"{"name":"write","parameters":{"properties":{"path":{"type":"string"}},"required":["path"]}}"#,
-            r#"{"type":"function","function":{"name":"write","description":"Write a file","parameters":{}}}"#,
-            r#"Here is an example of the API:"#,
-            "Documentation",
-            "Usage",
-            "```text\ncall write proof.txt\n```",
-            "```json\n{\"name\":\"write\",\"arguments\":{}}",
-            "<tool_call><function=read><parameter=path>proof.txt</parameter></function>",
-            "<tool_call><function=read><parameter=path>proof.txt</parameter></function></function_call>",
-            "Action: read",
-            "Action: read\nAction Input:",
-            r#"Action: read
-Action Input: {"path":"proof.txt""#,
-            "Action: read\nAction Input: [\"proof.txt\"",
-            r#"Action: read
-Action Input: "proof.txt"#,
-            "Action: read\nAction Input: {\"path\":\"proof.txt\"}\nObservation: example result",
-            r#"[TOOL_CALL]{tool => "read", args => {}}]"#,
-            r#"[TOOL_CALL]{tool => "read"}[/TOOL_CALL]"#,
-        ] {
-            assert!(!looks_like_tool_call(text), "expected prose: {text}");
-        }
-
-        for text in [
-            format!("Here is an example of the API:\n{fenced}"),
-            format!("I'll show an example.\n{fenced}"),
-            format!("Documentation\n{fenced}"),
-            format!("Usage\n{fenced}"),
-            format!("{fenced}\nThis is an example; it has not run."),
-        ] {
-            assert!(!looks_like_tool_call(&text), "expected prose: {text}");
-        }
-
-        for text in [wrapped_xml, react, legacy] {
-            for variant in [
-                format!("Here is an example:\n{text}"),
-                format!("Here is an example:\n```\n{text}\n```"),
-                format!("{text}\nThis is an example; it has not run."),
-            ] {
-                assert!(!looks_like_tool_call(&variant), "expected prose: {variant}");
-            }
-        }
-    }
-
-    #[test]
-    fn looks_like_tool_call_is_name_agnostic_while_repair_uses_the_allowlist() {
-        let wrapped_xml = "<tool_call><function=unregistered><parameter=path>proof.txt</parameter></function></tool_call>";
-        let react = "Action: unregistered\nAction Input: {\"path\":\"proof.txt\"}";
-        let legacy =
-            r#"[TOOL_CALL]{tool => "unregistered", args => {"path":"proof.txt"}}[/TOOL_CALL]"#;
-        for text in [wrapped_xml, react, legacy] {
-            assert!(
-                looks_like_tool_call(text),
-                "detection has no allowlist: {text}"
-            );
-            let (calls, output) = repair(text, &options(&["read"], 256_000));
-            assert!(calls.is_empty());
-            assert_eq!(output, text);
-        }
-    }
-
-    #[test]
-    fn keeps_explanatory_prefixes_literal() {
-        let call = r#"{"name":"write","arguments":{"path":"proof.txt","content":"OK"}}"#;
-        let fenced = format!("```json\n{call}\n```");
-        assert!(!looks_like_tool_call(&format!(
-            "Example of functions.write\n{fenced}"
-        )));
-    }
-
-    #[test]
-    fn repairs_a_standalone_json_block_and_removes_its_line() {
-        let text = "Before\n[read]\n{\"path\":\"/tmp/a\"}\n[/read]\nAfter";
-        let (calls, output) = repaired(text);
-        assert_eq!(calls.len(), 1);
-        assert_eq!(calls[0].name, "read");
-        assert_eq!(calls[0].arguments, r#"{"path":"/tmp/a"}"#);
-        assert_eq!(
-            &text[calls[0].span.clone()],
-            "[read]\n{\"path\":\"/tmp/a\"}\n[/read]"
-        );
-        assert_eq!(output, "Before\nAfter");
-    }
-
-    #[test]
-    fn repairs_xmlish_and_harmony_calls() {
-        let xml = "<function=read><parameter=path>a</parameter></function>";
-        let (calls, output) = repaired(xml);
-        assert_eq!(calls.len(), 1);
-        assert_eq!(calls[0].name, "read");
-        assert_eq!(calls[0].arguments, r#"{"path":"a"}"#);
-        assert_eq!(output, "");
-
-        let harmony = r#"<|channel|>commentary to=read code<|message|>{"path":"a"}<|call|>"#;
-        let (calls, output) = repaired(harmony);
-        assert_eq!(calls.len(), 1);
-        assert_eq!(calls[0].name, "read");
-        assert_eq!(output, "");
-    }
-
-    #[test]
-    fn repairs_multiple_calls_in_order() {
-        let text = "[read]\n{\"path\":\"a\"}[/read]\n[tool:write]{\"path\":\"b\"}\n";
-        let (calls, output) = repaired(text);
-        assert_eq!(
-            calls
-                .iter()
-                .map(|call| call.name.as_str())
-                .collect::<Vec<_>>(),
-            ["read", "write"]
-        );
-        assert_eq!(calls[0].arguments, r#"{"path":"a"}"#);
-        assert_eq!(calls[1].arguments, r#"{"path":"b"}"#);
-        assert_eq!(output, "");
-    }
-
-    #[test]
-    fn preserves_argument_key_order_and_utf8_byte_spans() {
-        let json = "[read]\n{ \"path\" : \"a\", \"mode\" : \"r\" }[/read]";
-        let (calls, _) = repaired(json);
-        assert_eq!(calls[0].arguments, r#"{"path":"a","mode":"r"}"#);
-
-        let xml =
-            "<function=read><parameter=path>a</parameter><parameter=mode>r</parameter></function>";
-        let (calls, _) = repaired(xml);
-        assert_eq!(calls[0].arguments, r#"{"path":"a","mode":"r"}"#);
-
-        let text = "é\n[read]\n{\"path\":\"檔案\"}[/read]\né";
-        let (calls, output) = repaired(text);
-        assert_eq!(calls.len(), 1);
-        assert_eq!(
-            &text[calls[0].span.clone()],
-            "[read]\n{\"path\":\"檔案\"}[/read]"
-        );
-        assert_eq!(output, "é\né");
-    }
-
-    #[test]
-    fn never_repairs_without_an_allowlist() {
-        let text = "[read]\n{\"path\":\"a\"}\n[/read]";
-        let (calls, output) = repair(text, &RepairOptions::default());
-        assert!(calls.is_empty());
-        assert_eq!(output, text);
-    }
-
-    #[test]
-    fn keeps_calls_with_unknown_names_and_oversized_payloads() {
-        let unknown = "[write]\n{\"path\":\"a\"}\n[/write]";
-        let (calls, output) = repair(unknown, &options(&["read"], 256_000));
-        assert!(calls.is_empty());
-        assert_eq!(output, unknown);
-
-        let payload = "[read]\n{\"path\":\"aaaaaaaaaa\"}\n[/read]";
-        let (calls, output) = repair(payload, &options(&["read"], 8));
-        assert!(calls.is_empty());
-        assert_eq!(output, payload);
-    }
-
-    #[test]
-    fn keeps_non_object_arguments_literal() {
-        for text in ["[read]\n[]\n[/read]", "[read]\n\"path\"\n[/read]"] {
-            let (calls, output) = repair(text, &options(&["read"], 256_000));
-            assert!(calls.is_empty());
-            assert_eq!(output, text);
-        }
-    }
-
-    #[test]
-    fn never_repairs_calls_inside_fenced_code() {
-        let call = "[read]\n{\"path\":\"a\"}\n[/read]";
-        let text = format!("Example:\n```json\n{call}\n```\n");
-        let (calls, output) = repaired(&text);
-        assert!(calls.is_empty());
-        assert_eq!(output, text);
-    }
-}
+mod tests;

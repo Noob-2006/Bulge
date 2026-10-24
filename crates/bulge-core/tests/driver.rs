@@ -44,6 +44,7 @@ impl FakeBackend {
                 deferred_tools: false,
                 images: false,
                 reasoning: false,
+                default_effort: None,
             }],
         })
     }

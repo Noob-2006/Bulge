@@ -43,7 +43,7 @@ impl ScriptBackend {
     }
 }
 fn model() -> ModelInfo {
-    ModelInfo { id: "m".into(), context_window: 100_000, max_tokens: 4096, system_prompt_update: Default::default(), deferred_tools: false, images: false, reasoning: false }
+    ModelInfo { id: "m".into(), context_window: 100_000, max_tokens: 4096, system_prompt_update: Default::default(), deferred_tools: false, images: false, reasoning: false , default_effort: None}
 }
 impl LlmBackend for ScriptBackend {
     fn id(&self) -> &str { "fake" }

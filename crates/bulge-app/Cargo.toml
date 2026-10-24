@@ -13,7 +13,8 @@ name = "bulge-app"
 path = "src/main.rs"
 
 [dependencies]
-bulge-cli = { path = "../bulge-cli" }
+bulge-util = { path = "../bulge-util" }
+bulge-runtime = { path = "../bulge-runtime" }
 bulge-core = { path = "../bulge-core" }
 bulge-guard = { path = "../bulge-guard" }
 bulge-harness = { path = "../bulge-harness" }

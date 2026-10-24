@@ -28,18 +28,6 @@ pub struct EvalConfig {
 }
 
 /// Clone a BackendSpec (small, no secrets held).
-fn clone_backend(spec: &BackendSpec) -> BackendSpec {
-    BackendSpec {
-        id: spec.id.clone(),
-        base_url: spec.base_url.clone(),
-        protocol: spec.protocol,
-        model: spec.model.clone(),
-        context_window: spec.context_window,
-        max_tokens: spec.max_tokens,
-        reasoning: spec.reasoning,
-    }
-}
-
 pub async fn run_eval(config: EvalConfig) -> Result<EvalSummary, String> {
     let raw = std::fs::read_to_string(&config.tasks_file).map_err(|e| format!("read tasks {}: {e}", config.tasks_file.display()))?;
     let tasks: Vec<EvalTask> = serde_json::from_str(&raw).map_err(|e| format!("parse tasks: {e}"))?;
@@ -48,7 +36,7 @@ pub async fn run_eval(config: EvalConfig) -> Result<EvalSummary, String> {
     }
 
     // The judge backend is built once and reused.
-    let judge = backend::build(&config.backend)?;
+    let judge = backend::build(&config.backend, false, None)?;
     let mut summary = EvalSummary::default();
 
     for task in &tasks {
@@ -61,23 +49,16 @@ pub async fn run_eval(config: EvalConfig) -> Result<EvalSummary, String> {
         }
 
         let run_config = RunConfig {
-            job_id: None,
-            goal: task.goal.clone(),
             title: format!("eval:{}", task.id),
-            workspace: workspace.clone(),
             store_root: config.store_root.clone(),
             harness_dir: config.harness_dir.clone(),
             autonomy: config.autonomy,
             budget: config.budget.clone(),
-            backend: clone_backend(&config.backend),
             network: config.network,
             cpus: config.cpus,
             ram_mib: config.ram_mib,
-            sampling: crate::run::Sampling::default(),
-            system_prompt: None,
-            egress_approvals: None,
-            skip_review: false,
-            auto_review: false,
+            host_integrations: true,
+            ..RunConfig::new(task.goal.clone(), workspace.clone(), config.backend.clone())?
         };
 
         let result = match run(run_config).await {
@@ -89,6 +70,11 @@ pub async fn run_eval(config: EvalConfig) -> Result<EvalSummary, String> {
             }
         };
 
+        if let Some(error) = &result.changes_error {
+            eprintln!("  run failed: {error}");
+            summary.record(false, false);
+            continue;
+        }
         let artifacts = result.diff.clone().unwrap_or_else(|| "(no workspace changes were made)".into());
         let judgment = judge_task(judge.as_ref(), &config.backend.model, task, &artifacts).await;
         match judgment {
@@ -155,11 +141,8 @@ async fn judge_task(backend: &dyn LlmBackend, model: &str, task: &EvalTask, arti
         assembler.push(&chunk);
     }
     let assembled = assembler.finish(model);
-    let text = assembled.message.content.iter().find_map(|b| match b {
-        bulge_llm::ContentBlock::Text { text } => Some(text.clone()),
-        _ => None,
-    })?;
-    parse_judgment(&text)
+    let text = assembled.message.content.iter().find_map(bulge_llm::ContentBlock::as_text)?;
+    parse_judgment(text)
 }
 
 /// A filesystem-safe fragment from a task id.

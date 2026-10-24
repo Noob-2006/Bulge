@@ -4,27 +4,49 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Bulge</title>
+    <link rel="stylesheet" href="theme.css" />
     <link rel="stylesheet" href="style.css" />
   </head>
   <body>
+    <!-- Line icons, referenced with <use href="#i-…">. -->
+    <svg width="0" height="0" style="position:absolute" aria-hidden="true">
+      <symbol id="i-plus" viewBox="0 0 16 16"><path d="M8 3v10M3 8h10"/></symbol>
+      <symbol id="i-send" viewBox="0 0 16 16"><path d="M8 13V3M3.5 7.5 8 3l4.5 4.5"/></symbol>
+      <symbol id="i-stop" viewBox="0 0 16 16"><rect x="4" y="4" width="8" height="8" rx="1.5"/></symbol>
+      <symbol id="i-folder" viewBox="0 0 16 16"><path d="M2 4.5c0-.8.7-1.5 1.5-1.5h3l1.5 1.5h4.5c.8 0 1.5.7 1.5 1.5v5.5c0 .8-.7 1.5-1.5 1.5h-9C2.7 13 2 12.3 2 11.5z"/></symbol>
+      <symbol id="i-globe" viewBox="0 0 16 16"><circle cx="8" cy="8" r="5.5"/><path d="M2.5 8h11M8 2.5c1.6 1.6 2.4 3.4 2.4 5.5S9.6 11.9 8 13.5C6.4 11.9 5.6 10.1 5.6 8S6.4 4.1 8 2.5z"/></symbol>
+      <symbol id="i-key" viewBox="0 0 16 16"><circle cx="5.5" cy="10.5" r="2.5"/><path d="M7.3 8.7 13 3M11 5l1.5 1.5"/></symbol>
+      <symbol id="i-gear" viewBox="0 0 16 16"><circle cx="8" cy="8" r="2"/><path d="M8 1.8v1.7M8 12.5v1.7M14.2 8h-1.7M3.5 8H1.8M12.4 3.6l-1.2 1.2M4.8 11.2l-1.2 1.2M12.4 12.4l-1.2-1.2M4.8 4.8 3.6 3.6"/></symbol>
+      <symbol id="i-contrast" viewBox="0 0 16 16"><circle cx="8" cy="8" r="5.5"/><path d="M8 2.5v11a5.5 5.5 0 0 0 0-11z" fill="currentColor" stroke="none"/></symbol>
+      <symbol id="i-close" viewBox="0 0 16 16"><path d="M4 4l8 8M12 4l-8 8"/></symbol>
+      <symbol id="i-org" viewBox="0 0 16 16"><rect x="6" y="2" width="4" height="3" rx=".8"/><rect x="2" y="11" width="4" height="3" rx=".8"/><rect x="10" y="11" width="4" height="3" rx=".8"/><path d="M8 5v3M4 11V8h8v3"/></symbol>
+      <symbol id="i-search" viewBox="0 0 16 16"><circle cx="7" cy="7" r="4"/><path d="m10 10 3.5 3.5"/></symbol>
+      <symbol id="i-back" viewBox="0 0 16 16"><path d="M10 3.5 5.5 8l4.5 4.5"/></symbol>
+      <symbol id="i-refresh" viewBox="0 0 16 16"><path d="M13 8a5 5 0 1 1-1.5-3.6M13 2.5V5h-2.5"/></symbol>
+    </svg>
+
     <div class="shell">
       <!-- ===== Sidebar ===== -->
       <aside class="sidebar">
         <div class="brand">
-          <span class="brand-dot"></span>
-          <span class="brand-name">Bulge</span>
+          <span class="brand-mark" aria-hidden="true"></span>
+          <span class="brand-name">BULGE</span>
+          <span class="brand-tag">SANDBOX AGENT</span>
         </div>
-        <button id="new-task" class="btn btn-primary btn-block">＋ 新任務</button>
+        <button id="new-task" class="btn btn-primary btn-block"><svg class="icon"><use href="#i-plus"/></svg>新任務</button>
 
-        <div class="side-section-label">最近任務</div>
-        <input id="job-search" class="control" placeholder="搜尋過往任務…" autocomplete="off" />
+        <div class="side-section-label">任務紀錄</div>
+        <label class="search">
+          <svg class="icon"><use href="#i-search"/></svg>
+          <input id="job-search" class="control" placeholder="搜尋過往任務" autocomplete="off" />
+        </label>
         <div id="job-list" class="job-list">
           <div class="side-empty">還沒有任務</div>
         </div>
 
         <div class="sidebar-footer">
-          <button id="theme-toggle" class="btn btn-ghost btn-icon" title="切換深／淺色">◐</button>
-          <button id="open-settings" class="btn btn-ghost btn-block-min">設定</button>
+          <button id="open-settings" class="btn btn-ghost side-settings"><svg class="icon"><use href="#i-gear"/></svg>設定</button>
+          <button id="theme-toggle" class="btn btn-ghost btn-icon" title="切換深／淺色"><svg class="icon"><use href="#i-contrast"/></svg></button>
         </div>
       </aside>
 
@@ -37,23 +59,26 @@
           </div>
           <div class="topbar-meta">
             <span id="working" class="working hidden"><i></i><i></i><i></i></span>
-            <span id="elapsed" class="meta-num hidden">0s</span>
             <span id="steps" class="meta-num hidden"></span>
+            <span id="elapsed" class="meta-num hidden">0s</span>
             <span id="tokens-wrap" class="meter-wrap hidden" title="已用 token">
               <span class="meter"><span id="meter-fill" class="meter-fill"></span></span>
               <span id="tokens" class="meta-num"></span>
             </span>
-            <button id="org-toggle" class="btn btn-ghost btn-sm" title="檢視這個任務的組織圖">組織</button>
-            <button id="stop" class="btn btn-danger hidden">■ 停止</button>
+            <button id="org-toggle" class="btn btn-ghost btn-sm" title="檢視這個任務的組織圖"><svg class="icon"><use href="#i-org"/></svg>組織</button>
+            <button id="stop" class="btn btn-danger btn-sm hidden"><svg class="icon"><use href="#i-stop"/></svg>停止</button>
           </div>
+          <span class="scanline" aria-hidden="true"></span>
         </header>
 
-        <div class="content">
+        <div class="content grid-canvas">
           <section id="transcript" class="transcript">
             <div id="empty-state" class="empty-state">
-              <div class="empty-icon">▣</div>
+              <div class="empty-frame" aria-hidden="true"><span></span><span></span><span></span><span></span></div>
+              <div class="empty-eyebrow">隔離沙箱 · 可回復的寫回</div>
               <div class="empty-title">交辦一個任務</div>
-              <div class="empty-desc">代理會在隔離的沙箱虛擬機裡完成工作,過程即時顯示在這裡。它的任何改動都要你審核後才會寫回你的電腦。</div>
+              <div class="empty-desc">代理在隔離的虛擬機裡工作，過程即時顯示在這裡。它的改動要你審核後才會寫回你的電腦；全自動模式會自己寫回，但寫回前都有快照，可一鍵回復。</div>
+              <div class="empty-hints"><span><kbd>/</kbd> 指令</span><span><kbd>Enter</kbd> 送出</span><span><kbd>Shift</kbd>+<kbd>Enter</kbd> 換行</span></div>
             </div>
           </section>
 
@@ -62,8 +87,8 @@
             <div class="org-head">
               <div class="org-head-title">組織 <span id="org-job" class="org-job"></span></div>
               <div class="org-head-actions">
-                <button id="org-refresh" class="btn btn-ghost btn-sm">重新整理</button>
-                <button id="org-close" class="btn btn-ghost btn-icon" title="收起">✕</button>
+                <button id="org-refresh" class="btn btn-ghost btn-sm"><svg class="icon"><use href="#i-refresh"/></svg>重新整理</button>
+                <button id="org-close" class="btn btn-ghost btn-icon" title="收起"><svg class="icon"><use href="#i-close"/></svg></button>
               </div>
             </div>
             <div id="org-body" class="org-body"></div>
@@ -72,7 +97,7 @@
           <!-- ===== A sub-agent's transcript, opened from the org tree ===== -->
           <section id="subagent-view" class="subagent-view hidden" aria-label="子代理逐字稿">
             <div class="subagent-head">
-              <button id="subagent-back" class="btn btn-ghost btn-sm">← 回到組織</button>
+              <button id="subagent-back" class="btn btn-ghost btn-sm"><svg class="icon"><use href="#i-back"/></svg>回到組織</button>
               <span id="subagent-title" class="subagent-title"></span>
             </div>
             <div id="subagent-transcript" class="transcript subagent-transcript"></div>
@@ -84,9 +109,9 @@
           <div class="review-head">
             <span class="review-eyebrow">審批寫回</span>
             <span id="review-status" class="badge"></span>
-            <button id="review-close" class="btn btn-ghost btn-icon" title="收起">✕</button>
+            <button id="review-close" class="btn btn-ghost btn-icon" title="收起"><svg class="icon"><use href="#i-close"/></svg></button>
           </div>
-          <p id="review-hint-text" class="review-hint">以下改動目前都還<b>只在沙箱裡</b>,沒碰你的電腦。勾選要保留的,按下套用才會寫回工作區。</p>
+          <p id="review-hint-text" class="review-hint">以下改動目前都還<b>只在沙箱裡</b>，沒碰你的電腦。勾選要保留的，按下套用才會寫回工作區。</p>
           <div class="review-actions">
             <button id="select-all" class="btn btn-ghost btn-sm">全選</button>
             <button id="select-none" class="btn btn-ghost btn-sm">全不選</button>
@@ -94,6 +119,11 @@
             <button id="apply" class="btn btn-primary">套用勾選的變更</button>
           </div>
           <div id="change-list" class="change-list"></div>
+          <div id="writebacks" class="writebacks hidden">
+            <div class="contract-sub">寫回紀錄（寫回前都有快照，可回復）</div>
+            <div id="writeback-list"></div>
+            <div id="writeback-msg" class="inline-msg"></div>
+          </div>
           <details class="diff-wrap">
             <summary>查看完整 diff</summary>
             <div id="diff" class="diff"></div>
@@ -103,14 +133,15 @@
 
         <!-- ===== Composer ===== -->
         <footer id="composer" class="composer">
-          <div class="composer-row">
-            <button id="pick-ws" class="chip" title="不選就用虛擬機暫存目錄">📁 <span id="ws-label">暫存(VM 內)</span></button>
-            <label class="chip chip-check"><input id="network" type="checkbox" /> 允許上網</label>
-            <span class="chip-hint" id="key-chip">金鑰:檢查中…</span>
-          </div>
           <div class="composer-input">
-            <textarea id="goal" rows="1" placeholder="交辦任務… 例如:讀 data.csv,算每月營收,寫成 report.md"></textarea>
-            <button id="start" class="btn btn-primary btn-send" title="開始">↑</button>
+            <textarea id="goal" rows="1" placeholder="交辦任務⋯ 例如：讀 data.csv，算每月營收，寫成 report.md"></textarea>
+            <button id="start" class="btn btn-primary btn-send" title="開始"><svg class="icon"><use href="#i-send"/></svg></button>
+          </div>
+          <div class="composer-row">
+            <button id="pick-ws" class="chip" title="不選就用虛擬機暫存目錄"><svg class="icon"><use href="#i-folder"/></svg><span id="ws-label">暫存（VM 內）</span></button>
+            <label class="chip chip-check"><input id="network" type="checkbox" /><svg class="icon"><use href="#i-globe"/></svg>允許上網</label>
+            <span class="spacer"></span>
+            <span class="chip-hint" id="key-chip">金鑰：檢查中⋯</span>
           </div>
           <div id="start-msg" class="inline-msg"></div>
         </footer>
@@ -122,7 +153,7 @@
       <div class="settings-panel">
         <div class="settings-head">
           <h2>設定</h2>
-          <button id="close-settings" class="btn btn-ghost btn-icon">✕</button>
+          <button id="close-settings" class="btn btn-ghost btn-icon" title="關閉"><svg class="icon"><use href="#i-close"/></svg></button>
         </div>
 
         <div class="settings-section-label">模型</div>
@@ -307,6 +338,7 @@
 
     <script src="vendor/markdown-it.min.js"></script>
     <script src="vendor/purify.min.js"></script>
+    <script src="palette.js"></script>
     <script src="app.js"></script>
   </body>
 </html>

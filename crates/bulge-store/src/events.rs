@@ -12,17 +12,8 @@ use serde_json::Value;
 pub const FORMAT: &str = "bulge-job";
 pub const FORMAT_VERSION: u32 = 1;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Autonomy {
-    /// Approve the plan and every write-back to the host.
-    Collaborative,
-    /// Approve only the final diff; high-risk gates may still interrupt.
-    #[default]
-    Autonomous,
-    /// Low-risk diffs apply automatically (snapshot kept); high risk still asks.
-    FullAuto,
-}
+/// One definition, shared with the guard that enforces it.
+pub use bulge_guard::Autonomy;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Budget {
@@ -115,6 +106,10 @@ pub enum JobEvent {
     ToolClaimed { call_id: String, name: String, arguments: Value },
     ToolCompleted { call_id: String, ok: bool, result: Value },
     Usage { model: String, usage: TokenUsage },
+    /// Tokens spent by sub-agents this job delegated to during one turn. They
+    /// run as their own jobs; this carries their total into the parent so the
+    /// parent's budget survives across turns and resumes.
+    DelegatedUsage { tokens: u64 },
     ApprovalAsked { id: String, kind: String, detail: Value },
     ApprovalDecided { id: String, approved: bool, note: Option<String> },
     NetDomain { domain: String, addrs: Vec<String>, decision: String },

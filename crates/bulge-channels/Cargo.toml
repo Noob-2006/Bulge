@@ -1,0 +1,32 @@
+[package]
+name = "bulge-channels"
+description = "Messaging-app channels: talk to bulge from Telegram, Discord, Slack, Matrix, Signal, LINE"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+futures.workspace = true
+getrandom.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["net", "process", "fs"] }
+tokio-util.workspace = true
+bulge-channel-api = { path = "../bulge-channel-api" }
+tokio-tungstenite = { version = "0.30", default-features = false, features = ["connect", "rustls-tls-webpki-roots"] }
+hmac.workspace = true
+sha2.workspace = true
+base64 = "0.22"
+subtle = "2"
+bulge-util = { path = "../bulge-util" }
+rusqlite = { version = "0.40", features = ["bundled"] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net"] }
+
+[lints]
+workspace = true

@@ -119,11 +119,6 @@ impl Vm {
             let socket_path = runtime_dir.join(GATEWAY_SOCKET);
             let listener = crate::net::gateway::bind(&socket_path)?;
             let stats = Arc::new(crate::net::GatewayStats::default());
-            // The host's own interface addresses — a resolved destination matching
-            // one of these is refused even if public (so an allowlisted/approved
-            // name cannot be aimed back at a service on this machine).
-            let host_addrs: std::collections::HashSet<std::net::IpAddr> =
-                if_addrs::get_if_addrs().map(|ifaces| ifaces.into_iter().map(|i| i.ip()).collect()).unwrap_or_default();
             let handle = crate::net::gateway::serve(
                 listener,
                 crate::net::GatewayConfig {
@@ -133,7 +128,7 @@ impl Vm {
                     stats: stats.clone(),
                     approvals: config.egress_approvals.clone(),
                     approved: Arc::new(tokio::sync::Mutex::new(std::collections::HashSet::new())),
-                    host_addrs: Arc::new(host_addrs),
+                    limits: crate::net::gateway::GatewayLimits::default(),
                     real_world: config.real_world.clone(),
                 },
             );

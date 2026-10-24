@@ -32,14 +32,42 @@ impl Rule {
 
 pub type Ruleset = Vec<Rule>;
 
+/// Canonical form of a tool (action) name for matching: lowercase snake_case.
+/// MCP servers name tools in every style (`sendEmail`, `send-email`,
+/// `SendEmail`, `send.email`); a rule written as `*send_email*` must catch all
+/// of them, or a real-world or deny rule is bypassed by naming style alone.
+/// Glob metacharacters pass through, so the same function canonicalizes rules.
+pub fn tool_key(name: &str) -> String {
+    let mut out = String::with_capacity(name.len() + 4);
+    let mut prev_lower_or_digit = false;
+    for ch in name.chars() {
+        if ch.is_uppercase() {
+            if prev_lower_or_digit {
+                out.push('_');
+            }
+            out.extend(ch.to_lowercase());
+            prev_lower_or_digit = false;
+        } else if matches!(ch, '-' | '.' | ' ') {
+            out.push('_');
+            prev_lower_or_digit = false;
+        } else {
+            out.push(ch);
+            prev_lower_or_digit = ch.is_lowercase() || ch.is_ascii_digit();
+        }
+    }
+    out
+}
+
 /// Effect for one action+resource. Later rulesets override earlier ones; within
-/// a ruleset a later rule overrides an earlier one. No match → `Ask`.
+/// a ruleset a later rule overrides an earlier one. No match → `Ask`. Actions
+/// are compared in their [`tool_key`] form; resources are matched as given.
 pub fn evaluate(action: &str, resource: &str, rulesets: &[&Ruleset]) -> Effect {
+    let action = tool_key(action);
     rulesets
         .iter()
         .rev()
         .flat_map(|rs| rs.iter().rev())
-        .find(|rule| matches(action, &rule.action) && matches(resource, &rule.resource))
+        .find(|rule| matches(&action, &tool_key(&rule.action)) && matches(resource, &rule.resource))
         .map_or(Effect::Ask, |rule| rule.effect)
 }
 
@@ -62,6 +90,17 @@ mod tests {
 
     fn rs(rules: &[(&str, &str, Effect)]) -> Ruleset {
         rules.iter().map(|(a, r, e)| Rule::new(*a, *r, *e)).collect()
+    }
+
+    #[test]
+    fn action_names_match_across_naming_styles() {
+        let rules = rs(&[("*", "*", Effect::Allow), ("mcp__*send_email*", "*", Effect::Deny)]);
+        for name in ["mcp__mail__send_email", "mcp__mail__sendEmail", "mcp__mail__send-email", "mcp__Mail__SendEmail", "MCP__mail__SEND_EMAIL"] {
+            assert_eq!(evaluate(name, "", &[&rules]), Effect::Deny, "{name}");
+        }
+        assert_eq!(evaluate("mcp__mail__list_inbox", "", &[&rules]), Effect::Allow);
+        assert_eq!(tool_key("createPaymentIntent"), "create_payment_intent");
+        assert_eq!(tool_key("mcp__*pay*"), "mcp__*pay*");
     }
 
     #[test]

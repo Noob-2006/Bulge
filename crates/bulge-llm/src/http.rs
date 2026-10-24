@@ -79,6 +79,7 @@ impl HttpBackend {
             deferred_tools: false,
             images: false,
             reasoning: false,
+            default_effort: None,
         })
     }
 }
@@ -126,8 +127,9 @@ struct Job {
     model: String,
 }
 
-/// Outcome of one attempt. Retries are only allowed before any chunk reached
-/// the consumer, so a consumer never sees a partially repeated response.
+/// Outcome of one attempt. A retry after chunks already reached the consumer
+/// is preceded by `StreamChunk::Restart`, so a consumer never assembles a
+/// partially repeated response.
 enum Attempt {
     Done(FinishReason),
     Failed { error: LlmError, emitted: bool },
@@ -143,12 +145,16 @@ impl Job {
             };
             match attempt {
                 Attempt::Done(finish) => return finish,
-                Attempt::Failed { error, emitted: true } => return FinishReason::Error(error),
-                Attempt::Failed { error, emitted: false } => {
+                Attempt::Failed { error, emitted } => {
                     retry += 1;
                     let Some(delay) = self.config.retry.delay_for(retry, &error, jitter()) else {
                         return FinishReason::Error(error);
                     };
+                    // Chunks already reached the consumer: tell it to drop them,
+                    // so the retried response is never seen twice.
+                    if emitted && tx.send(StreamChunk::Restart).await.is_err() {
+                        return FinishReason::Aborted;
+                    }
                     tokio::select! {
                         () = cancel.cancelled() => return FinishReason::Aborted,
                         () = tokio::time::sleep(delay) => {}

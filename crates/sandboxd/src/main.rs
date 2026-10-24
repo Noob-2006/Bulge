@@ -116,6 +116,8 @@ async fn run() -> Result<(), String> {
         .command("edit", tools::handlers::edit)
         .command("glob", tools::handlers::glob)
         .command("grep", tools::handlers::grep)
+        .command("view_image", tools::handlers::view_image)
+        .command("browser", sandboxd::browser::browser)
         .command("slot_open", slots::slot_open)
         .command("slot_changes", slots::slot_changes)
         .command("slot_export", slots::slot_export)

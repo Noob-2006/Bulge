@@ -282,19 +282,26 @@ async fn run_command_hook(command: &str, payload: &Value, timeout_ms: u64, cance
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
+        // A hook that outlives its timeout or a cancel is killed, not leaked.
+        .kill_on_drop(true)
         .spawn()
     {
         Ok(c) => c,
         Err(e) => return deny(format!("hook failed to start: {e}")),
     };
 
-    if let Some(mut stdin) = child.stdin.take() {
-        let bytes = serde_json::to_vec(payload).unwrap_or_default();
-        let _ = stdin.write_all(&bytes).await;
-        let _ = stdin.shutdown().await;
-    }
-
-    let wait = child.wait_with_output();
+    // Feed stdin concurrently with waiting, all under the timeout: a payload
+    // larger than the pipe buffer would otherwise block forever on a hook that
+    // never reads its input. A hook that exits without reading is fine.
+    let stdin = child.stdin.take();
+    let bytes = serde_json::to_vec(payload).unwrap_or_default();
+    let feed = async move {
+        if let Some(mut stdin) = stdin {
+            let _ = stdin.write_all(&bytes).await;
+            let _ = stdin.shutdown().await;
+        }
+    };
+    let wait = async move { tokio::join!(feed, child.wait_with_output()).1 };
     let output = tokio::select! {
         _ = cancel.cancelled() => return deny("hook cancelled".into()),
         r = tokio::time::timeout(Duration::from_millis(timeout_ms), wait) => r,
@@ -471,6 +478,19 @@ mod tests {
         let token = CancellationToken::new();
         let d = runner.pre("write", &args(&[("path", "a.txt")]), &token).await;
         assert_eq!(d.block.as_deref(), Some("blocked by ci"));
+    }
+
+    #[tokio::test]
+    async fn oversized_payload_to_a_hook_that_never_reads_still_times_out() {
+        // 1 MiB of arguments: far beyond a pipe buffer. The hook ignores stdin and
+        // sleeps; the call must be blocked by the timeout, not hang.
+        let payload = json!({ "content": "x".repeat(1 << 20) });
+        let token = CancellationToken::new();
+        let started = std::time::Instant::now();
+        let reply = run_command_hook("sleep 30", &payload, 300, &token).await;
+        assert!(started.elapsed() < Duration::from_secs(10), "hook hung: {:?}", started.elapsed());
+        assert_eq!(reply.action.as_deref(), Some("deny"));
+        assert!(reply.reason.unwrap_or_default().contains("timed out"));
     }
 
     #[tokio::test]

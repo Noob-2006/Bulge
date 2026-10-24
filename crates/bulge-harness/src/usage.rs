@@ -88,7 +88,8 @@ impl Default for CuratePolicy {
     fn default() -> Self {
         Self {
             stale_after_secs: 14 * 24 * 3600,
-            archive_after_secs: 60 * 24 * 3600,
+            // CORE.md §5: a skill unused for 30 days is archived.
+            archive_after_secs: 30 * 24 * 3600,
         }
     }
 }
@@ -148,10 +149,20 @@ impl UsageLedger {
     }
 
     /// Count one use, creating an active agent entry when the skill is unknown.
+    /// A stale skill that is used again is active again (an archived one is not
+    /// offered, so it is not used; restoring it is a user's decision).
     pub fn bump_use(&mut self, name: &str, now: u64) {
         let entry = self.entry_or_insert(name, Some(now));
         entry.uses = entry.uses.saturating_add(1);
         entry.last_used_at = Some(now);
+        if entry.state == Lifecycle::Stale {
+            entry.state = Lifecycle::Active;
+        }
+    }
+
+    /// The state of `name`, or `None` when the ledger does not know it.
+    pub fn state(&self, name: &str) -> Option<Lifecycle> {
+        self.entries.get(name).map(|entry| entry.state)
     }
 
     /// Count one patch, creating an active agent entry when the skill is unknown.

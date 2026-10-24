@@ -21,12 +21,16 @@ fn glob(input: &[u8], pattern: &[u8]) -> bool {
     let (mut i, mut p) = (0usize, 0usize);
     let (mut star_p, mut star_i): (Option<usize>, usize) = (None, 0);
     while i < input.len() {
-        if p < pattern.len() && (pattern[p] == b'?' || pattern[p] == input[i]) {
-            i += 1;
-            p += 1;
-        } else if p < pattern.len() && pattern[p] == b'*' {
+        // A `*` in the pattern is always a wildcard, even when the input has
+        // a literal `*` at this spot; matching it literally would skip
+        // recording the star (so `**/x` failed `*`, and `rm -rf /**` slipped
+        // past a `rm -rf /*` deny).
+        if p < pattern.len() && pattern[p] == b'*' {
             star_p = Some(p);
             star_i = i;
+            p += 1;
+        } else if p < pattern.len() && (pattern[p] == b'?' || pattern[p] == input[i]) {
+            i += 1;
             p += 1;
         } else if let Some(sp) = star_p {
             p = sp + 1;
@@ -54,6 +58,16 @@ mod tests {
         assert!(matches("src/a/b.rs", "src/*"));
         assert!(!matches("other/x", "src/*"));
         assert!(matches("file.env", "*.env"));
+    }
+
+    #[test]
+    fn stars_in_the_input_do_not_disarm_the_pattern() {
+        assert!(matches("**/*.txt", "*"));
+        assert!(matches("*", "*"));
+        assert!(matches("rm -rf /**", "rm -rf /*"));
+        assert!(matches("rm -rf /*", "rm -rf /*"));
+        assert!(matches("a*b*c", "a*c"));
+        assert!(!matches("a*b", "a*c"));
     }
 
     #[test]

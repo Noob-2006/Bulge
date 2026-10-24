@@ -1,17 +1,12 @@
-//! Saved-task scheduling: one-shot and recurring schedules, plus the JSON
-//! store beside the other bulge state files.
+//! Saved-task scheduling: one-shot and recurring schedules and when they
+//! next fire. The schedule file itself belongs to the CLI (`bulge cron`).
 //!
 //! All times are Unix seconds (UTC). Wall-clock selectors (`daily`, `weekly`
 //! and cron) are interpreted in a fixed UTC offset supplied by the caller, so
 //! this module needs no time-zone database. The tick loop that launches the
-//! agent lives outside this crate; this is pure time math and persistence.
-
-use std::path::Path;
+//! agent lives outside this crate; this is pure time math.
 
 use serde::{Deserialize, Serialize};
-
-/// The schedule file name, joined to `~/.bulge` by the caller.
-pub const SCHEDULE_FILE: &str = "schedule.json";
 
 const SECONDS_PER_DAY: i64 = 86_400;
 const MINUTE_SECONDS: u64 = 60;
@@ -83,31 +78,6 @@ impl Schedule {
     pub fn is_one_shot(&self) -> bool {
         matches!(self, Self::AfterSeconds { .. } | Self::At { .. })
     }
-}
-
-fn default_true() -> bool {
-    true
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ScheduledJob {
-    pub id: String,
-    pub title: String,
-    /// The task text handed to the agent when it fires.
-    pub prompt: String,
-    pub schedule: Schedule,
-    /// Fixed UTC offset in minutes for wall-clock selectors (daily/weekly/cron).
-    #[serde(default)]
-    pub offset_minutes: i32,
-    #[serde(default = "default_true")]
-    pub enabled: bool,
-    /// Scheduler-owned runtime state (kept with the job for simplicity).
-    #[serde(default)]
-    pub next_run_at: Option<u64>,
-    #[serde(default)]
-    pub last_run_at: Option<u64>,
-    #[serde(default)]
-    pub runs: u32,
 }
 
 /// Howard Hinnant's `days_from_civil`: days since 1970-01-01 for a Gregorian
@@ -406,128 +376,10 @@ fn expand_field(field: &str, min: u32, max: u32) -> Option<Vec<u32>> {
     Some(values)
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ScheduleStore {
-    #[serde(default)]
-    pub jobs: Vec<ScheduledJob>,
-}
-
-impl ScheduleStore {
-    /// Load the schedule at `path`. A missing file is an empty store; a
-    /// malformed one is an error, so a corrupt schedule is never overwritten.
-    pub fn load(path: &Path) -> Result<Self, String> {
-        match std::fs::read_to_string(path) {
-            Ok(source) => serde_json::from_str(&source)
-                .map_err(|error| format!("parse {}: {error}", path.display())),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Self::default()),
-            Err(error) => Err(format!("read {}: {error}", path.display())),
-        }
-    }
-
-    /// Save atomically: write a sibling temp file, then rename it over `path`.
-    /// Creates the parent directory when needed.
-    pub fn save(&self, path: &Path) -> Result<(), String> {
-        let source = serde_json::to_string_pretty(self)
-            .map_err(|error| format!("serialize schedule: {error}"))?;
-        if let Some(parent) = path
-            .parent()
-            .filter(|parent| !parent.as_os_str().is_empty())
-        {
-            std::fs::create_dir_all(parent)
-                .map_err(|error| format!("create {}: {error}", parent.display()))?;
-        }
-        let file = path
-            .file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or(SCHEDULE_FILE);
-        let temp = path.with_file_name(format!("{file}.tmp-{}", std::process::id()));
-        std::fs::write(&temp, source)
-            .map_err(|error| format!("write {}: {error}", temp.display()))?;
-        std::fs::rename(&temp, path).map_err(|error| {
-            let _ = std::fs::remove_file(&temp);
-            format!("rename {} to {}: {error}", temp.display(), path.display())
-        })
-    }
-
-    pub fn get(&self, id: &str) -> Option<&ScheduledJob> {
-        self.jobs.iter().find(|job| job.id == id)
-    }
-
-    /// Replace the job with the same id, or append it.
-    pub fn upsert(&mut self, job: ScheduledJob) {
-        match self.jobs.iter_mut().find(|existing| existing.id == job.id) {
-            Some(existing) => *existing = job,
-            None => self.jobs.push(job),
-        }
-    }
-
-    pub fn remove(&mut self, id: &str) -> bool {
-        match self.jobs.iter().position(|job| job.id == id) {
-            Some(index) => {
-                self.jobs.remove(index);
-                true
-            }
-            None => false,
-        }
-    }
-
-    /// Enabled jobs whose `next_run_at` has arrived.
-    pub fn due(&self, now: u64) -> Vec<ScheduledJob> {
-        self.jobs
-            .iter()
-            .filter(|job| job.enabled && job.next_run_at.is_some_and(|at| at <= now))
-            .cloned()
-            .collect()
-    }
-
-    /// Record that a job fired at `now`. One-shots are disabled; recurring jobs
-    /// advance to the next occurrence strictly after `now`, coalescing missed
-    /// runs instead of backfilling them.
-    pub fn mark_fired(&mut self, id: &str, now: u64) {
-        let Some(job) = self.jobs.iter_mut().find(|job| job.id == id) else {
-            return;
-        };
-        job.runs = job.runs.saturating_add(1);
-        job.last_run_at = Some(now);
-        if job.schedule.is_one_shot() {
-            job.enabled = false;
-            job.next_run_at = None;
-        } else {
-            job.next_run_at = next_occurrence(&job.schedule, now, now, job.offset_minutes);
-        }
-    }
-
-    /// (Re)compute `next_run_at` from `now` using the job's schedule.
-    pub fn schedule_next(&mut self, id: &str, now: u64) {
-        let Some(job) = self.jobs.iter_mut().find(|job| job.id == id) else {
-            return;
-        };
-        job.next_run_at = next_occurrence(&job.schedule, now, now, job.offset_minutes);
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
 
-    fn job(id: &str, schedule: Schedule) -> ScheduledJob {
-        ScheduledJob {
-            id: id.to_owned(),
-            title: format!("Job {id}"),
-            prompt: format!("Do {id}"),
-            schedule,
-            offset_minutes: 0,
-            enabled: true,
-            next_run_at: None,
-            last_run_at: None,
-            runs: 0,
-        }
-    }
-
-    fn temp_dir(label: &str) -> PathBuf {
-        std::env::temp_dir().join(format!("bulge-cron-{}-{label}", std::process::id()))
-    }
 
     #[test]
     fn civil_days_round_trip_and_match_known_epochs() {
@@ -726,140 +578,4 @@ mod tests {
         assert_eq!(next_occurrence(&out_of_range, 0, 0, 0), None);
     }
 
-    #[test]
-    fn store_upsert_get_and_remove() {
-        let mut store = ScheduleStore::default();
-        store.upsert(job("a", Schedule::every(60)));
-        store.upsert(job("b", Schedule::At { unix: 500 }));
-        assert_eq!(store.jobs.len(), 2);
-        assert_eq!(
-            store.get("a").map(|entry| entry.title.as_str()),
-            Some("Job a")
-        );
-        assert!(store.get("missing").is_none());
-
-        store.upsert(job("a", Schedule::At { unix: 100 }));
-        assert_eq!(store.jobs.len(), 2, "upsert replaces by id");
-        assert_eq!(
-            store.get("a").map(|entry| entry.schedule.clone()),
-            Some(Schedule::At { unix: 100 })
-        );
-
-        assert!(store.remove("a"));
-        assert!(!store.remove("a"));
-        assert_eq!(store.jobs.len(), 1);
-    }
-
-    #[test]
-    fn schedule_next_makes_jobs_due_when_their_time_arrives() {
-        let mut store = ScheduleStore::default();
-        let mut one_shot = job("once", Schedule::At { unix: 1_000 });
-        one_shot.enabled = true;
-        store.upsert(one_shot);
-        store.upsert(job("later", Schedule::AfterSeconds { seconds: 60 }));
-        store.upsert(job("off", Schedule::At { unix: 1_000 }));
-        if let Some(off) = store.jobs.iter_mut().find(|entry| entry.id == "off") {
-            off.enabled = false;
-        }
-
-        store.schedule_next("once", 0);
-        store.schedule_next("later", 500);
-        store.schedule_next("off", 0);
-        assert_eq!(
-            store.get("once").and_then(|entry| entry.next_run_at),
-            Some(1_000)
-        );
-        assert_eq!(
-            store.get("later").and_then(|entry| entry.next_run_at),
-            Some(560)
-        );
-
-        assert!(store.due(559).is_empty());
-        let due = store.due(560);
-        assert_eq!(due.len(), 1);
-        assert_eq!(due[0].id, "later");
-        assert_eq!(store.due(1_000).len(), 2);
-    }
-
-    #[test]
-    fn mark_fired_disables_one_shot_and_advances_recurring() {
-        let mut store = ScheduleStore::default();
-        store.upsert(job("once", Schedule::At { unix: 1_000 }));
-        store.schedule_next("once", 0);
-        store.mark_fired("once", 1_000);
-        let one_shot = store.get("once").expect("job exists");
-        assert!(!one_shot.enabled);
-        assert_eq!(one_shot.next_run_at, None);
-        assert_eq!(one_shot.last_run_at, Some(1_000));
-        assert_eq!(one_shot.runs, 1);
-
-        let mut recurring = job("every", Schedule::every(300));
-        recurring.next_run_at = Some(1_000);
-        store.upsert(recurring);
-        // Fired late at 1_400: coalesce to 1_700 rather than backfilling 1_300.
-        store.mark_fired("every", 1_400);
-        let recurring = store.get("every").expect("job exists");
-        assert!(recurring.enabled);
-        assert_eq!(recurring.next_run_at, Some(1_700));
-        assert_eq!(recurring.last_run_at, Some(1_400));
-        assert_eq!(recurring.runs, 1);
-    }
-
-    #[test]
-    fn save_then_load_round_trips() {
-        let dir = temp_dir("round-trip");
-        let path = dir.join(SCHEDULE_FILE);
-        let _ = std::fs::remove_dir_all(&dir);
-
-        let mut store = ScheduleStore::default();
-        store.upsert(job(
-            "daily",
-            Schedule::Daily {
-                hour: 9,
-                minute: 30,
-            },
-        ));
-        store.upsert(job(
-            "weekly",
-            Schedule::Weekly {
-                weekdays: vec![Weekday::Mon, Weekday::Fri],
-                hour: 18,
-                minute: 0,
-            },
-        ));
-        store.upsert(job(
-            "cron",
-            Schedule::Cron {
-                expr: "*/15 * * * *".to_owned(),
-            },
-        ));
-        store.save(&path).expect("saves");
-
-        let loaded = ScheduleStore::load(&path).expect("loads");
-        assert_eq!(loaded, store);
-        assert_eq!(
-            loaded.get("weekly").expect("job exists").schedule,
-            Schedule::Weekly {
-                weekdays: vec![Weekday::Mon, Weekday::Fri],
-                hour: 18,
-                minute: 0,
-            }
-        );
-
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn missing_schedule_loads_as_empty() {
-        let dir = temp_dir("missing");
-        let path = dir.join(SCHEDULE_FILE);
-        let _ = std::fs::remove_dir_all(&dir);
-
-        assert_eq!(
-            ScheduleStore::load(&path).expect("missing is empty"),
-            ScheduleStore::default()
-        );
-
-        let _ = std::fs::remove_dir_all(&dir);
-    }
 }

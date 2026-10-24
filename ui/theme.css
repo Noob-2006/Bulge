@@ -1,0 +1,235 @@
+/* ============================================================
+   Bulge — "Instrument" design tokens, shared by the desktop app and
+   Bulge Remote (each app's build copies this file into its dist/).
+
+   Swiss: one grid (8 px), flush-left type, numbered micro-labels,
+   hairline rules, a single signal red. Apple: the system font, vibrancy,
+   grouped inset lists, soft radii, quiet motion. Sci-fi only where it
+   carries information: monospace telemetry, status lights, a scan line
+   while work runs. Dark is the default; [data-theme="light"] overrides
+   (Bulge Remote follows the system setting).
+   ============================================================ */
+
+:root,
+:root[data-theme="dark"] {
+  color-scheme: dark;
+
+  /* Surfaces — graphite, stepped by elevation. */
+  --bg: #08090b;
+  --bg-grid: rgba(255, 255, 255, 0.028);
+  --surface-1: #0f1013;
+  --surface-2: #15171b;
+  --surface-3: #1c1f24;
+  --surface-hover: rgba(255, 255, 255, 0.045);
+  --surface-press: rgba(255, 255, 255, 0.07);
+  --glass: rgba(16, 17, 20, 0.72);
+  --glass-strong: rgba(20, 22, 26, 0.86);
+  --sheet: rgba(17, 18, 22, 0.97);
+
+  /* Ink. */
+  --ink-1: #f2f2f4;
+  --ink-2: #a1a1a8;
+  --ink-3: #6b6b73;
+  --ink-4: #44444b;
+
+  /* Rules. */
+  --rule: rgba(255, 255, 255, 0.07);
+  --rule-strong: rgba(255, 255, 255, 0.12);
+  --rule-focus: rgba(255, 255, 255, 0.22);
+
+  /* Signals. Red acts; cyan reports. */
+  --signal: #ff453a;
+  --signal-hover: #ff5c52;
+  --signal-ink: #ffffff;
+  --signal-soft: rgba(255, 69, 58, 0.12);
+  --signal-glow: rgba(255, 69, 58, 0.45);
+  --live: #64d2ff;
+  --live-soft: rgba(100, 210, 255, 0.10);
+  --live-glow: rgba(100, 210, 255, 0.55);
+  --ok: #30d158;
+  --ok-soft: rgba(48, 209, 88, 0.12);
+  --warn: #ffd60a;
+  --warn-soft: rgba(255, 214, 10, 0.12);
+  --bad: #ff6961;
+  --bad-soft: rgba(255, 105, 97, 0.12);
+
+  --diff-add: #4cd964;
+  --diff-add-bg: rgba(48, 209, 88, 0.09);
+  --diff-del: #ff6961;
+  --diff-del-bg: rgba(255, 105, 97, 0.09);
+  --diff-meta: #64d2ff;
+
+  --shadow-1: 0 1px 0 rgba(255, 255, 255, 0.03) inset, 0 1px 2px rgba(0, 0, 0, 0.4);
+  --shadow-2: 0 1px 0 rgba(255, 255, 255, 0.04) inset, 0 8px 24px rgba(0, 0, 0, 0.45);
+  --shadow-3: 0 1px 0 rgba(255, 255, 255, 0.05) inset, 0 24px 64px rgba(0, 0, 0, 0.6);
+}
+
+:root[data-theme="light"] {
+  color-scheme: light;
+
+  --bg: #f5f5f7;
+  --bg-grid: rgba(0, 0, 0, 0.026);
+  --surface-1: #ffffff;
+  --surface-2: #fbfbfd;
+  --surface-3: #f0f0f3;
+  --surface-hover: rgba(0, 0, 0, 0.04);
+  --surface-press: rgba(0, 0, 0, 0.07);
+  --glass: rgba(246, 246, 248, 0.78);
+  --glass-strong: rgba(255, 255, 255, 0.9);
+  --sheet: rgba(252, 252, 253, 0.97);
+
+  --ink-1: #1d1d1f;
+  --ink-2: #57575d;
+  --ink-3: #86868b;
+  --ink-4: #c7c7cc;
+
+  --rule: rgba(0, 0, 0, 0.08);
+  --rule-strong: rgba(0, 0, 0, 0.13);
+  --rule-focus: rgba(0, 0, 0, 0.28);
+
+  --signal: #e8302a;
+  --signal-hover: #d0221c;
+  --signal-ink: #ffffff;
+  --signal-soft: rgba(232, 48, 42, 0.09);
+  --signal-glow: rgba(232, 48, 42, 0.3);
+  --live: #0a84c8;
+  --live-soft: rgba(10, 132, 200, 0.09);
+  --live-glow: rgba(10, 132, 200, 0.35);
+  --ok: #1f9e44;
+  --ok-soft: rgba(31, 158, 68, 0.1);
+  --warn: #b58100;
+  --warn-soft: rgba(181, 129, 0, 0.1);
+  --bad: #d92d20;
+  --bad-soft: rgba(217, 45, 32, 0.08);
+
+  --diff-add: #1a7f37;
+  --diff-add-bg: rgba(31, 158, 68, 0.08);
+  --diff-del: #c9251d;
+  --diff-del-bg: rgba(217, 45, 32, 0.07);
+  --diff-meta: #0a6fa8;
+
+  --shadow-1: 0 1px 2px rgba(0, 0, 0, 0.06);
+  --shadow-2: 0 4px 16px rgba(0, 0, 0, 0.08), 0 1px 2px rgba(0, 0, 0, 0.05);
+  --shadow-3: 0 24px 64px rgba(0, 0, 0, 0.16), 0 2px 6px rgba(0, 0, 0, 0.06);
+}
+
+:root {
+  /* Type: the platform's own UI font (SF on Apple, Segoe on Windows,
+     Noto elsewhere), and a monospace for anything measured. */
+  --font: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI Variable Text", "Segoe UI", "Inter", "Helvetica Neue",
+    "PingFang TC", "Microsoft JhengHei", "Noto Sans TC", "Noto Sans CJK TC", sans-serif;
+  --font-display: -apple-system, BlinkMacSystemFont, "SF Pro Display", "Segoe UI Variable Display", "Segoe UI", "Inter",
+    "Helvetica Neue", "PingFang TC", "Microsoft JhengHei", "Noto Sans TC", "Noto Sans CJK TC", sans-serif;
+  --mono: "SF Mono", ui-monospace, "JetBrains Mono", "Cascadia Mono", "Menlo", "Consolas", "Noto Sans Mono CJK TC", monospace;
+
+  --t-micro: 10.5px;
+  --t-small: 12px;
+  --t-body: 14px;
+  --t-lead: 15px;
+  --t-title: 17px;
+  --t-display: 28px;
+
+  /* Grid. */
+  --u: 8px;
+  --r-sm: 6px;
+  --r-md: 10px;
+  --r-lg: 14px;
+  --r-xl: 20px;
+
+  --ease: cubic-bezier(0.2, 0.8, 0.2, 1);
+  --fast: 120ms;
+  --mid: 200ms;
+
+  /* Command palette (ui/palette.js) reads these. */
+  --surface: var(--surface-2);
+  --text: var(--ink-1);
+  --line: var(--rule-strong);
+  --accent: var(--signal);
+  --accent-text: var(--signal-ink);
+  --palette-bg: var(--sheet);
+  --palette-radius: var(--r-lg);
+  --palette-shadow: var(--shadow-3);
+  --palette-active-bg: var(--surface-press);
+  --palette-active-ink: var(--ink-1);
+  --palette-active-cmd: var(--signal);
+  --palette-marker: var(--signal);
+}
+
+*,
+*::before,
+*::after { box-sizing: border-box; }
+
+html,
+body {
+  margin: 0;
+  height: 100%;
+  background: var(--bg);
+  color: var(--ink-1);
+  font: 400 var(--t-body)/1.55 var(--font);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
+  font-feature-settings: "kern", "tnum";
+}
+
+::selection { background: var(--signal-soft); color: var(--ink-1); }
+
+code,
+kbd,
+pre { font-family: var(--mono); font-size: 0.92em; }
+
+/* The measurement grid behind working surfaces. */
+.grid-canvas {
+  background-color: var(--bg);
+  background-image:
+    linear-gradient(var(--bg-grid) 1px, transparent 1px),
+    linear-gradient(90deg, var(--bg-grid) 1px, transparent 1px);
+  background-size: 32px 32px;
+  background-position: -1px -1px;
+}
+
+/* Micro-label: uppercase monospace, tracked — the Swiss caption. */
+.label {
+  font: 500 var(--t-micro)/1.2 var(--mono);
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--ink-3);
+}
+
+/* Status light. */
+.led {
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--ink-4);
+  flex: none;
+}
+.led.ok { background: var(--ok); box-shadow: 0 0 8px var(--ok); }
+.led.bad { background: var(--bad); box-shadow: 0 0 8px var(--bad); }
+.led.live { background: var(--live); box-shadow: 0 0 10px var(--live-glow); animation: led-pulse 1.6s var(--ease) infinite; }
+
+@keyframes led-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.35; }
+}
+
+/* Line icons (inline SVG, stroke = currentColor). */
+.icon {
+  width: 16px;
+  height: 16px;
+  flex: none;
+  stroke: currentColor;
+  fill: none;
+  stroke-width: 1.6;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+:focus-visible { outline: none; box-shadow: 0 0 0 2px var(--bg), 0 0 0 4px var(--signal-glow); }
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after { animation-duration: 0.001ms !important; transition-duration: 0.001ms !important; }
+}

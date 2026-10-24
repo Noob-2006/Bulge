@@ -19,6 +19,11 @@ Do NOT record any of the following — they poison future runs:\n\
 - Negative tool claims (\"tool X is broken\", \"the API doesn't work\") — they are usually transient or local.\n\
 - Transient errors you recovered from, or dead-ends you never resolved, dressed up as advice.\n\
 - Anything tied to this one task: specific file names, IDs, dates, PR numbers, or quoted output.\n\
+- Text inside <harness-note> or <turn-context>: bulge wrote it (its own checks, reminders, and the \
+profile and lessons it injected), never the user — it is not a user preference and not new knowledge. \
+USER.md facts come only from the user's own words.\n\
+- Checking rituals as standing rules (byte dumps, re-reading written files, extra test passes): how \
+much to check is decided per request, not once for every job.\n\
 When you do record something, state the rule procedurally and, for a pitfall, give the rule plus ONE short why-clause. \
 Fix knowledge in place — never append \"UPDATE: actually …\" to an existing item. \
 If the user expressed a preference or frustration (\"stop doing X\", \"too verbose\", \"always do Y\"), \
@@ -45,7 +50,10 @@ never facts specific to this one task. Each: cue (the situation it applies to; s
 keyword-rich — this is how it is found later), lesson (what to do, concretely), evidence (what \
 in this job shows it: a step, a file, an error, a result), confidence (a number in [0,1]). \
 Drop anything you are not sure generalises, and anything an entry in <lessons> above \
-already says (even in other words) — repeats bloat memory and teach nothing new.\n\n\
+already says (even in other words) — repeats bloat memory and teach nothing new. Cost counts \
+like correctness: if the job (see its cost line) took more steps, sub-agents or checks than the \
+request needed, a lesson on reaching the same result more cheaply is worth recording; never \
+record one that adds steps or checks beyond what the request asked for.\n\n\
 2. PROFILE — what you now durably know, on TWO surfaces: USER.md (target \"user\": who the user \
 is and how they want you to work — role, preferences, recurring instructions, things they told \
 you to always/never do; one fact per section) and MEMORY.md (target \"env\": durable facts about \
@@ -55,7 +63,9 @@ two-sentence bodies; to delete an obsolete section set remove=true.\n\n\
 3. SKILL — a successful, repeatable procedure usually IS worth a skill. If this job used one \
 that would work again on FUTURE, similar jobs, propose ONE: a named, general, multi-step \
 procedure (not a one-off, not a single fact — small facts are lessons). Return null if a \
-skill in <available_skills> above already covers it. name: short kebab-case; \
+skill in <available_skills> above already covers it. A skill is followed on every similar job, \
+so it must reach the result in as few steps as care allows: steps that verify beyond the \
+request (extra test passes, re-reads, meta-checks of the tests themselves) do not belong in it. name: short kebab-case; \
 description: one line saying when to use it, at most 60 characters (the skill index truncates \
 at 60 and anything past it never routes); body: the steps, in Markdown.",
     "\n\n",
@@ -66,6 +76,14 @@ at 60 and anything past it never routes); body: the steps, in Markdown.",
 Use [] / null for anything with nothing durable. Be terse: each lesson, evidence and \
 profile body is one sentence; a skill body is at most ten short numbered steps."
 );
+
+/// The cost line handed to the learner with [`PROPOSE_LEARNING_PROMPT`], so a
+/// lesson can weigh what the result cost, not only whether it was reached.
+pub fn cost_line(steps: u64, own_tokens: u64, delegated_tokens: u64, delegations: usize) -> String {
+    format!(
+        "Cost of this job: {steps} steps, {own_tokens} tokens in its own model calls, {delegations} delegated ticket(s) costing {delegated_tokens} tokens more."
+    )
+}
 
 /// The three proposals parsed from one [`PROPOSE_LEARNING_PROMPT`] reply.
 #[derive(Debug, Clone, Default, PartialEq)]

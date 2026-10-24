@@ -74,6 +74,19 @@ const DEFAULT_HOSTS: &[&str] = &[
     "wise.com",
     "coinbase.com",
     "binance.com",
+    "stripe.network",
+    "paypal.me",
+    "venmo.com",
+    "cash.app",
+    "revolut.com",
+    "paddle.com",
+    "lemonsqueezy.com",
+    "gocardless.com",
+    "plaid.com",
+    "ecpay.com.tw",
+    "newebpay.com",
+    "linepay.line.me",
+    "jkopay.com",
 ];
 
 impl RealWorldPolicy {
@@ -121,9 +134,11 @@ impl RealWorldPolicy {
         })
     }
 
-    /// Whether `tool` is a real-world action by name.
+    /// Whether `tool` is a real-world action by name (compared in
+    /// [`crate::permission::tool_key`] form, like the rules).
     pub fn tool_is_real_world(&self, tool: &str) -> bool {
-        self.tools.iter().any(|glob| matches(tool, glob))
+        let tool = crate::permission::tool_key(tool);
+        self.tools.iter().any(|glob| matches(&tool, &crate::permission::tool_key(glob)))
     }
 }
 
@@ -147,6 +162,11 @@ mod tests {
         assert_eq!(evaluate("mcp__shop__create_order", "", &[&rules]), Effect::Ask);
         assert_eq!(evaluate("mcp__docs__search", "", &[&rules]), Effect::Allow);
         assert_eq!(evaluate("mcp__docs__search", "", &[&base]), Effect::Allow);
+        // Naming style does not escape the boundary.
+        assert_eq!(evaluate("mcp__stripe__createPaymentIntent", "", &[&rules]), Effect::Ask);
+        assert_eq!(evaluate("mcp__mail__sendEmail", "", &[&rules]), Effect::Ask);
+        assert_eq!(evaluate("mcp__mail__send-email", "", &[&rules]), Effect::Ask);
+        assert!(RealWorldPolicy::defaults().tool_is_real_world("mcp__shop__PlaceOrder"));
     }
 
     #[test]

@@ -118,7 +118,7 @@ function formatToolResult(ok, result) {
       const wrap = el("div");
       if (parts.length) wrap.appendChild(el("div", "ev-sys", parts.join(" · ")));
       if (out && out.trim()) wrap.appendChild(collapsiblePre(out));
-      if (err && err.trim()) { const e = collapsiblePre(err); e.firstChild.style.color = "var(--danger)"; wrap.appendChild(e); }
+      if (err && err.trim()) { const e = collapsiblePre(err); e.firstChild.style.color = "var(--bad)"; wrap.appendChild(e); }
       if ((!out || !out.trim()) && (!err || !err.trim())) wrap.appendChild(el("div", "ev-sys", "(無輸出)"));
       return wrap;
     }
@@ -205,7 +205,7 @@ function renderEvent(ev) {
       break;
     }
     case "plan": renderPlan(ev.items || []); break;
-    case "net_domain": appendBlock(el("div", "ev-net", "🌐 " + ev.domain + " → " + ev.decision)); break;
+    case "net_domain": appendBlock(el("div", "ev-net", ev.domain + " → " + ev.decision)); break;
     case "status_changed": appendBlock(el("div", "ev-sys", "狀態:" + ev.status + (ev.summary ? " — " + ev.summary : ""))); break;
     case "vm_started": appendBlock(el("div", "ev-sys", "虛擬機已啟動")); break;
     case "vm_stopped": appendBlock(el("div", "ev-sys", "虛擬機已關閉" + (ev.reason ? " (" + ev.reason + ")" : ""))); break;
@@ -213,8 +213,8 @@ function renderEvent(ev) {
     case "cache_break":
       appendBlock(el("div", "ev-sys", "(快取斷點:應命中 " + ev.expected + "、實得 " + ev.cached + " token — " + ev.detail + ")"));
       break;
-    case "budget_warning": appendBlock(el("div", "ev-net", "⚠ 預算接近上限:" + ev.kind + " " + ev.used + "/" + ev.limit)); break;
-    case "approval_asked": appendBlock(el("div", "ev-net", "⏸ 等待核准:" + ev.kind)); break;
+    case "budget_warning": appendBlock(el("div", "ev-net warn", "預算接近上限:" + ev.kind + " " + ev.used + "/" + ev.limit)); break;
+    case "approval_asked": appendBlock(el("div", "ev-net warn", "等待核准:" + ev.kind)); break;
     case "contract": renderContract(ev.contract || {}); break;
     case "created": break;
     default: appendBlock(el("div", "ev-sys", ev.type));
@@ -233,7 +233,7 @@ function argSummary(name, args) {
 function renderEgressAsk(id, host, port) {
   const card = el("div", "egress-ask");
   const head = el("div", "egress-head");
-  head.append(el("span", "egress-icon", "🌐"), el("span", "egress-q", "代理想連線到 " + host + ":" + port + " — 允許嗎?"));
+  head.append(el("span", "egress-icon", ""), el("span", "egress-q", "代理想連線到 " + host + ":" + port + " — 允許嗎?"));
   const sub = el("div", "egress-sub", "這是沙箱內代理要連到的外部主機(不是模型 API)。允許後本次工作階段會記住這個主機。");
   const actions = el("div", "egress-actions");
   const allow = el("button", "btn btn-primary btn-sm", "允許");
@@ -394,9 +394,16 @@ async function loadMemory() {
   try { items = await invoke("list_memory"); } catch (e) {}
   box.innerHTML = "";
   if (!items.length) { box.appendChild(el("div", "mcp-empty", "還沒有學到的教訓。")); return; }
-  for (const m of items.slice(0, 50)) {
+  box.appendChild(el("div", "mem-evidence", "共 " + items.length + " 條教訓(依開工目標的相關度取用,每次取用會計次)"));
+  for (const m of items) {
     const row = el("div", "mem-item");
-    row.appendChild(el("div", "mem-cue", m.cue || ""));
+    const head = el("div", "mem-cue", (m.cue || "") + "  · 用過 " + (m.uses || 0) + " 次");
+    const forget = el("button", "btn btn-ghost btn-sm", "忘記");
+    forget.addEventListener("click", async () => {
+      try { await invoke("remove_lesson", { id: m.id }); loadMemory(); } catch (e) { toast("刪除失敗:" + e, "err"); }
+    });
+    head.appendChild(forget);
+    row.appendChild(head);
     row.appendChild(el("div", "mem-lesson", m.lesson || ""));
     if (m.evidence) row.appendChild(el("div", "mem-evidence", "依據:" + m.evidence));
     box.appendChild(row);
@@ -681,6 +688,7 @@ async function viewJob(id, title) {
     try { renderEvent(JSON.parse(ln)); } catch (e) {}
   }
   if (data.diff) showReview({ status: "(過去任務)", diff: data.diff, changes: [], readonly: true });
+  renderWritebacks(id);
   document.querySelectorAll(".job-item").forEach((n) => n.classList.toggle("active", n.dataset.id === id));
   if (!$("org-panel").classList.contains("hidden") || !$("subagent-view").classList.contains("hidden")) {
     orgJobId = id;
@@ -927,9 +935,33 @@ function newTask() {
   $("goal").focus();
 }
 
+/* ---- commands (type "/" in the composer) ---- */
+const APP_COMMANDS = [
+  { name: "new", summary: "開始新任務", run: () => newTask() },
+  { name: "stop", summary: "停止正在跑的任務", run: () => stopJob() },
+  { name: "workspace", summary: "選擇工作區資料夾", run: () => pickWorkspace() },
+  { name: "network", summary: "切換是否允許上網", run: () => { const box = $("network"); box.checked = !box.checked; toast(box.checked ? "已允許上網" : "已關閉上網", "ok"); } },
+  { name: "org", summary: "顯示或隱藏組織面板", run: () => toggleOrgPanel() },
+  { name: "model", summary: "選擇模型與推理強度", run: () => { openSettings(); $("model").focus(); } },
+  { name: "settings", summary: "開啟設定", run: () => openSettings() },
+  { name: "help", summary: "列出所有指令", run: () => toast(APP_COMMANDS.map((c) => "/" + c.name + "  " + c.summary).join("\n"), "ok") },
+];
+
+/** A composer line that is one of the commands runs it; true when handled. */
+function runCommand(text) {
+  const match = /^\/([\w-]+)\s*$/.exec(text);
+  if (!match) return false;
+  const command = APP_COMMANDS.find((c) => c.name === match[1].toLowerCase());
+  if (!command) { toast("不認得 /" + match[1] + "，輸入 / 看可用的指令", "err"); return true; }
+  $("goal").value = ""; autoGrow();
+  command.run();
+  return true;
+}
+
 /* ---- start / stop ---- */
 async function startJob() {
   const goal = $("goal").value.trim();
+  if (runCommand(goal)) return;
   const msg = $("start-msg"); msg.textContent = ""; msg.className = "inline-msg";
   if (!goal) { msg.textContent = "請寫下目標。"; msg.className = "inline-msg err"; return; }
   if (running) return;
@@ -962,11 +994,21 @@ async function startJob() {
     system_prompt: $("system-prompt").value.trim() || null,
   };
   try {
-    currentHandle = await invoke("start_job", { args });
     setRunning(true);
+    starting = true;
+    currentHandle = await invoke("start_job", { args });
+    starting = false;
+    const early = earlyDone.get(currentHandle);
+    earlyDone.clear();
+    if (early) { onJobDone(early); return; }
     setStatusBadge("執行中", null);
     $("goal").value = ""; autoGrow();
-  } catch (e) { msg.textContent = "無法開始:" + e; msg.className = "inline-msg err"; }
+  } catch (e) {
+    starting = false;
+    earlyDone.clear();
+    setRunning(false);
+    msg.textContent = "無法開始:" + e; msg.className = "inline-msg err";
+  }
 }
 async function stopJob() {
   if (!currentHandle) return;
@@ -985,7 +1027,11 @@ function showReview(ev) {
 
   review.className = "review";
   const eyebrow = review.querySelector(".review-eyebrow");
-  if (eyebrow) eyebrow.textContent = ev.readonly ? "這個任務的變更" : (changes.length ? "待寫回的變更 · " + changes.length + " 項" : "沒有變更");
+  const pending = changes.filter((c) => !c.applied).length;
+  const autoApplied = changes.length - pending;
+  if (eyebrow) eyebrow.textContent = ev.readonly ? "這個任務的變更" :
+    (pending ? "待寫回的變更 · " + pending + " 項" : changes.length ? "已全部寫回" : "沒有變更") +
+    (autoApplied ? " · 已自動寫回 " + autoApplied + " 項" : "");
   const badge = $("review-status");
   badge.textContent = ev.error ? "錯誤" : ev.status;
   badge.className = "badge " + (ev.readonly ? "" : ev.status === "Succeeded" ? "ok" : "bad");
@@ -994,6 +1040,9 @@ function showReview(ev) {
   list.innerHTML = "";
   const applyBtn = $("apply");
   const hint = $("review-hint-text");
+  if (hint) hint.innerHTML = autoApplied
+    ? "全自動模式已把標示的項目寫回工作區(寫回前有快照,可在下方「寫回紀錄」回復);其餘改動還<b>只在沙箱裡</b>,勾選後按套用才會寫回。"
+    : "以下改動目前都還<b>只在沙箱裡</b>,沒碰你的電腦。勾選要保留的,按下套用才會寫回工作區。";
   if (ev.readonly) {
     if (hint) hint.classList.add("hidden");
     applyBtn.classList.add("hidden");
@@ -1009,10 +1058,13 @@ function showReview(ev) {
   } else {
     applyBtn.disabled = false;
     for (const c of changes) {
-      const row = el("label", "change" + (c.kind === "deleted" ? " del" : ""));
-      const cb = el("input"); cb.type = "checkbox"; cb.checked = true; cb.dataset.path = c.path;
-      if (c.kind === "too_large") { cb.disabled = true; cb.checked = false; }
-      row.append(cb, el("span", "ck", kindLabel(c.kind)), el("span", "cpath", c.path), el("span", "cdetail", c.detail || ""));
+      const row = el("label", "change" + (c.kind === "deleted" ? " del" : "") + (c.ignored ? " byproduct" : ""));
+      // By-products (matched by .gitignore / review rules) are listed but start unselected.
+      const cb = el("input"); cb.type = "checkbox"; cb.checked = !c.ignored && !c.applied; cb.dataset.path = c.path;
+      if (c.kind === "too_large" || c.applied) { cb.disabled = true; cb.checked = false; }
+      const detail = c.applied ? "已自動寫回 · " + (c.detail || "") : c.ignored ? "附帶產物 · " + c.ignored : (c.detail || "");
+      row.append(cb, el("span", "ck", kindLabel(c.kind)), el("span", "cpath", c.path), el("span", "cdetail", detail));
+      if (c.ignored) row.title = "符合忽略規則（" + c.ignored + "），預設不寫回；需要的話可以勾選";
       list.appendChild(row);
     }
   }
@@ -1027,7 +1079,8 @@ function renderDiffInto(box, text) {
   for (const raw of String(text).split("\n")) {
     let cls = "dl-ctx";
     if (raw.startsWith("+++") || raw.startsWith("---") || raw.startsWith("@@") || raw.startsWith("diff ") ||
-        raw.startsWith("new ") || raw.startsWith("deleted") || raw.startsWith("symlink") || raw.startsWith("Binary") || raw.startsWith("too large")) cls = "dl-meta";
+        raw.startsWith("new ") || raw.startsWith("deleted") || raw.startsWith("symlink") || raw.startsWith("Binary") || raw.startsWith("too large") ||
+        raw.startsWith("#") || raw.startsWith("note:") || raw.startsWith("content unchanged")) cls = "dl-meta";
     else if (raw.startsWith("+")) cls = "dl-add";
     else if (raw.startsWith("-")) cls = "dl-del";
     const span = el("span", cls, raw || " ");
@@ -1051,8 +1104,55 @@ async function applyChanges() {
     if (report.skipped.length) txt += " 略過 " + report.skipped.length + " 項:" + report.skipped.map((s) => s[0] + "(" + s[1] + ")").join("、");
     msg.textContent = txt; msg.className = "inline-msg " + (report.skipped.length ? "err" : "ok");
     toast(report.skipped.length ? "部分套用完成" : "已套用到工作區", report.skipped.length ? "err" : "ok");
+    renderWritebacks(currentJobId);
   } catch (e) { msg.textContent = "套用失敗:" + e; msg.className = "inline-msg err"; }
   finally { $("apply").disabled = false; }
+}
+
+/* ---- write-back history + rollback ---- */
+const WRITEBACK_STATE = { applied: "已寫回", rolled_back: "已回復", partially_rolled_back: "部分回復", pending: "中斷(可回復)" };
+async function renderWritebacks(jobId, keepMessage) {
+  const box = $("writebacks"), list = $("writeback-list");
+  list.innerHTML = "";
+  if (!keepMessage) { $("writeback-msg").textContent = ""; $("writeback-msg").className = "inline-msg"; }
+  if (!jobId) { box.classList.add("hidden"); return; }
+  let rows = [];
+  try { rows = await invoke("list_writebacks", { jobId }); } catch (e) { rows = []; }
+  if (!rows.length) { box.classList.add("hidden"); return; }
+  $("review").classList.remove("hidden");
+  for (const w of rows.slice().reverse()) {
+    const row = el("div", "change");
+    const when = new Date(w.created_ms).toLocaleString();
+    row.append(el("span", "ck", WRITEBACK_STATE[w.state] || w.state), el("span", "cpath", w.paths.length + " 項 · " + (w.auto ? "全自動" : "人工核准")),
+      el("span", "cdetail", when));
+    row.title = w.paths.join("\n");
+    if (w.state === "applied" || w.state === "partially_rolled_back" || w.state === "pending") {
+      const btn = el("button", "btn btn-ghost btn-sm", "回復");
+      btn.addEventListener("click", () => rollbackWriteback(jobId, w.id, false));
+      row.appendChild(btn);
+    }
+    list.appendChild(row);
+  }
+  box.classList.remove("hidden");
+}
+async function rollbackWriteback(jobId, id, force) {
+  const msg = $("writeback-msg");
+  try {
+    const r = await invoke("rollback_writeback", { jobId, writebackId: id, force });
+    if (r.conflicts.length) {
+      msg.innerHTML = "";
+      msg.append(el("span", null, "已回復 " + r.restored.length + " 項;" + r.conflicts.length + " 項在寫回後又被改過,未覆蓋:" +
+        r.conflicts.map((c) => c[0]).join("、") + " "));
+      const again = el("button", "btn btn-ghost btn-sm", "仍要覆蓋");
+      again.addEventListener("click", () => rollbackWriteback(jobId, id, true));
+      msg.appendChild(again);
+      msg.className = "inline-msg err";
+    } else {
+      msg.textContent = "已回復 " + r.restored.length + " 項到寫回前的狀態。"; msg.className = "inline-msg ok";
+      toast("已回復", "ok");
+    }
+  } catch (e) { msg.textContent = String(e); msg.className = "inline-msg err"; }
+  await renderWritebacks(jobId, true);
 }
 
 /* ---- composer auto-grow ---- */
@@ -1091,17 +1191,29 @@ listen("egress-ask", (e) => {
   if (!currentHandle || p.handle !== currentHandle) return;
   renderEgressAsk(p.id, p.host, p.port);
 });
+// A job that fails at once can report "done" before start_job has returned
+// its handle (the old session's handle may still be current, or a follow-up
+// reuses it), so every report that arrives while start_job is pending waits
+// here until the handle is known.
+const earlyDone = new Map();
+let starting = false;
 listen("job-done", (e) => {
   const p = e.payload;
+  if (starting) { earlyDone.set(p.handle, p); return; }
   if (!currentHandle || p.handle !== currentHandle) return;
+  onJobDone(p);
+});
+function onJobDone(p) {
   setRunning(false);
   if (p.job_id) currentJobId = p.job_id; // enable follow-up turns on this conversation
   const ok = p.status === "Succeeded";
   setStatusBadge(p.error ? "失敗" : p.status, ok ? true : false);
   showReview(p);
+  if (p.auto_writeback) toast("全自動:已寫回 " + p.auto_writeback.paths.length + " 項(可回復)", "ok");
+  renderWritebacks(currentJobId);
   loadJobs();
   scheduleOrgRefresh();
-});
+}
 
 /* ---- wire up ---- */
 window.addEventListener("DOMContentLoaded", () => {
@@ -1136,6 +1248,7 @@ window.addEventListener("DOMContentLoaded", () => {
   $("select-none").addEventListener("click", () => setAllChecks(false));
   $("apply").addEventListener("click", applyChanges);
   $("goal").addEventListener("input", autoGrow);
+  BulgePalette.attach($("goal"), () => APP_COMMANDS);
   $("goal").addEventListener("keydown", (e) => {
     // Enter sends; Shift+Enter inserts a newline. `isComposing` guards IME input
     // (e.g. confirming a Chinese candidate with Enter must NOT send). Ctrl/Cmd+Enter

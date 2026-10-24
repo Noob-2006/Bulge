@@ -56,6 +56,7 @@ async fn connects_lists_and_calls_a_real_stdio_server() {
         args: vec![script.to_string_lossy().into_owned()],
         env: HashMap::new(),
         disabled: false,
+        max_result_bytes: None,
     };
 
     let client = McpClient::connect("fake", &config).await.expect("connect");

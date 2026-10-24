@@ -1,6 +1,5 @@
 //! Destination policy for guest egress.
 
-use std::collections::HashSet;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 /// One CIDR from ipaddr.js 2.5.0 `IPv4.prototype.SpecialRanges` whose category
@@ -323,29 +322,74 @@ pub fn is_forbidden_destination(ip: IpAddr) -> bool {
     }
 }
 
-/// Per-VM egress policy. Host addresses are refreshed by the relay so that a
-/// network change cannot expose a newly acquired host address.
+/// The networks this host is attached to: every interface address together with
+/// its on-link prefix. A destination inside any of them is the host itself or a
+/// LAN neighbour. This covers IPv6 as well as IPv4: a NAS or router on the LAN
+/// with a global IPv6 address is not in any special-use range, so
+/// `is_forbidden_destination` alone would let it through.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct HostNetworks {
+    nets: Vec<(IpAddr, u8)>,
+}
+
+impl HostNetworks {
+    /// Read the host's interfaces now. Callers check per connection, so an
+    /// address acquired later (DHCP renewal, IPv6 privacy address) is covered.
+    pub fn current() -> std::io::Result<Self> {
+        let ifaces = if_addrs::get_if_addrs()?;
+        Ok(Self::from_nets(ifaces.into_iter().map(|iface| match iface.addr {
+            if_addrs::IfAddr::V4(v4) => (IpAddr::V4(v4.ip), v4.prefixlen),
+            if_addrs::IfAddr::V6(v6) => (IpAddr::V6(v6.ip), v6.prefixlen),
+        })))
+    }
+
+    pub fn from_nets(nets: impl IntoIterator<Item = (IpAddr, u8)>) -> Self {
+        Self { nets: nets.into_iter().collect() }
+    }
+
+    /// Whether `ip` is one of this host's addresses or on one of its links.
+    pub fn contains(&self, ip: IpAddr) -> bool {
+        let ip = ip.to_canonical();
+        self.nets.iter().any(|&(net, len)| same_prefix(net.to_canonical(), ip, len))
+    }
+}
+
+/// Whether `a` and `b` share their first `len` bits (same address family only).
+fn same_prefix(a: IpAddr, b: IpAddr, len: u8) -> bool {
+    fn masked(bits: u128, width: u32, len: u8) -> u128 {
+        let len = u32::from(len).min(width);
+        if len == 0 { 0 } else { bits >> (width - len) }
+    }
+    match (a, b) {
+        (IpAddr::V4(a), IpAddr::V4(b)) => masked(u32::from(a).into(), 32, len) == masked(u32::from(b).into(), 32, len),
+        (IpAddr::V6(a), IpAddr::V6(b)) => masked(u128::from(a), 128, len) == masked(u128::from(b), 128, len),
+        _ => false,
+    }
+}
+
+/// Per-VM egress policy. Host networks are refreshed by the relay so that a
+/// network change cannot expose a newly acquired host address. If the host's
+/// interfaces could never be read, nothing but the DNS forwarder is allowed
+/// (fail closed: an unknown LAN cannot be told apart from the internet).
 #[derive(Debug, Clone)]
 pub struct EgressPolicy {
-    host_addrs: HashSet<IpAddr>,
+    host: Option<HostNetworks>,
     /// passt's DNS forwarder address handed to the guest (`--dns-forward`).
     dns_forwarder: IpAddr,
 }
 
 impl EgressPolicy {
     pub fn new(dns_forwarder: IpAddr) -> Self {
-        let mut policy = Self {
-            host_addrs: HashSet::new(),
-            dns_forwarder,
-        };
+        let mut policy = Self { host: None, dns_forwarder };
         policy.refresh_host_addrs();
         policy
     }
 
-    /// Re-read every address currently assigned to a host interface.
+    /// Re-read every address and on-link prefix of the host's interfaces. A
+    /// failed read keeps the previous view rather than forgetting it.
     pub fn refresh_host_addrs(&mut self) {
-        if let Ok(ifaces) = if_addrs::get_if_addrs() {
-            self.host_addrs = ifaces.into_iter().map(|iface| iface.ip()).collect();
+        if let Ok(host) = HostNetworks::current() {
+            self.host = Some(host);
         }
     }
 
@@ -358,7 +402,7 @@ impl EgressPolicy {
         if dst == self.dns_forwarder {
             return dst_port == Some(53);
         }
-        !self.host_addrs.contains(&dst) && !is_forbidden_destination(dst)
+        self.host.as_ref().is_some_and(|host| !host.contains(dst)) && !is_forbidden_destination(dst)
     }
 
     #[cfg(test)]
@@ -366,16 +410,38 @@ impl EgressPolicy {
         dns_forwarder: IpAddr,
         host_addrs: impl IntoIterator<Item = IpAddr>,
     ) -> Self {
-        Self {
-            host_addrs: host_addrs.into_iter().collect(),
-            dns_forwarder,
-        }
+        let nets = host_addrs.into_iter().map(|ip| (ip, if ip.is_ipv4() { 32 } else { 128 }));
+        Self { host: Some(HostNetworks::from_nets(nets)), dns_forwarder }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn host_networks_cover_lan_neighbours_in_both_families() {
+        let host = HostNetworks::from_nets([
+            ("192.168.1.20".parse().unwrap(), 24),
+            ("2001:db8:aa:bb::20".parse().unwrap(), 64),
+            ("203.0.113.9".parse().unwrap(), 32),
+        ]);
+        assert!(host.contains("192.168.1.77".parse().unwrap()));
+        assert!(host.contains("::ffff:192.168.1.77".parse().unwrap()), "IPv4-mapped form");
+        assert!(host.contains("2001:db8:aa:bb::1234".parse().unwrap()), "LAN global IPv6");
+        assert!(host.contains("203.0.113.9".parse().unwrap()), "host's own public address");
+        assert!(!host.contains("203.0.113.10".parse().unwrap()));
+        assert!(!host.contains("2001:db8:aa:cc::1".parse().unwrap()));
+        assert!(!host.contains("8.8.8.8".parse().unwrap()));
+    }
+
+    #[test]
+    fn unknown_host_networks_fail_closed() {
+        let dns: IpAddr = "10.0.2.3".parse().unwrap();
+        let policy = EgressPolicy { host: None, dns_forwarder: dns };
+        assert!(!policy.allows("8.8.8.8".parse().unwrap(), Some(443)));
+        assert!(policy.allows(dns, Some(53)));
+    }
 
     fn parse(literal: &str) -> IpAddr {
         literal.parse().expect("test literal must be an IP address")

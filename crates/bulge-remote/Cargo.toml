@@ -1,0 +1,56 @@
+[package]
+name = "bulge-remote"
+description = "Reach bulge from your other devices across networks: a blind relay plus end-to-end Noise sessions"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "bulge-relay"
+path = "src/bin/relay.rs"
+
+[[bin]]
+name = "bulge-remote"
+path = "src/bin/client.rs"
+required-features = ["direct"]
+
+[features]
+default = ["direct"]
+# The host-side `remote` channel for `bulge channels serve`.
+channel = ["dep:bulge-channel-api", "dep:futures", "direct"]
+# Direct device↔host connections (UDP hole punching + QUIC). The relay does
+# not need it: build it with `--no-default-features --bin bulge-relay`.
+direct = ["dep:quinn", "dep:rustls", "dep:rcgen", "dep:sha2"]
+
+[dependencies]
+bulge-util = { path = "../bulge-util" }
+bulge-channel-api = { path = "../bulge-channel-api", optional = true }
+futures = { workspace = true, optional = true }
+getrandom.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio = { workspace = true, features = ["net", "fs", "signal"] }
+zeroize.workspace = true
+snow = { version = "0.10", default-features = false, features = ["use-curve25519", "use-chacha20poly1305", "use-blake2", "use-getrandom"] }
+ed25519-dalek = "3"
+base64 = "0.22"
+subtle = "2"
+qrcode = { version = "0.14", default-features = false }
+quinn = { version = "0.11", default-features = false, features = ["runtime-tokio", "rustls-ring", "log"], optional = true }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"], optional = true }
+rcgen = { version = "0.14", default-features = false, features = ["crypto", "ring", "pem"], optional = true }
+sha2 = { workspace = true, optional = true }
+
+[dev-dependencies]
+bulge-channel-api = { path = "../bulge-channel-api" }
+serde_json.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net"] }
+
+[[test]]
+name = "e2e"
+required-features = ["channel"]
+
+[lints]
+workspace = true

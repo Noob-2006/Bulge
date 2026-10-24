@@ -288,11 +288,27 @@ pub fn always_on(tree: &Tree, spec: &SurfaceSpec) -> String {
 /// The `<available_skills>` catalog (empty when there are no valid skills). It
 /// grows as the skill workshop installs skills, so a runner that cares about the
 /// provider prefix cache should place it after the stable system prompt.
+/// Archived skills (per the usage ledger beside the skills) are left out: an
+/// archived skill no longer routes, it only stays on disk to be restored.
 pub fn skills_catalog(tree: &Tree, spec: &SurfaceSpec) -> String {
+    let archived = archived_skills(tree, spec);
     match skills(tree, spec) {
-        Ok(found) if !found.is_empty() => skills_block(&found),
-        _ => String::new(),
+        Ok(found) => {
+            let live: Vec<Skill> = found.into_iter().filter(|skill| !archived.contains(&skill.name)).collect();
+            if live.is_empty() { String::new() } else { skills_block(&live) }
+        }
+        Err(_) => String::new(),
     }
+}
+
+/// Names the usage ledger (`<skill_dir>.usage.json`) marks archived. A missing
+/// or unreadable ledger archives nothing.
+fn archived_skills(tree: &Tree, spec: &SurfaceSpec) -> Vec<String> {
+    let path = format!("{}{}", skill_prefix(spec), crate::usage::USAGE_FILE);
+    tree.get(&path)
+        .and_then(|source| serde_json::from_str::<crate::usage::UsageLedger>(source).ok())
+        .map(|ledger| ledger.in_state(crate::usage::Lifecycle::Archived))
+        .unwrap_or_default()
 }
 
 #[cfg(test)]
@@ -316,6 +332,20 @@ mod tests {
 
     const ALPHA: &str = "---\nname: alpha\ndescription: Alpha workflow.\n---\n# Alpha\nDo alpha.\n";
     const BETA: &str = "---\nname: beta\ndescription: Beta workflow.\n---\n# Beta\nDo beta.\n";
+
+    #[test]
+    fn archived_skills_leave_the_catalog() {
+        let ledger = r#"{"entries":{"beta":{"created_by":"agent","uses":0,"patches":0,"state":"archived","pinned":false}}}"#;
+        let tree = tree(&[("skills/alpha/SKILL.md", ALPHA), ("skills/beta/SKILL.md", BETA), ("skills/.usage.json", ledger)]);
+        assert_eq!(skills_catalog(&tree, &surface()), "<available_skills>\nalpha: Alpha workflow.\n</available_skills>");
+        // A ledger that cannot be read archives nothing.
+        let tree = tree_with_bad_ledger();
+        assert!(skills_catalog(&tree, &surface()).contains("beta"));
+    }
+
+    fn tree_with_bad_ledger() -> Tree {
+        tree(&[("skills/alpha/SKILL.md", ALPHA), ("skills/beta/SKILL.md", BETA), ("skills/.usage.json", "not json")])
+    }
 
     #[test]
     fn normal_tree_parses_validates_and_materializes() {

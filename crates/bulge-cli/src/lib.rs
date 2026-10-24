@@ -1,13 +1,10 @@
-//! bulge-cli as a library.
-//!
-//! The CLI binary (`src/main.rs`) parses flags and calls into these modules; the
-//! desktop app (`bulge-app`) reuses the exact same orchestration through
-//! [`run::run_streaming`] so there is one code path for a job, not two.
+//! bulge-cli as a library: the front ends (chat channels, schedules, ACP,
+//! eval, remote pairing) over [`bulge_runtime`], whose modules are
+//! re-exported here under their old paths.
 
 pub mod acp;
-pub mod backend;
-pub mod cron;
-pub mod delegate;
+pub mod channels;
+pub mod remote;
 pub mod eval;
-pub mod recall;
-pub mod run;
+
+pub use bulge_runtime::{backend, cron, delegate, recall, recipe, run, skills, writeback};

@@ -14,5 +14,5 @@ pub use netgate::{DomainVerdict, NetDecision, NetGate};
 pub use permission::{Effect, Rule, Ruleset, evaluate, evaluate_resources};
 pub use realworld::RealWorldPolicy;
 pub use redact::{Redactor, redact_secrets};
-pub use risk::{Autonomy, ChangeKind, Risk, classify_change, gate, is_sensitive_path, max_risk};
+pub use risk::{Autonomy, ChangeKind, Risk, classify_change, gate, is_sensitive_path, max_risk, runs_on_host};
 pub use threat::{Scope, ThreatHit, is_threat, scan as threat_scan};

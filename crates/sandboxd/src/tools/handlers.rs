@@ -17,7 +17,10 @@ use super::truncate::{Limits, bound_output};
 use crate::runtime::{HandlerError, InvocationContext};
 use crate::setup::{WORKSPACE, WORKSPACE_LOWER, WORKSPACE_UPPER};
 
-pub const SPILL_DIR: &str = "/run/bulge/spill";
+/// Where long tool output is saved for the agent to page through. On the
+/// /home tmpfs and owned by the agent (created by setup): tools run without
+/// privileges, and workspace slots hide /run/bulge.
+pub const SPILL_DIR: &str = "/home/.bulge-spill";
 /// Largest single file `export_changes` will carry back to the host.
 pub(crate) const MAX_EXPORT_FILE_BYTES: u64 = 4 * 1024 * 1024;
 const MAX_GLOB_RESULTS: usize = 1000;
@@ -76,6 +79,48 @@ pub async fn read(cx: InvocationContext) -> Result<Value, HandlerError> {
         Err(e @ ReadError::OffsetPastEnd { .. }) => Err(HandlerError::new("OFFSET_PAST_END", e.to_string())),
         Err(ReadError::Io(e)) => Err(io_error(e)),
     }
+}
+
+/// Largest image `view_image` returns (the model provider downsizes anyway).
+const MAX_IMAGE_BYTES: u64 = 5 * 1024 * 1024;
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ViewImageParams {
+    path: String,
+}
+
+/// The media type of PNG, JPEG, GIF and WebP files, from their first bytes.
+pub fn image_media_type(bytes: &[u8]) -> Option<&'static str> {
+    match bytes {
+        [0x89, b'P', b'N', b'G', ..] => Some("image/png"),
+        [0xFF, 0xD8, 0xFF, ..] => Some("image/jpeg"),
+        [b'G', b'I', b'F', b'8', ..] => Some("image/gif"),
+        [b'R', b'I', b'F', b'F', _, _, _, _, b'W', b'E', b'B', b'P', ..] => Some("image/webp"),
+        _ => None,
+    }
+}
+
+/// Load an image so the model can look at it (the host attaches it to the
+/// conversation). Only real PNG/JPEG/GIF/WebP files, up to 5 MB.
+pub async fn view_image(cx: InvocationContext) -> Result<Value, HandlerError> {
+    let p: ViewImageParams = params(&cx)?;
+    let path = resolve(&p.path);
+    let meta = tokio::fs::metadata(&path).await.map_err(|_| HandlerError::new("NOT_FOUND", path.display().to_string()))?;
+    if !meta.is_file() {
+        return Err(HandlerError::new("NOT_A_FILE", path.display().to_string()));
+    }
+    if meta.len() > MAX_IMAGE_BYTES {
+        return Err(HandlerError::new("TOO_LARGE", format!("{} is {} bytes; images up to {MAX_IMAGE_BYTES} bytes (shrink it first, e.g. with ImageMagick if installed)", path.display(), meta.len())));
+    }
+    let bytes = tokio::fs::read(&path).await.map_err(io_error)?;
+    let media_type = image_media_type(&bytes).ok_or_else(|| HandlerError::new("NOT_AN_IMAGE", format!("{} is not a PNG, JPEG, GIF or WebP image", path.display())))?;
+    Ok(json!({
+        "path": path,
+        "media_type": media_type,
+        "bytes": bytes.len(),
+        "data": base64::engine::general_purpose::STANDARD.encode(&bytes),
+    }))
 }
 
 #[derive(Deserialize)]

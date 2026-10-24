@@ -86,6 +86,7 @@ fn anthropic_stream_assembles_into_a_replayable_tool_turn() {
         deferred_tools: true,
         images: false,
         reasoning: true,
+        default_effort: None,
     };
     let same = AnthropicMessages.encode(&request("m1"), &EncodeContext { model: &info("m1"), default_max_tokens: 4096 }).expect("encode");
     assert!(same.to_string().contains("sig-1"));

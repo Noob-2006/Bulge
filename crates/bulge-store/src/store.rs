@@ -1,7 +1,6 @@
 //! Job store: one directory per job under the store root, holding `job.jsonl`.
 
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use bulge_llm::Message;
 use serde_json::json;
@@ -29,7 +28,7 @@ pub enum StoreError {
 }
 
 fn now_ms() -> u64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX)).unwrap_or(0)
+    bulge_util::now_ms()
 }
 
 /// Random job id: `j-` + 16 hex chars.
@@ -104,7 +103,10 @@ impl JobStore {
         let state = JobState::from_events(&envelopes)?;
         let mut handle = JobHandle { log, state, dir };
         let mut recovery = Recovery { torn_tail_bytes: scan.torn_tail_bytes, ..Recovery::default() };
-        if !handle.state.status.is_terminal() && !handle.state.pending_calls.is_empty() {
+        // Also for a terminal job: opening for writing means another turn is
+        // about to run on this history, and an unanswered call would make every
+        // later request invalid.
+        if !handle.state.pending_calls.is_empty() {
             recovery.interrupted_calls = handle.recover_interrupted()?;
         }
         Ok((handle, recovery))

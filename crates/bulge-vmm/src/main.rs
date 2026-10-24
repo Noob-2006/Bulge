@@ -118,24 +118,32 @@ fn check(step: &str, code: i32) -> Result<(), String> {
     if code < 0 { Err(format!("{step} failed: errno {}", -code)) } else { Ok(()) }
 }
 
-/// Restrict this process to only the filesystem paths the microVM needs. Best
-/// effort: on a kernel without Landlock it prints a note and continues (the VM
-/// still runs, just without this extra cage). Paths that do not exist are skipped.
-fn apply_landlock(config: &VmmConfig) {
+/// Restrict this process to only what the microVM needs: a handful of
+/// filesystem paths, no TCP at all, no abstract unix sockets or signals outside
+/// itself. Fail closed: if the kernel cannot enforce at least the filesystem
+/// cage, the VM does not start (the cage is the reason a libkrun escape lands
+/// in a box instead of in the user's account). Newer Landlock features (TCP,
+/// scopes, ioctl filtering) are added when the kernel has them.
+/// Paths that do not exist are skipped.
+fn apply_landlock(config: &VmmConfig) -> Result<(), String> {
     use landlock::{
-        ABI, Access, AccessFs, CompatLevel, Compatible, PathBeneath, PathFd, Ruleset, RulesetAttr, RulesetCreatedAttr, RulesetError,
+        ABI, Access, AccessFs, AccessNet, CompatLevel, Compatible, PathBeneath, PathFd, Ruleset, RulesetAttr, RulesetCreatedAttr,
+        RulesetError, RulesetStatus, Scope,
     };
     use std::path::PathBuf;
 
-    let abi = ABI::V2;
+    let abi = ABI::V6;
     let read = AccessFs::ReadFile | AccessFs::ReadDir;
     let read_exec = read | AccessFs::Execute;
-    let rw_file = AccessFs::ReadFile | AccessFs::WriteFile;
     let full = AccessFs::from_all(abi);
 
     // (path, access) pairs. System and library trees are read+execute (libkrun
     // dlopens shared objects); rootfs and shares are read-only; the per-VM runtime
-    // dir needs to create sockets; /dev/kvm needs read+write.
+    // dir needs to create sockets; /dev/kvm needs read+write and its ioctls.
+    // From /proc only this process's own directory: libkrun reads
+    // /proc/self/maps and reopens shared files through /proc/self/fd. All of
+    // /proc would expose other processes of the same user (their environ holds
+    // API keys). From /sys only the CPU topology it reads.
     let mut rules: Vec<(PathBuf, landlock::BitFlags<AccessFs>)> = Vec::new();
     for dir in ["/usr", "/lib", "/lib64", "/bin", "/sbin"] {
         rules.push((PathBuf::from(dir), read_exec));
@@ -145,10 +153,10 @@ fn apply_landlock(config: &VmmConfig) {
             rules.push((PathBuf::from(dir), read_exec));
         }
     }
-    for dir in ["/etc", "/proc", "/sys", "/dev"] {
+    for dir in ["/etc", "/dev", "/proc/self", "/sys/devices/system/cpu"] {
         rules.push((PathBuf::from(dir), read));
     }
-    rules.push((PathBuf::from("/dev/kvm"), rw_file));
+    rules.push((PathBuf::from("/dev/kvm"), AccessFs::ReadFile | AccessFs::WriteFile | AccessFs::IoctlDev));
     rules.push((config.rootfs.clone(), read));
     for share in &config.shares {
         rules.push((share.host_path.clone(), read));
@@ -169,16 +177,26 @@ fn apply_landlock(config: &VmmConfig) {
         .filter_map(|(path, access)| PathFd::new(&path).ok().map(|fd| Ok(PathBeneath::new(fd, access))))
         .collect();
 
-    let result = Ruleset::default()
-        .set_compatibility(CompatLevel::BestEffort)
-        .handle_access(full)
+    // The base filesystem rights (ABI v1) are a hard requirement; everything
+    // newer is best effort. No TCP rule is added, so handling TCP denies it all
+    // (the VM's network is a unix/vsock bridge, never TCP from this process).
+    let status = Ruleset::default()
+        .set_compatibility(CompatLevel::HardRequirement)
+        .handle_access(AccessFs::from_all(ABI::V1))
+        .and_then(|r| r.set_compatibility(CompatLevel::BestEffort).handle_access(full))
+        .and_then(|r| r.handle_access(AccessNet::from_all(abi)))
+        .and_then(|r| r.scope(Scope::from_all(abi)))
         .and_then(|r| r.create())
         .and_then(|r| r.add_rules(beneath))
-        .and_then(|r| r.restrict_self());
-
-    match result {
-        Ok(_) => {}
-        Err(error) => eprintln!("bulge-vmm: landlock not applied ({error}); continuing without the extra cage"),
+        .and_then(|r| r.restrict_self())
+        .map_err(|error| format!("landlock cage could not be applied ({error}); refusing to start the VM"))?;
+    match status.ruleset {
+        RulesetStatus::FullyEnforced => Ok(()),
+        RulesetStatus::PartiallyEnforced => {
+            eprintln!("bulge-vmm: landlock partially enforced (kernel lacks newer Landlock features); filesystem cage active");
+            Ok(())
+        }
+        RulesetStatus::NotEnforced => Err("landlock is not enforced by this kernel; refusing to start the VM".into()),
     }
 }
 
@@ -192,7 +210,7 @@ fn run() -> Result<(), String> {
     // If the guest ever escapes into this (the only unsafe/FFI) process, it is
     // still confined to the handful of paths the VM genuinely needs — never the
     // user's home, SSH keys, API keys, or other projects.
-    apply_landlock(&config);
+    apply_landlock(&config)?;
 
     // Keep every CString alive until krun_start_enter: libkrun may keep pointers.
     let mut keep: Vec<CString> = Vec::new();

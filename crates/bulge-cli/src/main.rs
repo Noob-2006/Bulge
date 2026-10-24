@@ -4,14 +4,14 @@
 //!
 //! Events stream to stdout as JSONL (the job log, line by line); diagnostics go to
 //! stderr. Workspace changes stay in the VM overlay and are written as a diff for
-//! review — the host is never modified.
+//! review; the host is modified only in full-auto mode or with `--writeback`, and
+//! then always under a snapshot that `bulge rollback` undoes.
 
 use std::path::PathBuf;
-use std::time::{SystemTime, UNIX_EPOCH};
 
-use bulge_cli::backend::{BackendSpec, Protocol};
+use bulge_runtime::backend::{BackendSpec, Protocol};
 use bulge_cli::eval::{self, EvalConfig};
-use bulge_cli::run::{self, RunConfig};
+use bulge_runtime::run::{self, RunConfig};
 use bulge_org::{RoleLibrary, append_decision, parse_charter};
 use bulge_store::{Autonomy, Budget};
 
@@ -24,6 +24,13 @@ USAGE:
     bulge acp  (ACP agent server over stdio; editors spawn this)
     bulge schedule add|list|remove|tick   (scheduled tasks; see below)
     bulge recall <query> [--limit N]      (keyword search over past jobs)
+    bulge channels serve|pending|approve <code>|revoke|allowed
+                                          (talk to bulge from chat apps; see ~/.bulge/channels.json)
+    bulge remote init --relay <host:port>|pair|devices|revoke <name>
+                                          (your other devices, through a relay, end-to-end encrypted)
+    bulge writebacks <job-id>             (list a job's snapshotted write-backs)
+    bulge rollback <job-id> [<id>] [--force]
+                                          (undo a write-back; default: the newest)
     bulge org roles|veto <name>|log [--harness DIR]
                                           (inspect, veto, or review governed roles)
 
@@ -56,7 +63,10 @@ OPTIONS:
     --store <DIR>          Job store root (default: ~/.bulge/jobs)
     --harness <DIR>        Harness tree + memory root (default: ~/.bulge/harness)
     --autonomy <MODE>      collaborative | autonomous | full-auto (default: autonomous)
-    --model <ID>           Model id (default: deepseek-chat)
+                           full-auto writes changes back by itself, under a
+                           snapshot (undo: bulge rollback); by-products and
+                           high-risk changes stay for review
+    --model <ID>           Model id (default: deepseek-flash)
     --base-url <URL>       API base URL (default: https://api.deepseek.com)
     --protocol <P>         openai | anthropic (default: openai)
     --backend-id <ID>      Logical backend name recorded in the job (default: from host)
@@ -76,6 +86,10 @@ The API key is read from $BULGE_API_KEY or ~/.bulge/keys/<host> (chmod 600).
 ";
 
 fn main() {
+    // Keep ~/.bulge private (mode 700) before anything is written into it.
+    if let Err(error) = bulge_util::fs::bulge_home() {
+        eprintln!("warning: {error}");
+    }
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.first().map(String::as_str) {
         Some("run") => {
@@ -89,11 +103,33 @@ fn main() {
                 match rt.block_on(run::run(config)) {
                     Ok(result) => {
                         if let Some(dir) = writeback {
-                            let names: Vec<String> = result.changes.iter().map(|c| c.path().to_string()).collect();
-                            let report = bulge_vm::changes::apply(&dir, &result.changes, &names);
-                            eprintln!("writeback: applied {} change(s) to {}", report.applied.len(), dir.display());
-                            for (path, why) in &report.skipped {
-                                eprintln!("writeback: skipped {path}: {why}");
+                            // By-products (review rules) and what full-auto
+                            // already wrote are not written (again).
+                            let done = result.auto_writeback.as_ref().map(|m| m.applied_paths()).unwrap_or_default();
+                            let names: Vec<String> = result
+                                .changes
+                                .iter()
+                                .map(|c| c.path().to_string())
+                                .filter(|path| !result.ignored.iter().any(|(ignored, _)| ignored == path) && !done.contains(path))
+                                .collect();
+                            match bulge_vm::writeback::apply(&dir, &result.changes, &names, &result.job_dir, true) {
+                                Ok(manifest) => {
+                                    eprintln!(
+                                        "writeback: applied {} change(s) to {} under snapshot {} (undo: bulge rollback {} {})",
+                                        manifest.applied_paths().len(),
+                                        dir.display(),
+                                        manifest.id,
+                                        result.job_id,
+                                        manifest.id
+                                    );
+                                    for (path, reason) in &manifest.skipped {
+                                        eprintln!("writeback: skipped {path}: {reason}");
+                                    }
+                                }
+                                Err(error) => eprintln!("writeback: not done (snapshot failed, {} untouched): {error}", dir.display()),
+                            }
+                            for (path, reason) in &result.ignored {
+                                eprintln!("writeback: not applied (by-product) {path}: {reason}");
                             }
                         }
                         std::process::exit(i32::from(result.status != bulge_store::JobStatus::Succeeded));
@@ -141,11 +177,23 @@ fn main() {
         }
         Some("schedule") => {
             // Scheduled tasks: add/list/remove/tick. `tick` runs its own runtime.
-            std::process::exit(bulge_cli::cron::dispatch(&args[1..]));
+            std::process::exit(bulge_runtime::cron::dispatch(&args[1..]));
+        }
+        Some("channels") => {
+            // Talk to bulge from chat apps (Telegram, …): serve, and manage pairing.
+            std::process::exit(bulge_cli::channels::dispatch(&args[1..]));
+        }
+        Some("remote") => {
+            // Pair other devices with this bulge (they talk through `channels serve`).
+            std::process::exit(bulge_cli::remote::dispatch(&args[1..]));
+        }
+        Some(command @ ("writebacks" | "rollback")) => {
+            // Snapshotted write-backs of a job: list them, or undo one.
+            std::process::exit(bulge_runtime::writeback::dispatch(command, &args[1..]));
         }
         Some("recall") => {
             // Keyword search over past job transcripts.
-            std::process::exit(bulge_cli::recall::dispatch(&args[1..]));
+            std::process::exit(bulge_runtime::recall::dispatch(&args[1..]));
         }
         Some("org") => {
             // Role governance: list, veto, or inspect the decision log. No VM.
@@ -185,12 +233,12 @@ fn parse_run(args: &[String]) -> Result<RunConfig, String> {
     let mut store = None;
     let mut harness = None;
     let mut autonomy = Autonomy::Autonomous;
-    let mut model = "deepseek-chat".to_string();
-    let mut base_url = "https://api.deepseek.com".to_string();
+    let mut model = bulge_runtime::backend::DEFAULT_MODEL.to_string();
+    let mut base_url = bulge_runtime::backend::DEFAULT_BASE_URL.to_string();
     let mut protocol = Protocol::OpenAiChat;
     let mut backend_id: Option<String> = None;
-    let mut context_window: u32 = 128_000;
-    let mut max_tokens: u32 = 8_192;
+    let mut context_window: u32 = bulge_runtime::backend::DEFAULT_CONTEXT_WINDOW;
+    let mut max_tokens: u32 = bulge_runtime::backend::DEFAULT_MAX_TOKENS;
     let mut reasoning = false;
     let mut auto_review = false;
     let mut max_steps: u64 = 200;
@@ -233,36 +281,24 @@ fn parse_run(args: &[String]) -> Result<RunConfig, String> {
     if !workspace.is_dir() {
         return Err(format!("workspace {} is not a directory", workspace.display()));
     }
-    let home = PathBuf::from(std::env::var("HOME").map_err(|_| "HOME is not set".to_string())?);
     let title = title.unwrap_or_else(|| goal.lines().next().unwrap_or("job").chars().take(80).collect());
-    let backend_host = base_url.trim_start_matches("https://").trim_start_matches("http://").split('/').next().unwrap_or("backend").to_string();
-
+    let mut backend = BackendSpec { context_window, max_tokens, reasoning, ..BackendSpec::new(base_url, protocol, model) };
+    if let Some(id) = backend_id {
+        backend.id = id;
+    }
+    let defaults = RunConfig::new(goal, workspace, backend)?;
     Ok(RunConfig {
-        job_id: None,
-        goal,
         title,
-        workspace,
-        store_root: store.unwrap_or_else(|| home.join(".bulge/jobs")),
-        harness_dir: harness.unwrap_or_else(|| home.join(".bulge/harness")),
+        store_root: store.unwrap_or(defaults.store_root.clone()),
+        harness_dir: harness.unwrap_or(defaults.harness_dir.clone()),
         autonomy,
         budget: Budget { max_steps, max_tokens: max_model_tokens, max_wall_secs: max_secs },
-        backend: BackendSpec {
-            id: backend_id.unwrap_or(backend_host),
-            base_url,
-            protocol,
-            model,
-            context_window,
-            max_tokens,
-            reasoning,
-        },
         network,
         cpus,
         ram_mib,
-        sampling: bulge_cli::run::Sampling::default(),
-        system_prompt: None,
-        egress_approvals: None,
-        skip_review: false,
         auto_review,
+        host_integrations: true,
+        ..defaults
     })
 }
 
@@ -273,12 +309,12 @@ fn parse_eval(args: &[String]) -> Result<EvalConfig, String> {
     let mut store = None;
     let mut harness = None;
     let mut autonomy = Autonomy::Autonomous;
-    let mut model = "deepseek-chat".to_string();
-    let mut base_url = "https://api.deepseek.com".to_string();
+    let mut model = bulge_runtime::backend::DEFAULT_MODEL.to_string();
+    let mut base_url = bulge_runtime::backend::DEFAULT_BASE_URL.to_string();
     let mut protocol = Protocol::OpenAiChat;
     let mut backend_id: Option<String> = None;
-    let mut context_window: u32 = 128_000;
-    let mut max_tokens: u32 = 8_192;
+    let mut context_window: u32 = bulge_runtime::backend::DEFAULT_CONTEXT_WINDOW;
+    let mut max_tokens: u32 = bulge_runtime::backend::DEFAULT_MAX_TOKENS;
     let mut reasoning = false;
     let mut max_steps: u64 = 200;
     let mut max_model_tokens: u64 = 2_000_000;
@@ -314,17 +350,19 @@ fn parse_eval(args: &[String]) -> Result<EvalConfig, String> {
     }
 
     let tasks_file = tasks_file.ok_or("--tasks is required")?;
-    let home = PathBuf::from(std::env::var("HOME").map_err(|_| "HOME is not set".to_string())?);
-    let backend_host = base_url.trim_start_matches("https://").trim_start_matches("http://").split('/').next().unwrap_or("backend").to_string();
+    let mut backend = BackendSpec { context_window, max_tokens, reasoning, ..BackendSpec::new(base_url, protocol, model) };
+    if let Some(id) = backend_id {
+        backend.id = id;
+    }
 
     Ok(EvalConfig {
         tasks_file,
         workspace_root: workspace_root.unwrap_or_else(std::env::temp_dir),
-        store_root: store.unwrap_or_else(|| home.join(".bulge/jobs")),
-        harness_dir: harness.unwrap_or_else(|| home.join(".bulge/harness")),
+        store_root: match store { Some(store) => store, None => bulge_util::fs::jobs_dir()? },
+        harness_dir: match harness { Some(harness) => harness, None => bulge_util::fs::harness_dir()? },
         autonomy,
         budget: Budget { max_steps, max_tokens: max_model_tokens, max_wall_secs: max_secs },
-        backend: BackendSpec { id: backend_id.unwrap_or(backend_host), base_url, protocol, model, context_window, max_tokens, reasoning },
+        backend,
         network,
         cpus,
         ram_mib,
@@ -359,10 +397,7 @@ fn parse_org_args(args: &[String]) -> Result<(Option<String>, PathBuf), String> 
     }
     let harness = match harness {
         Some(path) => path,
-        None => {
-            let home = std::env::var("HOME").map_err(|_| "HOME is not set".to_string())?;
-            PathBuf::from(home).join(".bulge/harness")
-        }
+        None => bulge_util::fs::harness_dir()?,
     };
     Ok((name, harness))
 }
@@ -509,10 +544,7 @@ fn org_log(args: &[String]) -> Result<(), String> {
 
 /// Current wall-clock time in Unix milliseconds (0 before the epoch).
 fn now_ms() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_millis() as u64)
-        .unwrap_or(0)
+    bulge_util::now_ms()
 }
 
 fn parse_autonomy(value: &str) -> Result<Autonomy, String> {

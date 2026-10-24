@@ -1,3 +1,9 @@
 /target
 /crates/bulge-app/gen/
 /snake/
+
+# Copied from ui/ by each app's build.rs
+crates/bulge-app/dist/palette.js
+crates/bulge-mobile/dist/palette.js
+crates/bulge-app/dist/theme.css
+crates/bulge-mobile/dist/theme.css

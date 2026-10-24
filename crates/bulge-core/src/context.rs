@@ -16,11 +16,13 @@ const BLOCK_OVERHEAD: u64 = 4;
 /// Role-field framing overhead added to every message.
 const ROLE_OVERHEAD: u64 = 4;
 
+/// What one image costs in the heuristic (chars; ≈ 1024 tokens).
+const IMAGE_CHARS: u64 = 4096;
+
 /// Content characters that contribute to the heuristic price of one block.
 ///
 /// Provider replay metadata (`ToolCall::id`, `Reasoning::signature`) is omitted:
-/// it is not model-visible content. Image payloads are included because they are
-/// genuinely sent to the provider.
+/// it is not model-visible content. Images count as a fixed price.
 fn block_chars(block: &ContentBlock) -> u64 {
     match block {
         ContentBlock::Text { text } => char_count(text),
@@ -28,7 +30,9 @@ fn block_chars(block: &ContentBlock) -> u64 {
         ContentBlock::ToolCall {
             name, arguments, ..
         } => char_count(name) + char_count(arguments),
-        ContentBlock::Image { media_type, data } => char_count(media_type) + char_count(data),
+        // Providers bill an image as a bounded number of tokens (DeepSeek
+        // caps it near 1024), not by its base64 length.
+        ContentBlock::Image { .. } => IMAGE_CHARS,
         ContentBlock::ToolAddition { name } | ContentBlock::ToolRemoval { name } => {
             char_count(name)
         }
@@ -84,6 +88,49 @@ impl Default for PruneConfig {
             boundary_step: 8,
         }
     }
+}
+
+/// Result shown for a tool call whose result the log does not have.
+pub const UNANSWERED_CALL_NOTE: &str = "not run: this call was interrupted before it produced a result; its effects are unknown. Check the current state before retrying.";
+
+/// Put every tool result directly after the assistant message that called it,
+/// and answer any call the log has no result for. Providers reject a history
+/// where anything else sits between a call and its results. Logs written by the
+/// current driver already have this shape; older logs and torn writes may not,
+/// and this keeps such a job resumable instead of failing every request.
+/// A result whose call is not in `messages` cannot be sent and is left out.
+pub fn pair_tool_results(messages: Vec<Message>) -> Vec<Message> {
+    let mut results: std::collections::HashMap<String, Message> = std::collections::HashMap::new();
+    for message in &messages {
+        if message.role == Role::Tool
+            && let Some(id) = &message.tool_call_id
+        {
+            results.entry(id.clone()).or_insert_with(|| message.clone());
+        }
+    }
+    let mut out = Vec::with_capacity(messages.len());
+    for message in messages {
+        if message.role == Role::Tool {
+            continue;
+        }
+        let calls: Vec<String> = match message.role {
+            Role::Assistant => message
+                .content
+                .iter()
+                .filter_map(|block| match block {
+                    ContentBlock::ToolCall { id, .. } => Some(id.clone()),
+                    _ => None,
+                })
+                .collect(),
+            _ => Vec::new(),
+        };
+        out.push(message);
+        for id in calls {
+            let result = results.remove(&id).unwrap_or_else(|| Message::tool_result(id, UNANSWERED_CALL_NOTE, true));
+            out.push(result);
+        }
+    }
+    out
 }
 
 /// Return a pruned copy of `messages` when over pressure, else the input as-is.

@@ -16,6 +16,7 @@ thiserror = { workspace = true }
 tokio = { workspace = true, features = ["process", "fs", "rt-multi-thread", "macros", "net", "io-util"] }
 tokio-vsock = "0.7"
 base64 = "0.22"
+tokio-tungstenite = { version = "0.30", default-features = false, features = ["connect"] }
 nix = { version = "0.30", features = ["user", "process", "mount", "sched", "resource", "fs", "signal"] }
 
 # The workspace forbids `unsafe`; sandboxd only denies it, so the three audited

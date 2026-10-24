@@ -17,13 +17,13 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use bulge_core::driver::LoopOutcome;
-use bulge_store::{Autonomy, Budget};
+use bulge_store::Autonomy;
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio_util::sync::CancellationToken;
 
 use crate::backend::{BackendSpec, Protocol};
-use crate::run::{RunConfig, Sampling, Session};
+use crate::run::{RunConfig, Session};
 
 /// The ACP protocol version this agent implements.
 const PROTOCOL_VERSION: u64 = 1;
@@ -125,35 +125,21 @@ async fn new_session(params: Value) -> Result<(String, Session), String> {
 /// Read bulge's model/backend config from the environment (same defaults as the
 /// CLI); the API key is read by the backend from `~/.bulge/keys/<host>`.
 fn acp_run_config(workspace: PathBuf) -> Result<RunConfig, String> {
-    let home = PathBuf::from(std::env::var("HOME").map_err(|_| "HOME is not set".to_string())?);
     let env_or = |key: &str, default: &str| std::env::var(key).unwrap_or_else(|_| default.to_string());
-    let base_url = env_or("BULGE_BASE_URL", "https://api.deepseek.com");
-    let model = env_or("BULGE_MODEL", "deepseek-chat");
+    let base_url = env_or("BULGE_BASE_URL", crate::backend::DEFAULT_BASE_URL);
+    let model = env_or("BULGE_MODEL", crate::backend::DEFAULT_MODEL);
     let protocol = Protocol::parse(&env_or("BULGE_PROTOCOL", "openai"))?;
     let autonomy = match env_or("BULGE_AUTONOMY", "autonomous").as_str() {
         "collaborative" => Autonomy::Collaborative,
         "full-auto" | "full_auto" => Autonomy::FullAuto,
         _ => Autonomy::Autonomous,
     };
-    let host = base_url.trim_start_matches("https://").trim_start_matches("http://").split('/').next().unwrap_or("backend").to_string();
     Ok(RunConfig {
-        job_id: None,
-        goal: String::new(),
         title: "acp".into(),
-        workspace,
-        store_root: home.join(".bulge/jobs"),
-        harness_dir: home.join(".bulge/harness"),
         autonomy,
-        budget: Budget { max_steps: 200, max_tokens: 2_000_000, max_wall_secs: 14_400 },
-        backend: BackendSpec { id: host, base_url, protocol, model, context_window: 128_000, max_tokens: 8_192, reasoning: false },
         network: std::env::var("BULGE_NETWORK").is_ok(),
-        cpus: 2,
-        ram_mib: 1024,
-        sampling: Sampling::default(),
-        system_prompt: None,
-        egress_approvals: None,
-        skip_review: false,
-        auto_review: false,
+        host_integrations: true,
+        ..RunConfig::new(String::new(), workspace, BackendSpec::new(base_url, protocol, model))?
     })
 }
 

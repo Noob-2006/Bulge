@@ -1,7 +1,8 @@
 //! Guest filesystem lockdown, run once before the host connects.
 //!
 //! - `/` (the host-provided rootfs) becomes read-only.
-//! - `/tmp`, `/root`, `/home`, `/run/bulge` are fresh tmpfs.
+//! - `/tmp`, `/root`, `/home`, `/run/bulge` are fresh tmpfs; long tool output
+//!   is saved under `/home/.bulge-spill` (the agent's, mode 700).
 //! - `/workspace` is an overlay: the host share (read-only virtiofs tag
 //!   `workspace`) below, a tmpfs upper above. Every change the guest makes
 //!   stays in the upper dir until the host approves and applies it.
@@ -44,6 +45,12 @@ pub fn lock_down(uid: u32, gid: u32) -> io::Result<()> {
     step(
         "chmod egress socket dir",
         std::fs::set_permissions(crate::bridge::UNIX_PROXY_DIR, std::os::unix::fs::PermissionsExt::from_mode(0o700)),
+    )?;
+    step("create spill dir", std::fs::create_dir_all(crate::tools::handlers::SPILL_DIR))?;
+    step("chown spill dir", chown(crate::tools::handlers::SPILL_DIR, uid, gid))?;
+    step(
+        "chmod spill dir",
+        std::fs::set_permissions(crate::tools::handlers::SPILL_DIR, std::os::unix::fs::PermissionsExt::from_mode(0o700)),
     )?;
     if !is_mountpoint("/run/bulge") {
         step("create /run/bulge", std::fs::create_dir_all("/run/bulge"))?;

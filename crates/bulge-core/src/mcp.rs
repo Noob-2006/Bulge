@@ -36,6 +36,9 @@ const PROTOCOL_VERSION: &str = "2024-11-05";
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
 /// How long the initialize + tools/list handshake may take.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
+/// Default cap on one tool result shown to the model — the same bound the VM
+/// tools apply to their output. Per server: `max_result_bytes` in `mcp.json`.
+pub const DEFAULT_MAX_RESULT_BYTES: usize = 50 * 1024;
 
 /// One MCP server declaration from `mcp.json`.
 #[derive(Debug, Clone, Deserialize)]
@@ -47,6 +50,10 @@ pub struct McpServerConfig {
     pub env: HashMap<String, String>,
     #[serde(default)]
     pub disabled: bool,
+    /// Largest tool result passed to the model; longer ones keep their head and
+    /// tail. Default [`DEFAULT_MAX_RESULT_BYTES`].
+    #[serde(default)]
+    pub max_result_bytes: Option<usize>,
 }
 
 /// The `mcp.json` file. Accepts both `{"mcpServers": {...}}` (the common editor
@@ -87,6 +94,7 @@ pub struct McpClient {
     pending: Pending,
     next_id: AtomicU64,
     tools: Vec<McpTool>,
+    max_result_bytes: usize,
     // Kept so the server process is killed when the client drops.
     _child: Child,
 }
@@ -149,7 +157,7 @@ impl McpClient {
             }
         });
 
-        let client = Arc::new(Self { name: name.to_string(), stdin: Mutex::new(stdin), pending, next_id: AtomicU64::new(1), tools: Vec::new(), _child: child });
+        let client = Arc::new(Self { name: name.to_string(), stdin: Mutex::new(stdin), pending, next_id: AtomicU64::new(1), tools: Vec::new(), max_result_bytes: config.max_result_bytes.unwrap_or(DEFAULT_MAX_RESULT_BYTES), _child: child });
 
         // Handshake, bounded so a silent server can't hang the launch.
         tokio::time::timeout(CONNECT_TIMEOUT, client.handshake())
@@ -197,15 +205,20 @@ impl McpClient {
         Ok(tools)
     }
 
-    /// Call one tool on this server. `cancel` aborts the wait (not the server).
+    /// Call one tool on this server. `cancel` stops the wait and tells the
+    /// server the request is cancelled (MCP `notifications/cancelled`).
     pub async fn call_tool(&self, tool: &str, arguments: Value, cancel: CancellationToken) -> CallOutcome {
         let params = json!({ "name": tool, "arguments": arguments });
+        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let result = tokio::select! {
-            () = cancel.cancelled() => return CallOutcome::Skipped,
-            r = self.request("tools/call", params) => r,
+            () = cancel.cancelled() => {
+                let _ = self.notify("notifications/cancelled", json!({ "requestId": id, "reason": "cancelled by bulge" })).await;
+                return CallOutcome::Skipped;
+            }
+            r = self.request_with_id(id, "tools/call", params) => r,
         };
         match result {
-            Ok(value) => interpret_tool_result(value),
+            Ok(value) => bound_outcome(interpret_tool_result(value), self.max_result_bytes),
             Err(message) => CallOutcome::Err { code: "MCP_CALL_FAILED".into(), message },
         }
     }
@@ -213,20 +226,23 @@ impl McpClient {
     /// Send a JSON-RPC request and await its response (bounded by a timeout).
     async fn request(&self, method: &str, params: Value) -> Result<Value, String> {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+        self.request_with_id(id, method, params).await
+    }
+
+    /// [`Self::request`] with a caller-chosen id. If this future is dropped
+    /// before the response (cancel), its waiter is removed from `pending`.
+    async fn request_with_id(&self, id: u64, method: &str, params: Value) -> Result<Value, String> {
         let (tx, rx) = oneshot::channel();
         self.pending.lock().await.insert(id, tx);
+        let _forget = ForgetOnDrop { pending: self.pending.clone(), id };
         let line = json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params }).to_string();
         if let Err(e) = self.write_line(&line).await {
-            self.pending.lock().await.remove(&id);
             return Err(format!("write failed: {e}"));
         }
         match tokio::time::timeout(REQUEST_TIMEOUT, rx).await {
             Ok(Ok(result)) => result,
             Ok(Err(_)) => Err("request channel closed".into()),
-            Err(_) => {
-                self.pending.lock().await.remove(&id);
-                Err(format!("{method} timed out"))
-            }
+            Err(_) => Err(format!("{method} timed out")),
         }
     }
 
@@ -346,6 +362,65 @@ fn interpret_tool_result(result: Value) -> CallOutcome {
     }
 }
 
+/// Removes a request's waiter from `pending` when the request ends for any
+/// reason (answered entries are already gone; removal is then a no-op).
+struct ForgetOnDrop {
+    pending: Pending,
+    id: u64,
+}
+
+impl Drop for ForgetOnDrop {
+    fn drop(&mut self) {
+        let (pending, id) = (self.pending.clone(), self.id);
+        if let Ok(mut map) = pending.try_lock() {
+            map.remove(&id);
+        } else if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+            runtime.spawn(async move {
+                pending.lock().await.remove(&id);
+            });
+        }
+    }
+}
+
+/// Cap a tool result at `max_bytes`, keeping its head and tail. The model is
+/// told how much was left out.
+fn bound_outcome(outcome: CallOutcome, max_bytes: usize) -> CallOutcome {
+    match outcome {
+        CallOutcome::Ok(Value::Object(map)) if map.len() == 1 && map.get("text").is_some_and(Value::is_string) => {
+            let text = map["text"].as_str().unwrap_or_default();
+            CallOutcome::Ok(json!({ "text": bound_text(text, max_bytes) }))
+        }
+        CallOutcome::Ok(value) => {
+            let rendered = value.to_string();
+            if rendered.len() <= max_bytes { CallOutcome::Ok(value) } else { CallOutcome::Ok(json!({ "text": bound_text(&rendered, max_bytes) })) }
+        }
+        CallOutcome::Err { code, message } => CallOutcome::Err { code, message: bound_text(&message, max_bytes) },
+        other => other,
+    }
+}
+
+fn bound_text(text: &str, max_bytes: usize) -> String {
+    if text.len() <= max_bytes {
+        return text.to_string();
+    }
+    let floor = |mut i: usize| {
+        while !text.is_char_boundary(i) {
+            i -= 1;
+        }
+        i
+    };
+    let ceil = |mut i: usize| {
+        while !text.is_char_boundary(i) {
+            i += 1;
+        }
+        i
+    };
+    let head = floor(max_bytes / 2);
+    let tail = ceil(text.len() - (max_bytes - max_bytes / 2));
+    let omitted = tail - head;
+    format!("{}\n[... {omitted} bytes of this result omitted (limit {max_bytes}) ...]\n{}", &text[..head], &text[tail..])
+}
+
 /// A readable message from a JSON-RPC error object.
 fn rpc_error_message(err: &Value) -> String {
     let message = err.get("message").and_then(Value::as_str).unwrap_or("error");
@@ -358,6 +433,21 @@ fn rpc_error_message(err: &Value) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn long_results_keep_head_and_tail() {
+        let text = format!("{}{}", "a".repeat(10_000), "z".repeat(10_000));
+        let CallOutcome::Ok(value) = bound_outcome(CallOutcome::Ok(json!({ "text": text })), 1000) else { panic!() };
+        let shown = value["text"].as_str().unwrap();
+        assert!(shown.len() < 1200, "{}", shown.len());
+        assert!(shown.starts_with("aaa") && shown.ends_with("zzz") && shown.contains("19000 bytes"));
+        // Multi-byte text is cut on character boundaries.
+        let wide = "測".repeat(1000);
+        let CallOutcome::Ok(value) = bound_outcome(CallOutcome::Ok(json!({ "text": wide })), 101) else { panic!() };
+        assert!(value["text"].as_str().unwrap().contains("omitted"));
+        // Small results are untouched.
+        assert_eq!(bound_outcome(CallOutcome::Ok(json!({ "text": "ok" })), 1000), CallOutcome::Ok(json!({ "text": "ok" })));
+    }
 
     #[test]
     fn config_accepts_both_keys() {

@@ -8,5 +8,7 @@
 
 pub mod net;
 pub mod changes;
+pub mod review;
+pub mod writeback;
 pub mod slots;
 pub mod vm;
