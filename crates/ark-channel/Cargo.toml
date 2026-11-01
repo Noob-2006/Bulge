@@ -1,0 +1,12 @@
+[package]
+name = "ark-channel"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+ark-core.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+ureq.workspace = true
+libc.workspace = true

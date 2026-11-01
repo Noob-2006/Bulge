@@ -1,0 +1,32 @@
+[workspace]
+resolver = "2"
+members = ["crates/ark-core", "crates/ark-kernel", "crates/ark-model", "crates/ark-tools", "crates/ark-plugin", "crates/ark-channel", "crates/ark"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+rust-version = "1.80"
+
+# Dependency budget (see 架構設計-v0.md §6). Every entry needs a reason.
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }          # serialization of every event / protocol type
+serde_json = "1"                                          # JSON-RPC, JSONL log, provider wire formats
+toml = { version = "0.9", default-features = false, features = ["parse", "display", "serde"] } # human config
+ureq = { version = "3", default-features = false, features = ["rustls"] } # blocking HTTP+TLS, smallest tree
+regex = { version = "1", default-features = false, features = ["std", "unicode-perl", "unicode-case"] } # grep tool, secret patterns
+libc = "0.2"                                              # process groups / signals for shell kill
+
+ark-core = { path = "crates/ark-core" }
+ark-kernel = { path = "crates/ark-kernel" }
+ark-model = { path = "crates/ark-model" }
+ark-tools = { path = "crates/ark-tools" }
+ark-plugin = { path = "crates/ark-plugin" }
+ark-channel = { path = "crates/ark-channel" }
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+strip = true
+panic = "abort"

@@ -1,0 +1,431 @@
+//! Append-only JSONL session store with crash repair and single-writer locking.
+
+use crate::event::{now_ms, Event, EventKind, LOG_VERSION};
+use std::fs::{self, File, OpenOptions};
+use std::io::{BufRead, BufReader, Seek, SeekFrom, Write};
+use std::os::unix::io::AsRawFd;
+use std::path::{Path, PathBuf};
+
+#[derive(Debug)]
+pub enum StoreError {
+    Io(std::io::Error),
+    /// Another process holds the session's write lock.
+    Locked(String),
+    NotFound(String),
+    /// A line in the middle of the log does not parse. Never silently skipped.
+    Corrupt { line: usize, reason: String },
+    Version(u32),
+}
+
+impl std::fmt::Display for StoreError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            StoreError::Io(e) => write!(f, "io: {e}"),
+            StoreError::Locked(id) => write!(f, "session {id} is in use by another ark process"),
+            StoreError::NotFound(id) => write!(f, "session {id} not found"),
+            StoreError::Corrupt { line, reason } => write!(f, "event log corrupt at line {line}: {reason}"),
+            StoreError::Version(v) => write!(f, "event log version {v} is newer than this ark ({LOG_VERSION})"),
+        }
+    }
+}
+impl std::error::Error for StoreError {}
+impl From<std::io::Error> for StoreError {
+    fn from(e: std::io::Error) -> Self {
+        StoreError::Io(e)
+    }
+}
+
+pub struct Store {
+    root: PathBuf,
+    /// fsync every append (durability) — on by default; tests may turn it off.
+    pub sync: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct SessionInfo {
+    pub id: String,
+    pub workspace: String,
+    pub model: String,
+    pub parent: Option<String>,
+    pub title: Option<String>,
+    pub created_ms: u64,
+    pub updated_ms: u64,
+    pub messages: usize,
+}
+
+#[derive(Debug, Clone)]
+pub struct SearchHit {
+    pub session: String,
+    pub seq: u64,
+    pub snippet: String,
+}
+
+impl Store {
+    pub fn new(root: impl Into<PathBuf>) -> Self {
+        Store { root: root.into(), sync: true }
+    }
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+    pub fn dir(&self, id: &str) -> PathBuf {
+        self.root.join(id)
+    }
+    pub fn exists(&self, id: &str) -> bool {
+        valid_id(id) && self.dir(id).join("events.jsonl").is_file()
+    }
+
+    pub fn create(&self, header: EventKind) -> Result<SessionLog, StoreError> {
+        let id = match &header {
+            EventKind::Header { session_id, .. } => session_id.clone(),
+            _ => panic!("create() needs a Header event"),
+        };
+        if !valid_id(&id) {
+            return Err(StoreError::NotFound(id));
+        }
+        let dir = self.dir(&id);
+        fs::create_dir_all(dir.join("artifacts"))?;
+        let path = dir.join("events.jsonl");
+        let file = OpenOptions::new().create_new(true).append(true).read(true).open(&path)?;
+        lock(&file, &id)?;
+        let mut log = SessionLog { id, dir, file, events: Vec::new(), sync: self.sync };
+        log.append(header)?;
+        Ok(log)
+    }
+
+    pub fn open(&self, id: &str) -> Result<SessionLog, StoreError> {
+        if !self.exists(id) {
+            return Err(StoreError::NotFound(id.to_string()));
+        }
+        let dir = self.dir(id);
+        let path = dir.join("events.jsonl");
+        let mut file = OpenOptions::new().read(true).append(true).open(&path)?;
+        lock(&file, id)?;
+        let events = read_events(&mut file, true)?;
+        Ok(SessionLog { id: id.to_string(), dir, file, events, sync: self.sync })
+    }
+
+    /// Read without taking the write lock (for listing / display while a session runs).
+    pub fn read(&self, id: &str) -> Result<Vec<Event>, StoreError> {
+        if !self.exists(id) {
+            return Err(StoreError::NotFound(id.to_string()));
+        }
+        let mut f = File::open(self.dir(id).join("events.jsonl"))?;
+        read_events(&mut f, false)
+    }
+
+    pub fn list(&self) -> Vec<SessionInfo> {
+        let mut out = Vec::new();
+        let Ok(rd) = fs::read_dir(&self.root) else { return out };
+        for e in rd.flatten() {
+            let id = e.file_name().to_string_lossy().to_string();
+            let Ok(events) = self.read(&id) else { continue };
+            let Some(first) = events.first() else { continue };
+            if let EventKind::Header { workspace, model, parent, title, .. } = &first.kind {
+                out.push(SessionInfo {
+                    id,
+                    workspace: workspace.clone(),
+                    model: model.clone(),
+                    parent: parent.clone(),
+                    title: title.clone(),
+                    created_ms: first.ts,
+                    updated_ms: events.last().map(|e| e.ts).unwrap_or(first.ts),
+                    messages: events.iter().filter(|e| e.is_message()).count(),
+                });
+            }
+        }
+        out.sort_by_key(|s| std::cmp::Reverse(s.updated_ms));
+        out
+    }
+
+    /// Case-insensitive substring search over message text (works for CJK).
+    pub fn search(&self, query: &str, limit: usize) -> Vec<SearchHit> {
+        let q = query.to_lowercase();
+        let mut hits = Vec::new();
+        if q.trim().is_empty() || limit == 0 {
+            return hits;
+        }
+        for info in self.list() {
+            let Ok(events) = self.read(&info.id) else { continue };
+            for ev in events.iter().rev() {
+                if let EventKind::Message { message, .. } = &ev.kind {
+                    let text = message.text();
+                    let lower = text.to_lowercase();
+                    if let Some(pos) = lower.find(&q) {
+                        hits.push(SearchHit { session: info.id.clone(), seq: ev.seq, snippet: snippet(&lower, &text, pos, q.len()) });
+                        if hits.len() >= limit {
+                            return hits;
+                        }
+                    }
+                }
+            }
+        }
+        hits
+    }
+
+    pub fn remove(&self, id: &str) -> Result<(), StoreError> {
+        let log = self.open(id)?; // refuses while another process holds it
+        drop(log);
+        fs::remove_dir_all(self.dir(id))?;
+        Ok(())
+    }
+}
+
+fn snippet(lower: &str, orig: &str, pos: usize, qlen: usize) -> String {
+    // `lower` and `orig` may differ in byte length for some scripts; fall back to lower.
+    let src = if lower.len() == orig.len() { orig } else { lower };
+    let mut a = pos.saturating_sub(60);
+    while !src.is_char_boundary(a) {
+        a -= 1;
+    }
+    let mut b = (pos + qlen + 60).min(src.len());
+    while !src.is_char_boundary(b) {
+        b += 1;
+    }
+    src[a..b].replace('\n', " ")
+}
+
+fn valid_id(id: &str) -> bool {
+    !id.is_empty() && id.len() <= 64 && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+}
+
+/// Take the exclusive write lock. Retries briefly: a forked child (shell tool,
+/// git) holds inherited fds until its exec closes them, which would otherwise
+/// look like "in use by another process" for a few microseconds.
+fn lock(f: &File, id: &str) -> Result<(), StoreError> {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(1500);
+    loop {
+        // SAFETY: flock on a valid fd owned by `f`; released when the fd closes.
+        if unsafe { libc::flock(f.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
+            return Ok(());
+        }
+        let err = std::io::Error::last_os_error();
+        if err.raw_os_error() != Some(libc::EWOULDBLOCK) {
+            return Err(err.into());
+        }
+        if std::time::Instant::now() >= deadline {
+            return Err(StoreError::Locked(id.to_string()));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+}
+
+/// Parse a log. A torn final line (crash mid-write) is dropped — and truncated
+/// from disk when `repair` — but corruption anywhere else is an error.
+fn read_events(file: &mut File, repair: bool) -> Result<Vec<Event>, StoreError> {
+    file.seek(SeekFrom::Start(0))?;
+    let mut reader = BufReader::new(&*file);
+    let mut events: Vec<Event> = Vec::new();
+    let mut good_len: u64 = 0;
+    let mut line_no = 0;
+    let mut buf = Vec::new();
+    loop {
+        buf.clear();
+        let n = reader.read_until(b'\n', &mut buf)?;
+        if n == 0 {
+            break;
+        }
+        line_no += 1;
+        let complete = buf.last() == Some(&b'\n');
+        let text = String::from_utf8_lossy(&buf);
+        let trimmed = text.trim();
+        if trimmed.is_empty() {
+            good_len += n as u64;
+            continue;
+        }
+        match serde_json::from_str::<Event>(trimmed) {
+            Ok(ev) if complete => {
+                if let EventKind::Header { version, .. } = &ev.kind {
+                    if *version > LOG_VERSION {
+                        return Err(StoreError::Version(*version));
+                    }
+                }
+                if let Some(prev) = events.last() {
+                    if ev.seq != prev.seq + 1 {
+                        return Err(StoreError::Corrupt { line: line_no, reason: format!("seq {} after {}", ev.seq, prev.seq) });
+                    }
+                }
+                events.push(ev);
+                good_len += n as u64;
+            }
+            // Incomplete last line, whether or not it happens to parse: torn write.
+            _ if !complete => break,
+            Err(e) => {
+                // A complete but unparseable line is only tolerated if it is the last one.
+                let mut rest = Vec::new();
+                reader.read_until(b'\n', &mut rest)?;
+                if rest.iter().all(|b| b.is_ascii_whitespace()) {
+                    break;
+                }
+                return Err(StoreError::Corrupt { line: line_no, reason: e.to_string() });
+            }
+            Ok(_) => unreachable!(),
+        }
+    }
+    if repair && file.metadata()?.len() != good_len {
+        file.set_len(good_len)?;
+        file.sync_all()?;
+    }
+    Ok(events)
+}
+
+pub struct SessionLog {
+    pub id: String,
+    pub dir: PathBuf,
+    file: File,
+    events: Vec<Event>,
+    sync: bool,
+}
+
+impl SessionLog {
+    pub fn events(&self) -> &[Event] {
+        &self.events
+    }
+    pub fn artifacts(&self) -> PathBuf {
+        self.dir.join("artifacts")
+    }
+    pub fn next_seq(&self) -> u64 {
+        self.events.last().map(|e| e.seq + 1).unwrap_or(0)
+    }
+    pub fn append(&mut self, kind: EventKind) -> Result<Event, StoreError> {
+        let ev = Event { seq: self.next_seq(), ts: now_ms(), kind };
+        let mut line = serde_json::to_vec(&ev).map_err(|e| StoreError::Io(std::io::Error::other(e)))?;
+        line.push(b'\n');
+        self.file.write_all(&line)?;
+        if self.sync {
+            self.file.sync_data()?;
+        }
+        self.events.push(ev.clone());
+        Ok(ev)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ark_core::Message;
+
+    fn tmp() -> Store {
+        let mut s = Store::new(std::env::temp_dir().join(format!("ark-store-{}", crate::util::random_hex(10))));
+        s.sync = false;
+        s
+    }
+    fn header(id: &str) -> EventKind {
+        EventKind::Header { version: LOG_VERSION, session_id: id.into(), workspace: "/w".into(), model: "m".into(), parent: None, title: None }
+    }
+    fn msg(t: &str) -> EventKind {
+        EventKind::Message { message: Message::user(t), usage: None, model: None, inbox: None }
+    }
+
+    #[test]
+    fn create_append_reopen() {
+        let s = tmp();
+        let mut log = s.create(header("a1")).unwrap();
+        log.append(msg("hello 世界")).unwrap();
+        drop(log);
+        let log = s.open("a1").unwrap();
+        assert_eq!(log.events().len(), 2);
+        assert_eq!(log.next_seq(), 2);
+        assert_eq!(s.list()[0].messages, 1);
+    }
+
+    #[test]
+    fn second_writer_is_refused() {
+        let s = tmp();
+        let _log = s.create(header("a2")).unwrap();
+        match s.open("a2") {
+            Err(StoreError::Locked(_)) => {}
+            other => panic!("expected Locked, got {:?}", other.err()),
+        }
+        // Readers are fine while locked.
+        assert_eq!(s.read("a2").unwrap().len(), 1);
+    }
+
+    #[test]
+    fn torn_tail_is_repaired() {
+        let s = tmp();
+        let mut log = s.create(header("a3")).unwrap();
+        log.append(msg("one")).unwrap();
+        drop(log);
+        let p = s.dir("a3").join("events.jsonl");
+        let mut f = OpenOptions::new().append(true).open(&p).unwrap();
+        f.write_all(br#"{"seq":2,"ts":1,"type":"mess"#).unwrap();
+        drop(f);
+        let mut log = s.open("a3").unwrap();
+        assert_eq!(log.events().len(), 2);
+        log.append(msg("two")).unwrap();
+        drop(log);
+        let log = s.open("a3").unwrap();
+        assert_eq!(log.events().len(), 3);
+        assert_eq!(log.events()[2].seq, 2);
+    }
+
+    #[test]
+    fn complete_but_garbage_last_line_is_dropped() {
+        let s = tmp();
+        drop(s.create(header("a4")).unwrap());
+        let p = s.dir("a4").join("events.jsonl");
+        let mut f = OpenOptions::new().append(true).open(&p).unwrap();
+        f.write_all(b"not json\n").unwrap();
+        drop(f);
+        assert_eq!(s.open("a4").unwrap().events().len(), 1);
+    }
+
+    #[test]
+    fn mid_file_corruption_is_an_error() {
+        let s = tmp();
+        let mut log = s.create(header("a5")).unwrap();
+        log.append(msg("x")).unwrap();
+        drop(log);
+        let p = s.dir("a5").join("events.jsonl");
+        let content = fs::read_to_string(&p).unwrap();
+        let broken = content.replacen("\"type\":\"header\"", "\"type\":\"heade", 1);
+        fs::write(&p, broken).unwrap();
+        assert!(matches!(s.open("a5"), Err(StoreError::Corrupt { line: 1, .. })));
+    }
+
+    #[test]
+    fn seq_gap_is_corruption() {
+        let s = tmp();
+        let mut log = s.create(header("a6")).unwrap();
+        log.append(msg("x")).unwrap();
+        log.append(msg("y")).unwrap();
+        drop(log);
+        let p = s.dir("a6").join("events.jsonl");
+        let lines: Vec<String> = fs::read_to_string(&p).unwrap().lines().map(String::from).collect();
+        fs::write(&p, format!("{}\n{}\n", lines[0], lines[2])).unwrap();
+        assert!(matches!(s.open("a6"), Err(StoreError::Corrupt { .. })));
+    }
+
+    #[test]
+    fn newer_version_refused_and_bad_ids_rejected() {
+        let s = tmp();
+        let h = EventKind::Header { version: 99, session_id: "a7".into(), workspace: "/".into(), model: "m".into(), parent: None, title: None };
+        drop(s.create(h).unwrap());
+        assert!(matches!(s.open("a7"), Err(StoreError::Version(99))));
+        assert!(matches!(s.open("../etc"), Err(StoreError::NotFound(_))));
+        assert!(matches!(s.open("missing"), Err(StoreError::NotFound(_))));
+    }
+
+    #[test]
+    fn search_finds_cjk_and_respects_limit() {
+        let s = tmp();
+        let mut log = s.create(header("a8")).unwrap();
+        log.append(msg("部署到正式環境")).unwrap();
+        log.append(msg("Deploy again")).unwrap();
+        drop(log);
+        assert_eq!(s.search("正式", 10).len(), 1);
+        assert_eq!(s.search("DEPLOY", 10).len(), 1);
+        assert_eq!(s.search("", 10).len(), 0);
+        assert_eq!(s.search("部署", 0).len(), 0);
+    }
+
+    #[test]
+    fn remove_refuses_locked_session() {
+        let s = tmp();
+        let log = s.create(header("a9")).unwrap();
+        assert!(matches!(s.remove("a9"), Err(StoreError::Locked(_))));
+        drop(log);
+        s.remove("a9").unwrap();
+        assert!(!s.exists("a9"));
+    }
+}

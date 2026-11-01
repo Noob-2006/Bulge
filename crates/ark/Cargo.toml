@@ -1,0 +1,21 @@
+[package]
+name = "ark"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "ark"
+path = "src/main.rs"
+
+[dependencies]
+ark-core.workspace = true
+ark-kernel.workspace = true
+ark-model.workspace = true
+ark-tools.workspace = true
+ark-plugin.workspace = true
+ark-channel.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+toml.workspace = true
+libc.workspace = true
