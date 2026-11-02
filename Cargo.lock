@@ -15,16 +15,36 @@ dependencies = [
 name = "ark"
 version = "0.1.0"
 dependencies = [
+ "ark-app",
  "ark-channel",
  "ark-core",
  "ark-kernel",
  "ark-model",
+ "ark-net",
  "ark-plugin",
  "ark-tools",
  "libc",
  "serde",
  "serde_json",
  "toml",
+ "ureq",
+]
+
+[[package]]
+name = "ark-app"
+version = "0.1.0"
+dependencies = [
+ "ark-core",
+ "ark-kernel",
+ "ark-net",
+ "ark-plugin",
+ "ark-tools",
+ "libc",
+ "ring",
+ "serde",
+ "serde_json",
+ "toml",
+ "ureq",
 ]
 
 [[package]]
@@ -32,7 +52,10 @@ name = "ark-channel"
 version = "0.1.0"
 dependencies = [
  "ark-core",
+ "ark-net",
+ "base64",
  "libc",
+ "ring",
  "serde",
  "serde_json",
  "ureq",
@@ -69,10 +92,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "ark-net"
+version = "0.1.0"
+dependencies = [
+ "base64",
+ "ring",
+ "rustls",
+ "webpki-roots",
+]
+
+[[package]]
 name = "ark-plugin"
 version = "0.1.0"
 dependencies = [
  "ark-core",
+ "ark-net",
  "libc",
  "serde",
  "serde_json",

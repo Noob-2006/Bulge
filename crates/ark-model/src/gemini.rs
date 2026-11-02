@@ -3,7 +3,7 @@
 //! before the `ToolUse` they belong to.
 
 use crate::http::{json, truncated};
-use crate::{caps_for, classify, finalize_usage, Conn};
+use crate::{caps_for, classify, finalize_usage, thinking_budget, Conn};
 use ark_core::*;
 use serde_json::{json, Value};
 use std::collections::HashMap;
@@ -34,6 +34,7 @@ impl Gemini {
             for b in &m.content {
                 match b {
                     Block::Text { text } if !text.is_empty() => parts.push(json!({"text": text})),
+                    Block::Image { media_type, data } => parts.push(json!({"inlineData": {"mimeType": media_type, "data": data}})),
                     Block::Thinking { signature: Some(s), .. } => pending_sig = Some(s),
                     Block::ToolUse { name, input, .. } => {
                         let mut p = json!({"functionCall": {"name": name, "args": input}});
@@ -59,6 +60,11 @@ impl Gemini {
         let mut gen = json!({"maxOutputTokens": req.max_tokens});
         if let Some(t) = req.temperature {
             gen["temperature"] = t.into();
+        }
+        match (req.reasoning.as_deref(), thinking_budget(req.reasoning.as_deref())) {
+            (_, Some(n)) => gen["thinkingConfig"] = json!({"thinkingBudget": n, "includeThoughts": true}),
+            (Some("off"), None) => gen["thinkingConfig"] = json!({"thinkingBudget": 0}),
+            _ => {}
         }
         let mut b = json!({"contents": contents, "generationConfig": gen});
         let sys = req.system_text();

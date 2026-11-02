@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#330716">
+<title>ark</title>
+<link rel="manifest" href="/manifest.webmanifest">
+<link rel="icon" href="/ui/star.svg" type="image/svg+xml">
+<link rel="stylesheet" href="/ui/theme.css">
+<link rel="stylesheet" href="/ui/app.css">
+</head>
+<body>
+<div class="starfield" id="starfield" aria-hidden="true"></div>
+
+<div class="shell">
+  <aside class="side panel cornered" id="side">
+    <span class="star corner tl"></span><span class="star corner tr"></span><span class="star corner bl"></span><span class="star corner br"></span>
+    <header class="brand">
+      <span class="star twinkle logo" style="--size:26px"></span>
+      <div>
+        <div class="brand-name">ark</div>
+        <div class="brand-sub" id="conn">尚未連線</div>
+      </div>
+    </header>
+    <button class="btn new" id="newSession">＋ 新對話</button>
+    <nav class="sessions" id="sessions" aria-label="對話清單"></nav>
+    <nav class="plugin-panels" id="pluginPanels" aria-label="外掛面板"></nav>
+    <footer class="side-foot">
+      <button class="btn ghost small" id="showNodes">裝置</button>
+      <button class="btn ghost small" id="showSettings">設定</button>
+    </footer>
+  </aside>
+
+  <main class="main">
+    <header class="topbar">
+      <button class="btn ghost small menu" id="menu" aria-label="開關側欄">☰</button>
+      <div class="title" id="title">選擇或建立一個對話</div>
+      <div class="status" id="status"></div>
+    </header>
+
+    <section class="log" id="log" aria-live="polite"></section>
+
+    <section class="pending" id="pending"></section>
+
+    <form class="composer panel cornered" id="composer">
+      <span class="star corner tl"></span><span class="star corner tr"></span><span class="star corner bl"></span><span class="star corner br"></span>
+      <textarea id="input" rows="1" placeholder="輸入訊息…" title="Enter 送出，Shift+Enter 換行" autocomplete="off"></textarea>
+      <div class="composer-actions">
+        <button type="button" class="btn ghost small" id="stop" hidden>停止</button>
+        <button type="submit" class="btn" id="send">送出</button>
+      </div>
+    </form>
+  </main>
+</div>
+
+<dialog id="login" class="panel cornered">
+  <span class="star corner tl"></span><span class="star corner tr"></span><span class="star corner bl"></span><span class="star corner br"></span>
+  <form method="dialog" id="loginForm">
+    <div class="dialog-head"><span class="star spin" style="--size:22px"></span><h2>連線到 ark</h2></div>
+    <p class="dim">輸入 App Server 的 token（<code>ark app token</code> 會顯示）。</p>
+    <input id="token" type="password" autocomplete="current-password" placeholder="token" required>
+    <label class="check"><input type="checkbox" id="remember" checked> 記住這台裝置</label>
+    <menu><button class="btn" value="ok">連線</button></menu>
+  </form>
+</dialog>
+
+<dialog id="panelDialog" class="panel cornered wide">
+  <span class="star corner tl"></span><span class="star corner tr"></span><span class="star corner bl"></span><span class="star corner br"></span>
+  <div class="dialog-head"><h2 id="panelTitle"></h2><button class="btn ghost small" id="panelClose">關閉</button></div>
+  <div id="panelBody"></div>
+</dialog>
+
+<template id="tpl-msg">
+  <article class="msg"><div class="who"></div><div class="body"></div></article>
+</template>
+
+<script src="/ui/app.js"></script>
+</body>
+</html>

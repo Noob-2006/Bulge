@@ -11,6 +11,8 @@ pub struct Req {
     pub path: String,
     pub headers: Vec<(String, String)>,
     pub body: String,
+    #[allow(dead_code)]
+    pub raw: Vec<u8>,
 }
 
 impl Req {
@@ -23,6 +25,7 @@ impl Req {
 }
 
 pub type Reply = (u16, Vec<(String, String)>, String);
+pub type RawReply = (u16, Vec<(String, String)>, Vec<u8>);
 
 pub struct FakeServer {
     pub url: String,
@@ -31,6 +34,13 @@ pub struct FakeServer {
 
 impl FakeServer {
     pub fn start(handler: impl Fn(&Req, usize) -> Reply + Send + 'static) -> FakeServer {
+        FakeServer::start_raw(move |r, n| {
+            let (s, h, b) = handler(r, n);
+            (s, h, b.into_bytes())
+        })
+    }
+    /// Binary request/response bodies (media).
+    pub fn start_raw(handler: impl Fn(&Req, usize) -> RawReply + Send + 'static) -> FakeServer {
         let l = TcpListener::bind("127.0.0.1:0").unwrap();
         let url = format!("http://{}", l.local_addr().unwrap());
         let seen = Arc::new(Mutex::new(Vec::new()));
@@ -64,7 +74,7 @@ impl FakeServer {
                 }
                 let mut body = vec![0; len];
                 r.read_exact(&mut body).unwrap();
-                let req = Req { method, path, headers, body: String::from_utf8_lossy(&body).into_owned() };
+                let req = Req { method, path, headers, body: String::from_utf8_lossy(&body).into_owned(), raw: body };
                 let n = {
                     let mut g = s2.lock().unwrap();
                     g.push(req.clone());
@@ -76,8 +86,9 @@ impl FakeServer {
                     out.push_str(&format!("{k}: {v}\r\n"));
                 }
                 out.push_str("\r\n");
-                out.push_str(&body);
-                let _ = stream.write_all(out.as_bytes());
+                let mut bytes = out.into_bytes();
+                bytes.extend_from_slice(&body);
+                let _ = stream.write_all(&bytes);
             }
         });
         FakeServer { url, seen }

@@ -73,8 +73,8 @@ impl Tool for ChannelSend {
             return ToolOutput::err(format!("pass `chat`: channel `{name}` has no default_chat"));
         };
         // Secrets are deliberately NOT substituted: humans' chats are outside the vault's trust boundary.
-        match target.channel.send(&Outbound { chat: chat.clone(), text: text.to_string(), reply_to: None }) {
-            Ok(()) => ToolOutput::ok(format!("sent {} chars to {name}/{chat}", text.chars().count())),
+        match target.channel.send(&Outbound::text(&chat, text)) {
+            Ok(_) => ToolOutput::ok(format!("sent {} chars to {name}/{chat}", text.chars().count())),
             Err(e) => ToolOutput::err(format!("send to {name}/{chat} failed: {e}")),
         }
     }
@@ -96,12 +96,12 @@ mod tests {
         fn poll(&self, _: &Cancel) -> Result<Vec<Inbound>, ChannelError> {
             Ok(vec![])
         }
-        fn send(&self, o: &Outbound) -> Result<(), ChannelError> {
+        fn send(&self, o: &Outbound) -> Result<crate::Sent, ChannelError> {
             if self.1 {
                 return Err(ChannelError::new(ChannelErrorKind::Auth, "revoked"));
             }
             self.0.lock().unwrap().push(o.clone());
-            Ok(())
+            Ok(crate::Sent::default())
         }
     }
     struct NoHost;

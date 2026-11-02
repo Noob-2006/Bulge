@@ -121,12 +121,13 @@ impl Store {
             let Ok(events) = self.read(&id) else { continue };
             let Some(first) = events.first() else { continue };
             if let EventKind::Header { workspace, model, parent, title, .. } = &first.kind {
+                let title = events.iter().rev().find_map(|e| if let EventKind::Title { title } = &e.kind { Some(title.clone()) } else { None }).or_else(|| title.clone());
                 out.push(SessionInfo {
                     id,
                     workspace: workspace.clone(),
                     model: model.clone(),
                     parent: parent.clone(),
-                    title: title.clone(),
+                    title,
                     created_ms: first.ts,
                     updated_ms: events.last().map(|e| e.ts).unwrap_or(first.ts),
                     messages: events.iter().filter(|e| e.is_message()).count(),

@@ -3,7 +3,7 @@ use ark_core::tool::{arg_opt_bool, arg_opt_u64, arg_str};
 use ark_core::{Effect, Tool, ToolCtx, ToolOutput, ToolSpec};
 use serde_json::{json, Value};
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 const MAX_LINE: usize = 2000;
 const DEFAULT_LIMIT: u64 = 2000;
@@ -263,6 +263,41 @@ impl Tool for Edit {
 
 pub struct Patch;
 
+fn resolve_in(ws: &Path, p: &str) -> PathBuf {
+    let p = ark_core::tool::expand_home(p);
+    if p.is_absolute() {
+        p
+    } else {
+        ws.join(p)
+    }
+}
+
+/// What a `write` / `edit` / `patch` call would change, without writing anything:
+/// (path, current text — None for a new file, text after the call).
+pub fn preview(ws: &Path, tool: &str, input: &Value) -> Result<Vec<(PathBuf, Option<String>, String)>, String> {
+    let mut input = input.clone();
+    match tool {
+        "write" => {
+            crate::util::alias(&mut input, "path", &["file", "file_path", "filename"]);
+            let p = resolve_in(ws, arg_str(&input, "path")?);
+            let old = if p.exists() { Some(read_text(&p)?) } else { None };
+            Ok(vec![(p, old, arg_str(&input, "content")?.to_string())])
+        }
+        "edit" => {
+            edit_aliases(&mut input);
+            let (p, old, new) = (resolve_in(ws, arg_str(&input, "path")?), arg_str(&input, "old_string")?, arg_str(&input, "new_string")?);
+            if old.is_empty() && !p.exists() {
+                return Ok(vec![(p, None, new.to_string())]);
+            }
+            let text = read_text(&p)?;
+            let (out, _) = apply_edit(&text, old, new, arg_opt_bool(&input, "replace_all").unwrap_or(false))?;
+            Ok(vec![(p, Some(text), out)])
+        }
+        "patch" => Ok(Patch::plan(ws, &input)?.into_iter().map(|f| (f.path, (!f.created).then_some(f.original), f.updated)).collect()),
+        t => Err(format!("`{t}` does not edit files")),
+    }
+}
+
 struct PlannedFile {
     path: PathBuf,
     original: String,
@@ -295,7 +330,7 @@ fn patch_edits(input: &Value) -> Option<Vec<Value>> {
 }
 
 impl Patch {
-    fn plan(ctx: &ToolCtx, input: &Value) -> Result<Vec<PlannedFile>, String> {
+    fn plan(ws: &Path, input: &Value) -> Result<Vec<PlannedFile>, String> {
         let edits = patch_edits(input).ok_or("missing array argument `edits`")?;
         if edits.is_empty() {
             return Err("`edits` is empty".into());
@@ -303,7 +338,7 @@ impl Patch {
         let mut files: Vec<PlannedFile> = Vec::new();
         for (i, e) in edits.iter().enumerate() {
             let (p, old, new) = match (arg_str(e, "path"), arg_str(e, "old_string"), arg_str(e, "new_string")) {
-                (Ok(p), Ok(o), Ok(n)) => (ctx.resolve(p), o, n),
+                (Ok(p), Ok(o), Ok(n)) => (resolve_in(ws, p), o, n),
                 (Err(err), _, _) | (_, Err(err), _) | (_, _, Err(err)) => return Err(format!("edit #{}: {err}", i + 1)),
             };
             let idx = match files.iter().position(|f| f.path == p) {
@@ -325,7 +360,7 @@ impl Patch {
             };
             let f = &mut files[idx];
             f.updated = apply_edit(&f.updated, old, new, false)
-                .map_err(|err| format!("edit #{} ({}): {err}", i + 1, display_path(&ctx.workspace, &p)))?
+                .map_err(|err| format!("edit #{} ({}): {err}", i + 1, display_path(ws, &p)))?
                 .0;
         }
         Ok(files)
@@ -358,7 +393,7 @@ impl Tool for Patch {
         out
     }
     fn call(&self, ctx: &ToolCtx, input: Value) -> ToolOutput {
-        let files = match Self::plan(ctx, &input) {
+        let files = match Self::plan(&ctx.workspace, &input) {
             Ok(f) => f,
             Err(e) => return ToolOutput::err(format!("patch rejected, no files changed: {e}")),
         };
@@ -385,6 +420,29 @@ impl Tool for Patch {
         }
         let names: Vec<_> = files.iter().map(|f| display_path(&ctx.workspace, &f.path)).collect();
         ToolOutput::ok(format!("patched {} file(s): {}", files.len(), names.join(", ")))
+    }
+}
+
+#[cfg(test)]
+mod preview_tests {
+    use super::*;
+
+    #[test]
+    fn previews_edits_without_writing() {
+        let d = std::env::temp_dir().join(format!("ark-preview-{}", std::process::id()));
+        fs::create_dir_all(&d).unwrap();
+        fs::write(d.join("a.txt"), "one two one").unwrap();
+        let p = preview(&d, "edit", &json!({"path": "a.txt", "old_string": "two", "new_string": "2"})).unwrap();
+        assert_eq!((p[0].1.as_deref(), p[0].2.as_str()), (Some("one two one"), "one 2 one"));
+        let p = preview(&d, "patch", &json!({"edits": [{"path": "a.txt", "old": "one", "new": "1"}, {"path": "b.txt", "old_string": "", "new_string": "new"}]}));
+        assert!(p.is_err(), "`one` is ambiguous");
+        let p = preview(&d, "patch", &json!({"edits": [{"path": "a.txt", "old": "two", "new": "2"}, {"path": "b.txt", "old_string": "", "new_string": "new"}]})).unwrap();
+        assert_eq!(p.len(), 2);
+        assert_eq!(p[1].1, None);
+        let p = preview(&d, "write", &json!({"path": "a.txt", "content": "x"})).unwrap();
+        assert_eq!(p[0].1.as_deref(), Some("one two one"));
+        assert_eq!(fs::read_to_string(d.join("a.txt")).unwrap(), "one two one", "nothing written");
+        let _ = fs::remove_dir_all(&d);
     }
 }
 

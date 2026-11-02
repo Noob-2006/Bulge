@@ -70,7 +70,8 @@ fn stdio_client_full_surface() {
     assert_eq!(tools.len(), 11, "both pages collected");
     assert!(tools.iter().find(|t| t.name == "echo").unwrap().read_only);
     let r = c.call_tool("add", json!({"a": 2, "b": 3}), &Cancel::new()).unwrap();
-    assert_eq!(r, CallResult { text: "5".into(), is_error: false });
+    assert_eq!((r.text.as_str(), r.is_error), ("5", false));
+    assert_eq!(r.raw["content"][0]["text"], "5", "raw CallToolResult kept");
     assert!(c.call_tool("fail", json!({}), &Cancel::new()).unwrap().is_error);
     let e = c.call_tool("nope", json!({}), &Cancel::new()).unwrap_err();
     assert!(e.contains("-32602") && e.contains("unknown tool"), "{e}");
@@ -423,7 +424,7 @@ fn ark_client_talks_to_ark_server_end_to_end() {
     writeln!(w, r#"{{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{{"name":"echo","arguments":{{"text":"via pipe"}}}}}}"#).unwrap();
     let mut l = String::new();
     rd.read_line(&mut l).unwrap();
-    assert!(l.contains("2025-06-18"));
+    assert!(l.contains(ark_plugin::mcp::PROTOCOL), "no version asked → latest: {l}");
     l.clear();
     rd.read_line(&mut l).unwrap();
     assert!(l.contains("via pipe"));

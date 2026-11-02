@@ -334,8 +334,9 @@ fn every_provider_down_ends_with_error_not_hang() {
     }
     let id = start(&e, "x");
     let o = e.k.run(&id, RunOpts::default()).unwrap();
-    assert!(matches!(o.reason, EndReason::Error(_)), "{:?}", o.reason);
-    assert!(events(&e, &id).iter().any(|k| matches!(k, EventKind::Notice { text, .. } if text.contains("provider missing unavailable"))));
+    // The last link's failure is the run's error, not an extra notice.
+    assert!(matches!(&o.reason, EndReason::Error(m) if m.contains("missing")), "{:?}", o.reason);
+    assert!(!events(&e, &id).iter().any(|k| matches!(k, EventKind::Notice { text, .. } if text.contains("provider missing unavailable"))));
 }
 
 #[test]
@@ -753,6 +754,41 @@ fn post_tool_prompt_session_and_turn_end_hooks() {
 }
 
 #[test]
+fn model_compaction_and_host_event_hooks() {
+    let e = env();
+    let (pre, pres) = fnhook(HookEvent::PreModel, |_| Ok(HookDecision::Allow));
+    let (post, posts) = fnhook(HookEvent::PostModel, |_| Ok(HookDecision::Allow));
+    let (nocompact, _) = fnhook(HookEvent::PreCompact, |_| Ok(HookDecision::Block("keep everything".into())));
+    let (recv, _) = fnhook(HookEvent::MessageReceived, |p| Ok(if p["prompt"] == "spam" { HookDecision::Block("spam".into()) } else { HookDecision::Modify(json!("clean")) }));
+    let (end, ends) = fnhook(HookEvent::SessionEnd, |_| Ok(HookDecision::Allow));
+    e.k.add_hooks(vec![pre, post, nocompact, recv, end]);
+    e.p.text("answer");
+    let id = start(&e, "q");
+    e.k.run(&id, RunOpts::default()).unwrap();
+    assert_eq!(pres.lock().unwrap()[0]["messages"], 1);
+    assert_eq!(posts.lock().unwrap()[0]["text"], "answer");
+    for i in 0..12 {
+        e.k.submit(&id, &format!("more {i}"), "user").unwrap();
+        e.p.text("ok");
+        e.k.run(&id, RunOpts::default()).unwrap();
+    }
+    assert!(!e.k.compact(&id).unwrap(), "pre_compact block skips compaction");
+    assert!(events(&e, &id).iter().any(|k| matches!(k, EventKind::Notice { text, .. } if text.contains("keep everything"))));
+    assert_eq!(e.k.emit(HookEvent::MessageReceived, json!({"prompt": "spam"}), "prompt").0.as_deref(), Some("test: spam"));
+    assert_eq!(e.k.emit(HookEvent::MessageReceived, json!({"prompt": "x"}), "prompt").1, Some(json!("clean")));
+    assert_eq!(e.k.emit(HookEvent::MessageSent, json!({}), ""), (None, None), "no hook → nothing");
+    e.k.end_session(&id, "deleted");
+    assert_eq!(ends.lock().unwrap()[0]["reason"], "deleted");
+    // A blocking pre_model hook fails the step instead of calling the provider.
+    let e2 = env();
+    let (deny, _) = fnhook(HookEvent::PreModel, |_| Ok(HookDecision::Block("offline hours".into())));
+    e2.k.add_hooks(vec![deny]);
+    let id = start(&e2, "q");
+    let o = e2.k.run(&id, RunOpts::default()).unwrap();
+    assert!(o.reason.label().contains("offline hours") && e2.p.requests().is_empty(), "{:?}", o.reason);
+}
+
+#[test]
 fn reasoning_only_truncation_retries_with_more_room() {
     let e = env_with(|c| c.model.max_tokens = 4096, Arc::new(Policy { allow_privilege: false, allow_egress: false }));
     let thinking = || Block::Thinking { text: String::new(), signature: Some("sig".into()) };
@@ -807,4 +843,136 @@ fn kernel_tools_reachable_through_indirection_and_errors_stay_short() {
     assert!(r[2].1 && r[2].0.contains("tool_call needs"), "{:?}", r[2]);
     assert!(r[3].1 && r[3].0.contains("Did you mean: echo"), "{:?}", r[3]);
     assert!(r[3].0.len() < 300, "no full catalog dump: {}", r[3].0.len());
+}
+
+#[test]
+fn images_thinking_titles_and_session_tools() {
+    let e = env();
+    let id = e.k.create_session(&e.ws, None, None, None).unwrap();
+    e.k.set_thinking(&id, "high").unwrap();
+    assert!(e.k.set_thinking(&id, "max").is_err());
+    e.k.set_title(&id, "fix the build").unwrap();
+    assert_eq!(e.k.store.list()[0].title.as_deref(), Some("fix the build"));
+    let (t, calls) = tool("editor_tool", false, true, false, |c, _| ToolOutput::ok(format!("session {}", c.session_id)));
+    e.k.set_session_tools(&id, vec![t]);
+    let other = e.k.create_session(&e.ws, None, None, None).unwrap();
+    e.p.call("editor_tool", json!({}));
+    e.p.text("done");
+    e.k.submit_with(&id, "what is this?", vec![Block::Image { media_type: "image/png".into(), data: "AAAA".into() }], "cli").unwrap();
+    assert!(e.k.run(&id, RunOpts::default()).unwrap().reason.ok());
+    assert_eq!(calls.load(Ordering::SeqCst), 1, "session tool ran");
+    let reqs = e.p.requests();
+    assert_eq!(reqs[0].reasoning.as_deref(), Some("high"));
+    assert!(reqs[0].tools.iter().any(|t| t.name == "editor_tool"), "session tools ship full schemas");
+    assert!(reqs[0].messages[0].content.contains(&Block::Image { media_type: "image/png".into(), data: "AAAA".into() }));
+    // Other sessions never see it; removing it hides it again.
+    e.p.call("editor_tool", json!({}));
+    e.p.text("ok");
+    e.k.submit(&other, "go", "cli").unwrap();
+    e.k.run(&other, RunOpts::default()).unwrap();
+    assert!(tool_results(&e, &other).iter().any(|(c, err)| *err && c.contains("unknown tool")), "{:?}", tool_results(&e, &other));
+    e.k.set_session_tools(&id, vec![]);
+    e.p.text("bye");
+    e.k.submit(&id, "again", "cli").unwrap();
+    e.k.run(&id, RunOpts::default()).unwrap();
+    assert!(!e.p.requests().last().unwrap().tools.iter().any(|t| t.name == "editor_tool"));
+}
+
+#[test]
+fn middleware_transforms_and_approval_events() {
+    let e = env_with(|_| {}, Arc::new(Yes));
+    let (req, _) = fnhook(HookEvent::ToolRequest, |p| Ok(if p["tool_input"]["text"] == "a" { HookDecision::Modify(json!({"text": "via middleware"})) } else { HookDecision::Allow }));
+    let (exec, execs) = fnhook(HookEvent::ToolExecution, |p| Ok(if p["phase"] == "call" && p["tool_name"] == "sh" { HookDecision::Modify(json!({"content": "cached answer"})) } else { HookDecision::Allow }));
+    let (tr, _) = fnhook(HookEvent::TransformToolResult, |p| Ok(HookDecision::Modify(json!(format!("{} [t]", p["result"].as_str().unwrap())))));
+    let (llm_req, _) = fnhook(HookEvent::LlmRequest, |p| {
+        let mut r = p["request"].clone();
+        r["system"].as_array_mut().unwrap().push(json!({"id": "mw", "text": "added by middleware"}));
+        Ok(HookDecision::Modify(r))
+    });
+    let (llm_exec, _) = fnhook(HookEvent::LlmExecution, |p| Ok(if p["phase"] == "call" && format!("{}", p["request"]["messages"]).contains("skip the model") { HookDecision::Modify(json!({"text": "from middleware"})) } else { HookDecision::Allow }));
+    let (out, _) = fnhook(HookEvent::TransformLlmOutput, |p| Ok(if p["text"] == "done" { HookDecision::Modify(json!("DONE (transformed)")) } else { HookDecision::Allow }));
+    e.k.add_hooks(vec![req, exec, tr, llm_req, llm_exec, out]);
+    e.p.calls(vec![("echo", json!({"text": "a"})), ("sh", json!({"cmd": "ls"}))]);
+    e.p.text("done");
+    let id = start(&e, "go");
+    assert_eq!(e.k.run(&id, RunOpts::default()).unwrap().text, "DONE (transformed)");
+    let r = tool_results(&e, &id);
+    assert_eq!(r[0].0, "via middleware [t]");
+    assert_eq!(r[1].0, "cached answer [t]");
+    assert_eq!(e.calls["sh"].load(Ordering::SeqCst), 0, "execution middleware answered instead of the tool");
+    assert!(execs.lock().unwrap().iter().any(|p| p["phase"] == "result" && p["tool_response"]["content"] == "via middleware"));
+    assert!(e.p.requests()[0].system.iter().any(|s| s.text == "added by middleware"));
+    // llm_execution can answer without the provider.
+    let n = e.p.requests().len();
+    e.k.submit(&id, "skip the model please", "user").unwrap();
+    assert_eq!(e.k.run(&id, RunOpts::default()).unwrap().text, "from middleware");
+    assert_eq!(e.p.requests().len(), n, "provider not called");
+
+    // Approval observers see the request and the answer.
+    let e = env_with(|_| {}, Arc::new(Yes));
+    let (pre, pres) = fnhook(HookEvent::PreApprovalRequest, |_| Ok(HookDecision::Allow));
+    let (post, posts) = fnhook(HookEvent::PostApprovalResponse, |_| Ok(HookDecision::Allow));
+    e.k.add_hooks(vec![pre, post]);
+    e.p.call("sh", json!({"cmd": "sudo reboot"}));
+    e.p.text("ok");
+    let id = start(&e, "x");
+    e.k.run(&id, RunOpts::default()).unwrap();
+    assert_eq!(pres.lock().unwrap().len(), 1);
+    assert_eq!(pres.lock().unwrap()[0]["gate"], "privilege");
+    assert_eq!(posts.lock().unwrap()[0]["choice"], "always");
+}
+
+struct Eng {
+    ingested: AtomicUsize,
+    assembled: Mutex<Vec<(usize, String)>>,
+}
+impl ark_kernel::engine::ContextEngine for Eng {
+    fn name(&self) -> String {
+        "test".into()
+    }
+    fn owns_compaction(&self) -> bool {
+        true
+    }
+    fn ingest(&self, _: &str, _: &Message) {
+        self.ingested.fetch_add(1, Ordering::SeqCst);
+    }
+    fn assemble(&self, _: &str, _: &str, m: &[Message], _: u64, _: &str, prompt: &str) -> Result<Option<ark_kernel::engine::Assembled>, String> {
+        self.assembled.lock().unwrap().push((m.len(), prompt.to_string()));
+        Ok(match prompt {
+            "only last" => Some(ark_kernel::engine::Assembled { messages: m[m.len() - 1..].to_vec(), system_addition: Some("engine context".into()) }),
+            "broken" => Some(ark_kernel::engine::Assembled { messages: vec![Message::assistant("bad")], system_addition: None }),
+            _ => None,
+        })
+    }
+    fn compact(&self, _: &str, _: &[Message], _: u64, _: u64, _: bool) -> Result<Option<ark_kernel::engine::Compacted>, String> {
+        Ok(Some(ark_kernel::engine::Compacted { summary: "engine summary".into(), keep_messages: Some(2) }))
+    }
+}
+
+#[test]
+fn context_engine_assembles_ingests_and_owns_compaction() {
+    let e = env();
+    let eng = Arc::new(Eng { ingested: AtomicUsize::new(0), assembled: Mutex::new(vec![]) });
+    e.k.set_context_engine(eng.clone());
+    e.p.text("first");
+    let id = start(&e, "hello");
+    e.k.run(&id, RunOpts::default()).unwrap();
+    e.k.submit(&id, "only last", "user").unwrap();
+    e.p.text("second");
+    e.k.run(&id, RunOpts::default()).unwrap();
+    let r = e.p.requests();
+    assert_eq!(r[0].messages.len(), 1);
+    assert_eq!(r[1].messages.len(), 1, "the engine trimmed the history");
+    assert!(r[1].system.iter().any(|s| s.id == "context_engine" && s.text == "engine context"));
+    assert!(eng.ingested.load(Ordering::SeqCst) >= 4, "user and assistant messages were ingested");
+    assert_eq!(eng.assembled.lock().unwrap()[1], (3, "only last".to_string()));
+    // An invalid history is ignored with a warning.
+    e.k.submit(&id, "broken", "user").unwrap();
+    e.p.text("third");
+    e.k.run(&id, RunOpts::default()).unwrap();
+    assert_eq!(e.p.requests()[2].messages.len(), 5);
+    assert!(events(&e, &id).iter().any(|k| matches!(k, EventKind::Notice { text, .. } if text.contains("invalid history"))));
+    // Compaction: the engine's summary is recorded.
+    assert!(e.k.compact(&id).unwrap());
+    assert!(events(&e, &id).iter().any(|k| matches!(k, EventKind::Compaction { summary, .. } if summary == "engine summary")));
 }

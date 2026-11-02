@@ -11,6 +11,7 @@ pub mod config;
 pub mod context;
 pub mod cron;
 pub mod daemon;
+pub mod engine;
 pub mod event;
 pub mod gate;
 pub mod hooks;

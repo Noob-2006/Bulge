@@ -20,7 +20,10 @@ pub struct View {
     pub messages: Vec<Message>,
     /// Seq of the event each entry of `messages` started from.
     pub message_seqs: Vec<u64>,
-    pub pending_inbox: Vec<(String, String, String)>, // (id, source, text)
+    pub pending_inbox: Vec<Queued>,
+    /// Reasoning effort set for this session, if any.
+    pub thinking: Option<String>,
+    pub title: Option<String>,
     /// Tool calls written ahead but never settled (crash mid-call).
     pub unsettled: Vec<Unsettled>,
     /// Tool uses in the last assistant message with no result message yet.
@@ -30,6 +33,9 @@ pub struct View {
     pub compactions: u64,
     pub last_input_tokens: u64,
 }
+
+/// Queued input: (inbox id, source, text, attachments).
+pub type Queued = (String, String, String, Vec<Block>);
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Unsettled {
@@ -50,7 +56,8 @@ pub fn project(events: &[Event]) -> View {
 
     for ev in events {
         match &ev.kind {
-            EventKind::Header { session_id, workspace, model, parent, .. } => {
+            EventKind::Header { session_id, workspace, model, parent, title, .. } => {
+                v.title = title.clone();
                 v.session_id = session_id.clone();
                 v.workspace = workspace.clone();
                 v.model = model.clone();
@@ -58,6 +65,8 @@ pub fn project(events: &[Event]) -> View {
             }
             EventKind::System { segments } => v.system = segments.clone(),
             EventKind::Model { model } => v.model = model.clone(),
+            EventKind::Thinking { level } => v.thinking = Some(level.clone()).filter(|l| !l.is_empty()),
+            EventKind::Title { title } => v.title = Some(title.clone()),
             EventKind::Message { usage, inbox, .. } => {
                 if let Some(u) = usage {
                     v.usage.add(u);
@@ -92,9 +101,9 @@ pub fn project(events: &[Event]) -> View {
     }
 
     for ev in events {
-        if let EventKind::Inbox { id, source, text } = &ev.kind {
+        if let EventKind::Inbox { id, source, text, attachments } = &ev.kind {
             if !consumed.contains(id) {
-                v.pending_inbox.push((id.clone(), source.clone(), text.clone()));
+                v.pending_inbox.push((id.clone(), source.clone(), text.clone(), attachments.clone()));
             }
         }
     }
@@ -170,8 +179,8 @@ mod tests {
     fn inbox_consumption_and_merging() {
         let v = project(&evs(vec![
             header(),
-            EventKind::Inbox { id: "i1".into(), source: "cli".into(), text: "a".into() },
-            EventKind::Inbox { id: "i2".into(), source: "cli".into(), text: "b".into() },
+            EventKind::Inbox { id: "i1".into(), source: "cli".into(), text: "a".into(), attachments: vec![] },
+            EventKind::Inbox { id: "i2".into(), source: "cli".into(), text: "b".into(), attachments: vec![] },
             EventKind::Message { message: Message::user("a"), usage: None, model: None, inbox: Some("i1".into()) },
             m(Message::user("extra")),
         ]));
@@ -202,7 +211,7 @@ mod tests {
             m(Message::user("go")),
             m(tool_use("t1")),
             EventKind::ToolCalled { tool_use_id: "t1".into(), name: "read".into(), input: json!({}), idempotency_key: "k".into() },
-            EventKind::ToolSettled { tool_use_id: "t1".into(), is_error: false, bytes: 9, artifact: Some("/a/t1.txt".into()) },
+            EventKind::ToolSettled { tool_use_id: "t1".into(), is_error: false, bytes: 9, artifact: Some("/a/t1.txt".into()), ui_resource: None },
             m(tool_result("t1", "BIG OUTPUT")),
             EventKind::Prune { tool_use_ids: vec!["t1".into()] },
         ]));

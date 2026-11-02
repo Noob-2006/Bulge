@@ -13,6 +13,8 @@ pub struct Providers {
     configs: BTreeMap<String, ProviderConfig>,
     vault: Arc<Vault>,
     cache: Mutex<HashMap<String, Arc<dyn Provider>>>,
+    /// Providers registered by plugins (`ark/provider.complete`); they shadow presets.
+    plugins: Mutex<BTreeMap<String, Arc<dyn Provider>>>,
 }
 
 impl Providers {
@@ -32,12 +34,18 @@ impl Providers {
             let cfg: ProviderConfig = base.try_into().map_err(|e: toml::de::Error| format!("[providers.{id}]: {}", e.message()))?;
             configs.insert(id.clone(), cfg);
         }
-        Ok(Providers { configs, vault, cache: Mutex::new(HashMap::new()) })
+        Ok(Providers { configs, vault, cache: Mutex::new(HashMap::new()), plugins: Mutex::default() })
     }
 
     pub fn configs(&self) -> &BTreeMap<String, ProviderConfig> {
         &self.configs
     }
+
+    /// Add a plugin's provider to the model registry under `id` (`id/model` in config).
+    pub fn register(&self, id: &str, p: Arc<dyn Provider>) {
+        self.plugins.lock().unwrap().insert(id.to_string(), p);
+    }
+
 
     /// Where the key for a provider would come from (for `ark doctor`).
     pub fn key_source(&self, id: &str) -> Result<&'static str, String> {
@@ -52,12 +60,15 @@ impl Providers {
         if self.vault.names().contains(env) {
             return Ok("vault");
         }
-        Err(format!("no API key: set {env} or run `ark secrets set {env}`"))
+        Err(format!("no API key: run `ark setup`, set {env}, or `ark secrets set {env}`"))
     }
 }
 
 impl Resolver for Providers {
     fn provider(&self, id: &str) -> Result<Arc<dyn Provider>, String> {
+        if let Some(p) = self.plugins.lock().unwrap().get(id) {
+            return Ok(p.clone());
+        }
         if let Some(p) = self.cache.lock().unwrap().get(id) {
             return Ok(p.clone());
         }

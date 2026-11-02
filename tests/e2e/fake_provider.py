@@ -46,6 +46,11 @@ class H(BaseHTTPRequestHandler):
         if self.path == "/__requests":
             with LOCK:
                 self.send_json(200, SEEN)
+        elif self.path.endswith("/models"):
+            if self.headers.get("authorization") == "Bearer bad-key":
+                self.send_json(401, {"error": {"message": "invalid api key", "type": "authentication_error"}})
+            else:
+                self.send_json(200, {"data": [{"id": "fake-model"}, {"id": "fake-embedding"}]})
         else:
             self.send_json(404, {"error": "nope"})
 

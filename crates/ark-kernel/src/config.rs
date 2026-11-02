@@ -32,13 +32,48 @@ pub struct Config {
     pub mcp: BTreeMap<String, toml::Table>,
     pub plugins: BTreeMap<String, toml::Table>,
     pub channels: BTreeMap<String, toml::Table>,
+    /// ACP: editor-side options and external ACP agents ark can drive: parsed by ark-app.
+    pub acp: toml::Table,
+    /// App server (web/desktop UI, OpenAI-compatible API, nodes, A2A): parsed by ark-app.
+    pub app: toml::Table,
+    /// Legal/compliance switches (see docs/compliance-tw.md).
+    pub compliance: ComplianceConfig,
     /// Workspaces whose `.ark/config.toml` may define the keys in `PROJECT_GATED`.
     pub trusted_projects: Vec<String>,
+    /// A plugin that assembles / compacts context (OpenClaw context engine). Empty = ark's own.
+    pub context_engine: String,
+    pub memory: MemoryConfig,
 }
+
+/// `[memory]`
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct MemoryConfig {
+    /// A plugin serving the `memory` tool (Hermes memory provider). Empty = MEMORY.md / USER.md.
+    pub provider: String,
+}
+
+/// `[compliance]`
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ComplianceConfig {
+    /// `"government"`: public-sector profile — providers and hosts in the PRC are refused
+    /// (行政院 2025-02 限制公務機關使用 DeepSeek 等「危害國家資通安全產品」).
+    pub profile: String,
+    /// Delete sessions (logs, transcripts) not updated for this many days. 0/None = keep.
+    pub retention_days: Option<u32>,
+}
+
+/// Model providers whose data is processed in the PRC, and their API hosts.
+pub const PRC_PROVIDERS: &[&str] = &["deepseek", "qwen", "dashscope", "kimi", "moonshot", "zhipu", "glm", "minimax", "doubao", "volcengine", "baichuan", "hunyuan", "qianfan", "siliconflow", "stepfun", "yi", "xiaomi"];
+pub const PRC_HOSTS: &[&str] = &[
+    "deepseek.com", "dashscope.aliyuncs.com", "aliyuncs.com", "moonshot.cn", "bigmodel.cn", "minimax.chat", "minimaxi.com", "volces.com", "volcengine.com",
+    "baichuan-ai.com", "tencentcloudapi.com", "baidubce.com", "siliconflow.cn", "stepfun.com", "lingyiwanwu.com", "xiaomimimo.com",
+];
 
 /// Keys that run programs or open listeners. A cloned repo must not get them
 /// for free: they are dropped from a project config unless the user trusts it.
-pub const PROJECT_GATED: &[&str] = &["hooks", "mcp", "plugins", "channels", "providers", "trusted_projects"];
+pub const PROJECT_GATED: &[&str] = &["hooks", "mcp", "plugins", "channels", "providers", "app", "acp", "trusted_projects", "context_engine", "memory"];
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -188,12 +223,31 @@ impl Config {
             let (k, v) = s.split_once('=').ok_or_else(|| format!("--set expects key=value, got `{s}`"))?;
             set_path(&mut merged, k.trim(), parse_value(v.trim()))?;
         }
-        let cfg: Config = toml::Value::Table(merged).try_into().map_err(|e: toml::de::Error| format!("config: {}", e.message()))?;
+        let mut cfg: Config = toml::Value::Table(merged).try_into().map_err(|e: toml::de::Error| format!("config: {}", e.message()))?;
+        if cfg.compliance.profile == "government" {
+            for h in PRC_HOSTS {
+                if !cfg.gate.egress_deny.iter().any(|x| x == h) {
+                    cfg.gate.egress_deny.push(h.to_string());
+                }
+            }
+        }
         cfg.validate()?;
         Ok(cfg)
     }
 
     pub fn validate(&self) -> Result<(), String> {
+        match self.compliance.profile.as_str() {
+            "" | "default" => {}
+            "government" => {
+                for m in std::iter::once(&self.model.default).chain(self.model.fallback.iter()).chain([&self.model.aux, &self.model.subagent].into_iter().filter(|s| !s.is_empty())) {
+                    let p = m.split('/').next().unwrap_or("");
+                    if PRC_PROVIDERS.contains(&p) {
+                        return Err(format!("compliance.profile = \"government\": model `{m}` is provided from the PRC and is not allowed for public-sector use"));
+                    }
+                }
+            }
+            other => return Err(format!("compliance.profile `{other}`: use \"government\" or leave it empty")),
+        }
         if !self.model.default.contains('/') {
             return Err(format!("model.default must be `provider/model`, got `{}`", self.model.default));
         }

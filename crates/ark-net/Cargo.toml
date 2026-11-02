@@ -1,0 +1,13 @@
+[package]
+name = "ark-net"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# Shared network plumbing for channels, MCP OAuth and the app server.
+# Every dependency here was already in the tree through ureq; none adds a crate.
+[dependencies]
+rustls.workspace = true
+webpki-roots.workspace = true
+ring.workspace = true
+base64.workspace = true

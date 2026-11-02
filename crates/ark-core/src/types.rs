@@ -27,6 +27,8 @@ pub enum Block {
         #[serde(default)]
         is_error: bool,
     },
+    /// Image input (user messages): base64 `data` of `media_type` (image/png, image/jpeg…).
+    Image { media_type: String, data: String },
 }
 
 impl Block {
@@ -98,6 +100,9 @@ pub struct ModelRequest {
     /// Index into `messages` after which a cache breakpoint should be placed (if supported).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cache_after_message: Option<usize>,
+    /// Reasoning effort: "off", "low", "medium" or "high"; None = provider default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning: Option<String>,
 }
 
 impl ModelRequest {
@@ -173,6 +178,9 @@ pub fn estimate_tokens(s: &str) -> u64 {
     ascii / 4 + (other * 2) / 3 + 1
 }
 
+/// Rough cost of one image input (providers bill ~1–2k tokens for a typical screenshot).
+pub const IMAGE_TOKENS: u64 = 1600;
+
 pub fn estimate_request_tokens(req: &ModelRequest) -> u64 {
     let mut n = estimate_tokens(&req.system_text());
     for m in &req.messages {
@@ -181,6 +189,7 @@ pub fn estimate_request_tokens(req: &ModelRequest) -> u64 {
                 Block::Text { text } | Block::Thinking { text, .. } => estimate_tokens(text),
                 Block::ToolUse { name, input, .. } => estimate_tokens(name) + estimate_tokens(&input.to_string()),
                 Block::ToolResult { content, .. } => estimate_tokens(content),
+                Block::Image { .. } => IMAGE_TOKENS,
             } + 4;
         }
     }

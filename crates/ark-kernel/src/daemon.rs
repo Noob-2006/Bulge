@@ -42,17 +42,33 @@ pub fn pending_approver(timeout: Duration) -> (Arc<Pending>, Arc<OnceLock<Weak<R
     (Arc::new(p), cell)
 }
 
+/// Extra ARP methods registered by the host (channels, MCP, pairing, nodes…).
+/// Returns `None` when the method is not theirs.
+pub type MethodExt = Arc<dyn Fn(&str, &Value) -> Option<Result<Value, (i32, String)>> + Send + Sync>;
+
 pub struct Daemon {
     pub k: Kernel,
     pub pending: Arc<Pending>,
     busy_jobs: Arc<Mutex<HashSet<String>>>,
     busy_goals: Arc<Mutex<HashSet<String>>>,
+    ext: Mutex<Vec<MethodExt>>,
 }
 
 impl Daemon {
     pub fn new(k: Kernel, pending: Arc<Pending>) -> Self {
-        Daemon { k, pending, busy_jobs: Default::default(), busy_goals: Default::default() }
+        Daemon { k, pending, busy_jobs: Default::default(), busy_goals: Default::default(), ext: Mutex::new(vec![]) }
     }
+
+    pub fn add_methods(&self, m: MethodExt) {
+        self.ext.lock().unwrap().push(m);
+    }
+
+    /// Method names served by this daemon (kernel + host extensions are not enumerable;
+    /// hosts list theirs via `capabilities`).
+    pub const METHODS: &'static [&'static str] = &[
+        "ping", "session.list", "session.create", "session.submit", "session.interrupt", "session.history", "session.view",
+        "gate.pending", "gate.answer", "goal.start", "goal.list", "schedule.list", "models.list", "tools.list", "shutdown", "session.attach", "events.subscribe",
+    ];
 
     pub fn run(self: Arc<Self>) -> Result<(), String> {
         let rt = &self.k.paths.runtime;
@@ -80,6 +96,7 @@ impl Daemon {
         self.resume();
         let me = self.clone();
         let sched = std::thread::spawn(move || me.scheduler_loop());
+        sd_notify("READY=1\nSTATUS=arkd listening");
 
         while !STOP.load(Ordering::SeqCst) {
             match listener.accept() {
@@ -92,6 +109,7 @@ impl Daemon {
             }
         }
 
+        sd_notify("STOPPING=1");
         // Graceful shutdown: interrupt runs (their logs stay consistent), wait a bit.
         for id in self.k.running_ids() {
             self.k.interrupt(&id);
@@ -147,10 +165,32 @@ impl Daemon {
         true
     }
 
+    /// Delete sessions older than `compliance.retention_days` (never a running one).
+    pub fn enforce_retention(&self) -> usize {
+        let Some(days) = self.k.cfg.compliance.retention_days.filter(|d| *d > 0) else { return 0 };
+        let cutoff = crate::event::now_ms().saturating_sub(days as u64 * 86_400_000);
+        let mut n = 0;
+        for s in self.k.store.list().into_iter().filter(|s| s.updated_ms < cutoff && !self.k.is_running(&s.id)) {
+            self.k.end_session(&s.id, "retention");
+            if self.k.store.remove(&s.id).is_ok() {
+                n += 1;
+            }
+        }
+        if n > 0 {
+            eprintln!("arkd: retention: deleted {n} session(s) older than {days} days");
+        }
+        n
+    }
+
     fn scheduler_loop(&self) {
         let tick = Duration::from_secs(self.k.cfg.schedule.tick_secs.max(1));
         let mut last = Instant::now() - tick;
+        let mut last_retention = Instant::now() - Duration::from_secs(3600);
         while !STOP.load(Ordering::SeqCst) {
+            if last_retention.elapsed() >= Duration::from_secs(3600) {
+                last_retention = Instant::now();
+                self.enforce_retention();
+            }
             if last.elapsed() >= tick {
                 last = Instant::now();
                 let busy: Vec<String> = self.busy_jobs.lock().unwrap().iter().cloned().collect();
@@ -246,24 +286,54 @@ impl Daemon {
             "goal.start" => Ok(json!({"started": self.start_goal(&need("id")?)})),
             "goal.list" => automation::read_list::<Goal>(&automation::goals_path(&k.paths.data)).map(|g| json!(g)).map_err(|e| (-32000, e)),
             "schedule.list" => automation::read_list::<Job>(&automation::jobs_path(&k.paths.data)).map(|j| json!(j)).map_err(|e| (-32000, e)),
+            "session.history" => {
+                let from = p.get("from_seq").and_then(|v| v.as_u64()).unwrap_or(0);
+                let evs = k.store.read(&need("id")?).map_err(|e| (-32000, e.to_string()))?;
+                Ok(json!(evs.into_iter().filter(|e| e.seq >= from).collect::<Vec<_>>()))
+            }
+            "session.view" => {
+                // The conversation as the model sees it, for UIs that render a transcript.
+                let evs = k.store.read(&need("id")?).map_err(|e| (-32000, e.to_string()))?;
+                let v = crate::projection::project(&evs);
+                Ok(json!({"messages": v.messages, "running": k.is_running(&need("id")?), "workspace": v.workspace}))
+            }
+            "models.list" => {
+                let c = &k.cfg.model;
+                Ok(json!({"default": c.default, "fallback": c.fallback, "aux": k.cfg.aux_model()}))
+            }
+            "tools.list" => Ok(json!(k.specs().into_iter().map(|s| json!({"name": s.name, "description": s.description})).collect::<Vec<_>>())),
             "shutdown" => {
                 Daemon::stop();
                 Ok(json!({"stopping": true}))
             }
             "" => Err((-32600, "missing method".into())),
-            m => Err((-32601, format!("unknown method `{m}`"))),
+            m => {
+                for f in self.ext.lock().unwrap().iter() {
+                    if let Some(r) = f(m, p) {
+                        return r;
+                    }
+                }
+                Err((-32601, format!("unknown method `{m}`")))
+            }
         }
     }
 
     /// Stream events. For `session.attach`: replay the log from `from_seq`, then
     /// follow live; ends when the client disconnects.
     fn stream(&self, w: &mut UnixStream, id: Value, method: &str, p: &Value) {
+        let mut sink = |v: &Value| send(w, v);
+        self.stream_to(&mut sink, id, method, p, &|| false);
+    }
+
+    /// Stream to any sink (unix socket, WebSocket, SSE). `stop` ends the stream early.
+    pub fn stream_to(&self, sink: &mut dyn FnMut(&Value) -> std::io::Result<()>, id: Value, method: &str, p: &Value, stop: &dyn Fn() -> bool) {
+        let w = sink;
         let rx = self.k.bus.subscribe();
         let session = p.get("id").and_then(|v| v.as_str()).map(String::from);
         let mut last_seq: Option<u64> = None;
         if method == "session.attach" {
             let Some(sid) = session.as_deref() else {
-                let _ = send(w, &json!({"jsonrpc":"2.0","id":id,"error":{"code":-32602,"message":"missing param `id`"}}));
+                let _ = w(&json!({"jsonrpc":"2.0","id":id,"error":{"code":-32602,"message":"missing param `id`"}}));
                 return;
             };
             let from = p.get("from_seq").and_then(|v| v.as_u64()).unwrap_or(0);
@@ -271,26 +341,29 @@ impl Daemon {
                 Ok(evs) => {
                     for e in evs.into_iter().filter(|e| e.seq >= from) {
                         last_seq = Some(e.seq);
-                        if send(w, &json!({"jsonrpc":"2.0","method":"event","params":{"session":sid,"event":e}})).is_err() {
+                        if w(&json!({"jsonrpc":"2.0","method":"event","params":{"session":sid,"event":e}})).is_err() {
                             return;
                         }
                     }
                 }
                 Err(e) => {
-                    let _ = send(w, &json!({"jsonrpc":"2.0","id":id,"error":{"code":-32000,"message":e.to_string()}}));
+                    let _ = w(&json!({"jsonrpc":"2.0","id":id,"error":{"code":-32000,"message":e.to_string()}}));
                     return;
                 }
             }
         }
-        if send(w, &json!({"jsonrpc":"2.0","id":id,"result":{"live":true,"running": session.as_deref().map(|s| self.k.is_running(s))}})).is_err() {
+        if w(&json!({"jsonrpc":"2.0","id":id,"result":{"live":true,"running": session.as_deref().map(|s| self.k.is_running(s))}})).is_err() {
             return;
         }
         loop {
+            if stop() {
+                return;
+            }
             let msg = match rx.recv_timeout(Duration::from_secs(15)) {
                 Ok(m) => m,
                 Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
                     // Heartbeat doubles as disconnect detection.
-                    if send(w, &json!({"jsonrpc":"2.0","method":"heartbeat","params":{}})).is_err() || STOP.load(Ordering::SeqCst) {
+                    if w(&json!({"jsonrpc":"2.0","method":"heartbeat","params":{}})).is_err() || STOP.load(Ordering::SeqCst) || stop() {
                         return;
                     }
                     continue;
@@ -308,7 +381,7 @@ impl Daemon {
                 BusMsg::Pending(item) if session.as_ref().is_none_or(|x| pending_session(item) == x) => json!({"jsonrpc":"2.0","method":"pending","params":pending_json(item.clone())}),
                 _ => continue,
             };
-            if send(w, &out).is_err() {
+            if w(&out).is_err() {
                 return;
             }
         }
@@ -334,6 +407,25 @@ fn send(w: &mut UnixStream, v: &Value) -> std::io::Result<()> {
     b.push(b'\n');
     w.write_all(&b)?;
     w.flush()
+}
+
+/// systemd `Type=notify` readiness (no crate: one datagram to $NOTIFY_SOCKET).
+pub fn sd_notify(state: &str) {
+    let Some(path) = std::env::var_os("NOTIFY_SOCKET") else { return };
+    let sock = match std::os::unix::net::UnixDatagram::unbound() {
+        Ok(s) => s,
+        Err(_) => return,
+    };
+    let p = path.to_string_lossy().into_owned();
+    if let Some(abs) = p.strip_prefix('@') {
+        // Abstract namespace socket.
+        use std::os::linux::net::SocketAddrExt;
+        if let Ok(addr) = std::os::unix::net::SocketAddr::from_abstract_name(abs.as_bytes()) {
+            let _ = sock.send_to_addr(state.as_bytes(), &addr);
+        }
+    } else {
+        let _ = sock.send_to(state.as_bytes(), &p);
+    }
 }
 
 // ───────────────────────── client side ─────────────────────────

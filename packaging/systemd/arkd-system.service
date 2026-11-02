@@ -1,0 +1,42 @@
+# System-wide instance: one dedicated `ark` user, state in /var/lib/ark.
+#   sudo useradd --system --create-home --home-dir /var/lib/ark ark
+#   sudo install -m 644 arkd-system.service /etc/systemd/system/arkd.service
+#   sudo systemctl enable --now arkd
+[Unit]
+Description=ark agent daemon (system)
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+Type=notify
+NotifyAccess=main
+User=ark
+Group=ark
+StateDirectory=ark
+RuntimeDirectory=ark
+Environment=ARK_HOME=/var/lib/ark
+Environment=XDG_RUNTIME_DIR=/run
+WorkingDirectory=/var/lib/ark
+ExecStart=/usr/local/bin/ark daemon run -w /var/lib/ark/workspace
+Restart=on-failure
+RestartSec=2s
+KillMode=mixed
+TimeoutStopSec=20s
+NoNewPrivileges=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+SystemCallArchitectures=native
+RestrictRealtime=yes
+PrivateTmp=yes
+ProtectSystem=full
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

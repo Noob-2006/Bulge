@@ -133,6 +133,53 @@ pub fn build_with_idle(cfg: &ProviderConfig, idle: Duration) -> Result<Arc<dyn P
     })
 }
 
+/// Model ids the provider advertises (`GET {base}/models`), for setup and pickers.
+/// Also the cheapest way to tell whether a key works: 401/403 come back as errors.
+pub fn list_models(cfg: &ProviderConfig, key: Option<&str>) -> Result<Vec<String>, String> {
+    use std::io::Read;
+    let agent: ureq::Agent = ureq::Agent::config_builder().http_status_as_error(false).timeout_global(Some(Duration::from_secs(20))).build().into();
+    let url = format!("{}/models", cfg.base_url.trim_end_matches('/'));
+    let mut req = agent.get(&url).header("accept", "application/json");
+    match (cfg.format, key) {
+        (WireFormat::Anthropic, Some(k)) => req = req.header("x-api-key", k).header("anthropic-version", "2023-06-01"),
+        (WireFormat::Gemini, Some(k)) => req = req.header("x-goog-api-key", k),
+        (_, Some(k)) => req = req.header("authorization", &format!("Bearer {k}")),
+        _ => {}
+    }
+    for (k, v) in &cfg.headers {
+        req = req.header(k, v);
+    }
+    let resp = req.call().map_err(|e| format!("GET {url}: {e}"))?;
+    let status = resp.status().as_u16();
+    let mut raw = String::new();
+    resp.into_body().into_reader().take(4 << 20).read_to_string(&mut raw).map_err(|e| format!("reading {url}: {e}"))?;
+    if !(200..300).contains(&status) {
+        let e = classify::from_status(status, None, &raw);
+        return Err(format!("{}: {e}", cfg.id));
+    }
+    let v: Value = serde_json::from_str(&raw).map_err(|e| format!("{url}: not JSON ({e})"))?;
+    Ok(parse_model_list(&v))
+}
+
+fn parse_model_list(v: &Value) -> Vec<String> {
+    let mut out = vec![];
+    // OpenAI / Anthropic / most compatible servers: {"data": [{"id": ..}]}
+    for m in v["data"].as_array().into_iter().flatten() {
+        if let Some(id) = m["id"].as_str() {
+            out.push(id.to_string());
+        }
+    }
+    // Gemini: {"models": [{"name": "models/x", "supportedGenerationMethods": [..]}]}
+    for m in v["models"].as_array().into_iter().flatten() {
+        let chat = m["supportedGenerationMethods"].as_array().is_none_or(|a| a.iter().any(|x| x == "generateContent"));
+        if let (Some(n), true) = (m["name"].as_str(), chat) {
+            out.push(n.trim_start_matches("models/").to_string());
+        }
+    }
+    out.dedup();
+    out
+}
+
 pub fn caps_for(model: &str) -> ModelCaps {
     let m = model.to_lowercase();
     let c = |ctx: u64, out: u32, vision: bool, explicit_cache: bool| ModelCaps {
@@ -176,6 +223,21 @@ pub(crate) fn parse_args(raw: &str) -> Value {
     serde_json::from_str(raw).unwrap_or_else(|_| serde_json::json!({ "__invalid_json": raw }))
 }
 
+/// Token budget for a reasoning effort level (None = off / provider default).
+pub(crate) fn thinking_budget(level: Option<&str>) -> Option<u32> {
+    match level? {
+        "low" => Some(2048),
+        "medium" => Some(8192),
+        "high" => Some(24576),
+        _ => None,
+    }
+}
+
+/// `data:` URL for an image block (OpenAI formats).
+pub(crate) fn data_url(media_type: &str, data: &str) -> String {
+    format!("data:{media_type};base64,{data}")
+}
+
 /// Fill usage heuristically when the provider sent none.
 pub(crate) fn finalize_usage(usage: Option<Usage>, req: &ModelRequest, msg: &Message) -> Usage {
     match usage {
@@ -188,6 +250,7 @@ pub(crate) fn finalize_usage(usage: Option<Usage>, req: &ModelRequest, msg: &Mes
                     Block::Text { text } | Block::Thinking { text, .. } => estimate_tokens(text),
                     Block::ToolUse { name, input, .. } => estimate_tokens(name) + estimate_tokens(&input.to_string()),
                     Block::ToolResult { content, .. } => estimate_tokens(content),
+                    Block::Image { .. } => ark_core::IMAGE_TOKENS,
                 })
                 .sum();
             Usage { input_tokens: estimate_request_tokens(req), output_tokens: out, estimated: true, ..Default::default() }
@@ -198,6 +261,15 @@ pub(crate) fn finalize_usage(usage: Option<Usage>, req: &ModelRequest, msg: &Mes
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn model_lists_from_each_api_shape() {
+        let oa = serde_json::json!({"data": [{"id": "gpt-x"}, {"id": "gpt-y"}]});
+        assert_eq!(parse_model_list(&oa), vec!["gpt-x", "gpt-y"]);
+        let g = serde_json::json!({"models": [{"name": "models/gemini-a", "supportedGenerationMethods": ["generateContent"]}, {"name": "models/embed", "supportedGenerationMethods": ["embedContent"]}]});
+        assert_eq!(parse_model_list(&g), vec!["gemini-a"]);
+        assert!(parse_model_list(&serde_json::json!({})).is_empty());
+    }
 
     #[test]
     fn presets_are_unique_and_valid() {

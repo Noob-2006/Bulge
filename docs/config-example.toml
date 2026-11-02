@@ -1,0 +1,124 @@
+# ark 完整設定範例：~/.config/ark/config.toml
+# 每個鍵都可以省略。秘密一律放 `ark secrets set NAME`，這裡用 {{secret:NAME}} 引用。
+# 專案目錄的 .ark/config.toml 也會被讀取，但 hooks / mcp / plugins / channels / providers / app
+# 只有在本檔的 trusted_projects 列出該目錄時才生效。
+
+# ───────────── 模型 ─────────────
+[model]
+default = "anthropic/claude-sonnet-5-5"
+fallback = ["openai/gpt-5-mini", "mistral/mistral-small-latest"]
+aux = "deepseek/deepseek-chat"     # 便宜模型：壓縮、標題、MCP sampling
+max_tokens = 8192
+
+[budget]                            # 每個 session 的上限（不設就無上限）
+max_cost_usd = 5.0
+max_steps = 300
+
+# ───────────── 只有兩道閘門 ─────────────
+[gate]
+privilege = "ask"                   # sudo、寫系統路徑：ask | deny | allow
+egress = "ask"                      # 秘密、個資、敏感檔案往外送
+egress_allow = ["github.com"]
+egress_deny = []
+
+[schedule]
+utc_offset_minutes = 480            # 排程時區 UTC+8
+
+# ───────────── 法遵（docs/compliance-tw.md）─────────────
+[compliance]
+# profile = "government"            # 公部門：拒絕中國境內的模型與主機
+retention_days = 180                # 超過天數的對話紀錄自動刪除
+
+# ───────────── MCP servers ─────────────
+[mcp.files]
+command = "npx"
+args = ["-y", "@modelcontextprotocol/server-filesystem", "/home/me/docs"]
+exclude_tools = ["*delete*"]
+
+[mcp.github]
+url = "https://api.githubcopilot.com/mcp/"
+auth = "oauth"                      # 之後執行 ark mcp login github（或 --device）
+trust = "untrusted"                 # 非唯讀工具每次都要核准
+keepalive_secs = 120
+
+[mcp.legacy]
+url = "https://old.example.com/sse"
+transport = "sse"                   # 2024-11-05 的 HTTP+SSE
+headers = { Authorization = "Bearer {{secret:LEGACY_TOKEN}}" }
+sampling = { enabled = true, max_rpm = 5, max_tokens_cap = 1024 }
+tool_costs = { "generate_*" = 2.0 }
+spend_limit = 50.0
+cost_unit = "credits"
+
+[mcp.tracker]
+url = "https://mcp.tracker.example/mcp"
+protocol = "auto"                   # auto（先 initialize，遇 2026-07-28 專用錯誤改 server/discover）| legacy | stateless
+tasks = true                        # taskSupport = "optional" 的工具也以 task 執行（"required" 一律如此）
+task_timeout_secs = 900             # 單一 task／URL elicitation 的上限
+apps = true                         # MCP Apps：宣告 io.modelcontextprotocol/ui，網頁 UI 以沙箱 iframe 呈現 ui://
+events = true                       # MCP events：mcp__tracker__events 工具（list/subscribe/unsubscribe）
+events_url = "https://ark.example.com/mcp-events"   # app server 對外 HTTPS 位址 + /mcp-events
+sampling = { enabled = true, tools = true, max_tool_rounds = 8 }
+oauth = { authorization_server = "https://auth.tracker.example" }   # 設定後 token 的 issuer 必須相符
+
+# ───────────── Channels（46 種，見 docs/parity.md）─────────────
+[channels.phone]
+kind = "telegram"
+token = "{{secret:TELEGRAM_TOKEN}}"
+dm_policy = "pairing"               # allowlist（預設）| pairing | open | disabled
+allow = ["123456789"]
+group_policy = "allowlist"
+groups = ["-1001234567890"]
+require_mention = true
+commands = true                     # 向 Telegram 註冊 /new /stop /status /help
+privacy_notice = "本服務由 AI 回覆。你的訊息會送到模型供應商處理，保存 180 天。隱私權政策：https://example.com/privacy"
+ai_label = "— 由 AI 生成"
+
+[channels.team]
+kind = "slack"
+bot_token = "{{secret:SLACK_BOT_TOKEN}}"
+app_token = "{{secret:SLACK_APP_TOKEN}}"   # Socket Mode
+allow = ["*"]
+group_policy = "open"
+group_allow_all_members = true
+# thread_history = 20                # 第一次在討論串被叫到時附上前文（conversations.replies）；0 關閉
+# suggested_prompts = [{ title = "能做什麼？", message = "你能幫我做什麼？" }]
+# [channels.team.modals.feedback]     # 按鈕 data = "modal:feedback" 開啟；送出後以訊息回報各欄位
+# title = { type = "plain_text", text = "Feedback" }
+# blocks = [{ type = "input", block_id = "b", label = { type = "plain_text", text = "Comment" }, element = { type = "plain_text_input", action_id = "c" } }]
+
+[channels.line]
+kind = "line"
+listen = "127.0.0.1:8790"
+channel_secret = "{{secret:LINE_SECRET}}"
+channel_access_token = "{{secret:LINE_TOKEN}}"
+allow = ["*"]
+dm_policy = "open"
+privacy_notice = "本帳號由 AI 自動回覆。"
+
+[channels.hook]
+kind = "webhook"
+listen = "127.0.0.1:8787"
+token = "{{secret:HOOK_TOKEN}}"
+outbound_url = "https://example.com/ark"
+allow = ["*"]
+
+# ───────────── App Server（Web／桌面／手機／API／裝置／A2A）─────────────
+[app]
+enabled = true
+listen = "127.0.0.1:8640"
+token = "{{secret:APP_TOKEN}}"       # ark app token 會教你產生
+nodes = true                         # 接受 ark node 裝置
+workspace = "/home/me/work"          # API 建立的對話用的工作目錄
+
+[app.a2a]
+enabled = true
+name = "my-ark"
+peers = { helper = "{{secret:A2A_HELPER_TOKEN}}" }
+agents = { research = { url = "https://research.example.com/a2a/v1", token = "{{secret:RESEARCH_TOKEN}}" } }
+
+# ───────────── Hooks（與 Claude Code 相容）─────────────
+[[hooks]]
+event = "pre_tool"
+matcher = "shell"
+command = "~/.config/ark/hooks/check-shell.sh"

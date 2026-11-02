@@ -3,8 +3,8 @@
 
 use std::collections::HashMap;
 
-pub const VALUE_FLAGS: &[&str] = &["model", "workspace", "set", "budget-tokens", "budget-usd", "max-steps", "session", "rounds", "from", "limit", "lang", "timeout", "url", "header"];
-pub const BOOL_FLAGS: &[&str] = &["yes", "allow-privilege", "allow-egress", "json", "quiet", "reuse", "user", "now", "help", "follow", "fork", "all"];
+pub const VALUE_FLAGS: &[&str] = &["model", "workspace", "set", "budget-tokens", "budget-usd", "max-steps", "session", "rounds", "from", "limit", "lang", "timeout", "url", "header", "cwd", "permission-mode", "relay", "setup-code", "ttl", "tls-fingerprint", "name"];
+pub const BOOL_FLAGS: &[&str] = &["yes", "allow-privilege", "allow-egress", "json", "quiet", "reuse", "user", "now", "help", "follow", "fork", "all", "device", "no-browser", "no-start", "list", "pair", "queue"];
 
 #[derive(Debug, Default)]
 pub struct Args {

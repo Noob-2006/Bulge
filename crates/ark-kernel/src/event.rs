@@ -1,7 +1,7 @@
 //! The session event log schema. The log is the single source of truth: every
 //! byte the model sees must be reconstructible from these events.
 
-use ark_core::{Message, SystemSegment, Usage};
+use ark_core::{Block, Message, SystemSegment, Usage};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -33,7 +33,14 @@ pub enum EventKind {
     /// Frozen system prompt segments; a new event replaces the previous one.
     System { segments: Vec<SystemSegment> },
     /// Queued input; becomes a user message when a turn consumes it.
-    Inbox { id: String, source: String, text: String },
+    Inbox {
+        id: String,
+        source: String,
+        text: String,
+        /// Extra blocks (images) that go into the user message with `text`.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        attachments: Vec<Block>,
+    },
     /// Message added to the conversation.
     Message {
         message: Message,
@@ -48,7 +55,16 @@ pub enum EventKind {
     /// Write-ahead record: a tool call is about to execute.
     ToolCalled { tool_use_id: String, name: String, input: Value, idempotency_key: String },
     /// The tool call finished (or was resolved during recovery).
-    ToolSettled { tool_use_id: String, is_error: bool, bytes: usize, #[serde(default)] artifact: Option<String> },
+    ToolSettled {
+        tool_use_id: String,
+        is_error: bool,
+        bytes: usize,
+        #[serde(default)]
+        artifact: Option<String>,
+        /// MCP Apps view for UIs (`{server, tool, uri, html, csp, toolInput, toolResult}`).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        ui_resource: Option<Value>,
+    },
     Gate { tool_use_id: String, gate: String, verdict: String, reason: String },
     /// Older history replaced by a summary; messages with seq < `upto_seq` are dropped.
     Compaction { upto_seq: u64, summary: String, #[serde(default)] pruned: Vec<String>, tokens_before: u64 },
@@ -59,6 +75,10 @@ pub enum EventKind {
     Notice { level: String, text: String },
     Error { message: String },
     Model { model: String },
+    /// Reasoning effort for later requests ("off", "low", "medium", "high"; "" = provider default).
+    Thinking { level: String },
+    /// Session renamed (overrides the header's title).
+    Title { title: String },
 }
 
 impl Event {

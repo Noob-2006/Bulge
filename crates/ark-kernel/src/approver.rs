@@ -8,9 +8,13 @@ use std::time::Duration;
 #[derive(Debug, Clone, PartialEq)]
 pub struct ApprovalRequest {
     pub id: String,
+    /// The tool call being judged (empty for nested code-mode calls).
+    pub tool_use_id: String,
     pub session: String,
     pub tool: String,
     pub summary: String,
+    /// The call's input, secrets redacted (lets UIs render diffs of edits).
+    pub input: serde_json::Value,
     pub gate: GateKind,
     pub reason: String,
 }
@@ -138,7 +142,7 @@ mod tests {
     use std::sync::Arc;
 
     fn req(id: &str) -> ApprovalRequest {
-        ApprovalRequest { id: id.into(), session: "s".into(), tool: "shell".into(), summary: "sudo x".into(), gate: GateKind::Privilege, reason: "sudo".into() }
+        ApprovalRequest { id: id.into(), tool_use_id: String::new(), session: "s".into(), tool: "shell".into(), summary: "sudo x".into(), input: serde_json::Value::Null, gate: GateKind::Privilege, reason: "sudo".into() }
     }
 
     #[test]

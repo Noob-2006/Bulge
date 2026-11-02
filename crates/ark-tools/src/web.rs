@@ -168,7 +168,7 @@ impl Tool for WebFetch {
         let over = raw.len() as u64 > MAX_BODY;
         raw.truncate(MAX_BODY as usize);
         if !ctype.is_empty() && !(ctype.starts_with("text/") || ctype.contains("json") || ctype.contains("xml") || ctype.contains("javascript")) {
-            return ToolOutput { content: format!("HTTP {status}, content-type {ctype}, {} bytes (binary body not shown)", raw.len()), is_error: status >= 400 };
+            return ToolOutput { content: format!("HTTP {status}, content-type {ctype}, {} bytes (binary body not shown)", raw.len()), is_error: status >= 400, ui_resource: None };
         }
         let text = String::from_utf8_lossy(&raw);
         let text = if ctype.contains("html") || (ctype.is_empty() && text.trim_start().starts_with('<')) { html_to_text(&text) } else { text.into_owned() };
@@ -177,7 +177,7 @@ impl Tool for WebFetch {
         if shown.len() < text.len() || over {
             out.push_str("\n…[body truncated]");
         }
-        ToolOutput { content: out, is_error: status >= 400 }
+        ToolOutput { content: out, is_error: status >= 400, ui_resource: None }
     }
 }
 

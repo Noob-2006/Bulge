@@ -1,0 +1,107 @@
+/* ark 統一視覺系統：深緋紅漸層 + 亮金四角內凹星。
+   Web UI、桌面殼與文件頁共用；TUI 以 ANSI truecolor 對應同一組色票（見 crates/ark-app/src/tui/theme.rs）。 */
+:root {
+  /* 深緋紅：由近黑的血紅到緋紅 */
+  --crimson-950: #12020a;
+  --crimson-900: #1f0410;
+  --crimson-800: #330716;
+  --crimson-700: #4a0a1e;
+  --crimson-600: #650d27;
+  --crimson-500: #8b1032;
+  /* 亮金 */
+  --gold-300: #ffe9a3;
+  --gold-400: #ffd66b;
+  --gold-500: #f5b83d;
+  --gold-600: #c98a1b;
+
+  --bg: radial-gradient(120% 90% at 15% 0%, var(--crimson-600) 0%, var(--crimson-800) 38%, var(--crimson-900) 70%, var(--crimson-950) 100%);
+  --panel: linear-gradient(160deg, rgba(101, 13, 39, .55), rgba(31, 4, 16, .78));
+  --panel-solid: #24050f;
+  --border: rgba(245, 184, 61, .28);
+  --border-strong: rgba(255, 214, 107, .6);
+  --text: #f7e9ec;
+  --text-dim: #c9a3ad;
+  --accent: var(--gold-400);
+  --accent-ink: #2a0610;
+  --danger: #ff7a8a;
+  --ok: #e8d48b;
+  --radius: 14px;
+  --shadow: 0 10px 40px rgba(0, 0, 0, .45), inset 0 1px 0 rgba(255, 214, 107, .08);
+  --font: "Noto Sans TC", "PingFang TC", "Microsoft JhengHei", system-ui, sans-serif;
+  --mono: "JetBrains Mono", "Noto Sans Mono CJK TC", ui-monospace, monospace;
+  color-scheme: dark;
+}
+
+* { box-sizing: border-box; }
+html, body { margin: 0; height: 100%; }
+body {
+  background: var(--crimson-950);
+  background-image: var(--bg);
+  background-attachment: fixed;
+  color: var(--text);
+  font: 15px/1.6 var(--font);
+  -webkit-font-smoothing: antialiased;
+}
+a { color: var(--gold-400); }
+code, pre, .mono { font-family: var(--mono); }
+
+/* 四角內凹星：以 CSS mask 套用同一個路徑，任何元素都能變成金星 */
+.star {
+  --size: 18px;
+  display: inline-block;
+  width: var(--size); height: var(--size);
+  background: radial-gradient(circle at 50% 50%, var(--gold-300) 0%, var(--gold-400) 35%, var(--gold-500) 70%, var(--gold-600) 100%);
+  -webkit-mask: url("star.svg") center / contain no-repeat;
+          mask: url("star.svg") center / contain no-repeat;
+  filter: drop-shadow(0 0 6px rgba(255, 214, 107, .55));
+  flex: none;
+}
+.star.twinkle { animation: twinkle 3.2s ease-in-out infinite; }
+.star.spin { animation: spin 9s linear infinite; }
+.star.pulse { animation: pulse 1.4s ease-in-out infinite; }
+@keyframes twinkle {
+  0%, 100% { transform: scale(.82) rotate(0deg); opacity: .75; }
+  50% { transform: scale(1.08) rotate(45deg); opacity: 1; }
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+@keyframes pulse {
+  0%, 100% { transform: scale(.7); opacity: .55; }
+  50% { transform: scale(1.15); opacity: 1; }
+}
+
+/* 四角裝飾：容器四個角各一顆星 */
+.cornered { position: relative; }
+.cornered > .corner { position: absolute; --size: 14px; }
+.cornered > .corner.tl { top: -7px; left: -7px; }
+.cornered > .corner.tr { top: -7px; right: -7px; }
+.cornered > .corner.bl { bottom: -7px; left: -7px; }
+.cornered > .corner.br { bottom: -7px; right: -7px; }
+
+.panel {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  backdrop-filter: blur(6px);
+}
+.btn {
+  appearance: none; cursor: pointer;
+  border: 1px solid var(--border-strong);
+  background: linear-gradient(180deg, var(--gold-400), var(--gold-500));
+  color: var(--accent-ink);
+  font: 600 14px var(--font);
+  padding: 8px 16px; border-radius: 10px;
+  transition: transform .12s ease, box-shadow .2s ease;
+}
+.btn:hover { box-shadow: 0 0 18px rgba(255, 214, 107, .45); }
+.btn:active { transform: translateY(1px); }
+.btn.ghost { background: transparent; color: var(--gold-300); }
+.btn.danger { background: transparent; color: var(--danger); border-color: rgba(255, 122, 138, .5); }
+
+/* 背景星空：少量緩慢閃爍的小金星 */
+.starfield { position: fixed; inset: 0; pointer-events: none; z-index: 0; overflow: hidden; }
+.starfield .star { position: absolute; opacity: .35; animation: twinkle 6s ease-in-out infinite; }
+
+@media (prefers-reduced-motion: reduce) {
+  .star, .starfield .star { animation: none !important; }
+}

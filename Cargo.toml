@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/ark-core", "crates/ark-kernel", "crates/ark-model", "crates/ark-tools", "crates/ark-plugin", "crates/ark-channel", "crates/ark"]
+members = ["crates/ark-core", "crates/ark-kernel", "crates/ark-model", "crates/ark-tools", "crates/ark-plugin", "crates/ark-net", "crates/ark-channel", "crates/ark-app", "crates/ark"]
 
 [workspace.package]
 version = "0.1.0"
@@ -16,6 +16,11 @@ toml = { version = "0.9", default-features = false, features = ["parse", "displa
 ureq = { version = "3", default-features = false, features = ["rustls"] } # blocking HTTP+TLS, smallest tree
 regex = { version = "1", default-features = false, features = ["std", "unicode-perl", "unicode-case"] } # grep tool, secret patterns
 libc = "0.2"                                              # process groups / signals for shell kill
+# Already pulled in by ureq+rustls; used directly by ark-net for WebSocket, webhook signatures, OAuth PKCE.
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+webpki-roots = "1"
+ring = "0.17"
+base64 = "0.23"
 
 ark-core = { path = "crates/ark-core" }
 ark-kernel = { path = "crates/ark-kernel" }
@@ -23,6 +28,8 @@ ark-model = { path = "crates/ark-model" }
 ark-tools = { path = "crates/ark-tools" }
 ark-plugin = { path = "crates/ark-plugin" }
 ark-channel = { path = "crates/ark-channel" }
+ark-net = { path = "crates/ark-net" }
+ark-app = { path = "crates/ark-app" }
 
 [profile.release]
 opt-level = "s"

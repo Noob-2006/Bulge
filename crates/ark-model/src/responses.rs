@@ -2,7 +2,7 @@
 //! as `{"id":..,"encrypted_content":..}` so stateless (`store:false`) tool loops keep them.
 
 use crate::http::{json, truncated};
-use crate::{caps_for, classify, finalize_usage, parse_args, Conn};
+use crate::{caps_for, classify, data_url, finalize_usage, parse_args, thinking_budget, Conn};
 use ark_core::*;
 use serde_json::{json, Value};
 
@@ -22,6 +22,9 @@ impl Responses {
                 match (m.role, b) {
                     (Role::User, Block::Text { text }) => {
                         input.push(json!({"role": "user", "content": [{"type": "input_text", "text": text}]}))
+                    }
+                    (Role::User, Block::Image { media_type, data }) => {
+                        input.push(json!({"role": "user", "content": [{"type": "input_image", "image_url": data_url(media_type, data)}]}))
                     }
                     (Role::Assistant, Block::Text { text }) => {
                         input.push(json!({"role": "assistant", "content": [{"type": "output_text", "text": text}]}))
@@ -57,6 +60,9 @@ impl Responses {
         }
         if let Some(t) = req.temperature {
             b["temperature"] = t.into();
+        }
+        if thinking_budget(req.reasoning.as_deref()).is_some() {
+            b["reasoning"] = json!({"effort": req.reasoning, "summary": "auto"});
         }
         if !req.tools.is_empty() {
             b["tools"] = req

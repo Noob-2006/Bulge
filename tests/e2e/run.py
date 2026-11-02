@@ -133,6 +133,36 @@ def config_and_providers():
     check(c == 1 and "FAKE_KEY" in err, "missing key must be reported: " + err)
 
 
+
+@test
+def setup_wizard_from_scratch_then_run():
+    home = os.path.join(ROOT, "fresh")
+    env = {**ENV, "ARK_HOME": home, "LANG": "C"}
+    c, out, _ = ark(env=env)
+    check(c == 0 and "ark setup" in out, "first-run hint: " + out[-200:])
+    c, _, err = ark("run", "hi", env=env)
+    check(c == 1 and err.count("API key missing") == 1 and "ark setup" in err, "one error line plus the setup hint: " + err)
+    script([{"text": "pong"}])
+    # Other → custom endpoint (after all presets), name, URL, needs key, bad key, good key,
+    # first listed model, web UI on, no chat platform.
+    n = len([l for l in ark("providers", "list", env=env)[1].splitlines() if l.strip()])
+    answers = ["11", str(n + 1), "fake", BASE + "/v1", "y", "bad-key", "good-key-not-secret", "1", "y", "1"]
+    c, out, err = ark("setup", stdin="\n".join(answers) + "\n", env=env)
+    check(c == 0 and "key rejected: " in err and "key works (" in err and "fake-embedding" not in err, err[-1500:])
+    cfg = open(os.path.join(home, "config", "config.toml")).read()
+    check('default = "fake/fake-model"' in cfg and "good-key" not in cfg and "{{secret:APP_TOKEN}}" in cfg, cfg)
+    c, out, _ = ark("secrets", "list", env=env)
+    check("FAKE_API_KEY" in out and "APP_TOKEN" in out, out)
+    script([{"text": "configured"}])
+    c, out, err = ark("run", "hi", env=env)
+    check(c == 0 and "configured" in out and seen()[0]["auth"] == "Bearer good-key-not-secret", out + err)
+    # Running it again keeps the old file as a backup.
+    script([{"text": "pong"}])
+    answers = ["11", str(n + 1), "fake", BASE + "/v1", "y", "y", "1", "n", "1"]
+    c, out, err = ark("setup", stdin="\n".join(answers) + "\n", env=env)
+    check(c == 0 and "Backup:" in err and any(f.startswith("config.toml.bak.") for f in os.listdir(os.path.join(home, "config"))), err[-800:])
+
+
 # ───────────── running tasks ─────────────
 
 @test
@@ -700,6 +730,593 @@ allow = ["amy"]
         finally:
             ark("daemon", "stop")
             out_srv.shutdown()
+
+
+
+def ws_connect(port, path):
+    """Minimal RFC 6455 client (text frames only) for the tests."""
+    import socket, base64, os as _os
+    s = socket.create_connection(("127.0.0.1", port), timeout=10)
+    key = base64.b64encode(_os.urandom(16)).decode()
+    s.sendall(f"GET {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: {key}\r\nSec-WebSocket-Version: 13\r\n\r\n".encode())
+    head = b""
+    while b"\r\n\r\n" not in head:
+        head += s.recv(1)
+    check(b" 101 " in head.split(b"\r\n")[0], head)
+    buf = bytearray()
+    def send(obj):
+        data = json.dumps(obj).encode()
+        mask = _os.urandom(4)
+        hdr = bytearray([0x81])
+        n = len(data)
+        if n < 126: hdr.append(0x80 | n)
+        elif n < 65536: hdr += bytes([0x80 | 126]) + n.to_bytes(2, "big")
+        else: hdr += bytes([0x80 | 127]) + n.to_bytes(8, "big")
+        s.sendall(bytes(hdr) + mask + bytes(b ^ mask[i % 4] for i, b in enumerate(data)))
+    def recv():
+        while True:
+            while len(buf) < 2:
+                buf.extend(s.recv(65536))
+            n = buf[1] & 0x7f; off = 2
+            if n == 126:
+                while len(buf) < 4: buf.extend(s.recv(65536))
+                n = int.from_bytes(buf[2:4], "big"); off = 4
+            elif n == 127:
+                while len(buf) < 10: buf.extend(s.recv(65536))
+                n = int.from_bytes(buf[2:10], "big"); off = 10
+            while len(buf) < off + n:
+                buf.extend(s.recv(65536))
+            op = buf[0] & 0x0f
+            payload = bytes(buf[off:off + n]); del buf[:off + n]
+            if op == 1:
+                return json.loads(payload)
+    return send, recv, s
+
+
+@test
+def app_server_ui_arp_openai_a2a_and_nodes():
+    import socket
+    s = socket.socket(); s.bind(("127.0.0.1", 0)); port = s.getsockname()[1]; s.close()
+    ark("secrets", "set", "APP_TOKEN", stdin="app-token-abc123")
+    ark("secrets", "set", "PEER_TOKEN", stdin="peer-token-xyz")
+    cfg = f"""
+[app]
+enabled = true
+listen = "127.0.0.1:{port}"
+token = "{{{{secret:APP_TOKEN}}}}"
+nodes = true
+workspace = "{WS}"
+
+[app.a2a]
+enabled = true
+peers = {{ helper = "{{{{secret:PEER_TOKEN}}}}" }}
+"""
+    base = f"http://127.0.0.1:{port}"
+    def req(path, body=None, token="app-token-abc123", method=None):
+        h = {"Content-Type": "application/json"}
+        if token:
+            h["Authorization"] = f"Bearer {token}"
+        r = urllib.request.Request(base + path, data=None if body is None else json.dumps(body).encode(), method=method or ("GET" if body is None else "POST"), headers=h)
+        try:
+            resp = urllib.request.urlopen(r, timeout=30)
+            return resp.status, resp.read().decode(), dict(resp.headers)
+        except urllib.error.HTTPError as e:
+            return e.code, e.read().decode(), dict(e.headers)
+    node = None
+    with extra_config(cfg):
+        c, out, err = ark("daemon", "start")
+        check(c == 0, out + err)
+        try:
+            deadline = time.time() + 10
+            while time.time() < deadline:
+                try:
+                    socket.create_connection(("127.0.0.1", port), timeout=0.5).close(); break
+                except OSError:
+                    time.sleep(0.1)
+            st, body, _ = req("/health", token=None)
+            check(st == 200 and '"ok":true' in body, body)
+            st, body, hdr = req("/", token=None)
+            check(st == 200 and "<title>ark</title>" in body and "content-security-policy" in {k.lower() for k in hdr}, "UI served with CSP")
+            check(req("/ui/theme.css", token=None)[1].count("--crimson-900") >= 1, "theme served")
+            check(req("/v1/models", token=None)[0] == 401, "API needs the token")
+            check(req("/v1/models", token="wrong")[0] == 401, "wrong token refused")
+            st, body, _ = req("/v1/models")
+            check(st == 200 and "fake/fake-model" in body, body)
+            st, body, _ = req("/arp", {"jsonrpc": "2.0", "id": 1, "method": "initialize"})
+            check('"protocol":"ark/2"' in body and "node.invoke" in body, body)
+            # The web UI sends no workspace: the session lands in [app] workspace, not "/".
+            st, body, _ = req("/arp", {"jsonrpc": "2.0", "id": 2, "method": "session.create", "params": {"title": "web"}})
+            sid = json.loads(body)["result"]["id"]
+            st, body, _ = req("/arp", {"jsonrpc": "2.0", "id": 3, "method": "session.view", "params": {"id": sid}})
+            check(json.loads(body)["result"]["workspace"] == WS, body[:300])
+            # ARP over WebSocket: ready event, then concurrent requests.
+            send, recv, sock = ws_connect(port, "/arp?token=app-token-abc123")
+            ready = recv()
+            check(ready.get("method") == "ready", ready)
+            send({"jsonrpc": "2.0", "id": 7, "method": "session.create", "params": {"workspace": WS, "title": "ws test"}})
+            r = recv()
+            check(r.get("id") == 7 and r["result"]["id"], r)
+            sid = r["result"]["id"]
+            send({"jsonrpc": "2.0", "id": 8, "method": "subscribe", "params": {}})
+            check(recv().get("id") == 8, "subscription acknowledged")
+            script([{"text": "ws reply"}])
+            send({"jsonrpc": "2.0", "id": 9, "method": "session.submit", "params": {"id": sid, "text": "hello over ws"}})
+            seen_reply = False
+            deadline = time.time() + 20
+            while time.time() < deadline and not seen_reply:
+                m = recv()
+                seen_reply = m.get("method") == "event" and "ws reply" in json.dumps(m)
+            check(seen_reply, "assistant message streamed over the WebSocket")
+            sock.close()
+            # OpenAI-compatible API.
+            script([{"text": "api reply"}])
+            st, body, hdr = req("/v1/chat/completions", {"model": "ark", "messages": [{"role": "system", "content": "be brief"}, {"role": "user", "content": "hi"}]})
+            v = json.loads(body)
+            check(st == 200 and v["choices"][0]["message"]["content"] == "api reply" and v["object"] == "chat.completion", body)
+            sess = {k.lower(): x for k, x in hdr.items()}["x-ark-session"]
+            script([{"text": "streamed reply"}])
+            r = urllib.request.Request(base + "/v1/chat/completions", data=json.dumps({"stream": True, "messages": [{"role": "user", "content": "again"}]}).encode(), headers={"Authorization": "Bearer app-token-abc123", "Content-Type": "application/json", "X-Ark-Session": sess})
+            sse = urllib.request.urlopen(r, timeout=30).read().decode()
+            joined = "".join(json.loads(l[6:])["choices"][0]["delta"].get("content", "") for l in sse.splitlines() if l.startswith("data: {") and json.loads(l[6:])["choices"])
+            check("data: [DONE]" in sse and joined == "streamed reply", sse)
+            # A2A: public card, peer token, blocking SendMessage.
+            st, body, _ = req("/.well-known/agent-card.json", token=None)
+            check(st == 200 and '"protocolBinding":"JSONRPC"' in body, body)
+            check(req("/a2a/v1", {"jsonrpc": "2.0", "id": 1, "method": "SendMessage", "params": {}}, token="nope")[0] == 401, "a2a peers must authenticate")
+            script([{"text": "a2a answer"}])
+            st, body, _ = req("/a2a/v1", {"jsonrpc": "2.0", "id": 1, "method": "SendMessage", "params": {"message": {"role": "ROLE_USER", "parts": [{"text": "help me"}], "messageId": "m1"}}}, token="peer-token-xyz")
+            check("result" in json.loads(body), body)
+            t = json.loads(body)["result"]["task"]
+            check(t["status"]["state"] == "TASK_STATE_COMPLETED" and t["artifacts"][0]["parts"][0]["text"] == "a2a answer", body)
+            st, body, _ = req("/a2a/v1", {"jsonrpc": "2.0", "id": 2, "method": "tasks/get", "params": {"id": t["id"]}}, token="peer-token-xyz")
+            check(json.loads(body)["result"]["status"]["state"] == "completed", "v0.3 alias and state names")
+            # Node: pair this machine, approve the code, invoke a command.
+            node = subprocess.Popen([ARK, "node", "--url", f"ws://127.0.0.1:{port}/node", "--session", "e2e-node"], env=ENV, cwd=WS, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+            code = None
+            deadline = time.time() + 15
+            while time.time() < deadline and not code:
+                c2, out, _ = ark("nodes", "pending")
+                pend = json.loads(out) if c2 == 0 and out.strip() else []
+                code = pend[0]["code"] if pend else None
+                time.sleep(0.2)
+            if not code:
+                node.kill()
+                raise AssertionError("pairing request not visible; node said: " + node.stdout.read()[-800:] + " / pending: " + out)
+            c2, out, err = ark("nodes", "approve", code)
+            check(c2 == 0 and "e2e-node" in out, out + err)
+            ok = False
+            deadline = time.time() + 15
+            while time.time() < deadline and not ok:
+                c2, out, _ = ark("nodes", "invoke", "e2e-node", "device.info")
+                ok = c2 == 0 and '"os": "linux"' in out
+                time.sleep(0.3)
+            check(ok, f"node invoke: {out}")
+            c2, out, _ = ark("nodes", "invoke", "e2e-node", "system.run", '{"command": "id"}')
+            check(c2 != 0, "system.run is denied by the node's default policy")
+        finally:
+            if node:
+                node.kill()
+            ark("daemon", "stop")
+
+
+def free_port():
+    import socket
+    s = socket.socket(); s.bind(("127.0.0.1", 0)); port = s.getsockname()[1]; s.close()
+    return port
+
+
+def wait_port(port, secs=10):
+    import socket
+    deadline = time.time() + secs
+    while time.time() < deadline:
+        try:
+            socket.create_connection(("127.0.0.1", port), timeout=0.5).close(); return
+        except OSError:
+            time.sleep(0.1)
+
+
+def wait_for(pred, secs=20, step=0.2):
+    deadline = time.time() + secs
+    while time.time() < deadline:
+        v = pred()
+        if v:
+            return v
+        time.sleep(step)
+    return None
+
+
+@test
+def node_setup_code_queue_rename_and_token_rotation():
+    port = free_port()
+    ark("secrets", "set", "APP_TOKEN", stdin="app-token-abc123")
+    cfg = f'[app]\nenabled = true\nlisten = "127.0.0.1:{port}"\ntoken = "{{{{secret:APP_TOKEN}}}}"\nnodes = true\n'
+    node_home = os.path.join(ROOT, "node-home")
+    os.makedirs(os.path.join(node_home, "config"), exist_ok=True)
+    node_env = {**ENV, "ARK_HOME": node_home}
+    procs = []
+    def start_node(*extra):
+        p = subprocess.Popen([ARK, "node", "--session", "e2e-sc", *extra], env=node_env, cwd=WS, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+        procs.append(p)
+        return p
+    def invoke_ok():
+        c, out, _ = ark("nodes", "invoke", "e2e-sc", "device.info")
+        return c == 0 and '"os": "linux"' in out
+    with extra_config(cfg):
+        c, out, err = ark("daemon", "start")
+        check(c == 0, out + err)
+        try:
+            wait_port(port)
+            c, out, err = ark("nodes", "setup-code", "--url", f"ws://127.0.0.1:{port}/node")
+            check(c == 0 and "█" in out and "ark node --setup-code" in out, out + err)
+            c, out, _ = ark("nodes", "setup-code", "--url", f"ws://127.0.0.1:{port}/node", "--json")
+            code = json.loads(out)["code"]
+            import base64
+            payload = json.loads(base64.urlsafe_b64decode(code + "=" * (-len(code) % 4)))
+            check(set(payload) == {"url", "bootstrapToken", "expiresAtMs"}, payload)
+            start_node("--setup-code", code)
+            check(wait_for(invoke_ok), "paired through the setup code without approval")
+            c, out, _ = ark("nodes", "pending")
+            check(json.loads(out) == [], "no manual approval needed")
+            c, out, _ = ark("nodes", "rename", "e2e-sc", "Lab", "laptop")
+            check(c == 0 and "Lab laptop" in out, out)
+            c, out, _ = ark("nodes", "describe", "e2e-sc")
+            d = json.loads(out)
+            check(d["name"] == "Lab laptop" and d["connected"] and "device.info" in d["commands"] and "file.fetch" in d["schemas"], out)
+            # Token rotation: the node stores the new token and can reconnect with it.
+            c, out, err = ark("nodes", "rotate", "e2e-sc")
+            check(c == 0 and '"rotated": true' in out, out + err)
+            time.sleep(0.5)
+            procs[-1].kill(); procs[-1].wait()
+            # Offline: the invoke waits in the queue and runs when the node comes back.
+            c, out, err = ark("nodes", "invoke", "e2e-sc", "device.info", "--queue")
+            check(c == 0 and '"queued": "q-' in out, out + err)
+            qid = json.loads(out)["queued"]
+            c, out, _ = ark("nodes", "invoke", "e2e-sc", "device.info")
+            check(c != 0 and "not connected" in out + _, "without --queue an offline node is an error")
+            start_node("--url", f"ws://127.0.0.1:{port}/node")
+            def ran():
+                c, out, _ = ark("nodes", "queue", "e2e-sc")
+                r = json.loads(out) if c == 0 else {}
+                return r if any(x.get("id") == qid and x.get("ok") for x in r.get("results", [])) else None
+            r = wait_for(ran)
+            check(r and r["queued"] == [], f"queued invoke ran after reconnect with the rotated token: {r}")
+            c, out, _ = ark("nodes", "wake", "e2e-sc", "status.request")
+            check(c == 0 and '"item"' in out, out)
+        finally:
+            for p in procs:
+                p.kill()
+            ark("daemon", "stop")
+
+
+KINDS = os.path.join(HERE, "..", "fixtures", "plugin", "kinds.py")
+
+
+@test
+def plugin_kinds_commands_provider_routes_services_and_channel_streaming():
+    port = free_port()
+    ark("secrets", "set", "APP_TOKEN", stdin="app-token-abc123")
+    log = os.path.join(ROOT, "kinds.log")
+    inbox, outbox = os.path.join(ROOT, "qa-in.jsonl"), os.path.join(ROOT, "qa-out.jsonl")
+    open(inbox, "w").close()
+    cfg = f"""
+[compliance]
+profile = "government"
+
+[plugins.kinds]
+command = "{sys.executable}"
+args = ["-I", "{KINDS}", "--log", "{log}"]
+
+[app]
+enabled = true
+listen = "127.0.0.1:{port}"
+token = "{{{{secret:APP_TOKEN}}}}"
+
+[channels.qa]
+kind = "qa-channel"
+inbox = "{inbox}"
+outbox = "{outbox}"
+poll_timeout_secs = 1
+allow = ["amy"]
+"""
+    def logged(kind, key):
+        try:
+            return [json.loads(l)[key] for l in open(log) if json.loads(l)["kind"] == kind]
+        except FileNotFoundError:
+            return []
+    def out_events():
+        try:
+            return [json.loads(l) for l in open(outbox) if l.strip()]
+        except FileNotFoundError:
+            return []
+    def say(mid, text):
+        with open(inbox, "a") as f:
+            f.write(json.dumps({"conversation": {"id": "amy", "kind": "direct"}, "senderId": "amy", "senderName": "Amy", "text": text, "id": mid}) + "\n")
+    with extra_config(cfg):
+        # Commands: from the CLI a reply, or a prompt for the agent.
+        c, out, err = ark("run", "/ping", "hi")
+        check(c == 0 and "pong hi from cli" in out, out + err)
+        script([{"text": "answered"}])
+        c, out, err = ark("run", "/ask", "why")
+        check(c == 0 and "Please answer: why" in json.dumps(seen()[0]["body"]["messages"]), err)
+        # Provider: the plugin's model streams through the registry.
+        c, out, err = ark("run", "-m", "plug/parrot", "hello", "parrot")
+        check(c == 0 and "parrot says: hello parrot" in out, out + err)
+        c, out, _ = ark("plugin", "list")
+        check("/ping" in out and "providers: plug" in out and "services: ticker" in out and "/plugins/kinds/echo" in out, out)
+        check({"session_start", "pre_model", "post_model", "user_prompt", "turn_end"} <= set(logged("hook", "event")), logged("hook", "event"))
+        c, out, err = ark("daemon", "start")
+        check(c == 0, out + err)
+        try:
+            wait_port(port)
+            base = f"http://127.0.0.1:{port}"
+            def req(path, body=None, token="app-token-abc123"):
+                h = {"Authorization": f"Bearer {token}"} if token else {}
+                r = urllib.request.Request(base + path, data=body, headers=h, method="POST" if body is not None else "GET")
+                try:
+                    resp = urllib.request.urlopen(r, timeout=30)
+                    return resp.status, resp.read().decode(), {k.lower(): v for k, v in resp.headers.items()}
+                except urllib.error.HTTPError as e:
+                    return e.code, e.read().decode(), {}
+            st, body, hdr = req("/plugins/kinds/echo/x?y=1")
+            v = json.loads(body)
+            check(st == 201 and v["path"] == "/echo/x" and v["query"] == "y=1" and not v["has_auth"] and hdr.get("x-plugin") == "kinds" and hdr.get("content-security-policy") == "sandbox", (st, body, hdr))
+            check(req("/plugins/kinds/echo", token=None)[0] == 401, "routes need the app token by default")
+            check(req("/plugins/kinds/public/hook", body=b"sig", token=None)[0] == 201, "public route")
+            check(req("/plugins/kinds/nope")[0] == 404 and req("/plugins/ghost/echo")[0] == 404, "unknown routes")
+            check(wait_for(lambda: "health" in logged("service", "action"), 10), "service started and health-checked")
+            check("daemon_start" in logged("hook", "event"), "daemon_start hook")
+            # Channel: a long reply streams (send, then edit in place); hooks and the AI label apply.
+            script([{"text": "This is a long streamed answer for Amy, written in several chunks."}])
+            say("m1", "hello there")
+            def edited():
+                ev = out_events()
+                return ev if any(e["kind"] == "message-edited" for e in ev) else None
+            ev = wait_for(edited, 20)
+            check(ev, f"reply edited in place: {out_events()}")
+            sent = [e for e in ev if e["kind"] == "outbound-message"]
+            last = [e for e in ev if e["kind"] == "message-edited"][-1]["message"]["text"]
+            check(len(sent) == 1 and sent[0]["message"]["text"].endswith(" …"), sent)
+            check(last.startswith("This is a long streamed answer for Amy") and "[via plugin]" in last and "本訊息由 AI 生成" in last, last)
+            check({"message_received", "message_sending", "message_sent"} <= set(logged("hook", "event")), logged("hook", "event"))
+            n_req = len(seen())
+            say("m2", "blocked words")
+            say("m3", "/ping from chat")
+            check(wait_for(lambda: any("pong from chat from channel" in e["message"].get("text", "") for e in out_events()), 15), f"plugin command in a channel: {out_events()[-2:]}")
+            check(len(seen()) == n_req, "dropped message and plugin command never reached the model")
+            sess = os.path.join(HOME, "data", "sessions")
+            amy = [d for d in os.listdir(sess) if "\"qa · Amy\"" in open(os.path.join(sess, d, "events.jsonl")).readline()]
+            check(len(amy) == 1, amy)
+            say("m4", "/forget")
+            check(wait_for(lambda: any("Deleted 1 conversation" in e["message"].get("text", "") for e in out_events()), 15), f"/forget reply: {out_events()[-1:]}")
+            check(not os.path.exists(os.path.join(sess, amy[0])), "the sender's session is gone")
+            check("session_end" in logged("hook", "event"), "session_end on /forget")
+        finally:
+            ark("daemon", "stop")
+        check(wait_for(lambda: "stop" in logged("service", "action"), 10) and "daemon_stop" in logged("hook", "event"), "services stopped with the daemon")
+
+
+@test
+def plugin_cli_middleware_engine_memory_and_ui():
+    port = free_port()
+    ark("secrets", "set", "APP_TOKEN", stdin="app-token-abc123")
+    log = os.path.join(ROOT, "kinds2.log")
+    cfg = f"""
+[plugins.kinds]
+command = "{sys.executable}"
+args = ["-I", "{KINDS}", "--log", "{log}"]
+
+[memory]
+provider = "kinds"
+
+[app]
+enabled = true
+listen = "127.0.0.1:{port}"
+token = "{{{{secret:APP_TOKEN}}}}"
+"""
+    def logged(kind):
+        try:
+            return [json.loads(l) for l in open(log) if json.loads(l)["kind"] == kind]
+        except FileNotFoundError:
+            return []
+    with extra_config(cfg):
+        # CLI commands: argv passes through untouched (flags too), output streams, exit code returns.
+        c, out, err = ark("kinds-echo", "a", "--odd-flag", "b")
+        check(c == 0 and out.startswith("streamed\n") and 'argv=["a", "--odd-flag", "b"]' in out, out + err)
+        check(ark("kinds-echo", "--fail")[0] == 3, "plugin exit code")
+        c, out, _ = ark("help")
+        check("PLUGIN COMMANDS" in out and "kinds-echo" in out, out[-400:])
+        c, _, err = ark("no-such-command")
+        check(c == 2 and "unknown command" in err, err)
+        c, out, _ = ark("plugin", "list")
+        check("cli: ark kinds-echo" in out and "memory provider" in out and "context engine" in out and "/plugins/kinds/ui/dash" in out, out)
+        # Middleware, transform hooks and the memory provider in one run.
+        script([
+            {"tool": "mcp__kinds__shout", "args": {"text": "rewrite me"}},
+            {"tool": "mcp__kinds__shout", "args": {"text": "cached"}},
+            {"tool": "memory", "args": {"action": "add", "text": "likes tea"}},
+            {"tool": "memory", "args": {"action": "search", "query": "TEA"}},
+            {"text": "TRANSFORM-ME please"},
+        ])
+        c, out, err = ark("run", "--json", "use the plugin")
+        check(c == 0 and json.loads(out.strip().splitlines()[-1])["text"] == "transformed by plugin", out + err)
+        body = json.dumps(seen()[-1]["body"])
+        check("REWRITTEN [transformed]" in body and "FROM CACHE [transformed]" in body, body[-1500:])
+        check("likes tea" in body and "Memory provider: kinds" in body, "memory provider served the tool and the prompt block")
+        check([m["action"] for m in logged("memory")] == ["add", "search"], logged("memory"))
+        mws = {(m["mw"], m["phase"]) for m in logged("middleware")}
+        check({("tool_request", None), ("tool_execution", "call"), ("tool_execution", "result"), ("llm_request", None), ("llm_execution", "call")} <= mws, mws)
+        # llm_execution middleware answers without the provider.
+        script([])
+        c, out, err = ark("run", "--json", "short-circuit")
+        check(c == 0 and json.loads(out.strip().splitlines()[-1])["text"] == "answered by middleware" and seen() == [], out + err)
+        # Context engine: assembles (first call bootstraps) and receives every message.
+        script([{"text": "engine reply"}])
+        c, out, err = ark("run", "--set", 'context_engine="kinds"', "ENGINE trim")
+        check(c == 0 and "engine reply" in out, out + err)
+        check("engine was here" in json.dumps(seen()[0]["body"]), json.dumps(seen()[0]["body"])[:800])
+        a = logged("assemble")
+        check(a and a[-1]["bootstrap"] is True and {"user", "assistant"} <= {m["role"] for m in logged("ingest")}, (a, logged("ingest")))
+        # UI panels: over HTTP (token, sandbox CSP) and over ARP for the web UI.
+        c, out, err = ark("daemon", "start")
+        check(c == 0, out + err)
+        try:
+            wait_port(port)
+            base = f"http://127.0.0.1:{port}"
+            def req(path, body=None, token="app-token-abc123"):
+                h = {"Authorization": f"Bearer {token}"} if token else {}
+                if body is not None:
+                    h["content-type"] = "application/json"
+                r = urllib.request.Request(base + path, data=json.dumps(body).encode() if body is not None else None, headers=h, method="POST" if body is not None else "GET")
+                try:
+                    resp = urllib.request.urlopen(r, timeout=30)
+                    return resp.status, resp.read().decode(), {k.lower(): v for k, v in resp.headers.items()}
+                except urllib.error.HTTPError as e:
+                    return e.code, e.read().decode(), {}
+            st, body, hdr = req("/plugins/kinds/ui/dash")
+            check(st == 200 and "kinds panel" in body and hdr.get("content-security-policy") == "sandbox", (st, body[:200], hdr))
+            check(req("/plugins/kinds/ui/dash", token=None)[0] == 401 and req("/plugins/kinds/ui/ghost")[0] == 404, "panels need the token; unknown ones 404")
+            st, body, _ = req("/arp", {"jsonrpc": "2.0", "id": 1, "method": "plugins.list"})
+            check(any(u["id"] == "dash" for p in json.loads(body)["result"] for u in p.get("ui", [])), body[:400])
+            st, body, _ = req("/arp", {"jsonrpc": "2.0", "id": 2, "method": "plugins.ui", "params": {"plugin": "kinds", "id": "dash"}})
+            check("kinds panel" in json.loads(body)["result"]["html"], body[:300])
+            st, body, _ = req("/arp", {"jsonrpc": "2.0", "id": 3, "method": "plugins.ui_call", "params": {"plugin": "kinds", "id": "dash", "method": "count"}})
+            check(json.loads(body)["result"]["count"] == 42, body)
+        finally:
+            ark("daemon", "stop")
+
+
+@test
+def acp_agent_over_stdio():
+    edit_file = os.path.join(WS, "acp_edit.txt")
+    open(edit_file, "w").write("keep\nold line\n")
+    script([
+        {"tool": "mcp__edfx__add", "args": {"a": 2, "b": 40}},
+        {"tool": "edit", "args": {"path": "acp_edit.txt", "old_string": "old line", "new_string": "new line"}},
+        {"tool": "write", "args": {"path": "/etc/ark-e2e-denied", "content": "nope"}},
+        {"text": "acp says hi"},
+    ])
+    p = subprocess.Popen([ARK, "acp"], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=ENV, cwd=WS)
+    def send(o):
+        p.stdin.write(json.dumps(o) + "\n"); p.stdin.flush()
+    def until(pred, limit=30, answer=None):
+        end = time.time() + limit
+        got = []
+        while time.time() < end:
+            line = p.stdout.readline()
+            if not line:
+                break
+            m = json.loads(line)
+            got.append(m)
+            if answer and m.get("method") == "session/request_permission":
+                send({"jsonrpc": "2.0", "id": m["id"], "result": {"outcome": {"outcome": "selected", "optionId": answer(m)}}})
+            if pred(m):
+                return m, got
+        raise AssertionError(f"timed out; saw {got[-5:]}")
+    def updates(msgs, kind):
+        return [m["params"]["update"] for m in msgs if m.get("method") == "session/update" and m["params"]["update"]["sessionUpdate"] == kind]
+    try:
+        send({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": 1, "clientCapabilities": {"fs": {"readTextFile": True}}}})
+        r, _ = until(lambda m: m.get("id") == 1)
+        caps = r["result"]["agentCapabilities"]
+        check(caps["loadSession"] is True and caps["promptCapabilities"]["image"] is True and "close" in caps["sessionCapabilities"], r)
+        edfx = {"name": "edfx", "command": sys.executable, "args": [FX], "env": []}
+        send({"jsonrpc": "2.0", "id": 2, "method": "session/new", "params": {"cwd": WS, "mcpServers": [edfx]}})
+        r, _ = until(lambda m: m.get("id") == 2)
+        res = r["result"]
+        sid = res["sessionId"]
+        check(res["modes"]["currentModeId"] == "default", r)
+        check(res["models"]["currentModelId"] == "fake/fake-model" and any(x["modelId"] == "fakeanth/fake-claude" for x in res["models"]["availableModels"]), res.get("models"))
+        check([o["id"] for o in res["configOptions"]] == ["mode", "model", "thought_level"], res.get("configOptions"))
+        png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="
+        perms = []
+        def answer(m):
+            perms.append(m["params"])
+            # Allow the editor's MCP tool, refuse the system-path write.
+            return "deny" if "/etc/" in json.dumps(m["params"]["toolCall"]) else "allow_once"
+        send({"jsonrpc": "2.0", "id": 3, "method": "session/prompt", "params": {"sessionId": sid, "prompt": [{"type": "text", "text": "hello"}, {"type": "resource", "resource": {"uri": "file:///x.txt", "text": "ctx"}}, {"type": "image", "mimeType": "image/png", "data": png}]}})
+        r, seen_msgs = until(lambda m: m.get("id") == 3, answer=answer)
+        check(r["result"]["stopReason"] == "end_turn", r)
+        chunks = "".join(u["content"]["text"] for u in updates(seen_msgs, "agent_message_chunk"))
+        check("acp says hi" in chunks, seen_msgs[-5:])
+        reqs = seen()
+        first = json.dumps(reqs[-4]["body"]["messages"])
+        check("file:///x.txt" in first, "embedded resource reached the model")
+        check("data:image/png;base64," + png[:20] in first, "image reached the model as image input")
+        check(any(t.get("function", {}).get("name") == "mcp__edfx__add" for t in reqs[-4]["body"]["tools"]), "editor MCP tool offered with its schema")
+        check("42" in json.dumps(reqs[-3]["body"]["messages"]), "editor MCP server ran (after the editor approved the untrusted call)")
+        check(len(perms) == 2 and "mcp__edfx__add" in perms[0]["toolCall"]["title"], perms)
+        diff = perms[1]["toolCall"].get("content", [{}])[0]
+        check(diff.get("type") == "diff" and diff.get("newText") == "nope" and diff.get("path") == "/etc/ark-e2e-denied", perms[1])
+        check(not os.path.exists("/etc/ark-e2e-denied"), "denied write did not happen")
+        tc = [u for u in updates(seen_msgs, "tool_call") if u["title"] == "edit"][0]
+        check(tc["content"][0]["oldText"] == "keep\nold line\n" and tc["content"][0]["newText"] == "keep\nnew line\n", tc)
+        check(open(edit_file).read() == "keep\nnew line\n", "edit applied")
+        info = updates(seen_msgs, "session_info_update")
+        check(info and info[0]["title"] == "hello" and info[0]["updatedAt"].endswith("Z"), info)
+        usage = updates(seen_msgs, "usage_update")
+        check(usage and usage[-1]["size"] > 0 and usage[-1]["used"] > 0, usage)
+        # Model and thinking switches, then a turn on the other provider.
+        send({"jsonrpc": "2.0", "id": 4, "method": "session/set_model", "params": {"sessionId": sid, "modelId": "fakeanth/fake-claude"}})
+        r, got = until(lambda m: m.get("id") == 4)
+        check("error" not in r and updates(got, "config_option_update"), got)
+        send({"jsonrpc": "2.0", "id": 5, "method": "session/set_model", "params": {"sessionId": sid, "modelId": "nope/x"}})
+        r, _ = until(lambda m: m.get("id") == 5)
+        check("error" in r, r)
+        send({"jsonrpc": "2.0", "id": 6, "method": "session/set_config_option", "params": {"sessionId": sid, "configId": "thought_level", "value": "high"}})
+        r, _ = until(lambda m: m.get("id") == 6)
+        opts = {o["id"]: o["currentValue"] for o in r["result"]["configOptions"]}
+        check(opts == {"mode": "default", "model": "fakeanth/fake-claude", "thought_level": "high"}, r)
+        script([{"text": "from claude"}])
+        send({"jsonrpc": "2.0", "id": 7, "method": "session/prompt", "params": {"sessionId": sid, "prompt": [{"type": "text", "text": "again"}]}})
+        r, got = until(lambda m: m.get("id") == 7)
+        body = seen()[-1]["body"]
+        check(body.get("thinking", {}).get("budget_tokens") == 24576 and body["model"] == "fake-claude", body.get("thinking"))
+        check(not updates(got, "session_info_update"), "title only set once")
+        send({"jsonrpc": "2.0", "id": 8, "method": "session/set_config_option", "params": {"sessionId": sid, "configId": "mode", "value": "strict"}})
+        r, got = until(lambda m: m.get("id") == 8)
+        check("error" not in r and updates(got, "current_mode_update"), got)
+        send({"jsonrpc": "2.0", "id": 9, "method": "session/list", "params": {"cwd": os.path.realpath(WS)}})
+        r, _ = until(lambda m: m.get("id") == 9)
+        check(any(x["sessionId"] == sid and x["title"] == "hello" for x in r["result"]["sessions"]), r)
+        send({"jsonrpc": "2.0", "id": 10, "method": "session/close", "params": {"sessionId": sid}})
+        r, _ = until(lambda m: m.get("id") == 10)
+        check(r.get("result") == {}, r)
+        send({"jsonrpc": "2.0", "id": 11, "method": "session/load", "params": {"sessionId": sid, "cwd": WS, "mcpServers": []}})
+        r, replay = until(lambda m: m.get("id") == 11)
+        check(any(u["content"].get("type") == "image" for u in updates(replay, "user_message_chunk")), "history (with the image) replayed on load")
+        check(r["result"]["models"]["currentModelId"] == "fakeanth/fake-claude", r)
+    finally:
+        p.stdin.close()
+        p.wait(10)
+
+
+@test
+def acp_client_drives_external_agents():
+    fake = os.path.join(HERE, "fake_acp_agent.py")
+    open(os.path.join(WS, "acp_in.txt"), "w").write("first\nsecond\n")
+    with extra_config(f'[acp.agents.fake]\ncommand = "{sys.executable}"\nargs = ["-I", "{fake}"]\n'):
+        c, out, err = ark("acp-client", "--list")
+        check(c == 0 and "claude" in out and "codex-acp" in out and "fake" in out, out + err)
+        c, out, err = ark("acp-client", "fake", "hello there", "--json")
+        check(c == 0, err)
+        r = json.loads(out)
+        check(r["text"] == "echo: hello there" and r["stopReason"] == "end_turn" and r["plan"], r)
+        # No TTY: approve-reads cannot ask, so the write is refused.
+        c, out, err = ark("acp-client", "fake", "write:" + os.path.join(WS, "acp_out.txt") + ":x", "--json")
+        check(c == 0 and "permission rejected" in json.loads(out)["text"] and not os.path.exists(os.path.join(WS, "acp_out.txt")), out + err)
+        c, out, err = ark("acp-client", "fake", "write:" + os.path.join(WS, "acp_out.txt") + ":yes", "--permission-mode", "approve-all")
+        check(c == 0 and "wrote" in out and open(os.path.join(WS, "acp_out.txt")).read() == "yes", out + err)
+        c, out, err = ark("acp-client", "fake", "run:sudo rm -rf /tmp/nothing", "--permission-mode", "approve-all", "--json")
+        check("error" in json.loads(out)["text"], "ark's privilege gate still asks (and nobody can answer)")
+        # The acp_delegate tool, from a normal run.
+        script([
+            {"tool": "tool_call", "args": {"name": "acp_delegate", "input": {"agent": "fake", "prompt": "read:" + os.path.join(WS, "acp_in.txt")}}},
+            {"text": "delegated"},
+        ])
+        c, out, err = ark("run", "ask the fake agent")
+        check(c == 0 and "delegated" in out, out + err)
+        res = json.dumps(seen()[-1]["body"]["messages"])
+        check("content: second" in res and "continue with session" in res, res[-600:])
 
 
 try:

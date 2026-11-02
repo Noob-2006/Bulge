@@ -1,7 +1,7 @@
 //! Anthropic Messages API.
 
 use crate::http::{json, truncated};
-use crate::{caps_for, classify, finalize_usage, parse_args, Conn};
+use crate::{caps_for, classify, finalize_usage, parse_args, thinking_budget, Conn};
 use ark_core::*;
 use serde_json::{json, Value};
 
@@ -50,6 +50,7 @@ impl Anthropic {
                     Block::ToolResult { tool_use_id, content, is_error } => Some(
                         json!({"type": "tool_result", "tool_use_id": tool_use_id, "content": content, "is_error": is_error}),
                     ),
+                    Block::Image { media_type, data } => Some(json!({"type": "image", "source": {"type": "base64", "media_type": media_type, "data": data}})),
                 })
                 .collect();
             if blocks.is_empty() {
@@ -67,8 +68,17 @@ impl Anthropic {
         if !system.is_empty() {
             b["system"] = system.into();
         }
-        if let Some(t) = req.temperature {
-            b["temperature"] = t.into();
+        match thinking_budget(req.reasoning.as_deref()) {
+            // Extended thinking: max_tokens must exceed the budget and temperature must stay default.
+            Some(budget) => {
+                b["thinking"] = json!({"type": "enabled", "budget_tokens": budget});
+                b["max_tokens"] = req.max_tokens.max(budget + 4096).into();
+            }
+            None => {
+                if let Some(t) = req.temperature {
+                    b["temperature"] = t.into();
+                }
+            }
         }
         if !req.tools.is_empty() {
             b["tools"] = req

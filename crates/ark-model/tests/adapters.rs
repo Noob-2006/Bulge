@@ -39,6 +39,7 @@ fn simple_req() -> ModelRequest {
         max_tokens: 256,
         temperature: None,
         cache_after_message: None,
+        reasoning: None,
     }
 }
 
@@ -544,4 +545,38 @@ fn custom_headers_are_sent_and_local_servers_need_no_key() {
     let req = m.request();
     assert_eq!(req.header("x-title"), Some("ark"));
     assert!(req.header("authorization").is_none());
+}
+
+#[test]
+fn images_and_reasoning_effort_reach_every_format() {
+    for f in FORMATS {
+        let m = serve(sse(&text_stream(f)));
+        let mut req = simple_req();
+        req.messages = vec![Message { role: Role::User, content: vec![Block::text("what is this?"), Block::Image { media_type: "image/png".into(), data: "iVBORw0K".into() }] }];
+        req.reasoning = Some("high".into());
+        req.temperature = Some(0.2);
+        run(f, &m, &req, Duration::from_secs(5), &Cancel::new()).0.unwrap();
+        let b = m.request().body;
+        let s = b.to_string();
+        assert!(s.contains("iVBORw0K") && s.contains("what is this?"), "{f:?}: {s}");
+        match f {
+            WireFormat::Anthropic => {
+                assert_eq!(b["messages"][0]["content"][1]["source"]["media_type"], "image/png");
+                assert_eq!(b["thinking"]["budget_tokens"], 24576);
+                assert!(b["max_tokens"].as_u64().unwrap() > 24576 && b.get("temperature").is_none(), "{s}");
+            }
+            WireFormat::OpenAiChat => {
+                assert_eq!(b["messages"][1]["content"][1]["image_url"]["url"], "data:image/png;base64,iVBORw0K");
+                assert_eq!(b["reasoning_effort"], "high");
+            }
+            WireFormat::OpenAiResponses => {
+                assert!(s.contains("input_image") && s.contains("data:image/png;base64,iVBORw0K"));
+                assert_eq!(b["reasoning"]["effort"], "high");
+            }
+            WireFormat::Gemini => {
+                assert_eq!(b["contents"][0]["parts"][1]["inlineData"]["mimeType"], "image/png");
+                assert_eq!(b["generationConfig"]["thinkingConfig"]["thinkingBudget"], 24576);
+            }
+        }
+    }
 }

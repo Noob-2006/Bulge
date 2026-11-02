@@ -185,6 +185,7 @@ pub fn build_request(view: &View, cfg: &Config, specs: &[ToolSpec], kernel_tools
         // Cache through the second-to-last message: stable across this step's retries
         // and the next step's prefix.
         cache_after_message: if n >= 2 { Some(n - 2) } else { None },
+        reasoning: view.thinking.clone(),
     }
 }
 

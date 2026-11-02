@@ -79,6 +79,12 @@ impl Gates<'_> {
                     }
                 }
             }
+            Effect::Remote { dest, reason } => {
+                if self.denied_host(dest) {
+                    return self.apply(GateKind::Egress, None, Some(format!("destination {dest} is on the deny list")));
+                }
+                (GateKind::Egress, Some(format!("{reason} → {dest}")))
+            }
             Effect::Net { dest, payload } | Effect::Send { channel: dest, payload } => {
                 if self.denied_host(dest) {
                     return self.apply(GateKind::Egress, None, Some(format!("destination {dest} is on the deny list")));

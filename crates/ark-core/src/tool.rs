@@ -21,6 +21,9 @@ pub enum Effect {
     Send { channel: String, payload: String },
     /// Spawning another agent (budget accounting only).
     Spawn,
+    /// A call that always needs the egress gate's say-so (untrusted MCP server,
+    /// spend limit reached): `reason` is shown when asking.
+    Remote { dest: String, reason: String },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -57,14 +60,18 @@ pub struct ToolOutput {
     pub content: String,
     #[serde(default)]
     pub is_error: bool,
+    /// An interactive view for UIs (MCP Apps: `{server, tool, uri, html, csp, …}`).
+    /// Never reaches the model; the kernel records it on `tool_settled`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ui_resource: Option<Value>,
 }
 
 impl ToolOutput {
     pub fn ok(s: impl Into<String>) -> Self {
-        ToolOutput { content: s.into(), is_error: false }
+        ToolOutput { content: s.into(), is_error: false, ui_resource: None }
     }
     pub fn err(s: impl Into<String>) -> Self {
-        ToolOutput { content: s.into(), is_error: true }
+        ToolOutput { content: s.into(), is_error: true, ui_resource: None }
     }
 }
 
@@ -74,6 +81,8 @@ pub trait ToolHost: Send + Sync {
     fn spawn_agent(&self, req: SpawnRequest, cancel: &Cancel) -> Result<String, String>;
     /// Ask the human a question (may fail in headless mode).
     fn ask_user(&self, question: &str) -> Result<String, String>;
+    /// Live progress from a long-running tool, shown by attached UIs (not logged).
+    fn progress(&self, _text: &str) {}
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

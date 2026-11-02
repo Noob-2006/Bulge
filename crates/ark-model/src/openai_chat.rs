@@ -1,7 +1,7 @@
 //! OpenAI Chat Completions — also DeepSeek, Groq, OpenRouter, xAI, Mistral, Ollama, vLLM…
 
 use crate::http::{json, truncated};
-use crate::{caps_for, classify, finalize_usage, parse_args, Conn};
+use crate::{caps_for, classify, data_url, finalize_usage, parse_args, thinking_budget, Conn};
 use ark_core::*;
 use serde_json::{json, Map, Value};
 
@@ -24,16 +24,23 @@ impl OpenAiChat {
             match m.role {
                 Role::User => {
                     let mut text = Vec::new();
+                    let mut images = Vec::new();
                     for b in &m.content {
                         match b {
                             Block::ToolResult { tool_use_id, content, .. } => {
                                 msgs.push(json!({"role": "tool", "tool_call_id": tool_use_id, "content": content}))
                             }
                             Block::Text { text: t } => text.push(t.as_str()),
+                            Block::Image { media_type, data } => images.push(json!({"type": "image_url", "image_url": {"url": data_url(media_type, data)}})),
                             _ => {}
                         }
                     }
-                    if !text.is_empty() {
+                    if !images.is_empty() {
+                        // Content parts only when there is an image: text-only servers expect a string.
+                        let mut parts = vec![json!({"type": "text", "text": text.join("\n")})];
+                        parts.extend(images);
+                        msgs.push(json!({"role": "user", "content": parts}));
+                    } else if !text.is_empty() {
                         msgs.push(json!({"role": "user", "content": text.join("\n")}));
                     }
                 }
@@ -77,6 +84,9 @@ impl OpenAiChat {
         b[key] = req.max_tokens.into();
         if let Some(t) = req.temperature {
             b["temperature"] = t.into();
+        }
+        if thinking_budget(req.reasoning.as_deref()).is_some() {
+            b["reasoning_effort"] = req.reasoning.clone().into();
         }
         if !req.tools.is_empty() {
             b["tools"] = req

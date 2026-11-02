@@ -44,6 +44,7 @@ pub fn render_transcript(messages: &[Message], per_block: usize) -> String {
         for b in &m.content {
             let line = match b {
                 Block::Text { text } => format!("{who}: {text}"),
+                Block::Image { media_type, .. } => format!("{who}: [image {media_type}]"),
                 Block::Thinking { .. } => continue,
                 Block::ToolUse { name, input, .. } => format!("{who} called {name}({})", crate::util::head_tail(&input.to_string(), per_block).0),
                 Block::ToolResult { content, is_error, .. } => format!("TOOL{}: {}", if *is_error { " ERROR" } else { "" }, crate::util::head_tail(content, per_block).0),
@@ -108,6 +109,7 @@ pub fn summarise(provider: &dyn Provider, model: &str, messages: &[Message], can
         max_tokens: 4096,
         temperature: None,
         cache_after_message: None,
+        reasoning: None,
     };
     for _ in 0..2 {
         if cancel.is_cancelled() {

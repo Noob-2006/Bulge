@@ -20,22 +20,165 @@ use std::time::{Duration, Instant};
 #[serde(rename_all = "snake_case")]
 pub enum HookEvent {
     SessionStart,
+    /// The session is deleted, replaced (`/new`, `/forget`) or its interactive client exits.
+    SessionEnd,
     UserPrompt,
     PreTool,
     PostTool,
     TurnEnd,
+    /// Before each model request (`model`, `messages`); block = fail the step.
+    PreModel,
+    /// After a model response (`model`, `text`, `stop`, `usage`); observe only.
+    PostModel,
+    /// Before summarising the context; block = skip this compaction.
+    PreCompact,
+    PostCompact,
+    /// A channel message passed the access checks (`channel`, `chat`, `sender`, `prompt` = text);
+    /// block = drop it, modify = rewrite the text.
+    MessageReceived,
+    /// A channel reply is about to go out (`prompt` = text); block = don't send, modify = rewrite.
+    MessageSending,
+    MessageSent,
+    SubagentStart,
+    SubagentStop,
+    /// The agent needs a human (approval request or question).
+    Notification,
+    DaemonStart,
+    DaemonStop,
+    /// A gate is about to ask the human to approve a tool call (observe only).
+    PreApprovalRequest,
+    /// The human answered an approval (`choice`: once | always | deny; observe only).
+    PostApprovalResponse,
+    /// The agent asks the human a question / got the answer (`answer`; observe only).
+    HumanInputRequest,
+    HumanInputResolved,
+    /// A tool's result before the model sees it (`result` = text); modify = replace it.
+    TransformToolResult,
+    /// The shell tool's output (`output`), before transform_tool_result; modify = replace it.
+    TransformTerminalOutput,
+    /// The model's reply text (`text`); modify = replace the text blocks.
+    TransformLlmOutput,
+    /// A failed model call (`classification` = {kind, retryable, fallback}); modify = override them.
+    TransformApiError,
+    /// Middleware (Hermes): rewrite a tool call's arguments (`tool_input`) before hooks and gates.
+    ToolRequest,
+    /// Middleware: `phase` "call" — set `tool_response` to answer without running the tool;
+    /// `phase` "result" — replace `tool_response`.
+    ToolExecution,
+    /// Middleware: rewrite the model request (`request`, an ark ModelRequest).
+    LlmRequest,
+    /// Middleware: `phase` "call" — set `response` to answer without calling the provider;
+    /// `phase` "result" — replace `response`.
+    LlmExecution,
 }
 
 impl HookEvent {
-    /// Claude Code's event names, so existing hook scripts work unchanged.
+    pub const ALL: [HookEvent; 30] = [
+        HookEvent::SessionStart,
+        HookEvent::SessionEnd,
+        HookEvent::UserPrompt,
+        HookEvent::PreTool,
+        HookEvent::PostTool,
+        HookEvent::TurnEnd,
+        HookEvent::PreModel,
+        HookEvent::PostModel,
+        HookEvent::PreCompact,
+        HookEvent::PostCompact,
+        HookEvent::MessageReceived,
+        HookEvent::MessageSending,
+        HookEvent::MessageSent,
+        HookEvent::SubagentStart,
+        HookEvent::SubagentStop,
+        HookEvent::Notification,
+        HookEvent::DaemonStart,
+        HookEvent::DaemonStop,
+        HookEvent::PreApprovalRequest,
+        HookEvent::PostApprovalResponse,
+        HookEvent::HumanInputRequest,
+        HookEvent::HumanInputResolved,
+        HookEvent::TransformToolResult,
+        HookEvent::TransformTerminalOutput,
+        HookEvent::TransformLlmOutput,
+        HookEvent::TransformApiError,
+        HookEvent::ToolRequest,
+        HookEvent::ToolExecution,
+        HookEvent::LlmRequest,
+        HookEvent::LlmExecution,
+    ];
+
+    /// Middleware kinds (Hermes `register_middleware`): plugins declare them under `middleware`.
+    pub fn is_middleware(self) -> bool {
+        matches!(self, HookEvent::ToolRequest | HookEvent::ToolExecution | HookEvent::LlmRequest | HookEvent::LlmExecution)
+    }
+
+    /// Claude Code's event names, so existing hook scripts work unchanged
+    /// (events Claude Code lacks get names in the same style).
     pub fn claude_name(self) -> &'static str {
         match self {
             HookEvent::SessionStart => "SessionStart",
+            HookEvent::SessionEnd => "SessionEnd",
             HookEvent::UserPrompt => "UserPromptSubmit",
             HookEvent::PreTool => "PreToolUse",
             HookEvent::PostTool => "PostToolUse",
             HookEvent::TurnEnd => "Stop",
+            HookEvent::PreModel => "PreModel",
+            HookEvent::PostModel => "PostModel",
+            HookEvent::PreCompact => "PreCompact",
+            HookEvent::PostCompact => "PostCompact",
+            HookEvent::MessageReceived => "MessageReceived",
+            HookEvent::MessageSending => "MessageSending",
+            HookEvent::MessageSent => "MessageSent",
+            HookEvent::SubagentStart => "SubagentStart",
+            HookEvent::SubagentStop => "SubagentStop",
+            HookEvent::Notification => "Notification",
+            HookEvent::DaemonStart => "DaemonStart",
+            HookEvent::DaemonStop => "DaemonStop",
+            HookEvent::PreApprovalRequest => "PreApprovalRequest",
+            HookEvent::PostApprovalResponse => "PostApprovalResponse",
+            HookEvent::HumanInputRequest => "HumanInputRequest",
+            HookEvent::HumanInputResolved => "HumanInputResolved",
+            HookEvent::TransformToolResult => "TransformToolResult",
+            HookEvent::TransformTerminalOutput => "TransformTerminalOutput",
+            HookEvent::TransformLlmOutput => "TransformLlmOutput",
+            HookEvent::TransformApiError => "TransformApiError",
+            HookEvent::ToolRequest => "ToolRequest",
+            HookEvent::ToolExecution => "ToolExecution",
+            HookEvent::LlmRequest => "LlmRequest",
+            HookEvent::LlmExecution => "LlmExecution",
         }
+    }
+
+    /// snake_case name as written in config and the plugin protocol.
+    pub fn name(self) -> String {
+        serde_json::to_value(self).ok().and_then(|v| v.as_str().map(String::from)).unwrap_or_default()
+    }
+
+    /// Parse a config / plugin name, including upstream aliases
+    /// (OpenClaw `before_tool_call`, Hermes `pre_llm_call`, ark's old `inbound`/`outbound`…).
+    pub fn parse(s: &str) -> Option<HookEvent> {
+        let canon = match s {
+            "pre_tool_call" | "before_tool_call" => "pre_tool",
+            "post_tool_call" | "after_tool_call" => "post_tool",
+            "on_session_start" => "session_start",
+            "on_session_end" | "on_session_finalize" => "session_end",
+            "pre_llm_call" | "llm_input" | "before_model_call" => "pre_model",
+            "post_llm_call" | "llm_output" => "post_model",
+            "before_compaction" => "pre_compact",
+            "after_compaction" => "post_compact",
+            "inbound" | "pre_gateway_dispatch" | "before_dispatch" => "message_received",
+            "outbound" | "reply_payload_sending" => "message_sending",
+            "subagent_spawned" => "subagent_start",
+            "subagent_ended" => "subagent_stop",
+            "agent_end" | "stop" => "turn_end",
+            "user_prompt_submit" | "before_prompt_build" => "user_prompt",
+            "gateway_start" => "daemon_start",
+            "gateway_stop" => "daemon_stop",
+            "on_human_input_request" => "human_input_request",
+            "on_human_input_resolved" => "human_input_resolved",
+            "transform_api_error_classification" => "transform_api_error",
+            other => other,
+        };
+        serde_json::from_value(Value::String(canon.into())).ok()
     }
 }
 
@@ -253,6 +396,23 @@ mod tests {
         let h = hook(HookEvent::UserPrompt, "", "echo remember the tests");
         assert_eq!(h.run(HookEvent::UserPrompt, &p()).unwrap(), HookDecision::Context("remember the tests".into()));
         assert_eq!(hook(HookEvent::PostTool, "", "echo not json").run(HookEvent::PostTool, &p()).unwrap(), HookDecision::Allow);
+    }
+
+    #[test]
+    fn event_names_round_trip_and_upstream_aliases() {
+        for e in HookEvent::ALL {
+            assert_eq!(HookEvent::parse(&e.name()), Some(e));
+        }
+        assert_eq!(HookEvent::parse("before_tool_call"), Some(HookEvent::PreTool));
+        assert_eq!(HookEvent::parse("pre_llm_call"), Some(HookEvent::PreModel));
+        assert_eq!(HookEvent::parse("inbound"), Some(HookEvent::MessageReceived));
+        assert_eq!(HookEvent::parse("before_compaction"), Some(HookEvent::PreCompact));
+        assert_eq!(HookEvent::parse("transform_api_error_classification"), Some(HookEvent::TransformApiError));
+        assert_eq!(HookEvent::parse("pre_approval_request"), Some(HookEvent::PreApprovalRequest));
+        assert!(HookEvent::ToolExecution.is_middleware() && !HookEvent::PreTool.is_middleware());
+        assert_eq!(HookEvent::parse("nope"), None);
+        let h: HookConfig = toml::from_str("event = \"pre_compact\"\ncommand = \"true\"").unwrap();
+        assert_eq!(h.event, HookEvent::PreCompact);
     }
 
     #[test]

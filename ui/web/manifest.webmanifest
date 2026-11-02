@@ -1,0 +1,10 @@
+{
+  "name": "ark",
+  "short_name": "ark",
+  "description": "ark agent",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#12020a",
+  "theme_color": "#330716",
+  "icons": [{ "src": "/ui/icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any maskable" }]
+}

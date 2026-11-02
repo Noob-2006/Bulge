@@ -2,12 +2,13 @@
 //! chat maps to, slash commands, and redelivery dedup. State persists in one
 //! JSON file so restarts keep conversations and never double-submit.
 
+use crate::access::{Pairing, Policy, Verdict};
 use crate::{write_atomic, Inbound};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 /// Message ids remembered for dedup.
 pub const SEEN_MAX: usize = 512;
@@ -24,11 +25,21 @@ pub enum SessionPer {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RouterConfig {
-    /// Sender ids or names allowed to talk; `"*"` = anyone. Empty = nobody.
     #[serde(default)]
-    pub allow: Vec<String>,
+    pub policy: Policy,
     #[serde(default)]
     pub session_per: SessionPer,
+    #[serde(default)]
+    pub privacy_notice: Option<String>,
+    #[serde(default)]
+    pub ai_label: Option<String>,
+}
+
+impl RouterConfig {
+    /// Deny-by-default allow list, the common case in tests and simple configs.
+    pub fn allow(allow: &[&str], session_per: SessionPer) -> RouterConfig {
+        RouterConfig { policy: Policy { allow: allow.iter().map(|s| s.to_string()).collect(), ..Policy::default() }, session_per, ..Default::default() }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -61,14 +72,20 @@ pub enum Command {
     Stop,
     Status,
     Help,
+    /// Delete this sender's sessions and attachments (`ark data delete` for one person).
+    Forget,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Action {
     Ignore { reason: String },
     Command { cmd: Command, key: RouteKey, session: Option<String> },
-    /// `session: None` → create one, then `bind` it.
-    Submit { key: RouteKey, session: Option<String>, text: String },
+    /// `session: None` → create one, then `bind` it. `notice`: send this first (privacy notice).
+    Submit { key: RouteKey, session: Option<String>, text: String, notice: Option<String> },
+    /// Unknown sender under pairing: reply with this text and do nothing else.
+    Pair { key: RouteKey, reply: String },
+    /// A button press on an earlier message.
+    Callback { key: RouteKey, session: Option<String>, callback: crate::Callback },
 }
 
 /// One persisted binding, for listings.
@@ -83,17 +100,20 @@ struct State {
     routes: BTreeMap<String, String>,
     seen: VecDeque<String>,
     seen_set: HashSet<String>,
+    /// Senders that already got the privacy notice ("channel\u{1f}sender").
+    noticed: BTreeSet<String>,
 }
 
 pub struct Router {
     path: PathBuf,
     configs: HashMap<String, RouterConfig>,
+    pairing: Option<Arc<Pairing>>,
     state: Mutex<State>,
     /// Set when the state file was unreadable and has been moved aside.
     pub load_warning: Option<String>,
 }
 
-pub const HELP: &str = "Commands: /new (fresh session), /stop (interrupt), /status, /help. Anything else goes to the agent.";
+pub const HELP: &str = "Commands: /new (fresh session), /stop (interrupt), /status, /forget (delete what you sent here), /help. Anything else goes to the agent.";
 
 impl Router {
     pub fn open(path: PathBuf, configs: HashMap<String, RouterConfig>) -> Router {
@@ -114,21 +134,43 @@ impl Router {
                 }
             },
         };
-        Router { path, configs, state: Mutex::new(state), load_warning: warning }
+        Router { path, configs, pairing: None, state: Mutex::new(state), load_warning: warning }
+    }
+
+    pub fn with_pairing(mut self, p: Arc<Pairing>) -> Router {
+        self.pairing = Some(p);
+        self
+    }
+
+    pub fn pairing(&self) -> Option<&Arc<Pairing>> {
+        self.pairing.as_ref()
+    }
+
+    pub fn config(&self, channel: &str) -> Option<&RouterConfig> {
+        self.configs.get(channel)
     }
 
     pub fn key_for(&self, m: &Inbound) -> RouteKey {
         let per = self.configs.get(&m.channel).map(|c| c.session_per).unwrap_or_default();
-        RouteKey { channel: m.channel.clone(), chat: m.chat.clone(), sender: (per == SessionPer::Sender).then(|| m.sender.clone()) }
+        // Threads get their own session: `chat` + thread id.
+        let chat = match &m.thread {
+            Some(t) => format!("{}:thread:{t}", m.chat),
+            None => m.chat.clone(),
+        };
+        RouteKey { channel: m.channel.clone(), chat, sender: (per == SessionPer::Sender).then(|| m.sender.clone()) }
     }
 
     pub fn route(&self, m: &Inbound) -> Action {
         let ignore = |r: &str| Action::Ignore { reason: r.to_string() };
         let Some(cfg) = self.configs.get(&m.channel) else { return ignore("unknown channel") };
-        if !allowed(cfg, m) {
-            return Action::Ignore { reason: format!("sender {} ({}) is not in allow list", m.sender, m.sender_name) };
-        }
+        let approved = |s: &str| self.pairing.as_ref().is_some_and(|p| p.is_approved(&m.channel, s));
         let key = self.key_for(m);
+        match cfg.policy.check(m, &approved, self.pairing.as_deref()) {
+            Verdict::Allow => {}
+            Verdict::Deny(reason) => return Action::Ignore { reason },
+            Verdict::NotAddressed => return ignore("group message not addressed to the bot"),
+            Verdict::Pair(reply) => return Action::Pair { key, reply },
+        }
         let mut st = self.state.lock().unwrap();
         if !m.message_id.is_empty() {
             let id = format!("{}\u{1f}{}\u{1f}{}", m.channel, m.chat, m.message_id);
@@ -143,8 +185,13 @@ impl Router {
                 }
             }
         }
+        if let Some(cb) = &m.callback {
+            let session = st.routes.get(&key.encode()).cloned();
+            self.save(&st);
+            return Action::Callback { key, session, callback: cb.clone() };
+        }
         let text = m.text.trim();
-        if text.is_empty() {
+        if text.is_empty() && m.media.is_empty() {
             self.save(&st);
             return ignore("empty message");
         }
@@ -154,6 +201,7 @@ impl Router {
             Some("stop") => Some(Command::Stop),
             Some("status") => Some(Command::Status),
             Some("help") | Some("start") => Some(Command::Help),
+            Some("forget") => Some(Command::Forget),
             _ => None,
         };
         let enc = key.encode();
@@ -161,10 +209,14 @@ impl Router {
             st.routes.remove(&enc);
         }
         let session = st.routes.get(&enc).cloned();
+        let notice = match (&cfg.privacy_notice, cmd) {
+            (Some(n), None) if st.noticed.insert(format!("{}\u{1f}{}", m.channel, m.sender)) => Some(n.clone()),
+            _ => None,
+        };
         self.save(&st);
         match cmd {
             Some(cmd) => Action::Command { cmd, key, session },
-            None => Action::Submit { key, session, text: text.to_string() },
+            None => Action::Submit { key, session, text: text.to_string(), notice },
         }
     }
 
@@ -191,14 +243,9 @@ impl Router {
 
     /// Best effort: a failed write costs at most a redelivery after restart.
     fn save(&self, st: &State) {
-        let v = json!({ "version": 1, "routes": st.routes, "seen": st.seen });
+        let v = json!({ "version": 1, "routes": st.routes, "seen": st.seen, "noticed": st.noticed });
         let _ = write_atomic(&self.path, v.to_string().as_bytes());
     }
-}
-
-fn allowed(cfg: &RouterConfig, m: &Inbound) -> bool {
-    let name = m.sender_name.trim_start_matches('@');
-    cfg.allow.iter().any(|a| a == "*" || (!m.sender.is_empty() && *a == m.sender) || (!name.is_empty() && a.trim_start_matches('@').eq_ignore_ascii_case(name)))
 }
 
 fn parse_state(s: &str) -> Option<State> {
@@ -206,7 +253,8 @@ fn parse_state(s: &str) -> Option<State> {
     let routes: BTreeMap<String, String> = serde_json::from_value(v.get("routes")?.clone()).ok()?;
     let seen: VecDeque<String> = serde_json::from_value(v.get("seen").cloned().unwrap_or(json!([]))).ok()?;
     let seen_set = seen.iter().cloned().collect();
-    Some(State { routes, seen, seen_set })
+    let noticed: BTreeSet<String> = serde_json::from_value(v.get("noticed").cloned().unwrap_or(json!([]))).ok()?;
+    Some(State { routes, seen, seen_set, noticed })
 }
 
 #[cfg(test)]
@@ -215,12 +263,12 @@ mod tests {
     use crate::testutil::temp_dir;
 
     fn msg(chat: &str, sender: &str, id: &str, text: &str) -> Inbound {
-        Inbound { channel: "tg".into(), chat: chat.into(), sender: sender.into(), sender_name: "amy".into(), text: text.into(), message_id: id.into(), ts: 0 }
+        Inbound { channel: "tg".into(), chat: chat.into(), sender: sender.into(), sender_name: "amy".into(), text: text.into(), message_id: id.into(), ts: 0, ..Default::default() }
     }
 
     fn router(path: PathBuf, allow: &[&str], per: SessionPer) -> Router {
         let mut c = HashMap::new();
-        c.insert("tg".to_string(), RouterConfig { allow: allow.iter().map(|s| s.to_string()).collect(), session_per: per });
+        c.insert("tg".to_string(), RouterConfig::allow(allow, per));
         Router::open(path, c)
     }
 
@@ -248,7 +296,7 @@ mod tests {
     fn dedup_commands_and_binding() {
         let d = temp_dir("rt");
         let r = router(d.join("r.json"), &["*"], SessionPer::Chat);
-        let Action::Submit { key, session: None, text } = r.route(&msg("c", "1", "m1", "  do it ")) else { panic!() };
+        let Action::Submit { key, session: None, text, .. } = r.route(&msg("c", "1", "m1", "  do it ")) else { panic!() };
         assert_eq!(text, "do it");
         r.bind(&key, "S1");
         assert!(matches!(r.route(&msg("c", "1", "m1", "do it")), Action::Ignore { reason } if reason.contains("duplicate")));
@@ -258,6 +306,7 @@ mod tests {
         assert!(matches!(r.route(&msg("c", "1", "m3", "/status@ArkBot")), Action::Command { cmd: Command::Status, session: Some(_), .. }));
         assert!(matches!(r.route(&msg("c", "1", "m4", "/STOP now")), Action::Command { cmd: Command::Stop, .. }));
         assert!(matches!(r.route(&msg("c", "1", "m5", "/help")), Action::Command { cmd: Command::Help, .. }));
+        assert!(matches!(r.route(&msg("c", "1", "m5b", "/forget")), Action::Command { cmd: Command::Forget, session: Some(_), .. }));
         assert!(matches!(r.route(&msg("c", "1", "m6", "/deploy prod")), Action::Submit { .. }), "unknown slash text goes to the agent");
         assert!(matches!(r.route(&msg("c", "1", "m7", "   ")), Action::Ignore { .. }));
         assert!(matches!(r.route(&msg("c", "1", "m8", "/new")), Action::Command { cmd: Command::New, session: None, .. }));

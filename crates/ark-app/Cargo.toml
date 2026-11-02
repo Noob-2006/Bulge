@@ -1,0 +1,20 @@
+[package]
+name = "ark-app"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# The app server: one protocol (ARP, JSON-RPC 2.0) for every UI — web, desktop,
+# terminal, editors (ACP), devices (nodes) and other agents (A2A).
+[dependencies]
+ark-core.workspace = true
+ark-kernel.workspace = true
+ark-net.workspace = true
+ark-plugin.workspace = true
+ark-tools.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+toml.workspace = true
+libc.workspace = true
+ring.workspace = true
+ureq.workspace = true

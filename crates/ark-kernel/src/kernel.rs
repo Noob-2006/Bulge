@@ -6,11 +6,12 @@ use crate::checkpoint::Checkpoints;
 use crate::compaction;
 use crate::config::{Config, Paths};
 use crate::context::{self, split_model};
+use crate::engine::ContextEngine;
 use crate::event::{Event, EventKind, LOG_VERSION};
 use crate::gate::{Gates, Verdict};
 use crate::hooks::{self, Hook, HookDecision, HookEvent};
 use crate::ledger::{Budget, Ledger};
-use crate::projection::{project, View};
+use crate::projection::{project, Queued, View};
 use crate::store::{SessionLog, Store, StoreError};
 use crate::util::{head_tail, new_id};
 use crate::vault::Vault;
@@ -103,7 +104,7 @@ pub struct RunOpts {
 
 struct Running {
     cancel: Cancel,
-    queue: Arc<Mutex<Vec<(String, String, String)>>>,
+    queue: Arc<Mutex<Vec<Queued>>>,
 }
 
 pub struct Runtime {
@@ -121,11 +122,19 @@ pub struct Runtime {
     /// cooldown passes, so each step doesn't pay for a doomed request first.
     benched: Mutex<HashMap<String, Instant>>,
     hooks: std::sync::RwLock<Vec<Arc<dyn Hook>>>,
+    session_tools: std::sync::RwLock<HashMap<String, Vec<Arc<dyn Tool>>>>,
+    taps: std::sync::RwLock<Vec<Tap>>,
+    /// `context_engine = "<plugin>"`: shapes requests and may own compaction.
+    engine: std::sync::RwLock<Option<Arc<dyn ContextEngine>>>,
     /// Test hook / determinism: override sleep between retries.
     pub retry_sleep: Option<Duration>,
 }
 
 pub type Kernel = Arc<Runtime>;
+
+/// Synchronous event observer: runs on the appending thread before the bus sees
+/// the event (e.g. snapshot a file's text before the tool that edits it runs).
+pub type Tap = Arc<dyn Fn(&str, &Event) + Send + Sync>;
 
 #[derive(Default)]
 struct Fired {
@@ -140,7 +149,7 @@ const MAX_BOOSTED_TOKENS: u32 = 32_768;
 
 pub fn new_kernel(cfg: Config, paths: Paths, resolver: Arc<dyn Resolver>, tools: Vec<Arc<dyn Tool>>, vault: Arc<Vault>, approver: Arc<dyn Approver>) -> Kernel {
     let store = Store::new(paths.sessions());
-    Arc::new(Runtime { cfg, paths, store, resolver, tools, vault, approver, remembered: Remembered::default(), bus: Bus::default(), running: Mutex::new(HashMap::new()), benched: Mutex::new(HashMap::new()), hooks: Default::default(), retry_sleep: None })
+    Arc::new(Runtime { cfg, paths, store, resolver, tools, vault, approver, remembered: Remembered::default(), bus: Bus::default(), running: Mutex::new(HashMap::new()), benched: Mutex::new(HashMap::new()), hooks: Default::default(), session_tools: Default::default(), taps: Default::default(), engine: Default::default(), retry_sleep: None })
 }
 
 #[derive(Debug)]
@@ -169,14 +178,14 @@ const KERNEL_TOOL_SEARCH: &str = "session_search";
 const KERNEL_TOOL_GOAL_DONE: &str = "goal_done";
 
 impl Runtime {
-    fn specs(&self) -> Vec<ToolSpec> {
+    pub fn specs(&self) -> Vec<ToolSpec> {
         self.tools.iter().map(|t| t.spec()).filter(|s| !self.cfg.tools.disabled.contains(&s.name)).collect()
     }
-    fn tool(&self, name: &str) -> Option<Arc<dyn Tool>> {
+    fn tool(&self, session: &str, name: &str) -> Option<Arc<dyn Tool>> {
         if self.cfg.tools.disabled.iter().any(|d| d == name) {
             return None;
         }
-        self.tools.iter().find(|t| t.spec().name == name).cloned()
+        self.tools.iter().find(|t| t.spec().name == name).cloned().or_else(|| self.session_tools.read().unwrap().get(session)?.iter().find(|t| t.spec().name == name).cloned())
     }
 
     /// Short, token-cheap error: closest names instead of the whole catalog.
@@ -213,6 +222,12 @@ impl Runtime {
 
     fn append(&self, log: &mut SessionLog, kind: EventKind) -> Result<Event, StoreError> {
         let ev = log.append(kind)?;
+        for t in self.taps.read().unwrap().iter() {
+            t(&log.id, &ev);
+        }
+        if let (EventKind::Message { message, .. }, Some(e)) = (&ev.kind, self.engine()) {
+            e.ingest(&log.id, message);
+        }
         self.bus.publish(BusMsg::Event { session: log.id.clone(), event: ev.clone() });
         Ok(ev)
     }
@@ -221,6 +236,23 @@ impl Runtime {
 
     pub fn add_hooks(&self, hooks: Vec<Arc<dyn Hook>>) {
         self.hooks.write().unwrap().extend(hooks);
+    }
+    pub fn add_tap(&self, t: Tap) {
+        self.taps.write().unwrap().push(t);
+    }
+    pub fn set_context_engine(&self, e: Arc<dyn ContextEngine>) {
+        *self.engine.write().unwrap() = Some(e);
+    }
+    fn engine(&self) -> Option<Arc<dyn ContextEngine>> {
+        self.engine.read().unwrap().clone()
+    }
+
+    /// Fire a hook whose `field` a hook may replace; returns the replacement (warnings go to the log).
+    fn transform(&self, log: &mut SessionLog, event: HookEvent, tool: Option<&str>, payload: Value, field: &str) -> Result<Option<Value>, StoreError> {
+        if !self.hooks.read().unwrap().iter().any(|h| h.wants(event, tool)) {
+            return Ok(None);
+        }
+        Ok(self.fire(Some(log), event, tool, payload, field)?.modified)
     }
 
     /// Run every matching hook in order. A block wins immediately; modifications
@@ -244,12 +276,40 @@ impl Runtime {
                 Err(e) => warnings.push(format!("hook {} failed ({e}); continuing", h.name())),
             }
         }
-        if let Some(log) = log {
-            for w in warnings {
-                self.append(log, EventKind::Notice { level: "warn".into(), text: w })?;
+        match log {
+            Some(log) => {
+                for w in warnings {
+                    self.append(log, EventKind::Notice { level: "warn".into(), text: w })?;
+                }
             }
+            None => warnings.iter().for_each(|w| eprintln!("ark: {w}")),
         }
         Ok(fired)
+    }
+
+    pub fn has_hooks(&self, event: HookEvent) -> bool {
+        self.hooks.read().unwrap().iter().any(|h| h.wants(event, None))
+    }
+
+    /// Hooks for events the host raises (channels, daemon, CLI): returns (block reason,
+    /// replacement for `payload[field]`). Warnings go to stderr, never to a session log
+    /// (the session may be running on another thread).
+    pub fn emit(&self, event: HookEvent, payload: Value, field: &str) -> (Option<String>, Option<Value>) {
+        if !self.has_hooks(event) {
+            return (None, None);
+        }
+        let f = self.fire(None, event, None, payload, field).unwrap_or_default();
+        (f.block, f.modified)
+    }
+
+    /// Fire `session_end` for a session the host is done with.
+    pub fn end_session(&self, id: &str, reason: &str) {
+        if self.has_hooks(HookEvent::SessionEnd) {
+            let ws = self.store.open(id).map(|l| project(l.events()).workspace).unwrap_or_default();
+            let mut p = hooks::payload(id, &ws, None, None, None, None);
+            p["reason"] = reason.into();
+            self.emit(HookEvent::SessionEnd, p, "");
+        }
     }
 
     // ───────────────────────── public API ─────────────────────────
@@ -284,7 +344,12 @@ impl Runtime {
 
     /// Queue input durably. If the session is running, it is steered mid-turn.
     pub fn submit(&self, id: &str, text: &str, source: &str) -> Result<(), KernelError> {
-        if text.trim().is_empty() {
+        self.submit_with(id, text, vec![], source)
+    }
+
+    /// `submit` plus extra content blocks (images) for the same user message.
+    pub fn submit_with(&self, id: &str, text: &str, attachments: Vec<Block>, source: &str) -> Result<(), KernelError> {
+        if text.trim().is_empty() && attachments.is_empty() {
             return Err(KernelError::Invalid("empty prompt".into()));
         }
         let mut text = text.to_string();
@@ -305,11 +370,11 @@ impl Runtime {
         let running = self.running.lock().unwrap();
         let inbox_id = new_id();
         if let Some(r) = running.get(id) {
-            r.queue.lock().unwrap().push((inbox_id, source.into(), text.into()));
+            r.queue.lock().unwrap().push((inbox_id, source.into(), text.into(), attachments));
             return Ok(());
         }
         let mut log = self.store.open(id)?;
-        self.append(&mut log, EventKind::Inbox { id: inbox_id, source: source.into(), text: text.into() })?;
+        self.append(&mut log, EventKind::Inbox { id: inbox_id, source: source.into(), text: text.into(), attachments })?;
         Ok(())
     }
 
@@ -336,6 +401,40 @@ impl Runtime {
         let mut log = self.store.open(id)?;
         self.append(&mut log, EventKind::Model { model: model.into() })?;
         Ok(())
+    }
+
+    /// Reasoning effort for the session's next requests ("" = provider default).
+    pub fn set_thinking(&self, id: &str, level: &str) -> Result<(), KernelError> {
+        if !matches!(level, "" | "off" | "low" | "medium" | "high") {
+            return Err(KernelError::Invalid(format!("thinking level `{level}`: use off, low, medium or high")));
+        }
+        let mut log = self.store.open(id)?;
+        self.append(&mut log, EventKind::Thinking { level: level.into() })?;
+        Ok(())
+    }
+
+    pub fn set_title(&self, id: &str, title: &str) -> Result<(), KernelError> {
+        let mut log = self.store.open(id)?;
+        self.append(&mut log, EventKind::Title { title: title.chars().take(80).collect() })?;
+        Ok(())
+    }
+
+    /// Tools that exist only for one session (e.g. MCP servers an editor brought);
+    /// shipped with full schemas. An empty list removes them.
+    pub fn set_session_tools(&self, id: &str, tools: Vec<Arc<dyn Tool>>) {
+        let mut st = self.session_tools.write().unwrap();
+        if tools.is_empty() {
+            st.remove(id);
+        } else {
+            st.insert(id.to_string(), tools);
+        }
+    }
+    fn session_specs(&self, id: &str) -> Vec<ToolSpec> {
+        let mut v = self.specs();
+        if let Some(ts) = self.session_tools.read().unwrap().get(id) {
+            v.extend(ts.iter().map(|t| ToolSpec { pinned: true, ..t.spec() }).filter(|s| !self.cfg.tools.disabled.contains(&s.name)));
+        }
+        v
     }
 
     /// Force compaction now (`/compact`).
@@ -401,10 +500,10 @@ impl Runtime {
         std::thread::spawn(move || k.run(&id, opts))
     }
 
-    fn drain_queue(&self, log: &mut SessionLog, q: &Mutex<Vec<(String, String, String)>>) -> Result<(), StoreError> {
+    fn drain_queue(&self, log: &mut SessionLog, q: &Mutex<Vec<Queued>>) -> Result<(), StoreError> {
         let items: Vec<_> = std::mem::take(&mut *q.lock().unwrap());
-        for (id, source, text) in items {
-            self.append(log, EventKind::Inbox { id, source, text })?;
+        for (id, source, text, attachments) in items {
+            self.append(log, EventKind::Inbox { id, source, text, attachments })?;
         }
         Ok(())
     }
@@ -419,7 +518,7 @@ impl Runtime {
         let dangling_ids: Vec<&str> = view.dangling.iter().map(|(i, _, _)| i.as_str()).collect();
         for u in &view.unsettled {
             if !dangling_ids.contains(&u.tool_use_id.as_str()) {
-                self.append(log, EventKind::ToolSettled { tool_use_id: u.tool_use_id.clone(), is_error: true, bytes: 0, artifact: None })?;
+                self.append(log, EventKind::ToolSettled { tool_use_id: u.tool_use_id.clone(), is_error: true, bytes: 0, artifact: None, ui_resource: None })?;
             }
         }
         if !view.dangling.is_empty() {
@@ -430,7 +529,7 @@ impl Runtime {
                     EventKind::ToolSettled { tool_use_id, artifact, .. } if tool_use_id == id => Some(artifact.clone()),
                     _ => None,
                 });
-                let tool = self.tool(name);
+                let tool = self.tool(&log.id, name);
                 let idempotent = tool.as_ref().is_some_and(|t| t.spec().idempotent);
                 let out = match settled_artifact {
                     Some(Some(a)) => ToolOutput::ok(format!("[recovered after crash; full output saved at {a}]")),
@@ -439,13 +538,13 @@ impl Runtime {
                         let ctx = self.ctx(&view, log, cancel, 0, Ledger::new(Budget::default()));
                         let o = run_tool(tool.as_ref().unwrap().as_ref(), &ctx, input.clone());
                         if settled_artifact.is_none() {
-                            self.append(log, EventKind::ToolSettled { tool_use_id: id.clone(), is_error: o.is_error, bytes: o.content.len(), artifact: None })?;
+                            self.append(log, EventKind::ToolSettled { tool_use_id: id.clone(), is_error: o.is_error, bytes: o.content.len(), artifact: None, ui_resource: None })?;
                         }
                         o
                     }
                     _ => {
                         if settled_artifact.is_none() {
-                            self.append(log, EventKind::ToolSettled { tool_use_id: id.clone(), is_error: true, bytes: 0, artifact: None })?;
+                            self.append(log, EventKind::ToolSettled { tool_use_id: id.clone(), is_error: true, bytes: 0, artifact: None, ui_resource: None })?;
                         }
                         ToolOutput::err(format!("[interrupted by a crash while running `{name}`; its side effects are unknown — inspect the state before retrying]"))
                     }
@@ -468,7 +567,7 @@ impl Runtime {
 
     // ───────────────────────── the turn ─────────────────────────
 
-    fn turn(self: &Arc<Self>, log: &mut SessionLog, ledger: &Ledger, cancel: &Cancel, depth: u32, queue: &Mutex<Vec<(String, String, String)>>, goal_mode: bool) -> Result<Outcome, StoreError> {
+    fn turn(self: &Arc<Self>, log: &mut SessionLog, ledger: &Ledger, cancel: &Cancel, depth: u32, queue: &Mutex<Vec<Queued>>, goal_mode: bool) -> Result<Outcome, StoreError> {
         let turn_no = project(log.events()).turns;
         self.append(log, EventKind::TurnStart { turn: turn_no })?;
         self.consume_inbox(log)?;
@@ -482,7 +581,7 @@ impl Runtime {
         let mut repeats: Vec<String> = Vec::new();
         let mut last_text = String::new();
         let kernel_tools = self.kernel_tools(goal_mode);
-        let specs = self.specs();
+        let specs = self.session_specs(&log.id);
 
         let reason = loop {
             if cancel.is_cancelled() {
@@ -502,6 +601,7 @@ impl Runtime {
                 view = project(log.events());
             }
             let mut req = context::build_request(&view, &self.cfg, &specs, &kernel_tools, &view.model);
+            self.assemble(log, &view, &mut req)?;
             if boost > 0 {
                 req.max_tokens = req.max_tokens.saturating_mul(1 << boost).min(MAX_BOOSTED_TOKENS);
             }
@@ -595,10 +695,35 @@ impl Runtime {
         Ok(Outcome { reason, text: last_text, usage, turns: 1 })
     }
 
+    /// Let the context engine choose what the model sees this step.
+    fn assemble(&self, log: &mut SessionLog, view: &View, req: &mut ModelRequest) -> Result<(), StoreError> {
+        let Some(e) = self.engine() else { return Ok(()) };
+        let prompt = view.messages.iter().rev().find(|m| m.role == Role::User && !m.content.iter().any(|b| matches!(b, Block::ToolResult { .. }))).map(|m| m.text()).unwrap_or_default();
+        match e.assemble(&log.id, &view.workspace, &req.messages, self.window(&view.model), &view.model, &prompt) {
+            Ok(Some(a)) if crate::engine::valid(&a.messages) => {
+                req.messages = a.messages;
+                req.cache_after_message = None;
+                if let Some(t) = a.system_addition.filter(|t| !t.trim().is_empty()) {
+                    req.system.push(SystemSegment { id: "context_engine".into(), text: t, cache: false });
+                }
+            }
+            Ok(Some(_)) => {
+                self.append(log, EventKind::Notice { level: "warn".into(), text: format!("context engine {} returned an invalid history (must start and end with a user message); using ark's", e.name()) })?;
+            }
+            Ok(None) => {}
+            Err(w) => {
+                self.append(log, EventKind::Notice { level: "warn".into(), text: format!("context engine {} failed ({w}); using ark's history", e.name()) })?;
+            }
+        }
+        Ok(())
+    }
+
     fn consume_inbox(&self, log: &mut SessionLog) -> Result<(), StoreError> {
-        for (id, source, text) in project(log.events()).pending_inbox {
+        for (id, source, text, attachments) in project(log.events()).pending_inbox {
             let body = if source == "cli" || source == "user" { text } else { format!("[from {source}] {text}") };
-            self.append(log, EventKind::Message { message: Message::user(body), usage: None, model: None, inbox: Some(id) })?;
+            let mut message = Message::user(body);
+            message.content.extend(attachments);
+            self.append(log, EventKind::Message { message, usage: None, model: None, inbox: Some(id) })?;
         }
         Ok(())
     }
@@ -627,14 +752,57 @@ impl Runtime {
             chain.sort_by_key(|m| benched.contains_key(m));
         }
         let mut last = ProviderError::new(ProviderErrorKind::Network, "no provider tried");
+        let mut no_fallback = false;
         let session = log.id.clone();
+        if self.has_hooks(HookEvent::PreModel) {
+            let mut p = hooks::payload(&session, "", None, None, None, None);
+            p["model"] = model.into();
+            p["messages"] = req.messages.len().into();
+            p["tools"] = req.tools.len().into();
+            if let Some(b) = self.fire(Some(log), HookEvent::PreModel, None, p, "")?.block {
+                return Ok(Err(ProviderError::new(ProviderErrorKind::BadRequest, format!("model call blocked by {b}"))));
+            }
+        }
+        // Middleware: rewrite the request, or answer it without a provider.
+        let mw = |log: &mut SessionLog, ev: HookEvent, extra: Value, field: &str| -> Result<Option<Value>, StoreError> {
+            let mut p = hooks::payload(&session, "", None, None, None, None);
+            p["model"] = model.into();
+            if let (Value::Object(o), Value::Object(x)) = (&mut p, extra) {
+                o.extend(x);
+            }
+            self.transform(log, ev, None, p, field)
+        };
+        if let Some(v) = mw(log, HookEvent::LlmRequest, json!({"request": req}), "request")? {
+            match serde_json::from_value::<ModelRequest>(v) {
+                Ok(r) => req = r,
+                Err(e) => {
+                    self.append(log, EventKind::Notice { level: "warn".into(), text: format!("llm_request middleware returned an invalid request ({e}); ignoring it") })?;
+                }
+            }
+        }
+        if let Some(v) = mw(log, HookEvent::LlmExecution, json!({"phase": "call", "request": req}), "response")? {
+            match response_from(v, model) {
+                Some(r) => {
+                    let r = self.finish_response(log, &session, r)?;
+                    // Nothing streamed: show the answer like a provider would have.
+                    self.bus.publish(BusMsg::Delta { session: session.clone(), text: r.message.text(), thinking: false });
+                    return Ok(Ok(r));
+                }
+                None => {
+                    self.append(log, EventKind::Notice { level: "warn".into(), text: "llm_execution middleware returned no usable response; calling the model".into() })?;
+                }
+            }
+        }
         for (ci, m) in chain.iter().enumerate() {
             let (pid, mname) = split_model(m);
             let provider = match self.resolver.provider(pid) {
                 Ok(p) => p,
                 Err(e) => {
                     last = ProviderError::new(ProviderErrorKind::Auth, format!("{pid}: {e}"));
-                    self.append(log, EventKind::Notice { level: "warn".into(), text: format!("provider {pid} unavailable: {e}") })?;
+                    // The last link's failure is reported once, as the run's error.
+                    if ci + 1 < chain.len() {
+                        self.append(log, EventKind::Notice { level: "warn".into(), text: format!("provider {pid} unavailable: {e}") })?;
+                    }
                     continue;
                 }
             };
@@ -661,13 +829,18 @@ impl Runtime {
                         } else if !r.model.contains('/') {
                             r.model = format!("{pid}/{}", r.model);
                         }
-                        return Ok(Ok(r));
+                        return Ok(Ok(self.finish_response(log, &session, r)?));
                     }
                     Err(e) => {
                         if matches!(e.kind, ProviderErrorKind::Cancelled | ProviderErrorKind::ContextOverflow | ProviderErrorKind::BadRequest) {
                             return Ok(Err(e));
                         }
-                        let retry = e.is_retryable() && attempt < self.cfg.runner.max_retries;
+                        let mut retryable = e.is_retryable();
+                        if let Some(c) = mw(log, HookEvent::TransformApiError, json!({"classification": {"kind": format!("{:?}", e.kind), "message": e.message, "retryable": retryable, "fallback": e.allows_fallback()}}), "classification")? {
+                            retryable = c["retryable"].as_bool().unwrap_or(retryable);
+                            no_fallback |= c["fallback"] == false;
+                        }
+                        let retry = retryable && attempt < self.cfg.runner.max_retries;
                         last = e.clone();
                         if !retry {
                             break;
@@ -687,11 +860,47 @@ impl Runtime {
             if matches!(last.kind, ProviderErrorKind::Auth) {
                 self.benched.lock().unwrap().insert(m.clone(), Instant::now());
             }
-            if !last.allows_fallback() {
+            if !last.allows_fallback() || no_fallback {
                 break;
             }
         }
         Ok(Err(last))
+    }
+
+    /// Execution middleware's result phase, post_model, transform_llm_output.
+    fn finish_response(&self, log: &mut SessionLog, session: &str, mut r: ModelResponse) -> Result<ModelResponse, StoreError> {
+        let base = |model: &str| {
+            let mut p = hooks::payload(session, "", None, None, None, None);
+            p["model"] = model.into();
+            p
+        };
+        let mut p = base(&r.model);
+        p["phase"] = "result".into();
+        p["response"] = json!(r);
+        if let Some(v) = self.transform(log, HookEvent::LlmExecution, None, p, "response")? {
+            let m = r.model.clone();
+            match response_from(v, &m) {
+                Some(x) => r = x,
+                None => {
+                    self.append(log, EventKind::Notice { level: "warn".into(), text: "llm_execution middleware returned no usable response; keeping the model's".into() })?;
+                }
+            }
+        }
+        if self.has_hooks(HookEvent::PostModel) {
+            let mut p = base(&r.model);
+            p["text"] = r.message.text().into();
+            p["stop"] = json!(r.stop);
+            p["usage"] = json!(r.usage);
+            self.fire(Some(log), HookEvent::PostModel, None, p, "")?;
+        }
+        let mut p = base(&r.model);
+        p["text"] = r.message.text().into();
+        if let Some(t) = self.transform(log, HookEvent::TransformLlmOutput, None, p, "text")?.as_ref().and_then(Value::as_str) {
+            // The new text replaces the text blocks; tool calls and reasoning stay.
+            r.message.content.retain(|b| !matches!(b, Block::Text { .. }));
+            r.message.content.insert(0, Block::text(t));
+        }
+        Ok(r)
     }
 
     fn backoff(&self, attempt: u32, e: &ProviderError) -> Duration {
@@ -715,7 +924,7 @@ impl Runtime {
 
     fn maybe_compact(&self, log: &mut SessionLog, view: &View, cancel: &Cancel) -> Result<bool, StoreError> {
         let window = self.window(&view.model) as f64;
-        let used = if view.last_input_tokens > 0 { view.last_input_tokens } else { estimate_request_tokens(&ModelRequest { model: String::new(), system: view.system.clone(), messages: view.messages.clone(), tools: vec![], max_tokens: 0, temperature: None, cache_after_message: None }) } as f64;
+        let used = if view.last_input_tokens > 0 { view.last_input_tokens } else { estimate_request_tokens(&ModelRequest { model: String::new(), system: view.system.clone(), messages: view.messages.clone(), tools: vec![], max_tokens: 0, temperature: None, cache_after_message: None, reasoning: None }) } as f64;
         let c = &self.cfg.compaction;
         if used < window * c.prune_threshold {
             return Ok(false);
@@ -737,19 +946,83 @@ impl Runtime {
         Ok(true)
     }
 
+    /// `{{secret:NAME}}` substitution with the vault (for hosts resolving config values).
+    pub fn vault_substitute(&self) -> Arc<dyn Fn(&str) -> String + Send + Sync> {
+        let v = self.vault.clone();
+        Arc::new(move |s: &str| v.substitute(s))
+    }
+
+    /// One model completion outside any session (MCP sampling). `model` = "provider/model",
+    /// default the aux model. `tools` are offered to the model as-is (sampling tool
+    /// rounds: the caller executes nothing, it returns the `tool_use` blocks). Returns
+    /// (reply, model used, stop reason).
+    pub fn sample(&self, model: Option<&str>, system: &str, messages: Vec<Message>, tools: Vec<ToolSchema>, max_tokens: u32, cancel: &Cancel) -> Result<(Message, String, StopReason), String> {
+        let m = model.filter(|m| !m.is_empty()).map(str::to_string).unwrap_or_else(|| self.cfg.aux_model().to_string());
+        let (pid, name) = split_model(&m);
+        let p = self.resolver.provider(pid)?;
+        if !tools.is_empty() && !p.caps(name).tools {
+            return Err(format!("model `{m}` does not support tool use; sampling with tools needs one that does"));
+        }
+        let req = ModelRequest {
+            model: name.to_string(),
+            system: if system.is_empty() { vec![] } else { vec![SystemSegment { id: "mcp-sampling".into(), text: system.to_string(), cache: false }] },
+            messages,
+            tools,
+            max_tokens,
+            temperature: None,
+            cache_after_message: None,
+            reasoning: None,
+        };
+        let r = p.complete(&req, &mut |_| {}, cancel).map_err(|e| e.message)?;
+        // Reasoning stays here: sampling results carry text and tool calls only.
+        let content = r.message.content.into_iter().filter(|b| !matches!(b, Block::Thinking { .. })).collect();
+        Ok((Message { role: Role::Assistant, content }, m, r.stop))
+    }
+
     fn summarise(&self, log: &mut SessionLog, view: &View, cancel: &Cancel) -> Result<bool, StoreError> {
-        let Some(cut) = compaction::cut_index(&view.messages, self.cfg.compaction.keep_messages) else { return Ok(false) };
+        // An engine that owns compaction writes the summary (and picks how much to keep).
+        let mut owned = None;
+        if let Some(e) = self.engine().filter(|e| e.owns_compaction()) {
+            let current = estimate_tokens(&compaction::render_transcript(&view.messages, usize::MAX));
+            match e.compact(&log.id, &view.messages, self.window(&view.model), current, true) {
+                Ok(Some(c)) => owned = Some(c),
+                Ok(None) => return Ok(false),
+                Err(w) => {
+                    self.append(log, EventKind::Notice { level: "warn".into(), text: format!("context engine {} could not compact ({w}); using ark's summary", e.name()) })?;
+                }
+            }
+        }
+        let keep = owned.as_ref().and_then(|c| c.keep_messages).unwrap_or(self.cfg.compaction.keep_messages);
+        let Some(cut) = compaction::cut_index(&view.messages, keep) else { return Ok(false) };
         let aux = self.cfg.aux_model().to_string();
         let (pid, m) = split_model(&aux);
         let before = estimate_tokens(&compaction::render_transcript(&view.messages, usize::MAX));
-        let (summary, fallback) = match self.resolver.provider(pid) {
-            Ok(p) => compaction::summarise(p.as_ref(), m, &view.messages[..cut], cancel),
-            Err(_) => (compaction::fallback_summary(&view.messages[..cut]), true),
+        let hp = |n: &str, v: Value| {
+            let mut p = hooks::payload(&log.id, &view.workspace, None, None, None, None);
+            p["messages"] = view.messages.len().into();
+            p["tokens_before"] = before.into();
+            p[n] = v;
+            p
+        };
+        let (pre, post) = (hp("compacting", cut.into()), hp("compacted", cut.into()));
+        if self.has_hooks(HookEvent::PreCompact) {
+            if let Some(b) = self.fire(Some(log), HookEvent::PreCompact, None, pre, "")?.block {
+                self.append(log, EventKind::Notice { level: "warn".into(), text: format!("compaction skipped: {b}") })?;
+                return Ok(false);
+            }
+        }
+        let (summary, fallback) = match (owned, self.resolver.provider(pid)) {
+            (Some(c), _) => (c.summary, false),
+            (None, Ok(p)) => compaction::summarise(p.as_ref(), m, &view.messages[..cut], cancel),
+            (None, Err(_)) => (compaction::fallback_summary(&view.messages[..cut]), true),
         };
         if fallback {
             self.append(log, EventKind::Notice { level: "warn".into(), text: "summary model unavailable or low quality; used deterministic digest".into() })?;
         }
         self.append(log, EventKind::Compaction { upto_seq: view.message_seqs[cut], summary, pruned: vec![], tokens_before: before })?;
+        if self.has_hooks(HookEvent::PostCompact) {
+            self.fire(Some(log), HookEvent::PostCompact, None, post, "")?;
+        }
         // The cache breaks here anyway: refresh memory / project segments.
         let ws = PathBuf::from(&view.workspace);
         let segs = context::system_segments(&self.cfg, &self.paths, &ws, &self.specs(), self.cfg.schedule.utc_offset_minutes);
@@ -780,6 +1053,8 @@ impl Runtime {
         let ctx = self.ctx(view, log, cancel, depth, ledger.clone());
         let mut results: Vec<Option<ToolOutput>> = vec![None; uses.len()];
         let mut runnable: Vec<(usize, Arc<dyn Tool>, Value)> = Vec::new();
+        // Calls execution middleware answered (they skip the tool, not the transforms).
+        let mut answered: Vec<(usize, String, Value)> = Vec::new();
         let mut goal_done = None;
 
         for (i, (id, name, input)) in uses.iter().enumerate() {
@@ -811,7 +1086,7 @@ impl Runtime {
                     let mut bad = 0;
                     for n in names.iter().take(12) {
                         let kernel = self.kernel_tools(true).into_iter().find(|t| &t.name == n).map(|t| (t.description, t.input_schema));
-                        out.push(match (self.tool(n), kernel) {
+                        out.push(match (self.tool(&log.id, n), kernel) {
                             (Some(t), _) => {
                                 let s = t.spec();
                                 format!("## {n}\n{}\ninput schema: {}", s.description, s.input_schema)
@@ -843,6 +1118,10 @@ impl Runtime {
                 }
                 _ => {}
             }
+            let p = hooks::payload(&log.id, &view.workspace, Some(&tname), Some(&tinput), None, None);
+            if let Some(m) = self.transform(log, HookEvent::ToolRequest, Some(&tname), p, "tool_input")?.filter(Value::is_object) {
+                tinput = m;
+            }
             match self.pre_tool(log, id, &tname, &tinput, &view.workspace)? {
                 Err(blocked) => {
                     results[i] = Some(blocked);
@@ -855,7 +1134,7 @@ impl Runtime {
                 runnable.push((i, Arc::new(RunMarker), tinput));
                 continue;
             }
-            let Some(tool) = self.tool(&tname) else {
+            let Some(tool) = self.tool(&log.id, &tname) else {
                 results[i] = Some(ToolOutput::err(self.unknown_tool(&tname)));
                 continue;
             };
@@ -866,6 +1145,14 @@ impl Runtime {
             }
             if let Some(denied) = self.gate(log, id, &tname, &tool.effects(&ctx, &tinput), &tinput)? {
                 results[i] = Some(denied);
+                continue;
+            }
+            // Execution middleware may answer instead of the tool.
+            let mut p = hooks::payload(&log.id, &view.workspace, Some(&tname), Some(&tinput), None, None);
+            p["phase"] = "call".into();
+            if let Some(v) = self.transform(log, HookEvent::ToolExecution, Some(&tname), p, "tool_response")? {
+                results[i] = Some(output_from(v));
+                answered.push((i, tname, tinput));
                 continue;
             }
             runnable.push((i, tool, tinput));
@@ -930,6 +1217,35 @@ impl Runtime {
             }
         }
 
+        // Middleware result phase, then the transform_* hooks (Hermes order: terminal output first).
+        let ran_names = runnable.iter().map(|(i, t, inp)| (*i, if t.spec().name.is_empty() { "run".to_string() } else { t.spec().name }, inp.clone(), true));
+        let post: Vec<(usize, String, Value, bool)> = ran_names.chain(answered.into_iter().map(|(i, n, v)| (i, n, v, false))).collect();
+        for (i, name, input, ran) in &post {
+            let Some(out) = results[*i].as_mut() else { continue };
+            if *ran {
+                let mut p = hooks::payload(&log.id, &view.workspace, Some(name), Some(input), Some(&json!({"content": self.vault.redact(&out.content), "is_error": out.is_error})), None);
+                p["phase"] = "result".into();
+                if let Some(v) = self.transform(log, HookEvent::ToolExecution, Some(name), p, "tool_response")? {
+                    let ui = out.ui_resource.take();
+                    *out = output_from(v);
+                    out.ui_resource = ui;
+                }
+            }
+            if name == "shell" {
+                let mut p = hooks::payload(&log.id, &view.workspace, Some(name), Some(input), None, None);
+                p["command"] = input["command"].clone();
+                p["output"] = self.vault.redact(&out.content).into();
+                if let Some(t) = self.transform(log, HookEvent::TransformTerminalOutput, Some(name), p, "output")?.as_ref().and_then(Value::as_str) {
+                    out.content = t.to_string();
+                }
+            }
+            let mut p = hooks::payload(&log.id, &view.workspace, Some(name), Some(input), Some(&json!({"is_error": out.is_error})), None);
+            p["result"] = self.vault.redact(&out.content).into();
+            if let Some(t) = self.transform(log, HookEvent::TransformToolResult, Some(name), p, "result")?.as_ref().and_then(Value::as_str) {
+                out.content = t.to_string();
+            }
+        }
+
         // Redact, spill, settle.
         let mut blocks = Vec::new();
         let ran: Vec<usize> = runnable.iter().map(|(i, _, _)| *i).collect();
@@ -947,7 +1263,7 @@ impl Runtime {
                 }
             }
             if ran.contains(&i) {
-                self.append(log, EventKind::ToolSettled { tool_use_id: id.clone(), is_error: out.is_error, bytes: out.content.len(), artifact })?;
+                self.append(log, EventKind::ToolSettled { tool_use_id: id.clone(), is_error: out.is_error, bytes: out.content.len(), artifact, ui_resource: out.ui_resource.clone() })?;
             }
             blocks.push(Block::ToolResult { tool_use_id: id.clone(), content, is_error: out.is_error });
         }
@@ -968,16 +1284,38 @@ impl Runtime {
         } else if self.remembered.contains(&log.id, gate, &reason) {
             "allow (remembered)"
         } else {
-            let req = ApprovalRequest { id: new_id(), session: log.id.clone(), tool: tool.into(), summary: head_tail(&self.vault.redact(&input.to_string()), 600).0, gate, reason: reason.clone() };
+            let redacted = self.vault.redact(&input.to_string());
+            let req = ApprovalRequest { id: new_id(), tool_use_id: id.into(), session: log.id.clone(), tool: tool.into(), summary: head_tail(&redacted, 600).0, input: serde_json::from_str(&redacted).unwrap_or_default(), gate, reason: reason.clone() };
             self.bus.publish(BusMsg::Pending(PendingItem::Approval(req.clone())));
-            match self.approver.approve(&req) {
-                Approval::Once => "allow",
+            let sid = log.id.clone();
+            let ap = || {
+                let mut p = hooks::payload(&sid, "", Some(tool), Some(&req.input), None, None);
+                p["kind"] = "approval".into();
+                p["gate"] = gname.clone().into();
+                p["reason"] = reason.clone().into();
+                p["message"] = format!("{tool} needs approval: {reason}").into();
+                p
+            };
+            if self.has_hooks(HookEvent::Notification) {
+                self.fire(Some(log), HookEvent::Notification, None, ap(), "")?;
+            }
+            if self.has_hooks(HookEvent::PreApprovalRequest) {
+                self.fire(Some(log), HookEvent::PreApprovalRequest, None, ap(), "")?;
+            }
+            let (choice, d) = match self.approver.approve(&req) {
+                Approval::Once => ("once", "allow"),
                 Approval::Always => {
                     self.remembered.insert(&log.id, gate, &reason);
-                    "allow (always)"
+                    ("always", "allow (always)")
                 }
-                Approval::Deny => "deny",
+                Approval::Deny => ("deny", "deny"),
+            };
+            if self.has_hooks(HookEvent::PostApprovalResponse) {
+                let mut p = ap();
+                p["choice"] = choice.into();
+                self.fire(Some(log), HookEvent::PostApprovalResponse, None, p, "")?;
             }
+            d
         };
         self.append(log, EventKind::Gate { tool_use_id: id.into(), gate: gname.clone(), verdict: decision.into(), reason: reason.clone() })?;
         if decision.starts_with("allow") {
@@ -1018,7 +1356,7 @@ impl Runtime {
         let mut handle = |nested: crate::coderun::Nested| -> ToolOutput {
             n += 1;
             let nid = format!("{parent_id}.{n}");
-            let Some(tool) = self.tool(&nested.tool) else {
+            let Some(tool) = self.tool(&log.id, &nested.tool) else {
                 return ToolOutput::err(format!("unknown tool `{}`", nested.tool));
             };
             let mut nested = nested;
@@ -1049,8 +1387,8 @@ impl Runtime {
                 return ToolOutput::err("kernel log error");
             }
             let out = run_tool(tool.as_ref(), ctx, nested.input);
-            let _ = self.append(log, EventKind::ToolSettled { tool_use_id: nid, is_error: out.is_error, bytes: out.content.len(), artifact: None });
-            ToolOutput { content: self.vault.redact(&out.content), is_error: out.is_error }
+            let _ = self.append(log, EventKind::ToolSettled { tool_use_id: nid, is_error: out.is_error, bytes: out.content.len(), artifact: None, ui_resource: None });
+            ToolOutput { content: self.vault.redact(&out.content), is_error: out.is_error, ui_resource: None }
         };
         let out = crate::coderun::run(&self.paths.runtime, &script, &lang, timeout, Path::new(&view.workspace), &ctx.cancel, &mut handle);
         if let Some(e) = store_err {
@@ -1074,7 +1412,7 @@ impl Runtime {
 Reply ONLY with JSON: {{\"memory\": [\"...\"], \"user\": [\"...\"]}} (empty arrays if nothing is worth keeping). Never include secrets.\n\n{}",
             compaction::render_transcript(&tail, 1500)
         );
-        let req = ModelRequest { model: m.into(), system: vec![], messages: vec![Message::user(prompt)], tools: vec![], max_tokens: 1024, temperature: None, cache_after_message: None };
+        let req = ModelRequest { model: m.into(), system: vec![], messages: vec![Message::user(prompt)], tools: vec![], max_tokens: 1024, temperature: None, cache_after_message: None, reasoning: None };
         let Ok(r) = p.complete(&req, &mut |_| {}, cancel) else { return };
         let text = r.message.text();
         let json_part = text.find('{').and_then(|a| text.rfind('}').map(|b| &text[a..=b]));
@@ -1161,6 +1499,33 @@ fn strip_thinking(req: &mut ModelRequest) {
     }
 }
 
+/// A middleware's `tool_response`: `{content, is_error}` or plain text.
+fn output_from(v: Value) -> ToolOutput {
+    match v {
+        Value::String(s) => ToolOutput::ok(s),
+        v => {
+            let content = match &v["content"] {
+                Value::String(s) => s.clone(),
+                Value::Null => String::new(),
+                c => c.to_string(),
+            };
+            ToolOutput { content, is_error: v["is_error"].as_bool().unwrap_or(false), ui_resource: None }
+        }
+    }
+}
+
+/// A middleware's `response`: a full ModelResponse, or the `{text}` shorthand.
+fn response_from(v: Value, model: &str) -> Option<ModelResponse> {
+    if let Ok(mut r) = serde_json::from_value::<ModelResponse>(v.clone()) {
+        if r.model.is_empty() {
+            r.model = model.to_string();
+        }
+        return Some(r);
+    }
+    let t = v.get("text").and_then(Value::as_str).or(v.as_str())?;
+    Some(ModelResponse { message: Message::assistant(t), stop: StopReason::EndTurn, usage: Usage { estimated: true, output_tokens: estimate_tokens(t), ..Default::default() }, model: model.to_string() })
+}
+
 struct Host {
     rt: Arc<Runtime>,
     session: String,
@@ -1178,6 +1543,18 @@ impl ToolHost for Host {
         let model = req.model.clone().filter(|m| !m.is_empty()).unwrap_or_else(|| self.rt.cfg.subagent_model().to_string());
         let title: String = req.task.chars().take(60).collect();
         let child = self.rt.create_session(&self.workspace, Some(&model), Some(&self.session), Some(&title)).map_err(|e| e.to_string())?;
+        let sub = |extra: Value| {
+            let mut p = hooks::payload(&self.session, &self.workspace.to_string_lossy(), None, None, None, Some(&req.task));
+            p["subagent_id"] = child.clone().into();
+            p["model"] = model.clone().into();
+            if let (Value::Object(m), Some(o)) = (extra, p.as_object_mut()) {
+                o.extend(m);
+            }
+            p
+        };
+        if let (Some(b), _) = self.rt.emit(HookEvent::SubagentStart, sub(json!({})), "") {
+            return Err(format!("sub-agent blocked by {b}"));
+        }
         if req.fork {
             let mut log = self.rt.store.open(&child).map_err(|e| e.to_string())?;
             // Everything up to (not including) the assistant message that called spawn.
@@ -1188,6 +1565,7 @@ impl ToolHost for Host {
         }
         self.rt.submit(&child, &req.task, "parent").map_err(|e| e.to_string())?;
         let o = self.rt.run(&child, RunOpts { ledger: Some(self.ledger.child(Budget::default())), depth: self.depth + 1, cancel: Some(cancel.clone()), goal_mode: false }).map_err(|e| e.to_string())?;
+        self.rt.emit(HookEvent::SubagentStop, sub(json!({"end_reason": o.reason.label(), "text": o.text, "tokens": o.usage.total()})), "");
         let header = format!("[sub-agent {child} · {} · {} tokens]", o.reason.label(), o.usage.total());
         if o.reason.ok() {
             Ok(format!("{header}\n{}", o.text))
@@ -1196,6 +1574,20 @@ impl ToolHost for Host {
         }
     }
     fn ask_user(&self, question: &str) -> Result<String, String> {
-        self.rt.approver.ask(&self.session, question)
+        let mut p = hooks::payload(&self.session, &self.workspace.to_string_lossy(), None, None, None, None);
+        p["kind"] = "question".into();
+        p["message"] = question.into();
+        self.rt.emit(HookEvent::Notification, p.clone(), "");
+        self.rt.emit(HookEvent::HumanInputRequest, p.clone(), "");
+        let a = self.rt.approver.ask(&self.session, question);
+        if self.rt.has_hooks(HookEvent::HumanInputResolved) {
+            p["answer"] = a.as_ref().map(|s| json!(s)).unwrap_or(Value::Null);
+            p["cancelled"] = a.is_err().into();
+            self.rt.emit(HookEvent::HumanInputResolved, p, "");
+        }
+        a
+    }
+    fn progress(&self, text: &str) {
+        self.rt.bus.publish(BusMsg::Delta { session: self.session.clone(), text: text.to_string(), thinking: true });
     }
 }

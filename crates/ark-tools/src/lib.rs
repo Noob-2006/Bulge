@@ -18,7 +18,7 @@ use ark_core::Tool;
 use std::sync::Arc;
 
 pub use agent::{AskUser, Spawn};
-pub use fs::{Edit, Patch, Read, Write};
+pub use fs::{preview, Edit, Patch, Read, Write};
 pub use job::Job;
 pub use memory::Memory;
 pub use plan::{Skill, Todo};

@@ -1,6 +1,7 @@
 mod args;
 mod ext;
 mod providers;
+mod setup;
 mod term;
 
 use args::Args;
@@ -27,6 +28,7 @@ use std::time::{Duration, Instant};
 const HELP: &str = "ark — autonomous agent kernel
 
 USAGE
+  ark setup                            first-run wizard: provider, key, model, web UI, chat platform
   ark run [opts] <prompt…|->           run one task to completion (reads stdin with -)
   ark chat [opts]                      line-based conversation (/help inside)
   ark session list|show|resume|fork|search|export|compact|model|rm …
@@ -42,10 +44,20 @@ USAGE
   ark config path|show|init|get <key>|validate
   ark secrets set <NAME> | list | rm <NAME>   (value read from stdin, never argv)
   ark providers list | check [provider/model]
-  ark mcp list | tools [server] | test <server> | refresh <server> | add <name> (--url U | -- cmd args…) | rm <name> | serve
-  ark plugin list                      plugins and what they provide (tools, hooks, channels)
+  ark mcp list | tools [server] | test <server> | refresh <server> | add <name> (--url U | -- cmd args…) | rm <name> | serve [--relay URL [--pair]]
+  ark plugin list                      plugins and what they provide (tools, hooks, channels,
+                                       commands, CLI, routes, UI, providers, services…)
+  ark <plugin-command> [args…]         a CLI command a plugin adds (listed by `ark help`)
   ark channel list | send <channel> <chat> <text…>
-  ark commands                         custom /commands and MCP prompts
+  ark webhook list <channel> | subscribe <channel> <route> [json] | rm <channel> <route>
+  ark acp                              ACP agent on stdio (for Zed, JetBrains, Neovim…)
+  ark acp-client <agent> <prompt…|->   drive an external ACP agent (claude, codex, gemini, opencode…)
+                                       [--cwd DIR] [--permission-mode approve-all|approve-reads|deny-all]
+                                       [--session ID] [--list] [--json]
+  ark commands                         custom /commands, plugin commands and MCP prompts
+  ark node --url ws://host:8640/node | --setup-code CODE   run this machine as a device node
+  ark nodes list|pending|approve|reject|remove|rename|describe|invoke|queue|events|rotate|setup-code
+  ark data export|delete <channel> <sender|chat>
   ark call <tool> [json]               call a tool from inside the `run` tool (alias: ark-call)
   ark doctor | version | help
 
@@ -101,25 +113,41 @@ fn usage<T>(s: impl Into<String>) -> Result<T, Fail> {
 }
 type R = Result<i32, Fail>;
 
+/// Top-level commands; plugins cannot take these names.
+const BUILTINS: &[&str] = &[
+    "help", "--help", "-h", "version", "--version", "-V", "setup", "onboard", "call", "run", "chat", "session", "sessions", "daemon", "send", "attach", "interrupt", "gate", "gates", "schedule", "cron", "goal", "goals", "memory",
+    "checkpoint", "checkpoints", "undo", "config", "secrets", "secret", "providers", "models", "doctor", "mcp", "connector", "connectors", "plugin", "plugins", "channel", "channels", "pairing", "pair", "tui",
+    "acp", "acp-client", "node", "nodes", "app", "data", "service", "health", "commands", "command", "webhook", "webhooks",
+];
+
 fn dispatch(raw: Vec<String>) -> R {
     let Some(cmd) = raw.first().cloned() else {
-        println!("{HELP}");
+        print_help();
+        if !Paths::from_env().user_config().exists() {
+            println!("\n{}", setup::t("第一次使用？執行 `ark setup`，一步步設定模型、金鑰與聊天平台。", "First time? Run `ark setup` to configure a model, key and chat platform step by step."));
+        }
         return Ok(0);
     };
-    let a = Args::parse(&raw[1..]).map_err(Fail::Usage)?;
-    if a.flag("help") {
-        println!("{HELP}");
+    let a = match Args::parse(&raw[1..]) {
+        Ok(a) => a,
+        // Plugin CLI commands take their own flags.
+        Err(_) if !BUILTINS.contains(&cmd.as_str()) => return cmd_plugin_cli(&cmd, &raw[1..]),
+        Err(e) => return usage(e),
+    };
+    if a.flag("help") && BUILTINS.contains(&cmd.as_str()) {
+        print_help();
         return Ok(0);
     }
     match cmd.as_str() {
         "help" | "--help" | "-h" => {
-            println!("{HELP}");
+            print_help();
             Ok(0)
         }
         "version" | "--version" | "-V" => {
             println!("ark {} (log v{}, protocol v{})", env!("CARGO_PKG_VERSION"), ark_kernel::event::LOG_VERSION, daemon::PROTOCOL_VERSION);
             Ok(0)
         }
+        "setup" | "onboard" => Ok(setup::run(&Paths::from_env())?),
         "call" => cmd_call(&a),
         "run" => cmd_run(&a),
         "chat" => cmd_chat(&a),
@@ -154,6 +182,23 @@ fn dispatch(raw: Vec<String>) -> R {
         "mcp" | "connector" | "connectors" => cmd_mcp(&a),
         "plugin" | "plugins" => cmd_plugin(&a),
         "channel" | "channels" => cmd_channel(&a),
+        "pairing" | "pair" => cmd_pairing(&a),
+        "webhook" | "webhooks" => cmd_webhook(&a),
+        "tui" => cmd_tui(&a),
+        "acp" => cmd_acp(&a),
+        "acp-client" => cmd_acp_client(&a),
+        "node" => cmd_node(&a),
+        "nodes" => cmd_nodes(&a),
+        "app" => cmd_app(&a),
+        "data" => cmd_data(&a),
+        "service" => cmd_service(&a),
+        "health" => {
+            // For container health checks and monitors: is the daemon answering?
+            match daemon::call(&Paths::from_env().socket(), "ping", json!({})) {
+                Ok(_) => Ok(0),
+                Err(e) => Err(e.into()),
+            }
+        }
         "commands" | "command" => {
             let c = build_agent(&a, approver_for(&a, false), false)?;
             let defs = &c.ext.as_ref().unwrap().commands;
@@ -163,13 +208,62 @@ fn dispatch(raw: Vec<String>) -> R {
             for d in defs {
                 println!("/{:<20} {}  ({})", d.name, d.description, d.path.display());
             }
+            for (n, d) in c.ext.as_ref().unwrap().plugin_commands() {
+                println!("/{n:<20} {d}  (plugin)");
+            }
             for p in c.ext.as_ref().unwrap().registry.prompts() {
                 println!("/mcp__{}__{:<10} {}", p.server, p.name, p.description);
             }
             Ok(0)
         }
-        other => usage(format!("unknown command `{other}`")),
+        other => cmd_plugin_cli(other, &raw[1..]),
     }
+}
+
+/// `HELP`, plus the CLI commands configured plugins add.
+fn print_help() {
+    println!("{HELP}");
+    let paths = Paths::from_env();
+    let Ok(ws) = std::env::current_dir() else { return };
+    let (Ok(cfg), Ok(vault)) = (Config::load(Some(&paths.user_config()), Some(&project_config(&ws)), &[]), load_vault(&paths)) else { return };
+    if cfg.plugins.is_empty() {
+        return;
+    }
+    let (plugins, _) = ext::start_plugins(&cfg, &vault);
+    let cmds: Vec<String> = plugins.iter().flat_map(|p| p.cli.iter().filter(|c| !BUILTINS.contains(&c.name.as_str())).map(move |c| format!("  ark {:<32} {} ({})", format!("{} {}", c.name, c.args).trim_end(), c.description, p.name))).collect();
+    if !cmds.is_empty() {
+        println!("\nPLUGIN COMMANDS\n{}", cmds.join("\n"));
+    }
+}
+
+/// `ark <name> …` served by a plugin's `cli` declaration (OpenClaw `registerCli`).
+fn cmd_plugin_cli(name: &str, argv: &[String]) -> R {
+    let paths = Paths::from_env();
+    let ws = std::env::current_dir().map_err(|e| e.to_string())?;
+    let cfg = Config::load(Some(&paths.user_config()), Some(&project_config(&ws)), &[]).map_err(Fail::Msg)?;
+    if cfg.plugins.is_empty() {
+        return usage(format!("unknown command `{name}`"));
+    }
+    let vault = load_vault(&paths)?;
+    let (plugins, warn) = ext::start_plugins(&cfg, &vault);
+    let Some(p) = ext::cli_owner(&plugins, name) else {
+        for w in warn {
+            eprintln!("ark: warning: {w}");
+        }
+        return usage(format!("unknown command `{name}`"));
+    };
+    let r = p.cli(name, argv, &ws.to_string_lossy(), &mut |stream, text| {
+        if stream == "stderr" {
+            eprint!("{text}");
+        } else {
+            print!("{text}");
+            let _ = std::io::stdout().flush();
+        }
+    })?;
+    print!("{}", r.stdout);
+    eprint!("{}", r.stderr);
+    let _ = std::io::stdout().flush();
+    Ok(r.exit)
 }
 
 // ───────────────────────── setup ─────────────────────────
@@ -234,8 +328,14 @@ fn build_agent(a: &Args, approver: Arc<dyn Approver>, with_channels: bool) -> Re
     let ws = workspace(a)?;
     let mut cfg = load_config(a, &ws, &paths)?;
     let vault = load_vault(&paths)?;
-    let resolver: Arc<dyn Resolver> = Arc::new(Providers::new(&cfg.providers, vault.clone())?);
+    let providers = Arc::new(Providers::new(&cfg.providers, vault.clone())?);
+    let resolver: Arc<dyn Resolver> = providers.clone();
     let (ext, extra, hooks) = ext::load(&cfg, &paths, &vault, &ws, with_channels);
+    for p in &ext.plugins {
+        for (id, imp) in p.provider_impls() {
+            providers.register(&id, imp);
+        }
+    }
     if !a.flag("quiet") {
         for w in &ext.warnings {
             eprintln!("ark: warning: {w}");
@@ -248,9 +348,37 @@ fn build_agent(a: &Args, approver: Arc<dyn Approver>, with_channels: bool) -> Re
     let disabled = cfg.tools.disabled.clone();
     let mut tools = ark_tools::builtin_tools();
     tools.extend(extra);
+    match ark_app::AppConfig::parse(&cfg.app) {
+        Ok(app) => {
+            if app.nodes {
+                tools.push(Arc::new(ark_app::node::NodeInvoke));
+            }
+            tools.extend(ark_app::a2a::tools(&app.a2a));
+        }
+        Err(e) => eprintln!("ark: warning: {e}"),
+    }
+    match ark_app::acp_client::AcpConfig::parse(&cfg.acp) {
+        Ok(acp) => tools.push(Arc::new(ark_app::acp_client::AcpDelegate { cfg: acp, gate: cfg.gate.clone(), vault: vault.clone() })),
+        Err(e) => eprintln!("ark: warning: {e}"),
+    }
+    let (engine, memory) = ext::selected(&cfg, &ext).unwrap_or_else(|e| {
+        eprintln!("ark: warning: {e}; using ark's own");
+        (None, None)
+    });
+    if let Some(m) = memory {
+        tools.retain(|t| t.spec().name != "memory");
+        tools.push(m);
+        if let Some(t) = ext.plugins.iter().find(|p| p.name == cfg.memory.provider.trim()).and_then(|p| p.memory_prompt()) {
+            cfg.identity = if cfg.identity.is_empty() { t } else { format!("{}\n{t}", cfg.identity) };
+        }
+    }
     tools.retain(|t| !disabled.contains(&t.spec().name));
     let k = new_kernel(cfg, paths.clone(), resolver, tools, vault, approver);
     k.add_hooks(hooks);
+    if let Some(e) = engine {
+        k.set_context_engine(e);
+    }
+    let _ = ext.kernel.set(k.clone());
     Ok(Ctx { k, paths, workspace: ws, ext: Some(ext) })
 }
 
@@ -274,6 +402,10 @@ fn find_session(k: &Kernel, q: &str) -> Result<String, Fail> {
         1 => Ok(m[0].id.clone()),
         n => Err(format!("`{q}` matches {n} sessions; be more specific").into()),
     }
+}
+
+fn setup_hint(err: &str) -> Option<&'static str> {
+    setup::hint(err)
 }
 
 fn exit_code(r: &EndReason) -> i32 {
@@ -327,7 +459,9 @@ fn run_foreground(c: &Ctx, id: &str, a: &Args, opts: RunOpts) -> R {
     close_printer(&c.k, printer);
     let o = r.map_err(|e| Fail::Msg(e.to_string()))?;
     if !a.flag("quiet") && !a.flag("json") {
-        eprintln!("• {} · {} tokens · {:.1}s · session {id}", term::one_line(&o.reason.label(), 120), o.usage.total(), started.elapsed().as_secs_f32());
+        // The error itself was already printed from the event stream.
+        let label = if let EndReason::Error(e) = &o.reason { setup_hint(e).map(|h| format!("failed — {h}")).unwrap_or_else(|| "failed".into()) } else { term::one_line(&o.reason.label(), 120) };
+        eprintln!("• {label} · {} tokens · {:.1}s · session {id}", o.usage.total(), started.elapsed().as_secs_f32());
     }
     if a.flag("json") {
         println!("{}", json!({"session": id, "reason": o.reason.label(), "text": o.text, "usage": o.usage}));
@@ -362,7 +496,19 @@ fn read_prompt(a: &Args, from: usize) -> Result<String, Fail> {
 fn cmd_run(a: &Args) -> R {
     let prompt = read_prompt(a, 0)?;
     let c = build_agent(a, approver_for(a, true), false)?;
-    let prompt = expand_prompt(&c, &prompt)?;
+    let prompt = match c.ext.as_ref().and_then(|e| e.run_command(&prompt, json!({"surface": "cli"}))) {
+        Some(Err(e)) => return Err(e.into()),
+        Some(Ok(r)) => {
+            if let Some(t) = &r.text {
+                println!("{t}");
+            }
+            match r.prompt {
+                Some(p) => p,
+                None => return Ok(0),
+            }
+        }
+        None => expand_prompt(&c, &prompt)?,
+    };
     let id = match a.val("session") {
         Some(s) => find_session(&c.k, s)?,
         None => c.k.create_session(&c.workspace, None, None, Some(&term::one_line(&prompt, 60))).map_err(|e| e.to_string())?,
@@ -394,7 +540,7 @@ fn cmd_chat(a: &Args) -> R {
             let (name, arg) = cmd.split_once(' ').map(|(a, b)| (a, b.trim())).unwrap_or((cmd, ""));
             match name {
                 "exit" | "quit" | "q" => break,
-                "help" => eprintln!("/model provider/model · /compact · /status · /undo [id] · /new · /commands · /<custom command> · /exit"),
+                "help" => eprintln!("/model provider/model · /compact · /status · /undo [id] · /new · /commands · /<custom or plugin command> · /exit"),
                 "model" if !arg.is_empty() => match c.k.set_model(&id, arg) {
                     Ok(()) => eprintln!("• model → {arg}"),
                     Err(e) => eprintln!("error: {e}"),
@@ -420,6 +566,7 @@ fn cmd_chat(a: &Args) -> R {
                     Err(e) => eprintln!("error: {e}"),
                 },
                 "new" => {
+                    c.k.end_session(&id, "new");
                     id = c.k.create_session(&c.workspace, None, None, Some("chat")).map_err(|e| e.to_string())?;
                     eprintln!("• new session {id}");
                 }
@@ -427,7 +574,23 @@ fn cmd_chat(a: &Args) -> R {
                     for d in c.ext.iter().flat_map(|e| e.commands.iter()) {
                         eprintln!("/{} — {}", d.name, d.description);
                     }
+                    for (n, d) in c.ext.iter().flat_map(|e| e.plugin_commands()) {
+                        eprintln!("/{n} — {d}");
+                    }
                 }
+                _ if c.ext.as_ref().is_some_and(|e| e.plugin_command(name).is_some()) => match c.ext.as_ref().and_then(|e| e.run_command(&line, json!({"surface": "chat", "session": id}))) {
+                    Some(Ok(r)) => {
+                        if let Some(t) = &r.text {
+                            eprintln!("{t}");
+                        }
+                        if let Some(p) = r.prompt {
+                            c.k.submit(&id, &p, "cli").map_err(|e| e.to_string())?;
+                            let _ = run_foreground(&c, &id, a, RunOpts::default())?;
+                        }
+                    }
+                    Some(Err(e)) => eprintln!("error: {e}"),
+                    None => {}
+                },
                 _ => match expand_prompt(&c, &line) {
                     Ok(t) if t != line => {
                         c.k.submit(&id, &t, "cli").map_err(|e| e.to_string())?;
@@ -442,6 +605,7 @@ fn cmd_chat(a: &Args) -> R {
         c.k.submit(&id, &line, "cli").map_err(|e| e.to_string())?;
         let _ = run_foreground(&c, &id, a, RunOpts::default())?;
     }
+    c.k.end_session(&id, "exit");
     eprintln!("bye · resume with `ark chat -s {id}`");
     Ok(0)
 }
@@ -579,6 +743,127 @@ fn cmd_session(a: &Args) -> R {
 
 // ───────────────────────── daemon ─────────────────────────
 
+const HOST_METHODS: &[&str] = &["channels.list", "pairing.list", "pairing.approve", "pairing.revoke", "mcp.list", "mcp.app_call", "plugins.list", "plugins.ui", "plugins.ui_call", "command.run"];
+
+fn plugin_json(p: &Arc<ark_plugin::PluginHost>) -> Value {
+    json!({"name": p.name, "hooks": p.hooks(), "channels": p.channels(), "commands": p.commands, "routes": p.routes, "providers": p.providers, "services": p.services,
+        "cli": p.cli, "middleware": p.middleware_kinds(), "context_engine": p.context_engine, "memory": p.memory, "node_commands": p.node_commands, "ui": p.ui})
+}
+
+/// `/plugins/<name>/ui/<id>`: a declared UI panel.
+fn ui_panel(sub: &str) -> Option<&str> {
+    sub.strip_prefix("/ui/").map(|id| id.trim_end_matches('/')).filter(|id| !id.is_empty() && !id.contains('/'))
+}
+
+/// A plugin's HTTP routes on the app server.
+struct PluginMount(Arc<ark_plugin::PluginHost>);
+
+impl ark_app::server::Mount for PluginMount {
+    fn route(&self, method: &str, sub: &str) -> Option<bool> {
+        if method == "GET" && ui_panel(sub).is_some_and(|id| self.0.ui.iter().any(|u| u.id == id)) {
+            return Some(false);
+        }
+        self.0.route(method, sub).map(|r| r.public)
+    }
+    fn serve(&self, r: &ark_net::httpd::Request, sub: &str) -> ark_net::httpd::Response {
+        if let Some(id) = ui_panel(sub).filter(|id| r.method == "GET" && self.0.ui.iter().any(|u| u.id == *id)) {
+            return match self.0.ui_render(id, &r.raw_query) {
+                Ok(v) => ark_net::httpd::Response::new(200, "text/html; charset=utf-8", v["html"].as_str().unwrap_or("").as_bytes().to_vec()),
+                Err(e) => ark_net::httpd::Response::json(502, &json!({"error": e}).to_string()),
+            };
+        }
+        match self.0.http(&r.method, sub, &r.raw_query, &r.headers, &r.body) {
+            Ok(h) => {
+                let ctype = h.headers.iter().find(|(k, _)| k.eq_ignore_ascii_case("content-type")).map(|(_, v)| v.clone()).unwrap_or_else(|| "application/octet-stream".into());
+                let mut resp = ark_net::httpd::Response::new(h.status, &ctype, h.body);
+                const SKIP: &[&str] = &["content-type", "content-length", "connection", "transfer-encoding", "content-security-policy"];
+                for (k, v) in h.headers.iter().filter(|(k, _)| !SKIP.iter().any(|s| k.eq_ignore_ascii_case(s))) {
+                    resp = resp.with_header(k, v);
+                }
+                resp
+            }
+            Err(e) => ark_net::httpd::Response::json(502, &json!({"error": e}).to_string()),
+        }
+    }
+}
+
+/// ARP methods that live in the binary (channels, DM pairing, MCP status).
+fn host_methods(paths: &Paths, ext: Option<&ext::Ext>) -> ark_kernel::daemon::MethodExt {
+    let pairing = Arc::new(ark_channel::access::Pairing::open(paths.data.join("channels").join("pairing.json")));
+    let plugins: Vec<Arc<ark_plugin::PluginHost>> = ext.map(|e| e.plugins.clone()).unwrap_or_default();
+    let plugin_list: Vec<Value> = plugins.iter().map(plugin_json).collect();
+    let channels: Vec<Value> = ext.map(|e| e.channels.iter().map(|(n, (ch, c))| json!({"name": n, "kind": c.kind, "caps": ch.caps(), "dm_policy": c.policy.dm_policy, "default_chat": c.default_chat})).collect()).unwrap_or_default();
+    let mcp: Vec<Value> = ext.map(|e| e.registry.status().into_iter().map(|(n, tools, running)| json!({"name": n, "tools": tools, "running": running})).collect()).unwrap_or_default();
+    // MCP Apps: tools a view may call, with the client that serves them.
+    let app_tools: Vec<(String, ark_plugin::ToolDef, Arc<ark_plugin::Client>)> =
+        ext.map(|e| e.registry.app_tools().into_iter().filter_map(|(s, d)| Some((s.clone(), d, e.registry.client(&s)?))).collect()).unwrap_or_default();
+    let kernel = ext.map(|e| e.kernel.clone());
+    Arc::new(move |m: &str, p: &Value| {
+        let s = |k: &str| p[k].as_str().unwrap_or("").to_string();
+        Some(match m {
+            "mcp.app_call" => mcp_app_call(&app_tools, kernel.as_ref().and_then(|k| k.get()), p),
+            "channels.list" => Ok(json!(channels)),
+            "mcp.list" => Ok(json!(mcp)),
+            "plugins.list" => Ok(json!(plugin_list)),
+            // UI panels: the page renders the HTML in a sandboxed srcdoc frame (like MCP Apps).
+            "plugins.ui" | "plugins.ui_call" => {
+                let (name, id) = (s("plugin"), s("id"));
+                let Some(h) = plugins.iter().find(|h| h.name == name) else { return Some(Err((-32602, format!("no plugin `{name}`")))) };
+                let r = if m == "plugins.ui" { h.ui_render(&id, p["query"].as_str().unwrap_or("")) } else { h.ui_call(&id, &s("method"), p.get("params").cloned().unwrap_or(json!({}))) };
+                r.map_err(|e| (-32000, e))
+            }
+            // Plugin slash commands for the TUI / web UI: {handled:false} when `line` is not one.
+            "command.run" => {
+                let line = s("line");
+                let ctx = json!({"surface": p["surface"].as_str().unwrap_or("tui"), "session": p["session"]});
+                let rest = line.trim().trim_start_matches('/');
+                let name = rest.split_whitespace().next().unwrap_or("");
+                match plugins.iter().find(|h| h.commands.iter().any(|c| c.name == name)) {
+                    None => Ok(json!({"handled": false})),
+                    Some(h) => h.command(name, rest[name.len()..].trim(), ctx).map(|r| json!({"handled": true, "text": r.text, "prompt": r.prompt})).map_err(|e| (-32000, e)),
+                }
+            }
+            "pairing.list" => Ok(json!({"pending": pairing.pending(), "approved": pairing.approved().into_iter().map(|(c, s, a)| json!({"channel": c, "sender": s, "name": a.sender_name, "approved_at": a.approved_at})).collect::<Vec<_>>()})),
+            "pairing.approve" => pairing.approve(&s("channel"), &s("code")).map(|(sender, name)| json!({"sender": sender, "name": name})).map_err(|e| (-32001, e)),
+            "pairing.revoke" => Ok(json!({"revoked": pairing.revoke(&s("channel"), &s("sender"))})),
+            _ => return None,
+        })
+    })
+}
+
+/// `tools/call` from an MCP App view, proxied over ARP. Only tools the server marks
+/// app-visible; anything not read-only asks the egress gate's human first.
+fn mcp_app_call(tools: &[(String, ark_plugin::ToolDef, Arc<ark_plugin::Client>)], k: Option<&Kernel>, p: &Value) -> Result<Value, (i32, String)> {
+    use ark_kernel::approver::{Approval, ApprovalRequest};
+    let (server, name) = (p["server"].as_str().unwrap_or(""), p["name"].as_str().unwrap_or(""));
+    let Some((_, def, client)) = tools.iter().find(|(s, d, _)| s == server && d.name == name) else {
+        return Err((-32602, format!("`{name}` on MCP server `{server}` is not callable from an app view")));
+    };
+    let args = if p["arguments"].is_object() { p["arguments"].clone() } else { json!({}) };
+    if !def.read_only || client.config().untrusted() {
+        let k = k.ok_or((-32000, "agent not ready".to_string()))?;
+        let req = ApprovalRequest {
+            id: format!("app-{}", ark_net::crypto::random_token(6)),
+            tool_use_id: String::new(),
+            session: p["session"].as_str().unwrap_or("mcp-app").into(),
+            tool: format!("mcp__{server}__{name}"),
+            summary: args.to_string().chars().take(2000).collect(),
+            input: args.clone(),
+            gate: ark_kernel::gate::GateKind::Egress,
+            reason: format!("the `{server}` app view wants to call `{name}`"),
+        };
+        if k.approver.approve(&req) == Approval::Deny {
+            return Err((-32001, "denied by the user".into()));
+        }
+    }
+    let r = client.call_tool(name, args, &ark_core::Cancel::new()).map_err(|e| (-32000, e))?;
+    let mut raw = if r.raw.is_object() { r.raw } else { json!({"content": [{"type": "text", "text": r.text}]}) };
+    if r.is_error {
+        raw["isError"] = json!(true);
+    }
+    Ok(raw)
+}
+
 fn cmd_daemon(a: &Args) -> R {
     let paths = Paths::from_env();
     let sock = paths.socket();
@@ -596,8 +881,50 @@ fn cmd_daemon(a: &Args) -> R {
             if !loops.is_empty() {
                 eprintln!("arkd: {} channel(s) active", loops.len());
             }
-            let r = Arc::new(Daemon::new(c.k, pending)).run();
+            let services = c.ext.as_ref().and_then(|e| ark_plugin::plugin::supervise(e.plugins.clone(), stop.clone()));
+            for p in c.ext.iter().flat_map(|e| e.plugins.iter()).filter(|p| !p.routes.is_empty() || !p.ui.is_empty()) {
+                ark_app::server::mount(&p.name, Arc::new(PluginMount(p.clone())));
+            }
+            c.k.emit(ark_kernel::hooks::HookEvent::DaemonStart, json!({"session_id": "", "cwd": c.workspace, "pid": std::process::id()}), "");
+            let d = Arc::new(Daemon::new(c.k.clone(), pending));
+            ark_app::node::init(&paths.data);
+            d.add_methods(ark_app::node::methods());
+            d.add_methods(host_methods(&paths, c.ext.as_ref()));
+            // App server: web/desktop UI, WebSocket ARP, OpenAI-compatible API, A2A, nodes.
+            let app_cfg = ark_app::AppConfig::parse(&c.k.cfg.app)?;
+            let _server = if app_cfg.enabled {
+                let token = app_cfg.token.as_deref().map(|t| (c.k.vault_substitute())(t)).unwrap_or_default();
+                if token.contains("{{secret:") {
+                    return Err("[app] token references a secret that is not set (ark secrets set APP_TOKEN …)".into());
+                }
+                let mut host: Vec<String> = ark_app::node::METHODS.iter().map(|s| s.to_string()).collect();
+                host.extend(HOST_METHODS.iter().map(|s| s.to_string()));
+                // MCP event deliveries arrive as signed webhooks and are queued into the subscribing session.
+                let mut routes: Vec<(String, ark_net::httpd::Handler)> = vec![];
+                if let Some(hub) = c.ext.as_ref().and_then(|e| e.registry.events()) {
+                    let k = c.k.clone();
+                    hub.set_sink(Arc::new(move |dl: &ark_plugin::events::Delivery| {
+                        let Some(sid) = dl.session.as_deref() else { return };
+                        if k.submit(sid, &ark_plugin::events::prompt_for(dl), "mcp-event").is_ok() && !k.is_running(sid) {
+                            let _ = k.start(sid, Default::default());
+                        }
+                    }));
+                    hub.start_refresher();
+                    routes.push(("/mcp-events/".into(), hub.handler()));
+                }
+                let app = Arc::new(ark_app::App { d: d.clone(), cfg: app_cfg.clone(), token, host_methods: host, routes });
+                let srv = ark_app::start(app)?;
+                eprintln!("arkd: app server on http://{} (UI, /arp, /v1, {})", srv.local_addr(), if app_cfg.a2a.enabled { "/a2a" } else { "no a2a" });
+                Some(srv)
+            } else {
+                None
+            };
+            let r = d.run();
+            c.k.emit(ark_kernel::hooks::HookEvent::DaemonStop, json!({"session_id": "", "cwd": c.workspace}), "");
             stop.cancel();
+            if let Some(t) = services {
+                let _ = t.join();
+            }
             r?;
             Ok(0)
         }
@@ -1084,7 +1411,7 @@ fn cmd_providers(a: &Args) -> R {
             let model = a.pos(1).map(String::from).unwrap_or(cfg.model.default.clone());
             let (pid, m) = ark_kernel::context::split_model(&model);
             let prov = p.provider(pid)?;
-            let req = ark_core::ModelRequest { model: m.into(), system: vec![], messages: vec![ark_core::Message::user("Reply with exactly: pong")], tools: vec![], max_tokens: 2048, temperature: None, cache_after_message: None };
+            let req = ark_core::ModelRequest { model: m.into(), system: vec![], messages: vec![ark_core::Message::user("Reply with exactly: pong")], tools: vec![], max_tokens: 2048, temperature: None, cache_after_message: None, reasoning: None };
             let t0 = Instant::now();
             match prov.complete(&req, &mut |_| {}, &ark_core::Cancel::new().with_deadline(Instant::now() + Duration::from_secs(60))) {
                 Ok(r) => {
@@ -1221,6 +1548,52 @@ fn cmd_mcp(a: &Args) -> R {
                 Err(e) => Err(format!("{name}: {e}").into()),
             }
         }
+        "login" => {
+            let name = a.need(1, "server")?;
+            let ws = workspace(a)?;
+            let cfg = load_config(a, &ws, &paths)?;
+            let (cfgs, _) = ext::mcp_configs(&cfg);
+            let c = cfgs.get(name).ok_or_else(|| format!("no MCP server `{name}` in config"))?;
+            let url = c.url.as_deref().ok_or("OAuth applies to HTTP servers (`url`), not stdio")?;
+            if !c.uses_oauth() {
+                eprintln!("note: [mcp.{name}] has no `auth = \"oauth\"`; tokens are saved but not used until you add it");
+            }
+            struct Show(bool);
+            impl ark_plugin::oauth::Prompter for Show {
+                fn open(&self, url: &str) {
+                    println!("在瀏覽器開啟以下網址完成授權：\n\n  {url}\n");
+                    if self.0 {
+                        let _ = std::process::Command::new("xdg-open").arg(url).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).spawn();
+                    }
+                }
+                fn device(&self, uri: &str, code: &str, complete: Option<&str>) {
+                    println!("請到 {uri} 輸入代碼：{code}");
+                    if let Some(c) = complete {
+                        println!("（或直接開啟 {c}）");
+                    }
+                }
+            }
+            let challenge = ark_plugin::oauth::probe_challenge(url);
+            let wait = Duration::from_secs(600);
+            let t = if a.flag("device") {
+                ark_plugin::oauth::login_device(url, challenge.as_deref(), &c.oauth, &Show(false), wait)
+            } else {
+                ark_plugin::oauth::login_browser(url, challenge.as_deref(), &c.oauth, &Show(!a.flag("no-browser")), wait)
+            }
+            .map_err(|e| format!("{name}: login failed: {e}"))?;
+            let store = ark_plugin::oauth::Store::new(&paths.data, name);
+            store.save(t)?;
+            println!("{name}: 已登入，token 存在 {}", store.path().display());
+            Ok(0)
+        }
+        "logout" => {
+            let name = a.need(1, "server")?;
+            let store = ark_plugin::oauth::Store::new(&paths.data, name);
+            let had = store.has_tokens();
+            store.clear();
+            println!("{name}: {}", if had { "已登出（token 已刪除）" } else { "原本就沒有登入" });
+            Ok(0)
+        }
         "add" => {
             let name = a.need(1, "name")?;
             if !valid_ext_name(name) {
@@ -1292,7 +1665,9 @@ fn cmd_mcp(a: &Args) -> R {
             let ws = workspace(a)?;
             let cfg = load_config(a, &ws, &paths)?;
             let vault = load_vault(&paths)?;
-            let tools: Vec<Arc<dyn ark_core::Tool>> = ark_tools::builtin_tools().into_iter().filter(|t| !matches!(t.spec().name.as_str(), "spawn" | "ask_user")).collect();
+            let mut tools: Vec<Arc<dyn ark_core::Tool>> = ark_tools::builtin_tools().into_iter().filter(|t| !matches!(t.spec().name.as_str(), "spawn" | "ask_user")).collect();
+            // Conversation tools: drive and approve sessions in the running daemon.
+            tools.extend(ark_app::conversations::tools(paths.socket()));
             let (allow_p, allow_e) = (a.flag("allow-privilege") || a.flag("yes"), a.flag("allow-egress") || a.flag("yes"));
             let v2 = vault.clone();
             let gcfg = cfg.gate.clone();
@@ -1316,7 +1691,15 @@ fn cmd_mcp(a: &Args) -> R {
                 host: Arc::new(NoHost),
                 secrets: ext::secrets_fn(&v3),
             };
-            let info = ark_plugin::ServerInfo { name: "ark".into(), version: env!("CARGO_PKG_VERSION").into(), instructions: Some("Ark's file, search, shell and memory tools. Calls pass Ark's privilege and egress gates.".into()) };
+            let info = ark_plugin::ServerInfo { name: "ark".into(), version: env!("CARGO_PKG_VERSION").into(), instructions: Some("Ark's file, search, shell and memory tools, plus ark_session_* / ark_pending* to drive and approve sessions in the running ark daemon. Calls pass Ark's privilege and egress gates.".into()) };
+            if let Some(relay) = a.val("relay") {
+                // Outbound relay instead of stdio: no inbound port, Ed25519-authenticated, grant-scoped.
+                let srv = ark_plugin::Server { info: &info, tools: &tools, ctx: &ctx, judge: &judge };
+                let handle = |m: &Value| srv.handle(m).and_then(|r| serde_json::from_str(&vault.redact(&r.to_string())).ok());
+                let opts = ark_plugin::relay::Opts { relay: relay.to_string(), state: paths.data.join("mcp-relay.json"), name: "ark".into(), version: env!("CARGO_PKG_VERSION").into(), pair: a.flag("pair") };
+                ark_plugin::relay::run(&opts, &handle, &ark_core::Cancel::new(), &|l: &str| eprintln!("{l}"))?;
+                return Ok(0);
+            }
             let stdin = std::io::stdin();
             ark_plugin::serve(&info, &tools, &ctx, &judge, stdin.lock(), RedactingWriter { inner: std::io::stdout(), vault, buf: Vec::new() }).map_err(|e| e.to_string())?;
             Ok(0)
@@ -1368,9 +1751,477 @@ fn cmd_plugin(a: &Args) -> R {
     }
     for p in &e.plugins {
         let tools = c.k.tools.iter().filter(|t| t.spec().name.starts_with(&format!("mcp__{}__", p.name))).count();
-        println!("{:<16} {tools} tools · hooks: {} · channels: {}", p.name, if p.hooks().is_empty() { "-".into() } else { p.hooks().join(",") }, if p.channels().is_empty() { "-".into() } else { p.channels().join(",") });
+        let list = |v: Vec<String>| if v.is_empty() { "-".to_string() } else { v.join(",") };
+        println!(
+            "{:<16} {tools} tools · hooks: {} · channels: {} · commands: {} · routes: {} · providers: {} · services: {}",
+            p.name,
+            list(p.hooks().to_vec()),
+            list(p.channels().to_vec()),
+            list(p.commands.iter().map(|c| format!("/{}", c.name)).collect()),
+            list(p.routes.iter().map(|r| format!("/plugins/{}{}", p.name, if r.path.is_empty() { "/" } else { &r.path })).collect()),
+            list(p.providers.iter().map(|x| x.id.clone()).collect()),
+            list(p.services.iter().map(|x| x.name.clone()).collect()),
+        );
+        let mut extra = vec![];
+        if !p.cli.is_empty() {
+            extra.push(format!("cli: {}", list(p.cli.iter().map(|c| format!("ark {}", c.name)).collect())));
+        }
+        if !p.middleware_kinds().is_empty() {
+            extra.push(format!("middleware: {}", list(p.middleware_kinds().to_vec())));
+        }
+        if let Some(e) = &p.context_engine {
+            extra.push(format!("context engine{}", if e.owns_compaction { " (owns compaction)" } else { "" }));
+        }
+        if p.memory {
+            extra.push("memory provider".into());
+        }
+        if !p.node_commands.is_empty() {
+            extra.push(format!("node commands: {}", list(p.node_commands.iter().map(|c| c.command.clone()).collect())));
+        }
+        if !p.ui.is_empty() {
+            extra.push(format!("ui: {}", list(p.ui.iter().map(|u| format!("/plugins/{}/ui/{}", p.name, u.id)).collect())));
+        }
+        if !extra.is_empty() {
+            println!("{:<16} {}", "", extra.join(" · "));
+        }
     }
     Ok(0)
+}
+
+/// The systemd user unit for the daemon (see packaging/systemd/ for notes).
+pub fn service_unit(exe: &Path, workspace: &Path) -> String {
+    format!(
+        "[Unit]
+Description=ark agent daemon
+Documentation=https://github.com/ark-agent/ark
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+Type=notify
+NotifyAccess=main
+ExecStart={exe} daemon run -w {ws}
+WorkingDirectory={ws}
+Restart=on-failure
+RestartSec=2s
+# SIGTERM to arkd first (it interrupts runs and saves state), then the rest of the group.
+KillMode=mixed
+TimeoutStopSec=20s
+# ark refuses sudo by policy; make that impossible rather than merely discouraged.
+NoNewPrivileges=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+SystemCallArchitectures=native
+RestrictRealtime=yes
+UMask=0077
+# Not set on purpose: MemoryDenyWriteExecute (breaks Node/V8 bridges), ProtectHome (ark works
+# in $HOME), RestrictNamespaces (breaks sandboxes ark may run). PrivateTmp/ProtectKernel* need
+# unprivileged user namespaces in user units; enable them in a drop-in if your distro allows.
+
+[Install]
+WantedBy=default.target
+",
+        exe = exe.display(),
+        ws = workspace.display()
+    )
+}
+
+/// Install / remove the systemd user service.
+fn cmd_service(a: &Args) -> R {
+    let unit_dir = std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from).unwrap_or_else(|| PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join(".config")).join("systemd/user");
+    let unit = unit_dir.join("arkd.service");
+    let systemctl = |args: &[&str]| std::process::Command::new("systemctl").arg("--user").args(args).status().map(|s| s.success()).unwrap_or(false);
+    match a.pos(0).unwrap_or("status") {
+        "install" => {
+            let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+            let ws = workspace(a)?;
+            std::fs::create_dir_all(&unit_dir).map_err(|e| e.to_string())?;
+            std::fs::write(&unit, service_unit(&exe, &ws)).map_err(|e| format!("{}: {e}", unit.display()))?;
+            println!("wrote {}", unit.display());
+            if a.flag("no-start") {
+                return Ok(0);
+            }
+            if !(systemctl(&["daemon-reload"]) && systemctl(&["enable", "--now", "arkd.service"])) {
+                return Err("systemctl --user failed (no user session bus?). Start it later with: systemctl --user enable --now arkd".into());
+            }
+            println!("arkd enabled and started.");
+            println!("To keep it running after logout and start it at boot: loginctl enable-linger $USER");
+            Ok(0)
+        }
+        "uninstall" => {
+            let _ = systemctl(&["disable", "--now", "arkd.service"]);
+            let _ = std::fs::remove_file(&unit);
+            let _ = systemctl(&["daemon-reload"]);
+            println!("removed {}", unit.display());
+            Ok(0)
+        }
+        "status" => {
+            if !unit.exists() {
+                println!("not installed (ark service install)");
+                return Ok(0);
+            }
+            systemctl(&["status", "--no-pager", "arkd.service"]);
+            Ok(0)
+        }
+        "print" => {
+            print!("{}", service_unit(&std::env::current_exe().map_err(|e| e.to_string())?, &workspace(a)?));
+            Ok(0)
+        }
+        other => Err(format!("unknown service subcommand `{other}` (install [--no-start], uninstall, status, print)").into()),
+    }
+}
+
+/// Data-subject requests (個資法 §3/§11): export or delete everything ark holds about one
+/// channel user — their sessions, routing, pairing approval and downloaded attachments.
+fn cmd_data(a: &Args) -> R {
+    let paths = Paths::from_env();
+    let action = a.pos(0).unwrap_or("");
+    let channel = a.need(1, "channel")?;
+    let who = a.need(2, "sender or chat id")?;
+    let dir = paths.data.join("channels");
+    let router = ark_channel::Router::open(dir.join("routes.json"), Default::default());
+    let routes = ext::forget_routes(&router, channel, &[who]);
+    let store = ark_kernel::store::Store::new(paths.data.join("sessions"));
+    let pairing = ark_channel::access::Pairing::open(dir.join("pairing.json"));
+    match action {
+        "export" => {
+            let mut sessions = Vec::new();
+            for r in &routes {
+                let events = store.read(&r.session).map(|e| serde_json::to_value(e).unwrap_or_default()).unwrap_or(Value::Null);
+                sessions.push(json!({"chat": r.key.chat, "sender": r.key.sender, "session": r.session, "events": events}));
+            }
+            let approved: Vec<Value> = pairing.approved().into_iter().filter(|(c, s, _)| c == channel && s == who).map(|(_, _, ap)| json!(ap)).collect();
+            let doc = json!({"channel": channel, "subject": who, "exported_at": now_secs(), "sessions": sessions, "pairing": approved,
+                "note": "Long-term memory (ark memory) is shared across sessions and is not split per person; review it with `ark memory show`."});
+            println!("{}", serde_json::to_string_pretty(&doc).unwrap_or_default());
+            Ok(0)
+        }
+        "delete" => {
+            if !a.flag("yes") {
+                return Err(format!("this permanently deletes {} session(s) for {who} on {channel}; re-run with --yes", routes.len()).into());
+            }
+            let (n, files, revoked) = ext::forget(&store, &router, Some(&pairing), channel, &[who]);
+            println!("deleted {n} session(s), {files} attachment(s){} for {who} on {channel}", if revoked { ", revoked pairing" } else { "" });
+            println!("note: shared long-term memory is not split per person; check `ark memory show` for anything about them.");
+            Ok(0)
+        }
+        _ => Err("usage: ark data export <channel> <sender|chat>  |  ark data delete <channel> <sender|chat> --yes".into()),
+    }
+}
+
+/// Dynamic webhook routes (Hermes `webhook subscribe`); the listener hot-reloads the file.
+fn cmd_webhook(a: &Args) -> R {
+    use ark_channel::webhook;
+    let paths = Paths::from_env();
+    let channel = a.need(1, "channel")?;
+    let file = webhook::subscriptions_path(&paths.data.join("channels"), channel);
+    match a.pos(0).unwrap_or("") {
+        "list" | "ls" => {
+            let subs = webhook::list_subscriptions(&file)?;
+            for (name, r) in &subs {
+                let target = r["cron_job"].as_str().map(|j| format!("cron job {j}")).unwrap_or_else(|| r["deliver"].as_str().unwrap_or("reply").to_string());
+                println!("{name}  {}  → {target}{}", r["path"].as_str().map(String::from).unwrap_or(format!("/webhooks/{name}")), if r["enabled"] == json!(false) { "  (disabled)" } else { "" });
+            }
+            if subs.is_empty() {
+                println!("no subscriptions on {channel}");
+            }
+            Ok(0)
+        }
+        "subscribe" | "add" => {
+            let name = a.need(2, "route")?;
+            let route: Value = match a.pos(3) {
+                Some(j) => serde_json::from_str(j).map_err(|e| format!("route json: {e}"))?,
+                None => json!({}),
+            };
+            let r = webhook::subscribe(&file, name, route)?;
+            println!("subscribed {name} on {channel}: POST {}", r["path"].as_str().map(String::from).unwrap_or(format!("/webhooks/{name}")));
+            println!("secret: {}", r["secret"].as_str().unwrap_or(""));
+            Ok(0)
+        }
+        "rm" | "remove" => {
+            let name = a.need(2, "route")?;
+            Ok(if webhook::unsubscribe(&file, name)? { 0 } else { 1 })
+        }
+        _ => Err("usage: ark webhook list <channel> | subscribe <channel> <route> [json] | rm <channel> <route>".into()),
+    }
+}
+
+/// Full-screen terminal UI on the daemon (same protocol as the web UI).
+fn cmd_tui(a: &Args) -> R {
+    let paths = Paths::from_env();
+    let ws = workspace(a)?;
+    ark_app::tui::run(&paths.socket(), &ws)?;
+    Ok(0)
+}
+
+/// ACP agent on stdio for editors (Zed, JetBrains, Neovim…): `"command": "ark", "args": ["acp"]`.
+fn cmd_acp(a: &Args) -> R {
+    let slot: Arc<std::sync::OnceLock<Arc<ark_app::acp::Peer>>> = Arc::default();
+    let approver = Arc::new(ark_app::acp::AcpApprover(slot.clone()));
+    let c = build_agent(a, approver, false)?;
+    let mut commands: Vec<(String, String)> = c.ext.as_ref().map(|e| e.commands.iter().map(|c| (c.name.clone(), c.description.clone())).collect()).unwrap_or_default();
+    commands.extend([("new".to_string(), "開新對話".to_string()), ("compact".into(), "壓縮對話脈絡".into())]);
+    let acp = ark_app::acp_client::AcpConfig::parse(&c.k.cfg.acp).map_err(Fail::Msg)?;
+    let stdin = std::io::stdin();
+    ark_app::acp::serve(c.k.clone(), commands, acp, slot, stdin.lock(), Box::new(std::io::stdout()));
+    Ok(0)
+}
+
+/// Drive an external ACP agent (acpx-style): `ark acp-client claude "fix the tests"`.
+fn cmd_acp_client(a: &Args) -> R {
+    use ark_app::acp_client::{describe_update, render_turn, AcpClient, AcpConfig, PermissionMode};
+    let paths = Paths::from_env();
+    let ws = workspace(a)?;
+    let cfg = load_config(a, &ws, &paths)?;
+    let acp = AcpConfig::parse(&cfg.acp).map_err(Fail::Msg)?;
+    if a.flag("list") {
+        for n in acp.names() {
+            let s = acp.agent(&n).map_err(Fail::Msg)?;
+            println!("{n:<12} {}  {}", ark_app::acp_client::command_line(&s), s.description.unwrap_or_default());
+        }
+        return Ok(0);
+    }
+    let name = a.need(0, "agent")?;
+    let spec = acp.agent(name).map_err(Fail::Msg)?;
+    let prompt = read_prompt(a, 1)?;
+    let cwd = match a.val("cwd") {
+        Some(d) => PathBuf::from(d).canonicalize().map_err(|e| Fail::Msg(format!("--cwd {d}: {e}")))?,
+        None => ws.clone(),
+    };
+    let mode = match a.val("permission-mode") {
+        Some(m) => PermissionMode::parse(m).map_err(Fail::Usage)?,
+        None if a.flag("yes") => PermissionMode::ApproveAll,
+        None => acp.mode_for(&spec),
+    };
+    let tty = term::TtyApprover::available().then(|| Arc::new(term::TtyApprover::new()));
+    let ask: ark_app::acp_client::Asker = Arc::new(move |q: &str| match &tty {
+        Some(t) => t.ask("", &format!("{q} [y/N]")).is_ok_and(|x| ark_app::acp_client::is_yes(&x)),
+        None => false,
+    });
+    let vault = load_vault(&paths)?;
+    let secrets = ext::secrets_fn(&vault);
+    let mut c = AcpClient::start(name, &spec, &cwd, mode, ask, Some((cfg.gate.clone(), vault)), &*secrets).map_err(Fail::Msg)?;
+    c.open_session(a.val("session")).map_err(Fail::Msg)?;
+    let json_out = a.flag("json");
+    let quiet = a.flag("quiet");
+    if !json_out {
+        c.set_progress(Some(Arc::new(move |u: &Value| {
+            if u["sessionUpdate"] == "agent_message_chunk" {
+                print!("{}", u["content"]["text"].as_str().unwrap_or(""));
+                let _ = std::io::stdout().flush();
+            } else if let Some(l) = describe_update(u).filter(|_| !quiet) {
+                eprintln!("{l}");
+            }
+        })));
+    }
+    // Ctrl-C → session/cancel (a second one quits).
+    SIGINTS.store(0, Ordering::SeqCst);
+    unsafe {
+        libc::signal(libc::SIGINT, on_sigint as *const () as libc::sighandler_t);
+    }
+    let cancel = ark_core::Cancel::new();
+    let c2 = cancel.clone();
+    std::thread::spawn(move || loop {
+        if SIGINTS.load(Ordering::SeqCst) > 0 {
+            eprintln!("\n• cancelling… (Ctrl-C again to force quit)");
+            c2.cancel();
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    });
+    let timeout = Duration::from_secs(a.num::<u64>("timeout").map_err(Fail::Usage)?.or(acp.timeout_secs).unwrap_or(1800));
+    let t = c.prompt(&prompt, &cancel, timeout).map_err(Fail::Msg)?;
+    if json_out {
+        println!("{}", json!({"agent": name, "sessionId": c.session_id, "stopReason": t.stop_reason, "text": t.text, "toolCalls": t.tools.iter().map(|x| json!({"id": x.0, "title": x.1, "kind": x.2, "status": x.3})).collect::<Vec<_>>(), "plan": t.plan, "permissions": t.permissions}));
+    } else {
+        println!();
+        if !quiet {
+            eprintln!("{}", render_turn(&c, &t, "done").lines().next().unwrap_or(""));
+        }
+    }
+    c.close();
+    Ok(if t.stop_reason == "cancelled" { 130 } else { 0 })
+}
+
+/// Run this machine as a node of an ark app server.
+fn cmd_node(a: &Args) -> R {
+    let paths = Paths::from_env();
+    // A setup code (from `ark nodes setup-code`) carries the URL, a one-time bootstrap token and
+    // optionally the server's certificate fingerprint.
+    let (url, bootstrap, tls_fingerprint) = match a.val("setup-code") {
+        Some(code) => {
+            let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0);
+            let sc = ark_app::node::SetupCode::decode(code, now)?;
+            (sc.url, Some(sc.bootstrap_token), sc.tls_fingerprint)
+        }
+        None => (a.val("url").ok_or("--url ws://host:8640/node (or --setup-code CODE) is required")?.to_string(), None, None),
+    };
+    let host = std::fs::read_to_string("/etc/hostname").unwrap_or_else(|_| "linux".into()).trim().to_string();
+    let id = a.val("session").map(str::to_string).unwrap_or_else(|| format!("linux-{host}"));
+    let policy_path = paths.config_dir.join("node.toml");
+    let policy: ark_app::node::HostPolicy = match std::fs::read_to_string(&policy_path) {
+        Ok(t) => toml::from_str(&t).map_err(|e| format!("{}: {e}", policy_path.display()))?,
+        Err(_) => ark_app::node::HostPolicy { run: "deny".into(), read_roots: vec![workspace(a)?], ..Default::default() },
+    };
+    eprintln!("ark node: {id} → {url} (system.run: {}, policy file {})", if policy.run.is_empty() { "deny" } else { &policy.run }, policy_path.display());
+    let token_path = paths.data.join("node.token");
+    let mut backoff = 1u64;
+    loop {
+        // The bootstrap token is single use: once a device token exists it is not sent again.
+        let conn = ark_app::node::HostConn { url: url.clone(), id: id.clone(), name: a.val("name").unwrap_or(&host).to_string(), key_path: paths.data.join("node.key"), token_path: token_path.clone(), bootstrap: bootstrap.clone(), tls_fingerprint: tls_fingerprint.clone() };
+        match ark_app::node::run_host(&conn, &policy) {
+            Ok(()) => return Ok(0),
+            Err(e) => {
+                eprintln!("ark node: {e}; retry in {backoff}s");
+                std::thread::sleep(Duration::from_secs(backoff));
+                backoff = (backoff * 2).min(60);
+            }
+        }
+    }
+}
+
+/// Manage devices connected to the app server (through the daemon).
+fn cmd_nodes(a: &Args) -> R {
+    let sock = Paths::from_env().socket();
+    let r = match a.pos(0).unwrap_or("list") {
+        "list" | "ls" => daemon::call(&sock, "node.list", json!({}))?,
+        "pending" => daemon::call(&sock, "node.pair.list", json!({}))?,
+        "approve" => daemon::call(&sock, "node.pair.approve", json!({"code": a.need(1, "code")?}))?,
+        "reject" => daemon::call(&sock, "node.pair.reject", json!({"code": a.need(1, "code")?}))?,
+        "remove" | "rm" => daemon::call(&sock, "node.remove", json!({"id": a.need(1, "id")?}))?,
+        "describe" | "show" => daemon::call(&sock, "node.describe", json!({"id": a.need(1, "id")?}))?,
+        "rename" => daemon::call(&sock, "node.rename", json!({"id": a.need(1, "id")?, "name": a.rest(2)}))?,
+        "invoke" => {
+            let params = match a.rest(3) {
+                r if r.trim().is_empty() => json!({}),
+                r => serde_json::from_str::<Value>(&r).map_err(|e| format!("params must be JSON: {e}"))?,
+            };
+            daemon::call(&sock, "node.invoke", json!({"id": a.need(1, "node")?, "command": a.need(2, "command")?, "params": params, "queue": a.flag("queue")}))?
+        }
+        "queue" => daemon::call(&sock, "node.queue", json!({"id": a.pos(1).unwrap_or("")}))?,
+        "events" => daemon::call(&sock, "node.events", json!({"id": a.pos(1).unwrap_or("")}))?,
+        "rotate" | "rotate-token" => daemon::call(&sock, "node.token.rotate", json!({"id": a.need(1, "id")?}))?,
+        "wake" | "enqueue" => daemon::call(&sock, "node.pending.enqueue", json!({"nodeId": a.need(1, "id")?, "type": a.pos(2).unwrap_or("status.request")}))?,
+        "setup-code" => {
+            let ws = workspace(a)?;
+            let paths = Paths::from_env();
+            let cfg = load_config(a, &ws, &paths)?;
+            let app = ark_app::AppConfig::parse(&cfg.app)?;
+            if !app.nodes {
+                eprintln!("ark: warning: [app] nodes = false; the app server will not accept nodes until you enable it");
+            }
+            let url = match a.val("url") {
+                Some(u) => u.to_string(),
+                None => {
+                    let listen = app.listen.replace("0.0.0.0", &std::fs::read_to_string("/etc/hostname").unwrap_or_else(|_| "localhost".into()).trim().to_lowercase());
+                    format!("ws://{listen}/node")
+                }
+            };
+            let ttl = a.num::<u64>("ttl").map_err(Fail::Usage)?.unwrap_or(10) * 60_000;
+            let mut p = json!({"url": url, "ttlMs": ttl});
+            if let Some(f) = a.val("tls-fingerprint") {
+                p["tlsFingerprint"] = json!(f);
+            }
+            let r = daemon::call(&sock, "node.setup.create", p)?;
+            let code = r["code"].as_str().unwrap_or("");
+            if a.flag("json") {
+                println!("{}", serde_json::to_string_pretty(&r).unwrap_or_default());
+                return Ok(0);
+            }
+            match ark_app::qr::Qr::encode(code.as_bytes()) {
+                Some(q) => println!("{}", q.render(2)),
+                None => eprintln!("(code is too long for a terminal QR code; copy it instead)"),
+            }
+            println!("setup code (valid {} min, single use) for {}:\n{code}\n\non the device: ark node --setup-code {code}", ttl / 60_000, r["url"].as_str().unwrap_or(""));
+            return Ok(0);
+        }
+        other => return Err(format!("unknown nodes subcommand `{other}` (list, pending, approve <code>, reject <code>, remove <id>, describe <id>, rename <id> <name>, invoke <node> <command> [json] [--queue], queue [id], events [id], rotate <id>, wake <id> [status.request|location.request], setup-code [--url ws://…] [--ttl MIN] [--tls-fingerprint SHA256])").into()),
+    };
+    println!("{}", serde_json::to_string_pretty(&r).unwrap_or_default());
+    Ok(0)
+}
+
+/// App server helpers: token, open the UI, status.
+fn cmd_app(a: &Args) -> R {
+    let paths = Paths::from_env();
+    let ws = workspace(a)?;
+    let cfg = load_config(a, &ws, &paths)?;
+    let vault = load_vault(&paths)?;
+    let app = ark_app::AppConfig::parse(&cfg.app)?;
+    let token = app.token.as_deref().map(|t| vault.substitute(t)).filter(|t| !t.contains("{{secret:")).unwrap_or_default();
+    let url = format!("http://{}", app.listen);
+    match a.pos(0).unwrap_or("status") {
+        "token" => {
+            if token.is_empty() {
+                let t = ark_net::crypto::random_token(24);
+                println!("尚未設定 token。最簡單是執行 `ark setup`；或手動：\n  echo {t} | ark secrets set APP_TOKEN\n然後在 config.toml 加上：\n  [app]\n  enabled = true\n  token = \"{{{{secret:APP_TOKEN}}}}\"");
+            } else {
+                println!("{token}");
+            }
+            Ok(0)
+        }
+        "open" => {
+            if token.is_empty() {
+                return Err("set [app] token first (`ark app token`)".into());
+            }
+            // The token travels in the fragment, which browsers never send to servers or logs.
+            let link = format!("{url}/#token={token}");
+            let opened = ["chromium", "google-chrome", "brave-browser"].iter().any(|b| std::process::Command::new(b).arg(format!("--app={link}")).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).spawn().is_ok());
+            if !opened {
+                let _ = std::process::Command::new("xdg-open").arg(&link).spawn();
+            }
+            println!("{url}");
+            Ok(0)
+        }
+        "status" => {
+            println!("[app] {} on {url} · ui {} · openai api {} · nodes {} · a2a {}", if app.enabled { "enabled" } else { "disabled" }, app.ui, app.openai_api, app.nodes, app.a2a.enabled);
+            Ok(0)
+        }
+        other => Err(format!("unknown app subcommand `{other}` (token, open, status)").into()),
+    }
+}
+
+/// DM pairing: approve the one-time codes unknown senders receive under `dm_policy = "pairing"`.
+fn cmd_pairing(a: &Args) -> R {
+    let paths = Paths::from_env();
+    let p = ark_channel::access::Pairing::open(paths.data.join("channels").join("pairing.json"));
+    match a.pos(0).unwrap_or("list") {
+        "list" | "ls" => {
+            let pending = p.pending();
+            if pending.is_empty() {
+                println!("no pending pairing requests");
+            }
+            for r in pending {
+                println!("pending  {:<14} {} ({})  {}s ago", r.channel, r.sender, r.sender_name, now_secs() - r.created);
+            }
+            for (c, s, ap) in p.approved() {
+                println!("approved {c:<14} {s} ({})", ap.sender_name);
+            }
+            Ok(0)
+        }
+        "approve" => {
+            let (ch, code) = (a.need(1, "channel")?, a.need(2, "code")?);
+            let (s, n) = p.approve(ch, code).map_err(|e| e.to_string())?;
+            println!("approved {s} ({n}) on {ch}");
+            Ok(0)
+        }
+        "revoke" | "rm" => {
+            let (ch, sender) = (a.need(1, "channel")?, a.need(2, "sender")?);
+            if p.revoke(ch, sender) {
+                println!("revoked {sender} on {ch}");
+                Ok(0)
+            } else {
+                Err(format!("{sender} is not approved on {ch}").into())
+            }
+        }
+        other => Err(format!("unknown pairing subcommand `{other}` (list, approve <channel> <code>, revoke <channel> <sender>)").into()),
+    }
+}
+
+fn now_secs() -> i64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0)
 }
 
 fn cmd_channel(a: &Args) -> R {
@@ -1379,12 +2230,13 @@ fn cmd_channel(a: &Args) -> R {
             let c = build_agent(a, approver_for(a, false), false)?;
             let e = c.ext.as_ref().unwrap();
             if e.channels.is_empty() {
-                println!("no channels (configure [channels.<name>] kind = \"telegram\" | \"webhook\" | \"plugin\")");
+                println!("no channels (configure [channels.<name>] kind = \"telegram\", \"discord\", \"slack\", \"line\"… — see docs/config-example.toml)");
             }
             for (n, (_, cfg)) in &e.channels {
                 let kind = serde_json::to_value(cfg).ok().and_then(|v| v["kind"].as_str().map(String::from)).unwrap_or_default();
                 let r = cfg.router();
-                println!("{n:<16} {kind:<9} allow: {}", if r.allow.is_empty() { "(nobody — set allow)".into() } else { r.allow.join(",") });
+                let allow = &r.policy.allow;
+                println!("{n:<16} {kind:<14} dm: {:?} · allow: {}", r.policy.dm_policy, if allow.is_empty() { "(nobody — set allow)".into() } else { allow.join(",") });
             }
             Ok(0)
         }
@@ -1397,7 +2249,7 @@ fn cmd_channel(a: &Args) -> R {
             }
             let c = build_agent(a, approver_for(a, false), false)?;
             let (ch, _) = c.ext.as_ref().unwrap().channels.get(name).ok_or_else(|| format!("no channel `{name}`"))?;
-            ch.send(&ark_channel::Outbound { chat: chat.into(), text, reply_to: None }).map_err(|e| e.message)?;
+            ch.send(&ark_channel::Outbound { chat: chat.into(), text, reply_to: None, ..Default::default() }).map_err(|e| e.message)?;
             println!("sent");
             Ok(0)
         }
