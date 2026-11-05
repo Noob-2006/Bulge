@@ -24,6 +24,8 @@ pub mod browser_view;
 pub mod computer;
 pub mod clip;
 pub mod exposure;
+pub mod identity;
+pub mod metrics;
 pub mod logbook;
 pub mod conversations;
 pub mod cron_fire;
@@ -83,11 +85,15 @@ pub struct AppConfig {
     pub tokens: Vec<exposure::TokenConfig>,
     /// `[app.exposure]`: how far beyond loopback this server may go (A8/A9).
     pub exposure: exposure::ExposureConfig,
+    /// `[app.rbac]`: login → role mapping (ent-053/047). Absent = historical behaviour.
+    pub rbac: Option<identity::RbacConfig>,
+    /// Serve `/metrics` without a credential (for a scraper on a private network). Off by default.
+    pub metrics_public: bool,
 }
 
 impl Default for AppConfig {
     fn default() -> Self {
-        AppConfig { enabled: false, listen: d_listen(), token: None, allow_origins: vec![], ui: true, openai_api: false, nodes: false, a2a: a2a::A2aConfig::default(), max_conns: d_conns(), workspace: None, terminal: false, auth: dashboard_auth::AuthConfig::default(), tokens: vec![], exposure: exposure::ExposureConfig::default() }
+        AppConfig { enabled: false, listen: d_listen(), token: None, allow_origins: vec![], ui: true, openai_api: false, nodes: false, a2a: a2a::A2aConfig::default(), max_conns: d_conns(), workspace: None, terminal: false, auth: dashboard_auth::AuthConfig::default(), tokens: vec![], exposure: exposure::ExposureConfig::default(), rbac: None, metrics_public: false }
     }
 }
 
@@ -106,11 +112,21 @@ impl AppConfig {
             if tok.token.trim().is_empty() {
                 return Err(format!("[app] tokens[{i}] has an empty token"));
             }
-            let scope = exposure::Scope::parse(&tok.scope).map_err(|e| format!("[app] tokens[{i}]: {e}"))?;
+            // `scope` takes a scope (read/write/approve/admin) or a role (operator/auditor/user).
+            let norm = match exposure::Scope::parse(&tok.scope) {
+                Ok(scope) => scope.as_str().to_string(),
+                Err(e) => match identity::Role::parse(&tok.scope) {
+                    Ok(r) => r.as_str().to_string(),
+                    Err(_) => return Err(format!("[app] tokens[{i}]: {e} (or a role: operator, auditor, user)")),
+                },
+            };
             if tok.name.as_deref().is_some_and(|n| n.trim().is_empty()) {
                 tok.name = None;
             }
-            tok.scope = scope.as_str().to_string();
+            tok.scope = norm;
+        }
+        if let Some(rb) = &c.rbac {
+            rb.validate()?;
         }
         Ok(c)
     }

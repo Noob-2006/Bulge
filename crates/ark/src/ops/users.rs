@@ -20,7 +20,15 @@ pub fn safe(s: &str) -> String {
 }
 
 pub fn line(u: &User) -> String {
-    format!("{}\t{}\t{}", safe(&u.id), safe(&u.name), safe(&u.emails.join(",")))
+    let mut l = format!("{}\t{}\t{}", safe(&u.id), safe(&u.name), safe(&u.emails.join(",")));
+    if !u.role.is_empty() || !u.team.is_empty() || u.disabled {
+        l.push_str(&format!("\trole={}\tteam={}{}", if u.role.is_empty() { "-" } else { &u.role }, if u.team.is_empty() { "-" } else { &u.team }, if u.disabled { "\tdisabled" } else { "" }));
+    }
+    l
+}
+
+fn audit(p: &Paths, kind: &str, target: &str, detail: &serde_json::Value) {
+    ark_security::audit::record(&p.data, ark_security::audit::Event::new(kind, ark_security::audit::Actor::local(), target, "ok").detail(detail.clone()));
 }
 
 fn show(us: &[User], json: bool) -> String {
@@ -44,6 +52,43 @@ pub fn run(p: &Paths, a: &Args) -> Result<String, String> {
         "link-email" => show(&[agents::user_link_email(p, to()?, a.need(1, "email")?)?], js),
         "link" => show(&[agents::user_link(p, to()?, a.need(1, "channel")?, a.need(2, "sender")?)?], js),
         "instructions" => show(&[agents::user_set_instructions(p, a.need(1, "id")?, &a.rest(2))?], js),
+        // ent-060: the registry is also who may log in and what they may do.
+        "role" => {
+            let role = a.need(2, "role")?.to_string();
+            if role != "-" {
+                ark_app::identity::Role::parse(&role)?;
+            }
+            let u = agents::user_update(p, a.need(1, "id")?, |u| {
+                u.role = if role == "-" { String::new() } else { role.clone() };
+                Ok(())
+            })?;
+            audit(p, "user.role", &u.name, &serde_json::json!({"role": u.role}));
+            show(&[u], js)
+        }
+        "team" => {
+            let team = a.rest(2);
+            let u = agents::user_update(p, a.need(1, "id")?, |u| {
+                u.team = if team.trim() == "-" { String::new() } else { team.trim().to_string() };
+                Ok(())
+            })?;
+            audit(p, "user.team", &u.name, &serde_json::json!({"team": u.team}));
+            show(&[u], js)
+        }
+        "disable" | "enable" => {
+            let off = a.pos(0) == Some("disable");
+            let u = agents::user_update(p, a.need(1, "id")?, |u| {
+                u.disabled = off;
+                Ok(())
+            })?;
+            audit(p, if off { "user.disable" } else { "user.enable" }, &u.name, &serde_json::Value::Null);
+            show(&[u], js)
+        }
+        // Bind an SSO subject (`sub` claim) to a profile; logins then resolve to it.
+        "link-oidc" => {
+            let u = agents::user_link(p, to()?, "oidc", a.need(1, "subject")?)?;
+            audit(p, "user.link", &u.name, &serde_json::json!({"oidc": a.pos(1)}));
+            show(&[u], js)
+        }
         "merge" => {
             let src = a.need(1, "sourceProfileId")?;
             let into = a.val("into").ok_or("--into <targetProfileId> is required")?;
@@ -62,7 +107,7 @@ pub fn run(p: &Paths, a: &Args) -> Result<String, String> {
             Some(u) => show(&[u], js),
             None => return Err("no user profile has that identity".into()),
         },
-        other => return Err(format!("unknown `users {other}` (list | add <name> | link-email <email> --to <id> | link <channel> <sender> --to <id> | merge <source> --into <target> | instructions <id> <text> | rm <id> | whois <channel> <sender>)")),
+        other => return Err(format!("unknown `users {other}` (list | add <name> | link-email <email> --to <id> | link <channel> <sender> --to <id> | link-oidc <subject> --to <id> | role <id> <admin|operator|user|auditor|-> | team <id> <team|-> | disable <id> | enable <id> | merge <source> --into <target> | instructions <id> <text> | rm <id> | whois <channel> <sender>)")),
     })
 }
 
@@ -99,6 +144,17 @@ mod tests {
         assert!(m.starts_with(&format!("Survivor: {a}")) && m.contains(&format!("Retired profile: {b}")));
         assert!(r(&["whois", "telegram", "42"]).unwrap().starts_with(&a));
         assert!(r(&["list", "--json"]).unwrap().contains("\"profiles\""));
+        // ent-060: role, team, disable and an SSO subject on the same profile.
+        assert!(r(&["role", &a, "root"]).is_err());
+        assert!(r(&["role", &a, "auditor"]).unwrap().contains("role=auditor"));
+        assert!(r(&["team", &a, "eng"]).unwrap().contains("team=eng"));
+        r(&["link-oidc", "sub-123", "--to", &a]).unwrap();
+        assert_eq!(agents::find_login(p, "sub-123", "").unwrap().id, a);
+        assert!(r(&["disable", &a]).unwrap().contains("disabled"));
+        assert!(ark_app::identity::channel_permits(p, "telegram", "42", false).unwrap_err().contains("disabled"));
+        assert!(r(&["enable", &a]).unwrap().contains("role=auditor"));
+        assert!(ark_app::identity::channel_permits(p, "telegram", "42", true).is_err(), "auditors do not approve from chat");
+        assert!(ark_security::audit::all(&p.data).iter().any(|e| e["kind"] == "user.role"));
         assert!(r(&["bogus"]).is_err());
     }
 

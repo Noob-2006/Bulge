@@ -394,7 +394,12 @@ pub fn dispatch(cmd: &str, a: &Args, _raw: &[String]) -> Option<R> {
     if cmd != "audit" {
         return None;
     }
-    Some(run(&Paths::from_env(), a))
+    let paths = Paths::from_env();
+    // The unified, hash-chained stream (ent-072/073): `events`, `verify`, `head`, `rotate`, `export`.
+    if let Some(r) = crate::ops::enterprise::audit_sub(&paths, a) {
+        return Some(r);
+    }
+    Some(run(&paths, a))
 }
 
 /// Command body, parameterised on the paths so tests can point it at a temp layout.

@@ -13,6 +13,8 @@
 //! secret store (`secretbox`).
 
 pub mod approvals;
+pub mod audit;
+pub mod audit_export;
 pub mod broker;
 pub mod capability;
 pub mod credfiles;
@@ -27,6 +29,7 @@ pub mod guidance;
 pub mod hardline;
 pub mod osv;
 pub mod paths;
+pub mod pii;
 pub mod plugin_guard;
 pub mod review;
 pub mod risk;

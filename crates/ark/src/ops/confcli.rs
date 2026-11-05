@@ -52,6 +52,10 @@ pub fn dispatch(cmd: &str, a: &Args, _raw: &[String]) -> Option<R> {
             Ok(0)
         })()),
         ("config", "edit") => Some(edit(&paths)),
+        ("config", "managed") => Some((|| {
+            println!("{}", managed(&paths, &crate::workspace(a)?, a.flag("json"))?);
+            Ok(0)
+        })()),
         ("config", "file") => {
             println!("{}", paths.user_config().display());
             Some(Ok(0))
@@ -308,17 +312,57 @@ pub fn edited_text(text: &str, key: &str, value: Option<toml::Value>) -> Result<
     toml::to_string_pretty(&table).map_err(|e| e.to_string())
 }
 
+/// System policy (`/etc/ark`, ent-063): a locked key cannot be changed from the user config.
+pub fn refuse_locked(key: &str) -> Result<(), String> {
+    let files = ark_kernel::managed::system_files();
+    if files.is_empty() {
+        return Ok(());
+    }
+    let (_, locked, names) = ark_kernel::managed::load_system(&files)?;
+    let m = ark_kernel::managed::Managed { files: names, locked, overridden: vec![] };
+    if m.is_locked(key) {
+        return Err(format!("`{key}` is locked by system policy ({}); ask your administrator", m.files.join(", ")));
+    }
+    Ok(())
+}
+
+/// ent-073: every configuration change is an audit record (key only — values may be secrets).
+fn audit_change(paths: &Paths, key: &str, op: &str) {
+    ark_security::audit::record(&paths.data, ark_security::audit::Event::new("config.change", ark_security::audit::Actor::local(), key, "ok").detail(serde_json::json!({"op": op, "file": paths.user_config().display().to_string()})));
+}
+
 pub fn set(paths: &Paths, key: &str, value: &str) -> Result<String, String> {
+    refuse_locked(key)?;
     let v = parse_value(value.trim());
     let text = edited_text(&read_user(paths)?, key, Some(v.clone()))?;
     write_validated(paths, &text, true)?;
+    audit_change(paths, key, "set");
     Ok(format!("{key} = {v} (in {})", paths.user_config().display()))
 }
 
 pub fn unset(paths: &Paths, key: &str) -> Result<String, String> {
+    refuse_locked(key)?;
     let text = edited_text(&read_user(paths)?, key, None)?;
     write_validated(paths, &text, true)?;
+    audit_change(paths, key, "unset");
     Ok(format!("removed {key} from {}", paths.user_config().display()))
+}
+
+/// `ark config managed`: the system layer, its locked keys and what it overrides here.
+pub fn managed(paths: &Paths, ws: &Path, json: bool) -> Result<String, String> {
+    let cfg = Config::load(Some(&paths.user_config()), Some(&project_config(ws)), &[])?;
+    let m = &cfg.managed;
+    if json {
+        return Ok(serde_json::to_string_pretty(m).unwrap_or_default());
+    }
+    if !m.active() {
+        return Ok(format!("no system policy ({}/managed.toml and managed.d/*.toml are absent)", ark_kernel::managed::SYSTEM_DIR));
+    }
+    let mut out = format!("system policy: {}\nlocked keys: {}\n", m.files.join(", "), if m.locked.is_empty() { "(none)".into() } else { m.locked.join(", ") });
+    if !m.overridden.is_empty() {
+        out.push_str(&format!("overriding your settings for: {}\n", m.overridden.join(", ")));
+    }
+    Ok(out.trim_end().to_string())
 }
 
 /// Effective value (defaults → user → project), as TOML text.
@@ -345,8 +389,11 @@ pub fn patch(paths: &Paths, src: &str) -> Result<String, String> {
         let t: toml::Table = src.parse().map_err(|e| format!("patch TOML: {e}"))?;
         merge_toml(&mut table, t);
     }
+    // Locked keys in a patch are not refused here: the system layer re-applies them at load
+    // (and says so on stderr), which also covers hand edits of the file.
     let text = toml::to_string_pretty(&table).map_err(|e| e.to_string())?;
     write_validated(paths, &text, true)?;
+    audit_change(paths, "(patch)", "patch");
     Ok(format!("patched {}", paths.user_config().display()))
 }
 

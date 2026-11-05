@@ -38,7 +38,6 @@ crates/ark-app/src/browser_view.rs  # temp_dir
 crates/ark-app/src/computer/hermes.rs  # temp_dir
 crates/ark-app/src/computer/openclaw.rs  # temp_dir
 crates/ark-app/src/cron_fire.rs  # temp_dir
-crates/ark-app/src/dashboard_auth.rs  # temp_dir
 crates/ark-app/src/logbook.rs  # temp_dir
 crates/ark-app/src/server.rs  # temp_dir
 crates/ark-app/src/session_share.rs  # temp_dir

@@ -19,6 +19,7 @@
 //! `content-type: application/json`.
 
 use crate::exposure::{self, Scope};
+use crate::identity::{self, Access, Principal};
 use crate::{a2a, openai, ui, AppConfig};
 use ark_kernel::daemon::Daemon;
 use ark_net::httpd::{self, Request, Response};
@@ -64,40 +65,71 @@ pub struct App {
 }
 
 impl App {
-    /// Which scope the request's credential carries, if it presents one.
-    ///
-    /// A token may come from `Authorization: Bearer`, the `ark.token.<t>` subprotocol, or —
-    /// **only on a WebSocket upgrade whose Origin is ours** — `?token=`: a URL leaks into
-    /// history, `Referer` headers, proxy logs and screenshots, so a plain HTTP request has to
-    /// put the token in a header (A11, the OpenClaw CVE-2026-25253 shape).
-    pub fn credential(&self, r: &Request) -> Option<Scope> {
-        // A dashboard login session is the owner in person: admin.
-        if self.cfg.auth.enabled && crate::dashboard_auth::session_from(self, r).is_some() {
-            return Some(Scope::Admin);
-        }
+    /// The token a request presents, if any: `Authorization: Bearer`, the `ark.token.<t>`
+    /// subprotocol, or — **only on a WebSocket upgrade whose Origin is ours** — `?token=`: a
+    /// URL leaks into history, `Referer` headers, proxy logs and screenshots, so a plain HTTP
+    /// request has to put the token in a header (A11, the OpenClaw CVE-2026-25253 shape).
+    fn presented(&self, r: &Request) -> Option<String> {
         let subproto = r.header("sec-websocket-protocol").and_then(|p| p.split(',').map(str::trim).find_map(|x| x.strip_prefix("ark.token.")).map(str::to_string));
         let from_query = if r.is_upgrade() && self.origin_ok(r) { r.query("token").map(str::to_string) } else { None };
-        let given = r.bearer().map(str::to_string).or(subproto).or(from_query)?;
-        self.scope_of(&given)
+        r.bearer().map(str::to_string).or(subproto).or(from_query)
     }
 
-    /// Constant-time token → scope lookup; the single `[app] token` is admin. `{{secret:NAME}}`
+    /// The real client address (trusted-proxy aware, ent-120).
+    pub fn client_ip(&self, r: &Request) -> Option<std::net::IpAddr> {
+        exposure::client_ip(&self.cfg.exposure, r.peer, r.header("x-forwarded-for"))
+    }
+
+    /// Who is calling (ent-053): a dashboard login (with its roles), an issued service account,
+    /// or a configured token. `None` = no valid credential.
+    pub fn principal(&self, r: &Request) -> Option<Principal> {
+        let ip = self.client_ip(r).map(|i| i.to_string()).unwrap_or_default();
+        if self.cfg.auth.enabled {
+            if let Some(l) = crate::dashboard_auth::login_from(self, r) {
+                return Some(Principal { kind: l.kind, name: l.name, access: Access::Roles(l.roles), ip });
+            }
+        }
+        let given = self.presented(r)?;
+        if let Some(a) = identity::lookup(&self.d.k.paths.data, &given) {
+            let access = a.access().ok()?;
+            return Some(Principal { kind: "service".into(), name: a.name, access, ip });
+        }
+        let (access, name) = self.scope_of(&given)?;
+        Some(Principal { kind: "token".into(), name, access, ip })
+    }
+
+    /// Which scope the request's credential carries, if it presents one (roles are mapped onto
+    /// the nearest scope; use [`App::principal`] for the real decision).
+    pub fn credential(&self, r: &Request) -> Option<Scope> {
+        self.principal(r).map(|p| match p.access {
+            Access::Scope(s) => s,
+            Access::Roles(r) if r.contains(&identity::Role::Admin) => Scope::Admin,
+            Access::Roles(r) if r.contains(&identity::Role::User) => Scope::Approve,
+            Access::Roles(_) => Scope::Read,
+        })
+    }
+
+    /// Constant-time token → access lookup; the single `[app] token` is admin. `{{secret:NAME}}`
     /// references are resolved exactly like the daemon resolves `token`; an unresolvable one
-    /// never matches anything.
-    fn scope_of(&self, given: &str) -> Option<Scope> {
+    /// never matches anything. The name is the token's `name` (or `app-token` / `tokens[i]`).
+    fn scope_of(&self, given: &str) -> Option<(Access, String)> {
         let mut found = None;
         if !self.token.trim().is_empty() && ark_net::crypto::ct_eq(given.as_bytes(), self.token.as_bytes()) {
-            found = Some(Scope::Admin);
+            found = Some((Access::Scope(Scope::Admin), "app-token".to_string()));
         }
         if !self.cfg.tokens.is_empty() {
             let subst = self.d.k.vault_substitute();
-            for t in &self.cfg.tokens {
+            for (i, t) in self.cfg.tokens.iter().enumerate() {
                 let value = subst(&t.token);
                 if value.is_empty() || value.contains("{{secret:") {
                     continue; // an unresolved reference is not a credential
                 }
                 if ark_net::crypto::ct_eq(given.as_bytes(), value.as_bytes()) {
-                    found = Some(Scope::parse(&t.scope).unwrap_or(Scope::Admin));
+                    let access = match Scope::parse(&t.scope) {
+                        Ok(s) => Access::Scope(s),
+                        Err(_) => identity::Role::parse(&t.scope).map(|r| Access::Roles(vec![r])).unwrap_or(Access::Scope(Scope::Admin)),
+                    };
+                    found = Some((access, t.name.clone().unwrap_or_else(|| format!("tokens[{i}]"))));
                 }
             }
         }
@@ -106,7 +138,21 @@ impl App {
 
     /// The request carries *a* credential (any scope).
     pub fn authorized(&self, r: &Request) -> bool {
-        self.credential(r).is_some()
+        self.principal(r).is_some()
+    }
+
+    /// One audit record for a request decision (ent-073). Reads that expose no content are
+    /// only recorded with `[audit] log_reads`.
+    fn audit_request(&self, p: &Principal, target: &str, outcome: &str, detail: Value) {
+        let quiet = matches!(target, "ping" | "initialize" | "unsubscribe" | "heartbeat");
+        let read_only = exposure::required_scope(target) == Scope::Read && !identity::is_content_method(target);
+        if outcome == "allow" && (quiet || (read_only && !self.d.k.cfg.audit.log_reads)) {
+            return;
+        }
+        let ev = ark_security::audit::Event::new(if outcome == "allow" { "app.request" } else { "auth.denied" }, p.actor(), target, outcome).detail(detail);
+        if ark_security::audit::emit(&self.d.k.paths.data, ev).is_err() {
+            crate::metrics::audit_error();
+        }
     }
 
     /// Browsers send Origin on WebSocket upgrades: only our own page (or listed origins) may connect.
@@ -121,7 +167,7 @@ impl App {
         let mut methods: Vec<String> = Daemon::METHODS.iter().map(|s| s.to_string()).collect();
         methods.extend(self.host_methods.iter().cloned());
         methods.extend(crate::browser_view::METHODS.iter().map(|s| s.to_string()));
-        methods.extend(["initialize", "subscribe", "unsubscribe"].map(String::from));
+        methods.extend(["initialize", "subscribe", "unsubscribe", "whoami", "audit.query", "audit.verify"].map(String::from));
         json!({
             "protocol": ARP_VERSION,
             "server": {"name": "ark", "version": env!("CARGO_PKG_VERSION")},
@@ -131,7 +177,7 @@ impl App {
         })
     }
 
-    fn handle(self: &Arc<Self>, r: Request) -> Response {
+    pub(crate) fn handle(self: &Arc<Self>, r: Request) -> Response {
         let path = r.path.clone();
         if let Some((_, h)) = self.routes.iter().find(|(pre, _)| path.starts_with(pre.as_str())) {
             return h(r);
@@ -141,7 +187,8 @@ impl App {
         if r.method != "GET" && r.method != "HEAD" && !self.origin_ok(&r) {
             return Response::json(403, &json!({"error": "forbidden: cross-origin request (Origin not allowed)"}).to_string());
         }
-        if !crate::exposure::rate_ok(&self.cfg.exposure, r.peer) {
+        if !crate::exposure::rate_ok_ip(&self.cfg.exposure, self.client_ip(&r)) {
+            crate::metrics::inc("http_rate_limited", "");
             return Response::json(429, &json!({"error": "too many requests"}).to_string()).with_header("retry-after", "60");
         }
         // A page on another site must not even learn whether a credential is present.
@@ -150,6 +197,20 @@ impl App {
         }
         match (r.method.as_str(), path.as_str()) {
             ("GET", "/health") => Response::json(200, &json!({"ok": true, "version": env!("CARGO_PKG_VERSION")}).to_string()),
+            // Readiness (ent-098): the status code is public (load balancers), details need a credential.
+            ("GET", "/ready") | ("GET", "/readyz") => {
+                let (ok, body) = crate::metrics::readiness_json(&self.d);
+                let body = if self.authorized(&r) { body } else { json!({"ready": ok}) };
+                Response::json(if ok { 200 } else { 503 }, &body.to_string()).with_header("cache-control", "no-store")
+            }
+            // Prometheus (ent-099): any authenticated principal (metrics carry no content), or
+            // everyone with `[app] metrics_public = true`.
+            ("GET", "/metrics") => {
+                if !self.cfg.metrics_public && !self.authorized(&r) {
+                    return Response::json(401, &json!({"error": "unauthorized"}).to_string()).with_header("www-authenticate", "Bearer");
+                }
+                Response::text(200, &crate::metrics::render(&self.d)).with_header("content-type", "text/plain; version=0.0.4").with_header("cache-control", "no-store")
+            }
             ("GET", p) if self.cfg.ui && (p == "/" || p.starts_with("/ui/") || p == "/manifest.webmanifest" || p == "/sw.js") => ui::serve(p),
             ("GET", "/.well-known/agent-card.json") | ("GET", "/.well-known/agent.json") if self.cfg.a2a.enabled => a2a::card(self, &r),
             // Devices prove themselves with an Ed25519 key and operator-approved pairing.
@@ -162,15 +223,24 @@ impl App {
             (_, p) if p.starts_with("/a2a") && self.cfg.a2a.enabled => a2a::handle(self, r),
             (_, p) if p.starts_with("/auth/") && self.cfg.auth.enabled => crate::dashboard_auth::handle(self, &r),
             // Everything below needs a credential; how much depends on what is asked for.
-            _ => match self.credential(&r) {
-                Some(scope) => self.routed(r, scope),
-                None => Response::json(401, &json!({"error": "unauthorized: send the app token (Authorization: Bearer …)"}).to_string()).with_header("www-authenticate", "Bearer"),
+            _ => match self.principal(&r) {
+                Some(p) => self.routed(r, p),
+                None => {
+                    crate::metrics::inc("http_unauthorized", "");
+                    // A credential that matches nothing is worth a record (guessing, a revoked
+                    // or expired token); a bare request without one is not.
+                    if self.presented(&r).is_some() {
+                        let ip = self.client_ip(&r).map(|i| i.to_string()).unwrap_or_default();
+                        ark_security::audit::record(&self.d.k.paths.data, ark_security::audit::Event::new("auth.failed", ark_security::audit::Actor::new("anonymous", "").with_ip(&ip), &r.path, "deny"));
+                    }
+                    Response::json(401, &json!({"error": "unauthorized: send the app token (Authorization: Bearer …)"}).to_string()).with_header("www-authenticate", "Bearer")
+                }
             },
         }
     }
 
     /// The routes behind a credential, with the scope each one needs (A10).
-    fn routed(self: &Arc<Self>, r: Request, scope: Scope) -> Response {
+    fn routed(self: &Arc<Self>, r: Request, p: Principal) -> Response {
         match (r.method.as_str(), r.path.as_str()) {
             ("GET", "/arp") if r.is_upgrade() => {
                 if !self.origin_ok(&r) {
@@ -179,13 +249,14 @@ impl App {
                 let me = self.clone();
                 let proto = r.header("sec-websocket-protocol").and_then(|p| p.split(',').map(str::trim).find(|x| x.starts_with("ark.token.") || *x == "arp").map(str::to_string));
                 // Subscriptions are reads; every request inside the socket is checked on its own.
-                Response::upgrade(Box::new(move |s, head, rest| me.ws_session(s, &head, rest, proto, scope)))
+                Response::upgrade(Box::new(move |s, head, rest| me.ws_session(s, &head, rest, proto, p)))
             }
-            (_, p) if p.starts_with("/view/") => {
-                let need = exposure::required_scope_http(&r.method, p);
-                if !scope.allows(need) {
-                    return forbidden(need, scope, "the live view");
+            (_, path) if path.starts_with("/view/") => {
+                if let Err(e) = p.access.permits_http(&r.method, &r.path) {
+                    self.audit_request(&p, &r.path, "deny", json!({"http": r.method}));
+                    return forbidden_msg(&e);
                 }
+                self.audit_request(&p, "view.http", "allow", json!({"http": r.method, "path": r.path}));
                 crate::browser_view::handle(self, &r)
             }
             ("POST", "/arp") => {
@@ -199,16 +270,22 @@ impl App {
                     Err(e) => return Response::json(400, &json!({"jsonrpc": "2.0", "id": null, "error": {"code": -32700, "message": e.to_string()}}).to_string()),
                 };
                 let method = req["method"].as_str().unwrap_or("");
-                let need = exposure::required_scope(method);
-                if !scope.allows(need) {
-                    return forbidden(need, scope, method);
+                crate::metrics::inc("arp_requests", &format!("method=\"{}\"", crate::metrics::method_label(method)));
+                if let Err(e) = p.access.permits(method) {
+                    crate::metrics::inc("arp_forbidden", "");
+                    self.audit_request(&p, method, "deny", json!({"transport": "http"}));
+                    return forbidden_msg(&e);
                 }
-                Response::json(200, &self.rpc(&req).to_string())
+                self.audit_request(&p, method, "allow", json!({"transport": "http"}));
+                Response::json(200, &self.rpc_as(&req, Some(&p)).to_string())
             }
-            (_, p) if p.starts_with("/v1/") && self.cfg.openai_api => {
-                let need = exposure::required_scope_http(&r.method, p);
-                if !scope.allows(need) {
-                    return forbidden(need, scope, "the OpenAI-compatible API");
+            (_, path) if path.starts_with("/v1/") && self.cfg.openai_api => {
+                if let Err(e) = p.access.permits_http(&r.method, path) {
+                    self.audit_request(&p, path, "deny", json!({"http": r.method}));
+                    return forbidden_msg(&e);
+                }
+                if r.method != "GET" {
+                    self.audit_request(&p, "openai.request", "allow", json!({"path": path}));
                 }
                 openai::handle(self, r)
             }
@@ -226,11 +303,12 @@ impl App {
             // A plugin route that is not public needs the same scope a built-in route of that
             // shape would: reads for GET, writes for anything else.
             Some(public) if !public => {
-                let need = exposure::required_scope_http(&r.method, &r.path);
-                match self.credential(r) {
+                match self.principal(r) {
                     None => Response::json(401, &json!({"error": "unauthorized: send the app token (Authorization: Bearer …)"}).to_string()).with_header("www-authenticate", "Bearer"),
-                    Some(scope) if !scope.allows(need) => forbidden(need, scope, "this plugin route"),
-                    Some(_) => m.serve(r, &sub).with_header("content-security-policy", "sandbox").with_header("x-content-type-options", "nosniff"),
+                    Some(p) => match p.access.permits_http(&r.method, &r.path) {
+                        Err(e) => forbidden_msg(&e),
+                        Ok(()) => m.serve(r, &sub).with_header("content-security-policy", "sandbox").with_header("x-content-type-options", "nosniff"),
+                    },
                 }
             }
             // Plugin pages share our origin: sandbox them so they cannot read the UI's token.
@@ -243,11 +321,35 @@ impl App {
         self.cfg.workspace.clone().map(std::path::PathBuf::from).unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("/")))
     }
 
-    /// One JSON-RPC request → response (no streaming methods).
+    /// One JSON-RPC request → response (no streaming methods), with no principal (in-process
+    /// callers: A2A, the OpenAI shim, plugins).
     pub fn rpc(&self, req: &Value) -> Value {
+        self.rpc_as(req, None)
+    }
+
+    /// One JSON-RPC request on behalf of `who`: approvals carry the principal (ent-061),
+    /// sessions are charged to it (ent-070) and the identity/audit methods answer for it.
+    pub fn rpc_as(&self, req: &Value, who: Option<&Principal>) -> Value {
         let id = req.get("id").cloned().unwrap_or(Value::Null);
         let method = req["method"].as_str().unwrap_or("");
         let mut params = req.get("params").cloned().unwrap_or(json!({}));
+        // Identity fields are ours to set: a client never chooses who it is.
+        if let Some(o) = params.as_object_mut() {
+            o.remove("_by");
+            o.remove("_via");
+        }
+        if let (Some(p), Some(o)) = (who, params.as_object_mut()) {
+            if matches!(method, "gate.answer" | "approval.answer" | "approvals.answer" | "question.answer") {
+                o.insert("_by".into(), p.label().into());
+                o.insert("_via".into(), "app".into());
+            }
+        }
+        if let Some(r) = self.identity_rpc(method, &params, who) {
+            return match r {
+                Ok(v) => json!({"jsonrpc": "2.0", "id": id, "result": v}),
+                Err((code, message)) => json!({"jsonrpc": "2.0", "id": id, "error": {"code": code, "message": message}}),
+            };
+        }
         // Remote clients rarely know a good directory on this machine: use `[app] workspace`.
         if method == "session.create" && params["workspace"].as_str().is_none_or(|w| w.trim().is_empty()) {
             params["workspace"] = self.default_workspace().display().to_string().into();
@@ -258,15 +360,44 @@ impl App {
             m if m.starts_with("view.") => crate::browser_view::rpc(self, m, &params).map_err(|(c, e)| (c as i32, e)),
             m => self.d.call(m, &params),
         };
+        if let (Some(p), Ok(v)) = (who, &r) {
+            let sid = match method {
+                "session.create" => v["id"].as_str().map(str::to_string),
+                "session.submit" => params["id"].as_str().map(str::to_string),
+                _ => None,
+            };
+            if let Some(sid) = sid {
+                ark_kernel::governance::note_owner(&self.d.k.paths.data, &sid, &p.label());
+            }
+        }
         match r {
             Ok(v) => json!({"jsonrpc": "2.0", "id": id, "result": v}),
             Err((code, message)) => json!({"jsonrpc": "2.0", "id": id, "error": {"code": code, "message": message}}),
         }
     }
 
+    /// `whoami`, `audit.query`, `audit.verify` — answered by the app server itself because
+    /// they are about the caller and the stream the server writes.
+    fn identity_rpc(&self, method: &str, params: &Value, who: Option<&Principal>) -> Option<Result<Value, (i32, String)>> {
+        let data = &self.d.k.paths.data;
+        Some(match method {
+            "whoami" => Ok(match who {
+                Some(p) => json!({"kind": p.kind, "name": p.name, "access": p.access.label(), "ip": p.ip}),
+                None => json!({"kind": "in-process"}),
+            }),
+            "audit.query" => {
+                let s = |k: &str| params[k].as_str().map(str::to_string);
+                let q = ark_security::audit::Query { kind: s("kind"), actor: s("actor"), session: s("session"), outcome: s("outcome"), after_ms: params["after_ms"].as_u64(), before_ms: params["before_ms"].as_u64(), limit: params["limit"].as_u64().unwrap_or(100).min(1000) as usize };
+                Ok(json!(ark_security::audit::query(data, &q)))
+            }
+            "audit.verify" => Ok(serde_json::to_value(ark_security::audit::verify(data, params["anchor"].as_str())).unwrap_or(Value::Null)),
+            _ => return None,
+        })
+    }
+
     /// ARP over WebSocket: one thread owns the socket; requests run on workers,
     /// subscriptions on their own threads; everything outbound funnels through `out`.
-    fn ws_session(self: Arc<Self>, s: TcpStream, head: &str, rest: Vec<u8>, proto: Option<String>, scope: Scope) {
+    fn ws_session(self: Arc<Self>, s: TcpStream, head: &str, rest: Vec<u8>, proto: Option<String>, principal: Principal) {
         let _ = s.set_read_timeout(Some(Duration::from_millis(100)));
         let accepted = match &proto {
             // Echo the chosen subprotocol so browsers accept the upgrade.
@@ -305,12 +436,14 @@ impl App {
             let method_name = req["method"].as_str().unwrap_or("");
             // The socket carries the credential of the upgrade; each request still has to fit
             // what that scope may do (a `read` token cannot answer a gate or start a turn).
-            let need = exposure::required_scope(method_name);
-            if !scope.allows(need) {
-                let msg = format!("forbidden: this token has scope `{}`; `{method_name}` needs `{}`", scope.as_str(), need.as_str());
+            crate::metrics::inc("arp_requests", &format!("method=\"{}\"", crate::metrics::method_label(method_name)));
+            if let Err(msg) = principal.access.permits(method_name) {
+                crate::metrics::inc("arp_forbidden", "");
+                self.audit_request(&principal, method_name, "deny", json!({"transport": "ws"}));
                 let _ = out_tx.send(json!({"jsonrpc": "2.0", "id": id, "error": {"code": -32003, "message": msg}}));
                 continue;
             }
+            self.audit_request(&principal, method_name, "allow", json!({"transport": "ws"}));
             match method_name {
                 "subscribe" | "events.subscribe" | "session.attach" => {
                     let stop = Arc::new(AtomicBool::new(false));
@@ -341,9 +474,9 @@ impl App {
                     let _ = out_tx.send(json!({"jsonrpc": "2.0", "id": id, "result": {"ok": true}}));
                 }
                 _ => {
-                    let (me, tx) = (self.clone(), out_tx.clone());
+                    let (me, tx, who) = (self.clone(), out_tx.clone(), principal.clone());
                     std::thread::spawn(move || {
-                        let _ = tx.send(me.rpc(&req));
+                        let _ = tx.send(me.rpc_as(&req, Some(&who)));
                     });
                 }
             }
@@ -355,9 +488,9 @@ impl App {
     }
 }
 
-/// 403 that names the required scope (A10).
-fn forbidden(need: Scope, have: Scope, what: &str) -> Response {
-    Response::json(403, &json!({"error": format!("forbidden: this token has scope `{}`; `{what}` needs `{}`", have.as_str(), need.as_str())}).to_string())
+/// 403 that names what was missing (A10).
+fn forbidden_msg(msg: &str) -> Response {
+    Response::json(403, &json!({"error": msg}).to_string())
 }
 
 fn accept_with_protocol(mut s: TcpStream, head: &str, rest: Vec<u8>, proto: &str) -> std::io::Result<WebSocket<TcpStream>> {
@@ -376,6 +509,7 @@ pub fn start(app: Arc<App>) -> Result<httpd::Server, String> {
     }
     // A8/A9: refusing here means a misconfigured public bind never listens, not even briefly.
     crate::exposure::check_start(&app.cfg).map_err(|e| format!("app server: {e}"))?;
+    crate::metrics::started();
     let a = app.clone();
     let h: httpd::Handler = Arc::new(move |r| a.handle(r));
     let opts = httpd::Opts { max_body: 16 * 1024 * 1024, max_conns: app.cfg.max_conns, read_timeout: Duration::from_secs(30) };
@@ -403,7 +537,8 @@ mod tests {
     }
 
     fn app_with(cfg: AppConfig, vault: ark_kernel::vault::Vault) -> Arc<App> {
-        let home = std::env::temp_dir().join(format!("ark-app-srv-{}", ark_kernel::util::random_hex(8)));
+        // Removed when the test's thread ends (never left behind in TMPDIR).
+        let home = ark_core::tmp::scratch("ark-app-srv");
         let paths = Paths { data: home.join("data"), config_dir: home.join("cfg"), runtime: home.join("run") };
         let (pending, _cell) = ark_kernel::daemon::pending_approver(Duration::from_secs(1));
         let k = ark_kernel::kernel::new_kernel(Config::default(), paths, Arc::new(NoRes), vec![], Arc::new(vault), pending.clone());
@@ -646,5 +781,95 @@ mod tests {
         assert!(!d.exposure.allow_public && d.exposure.rate_limit_per_min > 0);
         assert!(!d.enabled);
     }
-}
 
+    /// ent-053/058/061/073/098/099/120 through the real request path.
+    #[test]
+    fn roles_service_accounts_approver_identity_and_audit() {
+        let home = ark_core::tmp::scratch("ark-app-rbac");
+        let paths = Paths { data: home.join("data"), config_dir: home.join("cfg"), runtime: home.join("run") };
+        let (pending, _cell) = ark_kernel::daemon::pending_approver(Duration::from_secs(5));
+        let k = ark_kernel::kernel::new_kernel(Config::default(), paths, Arc::new(NoRes), vec![], Arc::new(ark_kernel::vault::Vault::empty()), pending.clone());
+        let d = Arc::new(Daemon::new(k, pending.clone()));
+        std::fs::create_dir_all(home.join("ws")).unwrap();
+        let cfg = AppConfig {
+            enabled: true,
+            listen: "127.0.0.1:0".into(),
+            tokens: vec![
+                crate::exposure::TokenConfig { token: "op-token".into(), scope: "operator".into(), name: Some("ops-bot".into()) },
+                crate::exposure::TokenConfig { token: "au-token".into(), scope: "auditor".into(), name: Some("auditor".into()) },
+                crate::exposure::TokenConfig { token: "ap-token".into(), scope: "approve".into(), name: Some("approver".into()) },
+            ],
+            exposure: crate::exposure::ExposureConfig { behind_proxy: true, ..Default::default() },
+            workspace: Some(home.join("ws").display().to_string()),
+            ..AppConfig::default()
+        };
+        let a = Arc::new(App { d: d.clone(), cfg, token: "admin-token".into(), host_methods: vec![], routes: vec![] });
+        let data = d.k.paths.data.clone();
+        let call = |tok: &str, method: &str, params: Value| {
+            let auth = format!("Bearer {tok}");
+            let mut r = json_req("/arp", &[("authorization", &auth), ("x-forwarded-for", "198.51.100.7, 203.0.113.5")], &json!({"jsonrpc": "2.0", "id": 1, "method": method, "params": params}).to_string());
+            r.peer = Some("127.0.0.1:4000".parse().unwrap());
+            a.clone().handle(r)
+        };
+        // Operator: metadata yes, content no, lifecycle yes.
+        assert_eq!(call("op-token", "session.list", json!({})).status, 200);
+        let r = call("op-token", "session.history", json!({"id": "x"}));
+        assert_eq!(r.status, 403, "{}", body_text(&r));
+        assert!(body_text(&r).contains("role operator"));
+        assert_eq!(call("op-token", "channels.restart", json!({})).status, 200);
+        assert_eq!(call("op-token", "session.submit", json!({})).status, 403);
+        // Auditor: the audit stream, never content.
+        let r = call("au-token", "audit.query", json!({"kind": "auth.denied"}));
+        assert_eq!(r.status, 200);
+        let recs: Value = serde_json::from_str(&body_text(&r)).unwrap();
+        let denied = &recs["result"][0];
+        assert_eq!(denied["actor"]["name"], "ops-bot");
+        assert_eq!(denied["actor"]["kind"], "token");
+        assert_eq!(denied["actor"]["ip"], "203.0.113.5", "client address from a trusted proxy's X-Forwarded-For");
+        assert_eq!(denied["target"], "session.history");
+        assert_eq!(call("au-token", "session.view", json!({})).status, 403);
+        assert_eq!(call("ap-token", "audit.query", json!({})).status, 403, "scoped tokens below admin cannot read the audit stream");
+        let v: Value = serde_json::from_str(&body_text(&call("au-token", "audit.verify", json!({})))).unwrap();
+        assert_eq!(v["result"]["ok"], true, "{v}");
+        // A service account is a named principal with a role.
+        let (_, sa) = crate::identity::issue(&data, "ci", "user", 1, "", &ark_security::audit::Actor::local()).unwrap();
+        let who: Value = serde_json::from_str(&body_text(&call(&sa, "whoami", json!({})))).unwrap();
+        assert_eq!((who["result"]["kind"].as_str(), who["result"]["name"].as_str(), who["result"]["access"].as_str()), (Some("service"), Some("ci"), Some("user")));
+        assert_eq!(call(&sa, "config.set", json!({})).status, 403);
+        let created: Value = serde_json::from_str(&body_text(&call(&sa, "session.create", json!({})))).unwrap();
+        let sid = created["result"]["id"].as_str().unwrap_or_else(|| panic!("{created}")).to_string();
+        assert_eq!(ark_kernel::governance::owner_of(&d.k, &sid).user, "service:ci", "the session is charged to its creator");
+        // A pending approval answered over ARP records who approved (ent-061).
+        let areq = ark_kernel::approver::ApprovalRequest { id: "ap1".into(), tool_use_id: "t".into(), session: sid.clone(), tool: "bash".into(), summary: "deploy".into(), input: Value::Null, gate: ark_kernel::gate::GateKind::Privilege, reason: "deploy [tier 2: prod]".into(), tier: 2 };
+        let p2 = pending.clone();
+        let h = std::thread::spawn(move || ark_kernel::approver::Approver::approve(&*p2, &areq));
+        while ark_kernel::approver::Approver::pending(&*pending).is_empty() {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        // A client cannot claim to be someone else.
+        let r = call("ap-token", "gate.answer", json!({"id": "ap1", "answer": "once", "_by": "sso:ceo@corp.example"}));
+        assert_eq!(r.status, 200, "{}", body_text(&r));
+        assert_eq!(h.join().unwrap(), ark_kernel::approver::Approval::Once);
+        let rec = ark_security::audit::query(&data, &ark_security::audit::Query { kind: Some("approval".into()), ..Default::default() });
+        assert_eq!(rec[0]["actor"]["name"], "approver");
+        assert_eq!(rec[0]["detail"]["approved_by"], "token:approver");
+        assert_eq!(rec[0]["detail"]["tier"], 2);
+        // Bad credentials are recorded with the client address.
+        assert_eq!(call("nope", "session.list", json!({})).status, 401);
+        assert!(ark_security::audit::query(&data, &ark_security::audit::Query { kind: Some("auth.failed".into()), ..Default::default() }).len() == 1);
+        assert!(ark_security::audit::verify(&data, None).ok);
+        // Readiness: public status code only; a NoRes resolver means the model is not reachable.
+        let r = a.clone().handle(req("GET", "/ready", &[], ""));
+        assert_eq!(r.status, 503);
+        assert_eq!(body_text(&r), "{\"ready\":false}");
+        let r = a.clone().handle(req("GET", "/ready", &[("authorization", "Bearer au-token")], ""));
+        let body: Value = serde_json::from_str(&body_text(&r)).unwrap();
+        assert!(body["checks"].as_array().unwrap().iter().any(|c| c["name"] == "model" && c["ok"] == false), "{body}");
+        crate::metrics::register_check("test:ok", Arc::new(|| Ok("fine".into())));
+        // Metrics need a credential unless public.
+        assert_eq!(a.clone().handle(req("GET", "/metrics", &[], "")).status, 401);
+        let m = body_text(&a.clone().handle(req("GET", "/metrics", &[("authorization", "Bearer op-token")], "")));
+        assert!(m.contains("ark_up 1") && m.contains("ark_arp_forbidden_total") && m.contains("ark_arp_requests_total{method=\"session.list\"}") && m.contains("ark_ready{check=\"test:ok\"} 1"), "{m}");
+        assert!(m.contains("ark_audit_seq "));
+    }
+}

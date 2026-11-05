@@ -300,7 +300,14 @@ impl Runtime {
 
     pub(crate) fn append(&self, log: &mut SessionLog, kind: EventKind) -> Result<Event, StoreError> {
         let kind = if matches!(kind, EventKind::Message { .. }) && self.has_hooks(HookEvent::BeforeMessageWrite) { self.before_message_write(log, kind)? } else { kind };
+        // ent-078: `[compliance.pii] at_rest` masks conversation text before it is stored.
+        let kind = if self.cfg.compliance.pii.at_rest { mask_at_rest(kind, &self.cfg.compliance.pii) } else { kind };
         let ev = log.append(kind)?;
+        // ent-073: gate decisions also go to the unified audit stream (metadata only).
+        if let EventKind::Gate { tool_use_id, gate, verdict, reason } = &ev.kind {
+            let actor = ark_security::audit::Actor::new("agent", &log.id);
+            ark_security::audit::record(&self.paths.data, ark_security::audit::Event::new("gate.decision", actor, gate, verdict).session(&log.id).detail(serde_json::json!({"tool_use_id": tool_use_id, "reason": reason})));
+        }
         for t in self.taps.read().unwrap().iter() {
             t(&log.id, &ev);
         }
@@ -905,13 +912,29 @@ impl Runtime {
                 last_limits = Instant::now();
                 match crate::limits::check(self, &log.id) {
                     crate::limits::Verdict::Pause(r) => {
+                        // ent-094: caps reach the administrators, not only the session.
+                        crate::governance::alert_on(self, &format!("limits:{}", log.id), "pause", &r);
                         self.append(log, EventKind::Notice { level: "warn".into(), text: format!("paused: {r}") })?;
                         break EndReason::Paused(format!("limits: {r}"));
                     }
                     crate::limits::Verdict::Warn(r) => {
+                        crate::governance::alert_on(self, &format!("limits:{}", log.id), "warn", &r);
                         self.append(log, EventKind::Notice { level: "warn".into(), text: r })?;
                     }
                     crate::limits::Verdict::Ok => {}
+                }
+                // ent-071: per-user / per-team quotas, charged to the session's owner.
+                match crate::governance::quota_check(self, &log.id) {
+                    crate::governance::QuotaVerdict::Over(r) => {
+                        crate::governance::alert_on(self, &format!("quota:{}", crate::governance::owner_of(self, &log.id).user), "over", &r);
+                        self.append(log, EventKind::Notice { level: "warn".into(), text: format!("stopped: {r}") })?;
+                        break EndReason::Budget(r);
+                    }
+                    crate::governance::QuotaVerdict::Warn(r) => {
+                        crate::governance::alert_on(self, &format!("quota:{}", crate::governance::owner_of(self, &log.id).user), "warn", &r);
+                        self.append(log, EventKind::Notice { level: "warn".into(), text: r })?;
+                    }
+                    crate::governance::QuotaVerdict::Ok => {}
                 }
             }
             if steps >= cfg.runner.max_steps_per_turn {
@@ -2144,5 +2167,22 @@ impl ToolHost for Host {
             ("XDG_CACHE_HOME".into(), cache.display().to_string()),
             ("XDG_CONFIG_HOME".into(), cfg.display().to_string()),
         ]
+    }
+}
+
+/// Mask PII in the text a session stores (messages and queued input). Tool inputs and
+/// results are left alone: masking them would change what tools did.
+fn mask_at_rest(kind: EventKind, c: &ark_security::pii::PiiConfig) -> EventKind {
+    match kind {
+        EventKind::Message { mut message, usage, model, inbox } => {
+            for b in message.content.iter_mut() {
+                if let ark_core::Block::Text { text } = b {
+                    *text = ark_security::pii::mask_with(text, c);
+                }
+            }
+            EventKind::Message { message, usage, model, inbox }
+        }
+        EventKind::Inbox { id, text, source, attachments } => EventKind::Inbox { id, text: ark_security::pii::mask_with(&text, c), source, attachments },
+        other => other,
     }
 }

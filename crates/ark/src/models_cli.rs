@@ -878,6 +878,10 @@ fn account_lines(cfg: &Config, vault: Arc<Vault>) -> Vec<String> {
 }
 
 pub fn cmd_usage(a: &Args, paths: &Paths, cfg: &Config, vault: Arc<Vault>) -> R {
+    // ent-070: spend per user / team (session owners, the `ark users` registry and its teams).
+    if let Some(by) = a.val("by") {
+        return crate::ops::enterprise::usage_by(a, by).map_err(|e| e.to_string());
+    }
     let days = a.num::<u64>("days")?.unwrap_or(30);
     let since = ark_model::ratelimit::now_ms().saturating_sub(days * 86_400_000);
     let sessions = Sessions::new(paths.sessions());

@@ -31,7 +31,7 @@ use crate::config::Config;
 use ark_core::SystemSegment;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex, OnceLock};
 
 /// The L0 core, compiled in: it is part of every identity, so it must not depend on `share/`.

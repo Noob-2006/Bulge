@@ -205,6 +205,35 @@ pub enum PendingItem {
     },
 }
 
+/// Answer a pending approval / question **and record who answered** (ent-061).
+///
+/// Every answer path (ARP `gate.answer`, `/approve` in a chat or the TUI, chat buttons) goes
+/// through here, so the unified audit stream always says which token, SSO user, channel
+/// sender or local user approved a tier 2/3 action. The decision itself is unchanged: this
+/// only calls [`Approver::answer`] and writes an `approval.answer` audit record on success.
+pub fn answer_by(approver: &dyn Approver, data: &std::path::Path, id: &str, answer: &str, who: &ark_security::audit::Actor, via: &str) -> bool {
+    let item = approver.pending().into_iter().find(|p| match p {
+        PendingItem::Approval(r) => r.id == id,
+        PendingItem::Question { id: q, .. } => q == id,
+    });
+    if !approver.answer(id, answer) {
+        return false;
+    }
+    let decision = ark_security::approvals::parse_answer(answer).0.to_string();
+    let ev = match item {
+        Some(PendingItem::Approval(r)) => {
+            let tier = r.reason.split("tier ").nth(1).and_then(|t| t.chars().next()).and_then(|c| c.to_digit(10));
+            ark_security::audit::Event::new("approval.answer", who.clone(), id, &decision).session(&r.session).detail(serde_json::json!({
+                "tool": r.tool, "gate": format!("{:?}", r.gate).to_lowercase(), "tier": tier, "via": via, "approved_by": who.label(),
+            }))
+        }
+        Some(PendingItem::Question { session, .. }) => ark_security::audit::Event::new("question.answer", who.clone(), id, "answered").session(&session).detail(serde_json::json!({"via": via, "answered_by": who.label()})),
+        None => ark_security::audit::Event::new("approval.answer", who.clone(), id, &decision).detail(serde_json::json!({"via": via, "approved_by": who.label()})),
+    };
+    ark_security::audit::record(data, ev);
+    true
+}
+
 #[derive(Default)]
 struct PendingState {
     open: HashMap<String, PendingItem>,
