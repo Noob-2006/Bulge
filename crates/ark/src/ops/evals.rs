@@ -3,6 +3,9 @@
 //!
 //! Upstream ships ~74 pytest modules (`evals/acp_empty_session_wire.py`,
 //! `evals/gateway_status_render/`, `evals/core_tool_deferral/`, …) and runs them with pytest.
+//! The scored runner (benchmarks, model matrices, judge, role scenarios, reports) shares this
+//! command: `ark evals bench|roles|fetch|…` are dispatched to [`super::evalkit`].
+//!
 //! ark has no separate test runner: the evals are functions in this file, registered in
 //! [`evals`], and `ark evals run` is a pytest-style front end for them:
 //!
@@ -301,6 +304,8 @@ fn env_lock() -> std::sync::MutexGuard<'static, ()> {
 struct Home {
     kit: Kit,
     prev: Option<std::ffi::OsString>,
+    /// The throwaway tree, removed on drop.
+    root: std::path::PathBuf,
     _lock: std::sync::MutexGuard<'static, ()>,
 }
 
@@ -310,6 +315,7 @@ impl Drop for Home {
             Some(v) => std::env::set_var("ARK_HOME", v),
             None => std::env::remove_var("ARK_HOME"),
         }
+        let _ = std::fs::remove_dir_all(&self.root);
     }
 }
 
@@ -352,6 +358,7 @@ fn home() -> Home {
             echo,
         },
         prev,
+        root,
         _lock: lock,
     }
 }
@@ -1142,7 +1149,7 @@ fn run_cli(a: &Args) -> R {
         None | Some("list") => list_evals(a),
         Some("run") if a.flag("list") => list_evals(a),
         Some("run") => run_evals(a),
-        Some(other) => usage(format!("unknown `evals {other}` (list, run)")),
+        Some(other) => super::evalkit::dispatch_sub(a).unwrap_or_else(|| usage(format!("unknown `evals {other}` (list, run, bench, roles, fetch, import, report, compare, collect, swe-score, suites, agents)"))),
     }
 }
 

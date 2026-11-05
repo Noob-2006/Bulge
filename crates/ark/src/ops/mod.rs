@@ -18,6 +18,8 @@ pub mod context;
 pub mod confcli;
 pub mod doctor;
 pub mod envfile;
+pub mod distill;
+pub mod evalkit;
 pub mod evals;
 pub mod logs;
 pub mod migrate;
@@ -83,6 +85,8 @@ const MODULES: &[Module] = &[
     (status::COMMANDS, status::VALUE_FLAGS, status::BOOL_FLAGS, status::dispatch),
     (batch::COMMANDS, batch::VALUE_FLAGS, batch::BOOL_FLAGS, batch::dispatch),
     (evals::COMMANDS, evals::VALUE_FLAGS, evals::BOOL_FLAGS, evals::dispatch),
+    (&[], evalkit::VALUE_FLAGS, evalkit::BOOL_FLAGS, no_commands),
+    (distill::COMMANDS, distill::VALUE_FLAGS, distill::BOOL_FLAGS, distill::dispatch),
     (worktree::COMMANDS, worktree::VALUE_FLAGS, worktree::BOOL_FLAGS, worktree::dispatch),
     (project::COMMANDS, project::VALUE_FLAGS, project::BOOL_FLAGS, project::dispatch),
     (debugdump::COMMANDS, debugdump::VALUE_FLAGS, debugdump::BOOL_FLAGS, debugdump::dispatch),
@@ -104,6 +108,11 @@ const MODULES: &[Module] = &[
     (docker::COMMANDS, docker::VALUE_FLAGS, docker::BOOL_FLAGS, docker::dispatch),
     (crate::slash::COMMANDS, crate::slash::VALUE_FLAGS, crate::slash::BOOL_FLAGS, crate::slash::dispatch),
 ];
+
+/// Flag-only entries (their commands are dispatched by another module).
+fn no_commands(_: &str, _: &Args, _: &[String]) -> Option<R> {
+    None
+}
 
 pub fn modules() -> &'static [Module] {
     MODULES

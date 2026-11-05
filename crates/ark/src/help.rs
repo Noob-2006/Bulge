@@ -68,6 +68,8 @@ USAGE
   ark status [--full|--all] [--deep] [--json] | sessions | health   what this install is doing, component by component
   ark telemetry status|test [--endpoint URL] [--json]   gateway monitoring: OTLP export posture + one probe span
   ark evals list|run [ID…] [--filter S] [--json] [--verbose]   in-process runtime evals (hermetic, no network/keys)
+  ark evals bench|roles|fetch|import|report|compare|collect|swe-score|suites|agents   scored evaluations: benchmarks (SWE-bench, Terminal-Bench, GAIA, OSWorld), model matrix, judge, role scenarios, other agents side by side (docs/evals.md)
+  ark distill research|abstract|check|eval|sign|run|team|purge   occupation guidelines from documented practice (docs/evals.md)
   ark tools list|enable|disable [NAME…] [--platform P] | --summary | post-setup KEY [--dry-run]   per-platform tools, backend install hooks
   ark fleet [status|board|files|limits|resume SESSION] [--json]   multi-agent progress: agents, files held, spend, shared board, pauses
   ark docker check [--file Dockerfile] [--json]   lint the container files (multi-stage, USER, HEALTHCHECK, secrets)
