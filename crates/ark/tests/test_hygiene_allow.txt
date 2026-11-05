@@ -231,7 +231,6 @@ crates/ark/src/ops/wizard.rs  # temp_dir+test-code HOME/kill
 crates/ark/src/ops/worker.rs  # temp_dir
 crates/ark/src/ops/worktree.rs  # temp_dir
 crates/ark/src/plugin_backends.rs  # temp_dir
-crates/ark/src/providers.rs  # temp_dir
 crates/ark/src/security_cli.rs  # temp_dir
 crates/ark/src/slash.rs  # temp_dir
 crates/ark/src/web_cli.rs  # temp_dir

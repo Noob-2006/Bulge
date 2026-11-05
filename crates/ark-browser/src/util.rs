@@ -62,7 +62,18 @@ pub fn run(argv: &[&str], timeout: Duration, stdin: Option<&[u8]>, env: &[(&str,
     for (k, v) in env {
         cmd.env(k, v);
     }
-    let mut child = cmd.spawn().map_err(|e| format!("{bin}: {e}"))?;
+    // ETXTBSY ("Text file busy"): a just-written executable can still be open for writing in a
+    // child another thread forked a moment ago; it clears as soon as that child execs.
+    let mut tries = 0;
+    let mut child = loop {
+        match cmd.spawn() {
+            Err(e) if e.raw_os_error() == Some(libc::ETXTBSY) && tries < 40 => {
+                tries += 1;
+                std::thread::sleep(std::time::Duration::from_millis(25));
+            }
+            r => break r.map_err(|e| format!("{bin}: {e}"))?,
+        }
+    };
     if let (Some(data), Some(mut si)) = (stdin, child.stdin.take()) {
         let data = data.to_vec();
         std::thread::spawn(move || {

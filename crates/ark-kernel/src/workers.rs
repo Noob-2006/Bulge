@@ -381,7 +381,9 @@ mod tests {
     }
 
     /// A fake worker speaking the protocol in POSIX sh: the first process ever started dies on
-    /// its first `run` (exit 3) without answering; every later one answers `completed`.
+    /// its first `run` (exit 3) without answering; every later one answers `completed`. `set -C`
+    /// (O_EXCL) is the atomic test-and-set — two workers handed their first run at once must not
+    /// both crash. Not `mkdir`: uutils coreutils' mkdir (Ubuntu 25.10+) lets both racers win.
     fn fake_worker(dir: &std::path::Path) -> Vec<String> {
         let script = dir.join("worker.sh");
         let mark = dir.join("crashed-once");
@@ -389,7 +391,7 @@ mod tests {
         std::fs::write(
             &script,
             format!(
-                "#!/bin/sh\nwhile IFS= read -r line; do\n  turn=$(printf '%s' \"$line\" | sed -n 's/.*\"turnId\":\"\\([^\"]*\\)\".*/\\1/p')\n  sid=$(printf '%s' \"$line\" | sed -n 's/.*\"sessionId\":\"\\([^\"]*\\)\".*/\\1/p')\n  if [ ! -e {mark} ]; then : > {mark}; exit 3; fi\n  echo \"$$ $sid\" >> {log}\n  printf '{{\"type\":\"started\",\"turnId\":\"%s\",\"sessionId\":\"%s\"}}\\n' \"$turn\" \"$sid\"\n  printf '{{\"type\":\"result\",\"turnId\":\"%s\",\"sessionId\":\"%s\",\"status\":\"completed\"}}\\n' \"$turn\" \"$sid\"\ndone\n",
+                "#!/bin/sh\nwhile IFS= read -r line; do\n  turn=$(printf '%s' \"$line\" | sed -n 's/.*\"turnId\":\"\\([^\"]*\\)\".*/\\1/p')\n  sid=$(printf '%s' \"$line\" | sed -n 's/.*\"sessionId\":\"\\([^\"]*\\)\".*/\\1/p')\n  if (set -C; : > {mark}) 2>/dev/null; then exit 3; fi\n  echo \"$$ $sid\" >> {log}\n  printf '{{\"type\":\"started\",\"turnId\":\"%s\",\"sessionId\":\"%s\"}}\\n' \"$turn\" \"$sid\"\n  printf '{{\"type\":\"result\",\"turnId\":\"%s\",\"sessionId\":\"%s\",\"status\":\"completed\"}}\\n' \"$turn\" \"$sid\"\ndone\n",
                 mark = mark.display(),
                 log = log.display()
             ),
