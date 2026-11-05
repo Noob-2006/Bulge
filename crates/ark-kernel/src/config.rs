@@ -209,15 +209,23 @@ impl Default for TelemetryConfig {
 pub struct UpdateConfig {
     /// GitHub-compatible releases API of the repository (`…/repos/<owner>/<repo>`).
     pub url: String,
-    /// stable | beta | dev
+    /// stable | lts | beta | dev
     pub channel: String,
     /// Check for a newer release when the daemon starts (prints a notice, never installs).
     pub check_on_start: bool,
+    /// The maintained `lts` line, `MAJOR.MINOR` (e.g. "1.4"): the lts channel follows the newest
+    /// stable release of that line and never jumps to a newer minor. Empty = releases whose notes
+    /// carry an `LTS` line.
+    pub lts_series: String,
+    /// Ed25519 public key (`release-key.pub.pem` text, or base64 of the raw 32 bytes) that
+    /// `SHA256SUMS.sig` must verify against. Set = `ark update` refuses a release without a
+    /// valid signature; empty = checksum + TLS only (a notice says so).
+    pub verify_key: String,
 }
 
 impl Default for UpdateConfig {
     fn default() -> Self {
-        UpdateConfig { url: "https://api.github.com/repos/ark-agent/ark".into(), channel: "stable".into(), check_on_start: false }
+        UpdateConfig { url: "https://api.github.com/repos/ark-agent/ark".into(), channel: "stable".into(), check_on_start: false, lts_series: String::new(), verify_key: String::new() }
     }
 }
 

@@ -1,12 +1,22 @@
 name: release
+# Tag push v* builds four Linux binaries, checks them, smoke-tests them on real old/other distros,
+# bundles share/ (skills, roles, catalogs, VM builder), and publishes tarballs + SHA256SUMS +
+# SBOM (+ Ed25519 signature when the signing secret is set) + build attestation.
+# Asset names are the contract `ark update` and install.sh rely on:
+#   ark-<triple>.tar.gz   (bin/ark, share/ark/…), SHA256SUMS, SHA256SUMS.sig, sbom.spdx.json
 on:
   push:
     tags: ["v*"]
 permissions:
   contents: read
+env:
+  # Same inputs, same bytes: no build path or clock leaks into the binary (packaging/release/repro-check.sh).
+  CARGO_INCREMENTAL: "0"
+  RUSTFLAGS: "--remap-path-prefix=${{ github.workspace }}=/build/ark --remap-path-prefix=/home/runner/.cargo=/cargo"
 jobs:
   build:
     strategy:
+      fail-fast: false
       matrix:
         target: [x86_64-unknown-linux-gnu, aarch64-unknown-linux-gnu, x86_64-unknown-linux-musl, aarch64-unknown-linux-musl]
     runs-on: ubuntu-24.04
@@ -21,31 +31,116 @@ jobs:
       - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2
       # rustls + ring only: no OpenSSL, so zig cross-compiles every target. glibc floor 2.28.
       - run: cargo install --locked cargo-zigbuild
-      - run: |
+      - name: build
+        run: |
+          set -euo pipefail
           t='${{ matrix.target }}'
+          export SOURCE_DATE_EPOCH="$(git log -1 --format=%ct)"
           case "$t" in *-gnu) zt="$t.2.28" ;; *) zt="$t" ;; esac
           cargo zigbuild --release --locked --target "$zt" --bin ark
-          tar -C "target/$t/release" -czf "ark-$t.tar.gz" ark
+          # The microVM guest agent is x86_64 and must be static: ship it with the x86_64 musl bundle.
+          agent=""
+          if [ "$t" = x86_64-unknown-linux-musl ]; then
+            cargo zigbuild --release --locked --target "$t" -p ark-vm --bin ark-vm-guest
+            agent="--vm-agent target/$t/release/ark-vm-guest"
+          fi
+          # ent-004: musl is really static, gnu really stays within glibc 2.28.
+          packaging/release/check-binary.sh "$t" "target/$t/release/ark" --max-glibc 2.28
+          packaging/release/make-tarball.sh "$t" "target/$t/release/ark" "ark-$t.tar.gz" $agent
       - uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
         with:
           name: ark-${{ matrix.target }}
           path: ark-*.tar.gz
-  publish:
+  # The binaries must actually start where we claim they do: glibc 2.28 (AlmaLinux 8), Alpine
+  # (musl), and native arm64 hardware (Graviton-class). Also runs install.sh from the artifacts.
+  smoke:
     needs: build
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { target: x86_64-unknown-linux-gnu, runner: ubuntu-24.04, image: "almalinux:8" }
+          - { target: x86_64-unknown-linux-musl, runner: ubuntu-24.04, image: "alpine:3.20" }
+          - { target: aarch64-unknown-linux-gnu, runner: ubuntu-24.04-arm, image: "almalinux:8" }
+          - { target: aarch64-unknown-linux-musl, runner: ubuntu-24.04-arm, image: "alpine:3.20" }
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6
+        with:
+          name: ark-${{ matrix.target }}
+          path: dist
+      - name: version and share/ inside ${{ matrix.image }}
+        run: |
+          set -euo pipefail
+          t='${{ matrix.target }}'
+          mkdir -p "x/$t" && tar -xzf "dist/ark-$t.tar.gz" -C "x/$t"
+          docker run --rm -v "$PWD/x/$t:/ark:ro" ${{ matrix.image }} sh -c '
+            set -e
+            /ark/bin/ark version
+            test -f /ark/share/ark/blueprints.json
+            test -d /ark/share/ark/skills -a -d /ark/share/ark/roles -a -d /ark/share/ark/plugin-catalog -a -d /ark/share/ark/optional-mcps
+            # bundled share/ is found next to the binary, no env var
+            env -u ARK_SHARE_DIR ARK_HOME=/tmp/h /ark/bin/ark skills list >/dev/null'
+      - name: install.sh inside ${{ matrix.image }} (musl artifact only)
+        if: endsWith(matrix.target, '-musl')
+        run: |
+          set -euo pipefail
+          t='${{ matrix.target }}'
+          (cd dist && sha256sum "ark-$t.tar.gz" > SHA256SUMS)
+          docker run --rm -v "$PWD:/src:ro" -v "$PWD/dist:/rel:ro" -e ARK_RELEASE_BASE=file:///rel ${{ matrix.image }} sh -c '
+            set -e
+            sh /src/packaging/install.sh
+            ~/.local/bin/ark version
+            test -d ~/.local/lib/ark/share/skills'
+  repro:
+    # The same tree built from two different paths must give identical bytes (A18).
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+      - run: packaging/release/repro-check.sh
+  publish:
+    needs: [build, smoke, repro]
     runs-on: ubuntu-24.04
     permissions:
       contents: write
       id-token: write
       attestations: write
     steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
       - uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6
         with:
+          path: dist
           merge-multiple: true
-      - run: sha256sum ark-*.tar.gz > SHA256SUMS
+      - name: SBOM, checksums, signature
+        env:
+          SIGNING_KEY: ${{ secrets.ARK_RELEASE_SIGNING_KEY }}
+        run: |
+          set -euo pipefail
+          export SOURCE_DATE_EPOCH="$(git log -1 --format=%ct)"
+          cd dist
+          python3 ../packaging/release/sbom.py --root .. --out sbom.spdx.json
+          python3 ../packaging/release/sbom.py --root .. --check --out sbom.spdx.json
+          if [ -n "${SIGNING_KEY:-}" ]; then
+            umask 077
+            printf '%s\n' "$SIGNING_KEY" > "$RUNNER_TEMP/release-key.pem"
+            openssl pkey -in "$RUNNER_TEMP/release-key.pem" -pubout -out release-key.pub.pem
+          else
+            echo "::warning::ARK_RELEASE_SIGNING_KEY is not set: this release is NOT signed (SHA256SUMS + attestation only)"
+          fi
+          LC_ALL=C sha256sum $(ls | grep -v '^SHA256SUMS' ) | sort -k2 > SHA256SUMS
+          if [ -f "$RUNNER_TEMP/release-key.pem" ]; then
+            ../packaging/release/sign.sh SHA256SUMS "$RUNNER_TEMP/release-key.pem"
+            rm -f "$RUNNER_TEMP/release-key.pem"
+            ../packaging/release/verify-release.sh . --key release-key.pub.pem
+          fi
+          ls -l
       # SLSA build provenance; verify with: gh attestation verify ark-*.tar.gz -R <owner>/ark
       - uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4
         with:
-          subject-path: ark-*.tar.gz
-      - run: gh release create "$GITHUB_REF_NAME" ark-*.tar.gz SHA256SUMS --verify-tag --repo "$GITHUB_REPOSITORY"
+          subject-path: dist/ark-*.tar.gz
+      - run: gh release create "$GITHUB_REF_NAME" dist/* --verify-tag --repo "$GITHUB_REPOSITORY"
         env:
           GH_TOKEN: ${{ github.token }}

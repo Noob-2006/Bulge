@@ -18,9 +18,7 @@ const MAX_RECURSION: usize = 4;
 
 /// The checkout backing this binary, when the binary runs from inside it.
 pub fn running_source_root() -> Option<PathBuf> {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent()?.parent()?.canonicalize().ok()?;
-    let exe = std::env::current_exe().ok()?.canonicalize().ok()?;
-    (root.join(".git").exists() && exe.starts_with(&root)).then_some(root)
+    ark_core::share::running_source_root()
 }
 
 fn resolve(p: &str, base: &Path) -> PathBuf {

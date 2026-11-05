@@ -12,10 +12,10 @@ NotifyAccess=main
 ExecStart=%h/.local/bin/ark daemon run -w %h
 WorkingDirectory=%h
 Restart=on-failure
-RestartSec=2s
+RestartSec=5s
 # SIGTERM to arkd first (it interrupts runs and saves state), then the rest of the group.
 KillMode=mixed
-TimeoutStopSec=20s
+TimeoutStopSec=30s
 # ark refuses sudo by policy; make that impossible rather than merely discouraged.
 NoNewPrivileges=yes
 RestrictSUIDSGID=yes

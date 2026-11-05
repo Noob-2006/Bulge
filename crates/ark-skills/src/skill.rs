@@ -318,23 +318,11 @@ pub fn user_dir(paths: &Paths) -> PathBuf {
     paths.data.join("skills")
 }
 
-/// ark's shared data dir (bundled skills, optional-skills, optional-mcps, plugin-catalog):
-/// `$ARK_SHARE_DIR`, `<exe>/../share/ark`, or the source tree's `share/` (dev builds).
+/// ark's shared data dir (bundled skills, optional-skills, optional-mcps, plugin-catalog, roles):
+/// `$ARK_SHARE_DIR`, `<exe>/../share/ark`, `/usr/{local/,}share/ark`, or the checkout the binary
+/// runs from. Resolved at run time only (see `ark_core::share`).
 pub fn share_dir() -> Option<PathBuf> {
-    if let Some(p) = std::env::var_os("ARK_SHARE_DIR").map(PathBuf::from).filter(|p| p.is_dir()) {
-        return Some(p);
-    }
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(bin) = exe.parent() {
-            for c in [bin.join("../share/ark"), bin.join("share")] {
-                if c.is_dir() {
-                    return c.canonicalize().ok();
-                }
-            }
-        }
-    }
-    let dev = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../share");
-    dev.is_dir().then(|| dev.canonicalize().ok()).flatten()
+    ark_core::share::share_dir()
 }
 
 /// Every skill under `roots` (first definition of a name wins). Nested category folders are

@@ -2,11 +2,17 @@
 //! with stable/beta/dev channels, `uninstall`, `reset`).
 //!
 //! Releases come from a GitHub-compatible API (`[update] url`): stable = newest
-//! non-prerelease, beta = newest prerelease or stable, dev = newest of all. The asset
-//! for this platform (`ark-<arch>-<os>[.tar.gz]`) must match the release's `SHA256SUMS`
-//! (or `<asset>.sha256`). The binary is replaced atomically next to itself, the old one
-//! kept as `ark.prev` (`ark update --rollback`), and a running daemon is stopped before
-//! and restarted after the swap.
+//! non-prerelease, lts = newest stable of the maintained line (`[update] lts_series`, or releases
+//! marked `LTS` in their notes), beta = newest prerelease or stable, dev = newest of all.
+//!
+//! The asset is the one `.github/workflows/release.yml` publishes, `ark-<triple>.tar.gz` with
+//! `<triple>` = `<arch>-unknown-linux-musl` (static, preferred) or `-gnu`; the archive holds
+//! `bin/ark` and `share/ark/…`. It must match the release's `SHA256SUMS`, and when
+//! `[update] verify_key` is set, `SHA256SUMS.sig` must verify (Ed25519) against that key.
+//! The binary is replaced atomically next to itself, the old one kept as `ark.prev`
+//! (`ark update --rollback`); the bundled `share/ark` next to it is refreshed the same way. A
+//! config+data backup is written first, so `ark update --rollback --restore-data` can undo
+//! settings and state too. A running daemon is stopped before and restarted after the swap.
 
 use crate::args::Args;
 use crate::ops::{archive, net};
@@ -18,10 +24,18 @@ use std::time::Duration;
 
 pub const COMMANDS: &[&str] = &["update", "upgrade", "uninstall", "reset"];
 pub const VALUE_FLAGS: &[&str] = &["channel", "version", "scope"];
-pub const BOOL_FLAGS: &[&str] = &["check", "rollback", "purge", "all-profiles", "remove-binary", "no-restart"];
+pub const BOOL_FLAGS: &[&str] = &["check", "rollback", "purge", "all-profiles", "remove-binary", "no-restart", "restore-data"];
 
+/// The release triple this machine downloads: the static musl build of its CPU.
 pub fn target() -> String {
-    format!("{}-{}", std::env::consts::ARCH, std::env::consts::OS)
+    format!("{}-unknown-linux-musl", std::env::consts::ARCH)
+}
+
+/// Asset names of `arch`, best first: exactly what release.yml publishes (musl is static and
+/// runs everywhere; gnu is the fallback). Kept in one place so the release workflow and the
+/// updater cannot drift apart again (see the `asset_names_match_release_workflow` test).
+pub fn asset_names(arch: &str) -> Vec<String> {
+    ["musl", "gnu"].iter().map(|libc| format!("ark-{arch}-unknown-linux-{libc}.tar.gz")).collect()
 }
 
 /// `v1.2.3-beta.1` → (1,2,3, pre?) ordering key.
@@ -54,32 +68,48 @@ pub struct Release {
     pub notes: String,
     pub asset: Option<(String, String)>,
     pub sums: Option<String>,
+    /// URL of `SHA256SUMS.sig` (detached base64 Ed25519 signature over `SHA256SUMS`).
+    pub sig: Option<String>,
 }
 
 pub fn releases(base: &str) -> Result<Vec<Release>, String> {
     let v = net::get_json(&format!("{}/releases?per_page=30", base.trim_end_matches('/')), &[("accept", "application/vnd.github+json".into()), ("user-agent", format!("ark/{}", env!("CARGO_PKG_VERSION")))])?;
-    let t = target();
+    let wanted = asset_names(std::env::consts::ARCH);
     Ok(v.as_array().ok_or("release index is not a list")?.iter().filter(|r| r["draft"] != true).map(|r| {
         let assets = r["assets"].as_array().cloned().unwrap_or_default();
         let url = |a: &Value| (a["name"].as_str().unwrap_or("").to_string(), a["browser_download_url"].as_str().unwrap_or("").to_string());
-        let asset = assets.iter().find(|a| a["name"].as_str().is_some_and(|n| n == format!("ark-{t}") || n == format!("ark-{t}.tar.gz"))).map(url);
+        let asset = wanted.iter().find_map(|w| assets.iter().find(|a| a["name"].as_str() == Some(w.as_str()))).map(url);
         let sums = assets.iter().find(|a| a["name"] == "SHA256SUMS").map(|a| url(a).1).or_else(|| asset.as_ref().and_then(|(n, _)| assets.iter().find(|a| a["name"].as_str() == Some(&format!("{n}.sha256"))).map(|a| url(a).1)));
-        Release { tag: r["tag_name"].as_str().unwrap_or("").to_string(), prerelease: r["prerelease"] == true, notes: r["body"].as_str().unwrap_or("").to_string(), asset, sums }
+        let sig = assets.iter().find(|a| a["name"] == "SHA256SUMS.sig").map(|a| url(a).1);
+        Release { tag: r["tag_name"].as_str().unwrap_or("").to_string(), prerelease: r["prerelease"] == true, notes: r["body"].as_str().unwrap_or("").to_string(), asset, sums, sig }
     }).collect())
 }
 
-pub fn pick(rs: &[Release], channel: &str, version: Option<&str>) -> Result<Option<Release>, String> {
+/// `MAJOR.MINOR` of a tag.
+fn series(tag: &str) -> Option<String> {
+    parse_version(tag).map(|(a, b, ..)| format!("{a}.{b}"))
+}
+
+/// A release the maintainers marked as long-term support: an `LTS` line in the notes.
+fn marked_lts(notes: &str) -> bool {
+    notes.lines().any(|l| matches!(l.trim().trim_start_matches(['#', '*', '-', ' ']).to_ascii_lowercase().trim_end_matches([':', '.']), "lts" | "channel: lts" | "lts release"))
+}
+
+/// The release `channel` (or an exact `version`) resolves to; `lts_series` is `[update] lts_series`.
+pub fn pick_in(rs: &[Release], channel: &str, version: Option<&str>, lts_series: &str) -> Result<Option<Release>, String> {
     if let Some(v) = version {
         return rs.iter().find(|r| r.tag.trim_start_matches('v') == v.trim_start_matches('v')).cloned().map(Some).ok_or_else(|| format!("no release {v}"));
     }
+    let lts_series = lts_series.trim().trim_start_matches('v');
     let ok = |r: &&Release| match channel {
         "stable" => !r.prerelease,
+        "lts" => !r.prerelease && if lts_series.is_empty() { marked_lts(&r.notes) } else { series(&r.tag).as_deref() == Some(lts_series) },
         "beta" => !r.prerelease || r.tag.contains("beta") || r.tag.contains("rc"),
         "dev" => true,
         _ => false,
     };
-    if !["stable", "beta", "dev"].contains(&channel) {
-        return Err(format!("unknown channel `{channel}` (stable, beta, dev)"));
+    if !["stable", "lts", "beta", "dev"].contains(&channel) {
+        return Err(format!("unknown channel `{channel}` (stable, lts, beta, dev)"));
     }
     let mut best: Option<&Release> = None;
     for r in rs.iter().filter(ok) {
@@ -93,7 +123,7 @@ pub fn pick(rs: &[Release], channel: &str, version: Option<&str>) -> Result<Opti
 /// `None` when up to date.
 pub fn check(cfg: &Config, channel: Option<&str>) -> Result<Option<Release>, String> {
     let rs = releases(&cfg.update.url)?;
-    let r = pick(&rs, channel.unwrap_or(&cfg.update.channel), None)?;
+    let r = pick_in(&rs, channel.unwrap_or(&cfg.update.channel), None, &cfg.update.lts_series)?;
     Ok(r.filter(|r| newer(&r.tag, env!("CARGO_PKG_VERSION"))))
 }
 
@@ -114,12 +144,57 @@ fn download(url: &str) -> Result<Vec<u8>, String> {
     Ok(b)
 }
 
-/// The verified new binary bytes for `r`.
-pub fn fetch(r: &Release) -> Result<Vec<u8>, String> {
-    let (name, url) = r.asset.clone().ok_or_else(|| format!("release {} has no build for {}", r.tag, target()))?;
+/// What a release tarball carries: the binary and the bundled `share/ark/…` entries
+/// (paths relative to the share dir).
+#[derive(Debug)]
+pub struct Bundle {
+    pub bin: Vec<u8>,
+    pub share: Vec<archive::Entry>,
+}
+
+/// Ed25519 public key from `release-key.pub.pem` text or base64 (raw 32 bytes, or an SPKI DER).
+pub fn parse_verify_key(text: &str) -> Result<Vec<u8>, String> {
+    let body: String = text.lines().filter(|l| !l.starts_with("-----")).collect::<Vec<_>>().concat();
+    let der = ark_net::crypto::b64_decode(body.trim()).ok_or("[update] verify_key is not base64 / PEM")?;
+    match der.len() {
+        32 => Ok(der),
+        44 if der.starts_with(&[0x30, 0x2a, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x03, 0x21, 0x00]) => Ok(der[12..].to_vec()),
+        n => Err(format!("[update] verify_key is {n} bytes; expected an Ed25519 public key (32 raw bytes or SPKI)")),
+    }
+}
+
+/// `SHA256SUMS.sig` (base64 of 64 raw bytes, from `packaging/release/sign.sh`) over `sums`.
+pub fn verify_signature(sums: &[u8], sig_b64: &str, key: &str) -> Result<(), String> {
+    let key = parse_verify_key(key)?;
+    let sig = ark_net::crypto::b64_decode(sig_b64.trim()).ok_or("SHA256SUMS.sig is not base64")?;
+    if sig.len() != 64 || !ark_net::crypto::ed25519_verify(&key, sums, &sig) {
+        return Err("the signature of SHA256SUMS does not verify against [update] verify_key; refusing this release".into());
+    }
+    Ok(())
+}
+
+fn unpack(name: &str, bytes: Vec<u8>) -> Result<Bundle, String> {
+    if !name.ends_with(".tar.gz") {
+        return Ok(Bundle { bin: bytes, share: vec![] });
+    }
+    let entries = archive::untar(&archive::gunzip(&bytes)?)?;
+    let clean = |p: &str| p.trim_start_matches("./").to_string();
+    let bin = entries.iter().find(|e| !e.dir && matches!(clean(&e.path).as_str(), "ark" | "bin/ark")).map(|e| e.data.clone()).ok_or("archive has no `bin/ark` binary")?;
+    let share = entries.into_iter().filter_map(|e| clean(&e.path).strip_prefix("share/ark/").filter(|r| !r.is_empty()).map(|r| archive::Entry { path: r.to_string(), ..e })).collect();
+    Ok(Bundle { bin, share })
+}
+
+/// The verified release contents for `r`. `verify_key` (may be empty) is `[update] verify_key`.
+pub fn fetch_bundle(r: &Release, verify_key: &str) -> Result<Bundle, String> {
+    let (name, url) = r.asset.clone().ok_or_else(|| format!("release {} has no build for {} (looked for {})", r.tag, target(), asset_names(std::env::consts::ARCH).join(" / ")))?;
     let sums_url = r.sums.clone().ok_or_else(|| format!("release {} publishes no SHA256SUMS; refusing an unverifiable binary", r.tag))?;
     let bytes = download(&url)?;
-    let sums = String::from_utf8_lossy(&download(&sums_url)?).to_string();
+    let sums_raw = download(&sums_url)?;
+    if !verify_key.trim().is_empty() {
+        let sig_url = r.sig.clone().ok_or_else(|| format!("release {} has no SHA256SUMS.sig but [update] verify_key is set; refusing an unsigned release", r.tag))?;
+        verify_signature(&sums_raw, &String::from_utf8_lossy(&download(&sig_url)?), verify_key)?;
+    }
+    let sums = String::from_utf8_lossy(&sums_raw).to_string();
     let want = sums.lines().find_map(|l| {
         let mut p = l.split_whitespace();
         let (h, n) = (p.next()?, p.next().unwrap_or(&name).trim_start_matches('*'));
@@ -129,11 +204,35 @@ pub fn fetch(r: &Release) -> Result<Vec<u8>, String> {
     if got != want {
         return Err(format!("checksum mismatch for {name}: expected {want}, got {got}"));
     }
-    if name.ends_with(".tar.gz") {
-        let entries = archive::untar(&archive::gunzip(&bytes)?)?;
-        return entries.into_iter().find(|e| !e.dir && (e.path == "ark" || e.path.ends_with("/ark"))).map(|e| e.data).ok_or_else(|| "archive has no `ark` binary".into());
+    unpack(&name, bytes)
+}
+
+/// Where the bundled data of the binary at `exe` lives, if it was installed with one:
+/// `<bin>/../lib/ark/share` (install.sh) or `<bin>/../share/ark` (tarball under a prefix).
+pub fn installed_share(exe: &Path) -> Option<PathBuf> {
+    let bin = exe.parent()?;
+    ["../lib/ark/share", "../share/ark"].iter().map(|r| bin.join(r)).find(|p| p.join("skills").is_dir())
+}
+
+/// Replace the share dir with the release's (stage next to it, swap, drop the old one).
+pub fn install_share(dest: &Path, entries: &[archive::Entry]) -> Result<usize, String> {
+    if entries.is_empty() {
+        return Ok(0);
     }
-    Ok(bytes)
+    let stage = dest.with_extension("new");
+    let old = dest.with_extension("old");
+    let _ = std::fs::remove_dir_all(&stage);
+    let _ = std::fs::remove_dir_all(&old);
+    std::fs::create_dir_all(&stage).map_err(|e| format!("{}: {e}", stage.display()))?;
+    let n = archive::extract(entries, &stage).inspect_err(|_| {
+        let _ = std::fs::remove_dir_all(&stage);
+    })?;
+    if dest.exists() {
+        std::fs::rename(dest, &old).map_err(|e| format!("{}: {e}", dest.display()))?;
+    }
+    std::fs::rename(&stage, dest).map_err(|e| format!("{}: {e}", dest.display()))?;
+    let _ = std::fs::remove_dir_all(&old);
+    Ok(n)
 }
 
 /// Package-managed installs update through their manager.
@@ -141,8 +240,10 @@ pub fn managed(exe: &Path) -> Option<&'static str> {
     let s = exe.to_string_lossy();
     if s.starts_with("/nix/store/") {
         Some("installed by Nix: update your flake / profile instead")
-    } else if s.starts_with("/usr/bin/") || s.starts_with("/bin/") {
+    } else if s.starts_with("/usr/bin/") || s.starts_with("/bin/") || s.starts_with("/usr/sbin/") || s.starts_with("/usr/lib/") {
         Some("installed by the system package manager: update it there")
+    } else if exe.parent().is_some_and(|b| b.join("../share/ark/managed-by-package").exists() || b.join("ark.managed").exists()) {
+        Some("installed by a package (managed-by-package marker): update it with the package manager")
     } else {
         None
     }
@@ -191,11 +292,20 @@ fn cmd_update(a: &Args) -> R {
     if a.flag("rollback") {
         rollback(&exe)?;
         println!("rolled back to the previous binary");
+        let rec = rollback_record(&paths);
+        if a.flag("restore-data") {
+            let rec = rec.ok_or("no pre-update backup recorded; nothing to restore")?;
+            let file = PathBuf::from(rec["backup"].as_str().unwrap_or(""));
+            let (n, pre) = crate::ops::backup::restore(&paths, &file, false)?;
+            println!("restored {n} file(s) of config and data from {} (state before the restore: {})", file.display(), pre.display());
+        } else if let Some(rec) = rec {
+            println!("settings and data were not rolled back; the state before the update to {} is in {} (add --restore-data, arkd must be stopped)", rec["to"].as_str().unwrap_or("?"), rec["backup"].as_str().unwrap_or("?"));
+        }
         return Ok(0);
     }
     let channel = a.val("channel").unwrap_or(&cfg.update.channel).to_string();
     let rs = releases(&cfg.update.url)?;
-    let Some(r) = pick(&rs, &channel, a.val("version"))? else {
+    let Some(r) = pick_in(&rs, &channel, a.val("version"), &cfg.update.lts_series)? else {
         println!("no release on the {channel} channel");
         return Ok(0);
     };
@@ -210,12 +320,26 @@ fn cmd_update(a: &Args) -> R {
     if let Some(why) = managed(&exe) {
         return Err(why.into());
     }
-    let bytes = fetch(&r)?;
+    if cfg.update.verify_key.trim().is_empty() {
+        eprintln!("note: [update] verify_key is not set; this update is checked against SHA256SUMS only (set it to require a release signature)");
+    }
+    let bundle = fetch_bundle(&r, &cfg.update.verify_key)?;
+    match pre_update_backup(&paths, &r.tag) {
+        Ok(b) => println!("backed up settings and data to {} (`ark update --rollback --restore-data` restores them)", b.display()),
+        Err(e) => eprintln!("warning: could not back up settings and data before updating ({e}); `--rollback` will only restore the binary"),
+    }
     let restart = daemon_running(&paths) && !a.flag("no-restart");
     if restart {
         run_self(&["daemon", "stop"]);
     }
-    let prev = install_binary(&exe, &bytes)?;
+    let prev = install_binary(&exe, &bundle.bin)?;
+    if let Some(share) = installed_share(&exe) {
+        match install_share(&share, &bundle.share) {
+            Ok(0) => {}
+            Ok(n) => println!("refreshed {n} bundled file(s) in {}", share.display()),
+            Err(e) => eprintln!("warning: the new binary is in place but the bundled data in {} was not refreshed: {e}", share.display()),
+        }
+    }
     println!("updated ark {} → {} (previous binary: {}; `ark update --rollback` restores it)", env!("CARGO_PKG_VERSION"), r.tag, prev.display());
     if restart {
         let unit = std::process::Command::new("systemctl").args(["--user", "is-active", "--quiet", "arkd.service"]).status().is_ok_and(|s| s.success());
@@ -227,6 +351,24 @@ fn cmd_update(a: &Args) -> R {
         println!("daemon restarted on the new version");
     }
     Ok(0)
+}
+
+const ROLLBACK_FILE: &str = "update-rollback.json";
+
+/// Config + data (no sessions: they only grow) archived before an update replaces the binary.
+pub fn pre_update_backup(paths: &Paths, to: &str) -> Result<PathBuf, String> {
+    let from = env!("CARGO_PKG_VERSION");
+    let file = paths.data.join("backups").join(format!("pre-update-{from}-to-{}.tar.gz", to.trim_start_matches('v')));
+    let (file, _) = crate::ops::backup::create(paths, &file, &crate::ops::backup::Opts { label: format!("before update {from} -> {to}"), ..Default::default() })?;
+    std::fs::create_dir_all(&paths.data).map_err(|e| e.to_string())?;
+    let rec = json!({"from": from, "to": to, "backup": file.display().to_string(), "at": ark_kernel::util::unix_now()});
+    std::fs::write(paths.data.join(ROLLBACK_FILE), rec.to_string()).map_err(|e| e.to_string())?;
+    Ok(file)
+}
+
+/// The last update's `{from, to, backup}` record.
+pub fn rollback_record(paths: &Paths) -> Option<Value> {
+    serde_json::from_str(&std::fs::read_to_string(paths.data.join(ROLLBACK_FILE)).ok()?).ok()
 }
 
 /// What `ark reset --scope` clears (OpenClaw `reset`): config | sessions | memory | state | all.
@@ -434,13 +576,13 @@ mod tests {
     #[test]
     fn versions_and_channels() {
         assert!(newer("v1.2.0", "1.1.9") && !newer("1.0.0", "1.0.0") && newer("1.0.0", "1.0.0-rc.1") && newer("1.0.0-rc.2", "1.0.0-rc.1") && !newer("0.9", "0.10.0"));
-        let rel = |t: &str, p: bool| Release { tag: t.into(), prerelease: p, notes: String::new(), asset: None, sums: None };
+        let rel = |t: &str, p: bool| Release { tag: t.into(), prerelease: p, notes: String::new(), asset: None, sums: None, sig: None };
         let rs = vec![rel("v0.3.0-beta.1", true), rel("v0.2.0", false), rel("v0.3.0-dev.5", true)];
-        assert_eq!(pick(&rs, "stable", None).unwrap().unwrap().tag, "v0.2.0");
-        assert_eq!(pick(&rs, "beta", None).unwrap().unwrap().tag, "v0.3.0-beta.1");
-        assert_eq!(pick(&rs, "dev", None).unwrap().unwrap().tag, "v0.3.0-dev.5");
-        assert_eq!(pick(&rs, "stable", Some("0.3.0-beta.1")).unwrap().unwrap().tag, "v0.3.0-beta.1");
-        assert!(pick(&rs, "nightly", None).is_err());
+        assert_eq!(pick_in(&rs, "stable", None, "").unwrap().unwrap().tag, "v0.2.0");
+        assert_eq!(pick_in(&rs, "beta", None, "").unwrap().unwrap().tag, "v0.3.0-beta.1");
+        assert_eq!(pick_in(&rs, "dev", None, "").unwrap().unwrap().tag, "v0.3.0-dev.5");
+        assert_eq!(pick_in(&rs, "stable", Some("0.3.0-beta.1"), "").unwrap().unwrap().tag, "v0.3.0-beta.1");
+        assert!(pick_in(&rs, "nightly", None, "").is_err());
         assert!(managed(Path::new("/nix/store/abc/bin/ark")).is_some() && managed(Path::new("/home/u/.local/bin/ark")).is_none());
     }
 
@@ -515,30 +657,50 @@ mod tests {
 
     #[test]
     fn fetch_verifies_checksums_against_a_fake_release_server() {
-        let t = target();
+        // The asset name is the one release.yml publishes (not a name made up here), and the
+        // archive has the layout make-tarball.sh produces: bin/ark + share/ark/….
+        let t = asset_names(std::env::consts::ARCH)[0].trim_end_matches(".tar.gz").trim_start_matches("ark-").to_string();
+        assert_eq!(t, target());
         let bin = b"#!/bin/sh\necho ark 9.9.9\n".to_vec();
-        let tgz = archive::gzip(&archive::tar(&[archive::Entry { path: "ark".into(), data: bin.clone(), mode: 0o755, dir: false }]));
+        let tgz = archive::gzip(&archive::tar(&[
+            archive::Entry { path: "./bin/ark".into(), data: bin.clone(), mode: 0o755, dir: false },
+            archive::Entry { path: "./share/ark/skills/x/SKILL.md".into(), data: b"---\nname: x\n---\n".to_vec(), mode: 0o644, dir: false },
+        ]));
         let sum = ark_net::crypto::hex(&ark_net::crypto::sha256(&tgz));
         let (tgz2, sum2) = (tgz.clone(), sum.clone());
         let tt = t.clone();
+        // Release signing: sign.sh signs the SHA256SUMS text with Ed25519 and publishes base64.
+        let seed = [7u8; 32];
+        let sums_text = format!("{sum}  ark-{t}.tar.gz\n");
+        let sig2 = ark_net::crypto::b64(&ark_net::crypto::ed25519_sign(&seed, sums_text.as_bytes()));
+        let pubkey = ark_net::crypto::b64(&ark_net::crypto::ed25519_public(&seed));
         let (base, _log) = fake::serve(Arc::new(move |r: &fake::Req| {
             let me = "http://HOST";
             match r.path.as_str() {
                 p if p.starts_with("/repos/o/r/releases") => (200, "application/json".into(), json!([
-                    {"tag_name": "v9.9.9", "prerelease": false, "body": "notes", "assets": [{"name": format!("ark-{tt}.tar.gz"), "browser_download_url": format!("{me}/dl/ark.tgz")}, {"name": "SHA256SUMS", "browser_download_url": format!("{me}/dl/sums")}]},
+                    {"tag_name": "v9.9.9", "prerelease": false, "body": "notes", "assets": [{"name": format!("ark-{tt}.tar.gz"), "browser_download_url": format!("{me}/dl/ark.tgz")}, {"name": "SHA256SUMS", "browser_download_url": format!("{me}/dl/sums")}, {"name": "SHA256SUMS.sig", "browser_download_url": format!("{me}/dl/sig")}]},
                     {"tag_name": "v9.9.8", "prerelease": false, "assets": [{"name": format!("ark-{tt}.tar.gz"), "browser_download_url": format!("{me}/dl/ark.tgz")}, {"name": "SHA256SUMS", "browser_download_url": format!("{me}/dl/badsums")}]}
                 ]).to_string().into_bytes()),
                 "/dl/ark.tgz" => (200, "application/octet-stream".into(), tgz2.clone()),
                 "/dl/sums" => (200, "text/plain".into(), format!("{sum2}  ark-{tt}.tar.gz\n").into_bytes()),
+                "/dl/sig" => (200, "text/plain".into(), sig2.clone().into_bytes()),
                 "/dl/badsums" => (200, "text/plain".into(), format!("{}  ark-{tt}.tar.gz\n", "0".repeat(64)).into_bytes()),
                 _ => (404, "text/plain".into(), vec![]),
             }
         }));
-        let fix = |r: Release| Release { asset: r.asset.map(|(n, u)| (n, u.replace("http://HOST", &base))), sums: r.sums.map(|u| u.replace("http://HOST", &base)), ..r };
+        let fix = |r: Release| Release { asset: r.asset.map(|(n, u)| (n, u.replace("http://HOST", &base))), sums: r.sums.map(|u| u.replace("http://HOST", &base)), sig: r.sig.map(|u| u.replace("http://HOST", &base)), ..r };
         let rs: Vec<Release> = releases(&format!("{base}/repos/o/r")).unwrap().into_iter().map(fix).collect();
         assert_eq!(rs.len(), 2);
-        assert_eq!(fetch(&rs[0]).unwrap(), bin);
-        assert!(fetch(&rs[1]).unwrap_err().contains("checksum mismatch"));
+        assert_eq!(fetch_bundle(&rs[0], "").unwrap().bin, bin);
+        let b = fetch_bundle(&rs[0], &pubkey).unwrap();
+        assert_eq!(b.bin, bin);
+        assert_eq!(b.share.len(), 1, "{:?}", b.share.iter().map(|e| &e.path).collect::<Vec<_>>());
+        assert_eq!(b.share[0].path, "skills/x/SKILL.md");
+        // A key that did not sign this release, or a release without a signature, is refused.
+        let other = ark_net::crypto::b64(&ark_net::crypto::ed25519_public(&[9u8; 32]));
+        assert!(fetch_bundle(&rs[0], &other).unwrap_err().contains("does not verify"));
+        assert!(fetch_bundle(&rs[1], &pubkey).unwrap_err().contains("no SHA256SUMS.sig"));
+        assert!(fetch_bundle(&rs[1], "").unwrap_err().contains("checksum mismatch"));
         // Install over a fake "current" binary, then roll back.
         let t = ark_core::tmp::TempDir::new("ark-upd");
         let d = t.path().to_path_buf();
@@ -552,6 +714,114 @@ mod tests {
         assert!(install_binary(&exe, b"not a program").is_err(), "smoke test guards the swap");
         rollback(&exe).unwrap();
         assert!(std::fs::read_to_string(&exe).unwrap().contains("0.0.1"));
+    }
+
+    #[test]
+    fn asset_names_match_release_workflow() {
+        let yml = std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.github/workflows/release.yml")).expect("release.yml");
+        let line = yml.lines().find(|l| l.trim_start().starts_with("target: [")).expect("build matrix");
+        let triples: Vec<&str> = line.split('[').nth(1).unwrap().split(']').next().unwrap().split(',').map(str::trim).collect();
+        assert_eq!(triples.len(), 4);
+        // The workflow names the file `ark-$t.tar.gz`, `t` being a matrix triple.
+        assert!(yml.contains("\"ark-$t.tar.gz\""), "tarball naming in release.yml changed");
+        for arch in ["x86_64", "aarch64"] {
+            let names = asset_names(arch);
+            for libc in ["gnu", "musl"] {
+                let published = format!("ark-{arch}-unknown-linux-{libc}.tar.gz");
+                assert!(triples.contains(&format!("{arch}-unknown-linux-{libc}").as_str()), "{published} is not built by release.yml");
+                assert!(names.contains(&published), "ark update does not look for {published}");
+            }
+            assert!(names[0].contains("musl"), "static build preferred");
+        }
+        // install.sh downloads the same musl names.
+        let sh = std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../packaging/install.sh")).unwrap();
+        assert!(sh.contains("ark-$target.tar.gz") && sh.contains("$arch-unknown-linux-musl"));
+    }
+
+    #[test]
+    fn release_index_picks_the_published_asset_name() {
+        let arch = std::env::consts::ARCH;
+        let (base, _log) = fake::serve(Arc::new(move |_r: &fake::Req| {
+            let a = |n: String| json!({"name": n, "browser_download_url": "http://h/x"});
+            (200, "application/json".into(), json!([{"tag_name": "v1.0.0", "assets": [a(format!("ark-{arch}-unknown-linux-gnu.tar.gz")), a(format!("ark-{arch}-unknown-linux-musl.tar.gz")), a("ark-other-unknown-linux-musl.tar.gz".into()), a("SHA256SUMS".into())]}]).to_string().into_bytes())
+        }));
+        let rs = releases(&format!("{base}/repos/o/r")).unwrap();
+        assert_eq!(rs[0].asset.as_ref().unwrap().0, format!("ark-{arch}-unknown-linux-musl.tar.gz"));
+        assert!(rs[0].sums.is_some() && rs[0].sig.is_none());
+    }
+
+    #[test]
+    fn lts_follows_its_line_or_the_notes_marker() {
+        let rel = |t: &str, notes: &str| Release { tag: t.into(), prerelease: false, notes: notes.into(), asset: None, sums: None, sig: None };
+        let rs = vec![rel("v1.4.1", ""), rel("v1.4.3", ""), rel("v1.5.0", ""), rel("v2.0.0", "Big release")];
+        // Configured line: newest patch of 1.4, never the newer minors.
+        assert_eq!(pick_in(&rs, "lts", None, "1.4").unwrap().unwrap().tag, "v1.4.3");
+        assert_eq!(pick_in(&rs, "stable", None, "1.4").unwrap().unwrap().tag, "v2.0.0");
+        // No line configured: only releases whose notes say LTS.
+        let rs = vec![rel("v1.4.3", "## v1.4.3\nLTS\n- fixes"), rel("v1.5.0", ""), rel("v1.4.2", "LTS")];
+        assert_eq!(pick_in(&rs, "lts", None, "").unwrap().unwrap().tag, "v1.4.3");
+        assert!(pick_in(&[rel("v1.0.0", "")], "lts", None, "").unwrap().is_none());
+        assert!(pick_in(&rs, "bogus", None, "").unwrap_err().contains("lts"));
+    }
+
+    #[test]
+    fn verify_key_accepts_pem_and_raw() {
+        let seed = [3u8; 32];
+        let raw = ark_net::crypto::ed25519_public(&seed);
+        let mut der = vec![0x30, 0x2a, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x03, 0x21, 0x00];
+        der.extend(raw);
+        let pem = format!("-----BEGIN PUBLIC KEY-----\n{}\n-----END PUBLIC KEY-----\n", ark_net::crypto::b64(&der));
+        assert_eq!(parse_verify_key(&pem).unwrap(), raw);
+        assert_eq!(parse_verify_key(&ark_net::crypto::b64(&raw)).unwrap(), raw);
+        assert!(parse_verify_key("AAAA").is_err());
+        let sig = ark_net::crypto::b64(&ark_net::crypto::ed25519_sign(&seed, b"sums"));
+        assert!(verify_signature(b"sums", &sig, &pem).is_ok());
+        assert!(verify_signature(b"tampered", &sig, &pem).is_err());
+    }
+
+    #[test]
+    fn share_dir_is_swapped_in_and_package_installs_are_managed() {
+        let t = ark_core::tmp::TempDir::new("ark-upd-share");
+        let r = t.path();
+        let share = r.join("prefix/lib/ark/share");
+        std::fs::create_dir_all(share.join("skills/old")).unwrap();
+        std::fs::write(share.join("skills/old/SKILL.md"), "old").unwrap();
+        std::fs::create_dir_all(r.join("prefix/bin")).unwrap();
+        let exe = r.join("prefix/bin/ark");
+        assert_eq!(installed_share(&exe).unwrap().canonicalize().unwrap(), share.canonicalize().unwrap());
+        let n = install_share(&installed_share(&exe).unwrap(), &[archive::Entry::file("skills/new/SKILL.md", b"new".to_vec())]).unwrap();
+        assert_eq!(n, 1);
+        assert!(share.join("skills/new/SKILL.md").is_file() && !share.join("skills/old").exists());
+        assert!(!share.with_extension("old").exists() && !share.with_extension("new").exists());
+        assert!(install_share(&share, &[archive::Entry::file("../evil", b"x".to_vec())]).is_err(), "no path escapes");
+        assert!(share.join("skills/new").is_dir(), "a rejected archive leaves the install intact");
+        assert!(managed(Path::new("/usr/bin/ark")).is_some() && managed(Path::new("/usr/lib/ark/ark")).is_some());
+        assert!(managed(&exe).is_none());
+        std::fs::write(r.join("prefix/bin/ark.managed"), "").unwrap();
+        assert!(managed(&exe).is_some());
+    }
+
+    #[test]
+    fn rollback_can_restore_settings_and_data() {
+        let t = ark_core::tmp::TempDir::new("ark-upd-data");
+        let root = t.path();
+        let p = Paths { data: root.join("data"), config_dir: root.join("config"), runtime: root.join("run") };
+        std::fs::create_dir_all(p.data.join("memory")).unwrap();
+        std::fs::create_dir_all(&p.config_dir).unwrap();
+        std::fs::write(p.user_config(), "identity = \"v1\"\n").unwrap();
+        std::fs::write(p.data.join("memory/MEMORY.md"), "before").unwrap();
+        let file = pre_update_backup(&p, "v9.9.9").unwrap();
+        assert!(file.is_file());
+        let rec = rollback_record(&p).unwrap();
+        assert_eq!(rec["to"], "v9.9.9");
+        // The new version migrates things...
+        std::fs::write(p.user_config(), "identity = \"v2\"\n").unwrap();
+        std::fs::write(p.data.join("memory/MEMORY.md"), "after").unwrap();
+        // ...and --rollback --restore-data puts them back.
+        let (n, _pre) = crate::ops::backup::restore(&p, Path::new(rec["backup"].as_str().unwrap()), false).unwrap();
+        assert!(n >= 2);
+        assert_eq!(std::fs::read_to_string(p.user_config()).unwrap(), "identity = \"v1\"\n");
+        assert_eq!(std::fs::read_to_string(p.data.join("memory/MEMORY.md")).unwrap(), "before");
     }
 
     #[test]

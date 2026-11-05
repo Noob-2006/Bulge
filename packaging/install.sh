@@ -1,8 +1,10 @@
 #!/bin/sh
 # ark installer.  curl --proto '=https' --tlsv1.2 -fsSL <url>/install.sh | sh
-# Options: --from-source  --service  --version vX.Y.Z   Env: ARK_INSTALL_DIR, ARK_REPO
-# Never uses sudo; installs to ~/.local/bin by default; verifies SHA256SUMS
-# (and the GitHub build attestation when `gh` is available).
+# Options: --from-source  --service  --version vX.Y.Z   Env: ARK_INSTALL_DIR, ARK_REPO, ARK_RELEASE_PUBKEY, ARK_RELEASE_BASE (mirror dir or file:// URL)
+# Never uses sudo; installs to ~/.local/bin (+ ~/.local/lib/ark/share for the bundled skills, roles,
+# catalogs) by default; verifies SHA256SUMS, the Ed25519 signature of SHA256SUMS when
+# ARK_RELEASE_PUBKEY (path to release-key.pub.pem) is set, and the GitHub build attestation
+# when `gh` is available. Works on Alpine/busybox (POSIX sh, wget or curl, musl static build).
 set -eu
 (set -o pipefail) 2>/dev/null && set -o pipefail
 
@@ -26,9 +28,13 @@ main() {
     mkdir -p "$dir"
 
     if [ "$from_source" = 1 ]; then
-        need cargo
+        need cargo; need git
+        tmp="$(mktemp -d)"
+        trap 'rm -rf "$tmp"' EXIT
         say "building from source (cargo install)…"
-        cargo install --locked --git "https://github.com/$repo" --bin ark --root "$dir/.." ark
+        if [ "$version" = latest ]; then git clone --depth 1 "https://github.com/$repo" "$tmp/src"; else git clone --depth 1 --branch "$version" "https://github.com/$repo" "$tmp/src"; fi
+        cargo install --locked --path "$tmp/src/crates/ark" --root "$dir/.." --bin ark
+        install_share "$tmp/src" "$dir/../lib/ark/share" source
     else
         need uname; need tar
         case "$(uname -m)" in
@@ -39,18 +45,25 @@ main() {
         [ "$(uname -s)" = Linux ] || err "prebuilt binaries are Linux-only; use --from-source"
         # The musl build is static: no glibc version to match.
         target="$arch-unknown-linux-musl"
-        if [ "$version" = latest ]; then base="https://github.com/$repo/releases/latest/download"; else base="https://github.com/$repo/releases/download/$version"; fi
+        if [ -n "${ARK_RELEASE_BASE:-}" ]; then base="${ARK_RELEASE_BASE%/}"
+        elif [ "$version" = latest ]; then base="https://github.com/$repo/releases/latest/download"; else base="https://github.com/$repo/releases/download/$version"; fi
         tmp="$(mktemp -d)"
         trap 'rm -rf "$tmp"' EXIT
         fetch "$base/ark-$target.tar.gz" "$tmp/ark-$target.tar.gz"
         fetch "$base/SHA256SUMS" "$tmp/SHA256SUMS"
         (cd "$tmp" && verify_sum "ark-$target.tar.gz")
-        if command -v gh >/dev/null 2>&1; then
-            gh attestation verify "$tmp/ark-$target.tar.gz" -R "$repo" >/dev/null 2>&1 && say "build provenance verified" || say "warning: could not verify the build attestation (gh not logged in?)"
+        verify_signature "$base" "$tmp"
+        if [ -z "${ARK_RELEASE_BASE:-}" ] && command -v gh >/dev/null 2>&1; then
+            if gh attestation verify "$tmp/ark-$target.tar.gz" -R "$repo" >/dev/null 2>&1; then say "build provenance verified"; else say "warning: could not verify the build attestation (gh not logged in?)"; fi
         fi
-        tar -xzf "$tmp/ark-$target.tar.gz" -C "$tmp"
-        install -m 0755 "$tmp/ark" "$dir/ark.new"
+        mkdir -p "$tmp/x"
+        tar -xzf "$tmp/ark-$target.tar.gz" -C "$tmp/x"
+        [ -f "$tmp/x/bin/ark" ] || err "the archive has no bin/ark"
+        install -m 0755 "$tmp/x/bin/ark" "$dir/ark.new"
         mv -f "$dir/ark.new" "$dir/ark"
+        # Bundled data goes to <install dir>/../lib/ark/share, where `ark` looks for it. Not
+        # ../share/ark: with the default ~/.local/bin that is ark's own data dir.
+        install_share "$tmp/x" "$dir/../lib/ark/share" tarball
     fi
     say "installed $("$dir/ark" --version 2>/dev/null || echo ark) to $dir/ark"
     case ":$PATH:" in *":$dir:"*) ;; *) say "add $dir to your PATH, e.g. echo 'export PATH=\"$dir:\$PATH\"' >> ~/.profile" ;; esac
@@ -62,11 +75,46 @@ main() {
     say "your data (~/.local/share/ark) and config (~/.config/ark) were not touched."
 }
 
+# install_share <unpacked tarball | source checkout> <dest> <tarball|source>
+install_share() {
+    src="$1"; dest="$2"
+    mkdir -p "$(dirname "$dest")"
+    rm -rf "$dest.new" "$dest.old"
+    if [ "$3" = tarball ]; then
+        [ -d "$src/share/ark" ] || return 0
+        cp -R "$src/share/ark" "$dest.new"
+    else
+        mkdir -p "$dest.new/vm" "$dest.new/sandbox-browser"
+        cp -R "$src/share/." "$dest.new/"
+        cp "$src/packaging/vm/build-image.sh" "$src/packaging/vm/README.md" "$dest.new/vm/"
+        cp -R "$src/packaging/sandbox-browser/." "$dest.new/sandbox-browser/"
+    fi
+    [ -d "$dest" ] && mv "$dest" "$dest.old"
+    mv "$dest.new" "$dest"
+    rm -rf "$dest.old"
+    say "installed bundled skills and catalogs to $dest"
+}
+
+# Ed25519 signature over SHA256SUMS (packaging/release/sign.sh). Only when the caller supplies
+# the public key they trust (ARK_RELEASE_PUBKEY); then a missing or bad signature is fatal.
+verify_signature() {
+    [ -n "${ARK_RELEASE_PUBKEY:-}" ] || return 0
+    need openssl
+    [ -f "$ARK_RELEASE_PUBKEY" ] || err "ARK_RELEASE_PUBKEY=$ARK_RELEASE_PUBKEY is not a file"
+    fetch "$1/SHA256SUMS.sig" "$2/SHA256SUMS.sig"
+    openssl base64 -d -A -in "$2/SHA256SUMS.sig" -out "$2/SHA256SUMS.sig.bin" 2>/dev/null || err "SHA256SUMS.sig is not base64"
+    openssl pkeyutl -verify -pubin -inkey "$ARK_RELEASE_PUBKEY" -rawin -in "$2/SHA256SUMS" -sigfile "$2/SHA256SUMS.sig.bin" >/dev/null 2>&1 || err "signature of SHA256SUMS does not verify against $ARK_RELEASE_PUBKEY"
+    say "release signature verified"
+}
+
 say() { printf '%s\n' "ark-install: $*"; }
 err() { say "error: $*" >&2; exit 1; }
 need() { command -v "$1" >/dev/null 2>&1 || err "needs $1"; }
 
 fetch() {
+    case "$1" in
+        file://*) cp "${1#file://}" "$2" || err "cannot read $1"; return 0 ;;
+    esac
     if command -v curl >/dev/null 2>&1; then
         curl --proto '=https' --tlsv1.2 -fsSL "$1" -o "$2" || err "download failed: $1"
     elif command -v wget >/dev/null 2>&1; then

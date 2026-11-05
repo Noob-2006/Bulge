@@ -1,0 +1,19 @@
+# ark app server reachable from outside the container. The daemon REFUSES to listen on a
+# non-loopback address until every layer below is configured (docs/SECURITY.md, A9):
+#   - a token, strong auth (a real provider, not shared "basic"), explicit allowed origins,
+#   - TLS terminated by a reverse proxy in front (behind_proxy = true), rate limiting on.
+# Secrets come from `ark secrets set APP_TOKEN` / APP_AUTH_SECRET (never put them in this file).
+[app]
+enabled = true
+listen = "0.0.0.0:8640"
+token = "{{secret:APP_TOKEN}}"
+allow_origins = ["https://ark.example.com"]
+
+[app.exposure]
+allow_public = true
+behind_proxy = true
+
+[app.auth]
+enabled = true
+provider = "self_hosted"
+secret = "{{secret:APP_AUTH_SECRET}}"

@@ -20,7 +20,7 @@ use std::time::{Duration, Instant};
 
 pub const COMMANDS: &[&str] = &["service"];
 pub const VALUE_FLAGS: &[&str] = &["drain", "lines", "user-name"];
-pub const BOOL_FLAGS: &[&str] = &["system", "launchd"];
+pub const BOOL_FLAGS: &[&str] = &["system", "launchd", "sysusers", "tmpfiles"];
 
 pub const STORM_WINDOW_SECS: i64 = 600;
 pub const STORM_THRESHOLD: usize = 3;
@@ -43,16 +43,55 @@ pub fn user_unit_dir() -> PathBuf {
     std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from).unwrap_or_else(|| PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join(".config")).join("systemd/user")
 }
 
-/// The systemd unit (see packaging/systemd/ for notes). `user` = `Some(name)` for a system unit.
+/// Where a system instance keeps everything (`StateDirectory=ark`).
+pub const SYSTEM_HOME: &str = "/var/lib/ark";
+/// The dedicated system account of the system service (created by `sysusers.d`).
+pub const SYSTEM_USER: &str = "ark";
+/// Default workspace of the system instance.
+pub const SYSTEM_WORKSPACE: &str = "/var/lib/ark/workspace";
+
+/// The systemd unit. `user` = `Some(name)` for a system unit (dedicated account, state under
+/// `/var/lib/ark`, sandboxing that only a system manager can apply).
+///
+/// This is the one source of unit text: `packaging/systemd/*.service` are generated from it
+/// (`ARK_BLESS=1 cargo test -p ark packaged_units` rewrites them), and `nix/nixos.nix` is checked
+/// against the same hardening list by a test.
 pub fn unit(exe: &Path, workspace: &Path, user: Option<&str>) -> String {
     let home_env = std::env::var("ARK_HOME").ok().filter(|_| crate::ops::profile::current() == "custom ARK_HOME").map(|h| format!("Environment=ARK_HOME={h}\n")).unwrap_or_default();
-    let (who, target) = match user {
-        Some(u) => (format!("User={u}\nGroup={u}\n"), "multi-user.target"),
-        None => (String::new(), "default.target"),
+    render_unit(exe, workspace, user, &profile_arg(), &home_env)
+}
+
+/// Pure renderer behind [`unit`] (`prof` = ` -p name` or empty, `home_env` = an `Environment=` line).
+pub fn render_unit(exe: &Path, workspace: &Path, user: Option<&str>, prof: &str, home_env: &str) -> String {
+    let (who, target, sandbox) = match user {
+        Some(u) => (
+            format!("User={u}\nGroup={u}\nStateDirectory=ark ark/workspace\nStateDirectoryMode=0750\nEnvironment=ARK_HOME={SYSTEM_HOME}\n"),
+            "multi-user.target",
+            "# A system manager can apply the full sandbox (user units cannot without user namespaces).
+PrivateTmp=yes
+ProtectSystem=full
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+# Not set on purpose: MemoryDenyWriteExecute (breaks Node/V8 bridges), ProtectHome and
+# RestrictNamespaces (the sandboxes ark may run need them).
+",
+        ),
+        None => (
+            String::new(),
+            "default.target",
+            "# Not set on purpose: MemoryDenyWriteExecute (breaks Node/V8 bridges), ProtectHome (ark works
+# in $HOME), RestrictNamespaces (breaks sandboxes ark may run). PrivateTmp/ProtectKernel* need
+# unprivileged user namespaces in user units; enable them in a drop-in if your distro allows.
+",
+        ),
     };
+    let home_env = if user.is_some() { "" } else { home_env };
     format!(
         "[Unit]
-Description=ark agent daemon{prof}
+Description=ark agent daemon{desc}
 Documentation=https://github.com/ark-agent/ark
 After=network-online.target
 Wants=network-online.target
@@ -76,17 +115,24 @@ LockPersonality=yes
 SystemCallArchitectures=native
 RestrictRealtime=yes
 UMask=0077
-# Not set on purpose: MemoryDenyWriteExecute (breaks Node/V8 bridges), ProtectHome (ark works
-# in $HOME), RestrictNamespaces (breaks sandboxes ark may run). PrivateTmp/ProtectKernel* need
-# unprivileged user namespaces in user units; enable them in a drop-in if your distro allows.
-
+{sandbox}
 [Install]
 WantedBy={target}
 ",
+        desc = if user.is_some() { " (system)" } else { "" },
         exe = exe.display(),
         ws = workspace.display(),
-        prof = profile_arg(),
     )
+}
+
+/// `sysusers.d` entry creating the dedicated account (`systemd-sysusers`).
+pub fn sysusers(user: &str) -> String {
+    format!("# ark agent daemon: dedicated system account (systemd-sysusers)\nu {user} - \"ark agent\" {SYSTEM_HOME} /usr/sbin/nologin\n")
+}
+
+/// `tmpfiles.d` entry for the system instance's directories (also created by `StateDirectory=`).
+pub fn tmpfiles(user: &str) -> String {
+    format!("# ark agent daemon: state and workspace of the system instance\nd {SYSTEM_HOME} 0750 {user} {user} -\nd {SYSTEM_WORKSPACE} 0750 {user} {user} -\n")
 }
 
 pub fn launchd_label() -> String {
@@ -317,11 +363,22 @@ pub fn dispatch(cmd: &str, a: &Args, _raw: &[String]) -> Option<R> {
             }
             "install" if system => {
                 let exe = std::env::current_exe().map_err(|e| e.to_string())?;
-                let user = a.val("user-name").map(String::from).or_else(|| std::env::var("USER").ok()).ok_or("set --user-name")?;
-                let body = unit(&exe, &crate::workspace(a)?, Some(&user));
-                let tmp = std::env::temp_dir().join(&name);
-                std::fs::write(&tmp, &body).map_err(|e| e.to_string())?;
-                println!("wrote {} — ark does not run sudo itself; install it with:\n  sudo install -m 0644 {} /etc/systemd/system/{name}\n  sudo systemctl daemon-reload && sudo systemctl enable --now {name}", tmp.display(), tmp.display());
+                let user = a.val("user-name").unwrap_or(SYSTEM_USER).to_string();
+                let ws = match a.val("workspace") {
+                    Some(_) => crate::workspace(a)?,
+                    None => PathBuf::from(SYSTEM_WORKSPACE),
+                };
+                let dir = std::env::temp_dir().join(format!("ark-service-{}", std::process::id()));
+                std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+                let (unit_f, users_f, tmp_f) = (dir.join(&name), dir.join("ark-sysusers.conf"), dir.join("ark-tmpfiles.conf"));
+                std::fs::write(&unit_f, unit(&exe, &ws, Some(&user))).map_err(|e| e.to_string())?;
+                std::fs::write(&users_f, sysusers(&user)).map_err(|e| e.to_string())?;
+                std::fs::write(&tmp_f, tmpfiles(&user)).map_err(|e| e.to_string())?;
+                let e = exe.to_string_lossy();
+                if e.starts_with("/home/") || e.starts_with("/root/") {
+                    eprintln!("warning: {e} is under a home directory; user `{user}` cannot run it. Install ark to /usr/local/bin first (sudo install -m 0755 {e} /usr/local/bin/ark) and re-run from there.");
+                }
+                println!("wrote {} — ark does not run sudo itself; install the system account, directories and unit with:\n  sudo install -m 0644 {} /etc/sysusers.d/ark.conf && sudo systemd-sysusers\n  sudo install -m 0644 {} /etc/tmpfiles.d/ark.conf && sudo systemd-tmpfiles --create\n  sudo install -m 0644 {} /etc/systemd/system/{name}\n  sudo systemctl daemon-reload && sudo systemctl enable --now {name}\nState lives in {SYSTEM_HOME} (ARK_HOME), owned by `{user}`; put the config at {SYSTEM_HOME}/config/config.toml.", dir.display(), users_f.display(), tmp_f.display(), unit_f.display());
                 Ok(0)
             }
             "install" => {
@@ -350,7 +407,16 @@ pub fn dispatch(cmd: &str, a: &Args, _raw: &[String]) -> Option<R> {
             }
             "print" => {
                 let exe = std::env::current_exe().map_err(|e| e.to_string())?;
-                print!("{}", unit(&exe, &crate::workspace(a)?, if system { std::env::var("USER").ok() } else { None }.as_deref()));
+                if a.flag("sysusers") {
+                    print!("{}", sysusers(a.val("user-name").unwrap_or(SYSTEM_USER)));
+                } else if a.flag("tmpfiles") {
+                    print!("{}", tmpfiles(a.val("user-name").unwrap_or(SYSTEM_USER)));
+                } else if system {
+                    let ws = if a.val("workspace").is_some() { crate::workspace(a)? } else { PathBuf::from(SYSTEM_WORKSPACE) };
+                    print!("{}", unit(&exe, &ws, Some(a.val("user-name").unwrap_or(SYSTEM_USER))));
+                } else {
+                    print!("{}", unit(&exe, &crate::workspace(a)?, None));
+                }
                 Ok(0)
             }
             "restart" => {
@@ -388,7 +454,7 @@ pub fn dispatch(cmd: &str, a: &Args, _raw: &[String]) -> Option<R> {
                 }
                 Ok(if issues.is_empty() { 0 } else { 1 })
             }
-            other => usage(format!("unknown `service {other}` (install [--system|--launchd] [--no-start], uninstall, status, print, restart [--drain S], logs, audit)")),
+            other => usage(format!("unknown `service {other}` (install [--system|--launchd] [--no-start], uninstall, status, print [--system|--sysusers|--tmpfiles], restart [--drain S], logs, audit)")),
         }
     })())
 }
@@ -412,6 +478,61 @@ mod tests {
         assert_eq!(audit_text(&drift, &u, &exe)[0].code, "unit-drift");
         let p = plist(&exe, ws, Path::new("/tmp/a&b.log"));
         assert!(p.contains("<string>daemon</string>") && p.contains("a&amp;b.log") && p.contains("<key>KeepAlive</key>"));
+    }
+
+    fn repo(rel: &str) -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../..").join(rel)
+    }
+
+    /// `ARK_BLESS=1` rewrites the packaged file instead of failing.
+    fn same_as_file(rel: &str, want: &str) {
+        let p = repo(rel);
+        if std::env::var_os("ARK_BLESS").is_some() {
+            std::fs::write(&p, want).unwrap();
+        }
+        let got = std::fs::read_to_string(&p).unwrap_or_default();
+        assert_eq!(got, want, "{rel} is generated from ops/service.rs; refresh it with: ARK_BLESS=1 cargo test -p ark packaged_units");
+    }
+
+    #[test]
+    fn packaged_units_are_generated_from_the_one_source() {
+        same_as_file("packaging/systemd/arkd.service", &render_unit(Path::new("%h/.local/bin/ark"), Path::new("%h"), None, "", ""));
+        same_as_file("packaging/systemd/arkd-system.service", &render_unit(Path::new("/usr/bin/ark"), Path::new(SYSTEM_WORKSPACE), Some(SYSTEM_USER), "", ""));
+        same_as_file("packaging/systemd/ark-sysusers.conf", &sysusers(SYSTEM_USER));
+        same_as_file("packaging/systemd/ark-tmpfiles.conf", &tmpfiles(SYSTEM_USER));
+    }
+
+    #[test]
+    fn system_unit_uses_the_dedicated_account_and_state_directory() {
+        let u = render_unit(Path::new("/usr/bin/ark"), Path::new(SYSTEM_WORKSPACE), Some("ark"), "", "");
+        for want in ["User=ark\nGroup=ark", "StateDirectory=ark ark/workspace", "Environment=ARK_HOME=/var/lib/ark", "ProtectSystem=full", "PrivateTmp=yes", "ProtectKernelLogs=yes", "WantedBy=multi-user.target", "NoNewPrivileges=yes", "Type=notify"] {
+            assert!(u.contains(want), "system unit lacks {want}:\n{u}");
+        }
+        // The user unit never carries system-only directives, and a custom ARK_HOME shows up there only.
+        let user = render_unit(Path::new("/x/ark"), Path::new("/w"), None, "", "Environment=ARK_HOME=/h\n");
+        assert!(!user.contains("StateDirectory") && !user.contains("ProtectSystem") && user.contains("Environment=ARK_HOME=/h"));
+        assert!(!render_unit(Path::new("/x/ark"), Path::new("/w"), Some("ark"), "", "Environment=ARK_HOME=/h\n").contains("ARK_HOME=/h"));
+        assert!(sysusers("ark").starts_with("# ") && sysusers("ark").contains("u ark - \"ark agent\" /var/lib/ark"));
+        assert!(tmpfiles("ark").contains("d /var/lib/ark/workspace 0750 ark ark -"));
+        // audit accepts what we render.
+        let exe = std::env::current_exe().unwrap();
+        let sys = render_unit(&exe, Path::new(SYSTEM_WORKSPACE), Some("ark"), "", "");
+        assert!(audit_text(&sys, &sys, &exe).is_empty());
+    }
+
+    #[test]
+    fn nixos_module_carries_the_same_hardening() {
+        let nix = std::fs::read_to_string(repo("nix/nixos.nix")).unwrap();
+        let u = render_unit(Path::new("/usr/bin/ark"), Path::new(SYSTEM_WORKSPACE), Some("ark"), "", "");
+        let key_re = |l: &str| l.split_once('=').map(|(k, _)| k.to_string());
+        for line in u.lines().filter(|l| !l.starts_with('#')) {
+            let Some(k) = key_re(line) else { continue };
+            if ["Description", "Documentation", "After", "Wants", "ExecStart", "WantedBy", "Environment", "StartLimitIntervalSec", "StartLimitBurst", "WorkingDirectory", "RestartSec"].contains(&k.as_str()) {
+                continue;
+            }
+            assert!(nix.contains(&format!("{k} =")), "nix/nixos.nix lacks {k} (kept in step with ops/service.rs)");
+        }
+        assert!(nix.contains("ARK_HOME = \"/var/lib/ark\"") && nix.contains("users.users.ark"));
     }
 
     #[test]

@@ -30,6 +30,8 @@ pub const KERNEL_FILE: &str = "vmlinux";
 pub const INITRAMFS_FILE: &str = "initramfs.cpio.gz";
 /// Builder, relative to the repository root.
 pub const BUILD_SCRIPT: &str = "packaging/vm/build-image.sh";
+/// The same script inside an installed share dir (`<share>/vm/build-image.sh`).
+pub const SHIPPED_SCRIPT: &str = "vm/build-image.sh";
 
 /// One file of the image: its name inside the image directory, its digest and
 /// its size. All three are verified on every load.
@@ -250,7 +252,7 @@ impl GuestImage {
         let script = build_script_path();
         if !script.is_file() {
             return Err(format!(
-                "guest image build script not found at {}; set ARK_REPO_ROOT to the ark checkout, or run `ark sandbox vm image build` from the repo",
+                "guest image build script not found at {}; set ARK_REPO_ROOT to the ark checkout, or install ark with its share/ directory (ARK_SHARE_DIR)",
                 script.display()
             ));
         }
@@ -260,6 +262,9 @@ impl GuestImage {
         let verbose = std::env::var("ARK_VM_BUILD_VERBOSE").map(|v| v == "1").unwrap_or(false);
         let mut cmd = Command::new("bash");
         cmd.arg(&script).arg("--out").arg(&out);
+        if let Some(agent) = shipped_agent(&script) {
+            cmd.arg("--agent").arg(agent);
+        }
         cmd.stdout(if verbose { Stdio::inherit() } else { Stdio::null() });
         cmd.stderr(if verbose { Stdio::inherit() } else { Stdio::piped() });
         let output = cmd.output().map_err(|e| format!("guest image: cannot run {}: {e}", script.display()))?;
@@ -324,14 +329,40 @@ impl GuestImage {
     }
 }
 
-/// Where the builder script is expected: `ARK_REPO_ROOT` when set (an explicit
-/// override, also what tests and packagers use), else `<crate>/../..`.
+/// Where the builder script is expected. Resolved at run time only (no build-directory path is
+/// baked into the binary): `ARK_REPO_ROOT` (an explicit override, also what tests and packagers
+/// use), then the installed share dir (`$ARK_SHARE_DIR`, `<exe>/../share/ark`,
+/// `/usr/{local/,}share/ark`: `vm/build-image.sh`), then a checkout the binary runs from.
 fn build_script_path() -> PathBuf {
-    let root = match std::env::var_os("ARK_REPO_ROOT") {
-        Some(r) => PathBuf::from(r),
-        None => Path::new(env!("CARGO_MANIFEST_DIR")).join("../.."),
-    };
-    root.join(BUILD_SCRIPT)
+    build_script_in(std::env::var_os("ARK_REPO_ROOT").map(PathBuf::from), std::env::var_os("ARK_SHARE_DIR").map(PathBuf::from), std::env::current_exe().ok().as_deref(), &["/usr/local/share/ark", "/usr/share/ark"])
+}
+
+fn build_script_in(repo_root: Option<PathBuf>, share_env: Option<PathBuf>, exe: Option<&Path>, system: &[&str]) -> PathBuf {
+    if let Some(r) = repo_root {
+        return r.join(BUILD_SCRIPT);
+    }
+    let mut cands: Vec<PathBuf> = share_env.into_iter().collect();
+    if let Some(bin) = exe.and_then(Path::parent) {
+        cands.push(bin.join("../share/ark"));
+        cands.push(bin.join("../lib/ark/share"));
+        cands.push(bin.join("share"));
+    }
+    cands.extend(system.iter().map(PathBuf::from));
+    if let Some(found) = cands.iter().map(|d| d.join(SHIPPED_SCRIPT)).find(|p| p.is_file()) {
+        return found;
+    }
+    // A checkout the binary runs from: any ancestor of the executable that holds the script.
+    if let Some(found) = exe.into_iter().flat_map(|e| e.ancestors().skip(1)).map(|d| d.join(BUILD_SCRIPT)).find(|p| p.is_file()) {
+        return found;
+    }
+    PathBuf::from(BUILD_SCRIPT)
+}
+
+/// The guest agent shipped next to the shipped builder script (release tarballs carry a static
+/// `ark-vm-guest`, so building an image needs no Rust toolchain).
+fn shipped_agent(script: &Path) -> Option<PathBuf> {
+    let a = script.parent()?.join("ark-vm-guest");
+    a.is_file().then_some(a)
 }
 
 /// sha256 of a file as lowercase hex.
@@ -436,6 +467,24 @@ mod tests {
         let p = write(&dir, "abc", b"abc");
         assert_eq!(sha256_file(&p).unwrap(), "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_builder_script_is_found_in_the_installed_share_dir() {
+        let root = tmp_dir("share-script");
+        let share = root.join("prefix/share/ark");
+        fs::create_dir_all(share.join("vm")).unwrap();
+        fs::create_dir_all(root.join("prefix/bin")).unwrap();
+        fs::write(share.join(SHIPPED_SCRIPT), "#!/bin/sh\n").unwrap();
+        fs::write(share.join("vm/ark-vm-guest"), "elf").unwrap();
+        let exe = root.join("prefix/bin/ark");
+        let got = build_script_in(None, None, Some(&exe), &[]);
+        assert_eq!(got.canonicalize().unwrap(), share.join(SHIPPED_SCRIPT).canonicalize().unwrap());
+        assert!(shipped_agent(&got).is_some(), "the shipped guest agent is passed as --agent");
+        // An explicit ARK_REPO_ROOT still wins; with nothing installed the error names the script.
+        assert_eq!(build_script_in(Some(root.clone()), None, Some(&exe), &[]), root.join(BUILD_SCRIPT));
+        assert_eq!(build_script_in(None, None, Some(&root.join("elsewhere/bin/ark")), &[]), PathBuf::from(BUILD_SCRIPT));
+        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]

@@ -699,6 +699,31 @@ ENTRYPOINT ["/ark", "daemon", "run"]
         }
     }
 
+    /// The image's default command must start (A9 refuses an unprotected 0.0.0.0 app server), and
+    /// the image must carry share/ — the two PoC-breaking gaps of the old Dockerfile.
+    #[test]
+    fn repo_dockerfile_starts_safely_and_ships_share() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let text = std::fs::read_to_string(root.join("Dockerfile")).unwrap();
+        let cmd = text.lines().find(|l| l.starts_with("CMD ")).expect("CMD");
+        assert!(!cmd.contains("0.0.0.0") && !cmd.contains("app.listen"), "default CMD must not bind publicly: {cmd}");
+        assert!(text.lines().any(|l| l.starts_with("COPY --from=builder /app/share/ /usr/share/ark/")), "share/ is copied into the image");
+        assert!(text.contains("ARK_SHARE_DIR=/usr/share/ark") && text.contains("packaging/vm/build-image.sh") && text.contains("packaging/sandbox-browser"));
+        assert!(!text.lines().filter(|l| !l.trim_start().starts_with('#')).any(|l| l.contains("ARK_APP_ENABLED")), "app server stays opt-in (it needs a token to start)");
+
+        // What the default does: nothing listens, so there is no refusal to hit.
+        let cfg = ark_app::AppConfig::default();
+        assert!(!cfg.enabled);
+
+        // The documented public config satisfies every layer; the old bare bind is refused.
+        let pub_toml: toml::Table = std::fs::read_to_string(root.join("packaging/docker/config.public.toml")).unwrap().parse().unwrap();
+        let app = ark_app::AppConfig::parse(pub_toml["app"].as_table().unwrap()).unwrap();
+        ark_app::exposure::check_start(&app).expect("config.public.toml must pass the app server's start-up policy");
+        let bare: toml::Table = "listen = \"0.0.0.0:8640\"\nenabled = true\ntoken = \"t\"".parse().unwrap();
+        assert!(ark_app::exposure::check_start(&ark_app::AppConfig::parse(&bare).unwrap()).is_err());
+        assert!(root.join("packaging/docker/compose.yml").is_file());
+    }
+
     #[test]
     fn fixture_findings_are_exact() {
         let f = lint("fixture.Dockerfile", BAD);

@@ -1,9 +1,6 @@
-# System-wide instance: one dedicated `ark` user, state in /var/lib/ark.
-#   sudo useradd --system --create-home --home-dir /var/lib/ark ark
-#   sudo install -m 644 arkd-system.service /etc/systemd/system/arkd.service
-#   sudo systemctl enable --now arkd
 [Unit]
 Description=ark agent daemon (system)
+Documentation=https://github.com/ark-agent/ark
 After=network-online.target
 Wants=network-online.target
 StartLimitIntervalSec=300
@@ -14,21 +11,24 @@ Type=notify
 NotifyAccess=main
 User=ark
 Group=ark
-StateDirectory=ark
-RuntimeDirectory=ark
+StateDirectory=ark ark/workspace
+StateDirectoryMode=0750
 Environment=ARK_HOME=/var/lib/ark
-Environment=XDG_RUNTIME_DIR=/run
-WorkingDirectory=/var/lib/ark
-ExecStart=/usr/local/bin/ark daemon run -w /var/lib/ark/workspace
+ExecStart=/usr/bin/ark daemon run -w /var/lib/ark/workspace
+WorkingDirectory=/var/lib/ark/workspace
 Restart=on-failure
-RestartSec=2s
+RestartSec=5s
+# SIGTERM to arkd first (it interrupts runs and saves state), then the rest of the group.
 KillMode=mixed
-TimeoutStopSec=20s
+TimeoutStopSec=30s
+# ark refuses sudo by policy; make that impossible rather than merely discouraged.
 NoNewPrivileges=yes
 RestrictSUIDSGID=yes
 LockPersonality=yes
 SystemCallArchitectures=native
 RestrictRealtime=yes
+UMask=0077
+# A system manager can apply the full sandbox (user units cannot without user namespaces).
 PrivateTmp=yes
 ProtectSystem=full
 ProtectKernelTunables=yes
@@ -36,7 +36,8 @@ ProtectKernelModules=yes
 ProtectKernelLogs=yes
 ProtectControlGroups=yes
 ProtectClock=yes
-UMask=0077
+# Not set on purpose: MemoryDenyWriteExecute (breaks Node/V8 bridges), ProtectHome and
+# RestrictNamespaces (the sandboxes ark may run need them).
 
 [Install]
 WantedBy=multi-user.target
