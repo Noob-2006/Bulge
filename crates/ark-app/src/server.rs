@@ -75,6 +75,20 @@ impl App {
         r.bearer().map(str::to_string).or(subproto).or(from_query)
     }
 
+    /// The request's verified workload identity when it is one `[app.exposure] node_identities`
+    /// allows (ent-059). Only the TLS terminator can set the header (it strips client copies),
+    /// so without native TLS there is none.
+    pub fn workload_identity(&self, r: &Request) -> Option<String> {
+        if !self.cfg.exposure.tls {
+            return None;
+        }
+        let id = r.header(ark_net::tlsd::H_CLIENT)?;
+        self.cfg.exposure.node_identities.iter().any(|p| match p.strip_suffix('*') {
+            Some(prefix) => id.starts_with(prefix),
+            None => p == id,
+        }).then(|| id.to_string())
+    }
+
     /// The real client address (trusted-proxy aware, ent-120).
     pub fn client_ip(&self, r: &Request) -> Option<std::net::IpAddr> {
         exposure::client_ip(&self.cfg.exposure, r.peer, r.header("x-forwarded-for"))
@@ -229,7 +243,9 @@ impl App {
             // Devices prove themselves with an Ed25519 key and operator-approved pairing.
             (_, p) if p.starts_with("/node") && self.cfg.nodes && r.is_upgrade() => {
                 let me = self.clone();
-                Response::upgrade(Box::new(move |s, head, rest| crate::node::session(&me, s, &head, rest)))
+                // ent-059: a verified, allowed workload identity (mTLS SVID) replaces the token.
+                let workload = self.workload_identity(&r);
+                Response::upgrade(Box::new(move |s, head, rest| crate::node::session(&me, s, &head, rest, workload)))
             }
             (_, p) if p.starts_with("/plugins/") => self.plugin_route(&r),
             // A2A authenticates its own peers (per-peer tokens) before anything else.
@@ -629,6 +645,20 @@ mod tests {
         assert!(body.contains("forbidden"), "a read-scoped certificate may not call admin methods: {body}");
         // No client certificate: the handshake itself fails.
         assert!(call(ark_net::http::NetConfig { client_cert: None, client_key: None, ..net }, "session.list").is_err());
+    }
+
+    /// ent-059: the node route only trusts a workload identity behind native TLS, and only one
+    /// listed in `node_identities`.
+    #[test]
+    fn workload_identity_needs_native_tls_and_the_allowlist() {
+        let h = [("x-ark-tls-client", "spiffe://example.org/ark/node/n1")];
+        let mut cfg = AppConfig { enabled: true, listen: "127.0.0.1:0".into(), ..AppConfig::default() };
+        cfg.exposure.node_identities = vec!["spiffe://example.org/ark/node/*".into()];
+        assert_eq!(app(cfg.clone()).workload_identity(&req("GET", "/node", &h, "")), None, "plain HTTP: a forged header");
+        cfg.exposure.tls = true;
+        assert_eq!(app(cfg.clone()).workload_identity(&req("GET", "/node", &h, "")).as_deref(), Some("spiffe://example.org/ark/node/n1"));
+        cfg.exposure.node_identities = vec!["spiffe://example.org/ark/ci/*".into()];
+        assert_eq!(app(cfg).workload_identity(&req("GET", "/node", &h, "")), None);
     }
 
     /// A11 / H7: the OpenClaw CVE-2026-25253 shape — an evil page with a stolen token in the

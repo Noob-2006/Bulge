@@ -71,6 +71,9 @@ pub struct ExposureConfig {
     /// its SPIFFE ID, another SAN URI, `dns:<name>` or `sha256:<fingerprint>` — exactly, or as a
     /// prefix with a trailing `*`. `scope` takes a token scope or an RBAC role.
     pub client_identities: Vec<ClientIdentity>,
+    /// Workload identities (SPIFFE IDs, exact or `prefix*`) that may connect as nodes without a
+    /// device token or operator approval (ent-059); needs `tls` with `client_auth`.
+    pub node_identities: Vec<String>,
     /// Requests per minute per client IP; 0 = off (refused when public).
     pub rate_limit_per_min: u32,
     /// With `behind_proxy`: the proxies whose `X-Forwarded-For` is believed (IPs or CIDRs).
@@ -100,7 +103,7 @@ impl ClientIdentity {
 
 impl Default for ExposureConfig {
     fn default() -> Self {
-        ExposureConfig { allow_public: false, behind_proxy: false, tls: false, cert: None, key: None, client_auth: "off".into(), client_ca: None, client_identities: vec![], rate_limit_per_min: 1200, trusted_proxies: vec![] }
+        ExposureConfig { allow_public: false, behind_proxy: false, tls: false, cert: None, key: None, client_auth: "off".into(), client_ca: None, client_identities: vec![], node_identities: vec![], rate_limit_per_min: 1200, trusted_proxies: vec![] }
     }
 }
 

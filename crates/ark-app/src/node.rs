@@ -62,6 +62,11 @@ pub struct Paired {
     /// Plugin-provided commands' `{description, dangerous, params}` as the device declared them.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub meta: BTreeMap<String, Value>,
+    /// Workload identity (ent-059): the SPIFFE ID (or other verified certificate identity) this
+    /// device is bound to. Once set, it replaces the device token: a connection must present
+    /// the same verified identity through mTLS.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workload_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -181,7 +186,7 @@ fn rpc_ok(id: &Value, result: Value) -> String {
 }
 
 /// Server side of one device connection.
-pub fn session(_app: &Arc<App>, s: TcpStream, head: &str, rest: Vec<u8>) {
+pub fn session(_app: &Arc<App>, s: TcpStream, head: &str, rest: Vec<u8>, workload: Option<String>) {
     let _ = s.set_read_timeout(Some(Duration::from_millis(100)));
     let Ok(ws) = WebSocket::accept(s, head, rest) else { return };
     let mut ws = ws;
@@ -213,7 +218,7 @@ pub fn session(_app: &Arc<App>, s: TcpStream, head: &str, rest: Vec<u8>) {
         let rid = &v["id"];
         let me_now = me.clone();
         match (v["method"].as_str().unwrap_or(""), me_now.as_deref()) {
-            ("node.connect", None) => match connect(p, &nonce, &tx) {
+            ("node.connect", None) => match connect(p, &nonce, &tx, workload.as_deref()) {
                 Ok(Conn::Live(id)) => {
                     let _ = ws.send_text(&rpc_ok(rid, json!({"connected": true, "id": id})));
                     let n = reg().lock().unwrap().queue.get(&id).map_or(0, Vec::len);
@@ -303,12 +308,15 @@ enum Conn {
 fn issue_token(r: &mut Registry, id: &str, name: &str, platform: &str, pk: &str, commands: Vec<String>) -> String {
     let token = ark_net::crypto::random_token(32);
     let salt = ark_net::crypto::random_token(12);
-    r.paired.insert(id.into(), Paired { name: name.into(), public_key: pk.into(), token_hash: token_hash(&salt, &token), salt, approved_at: now(), platform: platform.into(), commands, token_rotated_at: 0, meta: BTreeMap::new() });
+    r.paired.insert(id.into(), Paired { name: name.into(), public_key: pk.into(), token_hash: token_hash(&salt, &token), salt, approved_at: now(), platform: platform.into(), commands, token_rotated_at: 0, meta: BTreeMap::new(), workload_id: None });
     save(r);
     token
 }
 
-fn connect(p: &Value, nonce: &str, tx: &mpsc::Sender<Value>) -> Result<Conn, String> {
+/// `workload`: the connection's verified, operator-allowed workload identity (ent-059; a SPIFFE
+/// ID from the mTLS client certificate), `None` without one. It stands in for the device token
+/// and for operator approval: the mesh CA already attested who this is.
+fn connect(p: &Value, nonce: &str, tx: &mpsc::Sender<Value>, workload: Option<&str>) -> Result<Conn, String> {
     let id = p["id"].as_str().filter(|s| !s.is_empty() && s.len() <= 64).ok_or("missing node id")?.to_string();
     let pk_hex = p["publicKey"].as_str().ok_or("missing publicKey")?;
     let pk = ark_net::crypto::hex_decode(pk_hex).filter(|k| k.len() == 32).ok_or("publicKey must be 32-byte hex (Ed25519)")?;
@@ -323,9 +331,23 @@ fn connect(p: &Value, nonce: &str, tx: &mpsc::Sender<Value>) -> Result<Conn, Str
     let known = r.paired.get(&id).cloned();
     match known {
         Some(d) if d.public_key == pk_hex => {
-            let tok = p["deviceToken"].as_str().unwrap_or("");
-            if !ark_net::crypto::ct_eq(token_hash(&d.salt, tok).as_bytes(), d.token_hash.as_bytes()) {
-                return Err("bad device token; re-pair this node".into());
+            match (&d.workload_id, workload) {
+                // Bound to a workload identity: only that verified identity gets in.
+                (Some(bound), Some(w)) if bound == w => {}
+                (Some(bound), _) => return Err(format!("this node is bound to workload identity {bound}; connect through mTLS with that SVID")),
+                // Not bound yet: an allowed identity replaces the token from now on.
+                (None, Some(w)) => {
+                    if let Some(e) = r.paired.get_mut(&id) {
+                        e.workload_id = Some(w.to_string());
+                    }
+                    save(&r);
+                }
+                (None, None) => {
+                    let tok = p["deviceToken"].as_str().unwrap_or("");
+                    if !ark_net::crypto::ct_eq(token_hash(&d.salt, tok).as_bytes(), d.token_hash.as_bytes()) {
+                        return Err("bad device token; re-pair this node".into());
+                    }
+                }
             }
             let commands = strs("commands");
             let meta = command_meta(&p["commandMeta"], &commands);
@@ -342,6 +364,24 @@ fn connect(p: &Value, nonce: &str, tx: &mpsc::Sender<Value>) -> Result<Conn, Str
             Ok(Conn::Live(id))
         }
         Some(_) => Err("this node id is paired with a different key".into()),
+        None if workload.is_some() => {
+            // A new device with an allowed workload identity pairs itself (no code to approve).
+            let w = workload.unwrap_or_default().to_string();
+            if r.paired.values().any(|x| x.workload_id.as_deref() == Some(w.as_str())) {
+                return Err(format!("workload identity {w} is already bound to another node id"));
+            }
+            let commands = strs("commands");
+            let _ = issue_token(&mut r, &id, &name, &platform, pk_hex, commands.clone());
+            let meta = command_meta(&p["commandMeta"], &commands);
+            if let Some(e) = r.paired.get_mut(&id) {
+                e.workload_id = Some(w.clone());
+                e.meta = meta.clone();
+            }
+            save(&r);
+            eprintln!("arkd: node `{name}` ({id}, {platform}) paired by workload identity {w}");
+            r.live.insert(id.clone(), Live { name, platform, caps: strs("caps"), commands, meta, tx: tx.clone(), since: now() });
+            Ok(Conn::Live(id))
+        }
         None => {
             if let Some(bt) = p["bootstrapToken"].as_str().filter(|t| !t.is_empty()) {
                 let t = now_ms();
@@ -1739,6 +1779,39 @@ pub fn run_host(c: &HostConn, policy: &HostPolicy) -> Result<(), String> {
 mod tests {
     use super::*;
 
+    /// ent-059: a verified SPIFFE ID pairs a new node without a code, then replaces its device
+    /// token; another identity (or none) cannot take the node over.
+    #[test]
+    fn spiffe_workload_identity_replaces_the_node_token() {
+        use ring::signature::KeyPair;
+        let rng = ring::rand::SystemRandom::new();
+        let kp = ring::signature::Ed25519KeyPair::from_pkcs8(ring::signature::Ed25519KeyPair::generate_pkcs8(&rng).unwrap().as_ref()).unwrap();
+        let id = format!("wl-{}", ark_net::crypto::random_token(6));
+        let hello = |nonce: &str, token: &str| {
+            json!({"id": id, "name": "build-agent", "platform": "linux", "commands": [], "publicKey": ark_net::crypto::hex(kp.public_key().as_ref()), "signature": ark_net::crypto::hex(kp.sign(signed_message(&id, nonce).as_bytes()).as_ref()), "deviceToken": token})
+        };
+        let (tx, _rx) = mpsc::channel();
+        let svid = "spiffe://example.org/ark/node/build-1";
+        // New device + allowed identity: paired and live at once, no pairing code.
+        match connect(&hello("n1", ""), "n1", &tx, Some(svid)).unwrap() {
+            Conn::Live(got) => assert_eq!(got, id),
+            _ => panic!("expected a live node"),
+        }
+        assert_eq!(reg().lock().unwrap().paired[&id].workload_id.as_deref(), Some(svid));
+        reg().lock().unwrap().live.remove(&id);
+        // Reconnect with the same SVID and no token: accepted.
+        assert!(matches!(connect(&hello("n2", ""), "n2", &tx, Some(svid)), Ok(Conn::Live(_))));
+        reg().lock().unwrap().live.remove(&id);
+        // Without the SVID, or with another one: refused, even with a guessed token.
+        assert!(connect(&hello("n3", "guess"), "n3", &tx, None).err().unwrap_or_default().contains("bound to workload identity"));
+        assert!(connect(&hello("n4", ""), "n4", &tx, Some("spiffe://example.org/ark/node/other")).is_err());
+        // A second node id cannot reuse a bound identity.
+        let mut other = hello("n5", "");
+        other["id"] = json!(format!("{id}-b"));
+        assert!(connect(&other, "n5", &tx, Some(svid)).is_err());
+        reg().lock().unwrap().paired.remove(&id);
+    }
+
     #[test]
     fn setup_code_matches_openclaw_format() {
         let sc = SetupCode { url: "wss://gw.example:8640/node".into(), bootstrap_token: "tok".into(), expires_at_ms: Some(2_000), tls_fingerprint: Some("AB:".repeat(31) + "AB") };
@@ -1760,7 +1833,7 @@ mod tests {
     fn queue_ttl_dedup_and_command_filter() {
         let mut r = Registry::default();
         assert!(enqueue(&mut r, "n", "device.info", json!({}), 1000, 0).is_err(), "unpaired");
-        r.paired.insert("n".into(), Paired { name: "n".into(), public_key: String::new(), token_hash: String::new(), salt: String::new(), approved_at: 0, platform: String::new(), commands: vec!["device.info".into(), "photos.latest".into()], token_rotated_at: 0, meta: BTreeMap::new() });
+        r.paired.insert("n".into(), Paired { name: "n".into(), public_key: String::new(), token_hash: String::new(), salt: String::new(), approved_at: 0, platform: String::new(), commands: vec!["device.info".into(), "photos.latest".into()], token_rotated_at: 0, meta: BTreeMap::new(), workload_id: None });
         assert!(enqueue(&mut r, "n", "system.run", json!({}), 1000, 0).unwrap_err().contains("did not offer"));
         let a = enqueue(&mut r, "n", "device.info", json!({}), 5_000, 0).unwrap();
         let b = enqueue(&mut r, "n", "photos.latest", json!({"limit": 1}), 60_000, 0).unwrap();

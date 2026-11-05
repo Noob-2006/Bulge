@@ -125,6 +125,9 @@ impl AppConfig {
             }
             tok.scope = norm;
         }
+        if c.exposure.node_identities.iter().any(|n| n.trim().is_empty() || n.trim() == "*") {
+            return Err("[app.exposure] node_identities: every entry must name an identity (a bare `*` would let any certificate pair as a node)".into());
+        }
         for (i, ci) in c.exposure.client_identities.iter().enumerate() {
             if ci.id.trim().is_empty() || ci.id.trim() == "*" {
                 return Err(format!("[app.exposure] client_identities[{i}]: `id` must name a certificate identity (a bare `*` would admit every certificate)"));
