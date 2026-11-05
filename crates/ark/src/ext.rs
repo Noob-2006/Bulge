@@ -742,6 +742,20 @@ pub fn forget_routes(router: &Router, channel: &str, who: &[&str]) -> Vec<ark_ch
     router.routes().into_iter().filter(|r| r.key.channel == channel && who.iter().any(|w| r.key.sender.as_deref() == Some(*w) || r.key.chat == *w || r.key.chat.starts_with(&format!("{w}:thread:")))).collect()
 }
 
+/// The native chat menu: a handful of everyday commands (interface reduction; the rest is
+/// behind `/help`).
+pub fn short_menu() -> Vec<(String, String)> {
+    const SHORT: [(&str, &str); 6] = [
+        ("status", "Current status"),
+        ("stop", "Interrupt the running task"),
+        ("approve", "Approve a pending action"),
+        ("new", "Start a fresh conversation"),
+        ("help", "All commands and help"),
+        ("sethome", "Make this chat the home chat"),
+    ];
+    SHORT.iter().map(|(n, d)| (n.to_string(), crate::slash::find(n).map(|x| x.help.to_string()).filter(|h| !h.is_empty()).unwrap_or_else(|| d.to_string()))).collect()
+}
+
 pub fn spawn_channel_loops(k: Kernel, ext: &Arc<Ext>, ws: PathBuf, cancel: Cancel) -> Vec<std::thread::JoinHandle<()>> {
     if ext.channels.is_empty() {
         return vec![];
@@ -760,11 +774,11 @@ pub fn spawn_channel_loops(k: Kernel, ext: &Arc<Ext>, ws: PathBuf, cancel: Cance
         })
         .collect();
     let stream = ext.channels.iter().filter(|(_, (ch, c))| c.stream && ch.caps().streaming != ark_channel::Streaming::None).map(|(n, _)| n.clone()).collect();
-    // Native command menus offer the full slash set (channels opt in with `commands = true`).
-    let mut menu: Vec<(String, String)> = ["new", "stop", "status", "help", "forget"].iter().map(|n| (n.to_string(), crate::slash::find(n).map(|d| d.help.to_string()).unwrap_or_else(|| "Delete what you sent here".into()))).collect();
-    menu.extend(crate::slash::defs().filter(|d| !d.local && !["new", "stop", "status", "help"].contains(&d.name)).map(|d| (d.name.to_string(), d.help.to_string())));
-    menu.extend(ext.commands.iter().filter(|c| !c.name.contains(':')).map(|c| (c.name.clone(), c.description.clone())));
-    menu.extend(ext.plugin_commands());
+    // Native command menus (Telegram / Discord) show only the few everyday commands;
+    // `/help` expands the rest. Full list stays reachable by typing any slash command.
+    let menu = short_menu();
+    ark_channel::outfile::load_homes(&dir.join("home.json"));
+    ark_channel::outfile::add_root(&ws);
     ark_channel::set_menu(menu);
     let pairing = Arc::new(Pairing::open(dir.join("pairing.json")));
     let router = Arc::new(Router::open(dir.join("routes.json"), cfgs).with_pairing(pairing));
@@ -788,6 +802,9 @@ pub fn spawn_channel_loops(k: Kernel, ext: &Arc<Ext>, ws: PathBuf, cancel: Cance
             Ok(())
         })),
     };
+    // The `message` tool answers in the chat the calling session came from.
+    let tool_router = router.clone();
+    ark_channel::outfile::set_origin(Some(Arc::new(move |session: &str| tool_router.routes().into_iter().find(|r| r.session == session).map(|r| (r.key.channel, r.key.chat)))));
     ext.channels.values().for_each(|(ch, _)| ch.wire(&wiring));
     let hub = Arc::new(Hub { k, router, deliver: Arc::new(Deliverer::new(Some(dir.join("outbox.json")))), ws, commands: Arc::new(ext.commands.clone()), plugins: ext.plugins.clone(), stream, ext: ext.clone() });
     crate::agentcmds::bindings::set_router(hub.router.clone());
@@ -1209,6 +1226,19 @@ fn leading_command(text: &str) -> Option<String> {
     (!name.is_empty()).then(|| name.to_ascii_lowercase())
 }
 
+/// `/sethome`: make this chat the channel's home (where cron results and unaddressed
+/// `message` / `channel_send` calls go). Only the owner (an `approvals.forward.approvers`
+/// entry for this channel) may; fails closed without one.
+fn sethome(k: &Kernel, m: &Inbound) -> String {
+    if !ark_kernel::secgate::channel_operator(&k.cfg.approvals, &m.channel, &m.sender, &m.sender_name) {
+        return "Only the owner can set the home chat. Set one with `ark setup --owner <your id>` (or approvals.forward.approvers).".into();
+    }
+    match ark_channel::outfile::set_home(&m.channel, &m.chat) {
+        Ok(()) => format!("Home set: scheduled results and unaddressed messages on {} now go to this chat ({}).", m.channel, m.chat),
+        Err(e) => format!("error: {e}"),
+    }
+}
+
 /// What to reply instead of starting a new turn while the emergency stop is engaged
 /// (`ark pause`, `<data>/ESTOP`). `None` = not paused, or a command that must keep
 /// working: `/resume`, `/status`, `/help`, `/pause`.
@@ -1352,6 +1382,9 @@ fn handle_inbound(hub: &Arc<Hub>, ch: &Arc<dyn Channel>, m: Inbound) {
             // `ark pause` (ESTOP): no new channel turns — and no session — until `/resume`.
             if let Some(p) = estop_blocked(k, &text) {
                 return reply(hub, ch, &to, &p);
+            }
+            if leading_command(&text).as_deref() == Some("sethome") {
+                return reply(hub, ch, &to, &sethome(k, &m));
             }
             // Security commands (`/approve /deny /yolo /approvals /elevated /exec /pause
             // /resume`) authorize by `channel` + sender, so the chat path must pass `who`.
@@ -1552,6 +1585,58 @@ fn slash_ctx<'a>(hub: &'a Arc<Hub>, ch: &Arc<dyn Channel>, m: &Inbound, to: &Rep
     }
 }
 
+/// Compact progress for long chat tasks (srv-009): nothing for short ones; once a task has run
+/// past `first`, at most one line per `every` while new tools keep being used, at most `MAX`
+/// per task. Pure (the clock is passed in) so the pacing is unit-testable.
+pub struct Pulse {
+    start: std::time::Instant,
+    first: Duration,
+    every: Duration,
+    last: Option<std::time::Instant>,
+    tools: Vec<(String, u32)>,
+    fresh: bool,
+    sent: u32,
+}
+
+impl Pulse {
+    const MAX: u32 = 12;
+    pub fn new(first: Duration, every: Duration) -> Pulse {
+        Pulse { start: std::time::Instant::now(), first, every, last: None, tools: vec![], fresh: false, sent: 0 }
+    }
+    /// 20 s before the first line, then every 45 s; `ARK_CHAT_PROGRESS_SECS=first,every` overrides.
+    pub fn from_env() -> Pulse {
+        let (f, e) = std::env::var("ARK_CHAT_PROGRESS_SECS")
+            .ok()
+            .and_then(|v| v.split_once(',').and_then(|(a, b)| Some((a.trim().parse::<u64>().ok()?, b.trim().parse::<u64>().ok()?))))
+            .unwrap_or((20, 45));
+        Pulse::new(Duration::from_secs(f), Duration::from_secs(e))
+    }
+    pub fn note(&mut self, tool: &str) {
+        self.fresh = true;
+        match self.tools.iter_mut().find(|(n, _)| n == tool) {
+            Some((_, c)) => *c += 1,
+            None => self.tools.push((tool.to_string(), 1)),
+        }
+    }
+    /// The line to send now, if one is due.
+    pub fn due(&mut self, now: std::time::Instant) -> Option<String> {
+        let ran = now.saturating_duration_since(self.start);
+        let gap_ok = self.last.is_none_or(|l| now.saturating_duration_since(l) >= self.every);
+        if !self.fresh || self.sent >= Self::MAX || ran < self.first || !gap_ok {
+            return None;
+        }
+        self.fresh = false;
+        self.last = Some(now);
+        self.sent += 1;
+        let secs = ran.as_secs();
+        let mut top = self.tools.clone();
+        top.sort_by_key(|t| std::cmp::Reverse(t.1));
+        let used = top.iter().take(4).map(|(n, c)| if *c > 1 { format!("{n}×{c}") } else { n.clone() }).collect::<Vec<_>>().join(", ");
+        let more = if top.len() > 4 { format!(" +{}", top.len() - 4) } else { String::new() };
+        Some(format!("{} {}m{:02}s · {}{}{more}", crate::setup::t("⏳ 仍在處理", "⏳ Still working"), secs / 60, secs % 60, crate::setup::t("用到：", "used: "), used))
+    }
+}
+
 /// Tool progress lines for `/verbose new|all|verbose` (Hermes tool progress display).
 fn progress_line(level: &str, seen: &mut HashSet<String>, name: &str, input: &Value) -> Option<String> {
     match level {
@@ -1650,16 +1735,27 @@ fn spawn_run(hub: &Arc<Hub>, ch: &Arc<dyn Channel>, sid: String, to: ReplyTo) {
             })
         });
         let prefs = crate::slash::display_get(&hub.k.paths, &sid);
-        let progress = prefs["verbose"].as_str().filter(|l| *l != "off").map(|level| {
-            let (rx, d, c, base, s, level) = (hub.k.bus.subscribe(), done.clone(), ch.clone(), base_out(&to), sid.clone(), level.to_string());
+        // Default: a compact heartbeat for long tasks (`/verbose off` silences it, `/verbose
+        // new|all|verbose` shows per-tool lines instead).
+        let level = prefs["verbose"].as_str().unwrap_or("auto").to_string();
+        let progress = (level != "off").then(|| {
+            let (rx, d, c, base, s) = (hub.k.bus.subscribe(), done.clone(), ch.clone(), base_out(&to), sid.clone());
             std::thread::spawn(move || {
                 let mut seen = HashSet::new();
+                let mut pulse = Pulse::from_env();
                 while !d.load(std::sync::atomic::Ordering::SeqCst) {
                     if let Ok(ark_kernel::kernel::BusMsg::Event { session, event }) = rx.recv_timeout(Duration::from_millis(200)) {
                         if let (true, ark_kernel::event::EventKind::ToolCalled { name, input, .. }) = (session == s, &event.kind) {
-                            if let Some(line) = progress_line(&level, &mut seen, name, input) {
+                            if level == "auto" {
+                                pulse.note(name);
+                            } else if let Some(line) = progress_line(&level, &mut seen, name, input) {
                                 let _ = c.send(&Outbound { text: line, ..base.clone() });
                             }
+                        }
+                    }
+                    if level == "auto" {
+                        if let Some(text) = pulse.due(std::time::Instant::now()) {
+                            let _ = c.send(&Outbound { text, silent: true, ..base.clone() });
                         }
                     }
                 }
@@ -2634,5 +2730,62 @@ command = "/bin/cat"
             std::thread::sleep(Duration::from_millis(25));
         }
         assert!(user_text(&kit, &parent).contains("anyone there?"), "after expiry the chat handles the message: {:?}", ch.all());
+    }
+
+    #[test]
+    fn native_menu_is_the_short_list_and_help_stays_the_way_to_the_rest() {
+        let names: Vec<String> = short_menu().into_iter().map(|(n, _)| n).collect();
+        assert_eq!(names, ["status", "stop", "approve", "new", "help", "sethome"]);
+        assert!(short_menu().iter().all(|(_, d)| !d.trim().is_empty()));
+        assert!(names.len() <= 8 && crate::slash::defs().count() > 30, "the full table still exists behind /help");
+        assert!(ark_channel::router::HELP.contains("/help") && ark_channel::router::HELP.contains("/approve"));
+        // Both platforms accept every entry.
+        let menu = short_menu();
+        assert_eq!(ark_channel::telegram_menu(&menu).len(), menu.len());
+        assert_eq!(ark_channel::discord_menu(&menu).len(), menu.len());
+    }
+
+    #[test]
+    fn pulse_is_silent_for_short_tasks_and_paced_for_long_ones() {
+        let t0 = std::time::Instant::now();
+        let mut p = Pulse::new(Duration::from_secs(20), Duration::from_secs(45));
+        p.note("bash");
+        assert!(p.due(t0 + Duration::from_secs(5)).is_none(), "short task: no chatter");
+        let first = p.due(t0 + Duration::from_secs(21)).expect("first line after the threshold");
+        assert!(first.contains("bash") && first.contains("0m2"), "{first}");
+        p.note("read_file");
+        p.note("bash");
+        assert!(p.due(t0 + Duration::from_secs(40)).is_none(), "paced");
+        let second = p.due(t0 + Duration::from_secs(70)).expect("second line");
+        assert!(second.contains("bash×2") && second.contains("read_file"), "{second}");
+        assert!(p.due(t0 + Duration::from_secs(300)).is_none(), "nothing new, nothing sent");
+        // Capped per task.
+        let mut q = Pulse::new(Duration::ZERO, Duration::ZERO);
+        let mut n = 0;
+        for i in 0..40 {
+            q.note("t");
+            n += q.due(t0 + Duration::from_secs(1 + i)).is_some() as u32;
+        }
+        assert_eq!(n, Pulse::MAX);
+    }
+
+    #[test]
+    fn sethome_is_for_the_owner_only_and_changes_where_unaddressed_messages_go() {
+        let kit = crate::testkit::kit_with(|c| {
+            c.approvals.forward.approvers.insert("tgh".into(), vec!["owner1".into()]);
+        });
+        let d = ark_core::tmp::scratch("ark-sethome");
+        ark_channel::outfile::load_homes(&d.join("home.json"));
+        let mk = |sender: &str, chat: &str| Inbound { channel: "tgh".into(), chat: chat.into(), sender: sender.into(), text: "/sethome".into(), ..Default::default() };
+        let denied = sethome(&kit.k, &mk("stranger", "55"));
+        assert!(denied.contains("Only the owner"), "{denied}");
+        assert_eq!(ark_channel::outfile::home("tgh"), None);
+        let ok = sethome(&kit.k, &mk("owner1", "-100200"));
+        assert!(ok.contains("Home set") && ok.contains("-100200"), "{ok}");
+        assert_eq!(ark_channel::outfile::effective_default("tgh", Some(&"cfg".to_string())).as_deref(), Some("-100200"));
+        // Scheduled deliveries (`deliver = "tgh"`) use it too.
+        assert!(std::fs::read_to_string(d.join("home.json")).unwrap().contains("-100200"), "persisted");
+        assert_eq!(leading_command("/sethome@mybot now").as_deref(), Some("sethome"));
+        let _ = std::fs::remove_dir_all(&d);
     }
 }
