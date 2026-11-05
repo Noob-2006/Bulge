@@ -56,11 +56,21 @@ pub fn system_segments(cfg: &Config, paths: &Paths, workspace: &Path, specs: &[T
     let tv = split_tools(specs, cfg);
     let mut segs = Vec::new();
     let mut identity = IDENTITY.to_string();
+    // L0 professional core: part of every identity (BATCH-next §7-2, crate::roles).
+    if let Some(core) = crate::roles::core_text(cfg) {
+        identity.push_str("\n\n");
+        identity.push_str(&core);
+    }
     if !cfg.identity.trim().is_empty() {
         identity.push_str("\n\n");
         identity.push_str(cfg.identity.trim());
     }
     segs.push(SystemSegment { id: "identity".into(), text: identity, cache: false });
+    // The occupation (`[role] active`): L1 + L2 as their own segment, so `/role` can swap it
+    // and `/context` can count it.
+    if let Some(seg) = crate::roles::active_segment(cfg) {
+        segs.push(seg);
+    }
 
     if !tv.unpinned.is_empty() {
         let mut t = String::from("# Tool index (tool_describe several at once, then tool_call)\n");

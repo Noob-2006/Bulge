@@ -444,7 +444,9 @@ pub struct AgentDef {
     pub tools_deny: Vec<String>,
     /// Routing default when no binding matches (at most one agent).
     pub default: bool,
-    /// Role seed this agent was created from (coordinator, researcher, writer, reviewer).
+    /// Role: a team seed this agent was created from (coordinator, researcher, writer,
+    /// reviewer — it seeded `identity`), or an occupation (a preset id or role-pack slug from
+    /// `share/roles`, see crate::roles) assembled into the agent's `role` segment.
     pub role: String,
 }
 
@@ -526,6 +528,8 @@ pub struct Resolved {
     pub identity: Option<String>,
     pub tools_allow: Option<Vec<String>>,
     pub tools_deny: Vec<String>,
+    /// Occupation (preset id or pack slug) when `role` is not a team seed.
+    pub role: Option<String>,
 }
 
 pub fn resolve(cfg: &Config, paths: &Paths, id: &str) -> Option<Resolved> {
@@ -543,6 +547,7 @@ pub fn resolve(cfg: &Config, paths: &Paths, id: &str) -> Option<Resolved> {
         identity,
         tools_allow: Some(a.tools_allow.clone()).filter(|t| !t.is_empty()),
         tools_deny: a.tools_deny.clone(),
+        role: Some(a.role.trim().to_string()).filter(|r| !r.is_empty() && !crate::roles::TEAM_SEEDS.contains(&r.as_str())),
     })
 }
 
@@ -881,15 +886,30 @@ impl Runtime {
         let a = resolve(&self.cfg, &self.paths, &id).ok_or_else(|| KernelError::Invalid(format!("unknown agent `{id}`")))?;
         let ws = a.workspace.clone().filter(|w| w.is_dir()).unwrap_or_else(|| workspace.to_path_buf());
         let model = model.map(str::to_string).or(a.model.clone());
+        // The agent's occupation replaces the config's `role` segment; its preset's tool profile
+        // narrows the tools unless the agent lists its own. Resolved first: an unknown role
+        // fails before any session exists.
+        let role = match a.role.as_deref() {
+            Some(r) => Some(crate::roles::resolve(&self.cfg, &crate::roles::Catalog::for_config(&self.cfg), r).map_err(KernelError::Invalid)?),
+            None => None,
+        };
         let sid = self.create_session(&ws, model.as_deref(), parent, title)?;
         let u = user.and_then(|u| get_user(&self.paths, u));
-        if id == MAIN && u.is_none() && a.identity.is_none() && a.tools_allow.is_none() && a.tools_deny.is_empty() {
+        if id == MAIN && u.is_none() && a.identity.is_none() && a.tools_allow.is_none() && a.tools_deny.is_empty() && a.role.is_none() {
             return Ok(sid);
         }
         let mut log = self.store.open(&sid)?;
         self.append(&mut log, EventKind::Agent { agent: id.clone(), user: u.as_ref().map(|u| u.id.clone()) })?;
-        if a.tools_allow.is_some() || !a.tools_deny.is_empty() {
-            self.append(&mut log, EventKind::Tools { allow: a.tools_allow.as_ref().map(|t| crate::subagents::expand_tools(t)), deny: a.tools_deny.clone() })?;
+        let allow = a.tools_allow.clone().or_else(|| role.as_ref().and_then(|r| r.tool_profile()).and_then(|p| ark_security::toolpolicy::profile(p).flatten()));
+        if allow.is_some() || !a.tools_deny.is_empty() {
+            self.append(&mut log, EventKind::Tools { allow: allow.as_ref().map(|t| crate::subagents::expand_tools(t)), deny: a.tools_deny.clone() })?;
+        }
+        if let Some(r) = &role {
+            let mut v = crate::projection::project(log.events());
+            v.system.retain(|s| s.id != crate::roles::SEGMENT_ID);
+            let at = v.system.iter().position(|s| s.id == "identity").map(|i| i + 1).unwrap_or(0);
+            v.system.insert(at, r.segment());
+            self.append(&mut log, EventKind::System { segments: v.system })?;
         }
         let mut extra = Vec::new();
         if let Some(i) = &a.identity {
