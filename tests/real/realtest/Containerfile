@@ -1,0 +1,16 @@
+# Real-environment test image (gen1-304 / gen1-308): one image, two roles.
+#  * Bot Desktop: TigerVNC Xvnc + a component-wise Xfce (what `ark screen start` launches),
+#    xdotool + ImageMagick `import` + AT-SPI (gdbus) for computer_use, zenity as a target app.
+#  * sshd: the remote host for the `ssh` exec backend.
+# Ubuntu 26.04 so the host-built test binaries (glibc 2.43) run inside unchanged.
+# Built and removed by tests/real/realtest.sh as localhost/ark-test-realtest:latest.
+FROM docker.io/library/ubuntu:26.04
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      tigervnc-standalone-server xfce4-panel xfwm4 xfdesktop4 xfce4-settings xfce4-terminal \
+      dbus-x11 dbus-daemon x11-xserver-utils x11-utils x11-xkb-utils xauth fonts-dejavu-core \
+      xdotool imagemagick at-spi2-core libglib2.0-bin zenity \
+      openssh-server bash procps tar coreutils ca-certificates \
+ && rm -rf /var/lib/apt/lists/* \
+ && mkdir -p /run/sshd \
+ && sed -i 's/^#\?PermitRootLogin.*/PermitRootLogin prohibit-password/' /etc/ssh/sshd_config

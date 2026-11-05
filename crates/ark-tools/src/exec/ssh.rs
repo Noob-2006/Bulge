@@ -132,12 +132,20 @@ the connection is retried on the next command",
     )
 }
 
+/// The remote command line. ssh joins its trailing arguments with spaces and hands the result
+/// to the remote login shell, so `bash -c <script>` as separate argv words loses the quoting
+/// (`printf 'X=%s\n' "$HOME"` arrived as `printf X=%s\n $HOME` → "printf: usage"): the script
+/// must travel as one shell-quoted word (found by the real-sshd test, gen1-308).
+pub(crate) fn remote_command(flag: &str, script: &str) -> String {
+    format!("bash {flag} {}", super::sh_quote(script))
+}
+
 /// One probe command over a fresh/multiplexed connection (no sync, no env).
 fn probe(cfg: &SshConfig, control: &str, script: &str, timeout: Duration) -> Result<(ExitInfo, Vec<u8>), String> {
     let mut cmd = Command::new("ssh");
     cmd.args(ssh_opts(cfg, control));
     cmd.arg(target(cfg));
-    cmd.arg("bash").arg("-c").arg(script);
+    cmd.arg(remote_command("-c", script));
     let child = spawn_command(cmd, &ExecRequest::default(), None).map_err(|e| format!("cannot start `ssh`: {e}"))?;
     super::drain(child, timeout)
 }
@@ -279,8 +287,7 @@ impl ExecBackend for SshBackend {
         let mut cmd = Command::new("ssh");
         cmd.args(self.args());
         cmd.arg(target(&self.cfg));
-        cmd.arg("bash").arg(if req.login { "-lc" } else { "-c" });
-        cmd.arg(script);
+        cmd.arg(remote_command(if req.login { "-lc" } else { "-c" }, &script));
         spawn_command(cmd, req, None)
     }
     fn map_path(&self, host: &Path) -> String {
@@ -404,7 +411,7 @@ mod tests {
         let s = String::from_utf8_lossy(&out);
         assert_eq!(st.code, Some(4), "{s}");
         assert!(s.contains("from host") && s.contains("oops"), "{s}");
-        assert!(read().contains("bash -c mkdir -p"), "cwd mapped and cd'd: {}", read());
+        assert!(read().contains("bash -c 'mkdir -p"), "cwd mapped and cd'd, script sent as one quoted word: {}", read());
 
         // pull: what the command wrote comes back to the host workspace.
         b.after_exec().unwrap();

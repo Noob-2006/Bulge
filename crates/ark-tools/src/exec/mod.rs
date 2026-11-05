@@ -653,6 +653,9 @@ pub fn sh_quote(s: &str) -> String {
 }
 
 #[cfg(test)]
+mod tests_real;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
