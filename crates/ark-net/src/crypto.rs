@@ -15,6 +15,40 @@ pub fn sha256(data: &[u8]) -> [u8; 32] {
     out
 }
 
+/// Incremental sha256 for inputs too large to hold in memory (VM images, browser archives).
+pub struct Sha256Stream(digest::Context);
+
+impl Default for Sha256Stream {
+    fn default() -> Self {
+        Sha256Stream(digest::Context::new(&digest::SHA256))
+    }
+}
+
+impl Sha256Stream {
+    pub fn update(&mut self, data: &[u8]) {
+        self.0.update(data);
+    }
+    /// Lowercase hex digest.
+    pub fn finish_hex(self) -> String {
+        hex(self.0.finish().as_ref())
+    }
+}
+
+/// sha256 of a file, streamed, as lowercase hex.
+pub fn sha256_file_hex(p: &std::path::Path) -> std::io::Result<String> {
+    use std::io::Read;
+    let mut f = std::fs::File::open(p)?;
+    let mut h = Sha256Stream::default();
+    let mut buf = vec![0u8; 1 << 20];
+    loop {
+        let n = f.read(&mut buf)?;
+        if n == 0 {
+            return Ok(h.finish_hex());
+        }
+        h.update(&buf[..n]);
+    }
+}
+
 /// Only for protocols that mandate it (WebSocket handshake, WeCom/Feishu legacy signatures).
 pub fn sha1(data: &[u8]) -> [u8; 20] {
     let d = digest::digest(&digest::SHA1_FOR_LEGACY_USE_ONLY, data);

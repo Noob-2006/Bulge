@@ -331,6 +331,28 @@ VM 內沒有金鑰、沒有 daemon socket；指令透過 `ark-vm` 的協定進�
 - VM pool 的閒置回收／session teardown／broker 安裝有實作，但目前主要由 `ark sandbox vm …` 與 `ark exec` 路徑驅動，daemon 的自動回收尚未接上。
 - 沒有 `/dev/kvm` 的機器會退回 bwrap 並警告；`ark doctor` 不會顯示隔離等級，請看 `ark sandbox explain`。
 
+### 5.5 桌面 VM（給 computer use 用的圖形虛擬機）
+
+和上面無畫面的工具隔離 microVM 不同，桌面 VM 是一台完整的 Debian 13 + Xfce + Chromium 虛擬機：代理只靠截圖與模擬滑鼠／鍵盤操作，人可以在網頁主控台觀看並接手。詳見 [desktop-vm.md](desktop-vm.md)。
+
+```sh
+ark vm desktop build      # 下載固定版本映像（sha256 驗證）＋ cloud-init 佈建桌面，可重複執行
+ark vm desktop start [name]
+ark vm desktop screenshot [name] -o shot.png
+ark vm desktop input [name] '{"type":"click","x":640,"y":90}'
+ark vm desktop status|list [--json]
+ark vm desktop stop [name]
+ark vm desktop reset [name]   # 刪除磁碟疊加層，下次開機用新映像
+```
+
+- 設定在 `[desktop_vm]`（`memory_mb`、`cpus`、`width`/`height` 預設 1280×800、`accel = auto|kvm|tcg`、`network = user|none`、`idle_timeout_secs` …）。
+- 映像內含 `fonts-noto-cjk`（繁中網頁正常顯示）與 `zh_TW.UTF-8` locale；含中文的 `type` 輸入走 virtio-serial 文字通道，由客體內 `ark-text-input` 經剪貼簿貼上（xclip + Ctrl+V）。
+- 有 `/dev/kvm` 用 KVM，否則 TCG 並警告；畫面走 QMP `screendump`，輸入走 QMP `input-send-event`（USB tablet 絕對座標），不需要 VNC 用戶端；QEMU 自帶的 VNC 在私有 unix socket 上。
+- 每台 VM 有自己的磁碟疊加層（`<data>/vm/desktop/<name>/disk.qcow2`）與自己的接手租約；人接手時代理對該 VM 的所有動作都會被拒。
+- 代理端：`computer_use` 的 `target = "vm:<name>"`（或 `[computer_use] target` 預設值）；核准範圍為 `desktop:vm:<name>:<action>`。
+- 主控台：`view.desktop.list`、`view.desktop.{state,frame,takeover,handback,input}`（帶 `target`）、`view.vm.start|stop`（admin）。
+- 內建瀏覽器：`install.sh --with-browser`／離線包 `--with-browser` 會帶固定版本的 Chrome for Testing（sha256 驗證）到 `<share>/browsers/`，`[browser] prefer_bundled = true` 時優先使用。
+
 ---
 
 ## 6. 多代理艦隊（fleet）

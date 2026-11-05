@@ -12,10 +12,32 @@
 //!   ARP; raw `image/jpeg` from `GET /view/browser/frame?…`).
 //! - `view.browser.input {viewer, session?, key?, targetId?, event}` / `POST /view/browser/input`:
 //!   viewer input; only from the viewer holding the Bot Desktop lease.
-//! - `view.desktop.state {viewer?}` / `GET /view/desktop`: the lease (who controls the screen).
-//! - `view.desktop.frame` → PNG of the display computer_use acts on (`GET /view/desktop/frame`).
-//! - `view.desktop.takeover {viewer, reason?}` / `view.desktop.handback {viewer}` (`POST
-//!   /view/desktop/takeover|handback`): the Bot Desktop control lease.
+//! - `view.desktop.list` / `GET /view/desktop/list`: the desktop targets — the host's Bot
+//!   Desktop and every desktop VM (`[desktop_vm]`, `ark vm desktop`):
+//!   `[{id: "host"|"vm:<name>", kind: "host"|"vm", label, running, width, height,
+//!   controller: "agent"|"human", lease}]` (VMs also carry `accel`, `imageBuilt`).
+//! - `view.desktop.state {viewer?, target?}` / `GET /view/desktop?target=`: the target's lease
+//!   (who controls that screen) → `{target, lease, viewerHolds?, botDesktop | running}`.
+//!   `target` is `"host"` (default everywhere below) or `"vm:<name>"`.
+//! - `view.desktop.frame {target?}` → `{mime: "image/png", data (base64), target, lease}`
+//!   (raw `image/png` from `GET /view/desktop/frame?target=`). For a VM: QMP `screendump`.
+//! - `view.desktop.takeover {viewer, target?, reason?}` / `view.desktop.handback {viewer,
+//!   target?}` (`POST /view/desktop/takeover|handback`) → the state shape. Each target has
+//!   its own lease: `host` = the Bot Desktop's, `vm:<name>` =
+//!   `<data>/vm/desktop/<name>/bot-desktop/lease.json`. While a human holds a target's lease
+//!   the agent's computer-use calls on that target are refused.
+//! - `view.desktop.input {viewer, target?, event}` / `POST /view/desktop/input`: one input
+//!   event in screen pixels, accepted only from the viewer holding that target's lease:
+//!   `{type: "move"|"click"|"dblclick"|"down"|"up"|"scroll"|"key"|"type"|"drag", x, y,
+//!   button: "left"|"middle"|"right", count, dx, dy (wheel ticks, +dy = down), key ("Enter",
+//!   "Backspace", "ArrowUp", "Control+a", "ctrl+shift+t"), text, toX, toY}` →
+//!   `{ok, type, width?, height?, typed?, via?}`. VMs: QMP `input-send-event` (US keyboard;
+//!   text with non-ASCII characters such as CJK goes over the guest text channel, `via:
+//!   "text-channel"`);
+//!   `host`: xdotool / ydotool on the Bot Desktop.
+//! - `view.vm.start {name?}` → the VM's status `{name, running, pid, width, height, accel,
+//!   memory_mb, cpus, disk, image_built, qmp, vnc, warning, …}`; `view.vm.stop {name}` →
+//!   `{name, stopped}` (`POST /view/vm/start|stop`). Admin scope (exposure.rs).
 //! - `view.novnc {key, open?}` / `POST /view/novnc`: a one-time 60 s ticket for the sandbox
 //!   browser's noVNC (`GET /view/novnc?ticket=` serves the bootstrap page); `open: true`
 //!   redeems it at once and returns the loopback noVNC URL for the UI to open.
@@ -24,10 +46,24 @@ use crate::server::App;
 use ark_browser::manager::{self, Manager};
 use ark_browser::{lease, view, BrowserConfig};
 use ark_net::httpd::{Request, Response};
+use ark_vm::desktop::{DesktopConfig, DesktopVms};
 use serde_json::{json, Value};
 use std::path::Path;
 
-pub const METHODS: &[&str] = &["view.browser.list", "view.browser.frame", "view.browser.input", "view.desktop.state", "view.desktop.frame", "view.desktop.takeover", "view.desktop.handback", "view.novnc"];
+pub const METHODS: &[&str] = &[
+    "view.browser.list",
+    "view.browser.frame",
+    "view.browser.input",
+    "view.desktop.list",
+    "view.desktop.state",
+    "view.desktop.frame",
+    "view.desktop.takeover",
+    "view.desktop.handback",
+    "view.desktop.input",
+    "view.vm.start",
+    "view.vm.stop",
+    "view.novnc",
+];
 
 type R = Result<Value, (i64, String)>;
 
@@ -36,6 +72,8 @@ pub struct Ctx<'a> {
     pub home: &'a Path,
     pub cfg: &'a BrowserConfig,
     pub m: &'a Manager,
+    /// Desktop VMs of this home (`[desktop_vm]`).
+    pub vms: &'a DesktopVms,
 }
 
 fn s<'a>(p: &'a Value, k: &str) -> Option<&'a str> {
@@ -58,16 +96,111 @@ fn frame(c: &Ctx, p: &Value) -> Result<view::Frame, (i64, String)> {
     view::capture(&b, &t, w, q).map_err(|e| (-32000, e))
 }
 
-fn desktop_png(home: &Path) -> Result<Vec<u8>, (i64, String)> {
-    crate::computer::screenshot_png(home).map_err(|e| (-32000, e))
+/// A desktop target: the host Bot Desktop or a desktop VM.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Target {
+    Host,
+    Vm(String),
 }
 
-fn desktop_state(home: &Path, p: &Value) -> Value {
-    let mut v = json!({"lease": lease::public_view(home), "botDesktop": home.join("bot-desktop").exists()});
+impl Target {
+    pub fn id(&self) -> String {
+        match self {
+            Target::Host => "host".into(),
+            Target::Vm(n) => format!("vm:{n}"),
+        }
+    }
+}
+
+fn target(c: &Ctx, p: &Value) -> Result<Target, (i64, String)> {
+    match s(p, "target") {
+        None | Some("host") => Ok(Target::Host),
+        Some(t) => {
+            let n = t.strip_prefix("vm:").ok_or_else(|| (-32602, format!("target `{t}`: use \"host\" or \"vm:<name>\"")))?;
+            ark_vm::desktop::valid_name(n).map_err(|e| (-32602, e))?;
+            if !c.vms.cfg.enabled {
+                return Err((-32001, "desktop VMs are disabled ([desktop_vm] enabled = false)".into()));
+            }
+            Ok(Target::Vm(n.to_string()))
+        }
+    }
+}
+
+/// Where a target's control lease lives (`<home>/bot-desktop/lease.json`).
+fn lease_home(c: &Ctx, t: &Target) -> std::path::PathBuf {
+    match t {
+        Target::Host => c.home.to_path_buf(),
+        Target::Vm(n) => c.vms.lease_home(n),
+    }
+}
+
+fn desktop_png(c: &Ctx, t: &Target) -> Result<Vec<u8>, (i64, String)> {
+    match t {
+        Target::Host => crate::computer::screenshot_png(c.home).map_err(|e| (-32000, e)),
+        Target::Vm(n) if !c.vms.is_running(n) => Err((-32001, format!("desktop VM `{n}` is not running (view.vm.start)"))),
+        Target::Vm(n) => c.vms.screenshot(n).map_err(|e| (-32000, e)),
+    }
+}
+
+fn desktop_state(c: &Ctx, t: &Target, p: &Value) -> Value {
+    let home = lease_home(c, t);
+    let mut v = json!({"target": t.id(), "lease": lease::public_view(&home)});
+    match t {
+        Target::Host => v["botDesktop"] = c.home.join("bot-desktop").exists().into(),
+        Target::Vm(n) => v["running"] = c.vms.is_running(n).into(),
+    }
     if let Ok(id) = viewer(p) {
-        v["viewerHolds"] = lease::viewer_may_send_input(home, id).into();
+        v["viewerHolds"] = lease::viewer_may_send_input(&home, id).into();
     }
     v
+}
+
+fn host_geometry(home: &Path) -> (u32, u32) {
+    let g = ark_browser::control::screen::Desktop::new(home).geometry;
+    g.split_once('x').and_then(|(w, h)| Some((w.trim().parse().ok()?, h.trim().parse().ok()?))).unwrap_or((1440, 900))
+}
+
+/// `view.desktop.list`: the host first, then the desktop VMs.
+fn desktop_list(c: &Ctx) -> Value {
+    let (w, h) = host_geometry(c.home);
+    let host_up = !ark_browser::control::screen::Desktop::new(c.home).published_env().is_empty();
+    let mut v = vec![json!({"id": "host", "kind": "host", "label": "Bot Desktop (host)", "running": host_up, "width": w, "height": h, "controller": lease::get(c.home).holder, "lease": lease::public_view(c.home)})];
+    if c.vms.cfg.enabled {
+        c.vms.reap();
+        for st in c.vms.list() {
+            let home = c.vms.lease_home(&st.name);
+            v.push(json!({"id": format!("vm:{}", st.name), "kind": "vm", "label": format!("Desktop VM {}", st.name), "running": st.running, "width": st.width, "height": st.height, "controller": lease::get(&home).holder, "lease": lease::public_view(&home), "accel": st.accel, "imageBuilt": st.image_built}));
+        }
+    }
+    Value::Array(v)
+}
+
+/// A desktop input event on the host's Bot Desktop, through xdotool / ydotool.
+fn host_input(home: &Path, e: &Value) -> Result<Value, (i64, String)> {
+    use ark_vm::desktop::Input as I;
+    let ev = I::from_json(e).map_err(|m| (-32602, m))?;
+    let btn = |b: &str| match b {
+        "right" | "3" => "right_click",
+        "middle" | "2" => "middle_click",
+        _ => "left_click",
+    };
+    let p = match &ev {
+        I::Move { x, y } => json!({"action": "mouse_move", "x": x, "y": y}),
+        I::Click { x, y, button, count } => json!({"action": if *count >= 2 { "double_click" } else { btn(button) }, "x": x, "y": y}),
+        I::Down { x, y, .. } => json!({"action": "left_mouse_down", "x": x, "y": y}),
+        I::Up { x, y, .. } => json!({"action": "left_mouse_up", "x": x, "y": y}),
+        I::Scroll { x, y, dx, dy } => {
+            let (dir, n) = if *dy != 0 { (if *dy > 0 { "down" } else { "up" }, dy.unsigned_abs()) } else { (if *dx > 0 { "right" } else { "left" }, dx.unsigned_abs()) };
+            json!({"action": "scroll", "x": x, "y": y, "scrollDirection": dir, "scrollAmount": n.max(1)})
+        }
+        I::Key { keys } => json!({"action": "key", "keys": keys}),
+        I::Type { text } => json!({"action": "type", "text": text}),
+        I::Drag { from, to, .. } => json!({"action": "left_click_drag", "fromX": from.0, "fromY": from.1, "x": to.0, "y": to.1}),
+    };
+    let env = ark_browser::control::screen::Desktop::new(home).published_env();
+    let tool = crate::computer::native::input_tool("auto", &env).ok_or_else(|| (-32001, crate::computer::native::NO_INPUT.to_string()))?;
+    crate::node::with_env(&env, || crate::computer::native::run_steps(tool, &p, std::time::Duration::from_secs(10))).map_err(|m| (-32000, m))?;
+    Ok(json!({"ok": true, "type": ev.kind()}))
 }
 
 /// One view method.
@@ -83,18 +216,60 @@ pub fn call(c: &Ctx, method: &str, p: &Value) -> R {
             let (b, t) = view::resolve(c.m, s(p, "session"), s(p, "key"), s(p, "targetId")).map_err(|e| (-32001, e))?;
             view::input(c.cfg, &b, &t, &p["event"]).map_err(|e| (-32000, e))
         }
-        "view.desktop.state" => Ok(desktop_state(c.home, p)),
-        "view.desktop.frame" => desktop_png(c.home).map(|png| json!({"mime": "image/png", "data": ark_net::crypto::b64(&png), "lease": lease::public_view(c.home)})),
+        "view.desktop.list" => Ok(desktop_list(c)),
+        "view.desktop.state" => {
+            let t = target(c, p)?;
+            Ok(desktop_state(c, &t, p))
+        }
+        "view.desktop.frame" => {
+            let t = target(c, p)?;
+            desktop_png(c, &t).map(|png| json!({"mime": "image/png", "data": ark_net::crypto::b64(&png), "target": t.id(), "lease": lease::public_view(&lease_home(c, &t))}))
+        }
         "view.desktop.takeover" => {
             let id = viewer(p)?;
+            let t = target(c, p)?;
             let reason: String = s(p, "reason").unwrap_or("").chars().take(200).collect();
-            lease::acquire(c.home, id, &reason).map_err(|e| (-32000, e))?;
-            Ok(desktop_state(c.home, p))
+            lease::acquire(&lease_home(c, &t), id, &reason).map_err(|e| (-32000, e))?;
+            Ok(desktop_state(c, &t, p))
         }
         "view.desktop.handback" => {
             let id = viewer(p)?;
-            lease::release(c.home, Some(id), false).map_err(|e| (-32000, e))?;
-            Ok(desktop_state(c.home, p))
+            let t = target(c, p)?;
+            lease::release(&lease_home(c, &t), Some(id), false).map_err(|e| (-32000, e))?;
+            Ok(desktop_state(c, &t, p))
+        }
+        "view.desktop.input" => {
+            let id = viewer(p)?;
+            let t = target(c, p)?;
+            if !lease::viewer_may_send_input(&lease_home(c, &t), id) {
+                return Err((-32003, format!("Take control first (view.desktop.takeover, target {}): desktop input is only accepted from the viewer holding that desktop's lease.", t.id())));
+            }
+            if !p["event"].is_object() {
+                return Err((-32602, "event is required ({type, x, y, …})".into()));
+            }
+            match &t {
+                Target::Host => host_input(c.home, &p["event"]),
+                Target::Vm(n) => {
+                    let ev = ark_vm::desktop::Input::from_json(&p["event"]).map_err(|m| (-32602, m))?;
+                    if !c.vms.is_running(n) {
+                        return Err((-32001, format!("desktop VM `{n}` is not running (view.vm.start)")));
+                    }
+                    c.vms.input(n, &ev).map_err(|m| (-32000, m))
+                }
+            }
+        }
+        "view.vm.start" => {
+            if !c.vms.cfg.enabled {
+                return Err((-32001, "desktop VMs are disabled ([desktop_vm] enabled = false)".into()));
+            }
+            let name = s(p, "name").unwrap_or(&c.vms.cfg.default).to_string();
+            ark_vm::desktop::valid_name(&name).map_err(|e| (-32602, e))?;
+            c.vms.start(&name).map(|st| serde_json::to_value(st).unwrap_or_default()).map_err(|e| (-32000, e))
+        }
+        "view.vm.stop" => {
+            let name = s(p, "name").ok_or((-32602, "name is required".to_string()))?;
+            ark_vm::desktop::valid_name(name).map_err(|e| (-32602, e))?;
+            c.vms.stop(name).map(|stopped| json!({"name": name, "stopped": stopped})).map_err(|e| (-32000, e))
         }
         "view.novnc" => {
             let key = s(p, "key").ok_or((-32602, "key is required (the sandbox browser's key from view.browser.list)".to_string()))?;
@@ -114,7 +289,16 @@ pub fn call(c: &Ctx, method: &str, p: &Value) -> R {
 fn with_app<T>(app: &App, f: impl FnOnce(&Ctx) -> T) -> T {
     let home = app.d.k.paths.data.clone();
     let cfg = BrowserConfig::parse(&app.d.k.cfg.browser).unwrap_or_default();
-    f(&Ctx { home: &home, cfg: &cfg, m: manager::global() })
+    let vms = desktop_vms(app);
+    f(&Ctx { home: &home, cfg: &cfg, m: manager::global(), vms: &vms })
+}
+
+/// The desktop VMs of the daemon's home (an invalid `[desktop_vm]` disables them; the config
+/// validator reports why).
+pub fn desktop_vms(app: &App) -> DesktopVms {
+    let paths = &app.d.k.paths;
+    let dcfg = DesktopConfig::parse(&app.d.k.cfg.desktop_vm).unwrap_or_else(|_| DesktopConfig { enabled: false, ..Default::default() });
+    DesktopVms::new(dcfg, &paths.data, &paths.cache_dir(), &paths.runtime)
 }
 
 /// ARP entry point (`App::rpc`).
@@ -174,12 +358,16 @@ pub fn route(c: &Ctx, r: &Request) -> Response {
         }
         ("POST", "/view/browser/input") => j(call(c, "view.browser.input", &body())),
         ("GET", "/view/desktop") => j(call(c, "view.desktop.state", &q)),
-        ("GET", "/view/desktop/frame") => match desktop_png(c.home) {
+        ("GET", "/view/desktop/list") => j(call(c, "view.desktop.list", &q)),
+        ("GET", "/view/desktop/frame") => match target(c, &q).and_then(|t| desktop_png(c, &t)) {
             Ok(png) => no_store(Response::new(200, "image/png", png)),
             Err((code, m)) => err(code, &m),
         },
         ("POST", "/view/desktop/takeover") => j(call(c, "view.desktop.takeover", &body())),
         ("POST", "/view/desktop/handback") => j(call(c, "view.desktop.handback", &body())),
+        ("POST", "/view/desktop/input") => j(call(c, "view.desktop.input", &body())),
+        ("POST", "/view/vm/start") => j(call(c, "view.vm.start", &body())),
+        ("POST", "/view/vm/stop") => j(call(c, "view.vm.stop", &body())),
         ("POST", "/view/novnc") => j(call(c, "view.novnc", &body())),
         // bridge-server.ts `/sandbox/novnc`: authenticated + a one-time ticket.
         ("GET", "/view/novnc") => {
@@ -252,7 +440,7 @@ mod tests {
         let home = ark_core::tmp::scratch_path(format!("ark-bview-{}-{}", std::process::id(), ark_net::crypto::random_token(4)));
         let srv = crate::server::start(app(&home)).unwrap();
         let base = format!("http://{}", srv.local_addr());
-        for p in ["/view/browser", "/view/browser/frame", "/view/desktop", "/view/desktop/frame", "/view/novnc?ticket=x"] {
+        for p in ["/view/browser", "/view/browser/frame", "/view/desktop", "/view/desktop/list", "/view/desktop/frame", "/view/novnc?ticket=x"] {
             assert_eq!(get(&base, p, None, None).0, 401, "{p} without token");
             assert_eq!(get(&base, p, Some("wrong"), None).0, 401, "{p} wrong token");
         }
@@ -342,6 +530,115 @@ mod tests {
         assert_eq!(get(&base, "/view/", None, None).0, 401, "no token");
         assert_eq!(get(&base, "/view/ui", Some("wrong"), None).0, 401, "wrong token");
         let _ = std::fs::remove_dir_all(&home);
+    }
+
+    /// Desktop targets: `view.desktop.list` shape, per-target leases, `view.desktop.input` only
+    /// from the lease holder, frames and input reaching the VM over (fake) QMP, start/stop.
+    #[test]
+    fn desktop_vm_targets_frames_input_and_leases() {
+        use ark_vm::desktop::fake;
+        let d = ark_core::tmp::TempDir::new("ark-bview-vm");
+        let vms = fake::fake_vms(&d);
+        let bcfg = BrowserConfig::default();
+        let home = d.join("data");
+        let c = Ctx { home: &home, cfg: &bcfg, m: manager::global(), vms: &vms };
+        let l = call(&c, "view.desktop.list", &json!({})).unwrap();
+        let ids: Vec<&str> = l.as_array().unwrap().iter().map(|t| t["id"].as_str().unwrap()).collect();
+        assert_eq!(ids, ["host", "vm:desk"]);
+        let vm = &l[1];
+        assert_eq!((vm["kind"].as_str(), vm["running"].as_bool(), vm["width"].as_u64(), vm["height"].as_u64(), vm["controller"].as_str()), (Some("vm"), Some(false), Some(1280), Some(800), Some("agent")), "{vm}");
+        assert!(l[0]["label"].is_string() && l[0]["width"].is_u64() && l[0]["controller"] == "agent", "{l}");
+        assert_eq!(call(&c, "view.desktop.frame", &json!({"target": "vm:desk"})).unwrap_err().0, -32001, "not running");
+        assert_eq!(call(&c, "view.desktop.state", &json!({"target": "bogus"})).unwrap_err().0, -32602);
+        assert_eq!(call(&c, "view.desktop.state", &json!({"target": "vm:../x"})).unwrap_err().0, -32602);
+        assert_eq!(call(&c, "view.vm.stop", &json!({})).unwrap_err().0, -32602, "name is required");
+
+        let marker = d.join("bin/spawned");
+        let sock = vms.qmp_path("desk");
+        let th = std::thread::spawn(move || {
+            while !marker.exists() {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            fake::FakeQmp::start(&sock, 1024, 768)
+        });
+        let st = call(&c, "view.vm.start", &json!({})).unwrap();
+        let qmp = th.join().unwrap();
+        assert_eq!((st["name"].as_str(), st["running"].as_bool()), (Some("desk"), Some(true)), "{st}");
+        let f = call(&c, "view.desktop.frame", &json!({"target": "vm:desk"})).unwrap();
+        assert_eq!((f["mime"].as_str(), f["target"].as_str()), (Some("image/png"), Some("vm:desk")));
+        let png = ark_net::crypto::b64_decode(f["data"].as_str().unwrap()).unwrap();
+        assert_eq!(ark_vm::desktop::qmp::png_size(&png), Some((1024, 768)));
+        let l = call(&c, "view.desktop.list", &json!({})).unwrap();
+        assert_eq!((l[1]["running"].as_bool(), l[1]["width"].as_u64()), (Some(true), Some(1024)), "the live framebuffer size");
+
+        // Input needs the VM's lease; the host lease is separate.
+        let click = json!({"viewer": "viewer-vm-01", "target": "vm:desk", "event": {"type": "click", "x": 512, "y": 384}});
+        assert_eq!(call(&c, "view.desktop.input", &click).unwrap_err().0, -32003);
+        let s = call(&c, "view.desktop.takeover", &json!({"viewer": "viewer-vm-01", "target": "vm:desk", "reason": "login"})).unwrap();
+        assert_eq!((s["target"].as_str(), s["lease"]["holder"].as_str(), s["viewerHolds"].as_bool()), (Some("vm:desk"), Some("human"), Some(true)), "{s}");
+        assert_eq!(call(&c, "view.desktop.state", &json!({})).unwrap()["lease"]["holder"], "agent", "host lease untouched");
+        assert_eq!(call(&c, "view.desktop.list", &json!({})).unwrap()[1]["controller"], "human");
+        let other = json!({"viewer": "viewer-vm-02", "target": "vm:desk", "event": {"type": "key", "key": "Enter"}});
+        assert_eq!(call(&c, "view.desktop.input", &other).unwrap_err().0, -32003, "only the holder");
+        let r = call(&c, "view.desktop.input", &click).unwrap();
+        assert_eq!((r["ok"].as_bool(), r["type"].as_str()), (Some(true), Some("click")));
+        let r = call(&c, "view.desktop.input", &json!({"viewer": "viewer-vm-01", "target": "vm:desk", "event": {"type": "type", "text": "hello"}})).unwrap();
+        assert_eq!(r["typed"], 5);
+        assert_eq!(call(&c, "view.desktop.input", &json!({"viewer": "viewer-vm-01", "target": "vm:desk", "event": {"type": "warp"}})).unwrap_err().0, -32602);
+        assert_eq!(call(&c, "view.desktop.input", &json!({"viewer": "viewer-vm-01", "target": "vm:desk"})).unwrap_err().0, -32602);
+        let ev = qmp.events();
+        assert!(ev.iter().any(|e| e["data"]["button"] == "left" && e["data"]["down"] == true), "{ev:?}");
+        assert!(ev.iter().any(|e| e["type"] == "key" && e["data"]["key"]["data"] == "h"));
+        call(&c, "view.desktop.handback", &json!({"viewer": "viewer-vm-01", "target": "vm:desk"})).unwrap();
+        assert_eq!(call(&c, "view.desktop.input", &click).unwrap_err().0, -32003, "handed back");
+        let s = call(&c, "view.vm.stop", &json!({"name": "desk"})).unwrap();
+        assert_eq!(s, json!({"name": "desk", "stopped": true}));
+        assert!(qmp.commands().contains(&"system_powerdown".to_string()));
+        drop(qmp);
+    }
+
+    /// Real desktop VM through the RPC layer (not run by default): `ARK_REAL_DVM_HOME=<ark home
+    /// with a built image> ARK_REAL_DVM_OUT=<dir> cargo test -p ark-app real_desktop_vm -- --ignored`.
+    /// Starts `desk`, takes the lease, clicks Chromium's address bar, types a URL and saves
+    /// before/after frames.
+    #[test]
+    #[ignore]
+    fn real_desktop_vm_over_rpc() {
+        let root = std::path::PathBuf::from(std::env::var("ARK_REAL_DVM_HOME").expect("ARK_REAL_DVM_HOME"));
+        let out = std::path::PathBuf::from(std::env::var("ARK_REAL_DVM_OUT").expect("ARK_REAL_DVM_OUT"));
+        let vms = DesktopVms::new(DesktopConfig::default(), &root.join("data"), &root.join("cache"), &root.join("run"));
+        let bcfg = BrowserConfig::default();
+        let home = root.join("data");
+        let c = Ctx { home: &home, cfg: &bcfg, m: manager::global(), vms: &vms };
+        call(&c, "view.vm.start", &json!({"name": "desk"})).unwrap();
+        let list = call(&c, "view.desktop.list", &json!({})).unwrap();
+        std::fs::write(out.join("rpc-desktop-list.json"), serde_json::to_string_pretty(&list).unwrap()).unwrap();
+        let save = |name: &str| {
+            let f = call(&c, "view.desktop.frame", &json!({"target": "vm:desk"})).unwrap();
+            std::fs::write(out.join(name), ark_net::crypto::b64_decode(f["data"].as_str().unwrap()).unwrap()).unwrap();
+        };
+        save("rpc-01-before.png");
+        let v = |e: Value| json!({"viewer": "proof-viewer-1", "target": "vm:desk", "event": e});
+        assert_eq!(call(&c, "view.desktop.input", &v(json!({"type": "click", "x": 600, "y": 90}))).unwrap_err().0, -32003, "no lease yet");
+        call(&c, "view.desktop.takeover", &json!({"viewer": "proof-viewer-1", "target": "vm:desk", "reason": "proof"})).unwrap();
+        call(&c, "view.desktop.input", &v(json!({"type": "click", "x": 600, "y": 90}))).unwrap();
+        call(&c, "view.desktop.input", &v(json!({"type": "key", "key": "Control+a"}))).unwrap();
+        call(&c, "view.desktop.input", &v(json!({"type": "type", "text": "data:text/html,<h1 style='font-size:64px'>Hello from ark RPC</h1>"}))).unwrap();
+        call(&c, "view.desktop.input", &v(json!({"type": "key", "key": "Enter"}))).unwrap();
+        std::thread::sleep(Duration::from_secs(2));
+        save("rpc-02-after.png");
+        // CJK: a page with Traditional Chinese (fonts) and a textarea typed into over the text channel.
+        call(&c, "view.desktop.input", &v(json!({"type": "click", "x": 600, "y": 90}))).unwrap();
+        call(&c, "view.desktop.input", &v(json!({"type": "key", "key": "Control+a"}))).unwrap();
+        call(&c, "view.desktop.input", &v(json!({"type": "type", "text": "data:text/html;charset=utf-8,<h1 style='font-size:48px'>%E7%B9%81%E9%AB%94%E4%B8%AD%E6%96%87 CJK</h1><textarea autofocus style='font-size:40px;width:90%;height:200px'></textarea>"}))).unwrap();
+        call(&c, "view.desktop.input", &v(json!({"type": "key", "key": "Enter"}))).unwrap();
+        std::thread::sleep(Duration::from_secs(2));
+        call(&c, "view.desktop.input", &v(json!({"type": "click", "x": 640, "y": 300}))).unwrap();
+        let r = call(&c, "view.desktop.input", &v(json!({"type": "type", "text": "你好，這是 ark 輸入的繁體中文。"}))).unwrap();
+        assert_eq!(r["via"], "text-channel", "{r}");
+        std::thread::sleep(Duration::from_secs(4));
+        save("rpc-03-cjk.png");
+        call(&c, "view.desktop.handback", &json!({"viewer": "proof-viewer-1", "target": "vm:desk"})).unwrap();
     }
 
     #[test]

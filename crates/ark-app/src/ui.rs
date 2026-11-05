@@ -9,6 +9,7 @@ const INDEX: &str = include_str!("../../../ui/web/index.html");
 const FILES: &[(&str, &str, &str, &str)] = &[
     ("/ui/app.js", JS, "web/app.js", include_str!("../../../ui/web/app.js")),
     ("/ui/ops.js", JS, "web/ops.js", include_str!("../../../ui/web/ops.js")),
+    ("/ui/work.js", JS, "web/work.js", include_str!("../../../ui/web/work.js")),
     ("/ui/surfaces.js", JS, "web/surfaces.js", include_str!("../../../ui/web/surfaces.js")),
     ("/ui/pages.js", JS, "web/pages.js", include_str!("../../../ui/web/pages.js")),
     ("/ui/app.css", CSS, "web/app.css", include_str!("../../../ui/web/app.css")),

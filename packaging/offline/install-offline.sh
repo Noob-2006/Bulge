@@ -75,5 +75,14 @@ if [ -d "$HERE/vm-image" ]; then
     mkdir -p "$dest/image" && cp -R "$HERE/vm-image/." "$dest/image/"
     say "microVM guest image copied to $dest/image; point ark at it:  ark config set exec.vm.image_dir=$dest"
 fi
+if [ -f "$HERE/browser/chrome-linux64.zip" ]; then
+    # Hash already checked against BUNDLE.sha256 above; unpack the pinned Chrome for Testing
+    # where ark's browser discovery looks (<share>/browsers/chrome-linux64/chrome).
+    mkdir -p "$P/share/ark/browsers" && rm -rf "$P/share/ark/browsers/chrome-linux64"
+    if command -v unzip >/dev/null 2>&1; then unzip -q -o "$HERE/browser/chrome-linux64.zip" -d "$P/share/ark/browsers"; else python3 -I -c 'import sys,zipfile; zipfile.ZipFile(sys.argv[1]).extractall(sys.argv[2])' "$HERE/browser/chrome-linux64.zip" "$P/share/ark/browsers"; fi
+    chmod 0755 "$P/share/ark/browsers/chrome-linux64/chrome" "$P/share/ark/browsers/chrome-linux64/chrome_crashpad_handler" 2>/dev/null || true
+    cp "$HERE/browser/VERSION" "$P/share/ark/browsers/chrome-linux64/.ark-version" 2>/dev/null || true
+    say "bundled Chrome for Testing → $P/share/ark/browsers/chrome-linux64 (prefer it: ark config set browser.prefer_bundled=true)"
+fi
 "$P/bin/ark" --version
 say "installed. Next: ark doctor"

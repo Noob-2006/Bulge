@@ -335,14 +335,14 @@ impl Scope {
 }
 
 const ADMIN_PREFIXES: &[&str] = &[
-    "config.", "plugin.", "plugins.", "daemon.", "secret.", "secrets.", "vault.", "hook.", "hooks.", "skill.", "skills.", "provider.", "providers.", "channel.", "channels.", "node.", "nodes.", "device.", "devices.", "auth.", "policy.", "system.", "backup.",
+    "config.", "plugin.", "plugins.", "daemon.", "secret.", "secrets.", "vault.", "hook.", "hooks.", "skill.", "skills.", "provider.", "providers.", "channel.", "channels.", "node.", "nodes.", "device.", "devices.", "auth.", "policy.", "system.", "backup.", "view.vm.",
 ];
 const APPROVE_METHODS: &[&str] = &["gate.answer", "approval.answer", "approvals.answer", "question.answer", "session.review.set"];
 const READ_METHODS: &[&str] = &[
     "ping", "initialize", "session.list", "session.history", "session.view", "gate.pending", "goal.list", "schedule.list", "models.list", "tools.list", "events.subscribe", "session.attach", "subscribe", "unsubscribe", "view.browser.list", "view.browser.frame", "view.desktop.state", "logbook.list", "whoami",
 ];
 const WRITE_METHODS: &[&str] = &[
-    "session.create", "session.submit", "session.command", "session.interrupt", "goal.start", "goal.stop", "goal.cancel", "schedule.run", "view.browser.input", "view.desktop.takeover", "view.desktop.handback", "view.novnc", "chat.send", "message.send",
+    "session.create", "session.submit", "session.command", "session.interrupt", "goal.start", "goal.stop", "goal.cancel", "schedule.run", "view.browser.input", "view.desktop.takeover", "view.desktop.handback", "view.desktop.input", "view.novnc", "chat.send", "message.send",
 ];
 /// Suffixes that only ever report state (`surfaces.list`, `logs.tail`, `usage.status` …).
 const READ_SUFFIXES: &[&str] = &[".list", ".get", ".state", ".history", ".status", ".show", ".info", ".search", ".query", ".view", ".tail", ".describe"];
@@ -383,7 +383,8 @@ pub fn required_scope_http(method: &str, path: &str) -> Scope {
     let get = method == "GET" || method == "HEAD";
     if let Some(rest) = path.strip_prefix("/view/") {
         return match rest {
-            _ if get && (rest.starts_with("browser/frame") || rest.starts_with("browser/list") || rest.starts_with("desktop/state")) => Scope::Read,
+            _ if rest.starts_with("vm/") => Scope::Admin,
+            _ if get && (rest.starts_with("browser/frame") || rest.starts_with("browser/list") || rest.starts_with("desktop/state") || rest.starts_with("desktop/list")) => Scope::Read,
             _ => Scope::Write,
         };
     }
@@ -535,6 +536,10 @@ mod tests {
             ("session.create", Scope::Write),
             ("chat.send", Scope::Write),
             ("view.browser.input", Scope::Write),
+            ("view.desktop.input", Scope::Write),
+            ("view.desktop.list", Scope::Read),
+            ("view.vm.start", Scope::Admin),
+            ("view.vm.stop", Scope::Admin),
             ("gate.answer", Scope::Approve),
             ("shutdown", Scope::Admin),
             ("config.get", Scope::Admin),
@@ -551,6 +556,9 @@ mod tests {
         assert_eq!(required_scope_http("POST", "/v1/chat/completions"), Scope::Write);
         assert_eq!(required_scope_http("GET", "/view/browser/frame"), Scope::Read);
         assert_eq!(required_scope_http("GET", "/view/desktop/frame"), Scope::Write);
+        assert_eq!(required_scope_http("GET", "/view/desktop/list"), Scope::Read);
+        assert_eq!(required_scope_http("POST", "/view/vm/start"), Scope::Admin);
+        assert_eq!(required_scope_http("POST", "/view/desktop/input"), Scope::Write);
         assert_eq!(required_scope_http("POST", "/plugins/x/hook"), Scope::Write);
     }
 

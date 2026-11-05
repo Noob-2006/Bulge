@@ -38,7 +38,8 @@ pub fn schema() -> Value {
         "raise_window": {"type": "boolean", "description": "Only for action='focus_app'. If true, brings the window to front (DISRUPTS the user). Default false — input is routed to the app without raising, matching the background co-work model."},
         "delivery_mode": {"type": "string", "enum": ["background", "foreground"], "description": "For input actions (click, type, key, drag, scroll). `background` (DEFAULT) delivers without raising the window or stealing focus. `foreground` briefly fronts the window then restores focus — a visible change needing its own approval; use it only when a result's verdict tells you to escalate there. Each result's `verdict` carries the next step; follow it rather than guessing."},
         "bring_to_front": {"type": "boolean", "description": "Optional and only valid with delivery_mode='foreground'. Explicitly invokes cua-driver's standalone bring_to_front tool before the input; it is never passed as an input property. This persistent focus change has a separate approval scope. Default false."},
-        "capture_after": {"type": "boolean", "description": "If true, take a follow-up capture after the action and include it in the response. Saves a round-trip when you need to verify an action's effect."}
+        "capture_after": {"type": "boolean", "description": "If true, take a follow-up capture after the action and include it in the response. Saves a round-trip when you need to verify an action's effect."},
+        "target": {"type": "string", "description": "Which desktop: \"host\" (this machine's display) or \"vm:<name>\" (an ark desktop VM: Debian + Xfce + Chromium, operated purely by screenshot + coordinates — no element indices, no set_value/focus_app). Default from [computer_use] target."}
     }, "required": ["action"]})
 }
 
@@ -206,6 +207,14 @@ pub struct ComputerUseTool {
     pub extra_env: Vec<(String, String)>,
     sessions: Mutex<HashMap<String, Arc<Mutex<Slot>>>>,
     dedup: Mutex<HashMap<String, DedupEntry>>,
+    /// Desktop VMs (`target = "vm:<name>"`); None = only the host desktop.
+    pub vms: Option<Arc<ark_vm::desktop::DesktopVms>>,
+}
+
+/// The desktop one call acts on.
+enum Target {
+    Host,
+    Vm(String),
 }
 
 struct Slot {
@@ -221,7 +230,44 @@ impl Drop for Slot {
 
 impl ComputerUseTool {
     pub fn new(cfg: Arc<ComputerUseConfig>) -> Self {
-        ComputerUseTool { cfg, extra_env: vec![], sessions: Mutex::default(), dedup: Mutex::default() }
+        ComputerUseTool { cfg, extra_env: vec![], sessions: Mutex::default(), dedup: Mutex::default(), vms: None }
+    }
+
+    /// `input.target`, else `[computer_use] target`.
+    fn target(&self, input: &Value) -> Result<Target, String> {
+        let t = input["target"].as_str().map(str::trim).filter(|s| !s.is_empty()).unwrap_or(&self.cfg.target);
+        if t == "host" {
+            return Ok(Target::Host);
+        }
+        let n = t.strip_prefix("vm:").ok_or_else(|| format!("target `{t}`: use \"host\" or \"vm:<name>\""))?;
+        ark_vm::desktop::valid_name(n)?;
+        match &self.vms {
+            Some(v) if v.cfg.enabled => Ok(Target::Vm(n.to_string())),
+            _ => Err("desktop VMs are not enabled here ([desktop_vm] enabled = false)".into()),
+        }
+    }
+
+    /// computer_use on a desktop VM: same lease → dispatch → fence order as the host, with
+    /// the VM's own lease (`<data>/vm/desktop/<name>/bot-desktop/lease.json`).
+    fn call_vm(&self, ctx: &ToolCtx, action: &str, input: &Value, name: &str) -> ToolOutput {
+        let vms = self.vms.clone().expect("target() checked");
+        let lease_home = vms.lease_home(name);
+        let admitted = match ark_browser::lease::agent_may_act(&lease_home) {
+            Ok(e) => e,
+            Err(e) => return ToolOutput::err(super::refused(action, &e)),
+        };
+        if let Some(e) = reject_unsafe(action, input) {
+            return out(e);
+        }
+        if !vms.is_running(name) {
+            return out(json!({"error": format!("desktop VM `{name}` is not running"), "hint": format!("Ask the user to start it (`ark vm desktop start {name}` or the console's VM controls).")}));
+        }
+        let mut b = super::vm::VmBackend { vms: vms.clone(), name: name.to_string() };
+        let raw = dispatch(&mut b, action, input, &self.cfg.capture_after_mode);
+        if ark_browser::lease::fence(&lease_home, admitted).is_err() {
+            return ToolOutput::err(super::refused(action, super::TAKEOVER));
+        }
+        self.shape(ctx, action, raw)
     }
 
     fn env(&self, home: &Path) -> Vec<(String, String)> {
@@ -476,6 +522,13 @@ impl Tool for ComputerUseTool {
         }
         let mode = if input["delivery_mode"] == "foreground" { "foreground" } else { "background" };
         let mut e = vec![];
+        if let Ok(Target::Vm(n)) = self.target(input) {
+            // A VM is its own approval scope: allowing input on the host does not allow it here.
+            if destructive(&action) {
+                e.push(Effect::Remote { dest: format!("desktop:vm:{n}:{action}"), reason: format!("Allow computer_use to perform `{action}` on desktop VM `{n}`? computer_use: {}", summarize(&action, input)) });
+            }
+            return e;
+        }
         if destructive(&action) {
             e.push(Effect::Remote { dest: format!("desktop:cua:{action}:{mode}"), reason: format!("Allow computer_use to perform `{action}`? computer_use: {}", summarize(&action, input)) });
         }
@@ -489,6 +542,11 @@ impl Tool for ComputerUseTool {
         let action = input["action"].as_str().unwrap_or("").trim().to_lowercase();
         if action.is_empty() {
             return out(json!({"error": "missing `action`"}));
+        }
+        match self.target(&input) {
+            Err(e) => return out(json!({"error": e})),
+            Ok(Target::Vm(n)) => return self.call_vm(ctx, &action, &input, &n),
+            Ok(Target::Host) => {}
         }
         // Bot Desktop lease: while a human drives the screen every action, capture included, is refused.
         let admitted = match ark_browser::lease::agent_may_act(&ctx.home) {
@@ -523,6 +581,13 @@ impl Tool for ComputerUseTool {
         if ark_browser::lease::fence(&ctx.home, admitted).is_err() {
             return ToolOutput::err(super::refused(&action, super::TAKEOVER));
         }
+        self.shape(ctx, &action, raw)
+    }
+}
+
+impl ComputerUseTool {
+    /// The model-facing result of one dispatch (after the lease fence).
+    fn shape(&self, ctx: &ToolCtx, action: &str, raw: Result<Raw, String>) -> ToolOutput {
         match raw {
             Err(e) => out(json!({"error": format!("{action} failed: {e}")})),
             Ok(Raw::Json(v)) => out(v),

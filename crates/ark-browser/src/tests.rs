@@ -217,6 +217,29 @@ fn hermes_tools_against_a_fake_cdp_browser() {
 }
 
 #[test]
+fn a_human_takeover_fences_every_browser_tool() {
+    let _g = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    let f = fake_page();
+    let cfg = BrowserConfig { backend: "cdp".into(), cdp_url: f.http.clone(), enabled: toml::Value::Boolean(true), ..Default::default() };
+    let c = ctx("fence", "sess-fence");
+    let (ok, _, raw) = call(&cfg, &c, "browser_navigate", json!({"url": "https://app.example/login"}));
+    assert!(ok, "{raw}");
+    // A person takes over from the web console (a plain CDP browser, not the Bot Desktop).
+    crate::lease::acquire(&c.home, "web-viewer-0001", "typing a password").unwrap();
+    for (tool, input) in [("browser_click", json!({"ref": "e1"})), ("browser_type", json!({"ref": "e2", "text": "x"})), ("browser_snapshot", json!({})), ("browser_navigate", json!({"url": "https://app.example/other"}))] {
+        let (ok, _, raw) = call(&cfg, &c, tool, input);
+        if ok || !raw.contains("human has taken over") {
+            crate::manager::global().stop("cdp");
+            panic!("{tool} acted during a takeover: {raw}");
+        }
+    }
+    crate::lease::release(&c.home, Some("web-viewer-0001"), false).unwrap();
+    let (ok, _, raw) = call(&cfg, &c, "browser_click", json!({"ref": "e1"}));
+    crate::manager::global().stop("cdp");
+    assert!(ok, "after hand-back: {raw}");
+}
+
+#[test]
 fn openclaw_browser_tool_against_a_fake_cdp_browser() {
     let _g = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     let f = fake_page();

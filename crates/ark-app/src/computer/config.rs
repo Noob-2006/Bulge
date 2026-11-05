@@ -36,6 +36,9 @@ pub struct ComputerUseConfig {
     pub timeout: u64,
     /// Mode of the follow-up capture `capture_after = true` takes: som | vision | ax.
     pub capture_after_mode: String,
+    /// Default desktop `computer_use` acts on: "host" (this machine's display / Bot Desktop) or
+    /// "vm:<name>" (a `[desktop_vm]` desktop VM). A call's `target` argument overrides it.
+    pub target: String,
     pub bot_desktop: BotDesktopConfig,
 }
 
@@ -78,6 +81,7 @@ impl Default for ComputerUseConfig {
             vision: true,
             timeout: 30,
             capture_after_mode: "som".into(),
+            target: "host".into(),
             bot_desktop: BotDesktopConfig::default(),
         }
     }
@@ -100,6 +104,7 @@ native_wayland = false
 vision = true               # describe captures with the session's vision model
 timeout = 30                # seconds per desktop call
 capture_after_mode = "som"  # follow-up capture for capture_after = true: som | vision | ax
+target = "host"             # default desktop for computer_use: "host" or "vm:<name>" (a [desktop_vm] VM)
 [computer_use.bot_desktop]
 auto_start = false          # start the headless screen when this host has no display
 geometry = "1440x900"
@@ -125,6 +130,9 @@ impl ComputerUseConfig {
         }
         if let Some(t) = c.tools.iter().find(|t| !matches!(t.as_str(), "computer_use" | "computer")) {
             return Err(format!("[computer_use] tools: unknown `{t}` (computer_use, computer)"));
+        }
+        if c.target != "host" && c.target.strip_prefix("vm:").is_none_or(|n| ark_vm::desktop::valid_name(n).is_err()) {
+            return Err(format!("[computer_use] target must be \"host\" or \"vm:<name>\", got `{}`", c.target));
         }
         parse_geometry(&c.bot_desktop.geometry).ok_or_else(|| format!("[computer_use.bot_desktop] geometry must be WxH, got `{}`", c.bot_desktop.geometry))?;
         Ok(c)

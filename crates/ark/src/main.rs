@@ -44,6 +44,7 @@ mod slash;
 mod system_cli;
 mod telephony;
 mod term;
+mod vm_cli;
 mod web_cli;
 mod wire;
 mod worktree_session;
@@ -508,7 +509,7 @@ fn build_agent(a: &Args, approver: Arc<dyn Approver>, with_channels: bool) -> Re
     }
     // `computer_use` (Hermes) / `computer` (OpenClaw) on this gateway's own display
     // (`[computer_use]`; no paired node needed).
-    match ark_app::computer::tools(&cfg.computer_use) {
+    match ark_app::computer::tools_with(&cfg.computer_use, &cfg.desktop_vm) {
         Ok(c) => tools.extend(c),
         Err(e) => eprintln!("ark: warning: {e}"),
     }

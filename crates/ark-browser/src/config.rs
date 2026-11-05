@@ -59,6 +59,9 @@ pub struct BrowserConfig {
     pub auto_install: bool,
     /// Base URL of the Chromium build CDN (pinned paths + SHA-256 are appended).
     pub install_base_url: String,
+    /// Prefer the Chrome for Testing build bundled with ark (install.sh --with-browser, the
+    /// offline bundle, `ark browser install`) over browsers found on the host.
+    pub prefer_bundled: bool,
     /// Offer browser_exec (Browser Use harness code against the session browser).
     pub exec_enabled: bool,
     /// Command that runs Python from stdin with the Browser Use helpers.
@@ -189,6 +192,7 @@ impl Default for BrowserConfig {
             cloud_provider: String::new(),
             auto_install: true,
             install_base_url: "https://cdn.playwright.dev".into(),
+            prefer_bundled: false,
             exec_enabled: false,
             exec_command: vec!["python3".into(), "-m".into(), "browser_harness.run".into()],
             camofox: CamofoxConfig::default(),
@@ -230,6 +234,7 @@ isolate_sessions = false    # one browser context per ark session
 cloud_provider = ""         # browserbase | browser-use | firecrawl | camofox | local ("" = auto-detect from keys)
 auto_install = true         # no Chromium found: download the pinned Chrome for Testing build (ARK_DISABLE_LAZY_INSTALLS=1 turns off)
 install_base_url = "https://cdn.playwright.dev"  # Chromium CDN (pinned path + SHA-256 verified)
+prefer_bundled = false      # true: use the bundled Chrome for Testing (share/browsers, data/browsers) before host browsers
 exec_enabled = false        # offer browser_exec (Browser Use harness)
 exec_command = ["python3", "-m", "browser_harness.run"]
 [browser.camofox]           # CAMOFOX_URL / CAMOFOX_API_KEY env override

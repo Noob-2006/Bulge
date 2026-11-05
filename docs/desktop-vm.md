@@ -1,0 +1,95 @@
+# 桌面 VM（Desktop VM）
+
+ark 可以開一台**有畫面的虛擬機**（Debian 13 + Xfce + Chromium），讓代理只靠「截圖 + 模擬滑鼠鍵盤」操作（computer use），人可以在網頁主控台即時觀看、隨時接手。它和工具隔離用的 microVM（`[exec.vm]`，無畫面、無網卡）是兩回事，程式在 `crates/ark-vm/src/desktop/`。
+
+## 快速開始
+
+```sh
+ark vm desktop build          # 下載固定版本的 Debian 雲端映像（sha256 驗證）並安裝桌面，約 3–5 分鐘，可重複執行
+ark vm desktop start          # 開機（預設名稱 desk），約 20 秒後自動登入並開好 Chromium
+ark vm desktop screenshot -o desk.png
+ark vm desktop input '{"type":"click","x":640,"y":90}'
+ark vm desktop input '{"type":"type","text":"example.com\n"}'
+ark vm desktop status | list [--json]
+ark vm desktop stop           # ACPI 關機（磁碟保持一致），逾時才 quit / SIGTERM
+ark vm desktop reset          # 停機並刪除磁碟疊加層，下次開機用目前的映像
+```
+
+主機只需要 `qemu-system-x86_64`、`qemu-img`。不需要 root、ISO 工具、VNC 用戶端或 xdotool。
+
+## 機器長相
+
+| 項目 | 內容 |
+|---|---|
+| 加速 | `/dev/kvm` 可讀寫時用 KVM，否則 TCG（很慢，狀態會帶警告） |
+| 顯示 | std VGA，EDID 偏好解析度 = 設定值（預設 1280×800）；畫面以 QMP `screendump` 取得 PNG |
+| 輸入 | USB tablet（絕對座標）+ PS/2 鍵盤，以 QMP `input-send-event` 送出；鍵盤配置為美式。ASCII 走鍵盤事件；含中文等非 ASCII 的文字改走 virtio-serial 文字通道 `org.ark.text`（`<runtime>/dvm/<name>/text.sock`），客體桌面工作階段裡的 `ark-text-input` 經剪貼簿貼上（xclip + Ctrl+V，會覆蓋客體剪貼簿；終端機需要 Ctrl+Shift+V，所以對終端機請只送 ASCII）。改用剪貼簿是因為 xdotool 的 Unicode keysym 輸入在 Chromium 會出現錯字 |
+| 網路 | QEMU user-mode NAT（`network = "none"` 可關閉） |
+| 通訊端 | `<runtime>/dvm/<name>/qmp.sock`、`vnc.sock`（QEMU 自帶 VNC，目錄 0700） |
+| 磁碟 | `<data>/vm/desktop/<name>/disk.qcow2`：以佈建好的映像為底的 copy-on-write 疊加層，關機後保留 |
+| 生命週期 | QEMU 以 `-daemonize` 常駐，CLI 結束後仍在跑；`pid` 存活且其命令列含本 VM 的 QMP 路徑才算執行中；`reap()` 清除殘留並停止閒置超過 `idle_timeout_secs` 的 VM |
+
+## 映像
+
+- 來源：`https://cloud.debian.org/images/cloud/trixie/20261026-2643/debian-13-generic-amd64-20261026-2643.qcow2`
+- sha256：`7740a80114c1b5e6456c65713c76f4006e8b00eb50d8a122924ba823b9959fc5`（已對照 Debian 官方 SHA512SUMS），418 MiB。`image_url` 也可以是 `file://` 或絕對路徑（離線環境）。
+- 佈建方式：ark 在主機 127.0.0.1 開一次性的 HTTP 伺服器提供 cloud-init NoCloud 種子，透過 SMBIOS `ds=nocloud;s=http://10.0.2.2:PORT/` 讓客體抓取；客體裝好 `xserver-xorg-core`、LightDM（自動登入使用者 `ark`）、Xfce（xfwm4/panel/desktop/terminal/thunar）、`chromium`、`fonts-dejavu-core`、`fonts-noto-cjk`（繁中網頁不會變成方塊）、`locales`（產生 `zh_TW.UTF-8`，介面語言維持映像預設）、`xdotool`、`xclip` 等（不裝 recommends），最後在序列埠印出 `ARK_PROVISION_OK` 並關機，ark 再把結果攤平成 `<cache>/desktop-vm/desktop-<recipe>.qcow2` 與同名 `.json` manifest。
+- recipe 雜湊涵蓋來源 sha256、cloud-config 範本與套件清單；設定不變時 `build` 直接回報「up to date」。解析度與 Chromium 起始網址每次開機經 SMBIOS OEM 字串（`ark-res=`、`ark-url=`）傳入，不必重建。
+
+## 設定 `[desktop_vm]`
+
+```toml
+[desktop_vm]
+enabled = true
+default = "desk"
+qemu = "qemu-system-x86_64"
+qemu_img = "qemu-img"
+accel = "auto"            # auto | kvm | tcg
+memory_mb = 2048
+cpus = 2
+width = 1280
+height = 800
+disk_gb = 12
+network = "user"          # user | none
+start_url = "about:blank"
+image_url = "…"           # 預設為上面的固定版本
+image_sha256 = "…"
+extra_packages = []
+build_timeout_secs = 2400
+stop_timeout_secs = 30
+idle_timeout_secs = 0     # 0 = 不自動停
+```
+
+## 網頁主控台（ARP / HTTP）
+
+`crates/ark-app/src/browser_view.rs` 模組文件是正式規格，摘要：
+
+- `view.desktop.list` → `[{id:"host"|"vm:<name>", kind, label, running, width, height, controller, lease, accel?, imageBuilt?}]`（`GET /view/desktop/list`）
+- `view.desktop.state|frame|takeover|handback` 多了可選的 `target`（預設 `host`，行為與舊版相同）。
+- `view.desktop.input {viewer, target, event}`（`POST /view/desktop/input`）：事件為螢幕像素座標 `{type: move|click|dblclick|down|up|scroll|key|type|drag, x, y, button, dx, dy, key, text, toX, toY}`；只接受持有該目標租約（lease）的 viewer。
+- `view.vm.start {name?}` / `view.vm.stop {name}`（`POST /view/vm/start|stop`）：admin 權限。
+
+每個目標有自己的接手租約：`host` 是原本的 Bot Desktop 租約，`vm:<name>` 在 `<data>/vm/desktop/<name>/bot-desktop/lease.json`。人接手某台 VM 時，代理對那台 VM 的所有動作（含截圖）都會被拒絕，主機與其他 VM 不受影響。
+
+## 代理的 computer use
+
+`computer_use` 工具多了 `target` 參數（`"host"` 或 `"vm:<name>"`），預設值來自 `[computer_use] target`。VM 目標：
+
+- `capture` 回傳整個螢幕的 PNG 給模型（沒有無障礙樹、沒有元素編號）；
+- `click / double_click / right_click / drag / scroll / type / key` 以截圖像素座標經 QMP 送出；
+- `set_value`、`focus_app`、元素編號、點擊時的修飾鍵回傳 `unsupported_action`；
+- 核准範圍獨立：`desktop:vm:<name>:<action>`（主機上的授權不會延伸到 VM）。
+
+## 內建瀏覽器
+
+- `install.sh --with-browser`：把固定版本的 Chrome for Testing（`157.0.8103.38`，zip sha256 `8cdeb344…2a66`）驗證後解到 `<share>/browsers/chrome-linux64/`。
+- 離線包：`make-offline-bundle.sh --with-browser [--browser-zip FILE]` 會帶上 `browser/chrome-linux64.zip`，`install-offline.sh` 與 `install.sh --with-browser` 會使用它。
+- `ark browser install` 預設也改成下載同一個固定版本並驗證 sha256（`--url latest` 才查 Google 的最新版索引）。
+- 探索順序：`[browser] prefer_bundled = true` 時優先用內建版本；否則主機瀏覽器找不到時才退回內建版本。
+- 桌面 VM 映像本身內建 Debian 的 `chromium`。
+
+## 已知限制
+
+- 只支援 x86_64 主機；鍵盤事件為美式配置。非 ASCII 文字依賴客體內的 `ark-text-input`（2026-11 以後建的映像才有），是「輸入文字」而不是輸入法組字。
+- 主機（`target = host`）的 `view.desktop.input` 走 xdotool / ydotool，主機沒有這些工具時會回報錯誤。
+- 映像重建後，舊 VM 的疊加層仍指向舊映像檔；要用新映像請執行 `ark vm desktop reset <name>`。

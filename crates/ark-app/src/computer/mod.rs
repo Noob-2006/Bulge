@@ -16,6 +16,7 @@ pub mod cua;
 pub mod hermes;
 pub mod native;
 pub mod openclaw;
+pub mod vm;
 
 #[cfg(test)]
 pub(crate) mod fake_driver;
@@ -85,17 +86,30 @@ pub fn display_of(env: &[(String, String)]) -> String {
 
 /// The `[computer_use]` tools (`tools = ["computer_use", "computer"]`), or none when disabled.
 pub fn tools(t: &toml::Table) -> Result<Vec<Arc<dyn ark_core::Tool>>, String> {
+    tools_with(t, &toml::Table::new())
+}
+
+/// [`tools`] plus the `[desktop_vm]` table: `computer_use` can then act on desktop VMs
+/// (`target = "vm:<name>"`), and with `[computer_use] target = "vm:…"` it is offered even on a
+/// host without a display of its own.
+pub fn tools_with(t: &toml::Table, desktop_vm: &toml::Table) -> Result<Vec<Arc<dyn ark_core::Tool>>, String> {
     let cfg = ComputerUseConfig::parse(t)?;
-    let home = ark_kernel::config::Paths::from_env().data;
-    let on = cfg.enabled().unwrap_or_else(|| available(&cfg, &home));
+    let dcfg = ark_vm::desktop::DesktopConfig::parse(desktop_vm)?;
+    let paths = ark_kernel::config::Paths::from_env();
+    let home = paths.data.clone();
+    let vm_default = cfg.target.starts_with("vm:") && dcfg.enabled;
+    let on = cfg.enabled().unwrap_or_else(|| vm_default || available(&cfg, &home));
     if !on {
         return Ok(vec![]);
     }
+    let vms = Arc::new(ark_vm::desktop::DesktopVms::new(dcfg, &paths.data, &paths.cache_dir(), &paths.runtime));
     let cfg = Arc::new(cfg);
     let kind = driver_kind(&cfg, &home);
     let mut v: Vec<Arc<dyn ark_core::Tool>> = vec![];
     if cfg.tools.iter().any(|t| t == "computer_use") {
-        v.push(Arc::new(hermes::ComputerUseTool::new(cfg.clone())));
+        let mut t = hermes::ComputerUseTool::new(cfg.clone());
+        t.vms = Some(vms);
+        v.push(Arc::new(t));
     }
     if cfg.tools.iter().any(|t| t == "computer") {
         v.push(Arc::new(openclaw::ComputerTool::new(cfg.clone(), kind)));

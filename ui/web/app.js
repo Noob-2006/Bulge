@@ -34,7 +34,7 @@ const I18N = {
     'not_a_command': '未知指令：{line}（/help 看清單）', 'local_only': '/{name} 只在終端機有效；這裡改用對應的頁面。',
     'quit_web': '/quit 只關閉終端機；關掉這個分頁即可離開。', 'copied': '已複製。', 'copy': '複製',
     'today': '今天', 'yesterday': '昨天', 'earlier': '更早', 'thinking': '思考中…',
-    'dual': '雙人覆核', 'requester': '申請者', 'dual_wait': '已記下你的核准（{n}/{m}），還需要其他核准者。',
+    'work': '工作區', 'dual': '雙人覆核', 'requester': '申請者', 'dual_wait': '已記下你的核准（{n}/{m}），還需要其他核准者。',
     'review': '覆核', 'reviewed': '標記已覆核', 'flagged': '標記可疑', 'review_note': '覆核註記（選填）', 'review_done': '已記錄覆核：{s}',
   },
   en: {
@@ -54,7 +54,7 @@ const I18N = {
     'not_a_command': 'Unknown command: {line} (see /help)', 'local_only': '/{name} only works in a terminal; use the matching page here.',
     'quit_web': '/quit closes the terminal UI; just close this tab to leave.', 'copied': 'Copied.', 'copy': 'Copy',
     'today': 'Today', 'yesterday': 'Yesterday', 'earlier': 'Earlier', 'thinking': 'Thinking…',
-    'dual': 'Dual control', 'requester': 'requested by', 'dual_wait': 'Your approval is recorded ({n}/{m}); more approvers are needed.',
+    'work': 'Workspace', 'dual': 'Dual control', 'requester': 'requested by', 'dual_wait': 'Your approval is recorded ({n}/{m}); more approvers are needed.',
     'review': 'Review', 'reviewed': 'Mark reviewed', 'flagged': 'Flag', 'review_note': 'Review note (optional)', 'review_done': 'Review recorded: {s}',
   },
 };
@@ -111,6 +111,7 @@ const VIEW_SEC = { ops: 'nav.ops', chat: 'nav.chat', agents: 'nav.agents', devic
 function showView(name, opts) {
   const prev = S.view;
   if (prev && prev !== name && VIEWS[prev] && VIEWS[prev].leave) VIEWS[prev].leave();
+  if (name !== 'chat' && typeof W === 'object' && W.open) workShow(false);
   S.view = name;
   for (const el of document.querySelectorAll('.view')) el.hidden = true;
   const el = name === 'page' ? $('panelDialog') : $('view-' + name);
@@ -448,6 +449,7 @@ function addToolCall(b) {
   det.className = 'tl run';
   det.innerHTML = `<summary><span class="star spin" style="--size:9px"></span><span class="nm">${esc(b.name)}</span><span class="arg">${esc(toolArg(b.name, b.input))}</span><span class="st">${esc(t('tool_run'))}</span></summary>${toolInput(b.name, b.input)}`;
   if (b.name === 'todo') det.open = true;
+  if (typeof workNote === 'function') workNote(b);
   el.querySelector('.body').appendChild(det);
   if (b.id) S.tools.set(b.id, det);
   return det;
@@ -801,6 +803,7 @@ async function openSession(id) {
   redrawDock();
   $('reviewBtn').hidden = false;
   loadReview();
+  if (typeof workSession === 'function') workSession();
   $('input').focus();
 }
 // ── session review (reviewer marks a conversation reviewed / flagged; audited server-side) ──
@@ -931,7 +934,17 @@ document.addEventListener('keydown', (e) => {
 async function start(token) {
   S.arp = new Arp(token);
   setConn(t('conn.connecting'));
-  try { await S.arp.connect(); } catch (e) { setConn(t('conn.failed'), 'down'); store.del('ark.token'); return askToken(); }
+  // A failed connect is usually the daemon restarting: keep the saved token and retry. Only
+  // when it has never worked in this page (likely a wrong token) ask for one, pre-filled.
+  try { await S.arp.connect(); } catch (e) {
+    setConn(t('conn.failed'), 'down');
+    S.fails = (S.fails || 0) + 1;
+    if (S.connected || S.fails < 3) { setTimeout(() => start(token), Math.min(10000, 1500 * S.fails)); return; }
+    $('token').value = token;
+    return askToken();
+  }
+  S.connected = true;
+  S.fails = 0;
   S.arp.on('ready', (p) => setConn(t('conn.ready', { v: p.server.version }), 'live'));
   // Two subscriptions share the socket: the global one feeds the rail and approvals,
   // the session one feeds the transcript. Route by subscription id so nothing renders twice.
@@ -945,7 +958,7 @@ async function start(token) {
   });
   S.arp.on('delta', (p) => { if (p.subscription !== S.globalSub) onDelta(p); });
   S.arp.on('pending', (p) => { if (p.subscription === S.globalSub) onPending(p); });
-  S.arp.on('close', () => { setConn(t('conn.down'), 'down'); setTimeout(() => start(token), 3000); });
+  S.arp.on('close', () => { if (S.arp && S.arp.token !== token) return; setConn(t('conn.down'), 'down'); setTimeout(() => start(token), 3000); });
   // After the handlers: the server's `ready` notification must not arrive unobserved.
   try { S.me = await S.arp.call('whoami'); } catch { S.me = null; }
   applyAccess(S.me);

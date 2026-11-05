@@ -50,6 +50,9 @@ pub struct Config {
     /// The agent's own headless desktop (`[bot_desktop]`: geometry, memory floor): read by
     /// `ark screen` / `ark computer-use` (ark-browser).
     pub bot_desktop: toml::Table,
+    /// Graphical desktop VMs (`[desktop_vm]`: QEMU + Xfce + Chromium driven by computer use,
+    /// watched / taken over from the web console): parsed by ark-vm (`ark_vm::desktop::DesktopConfig`).
+    pub desktop_vm: toml::Table,
     /// Web tools (`[web]`: search provider, extract backend, link understanding): parsed by
     /// ark-tools (`ark_tools::web::config::WebConfig`).
     pub web: toml::Table,
@@ -332,7 +335,7 @@ pub const PRC_HOSTS: &[&str] = &[
 
 /// Keys that run programs or open listeners. A cloned repo must not get them
 /// for free: they are dropped from a project config unless the user trusts it.
-pub const PROJECT_GATED: &[&str] = &["hooks", "hooks_extra", "mcp", "plugins", "channels", "providers", "app", "acp", "browser", "media", "bot_desktop", "web", "exec", "files", "computer_use", "trusted_projects", "context_engine", "memory", "network", "webhooks", "kanban", "meetings", "workflows", "integrations", "automation", "heartbeat", "surfaces", "audit", "quotas", "alerts"];
+pub const PROJECT_GATED: &[&str] = &["hooks", "hooks_extra", "mcp", "plugins", "channels", "providers", "app", "acp", "browser", "media", "bot_desktop", "desktop_vm", "web", "exec", "files", "computer_use", "trusted_projects", "context_engine", "memory", "network", "webhooks", "kanban", "meetings", "workflows", "integrations", "automation", "heartbeat", "surfaces", "audit", "quotas", "alerts"];
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]

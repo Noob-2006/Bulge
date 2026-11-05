@@ -65,6 +65,7 @@
       <button class="btn ghost small icon menu" id="menu" aria-label="開關側欄">☰</button>
       <div class="crumb"><span class="crumb-sec" id="crumbSec"></span><span class="title" id="title" data-i18n="pick">選擇或建立一個對話</span></div>
       <div class="status" id="status"></div>
+      <button class="btn ghost small" id="workBtn" title="瀏覽器與桌面"><span data-i18n="work">工作區</span><span class="badge" id="workBadge" hidden></span></button>
       <button class="btn ghost small" id="reviewBtn" hidden data-approve-ui><span data-i18n="review">覆核</span><span class="review-mark" id="reviewMark"></span></button>
       <div class="strip" id="strip" aria-label="即時狀態"></div>
       <button class="btn ghost small" id="paletteBtn" title="Ctrl+K"><span data-i18n="palette">指令</span> <kbd>⌘K</kbd></button>
@@ -77,6 +78,7 @@
     <section class="view" id="view-audit" hidden></section>
 
     <section class="view chat" id="view-chat">
+     <div class="chat-main">
       <div class="chat-scroll" id="chatScroll">
         <section class="log" id="log" aria-live="polite"></section>
       </div>
@@ -99,6 +101,33 @@
           </div>
         </form>
       </div>
+     </div>
+      <!-- Workspace pane (work.js): the agent's browser tabs and desktops, live, with take-over. -->
+      <aside class="work" id="work" hidden aria-label="工作區">
+        <header class="work-head">
+          <nav class="work-tabs" id="workTabs"></nav>
+          <button class="btn ghost small icon" id="workWide" title="放大／縮小">⤢</button>
+          <button class="btn ghost small icon" id="workClose" title="關閉">✕</button>
+        </header>
+        <div class="work-bar" id="workBar">
+          <button class="btn ghost small icon" data-nav="back" title="上一頁">←</button>
+          <button class="btn ghost small icon" data-nav="forward" title="下一頁">→</button>
+          <button class="btn ghost small icon" data-nav="reload" title="重新載入">⟳</button>
+          <input type="text" id="workUrl" readonly spellcheck="false" autocomplete="off">
+        </div>
+        <div class="work-stage" id="workStage" tabindex="0">
+          <img id="workFrame" alt="" draggable="false">
+          <div class="work-empty" id="workEmpty"></div>
+          <span class="work-ping" id="workPing" hidden></span>
+          <textarea id="workKeys" class="work-keys" aria-label="遠端鍵盤輸入" autocomplete="off" autocapitalize="off" spellcheck="false"></textarea>
+        </div>
+        <footer class="work-foot">
+          <span class="work-who" id="workWho"></span>
+          <span class="work-last faint" id="workLast"></span>
+          <span class="spacer"></span>
+          <button class="btn small" id="workTake" data-approve-ui>接手控制</button>
+        </footer>
+      </aside>
     </section>
 
     <!-- Control pages (pages.js) and dashboards (surfaces.js) render here. The element keeps
@@ -148,5 +177,6 @@
 <script src="/ui/surfaces.js"></script>
 <script src="/ui/pages.js"></script>
 <script src="/ui/ops.js"></script>
+<script src="/ui/work.js"></script>
 </body>
 </html>

@@ -64,7 +64,8 @@ kbd { font: 500 10.5px var(--mono); color: var(--text-3); border: 1px solid var(
 .view[hidden] { display: none !important; }
 
 /* ── chat (Claude-Code-like transcript) ── */
-.view.chat { display: flex; flex-direction: column; position: relative; overflow: hidden; }
+.view.chat { display: flex; flex-direction: row; overflow: hidden; }
+.chat-main { flex: 1; min-width: 0; display: flex; flex-direction: column; position: relative; }
 .chat-scroll { flex: 1; overflow-y: auto; }
 .log { max-width: 880px; margin: 0 auto; padding: 24px 28px 16px; display: flex; flex-direction: column; gap: 14px; }
 .msg { width: 100%; }
@@ -237,3 +238,35 @@ ul.todo li.in_progress { color: var(--gold-300); }
 .dual .slot { display: inline-block; width: 18px; height: 6px; border: 1px solid var(--thread-strong); margin-right: 3px; vertical-align: 1px; }
 .dual .slot.on { background: var(--gold-400); border-color: var(--gold-400); }
 .review-mark.reviewed { color: var(--ok); } .review-mark.flagged { color: var(--crit); }
+
+/* ── workspace pane (work.js): live browser tabs / desktops beside the transcript ── */
+.work { flex: none; width: 46%; min-width: 380px; max-width: 70%; display: flex; flex-direction: column; border-left: 1px solid var(--thread-2); background: var(--bg-rail); }
+.work.wide { width: 70%; }
+.work-head { display: flex; align-items: center; gap: 4px; padding: 6px 8px 0; border-bottom: 1px solid var(--thread); }
+.work-tabs { flex: 1; min-width: 0; display: flex; gap: 2px; overflow-x: auto; scrollbar-width: none; }
+.wtab { display: inline-flex; align-items: center; gap: 6px; max-width: 220px; padding: 6px 10px; background: transparent; border: 1px solid transparent; border-bottom: 0; border-radius: var(--radius) var(--radius) 0 0; color: var(--text-2); cursor: pointer; font: 12px var(--font); white-space: nowrap; }
+.wtab span.t { overflow: hidden; text-overflow: ellipsis; }
+.wtab .k { font: 600 9px var(--font); letter-spacing: .1em; text-transform: uppercase; color: var(--text-3); }
+.wtab:hover { color: var(--text); background: var(--surface); }
+.wtab.on { color: var(--text); background: var(--surface-2); border-color: var(--thread-2); box-shadow: inset 0 2px 0 var(--gold-400); }
+.wtab.agent::after { content: ""; width: 6px; height: 6px; border-radius: 50%; background: var(--gold-400); flex: none; }
+.work-bar { display: flex; gap: 4px; align-items: center; padding: 6px 8px; border-bottom: 1px solid var(--thread); }
+.work-bar[hidden] { display: none; }
+.work-bar input { flex: 1; font: 12px var(--mono) !important; padding: 5px 9px !important; }
+.work-stage { flex: 1; min-height: 0; position: relative; display: grid; place-items: center; background: #050103; outline: none; overflow: hidden; }
+:root[data-theme="daylight"] .work-stage { background: #e9e2d8; }
+.work-stage img { max-width: 100%; max-height: 100%; object-fit: contain; display: block; user-select: none; box-shadow: 0 0 0 1px var(--thread); }
+.work-stage img:not([src]) { display: none; }
+.work.human .work-stage { box-shadow: inset 0 0 0 2px var(--gold-400); }
+.work.human .work-stage img { cursor: crosshair; }
+.work-empty { position: absolute; inset: 0; display: grid; place-items: center; text-align: center; color: var(--text-3); font-size: 13px; padding: 24px; }
+.work-empty:empty { display: none; }
+.work-ping { position: absolute; width: 22px; height: 22px; margin: -11px 0 0 -11px; border: 2px solid var(--gold-400); border-radius: 50%; pointer-events: none; animation: ping .7s ease-out forwards; }
+@keyframes ping { from { transform: scale(.4); opacity: 1; } to { transform: scale(1.8); opacity: 0; } }
+.work-foot { display: flex; align-items: center; gap: 10px; padding: 7px 10px; border-top: 1px solid var(--thread); font-size: 12px; min-height: 42px; }
+.work-foot .spacer { flex: 1; }
+.work-who { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
+.work-last { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font: 11.5px var(--mono); min-width: 0; }
+.work.human .work-who { color: var(--gold-300); }
+@media (max-width: 900px) { .work { position: fixed; inset: 52px 0 0 0; width: auto !important; max-width: none; min-width: 0; z-index: 15; } }
+.work-keys { position: absolute; left: 0; bottom: 0; width: 1px; height: 1px; opacity: 0; border: 0; padding: 0; resize: none; pointer-events: none; }

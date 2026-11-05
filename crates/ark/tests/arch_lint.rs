@@ -50,7 +50,8 @@ const LAYERS: &[(u8, &str, &[&str])] = &[
     // H8: recalled memories are re-scanned with `ark_security::threat` at read time, so memory
     // depends on the policy helpers (a downward edge; security never names memory).
     (5, "ark-memory", &["ark-core", "ark-kernel", "ark-net", "ark-security", "ark-tools"]),
-    (6, "ark-app", &["ark-browser", "ark-channel", "ark-core", "ark-kernel", "ark-net", "ark-plugin", "ark-security", "ark-tools"]),
+    // `ark-vm` for desktop VMs (view.desktop.* targets, view.vm.*, computer_use on a VM).
+    (6, "ark-app", &["ark-browser", "ark-channel", "ark-core", "ark-kernel", "ark-net", "ark-plugin", "ark-security", "ark-tools", "ark-vm"]),
     (7, "ark", &["ark-app", "ark-vm", "ark-browser", "ark-channel", "ark-core", "ark-kernel", "ark-media", "ark-memory", "ark-model", "ark-net", "ark-plugin", "ark-security", "ark-skills", "ark-tools"]),
 ];
 

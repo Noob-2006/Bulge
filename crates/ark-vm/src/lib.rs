@@ -19,6 +19,7 @@
 pub mod cgroup;
 pub mod channel;
 pub mod config;
+pub mod desktop;
 pub mod hostcaps;
 pub mod image;
 pub mod isolation;

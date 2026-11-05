@@ -76,7 +76,7 @@ pub fn find_executable(explicit: &str) -> Result<PathBuf, String> {
     if let Some(p) = playwright_chromium() {
         return Ok(p);
     }
-    if let Some(p) = installed_chrome() {
+    if let Some(p) = bundled_chrome() {
         return Ok(p);
     }
     Err("No Chromium-based browser executable was found on this host. Install Chrome/Chromium/Brave/Edge, run `ark browser install` (downloads a pinned Chrome for Testing build into this ark home), or set browser.executable.".into())
@@ -87,6 +87,13 @@ pub fn find_executable(explicit: &str) -> Result<PathBuf, String> {
 pub fn ensure_executable(cfg: &crate::config::BrowserConfig, explicit: &str) -> Result<PathBuf, String> {
     use std::sync::atomic::{AtomicBool, Ordering};
     static TRIED: AtomicBool = AtomicBool::new(false);
+    // `browser.prefer_bundled`: the Chrome for Testing build shipped with ark (install.sh
+    // --with-browser, the offline bundle, `ark browser install`) wins over host browsers.
+    if cfg.prefer_bundled && explicit.trim().is_empty() && std::env::var_os("ARK_BROWSER_EXECUTABLE").is_none() {
+        if let Some(p) = bundled_chrome() {
+            return Ok(p);
+        }
+    }
     let first = find_executable(explicit);
     if first.is_ok() || !cfg.auto_install || TRIED.swap(true, Ordering::SeqCst) {
         return first;
@@ -121,18 +128,36 @@ pub fn installed_chrome_in(root: &Path) -> Option<PathBuf> {
     })
 }
 
+/// The Chrome for Testing build ark ships / installs by default (pinned: version, URL, sha256).
+/// packaging/install.sh (`--with-browser`) and the offline bundle carry the same three values.
+pub const PINNED_CFT_VERSION: &str = "157.0.8103.38";
+pub const PINNED_CFT_URL: &str = "https://storage.googleapis.com/chrome-for-testing-public/157.0.8103.38/linux64/chrome-linux64.zip";
+pub const PINNED_CFT_SHA256: &str = "8cdeb344e9b2cefe59f4aea8d1d93d5d93054c03cde217665c16fc1f62e72a66";
+
+/// The Chrome for Testing build bundled with ark: `<share>/browsers/chrome-linux64/chrome`
+/// (install.sh --with-browser, offline bundle), else `<data>/browsers/*/chrome` (`ark browser
+/// install`), else `<cache>/browsers/chrome-linux64/chrome`.
+pub fn bundled_chrome() -> Option<PathBuf> {
+    ark_core::share::share_path("browsers/chrome-linux64/chrome")
+        .filter(|p| p.is_file())
+        .or_else(installed_chrome)
+        .or_else(|| Some(ark_core::layout::cache_dir().join("browsers/chrome-linux64/chrome")).filter(|p| p.is_file()))
+}
+
 /// Where the download index lives (Google's Chrome for Testing "last known good versions").
 pub const CFT_INDEX: &str = "https://googlechromelabs.github.io/chrome-for-testing/last-known-good-versions-with-downloads.json";
 
 /// The zip `install_chromium` downloads: `--url`, a `.zip` in `browser.install_base_url`, else
-/// the current stable Chrome for Testing build for this host.
+/// the pinned Chrome for Testing build ([`PINNED_CFT_URL`], sha256-verified); `--url latest`
+/// asks Google's index for the current stable build instead.
 pub fn chromium_download_url(cfg: &crate::config::BrowserConfig, explicit: Option<&str>) -> Result<String, String> {
-    if let Some(u) = explicit.map(str::trim).filter(|u| !u.is_empty()) {
+    let explicit = explicit.map(str::trim).filter(|u| !u.is_empty());
+    if let Some(u) = explicit.filter(|u| *u != "latest") {
         return Ok(u.to_string());
     }
     let base = cfg.install_base_url.trim();
-    if base.ends_with(".zip") {
-        return Ok(base.to_string());
+    if explicit.is_none() {
+        return Ok(if base.ends_with(".zip") { base.to_string() } else { PINNED_CFT_URL.to_string() });
     }
     let body = ark_net::http::agent().get(CFT_INDEX)
         .call()
@@ -167,6 +192,13 @@ pub fn install_chromium(cfg: &crate::config::BrowserConfig, home: &Path, explici
     let body = resp.body_mut().with_config().limit(512 * 1024 * 1024).read_to_vec().map_err(|e| format!("download {url}: {e}"))?;
     if !body.starts_with(b"PK\x03\x04") {
         return Err(format!("{url} did not return a zip archive"));
+    }
+    if url == PINNED_CFT_URL {
+        let got = ark_net::crypto::hex(&ark_net::crypto::sha256(&body));
+        if got != PINNED_CFT_SHA256 {
+            return Err(format!("{url}: sha256 {got} does not match the pinned {PINNED_CFT_SHA256} (refusing to install it)"));
+        }
+        log(&format!("   sha256 ok (Chrome for Testing {PINNED_CFT_VERSION})"));
     }
     let stage = home.join("pm").join("chrome");
     let _ = std::fs::remove_dir_all(&stage);
@@ -646,6 +678,20 @@ pub fn lightpanda_serve(state_dir: &Path, block_private: bool) -> Result<Launche
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The default install is the pinned, sha256-checked Chrome for Testing build; the shell
+    /// installers carry the same pin.
+    #[test]
+    fn default_browser_install_is_the_pinned_build() {
+        let cfg = crate::config::BrowserConfig::default();
+        assert_eq!(chromium_download_url(&cfg, None).unwrap(), PINNED_CFT_URL);
+        assert_eq!(chromium_download_url(&cfg, Some("https://x/y.zip")).unwrap(), "https://x/y.zip");
+        assert!(PINNED_CFT_URL.contains(PINNED_CFT_VERSION) && PINNED_CFT_SHA256.len() == 64);
+        for f in ["packaging/install.sh", "packaging/offline/make-offline-bundle.sh"] {
+            let s = std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("../..").join(f)).unwrap();
+            assert!(s.contains(&format!("CFT_VERSION={PINNED_CFT_VERSION}")) && s.contains(&format!("CFT_SHA256={PINNED_CFT_SHA256}")), "{f} pins a different build");
+        }
+    }
 
     #[test]
     fn launch_flags_follow_openclaw() {

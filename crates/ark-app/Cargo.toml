@@ -23,6 +23,7 @@ ark-net.workspace = true
 ark-plugin.workspace = true
 ark-tools.workspace = true
 ark-browser.workspace = true
+ark-vm.workspace = true # desktop VMs: view.desktop.* targets, view.vm.*, computer_use on a VM
 # Features are chosen by this crate's `channel` feature (cargo cannot override
 # `default-features` through `workspace = true`).
 ark-channel = { path = "../ark-channel", default-features = false }

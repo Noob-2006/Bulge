@@ -58,6 +58,7 @@ dependencies = [
  "ark-plugin",
  "ark-security",
  "ark-tools",
+ "ark-vm",
  "image",
  "libc",
  "quick-xml",

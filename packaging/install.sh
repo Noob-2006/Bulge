@@ -17,6 +17,9 @@
 #   --no-start             install only; do not configure or start anything
 #   --no-systemd           do not use systemd; run `ark daemon` in the background
 #   --no-browser           do not open a browser
+#   --with-browser         also install the pinned Chrome for Testing build (sha256-verified) into
+#                          <share>/browsers/chrome-linux64; ark finds it (browser.prefer_bundled = true
+#                          makes it win over host browsers). From an offline bundle: browser/*.zip
 #   --uninstall [--purge]  remove ark (keeps config and data unless --purge)
 #   -y, --yes              no questions (take the defaults)
 # Env: ARK_RELEASE_BASE (mirror dir or file:// URL), ARK_RELEASE_PUBKEY (release-key.pub.pem to
@@ -39,7 +42,7 @@ need() { command -v "$1" >/dev/null 2>&1 || err "needs $1"; }
 
 main() {
     repo="${ARK_REPO:-ark-agent/ark}"
-    version=latest mode="" port="" local_bin="" package="" from_source=0 start=1 use_systemd=auto browser=1 uninstall=0 purge=0 assume_yes=0
+    version=latest mode="" port="" local_bin="" package="" from_source=0 start=1 use_systemd=auto browser=1 uninstall=0 purge=0 assume_yes=0 with_browser=0
     while [ $# -gt 0 ]; do
         case "$1" in
             --user) mode=user ;;
@@ -53,10 +56,11 @@ main() {
             --no-start) start=0 ;;
             --no-systemd) use_systemd=no ;;
             --no-browser) browser=0 ;;
+            --with-browser) with_browser=1 ;;
             --uninstall) uninstall=1 ;;
             --purge) purge=1 ;;
             -y|--yes) assume_yes=1 ;;
-            -h|--help) sed -n '2,27p' "$0" 2>/dev/null | sed 's/^# \{0,1\}//'; return 0 ;;
+            -h|--help) sed -n '2,30p' "$0" 2>/dev/null | sed 's/^# \{0,1\}//'; return 0 ;;
             *) err "unknown option $1 (see --help)" ;;
         esac
         shift
@@ -94,6 +98,7 @@ main() {
 
     next "install"
     install_files
+    [ "$with_browser" = 1 ] && install_browser
     case ":$PATH:" in *":$bin_dir:"*) ;; *) [ "$mode" = user ] && warn "add $bin_dir to PATH: echo 'export PATH=\"$bin_dir:\$PATH\"' >> ~/.profile" ;; esac
     if [ "$start" = 0 ]; then
         note "not started (--no-start). Later: ark setup bootstrap && ark daemon start && ark setup link"
@@ -244,6 +249,41 @@ verify_signature() {
     openssl base64 -d -A -in "$2/SHA256SUMS.sig" -out "$2/SHA256SUMS.sig.bin" 2>/dev/null || err "SHA256SUMS.sig is not base64"
     openssl pkeyutl -verify -pubin -inkey "$ARK_RELEASE_PUBKEY" -rawin -in "$2/SHA256SUMS" -sigfile "$2/SHA256SUMS.sig.bin" >/dev/null 2>&1 || err "signature of SHA256SUMS does not verify against $ARK_RELEASE_PUBKEY"
     ok "release signature verified"
+}
+
+# Pinned Chrome for Testing (same values as ark_browser::launch::PINNED_CFT_*).
+CFT_VERSION=157.0.8103.38
+CFT_SHA256=8cdeb344e9b2cefe59f4aea8d1d93d5d93054c03cde217665c16fc1f62e72a66
+CFT_URL="https://storage.googleapis.com/chrome-for-testing-public/$CFT_VERSION/linux64/chrome-linux64.zip"
+
+# --with-browser: the pinned build into <share>/browsers/chrome-linux64 (after install_files,
+# which replaces <share>). An offline bundle's browser/chrome-linux64.zip is used when present.
+install_browser() {
+    [ "$(uname -m)" = x86_64 ] || { warn "--with-browser: Chrome for Testing has no linux $(uname -m) build; skipped"; return 0; }
+    zip="$tmp/chrome-linux64.zip"
+    here=$(cd "$(dirname "$0")" 2>/dev/null && pwd || echo .)
+    if [ -f "$here/browser/chrome-linux64.zip" ]; then
+        cp "$here/browser/chrome-linux64.zip" "$zip"
+        note "browser from the offline bundle"
+    else
+        fetch "${ARK_BROWSER_URL:-$CFT_URL}" "$zip"
+    fi
+    if command -v sha256sum >/dev/null 2>&1; then got="$(sha256sum "$zip" | cut -d' ' -f1)"; else got="$(shasum -a 256 "$zip" | cut -d' ' -f1)"; fi
+    [ "$got" = "$CFT_SHA256" ] || err "Chrome for Testing archive sha256 $got does not match the pinned $CFT_SHA256"
+    mkdir -p "$share_dir/browsers"
+    rm -rf "$share_dir/browsers/chrome-linux64"
+    if command -v unzip >/dev/null 2>&1; then
+        unzip -q -o "$zip" -d "$share_dir/browsers" || err "unzip failed"
+    elif command -v python3 >/dev/null 2>&1; then
+        python3 -I -c 'import sys,zipfile; zipfile.ZipFile(sys.argv[1]).extractall(sys.argv[2])' "$zip" "$share_dir/browsers" || err "unpacking failed"
+    else
+        err "--with-browser needs unzip or python3"
+    fi
+    chmod 0755 "$share_dir/browsers/chrome-linux64/chrome" "$share_dir/browsers/chrome-linux64/chrome_crashpad_handler" 2>/dev/null || true
+    printf '%s\n' "$CFT_VERSION" > "$share_dir/browsers/chrome-linux64/.ark-version"
+    rm -f "$zip"
+    ok "Chrome for Testing $CFT_VERSION (sha256 ok) → $share_dir/browsers/chrome-linux64"
+    note "prefer it over host browsers: ark config set browser.prefer_bundled=true"
 }
 
 # ───────────── install ─────────────
