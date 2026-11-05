@@ -56,7 +56,19 @@ pub fn run(argv: &[String], cwd: Option<&Path>, timeout: Duration, cancel: &Canc
     if let Some(d) = cwd {
         cmd.current_dir(d);
     }
-    let mut child = cmd.spawn().map_err(|e| format!("cannot run `{prog}`: {e}"))?;
+    // ETXTBSY: a just-written executable can still be open for writing in a sibling fork
+    // (another thread spawning at the same moment); it clears within milliseconds.
+    let mut tries = 0;
+    let mut child = loop {
+        match cmd.spawn() {
+            Ok(c) => break c,
+            Err(e) if e.raw_os_error() == Some(libc::ETXTBSY) && tries < 20 => {
+                tries += 1;
+                std::thread::sleep(Duration::from_millis(25));
+            }
+            Err(e) => return Err(format!("cannot run `{prog}`: {e}")),
+        }
+    };
     let out = reader(child.stdout.take().expect("piped"));
     let err = reader(child.stderr.take().expect("piped"));
     let start = Instant::now();

@@ -89,7 +89,7 @@ impl Jira {
         let f = &issue["fields"];
         json!({"key": issue["key"], "summary": f["summary"], "status": f["status"]["name"], "priority": f["priority"]["name"], "assignee": f["assignee"]["displayName"], "type": f["issuetype"]["name"], "updated": f["updated"], "labels": f["labels"]})
     }
-    fn key<'a>(input: &'a Value) -> Result<&'a str, String> {
+    fn key(input: &Value) -> Result<&str, String> {
         arg(input, "key").filter(|k| jira_key_ok(k)).ok_or_else(|| "`key` must be an issue key like OPS-123".to_string())
     }
     fn run(&self, ep: &Endpoint, input: &Value, ctx: &ToolCtx) -> Result<Value, String> {

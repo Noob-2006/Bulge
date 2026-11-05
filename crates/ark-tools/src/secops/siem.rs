@@ -57,7 +57,7 @@ pub fn spl_read_only(q: &str) -> Result<String, String> {
         return Err("empty search".into());
     }
     for seg in t.split('|').skip(1) {
-        let cmd = seg.trim().split_whitespace().next().unwrap_or("").to_ascii_lowercase();
+        let cmd = seg.split_whitespace().next().unwrap_or("").to_ascii_lowercase();
         if SPL_DENY.contains(&cmd.as_str()) {
             return Err(format!("`| {cmd}` is not allowed: siem_alerts only runs read-only searches"));
         }
