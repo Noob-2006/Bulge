@@ -412,6 +412,7 @@ impl Slack {
             (p.to_string_lossy().into_owned(), base, Some(TempFile(p)))
         } else {
             let p = ark_core::tool::expand_home(src.strip_prefix("file://").unwrap_or(src));
+            let p = crate::media_guard::check_current(&p).map_err(bad)?;
             let base = p.file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_else(|| "file".into());
             (p.to_string_lossy().into_owned(), base, None)
         };

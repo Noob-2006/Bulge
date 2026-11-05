@@ -416,6 +416,8 @@ pub(super) fn load_media(src: &str, max: usize) -> Result<(String, String, Vec<u
         (base(src), String::new(), crate::http::get_bytes(src, &[], max as u64)?)
     } else {
         let p = ark_core::tool::expand_home(src.strip_prefix("file://").unwrap_or(src));
+        // srv-012: only workspace / sandbox-output files leave the host.
+        let p = crate::media_guard::check_current(&p).map_err(bad)?;
         let meta = std::fs::metadata(&p).map_err(|e| bad(format!("cannot read media {}: {e}", p.display())))?;
         if meta.len() as usize > max {
             return Err(bad(format!("media {} is larger than {max} bytes", p.display())));
@@ -1635,5 +1637,19 @@ mod tests {
         assert_eq!(sniff(b" {\"v\":\"5.5\"}"), Some("application/json"));
         let (_, ct, b) = load_media("data:text/plain;base64,aGk=", 10).unwrap();
         assert_eq!((ct.as_str(), b.as_slice()), ("text/plain", &b"hi"[..]));
+    }
+
+    #[test]
+    fn load_media_refuses_host_paths_outside_the_send_roots() {
+        // srv-012 second layer: even a path that reached the loader directly is checked.
+        let ws = ark_core::tmp::TempDir::new("dc-ws");
+        let host = ark_core::tmp::TempDir::new("dc-host");
+        std::fs::write(ws.join("a.png"), PNG).unwrap();
+        std::fs::write(host.join("secret.txt"), b"s").unwrap();
+        crate::media_guard::scoped(vec![ws.to_path_buf()], || {
+            assert!(load_media(&ws.join("a.png").display().to_string(), 1 << 20).is_ok());
+            let e = load_media(&format!("file://{}", host.join("secret.txt").display()), 1 << 20).unwrap_err();
+            assert!(e.message.contains("refusing to send"), "{}", e.message);
+        });
     }
 }

@@ -257,6 +257,10 @@ fn send_dm(inner: &Arc<Inner>, a: &Value, session: &str) -> Result<Value, YbErro
     }
     // Hermes `filter_media_delivery_paths`: only existing regular files go out.
     files.retain(|p| !p.is_empty() && std::path::Path::new(p).is_file());
+    // srv-012: attachments leave the host only from the workspace / sandbox output area.
+    for p in files.iter_mut() {
+        *p = crate::media_guard::check_current(std::path::Path::new(p)).map_err(fail)?.display().to_string();
+    }
     if message.is_empty() && files.is_empty() {
         return Err(fail("message or media_files is required"));
     }
@@ -391,7 +395,7 @@ impl Tool for YbTool {
         let r = match self.kind {
             Kind::GroupInfo => group_info(&self.inner, &input),
             Kind::Members => query_members(&self.inner, &input),
-            Kind::SendDm => send_dm(&self.inner, &input, &ctx.session_id),
+            Kind::SendDm => crate::media_guard::scoped(crate::media_guard::roots_for(ctx), || send_dm(&self.inner, &input, &ctx.session_id)),
             Kind::SearchSticker => search_sticker(&input),
             Kind::SendSticker => send_sticker(&self.inner, &input, &ctx.session_id),
         };
