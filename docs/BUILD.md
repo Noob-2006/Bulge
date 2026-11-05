@@ -396,3 +396,27 @@ is ark's own data dir), `/usr/local/share/ark`, `/usr/share/ark`, the source che
   `ark debug share` can be forbidden with `ARK_DEBUG_SHARE=off`, `/etc/ark/no-debug-upload` or the
   `government` compliance profile.
 * Hygiene: `tools/secret-scan.py` (CI: working tree and full history), `cargo deny`, clippy.
+
+### Packages, repositories, images (round 9, wave 2)
+
+* **musl build, verified.** `rust:alpine` + `apk add build-base` + `cargo build --release --locked -p ark`
+  links a static-pie binary (36 MB, `check-binary.sh` passes; mimalloc included). Every package
+  below carries that one binary.
+* **deb / rpm** — `packaging/nfpm/build-packages.sh --bin <static ark> --arch amd64|arm64 --out dist`
+  (one `nfpm.yaml`; nfpm runs from the `goreleaser/nfpm` container, or a local `nfpm`). Package name
+  `ark-agent` (`Conflicts: ark`: Debian/Ubuntu/Fedora/openSUSE ship a KDE archiver called `ark`).
+  Layout `/usr/bin/ark`, `/usr/share/ark`, `/etc/ark{,/managed.d}`, `/usr/lib/{systemd/system,sysusers.d,tmpfiles.d}`;
+  `/var/lib/ark` is created by tmpfiles/postinstall and never owned by the package. On systemd < 245
+  the postinstall regenerates the unit with `ark service print --system` (`ops/service.rs::degrade_unit`:
+  < 229 moves `StartLimit*` to `[Service]`, older directives are dropped; `--systemd-version N`
+  renders for another manager).
+* **repositories** — `packaging/repo/make-apt-repo.py`, `make-yum-repo.sh`; `test-repos.sh` proves them
+  end to end (debian:12 apt with `signed-by`, rockylinux:9 dnf with `gpgcheck`+`repo_gpgcheck`, and a
+  repository signed by a foreign key is refused).
+* **offline bundle** — `packaging/offline/make-offline-bundle.sh` / `install-offline.sh`.
+* **distro matrix** — `python3 -I packaging/matrix/matrix.py --dist dist` (containers `ark-test-pkg-<id>`,
+  fake model from `tests/e2e/fake_provider.py`); CI job `distro-matrix` in `release.yml`.
+* **images** — `Dockerfile` (debian), `Dockerfile.ubi`, `Dockerfile.distroless`; CI `images.yml`
+  (native amd64/arm64, SBOM + provenance, cosign keyless). `deploy-lint.yml` lints Helm, Terraform,
+  Ansible, cloud-init and the Dockerfiles.
+* Enterprise docs: `docs/enterprise/`.
