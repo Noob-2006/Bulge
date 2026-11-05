@@ -44,7 +44,8 @@ impl Tool for ChannelSend {
                 "properties": {
                     "channel": {"type": "string", "description": "Channel name; optional when only one is configured"},
                     "chat": {"type": "string", "description": "Chat id; defaults to the channel's default_chat"},
-                    "text": {"type": "string"}
+                    "text": {"type": "string", "description": "Message body; the caption when `media` is given"},
+                    "media": {"type": "array", "items": {"type": "string"}, "description": "Files to send (paths inside the workspace or artifacts folder)"}
                 },
                 "required": ["text"]
             }),
@@ -56,25 +57,38 @@ impl Tool for ChannelSend {
 
     fn effects(&self, _ctx: &ToolCtx, input: &Value) -> Vec<Effect> {
         let channel = self.pick(input).map(|(n, _)| n.to_string()).unwrap_or_else(|_| arg_opt_str(input, "channel").unwrap_or("?").to_string());
-        vec![Effect::Send { channel, payload: arg_opt_str(input, "text").unwrap_or("").to_string() }]
+        let mut payload = arg_opt_str(input, "text").unwrap_or("").to_string();
+        if let Some(a) = input.get("media").and_then(|m| m.as_array()) {
+            a.iter().filter_map(|v| v.as_str()).for_each(|f| payload.push_str(&format!("\n[file: {f}]")));
+        }
+        vec![Effect::Send { channel, payload }]
     }
 
-    fn call(&self, _ctx: &ToolCtx, input: Value) -> ToolOutput {
+    fn call(&self, ctx: &ToolCtx, input: Value) -> ToolOutput {
         let text = match arg_str(&input, "text") {
             Ok(t) if !t.trim().is_empty() => t,
             Ok(_) => return ToolOutput::err("`text` is empty"),
+            Err(e) => return ToolOutput::err(e),
+        };
+        let roots = [ctx.workspace.clone(), ctx.artifacts.clone()];
+        let media = match crate::outfile::media_from_input(&json!({"media": input.get("media").cloned().unwrap_or(Value::Null)}), &ctx.workspace, &roots) {
+            Ok(m) => m,
             Err(e) => return ToolOutput::err(e),
         };
         let (name, target) = match self.pick(&input) {
             Ok(x) => x,
             Err(e) => return ToolOutput::err(e),
         };
-        let Some(chat) = arg_opt_str(&input, "chat").map(str::to_string).or_else(|| target.default_chat.clone()) else {
+        let Some(chat) = arg_opt_str(&input, "chat").map(str::to_string).or_else(|| crate::outfile::effective_default(name, target.default_chat.as_ref())) else {
             return ToolOutput::err(format!("pass `chat`: channel `{name}` has no default_chat"));
         };
         // Secrets are deliberately NOT substituted: humans' chats are outside the vault's trust boundary.
-        match target.channel.send(&Outbound::text(&chat, text)) {
-            Ok(_) => ToolOutput::ok(format!("sent {} chars to {name}/{chat}", text.chars().count())),
+        if !media.is_empty() && !target.channel.caps().media {
+            return ToolOutput::err(format!("channel `{name}` cannot carry files"));
+        }
+        let n = media.len();
+        match target.channel.send(&Outbound { media, ..Outbound::text(&chat, text) }) {
+            Ok(_) => ToolOutput::ok(format!("sent {} chars{} to {name}/{chat}", text.chars().count(), if n > 0 { format!(" + {n} file(s)") } else { String::new() })),
             Err(e) => ToolOutput::err(format!("send to {name}/{chat} failed: {e}")),
         }
     }
@@ -143,5 +157,39 @@ mod tests {
         let r = tool.call(&ctx(), json!({"channel": "b", "text": "x"}));
         assert!(r.is_error && r.content.contains("revoked"));
         assert!(ChannelSend::new(BTreeMap::new()).call(&ctx(), json!({"text": "x"})).content.contains("no channels"));
+    }
+
+    #[test]
+    fn channel_send_attaches_workspace_files_only() {
+        struct Media(Rec);
+        impl Channel for Media {
+            fn id(&self) -> &str {
+                "m"
+            }
+            fn poll(&self, c: &Cancel) -> Result<Vec<Inbound>, ChannelError> {
+                self.0.poll(c)
+            }
+            fn caps(&self) -> crate::Caps {
+                crate::Caps { media: true, ..Default::default() }
+            }
+            fn send(&self, o: &Outbound) -> Result<crate::Sent, ChannelError> {
+                self.0.send(o)
+            }
+        }
+        let ch = Arc::new(Media(Rec(Mutex::new(vec![]), false)));
+        let mut t = BTreeMap::new();
+        t.insert("phone".to_string(), Target { channel: ch.clone(), default_chat: Some("42".into()) });
+        let tool = ChannelSend::new(t);
+        let mut c = ctx();
+        let d = ark_core::tmp::scratch("ark-ch-send");
+        std::fs::write(d.join("a.png"), b"\x89PNG").unwrap();
+        c.workspace = d.clone();
+        c.artifacts = d.clone();
+        let r = tool.call(&c, json!({"text": "here", "media": ["a.png"]}));
+        assert!(!r.is_error, "{}", r.content);
+        assert_eq!(ch.0 .0.lock().unwrap()[0].media.len(), 1);
+        let r = tool.call(&c, json!({"text": "x", "media": ["/etc/hostname"]}));
+        assert!(r.is_error && r.content.contains("outside"), "{}", r.content);
+        let _ = std::fs::remove_dir_all(&d);
     }
 }

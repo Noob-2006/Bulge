@@ -21,7 +21,7 @@ fn send(channels: &BTreeMap<String, (Arc<dyn Channel>, Option<String>)>, secrets
     match t {
         Target::Channel { name, chat, thread } => {
             let (ch, default_chat) = channels.get(name).ok_or_else(|| format!("unknown channel `{name}`; configured: {}", channels.keys().cloned().collect::<Vec<_>>().join(", ")))?;
-            let chat = chat.clone().or_else(|| default_chat.clone()).ok_or_else(|| format!("channel `{name}` has no default_chat; use `{name}:<chat>`"))?;
+            let chat = chat.clone().or_else(|| ark_channel::outfile::effective_default(name, default_chat.as_ref())).ok_or_else(|| format!("channel `{name}` has no default_chat; use `{name}:<chat>`"))?;
             let mut o = Outbound::text(&chat, &p.text);
             o.thread = thread.clone();
             ch.send(&o).map_err(|e| format!("send to {name}/{chat} failed: {e}"))?;
