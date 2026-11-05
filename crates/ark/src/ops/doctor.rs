@@ -24,6 +24,7 @@ use std::path::{Path, PathBuf};
 
 pub const COMMANDS: &[&str] = &[];
 pub const VALUE_FLAGS: &[&str] = &["only", "skip", "severity-min"];
+// `--bundle`, `--out`, `--lines`, `--keep-identity` belong to ops/debugdump.rs (`ark doctor --bundle`).
 pub const BOOL_FLAGS: &[&str] = &["lint", "dry-run"];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -837,6 +838,9 @@ fn build_ctx(a: &Args) -> Result<Ctx, crate::Fail> {
 }
 
 pub fn dispatch(cmd: &str, a: &Args, _raw: &[String]) -> Option<R> {
+    if cmd == "doctor" && a.flag("bundle") {
+        return Some(crate::ops::debugdump::doctor_bundle(a));
+    }
     if cmd != "doctor" || !(a.flag("fix") || a.flag("lint") || a.pos(0) == Some("checks")) {
         return None;
     }

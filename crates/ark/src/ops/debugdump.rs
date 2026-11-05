@@ -29,8 +29,8 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 pub const COMMANDS: &[&str] = &["dump", "debug"];
-pub const VALUE_FLAGS: &[&str] = &["lines", "expire"];
-pub const BOOL_FLAGS: &[&str] = &["show-keys", "local", "nous"];
+pub const VALUE_FLAGS: &[&str] = &["lines", "expire", "out"];
+pub const BOOL_FLAGS: &[&str] = &["show-keys", "local", "nous", "bundle", "keep-identity"];
 
 const PASTE_RS: &str = "https://paste.rs/";
 const DPASTE: &str = "https://dpaste.com/api/";
@@ -226,11 +226,147 @@ fn tail_lines(p: &Path, n: usize) -> Option<(String, String)> {
     Some((tail, text))
 }
 
+// ───────────── de-identification (support bundles) ─────────────
+
+/// What identifies this machine and its owner: scrubbed from anything that leaves the host.
+#[derive(Debug, Clone, Default)]
+pub struct Scrub {
+    pub home: String,
+    pub user: String,
+    pub host: String,
+    pub extra: Vec<(String, String)>,
+}
+
+impl Scrub {
+    /// This process's identity (`$HOME`, `$USER`, `/etc/hostname`) plus the workspace path.
+    pub fn here(workspace: Option<&Path>) -> Scrub {
+        let host = std::fs::read_to_string("/etc/hostname").map(|s| s.trim().to_string()).ok().filter(|s| !s.is_empty()).or_else(|| std::env::var("HOSTNAME").ok()).unwrap_or_default();
+        let user = std::env::var("USER").or_else(|_| std::env::var("LOGNAME")).unwrap_or_default();
+        let home = std::env::var("HOME").unwrap_or_default();
+        let extra = workspace.map(|w| vec![(w.display().to_string(), "<workspace>".to_string())]).unwrap_or_default();
+        Scrub { home, user, host, extra }
+    }
+
+    pub fn apply(&self, s: &str) -> String {
+        static IP4: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+        static IP6: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+        static MAC: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+        static MAIL: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+        let ip4 = IP4.get_or_init(|| regex::Regex::new(r"\b(?:\d{1,3}\.){3}\d{1,3}\b").unwrap());
+        let ip6 = IP6.get_or_init(|| regex::Regex::new(r"(?i)\b(?:[0-9a-f]{1,4}:){3,7}[0-9a-f]{1,4}\b|\b(?:[0-9a-f]{1,4}:){1,6}:(?:[0-9a-f]{1,4})?\b").unwrap());
+        let mac = MAC.get_or_init(|| regex::Regex::new(r"(?i)\b(?:[0-9a-f]{2}[:-]){5}[0-9a-f]{2}\b").unwrap());
+        let mail = MAIL.get_or_init(|| regex::Regex::new(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}").unwrap());
+        let mut t = s.to_string();
+        // Longest path first so a workspace under $HOME becomes <workspace>, not ~/…
+        let mut paths: Vec<&(String, String)> = self.extra.iter().filter(|(a, _)| a.len() > 1).collect();
+        paths.sort_by_key(|(a, _)| std::cmp::Reverse(a.len()));
+        for (from, to) in paths {
+            t = t.replace(from.as_str(), to);
+        }
+        if self.home.len() > 1 && self.home != "/" {
+            t = t.replace(&self.home, "~");
+        }
+        t = mail.replace_all(&t, "<email>").into_owned();
+        t = mac.replace_all(&t, "<mac>").into_owned();
+        t = ip6.replace_all(&t, |c: &regex::Captures| if &c[0] == "::1" { c[0].to_string() } else { "<ip6>".into() }).into_owned();
+        t = ip4.replace_all(&t, |c: &regex::Captures| {
+            let ip = &c[0];
+            // Versions like 1.2.3.4 and loopback/unspecified addresses carry no identity.
+            if ip.starts_with("127.") || ip == "0.0.0.0" || c[0].split('.').any(|o| o.parse::<u16>().map_or(true, |n| n > 255)) { ip.to_string() } else { "<ip>".into() }
+        }).into_owned();
+        for (word, to) in [(&self.host, "<host>"), (&self.user, "<user>")] {
+            if word.chars().count() >= 3 {
+                if let Ok(re) = regex::Regex::new(&format!(r"(?i)\b{}\b", regex::escape(word))) {
+                    t = re.replace_all(&t, to).into_owned();
+                }
+            }
+        }
+        t
+    }
+}
+
+/// `ark debug share` uploads to a public paste service. Policy that forbids it: `ARK_DEBUG_SHARE=off`,
+/// a `government` compliance profile, or an administrator's `/etc/ark/no-debug-upload`.
+pub fn upload_blocked(cfg: &Config) -> Option<String> {
+    if std::env::var("ARK_DEBUG_SHARE").is_ok_and(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "off" | "0" | "no" | "false")) {
+        return Some("ARK_DEBUG_SHARE=off".into());
+    }
+    if cfg.compliance.profile == "government" {
+        return Some("compliance profile `government`".into());
+    }
+    Path::new("/etc/ark/no-debug-upload").exists().then(|| "/etc/ark/no-debug-upload exists".to_string())
+}
+
+/// One diagnostic section of a support bundle: file name + text (already collected).
+pub type Section = (String, String);
+
+/// The `ark doctor --bundle` archive: `.tar.gz` bytes with the diagnostics, secrets redacted and
+/// (unless `keep_identity`) host name, user name, home/workspace paths, IP/MAC addresses and
+/// e-mail addresses replaced by placeholders. Nothing is sent anywhere.
+pub fn support_bundle(paths: &Paths, cfg: &Config, scrub: &Scrub, extra: Vec<Section>, lines: usize, keep_identity: bool) -> Result<Vec<u8>, String> {
+    use crate::ops::archive::{gzip, tar, Entry};
+    let clean = |s: &str| {
+        let t = redact(s);
+        if keep_identity { t } else { scrub.apply(&t) }
+    };
+    let mut files: Vec<Section> = vec![];
+    let report = bundle(paths, cfg, lines, true);
+    for (label, text) in report.into_iter().filter(|(l, _)| l == "report") {
+        files.push((format!("{label}.txt"), text));
+    }
+    let conf = std::fs::read_to_string(paths.user_config()).unwrap_or_else(|_| "(no user config)".into());
+    files.push(("config.toml".into(), conf));
+    files.extend(extra);
+    let manifest = format!(
+        "ark support bundle\nversion: {}\ncreated: {}\nsecrets: redacted (token shapes, key = value credentials, URL passwords)\nidentity: {}\nfiles: {}\n\nReview the files before sending them; nothing here was uploaded.\n",
+        env!("CARGO_PKG_VERSION"),
+        ark_kernel::util::unix_now(),
+        if keep_identity { "KEPT (--keep-identity)" } else { "host name, user name, home/workspace paths, IP/MAC addresses and e-mail addresses replaced with placeholders" },
+        files.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>().join(", ")
+    );
+    let mut entries: Vec<Entry> = vec![Entry { path: "ark-diagnostics/".into(), data: vec![], mode: 0o700, dir: true }];
+    entries.push(Entry::file("ark-diagnostics/MANIFEST.txt", manifest.into_bytes()));
+    for (name, text) in files {
+        entries.push(Entry::file(&format!("ark-diagnostics/{name}"), clean(&text).into_bytes()));
+    }
+    Ok(gzip(&tar(&entries)))
+}
+
+/// Run `ark <args>` and capture stdout+stderr (a failing check still produces output worth keeping).
+fn capture_self(args: &[&str]) -> String {
+    match std::env::current_exe().and_then(|e| std::process::Command::new(e).args(args).stdin(std::process::Stdio::null()).output()) {
+        Ok(o) => format!("$ ark {}\n{}{}\n(exit {})\n", args.join(" "), String::from_utf8_lossy(&o.stdout), String::from_utf8_lossy(&o.stderr), o.status.code().unwrap_or(-1)),
+        Err(e) => format!("$ ark {}\n(could not run: {e})\n", args.join(" ")),
+    }
+}
+
+/// `ark doctor --bundle [--out FILE] [--lines N] [--keep-identity]`.
+pub fn doctor_bundle(a: &Args) -> R {
+    let paths = Paths::from_env();
+    let ws = crate::workspace(a)?;
+    let cfg = crate::load_config(a, &ws, &paths)?;
+    let lines = a.num::<usize>("lines")?.unwrap_or(200);
+    let wsarg = ws.display().to_string();
+    let extra = vec![
+        ("doctor.txt".to_string(), capture_self(&["doctor", "--workspace", &wsarg])),
+        ("sandbox-explain.txt".to_string(), capture_self(&["sandbox", "explain", "--json", "--workspace", &wsarg])),
+        ("service-audit.txt".to_string(), capture_self(&["service", "audit", "--workspace", &wsarg])),
+    ];
+    let bytes = support_bundle(&paths, &cfg, &Scrub::here(Some(&ws)), extra, lines, a.flag("keep-identity"))?;
+    let out = a.val("out").map(PathBuf::from).unwrap_or_else(|| PathBuf::from(format!("ark-diagnostics-{}.tar.gz", ark_kernel::util::unix_now())));
+    std::fs::write(&out, &bytes).map_err(|e| format!("{}: {e}", out.display()))?;
+    println!("wrote {} ({} bytes). Secrets are redacted{}; nothing was uploaded — review it, then send it to support.", out.display(), bytes.len(), if a.flag("keep-identity") { "" } else { " and host/user/paths/IPs anonymized" });
+    Ok(0)
+}
+
 const REDACTION_BANNER: &str = "[ark debug share: secrets were redacted before upload]\n\n";
 
 /// label → text: the report (dump + log tails) and each full log (dump-prefixed).
 pub fn bundle(paths: &Paths, cfg: &Config, lines: usize, redact_on: bool) -> Vec<(String, String)> {
-    let r = |s: String| if redact_on { redact(&s) } else { s };
+    // Redacting also anonymizes what identifies the host and its owner (user/host names, home
+    // path, IPs, e-mails): a public paste must not carry them either.
+    let scrub = Scrub::here(None);
+    let r = |s: String| if redact_on { scrub.apply(&redact(&s)) } else { s };
     let d = r(dump(paths, cfg, false));
     let logs = [("ark.jsonl", crate::ops::logs::dir(paths).join("ark.jsonl")), ("arkd.log", paths.data.join("arkd.log"))];
     let mut report = d.clone();
@@ -363,6 +499,9 @@ pub type Shared = (Vec<(String, String)>, Vec<String>);
 
 /// Upload every bundle entry → (label → url, failures); paste.rs urls are scheduled for deletion.
 pub fn share(paths: &Paths, cfg: &Config, lines: usize, expiry: u32, redact_on: bool) -> Result<Shared, String> {
+    if let Some(why) = upload_blocked(cfg) {
+        return Err(format!("uploading debug reports is disabled here ({why}); use `ark doctor --bundle` to write a local, anonymized archive instead"));
+    }
     let b = bundle(paths, cfg, lines, redact_on);
     let mut urls = vec![];
     let mut fails = vec![];
@@ -436,6 +575,9 @@ pub fn run(paths: Paths, cmd: &str, a: &Args) -> R {
                     println!("{text}");
                 }
                 return Ok(0);
+            }
+            if let Some(why) = upload_blocked(&cfg) {
+                return Err(format!("uploading debug reports is disabled here ({why}); use `ark doctor --bundle` (local archive) or `ark debug share --local`").into());
             }
             eprintln!("{PRIVACY}");
             if !a.flag("yes") {
@@ -687,6 +829,62 @@ mod tests {
     use super::*;
     use crate::ops::net::fake;
     use std::sync::Arc;
+
+    #[test]
+    fn scrub_removes_identity_but_keeps_loopback() {
+        let s = Scrub { home: "/home/amy".into(), user: "amy".into(), host: "amy-laptop".into(), extra: vec![("/home/amy/work/proj".into(), "<workspace>".into())] };
+        let out = s.apply("amy@amy-laptop:/home/amy/work/proj$ ark ; cfg /home/amy/.config/ark ; peer 10.1.2.3 and 192.168.0.9 local 127.0.0.1 any 0.0.0.0 ; fe80:0:0:0:aa:bb:cc:dd ; mac 3c:22:fb:12:34:56 ; mail a.b@corp.example.com ; user Amy");
+        for gone in ["amy", "10.1.2.3", "192.168.0.9", "3c:22:fb", "corp.example.com", "fe80:0:0:0"] {
+            assert!(!out.to_lowercase().contains(gone), "{gone} leaked: {out}");
+        }
+        for kept in ["<workspace>", "~/.config/ark", "127.0.0.1", "0.0.0.0", "<ip>", "<mac>", "<email>", "<ip6>", "<user>"] {
+            assert!(out.contains(kept), "{kept} missing: {out}");
+        }
+        // Short names are not guessed at: replacing "al" would shred ordinary words.
+        let t = Scrub { home: "/home/al".into(), user: "al".into(), host: "h".into(), extra: vec![] };
+        assert_eq!(t.apply("the alarm"), "the alarm");
+    }
+
+    #[test]
+    fn doctor_bundle_is_an_anonymized_local_archive() {
+        let kit = crate::testkit::kit();
+        let (home, user) = ("/home/amy", "amy");
+        let scrub = Scrub { home: home.into(), user: user.into(), host: "amy-laptop".into(), extra: vec![] };
+        let secret = format!("sk-{}", "a1B2c3D4e5F6g7H8i9J0k1L2m3N4");
+        std::fs::create_dir_all(crate::ops::logs::dir(&kit.paths)).unwrap();
+        std::fs::write(crate::ops::logs::dir(&kit.paths).join("ark.jsonl"), format!("{{\"msg\":\"cwd {home}/proj by {user} from 203.0.113.7 key {secret}\"}}\n")).unwrap();
+        let extra = vec![("doctor.txt".to_string(), format!("✓ ok\n✗ net: cannot reach 198.51.100.4 as {user}@amy-laptop\n"))];
+        let gz = support_bundle(&kit.paths, &kit.k.cfg, &scrub, extra, 50, false).unwrap();
+        let entries = crate::ops::archive::untar(&crate::ops::archive::gunzip(&gz).unwrap()).unwrap();
+        let names: Vec<&str> = entries.iter().map(|e| e.path.as_str()).collect();
+        for want in ["ark-diagnostics/MANIFEST.txt", "ark-diagnostics/report.txt", "ark-diagnostics/config.toml", "ark-diagnostics/doctor.txt"] {
+            assert!(names.contains(&want), "{want} missing from {names:?}");
+        }
+        let all: String = entries.iter().map(|e| String::from_utf8_lossy(&e.data).to_string()).collect();
+        assert!(!all.contains("203.0.113.7") && !all.contains("198.51.100.4"), "IPs leaked: {all}");
+        assert!(!all.contains(&secret), "secret leaked");
+        assert!(!all.contains("/home/amy") && !all.contains("amy-laptop") && !all.contains("by amy"), "identity leaked: {all}");
+        assert!(all.contains("<ip>") && all.contains("~/proj") && all.contains("replaced with placeholders"));
+        // --keep-identity keeps the paths (but still redacts secrets).
+        let kept = support_bundle(&kit.paths, &kit.k.cfg, &scrub, vec![("doctor.txt".into(), format!("at {home}/proj key {secret}"))], 50, true).unwrap();
+        let all: String = crate::ops::archive::untar(&crate::ops::archive::gunzip(&kept).unwrap()).unwrap().iter().map(|e| String::from_utf8_lossy(&e.data).to_string()).collect();
+        assert!(all.contains("/home/amy/proj") && all.contains("KEPT") && !all.contains(&secret));
+    }
+
+    #[test]
+    fn policy_can_forbid_the_paste_upload() {
+        let kit = crate::testkit::kit();
+        std::env::remove_var("ARK_DEBUG_SHARE");
+        assert!(upload_blocked(&kit.k.cfg).is_none() || Path::new("/etc/ark/no-debug-upload").exists());
+        std::env::set_var("ARK_DEBUG_SHARE", "off");
+        let why = upload_blocked(&kit.k.cfg).unwrap();
+        let err = share(&kit.paths, &kit.k.cfg, 5, 1, true).unwrap_err();
+        std::env::remove_var("ARK_DEBUG_SHARE");
+        assert!(why.contains("ARK_DEBUG_SHARE") && err.contains("ark doctor --bundle"), "{err}");
+        let mut gov = kit.k.cfg.clone();
+        gov.compliance.profile = "government".into();
+        assert!(upload_blocked(&gov).unwrap().contains("government"));
+    }
 
     #[test]
     fn dump_masks_and_flags_shell_only_keys() {

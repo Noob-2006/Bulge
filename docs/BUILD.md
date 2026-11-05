@@ -366,3 +366,33 @@ which is why each variant in the table costs minutes rather than seconds.
 * Gating is per module, not per kind: `teams`, `twilio`, `imap`, `lark`, `urbit`,
   `twitter`, `wechat`, `imsg`, `qa_channel`… aliases disappear together with their
   platform.
+
+
+## Releases, installing and updating
+
+A `v*` tag builds four tarballs with `.github/workflows/release.yml`:
+`ark-{x86_64,aarch64}-unknown-linux-{musl,gnu}.tar.gz`. The musl builds are static (they use
+mimalloc instead of musl's malloc); the gnu builds need glibc 2.28 or newer. CI asserts both
+(`packaging/release/check-binary.sh`) and starts every binary on AlmaLinux 8 / Alpine / native arm64.
+
+Each tarball is a prefix: `bin/ark`, `share/ark/` (bundled skills, roles, plugin catalog, optional
+MCPs, `vm/` image builder, `sandbox-browser/` sources, `systemd/` units), `share/doc/ark/`.
+`ark` finds `share/ark` at run time, in this order: `$ARK_SHARE_DIR`, `<exe>/../share/ark`,
+`<exe>/../lib/ark/share` (what `install.sh` uses for `~/.local/bin`, because `~/.local/share/ark`
+is ark's own data dir), `/usr/local/share/ark`, `/usr/share/ark`, the source checkout it runs from.
+`ark doctor` reports which one it used.
+
+* `install.sh` — `curl … | sh`; verifies `SHA256SUMS`, the Ed25519 signature when
+  `ARK_RELEASE_PUBKEY=release-key.pub.pem` is set, and the GitHub attestation when `gh` exists.
+* `ark update [--channel stable|lts|beta|dev] [--check] [--rollback [--restore-data]]` — downloads the
+  same `ark-<triple>.tar.gz` (musl preferred), checks `SHA256SUMS` (and `SHA256SUMS.sig` against
+  `[update] verify_key` when set), swaps the binary and the bundled `share/ark`, and backs up
+  config and data first. `lts` follows `[update] lts_series = "1.4"` (or releases whose notes carry
+  an `LTS` line). Installs under `/usr/bin`, `/nix/store` or with an `ark.managed` marker refuse to
+  self-update.
+* Docker: `packaging/docker/README.md`. systemd: `packaging/systemd/README.md`
+  (`ark service install --system` creates the dedicated `ark` account via sysusers.d).
+* Support: `ark doctor --bundle` writes an anonymized diagnostics archive (no upload);
+  `ark debug share` can be forbidden with `ARK_DEBUG_SHARE=off`, `/etc/ark/no-debug-upload` or the
+  `government` compliance profile.
+* Hygiene: `tools/secret-scan.py` (CI: working tree and full history), `cargo deny`, clippy.

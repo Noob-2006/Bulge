@@ -1,8 +1,11 @@
 # Release packaging — checklist and tooling
 
-Everything in this directory is release plumbing for the `ark` binary. It is **manual by design**:
-there is no CI pipeline in this repository (see [What this does not cover](#what-this-does-not-cover)),
-so the checklist below *is* the release process.
+Everything in this directory is release plumbing for the `ark` binary. A tag push (`v*`) runs
+`.github/workflows/release.yml`, which performs steps 3-8 below for all four Linux targets
+(`make-tarball.sh`, `check-binary.sh`, `sbom.py`, `sign.sh`, `verify-release.sh`, `repro-check.sh`);
+the checklist stays the manual fallback and the description of what CI does. Signing happens in CI
+only when the repository secret `ARK_RELEASE_SIGNING_KEY` (the PEM from `gen-key.sh`) is set;
+without it the release is published unsigned with a warning (SHA256SUMS + attestation only).
 
 | File | What it does |
 |---|---|
@@ -11,6 +14,8 @@ so the checklist below *is* the release process.
 | `sign.sh` | Detached base64 Ed25519 signature over `SHA256SUMS`; refuses group/world-readable keys. |
 | `verify-release.sh` | Verifies a downloaded dist directory: signature → per-file hashes → no extra files → SBOM parses. |
 | `repro-check.sh` | Builds the tree twice from different paths and compares artifact hashes. |
+| `make-tarball.sh` | Deterministic `ark-<triple>.tar.gz`: `bin/ark` + `share/ark/` (skills, roles, catalogs, VM builder, sandbox-browser sources, systemd units). |
+| `check-binary.sh` | CI gate: musl binaries are static, gnu binaries need no glibc newer than 2.28, CPU matches the triple. |
 | `DEPENDENCY-REVIEW.md` | The process for adding/bumping a crate, the dependency budget, advisory triage. |
 
 Requirements: `bash`, `openssl` 3.x, `sha256sum` (coreutils or `shasum`), `tar`, `cargo`, `python3`
@@ -103,11 +108,11 @@ packaging/release/repro-check.sh --full     # whole workspace + every .rlib, sev
 ```
 
 Exit 0 = every artifact hash matched across the two build paths. Exit 1 = a DIFF table; the
-release is blocked until the cause is understood. **Current expected result:** the `ark` binary
-reports DIFF because several crates embed `env!("CARGO_MANIFEST_DIR")` (`ark-kernel/selfrepo.rs`,
-`ark-browser`, `ark-skills`, `ark-vm`, `ark-plugin`), which bakes the build directory into the
-binary. The script prints the grep to find them; making those paths relative is the fix, and until
-it lands the exception must be recorded in the release notes.
+release is blocked until the cause is understood. Shipped code does not embed
+`env!("CARGO_MANIFEST_DIR")` any more (a test in `crates/ark/tests/supply_chain.rs` enforces it):
+the share directory and the VM image builder are located at run time (`ark_core::share`,
+`ark-vm/src/image.rs`), so the build directory no longer leaks into the binary. The release
+workflow also passes `--remap-path-prefix` and `SOURCE_DATE_EPOCH`.
 
 **8. Verify what you are about to publish**
 
@@ -145,15 +150,16 @@ independently (website, git history) is what protects against a swapped key; the
 
 ## What this does not cover
 
-- **No CI.** Every step above is manual and trusted to the operator. Nothing prevents a release
-  that skipped step 2 or 7 except the checklist itself.
+- **CI cannot be run from here.** `release.yml` is checked by YAML/syntax tests only; the first tag
+  is the first real run (watch the smoke jobs: AlmaLinux 8 for glibc 2.28, Alpine for musl, native
+  arm64 runners).
 - **Key custody is the operator's job.** `gen-key.sh` creates the key; protecting it, backing it
   up, and rotating it are not automated. There is no HSM, no key split, no timestamping/notary —
   a signature proves *who signed* at some point, not *when*.
 - **Rust crates only.** The SBOM describes `Cargo.lock`. The browser extension (`ui/`), the
   sandbox image and any JS/npm tooling are not in it.
-- **One platform, one artifact.** Only the host `ark` binary is covered. Container images
-  (`packaging/sandbox-browser`), the VM image (`packaging/vm`) and the systemd units are built
-  elsewhere and are not signed here.
+- **Linux only.** Four tarballs (x86_64/aarch64, musl/gnu) are covered. Container images
+  (`Dockerfile`, `packaging/sandbox-browser`) and the VM image (`packaging/vm`) are built elsewhere
+  and are not signed here; `.deb`/`.rpm` packages are a separate effort.
 - **Not a vulnerability scanner.** The check in step 0 is advisory data (OSV/RUSTSEC) at the
   moment of the release; it says nothing about the day after.

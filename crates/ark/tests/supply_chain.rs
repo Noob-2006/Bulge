@@ -439,3 +439,269 @@ fn repro_check_parses_but_is_not_run() {
     assert!(body.contains("--quick"), "repro-check.sh lost its --quick mode");
     assert!(body.contains("SOURCE_DATE_EPOCH"), "repro-check.sh no longer pins SOURCE_DATE_EPOCH");
 }
+
+// ---------------------------------------------------------------------------------------------
+// Release tarball, installer, binary checks, secret scan, reproducibility guard
+// ---------------------------------------------------------------------------------------------
+
+fn fake_binary(sb: &Sandbox) -> PathBuf {
+    let p = sb.join("fake-ark");
+    std::fs::write(&p, "#!/bin/sh\necho \"ark 0.0.0-test\"\n").unwrap();
+    std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+    p
+}
+
+fn make_tarball(sb: &Sandbox, out: &Path) -> Output {
+    sb.bash("make-tarball.sh", &["x86_64-unknown-linux-musl", fake_binary(sb).to_str().unwrap(), out.to_str().unwrap()])
+}
+
+#[test]
+fn tarball_carries_the_binary_and_share_and_is_deterministic() {
+    if !have("tar") {
+        eprintln!("SKIP: no tar");
+        return;
+    }
+    let sb = Sandbox::new("tarball");
+    let (a, b) = (sb.join("a.tar.gz"), sb.join("b.tar.gz"));
+    assert_ok(&make_tarball(&sb, &a), "make-tarball.sh");
+    assert_ok(&make_tarball(&sb, &b), "make-tarball.sh (second run)");
+    assert_eq!(std::fs::read(&a).unwrap(), std::fs::read(&b).unwrap(), "same inputs must give the same bytes");
+    let listing = Command::new("tar").args(["tzf"]).arg(&a).output().unwrap();
+    let names = String::from_utf8_lossy(&listing.stdout).to_string();
+    for want in [
+        "./bin/ark",
+        "./share/ark/skills/",
+        "./share/ark/roles/",
+        "./share/ark/plugin-catalog/index.json",
+        "./share/ark/optional-mcps/index.json",
+        "./share/ark/blueprints.json",
+        "./share/ark/vm/build-image.sh",
+        "./share/ark/sandbox-browser/Dockerfile",
+        "./share/ark/systemd/arkd-system.service",
+        "./share/ark/systemd/ark-sysusers.conf",
+        "./share/ark/TARGET",
+    ] {
+        assert!(names.lines().any(|l| l == want), "tarball lacks {want}:\n{}", names.lines().take(30).collect::<Vec<_>>().join("\n"));
+    }
+    // The updater reads exactly this layout.
+    let bytes = std::fs::read(&a).unwrap();
+    assert!(bytes.len() > 1000);
+}
+
+/// A release directory the way release.yml's publish job leaves it, served by `file://`.
+fn served_release(sb: &Sandbox) -> PathBuf {
+    let rel = sb.join("rel");
+    std::fs::create_dir_all(&rel).unwrap();
+    assert_ok(&make_tarball(sb, &rel.join("ark-x86_64-unknown-linux-musl.tar.gz")), "make-tarball.sh");
+    rel
+}
+
+fn sums(sb: &Sandbox, rel: &Path) {
+    let out = sb.run_in(rel, Path::new("sh"), &["-c", "sha256sum ark-*.tar.gz > SHA256SUMS"]);
+    assert_ok(&out, "sha256sum");
+}
+
+fn install(sb: &Sandbox, shell: &str, rel: &Path, extra_env: &[(&str, &str)]) -> Output {
+    let home = sb.join("home");
+    let _ = std::fs::remove_dir_all(home.join(".local"));
+    let mut c = Command::new(shell);
+    c.arg(repo_root().join("packaging/install.sh"))
+        .env_clear()
+        .env("PATH", std::env::var_os("PATH").unwrap())
+        .env("HOME", &home)
+        .env("TMPDIR", sb.join("tmp"))
+        .env("ARK_RELEASE_BASE", format!("file://{}", rel.display()));
+    for (k, v) in extra_env {
+        c.env(k, v);
+    }
+    c.output().unwrap()
+}
+
+#[test]
+fn install_sh_installs_binary_and_share_under_posix_shells() {
+    if !have("tar") {
+        eprintln!("SKIP: no tar");
+        return;
+    }
+    let sb = Sandbox::new("install");
+    let rel = served_release(&sb);
+    sums(&sb, &rel);
+    let mut shells = vec!["sh"];
+    for extra in ["dash", "busybox"] {
+        if Command::new(extra).arg(if extra == "busybox" { "true" } else { "-c" }).arg("true").output().is_ok_and(|o| o.status.success()) {
+            shells.push(extra);
+        }
+    }
+    for shell in shells {
+        // busybox needs `sh` as its applet argument; the script path follows.
+        let out = if shell == "busybox" {
+            let home = sb.join("home");
+            let _ = std::fs::remove_dir_all(home.join(".local"));
+            Command::new("busybox").args(["sh"]).arg(repo_root().join("packaging/install.sh")).env_clear().env("PATH", std::env::var_os("PATH").unwrap()).env("HOME", &home).env("TMPDIR", sb.join("tmp")).env("ARK_RELEASE_BASE", format!("file://{}", rel.display())).output().unwrap()
+        } else {
+            install(&sb, shell, &rel, &[])
+        };
+        assert_ok(&out, &format!("install.sh under {shell}"));
+        let home = sb.join("home/.local");
+        assert!(home.join("bin/ark").is_file(), "{shell}: binary: {}", text(&out));
+        // share/ lands where `ark` looks for it (<bin>/../lib/ark/share), not in ark's data dir.
+        assert!(home.join("lib/ark/share/skills").is_dir() && home.join("lib/ark/share/roles").is_dir() && home.join("lib/ark/share/blueprints.json").is_file(), "{shell}: share: {}", text(&out));
+        assert!(!home.join("share/ark").exists(), "{shell}: must not write ark's data dir");
+    }
+}
+
+#[test]
+fn install_sh_refuses_a_bad_checksum_and_checks_the_signature() {
+    if !have("tar") {
+        eprintln!("SKIP: no tar");
+        return;
+    }
+    let sb = Sandbox::new("install-verify");
+    let rel = served_release(&sb);
+    sums(&sb, &rel);
+    std::fs::write(rel.join("SHA256SUMS"), format!("{}  ark-x86_64-unknown-linux-musl.tar.gz\n", "0".repeat(64))).unwrap();
+    let out = install(&sb, "sh", &rel, &[]);
+    assert_failed(&out, "install.sh with a wrong checksum");
+    assert!(text(&out).contains("checksum mismatch"), "{}", text(&out));
+    assert!(!sb.join("home/.local/bin/ark").exists(), "nothing installed after a failed check");
+
+    if !have("openssl") {
+        eprintln!("SKIP signature half: no openssl");
+        return;
+    }
+    sums(&sb, &rel);
+    let keys = sb.join("keys");
+    assert_ok(&sb.bash("gen-key.sh", &["--out-dir", keys.to_str().unwrap()]), "gen-key.sh");
+    assert_ok(&sb.bash("sign.sh", &[rel.join("SHA256SUMS").to_str().unwrap(), keys.join("release-key.pem").to_str().unwrap()]), "sign.sh");
+    let pubkey = keys.join("release-key.pub.pem");
+    let out = install(&sb, "sh", &rel, &[("ARK_RELEASE_PUBKEY", pubkey.to_str().unwrap())]);
+    assert_ok(&out, "install.sh with a valid signature");
+    assert!(text(&out).contains("release signature verified"), "{}", text(&out));
+    // A signature made over other bytes does not verify.
+    let mut sums_txt = std::fs::read_to_string(rel.join("SHA256SUMS")).unwrap();
+    sums_txt.push('\n');
+    std::fs::write(rel.join("SHA256SUMS"), sums_txt).unwrap();
+    let out = install(&sb, "sh", &rel, &[("ARK_RELEASE_PUBKEY", pubkey.to_str().unwrap())]);
+    assert_failed(&out, "install.sh with a tampered SHA256SUMS");
+    assert!(text(&out).contains("signature"), "{}", text(&out));
+}
+
+#[test]
+fn check_binary_tells_static_from_dynamic_and_glibc_floors() {
+    if !have("readelf") {
+        eprintln!("SKIP: no readelf");
+        return;
+    }
+    let sb = Sandbox::new("check-binary");
+    let dynamic = Path::new("/bin/true");
+    if dynamic.is_file() {
+        let d = dynamic.to_str().unwrap();
+        let (triple, other) = if cfg!(target_arch = "aarch64") { ("aarch64-unknown-linux", "x86_64-unknown-linux") } else { ("x86_64-unknown-linux", "aarch64-unknown-linux") };
+        assert_failed(&sb.bash("check-binary.sh", &[&format!("{triple}-musl"), d]), "a dynamic binary is not a musl static build");
+        assert_ok(&sb.bash("check-binary.sh", &[&format!("{triple}-gnu"), d, "--max-glibc", "99"]), "gnu within a high floor");
+        assert_failed(&sb.bash("check-binary.sh", &[&format!("{triple}-gnu"), d, "--max-glibc", "2.0"]), "gnu above a 2.0 floor");
+        assert_failed(&sb.bash("check-binary.sh", &[&format!("{other}-gnu"), d, "--max-glibc", "99"]), "wrong CPU");
+    }
+    let busybox = Path::new("/usr/bin/busybox");
+    if busybox.is_file() && Command::new("file").arg("-b").arg(busybox).output().is_ok_and(|o| String::from_utf8_lossy(&o.stdout).contains("statically linked")) && cfg!(target_arch = "x86_64") {
+        assert_ok(&sb.bash("check-binary.sh", &["x86_64-unknown-linux-musl", "/usr/bin/busybox"]), "a static binary passes the musl check");
+        assert_failed(&sb.bash("check-binary.sh", &["x86_64-unknown-linux-gnu", "/usr/bin/busybox"]), "a static binary is not the gnu build");
+    }
+}
+
+fn secret_scan(dir: &Path, extra: &[&str]) -> Output {
+    Command::new("python3").arg("-I").arg(repo_root().join("tools/secret-scan.py")).arg("--root").arg(dir).args(extra).output().expect("python3")
+}
+
+#[test]
+fn secret_scan_flags_real_looking_keys_and_passes_the_repo() {
+    if !have("git") {
+        eprintln!("SKIP: no git");
+        return;
+    }
+    let sb = Sandbox::new("secret-scan");
+    let d = sb.join("repo");
+    std::fs::create_dir_all(&d).unwrap();
+    let git = |args: &[&str]| {
+        let o = Command::new("git").arg("-C").arg(&d).args(args).env("HOME", sb.join("home")).env("GIT_CONFIG_GLOBAL", "/dev/null").output().unwrap();
+        assert!(o.status.success(), "git {args:?}: {}", text(&o));
+    };
+    git(&["init", "-q"]);
+    // Built at run time so this file itself does not look like a leaked key.
+    let aws = format!("AKIA{}", "Q7ZP3MNXL5VK2HTR");
+    std::fs::write(d.join("config.txt"), format!("aws_access_key_id = {aws}\n")).unwrap();
+    std::fs::write(d.join("doc.md"), "key shape: AKIAIOSFODNN7EXAMPLE (example)\n").unwrap();
+    git(&["add", "-A"]);
+    let out = secret_scan(&d, &[]);
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out));
+    let shown = String::from_utf8_lossy(&out.stdout).to_string();
+    assert!(shown.contains("config.txt:1") && shown.contains("aws-access-key") && !shown.contains(&aws), "findings are located and redacted: {shown}");
+    assert!(!shown.contains("doc.md"), "placeholders marked as examples are fine");
+    // Allow-listing by path clears it; history scan still sees committed blobs.
+    std::fs::create_dir_all(d.join("tools")).unwrap();
+    std::fs::write(d.join("tools/secret-scan.allow"), "path:config.txt  # fixture\n").unwrap();
+    git(&["add", "-A"]);
+    assert_eq!(secret_scan(&d, &[]).status.code(), Some(0));
+    git(&["-c", "user.name=t", "-c", "user.email=t@example.com", "commit", "-q", "-m", "x"]);
+    std::fs::remove_file(d.join("tools/secret-scan.allow")).unwrap();
+    git(&["rm", "-q", "--cached", "tools/secret-scan.allow"]);
+    git(&["rm", "-q", "-f", "config.txt"]);
+    assert_eq!(secret_scan(&d, &[]).status.code(), Some(0), "removed from the tree");
+    assert_eq!(secret_scan(&d, &["--all-history"]).status.code(), Some(1), "still in history");
+    // The real repository is clean.
+    let out = secret_scan(&repo_root(), &[]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out));
+}
+
+#[test]
+fn shipped_code_never_embeds_the_build_directory() {
+    // `env!("CARGO_MANIFEST_DIR")` bakes the checkout path into the binary: unreproducible, and
+    // wrong on any machine but the build host. Tests may use it; everything before the first
+    // `#[cfg(test)]` of a source file may not. Paths are resolved at run time (ark_core::share).
+    let mut offenders = vec![];
+    for krate in std::fs::read_dir(repo_root().join("crates")).unwrap().flatten() {
+        let mut stack = vec![krate.path().join("src")];
+        while let Some(d) = stack.pop() {
+            for e in std::fs::read_dir(&d).into_iter().flatten().flatten() {
+                let p = e.path();
+                if p.is_dir() {
+                    stack.push(p);
+                } else if p.extension().is_some_and(|x| x == "rs") && !p.file_name().is_some_and(|n| n == "tests.rs") && !p.components().any(|c| c.as_os_str() == "tests") {
+                    let t = std::fs::read_to_string(&p).unwrap();
+                    let prod = t.split("#[cfg(test)]").next().unwrap_or("");
+                    if prod.lines().any(|l| !l.trim_start().starts_with("//") && (l.contains("env!(\"CARGO_MANIFEST_DIR\")") || l.contains("env!(\"CARGO_MANIFEST_PATH\")"))) {
+                        offenders.push(p.display().to_string());
+                    }
+                }
+            }
+        }
+    }
+    assert!(offenders.is_empty(), "build-directory paths in shipped code: {offenders:?}");
+}
+
+#[test]
+fn release_workflow_wires_every_supply_chain_step() {
+    let yml = std::fs::read_to_string(repo_root().join(".github/workflows/release.yml")).unwrap();
+    for needle in [
+        "check-binary.sh",       // ent-004: static / glibc floor
+        "make-tarball.sh",       // ent-005: share/ in the bundle
+        "sbom.py",               // ent-127
+        "sign.sh",               // ent-128
+        "verify-release.sh",
+        "ARK_RELEASE_SIGNING_KEY",
+        "repro-check.sh",        // ent-129
+        "SOURCE_DATE_EPOCH",
+        "--remap-path-prefix",
+        "ubuntu-24.04-arm",      // ent-002: real arm64 smoke
+        "almalinux:8",           // ent-003: a real glibc 2.28
+        "alpine:3.20",           // ent-001/016
+        "actions/attest@",
+        "SHA256SUMS",
+    ] {
+        assert!(yml.contains(needle), "release.yml lacks {needle}");
+    }
+    let ci = std::fs::read_to_string(repo_root().join(".github/workflows/ci.yml")).unwrap();
+    for needle in ["tools/secret-scan.py", "--all-history", "actionlint", "install.sh on Alpine", "cargo-deny-action"] {
+        assert!(ci.contains(needle), "ci.yml lacks {needle}");
+    }
+}

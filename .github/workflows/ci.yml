@@ -18,6 +18,33 @@ jobs:
       - run: cargo build --release --locked
       - name: end-to-end
         run: python3 -I tests/e2e/run.py target/release/ark
+      # The tarball + installer path, on a stock Alpine (busybox sh/wget/tar, musl): the bundle
+      # layout, checksum verification and share/ install must work without curl, bash or sudo.
+      - name: install.sh on Alpine
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          packaging/release/make-tarball.sh x86_64-unknown-linux-musl target/release/ark dist/ark-x86_64-unknown-linux-musl.tar.gz
+          (cd dist && sha256sum ark-*.tar.gz > SHA256SUMS)
+          docker run --rm -v "$PWD/packaging:/src:ro" -v "$PWD/dist:/rel:ro" -e ARK_RELEASE_BASE=file:///rel alpine:3.20 sh -c '
+            set -e
+            sh /src/install.sh
+            test -x ~/.local/bin/ark && test -f ~/.local/lib/ark/share/blueprints.json'
+  hygiene:
+    # Secret scan (working tree + all history) and shell/YAML syntax of everything CI cannot run.
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          fetch-depth: 0
+      - run: python3 -I tools/secret-scan.py
+      - run: python3 -I tools/secret-scan.py --all-history
+      - name: shell syntax
+        run: |
+          sh -n packaging/install.sh
+          for f in packaging/release/*.sh packaging/vm/*.sh packaging/sandbox-browser/*.sh; do bash -n "$f"; done
+      - name: actionlint
+        run: docker run --rm -v "$PWD:/repo" -w /repo rhysd/actionlint:1.7.7 -color
   deny:
     runs-on: ubuntu-24.04
     steps:

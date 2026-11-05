@@ -5,6 +5,11 @@
 //! themselves through `ark_core::registry` and are collected by [`registry_init`]. See
 //! docs/ARCHITECTURE.md.
 
+// musl's malloc serialises threads on one lock; the static (musl) release builds use mimalloc.
+#[cfg(target_env = "musl")]
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 mod agentcmds;
 mod args;
 mod control_cli;
@@ -2308,6 +2313,8 @@ fn cmd_doctor(a: &Args) -> R {
     check("bash", tool("bash"));
     check("git (checkpoints)", tool("git"));
     check("python3 (code mode)", tool("python3"));
+    // The bundled skills / roles / catalogs: a binary copied without its share/ has none of them.
+    check("bundled share/", ark_core::share::share_dir().filter(|d| d.join("skills").is_dir() && d.join("plugin-catalog").is_dir()).map(|d| d.display().to_string()).ok_or_else(|| "not found (bundled skills and catalogs are unavailable): install with install.sh / the release tarball, or set ARK_SHARE_DIR".to_string()));
     check("data dir", std::fs::create_dir_all(&paths.data).map(|_| paths.data.display().to_string()).map_err(|e| e.to_string()));
     // Browser readiness (OpenClaw `extensions/browser` doctor-browser): optional, so a
     // missing browser is a note rather than a failed check.
