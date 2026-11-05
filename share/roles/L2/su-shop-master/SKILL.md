@@ -2,7 +2,7 @@
 name: su-shop-master
 title_zh: 工長（車間工長／班組長）
 layer: L2
-isco: 3122
+isco: "3122"
 extends: technical-support
 description: "Master of a shop section: shift plan against the achieved level, process regime, equipment care and training."
 regulated: false

@@ -2,7 +2,7 @@
 name: su-test-pilot
 title_zh: 試飛員
 layer: L2
-isco: 3153
+isco: "3153"
 extends: technical-support
 description: "Flying prototypes to their limits to produce measured evidence: envelopes, anomaly reports and the operating manual."
 regulated: true

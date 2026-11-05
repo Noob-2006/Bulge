@@ -2,7 +2,7 @@
 name: su-bricklayer
 title_zh: 砌磚工（泥瓦匠）
 layer: L2
-isco: 7112
+isco: "7112"
 extends: skilled-trades
 description: "Laying brick and block to line, level and bond, with corners, gauge and a continuous supply of units setting the pace."
 regulated: false

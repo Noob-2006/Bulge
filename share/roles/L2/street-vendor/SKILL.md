@@ -2,7 +2,7 @@
 name: street-vendor
 title_zh: 街頭小販（不包括食品）
 layer: L2
-isco: 9520
+isco: "9520"
 extends: elementary-support
 description: "Selling a small range of goods from a pitch or barrow, where cost, stock, cash and permission decide survival."
 regulated: false

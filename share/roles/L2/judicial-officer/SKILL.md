@@ -2,7 +2,7 @@
 name: judicial-officer
 title_zh: 法官與裁判
 layer: L2
-isco: 2612
+isco: "2612"
 extends: professional-practice
 description: "Applies to deciding cases: findings of fact, precedent, reasoning, remedies and conduct of proceedings."
 regulated: true

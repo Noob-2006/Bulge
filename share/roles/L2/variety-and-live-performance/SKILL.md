@@ -2,7 +2,7 @@
 name: variety-and-live-performance
 title_zh: 綜藝與現場表演
 layer: L2
-isco: 2659
+isco: "2659"
 extends: professional-practice
 description: "Applies to live variety performance: magic, clown, puppetry, circus acts and touring shows with an audience."
 regulated: false

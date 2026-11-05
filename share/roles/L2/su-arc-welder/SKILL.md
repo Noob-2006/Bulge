@@ -2,7 +2,7 @@
 name: su-arc-welder
 title_zh: 電焊工（手工電弧焊）
 layer: L2
-isco: 7212
+isco: "7212"
 extends: skilled-trades
 description: "Manual arc welding to a qualified procedure: joint preparation, current and position, with each weld recorded and inspectable."
 regulated: false

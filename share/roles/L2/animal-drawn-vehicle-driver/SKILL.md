@@ -2,7 +2,7 @@
 name: animal-drawn-vehicle-driver
 title_zh: 畜力車及畜力機械駕駛員
 layer: L2
-isco: 9332
+isco: "9332"
 extends: elementary-support
 description: "Driving horse, mule, ox or camel teams for goods, passengers and field machinery, where animal condition sets the pace."
 regulated: false

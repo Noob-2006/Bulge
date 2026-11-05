@@ -2,7 +2,7 @@
 name: building-site-labourer
 title_zh: 建築施工雜工
 layer: L2
-isco: 9313
+isco: "9313"
 extends: elementary-support
 description: "Building site labour: materials, scaffold, demolition strip-out, dust and hot work while other trades work above."
 regulated: false

@@ -2,7 +2,7 @@
 name: marketing-campaign
 title_zh: 廣告與行銷規劃
 layer: L2
-isco: 2431
+isco: "2431"
 extends: professional-practice
 description: "Applies to planning, writing and measuring advertising or marketing campaigns."
 regulated: false

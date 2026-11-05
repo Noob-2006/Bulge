@@ -2,7 +2,7 @@
 name: su-research-institute-director
 title_zh: 研究所所長
 layer: L2
-isco: 1120
+isco: "1120"
 extends: management
 description: "Directing a research institute: a few research fronts, autonomous laboratories, in-house apparatus and reproducibility."
 regulated: false

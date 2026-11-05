@@ -2,7 +2,7 @@
 name: refuse-sorter
 title_zh: 廢物分類員
 layer: L2
-isco: 9612
+isco: "9612"
 extends: elementary-support
 description: "Sorting discarded material to a buyer's specification at a site or depot, where contamination, sharps and price decide value."
 regulated: false

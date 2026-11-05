@@ -2,7 +2,7 @@
 name: electronics-technician
 title_zh: 電子工程技術
 layer: L2
-isco: 3114
+isco: "3114"
 extends: technical-support
 description: Applies to building, measuring and qualifying electronic circuits, instruments and products.
 regulated: false

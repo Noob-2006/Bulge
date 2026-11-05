@@ -2,7 +2,7 @@
 name: social-work-and-counselling
 title_zh: 社會工作與諮商
 layer: L2
-isco: 2635
+isco: "2635"
 extends: professional-practice
 description: Applies to casework, counselling and community organising with people in difficulty or at risk.
 regulated: true

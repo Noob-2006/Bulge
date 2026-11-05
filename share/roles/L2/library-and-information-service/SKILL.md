@@ -2,7 +2,7 @@
 name: library-and-information-service
 title_zh: 圖書館與資訊服務
 layer: L2
-isco: 2622
+isco: "2622"
 extends: professional-practice
 description: Applies to cataloguing, classifying and serving collections so readers find what they need.
 regulated: false

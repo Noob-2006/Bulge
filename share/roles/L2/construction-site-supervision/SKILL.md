@@ -2,7 +2,7 @@
 name: construction-site-supervision
 title_zh: 建築工地監督
 layer: L2
-isco: 3123
+isco: "3123"
 extends: technical-support
 description: "Applies to supervising building works: setting out, sequence, inspection hold points, safety and programme."
 regulated: false

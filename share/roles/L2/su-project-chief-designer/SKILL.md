@@ -2,7 +2,7 @@
 name: su-project-chief-designer
 title_zh: 項目主任設計師
 layer: L2
-isco: 2149
+isco: "2149"
 extends: professional-practice
 description: "Total technical authority for one system built by many subcontractors: simplicity, ground test and interface control."
 regulated: true

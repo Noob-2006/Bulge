@@ -2,7 +2,7 @@
 name: meter-and-vending-collector
 title_zh: 抄錶員及自動售賣機收款員
 layer: L2
-isco: 9623
+isco: "9623"
 extends: elementary-support
 description: "Reading meters and servicing vending or pay machines on a round, where sealed cash, exact counts and tamper evidence matter."
 regulated: false

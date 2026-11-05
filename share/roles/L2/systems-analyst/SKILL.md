@@ -2,7 +2,7 @@
 name: systems-analyst
 title_zh: 系統分析
 layer: L2
-isco: 2511
+isco: "2511"
 extends: professional-practice
 description: Applies to analysing a business process and specifying the system that will support it, before and across build.
 regulated: false

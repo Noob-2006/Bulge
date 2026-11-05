@@ -2,7 +2,7 @@
 name: pedal-vehicle-driver
 title_zh: 人力車及腳踏車司機
 layer: L2
-isco: 9331
+isco: "9331"
 extends: elementary-support
 description: "Rickshaw, cargo-cycle and cycle messenger work in traffic: predictable road position, load security and honest fares."
 regulated: false

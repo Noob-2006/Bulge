@@ -2,7 +2,7 @@
 name: mining-and-metallurgy
 title_zh: 採礦與冶金技術
 layer: L2
-isco: 3117
+isco: "3117"
 extends: technical-support
 description: Applies to sampling, assaying, mineral identification and smelting or alloy work in mine and plant.
 regulated: false

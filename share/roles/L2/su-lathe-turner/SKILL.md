@@ -2,7 +2,7 @@
 name: su-lathe-turner
 title_zh: 車床工（車工）
 layer: L2
-isco: 7223
+isco: "7223"
 extends: skilled-trades
 description: "Turning work on a lathe: cutting data, tool geometry, fixtures and the auxiliary time around the cut."
 regulated: false

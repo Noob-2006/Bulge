@@ -2,7 +2,7 @@
 name: su-chief-engineer-construction
 title_zh: 總工程師（企業／建設托拉斯／電力工程）
 layer: L2
-isco: 2141
+isco: "2141"
 extends: professional-practice
 description: "Statutory technical head of a construction trust or power project, from survey and layout through commissioning."
 regulated: true

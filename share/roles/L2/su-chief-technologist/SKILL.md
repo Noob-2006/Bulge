@@ -2,7 +2,7 @@
 name: su-chief-technologist
 title_zh: 總工藝師
 layer: L2
-isco: 2141
+isco: "2141"
 extends: professional-practice
 description: "Owns process routes, tooling and acceptance norms in a plant, with authority to stop a shop that departs from them."
 regulated: false

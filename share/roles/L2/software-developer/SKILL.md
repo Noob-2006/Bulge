@@ -2,7 +2,7 @@
 name: software-developer
 title_zh: 軟體開發
 layer: L2
-isco: 2512
+isco: "2512"
 extends: professional-practice
 description: Applies to writing and changing program code where correctness, review and long-term maintenance matter.
 regulated: false

@@ -2,7 +2,7 @@
 name: civil-engineering-site-work
 title_zh: 土木工程現場技術
 layer: L2
-isco: 3112
+isco: "3112"
 extends: technical-support
 description: "Applies to civil works: survey, ground testing, specification, site inspection and quantities."
 regulated: true

@@ -2,7 +2,7 @@
 name: network-engineering
 title_zh: 網路工程
 layer: L2
-isco: 2523
+isco: "2523"
 extends: professional-practice
 description: "Applies to designing, building and running networks: addressing, routing, resilience."
 regulated: false

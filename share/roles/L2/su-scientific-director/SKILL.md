@@ -2,7 +2,7 @@
 name: su-scientific-director
 title_zh: 科學總監（學術負責人）
 layer: L2
-isco: 2149
+isco: "2149"
 extends: professional-practice
 description: "Answering for the scientific correctness of a multi-institute programme without line authority over those doing the work."
 regulated: false

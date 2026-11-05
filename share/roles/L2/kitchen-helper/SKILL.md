@@ -2,7 +2,7 @@
 name: kitchen-helper
 title_zh: 廚房幫工
 layer: L2
-isco: 9412
+isco: "9412"
 extends: elementary-support
 description: "Kitchen support: preparation, washing, cleaning and stock rotation for a brigade that cooks to order."
 regulated: false

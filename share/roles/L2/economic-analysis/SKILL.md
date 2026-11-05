@@ -2,7 +2,7 @@
 name: economic-analysis
 title_zh: 經濟分析
 layer: L2
-isco: 2631
+isco: "2631"
 extends: professional-practice
 description: Applies to measuring an economy, estimating a model and advising on policy with stated assumptions.
 regulated: false

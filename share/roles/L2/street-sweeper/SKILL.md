@@ -2,7 +2,7 @@
 name: street-sweeper
 title_zh: 清掃員及相關工人
 layer: L2
-isco: 9613
+isco: "9613"
 extends: elementary-support
 description: "Cleaning streets, parks and stations to a beat, where timing, dust, litter hotspots and public safety shape the work."
 regulated: false

@@ -2,7 +2,7 @@
 name: su-okb-chief-designer
 title_zh: 主任設計師（設計局總設計師）
 layer: L2
-isco: 2144
+isco: "2144"
 extends: professional-practice
 description: "Chief designer of a design bureau answerable for a type's design, its pilot plant and its series output."
 regulated: true

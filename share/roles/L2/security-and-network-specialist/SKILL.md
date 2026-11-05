@@ -2,7 +2,7 @@
 name: security-and-network-specialist
 title_zh: 安全與網路專業（其他）
 layer: L2
-isco: 2529
+isco: "2529"
 extends: professional-practice
 description: Applies to security engineering, incident analysis and cryptography where an adversary is assumed.
 regulated: false

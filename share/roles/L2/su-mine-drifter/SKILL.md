@@ -2,7 +2,7 @@
 name: su-mine-drifter
 title_zh: 掘進工（礦山／隧道）
 layer: L2
-isco: 8111
+isco: "8111"
 extends: machine-operation
 description: "Advancing a rock heading or shaft face: hole pattern, blast cycle, immediate support and measured advance."
 regulated: false

@@ -2,7 +2,7 @@
 name: archive-and-curation
 title_zh: 檔案管理與博物館策展
 layer: L2
-isco: 2621
+isco: "2621"
 extends: professional-practice
 description: "Applies to keeping archives and collections: appraisal, custody, description, storage, access and display."
 regulated: false

@@ -2,7 +2,7 @@
 name: systems-administration
 title_zh: 系統管理
 layer: L2
-isco: 2522
+isco: "2522"
 extends: professional-practice
 description: "Applies to running servers and services: configuration, change, patching, backup."
 regulated: false

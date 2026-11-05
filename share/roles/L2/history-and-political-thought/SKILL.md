@@ -2,7 +2,7 @@
 name: history-and-political-thought
 title_zh: 歷史與政治思想
 layer: L2
-isco: 2633
+isco: "2633"
 extends: professional-practice
 description: "Applies to historical and political analysis: source criticism, causal argument and interpretation."
 regulated: false

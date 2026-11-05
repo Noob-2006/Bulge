@@ -2,7 +2,7 @@
 name: su-steelmaker
 title_zh: 煉鋼工（平爐／轉爐）
 layer: L2
-isco: 8121
+isco: "8121"
 extends: machine-operation
 description: "Melting and tapping a steel heat: charge calculation, furnace regime, crew roles and the record of every heat."
 regulated: false

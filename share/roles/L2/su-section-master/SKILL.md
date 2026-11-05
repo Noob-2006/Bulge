@@ -2,7 +2,7 @@
 name: su-section-master
 title_zh: 工長（工段長）
 layer: L2
-isco: 3122
+isco: "3122"
 extends: technical-support
 description: "First-line command of a shop section: plan, technology, discipline, training and quality sign-off at the bench."
 regulated: false

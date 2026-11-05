@@ -2,7 +2,7 @@
 name: su-steel-erector
 title_zh: 建築結構安裝工／高空安裝工
 layer: L2
-isco: 7214
+isco: "7214"
 extends: skilled-trades
 description: "Erecting structural steel at height: lifting plan, temporary stability, alignment and sign-off of each node."
 regulated: false

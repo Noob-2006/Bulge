@@ -2,7 +2,7 @@
 name: su-general-designer-lineage
 title_zh: 總設計師（火箭太空／航空發動機設計的國家稱號）
 layer: L2
-isco: 2144
+isco: "2144"
 extends: professional-practice
 description: "A personal state rank answering for one weapon or engine family across ministries."
 regulated: true
