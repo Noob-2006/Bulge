@@ -47,12 +47,12 @@
 
 | ID | 問題 | 回答 | 說明與證據 |
 |---|---|---|---|
-| C1 | 是否支援 SSO／OIDC？ | 是 | `self_hosted` OIDC，群組→角色（`[app.rbac]`）|
+| C1 | 是否支援 SSO／OIDC？ | 是 | `self_hosted` OIDC，群組→角色（`[app.rbac]`）；舊式前端（Kerberos／`mod_auth_gssapi`、WAM、mTLS 代理）以受信代理身分標頭登入（`[app.exposure.proxy_auth]`，只採信列出的代理位址）|
 | C2 | 是否支援 MFA？ | 客戶 | 由 IdP 提供；ark 不自行實作 MFA |
 | C3 | RBAC？ | 是 | admin／user／operator／auditor；多角色取聯集；內容方法對 operator、auditor 關閉（白皮書 §4）|
 | C4 | 最小權限？ | 是 | 工具預設隔離；政策鎖定；任務信封；服務帳號按角色 |
 | C5 | 服務帳號與憑證輪替？ | 是 | `ark accounts issue|rotate|revoke|expiring`，預設 90 天，輪替有寬限期，只存 SHA-256 |
-| C6 | 特權帳號管理？ | 部分 | `admin` 角色與本機 OS 使用者（unix socket）。沒有 JIT 提權或審批流程（客戶）|
+| C6 | 特權帳號管理？ | 部分 | `admin` 角色與本機 OS 使用者（unix socket）。高風險動作可要求雙人覆核（`[approvals.dual_control]`：N 位不同且非申請者的核准者、角色限定、到期，可連動 ServiceNow／Jira 變更單）。沒有 JIT 提權；擁有 daemon 的本機帳號可繞過雙人覆核（等同系統管理員）|
 | C7 | 使用者停用／離職？ | 是 | `ark users disable`，登入與聊天立即失效 |
 | C8 | 工作階段管理？ | 是 | 角色在登入時決定並簽進 cookie；個人 token TTL 不超過 session |
 | C9 | 核准者可否被冒充？ | 否（防住）| 伺服器端以認證後 principal 寫入核准者，用戶端 `_by` 被剝除 |
@@ -64,14 +64,17 @@
 | ID | 問題 | 回答 | 說明與證據 |
 |---|---|---|---|
 | D1 | 稽核日誌涵蓋？ | 是 | 請求決策、登入、token、設定變更、核准、gate、使用者異動、保留、匯出、預算（白皮書 §5）|
-| D2 | 日誌防竄改？ | 部分 | SHA-256 雜湊鏈、封存段 0400＋seal；同 uid 可整條重寫，需外送 SIEM 並以 `--anchor` 比對 |
+| D2 | 日誌防竄改？ | 部分 | SHA-256 雜湊鏈、封存段 0400＋seal；seal 可用 Ed25519 簽章並取 RFC 3161 時戳（`[audit] seal_key`、`tsa_url`；`ark audit verify --pubkey … --require-signed`）。同 uid 仍可重寫尚未輪替簽章的部分；簽章金鑰須放在被稽核主機之外，並外送 SIEM 以 `--anchor` 比對 |
 | D3 | 日誌保存？ | 是 | `[compliance.retention] audit_days`，不刪法律保全範圍 |
-| D4 | SIEM 整合？ | 是 | syslog RFC 5424、Splunk HEC、OTLP logs；各 sink 獨立游標、至少一次 |
-| D5 | 指標與健康檢查？ | 是 | `/metrics`（Prometheus）、`/ready`、`ark health --ready` |
+| D4 | SIEM 整合？ | 是 | syslog（UDP、TCP RFC 6587、TLS RFC 5425）訊息可為 JSON、CEF（ArcSight）或 LEEF（QRadar），可設多個具名 sink；Splunk HEC、OTLP logs；各 sink 獨立游標、至少一次 |
+| D5 | 指標與健康檢查？ | 是 | `/metrics`（Prometheus）、`/ready`、`ark health --ready`、`ark health --nagios`（Nagios／Icinga 外掛格式）、`[alerts]` 的 `snmp://` 目標（SNMPv2c trap，需 `snmptrap`）|
 | D6 | 時鐘同步？ | 客戶 | 使用主機時間；NTP 屬客戶 |
 | D7 | 日誌是否含秘密？ | 否（遮罩）| 稽核自由文字遮罩；工具輸出遮罩金鑰樣式 |
 | D8 | 重啟風暴／異常偵測？ | 是 | 10 分鐘內 3 次啟動警告（`ark doctor`、`ark service audit`）|
 | D9 | 費用／用量告警？ | 是 | `[alerts]` 推送、`[quotas]` 滿額停止 |
+| D10 | 給稽核人員的彙整報告？ | 是 | `ark audit report --from --to --format md\|html\|json`（ARP `audit.report`）：登入、權限異動、核准與核准者、被拒動作、設定變更、session 覆核，附整條鏈驗證結果與 head hash |
+| D11 | 對話的人工覆核？ | 是 | `ark session review <id> reviewed\|flagged\|cleared --note …`、ARP `session.review.*`；擁有者不能覆核自己的 session，auditor 唯讀；每次標記寫稽核 |
+| D12 | 稽核涵蓋是否有機制保證？ | 部分 | 測試逐一列舉 app server 所有會改變狀態的 ARP 方法與 `ark users`／`tenancy`／`accounts` 子命令，斷言每個都寫稽核（允許與拒絕兩條路徑）；其他 CLI 命令沒有同等的自動檢查 |
 
 ## E. 應用程式與介面安全（AIS）
 
@@ -111,7 +114,7 @@
 
 | ID | 問題 | 回答 | 說明與證據 |
 |---|---|---|---|
-| G1 | 高可用？ | 否 | 單 daemon／單副本；以服務重啟（`Restart=on-failure`）與外部備援處理 |
+| G1 | 高可用？ | 部分 | `[ha]`：多個 `arkd` 共用資料目錄，以租約＋fencing token 選出 leader，standby 自動接手（`ark ha status\|stepdown`）；`[workers]` 分派回合（`ark workers`）；`ark cluster` 是多節點主控台並以簽章下發受管政策。依賴共享儲存本身的可用性，沒有內建資料複寫或跨資料中心叢集 |
 | G2 | 備份？ | 客戶 | `/var/lib/ark`；金鑰來源（keyring、TPM、密語）要另外備份 |
 | G3 | 災難復原？ | 客戶 | 無內建；還原 `/var/lib/ark` 後 `ark doctor` |
 | G4 | 事故處理流程？ | 部分 | `ark doctor --bundle`（去識別除錯包，不上傳）；稽核與電子取證；正式事故通報流程屬客戶 |
@@ -138,4 +141,4 @@
 
 ## 附：回答範本中的「限制」彙整
 
-模型可能做錯事（tier 0／1 放行，靠回復）、同 uid 程序等同擁有者、金鑰庫降級、無隔離主機、語意型攻擊、無 HA、無第三方滲透測試、無 SLA。詳見白皮書 §9。
+模型可能做錯事（tier 0／1 放行，靠回復）、同 uid 程序等同擁有者、金鑰庫降級、無隔離主機、語意型攻擊、HA 依賴共享儲存（無內建資料複寫）、擁有 daemon 的本機帳號可繞過雙人覆核、無第三方滲透測試、無 SLA。詳見白皮書 §9。

@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
-/// OpenClaw's Linux search list, then PATH names.
+/// Fallback install locations (OpenClaw's Linux search list), tried after the `PATH_NAMES` on `$PATH`.
 const LINUX_PATHS: &[&str] = &[
     "/usr/bin/google-chrome",
     "/usr/bin/google-chrome-stable",
@@ -46,7 +46,7 @@ pub fn kind_of(exe: &Path) -> &'static str {
     }
 }
 
-/// Find a Chromium-family executable: explicit → default browser → known paths → PATH → Playwright cache.
+/// Find a Chromium-family executable: explicit / `ARK_BROWSER_EXECUTABLE` → default browser → PATH → known paths → Playwright cache.
 pub fn find_executable(explicit: &str) -> Result<PathBuf, String> {
     let explicit = explicit.trim();
     if !explicit.is_empty() {
@@ -61,14 +61,16 @@ pub fn find_executable(explicit: &str) -> Result<PathBuf, String> {
     if let Some(p) = default_browser_exe() {
         return Ok(p);
     }
-    for p in LINUX_PATHS {
-        if Path::new(p).is_file() {
-            return Ok(p.into());
-        }
-    }
+    // $PATH first (distro, Nix, Homebrew, custom prefixes), the well-known install locations
+    // only as a fallback for a service started with a minimal PATH.
     for n in PATH_NAMES {
         if let Some(p) = util::which(n) {
             return Ok(p);
+        }
+    }
+    for p in LINUX_PATHS {
+        if Path::new(p).is_file() {
+            return Ok(p.into());
         }
     }
     if let Some(p) = playwright_chromium() {
@@ -100,14 +102,9 @@ pub fn ensure_executable(cfg: &crate::config::BrowserConfig, explicit: &str) -> 
     }
 }
 
-/// ark's data directory (mirrors `ark_kernel::config::Paths::from_env().data`: launch.rs is
-/// below the kernel, so it reads the same environment itself).
+/// ark's data directory (the same `ark_core::layout` the kernel's `Paths` uses).
 pub fn data_dir() -> PathBuf {
-    if let Some(h) = std::env::var_os("ARK_HOME") {
-        return PathBuf::from(h).join("data");
-    }
-    let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("/tmp"));
-    std::env::var_os("XDG_DATA_HOME").map(PathBuf::from).filter(|p| p.is_absolute()).unwrap_or_else(|| home.join(".local/share")).join("ark")
+    ark_core::layout::data_dir()
 }
 
 /// The Chrome for Testing build `ark browser install` put in this home, if any.

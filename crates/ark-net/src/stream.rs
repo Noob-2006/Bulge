@@ -116,6 +116,29 @@ impl Stream {
         Ok(Stream::Tls(Box::new(s)))
     }
 
+    /// TLS to `host:port` trusting `ca_file` (PEM) instead of the process-wide roots — for a
+    /// service with its own private CA (a SIEM's syslog-over-TLS listener). `None` = the
+    /// usual roots ([`Stream::connect`]).
+    pub fn connect_with_roots(host: &str, port: u16, ca_file: Option<&str>, timeout: Duration) -> io::Result<Stream> {
+        let Some(ca) = ca_file.filter(|c| !c.trim().is_empty()) else { return Stream::connect(host, port, true, timeout) };
+        let certs = crate::http::load_ca(ca).map_err(io::Error::other)?;
+        let mut roots = rustls::RootCertStore::empty();
+        let (ok, _) = roots.add_parsable_certificates(certs.iter().map(|c| rustls::pki_types::CertificateDer::from(c.der().to_vec())));
+        if ok == 0 {
+            return Err(io::Error::other(format!("{ca}: no usable certificates")));
+        }
+        let provider = Arc::new(rustls::crypto::ring::default_provider());
+        let cfg = Arc::new(rustls::ClientConfig::builder_with_provider(provider).with_safe_default_protocol_versions().map_err(|e| io::Error::other(e.to_string()))?.with_root_certificates(roots).with_no_client_auth());
+        let tcp = open_tcp(host, port, timeout)?;
+        let name = rustls::pki_types::ServerName::try_from(host.to_string()).map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e.to_string()))?;
+        let conn = rustls::ClientConnection::new(cfg, name).map_err(|e| io::Error::other(e.to_string()))?;
+        let mut s = rustls::StreamOwned::new(conn, tcp);
+        while s.conn.is_handshaking() {
+            s.conn.complete_io(&mut s.sock)?;
+        }
+        Ok(Stream::Tls(Box::new(s)))
+    }
+
     /// STARTTLS (SMTP 587, IMAP 143, IRC): upgrade a plain connection in place.
     pub fn starttls(self, host: &str) -> io::Result<Stream> {
         let Stream::Plain(tcp) = self else { return Ok(self) };
@@ -153,6 +176,16 @@ impl Stream {
 
     pub fn shutdown(&self) {
         let _ = self.tcp().shutdown(std::net::Shutdown::Both);
+    }
+
+    /// End the session cleanly: TLS `close_notify` (so the peer sees a proper end of stream,
+    /// not a truncation), then shut the socket.
+    pub fn close(mut self) {
+        if let Stream::Tls(s) = &mut self {
+            s.conn.send_close_notify();
+            let _ = s.conn.complete_io(&mut s.sock);
+        }
+        self.shutdown();
     }
 
     /// A handle that can unblock a reader from another thread.

@@ -96,17 +96,6 @@ fn piper_spawn_error(e: String) -> String {
     }
 }
 
-/// `$ARK_HOME` or `~/.local/share/ark`.
-pub(crate) fn ark_home() -> PathBuf {
-    if let Some(h) = std::env::var_os("ARK_HOME").filter(|h| !h.is_empty()) {
-        return PathBuf::from(h);
-    }
-    if let Some(x) = std::env::var_os("XDG_DATA_HOME").filter(|h| !h.is_empty()) {
-        return PathBuf::from(x).join("ark");
-    }
-    ark_core::tool::expand_home("~/.local/share/ark")
-}
-
 const KITTEN_SCRIPT: &str = r#"import sys
 from kittentts import KittenTTS
 import soundfile as sf
@@ -162,7 +151,7 @@ impl Local {
             piper_config(&p)?;
             return Ok(p);
         }
-        let dir = opt(m, "piper", "voices_dir").map(|d| ark_core::tool::expand_home(&d)).unwrap_or_else(|| ark_home().join("cache").join("piper-voices"));
+        let dir = opt(m, "piper", "voices_dir").map(|d| ark_core::tool::expand_home(&d)).unwrap_or_else(|| ark_core::layout::cache_dir().join("piper-voices"));
         std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
         let cached = dir.join(format!("{voice}.onnx"));
         if cached.exists() && dir.join(format!("{voice}.onnx.json")).exists() {
@@ -263,7 +252,7 @@ impl TtsProvider for Local {
             Engine::NeuTts => {
                 let model = opt(m, "neutts", "model").unwrap_or_else(|| "neuphonic/neutts-air-q4-gguf".into());
                 let device = opt(m, "neutts", "device").unwrap_or_else(|| "cpu".into());
-                let samples = ark_home().join("neutts_samples");
+                let samples = ark_core::layout::data_dir().join("neutts_samples");
                 let ra = opt(m, "neutts", "ref_audio").unwrap_or_else(|| samples.join("jo.wav").display().to_string());
                 let rt = opt(m, "neutts", "ref_text").unwrap_or_else(|| samples.join("jo.txt").display().to_string());
                 let argv = vec![self.python(m), "-c".into(), NEUTTS_SCRIPT.into(), model, device, ra, rt, out.display().to_string()];

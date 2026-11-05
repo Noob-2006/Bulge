@@ -613,6 +613,11 @@ impl Runtime {
         let taint_gate = tainted.is_some() && tier >= Tier::Impactful;
         let decision: String = if !d.ask {
             "deny".into()
+        } else if a.dual_control.applies(tool, &gname, &d.reason, tier.as_u8()) {
+            // Four eyes: no grant, yolo, envelope, reviewer or single answer makes this quiet.
+            let (choice, extra) = self.decide_dual(log, id, tool, input, &d, tier)?;
+            deny_extra = extra;
+            choice
         } else if tier.is_irreversible() {
             // Hard floor (A6 / §0-1 tier 3): no yolo, mode=off, allowlist, remembered
             // choice or durable grant makes this quiet. A human, or the queue.
@@ -703,6 +708,70 @@ impl Runtime {
             }
             Ok(Some(ToolOutput::err(format!("Blocked by the {gname} gate: {}. Do not retry the same call; choose another approach or tell the user what they need to do.{extra}", d.reason))))
         }
+    }
+
+    /// Dual control (`[approvals.dual_control]`): wait for the quorum of distinct approvers,
+    /// none of them the session's owner. Every step lands in the audit stream: the request
+    /// here, each vote and the outcome in [`crate::approver::answer_as`], an expiry here.
+    fn decide_dual(&self, log: &mut SessionLog, id: &str, tool: &str, input: &Value, d: &Decision, tier: Tier) -> Result<(String, String), StoreError> {
+        use ark_security::audit::{record, Actor, Event};
+        let dc = &self.cfg.approvals.dual_control;
+        let data = self.paths.data.clone();
+        let gname = format!("{:?}", d.gate).to_lowercase();
+        let requester = crate::governance::owner_label_in(&self.paths, &self.store, &log.id);
+        if !self.approver.interactive() {
+            record(&data, Event::new("approval.request", Actor::parse_label(&requester), tool, "deny").session(&log.id).detail(json!({"tool": tool, "gate": gname, "tier": tier.as_u8(), "dual_control": true, "reason": "no approval surface"})));
+            return Ok(("deny (dual control)".into(), " This action needs dual control (several approvers) and no approval surface is reachable from this session.".into()));
+        }
+        let redacted = self.vault.redact(&input.to_string());
+        let reason = format!("{} [dual control: {} approvals from people other than {requester}]", d.reason, dc.required());
+        let req = ApprovalRequest { id: new_id(), tool_use_id: id.into(), session: log.id.clone(), tool: tool.into(), summary: head_tail(&redacted, 600).0, input: serde_json::from_str(&redacted).unwrap_or_default(), gate: d.gate, reason, tier: tier.as_u8() };
+        let mut q = ark_security::dual_control::Quorum::new(dc, &req.id, &log.id, tool, &requester, ark_security::audit::now_ms());
+        // Change control: a ticket in ServiceNow / Jira whose approval is the CAB's vote. A
+        // ticketing outage does not block the request (people can still reach the quorum).
+        let mut ticket = None;
+        if let Some(cc) = &dc.change_control {
+            let subst = self.vault_substitute();
+            let summary = format!("ark: {tool} needs dual-control approval ({})", d.reason.chars().take(120).collect::<String>());
+            let description = format!("Approval {} in session {} requested by {requester}.\nRule: {}\nRisk tier: {}\nCall (redacted): {}", req.id, log.id, d.reason, tier.as_u8(), req.summary);
+            match crate::change_control::create(cc, &|s: &str| subst(s), &summary, &description) {
+                Ok(t) => {
+                    q.change_ticket = Some(t.principal());
+                    record(&data, Event::new("change.request", Actor::parse_label(&requester), &t.principal(), "ok").session(&log.id).detail(json!({"approval": req.id, "system": t.system, "number": t.number})));
+                    ticket = Some(t);
+                }
+                Err(e) => record(&data, Event::new("change.request", Actor::parse_label(&requester), &cc.system, "error").session(&log.id).detail(json!({"approval": req.id, "error": e}))),
+            }
+        }
+        record(
+            &data,
+            Event::new("approval.request", Actor::parse_label(&requester), &req.id, "pending").session(&log.id).detail(json!({
+                "tool": tool, "gate": gname, "tier": tier.as_u8(), "dual_control": true, "required": q.required,
+                "approver_roles": q.approver_roles, "approvers": q.approvers, "expires_ms": q.expires_ms, "requester": requester, "rule": d.reason,
+            })),
+        );
+        crate::approver::open_quorum(q);
+        self.bus.publish(BusMsg::Pending(PendingItem::Approval(req.clone())));
+        if let (Some(t), Some(cc)) = (ticket, &dc.change_control) {
+            crate::change_control::watch(self.approver.clone(), data.clone(), cc.clone(), self.vault_substitute(), t, req.id.clone());
+        }
+        let wait = Duration::from_secs(dc.expiry_secs.max(1));
+        let answer = {
+            let _w = ap::human_wait(&log.id, wait);
+            self.approver.approve_within(&req, wait)
+        };
+        // Still registered = nobody completed it: the quorum was not reached in time.
+        let left = crate::approver::close_quorum(&req.id);
+        let by = ap::take_answered_by(&req.id).unwrap_or_default();
+        Ok(match (answer, left) {
+            (Approval::Deny, Some(q)) => {
+                record(&data, Event::new("approval.expired", Actor::system(), &req.id, "deny").session(&log.id).detail(json!({"tool": tool, "dual_control": true, "required": q.required, "approvals": q.approvals(), "requester": q.requester})));
+                let _ = self.append(log, EventKind::Notice { level: "warn".into(), text: format!("dual-control approval {} expired with {}/{} approvals; {tool} was denied", req.id, q.approvals().len(), q.required) });
+                ("deny (dual control expired)".into(), " This action needs dual control and the approvers did not reach the quorum in time. Do not retry it; tell the user it is waiting for a second approver.".into())
+            }
+            (Approval::Deny, None) => (format!("deny (dual control by {by})"), format!(" An approver ({by}) refused this action under dual control. Do NOT reach the same outcome another way.")),
+            _ => (format!("allow (dual control by {by})"), String::new()),
+        })
     }
 
     /// Reviewer + human (attended context). Returns (verdict label, text for the agent on deny).

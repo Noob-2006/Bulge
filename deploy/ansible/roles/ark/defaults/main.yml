@@ -32,6 +32,7 @@ ark_setup_force: false      # re-run setup on a host that already has a config.t
 ark_managed_policy: {}
 
 ark_system_user: ark
-ark_home: /var/lib/ark
+ark_home: /var/lib/ark          # state (home of the account); ark_core::layout::system::DATA
+ark_config_dir: /etc/ark        # config + secrets of the system instance (ent-008)
 ark_service_enabled: true
 ark_service_state: started

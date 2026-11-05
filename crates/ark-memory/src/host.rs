@@ -167,7 +167,7 @@ pub fn with_sampler(cfg: &Config, paths: &Paths, s: Sampler) -> Arc<Host> {
 pub fn register() {
     ark_core::registry::register_tool_provider("memory", 110, |env| {
         let cfg = env.config::<Config>()?;
-        let paths = Paths { data: env.data.clone(), config_dir: env.config_dir.clone(), runtime: env.runtime.clone() };
+        let paths = Paths { data: env.data.clone(), config_dir: env.config_dir.clone(), runtime: env.runtime.clone(), ..Default::default() };
         Ok(tools(cfg, &paths, &env.workspace))
     });
 }
@@ -182,7 +182,7 @@ mod tests {
         // No embedding provider: tests must never reach a network (`auto` would try OpenAI
         // when a key happens to be in the environment).
         let cfg = Config { memory: toml::from_str("[search.embedding]\nprovider = \"none\"\n").unwrap(), ..Default::default() };
-        let paths = Paths { data: d.clone(), config_dir: d.join("config"), runtime: d.join("run") };
+        let paths = Paths { data: d.clone(), config_dir: d.join("config"), runtime: d.join("run"), ..Default::default() };
         (cfg, paths, d)
     }
 
@@ -204,7 +204,7 @@ mod tests {
         use crate::util::testutil::fake;
         use std::os::unix::fs::PermissionsExt;
         let d = crate::tmp("host-secret");
-        let paths = Paths { data: d.clone(), config_dir: d.join("config"), runtime: d.join("run") };
+        let paths = Paths { data: d.clone(), config_dir: d.join("config"), runtime: d.join("run"), ..Default::default() };
         // The vault the binary reads (`ark secrets set EMBED_KEY …`).
         let secrets = paths.secrets();
         std::fs::create_dir_all(secrets.parent().unwrap()).unwrap();

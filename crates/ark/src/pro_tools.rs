@@ -246,7 +246,7 @@ mod tests {
 
     fn home(config_toml: &str) -> Home {
         let dir = ark_core::tmp::TempDir::new("ark-cfg-pro");
-        let paths = Paths { data: dir.join("data"), config_dir: dir.join("config"), runtime: dir.join("run") };
+        let paths = Paths { data: dir.join("data"), config_dir: dir.join("config"), runtime: dir.join("run"), ..Default::default() };
         std::fs::create_dir_all(&paths.data).unwrap();
         std::fs::create_dir_all(&paths.config_dir).unwrap();
         std::fs::write(paths.user_config(), config_toml).unwrap();
@@ -285,8 +285,8 @@ mod tests {
         n.sort();
         assert_eq!(n, ["directory_lookup", "forge_read", "forge_write", "sql_query", "sql_schema"]);
         // A broken table is refused by the config validator, with the section's own message.
-        let bad: Config = toml::from_str("[integrations.data.sources.s]\nkind = \"oracle\"\ndsn = \"x://y\"\n").unwrap();
-        assert!(ark_core::registry::validate_config(&bad).iter().any(|m| m.contains("oracle")), "{:?}", ark_core::registry::validate_config(&bad));
+        let bad: Config = toml::from_str("[integrations.data.sources.s]\nkind = \"informix\"\ndsn = \"x://y\"\n").unwrap();
+        assert!(ark_core::registry::validate_config(&bad).iter().any(|m| m.contains("informix")), "{:?}", ark_core::registry::validate_config(&bad));
         assert!(ark_core::registry::validate_config(&cfg).is_empty());
     }
 

@@ -437,7 +437,7 @@ mod tests {
 
     fn paths() -> Paths {
         let root = ark_core::tmp::scratch_path(format!("ark-bk-{}", ark_kernel::util::random_hex(6)));
-        let p = Paths { data: root.join("data"), config_dir: root.join("config"), runtime: root.join("run") };
+        let p = Paths { data: root.join("data"), config_dir: root.join("config"), runtime: root.join("run"), ..Default::default() };
         std::fs::create_dir_all(p.data.join("sessions")).unwrap();
         std::fs::create_dir_all(p.data.join("memory")).unwrap();
         std::fs::create_dir_all(&p.config_dir).unwrap();

@@ -157,7 +157,7 @@ pub fn engine_command(m: &Media, provider: &str) -> Result<Vec<String>, String> 
     if provider == "porcupine" && std::env::var("PORCUPINE_ACCESS_KEY").map(|k| k.trim().is_empty()).unwrap_or(true) {
         return Err("Porcupine wake word requires PORCUPINE_ACCESS_KEY (get a free key at https://console.picovoice.ai).".into());
     }
-    let model_dir = wstr(m, "model_dir").map(|d| ark_core::tool::expand_home(&d)).unwrap_or_else(|| crate::stt::local::ark_home().join("cache").join("wakewords").join("sherpa-onnx-kws-zipformer-gigaspeech-3.3M-2024-01-01"));
+    let model_dir = wstr(m, "model_dir").map(|d| ark_core::tool::expand_home(&d)).unwrap_or_else(|| ark_core::layout::cache_dir().join("wakewords").join("sherpa-onnx-kws-zipformer-gigaspeech-3.3M-2024-01-01"));
     let args = serde_json::json!({"engine": provider, "phrase": phrase(m), "sensitivity": sensitivity(m), "confirm": confirmation_frames(m), "model": wstr(m, "model").unwrap_or_default(), "model_dir": model_dir.display().to_string(), "model_url": SHERPA_KWS_MODEL_URL});
     Ok(vec![python(m), "-c".into(), ENGINE_PY.into(), args.to_string()])
 }

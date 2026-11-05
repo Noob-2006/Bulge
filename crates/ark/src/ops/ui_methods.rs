@@ -40,6 +40,7 @@ pub const METHODS: &[&str] = &[
     "ui.environments", "ui.environments.destroy",
     "ui.search", "ui.websearch.status", "ui.websearch.set", "ui.websearch.test",
     "ui.systems", "ui.systems.backup", "ui.custodian", "ui.labs", "ui.labs.set", "ui.about", "ui.profile", "ui.profile.set",
+    "ui.ops.status",
 ];
 
 type Res = Result<Value, (i32, String)>;
@@ -79,6 +80,7 @@ pub fn methods(paths: &Paths, k: Kernel, ext: Option<&crate::ext::Ext>) -> Metho
         live.mcp_apps = e.registry.app_tools().into_iter().map(|(s, d)| json!({"server": s, "name": d.name, "description": d.description})).collect();
     }
     let ws = k.cfg.app.get("workspace").and_then(|v| v.as_str()).map(PathBuf::from).or_else(|| std::env::current_dir().ok()).unwrap_or_else(|| PathBuf::from("/"));
+    crate::ops::opsview::mark_started();
     let c = Arc::new(UiCtx { paths: paths.clone(), k, ws, live, terms: Default::default() });
     Arc::new(move |m: &str, p: &Value| call(&c, m, p))
 }
@@ -210,6 +212,7 @@ pub fn call(c: &UiCtx, m: &str, p: &Value) -> Option<Res> {
         "ui.labs" => Ok(labs(c, &ws)),
         "ui.labs.set" => labs_set(c, &s("id"), p["enabled"].as_bool().unwrap_or(false)),
         "ui.about" => Ok(about(c)),
+        "ui.ops.status" => Ok(crate::ops::opsview::status(c)),
         "ui.profile" => Ok(profile(c)),
         "ui.profile.set" => profile_set(c, p),
         _ => return None,
@@ -1438,6 +1441,13 @@ mod tests {
         assert!(err(&c, "ui.labs.set", json!({"id": "nope"})).contains("no lab"));
         let s = ok(&c, "ui.systems", json!({}));
         assert_eq!(s["version"], env!("CARGO_PKG_VERSION"));
+        // The operations overview: host metrics, the daemon, agents and a growing series.
+        let o = ok(&c, "ui.ops.status", json!({}));
+        assert!(o["host"]["cpus"].as_u64().unwrap() >= 1 && o["host"]["mem"]["total"].as_u64().unwrap() > 0, "{o}");
+        assert_eq!(o["daemon"]["version"], env!("CARGO_PKG_VERSION"));
+        assert!(o["agents"].is_array() && o["alerts"].is_array() && o["audit"]["tail"].is_array());
+        let n = ok(&c, "ui.ops.status", json!({}))["series"].as_array().unwrap().len();
+        assert!(n >= 2, "each call adds a sample ({n})");
         assert!(s["service"].as_array().unwrap().iter().all(|i| i["code"].is_string() && i["message"].is_string()));
         let b = ok(&c, "ui.systems.backup", json!({}));
         assert!(std::path::Path::new(b["path"].as_str().unwrap()).is_file(), "{b}");

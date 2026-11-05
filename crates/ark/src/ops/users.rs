@@ -48,10 +48,28 @@ pub fn run(p: &Paths, a: &Args) -> Result<String, String> {
     let to = || a.val("to").ok_or_else(|| "--to <profileId> is required".to_string());
     Ok(match a.pos(0).unwrap_or("list") {
         "list" | "ls" => show(&agents::users(p), js),
-        "add" | "create" => show(&[agents::user_add(p, &a.rest(1))?], js),
-        "link-email" => show(&[agents::user_link_email(p, to()?, a.need(1, "email")?)?], js),
-        "link" => show(&[agents::user_link(p, to()?, a.need(1, "channel")?, a.need(2, "sender")?)?], js),
-        "instructions" => show(&[agents::user_set_instructions(p, a.need(1, "id")?, &a.rest(2))?], js),
+        // Every registry change is audited: an identity link decides who a login or a chat
+        // sender *is* (roles, dual control's "same person" check, quotas).
+        "add" | "create" => {
+            let u = agents::user_add(p, &a.rest(1))?;
+            audit(p, "user.add", &u.name, &serde_json::json!({"id": u.id}));
+            show(&[u], js)
+        }
+        "link-email" => {
+            let u = agents::user_link_email(p, to()?, a.need(1, "email")?)?;
+            audit(p, "user.link", &u.name, &serde_json::json!({"email": a.pos(1)}));
+            show(&[u], js)
+        }
+        "link" => {
+            let u = agents::user_link(p, to()?, a.need(1, "channel")?, a.need(2, "sender")?)?;
+            audit(p, "user.link", &u.name, &serde_json::json!({"channel": a.pos(1), "sender": a.pos(2)}));
+            show(&[u], js)
+        }
+        "instructions" => {
+            let u = agents::user_set_instructions(p, a.need(1, "id")?, &a.rest(2))?;
+            audit(p, "user.instructions", &u.name, &serde_json::Value::Null);
+            show(&[u], js)
+        }
         // ent-060: the registry is also who may log in and what they may do.
         "role" => {
             let role = a.need(2, "role")?.to_string();
@@ -106,6 +124,7 @@ pub fn run(p: &Paths, a: &Args) -> Result<String, String> {
             let src = a.need(1, "sourceProfileId")?;
             let into = a.val("into").ok_or("--into <targetProfileId> is required")?;
             let u = agents::user_merge(p, src, into)?;
+            audit(p, "user.merge", &u.name, &serde_json::json!({"retired": src, "into": u.id}));
             if js {
                 serde_json::json!({"profile": u, "retired": src}).to_string()
             } else {
@@ -114,6 +133,7 @@ pub fn run(p: &Paths, a: &Args) -> Result<String, String> {
         }
         "rm" | "remove" => {
             agents::user_remove(p, a.need(1, "id")?)?;
+            audit(p, "user.remove", a.need(1, "id")?, &serde_json::Value::Null);
             "removed".into()
         }
         "whois" => match agents::find_user(p, a.need(1, "channel")?, a.need(2, "sender")?) {
@@ -182,6 +202,63 @@ mod tests {
         assert!(ark_app::identity::channel_permits(p, "telegram", "42", true).is_err(), "auditors do not approve from chat");
         assert!(ark_security::audit::all(&p.data).iter().any(|e| e["kind"] == "user.role"));
         assert!(r(&["bogus"]).is_err());
+    }
+
+    /// Audit coverage for the admin CLI: every `ark users` / `ark tenancy` / `ark accounts`
+    /// subcommand named in its usage text is either read-only (listed with a reason) or leaves
+    /// an audit record of the expected kind. A new subcommand that is in neither list fails
+    /// this test until it is classified.
+    #[test]
+    fn every_admin_cli_change_is_audited() {
+        let kit = crate::testkit::kit();
+        let p = &kit.paths;
+        let args = |v: &[&str]| Args::parse(&v.iter().map(|s| s.to_string()).collect::<Vec<_>>()).unwrap();
+        let usage_words = |err: String| -> Vec<String> { err.split_once('(').map(|(_, r)| r).unwrap_or("").split(" | ").filter_map(|c| c.split_whitespace().next()).map(|w| w.trim_end_matches(')').to_string()).collect() };
+        let kinds = || ark_security::audit::all(&p.data).iter().map(|r| r["kind"].as_str().unwrap_or("").to_string()).collect::<Vec<_>>();
+        let a = agents::user_add(p, "Ann").unwrap().id;
+        let b = agents::user_add(p, "Bea").unwrap().id;
+        // (subcommand, argv, expected audit kind)
+        let mutating: Vec<(&str, Vec<&str>, &str)> = vec![
+            ("add", vec!["add", "Cy"], "user.add"),
+            ("link-email", vec!["link-email", "ann@x.org", "--to", &a], "user.link"),
+            ("link", vec!["link", "telegram", "42", "--to", &a], "user.link"),
+            ("link-oidc", vec!["link-oidc", "sub-1", "--to", &a], "user.link"),
+            ("role", vec!["role", &a, "auditor"], "user.role"),
+            ("org", vec!["org", &a, "acme"], "user.org"),
+            ("team", vec!["team", &a, "eng"], "user.team"),
+            ("disable", vec!["disable", &a], "user.disable"),
+            ("enable", vec!["enable", &a], "user.enable"),
+            ("instructions", vec!["instructions", &a, "be brief"], "user.instructions"),
+            ("merge", vec!["merge", &b, "--into", &a], "user.merge"),
+            ("rm", vec!["rm", &a], "user.remove"),
+        ];
+        const READ_ONLY: &[(&str, &str)] = &[("list", "lists profiles"), ("whois", "looks one identity up")];
+        let words = usage_words(run(p, &args(&["bogus"])).unwrap_err());
+        for w in &words {
+            assert!(mutating.iter().any(|(m, _, _)| m == w) || READ_ONLY.iter().any(|(r, _)| r == w), "`ark users {w}` is not classified as audited or read-only");
+        }
+        for (name, argv, kind) in &mutating {
+            let before = kinds().iter().filter(|k| k == kind).count();
+            run(p, &args(argv)).unwrap_or_else(|e| panic!("users {name}: {e}"));
+            assert_eq!(kinds().iter().filter(|k| k == kind).count(), before + 1, "`ark users {name}` must write one `{kind}` record");
+        }
+        // `ark tenancy`: every change is `tenancy.*`.
+        let t = |v: &[&str]| crate::ops::tenancy::run(p, &args(v));
+        let words = usage_words(t(&["bogus"]).unwrap_err());
+        assert!(words.contains(&"org".to_string()) && words.contains(&"set".to_string()));
+        for argv in [vec!["org", "add", "acme"], vec!["team", "add", "eng", "--org", "acme"], vec!["project", "add", "p1", "--team", "eng"], vec!["project", "member", "p1", "add", "u1"], vec!["set", "team:eng", "model", "x/y"], vec!["rm", "project", "p1"]] {
+            let before = kinds().iter().filter(|k| k.starts_with("tenancy.")).count();
+            t(&argv).unwrap_or_else(|e| panic!("tenancy {argv:?}: {e}"));
+            assert_eq!(kinds().iter().filter(|k| k.starts_with("tenancy.")).count(), before + 1, "`ark tenancy {argv:?}` must be audited");
+        }
+        // `ark accounts`: issue / rotate / revoke are `token.*`.
+        let acc = |v: &[&str]| crate::ops::enterprise::accounts(p, &args(v), 0);
+        for argv in [vec!["issue", "ci", "--role", "operator"], vec!["rotate", "ci"], vec!["revoke", "ci"]] {
+            let before = kinds().iter().filter(|k| k.starts_with("token.")).count();
+            acc(&argv).unwrap();
+            assert_eq!(kinds().iter().filter(|k| k.starts_with("token.")).count(), before + 1, "`ark accounts {argv:?}` must be audited");
+        }
+        assert!(ark_security::audit::verify(&p.data, None).ok);
     }
 
     /// `ark users …` reaches this module through `ops::MODULES`; other names fall through.

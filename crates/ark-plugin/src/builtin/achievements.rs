@@ -1904,7 +1904,7 @@ mod tests {
         Paths {
             data: d.join("data"),
             config_dir: d.join("cfg"),
-            runtime: d.join("run"),
+            runtime: d.join("run"), ..Default::default()
         }
     }
 

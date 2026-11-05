@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<meta name="theme-color" content="#330716">
+<meta name="theme-color" content="#0b0105">
 <title>ark</title>
 <link rel="manifest" href="/manifest.webmanifest">
 <link rel="icon" href="/ui/star.svg" type="image/svg+xml">
@@ -14,64 +14,109 @@
 <body>
 <div class="starfield" id="starfield" aria-hidden="true"></div>
 
-<div class="shell">
-  <aside class="side panel cornered" id="side">
-    <span class="star corner tl"></span><span class="star corner tr"></span><span class="star corner bl"></span><span class="star corner br"></span>
+<div class="app">
+  <aside class="rail" id="side">
     <header class="brand">
-      <span class="star twinkle logo" style="--size:26px"></span>
-      <div>
+      <span class="star glow twinkle logo" style="--size:22px"></span>
+      <div class="brand-text">
         <div class="brand-name">ark</div>
         <div class="brand-sub" id="conn" data-i18n="conn.idle">尚未連線</div>
       </div>
     </header>
-    <button class="btn new" id="newSession" data-write data-i18n="new">＋ 新對話</button>
-    <nav class="sessions" id="sessions" aria-label="對話清單"></nav>
+
+    <nav class="nav" id="nav" aria-label="主選單">
+      <button class="nav-item" data-view="ops"><span class="n">01</span><span data-i18n="nav.ops">總覽</span></button>
+      <button class="nav-item" data-view="chat"><span class="n">02</span><span data-i18n="nav.chat">對話</span></button>
+      <button class="nav-item" data-view="agents"><span class="n">03</span><span data-i18n="nav.agents">代理</span><span class="badge" id="badgeAgents" hidden></span></button>
+      <button class="nav-item" data-view="devices" id="showNodes"><span class="n">04</span><span data-i18n="devices">裝置</span></button>
+      <button class="nav-item" data-view="approvals"><span class="n">05</span><span data-i18n="nav.approvals">核准</span><span class="badge hot" id="badgeApprovals" hidden></span></button>
+      <button class="nav-item" data-view="audit"><span class="n">06</span><span data-i18n="nav.audit">稽核</span></button>
+      <button class="nav-item" id="showBoards"><span class="n">07</span><span data-i18n="boards">儀表板</span></button>
+      <button class="nav-item" id="showControl"><span class="n">08</span><span data-i18n="control">控制台</span></button>
+      <button class="nav-item" id="showSettings"><span class="n">09</span><span data-i18n="settings">設定</span></button>
+    </nav>
+
+    <section class="rail-sessions">
+      <div class="rail-head">
+        <span class="label" data-i18n="nav.sessions">對話</span>
+        <button class="btn ghost small icon" id="newSession" data-write data-i18n-title="new" title="新對話">＋</button>
+      </div>
+      <input type="search" id="sessFilter" class="rail-filter" placeholder="搜尋對話" data-i18n-ph="filter" autocomplete="off">
+      <nav class="sessions" id="sessions" aria-label="對話清單"></nav>
+    </section>
     <nav class="plugin-panels" id="pluginPanels" aria-label="外掛面板"></nav>
-    <footer class="side-foot">
-      <button class="btn ghost small" id="showBoards" data-i18n="boards">儀表板</button>
-      <button class="btn ghost small" id="showBoardsAll" data-i18n="boards_all">總覽</button>
-      <button class="btn ghost small" id="showNodes" data-i18n="devices">裝置</button>
-      <button class="btn ghost small" id="showControl" data-i18n="control">控制台</button>
-      <button class="btn ghost small" id="showSettings" data-i18n="settings">設定</button>
+
+    <footer class="rail-foot">
+      <div class="who-am-i" id="whoami"></div>
+      <div class="rail-tools">
+        <button class="btn ghost small" id="showBoardsAll" data-i18n="boards_all">所有儀表板</button>
+        <button class="btn ghost small" id="lang" title="Language">EN</button>
+        <select id="theme" class="theme-pick" title="Theme" aria-label="Theme">
+          <option value="crimson" data-i18n="theme.crimson">深緋紅</option>
+          <option value="midnight" data-i18n="theme.midnight">極夜</option>
+          <option value="daylight" data-i18n="theme.daylight">日光</option>
+        </select>
+      </div>
     </footer>
   </aside>
 
   <main class="main">
     <header class="topbar">
-      <button class="btn ghost small menu" id="menu" aria-label="開關側欄">☰</button>
-      <div class="title" id="title" data-i18n="pick">選擇或建立一個對話</div>
+      <button class="btn ghost small icon menu" id="menu" aria-label="開關側欄">☰</button>
+      <div class="crumb"><span class="crumb-sec" id="crumbSec"></span><span class="title" id="title" data-i18n="pick">選擇或建立一個對話</span></div>
       <div class="status" id="status"></div>
-      <button class="btn ghost small" id="lang" title="Language">EN</button>
-      <select id="theme" class="theme-pick" title="Theme" aria-label="Theme">
-        <option value="crimson" data-i18n="theme.crimson">深緋紅</option>
-        <option value="midnight" data-i18n="theme.midnight">極夜</option>
-        <option value="daylight" data-i18n="theme.daylight">日光</option>
-      </select>
+      <button class="btn ghost small" id="reviewBtn" hidden data-approve-ui><span data-i18n="review">覆核</span><span class="review-mark" id="reviewMark"></span></button>
+      <div class="strip" id="strip" aria-label="即時狀態"></div>
+      <button class="btn ghost small" id="paletteBtn" title="Ctrl+K"><span data-i18n="palette">指令</span> <kbd>⌘K</kbd></button>
     </header>
 
-    <section class="log" id="log" aria-live="polite"></section>
+    <section class="view" id="view-ops" hidden></section>
+    <section class="view" id="view-agents" hidden></section>
+    <section class="view" id="view-devices" hidden></section>
+    <section class="view" id="view-approvals" hidden></section>
+    <section class="view" id="view-audit" hidden></section>
 
-    <section class="pending" id="pending"></section>
-
-    <div class="attachments" id="attachments" hidden></div>
-    <div class="slash-menu panel cornered" id="slashMenu" hidden role="listbox" aria-label="Commands"></div>
-    <form class="composer panel cornered" id="composer" data-write>
-      <span class="star corner tl"></span><span class="star corner tr"></span><span class="star corner bl"></span><span class="star corner br"></span>
-      <button type="button" class="btn ghost small" id="attach" data-i18n="attach" title="Attach a file (or paste / drop one)">附加</button>
-      <input type="file" id="file" multiple hidden>
-      <textarea id="input" rows="1" placeholder="輸入訊息…  / 顯示指令" data-i18n-ph="input" title="Enter 送出，Shift+Enter 換行" autocomplete="off"></textarea>
-      <div class="composer-actions">
-        <button type="button" class="btn ghost small" id="stop" hidden data-i18n="stop">停止</button>
-        <button type="submit" class="btn" id="send" data-i18n="send">送出</button>
+    <section class="view chat" id="view-chat">
+      <div class="chat-scroll" id="chatScroll">
+        <section class="log" id="log" aria-live="polite"></section>
       </div>
-    </form>
+      <button class="jump" id="jump" hidden data-i18n="jump">↓ 最新</button>
+      <div class="dock">
+        <section class="pending" id="pending"></section>
+        <div class="attachments" id="attachments" hidden></div>
+        <div class="slash-menu" id="slashMenu" hidden role="listbox" aria-label="Commands"></div>
+        <form class="composer" id="composer" data-write>
+          <textarea id="input" rows="1" placeholder="輸入訊息…  / 顯示指令" data-i18n-ph="input" title="Enter 送出，Shift+Enter 換行" autocomplete="off"></textarea>
+          <div class="composer-bar">
+            <button type="button" class="btn ghost small" id="attach" data-i18n="attach" title="Attach a file (or paste / drop one)">附加</button>
+            <input type="file" id="file" multiple hidden>
+            <span class="chip" id="modelChip" title="模型"></span>
+            <span class="chip faint" id="usageChip"></span>
+            <span class="spacer"></span>
+            <span class="hint faint" data-i18n="send_hint">Enter 送出 · Shift+Enter 換行</span>
+            <button type="button" class="btn danger small" id="stop" hidden data-i18n="stop">停止</button>
+            <button type="submit" class="btn small" id="send" data-i18n="send">送出</button>
+          </div>
+        </form>
+      </div>
+    </section>
+
+    <!-- Control pages (pages.js) and dashboards (surfaces.js) render here. The element keeps
+         the old dialog id so pages can still call close() / read .open (shimmed in app.js). -->
+    <section class="view page" id="panelDialog" hidden>
+      <div class="page-head">
+        <button class="btn ghost small" id="panelClose" data-i18n="back">← 返回</button>
+        <h2 id="panelTitle"></h2>
+      </div>
+      <div class="page-body" id="panelBody"></div>
+    </section>
   </main>
 </div>
 
-<dialog id="login" class="panel cornered">
+<dialog id="login" class="modal cornered">
   <span class="star corner tl"></span><span class="star corner tr"></span><span class="star corner bl"></span><span class="star corner br"></span>
   <form method="dialog" id="loginForm">
-    <div class="dialog-head"><span class="star spin" style="--size:22px"></span><h2 data-i18n="login">連線到 ark</h2></div>
+    <div class="modal-head"><span class="star glow spin" style="--size:20px"></span><h2 data-i18n="login">連線到 ark</h2></div>
     <p class="dim" id="loginHint">輸入 App Server 的 token（<code>ark app token</code> 會顯示）。</p>
     <input id="token" type="password" autocomplete="current-password" placeholder="token" required>
     <label class="check"><input type="checkbox" id="remember" checked> <span data-i18n="remember">記住這台裝置</span></label>
@@ -79,11 +124,21 @@
   </form>
 </dialog>
 
-<dialog id="panelDialog" class="panel cornered wide">
-  <span class="star corner tl"></span><span class="star corner tr"></span><span class="star corner bl"></span><span class="star corner br"></span>
-  <div class="dialog-head"><h2 id="panelTitle"></h2><button class="btn ghost small" id="panelClose" data-i18n="close">關閉</button></div>
-  <div id="panelBody"></div>
+<dialog id="reviewDlg" class="modal">
+  <form method="dialog" id="reviewForm">
+    <div class="modal-head"><h2 data-i18n="review">覆核</h2></div>
+    <p class="dim" id="reviewCur"></p>
+    <input type="text" id="reviewNote" data-i18n-ph="review_note" placeholder="覆核註記（選填）" autocomplete="off">
+    <menu style="gap:8px"><button class="btn ghost" value="cancel" data-i18n="close">關閉</button><button class="btn danger" value="flagged" data-i18n="flagged">標記可疑</button><button class="btn" value="reviewed" data-i18n="reviewed">標記已覆核</button></menu>
+  </form>
 </dialog>
+
+<dialog id="palette" class="modal palette">
+  <input type="search" id="paletteInput" placeholder="跳到頁面、對話或指令…" data-i18n-ph="palette_ph" autocomplete="off">
+  <div class="palette-list" id="paletteList" role="listbox"></div>
+</dialog>
+
+<div class="toasts" id="toasts" aria-live="polite"></div>
 
 <template id="tpl-msg">
   <article class="msg"><div class="who"></div><div class="body"></div></article>
@@ -92,5 +147,6 @@
 <script src="/ui/app.js"></script>
 <script src="/ui/surfaces.js"></script>
 <script src="/ui/pages.js"></script>
+<script src="/ui/ops.js"></script>
 </body>
 </html>

@@ -12,6 +12,33 @@ pub fn fmt_ms(ms: u64) -> String {
 pub fn cmd_session(a: &Args) -> R {
     let sub = a.pos(0).unwrap_or("list");
     match sub {
+        // `ark session review <id> reviewed|flagged|cleared [--note TEXT]`,
+        // `ark session review list [--status flagged]`, `ark session review show <id>`.
+        "review" => {
+            let c = build(a, approver_for(a, false))?;
+            let k = &c.k;
+            let (method, params) = match a.pos(1).unwrap_or("list") {
+                "list" | "ls" => ("session.review.list", json!({"status": a.val("status").unwrap_or("")})),
+                "show" | "get" => ("session.review.get", json!({"id": find_session(k, a.need(2, "session")?)?})),
+                id => {
+                    let status = a.need(2, "reviewed|flagged|cleared")?;
+                    ("session.review.set", json!({"id": find_session(k, id)?, "status": status, "note": a.val("note").unwrap_or("")}))
+                }
+            };
+            let v = ark_kernel::session_review::rpc(k, method, &params).expect("known method").map_err(|(_, e)| Fail::Usage(e))?;
+            if a.flag("json") || method == "session.review.get" {
+                println!("{}", serde_json::to_string_pretty(&v).unwrap_or_default());
+                return Ok(0);
+            }
+            let rows = if method == "session.review.set" { vec![v] } else { v.as_array().cloned().unwrap_or_default() };
+            if rows.is_empty() {
+                println!("no reviewed or flagged sessions");
+            }
+            for r in rows {
+                println!("{}  {:<8} {}  by {}  {}", r["session"].as_str().unwrap_or(""), r["status"].as_str().unwrap_or(""), fmt_ms(r["at_ms"].as_u64().unwrap_or(0)), r["by"].as_str().unwrap_or(""), term::one_line(r["note"].as_str().unwrap_or(""), 80));
+            }
+            Ok(0)
+        }
         "list" | "ls" => {
             let c = build(a, approver_for(a, false))?;
             let lim = a.num::<usize>("limit").map_err(Fail::Usage)?.unwrap_or(20);

@@ -120,7 +120,7 @@ impl Daemon {
     /// hosts list theirs via `capabilities`).
     pub const METHODS: &'static [&'static str] = &[
         "ping", "session.list", "session.create", "session.submit", "session.interrupt", "session.history", "session.view",
-        "gate.pending", "gate.answer", "session.command", "goal.start", "goal.list", "schedule.list", "models.list", "tools.list", "shutdown", "session.attach", "events.subscribe",
+        "gate.pending", "gate.answer", "gate.policy.show", "session.review.set", "session.review.list", "session.review.get", "session.command", "goal.start", "goal.list", "schedule.list", "models.list", "tools.list", "shutdown", "session.attach", "events.subscribe",
     ];
 
     pub fn run(self: Arc<Self>) -> Result<(), String> {
@@ -441,10 +441,17 @@ impl Daemon {
     /// Forward new audit records to the configured SIEM sinks (ent-074…076).
     fn pump_audit(&self) {
         let cfg = &self.k.cfg.audit.export;
+        let subst = self.k.vault_substitute();
+        // Sign (and timestamp) the seals of segments rotated since the last pump.
+        if let Some(seed) = self.k.cfg.audit.seal_seed(&|s: &str| subst(s)) {
+            let tsa = self.k.cfg.audit.tsa_url.trim();
+            if let Err(e) = ark_security::audit_seal::sign_pending(&self.k.paths.data, &seed, (!tsa.is_empty()).then_some(tsa)) {
+                ark_security::audit::note_error(&format!("audit seal signing: {e}"));
+            }
+        }
         if cfg.sinks().is_empty() {
             return;
         }
-        let subst = self.k.vault_substitute();
         for (sink, r) in ark_security::audit_export::pump(&self.k.paths.data, cfg, &|s: &str| subst(s)) {
             if let Err(e) = r {
                 // Surfaced through `/metrics` (`ark_audit_errors`) and `/ready`; the cursor stays.
@@ -607,15 +614,17 @@ impl Daemon {
             "gate.answer" => {
                 // `_by` is set by the app server from the authenticated principal; on the
                 // owner-only unix socket the caller is the local user.
-                let who = s("_by").map(|b| ark_security::audit::Actor::parse_label(&b)).unwrap_or_else(ark_security::audit::Actor::local);
+                // `_by_role` (the principal's roles) is set the same way; dual control checks it.
+                let who = s("_by").map(|b| ark_security::audit::Actor::parse_label(&b).with_role(&s("_by_role").unwrap_or_default())).unwrap_or_else(ark_security::audit::Actor::local);
                 let via = s("_via").unwrap_or_else(|| "arp".into());
-                let ok = crate::approver::answer_by(&*self.pending, &k.paths.data, &need("id")?, &need("answer")?, &who, &via);
-                if ok {
-                    Ok(json!({"ok": true}))
-                } else {
-                    Err((-32001, "no such pending item (already answered or timed out)".into()))
+                match crate::approver::answer_as(&*self.pending, &k.paths.data, &need("id")?, &need("answer")?, &who, &via) {
+                    Ok(crate::approver::Answered::Final) => Ok(json!({"ok": true, "final": true})),
+                    Ok(crate::approver::Answered::Counted { have, need }) => Ok(json!({"ok": true, "final": false, "approvals": have, "required": need})),
+                    Err(e) if e.starts_with("no such pending") => Err((-32001, e)),
+                    Err(e) => Err((-32003, e)),
                 }
             }
+            "gate.policy.show" => Ok(json!({"dual_control": k.cfg.approvals.dual_control})),
             // Security slash commands (/approve /deny /yolo /approvals /elevated /exec /pause /resume)
             // for the TUI and web UI; `handled: false` when the line is not one of them.
             "session.command" => {
@@ -653,6 +662,7 @@ impl Daemon {
                 Ok(json!({"stopping": true}))
             }
             "" => Err((-32600, "missing method".into())),
+            m if m.starts_with("session.review.") => crate::session_review::rpc(k, m, p).unwrap_or_else(|| Err((-32601, format!("unknown method `{m}`")))),
             m if m.starts_with("kanban.") || m.starts_with("board.") => crate::kanban::methods::call(k, m, p).unwrap_or_else(|| Err((-32601, format!("unknown method `{m}`")))),
             m if m.starts_with("ha.") || m.starts_with("workers.") || m.starts_with("cluster.") => crate::cluster::call(self, m, p).unwrap_or_else(|| Err((-32601, format!("unknown method `{m}`")))),
             m => {
@@ -753,7 +763,14 @@ fn pending_session(i: &PendingItem) -> &str {
 
 fn pending_json(i: PendingItem) -> Value {
     match i {
-        PendingItem::Approval(a) => json!({"kind":"approval","id":a.id,"session":a.session,"tool":a.tool,"gate":format!("{:?}", a.gate).to_lowercase(),"reason":a.reason,"summary":a.summary}),
+        PendingItem::Approval(a) => {
+            let mut v = json!({"kind":"approval","id":a.id,"session":a.session,"tool":a.tool,"gate":format!("{:?}", a.gate).to_lowercase(),"reason":a.reason,"summary":a.summary,"tier":a.tier});
+            // Dual control: who asked, how many approvals are needed, who already approved.
+            if let Some(q) = crate::approver::quorum(&a.id) {
+                v["dual_control"] = json!({"required": q.required, "approvals": q.approvals(), "votes": q.votes, "requester": q.requester, "approver_roles": q.approver_roles, "approvers": q.approvers, "expires_ms": q.expires_ms, "change_ticket": q.change_ticket});
+            }
+            v
+        }
         PendingItem::Question { id, session, question, choices, multi } => json!({"kind":"question","id":id,"session":session,"question":question,"choices":choices,"multi_select":multi}),
     }
 }
@@ -835,7 +852,7 @@ mod session_command_tests {
     fn session_command_runs_security_slash_commands() {
         let tmp = ark_core::tmp::TempDir::new("ark-daemon-cmd");
         let root = tmp.path().to_path_buf();
-        let paths = crate::config::Paths { data: root.join("data"), config_dir: root.join("cfg"), runtime: root.join("run") };
+        let paths = crate::config::Paths { data: root.join("data"), config_dir: root.join("cfg"), runtime: root.join("run"), ..Default::default() };
         std::fs::create_dir_all(&root).unwrap();
         let (pending, cell) = pending_approver(Duration::from_secs(5));
         let k = crate::kernel::new_kernel(crate::config::Config::default(), paths, Arc::new(NoModels), vec![], Arc::new(crate::vault::Vault::empty()), pending.clone());

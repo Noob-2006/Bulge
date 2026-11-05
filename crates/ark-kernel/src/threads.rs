@@ -372,7 +372,7 @@ mod tests {
     fn paths(name: &str) -> crate::config::Paths {
         let root = ark_core::tmp::scratch_path(format!("ark-threads-{name}-{}", crate::util::random_hex(6)));
         let _ = std::fs::create_dir_all(root.join("data"));
-        crate::config::Paths { data: root.join("data"), config_dir: root.join("config"), runtime: root.join("run") }
+        crate::config::Paths { data: root.join("data"), config_dir: root.join("config"), runtime: root.join("run"), ..Default::default() }
     }
 
     fn b(session: &str, thread: &str) -> Binding {

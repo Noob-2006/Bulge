@@ -8,6 +8,9 @@
 //! | `mysql` | `mysql` with `--init-command="SET SESSION TRANSACTION READ ONLY"` and `START TRANSACTION READ ONLY … ROLLBACK` |
 //! | `clickhouse` | HTTP with `readonly=1` (the server refuses writes and setting changes) |
 //! | `bigquery` | HTTP `jobs.query` (no read-only mode exists: grant the token `bigquery.dataViewer` + `jobUser` only) |
+//! | `sqlserver` | `sqlcmd -K ReadOnly` (ApplicationIntent) and the statement inside `BEGIN TRANSACTION … ROLLBACK` (grant `db_datareader` only) |
+//! | `oracle` | `sqlplus` with `SET TRANSACTION READ ONLY` before the statement, then `ROLLBACK` |
+//! | `odbc` | unixODBC `isql -b`; only the DSN's own `ReadOnly` attribute and a read-only account (no portable switch) |
 //!
 //! PostgreSQL and MySQL go through the stock command-line clients (`psql`, `mysql`), found on
 //! `PATH` or named by the source's `client = ["podman", "exec", "-i", "pg", "psql"]`. That keeps
@@ -159,7 +162,18 @@ fn run_client(argv: &[String], env: &[(String, String)], script: &str, lim: &Lim
     let (prog, args) = argv.split_first().ok_or("empty client command")?;
     let mut cmd = Command::new(prog);
     cmd.args(args).envs(env.iter().map(|(k, v)| (k, v))).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
-    let mut child = cmd.spawn().map_err(|e| format!("cannot start `{prog}`: {e} (install the client or set `client = [...]` on the source)"))?;
+    // ETXTBSY: a freshly written client script can still be open for writing in a sibling
+    // thread's fork that has not reached exec yet; it clears within milliseconds.
+    let mut tries = 0;
+    let mut child = loop {
+        match cmd.spawn() {
+            Err(e) if e.raw_os_error() == Some(libc::ETXTBSY) && tries < 20 => {
+                tries += 1;
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            r => break r.map_err(|e| format!("cannot start `{prog}`: {e} (install the client or set `client = [...]` on the source)"))?,
+        }
+    };
     let pid = child.id() as i32;
     let mut stdin = child.stdin.take().ok_or("no stdin")?;
     let stdout = child.stdout.take().ok_or("no stdout")?;
@@ -405,6 +419,121 @@ pub fn mysql(dsn: &Dsn, client: &[String], sql: &str, lim: &Limits, mariadb: boo
     run_client(&argv, &env, &script, lim, &dsn.password, parse_mysql_batch)
 }
 
+// ─────────────────────── legacy enterprise databases (CLI clients) ───────────────────────
+
+/// Field separator for `sqlcmd` / `isql` output: ASCII unit separator, which never occurs in
+/// normal text (a cell that contains one is cut there; see the docs).
+const US: char = '\u{1f}';
+
+/// Separator-delimited output: a header line, optionally a `---` rule under it (`sqlcmd`),
+/// then rows. `null_word` is how the client prints NULL (`sqlcmd`: `NULL`; `isql`: empty).
+fn parse_delimited(r: &mut dyn BufRead, max_rows: usize, rule_line: bool, null_word: &str) -> Result<Rows, String> {
+    let mut sink = Sink::new(max_rows);
+    let mut line = String::new();
+    let mut state = 0; // 0 header, 1 rule, 2 rows
+    loop {
+        line.clear();
+        if r.read_line(&mut line).map_err(|e| e.to_string())? == 0 {
+            break;
+        }
+        let l = line.trim_end_matches(['\n', '\r']);
+        // Client diagnostics on stdout (`isql` prints `[ISQL]ERROR …`, `sqlcmd` `Msg 208, Level 16 …`).
+        if l.starts_with("[ISQL]ERROR") || l.starts_with("[unixODBC]") || (l.starts_with("Msg ") && l.contains(", Level ")) {
+            return Err(l.chars().take(500).collect());
+        }
+        if l.trim().is_empty() {
+            continue;
+        }
+        match state {
+            0 => {
+                sink.rows.columns = l.split(US).map(|c| c.trim().to_string()).collect();
+                state = if rule_line { 1 } else { 2 };
+            }
+            1 if l.chars().all(|c| c == '-' || c == US || c == ' ') => state = 2,
+            _ => {
+                state = 2;
+                let row = l.split(US).map(|c| if c == null_word { Value::Null } else { Value::String(clip_cell(c)) }).collect();
+                if !sink.push(row) {
+                    break;
+                }
+            }
+        }
+    }
+    Ok(sink.rows)
+}
+
+pub fn parse_sqlcmd(r: &mut dyn BufRead, max_rows: usize) -> Result<Rows, String> {
+    parse_delimited(r, max_rows, true, "NULL")
+}
+
+pub fn parse_isql(r: &mut dyn BufRead, max_rows: usize) -> Result<Rows, String> {
+    parse_delimited(r, max_rows, false, "")
+}
+
+/// Microsoft SQL Server through `sqlcmd` (mssql-tools / go-sqlcmd). The password travels in
+/// `SQLCMDPASSWORD`, never on the command line; no user = integrated (Kerberos) auth (`-E`).
+/// Layer 1: `ApplicationIntent=ReadOnly` (`-K ReadOnly`, routed to a readable secondary in an
+/// availability group) and the statement inside a transaction that is always rolled back.
+/// Grant the login `db_datareader` only: SQL Server has no session-wide read-only switch.
+pub fn sqlserver(dsn: &Dsn, client: &[String], sql: &str, lim: &Limits) -> Result<Rows, String> {
+    let mut argv = client_argv(client, "sqlcmd");
+    let server = match dsn.port {
+        Some(p) => format!("tcp:{},{p}", dsn.host),
+        None => format!("tcp:{}", dsn.host),
+    };
+    argv.extend(["-S".to_string(), server, "-b".into(), "-r1".into(), "-W".into(), "-s".into(), US.to_string(), "-w".into(), "65535".into(), "-l".into(), "10".into(), "-K".into(), "ReadOnly".into()]);
+    argv.extend(["-t".to_string(), lim.timeout.as_secs().max(1).to_string()]);
+    if !dsn.database.is_empty() {
+        argv.extend(["-d".to_string(), dsn.database.clone()]);
+    }
+    if dsn.user.is_empty() {
+        argv.push("-E".into());
+    } else {
+        argv.extend(["-U".to_string(), dsn.user.clone()]);
+    }
+    if dsn.param("trust_server_certificate").is_some_and(|v| v == "1" || v.eq_ignore_ascii_case("true")) {
+        argv.push("-C".into());
+    }
+    let env: Vec<(String, String)> = if dsn.password.is_empty() { vec![] } else { vec![("SQLCMDPASSWORD".into(), dsn.password.clone())] };
+    let script = format!("SET NOCOUNT ON;\nSET XACT_ABORT ON;\nBEGIN TRANSACTION;\n{sql};\nROLLBACK TRANSACTION;\nGO\n");
+    run_client(&argv, &env, &script, lim, &dsn.password, parse_sqlcmd)
+}
+
+/// Oracle through SQL*Plus (12.2+ for CSV markup). The credentials go in the script on stdin
+/// (`CONNECT`), not on the command line. Layer 1: `SET TRANSACTION READ ONLY` — Oracle then
+/// refuses every write in the transaction — and a final `ROLLBACK`.
+pub fn oracle(dsn: &Dsn, client: &[String], sql: &str, lim: &Limits) -> Result<Rows, String> {
+    let mut argv = client_argv(client, "sqlplus");
+    argv.extend(["-S", "-L", "/nolog"].map(String::from));
+    let target = format!("//{}:{}/{}", dsn.host, dsn.port.unwrap_or(1521), dsn.database);
+    let quote = |s: &str| format!("\"{}\"", s.replace('"', ""));
+    let connect = if dsn.user.is_empty() { format!("CONNECT /@{target}") } else { format!("CONNECT {}/{}@{target}", quote(&dsn.user), quote(&dsn.password)) };
+    let script = format!(
+        "WHENEVER SQLERROR EXIT FAILURE\nWHENEVER OSERROR EXIT FAILURE\n{connect}\nSET MARKUP CSV ON QUOTE ON\nSET FEEDBACK OFF\nSET PAGESIZE 50000\nSET LONG 2000\nSET TRANSACTION READ ONLY;\n{sql};\nROLLBACK;\nEXIT\n"
+    );
+    run_client(&argv, &[], &script, lim, &dsn.password, parse_psql_csv)
+}
+
+/// Any ODBC data source through unixODBC's `isql` (or `iusql` for Unicode drivers):
+/// `odbc://user:password@DSN_NAME` (the DSN is configured in `odbc.ini`). Credentials, when
+/// given here, are passed as `isql` arguments — prefer a DSN that carries them (or Kerberos),
+/// because arguments are visible to other local users in the process list. Layer 1 is the
+/// DSN's own read-only attribute (`ReadOnly = Yes` for most drivers) and a read-only account:
+/// ODBC has no portable read-only switch, so the statement guard is the layer ark enforces.
+pub fn odbc(dsn: &Dsn, client: &[String], sql: &str, lim: &Limits) -> Result<Rows, String> {
+    let mut argv = client_argv(client, "isql");
+    argv.extend(["-b", "-c", "-x0x1f"].map(String::from));
+    argv.push(dsn.host.clone());
+    if !dsn.user.is_empty() {
+        argv.push(dsn.user.clone());
+        if !dsn.password.is_empty() {
+            argv.push(dsn.password.clone());
+        }
+    }
+    let script = format!("{sql}\n");
+    run_client(&argv, &[], &script, lim, &dsn.password, parse_isql)
+}
+
 // ───────────────────────────── HTTP: ClickHouse, BigQuery ─────────────────────────────
 
 fn http_agent(timeout: Duration) -> ureq::Agent {
@@ -499,6 +628,9 @@ pub fn dialect_of(kind: &str) -> Option<Dialect> {
         "sqlite" => Dialect::Sqlite,
         "clickhouse" => Dialect::ClickHouse,
         "bigquery" => Dialect::BigQuery,
+        "sqlserver" | "mssql" => Dialect::SqlServer,
+        "oracle" => Dialect::Oracle,
+        "odbc" => Dialect::Odbc,
         _ => return None,
     })
 }

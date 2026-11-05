@@ -711,7 +711,7 @@ mod provider_tests {
 
     fn kernel() -> (Kernel, ark_core::tmp::TempDir) {
         let dir = ark_core::tmp::TempDir::new("ark-hooks-provider");
-        let paths = Paths { data: dir.join("data"), config_dir: dir.join("cfg"), runtime: dir.join("run") };
+        let paths = Paths { data: dir.join("data"), config_dir: dir.join("cfg"), runtime: dir.join("run"), ..Default::default() };
         std::fs::create_dir_all(&paths.config_dir).unwrap();
         let k = crate::kernel::new_kernel(Config::default(), paths, Arc::new(NoModels), vec![], Arc::new(crate::vault::Vault::empty()), Arc::new(crate::approver::Policy { allow_privilege: false, allow_egress: false }));
         (k, dir)

@@ -1464,7 +1464,7 @@ pub fn slack_manifest(name: &str, description: &str, messaging: &str, request_ur
     events.sort();
     Ok(json!({
         "_metadata": {"major_version": 1, "minor_version": 1},
-        "display_information": {"name": name.chars().take(35).collect::<String>(), "description": description.chars().take(140).collect::<String>(), "background_color": "#330716"},
+        "display_information": {"name": name.chars().take(35).collect::<String>(), "description": description.chars().take(140).collect::<String>(), "background_color": "#1f0411"},
         "features": features,
         "oauth_config": {"scopes": {"bot": scopes}},
         "settings": {"event_subscriptions": {"bot_events": events}, "interactivity": {"is_enabled": true}, "org_deploy_enabled": false, "socket_mode_enabled": true, "token_rotation_enabled": false}
@@ -2036,7 +2036,7 @@ mod tests {
         let root = ark_core::tmp::scratch_path(format!("ark-btw-busy-{}", ark_kernel::util::random_hex(8)));
         let ws = root.join("ws");
         std::fs::create_dir_all(&ws).unwrap();
-        let paths = ark_kernel::config::Paths { data: root.join("data"), config_dir: root.join("config"), runtime: root.join("run") };
+        let paths = ark_kernel::config::Paths { data: root.join("data"), config_dir: root.join("config"), runtime: root.join("run"), ..Default::default() };
         std::fs::create_dir_all(&paths.config_dir).unwrap();
         let mut cfg = ark_kernel::config::Config::default();
         cfg.model.default = "gate/m".into();

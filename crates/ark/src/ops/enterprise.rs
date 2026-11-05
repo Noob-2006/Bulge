@@ -19,8 +19,8 @@ use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 
 pub const COMMANDS: &[&str] = &["accounts", "service-accounts", "retention", "ediscovery", "quota"];
-pub const VALUE_FLAGS: &[&str] = &["role", "ttl-days", "grace-hours", "description", "owner", "team", "since", "until", "keyword", "matter", "by", "actor", "outcome", "kind", "anchor", "custodian", "org"];
-pub const BOOL_FLAGS: &[&str] = &["keep-pii", "ready"];
+pub const VALUE_FLAGS: &[&str] = &["role", "ttl-days", "grace-hours", "description", "owner", "team", "since", "until", "keyword", "matter", "by", "actor", "outcome", "kind", "anchor", "custodian", "org", "to", "pubkey", "note", "warn-pending"];
+pub const BOOL_FLAGS: &[&str] = &["keep-pii", "ready", "require-signed", "nagios"];
 
 pub fn dispatch(cmd: &str, a: &Args, _raw: &[String]) -> Option<R> {
     if !COMMANDS.contains(&cmd) {
@@ -35,7 +35,7 @@ pub fn dispatch(cmd: &str, a: &Args, _raw: &[String]) -> Option<R> {
     })
 }
 
-fn out(s: String) -> R {
+pub fn out(s: String) -> R {
     println!("{s}");
     Ok(0)
 }
@@ -72,6 +72,59 @@ pub fn health_ready(a: &Args) -> R {
         }
     }
     Ok(if v["ready"] == true { 0 } else { 1 })
+}
+
+/// Nagios / Icinga plugin output for `ark health --nagios`: one status line with perfdata
+/// and the plugin exit code (0 OK, 1 WARNING, 2 CRITICAL, 3 UNKNOWN). `ready` is the
+/// daemon's `health.ready` reply (`None` = the daemon did not answer: CRITICAL).
+pub fn nagios(ready: Option<&Value>, pending: Option<usize>, warn_pending: usize) -> (i32, String) {
+    let Some(r) = ready else { return (2, "ARK CRITICAL - daemon not answering on its socket".into()) };
+    let Some(checks) = r["checks"].as_array() else { return (3, "ARK UNKNOWN - unexpected health.ready reply".into()) };
+    let failed: Vec<String> = checks.iter().filter(|c| c["ok"] != true).map(|c| format!("{}: {}", c["name"].as_str().unwrap_or("?"), c["error"].as_str().or(c["detail"].as_str()).unwrap_or("failed"))).collect();
+    let ok = checks.len() - failed.len();
+    let pending = pending.unwrap_or(0);
+    let warn = if warn_pending == 0 { String::new() } else { warn_pending.to_string() };
+    let perf = format!("checks_ok={ok};;;0;{} checks_failed={};;0;0 approvals_pending={pending};{warn};;0", checks.len(), failed.len());
+    // A failed check is critical (not ready); a backlog of approvals waiting for a human is
+    // a warning when `--warn-pending N` is given.
+    let (code, word) = if !failed.is_empty() || r["ready"] == false {
+        (2, "CRITICAL")
+    } else if warn_pending > 0 && pending >= warn_pending {
+        (1, "WARNING")
+    } else {
+        (0, "OK")
+    };
+    let text = if failed.is_empty() { format!("{ok} check(s) passed, {pending} approval(s) pending") } else { failed.join("; ") };
+    (code, format!("ARK {word} - {} | {perf}", text.replace('|', "/")))
+}
+
+/// `ark gate list`: one line under a dual-controlled approval — progress, who already
+/// approved, who asked, which roles may answer, when it expires, the change ticket.
+pub fn dual_control_line(q: &Value) -> Option<String> {
+    if !q.is_object() {
+        return None;
+    }
+    let by: Vec<&str> = q["approvals"].as_array().into_iter().flatten().filter_map(|x| x.as_str()).collect();
+    let roles = q["approver_roles"].as_array().filter(|r| !r.is_empty()).map(|r| r.iter().filter_map(|x| x.as_str()).collect::<Vec<_>>().join("|")).unwrap_or_else(|| "any".into());
+    Some(format!(
+        "    dual control: {}/{} approvals{} · requested by {} · roles {roles} · expires {}{}",
+        by.len(),
+        q["required"].as_u64().unwrap_or(2),
+        if by.is_empty() { String::new() } else { format!(" ({})", by.join(", ")) },
+        q["requester"].as_str().unwrap_or("?"),
+        ts(q["expires_ms"].as_u64().unwrap_or(0)),
+        q["change_ticket"].as_str().map(|t| format!(" · ticket {t}")).unwrap_or_default(),
+    ))
+}
+
+/// `ark health --nagios`.
+pub fn health_nagios(a: &Args) -> R {
+    let sock = Paths::from_env().socket();
+    let ready = ark_kernel::daemon::call(&sock, "health.ready", json!({})).ok();
+    let pending = ark_kernel::daemon::call(&sock, "gate.pending", json!({})).ok().and_then(|v| v.as_array().map(|a| a.len()));
+    let (code, line) = nagios(ready.as_ref(), pending, a.num::<usize>("warn-pending")?.unwrap_or(0));
+    println!("{line}");
+    Ok(code)
 }
 
 // ───────────────────────── service accounts ─────────────────────────
@@ -129,7 +182,17 @@ pub fn accounts(paths: &Paths, a: &Args, off: usize) -> R {
 
 // ───────────────────────── audit stream ─────────────────────────
 
-/// `ark audit <events|verify|rotate|export|head>`; `None` when `pos(0)` is not one of them
+/// `[audit] seal_pubkey` (or the key derived from `seal_key`) and `require_signed_seals`, when
+/// the configuration loads (verification also works with only `--pubkey`).
+fn seal_settings(a: &Args, paths: &Paths) -> (Option<String>, bool) {
+    let Ok(ws) = crate::workspace(a) else { return (None, false) };
+    let Ok(cfg) = crate::load_config(a, &ws, paths) else { return (None, false) };
+    let vault = crate::load_vault(paths).ok();
+    let subst = |s: &str| vault.as_ref().map(|v| v.substitute(s)).unwrap_or_else(|| s.to_string());
+    (cfg.audit.seal_public(&subst), cfg.audit.require_signed_seals)
+}
+
+/// `ark audit <events|verify|report|rotate|seal|seal-key|export|head>`; `None` when `pos(0)` is not one of them
 /// (the activity view in `ops::audit` handles the rest).
 pub fn audit_sub(paths: &Paths, a: &Args) -> Option<R> {
     let d = &paths.data;
@@ -159,15 +222,84 @@ pub fn audit_sub(paths: &Paths, a: &Args) -> Option<R> {
         })(),
         "verify" => {
             let v = audit::verify(d, a.val("anchor"));
+            // Signed seals: `--pubkey`, else `[audit] seal_pubkey` / the key derived from `seal_key`.
+            let (cfg_pub, require) = seal_settings(a, paths);
+            let pubkey = a.val("pubkey").map(String::from).or(cfg_pub);
+            let seals = pubkey.as_deref().map(|k| ark_security::audit_seal::check_all(d, k.as_bytes()));
+            let require = require || a.flag("require-signed");
+            let seals_ok = seals.as_ref().is_none_or(|s| s.ok(require)) && !(require && seals.is_none());
             if a.flag("json") {
-                println!("{}", serde_json::to_string_pretty(&v).unwrap_or_default());
-            } else if v.ok {
-                println!("audit chain OK: {} record(s) in {} segment(s), seq {}…{}, head {}{}", v.events, v.segments, v.first_seq, v.last_seq, v.head, if v.anchor.is_empty() { String::new() } else { format!(" (anchored after pruned hash {})", v.anchor) });
+                println!("{}", serde_json::to_string_pretty(&json!({"chain": v, "seals": seals, "ok": v.ok && seals_ok})).unwrap_or_default());
             } else {
-                eprintln!("audit chain BROKEN: {}", v.error.clone().unwrap_or_default());
+                if v.ok {
+                    println!("audit chain OK: {} record(s) in {} segment(s), seq {}…{}, head {}{}", v.events, v.segments, v.first_seq, v.last_seq, v.head, if v.anchor.is_empty() { String::new() } else { format!(" (anchored after pruned hash {})", v.anchor) });
+                } else {
+                    eprintln!("audit chain BROKEN: {}", v.error.clone().unwrap_or_default());
+                }
+                match &seals {
+                    Some(s) if s.ok(require) => println!("seals OK: {} signed, {} unsigned, {} timestamped", s.signed, s.unsigned, s.timestamped),
+                    Some(s) => eprintln!("seals FAILED: {} signed, {} unsigned{}", s.signed, s.unsigned, if s.errors.is_empty() { String::new() } else { format!("; {}", s.errors.join("; ")) }),
+                    None if require => eprintln!("seals FAILED: signatures are required but no public key is configured (--pubkey or [audit] seal_pubkey)"),
+                    None => {}
+                }
             }
-            Ok(if v.ok { 0 } else { 1 })
+            Ok(if v.ok && seals_ok { 0 } else { 1 })
         }
+        // `ark audit report [--from D] [--to D] [--format md|html|json] [--out FILE]`
+        "report" => (|| -> R {
+            let now = audit::now_ms();
+            let from = a.val("from").or(a.val("since")).map(|v| parse_when(v, now)).transpose()?.unwrap_or(0);
+            let to = a.val("to").or(a.val("until")).map(|v| parse_when(v, now)).transpose()?.unwrap_or(0);
+            let (pubkey, _) = seal_settings(a, paths);
+            let pubkey = a.val("pubkey").map(String::from).or(pubkey);
+            let r = ark_security::audit_report::build(d, from, to, pubkey.as_deref().map(str::as_bytes));
+            let text = match a.val("format").unwrap_or("md") {
+                "md" | "markdown" => ark_security::audit_report::markdown(&r),
+                "html" => ark_security::audit_report::html(&r),
+                "json" => serde_json::to_string_pretty(&r).unwrap_or_default(),
+                other => return crate::usage(format!("--format {other}: use md, html or json")),
+            };
+            audit::record(d, audit::Event::new("audit.report", Actor::local(), "audit", "ok").detail(json!({"from_ms": from, "to_ms": to, "records": r.records, "head": r.verify.head})));
+            match a.val("out") {
+                Some(p) => {
+                    std::fs::write(p, text).map_err(|e| format!("{p}: {e}"))?;
+                    out(format!("wrote {p} ({} record(s), chain {})", r.records, if r.verify.ok { "OK" } else { "BROKEN" }))
+                }
+                None => {
+                    print!("{text}");
+                    Ok(0)
+                }
+            }
+        })(),
+        // `ark audit seal-key [--out FILE]`: a new Ed25519 seed for `[audit] seal_key`.
+        "seal-key" => (|| -> R {
+            let seed = ark_net::crypto::b64(&ark_net::crypto::random_bytes(32));
+            let public = ark_security::signing::public_of(&seed)?;
+            let p = a.val("out").map(PathBuf::from).unwrap_or_else(|| audit::dir(d).join("seal.key"));
+            if p.exists() {
+                return Err(format!("{} exists; refusing to overwrite a seal key", p.display()).into());
+            }
+            if let Some(parent) = p.parent() {
+                std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+            }
+            {
+                use std::io::Write;
+                use std::os::unix::fs::OpenOptionsExt;
+                let mut f = std::fs::OpenOptions::new().create_new(true).write(true).mode(0o600).open(&p).map_err(|e| format!("{}: {e}", p.display()))?;
+                writeln!(f, "{seed}").map_err(|e| e.to_string())?;
+            }
+            audit::record(d, audit::Event::new("audit.seal_key", Actor::local(), "audit", "ok").detail(json!({"public_key": public})));
+            out(format!("seal key written to {} (mode 0600)\n[audit]\nseal_key = \"{}\"\nseal_pubkey = \"{public}\"   # give this to the auditor", p.display(), p.display()))
+        })(),
+        // `ark audit seal`: sign (and timestamp) the seals of rotated segments now.
+        "seal" => (|| -> R {
+            let cfg = crate::load_config(a, &crate::workspace(a)?, paths)?;
+            let vault = crate::load_vault(paths)?;
+            let seed = cfg.audit.seal_seed(&|s: &str| vault.substitute(s)).ok_or("no usable [audit] seal_key (see `ark audit seal-key`)")?;
+            let tsa = cfg.audit.tsa_url.trim();
+            let n = ark_security::audit_seal::sign_pending(d, &seed, (!tsa.is_empty()).then_some(tsa))?;
+            out(format!("signed {n} seal(s){}", if tsa.is_empty() { String::new() } else { format!(" (timestamped by {tsa})") }))
+        })(),
         "head" => {
             let h = audit::head(d);
             out(json!({"seq": h.seq, "hash": h.hash}).to_string())
@@ -187,7 +319,7 @@ pub fn audit_sub(paths: &Paths, a: &Args) -> Option<R> {
             let mut failed = false;
             for (sink, r) in ark_security::audit_export::pump(d, &cfg.audit.export, &|s: &str| vault.substitute(s)) {
                 match r {
-                    Ok(n) => println!("{sink}: sent {n} record(s), cursor {}", ark_security::audit_export::cursor(d, sink)),
+                    Ok(n) => println!("{sink}: sent {n} record(s), cursor {}", ark_security::audit_export::cursor(d, &sink)),
                     Err(e) => {
                         failed = true;
                         eprintln!("{sink}: {e}");
@@ -441,6 +573,21 @@ mod tests {
     }
 
     #[test]
+    fn nagios_plugin_output_and_exit_codes() {
+        let good = json!({"ready": true, "checks": [{"name": "model", "ok": true, "detail": "x"}, {"name": "audit", "ok": true}]});
+        let (c, l) = nagios(Some(&good), Some(3), 0);
+        assert_eq!(c, 0);
+        assert_eq!(l, "ARK OK - 2 check(s) passed, 3 approval(s) pending | checks_ok=2;;;0;2 checks_failed=0;;0;0 approvals_pending=3;;;0");
+        assert_eq!(nagios(Some(&good), Some(3), 3).0, 1, "--warn-pending 3");
+        let bad = json!({"ready": false, "checks": [{"name": "model", "ok": false, "error": "HTTP 401 | bad key"}, {"name": "audit", "ok": true}]});
+        let (c, l) = nagios(Some(&bad), None, 0);
+        assert_eq!(c, 2);
+        assert!(l.starts_with("ARK CRITICAL - model: HTTP 401 / bad key | checks_ok=1"), "a `|` in the text would end it early: {l}");
+        assert_eq!(nagios(None, None, 0).0, 2);
+        assert_eq!(nagios(Some(&json!({"weird": 1})), None, 0).0, 3);
+    }
+
+    #[test]
     fn audit_subcommands_verify_and_query() {
         let kit = crate::testkit::kit();
         let p = &kit.paths;
@@ -451,6 +598,22 @@ mod tests {
         assert_eq!(audit_sub(p, &a(&["events", "--kind", "config"])).unwrap().unwrap(), 0);
         assert_eq!(audit_sub(p, &a(&["rotate"])).unwrap().unwrap(), 0);
         assert!(audit::verify(&p.data, None).ok);
+        // Signed seals: a new key, sign the rotated segment, verify with only the public key.
+        let key = p.data.join("seal.key");
+        assert_eq!(audit_sub(p, &a(&["seal-key", "--out", key.to_str().unwrap()])).unwrap().unwrap(), 0);
+        assert!(audit_sub(p, &a(&["seal-key", "--out", key.to_str().unwrap()])).unwrap().is_err(), "never overwrites a key");
+        let seed = std::fs::read_to_string(&key).unwrap().trim().to_string();
+        let public = ark_security::signing::public_of(&seed).unwrap();
+        assert_eq!(audit_sub(p, &a(&["verify", "--pubkey", &public, "--require-signed"])).unwrap().unwrap(), 1, "the segment is not signed yet");
+        assert_eq!(ark_security::audit_seal::sign_pending(&p.data, &seed, None).unwrap(), 1);
+        assert_eq!(audit_sub(p, &a(&["verify", "--pubkey", &public, "--require-signed"])).unwrap().unwrap(), 0);
+        // The auditor's report, as a file.
+        let rep = p.data.join("report.html");
+        assert_eq!(audit_sub(p, &a(&["report", "--from", "1d", "--format", "html", "--pubkey", &public, "--out", rep.to_str().unwrap()])).unwrap().unwrap(), 0);
+        let html = std::fs::read_to_string(&rep).unwrap();
+        assert!(html.contains("Configuration changes (2)") && html.contains("Signed seals: 1 signed"), "{html}");
+        assert!(audit::all(&p.data).iter().any(|r| r["kind"] == "audit.report"));
+        assert!(audit_sub(p, &a(&["report", "--format", "pdf"])).unwrap().is_err());
         // A tampered archive makes `verify` exit 1.
         let seg = audit::segments(&p.data).into_iter().next().unwrap();
         use std::os::unix::fs::PermissionsExt;

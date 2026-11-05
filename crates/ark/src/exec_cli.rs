@@ -755,7 +755,7 @@ fn start_vm_broker(k: &ark_kernel::kernel::Kernel) {
 /// file naming this module.
 pub fn register() {
     ark_core::registry::register_tool_provider("xai-code-execution", 150, |env| {
-        let paths = ark_kernel::config::Paths { data: env.data.clone(), config_dir: env.config_dir.clone(), runtime: env.runtime.clone() };
+        let paths = ark_kernel::config::Paths { data: env.data.clone(), config_dir: env.config_dir.clone(), runtime: env.runtime.clone(), ..Default::default() };
         Ok(tools(&paths))
     });
 }
@@ -777,7 +777,7 @@ mod tests {
     #[test]
     fn sandbox_list_recreate_and_explain() {
         let root = tmp("sb");
-        let paths = Paths { data: root.join("data"), config_dir: root.join("cfg"), runtime: root.join("run") };
+        let paths = Paths { data: root.join("data"), config_dir: root.join("cfg"), runtime: root.join("run"), ..Default::default() };
         std::fs::create_dir_all(&paths.config_dir).unwrap();
         std::fs::write(paths.user_config(), "[exec]\nbackend = \"local\"\n[exec.sandbox]\nmode = \"all\"\nbackend = \"bwrap\"\nworkspace_access = \"none\"\n[exec.sandbox.tools]\ndeny = [\"web_fetch\"]\n").unwrap();
         let cfg = exec_config(&paths).unwrap();
@@ -875,7 +875,7 @@ mod tests {
             }
         }
         let root = tmp("install");
-        let paths = Paths { data: root.join("data"), config_dir: root.join("cfg"), runtime: root.join("run") };
+        let paths = Paths { data: root.join("data"), config_dir: root.join("cfg"), runtime: root.join("run"), ..Default::default() };
         std::fs::create_dir_all(&paths.config_dir).unwrap();
         let ws = root.join("ws");
         std::fs::create_dir_all(&ws).unwrap();
@@ -910,7 +910,7 @@ mod tests {
     fn code_mode_runs_locally_after_install() {
         let _g = EXEC.lock().unwrap_or_else(|e| e.into_inner());
         let root = tmp("codemode");
-        let paths = Paths { data: root.join("data"), config_dir: root.join("cfg"), runtime: root.join("run") };
+        let paths = Paths { data: root.join("data"), config_dir: root.join("cfg"), runtime: root.join("run"), ..Default::default() };
         std::fs::create_dir_all(&paths.config_dir).unwrap();
         std::fs::write(paths.user_config(), "[exec]\nbackend = \"local\"\n").unwrap();
         install(&paths);
@@ -929,7 +929,7 @@ mod tests {
     fn session_routes_plugin_backends_and_elevated_reach_the_tools() {
         let _g = EXEC.lock().unwrap_or_else(|e| e.into_inner());
         let root = tmp("route");
-        let paths = Paths { data: root.join("data"), config_dir: root.join("cfg"), runtime: root.join("run") };
+        let paths = Paths { data: root.join("data"), config_dir: root.join("cfg"), runtime: root.join("run"), ..Default::default() };
         std::fs::create_dir_all(&paths.config_dir).unwrap();
         std::fs::write(paths.user_config(), "[exec]\n").unwrap();
         let ws = root.join("ws");
@@ -977,7 +977,7 @@ mod tests {
     fn shell_hints_follow_the_installed_exec_config() {
         let _g = EXEC.lock().unwrap_or_else(|e| e.into_inner());
         let root = tmp("hints");
-        let paths = Paths { data: root.join("data"), config_dir: root.join("cfg"), runtime: root.join("run") };
+        let paths = Paths { data: root.join("data"), config_dir: root.join("cfg"), runtime: root.join("run"), ..Default::default() };
         std::fs::create_dir_all(&paths.config_dir).unwrap();
         let ws = root.join("ws");
         std::fs::create_dir_all(&ws).unwrap();
@@ -1002,7 +1002,7 @@ mod tests {
     fn exec_route_reads_the_security_state() {
         let _g = EXEC.lock().unwrap_or_else(|e| e.into_inner());
         let root = tmp("routeread");
-        let paths = Paths { data: root.join("data"), config_dir: root.join("cfg"), runtime: root.join("run") };
+        let paths = Paths { data: root.join("data"), config_dir: root.join("cfg"), runtime: root.join("run"), ..Default::default() };
         std::fs::create_dir_all(&paths.config_dir).unwrap();
         std::fs::write(paths.user_config(), "[exec]\nbackend = \"local\"\n").unwrap();
         install(&paths);

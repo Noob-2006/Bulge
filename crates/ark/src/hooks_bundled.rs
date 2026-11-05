@@ -27,7 +27,7 @@ pub fn make(name: &str, x: &HooksExtra, paths: &Paths, kernel: KernelSlot) -> Ar
             let b = &x.bootstrap_extra_files;
             Arc::new(BootstrapExtraFiles { patterns: b.paths.iter().chain(&b.patterns).chain(&b.files).cloned().collect() })
         }
-        "command-logger" => Arc::new(CommandLogger { path: paths.data.join("logs").join("commands.log") }),
+        "command-logger" => Arc::new(CommandLogger { path: paths.log_dir().join("commands.log") }),
         "compaction-notifier" => Arc::new(CompactionNotifier),
         _ => Arc::new(SessionMemory { cfg: x.session_memory.clone(), kernel }),
     }

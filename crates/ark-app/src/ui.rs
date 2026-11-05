@@ -4,16 +4,34 @@
 use ark_net::httpd::Response;
 
 const INDEX: &str = include_str!("../../../ui/web/index.html");
-const APP_JS: &str = include_str!("../../../ui/web/app.js");
-const SURFACES_JS: &str = include_str!("../../../ui/web/surfaces.js");
-const APP_CSS: &str = include_str!("../../../ui/web/app.css");
-const PAGES_JS: &str = include_str!("../../../ui/web/pages.js");
-const PAGES_CSS: &str = include_str!("../../../ui/web/pages.css");
-const THEME: &str = include_str!("../../../ui/theme.css");
-const STAR: &str = include_str!("../../../ui/star.svg");
-const ICON: &str = include_str!("../../../ui/icon.svg");
-const MANIFEST: &str = include_str!("../../../ui/web/manifest.webmanifest");
-const SW: &str = include_str!("../../../ui/web/sw.js");
+
+/// Every other file of the UI: (URL path, content type, source path under `ui/`, contents).
+const FILES: &[(&str, &str, &str, &str)] = &[
+    ("/ui/app.js", JS, "web/app.js", include_str!("../../../ui/web/app.js")),
+    ("/ui/ops.js", JS, "web/ops.js", include_str!("../../../ui/web/ops.js")),
+    ("/ui/surfaces.js", JS, "web/surfaces.js", include_str!("../../../ui/web/surfaces.js")),
+    ("/ui/pages.js", JS, "web/pages.js", include_str!("../../../ui/web/pages.js")),
+    ("/ui/app.css", CSS, "web/app.css", include_str!("../../../ui/web/app.css")),
+    ("/ui/pages.css", CSS, "web/pages.css", include_str!("../../../ui/web/pages.css")),
+    ("/ui/theme.css", CSS, "theme.css", include_str!("../../../ui/theme.css")),
+    ("/ui/star.svg", SVG, "star.svg", include_str!("../../../ui/star.svg")),
+    ("/ui/icon.svg", SVG, "icon.svg", include_str!("../../../ui/icon.svg")),
+    ("/manifest.webmanifest", "application/manifest+json", "web/manifest.webmanifest", include_str!("../../../ui/web/manifest.webmanifest")),
+    ("/sw.js", JS, "web/sw.js", include_str!("../../../ui/web/sw.js")),
+    // First-run setup wizard (`GET /setup`); its RPC (`POST /setup/rpc`) is a host route.
+    ("/setup", "text/html; charset=utf-8", "web/setup.html", include_str!("../../../ui/web/setup.html")),
+    ("/ui/setup.js", JS, "web/setup.js", include_str!("../../../ui/web/setup.js")),
+];
+const JS: &str = "text/javascript; charset=utf-8";
+const CSS: &str = "text/css; charset=utf-8";
+const SVG: &str = "image/svg+xml";
+
+/// `ARK_UI_DIR=<checkout>/ui`: serve the UI files from disk instead of the embedded copy, so
+/// a UI change shows on reload without rebuilding (development and custom branding).
+fn from_disk(rel: &str) -> Option<String> {
+    let dir = std::env::var_os("ARK_UI_DIR").filter(|d| !d.is_empty())?;
+    std::fs::read_to_string(std::path::Path::new(&dir).join(rel)).ok()
+}
 
 /// Strict CSP: only our own scripts/styles, WebSocket back to the same origin.
 const CSP: &str = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self' ws: wss:; frame-src 'self' https:; frame-ancestors 'none'; base-uri 'none'; form-action 'self'";
@@ -29,27 +47,19 @@ fn index_csp(nonce: &str) -> String {
 pub fn serve(path: &str) -> Response {
     if matches!(path, "/" | "/ui/" | "/ui/index.html") {
         let nonce = ark_net::crypto::random_token(18);
-        let page = INDEX.replace("<script src=", &format!("<script nonce=\"{nonce}\" src="));
+        let index = from_disk("web/index.html");
+        let page = index.as_deref().unwrap_or(INDEX).replace("<script src=", &format!("<script nonce=\"{nonce}\" src="));
         return Response::new(200, "text/html; charset=utf-8", page.into_bytes())
             .with_header("content-security-policy", &index_csp(&nonce))
             .with_header("x-content-type-options", "nosniff")
             .with_header("referrer-policy", "no-referrer")
             .with_header("cache-control", "no-cache");
     }
-    let (ctype, body) = match path {
-        "/ui/app.js" => ("text/javascript; charset=utf-8", APP_JS),
-        "/ui/surfaces.js" => ("text/javascript; charset=utf-8", SURFACES_JS),
-        "/ui/app.css" => ("text/css; charset=utf-8", APP_CSS),
-        "/ui/pages.js" => ("text/javascript; charset=utf-8", PAGES_JS),
-        "/ui/pages.css" => ("text/css; charset=utf-8", PAGES_CSS),
-        "/ui/theme.css" => ("text/css; charset=utf-8", THEME),
-        "/ui/star.svg" => ("image/svg+xml", STAR),
-        "/ui/icon.svg" => ("image/svg+xml", ICON),
-        "/manifest.webmanifest" => ("application/manifest+json", MANIFEST),
-        "/sw.js" => ("text/javascript; charset=utf-8", SW),
-        _ => return Response::text(404, "not found"),
+    let Some((_, ctype, rel, embedded)) = FILES.iter().find(|f| f.0 == path) else {
+        return Response::text(404, "not found");
     };
-    Response::new(200, ctype, body.as_bytes().to_vec())
+    let body = from_disk(rel).unwrap_or_else(|| embedded.to_string());
+    Response::new(200, ctype, body.into_bytes())
         .with_header("content-security-policy", CSP)
         .with_header("x-content-type-options", "nosniff")
         .with_header("referrer-policy", "no-referrer")
@@ -59,6 +69,48 @@ pub fn serve(path: &str) -> Response {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn setup_wizard_page_is_served_with_the_strict_policy() {
+        let r = serve("/setup");
+        assert_eq!(r.status, 200);
+        let csp = r.headers.iter().find(|(k, _)| k.eq_ignore_ascii_case("content-security-policy")).map(|(_, v)| v.clone()).unwrap_or_default();
+        assert!(csp.contains("script-src 'self';") && csp.contains("frame-ancestors 'none'"), "{csp}");
+        let html = match r.body {
+            ark_net::httpd::Body::Bytes(b) => String::from_utf8(b).unwrap(),
+            _ => panic!("bytes"),
+        };
+        assert!(html.contains("/ui/setup.js") && html.contains("/ui/theme.css") && !html.contains("<script>"), "no inline script");
+        let js = serve("/ui/setup.js");
+        assert_eq!(js.status, 200);
+        let js = match js.body {
+            ark_net::httpd::Body::Bytes(b) => String::from_utf8(b).unwrap(),
+            _ => panic!("bytes"),
+        };
+        for m in ["setup.status", "setup.test_provider", "setup.apply", "x-ark-setup-token", "/setup/rpc"] {
+            assert!(js.contains(m), "setup.js lacks {m}");
+        }
+    }
+
+    #[test]
+    fn operations_views_are_served() {
+        let body = |r: Response| match r.body {
+            ark_net::httpd::Body::Bytes(b) => String::from_utf8(b).unwrap(),
+            _ => panic!("bytes"),
+        };
+        let index = body(serve("/"));
+        for id in ["view-ops", "view-agents", "view-devices", "view-approvals", "view-audit", "src=\"/ui/ops.js\"", "id=\"palette\""] {
+            assert!(index.contains(id), "{id} missing from index.html");
+        }
+        let ops = body(serve("/ui/ops.js"));
+        assert!(ops.contains("ui.ops.status") && ops.contains("audit.verify") && ops.contains("ui.fleet"));
+        assert!(body(serve("/ui/app.js")).contains("gate.answer"));
+        // The service worker's offline shell lists every UI file.
+        let sw = body(serve("/sw.js"));
+        for f in FILES.iter().map(|f| f.0).filter(|p| p.starts_with("/ui/") && !p.ends_with(".svg") && *p != "/ui/setup.js") {
+            assert!(sw.contains(f), "sw.js shell misses {f}");
+        }
+    }
 
     #[test]
     fn control_pages_are_served_and_linked() {

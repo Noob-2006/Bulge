@@ -74,7 +74,7 @@ struct Fixture {
 fn fixture(tag: &str) -> Fixture {
     let root = ark_core::tmp::scratch_path(format!("ark-skills-live-{tag}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&root);
-    let paths = Paths { data: root.join("data"), config_dir: root.join("cfg"), runtime: root.join("run") };
+    let paths = Paths { data: root.join("data"), config_dir: root.join("cfg"), runtime: root.join("run"), ..Default::default() };
     let ws = root.join("ws");
     std::fs::create_dir_all(ws.join(".ark/skills")).unwrap();
     let mut cfg = Config::default();

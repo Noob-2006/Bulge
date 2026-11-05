@@ -109,6 +109,22 @@ impl App {
                 return Some(Principal { kind: l.kind, name: l.name, access: Access::Roles(l.roles), ip, tenant: l.tenant });
             }
         }
+        // SSO behind a legacy front end: a listed reverse proxy (by its TCP address) asserts
+        // the user and groups in headers; they map through the same `[app.rbac]` as OIDC.
+        let pa = &self.cfg.exposure.proxy_auth;
+        if let Some(id) = pa.identity(r.peer, &|h: &str| r.header(h).map(str::to_string)) {
+            let facts = identity::LoginFacts { provider: "header", subject: &id.user, email: &id.email, groups: id.groups.clone(), provider_admin: false };
+            return match identity::login_roles(self.cfg.rbac.as_ref(), &self.d.k.paths, &facts) {
+                Ok(roles) => {
+                    let tenant = crate::tenant::login_viewer(self, &id.user, &id.email, &roles, &crate::tenant::login_team(self, &id.groups));
+                    Some(Principal { kind: "header".into(), name: id.user, access: Access::Roles(roles), ip, tenant })
+                }
+                Err(e) => {
+                    ark_security::audit::record(&self.d.k.paths.data, ark_security::audit::Event::new("auth.denied", ark_security::audit::Actor::new("header", &id.user).with_ip(&ip), "proxy_auth", "deny").detail(json!({"reason": e})));
+                    None
+                }
+            };
+        }
         // ent-121/059: a verified client certificate (mTLS; only the TLS terminator can set this
         // header — it strips every client-sent copy) maps through `client_identities`.
         if self.cfg.exposure.tls {
@@ -141,7 +157,7 @@ impl App {
     pub fn still_valid(&self, p: &Principal) -> bool {
         match p.kind.as_str() {
             "service" => identity::accounts(&self.d.k.paths.data).iter().any(|a| a.name == p.name && a.active(ark_security::audit::now_ms())),
-            "sso" | "saml" | "basic" | "plugin" => !ark_kernel::agents::find_login(&self.d.k.paths, &p.name, &p.name).is_some_and(|u| u.disabled),
+            "sso" | "saml" | "basic" | "plugin" | "header" => !ark_kernel::agents::find_login(&self.d.k.paths, &p.name, &p.name).is_some_and(|u| u.disabled),
             _ => true,
         }
     }
@@ -215,7 +231,7 @@ impl App {
         let mut methods: Vec<String> = Daemon::METHODS.iter().map(|s| s.to_string()).collect();
         methods.extend(self.host_methods.iter().cloned());
         methods.extend(crate::browser_view::METHODS.iter().map(|s| s.to_string()));
-        methods.extend(["initialize", "subscribe", "unsubscribe", "whoami", "audit.query", "audit.verify", "usage.query", "tenancy.show"].map(String::from));
+        methods.extend(["initialize", "subscribe", "unsubscribe", "whoami", "audit.query", "audit.verify", "audit.report", "usage.query", "tenancy.show"].map(String::from));
         json!({
             "protocol": ARP_VERSION,
             "server": {"name": "ark", "version": env!("CARGO_PKG_VERSION")},
@@ -261,7 +277,7 @@ impl App {
                 }
                 Response::text(200, &crate::metrics::render(&self.d)).with_header("content-type", "text/plain; version=0.0.4").with_header("cache-control", "no-store")
             }
-            ("GET", p) if self.cfg.ui && (p == "/" || p.starts_with("/ui/") || p == "/manifest.webmanifest" || p == "/sw.js") => ui::serve(p),
+            ("GET", p) if self.cfg.ui && (p == "/" || p.starts_with("/ui/") || p == "/manifest.webmanifest" || p == "/sw.js" || p == "/setup") => ui::serve(p),
             ("GET", "/.well-known/agent-card.json") | ("GET", "/.well-known/agent.json") if self.cfg.a2a.enabled => a2a::card(self, &r),
             // Devices prove themselves with an Ed25519 key and operator-approved pairing.
             (_, p) if p.starts_with("/node") && self.cfg.nodes && r.is_upgrade() => {
@@ -404,11 +420,13 @@ impl App {
         // Identity fields are ours to set: a client never chooses who it is.
         if let Some(o) = params.as_object_mut() {
             o.remove("_by");
+            o.remove("_by_role");
             o.remove("_via");
         }
         if let (Some(p), Some(o)) = (who, params.as_object_mut()) {
-            if matches!(method, "gate.answer" | "approval.answer" | "approvals.answer" | "question.answer") {
+            if matches!(method, "gate.answer" | "approval.answer" | "approvals.answer" | "question.answer" | "session.review.set") {
                 o.insert("_by".into(), p.label().into());
+                o.insert("_by_role".into(), p.access.label().into());
                 o.insert("_via".into(), "app".into());
             }
         }
@@ -491,6 +509,20 @@ impl App {
             }
             "audit.verify" if who.is_some_and(|p| crate::tenant::bound(self, p)) => Err((-32003, "forbidden: the whole-chain verification is installation-wide".to_string())),
             "audit.verify" => Ok(serde_json::to_value(ark_security::audit::verify(data, params["anchor"].as_str())).unwrap_or(Value::Null)),
+            "audit.report" if who.is_some_and(|p| crate::tenant::bound(self, p)) => Err((-32003, "forbidden: the audit report covers the whole installation".to_string())),
+            "audit.report" => {
+                let subst = self.d.k.vault_substitute();
+                let pubkey = self.d.k.cfg.audit.seal_public(&|s: &str| subst(s));
+                let r = ark_security::audit_report::build(data, params["from_ms"].as_u64().unwrap_or(0), params["to_ms"].as_u64().unwrap_or(0), pubkey.as_deref().map(str::as_bytes));
+                let actor = who.map(|p| p.actor()).unwrap_or_else(ark_security::audit::Actor::local);
+                ark_security::audit::record(data, ark_security::audit::Event::new("audit.report", actor, "audit", "ok").detail(json!({"from_ms": r.from_ms, "to_ms": r.to_ms, "records": r.records, "head": r.verify.head})));
+                match params["format"].as_str().unwrap_or("json") {
+                    "json" => Ok(serde_json::to_value(&r).unwrap_or(Value::Null)),
+                    "md" | "markdown" => Ok(json!({"format": "md", "text": ark_security::audit_report::markdown(&r)})),
+                    "html" => Ok(json!({"format": "html", "text": ark_security::audit_report::html(&r)})),
+                    f => Err((-32602, format!("format `{f}`: use json, md or html"))),
+                }
+            }
             _ => return None,
         })
     }
@@ -664,7 +696,7 @@ mod tests {
     fn app_with(cfg: AppConfig, vault: ark_kernel::vault::Vault) -> Arc<App> {
         // Removed when the test's thread ends (never left behind in TMPDIR).
         let home = ark_core::tmp::scratch("ark-app-srv");
-        let paths = Paths { data: home.join("data"), config_dir: home.join("cfg"), runtime: home.join("run") };
+        let paths = Paths { data: home.join("data"), config_dir: home.join("cfg"), runtime: home.join("run"), ..Default::default() };
         let (pending, _cell) = ark_kernel::daemon::pending_approver(Duration::from_secs(1));
         let k = ark_kernel::kernel::new_kernel(Config::default(), paths, Arc::new(NoRes), vec![], Arc::new(vault), pending.clone());
         let d = Arc::new(Daemon::new(k, pending));
@@ -952,11 +984,191 @@ mod tests {
         assert!(!d.enabled);
     }
 
+    /// SSO behind a legacy front end (Kerberos / `mod_auth_gssapi`, a web access manager):
+    /// identity headers count only from a listed proxy's own address, map through
+    /// `[app.rbac]`, and a disabled registry profile is refused.
+    #[test]
+    fn trusted_proxy_identity_headers_map_into_rbac() {
+        let home = ark_core::tmp::scratch("ark-app-proxyauth");
+        let paths = Paths { data: home.join("data"), config_dir: home.join("cfg"), runtime: home.join("run"), ..Default::default() };
+        let (pending, _cell) = ark_kernel::daemon::pending_approver(Duration::from_secs(1));
+        let k = ark_kernel::kernel::new_kernel(Config::default(), paths, Arc::new(NoRes), vec![], Arc::new(ark_kernel::vault::Vault::empty()), pending.clone());
+        let d = Arc::new(Daemon::new(k, pending));
+        let mut rbac = crate::identity::RbacConfig { default_role: "none".into(), ..Default::default() };
+        rbac.groups.insert("ark-auditors".into(), "auditor".into());
+        rbac.groups.insert("ark-users".into(), "user".into());
+        let pa = crate::exposure::ProxyAuthConfig { enabled: true, proxies: vec!["10.20.0.5/32".into()], user_header: "X-Remote-User".into(), groups_header: "X-Remote-Groups".into(), email_header: String::new(), strip_realm: true };
+        assert!(pa.validate().is_ok());
+        assert!(crate::exposure::ProxyAuthConfig { proxies: vec!["0.0.0.0/0".into()], ..pa.clone() }.validate().is_err());
+        assert!(crate::exposure::ProxyAuthConfig { proxies: vec![], ..pa.clone() }.validate().is_err());
+        let cfg = AppConfig { enabled: true, listen: "127.0.0.1:0".into(), rbac: Some(rbac), exposure: crate::exposure::ExposureConfig { proxy_auth: pa, ..Default::default() }, ..AppConfig::default() };
+        let a = Arc::new(App { d: d.clone(), cfg, token: "admin-token".into(), host_methods: vec![], routes: vec![] });
+        let call = |peer: &str, headers: &[(&str, &str)], method: &str| {
+            let mut r = json_req("/arp", headers, &json!({"jsonrpc": "2.0", "id": 1, "method": method, "params": {}}).to_string());
+            r.peer = Some(peer.parse().unwrap());
+            let resp = a.clone().handle(r);
+            (resp.status, serde_json::from_str::<Value>(&body_text(&resp)).unwrap_or(json!({})))
+        };
+        let (st, who) = call("10.20.0.5:40000", &[("x-remote-user", "alice@CORP.EXAMPLE"), ("x-remote-groups", "staff; ark-auditors")], "whoami");
+        assert_eq!(st, 200);
+        assert_eq!((who["result"]["kind"].as_str(), who["result"]["name"].as_str(), who["result"]["access"].as_str()), (Some("header"), Some("alice"), Some("auditor")), "{who}");
+        assert_eq!(call("10.20.0.5:40000", &[("x-remote-user", "alice"), ("x-remote-groups", "ark-auditors")], "session.submit").0, 403, "an auditor stays read-only");
+        assert_eq!(call("10.20.0.5:40000", &[("x-remote-user", "bob"), ("x-remote-groups", "ark-users")], "session.list").0, 200);
+        // The same headers from anyone else are ignored: no credential at all.
+        assert_eq!(call("10.20.0.6:40000", &[("x-remote-user", "alice"), ("x-remote-groups", "ark-auditors")], "whoami").0, 401);
+        assert_eq!(call("127.0.0.1:40000", &[("x-remote-user", "admin")], "whoami").0, 401);
+        // Unmapped (default_role = none): refused and audited.
+        assert_eq!(call("10.20.0.5:40000", &[("x-remote-user", "mallory")], "whoami").0, 401);
+        assert!(ark_security::audit::all(&d.k.paths.data).iter().any(|r| r["kind"] == "auth.denied" && r["actor"]["name"] == "mallory" && r["actor"]["kind"] == "header"));
+        // A disabled registry profile is refused even though the proxy vouches for it.
+        let u = ark_kernel::agents::user_add(&d.k.paths, "bob").unwrap();
+        ark_kernel::agents::user_update(&d.k.paths, &u.id, |u| {
+            u.disabled = true;
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(call("10.20.0.5:40000", &[("x-remote-user", "bob"), ("x-remote-groups", "ark-users")], "session.list").0, 401);
+    }
+
+    /// Audit coverage: every mutating ARP method the server knows — the daemon's, the app
+    /// server's own and the scope table — leaves an audit record naming the method and the
+    /// principal, both when it is allowed and when it is refused. Read-only methods are on an
+    /// explicit allowlist (recorded only with `[audit] log_reads`); `shutdown` is exercised
+    /// through the refusal path only (allowing it would stop the daemon under test).
+    #[test]
+    fn every_mutating_arp_method_is_audited() {
+        let home = ark_core::tmp::scratch("ark-app-auditcov");
+        let paths = Paths { data: home.join("data"), config_dir: home.join("cfg"), runtime: home.join("run"), ..Default::default() };
+        let (pending, _cell) = ark_kernel::daemon::pending_approver(Duration::from_millis(50));
+        let k = ark_kernel::kernel::new_kernel(Config::default(), paths, Arc::new(NoRes), vec![], Arc::new(ark_kernel::vault::Vault::empty()), pending.clone());
+        let d = Arc::new(Daemon::new(k, pending));
+        std::fs::create_dir_all(home.join("ws")).unwrap();
+        let cfg = AppConfig {
+            enabled: true,
+            listen: "127.0.0.1:0".into(),
+            tokens: vec![crate::exposure::TokenConfig { token: "ro-tok".into(), scope: "read".into(), name: Some("ro".into()), org: String::new(), team: String::new() }],
+            workspace: Some(home.join("ws").display().to_string()),
+            ..AppConfig::default()
+        };
+        let a = Arc::new(App { d: d.clone(), cfg, token: "admin-token".into(), host_methods: vec![], routes: vec![] });
+        let data = d.k.paths.data.clone();
+        let call = |tok: &str, method: &str| {
+            let auth = format!("Bearer {tok}");
+            let mut r = json_req("/arp", &[("authorization", &auth)], &json!({"jsonrpc": "2.0", "id": 1, "method": method, "params": {"id": "nope"}}).to_string());
+            r.peer = Some("127.0.0.1:4000".parse().unwrap());
+            a.clone().handle(r)
+        };
+        let mut methods: std::collections::BTreeSet<String> = a.capabilities()["methods"].as_array().unwrap().iter().filter_map(|m| m.as_str().map(String::from)).collect();
+        methods.extend(crate::exposure::method_scope_table().into_iter().map(|(m, _)| m.to_string()));
+        // Read-only: no record unless `[audit] log_reads` (content reads are always recorded).
+        let read_only = |m: &str| crate::exposure::required_scope(m) == Scope::Read && !crate::identity::is_content_method(m);
+        // Allowed calls not exercised here, with the reason.
+        const NOT_ALLOWED_HERE: &[(&str, &str)] = &[("shutdown", "would stop the daemon under test; its refusal path is checked below")];
+        let streaming = ["session.attach", "events.subscribe", "subscribe"];
+        let mut checked = 0;
+        for m in &methods {
+            if read_only(m) || streaming.contains(&m.as_str()) {
+                continue;
+            }
+            let has = |kind: &str, actor: &str| ark_security::audit::all(&data).iter().any(|r| r["kind"] == kind && r["target"] == m.as_str() && r["actor"]["name"] == actor);
+            // Refused (a read-only token): `auth.denied` with the method and the principal.
+            // (Content reads are allowed to it — and recorded as such.)
+            call("ro-tok", m);
+            if crate::exposure::required_scope(m) == Scope::Read {
+                assert!(has("app.request", "ro"), "content read `{m}` left no audit record");
+            } else {
+                assert!(has("auth.denied", "ro"), "refused `{m}` left no audit record");
+            }
+            if NOT_ALLOWED_HERE.iter().any(|(x, _)| x == m) {
+                continue;
+            }
+            // Allowed (the admin token): `app.request` before it runs, whatever it then returns.
+            call("admin-token", m);
+            assert!(has("app.request", "app-token"), "allowed `{m}` left no audit record");
+            checked += 1;
+        }
+        assert!(checked >= 20, "the enumeration found only {checked} mutating methods");
+        for m in ["gate.answer", "session.review.set", "session.submit", "config.set", "audit.report"] {
+            assert!(methods.contains(m) || crate::exposure::required_scope(m) > Scope::Read, "{m} is enumerated");
+        }
+        assert!(ark_security::audit::verify(&data, None).ok);
+    }
+
+    /// Four eyes, session review and the auditor report over ARP: the server stamps the
+    /// authenticated principal *and its roles* on every answer, a dual-controlled approval
+    /// needs two different people, an auditor can read but not vote or mark.
+    #[test]
+    fn dual_control_review_and_report_over_arp() {
+        let home = ark_core::tmp::scratch("ark-app-dual");
+        let paths = Paths { data: home.join("data"), config_dir: home.join("cfg"), runtime: home.join("run"), ..Default::default() };
+        let (pending, _cell) = ark_kernel::daemon::pending_approver(Duration::from_secs(10));
+        let k = ark_kernel::kernel::new_kernel(Config::default(), paths, Arc::new(NoRes), vec![], Arc::new(ark_kernel::vault::Vault::empty()), pending.clone());
+        let d = Arc::new(Daemon::new(k, pending.clone()));
+        std::fs::create_dir_all(home.join("ws")).unwrap();
+        let tok = |t: &str, scope: &str, name: &str| crate::exposure::TokenConfig { token: t.into(), scope: scope.into(), name: Some(name.into()), org: String::new(), team: String::new() };
+        let cfg = AppConfig {
+            enabled: true,
+            listen: "127.0.0.1:0".into(),
+            tokens: vec![tok("ann-tok", "user", "ann"), tok("bob-tok", "user", "bob"), tok("au-tok", "auditor", "audrey"), tok("req-tok", "user", "req")],
+            workspace: Some(home.join("ws").display().to_string()),
+            ..AppConfig::default()
+        };
+        let a = Arc::new(App { d: d.clone(), cfg, token: "admin-token".into(), host_methods: vec![], routes: vec![] });
+        let data = d.k.paths.data.clone();
+        let call = |tok: &str, method: &str, params: Value| -> Value {
+            let auth = format!("Bearer {tok}");
+            let mut r = json_req("/arp", &[("authorization", &auth)], &json!({"jsonrpc": "2.0", "id": 1, "method": method, "params": params}).to_string());
+            r.peer = Some("127.0.0.1:4000".parse().unwrap());
+            let resp = a.clone().handle(r);
+            let mut v: Value = serde_json::from_str(&body_text(&resp)).unwrap_or(json!({}));
+            v["status"] = resp.status.into();
+            v
+        };
+        // A session created by `req` (the server records it as the owner).
+        let sid = call("req-tok", "session.create", json!({}))["result"]["id"].as_str().unwrap().to_string();
+        let dc = ark_security::dual_control::DualControlConfig { enabled: true, tools: vec!["sh".into()], approver_roles: vec!["user".into()], ..Default::default() };
+        let req = ark_kernel::approver::ApprovalRequest { id: "dc-1".into(), tool_use_id: String::new(), session: sid.clone(), tool: "sh".into(), summary: "sudo reboot".into(), input: Value::Null, gate: ark_kernel::gate::GateKind::Privilege, reason: "sudo".into(), tier: 2 };
+        let owner = ark_kernel::governance::owner_label_in(&d.k.paths, &d.k.store, &sid);
+        assert_eq!(owner, "token:req");
+        ark_kernel::approver::open_quorum(ark_security::dual_control::Quorum::new(&dc, "dc-1", &sid, "sh", &owner, ark_security::audit::now_ms()));
+        let p2 = pending.clone();
+        let h = std::thread::spawn(move || ark_kernel::approver::Approver::approve_within(&*p2, &req, Duration::from_secs(10)));
+        while pending.list().is_empty() {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(call("au-tok", "gate.answer", json!({"id": "dc-1", "answer": "once"}))["status"], 403, "auditors never approve");
+        assert_eq!(call("req-tok", "gate.answer", json!({"id": "dc-1", "answer": "once"}))["error"]["code"], -32003, "the requester cannot approve");
+        let r = call("ann-tok", "gate.answer", json!({"id": "dc-1", "answer": "once", "_by": "sso:forged", "_by_role": "admin"}));
+        assert_eq!(r["result"], json!({"ok": true, "final": false, "approvals": 1, "required": 2}), "{r}");
+        let p = call("au-tok", "gate.pending", json!({}));
+        assert_eq!(p["result"][0]["dual_control"]["approvals"], json!(["token:ann"]), "the client cannot choose who it is: {p}");
+        assert_eq!(p["result"][0]["dual_control"]["requester"], "token:req");
+        assert!(call("ann-tok", "gate.answer", json!({"id": "dc-1", "answer": "once"}))["error"]["message"].as_str().unwrap().contains("already answered"));
+        assert_eq!(call("bob-tok", "gate.answer", json!({"id": "dc-1", "answer": "once"}))["result"]["final"], true);
+        assert_eq!(h.join().unwrap(), ark_kernel::approver::Approval::Once);
+        // Session review: the owner cannot review itself, an auditor cannot mark, ann can.
+        assert_eq!(call("req-tok", "session.review.set", json!({"id": sid, "status": "reviewed"}))["error"]["code"], -32003);
+        assert_eq!(call("au-tok", "session.review.set", json!({"id": sid, "status": "reviewed"}))["status"], 403);
+        let r = call("ann-tok", "session.review.set", json!({"id": sid, "status": "flagged", "note": "check the reboot"}));
+        assert_eq!(r["result"]["by"], "token:ann", "{r}");
+        let l = call("au-tok", "session.review.list", json!({"status": "flagged"}));
+        assert_eq!(l["result"][0]["session"], sid.as_str());
+        assert_eq!(call("au-tok", "session.review.get", json!({"id": sid}))["result"]["current"]["note"], "check the reboot");
+        // The auditor's report: one artefact with the approvers and the head hash.
+        let rep = call("au-tok", "audit.report", json!({"format": "md"}));
+        let text = rep["result"]["text"].as_str().unwrap_or_default().to_string();
+        assert!(text.contains("token:ann + token:bob") && text.contains("requested by token:req") && text.contains("Session reviews (1)"), "{rep}");
+        assert!(ark_security::audit::all(&data).iter().any(|r| text.contains(&format!("Head hash: `{}`", r["hash"].as_str().unwrap()))), "the report names a real chain head");
+        let j = call("au-tok", "audit.report", json!({}));
+        assert_eq!(j["result"]["verify"]["ok"], true);
+        assert!(ark_security::audit::all(&data).iter().any(|r| r["kind"] == "audit.report" && r["actor"]["name"] == "audrey"));
+    }
+
     /// ent-053/058/061/073/098/099/120 through the real request path.
     #[test]
     fn roles_service_accounts_approver_identity_and_audit() {
         let home = ark_core::tmp::scratch("ark-app-rbac");
-        let paths = Paths { data: home.join("data"), config_dir: home.join("cfg"), runtime: home.join("run") };
+        let paths = Paths { data: home.join("data"), config_dir: home.join("cfg"), runtime: home.join("run"), ..Default::default() };
         let (pending, _cell) = ark_kernel::daemon::pending_approver(Duration::from_secs(5));
         let k = ark_kernel::kernel::new_kernel(Config::default(), paths, Arc::new(NoRes), vec![], Arc::new(ark_kernel::vault::Vault::empty()), pending.clone());
         let d = Arc::new(Daemon::new(k, pending.clone()));

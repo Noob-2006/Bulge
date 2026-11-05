@@ -3,7 +3,7 @@ name: release
 # bundles share/ (skills, roles, catalogs, VM builder), and publishes tarballs + SHA256SUMS +
 # SBOM (+ Ed25519 signature when the signing secret is set) + build attestation.
 # Asset names are the contract `ark update` and install.sh rely on:
-#   ark-<triple>.tar.gz   (bin/ark, share/ark/…), SHA256SUMS, SHA256SUMS.sig, sbom.spdx.json
+#   ark-<triple>.tar.gz   (bin/ark, share/ark/…), SHA256SUMS, SHA256SUMS.sig, sbom.spdx.json, install.sh
 # Packages (ent-006/007/027/028/029): ark_<ver>-1_<arch>.deb, ark-<ver>-1.<arch>.rpm (nfpm, from the
 # musl binary), ark-apt-repo.tar.gz / ark-yum-repo.tar.gz (signed with ARK_REPO_GPG_KEY), and
 # ark-offline-<ver>-<arch>.tar.gz (air-gapped bundle). All except the offline bundle are inside SHA256SUMS.
@@ -93,7 +93,7 @@ jobs:
           (cd dist && sha256sum "ark-$t.tar.gz" > SHA256SUMS)
           docker run --rm -v "$PWD:/src:ro" -v "$PWD/dist:/rel:ro" -e ARK_RELEASE_BASE=file:///rel ${{ matrix.image }} sh -c '
             set -e
-            sh /src/packaging/install.sh
+            sh /src/packaging/install.sh --no-start
             ~/.local/bin/ark version
             test -d ~/.local/lib/ark/share/skills'
   # ent-006/007: .deb and .rpm from the static musl binary (one nfpm definition, packaging/nfpm).
@@ -207,6 +207,8 @@ jobs:
           set -euo pipefail
           export SOURCE_DATE_EPOCH="$(git log -1 --format=%ct)"
           cd dist
+          # the one-command installer is a release asset too (covered by SHA256SUMS and its signature)
+          install -m 0755 ../packaging/install.sh install.sh
           python3 ../packaging/release/sbom.py --root .. --out sbom.spdx.json
           python3 ../packaging/release/sbom.py --root .. --check --out sbom.spdx.json
           if [ -n "${SIGNING_KEY:-}" ]; then

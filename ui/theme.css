@@ -1,107 +1,175 @@
-/* ark 統一視覺系統：深緋紅漸層 + 亮金四角內凹星。
-   Web UI、桌面殼與文件頁共用；TUI 以 ANSI truecolor 對應同一組色票（見 crates/ark-app/src/tui/theme.rs）。 */
+/* ark 視覺系統：瑞士國際主義（網格、無襯線、靠左對齊、層級靠字級與留白）
+   × 深緋紅底 × 金絲線（1px 金色細線）與四角內凹金星。
+   Web UI、桌面殼與文件頁共用；TUI 以 ANSI truecolor 對應同一組色票（crates/ark-app/src/tui/theme.rs）。 */
 :root {
-  /* 深緋紅：由近黑的血紅到緋紅 */
-  --crimson-950: #12020a;
-  --crimson-900: #1f0410;
-  --crimson-800: #330716;
-  --crimson-700: #4a0a1e;
-  --crimson-600: #650d27;
-  --crimson-500: #8b1032;
-  /* 亮金 */
-  --gold-300: #ffe9a3;
-  --gold-400: #ffd66b;
-  --gold-500: #f5b83d;
-  --gold-600: #c98a1b;
+  /* 深緋紅：近黑的血紅底，層次只差一點點亮度 */
+  --crimson-950: #0b0105;
+  --crimson-900: #12020a;
+  --crimson-850: #18030d;
+  --crimson-800: #1f0411;
+  --crimson-700: #2a0617;
+  --crimson-600: #3a0820;
+  --crimson-500: #5c0c2c;
+  --crimson-400: #8e1238;
+  --crimson-300: #c41e4a;
+  /* 金：主色只用在動作、選取與星 */
+  --gold-100: #fff3cf;
+  --gold-300: #f1d488;
+  --gold-400: #e7bd5c;
+  --gold-500: #cf9a35;
+  --gold-600: #a2731b;
 
-  --bg: radial-gradient(120% 90% at 15% 0%, var(--crimson-600) 0%, var(--crimson-800) 38%, var(--crimson-900) 70%, var(--crimson-950) 100%);
-  --panel: linear-gradient(160deg, rgba(101, 13, 39, .55), rgba(31, 4, 16, .78));
-  --panel-solid: #24050f;
-  --border: rgba(245, 184, 61, .28);
-  --border-strong: rgba(255, 214, 107, .6);
-  --text: #f7e9ec;
-  --text-dim: #c9a3ad;
+  --bg: var(--crimson-950);
+  --bg-rail: var(--crimson-900);
+  --surface: var(--crimson-850);
+  --surface-2: var(--crimson-800);
+  --surface-3: var(--crimson-700);
+  --select: var(--crimson-600);
+  --thread: rgba(231, 189, 92, .16);
+  --thread-2: rgba(231, 189, 92, .3);
+  --thread-strong: rgba(231, 189, 92, .62);
+  --text: #f5eaec;
+  --text-2: #c9adb4;
+  --text-3: #8d6e77;
   --accent: var(--gold-400);
-  --accent-ink: #2a0610;
-  --danger: #ff7a8a;
-  --ok: #e8d48b;
-  --radius: 14px;
-  --shadow: 0 10px 40px rgba(0, 0, 0, .45), inset 0 1px 0 rgba(255, 214, 107, .08);
-  --font: "Noto Sans TC", "PingFang TC", "Microsoft JhengHei", system-ui, sans-serif;
-  --mono: "JetBrains Mono", "Noto Sans Mono CJK TC", ui-monospace, monospace;
+  --accent-ink: #1a0309;
+  --ok: #7fd3a3;
+  --warn: #f0b440;
+  --crit: #ff5468;
+  --info: #9fb9ff;
+  --radius: 3px;
+  --shadow: 0 18px 50px rgba(0, 0, 0, .55);
+  --font: "Inter", "Helvetica Neue", Helvetica, Arial, "Noto Sans TC", "PingFang TC", "Microsoft JhengHei", sans-serif;
+  --mono: "JetBrains Mono", "SFMono-Regular", Menlo, Consolas, "Noto Sans Mono CJK TC", monospace;
+
+  /* 舊名稱（pages.js / surfaces.js 與外掛面板仍在用） */
+  --border: var(--thread-2);
+  --border-strong: var(--thread-strong);
+  --text-dim: var(--text-2);
+  --danger: var(--crit);
+  --panel: var(--surface);
+  --panel-solid: var(--surface);
   color-scheme: dark;
 }
 
+:root[data-theme="midnight"] {
+  --bg: #04070f; --bg-rail: #070c18; --surface: #0a1121; --surface-2: #0e172b; --surface-3: #132038; --select: #1a2c4e;
+  --thread: rgba(150, 185, 255, .14); --thread-2: rgba(150, 185, 255, .26); --thread-strong: rgba(170, 200, 255, .6);
+  --text: #e8eefc; --text-2: #a3b3d2; --text-3: #6b7b9a;
+  --gold-100: #e8f0ff; --gold-300: #cfe0ff; --gold-400: #a8c8ff; --gold-500: #6f9bff; --gold-600: #3f6ed6;
+  --accent: var(--gold-400); --accent-ink: #050a16;
+  --crimson-300: #ff7a8e;
+}
+:root[data-theme="daylight"] {
+  --bg: #f6f2ec; --bg-rail: #efe8df; --surface: #fffdf9; --surface-2: #f8f2ea; --surface-3: #efe5d8; --select: #f1dfd6;
+  --thread: rgba(150, 100, 30, .16); --thread-2: rgba(150, 100, 30, .3); --thread-strong: rgba(140, 90, 20, .62);
+  --text: #1c0a0f; --text-2: #6a4e55; --text-3: #9b8389;
+  --gold-100: #6b1022; --gold-300: #7f0f2b; --gold-400: #8e1238; --gold-500: #a8782a; --gold-600: #8a5d14;
+  --accent: #8e1238; --accent-ink: #fff6ee;
+  --ok: #1d7a4f; --warn: #a86400; --crit: #b3122e; --info: #2d56b8;
+  --shadow: 0 14px 40px rgba(80, 40, 20, .16);
+  color-scheme: light;
+}
+
 * { box-sizing: border-box; }
+[hidden] { display: none !important; }
 html, body { margin: 0; height: 100%; }
 body {
-  background: var(--crimson-950);
-  background-image: var(--bg);
-  background-attachment: fixed;
+  background: var(--bg);
   color: var(--text);
-  font: 15px/1.6 var(--font);
+  font: 14px/1.55 var(--font);
+  font-feature-settings: "tnum" 1, "cv11" 1;
   -webkit-font-smoothing: antialiased;
 }
-a { color: var(--gold-400); }
+a { color: var(--gold-300); text-decoration-thickness: 1px; text-underline-offset: 2px; }
 code, pre, .mono { font-family: var(--mono); }
+::selection { background: rgba(231, 189, 92, .32); }
+:focus-visible { outline: 1px solid var(--gold-400); outline-offset: 2px; }
+* { scrollbar-width: thin; scrollbar-color: var(--thread-2) transparent; }
 
 /* 四角內凹星：以 CSS mask 套用同一個路徑，任何元素都能變成金星 */
 .star {
-  --size: 18px;
+  --size: 14px;
   display: inline-block;
   width: var(--size); height: var(--size);
-  background: radial-gradient(circle at 50% 50%, var(--gold-300) 0%, var(--gold-400) 35%, var(--gold-500) 70%, var(--gold-600) 100%);
+  background: radial-gradient(circle at 50% 50%, var(--gold-100) 0%, var(--gold-300) 30%, var(--gold-400) 62%, var(--gold-600) 100%);
   -webkit-mask: url("star.svg") center / contain no-repeat;
           mask: url("star.svg") center / contain no-repeat;
-  filter: drop-shadow(0 0 6px rgba(255, 214, 107, .55));
   flex: none;
 }
+.star.glow { filter: drop-shadow(0 0 6px rgba(231, 189, 92, .55)); }
 .star.twinkle { animation: twinkle 3.2s ease-in-out infinite; }
-.star.spin { animation: spin 9s linear infinite; }
+.star.spin { animation: spin 6s linear infinite; }
 .star.pulse { animation: pulse 1.4s ease-in-out infinite; }
-@keyframes twinkle {
-  0%, 100% { transform: scale(.82) rotate(0deg); opacity: .75; }
-  50% { transform: scale(1.08) rotate(45deg); opacity: 1; }
-}
+.star.ok { background: var(--ok); }
+.star.warn { background: var(--warn); }
+.star.crit { background: var(--crit); }
+.star.off { background: var(--text-3); }
+@keyframes twinkle { 0%, 100% { transform: scale(.85) rotate(0deg); opacity: .8; } 50% { transform: scale(1.05) rotate(45deg); opacity: 1; } }
 @keyframes spin { to { transform: rotate(360deg); } }
-@keyframes pulse {
-  0%, 100% { transform: scale(.7); opacity: .55; }
-  50% { transform: scale(1.15); opacity: 1; }
-}
+@keyframes pulse { 0%, 100% { transform: scale(.72); opacity: .6; } 50% { transform: scale(1.1); opacity: 1; } }
 
-/* 四角裝飾：容器四個角各一顆星 */
+/* 四角星：只留給對話框與登入（瑞士風格：裝飾要少而準） */
 .cornered { position: relative; }
-.cornered > .corner { position: absolute; --size: 14px; }
-.cornered > .corner.tl { top: -7px; left: -7px; }
-.cornered > .corner.tr { top: -7px; right: -7px; }
-.cornered > .corner.bl { bottom: -7px; left: -7px; }
-.cornered > .corner.br { bottom: -7px; right: -7px; }
+.cornered > .corner { position: absolute; --size: 10px; }
+.cornered > .corner.tl { top: -5px; left: -5px; }
+.cornered > .corner.tr { top: -5px; right: -5px; }
+.cornered > .corner.bl { bottom: -5px; left: -5px; }
+.cornered > .corner.br { bottom: -5px; right: -5px; }
 
+/* 面板：平面、細金線外框、頂端一條較亮的金絲線 */
 .panel {
-  background: var(--panel);
-  border: 1px solid var(--border);
+  background: var(--surface);
+  border: 1px solid var(--thread);
+  border-top-color: var(--thread-strong);
   border-radius: var(--radius);
-  box-shadow: var(--shadow);
-  backdrop-filter: blur(6px);
 }
+
 .btn {
   appearance: none; cursor: pointer;
-  border: 1px solid var(--border-strong);
-  background: linear-gradient(180deg, var(--gold-400), var(--gold-500));
+  display: inline-flex; align-items: center; gap: 6px;
+  border: 1px solid var(--accent);
+  background: var(--accent);
   color: var(--accent-ink);
-  font: 600 14px var(--font);
-  padding: 8px 16px; border-radius: 10px;
-  transition: transform .12s ease, box-shadow .2s ease;
+  font: 600 13px/1 var(--font);
+  letter-spacing: .01em;
+  padding: 8px 14px; border-radius: var(--radius);
+  transition: background .12s ease, border-color .12s ease, color .12s ease;
 }
-.btn:hover { box-shadow: 0 0 18px rgba(255, 214, 107, .45); }
+.btn:hover { background: var(--gold-300); border-color: var(--gold-300); }
 .btn:active { transform: translateY(1px); }
-.btn.ghost { background: transparent; color: var(--gold-300); }
-.btn.danger { background: transparent; color: var(--danger); border-color: rgba(255, 122, 138, .5); }
+.btn:disabled { opacity: .45; cursor: not-allowed; }
+.btn.ghost { background: transparent; color: var(--text); border-color: var(--thread-2); }
+.btn.ghost:hover { border-color: var(--thread-strong); background: var(--surface-2); }
+.btn.danger { background: transparent; color: var(--crit); border-color: color-mix(in srgb, var(--crit) 55%, transparent); }
+.btn.danger:hover { background: color-mix(in srgb, var(--crit) 14%, transparent); }
+.btn.small { padding: 5px 9px; font-size: 12px; }
+.btn.icon { padding: 5px 7px; }
 
-/* 背景星空：少量緩慢閃爍的小金星 */
+input:not([type]), input[type=text], input[type=password], input[type=search], input[type=number], input[type=url], select, textarea.cp-area {
+  background: var(--bg); border: 1px solid var(--thread-2); border-radius: var(--radius);
+  color: var(--text); padding: 7px 10px; font: 13px var(--font);
+}
+input[type=text], input[type=password], input[type=search], input[type=url] { width: 100%; }
+input:focus, select:focus, textarea:focus { outline: none; border-color: var(--gold-400); }
+
+table.kv { width: 100%; border-collapse: collapse; font-size: 13px; }
+table.kv td, table.kv th { border-bottom: 1px solid var(--thread); padding: 7px 8px; text-align: left; vertical-align: top; }
+table.kv th { color: var(--text-3); font: 600 10.5px/1.4 var(--font); letter-spacing: .1em; text-transform: uppercase; border-bottom-color: var(--thread-2); }
+table.kv tr:hover td { background: color-mix(in srgb, var(--surface-2) 60%, transparent); }
+
+.dim { color: var(--text-2); }
+.faint { color: var(--text-3); }
+.ok { color: var(--ok); }
+.warn { color: var(--warn); }
+.bad, .crit { color: var(--crit); }
+
+/* 背景星空：極少、極淡，只在空白狀態看得到 */
 .starfield { position: fixed; inset: 0; pointer-events: none; z-index: 0; overflow: hidden; }
-.starfield .star { position: absolute; opacity: .35; animation: twinkle 6s ease-in-out infinite; }
+.starfield .star { position: absolute; opacity: .12; animation: twinkle 7s ease-in-out infinite; }
+:root[data-theme="daylight"] .starfield { display: none; }
 
 @media (prefers-reduced-motion: reduce) {
   .star, .starfield .star { animation: none !important; }
+  * { transition: none !important; }
 }

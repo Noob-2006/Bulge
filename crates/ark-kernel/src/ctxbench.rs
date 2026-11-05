@@ -165,7 +165,7 @@ mod tests {
         let dir = Dir(root.clone());
         let ws = root.join("ws");
         std::fs::create_dir_all(&ws).unwrap();
-        let paths = Paths { data: root.join("data"), config_dir: root.join("cfg"), runtime: root.join("run") };
+        let paths = Paths { data: root.join("data"), config_dir: root.join("cfg"), runtime: root.join("run"), ..Default::default() };
         std::fs::create_dir_all(&paths.data).unwrap();
         let mut cfg = Config::default();
         cfg.model.default = "fake/m".into();

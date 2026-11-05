@@ -1045,7 +1045,7 @@ mod tests {
     #[test]
     fn audit_flags_foot_guns() {
         let root = ark_core::tmp::scratch_path(format!("ark-audit-{}", std::process::id()));
-        let paths = Paths { data: root.join("data"), config_dir: root.join("cfg"), runtime: root.join("run") };
+        let paths = Paths { data: root.join("data"), config_dir: root.join("cfg"), runtime: root.join("run"), ..Default::default() };
         std::fs::create_dir_all(&paths.config_dir).unwrap();
         std::fs::create_dir_all(&paths.data).unwrap();
         std::fs::write(paths.user_config(), "[app]\nenabled = true\nlisten = \"0.0.0.0:8640\"\n[mcp.gh]\ncommand = \"npx\"\nargs = [\"-y\", \"some-mcp\"]\n# token = \"x\"\napi_key = \"sk-ant-REDACTEDREDACTEDREDACTED00\"\n").unwrap();
@@ -1073,7 +1073,7 @@ mod tests {
     #[test]
     fn audit_flags_public_exposure() {
         let root = ark_core::tmp::scratch_path(format!("ark-audit-exposure-{}", ark_kernel::util::random_hex(8)));
-        let paths = Paths { data: root.join("data"), config_dir: root.join("cfg"), runtime: root.join("run") };
+        let paths = Paths { data: root.join("data"), config_dir: root.join("cfg"), runtime: root.join("run"), ..Default::default() };
         std::fs::create_dir_all(&paths.config_dir).unwrap();
         std::fs::create_dir_all(&paths.data).unwrap();
 

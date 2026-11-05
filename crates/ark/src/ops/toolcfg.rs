@@ -708,7 +708,7 @@ mod tests {
         let paths = Paths {
             data: root.join("data"),
             config_dir: root.join("config"),
-            runtime: root.join("run"),
+            runtime: root.join("run"), ..Default::default()
         };
         for d in [&paths.data, &paths.config_dir, &paths.runtime] {
             std::fs::create_dir_all(d).unwrap();

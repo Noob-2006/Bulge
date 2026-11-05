@@ -146,7 +146,7 @@ fn builtin_plugins_are_wired_into_the_real_tool_and_hook_lists() {
     let _ = std::fs::remove_dir_all(&d);
     let ws = d.join("ws");
     std::fs::create_dir_all(ws.join(".ark/artifacts")).unwrap();
-    let paths = ark_kernel::config::Paths { data: d.join("data"), config_dir: d.join("config"), runtime: d.join("run") };
+    let paths = ark_kernel::config::Paths { data: d.join("data"), config_dir: d.join("config"), runtime: d.join("run"), ..Default::default() };
     let vault = Arc::new(Vault::empty());
     // Off by default: nothing of the built-ins is present.
     let cfg = Config::default();
@@ -314,7 +314,7 @@ fn kit_with_approver(mut cfg: Config, ap: Arc<dyn ark_kernel::approver::Approver
     let root = ark_core::tmp::scratch_path(format!("ark-ext-sec-{}", ark_kernel::util::random_hex(8)));
     let ws = root.join("ws");
     std::fs::create_dir_all(&ws).unwrap();
-    let paths = ark_kernel::config::Paths { data: root.join("data"), config_dir: root.join("config"), runtime: root.join("run") };
+    let paths = ark_kernel::config::Paths { data: root.join("data"), config_dir: root.join("config"), runtime: root.join("run"), ..Default::default() };
     std::fs::create_dir_all(&paths.config_dir).unwrap();
     cfg.model.default = "echo/m".into();
     cfg.checkpoint.enabled = false;
@@ -855,7 +855,7 @@ fn kit_with_provider(cfg: Config, p: Arc<dyn Provider>) -> crate::testkit::Kit {
     let root = ark_core::tmp::scratch_path(format!("ark-ext-held-{}", ark_kernel::util::random_hex(8)));
     let ws = root.join("ws");
     std::fs::create_dir_all(&ws).unwrap();
-    let paths = ark_kernel::config::Paths { data: root.join("data"), config_dir: root.join("config"), runtime: root.join("run") };
+    let paths = ark_kernel::config::Paths { data: root.join("data"), config_dir: root.join("config"), runtime: root.join("run"), ..Default::default() };
     std::fs::create_dir_all(&paths.config_dir).unwrap();
     let mut cfg = cfg;
     cfg.model.default = "held/m".into();

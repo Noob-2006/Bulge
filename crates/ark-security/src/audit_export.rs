@@ -2,9 +2,20 @@
 //!
 //! ```toml
 //! [audit.export.syslog]
-//! address = "udp://siem.corp:514"     # udp://, tcp:// (RFC 6587 octet counting) or unix:///dev/log
+//! address = "udp://siem.corp:514"     # udp://, tcp:// (RFC 6587 octet counting),
+//!                                     # tls:// (RFC 5425) or unix:///dev/log
 //! app_name = "ark"
 //! facility = 13                       # log audit
+//! format = "rfc5424"                  # rfc5424 (JSON record) | cef (ArcSight) | leef (QRadar)
+//! ca_file = "/etc/pki/siem-ca.pem"    # tls:// only; default: [network] CA bundle / system roots
+//!
+//! # More syslog sinks, each with its own address, format and cursor:
+//! [audit.export.syslog_sinks.arcsight]
+//! address = "tls://arcsight.corp:6514"
+//! format = "cef"
+//! [audit.export.syslog_sinks.qradar]
+//! address = "tcp://qradar.corp:514"
+//! format = "leef"
 //!
 //! [audit.export.splunk_hec]
 //! url = "https://splunk.corp:8088"    # /services/collector/event is appended
@@ -34,6 +45,10 @@ use std::time::Duration;
 #[serde(default, deny_unknown_fields)]
 pub struct ExportConfig {
     pub syslog: Option<SyslogConfig>,
+    /// Further syslog sinks by name (sink `syslog.<name>`), e.g. CEF to ArcSight and LEEF to
+    /// QRadar side by side.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub syslog_sinks: BTreeMap<String, SyslogConfig>,
     pub splunk_hec: Option<HecConfig>,
     pub otlp: Option<OtlpConfig>,
     /// Records per sink per pump (default 500).
@@ -47,10 +62,27 @@ pub struct SyslogConfig {
     pub app_name: String,
     pub facility: u8,
     pub hostname: String,
+    /// Message format: `rfc5424` (the canonical JSON record), `cef` or `leef`.
+    pub format: String,
+    /// PEM roots for `tls://` (a private SIEM CA); default: the `[network]` CA bundle.
+    pub ca_file: Option<String>,
 }
 impl Default for SyslogConfig {
     fn default() -> Self {
-        SyslogConfig { address: String::new(), app_name: "ark".into(), facility: 13, hostname: String::new() }
+        SyslogConfig { address: String::new(), app_name: "ark".into(), facility: 13, hostname: String::new(), format: "rfc5424".into(), ca_file: None }
+    }
+}
+
+impl SyslogConfig {
+    pub fn validate(&self, name: &str) -> Result<(), String> {
+        if !matches!(self.format.as_str(), "" | "rfc5424" | "cef" | "leef") {
+            return Err(format!("[audit.export.{name}] format `{}`: use rfc5424, cef or leef", self.format));
+        }
+        let a = self.address.trim();
+        if !a.is_empty() && !["udp://", "tcp://", "tls://", "unix://"].iter().any(|p| a.starts_with(p)) {
+            return Err(format!("[audit.export.{name}] address `{a}`: use udp://, tcp://, tls:// or unix://"));
+        }
+        Ok(())
     }
 }
 
@@ -78,18 +110,44 @@ pub struct OtlpConfig {
 }
 
 impl ExportConfig {
-    pub fn sinks(&self) -> Vec<&'static str> {
+    pub fn sinks(&self) -> Vec<String> {
         let mut v = vec![];
         if self.syslog.as_ref().is_some_and(|s| !s.address.trim().is_empty()) {
-            v.push("syslog");
+            v.push("syslog".to_string());
+        }
+        for (n, s) in &self.syslog_sinks {
+            if !s.address.trim().is_empty() {
+                v.push(format!("syslog.{n}"));
+            }
         }
         if self.splunk_hec.as_ref().is_some_and(|s| !s.url.trim().is_empty()) {
-            v.push("splunk_hec");
+            v.push("splunk_hec".into());
         }
         if self.otlp.as_ref().is_some_and(|s| !s.endpoint.trim().is_empty()) {
-            v.push("otlp");
+            v.push("otlp".into());
         }
         v
+    }
+
+    pub fn validate(&self) -> Result<(), String> {
+        if let Some(s) = &self.syslog {
+            s.validate("syslog")?;
+        }
+        for (n, s) in &self.syslog_sinks {
+            if n.is_empty() || !n.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-') {
+                return Err(format!("[audit.export.syslog_sinks] name `{n}`: letters, digits, `_` and `-` only"));
+            }
+            s.validate(&format!("syslog_sinks.{n}"))?;
+        }
+        Ok(())
+    }
+
+    fn syslog_for(&self, sink: &str) -> Option<&SyslogConfig> {
+        match sink.strip_prefix("syslog.") {
+            Some(n) => self.syslog_sinks.get(n),
+            None if sink == "syslog" => self.syslog.as_ref(),
+            None => None,
+        }
     }
 }
 
@@ -158,12 +216,124 @@ pub fn rfc5424(r: &Value, c: &SyslogConfig) -> String {
     format!("<{pri}>1 {} {host} {} {} {} {sd} {}", rfc3339(r["ts"].as_u64().unwrap_or(0)), if c.app_name.is_empty() { "ark" } else { &c.app_name }, std::process::id(), if msgid.is_empty() { "-".into() } else { msgid }, audit::canonical(r))
 }
 
+const VENDOR: &str = "ark";
+const PRODUCT: &str = "ark";
+
+fn cef_header(s: &str) -> String {
+    s.replace('\\', "\\\\").replace('|', "\\|").replace(['\r', '\n'], " ")
+}
+fn cef_value(s: &str) -> String {
+    s.replace('\\', "\\\\").replace('=', "\\=").replace("\r\n", "\\n").replace('\n', "\\n").replace('\r', "\\r")
+}
+
+/// ArcSight Common Event Format (CEF:0). Severity 0–10: denials 7, errors 5, the rest 3.
+/// The chain fields travel as custom strings (`cs1` hash, `cs2` prev) so the SIEM copy stays
+/// an anchor for `ark audit verify --anchor`.
+pub fn cef(r: &Value) -> String {
+    let st = |k: &str| r[k].as_str().unwrap_or("");
+    let outcome = st("outcome");
+    let sev = if outcome.starts_with("deny") || outcome == "refused" { 7 } else if outcome == "error" || outcome == "fail" { 5 } else { 3 };
+    let kind = st("kind");
+    let mut ext = vec![
+        ("rt", r["ts"].as_u64().unwrap_or(0).to_string()),
+        ("externalId", r["seq"].as_u64().unwrap_or(0).to_string()),
+        ("suser", r["actor"]["name"].as_str().unwrap_or("").to_string()),
+        ("act", outcome.to_string()),
+        ("outcome", outcome.to_string()),
+        ("msg", st("target").to_string()),
+        ("cs1Label", "hash".into()),
+        ("cs1", st("hash").to_string()),
+        ("cs2Label", "prev".into()),
+        ("cs2", st("prev").to_string()),
+        ("cs3Label", "actorKind".into()),
+        ("cs3", r["actor"]["kind"].as_str().unwrap_or("").to_string()),
+    ];
+    if let Some(ip) = r["actor"]["ip"].as_str().filter(|s| !s.is_empty()) {
+        ext.push(("src", ip.to_string()));
+    }
+    if let Some(role) = r["actor"]["role"].as_str().filter(|s| !s.is_empty()) {
+        ext.push(("spriv", role.to_string()));
+    }
+    if !st("session").is_empty() {
+        ext.extend([("cs4Label", "session".to_string()), ("cs4", st("session").to_string())]);
+    }
+    if !st("org").is_empty() {
+        ext.extend([("cs5Label", "org".to_string()), ("cs5", format!("{}/{}", st("org"), st("team")))]);
+    }
+    if !r["detail"].is_null() {
+        ext.extend([("cs6Label", "detail".to_string()), ("cs6", audit::canonical(&r["detail"]))]);
+    }
+    let ext: Vec<String> = ext.into_iter().map(|(k, v)| format!("{k}={}", cef_value(&v))).collect();
+    format!("CEF:0|{VENDOR}|{PRODUCT}|{}|{}|{}|{sev}|{}", env!("CARGO_PKG_VERSION"), cef_header(kind), cef_header(&format!("ark {kind} {outcome}")), ext.join(" "))
+}
+
+fn leef_value(s: &str) -> String {
+    s.replace(['\t', '\r', '\n'], " ")
+}
+
+/// IBM QRadar Log Event Extended Format (LEEF:1.0, tab-delimited attributes).
+pub fn leef(r: &Value) -> String {
+    let st = |k: &str| r[k].as_str().unwrap_or("");
+    let outcome = st("outcome");
+    let sev = if outcome.starts_with("deny") || outcome == "refused" { 7 } else if outcome == "error" || outcome == "fail" { 5 } else { 3 };
+    let mut attrs = vec![
+        ("devTime", rfc3339(r["ts"].as_u64().unwrap_or(0))),
+        ("devTimeFormat", "yyyy-MM-dd'T'HH:mm:ss.SSSX".to_string()),
+        ("cat", st("kind").to_string()),
+        ("sev", sev.to_string()),
+        ("usrName", r["actor"]["name"].as_str().unwrap_or("").to_string()),
+        ("arkActorKind", r["actor"]["kind"].as_str().unwrap_or("").to_string()),
+        ("arkOutcome", outcome.to_string()),
+        ("arkTarget", st("target").to_string()),
+        ("arkSeq", r["seq"].as_u64().unwrap_or(0).to_string()),
+        ("arkHash", st("hash").to_string()),
+        ("arkPrev", st("prev").to_string()),
+    ];
+    if let Some(ip) = r["actor"]["ip"].as_str().filter(|s| !s.is_empty()) {
+        attrs.push(("src", ip.to_string()));
+    }
+    if let Some(role) = r["actor"]["role"].as_str().filter(|s| !s.is_empty()) {
+        attrs.push(("role", role.to_string()));
+    }
+    if !st("session").is_empty() {
+        attrs.push(("arkSession", st("session").to_string()));
+    }
+    if !r["detail"].is_null() {
+        attrs.push(("arkDetail", audit::canonical(&r["detail"])));
+    }
+    let a: Vec<String> = attrs.into_iter().map(|(k, v)| format!("{k}={}", leef_value(&v))).collect();
+    format!("LEEF:1.0|{VENDOR}|{PRODUCT}|{}|{}|{}", env!("CARGO_PKG_VERSION"), cef_header(st("kind")), a.join("\t"))
+}
+
+/// One syslog message in the sink's format. CEF / LEEF ride in the MSG part of an RFC 5424
+/// header (both collectors parse the header and the payload after it).
+pub fn syslog_line(r: &Value, c: &SyslogConfig) -> String {
+    match c.format.as_str() {
+        "cef" | "leef" => {
+            let pri = c.facility as u32 * 8 + severity(r) as u32;
+            let host = if c.hostname.is_empty() { hostname() } else { c.hostname.clone() };
+            let body = if c.format == "cef" { cef(r) } else { leef(r) };
+            format!("<{pri}>1 {} {host} {} {} - - {body}", rfc3339(r["ts"].as_u64().unwrap_or(0)), if c.app_name.is_empty() { "ark" } else { &c.app_name }, std::process::id())
+        }
+        _ => rfc5424(r, c),
+    }
+}
+
+/// RFC 6587 octet counting over a byte stream (TCP or TLS): `<len> <msg>` per record.
+fn send_framed(w: &mut dyn Write, c: &SyslogConfig, recs: &[Value], hp: &str) -> Result<(), String> {
+    for r in recs {
+        let m = syslog_line(r, c);
+        write!(w, "{} {m}", m.len()).map_err(|e| format!("syslog {hp}: {e}"))?;
+    }
+    w.flush().map_err(|e| format!("syslog {hp}: {e}"))
+}
+
 fn send_syslog(c: &SyslogConfig, recs: &[Value]) -> Result<(), String> {
     let addr = c.address.trim();
     if let Some(hp) = addr.strip_prefix("udp://") {
         let sock = std::net::UdpSocket::bind(if hp.starts_with('[') { "[::]:0" } else { "0.0.0.0:0" }).map_err(|e| e.to_string())?;
         for r in recs {
-            sock.send_to(rfc5424(r, c).as_bytes(), hp).map_err(|e| format!("syslog {hp}: {e}"))?;
+            sock.send_to(syslog_line(r, c).as_bytes(), hp).map_err(|e| format!("syslog {hp}: {e}"))?;
         }
         Ok(())
     } else if let Some(hp) = addr.strip_prefix("tcp://") {
@@ -171,20 +341,24 @@ fn send_syslog(c: &SyslogConfig, recs: &[Value]) -> Result<(), String> {
         let sa = hp.to_socket_addrs().map_err(|e| format!("syslog {hp}: {e}"))?.next().ok_or("syslog: no address")?;
         let mut s = std::net::TcpStream::connect_timeout(&sa, Duration::from_secs(10)).map_err(|e| format!("syslog {hp}: {e}"))?;
         let _ = s.set_write_timeout(Some(Duration::from_secs(10)));
-        for r in recs {
-            let m = rfc5424(r, c);
-            // RFC 6587 octet counting: `<len> <msg>`.
-            write!(s, "{} {m}", m.len()).map_err(|e| format!("syslog {hp}: {e}"))?;
-        }
-        s.flush().map_err(|e| e.to_string())
+        send_framed(&mut s, c, recs, hp)
+    } else if let Some(hp) = addr.strip_prefix("tls://") {
+        // RFC 5425: syslog over TLS, the same octet-counted framing inside the session.
+        let (host, port) = hp.rsplit_once(':').ok_or_else(|| format!("syslog {hp}: tls:// needs host:port (6514 is the standard port)"))?;
+        let port: u16 = port.parse().map_err(|_| format!("syslog {hp}: bad port"))?;
+        let host = host.trim_start_matches('[').trim_end_matches(']');
+        let mut s = ark_net::Stream::connect_with_roots(host, port, c.ca_file.as_deref(), Duration::from_secs(10)).map_err(|e| format!("syslog {hp}: {e}"))?;
+        let r = send_framed(&mut s, c, recs, hp);
+        s.close();
+        r
     } else if let Some(p) = addr.strip_prefix("unix://") {
         let sock = std::os::unix::net::UnixDatagram::unbound().map_err(|e| e.to_string())?;
         for r in recs {
-            sock.send_to(rfc5424(r, c).as_bytes(), p).map_err(|e| format!("syslog {p}: {e}"))?;
+            sock.send_to(syslog_line(r, c).as_bytes(), p).map_err(|e| format!("syslog {p}: {e}"))?;
         }
         Ok(())
     } else {
-        Err(format!("syslog address `{addr}`: use udp://host:port, tcp://host:port or unix:///dev/log"))
+        Err(format!("syslog address `{addr}`: use udp://host:port, tcp://host:port, tls://host:port or unix:///dev/log"))
     }
 }
 
@@ -275,7 +449,7 @@ fn send_otlp(c: &OtlpConfig, recs: &[Value], resolve: &dyn Fn(&str) -> String) -
 }
 
 /// Deliver everything each sink has not seen yet. Returns `(sink, Ok(records sent) | Err)`.
-pub fn pump(data: &Path, c: &ExportConfig, resolve: &dyn Fn(&str) -> String) -> Vec<(&'static str, Result<usize, String>)> {
+pub fn pump(data: &Path, c: &ExportConfig, resolve: &dyn Fn(&str) -> String) -> Vec<(String, Result<usize, String>)> {
     let sinks = c.sinks();
     if sinks.is_empty() {
         return vec![];
@@ -284,20 +458,20 @@ pub fn pump(data: &Path, c: &ExportConfig, resolve: &dyn Fn(&str) -> String) -> 
     let batch = if c.batch == 0 { 500 } else { c.batch };
     let mut out = vec![];
     for sink in sinks {
-        let from = cursor(data, sink);
+        let from = cursor(data, &sink);
         let todo: Vec<Value> = all.iter().filter(|r| r["seq"].as_u64().unwrap_or(0) > from).take(batch).cloned().collect();
         if todo.is_empty() {
             out.push((sink, Ok(0)));
             continue;
         }
-        let res = match sink {
-            "syslog" => send_syslog(c.syslog.as_ref().unwrap(), &todo),
+        let res = match sink.as_str() {
             "splunk_hec" => send_hec(c.splunk_hec.as_ref().unwrap(), &todo, resolve),
-            _ => send_otlp(c.otlp.as_ref().unwrap(), &todo, resolve),
+            "otlp" => send_otlp(c.otlp.as_ref().unwrap(), &todo, resolve),
+            s => send_syslog(c.syslog_for(s).expect("listed by sinks()"), &todo),
         };
         match res {
             Ok(()) => {
-                set_cursor(data, sink, todo.last().and_then(|r| r["seq"].as_u64()).unwrap_or(from));
+                set_cursor(data, &sink, todo.last().and_then(|r| r["seq"].as_u64()).unwrap_or(from));
                 out.push((sink, Ok(todo.len())));
             }
             Err(e) => out.push((sink, Err(e))),
@@ -443,5 +617,75 @@ mod tests {
         let rec = &v["resourceLogs"][0]["scopeLogs"][0]["logRecords"][0];
         assert_eq!(rec["severityText"], "WARN");
         assert!(rec["body"]["stringValue"].as_str().unwrap().contains("\"seq\":1"));
+    }
+
+    #[test]
+    fn cef_and_leef_escape_and_carry_the_chain() {
+        let r = json!({"seq": 9, "ts": 1_709_210_096_789u64, "kind": "approval.answer", "outcome": "deny", "hash": "h9", "prev": "h8", "target": "a=b|c", "session": "s1",
+            "actor": {"kind": "sso", "name": "ann\\x", "role": "admin", "ip": "10.0.0.7"}, "detail": {"tool": "shell"}});
+        let c = cef(&r);
+        assert!(c.starts_with(&format!("CEF:0|ark|ark|{}|approval.answer|ark approval.answer deny|7|", env!("CARGO_PKG_VERSION"))), "{c}");
+        assert!(c.contains("rt=1709210096789 externalId=9 suser=ann\\\\x act=deny"), "{c}");
+        assert!(c.contains("msg=a\\=b|c"), "extension values escape `=` (and `|` needs no escape there): {c}");
+        assert!(c.contains("cs1Label=hash cs1=h9 cs2Label=prev cs2=h8") && c.contains("src=10.0.0.7") && c.contains("cs4=s1"), "{c}");
+        let l = leef(&r);
+        assert!(l.starts_with(&format!("LEEF:1.0|ark|ark|{}|approval.answer|devTime=2024-02-29T12:34:56.789Z\t", env!("CARGO_PKG_VERSION"))), "{l}");
+        assert!(l.contains("\tusrName=ann\\x\t") && l.contains("\tarkHash=h9\t") && l.contains("\tsev=7\t") && l.contains("\tsrc=10.0.0.7"), "{l}");
+        let line = syslog_line(&r, &SyslogConfig { hostname: "h".into(), format: "cef".into(), ..Default::default() });
+        assert!(line.starts_with("<108>1 2024-02-29T12:34:56.789Z h ark ") && line.contains(" - - CEF:0|"), "{line}");
+        assert!(ExportConfig { syslog: Some(SyslogConfig { format: "xml".into(), ..Default::default() }), ..Default::default() }.validate().is_err());
+        assert!(ExportConfig { syslog_sinks: [("bad name".to_string(), SyslogConfig::default())].into(), ..Default::default() }.validate().is_err());
+    }
+
+    /// Two named sinks (CEF over TLS — RFC 5425 — to a private CA, LEEF over TCP) each keep
+    /// their own cursor; the TLS listener sees octet-counted CEF frames.
+    #[test]
+    fn named_sinks_tls_cef_and_tcp_leef() {
+        use std::sync::Arc;
+        let g = tmp("syslogtls");
+        seed(&g.0, 2);
+        let td = |f: &str| format!("{}/../ark-net/src/testdata/{f}", env!("CARGO_MANIFEST_DIR"));
+        let tls = ark_net::tlsd::ServerTls { cert: td("server.pem"), key: td("server.key"), ..Default::default() }.config().unwrap();
+        let l = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = l.local_addr().unwrap().port();
+        let h = std::thread::spawn(move || {
+            let (s, _) = l.accept().unwrap();
+            let conn = rustls::ServerConnection::new(Arc::clone(&tls)).unwrap();
+            let mut t = rustls::StreamOwned::new(conn, s);
+            let mut all = Vec::new();
+            let _ = t.read_to_end(&mut all);
+            String::from_utf8_lossy(&all).to_string()
+        });
+        let l2 = TcpListener::bind("127.0.0.1:0").unwrap();
+        let a2 = l2.local_addr().unwrap();
+        let h2 = std::thread::spawn(move || {
+            let (mut s, _) = l2.accept().unwrap();
+            let mut all = String::new();
+            s.read_to_string(&mut all).unwrap();
+            all
+        });
+        let c = ExportConfig {
+            syslog_sinks: [
+                ("arcsight".to_string(), SyslogConfig { address: format!("tls://localhost:{port}"), format: "cef".into(), ca_file: Some(td("ca.pem")), ..Default::default() }),
+                ("qradar".to_string(), SyslogConfig { address: format!("tcp://{a2}"), format: "leef".into(), ..Default::default() }),
+            ]
+            .into(),
+            ..Default::default()
+        };
+        assert!(c.validate().is_ok());
+        assert_eq!(c.sinks(), vec!["syslog.arcsight".to_string(), "syslog.qradar".to_string()]);
+        let r = pump(&g.0, &c, &|s| s.to_string());
+        assert!(r.iter().all(|(_, x)| *x == Ok(2)), "{r:?}");
+        let got = h.join().unwrap();
+        let (len, rest) = got.split_once(' ').unwrap();
+        let first = &rest[..len.parse::<usize>().unwrap()];
+        assert!(first.contains(" - - CEF:0|ark|ark|") && first.contains("externalId=1"), "{first}");
+        assert!(rest[first.len()..].contains("externalId=2"));
+        assert!(h2.join().unwrap().contains("LEEF:1.0|ark|ark|"));
+        assert_eq!((cursor(&g.0, "syslog.arcsight"), cursor(&g.0, "syslog.qradar")), (2, 2));
+        // A server certificate the configured CA did not sign is refused.
+        let c = ExportConfig { syslog_sinks: [("x".to_string(), SyslogConfig { address: format!("tls://localhost:{port}"), ca_file: Some(td("other.pem")), ..Default::default() })].into(), ..Default::default() };
+        emit(&g.0, Event::new("x", Actor::system(), "y", "ok")).unwrap();
+        assert!(pump(&g.0, &c, &|s| s.to_string())[0].1.is_err());
     }
 }

@@ -30,6 +30,12 @@ pub enum Dialect {
     Sqlite,
     ClickHouse,
     BigQuery,
+    /// Microsoft SQL Server (`sqlcmd`).
+    SqlServer,
+    /// Oracle (`sqlplus`).
+    Oracle,
+    /// Any ODBC source (`isql`).
+    Odbc,
 }
 
 const ALLOWED_FIRST: &[&str] = &["SELECT", "WITH", "EXPLAIN", "SHOW"];
@@ -37,7 +43,7 @@ const ALLOWED_FIRST: &[&str] = &["SELECT", "WITH", "EXPLAIN", "SHOW"];
 const FORBIDDEN_WORDS: &[&str] = &[
     "INSERT", "UPDATE", "DELETE", "DROP", "ALTER", "CREATE", "TRUNCATE", "GRANT", "REVOKE", "MERGE", "UPSERT", "INTO", "COPY", "CALL", "EXEC", "EXECUTE", "DO", "LOAD", "ATTACH", "DETACH", "PRAGMA", "VACUUM", "REINDEX", "SET",
     "RESET", "BEGIN", "COMMIT", "ROLLBACK", "SAVEPOINT", "LOCK", "UNLOCK", "KILL", "OPTIMIZE", "RENAME", "DISCARD", "LISTEN", "NOTIFY", "PREPARE", "DEALLOCATE",
-    "HANDLER", "USE", "UNDROP", "CHECKPOINT", "OUTFILE", "DUMPFILE", "DECLARE", "ASSERT", "RAISE",
+    "HANDLER", "USE", "UNDROP", "CHECKPOINT", "OUTFILE", "DUMPFILE", "DECLARE", "ASSERT", "RAISE", "WAITFOR", "BACKUP", "RESTORE", "DBCC", "RECONFIGURE", "SHUTDOWN", "BULK", "OPENXML",
 ];
 
 /// Functions that mutate state, read files, sleep or reach other servers, wherever they appear.
@@ -46,6 +52,8 @@ const FORBIDDEN_FUNCTIONS: &[&str] = &[
     "PG_TERMINATE_BACKEND", "PG_CANCEL_BACKEND", "PG_RELOAD_CONF", "PG_ROTATE_LOGFILE", "PG_LOGICAL_EMIT_MESSAGE", "PG_CREATE_RESTORE_POINT", "SET_CONFIG", "NEXTVAL", "SETVAL", "DBLINK", "DBLINK_EXEC", "DBLINK_CONNECT",
     "PG_ADVISORY_LOCK", "PG_ADVISORY_XACT_LOCK", "PG_TRY_ADVISORY_LOCK", "PG_TRY_ADVISORY_XACT_LOCK", "LOAD_FILE", "SLEEP", "BENCHMARK", "GET_LOCK", "RELEASE_LOCK", "SYS_EXEC", "SYS_EVAL", "XP_CMDSHELL", "LOAD_EXTENSION",
     "READFILE", "WRITEFILE", "EDIT", "SQLITE_SOURCE_ID_X",
+    // Oracle packages that reach the network or files, sleep or run jobs; SQL Server delays.
+    "UTL_HTTP", "UTL_TCP", "UTL_FILE", "UTL_SMTP", "UTL_MAIL", "UTL_INADDR", "HTTPURITYPE", "DBMS_PIPE", "DBMS_LOCK", "DBMS_SCHEDULER", "DBMS_JOB", "DBMS_JAVA", "DBMS_LDAP", "DBMS_AQ", "DBMS_XSLPROCESSOR", "DBMS_ADVISOR",
 ];
 
 /// File / network / remote-database table functions: refused when followed by `(`.

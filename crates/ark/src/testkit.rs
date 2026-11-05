@@ -62,7 +62,7 @@ pub fn kit_with(f: impl FnOnce(&mut Config)) -> Kit {
     let root = ark_core::tmp::scratch("ark-kit");
     let ws = root.join("ws");
     std::fs::create_dir_all(&ws).unwrap();
-    let paths = Paths { data: root.join("data"), config_dir: root.join("config"), runtime: root.join("run") };
+    let paths = Paths { data: root.join("data"), config_dir: root.join("config"), runtime: root.join("run"), ..Default::default() };
     std::fs::create_dir_all(&paths.config_dir).unwrap();
     let mut cfg = Config::default();
     cfg.model.default = "echo/m".into();

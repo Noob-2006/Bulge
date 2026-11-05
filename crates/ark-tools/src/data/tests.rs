@@ -125,7 +125,7 @@ fn schema_tool_lists_sources_tables_and_columns() {
 #[test]
 fn every_dialect_has_catalog_queries_that_pass_the_guard() {
     let s = SourceCfg { dataset: Some("analytics".into()), ..Default::default() };
-    for d in [Dialect::Postgres, Dialect::Mysql, Dialect::Sqlite, Dialect::ClickHouse, Dialect::BigQuery] {
+    for d in [Dialect::Postgres, Dialect::Mysql, Dialect::Sqlite, Dialect::ClickHouse, Dialect::BigQuery, Dialect::SqlServer, Dialect::Oracle, Dialect::Odbc] {
         for t in [None, Some("orders"), Some("public.orders")] {
             let sql = schema_sql(d, &s, t).unwrap();
             check_read_only(&sql, d).unwrap_or_else(|e| panic!("{d:?} {t:?}: {e}\n{sql}"));
@@ -138,7 +138,7 @@ fn every_dialect_has_catalog_queries_that_pass_the_guard() {
 fn config_is_validated_and_secrets_stay_secret() {
     assert!(tools(json!({})).unwrap().is_empty(), "no sources, no tools");
     assert!(tools(json!({"enabled": false, "sources": {"a": {"kind": "sqlite", "path": "/x"}}})).unwrap().is_empty());
-    assert!(DataConfig::from_value(json!({"sources": {"a": {"kind": "oracle", "dsn": "x://y"}}})).unwrap_err().contains("oracle"));
+    assert!(DataConfig::from_value(json!({"sources": {"a": {"kind": "informix", "dsn": "x://y"}}})).unwrap_err().contains("informix"));
     assert!(DataConfig::from_value(json!({"sources": {"a": {"kind": "postgres"}}})).unwrap_err().contains("dsn"));
     assert!(DataConfig::from_value(json!({"sources": {"a": {"kind": "bigquery", "project": "p"}}})).unwrap_err().contains("token"));
     assert!(DataConfig::from_value(json!({"bogus": 1})).is_err());
@@ -193,6 +193,78 @@ fn postgres_goes_through_a_read_only_transaction_with_the_password_in_the_enviro
     std::fs::remove_file(out.join("stdin.txt")).unwrap();
     assert!(q.call(&c, json!({"sql": "DELETE FROM people"})).is_error);
     assert!(!out.join("stdin.txt").exists(), "the client was not even started");
+}
+
+/// SQL Server through `sqlcmd`: password in `SQLCMDPASSWORD`, `-K ReadOnly`, the statement in a
+/// rolled-back transaction, unit-separator output with NULLs; integrated auth without a user.
+#[test]
+fn sqlserver_uses_sqlcmd_with_read_only_intent_and_a_rolled_back_transaction() {
+    let c = ctx("sql-mssql");
+    let (client, out) = fake_client(&c.workspace, "sqlcmd", "printf 'id\\037name\\n--\\037----\\n1\\037Ann\\n2\\037NULL\\n'");
+    let (q, s) = tool_set(json!({"sources": {"erp": {"kind": "sqlserver", "dsn": "sqlserver://rpt:Pw0rd%21x@sql01.corp:1433/ERP?trust_server_certificate=true", "client": [client]}}}));
+    let v = rows_of(&q.call(&c, json!({"sql": "SELECT TOP 10 id, name FROM dbo.customers"})));
+    assert_eq!(v["columns"], json!(["id", "name"]));
+    assert_eq!(v["rows"], json!([["1", "Ann"], ["2", null]]));
+    let argv = std::fs::read_to_string(out.join("argv.txt")).unwrap();
+    assert!(argv.contains("tcp:sql01.corp,1433") && argv.contains("ReadOnly") && argv.contains("\n-d\nERP\n") && argv.contains("\n-U\nrpt\n") && argv.contains("\n-C\n"), "{argv}");
+    assert!(!argv.contains("Pw0rd"), "the password is never an argument: {argv}");
+    assert!(std::fs::read_to_string(out.join("env.txt")).unwrap().contains("SQLCMDPASSWORD=Pw0rd!x"));
+    let stdin = std::fs::read_to_string(out.join("stdin.txt")).unwrap();
+    assert!(stdin.contains("BEGIN TRANSACTION;\nSELECT TOP 10 id, name FROM dbo.customers;\nROLLBACK TRANSACTION;\nGO"), "{stdin}");
+    // T-SQL specific refusals: delays, SELECT … INTO, EXEC, xp_cmdshell, OPENROWSET.
+    for bad in ["WAITFOR DELAY '00:00:05'", "SELECT * INTO #t FROM x", "EXEC sp_who", "SELECT * FROM OPENROWSET('SQLNCLI', 'x', 'SELECT 1')", "SELECT 1; SHUTDOWN"] {
+        assert!(q.call(&c, json!({"sql": bad})).is_error, "{bad}");
+    }
+    // A server-side error printed on stdout surfaces as an error.
+    let (client, _) = fake_client(&c.workspace, "sqlcmd-err", "printf \"Msg 208, Level 16, State 1, Server sql01, Line 4\\nInvalid object name 'nope'.\\n\"");
+    let (q2, _) = tool_set(json!({"sources": {"erp": {"kind": "mssql", "dsn": "sqlserver://sql01.corp/ERP", "client": [client]}}}));
+    let o = q2.call(&c, json!({"sql": "SELECT * FROM nope"}));
+    assert!(o.is_error && o.content.contains("Msg 208"), "{}", o.content);
+    // No user: integrated (Kerberos) authentication.
+    let (client, out) = fake_client(&c.workspace, "sqlcmd-krb", "printf 'n\\n-\\n1\\n'");
+    let (q3, _) = tool_set(json!({"sources": {"erp": {"kind": "sqlserver", "dsn": "sqlserver://sql01.corp/ERP", "client": [client]}}}));
+    assert!(!q3.call(&c, json!({"sql": "SELECT 1 AS n"})).is_error);
+    assert!(std::fs::read_to_string(out.join("argv.txt")).unwrap().contains("\n-E\n"));
+    let _ = s;
+}
+
+/// Oracle through SQL*Plus: credentials in the CONNECT line on stdin, a READ ONLY transaction,
+/// CSV markup; PL/SQL network packages are refused before anything runs.
+#[test]
+fn oracle_uses_sqlplus_with_a_read_only_transaction() {
+    let c = ctx("sql-oracle");
+    let (client, out) = fake_client(&c.workspace, "sqlplus", "printf '\"ID\",\"NAME\"\\n1,\"Ann\"\\n2,\\n'");
+    let (q, _) = tool_set(json!({"sources": {"fin": {"kind": "oracle", "dsn": "oracle://gl_ro:Secr3tPw@ora01.corp:1521/FINPDB", "client": [client]}}}));
+    let v = rows_of(&q.call(&c, json!({"sql": "SELECT id, name FROM gl.accounts WHERE ROWNUM <= 5"})));
+    assert_eq!(v["columns"], json!(["ID", "NAME"]));
+    assert_eq!(v["rows"], json!([["1", "Ann"], ["2", null]]));
+    let argv = std::fs::read_to_string(out.join("argv.txt")).unwrap();
+    assert_eq!(argv, "-S\n-L\n/nolog\n", "nothing secret on the command line");
+    let stdin = std::fs::read_to_string(out.join("stdin.txt")).unwrap();
+    assert!(stdin.contains("CONNECT \"gl_ro\"/\"Secr3tPw\"@//ora01.corp:1521/FINPDB") && stdin.contains("SET MARKUP CSV ON QUOTE ON"), "{stdin}");
+    assert!(stdin.contains("SET TRANSACTION READ ONLY;\nSELECT id, name FROM gl.accounts WHERE ROWNUM <= 5;\nROLLBACK;"), "{stdin}");
+    for bad in ["SELECT UTL_HTTP.REQUEST('http://x') FROM dual", "SELECT DBMS_PIPE.RECEIVE_MESSAGE('a', 10) FROM dual", "SELECT * FROM t FOR UPDATE"] {
+        assert!(q.call(&c, json!({"sql": bad})).is_error, "{bad}");
+    }
+}
+
+/// Any ODBC DSN through unixODBC `isql`: batch mode, unit-separator output, the DSN name from
+/// the connection string; isql's own error lines become errors.
+#[test]
+fn odbc_uses_isql_in_batch_mode() {
+    let c = ctx("sql-odbc");
+    let (client, out) = fake_client(&c.workspace, "isql", "printf 'PARTNO\\037QTY\\nA-1\\0373\\nB-2\\037\\n'");
+    let (q, _) = tool_set(json!({"sources": {"as400": {"kind": "odbc", "dsn": "odbc://DB2PROD", "client": [client], "description": "IBM i inventory"}}}));
+    let v = rows_of(&q.call(&c, json!({"sql": "SELECT partno, qty FROM inv.parts"})));
+    assert_eq!(v["rows"], json!([["A-1", "3"], ["B-2", null]]));
+    let argv = std::fs::read_to_string(out.join("argv.txt")).unwrap();
+    assert_eq!(argv, "-b\n-c\n-x0x1f\nDB2PROD\n");
+    assert_eq!(std::fs::read_to_string(out.join("stdin.txt")).unwrap(), "SELECT partno, qty FROM inv.parts\n");
+    let (client, _) = fake_client(&c.workspace, "isql-bad", "echo '[ISQL]ERROR: Could not SQLConnect'; exit 1");
+    let (q, _) = tool_set(json!({"sources": {"as400": {"kind": "odbc", "dsn": "odbc://DB2PROD", "client": [client]}}}));
+    let o = q.call(&c, json!({"sql": "SELECT 1 FROM sysibm.sysdummy1"}));
+    assert!(o.is_error && o.content.contains("SQLConnect"), "{}", o.content);
+    assert_eq!(q.effects(&c, &json!({"sql": "SELECT 1"})), vec![Effect::Net { dest: "DB2PROD".into(), payload: String::new() }]);
 }
 
 #[test]

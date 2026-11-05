@@ -99,7 +99,7 @@ fn kit(tag: &str, cfg_mut: impl FnOnce(&mut Config), titler: Option<super::title
     let root = temp_root(tag);
     let ws = root.join("ws");
     std::fs::create_dir_all(&ws).unwrap();
-    let paths = crate::config::Paths { data: root.join("data"), config_dir: root.join("cfg"), runtime: root.join("run") };
+    let paths = crate::config::Paths { data: root.join("data"), config_dir: root.join("cfg"), runtime: root.join("run"), ..Default::default() };
     std::fs::create_dir_all(&paths.data).unwrap();
     let mut cfg = Config::default();
     cfg.model.default = "fake/m".into();
@@ -713,7 +713,7 @@ fn attach_keeps_no_strong_reference_to_the_kernel() {
     let root = temp_root("weak");
     let ws = root.join("ws");
     std::fs::create_dir_all(&ws).unwrap();
-    let paths = crate::config::Paths { data: root.join("data"), config_dir: root.join("cfg"), runtime: root.join("run") };
+    let paths = crate::config::Paths { data: root.join("data"), config_dir: root.join("cfg"), runtime: root.join("run"), ..Default::default() };
     let cfg = Config::default();
     let p = Arc::new(Scripted { steps: Mutex::new(VecDeque::new()), rules: Mutex::new(vec![]), seen: Mutex::new(vec![]) });
     let k = new_kernel(cfg, paths, Arc::new(Res(p)), vec![], Arc::new(crate::vault::Vault::empty()), Arc::new(crate::approver::Policy { allow_privilege: true, allow_egress: true }));

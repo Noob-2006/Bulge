@@ -74,6 +74,9 @@ pub fn is_content_method(m: &str) -> bool {
 /// Admin-grade methods an operator may still call: lifecycle and channel management.
 const OPERATOR_METHODS: &[&str] = &["shutdown", "daemon.", "channel.", "channels.", "plugin.restart", "plugins.restart", "gateway.restart", "node.", "nodes.", "device.", "devices."];
 
+/// The `audit.*` methods an auditor may call (all read-only).
+pub const AUDITOR_AUDIT_READS: &[&str] = &["audit.query", "audit.verify", "audit.report"];
+
 fn operator_extra(m: &str) -> bool {
     OPERATOR_METHODS.iter().any(|p| if p.ends_with('.') { m.starts_with(p) } else { m == *p })
 }
@@ -112,7 +115,9 @@ impl Access {
                     Role::Admin => true,
                     Role::User => !method.starts_with("audit.") && need <= Scope::Approve,
                     Role::Operator => !is_content_method(method) && !method.starts_with("audit.") && (need == Scope::Read || operator_extra(method)),
-                    Role::Auditor => !is_content_method(method) && (need == Scope::Read || method.starts_with("audit.")),
+                    // Read-only by construction: reads, plus the audit stream's read methods
+                    // (never a write, an approval or a review mark, whatever is added later).
+                    Role::Auditor => !is_content_method(method) && (need == Scope::Read || AUDITOR_AUDIT_READS.contains(&method)),
                 });
                 if ok {
                     Ok(())
@@ -227,7 +232,7 @@ pub fn groups_from_claims(claims: &serde_json::Value, claim: &str) -> Vec<String
 
 /// The roles a login gets, or why it is refused.
 pub fn login_roles(rbac: Option<&RbacConfig>, paths: &ark_kernel::config::Paths, f: &LoginFacts) -> Result<Vec<Role>, String> {
-    let registered = ark_kernel::agents::find_login(paths, f.subject, f.email).or_else(|| ark_kernel::agents::users(paths).into_iter().find(|u| f.provider == "basic" && (u.name == f.subject || u.id == f.subject)));
+    let registered = ark_kernel::agents::find_login(paths, f.subject, f.email).or_else(|| ark_kernel::agents::users(paths).into_iter().find(|u| matches!(f.provider, "basic" | "header") && (u.name == f.subject || u.id == f.subject)));
     // SCIM-provisioned group memberships count like the IdP's groups claim (ent-049).
     let mut groups = f.groups.clone();
     if let Some(u) = &registered {
@@ -440,6 +445,26 @@ pub fn expiring(data: &Path, days: u64) -> Vec<ServiceAccount> {
 mod tests {
     use super::*;
 
+    /// The auditor role is read-only: no method that needs more than `read` (writes,
+    /// approvals, review marks, config, unknown names) and no conversation content, except
+    /// the read-only audit methods.
+    #[test]
+    fn auditor_never_writes_or_approves() {
+        let au = Access::Roles(vec![Role::Auditor]);
+        for (m, scope) in crate::exposure::method_scope_table() {
+            if scope > Scope::Read {
+                assert!(au.permits(m).is_err(), "auditor may not call {m}");
+            }
+        }
+        for m in ["gate.answer", "session.review.set", "audit.prune", "audit.hold", "audit.rotate", "config.set", "secrets.set", "some.new.method"] {
+            assert!(au.permits(m).is_err(), "auditor may not call {m}");
+        }
+        for m in ["audit.query", "audit.verify", "audit.report", "session.review.list", "session.review.get", "gate.pending", "usage.query"] {
+            assert!(au.permits(m).is_ok(), "auditor reads {m}");
+        }
+        assert!(au.permits_http("POST", "/plugins/x").is_err());
+    }
+
     #[test]
     fn roles_map_methods_and_hide_content_from_operator_and_auditor() {
         let op = Access::Roles(vec![Role::Operator]);
@@ -475,7 +500,7 @@ mod tests {
     #[test]
     fn login_role_mapping_order() {
         let tmp = ark_core::tmp::TempDir::new("ark-rbac");
-        let paths = ark_kernel::config::Paths { data: tmp.path().join("d"), config_dir: tmp.path().join("c"), runtime: tmp.path().join("r") };
+        let paths = ark_kernel::config::Paths { data: tmp.path().join("d"), config_dir: tmp.path().join("c"), runtime: tmp.path().join("r"), ..Default::default() };
         std::fs::create_dir_all(&paths.data).unwrap();
         let facts = |provider: &'static str, sub: &'static str, email: &'static str, groups: &[&str]| LoginFacts { provider, subject: sub, email, groups: groups.iter().map(|s| s.to_string()).collect(), provider_admin: false };
         // No [app.rbac]: basic stays admin, OIDC becomes user (never admin by default).

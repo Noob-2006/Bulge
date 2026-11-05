@@ -964,7 +964,7 @@ mod tests {
     #[test]
     fn capture_analyze_cards_standup_ask_and_prune() {
         let root = ark_core::tmp::scratch_path(format!("ark-logbook-{}", ark_kernel::util::random_hex(6)));
-        let paths = ark_kernel::config::Paths { data: root.join("data"), config_dir: root.join("c"), runtime: root.join("r") };
+        let paths = ark_kernel::config::Paths { data: root.join("data"), config_dir: root.join("c"), runtime: root.join("r"), ..Default::default() };
         let mut cfg: Config = toml::from_str("[integrations.logbook]\nenabled = true\ncapture_interval_seconds = 1\nvision_model = \"s/v\"\n").unwrap();
         cfg.model.default = "s/m".into();
         let lc = LogbookConfig::parse(&cfg);

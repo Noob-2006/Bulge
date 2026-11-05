@@ -1,0 +1,181 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<title>ark 初始設定</title>
+<link rel="icon" href="/ui/star.svg" type="image/svg+xml">
+<link rel="stylesheet" href="/ui/theme.css">
+<style>
+  /* Setup wizard: the console's Swiss grid — a numbered step rail and one column of sections.
+     Colours and type come from theme.css. */
+  body { min-height: 100vh; }
+  .setup-shell { display: grid; grid-template-columns: 260px minmax(0, 1fr); min-height: 100vh; }
+  .steps { position: sticky; top: 0; align-self: start; height: 100vh; padding: 28px 22px; background: var(--bg-rail); border-right: 1px solid var(--thread); display: flex; flex-direction: column; gap: 22px; }
+  .steps .brand { display: flex; gap: 10px; align-items: center; }
+  .steps .brand b { font: 700 20px var(--font); letter-spacing: -.01em; }
+  .steps .brand span.sub { display: block; font-size: 11px; color: var(--text-3); margin-top: 3px; }
+  .steps ol { list-style: none; margin: 0; padding: 0; display: grid; gap: 1px; }
+  .steps li a { display: grid; grid-template-columns: 28px 1fr; padding: 7px 10px; color: var(--text-2); text-decoration: none; font-size: 13.5px; border-radius: var(--radius); }
+  .steps li a .n { font: 500 10.5px/20px var(--mono); color: var(--text-3); }
+  .steps li a:hover { background: var(--surface); color: var(--text); }
+  .steps li a.on { background: var(--surface-2); color: var(--text); box-shadow: inset 2px 0 0 var(--gold-400); }
+  .steps li a.on .n { color: var(--gold-400); }
+  .steps li a.done .n::after { content: " ✓"; color: var(--ok); }
+  .steps .foot { margin-top: auto; font-size: 11.5px; color: var(--text-3); line-height: 1.6; }
+  .setup { max-width: 760px; padding: 40px 48px 120px; }
+  .setup header h1 { font: 300 40px/1.1 var(--font); letter-spacing: -.02em; margin: 0 0 10px; }
+  .setup header .kicker { font: 600 10.5px var(--font); letter-spacing: .14em; text-transform: uppercase; color: var(--gold-400); margin-bottom: 14px; display: block; }
+  .setup #intro { color: var(--text-2); max-width: 60ch; margin: 0 0 28px; padding-bottom: 22px; border-bottom: 1px solid var(--thread-2); }
+  .setup fieldset { border: 0; border-top: 1px solid var(--thread-strong); margin: 0 0 34px; padding: 14px 0 0; scroll-margin-top: 24px; }
+  .setup legend { float: left; width: 100%; padding: 0; margin: 0 0 12px; font: 600 10.5px var(--font); letter-spacing: .12em; text-transform: uppercase; color: var(--text); }
+  .setup legend + * { clear: both; }
+  .setup label { display: block; margin: 12px 0 5px; font-size: 12.5px; color: var(--text-2); }
+  .setup input:not([type=checkbox]):not([type=radio]), .setup select { width: 100%; padding: 9px 11px; font-size: 14px; }
+  .setup input[type=checkbox], .setup input[type=radio] { width: auto; accent-color: var(--gold-400); margin: 0; }
+  .setup .choice { display: grid; grid-template-columns: 18px 1fr; gap: 10px; align-items: start; padding: 10px 12px; margin: 6px 0; border: 1px solid var(--thread); border-radius: var(--radius); cursor: pointer; }
+  .setup .choice:has(input:checked) { border-color: var(--gold-400); background: var(--surface); }
+  .setup .choice label { margin: 0; color: var(--text); font-size: 13.5px; cursor: pointer; }
+  .setup .choice input { margin-top: 3px; }
+  .setup .hint { color: var(--text-3); font-size: 12px; margin: 6px 0 0; }
+  .setup .row { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; margin-top: 14px; }
+  .setup button { appearance: none; cursor: pointer; border: 1px solid var(--accent); background: var(--accent); color: var(--accent-ink); font: 600 13.5px var(--font); padding: 10px 18px; border-radius: var(--radius); }
+  .setup button:hover { background: var(--gold-300); border-color: var(--gold-300); }
+  .setup button.secondary { background: transparent; color: var(--text); border-color: var(--thread-2); }
+  .setup button.secondary:hover { border-color: var(--thread-strong); background: var(--surface-2); }
+  .setup button:disabled { opacity: .5; cursor: default; }
+  .setup .status { min-height: 1.4em; font-size: 13px; }
+  .setup .ok { color: var(--ok); }
+  .setup .error { color: var(--crit); }
+  .setup [hidden] { display: none !important; }
+  .setup ul.log { padding-left: 1.2rem; font: 12.5px/1.7 var(--mono); color: var(--text-2); }
+  .setup .applybar { position: sticky; bottom: 0; background: var(--bg); border-top: 1px solid var(--thread-2); padding: 14px 0; margin-top: 0; }
+  .setup #blocked, .setup #done { border-top: 1px solid var(--thread-strong); padding-top: 14px; }
+  .setup #blocked h2, .setup #done h2 { font: 300 26px var(--font); margin: 0 0 8px; }
+  @media (max-width: 860px) { .setup-shell { grid-template-columns: 1fr; } .steps { display: none; } .setup { padding: 24px 16px 100px; } .setup header h1 { font-size: 30px; } }
+</style>
+</head>
+<body>
+<div class="setup-shell">
+<aside class="steps" aria-label="設定步驟">
+  <div class="brand"><span class="star glow twinkle" style="--size:22px" aria-hidden="true"></span><div><b>ark</b><span class="sub">初始設定</span></div></div>
+  <ol id="stepNav">
+    <li><a href="#stepProvider"><span class="n">01</span>模型供應商</a></li>
+    <li><a href="#stepModel"><span class="n">02</span>預設模型</a></li>
+    <li><a href="#stepAuth"><span class="n">03</span>管理者登入</a></li>
+    <li><a href="#stepWorkspace"><span class="n">04</span>工作目錄</a></li>
+    <li><a href="#stepSecurity"><span class="n">05</span>安全模式</a></li>
+    <li><a href="#stepChannel"><span class="n">06</span>聊天平台</a></li>
+    <li><a href="#stepService"><span class="n">07</span>服務</a></li>
+  </ol>
+  <p class="foot">一次性連結，30 分鐘內有效。<br>金鑰只進保管庫，不寫入設定檔。</p>
+</aside>
+<main class="setup" id="setup">
+  <header>
+    <span class="kicker">First-run setup</span>
+    <h1>讓 ark 開始工作</h1>
+  </header>
+  <p class="hint" id="intro">這個一次性連結只能完成一次設定；完成後精靈會自動鎖定。金鑰只存進保管庫，不會顯示在畫面上，也不會寫進設定檔。</p>
+
+  <section id="blocked" class="notice" hidden>
+    <h2>無法使用設定精靈</h2>
+    <p id="blockedReason" class="error"></p>
+    <p class="hint">在主機上執行 <code>ark setup link</code> 取得新的一次性連結；設定已完成時用 <code>ark app open</code> 開啟主控台。</p>
+  </section>
+
+  <form id="wizard" hidden novalidate>
+    <fieldset id="stepProvider">
+      <legend>01　模型供應商與金鑰</legend>
+      <label for="provider">供應商</label>
+      <select id="provider" name="provider" required></select>
+      <div id="customFields" hidden>
+        <label for="customId">名稱（英數，用於 provider/model）</label>
+        <input id="customId" name="customId" autocomplete="off" pattern="[A-Za-z0-9_-]+">
+      </div>
+      <label for="baseUrl">服務位址（選填，預設用供應商的官方位址）</label>
+      <input id="baseUrl" name="baseUrl" type="url" placeholder="https://…" autocomplete="off">
+      <div id="keyField">
+        <label for="apiKey">API 金鑰</label>
+        <input id="apiKey" name="apiKey" type="password" autocomplete="off" spellcheck="false">
+        <p class="hint" id="keyHint"></p>
+      </div>
+      <div class="row">
+        <button type="button" class="secondary" id="testProvider">測試連線並列出模型</button>
+        <span class="status" id="testStatus" role="status" aria-live="polite"></span>
+      </div>
+    </fieldset>
+
+    <fieldset id="stepModel">
+      <legend>02　預設模型</legend>
+      <label for="model">模型名稱</label>
+      <input id="model" name="model" list="models" required autocomplete="off">
+      <datalist id="models"></datalist>
+    </fieldset>
+
+    <fieldset id="stepAuth">
+      <legend>03　管理者登入方式</legend>
+      <div class="choice"><input type="radio" name="auth" id="authToken" value="token" checked><label for="authToken">本機權杖（完成後產生的主控台連結即是管理者憑證）</label></div>
+      <div class="choice"><input type="radio" name="auth" id="authOidc" value="oidc"><label for="authOidc">OIDC 單一登入（Keycloak、Authentik、Entra ID…）</label></div>
+      <div id="oidcFields" hidden>
+        <label for="oidcIssuer">Issuer（https://…）</label>
+        <input id="oidcIssuer" name="oidcIssuer" type="url" autocomplete="off">
+        <label for="oidcClient">Client ID</label>
+        <input id="oidcClient" name="oidcClient" autocomplete="off">
+        <label for="oidcSecret">Client secret（公開用戶端留空）</label>
+        <input id="oidcSecret" name="oidcSecret" type="password" autocomplete="off">
+      </div>
+    </fieldset>
+
+    <fieldset id="stepWorkspace">
+      <legend>04　工作目錄</legend>
+      <label for="workspace">agent 預設在這個目錄工作</label>
+      <input id="workspace" name="workspace" autocomplete="off">
+    </fieldset>
+
+    <fieldset id="stepSecurity">
+      <legend>05　安全模式</legend>
+      <div class="choice"><input type="radio" name="security" id="secStrict" value="strict"><label for="secStrict">嚴格：每個動作都要核准，禁止提權，只在工作目錄內</label></div>
+      <div class="choice"><input type="radio" name="security" id="secBalanced" value="balanced" checked><label for="secBalanced">平衡（建議）：低風險動作自動放行，其餘詢問</label></div>
+      <div class="choice"><input type="radio" name="security" id="secRelaxed" value="relaxed"><label for="secRelaxed">寬鬆：自動核准，對外連線不詢問</label></div>
+    </fieldset>
+
+    <fieldset id="stepChannel">
+      <legend>06　聊天平台（選填）</legend>
+      <label for="channelKind">平台</label>
+      <select id="channelKind" name="channelKind">
+        <option value="">略過</option>
+        <option value="telegram">Telegram</option>
+        <option value="discord">Discord</option>
+      </select>
+      <div id="channelFields" hidden>
+        <label for="channelToken">Bot token</label>
+        <input id="channelToken" name="channelToken" type="password" autocomplete="off">
+        <label for="channelOwner">擁有者 ID（核准者＝管理者，選填）</label>
+        <input id="channelOwner" name="channelOwner" autocomplete="off">
+      </div>
+    </fieldset>
+
+    <fieldset id="stepService">
+      <legend>07　服務</legend>
+      <div class="choice"><input type="checkbox" id="autostart" name="autostart" checked><label for="autostart">開機時自動啟動 ark</label></div>
+      <p class="hint" id="modeHint"></p>
+    </fieldset>
+
+    <div class="row applybar">
+      <button type="submit" id="apply">完成設定</button>
+      <span class="status" id="applyStatus" role="status" aria-live="polite"></span>
+    </div>
+  </form>
+
+  <section id="done" hidden>
+    <h2>設定完成</h2>
+    <ul class="log" id="doneLog"></ul>
+    <p>ark 正在以新設定重新啟動，數秒後會自動前往主控台。</p>
+    <p><a id="consoleLink" href="/">開啟主控台</a></p>
+  </section>
+</main>
+</div>
+<script src="/ui/setup.js"></script>
+</body>
+</html>

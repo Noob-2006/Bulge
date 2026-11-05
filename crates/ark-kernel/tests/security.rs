@@ -94,7 +94,7 @@ fn env(cfg_mut: impl FnOnce(&mut Config), approver: Arc<dyn Approver>) -> Env {
     let root = ark_core::tmp::scratch_path(format!("ark-sec-{}", n()));
     let ws = root.join("ws");
     std::fs::create_dir_all(&ws).unwrap();
-    let paths = Paths { data: root.join("data"), config_dir: root.join("cfg"), runtime: root.join("run") };
+    let paths = Paths { data: root.join("data"), config_dir: root.join("cfg"), runtime: root.join("run"), ..Default::default() };
     let mut cfg = Config::default();
     cfg.model.default = "main/m".into();
     cfg.model.aux = "aux/m".into();
@@ -761,4 +761,73 @@ fn h11_output_secrets_are_masked_and_a_commit_with_a_key_asks() {
     let asked = r.asked.lock().unwrap().clone();
     assert!(asked.iter().any(|a| a.reason.contains("AWS access key") && a.reason.contains("H11")), "{asked:?} {gates:?}");
     assert_eq!(e.sh.load(Ordering::SeqCst), 1, "the commit did not run (only the echo did)");
+}
+
+/// Four eyes: a dual-controlled call waits for two distinct approvers who are not the session's
+/// owner; yolo and durable grants do not apply; every request / vote / answer is audited with
+/// who; a quorum that is not reached in time is a deny (and an `approval.expired` record).
+#[test]
+fn dual_control_needs_two_distinct_non_requesters() {
+    use ark_kernel::approver::{answer_as, Answered, Pending, PendingItem};
+    use ark_security::audit::{self, Actor};
+    let pending = Arc::new(Pending::new(Duration::from_secs(30), Box::new(|_| {})));
+    let e = env(
+        |c| {
+            c.approvals.dual_control = ark_security::dual_control::DualControlConfig { enabled: true, gates: vec!["privilege".into()], approver_roles: vec!["admin".into(), "user".into()], expiry_secs: 30, ..Default::default() };
+        },
+        pending.clone(),
+    );
+    let data = e.k.paths.data.clone();
+    let id = e.k.create_session(&e.ws, None, None, None).unwrap();
+    ark_kernel::governance::note_owner(&data, &id, "sso:req@corp.example");
+    ap::set_session_yolo(&data, &id, Some(true)).unwrap();
+    ap::add_grant(&data, ap::GrantKind::Gate, "sudo", Some("privilege"), "test").unwrap();
+    call(&e, "sh", json!({"cmd": "sudo systemctl restart nginx"}));
+    let k = e.k.clone();
+    let sid = id.clone();
+    let h = std::thread::spawn(move || {
+        k.submit(&sid, "go", "cli").unwrap();
+        k.run(&sid, RunOpts::default()).unwrap();
+    });
+    let aid = loop {
+        if let Some(PendingItem::Approval(a)) = pending.list().into_iter().next() {
+            break a.id;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    };
+    let q = ark_kernel::approver::quorum(&aid).expect("registered as dual control");
+    assert_eq!((q.required, q.requester.as_str()), (2, "sso:req@corp.example"));
+    let who = |n: &str, role: &str| Actor::new("sso", n).with_role(role);
+    assert!(answer_as(&*pending, &data, &aid, "once", &who("req@corp.example", "admin"), "app").unwrap_err().contains("cannot approve"));
+    assert!(answer_as(&*pending, &data, &aid, "once", &who("audrey", "auditor"), "app").is_err());
+    assert_eq!(answer_as(&*pending, &data, &aid, "always", &who("ann", "admin"), "app").unwrap(), Answered::Counted { have: 1, need: 2 });
+    assert!(answer_as(&*pending, &data, &aid, "once", &who("ann", "admin"), "app").unwrap_err().contains("already answered"));
+    assert!(!pending.list().is_empty(), "one approval is not enough");
+    assert_eq!(answer_as(&*pending, &data, &aid, "once", &who("bob", "user"), "app").unwrap(), Answered::Final);
+    h.join().unwrap();
+    let gates: Vec<String> = e.k.store.read(&id).unwrap().iter().filter_map(|x| if let EventKind::Gate { verdict, .. } = &x.kind { Some(verdict.clone()) } else { None }).collect();
+    assert_eq!(gates, vec!["allow (dual control by sso:ann + sso:bob)".to_string()], "neither /yolo nor the durable grant short-circuits it");
+    assert_eq!(e.sh.load(Ordering::SeqCst), 1);
+    assert!(ark_kernel::approver::quorum(&aid).is_none());
+    let recs = audit::query(&data, &audit::Query { kind: Some("approval".into()), limit: 100, ..Default::default() });
+    let kinds: Vec<(String, String)> = recs.iter().map(|r| (r["kind"].as_str().unwrap().to_string(), r["outcome"].as_str().unwrap().to_string())).collect();
+    assert_eq!(kinds[0], ("approval.request".into(), "pending".into()));
+    assert_eq!(kinds.iter().filter(|k| k.1 == "refused").count(), 3, "{kinds:?}");
+    let fin = recs.iter().find(|r| r["kind"] == "approval.answer").unwrap();
+    assert_eq!(fin["detail"]["approvals"], json!(["sso:ann", "sso:bob"]));
+    assert_eq!(fin["detail"]["requester"], "sso:req@corp.example");
+    assert_eq!(fin["session"], id.as_str(), "ids are recorded exactly");
+
+    // Nobody reaches the quorum in time: deny, recorded as expired.
+    let pending2 = Arc::new(Pending::new(Duration::from_secs(30), Box::new(|_| {})));
+    let e2 = env(|c| c.approvals.dual_control = ark_security::dual_control::DualControlConfig { enabled: true, tools: vec!["sh".into()], expiry_secs: 1, ..Default::default() }, pending2.clone());
+    call(&e2, "sh", json!({"cmd": "sudo id"}));
+    let (_, gates, res) = run(&e2, "cli");
+    assert_eq!(gates[0].1, "deny (dual control expired)");
+    assert!(res[0].contains("second approver"), "{res:?}");
+    assert_eq!(audit::query(&e2.k.paths.data, &audit::Query { kind: Some("approval.expired".into()), ..Default::default() }).len(), 1);
+    // A headless approver cannot satisfy dual control at all.
+    let e3 = env(|c| c.approvals.dual_control = ark_security::dual_control::DualControlConfig { enabled: true, tools: vec!["sh".into()], ..Default::default() }, Arc::new(Policy { allow_privilege: true, allow_egress: true }));
+    call(&e3, "sh", json!({"cmd": "sudo id"}));
+    assert_eq!(run(&e3, "cli").1[0].1, "deny (dual control)");
 }

@@ -393,7 +393,7 @@ mod tests {
     pub fn fixture(tag: &str) -> (PathBuf, Paths, PathBuf) {
         let d = ark_core::tmp::scratch_path(format!("ark-invoke-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
-        let paths = Paths { data: d.join("data"), config_dir: d.join("config"), runtime: d.join("run") };
+        let paths = Paths { data: d.join("data"), config_dir: d.join("config"), runtime: d.join("run"), ..Default::default() };
         let ws = d.join("ws");
         std::fs::create_dir_all(ws.join(".ark/skills/deploy/scripts")).unwrap();
         std::fs::write(ws.join(".ark/skills/deploy/SKILL.md"), "---\nname: deploy\ndescription: Ship it\nrequired_environment_variables: [DEPLOY_TOKEN_XYZ]\n---\nRun ${ARK_SKILL_DIR}/scripts/go.sh for ${ARK_SESSION_ID}").unwrap();

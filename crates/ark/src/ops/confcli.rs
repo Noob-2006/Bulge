@@ -111,6 +111,24 @@ pub fn dispatch(cmd: &str, a: &Args, _raw: &[String]) -> Option<R> {
 
 // ───────────── value parsing / paths ─────────────
 
+/// `ark config path`: the resolved layout (`ark_core::layout`, ent-008) and why this mode was chosen.
+pub fn print_paths(paths: &Paths, project: &Path, as_json: bool) {
+    let l = ark_core::layout::detect();
+    let share = ark_core::share::share_dir().map(|p| p.display().to_string()).unwrap_or_else(|| "(not found)".into());
+    if as_json {
+        let legacy: Vec<Value> = l.legacy.iter().map(|(w, p)| json!({"what": w, "path": p})).collect();
+        let v = json!({"mode": l.mode.as_str(), "reason": l.reason, "config": paths.user_config(), "project": project, "secrets": paths.secrets(), "policy": ark_kernel::managed::SYSTEM_DIR, "data": paths.data, "cache": paths.cache_dir(), "logs": paths.log_dir(), "daemon_log": paths.daemon_log(), "runtime": paths.runtime, "socket": paths.socket(), "workspace": paths.default_workspace(), "share": share, "legacy": legacy});
+        println!("{}", serde_json::to_string_pretty(&v).unwrap_or_default());
+        return;
+    }
+    println!("mode     {}  ({})", l.mode.as_str(), l.reason);
+    println!("user     {}\nproject  {}\nsecrets  {}\npolicy   {}/managed.toml", paths.user_config().display(), project.display(), paths.secrets().display(), ark_kernel::managed::SYSTEM_DIR);
+    println!("data     {}\ncache    {}\nlogs     {}\nruntime  {}\nsocket   {}\nworkspace {}\nshare    {share}", paths.data.display(), paths.cache_dir().display(), paths.log_dir().display(), paths.runtime.display(), paths.socket().display(), paths.default_workspace().display());
+    for (what, p) in &l.legacy {
+        println!("note     {what} is read from the pre-ent-008 location {} (see docs/paths.md)", p.display());
+    }
+}
+
 /// `--set`-style value: a TOML literal when it parses (numbers, bools, arrays, inline
 /// tables, quoted strings), otherwise the raw text as a string.
 pub fn parse_value(s: &str) -> toml::Value {
@@ -692,7 +710,7 @@ mod tests {
 
     fn paths() -> Paths {
         let root = ark_core::tmp::scratch_path(format!("ark-confcli-{}", ark_kernel::util::random_hex(6)));
-        Paths { data: root.join("data"), config_dir: root.join("config"), runtime: root.join("run") }
+        Paths { data: root.join("data"), config_dir: root.join("config"), runtime: root.join("run"), ..Default::default() }
     }
 
     #[test]

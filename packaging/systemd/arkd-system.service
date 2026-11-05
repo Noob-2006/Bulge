@@ -11,9 +11,14 @@ Type=notify
 NotifyAccess=main
 User=ark
 Group=ark
+Environment=ARK_MODE=system
 StateDirectory=ark ark/workspace
 StateDirectoryMode=0750
-Environment=ARK_HOME=/var/lib/ark
+CacheDirectory=ark
+LogsDirectory=ark
+RuntimeDirectory=ark
+RuntimeDirectoryMode=0750
+ReadWritePaths=-/etc/ark
 ExecStart=/usr/bin/ark daemon run -w /var/lib/ark/workspace
 WorkingDirectory=/var/lib/ark/workspace
 Restart=on-failure

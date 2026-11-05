@@ -690,7 +690,7 @@ mod tests {
     #[test]
     fn daemon_methods_report_the_node_and_audit_every_change() {
         let d = ark_core::tmp::TempDir::new("ark-cluster");
-        let paths = crate::config::Paths { data: d.path().join("data"), config_dir: d.path().join("cfg"), runtime: d.path().join("run") };
+        let paths = crate::config::Paths { data: d.path().join("data"), config_dir: d.path().join("cfg"), runtime: d.path().join("run"), ..Default::default() };
         let (pending, _cell) = crate::daemon::pending_approver(Duration::from_secs(5));
         let mut cfg = crate::config::Config::default();
         cfg.cluster.name = "solo".into();

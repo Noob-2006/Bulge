@@ -57,11 +57,14 @@ contents:
     expand: true
     dst: /usr/lib/tmpfiles.d/ark.conf
     file_info: { mode: 0644 }
-  # /etc/ark: administrator policy (ark_kernel::managed). The directories belong to the package,
-  # the policy files never do, so an upgrade or removal cannot touch an organisation's policy.
+  # /etc/ark: administrator policy (ark_kernel::managed) and, since ent-008, the system instance's
+  # config.toml + secrets (ark_core::layout::system::CONFIG). root:ark 1770: the service account
+  # can create and rewrite its own files, the sticky bit stops it replacing root-owned policy, and
+  # the policy loader refuses any policy file not owned by root. The directories belong to the
+  # package, the files in them never do, so an upgrade or removal cannot touch policy or config.
   - dst: /etc/ark
     type: dir
-    file_info: { mode: 0755 }
+    file_info: { mode: 01770, owner: root, group: ark }
   - dst: /etc/ark/managed.d
     type: dir
     file_info: { mode: 0755 }

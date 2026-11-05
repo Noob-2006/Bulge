@@ -770,7 +770,7 @@ mod tests {
         std::fs::write(root.join("workspace/SOUL.md"), "I am OpenClaw.").unwrap();
         std::fs::write(root.join("workspace/MEMORY.md"), "- likes tea\n- lives in Taipei\n").unwrap();
         std::fs::write(root.join("workspace/memory/2026-01-01.md"), "met Bob").unwrap();
-        let p = Paths { data: root.join("ark/data"), config_dir: root.join("ark/config"), runtime: root.join("ark/run") };
+        let p = Paths { data: root.join("ark/data"), config_dir: root.join("ark/config"), runtime: root.join("ark/run"), ..Default::default() };
         let acts = plan_openclaw(&root, &p.data).unwrap();
         assert!(acts.contains(&Act::Secret("TELEGRAM_BOT_TOKEN".into(), "123:abc".into())));
         assert!(acts.contains(&Act::Secret("ANTHROPIC_API_KEY".into(), "sk-ant-x".into())));

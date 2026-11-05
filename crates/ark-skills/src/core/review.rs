@@ -463,7 +463,7 @@ mod tests {
     fn fixture(tag: &str) -> (std::path::PathBuf, Paths, std::path::PathBuf) {
         let d = ark_core::tmp::scratch_path(format!("ark-review-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
-        let paths = Paths { data: d.join("data"), config_dir: d.join("config"), runtime: d.join("run") };
+        let paths = Paths { data: d.join("data"), config_dir: d.join("config"), runtime: d.join("run"), ..Default::default() };
         let ws = d.join("ws");
         std::fs::create_dir_all(ws.join(".ark/skills")).unwrap();
         (d, paths, ws)

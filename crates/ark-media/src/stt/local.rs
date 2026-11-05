@@ -38,17 +38,6 @@ pub const LOCAL_MODELS: &[&str] = &["base", "tiny", "small", "medium", "large-v3
 pub const DEFAULT_LOCAL_MODEL: &str = "base";
 pub const DEFAULT_LOCAL_LANGUAGE: &str = "en";
 
-/// `$ARK_HOME` or `~/.local/share/ark`.
-pub fn ark_home() -> PathBuf {
-    if let Some(h) = std::env::var_os("ARK_HOME").filter(|h| !h.is_empty()) {
-        return PathBuf::from(h);
-    }
-    if let Some(x) = std::env::var_os("XDG_DATA_HOME").filter(|h| !h.is_empty()) {
-        return PathBuf::from(x).join("ark");
-    }
-    ark_core::tool::expand_home("~/.local/share/ark")
-}
-
 /// A valid faster-whisper size: cloud-only names (`whisper-1`, Groq models) fall back to `base`.
 pub fn normalize_model(name: Option<&str>) -> String {
     match name.map(str::trim).filter(|s| !s.is_empty()) {
@@ -271,7 +260,7 @@ pub fn whisper_cpp_models(m: &Media) -> Vec<(String, String, String)> {
 }
 
 pub fn whisper_cpp_dir(m: &Media) -> PathBuf {
-    local_str(m, "models_dir").map(|d| ark_core::tool::expand_home(&d)).unwrap_or_else(|| ark_home().join("cache").join("whisper.cpp"))
+    local_str(m, "models_dir").map(|d| ark_core::tool::expand_home(&d)).unwrap_or_else(|| ark_core::layout::cache_dir().join("whisper.cpp"))
 }
 
 pub fn whisper_cpp_binary(m: &Media) -> Option<PathBuf> {

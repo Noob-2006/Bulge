@@ -39,16 +39,18 @@ fn profile_arg() -> String {
     }
 }
 
+/// systemd's per-user unit directory (`$XDG_CONFIG_HOME/systemd/user`).
 pub fn user_unit_dir() -> PathBuf {
-    std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from).unwrap_or_else(|| PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join(".config")).join("systemd/user")
+    std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from).filter(|p| p.is_absolute()).unwrap_or_else(|| ark_core::layout::home().join(".config")).join("systemd/user")
 }
 
-/// Where a system instance keeps everything (`StateDirectory=ark`).
-pub const SYSTEM_HOME: &str = "/var/lib/ark";
+/// Where a system instance keeps its state (`StateDirectory=ark`); the rest of the FHS layout
+/// (`/etc/ark`, `/var/cache/ark`, `/var/log/ark`, `/run/ark`) is in [`ark_core::layout::system`].
+pub const SYSTEM_HOME: &str = ark_core::layout::system::DATA;
 /// The dedicated system account of the system service (created by `sysusers.d`).
-pub const SYSTEM_USER: &str = "ark";
+pub const SYSTEM_USER: &str = ark_core::layout::system::USER;
 /// Default workspace of the system instance.
-pub const SYSTEM_WORKSPACE: &str = "/var/lib/ark/workspace";
+pub const SYSTEM_WORKSPACE: &str = ark_core::layout::system::WORKSPACE;
 
 /// The systemd unit. `user` = `Some(name)` for a system unit (dedicated account, state under
 /// `/var/lib/ark`, sandboxing that only a system manager can apply).
@@ -73,6 +75,8 @@ const DIRECTIVE_SINCE: &[(&str, u32)] = &[
     ("LockPersonality", 235),
     ("StateDirectory", 235),
     ("StateDirectoryMode", 235),
+    ("CacheDirectory", 235),
+    ("LogsDirectory", 235),
     ("RestrictSUIDSGID", 242),
     ("ProtectKernelLogs", 244),
     ("ProtectClock", 245),
@@ -81,6 +85,8 @@ const DIRECTIVE_SINCE: &[(&str, u32)] = &[
 /// `StartLimitIntervalSec=`/`StartLimitBurst=` live in `[Unit]` from systemd 229; before that
 /// (RHEL/CentOS 7 ships 219) they are `StartLimitInterval=`/`StartLimitBurst=` in `[Service]`.
 const START_LIMIT_UNIT_SECTION_SINCE: u32 = 229;
+/// Before 231 the directive was called `ReadWriteDirectories=`.
+const READ_WRITE_PATHS_SINCE: u32 = 231;
 
 /// Rewrite a unit rendered for a current systemd so that systemd `ver` accepts all of it (ent-025).
 /// `None` (version unknown) keeps the modern text; so does anything >= 245. Idempotent.
@@ -98,6 +104,12 @@ pub fn degrade_unit(text: &str, ver: Option<u32>) -> String {
         if let Some(k) = key {
             if DIRECTIVE_SINCE.iter().any(|(d, since)| *d == k && ver < *since) {
                 changed = true;
+                continue;
+            }
+            // `ReadWritePaths=` is the 231 name of `ReadWriteDirectories=`: same meaning.
+            if ver < READ_WRITE_PATHS_SINCE && k == "ReadWritePaths" {
+                changed = true;
+                out.push(line.replacen("ReadWritePaths", "ReadWriteDirectories", 1));
                 continue;
             }
             if ver < START_LIMIT_UNIT_SECTION_SINCE && section == "[Unit]" && (k == "StartLimitIntervalSec" || k == "StartLimitBurst") {
@@ -141,7 +153,14 @@ pub fn systemd_version() -> Option<u32> {
 pub fn render_unit(exe: &Path, workspace: &Path, user: Option<&str>, prof: &str, home_env: &str) -> String {
     let (who, target, sandbox) = match user {
         Some(u) => (
-            format!("User={u}\nGroup={u}\nStateDirectory=ark ark/workspace\nStateDirectoryMode=0750\nEnvironment=ARK_HOME={SYSTEM_HOME}\n"),
+            // ent-008: the FHS layout (ark_core::layout::system). systemd creates the state,
+            // cache, log and runtime directories owned by the account; /etc/ark (config and
+            // secrets, next to the root-owned policy) comes from the package (root:ark, 1770)
+            // and is only made writable here.
+            format!(
+                "User={u}\nGroup={u}\nEnvironment=ARK_MODE=system\nStateDirectory=ark ark/workspace\nStateDirectoryMode=0750\nCacheDirectory=ark\nLogsDirectory=ark\nRuntimeDirectory=ark\nRuntimeDirectoryMode=0750\nReadWritePaths=-{}\n",
+                ark_core::layout::system::CONFIG
+            ),
             "multi-user.target",
             "# A system manager can apply the full sandbox (user units cannot without user namespaces).
 PrivateTmp=yes
@@ -211,7 +230,8 @@ pub fn sysusers(user: &str) -> String {
 
 /// `tmpfiles.d` entry for the system instance's directories (also created by `StateDirectory=`).
 pub fn tmpfiles(user: &str) -> String {
-    format!("# ark agent daemon: state and workspace of the system instance\nd {SYSTEM_HOME} 0750 {user} {user} -\nd {SYSTEM_WORKSPACE} 0750 {user} {user} -\n")
+    use ark_core::layout::system::{CACHE, CONFIG, LOGS, RUNTIME};
+    format!("# ark agent daemon: directories of the system instance (ark_core::layout::system)\nd {CONFIG} 1770 root {user} -\nd {SYSTEM_HOME} 0750 {user} {user} -\nd {SYSTEM_WORKSPACE} 0750 {user} {user} -\nd {CACHE} 0750 {user} {user} -\nd {LOGS} 0750 {user} {user} -\nd {RUNTIME} 0750 {user} {user} -\n")
 }
 
 pub fn launchd_label() -> String {
@@ -471,7 +491,7 @@ pub fn dispatch(cmd: &str, a: &Args, _raw: &[String]) -> Option<R> {
         match sub {
             "install" if a.flag("launchd") => {
                 let exe = std::env::current_exe().map_err(|e| e.to_string())?;
-                let body = plist(&exe, &crate::workspace(a)?, &paths.data.join("arkd.log"));
+                let body = plist(&exe, &crate::workspace(a)?, &paths.daemon_log());
                 let p = PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join("Library/LaunchAgents").join(format!("{}.plist", launchd_label()));
                 if cfg!(target_os = "macos") {
                     std::fs::create_dir_all(p.parent().unwrap()).map_err(|e| e.to_string())?;
@@ -635,7 +655,7 @@ mod tests {
     #[test]
     fn system_unit_uses_the_dedicated_account_and_state_directory() {
         let u = render_unit(Path::new("/usr/bin/ark"), Path::new(SYSTEM_WORKSPACE), Some("ark"), "", "");
-        for want in ["User=ark\nGroup=ark", "StateDirectory=ark ark/workspace", "Environment=ARK_HOME=/var/lib/ark", "ProtectSystem=full", "PrivateTmp=yes", "ProtectKernelLogs=yes", "WantedBy=multi-user.target", "NoNewPrivileges=yes", "Type=notify"] {
+        for want in ["User=ark\nGroup=ark", "StateDirectory=ark ark/workspace", "Environment=ARK_MODE=system", "CacheDirectory=ark", "LogsDirectory=ark", "RuntimeDirectory=ark", "ReadWritePaths=-/etc/ark", "ProtectSystem=full", "PrivateTmp=yes", "ProtectKernelLogs=yes", "WantedBy=multi-user.target", "NoNewPrivileges=yes", "Type=notify"] {
             assert!(u.contains(want), "system unit lacks {want}:\n{u}");
         }
         // The user unit never carries system-only directives, and a custom ARK_HOME shows up there only.
@@ -644,6 +664,10 @@ mod tests {
         assert!(!render_unit(Path::new("/x/ark"), Path::new("/w"), Some("ark"), "", "Environment=ARK_HOME=/h\n").contains("ARK_HOME=/h"));
         assert!(sysusers("ark").starts_with("# ") && sysusers("ark").contains("u ark - \"ark agent\" /var/lib/ark"));
         assert!(tmpfiles("ark").contains("d /var/lib/ark/workspace 0750 ark ark -"));
+        for d in ["d /etc/ark 1770 root ark -", "d /var/cache/ark 0750 ark ark -", "d /var/log/ark 0750 ark ark -", "d /run/ark 0750 ark ark -"] {
+            assert!(tmpfiles("ark").contains(d), "tmpfiles lacks {d}");
+        }
+        assert!(!u.contains("ARK_HOME"), "the system unit uses the FHS layout, not ARK_HOME");
         // audit accepts what we render.
         let exe = std::env::current_exe().unwrap();
         let sys = render_unit(&exe, Path::new(SYSTEM_WORKSPACE), Some("ark"), "", "");
@@ -662,7 +686,7 @@ mod tests {
             }
             assert!(nix.contains(&format!("{k} =")), "nix/nixos.nix lacks {k} (kept in step with ops/service.rs)");
         }
-        assert!(nix.contains("ARK_HOME = \"/var/lib/ark\"") && nix.contains("users.users.ark"));
+        assert!(nix.contains("ARK_MODE = \"system\"") && nix.contains("users.users.ark") && nix.contains("d /etc/ark 1770 root ark -"));
     }
 
     #[test]
@@ -677,11 +701,11 @@ mod tests {
         let section = |name: &str| -> String { old.split(&format!("[{name}]\n")).nth(1).unwrap().split("\n[").next().unwrap().to_string() };
         assert!(!section("Unit").contains("StartLimit"), "StartLimit* must leave [Unit]:\n{old}");
         assert!(section("Service").contains("StartLimitInterval=300\nStartLimitBurst=5"), "{old}");
-        for gone in ["StateDirectory", "ProtectKernelLogs", "ProtectClock", "RestrictSUIDSGID", "LockPersonality", "ProtectKernelModules", "RestrictRealtime"] {
+        for gone in ["StateDirectory", "CacheDirectory", "LogsDirectory", "ReadWritePaths", "ProtectKernelLogs", "ProtectClock", "RestrictSUIDSGID", "LockPersonality", "ProtectKernelModules", "RestrictRealtime"] {
             assert!(!old.contains(&format!("\n{gone}")), "{gone} is unknown to systemd 219:\n{old}");
         }
         // what 219 does know stays: the sandbox that matters and the lifecycle.
-        for kept in ["Type=notify", "NotifyAccess=main", "KillMode=mixed", "NoNewPrivileges=yes", "PrivateTmp=yes", "ProtectSystem=full", "User=ark", "Environment=ARK_HOME=/var/lib/ark", "WantedBy=multi-user.target"] {
+        for kept in ["Type=notify", "NotifyAccess=main", "KillMode=mixed", "NoNewPrivileges=yes", "PrivateTmp=yes", "ProtectSystem=full", "User=ark", "Environment=ARK_MODE=system", "ReadWriteDirectories=-/etc/ark", "RuntimeDirectory=ark", "WantedBy=multi-user.target"] {
             assert!(old.contains(kept), "{kept} lost:\n{old}");
         }
         // 233 knows StateDirectory? no (235); 236 does and still lacks RestrictSUIDSGID (242).
@@ -745,7 +769,7 @@ mod tests {
     #[test]
     fn restart_storm_detection() {
         let root = ark_core::tmp::scratch_path(format!("ark-storm-{}", ark_kernel::util::random_hex(4)));
-        let p = Paths { data: root.join("data"), config_dir: root.join("c"), runtime: root.join("r") };
+        let p = Paths { data: root.join("data"), config_dir: root.join("c"), runtime: root.join("r"), ..Default::default() };
         assert!(record_start(&p).is_none());
         assert!(record_start(&p).is_none());
         assert!(record_start(&p).unwrap().contains("3 times"));

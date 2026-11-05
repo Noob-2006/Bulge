@@ -29,11 +29,46 @@ pub struct AuditConfig {
     /// Seconds between SIEM export pumps in the daemon.
     pub export_secs: u64,
     pub export: ark_security::audit_export::ExportConfig,
+    /// Ed25519 seed (base64, 32 bytes) that signs rotated segment seals: a file path, a
+    /// `{{secret:NAME}}` reference, or empty (seals stay unsigned). See `ark audit seal-key`.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub seal_key: String,
+    /// The matching public key (`ed25519:<base64>`) `ark audit verify` checks seals against;
+    /// empty = derived from `seal_key` when that is readable.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub seal_pubkey: String,
+    /// RFC 3161 Time-Stamping Authority URL; each signed seal is also timestamped there.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub tsa_url: String,
+    /// `ark audit verify` fails while any archived seal is unsigned.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub require_signed_seals: bool,
+}
+
+impl AuditConfig {
+    /// The seal-signing seed, resolved (`subst` resolves `{{secret:…}}`), if configured.
+    pub fn seal_seed(&self, subst: &dyn Fn(&str) -> String) -> Option<String> {
+        let k = self.seal_key.trim();
+        if k.is_empty() {
+            return None;
+        }
+        let v = if k.contains("{{secret:") { subst(k) } else { std::fs::read_to_string(ark_core::tool::expand_home(k)).ok()? };
+        let v = v.trim().to_string();
+        (!v.is_empty() && !v.contains("{{secret:")).then_some(v)
+    }
+
+    /// The public key seals are verified against: `seal_pubkey`, else derived from the seed.
+    pub fn seal_public(&self, subst: &dyn Fn(&str) -> String) -> Option<String> {
+        if !self.seal_pubkey.trim().is_empty() {
+            return Some(self.seal_pubkey.trim().to_string());
+        }
+        self.seal_seed(subst).and_then(|s| ark_security::signing::public_of(&s).ok())
+    }
 }
 
 impl Default for AuditConfig {
     fn default() -> Self {
-        AuditConfig { rotate_mb: 64, log_reads: false, export_secs: 10, export: Default::default() }
+        AuditConfig { rotate_mb: 64, log_reads: false, export_secs: 10, export: Default::default(), seal_key: String::new(), seal_pubkey: String::new(), tsa_url: String::new(), require_signed_seals: false }
     }
 }
 
@@ -89,6 +124,44 @@ pub struct AlertsConfig {
     pub targets: Vec<String>,
     /// Signing secret for webhook targets (`{{secret:NAME}}`).
     pub secret: Option<String>,
+    /// The Net-SNMP `snmptrap` binary for `snmp://community@host[:port]` targets (SNMPv2c
+    /// traps to a legacy NMS). Default: `snmptrap` on PATH.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub snmptrap: Option<String>,
+}
+
+/// Enterprise OID ark's traps use (32473 is the IANA example enterprise number, RFC 5612;
+/// map it in the NMS, or load the varbinds by OID).
+pub const SNMP_TRAP_OID: &str = "1.3.6.1.4.1.32473.1.0.1";
+
+/// Send one SNMPv2c trap through `snmptrap`: `target` is `snmp://community@host[:port]`.
+/// Varbinds: `.1.1` the alert key, `.1.2` the text (both strings).
+pub fn snmp_trap(bin: &str, target: &str, key: &str, text: &str) -> Result<String, String> {
+    let rest = target.strip_prefix("snmp://").ok_or("not an snmp:// target")?;
+    let (community, host) = rest.rsplit_once('@').unwrap_or(("public", rest));
+    let host = host.trim_end_matches('/');
+    if host.is_empty() || host.starts_with('-') || community.starts_with('-') {
+        return Err(format!("{target}: bad host or community"));
+    }
+    let host = if host.contains(':') { host.to_string() } else { format!("{host}:162") };
+    let mut cmd = std::process::Command::new(bin);
+    cmd.args(["-v", "2c", "-c", community, &host, "", SNMP_TRAP_OID]).args([format!("{SNMP_TRAP_OID}.1.1"), "s".into(), key.into(), format!("{SNMP_TRAP_OID}.1.2"), "s".into(), text.chars().take(255).collect()]);
+    let mut tries = 0;
+    let out = loop {
+        match cmd.output() {
+            // A just-written binary can be briefly busy (another thread's fork); retry.
+            Err(e) if e.raw_os_error() == Some(libc::ETXTBSY) && tries < 20 => {
+                tries += 1;
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            r => break r.map_err(|e| format!("snmp: cannot run `{bin}`: {e} (install net-snmp-utils / snmp, or set [alerts] snmptrap)"))?,
+        }
+    };
+    if out.status.success() {
+        Ok(format!("snmp trap to {host}"))
+    } else {
+        Err(format!("snmp: {}", String::from_utf8_lossy(&out.stderr).trim().chars().take(300).collect::<String>()))
+    }
 }
 
 // ───────────────────────── legal holds ─────────────────────────
@@ -204,25 +277,54 @@ pub fn owner_of(rt: &Runtime, session: &str) -> Owner {
 
 /// [`owner_of`] without a runtime (the CLI opens the store itself).
 pub fn owner_in(paths: &crate::config::Paths, store: &crate::store::Store, session: &str) -> Owner {
+    registry_owner(paths, &owner_label_in(paths, store, session))
+}
+
+/// The principal label (`kind:name`) a session belongs to, resolved like [`owner_in`] but
+/// without mapping it onto the user registry (dual control compares principals).
+pub fn owner_label_in(paths: &crate::config::Paths, store: &crate::store::Store, session: &str) -> String {
     let o = owners(&paths.data);
     let mut cur = session.to_string();
     for _ in 0..8 {
         if let Some(l) = o.get(&cur) {
-            return registry_owner(paths, l);
+            return l.clone();
         }
         let evs = store.read(&cur).unwrap_or_default();
         if let Some(src) = evs.iter().find_map(|e| match &e.kind {
             EventKind::Inbox { source, .. } if source.starts_with("channel:") => Some(source.clone()),
             _ => None,
         }) {
-            return registry_owner(paths, &src);
+            return src;
         }
         match store.list().into_iter().find(|s| s.id == cur).and_then(|s| s.parent) {
             Some(p) => cur = p,
             None => break,
         }
     }
-    registry_owner(paths, &ark_security::audit::Actor::local().label())
+    ark_security::audit::Actor::local().label()
+}
+
+/// The registered user (`ark users`) a principal label belongs to, if any: an SSO login, a
+/// linked chat identity or a registry name all resolve to the same person.
+pub fn registered_person(data: &Path, label: &str) -> Option<crate::agents::User> {
+    let paths = crate::config::Paths { data: data.to_path_buf(), config_dir: PathBuf::new(), runtime: PathBuf::new(), ..Default::default() };
+    let (kind, name) = label.split_once(':').unwrap_or(("local", label));
+    match kind {
+        "channel" => name.split_once(':').and_then(|(c, s)| crate::agents::find_user(&paths, c, s)),
+        "sso" | "saml" | "basic" | "plugin" | "header" => crate::agents::find_login(&paths, name, name).or_else(|| crate::agents::users(&paths).into_iter().find(|u| u.name == name)),
+        _ => crate::agents::users(&paths).into_iter().find(|u| u.name == name || u.id == name || u.identities.iter().any(|i| i.channel == kind && i.sender == name)),
+    }
+}
+
+/// Are two principal labels the same person (equal, or one registered user)?
+pub fn same_person(data: &Path, a: &str, b: &str) -> bool {
+    if a == b {
+        return true;
+    }
+    match (registered_person(data, a), registered_person(data, b)) {
+        (Some(x), Some(y)) => x.id == y.id,
+        _ => false,
+    }
 }
 
 /// The sessions among `sessions` that belong to the registered user `user` (ent-049: whose
@@ -346,6 +448,11 @@ pub fn alert(rt: &Runtime, key: &str, text: &str) -> Vec<String> {
     let _ = crate::util::atomic_write(&alerts_state(data), serde_json::to_string(&sent).unwrap_or_default().as_bytes());
     let mut receipts = vec![];
     for t in &rt.cfg.alerts.targets {
+        if t.starts_with("snmp://") {
+            let bin = rt.cfg.alerts.snmptrap.as_deref().unwrap_or("snmptrap");
+            receipts.push(snmp_trap(bin, t, key, text).unwrap_or_else(|e| e));
+            continue;
+        }
         let target = match crate::outbound::Target::parse(t) {
             Ok(crate::outbound::Target::Webhook { url, .. }) => crate::outbound::Target::Webhook { url, secret: rt.cfg.alerts.secret.clone() },
             Ok(t) => t,
@@ -533,7 +640,7 @@ mod tests {
 
     fn kernel(tmp: &ark_core::tmp::TempDir, mutate: impl FnOnce(&mut crate::config::Config)) -> crate::kernel::Kernel {
         let root = tmp.path();
-        let paths = crate::config::Paths { data: root.join("data"), config_dir: root.join("cfg"), runtime: root.join("run") };
+        let paths = crate::config::Paths { data: root.join("data"), config_dir: root.join("cfg"), runtime: root.join("run"), ..Default::default() };
         std::fs::create_dir_all(&paths.data).unwrap();
         let mut cfg = crate::config::Config::default();
         cfg.model.default = "fake/m".into();
@@ -617,6 +724,35 @@ mod tests {
         assert!(enforce_retention(&k).is_empty(), "a global hold stops every deletion");
     }
 
+    /// Legacy NMS: an `snmp://community@host` alert target sends an SNMPv2c trap through
+    /// `snmptrap` (a fake binary here) with the key and text as string varbinds.
+    #[test]
+    fn alerts_reach_a_legacy_nms_as_snmp_traps() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = ark_core::tmp::TempDir::new("ark-gov-snmp");
+        let fake = tmp.path().join("snmptrap");
+        let argv = tmp.path().join("argv.txt");
+        std::fs::write(&fake, format!("#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\n", argv.display())).unwrap();
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let bin = fake.display().to_string();
+        let k = kernel(&tmp, |c| {
+            c.alerts.targets = vec!["snmp://n0c-ro@nms.corp.example".into()];
+            c.alerts.snmptrap = Some(bin.clone());
+        });
+        let mut r = alert(&k, "quota:ann:2026-11", "ann used 90% of the monthly quota");
+        for _ in 0..50 {
+            if argv.exists() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert_eq!(r.pop().unwrap(), "snmp trap to nms.corp.example:162");
+        let a = std::fs::read_to_string(&argv).unwrap();
+        assert_eq!(a, format!("-v\n2c\n-c\nn0c-ro\nnms.corp.example:162\n\n{SNMP_TRAP_OID}\n{SNMP_TRAP_OID}.1.1\ns\nquota:ann:2026-11\n{SNMP_TRAP_OID}.1.2\ns\nann used 90% of the monthly quota\n"));
+        assert!(snmp_trap(&bin, "snmp://-x@h", "k", "t").is_err(), "no option injection through the target");
+        assert!(snmp_trap("/nonexistent/snmptrap", "snmp://c@h", "k", "t").unwrap_err().contains("install"));
+    }
+
     #[test]
     fn answers_record_the_approver() {
         let tmp = ark_core::tmp::TempDir::new("ark-gov-appr");
@@ -672,7 +808,7 @@ mod tests {
         }
         let tmp = ark_core::tmp::TempDir::new("ark-gov-team");
         let root = tmp.path();
-        let paths = crate::config::Paths { data: root.join("data"), config_dir: root.join("cfg"), runtime: root.join("run") };
+        let paths = crate::config::Paths { data: root.join("data"), config_dir: root.join("cfg"), runtime: root.join("run"), ..Default::default() };
         std::fs::create_dir_all(&paths.data).unwrap();
         let mut cfg = crate::config::Config::default();
         cfg.model.default = "fake/m".into();

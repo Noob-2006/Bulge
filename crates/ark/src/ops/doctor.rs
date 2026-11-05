@@ -906,7 +906,7 @@ mod tests {
 
     fn ctx(f: impl FnOnce(&mut Config)) -> Ctx {
         let root = ark_core::tmp::scratch_path(format!("ark-doc-{}", ark_kernel::util::random_hex(6)));
-        let paths = Paths { data: root.join("data"), config_dir: root.join("config"), runtime: root.join("run") };
+        let paths = Paths { data: root.join("data"), config_dir: root.join("config"), runtime: root.join("run"), ..Default::default() };
         for d in [&paths.data, &paths.config_dir, &paths.runtime, &root.join("ws")] {
             std::fs::create_dir_all(d).unwrap();
         }

@@ -305,7 +305,7 @@ mod tests {
         // Guard, not a bare dir: the test used to leave `ark-syscli-*` behind on every run.
         let td = ark_core::tmp::TempDir::new("ark-syscli");
         let root = td.path().to_path_buf();
-        (td, Paths { data: root.join("data"), config_dir: root.join("cfg"), runtime: root.join("run") })
+        (td, Paths { data: root.join("data"), config_dir: root.join("cfg"), runtime: root.join("run"), ..Default::default() })
     }
     fn s(v: &[&str]) -> Vec<String> {
         v.iter().map(|x| x.to_string()).collect()

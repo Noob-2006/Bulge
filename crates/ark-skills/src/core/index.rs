@@ -245,7 +245,7 @@ mod tests {
     fn segment_and_delta_notes() {
         let d = ark_core::tmp::scratch_path(format!("ark-index-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
-        let paths = Paths { data: d.join("data"), config_dir: d.join("cfg"), runtime: d.join("run") };
+        let paths = Paths { data: d.join("data"), config_dir: d.join("cfg"), runtime: d.join("run"), ..Default::default() };
         let ws = d.join("ws");
         let mk = |n: &str| {
             std::fs::create_dir_all(ws.join(".ark/skills").join(n)).unwrap();
@@ -279,7 +279,7 @@ mod tests {
     fn no_index_means_no_baseline_and_rebuilds_stay_per_workspace() {
         let d = ark_core::tmp::scratch_path(format!("ark-index-ws-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
-        let paths = Paths { data: d.join("data"), config_dir: d.join("cfg"), runtime: d.join("run") };
+        let paths = Paths { data: d.join("data"), config_dir: d.join("cfg"), runtime: d.join("run"), ..Default::default() };
         let (ws1, ws2) = (d.join("one"), d.join("two"));
         let mk = |ws: &std::path::Path, n: &str| {
             std::fs::create_dir_all(ws.join(".ark/skills").join(n)).unwrap();
@@ -316,7 +316,7 @@ mod tests {
         // plugin and named `plugin:skill` (Hermes `tools/skills_tool_plugin.py`).
         let d = ark_core::tmp::scratch_path(format!("ark-index-plugin-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
-        let paths = Paths { data: d.join("data"), config_dir: d.join("cfg"), runtime: d.join("run") };
+        let paths = Paths { data: d.join("data"), config_dir: d.join("cfg"), runtime: d.join("run"), ..Default::default() };
         let ws = d.join("ws");
         let plug = d.join("myplug");
         std::fs::create_dir_all(plug.join("skills/lint")).unwrap();
@@ -342,7 +342,7 @@ mod tests {
     fn reload_reports_the_difference_and_the_delta_still_announces_it() {
         let d = ark_core::tmp::scratch_path(format!("ark-index-reload-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
-        let paths = Paths { data: d.join("data"), config_dir: d.join("cfg"), runtime: d.join("run") };
+        let paths = Paths { data: d.join("data"), config_dir: d.join("cfg"), runtime: d.join("run"), ..Default::default() };
         let ws = d.join("ws");
         let mk = |n: &str, desc: &str| {
             std::fs::create_dir_all(ws.join(".ark/skills").join(n)).unwrap();

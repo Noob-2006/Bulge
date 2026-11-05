@@ -21,18 +21,13 @@ pub const BOOL_FLAGS: &[&str] = &["clone", "clone-all", "clone-channels", "no-al
 /// Names that collide with ark itself or common binaries.
 const RESERVED: &[&str] = &["ark", "arkd", "default", "test", "tmp", "root", "sudo", "ark-call"];
 
-/// Top of the default (non-profile) layout, ignoring `ARK_HOME`.
-fn xdg(var: &str, def: &str) -> PathBuf {
-    let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("/tmp"));
-    std::env::var_os(var).map(PathBuf::from).filter(|p| p.is_absolute()).unwrap_or_else(|| home.join(def))
-}
-
+/// Profiles hang off the default per-user layout (`ark_core::layout::user`, ignoring `ARK_HOME`).
 pub fn profiles_root() -> PathBuf {
-    xdg("XDG_DATA_HOME", ".local/share").join("ark").join("profiles")
+    ark_core::layout::user().data.join("profiles")
 }
 
 fn sticky_file() -> PathBuf {
-    xdg("XDG_CONFIG_HOME", ".config").join("ark").join("active_profile")
+    ark_core::layout::user().config.join("active_profile")
 }
 
 pub fn dir_of(name: &str) -> PathBuf {
@@ -100,7 +95,8 @@ pub fn current() -> String {
 /// Root (`ARK_HOME`-style or the default XDG dirs) of a profile.
 pub fn home_of(name: &str) -> (PathBuf, PathBuf) {
     if name == "default" {
-        (xdg("XDG_CONFIG_HOME", ".config").join("ark"), xdg("XDG_DATA_HOME", ".local/share").join("ark"))
+        let u = ark_core::layout::user();
+        (u.config, u.data)
     } else {
         let d = dir_of(name);
         (d.join("config"), d.join("data"))
@@ -465,7 +461,7 @@ pub fn install(source: &str, name: Option<&str>, force: bool, force_config: bool
         }
     }
     if let Ok(a) = std::fs::read_to_string(src.join("AGENTS.md")) {
-        crate::ops::confcli::set(&ark_kernel::config::Paths { data: data.clone(), config_dir: cfg.clone(), runtime: dir_of(&name).join("run") }, "identity", &toml::Value::String(a).to_string())?;
+        crate::ops::confcli::set(&ark_kernel::config::Paths { data: data.clone(), config_dir: cfg.clone(), runtime: dir_of(&name).join("run"), ..Default::default() }, "identity", &toml::Value::String(a).to_string())?;
     }
     let mut m = meta(&name);
     m["distribution"] = json!({"source": source, "version": prof.get("version").and_then(|v| v.as_str()), "installed": ark_kernel::util::unix_now()});
@@ -475,7 +471,7 @@ pub fn install(source: &str, name: Option<&str>, force: bool, force_config: bool
 
 fn describe_auto(name: &str) -> Result<String, String> {
     let (cfg, data) = home_of(name);
-    let paths = ark_kernel::config::Paths { data: data.clone(), config_dir: cfg.clone(), runtime: dir_of(name).join("run") };
+    let paths = ark_kernel::config::Paths { data: data.clone(), config_dir: cfg.clone(), runtime: dir_of(name).join("run"), ..Default::default() };
     let conf = ark_kernel::config::Config::load(Some(&paths.user_config()), None, &[])?;
     let vault = crate::load_vault(&paths).map_err(|e| e.to_string())?;
     let providers = crate::providers::Providers::new(&conf.providers, vault.clone())?;

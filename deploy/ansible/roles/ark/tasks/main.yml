@@ -34,7 +34,7 @@
          + (['--channel', ark_channel] if ark_channel | length else [])
          + (['--owner', ark_owner] if ark_owner | length else []) }}
   environment:
-    ARK_HOME: "{{ ark_home }}"
+    ARK_MODE: system   # FHS layout: config /etc/ark, state /var/lib/ark (docs/paths.md)
     ARK_SETUP_API_KEY: "{{ ark_api_key }}"
     ARK_SETUP_CHANNEL_TOKEN: "{{ ark_channel_token }}"
   become: true
@@ -45,7 +45,7 @@
   args:
     # setup rewrites config.toml (and keeps a .bak) on every run, so it only runs when there is none;
     # set ark_setup_force=true to apply changed provider/model/channel variables to an existing host
-    creates: "{{ omit if ark_setup_force | bool else ark_home ~ '/config/config.toml' }}"
+    creates: "{{ omit if ark_setup_force | bool else ark_config_dir ~ '/config.toml' }}"
   when: ark_provider | length > 0
   notify: restart arkd
 

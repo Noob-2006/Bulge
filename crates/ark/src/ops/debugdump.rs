@@ -294,7 +294,8 @@ pub fn upload_blocked(cfg: &Config) -> Option<String> {
     if cfg.compliance.profile == "government" {
         return Some("compliance profile `government`".into());
     }
-    Path::new("/etc/ark/no-debug-upload").exists().then(|| "/etc/ark/no-debug-upload exists".to_string())
+    let flag = Path::new(ark_core::layout::system::CONFIG).join("no-debug-upload");
+    flag.exists().then(|| format!("{} exists", flag.display()))
 }
 
 /// One diagnostic section of a support bundle: file name + text (already collected).
@@ -368,7 +369,7 @@ pub fn bundle(paths: &Paths, cfg: &Config, lines: usize, redact_on: bool) -> Vec
     let scrub = Scrub::here(None);
     let r = |s: String| if redact_on { scrub.apply(&redact(&s)) } else { s };
     let d = r(dump(paths, cfg, false));
-    let logs = [("ark.jsonl", crate::ops::logs::dir(paths).join("ark.jsonl")), ("arkd.log", paths.data.join("arkd.log"))];
+    let logs = [("ark.jsonl", crate::ops::logs::dir(paths).join("ark.jsonl")), ("arkd.log", paths.daemon_log())];
     let mut report = d.clone();
     report.push('\n');
     let mut full = vec![];

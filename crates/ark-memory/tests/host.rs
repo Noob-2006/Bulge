@@ -31,7 +31,7 @@ impl ToolHost for NoHost {
 }
 
 fn paths_at(d: &std::path::Path) -> Paths {
-    Paths { data: d.to_path_buf(), config_dir: d.join("config"), runtime: d.join("run") }
+    Paths { data: d.to_path_buf(), config_dir: d.join("config"), runtime: d.join("run"), ..Default::default() }
 }
 
 static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);

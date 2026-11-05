@@ -1,5 +1,7 @@
 // ark web / desktop UI: an ARP (JSON-RPC 2.0 over WebSocket) client.
 // Same methods and events as the terminal UI and the unix-socket daemon protocol.
+// Layout: a rail (navigation + conversations) and one view at a time — the operations views
+// (ops.js), the chat transcript, or a Control UI page (pages.js / surfaces.js).
 'use strict';
 
 const $ = (id) => document.getElementById(id);
@@ -16,34 +18,44 @@ const store = {
 // language of their own module (the Control UI is translated through `ui.pages` titles).
 const I18N = {
   'zh-Hant': {
-    'conn.idle': '尚未連線', 'conn.connecting': '連線中…', 'conn.failed': '連線失敗', 'conn.ready': '已連線 · {v}', 'conn.down': '連線中斷，3 秒後重試',
-    'new': '＋ 新對話', 'boards': '儀表板', 'boards_all': '總覽', 'devices': '裝置', 'control': '控制台', 'settings': '設定',
-    'pick': '選擇或建立一個對話', 'input': '輸入訊息…  / 顯示指令', 'stop': '停止', 'send': '送出', 'working': '工作中',
-    'you': '你', 'tool_result': '工具結果', 'tool_call': '呼叫 {n}', 'tool_error': '工具失敗',
-    'approval': '需要核准：{gate}', 'deny': '拒絕', 'always': '本次對話都允許', 'once': '允許一次',
+    'conn.idle': '尚未連線', 'conn.connecting': '連線中…', 'conn.failed': '連線失敗', 'conn.ready': '已連線 · v{v}', 'conn.down': '連線中斷，3 秒後重試',
+    'new': '新對話', 'boards': '儀表板', 'boards_all': '所有儀表板', 'devices': '裝置', 'control': '控制台', 'settings': '設定',
+    'nav.ops': '總覽', 'nav.chat': '對話', 'nav.agents': '代理', 'nav.approvals': '核准', 'nav.audit': '稽核', 'nav.sessions': '對話紀錄',
+    'filter': '搜尋對話', 'back': '← 返回', 'palette': '指令', 'palette_ph': '跳到頁面、對話或指令…', 'jump': '↓ 最新', 'send_hint': 'Enter 送出 · Shift+Enter 換行',
+    'pick': '選擇或建立一個對話', 'input': '交代 ark 要做的事…  輸入 / 顯示指令', 'stop': '停止', 'send': '送出', 'working': '工作中',
+    'you': '你', 'tool_result': '工具結果', 'tool_call': '呼叫 {n}', 'tool_error': '失敗', 'tool_ok': '完成', 'tool_run': '執行中',
+    'approval': '需要核准 · {gate}', 'deny': '拒絕', 'always': '本次對話都允許', 'once': '允許一次',
     'ask': 'ark 想問你', 'answer': '回答', 'close': '關閉',
-    'no_sessions': '還沒有對話', 'start': '開始一段新對話吧', 'login': '連線到 ark',
+    'no_sessions': '還沒有對話', 'start': '開始一段新對話', 'start_sub': '交代任務、貼上檔案，或輸入 / 看所有指令。ark 會在需要時請你核准。', 'login': '連線到 ark',
     'login_hint': '輸入 App Server 的 token（<code>ark app token</code> 會顯示）。', 'connect': '連線', 'remember': '記住這台裝置',
     'slash_hint': '指令 · ↑↓ 選擇、Tab 補齊、Esc 關閉', 'attach': '附加', 'attached': '已附加 {n} 個檔案',
     'too_big': '檔案太大（上限 8 MiB）', 'lang': 'EN', 'lang.name': 'English',
     'theme': '主題', 'theme.crimson': '深緋紅', 'theme.midnight': '極夜', 'theme.daylight': '日光',
     'not_a_command': '未知指令：{line}（/help 看清單）', 'local_only': '/{name} 只在終端機有效；這裡改用對應的頁面。',
-    'quit_web': '/quit 只關閉終端機；關掉這個分頁即可離開。', 'copied': '已複製最後一則回覆。',
+    'quit_web': '/quit 只關閉終端機；關掉這個分頁即可離開。', 'copied': '已複製。', 'copy': '複製',
+    'today': '今天', 'yesterday': '昨天', 'earlier': '更早', 'thinking': '思考中…',
+    'dual': '雙人覆核', 'requester': '申請者', 'dual_wait': '已記下你的核准（{n}/{m}），還需要其他核准者。',
+    'review': '覆核', 'reviewed': '標記已覆核', 'flagged': '標記可疑', 'review_note': '覆核註記（選填）', 'review_done': '已記錄覆核：{s}',
   },
   en: {
-    'conn.idle': 'Not connected', 'conn.connecting': 'Connecting…', 'conn.failed': 'Connection failed', 'conn.ready': 'Connected · {v}', 'conn.down': 'Disconnected, retrying in 3s',
-    'new': '+ New chat', 'boards': 'Dashboards', 'boards_all': 'Overview', 'devices': 'Devices', 'control': 'Control', 'settings': 'Settings',
-    'pick': 'Pick or start a conversation', 'input': 'Message…  / for commands', 'stop': 'Stop', 'send': 'Send', 'working': 'Working',
-    'you': 'You', 'tool_result': 'Tool result', 'tool_call': 'Calling {n}', 'tool_error': 'Tool failed',
-    'approval': 'Approval needed: {gate}', 'deny': 'Deny', 'always': 'Always in this chat', 'once': 'Allow once',
+    'conn.idle': 'Not connected', 'conn.connecting': 'Connecting…', 'conn.failed': 'Connection failed', 'conn.ready': 'Connected · v{v}', 'conn.down': 'Disconnected, retrying in 3s',
+    'new': 'New chat', 'boards': 'Dashboards', 'boards_all': 'All dashboards', 'devices': 'Devices', 'control': 'Control', 'settings': 'Settings',
+    'nav.ops': 'Overview', 'nav.chat': 'Chat', 'nav.agents': 'Agents', 'nav.approvals': 'Approvals', 'nav.audit': 'Audit', 'nav.sessions': 'Conversations',
+    'filter': 'Search conversations', 'back': '← Back', 'palette': 'Commands', 'palette_ph': 'Jump to a page, conversation or command…', 'jump': '↓ Latest', 'send_hint': 'Enter to send · Shift+Enter for newline',
+    'pick': 'Pick or start a conversation', 'input': 'Tell ark what to do…  / for commands', 'stop': 'Stop', 'send': 'Send', 'working': 'Working',
+    'you': 'You', 'tool_result': 'Tool result', 'tool_call': 'Calling {n}', 'tool_error': 'failed', 'tool_ok': 'done', 'tool_run': 'running',
+    'approval': 'Approval needed · {gate}', 'deny': 'Deny', 'always': 'Always in this chat', 'once': 'Allow once',
     'ask': 'ark asks', 'answer': 'Answer', 'close': 'Close',
-    'no_sessions': 'No conversations yet', 'start': 'Start a new conversation', 'login': 'Connect to ark',
+    'no_sessions': 'No conversations yet', 'start': 'Start a conversation', 'start_sub': 'Describe a task, paste files, or type / for every command. ark asks before anything risky.', 'login': 'Connect to ark',
     'login_hint': 'Enter the App Server token (shown by <code>ark app token</code>).', 'connect': 'Connect', 'remember': 'Remember this device',
     'slash_hint': 'Commands · ↑↓ pick, Tab complete, Esc close', 'attach': 'Attach', 'attached': '{n} file(s) attached',
     'too_big': 'File too large (8 MiB max)', 'lang': '中文', 'lang.name': '繁體中文',
     'theme': 'Theme', 'theme.crimson': 'Crimson', 'theme.midnight': 'Midnight', 'theme.daylight': 'Daylight',
     'not_a_command': 'Unknown command: {line} (see /help)', 'local_only': '/{name} only works in a terminal; use the matching page here.',
-    'quit_web': '/quit closes the terminal UI; just close this tab to leave.', 'copied': 'Copied the last reply.',
+    'quit_web': '/quit closes the terminal UI; just close this tab to leave.', 'copied': 'Copied.', 'copy': 'Copy',
+    'today': 'Today', 'yesterday': 'Yesterday', 'earlier': 'Earlier', 'thinking': 'Thinking…',
+    'dual': 'Dual control', 'requester': 'requested by', 'dual_wait': 'Your approval is recorded ({n}/{m}); more approvers are needed.',
+    'review': 'Review', 'reviewed': 'Mark reviewed', 'flagged': 'Flag', 'review_note': 'Review note (optional)', 'review_done': 'Review recorded: {s}',
   },
 };
 let LANG = store.get('ark.lang') || 'zh-Hant';
@@ -66,7 +78,7 @@ function applyI18n() {
   const hint = document.getElementById('loginHint');
   if (hint) hint.innerHTML = t('login_hint');
   if ($('conn') && !S.arp) setConn(t('conn.idle'));
-  if ($('title') && !S.current) $('title').textContent = t('pick');
+  if ($('title') && !S.current && S.view === 'chat') $('title').textContent = t('pick');
   document.title = 'ark';
 }
 // ── themes: the shell's palette is theme.css; these variables re-tint it ──
@@ -79,8 +91,49 @@ function setTheme(name, save) {
   const sel = $('theme');
   if (sel) sel.value = n;
   const meta = document.querySelector('meta[name=theme-color]');
-  if (meta) meta.content = n === 'daylight' ? '#f6ecdf' : n === 'midnight' ? '#0a1020' : '#330716';
+  if (meta) meta.content = n === 'daylight' ? '#f6f2ec' : n === 'midnight' ? '#04070f' : '#0b0105';
 }
+
+// ── toasts ──
+function toast(text, bad) {
+  const el = document.createElement('div');
+  el.className = 'toast' + (bad ? ' bad' : '');
+  el.textContent = text;
+  $('toasts').appendChild(el);
+  setTimeout(() => el.remove(), bad ? 6000 : 3200);
+}
+
+// ── views: one main view at a time ──
+// `ops`, `agents`, `devices`, `approvals`, `audit` are drawn by ops.js (VIEWS registry);
+// `chat` is the transcript; `page` is a Control UI page / dashboard (#panelDialog).
+const VIEWS = {}; // name → {title, render(el), leave()} (ops.js)
+const VIEW_SEC = { ops: 'nav.ops', chat: 'nav.chat', agents: 'nav.agents', devices: 'devices', approvals: 'nav.approvals', audit: 'nav.audit', page: 'control' };
+function showView(name, opts) {
+  const prev = S.view;
+  if (prev && prev !== name && VIEWS[prev] && VIEWS[prev].leave) VIEWS[prev].leave();
+  S.view = name;
+  for (const el of document.querySelectorAll('.view')) el.hidden = true;
+  const el = name === 'page' ? $('panelDialog') : $('view-' + name);
+  if (el) el.hidden = false;
+  for (const b of document.querySelectorAll('.nav-item')) b.classList.toggle('on', b.dataset.view === name || (name === 'page' && b.id === (S.pageNav || 'showControl')));
+  $('crumbSec').textContent = t(VIEW_SEC[name] || 'nav.ops');
+  if (name !== 'chat' && name !== 'page') $('title').textContent = (VIEWS[name] && VIEWS[name].title()) || '';
+  if (name === 'chat') $('title').textContent = S.current ? sessTitle(S.current) : t('pick');
+  $('reviewBtn').hidden = !(name === 'chat' && S.current);
+  $('side').classList.remove('open');
+  if (!(opts && opts.keepHash)) history.replaceState(null, '', name === 'page' ? location.pathname : '#view=' + name);
+  if (VIEWS[name] && S.arp) VIEWS[name].render($('view-' + name));
+  if (name !== 'page') store.set('ark.view', name);
+}
+// pages.js / surfaces.js still talk to the page view as the old dialog: `.open`, `.close()`,
+// `.showModal()`.
+(function shimPageView() {
+  const pv = $('panelDialog');
+  Object.defineProperty(pv, 'open', { get: () => S.view === 'page' });
+  pv.close = () => { if (S.view === 'page') showView(S.back || 'ops'); };
+  pv.showModal = () => { if (S.view !== 'page') S.back = S.view; showView('page'); };
+})();
+
 // ── attachments: paste / drop / pick a file, upload it over ARP, attach to the next message ──
 const ATT = []; // {path, name, bytes}
 const ATT_MAX = 8 * 1024 * 1024;
@@ -95,7 +148,7 @@ function readAsDataURL(f) {
 function renderAtt() {
   const box = $('attachments');
   if (!box) return;
-  box.innerHTML = ATT.map((a, i) => `<span class="att" title="${esc(a.path)}">${esc(a.name)} <span class="dim">${a.bytes ? '<span class="att-bytes">' + Math.ceil(a.bytes / 1024) + 'K</span>' : ''}</span><button class="btn ghost small" data-rm="${i}" aria-label="remove">✕</button></span>`).join('');
+  box.innerHTML = ATT.map((a, i) => `<span class="att" title="${esc(a.path)}">${esc(a.name)} <span class="dim">${a.bytes ? '<span class="att-bytes">' + Math.ceil(a.bytes / 1024) + 'K</span>' : ''}</span><button class="btn ghost small icon" data-rm="${i}" aria-label="remove">✕</button></span>`).join('');
   box.hidden = !ATT.length;
   for (const b of box.querySelectorAll('[data-rm]')) {
     b.onclick = async () => {
@@ -108,12 +161,12 @@ function renderAtt() {
 async function addFiles(files) {
   if (!files || !files.length || !S.arp) return;
   for (const f of Array.from(files).slice(0, 8)) {
-    if (f.size > ATT_MAX) { addMsg('notice', '', esc(t('too_big'))); continue; }
+    if (f.size > ATT_MAX) { toast(t('too_big'), true); continue; }
     try {
       const data = await readAsDataURL(f);
       const r = await S.arp.call('ui.upload', { name: f.name || 'paste.png', data });
       ATT.push({ path: r.path, name: r.name || f.name, bytes: r.bytes || f.size });
-    } catch (e) { addMsg('notice', '', '⚠ ' + esc(e.message)); }
+    } catch (e) { toast(e.message, true); }
   }
   renderAtt();
 }
@@ -166,7 +219,7 @@ async function runSlash(line) {
   if (!S.current) return;
   let r;
   try { r = await S.arp.call('command.run', { line, session: S.current, surface: 'web' }); }
-  catch (e) { addMsg('notice', '', '⚠ ' + esc(e.message)); return; }
+  catch (e) { addMsg('notice err', '', esc(e.message)); return; }
   if (!r || r.handled === false) { addMsg('notice', '', esc(t('not_a_command', { line }))); return; }
   if (r.text) addMsg('notice', '', md(String(r.text)));
   if (r.action) await runAction(r.action);
@@ -181,55 +234,107 @@ async function runAction(a) {
     if (n === 'copy') {
       const msgs = [...$('log').querySelectorAll('.msg.assistant .body')];
       const last = msgs[msgs.length - 1];
-      if (last) { try { await navigator.clipboard.writeText(last.innerText); addMsg('notice', '', esc(t('copied'))); } catch {} }
+      if (last) { try { await navigator.clipboard.writeText(last.innerText); toast(t('copied')); } catch {} }
       return;
     }
-    if (n === 'statusbar' || n === 'palette' || n === 'compose' || n === 'paste') { addMsg('notice', '', esc(t('local_only', { name: n }))); return; }
+    if (n === 'palette') { openPalette(); return; }
+    if (n === 'statusbar' || n === 'compose' || n === 'paste') { addMsg('notice', '', esc(t('local_only', { name: n }))); return; }
     if (a.arg) addMsg('notice', '', esc(a.arg));
     return;
   }
 }
 
-// ── starfield ──
+// ── starfield (sparse, only visible behind empty space) ──
 (function stars() {
   const f = $('starfield');
-  const n = Math.round(Math.min(40, (innerWidth * innerHeight) / 40000));
+  const n = Math.round(Math.min(18, (innerWidth * innerHeight) / 90000));
   for (let i = 0; i < n; i++) {
     const s = document.createElement('span');
     s.className = 'star';
     s.style.left = Math.random() * 100 + '%';
     s.style.top = Math.random() * 100 + '%';
-    s.style.setProperty('--size', 4 + Math.random() * 10 + 'px');
+    s.style.setProperty('--size', 4 + Math.random() * 8 + 'px');
     s.style.animationDelay = -Math.random() * 6 + 's';
-    s.style.animationDuration = 4 + Math.random() * 6 + 's';
     f.appendChild(s);
   }
 })();
 
-// ── tiny markdown (escape first, then a safe subset) ──
-function esc(s) { return s.replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c])); }
+// ── markdown (escape first, then a safe subset: headings, lists, tables, quotes, code) ──
+function esc(s) { return String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c])); }
+function inline(s) {
+  return esc(s)
+    .replace(/`([^`\n]+)`/g, '<code>$1</code>')
+    .replace(/\*\*([^*\n]+)\*\*/g, '<strong>$1</strong>')
+    .replace(/(^|[\s(])\*([^*\n]+)\*(?=[\s).,!?:;]|$)/g, '$1<em>$2</em>')
+    .replace(/~~([^~\n]+)~~/g, '<del>$1</del>')
+    .replace(/\[([^\]\n]+)\]\((https?:\/\/[^\s)]+)\)/g, '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>');
+}
+function codeBlock(lang, src) {
+  return `<div class="code"><div class="code-head"><span>${esc(lang || 'text')}</span><button type="button" data-copy>${esc(t('copy'))}</button></div><pre><code>${esc(src.replace(/\n$/, ''))}</code></pre></div>`;
+}
+function mdBlocks(text) {
+  const lines = text.split('\n');
+  let out = '';
+  let i = 0;
+  const para = [];
+  const flush = () => { if (para.length) { out += '<p>' + para.map(inline).join('<br>') + '</p>'; para.length = 0; } };
+  while (i < lines.length) {
+    const l = lines[i];
+    if (!l.trim()) { flush(); i++; continue; }
+    let m;
+    if ((m = l.match(/^(#{1,6})\s+(.+)$/))) { flush(); out += `<h4>${inline(m[2])}</h4>`; i++; continue; }
+    if (/^\s*([-*+]|\d+[.)])\s+/.test(l)) {
+      flush();
+      const ordered = /^\s*\d+[.)]/.test(l);
+      let items = '';
+      while (i < lines.length && /^\s*([-*+]|\d+[.)])\s+/.test(lines[i])) {
+        const it = lines[i].replace(/^\s*([-*+]|\d+[.)])\s+/, '').replace(/^\[( |x)\]\s+/i, (x) => (/x/i.test(x) ? '☑ ' : '☐ '));
+        items += `<li>${inline(it)}</li>`;
+        i++;
+      }
+      out += ordered ? `<ol>${items}</ol>` : `<ul>${items}</ul>`;
+      continue;
+    }
+    if (/^\s*\|.*\|\s*$/.test(l) && i + 1 < lines.length && /^\s*\|?\s*:?-{2,}/.test(lines[i + 1])) {
+      flush();
+      const cells = (r) => r.trim().replace(/^\||\|$/g, '').split('|').map((c) => c.trim());
+      let h = '<table><tr>' + cells(l).map((c) => `<th>${inline(c)}</th>`).join('') + '</tr>';
+      i += 2;
+      while (i < lines.length && /^\s*\|.*\|\s*$/.test(lines[i])) { h += '<tr>' + cells(lines[i]).map((c) => `<td>${inline(c)}</td>`).join('') + '</tr>'; i++; }
+      out += h + '</table>';
+      continue;
+    }
+    if (/^>\s?/.test(l)) {
+      flush();
+      const q = [];
+      while (i < lines.length && /^>\s?/.test(lines[i])) { q.push(lines[i].replace(/^>\s?/, '')); i++; }
+      out += `<blockquote>${q.map(inline).join('<br>')}</blockquote>`;
+      continue;
+    }
+    if (/^(-{3,}|\*{3,})$/.test(l.trim())) { flush(); out += '<hr>'; i++; continue; }
+    para.push(l);
+    i++;
+  }
+  flush();
+  return out;
+}
 function md(src) {
-  const parts = String(src).split(/```(\w*)\n?([\s\S]*?)```/g);
+  const parts = String(src).split(/```([\w+-]*)\n?([\s\S]*?)```/g);
   let out = '';
   for (let i = 0; i < parts.length; i++) {
-    if (i % 3 === 0) {
-      let t = esc(parts[i]);
-      t = t.replace(/`([^`\n]+)`/g, '<code>$1</code>')
-        .replace(/\*\*([^*\n]+)\*\*/g, '<strong>$1</strong>')
-        .replace(/(^|[\s(])\*([^*\n]+)\*(?=[\s).,!?]|$)/g, '$1<em>$2</em>')
-        .replace(/~~([^~\n]+)~~/g, '<del>$1</del>')
-        .replace(/\[([^\]\n]+)\]\((https?:\/\/[^\s)]+)\)/g, '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>')
-        .replace(/^#{1,6} (.+)$/gm, '<strong>$1</strong>')
-        .replace(/^&gt; (.+)$/gm, '<blockquote>$1</blockquote>')
-        .replace(/^[-*] (.+)$/gm, '• $1')
-        .replace(/\n/g, '<br>');
-      out += t;
-    } else if (i % 3 === 2) {
-      out += `<pre><code>${esc(parts[i])}</code></pre>`;
-    }
+    if (i % 3 === 0) out += mdBlocks(parts[i]);
+    else if (i % 3 === 2) out += codeBlock(parts[i - 1], parts[i]);
   }
   return out;
 }
+document.addEventListener('click', async (e) => {
+  const mc = e.target.closest('[data-msgcopy]');
+  if (mc) { try { await navigator.clipboard.writeText(mc.closest('.msg').querySelector('.body').innerText); toast(t('copied')); } catch {} return; }
+  const b = e.target.closest('[data-copy]');
+  if (!b) return;
+  const code = b.closest('.code');
+  try { await navigator.clipboard.writeText(code.querySelector('pre').innerText); b.textContent = t('copied'); setTimeout(() => (b.textContent = t('copy')), 1400); } catch {}
+});
 
 // ── ARP client ──
 class Arp {
@@ -249,6 +354,7 @@ class Arp {
   }
   call(method, params = {}) {
     const id = this.next++;
+    if (!this.ws || this.ws.readyState !== 1) return Promise.reject(new Error('連線中斷'));
     this.ws.send(JSON.stringify({ jsonrpc: '2.0', id, method, params }));
     return new Promise((ok, fail) => this.waiting.set(id, { ok, fail }));
   }
@@ -264,13 +370,34 @@ class Arp {
 }
 
 // ── app state ──
-const S = { arp: null, sessions: [], current: null, sub: null, streaming: null, running: false, pending: new Map() };
+const S = { arp: null, sessions: [], current: null, sub: null, streaming: null, running: false, pending: new Map(), tools: new Map(), view: null, back: null, usage: null };
 
-function setConn(text) { $('conn').textContent = text; }
+function setConn(text, state) {
+  const c = $('conn');
+  c.textContent = text;
+  c.classList.toggle('live', state === 'live');
+  c.classList.toggle('down', state === 'down');
+}
+// While a turn runs the topbar shows how long it has been going (Claude Code's spinner line).
 function setStatus(running) {
+  if (running && !S.running) S.turnStart = Date.now();
   S.running = running;
   $('stop').hidden = !running;
-  $('status').innerHTML = running ? '<span class="star pulse" style="--size:12px"></span> ' + esc(t('working')) : '';
+  clearInterval(S.turnTimer);
+  const draw = () => {
+    const s = Math.floor((Date.now() - (S.turnStart || Date.now())) / 1000);
+    $('status').innerHTML = S.running && S.view === 'chat' ? `<span class="star pulse" style="--size:11px"></span> ${esc(t('working'))} <span class="faint mono">${s >= 60 ? Math.floor(s / 60) + 'm ' : ''}${s % 60}s · Esc ${esc(t('stop'))}</span>` : '';
+  };
+  draw();
+  if (running) S.turnTimer = setInterval(draw, 1000);
+}
+
+const chatScroll = () => $('chatScroll');
+function nearBottom() { const c = chatScroll(); return c.scrollHeight - c.scrollTop - c.clientHeight < 120; }
+// Follow the transcript unless the person scrolled up; our own scrolling never counts as that.
+function stick(force) {
+  const c = chatScroll();
+  if (force || S.stick !== false) { c.scrollTop = c.scrollHeight; S.autoTop = c.scrollTop; }
 }
 
 function addMsg(kind, who, html) {
@@ -279,23 +406,70 @@ function addMsg(kind, who, html) {
   el.querySelector('.who').innerHTML = who;
   el.querySelector('.body').innerHTML = html;
   $('log').appendChild(el);
-  $('log').scrollTop = $('log').scrollHeight;
+  stick();
   return el;
 }
 
-// A tool call/result as a collapsible card (`<details>`), so a long transcript stays scannable.
-function addToolCard(title, body, collapsible, badge) {
-  const el = addMsg('tool toolcard', badge ? `<span class="bad">${esc(badge)}</span> ${esc(title)}` : esc(title), '');
-  const pre = `<pre>${esc(String(body).slice(0, 20000))}</pre>`;
-  el.querySelector('.body').innerHTML = collapsible
-    ? `<details><summary>${esc(title)}</summary>${pre}</details>`
-    : pre;
-  return el;
+// One line per tool call (Claude Code style): name, the most telling argument, status; the
+// input and the result expand underneath. Results find their call through `tool_use_id`.
+function toolArg(name, input) {
+  if (!input || typeof input !== 'object') return '';
+  if (Array.isArray(input.items)) return `${input.action || ''} · ${input.items.length} ${LANG === 'en' ? 'items' : '項'}`;
+  for (const k of ['command', 'cmd', 'path', 'file_path', 'file', 'url', 'query', 'pattern', 'task', 'name', 'prompt']) {
+    if (typeof input[k] === 'string' && input[k]) return input[k].split('\n')[0].slice(0, 200);
+  }
+  const s = JSON.stringify(input);
+  return s.length > 2 ? s.slice(0, 160) : '';
+}
+function diffHtml(text) {
+  return String(text).split('\n').map((l) => {
+    const c = /^@@/.test(l) ? 'diff-hunk' : /^\+(?!\+\+)/.test(l) ? 'diff-add' : /^-(?!--)/.test(l) ? 'diff-del' : '';
+    return c ? `<span class="${c}">${esc(l)}</span>` : esc(l);
+  }).join('\n');
+}
+// The call's input, shown the way a person reads it: an edit as a diff, a shell command as a
+// prompt line, a todo list as checkboxes; anything else as JSON.
+function toolInput(name, input) {
+  const i = input || {};
+  if ((name === 'edit' || name === 'str_replace') && typeof i.old_string === 'string') {
+    const lines = [`--- ${i.path || i.file_path || ''}`, `+++ ${i.path || i.file_path || ''}`, '@@'].concat(i.old_string.split('\n').map((l) => '-' + l), String(i.new_string || '').split('\n').map((l) => '+' + l));
+    return `<pre class="in">${diffHtml(lines.join('\n').slice(0, 20000))}</pre>`;
+  }
+  if ((name === 'shell' || name === 'job' || name === 'bash') && typeof i.command === 'string') return `<pre class="in"><span class="faint">$</span> ${esc(i.command.slice(0, 20000))}</pre>`;
+  if (name === 'write' && typeof i.content === 'string') return `<pre class="in"><span class="faint">${esc(i.path || i.file_path || '')} · ${i.content.split('\n').length} lines</span>\n${esc(i.content.slice(0, 4000))}</pre>`;
+  if (name === 'todo' && Array.isArray(i.items)) {
+    return `<ul class="todo">${i.items.map((it) => { const st = (it && it.status) || ''; const txt = (it && (it.content || it.text || it.step || it.title)) || String(it); return `<li class="${esc(st)}">${st === 'completed' || st === 'done' ? '☑' : st === 'in_progress' ? '◐' : '☐'} ${esc(txt)}</li>`; }).join('')}</ul>`;
+  }
+  return `<pre class="in">${esc(JSON.stringify(i, null, 2).slice(0, 20000))}</pre>`;
+}
+function addToolCall(b) {
+  const el = addMsg('tool', '', '');
+  const det = document.createElement('details');
+  det.className = 'tl run';
+  det.innerHTML = `<summary><span class="star spin" style="--size:9px"></span><span class="nm">${esc(b.name)}</span><span class="arg">${esc(toolArg(b.name, b.input))}</span><span class="st">${esc(t('tool_run'))}</span></summary>${toolInput(b.name, b.input)}`;
+  if (b.name === 'todo') det.open = true;
+  el.querySelector('.body').appendChild(det);
+  if (b.id) S.tools.set(b.id, det);
+  return det;
+}
+function settleTool(b) {
+  const body = typeof b.content === 'string' ? b.content : (Array.isArray(b.content) ? b.content.map((x) => (x && x.type === 'text' ? x.text : JSON.stringify(x))).join('\n') : JSON.stringify(b.content, null, 1));
+  let det = b.tool_use_id && S.tools.get(b.tool_use_id);
+  if (!det) det = addToolCall({ name: t('tool_result'), input: {} });
+  det.classList.remove('run');
+  det.classList.add(b.is_error ? 'err' : 'ok');
+  const star = det.querySelector('summary .star');
+  if (star) { star.classList.remove('spin'); star.classList.add(b.is_error ? 'crit' : 'ok'); }
+  det.querySelector('.st').textContent = b.is_error ? t('tool_error') : t('tool_ok');
+  const looksDiff = /^(---|\+\+\+|@@) /m.test(body);
+  det.insertAdjacentHTML('beforeend', `<pre class="out">${looksDiff ? diffHtml(body.slice(0, 20000)) : esc(String(body).slice(0, 20000))}</pre>`);
+  if (b.is_error) det.open = true;
 }
 
 function textOf(m) {
   return (m.content || []).map((b) => (b.type === 'text' ? b.text : '')).join('');
 }
+const ARK = '<span class="star" style="--size:9px"></span> ark<button type="button" class="msg-copy" data-msgcopy>' + '⧉' + '</button>';
 
 function renderEvent(ev) {
   const k = ev.type;
@@ -303,33 +477,27 @@ function renderEvent(ev) {
     const m = ev.message;
     if (m.role === 'user') {
       const txt = (m.content || []).map((b) => b.type === 'text' ? b.text : '').join('');
-      const results = (m.content || []).filter((b) => b.type === 'tool_result');
-      if (results.length) {
-        // One card per result: the head shows the status, the body the (truncated) output.
-        for (const b of results) {
-          const body = typeof b.content === 'string' ? b.content : JSON.stringify(b.content, null, 1);
-          const collapsible = String(body).length > 400 || String(body).includes('\n');
-          addToolCard(txt && !results.length ? txt : t('tool_result'), String(body), collapsible, b.is_error ? t('tool_error') : '');
-        }
-        if (txt.trim()) addMsg('user', esc(t('you')), md(txt));
-      } else if (txt.trim()) addMsg('user', esc(t('you')), md(txt));
+      for (const b of (m.content || []).filter((x) => x.type === 'tool_result')) settleTool(b);
+      // The kernel tags where a message came from (`[from web] …`); show it as a label.
+      const src = txt.match(/^\[from ([\w.-]+)\]\s*/);
+      if (txt.trim()) addMsg('user', esc(t('you')) + (src && src[1] !== 'web' ? ` <span class="faint">· ${esc(src[1])}</span>` : ''), md(src ? txt.slice(src[0].length) : txt));
     } else {
-      const t = textOf(m);
+      const tx = textOf(m);
       if (S.streaming) {
         // The final message replaces what was streamed so far.
-        if (t.trim()) {
-          S.streaming.el.querySelector('.who').innerHTML = '<span class="star" style="--size:11px"></span> ark';
-          S.streaming.el.querySelector('.body').innerHTML = md(t);
+        if (tx.trim()) {
+          S.streaming.el.querySelector('.who').innerHTML = ARK;
+          S.streaming.el.querySelector('.body').innerHTML = md(tx);
         } else S.streaming.el.remove();
         S.streaming = null;
-      } else if (t.trim()) addMsg('assistant', '<span class="star" style="--size:11px"></span> ark', md(t));
-      for (const b of m.content || []) if (b.type === 'tool_use') addToolCard(t('tool_call', { n: '' }) + b.name, JSON.stringify(b.input, null, 1), true, '');
+      } else if (tx.trim()) addMsg('assistant', ARK, md(tx));
+      for (const b of m.content || []) if (b.type === 'tool_use') addToolCall(b);
     }
   } else if (k === 'turn_start') setStatus(true);
   else if (k === 'turn_end') { setStatus(false); S.streaming = null; }
   else if (k === 'notice') addMsg('notice', '', esc(ev.text));
-  else if (k === 'error') addMsg('notice', '', '⚠ ' + esc(ev.message));
-  else if (k === 'gate') addMsg('notice', '', `閘門 ${esc(ev.gate)}：${esc(ev.verdict)} — ${esc(ev.reason)}`);
+  else if (k === 'error') addMsg('notice err', '', esc(ev.message));
+  else if (k === 'gate') addMsg('notice', '', `${esc(ev.gate)} · ${esc(ev.verdict)} — ${esc(ev.reason)}`);
   else if (k === 'tool_settled' && ev.ui_resource) renderApp(ev.ui_resource);
 }
 
@@ -353,7 +521,9 @@ function appDoc(ui) {
   return '<head>' + meta + '</head>' + html;
 }
 function renderApp(ui) {
-  const el = addMsg('tool app', `介面 ${esc(ui.server)} · ${esc(ui.tool)}`, '');
+  const el = addMsg('tool app', '', '');
+  el.querySelector('.who').style.display = 'flex';
+  el.querySelector('.who').textContent = `${ui.server} · ${ui.tool}`;
   const frame = document.createElement('iframe');
   frame.className = 'mcp-app';
   frame.setAttribute('sandbox', 'allow-scripts');
@@ -430,7 +600,7 @@ window.addEventListener('message', async (e) => {
         protocolVersion: (m.params && m.params.protocolVersion) || '2026-01-26',
         hostInfo: { name: 'ark', version: '1' },
         hostCapabilities: { serverTools: {}, openLinks: {} },
-        hostContext: { theme: matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light', displayMode: 'inline', availableDisplayModes: ['inline'], containerDimensions: { width: st.frame.clientWidth, maxHeight: 1200 }, locale: navigator.language, timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone, platform: 'web' },
+        hostContext: { theme: document.documentElement.dataset.theme === 'daylight' ? 'light' : 'dark', displayMode: 'inline', availableDisplayModes: ['inline'], containerDimensions: { width: st.frame.clientWidth, maxHeight: 1200 }, locale: navigator.language, timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone, platform: 'web' },
       });
     case 'ui/notifications/initialized':
       if (!st.ready || st.initialized) return;
@@ -464,21 +634,47 @@ window.addEventListener('message', async (e) => {
 
 function onDelta(p) {
   if (p.session !== S.current) return;
-  if (!S.streaming) S.streaming = { el: addMsg('assistant', '<span class="star spin" style="--size:11px"></span> ark', ''), text: '', think: '' };
+  if (!S.streaming) S.streaming = { el: addMsg('assistant', '<span class="star spin" style="--size:9px"></span> ark', ''), text: '', think: '' };
   if (p.thinking) S.streaming.think += p.text; else S.streaming.text += p.text;
-  const th = S.streaming.think ? `<div class="thinking">${esc(S.streaming.think.slice(-400))}</div>` : '';
+  const th = S.streaming.think && !S.streaming.text ? `<div class="thinking">${esc(S.streaming.think.slice(-600))}</div>` : '';
   S.streaming.el.querySelector('.body').innerHTML = th + md(S.streaming.text);
-  $('log').scrollTop = $('log').scrollHeight;
+  stick();
 }
 
-function onPending(p) {
-  if (p.session && S.current && p.session !== S.current) return;
-  if (S.pending.has(p.id)) return;
+// ── pending approvals / questions (the chat dock shows the current session's; the approvals
+// view lists all of them — ops.js reads S.pending) ──
+function pendingChanged() {
+  const n = [...S.pending.values()].length;
+  const b = $('badgeApprovals');
+  b.hidden = !n;
+  b.textContent = n;
+  if (S.view === 'approvals' && VIEWS.approvals) VIEWS.approvals.render($('view-approvals'));
+  if (typeof opsStrip === 'function') opsStrip();
+}
+async function answerPending(id, answer) {
+  let r;
+  try { r = await S.arp.call('gate.answer', { id, answer }); }
+  catch (err) { toast(err.message, true); return false; }
+  const e = S.pending.get(id);
+  // Dual control (four-eyes): a vote is recorded but the call waits for more approvers.
+  if (r && r.final === false) {
+    toast(t('dual_wait', { n: r.approvals, m: r.required }));
+    if (e) { e.p.dual_control = Object.assign({}, e.p.dual_control || {}, { approvals: Array(r.approvals).fill({}), required: r.required, voted: true }); if (e.box) { const nb = pendingBox(e.p); e.box.replaceWith(nb); e.box = nb; } }
+    pendingChanged();
+    return true;
+  }
+  if (e && e.box) e.box.remove();
+  S.pending.delete(id);
+  pendingChanged();
+  return true;
+}
+function pendingBox(p) {
   const box = document.createElement('div');
-  box.className = 'ask panel cornered';
-  box.innerHTML = '<span class="star corner tl"></span><span class="star corner br"></span>';
+  box.className = 'ask' + (p.kind === 'approval' ? '' : ' question');
   if (p.kind === 'approval') {
-    box.innerHTML += `<div class="q"><span class="star pulse" style="--size:18px"></span><div><strong>${esc(t('approval', { gate: p.gate }))}</strong><div class="dim">${esc(p.tool)} — ${esc(p.reason)}</div><pre>${esc(p.summary || '')}</pre></div></div>
+    const dc = p.dual_control;
+    const dual = dc ? `<div class="dual"><div><span class="label">${esc(t('dual'))}</span> ${Array.from({ length: dc.required || 2 }, (_, i) => `<span class="slot${i < (dc.approvals || []).length ? ' on' : ''}"></span>`).join('')} <span class="faint">${(dc.approvals || []).length}/${dc.required || 2}${dc.requester ? ' · ' + esc(t('requester')) + ' ' + esc(dc.requester) : ''}${(dc.approver_roles || []).length ? ' · ' + esc(dc.approver_roles.join('/')) : ''}${dc.change_ticket ? ' · ' + esc(dc.change_ticket.number || dc.change_ticket) : ''}</span></div>${(dc.votes || []).map((v) => `<div class="faint mono">${v.approve ? '✓' : '✕'} ${esc(v.by || '')}${v.role ? ' (' + esc(v.role) + ')' : ''}</div>`).join('')}</div>` : '';
+    box.innerHTML = `<div class="q"><span class="star pulse warn" style="--size:14px"></span><div><strong>${esc(t('approval', { gate: p.gate }))}</strong>${p.tier !== undefined ? ` <span class="chip">tier ${esc(p.tier)}</span>` : ''}<div class="dim">${esc(p.tool)} — ${esc(p.reason)}</div>${p.summary ? `<pre>${esc(p.summary)}</pre>` : ''}${dual}</div></div>
       <div class="acts" data-approve-ui><button class="btn danger small" data-a="deny">${esc(t('deny'))}</button><button class="btn ghost small" data-a="always">${esc(t('always'))}</button><button class="btn small" data-a="once">${esc(t('once'))}</button></div>`;
   } else {
     // `clarify` questions carry pickable choices (`choices`, `multi_select`); a plain
@@ -489,9 +685,9 @@ function onPending(p) {
     box._multi = multi;
     box._picked = new Set();
     const acts = choices.length
-      ? `<div class="acts">${choices.map((c, i) => `<button class="btn ghost small" data-c="${esc(c)}" data-i="${i}">${esc(c)}</button>`).join('')}${multi ? '<button class="btn small" data-a="answer">送出</button>' : ''}</div>`
+      ? `<div class="acts">${choices.map((c, i) => `<button class="btn ghost small" data-c="${esc(c)}" data-i="${i}">${esc(c)}</button>`).join('')}${multi ? `<button class="btn small" data-a="answer">${esc(t('send'))}</button>` : ''}</div>`
       : `<input type="text" placeholder="${esc(t('answer'))}"><div class="acts" data-approve-ui><button class="btn small" data-a="answer">${esc(t('answer'))}</button></div>`;
-    box.innerHTML += `<div class="q"><span class="star pulse" style="--size:18px"></span><div><strong>${esc(t('ask'))}</strong><div>${md(p.question)}</div>${multi ? '<div class="dim">可多選</div>' : ''}</div></div>${acts}`;
+    box.innerHTML = `<div class="q"><span class="star pulse" style="--size:14px"></span><div><strong>${esc(t('ask'))}</strong><div>${md(p.question)}</div>${multi ? '<div class="dim">可多選</div>' : ''}</div></div>${acts}`;
   }
   box.addEventListener('click', async (e) => {
     const d = e.target.dataset;
@@ -503,8 +699,7 @@ function onPending(p) {
         else { box._picked.add(i); e.target.classList.add('on'); }
         return;
       }
-      try { await S.arp.call('gate.answer', { id: p.id, answer: d.c }); } catch (err) { addMsg('notice', '', esc(err.message)); }
-      box.remove(); S.pending.delete(p.id);
+      await answerPending(p.id, d.c);
       return;
     }
     const a = d.a;
@@ -514,47 +709,131 @@ function onPending(p) {
       const input = box.querySelector('input');
       answer = input ? input.value : [...box._picked].sort((x, y) => x - y).map((i) => box._choices[i]).join(', ');
     }
-    try { await S.arp.call('gate.answer', { id: p.id, answer }); } catch (err) { addMsg('notice', '', esc(err.message)); }
-    box.remove(); S.pending.delete(p.id);
+    await answerPending(p.id, answer);
   });
-  S.pending.set(p.id, box);
-  $('pending').appendChild(box);
+  box.addEventListener('keydown', (e) => { if (e.key === 'Enter' && e.target.tagName === 'INPUT') { e.preventDefault(); box.querySelector('[data-a=answer]').click(); } });
+  return box;
+}
+function onPending(p) {
+  if (S.pending.has(p.id)) return;
+  const entry = { p, box: null };
+  S.pending.set(p.id, entry);
+  if (!p.session || p.session === S.current) { entry.box = pendingBox(p); $('pending').appendChild(entry.box); stick(); }
+  else toast(`${p.kind === 'approval' ? t('approval', { gate: p.gate }) : t('ask')} · ${sessTitle(p.session)}`);
+  pendingChanged();
+}
+// After switching sessions: show that session's open items in the dock.
+function redrawDock() {
+  $('pending').innerHTML = '';
+  for (const e of S.pending.values()) {
+    e.box = null;
+    if (!e.p.session || e.p.session === S.current) { e.box = pendingBox(e.p); $('pending').appendChild(e.box); }
+  }
 }
 
-async function loadSessions() {
-  S.sessions = await S.arp.call('session.list', { limit: 100 });
+// ── conversations (rail) ──
+function sessTitle(id) { const s = S.sessions.find((x) => x.id === id); return s ? (s.title || s.id) : id; }
+function ago(ms) {
+  if (!ms) return '';
+  const d = (Date.now() - ms) / 1000;
+  if (d < 60) return LANG === 'en' ? 'now' : '剛剛';
+  if (d < 3600) return Math.floor(d / 60) + (LANG === 'en' ? 'm' : ' 分');
+  if (d < 86400) return Math.floor(d / 3600) + (LANG === 'en' ? 'h' : ' 時');
+  return Math.floor(d / 86400) + (LANG === 'en' ? 'd' : ' 天');
+}
+function renderSessions() {
   const nav = $('sessions');
+  const q = ($('sessFilter').value || '').trim().toLowerCase();
   nav.innerHTML = '';
-  for (const s of S.sessions) {
+  const list = S.sessions.filter((s) => !q || (s.title || s.id).toLowerCase().includes(q) || s.id.includes(q));
+  // Children follow their parent (one level of indentation is enough to read the tree).
+  const ids = new Set(list.map((s) => s.id));
+  const roots = list.filter((s) => !s.parent || !ids.has(s.parent));
+  const kids = (id) => list.filter((s) => s.parent === id);
+  const day = 86400000;
+  const start = new Date(); start.setHours(0, 0, 0, 0);
+  const group = (s) => (s.updated_ms >= start.getTime() ? 'today' : s.updated_ms >= start.getTime() - day ? 'yesterday' : 'earlier');
+  let last = '';
+  const add = (s, child) => {
     const b = document.createElement('button');
-    b.className = 'sess' + (s.id === S.current ? ' active' : '');
-    b.innerHTML = `${s.running ? '<span class="star pulse" style="--size:10px"></span>' : ''}<span class="t">${esc(s.title || s.id)}</span><span class="m">${s.messages}</span>`;
+    b.className = 'sess' + (s.id === S.current ? ' active' : '') + (child ? ' child' : '');
+    b.dataset.id = s.id;
+    b.title = s.id;
+    b.innerHTML = `${s.running ? '<span class="star pulse" style="--size:10px"></span>' : '<span class="dot"></span>'}<span class="t">${esc(s.title || s.id)}</span><span class="m">${ago(s.updated_ms)}</span>`;
     b.onclick = () => openSession(s.id);
     nav.appendChild(b);
+  };
+  for (const s of roots) {
+    const g = group(s);
+    if (g !== last) { nav.insertAdjacentHTML('beforeend', `<div class="sess-group label">${esc(t(g))}</div>`); last = g; }
+    add(s, false);
+    for (const c of kids(s.id)) add(c, true);
   }
-  if (!S.sessions.length) nav.innerHTML = '<div class="dim" style="padding:8px">' + esc(t('no_sessions')) + '</div>';
+  if (!list.length) nav.innerHTML = '<div class="none" style="padding:8px 10px">' + esc(t('no_sessions')) + '</div>';
+  const running = S.sessions.filter((s) => s.running).length;
+  const ba = $('badgeAgents');
+  ba.hidden = !running;
+  ba.textContent = running;
+}
+async function loadSessions() {
+  try { S.sessions = await S.arp.call('session.list', { limit: 200 }); } catch { return; }
+  renderSessions();
+  if (S.current && S.view === 'chat') $('title').textContent = sessTitle(S.current);
+}
+
+function emptyChat() {
+  $('log').innerHTML = `<div class="empty"><span class="star glow twinkle"></span><h3>${esc(t('start'))}</h3><p>${esc(t('start_sub'))}</p><div class="tips">${['/help', '/status', '/model'].map((c) => `<button type="button" data-tip="${c}">${c}</button>`).join('')}</div></div>`;
+  for (const b of $('log').querySelectorAll('[data-tip]')) b.onclick = () => { $('input').value = b.dataset.tip; autosize(); $('input').focus(); updateSlashMenu(); };
 }
 
 async function openSession(id) {
-  S.current = id; S.streaming = null;
+  S.current = id; S.streaming = null; S.tools = new Map(); S.stick = true;
+  store.set('ark.session', id);
   $('log').innerHTML = '';
-  $('side').classList.remove('open');
+  showView('chat');
   const s = S.sessions.find((x) => x.id === id);
-  $('title').textContent = s ? (s.title || s.id) : id;
   setStatus(!!(s && s.running));
+  $('modelChip').textContent = (s && s.model) || (S.models && S.models.default) || '';
   if (S.sub) { S.arp.call('unsubscribe', { subscription: S.sub }).catch(() => {}); }
   S.sub = S.arp.next;
-  S.arp.call('subscribe', { id, from_seq: 0 }).catch((e) => addMsg('notice', '', esc(e.message)));
-  for (const b of $('sessions').children) b.classList.toggle('active', b.textContent.includes(s ? (s.title || s.id) : id));
+  S.arp.call('subscribe', { id, from_seq: 0 }).catch((e) => addMsg('notice err', '', esc(e.message)));
+  renderSessions();
+  redrawDock();
+  $('reviewBtn').hidden = false;
+  loadReview();
+  $('input').focus();
 }
+// ── session review (reviewer marks a conversation reviewed / flagged; audited server-side) ──
+async function loadReview() {
+  const id = S.current;
+  let r = null;
+  try { r = await S.arp.call('session.review.get', { id }); } catch {}
+  if (id !== S.current) return;
+  S.review = r && r.current;
+  $('reviewMark').textContent = S.review ? (S.review.status === 'flagged' ? ' ⚑' : ' ✓') : '';
+  $('reviewMark').className = 'review-mark ' + (S.review ? S.review.status : '');
+}
+$('reviewBtn').onclick = () => {
+  const c = S.review;
+  $('reviewCur').textContent = c ? `${c.status} · ${c.by || ''} · ${new Date(c.at_ms).toLocaleString()}${c.note ? ' — ' + c.note : ''}` : '';
+  $('reviewNote').value = '';
+  $('reviewDlg').showModal();
+};
+$('reviewDlg').addEventListener('close', async () => {
+  const v = $('reviewDlg').returnValue;
+  if (v !== 'reviewed' && v !== 'flagged') return;
+  try { await S.arp.call('session.review.set', { id: S.current, status: v, note: $('reviewNote').value }); toast(t('review_done', { s: t(v) })); }
+  catch (e) { toast(e.message, true); }
+  loadReview();
+});
 
 async function newSession() {
   const ws = store.get('ark.workspace') || '';
   // No workspace chosen: the server uses [app] workspace (or its own directory), never "/".
-  const { id } = await S.arp.call('session.create', ws ? { workspace: ws, title: '網頁對話' } : { title: '網頁對話' }).catch((e) => (addMsg('notice', '', esc(e.message)), {}));
+  const { id } = await S.arp.call('session.create', ws ? { workspace: ws, title: '網頁對話' } : { title: '網頁對話' }).catch((e) => (toast(e.message, true), {}));
   if (!id) return;
   await loadSessions();
-  openSession(id);
+  await openSession(id);
 }
 
 async function send(text, opts) {
@@ -565,6 +844,8 @@ async function send(text, opts) {
   // action they return (new_session / quit / local) is performed by this client.
   if (text.trim().startsWith('/') && !(opts && opts.raw)) { closeSlash(); return runSlash(text.trim()); }
   const uploads = ATT.map((a) => a.path);
+  if ($('log').querySelector('.empty')) $('log').innerHTML = '';
+  S.stick = true;
   try {
     if (uploads.length) {
       await S.arp.call('ui.submit', { id: S.current, text, uploads });
@@ -572,15 +853,18 @@ async function send(text, opts) {
       renderAtt();
     } else await S.arp.call('session.submit', { id: S.current, text, source: 'web' });
     setStatus(true);
-  } catch (e) { addMsg('notice', '', '⚠ ' + esc(e.message)); }
+  } catch (e) { addMsg('notice err', '', esc(e.message)); }
 }
 
 async function showPanel(title, fn, after) {
   $('panelTitle').textContent = title;
+  $('title').textContent = title;
   $('panelBody').innerHTML = '<span class="star spin"></span>';
   $('panelDialog').showModal();
-  try { $('panelBody').innerHTML = await fn(); if (after) after(); } catch (e) { $('panelBody').textContent = e.message; }
+  $('title').textContent = title;
+  try { $('panelBody').innerHTML = await fn(); if (after) after(); } catch (e) { $('panelBody').innerHTML = `<p class="bad">${esc(e.message)}</p>`; }
   guardPanel($('panelBody'));
+  $('panelDialog').scrollTop = 0;
 }
 
 // ── RBAC in the UI (gen2-518): the server enforces every method; the UI mirrors what the
@@ -590,6 +874,8 @@ function applyAccess(me) {
   document.body.classList.toggle('ro', !can.write);
   document.body.classList.toggle('no-approve', !can.approve);
   if (!can.write) document.body.dataset.access = (me && me.access) || 'read';
+  const who = me && (me.name || me.kind);
+  $('whoami').innerHTML = who ? `<span class="star" style="--size:9px"></span><span>${esc(who)}</span>${me.access ? `<span class="role">${esc(me.access)}</span>` : ''}` : '';
 }
 // Read-only callers: every control in a Control UI page is hidden / disabled unless it is a
 // pure read (navigation, refresh, export, filters), which pages.js marks with `data-read`.
@@ -602,39 +888,93 @@ function guardPanel(root) {
 
 function row(cells) { return '<tr>' + cells.map((c) => `<td>${c}</td>`).join('') + '</tr>'; }
 
+// ── command palette (Ctrl/⌘+K): views, Control pages, conversations, slash commands ──
+const PAL = { items: [], idx: 0 };
+function paletteItems(q) {
+  const items = [];
+  for (const [v, key] of Object.entries(VIEW_SEC)) if (v !== 'page') items.push({ kind: 'view', label: t(key), sub: '#' + v, run: () => (v === 'chat' && S.current ? openSession(S.current) : showView(v)) });
+  if (typeof PAGES === 'object') for (const [id, p] of Object.entries(PAGES)) items.push({ kind: 'page', label: p.title, sub: id, run: () => { S.pageNav = 'showControl'; openPage(id); } });
+  for (const s of S.sessions.slice(0, 80)) items.push({ kind: 'chat', label: s.title || s.id, sub: ago(s.updated_ms), run: () => openSession(s.id) });
+  for (const c of CMDS.list.slice(0, 120)) items.push({ kind: 'cmd', label: '/' + c.name, sub: c.description || '', run: () => { if (!S.current) return; showView('chat'); $('input').value = '/' + c.name + ' '; autosize(); $('input').focus(); } });
+  const n = q.trim().toLowerCase();
+  if (!n) return items.slice(0, 40);
+  return items.map((it) => [it.label.toLowerCase().startsWith(n) ? 0 : it.label.toLowerCase().includes(n) ? 1 : String(it.sub).toLowerCase().includes(n) ? 2 : 9, it]).filter(([r]) => r < 9).sort((a, b) => a[0] - b[0]).slice(0, 40).map(([, it]) => it);
+}
+function renderPalette() {
+  PAL.items = paletteItems($('paletteInput').value);
+  PAL.idx = Math.min(PAL.idx, Math.max(0, PAL.items.length - 1));
+  $('paletteList').innerHTML = PAL.items.map((it, i) => `<button type="button" class="pal${i === PAL.idx ? ' on' : ''}" data-i="${i}"><span class="kind">${esc(it.kind)}</span><span>${esc(it.label)}</span><span class="sub">${esc(String(it.sub).slice(0, 60))}</span></button>`).join('');
+  for (const b of $('paletteList').querySelectorAll('[data-i]')) b.onclick = () => runPalette(+b.dataset.i);
+}
+function runPalette(i) { const it = PAL.items[i]; $('palette').close(); if (it) it.run(); }
+async function openPalette() {
+  $('paletteInput').value = '';
+  PAL.idx = 0;
+  renderPalette();
+  $('palette').showModal();
+  $('paletteInput').focus();
+  // Commands arrive after the first paint; whatever was typed meanwhile still filters them.
+  if (!CMDS.loaded) { await loadCommands(); renderPalette(); }
+}
+$('paletteInput').addEventListener('input', () => { PAL.idx = 0; renderPalette(); });
+$('paletteInput').addEventListener('keydown', (e) => {
+  if (e.key === 'ArrowDown' || e.key === 'ArrowUp') { e.preventDefault(); PAL.idx = (PAL.idx + (e.key === 'ArrowDown' ? 1 : -1) + PAL.items.length) % Math.max(1, PAL.items.length); renderPalette(); }
+  else if (e.key === 'Enter') { e.preventDefault(); runPalette(PAL.idx); }
+});
+$('palette').addEventListener('click', (e) => { if (e.target === $('palette')) $('palette').close(); });
+$('paletteBtn').onclick = openPalette;
+document.addEventListener('keydown', (e) => {
+  if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') { e.preventDefault(); openPalette(); }
+  else if (e.key === 'Escape' && S.view === 'page' && !document.querySelector('dialog[open]')) $('panelDialog').close();
+});
+
 async function start(token) {
   S.arp = new Arp(token);
   setConn(t('conn.connecting'));
-  try { await S.arp.connect(); } catch (e) { setConn(t('conn.failed')); store.del('ark.token'); return askToken(); }
-  S.arp.on('ready', (p) => setConn(t('conn.ready', { v: p.server.version })));
-  // Two subscriptions share the socket: the global one feeds the sidebar and approvals,
+  try { await S.arp.connect(); } catch (e) { setConn(t('conn.failed'), 'down'); store.del('ark.token'); return askToken(); }
+  S.arp.on('ready', (p) => setConn(t('conn.ready', { v: p.server.version }), 'live'));
+  // Two subscriptions share the socket: the global one feeds the rail and approvals,
   // the session one feeds the transcript. Route by subscription id so nothing renders twice.
   S.arp.on('event', (p) => {
-    if (p.subscription === S.globalSub) { if (p.event && (p.event.type === 'turn_end' || p.event.type === 'header')) loadSessions(); return; }
+    if (p.subscription === S.globalSub) {
+      if (p.event && (p.event.type === 'turn_end' || p.event.type === 'turn_start' || p.event.type === 'header')) loadSessions();
+      if (typeof opsEvent === 'function') opsEvent(p);
+      return;
+    }
     if (p.session === S.current) renderEvent(p.event);
   });
   S.arp.on('delta', (p) => { if (p.subscription !== S.globalSub) onDelta(p); });
   S.arp.on('pending', (p) => { if (p.subscription === S.globalSub) onPending(p); });
-  S.arp.on('close', () => { setConn(t('conn.down')); setTimeout(() => start(token), 3000); });
+  S.arp.on('close', () => { setConn(t('conn.down'), 'down'); setTimeout(() => start(token), 3000); });
   // After the handlers: the server's `ready` notification must not arrive unobserved.
   try { S.me = await S.arp.call('whoami'); } catch { S.me = null; }
   applyAccess(S.me);
-  // A second subscription follows every session for approvals and the sidebar.
+  if ($('conn').textContent === t('conn.connecting')) setConn(t('conn.ready', { v: '' }).replace(' · v', ''), 'live');
+  // A second subscription follows every session for approvals and the rail.
   S.globalSub = S.arp.next;
   S.arp.call('subscribe', {}).catch(() => {});
+  try { S.models = await S.arp.call('models.list'); } catch { S.models = null; }
   await loadSessions();
   loadPluginPanels();
-  for (const p of await S.arp.call('gate.pending')) onPending(p);
-  if (!S.current && S.sessions[0]) openSession(S.sessions[0].id);
-  else if (!S.sessions.length) $('log').innerHTML = '<div class="empty"><span class="star twinkle"></span><div>' + esc(t('start')) + '</div></div>';
+  S.pending.clear();
+  try { for (const p of await S.arp.call('gate.pending')) onPending(p); } catch {}
+  // Start where the person left off: a deep link, the last view, or the overview.
+  const h = new URLSearchParams(location.hash.slice(1));
+  const want = h.get('view') || store.get('ark.view') || 'ops';
+  const last = store.get('ark.session');
+  if (want === 'chat') {
+    const id = (last && S.sessions.some((s) => s.id === last)) ? last : (S.sessions[0] && S.sessions[0].id);
+    if (id) openSession(id); else { showView('chat'); emptyChat(); }
+  } else if (!h.get('page')) showView(VIEWS[want] ? want : 'ops', { keepHash: true });
+  if (typeof opsStart === 'function') opsStart();
 }
 
 function askToken() {
   $('login').showModal();
   $('loginForm').onsubmit = () => {
-    const t = $('token').value.trim();
-    if ($('remember').checked) store.set('ark.token', t);
-    start(t);
+    const tk = $('token').value.trim();
+    if ($('remember').checked) store.set('ark.token', tk);
+    start(tk);
   };
 }
 
@@ -644,6 +984,7 @@ $('input').addEventListener('keydown', (e) => {
   if (SLASH.open && (e.key === 'ArrowDown' || e.key === 'ArrowUp')) { e.preventDefault(); moveSlash(e.key === 'ArrowDown' ? 1 : -1); return; }
   if (SLASH.open && (e.key === 'Tab' || (e.key === 'Enter' && !e.shiftKey))) { e.preventDefault(); pickSlash(SLASH.items[SLASH.idx].name); return; }
   if (SLASH.open && e.key === 'Escape') { e.preventDefault(); closeSlash(); return; }
+  if (e.key === 'Escape' && S.running) { e.preventDefault(); $('stop').click(); return; }
   if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); $('composer').requestSubmit(); }
 });
 $('input').addEventListener('input', () => { autosize(); updateSlashMenu(); });
@@ -654,33 +995,42 @@ $('composer').addEventListener('dragleave', () => $('composer').classList.remove
 $('composer').addEventListener('drop', (e) => { e.preventDefault(); $('composer').classList.remove('drop'); if (e.dataTransfer && e.dataTransfer.files.length) addFiles(e.dataTransfer.files); });
 $('attach').onclick = () => $('file').click();
 $('file').onchange = (e) => { addFiles(e.target.files); e.target.value = ''; };
-$('lang').onclick = () => { setLang(LANG === 'en' ? 'zh-Hant' : 'en'); $('lang').textContent = t('lang'); };
+$('lang').onclick = () => { setLang(LANG === 'en' ? 'zh-Hant' : 'en'); $('lang').textContent = t('lang'); renderSessions(); if (S.view && S.view !== 'page') showView(S.view, { keepHash: true }); };
 $('theme').onchange = (e) => setTheme(e.target.value);
 setLang(LANG, false);
 setTheme(store.get('ark.theme') || 'crimson', false);
 $('lang').textContent = t('lang');
-function autosize() { const t = $('input'); t.style.height = 'auto'; t.style.height = Math.min(t.scrollHeight, innerHeight * 0.4) + 'px'; }
-$('input').addEventListener('input', autosize);
+function autosize() { const ta = $('input'); ta.style.height = 'auto'; ta.style.height = Math.min(ta.scrollHeight, innerHeight * 0.4) + 'px'; }
 $('newSession').onclick = newSession;
+$('sessFilter').addEventListener('input', renderSessions);
 $('stop').onclick = () => S.current && S.arp.call('session.interrupt', { id: S.current });
 $('menu').onclick = () => $('side').classList.toggle('open');
 $('panelClose').onclick = () => $('panelDialog').close();
-$('showNodes').onclick = () => showPanel('裝置（nodes）', async () => {
-  const r = await S.arp.call('node.list');
-  const pend = await S.arp.call('node.pair.list');
-  let h = '<table class="kv"><tr><th>裝置</th><th>平台</th><th>指令</th></tr>';
-  for (const n of r.connected) h += row([esc(n.name), esc(n.platform), esc(n.commands.join(', '))]);
-  h += '</table>';
-  if (pend.length) h += '<h3>等待配對</h3><table class="kv">' + pend.map((p) => row([esc(p.name), esc(p.platform), `<code>${esc(p.code)}</code>`])).join('') + '</table><p class="dim">在主機上執行 <code>ark nodes approve &lt;code&gt;</code> 核准。</p>';
-  return h;
+chatScroll().addEventListener('scroll', () => {
+  const c = chatScroll();
+  if (Math.abs(c.scrollTop - (S.autoTop || 0)) < 4) return;
+  S.stick = nearBottom();
+  if (S.stick) S.autoTop = c.scrollTop;
+  $('jump').hidden = S.stick;
 });
-$('showSettings').onclick = () => showPanel('設定', async () => {
+$('jump').onclick = () => { S.stick = true; stick(true); $('jump').hidden = true; };
+for (const b of document.querySelectorAll('.nav-item[data-view]')) {
+  b.addEventListener('click', () => {
+    const v = b.dataset.view;
+    if (v === 'chat') { const id = S.current || store.get('ark.session') || (S.sessions[0] && S.sessions[0].id); if (id && S.sessions.some((s) => s.id === id)) openSession(id); else { showView('chat'); emptyChat(); } }
+    else showView(v);
+  });
+}
+// Control pages and dashboards light up their own nav entry.
+for (const id of ['showControl', 'showBoards', 'showSettings']) $(id).addEventListener('click', () => { S.pageNav = id; }, true);
+$('showSettings').onclick = () => showPanel(t('settings'), async () => {
   const m = await S.arp.call('models.list');
   const tools = await S.arp.call('tools.list');
-  return `<table class="kv">${row(['預設模型', esc(m.default)])}${row(['備援', esc((m.fallback || []).join(', ') || '—')])}${row(['輔助模型', esc(m.aux)])}${row(['工具', String(tools.length)])}</table>
-    <p><label class="dim">新對話的工作目錄</label><input type="text" id="wsInput" value="${esc(store.get('ark.workspace') || '')}" placeholder="/home/you/project"></p>
-    ${(S.settingsPanels || []).map(([p, u], i) => `<p><button class="btn ghost small" data-panel="${i}">${esc(u.title || u.id)}（${esc(p)}）</button></p>`).join('')}
-    <p><button class="btn ghost small" id="logout">登出這台裝置</button></p>`;
+  return `<h3>模型</h3><table class="kv">${row(['預設模型', `<code>${esc(m.default)}</code>`])}${row(['備援', esc((m.fallback || []).join(', ') || '—')])}${row(['輔助模型', `<code>${esc(m.aux || '—')}</code>`])}${row(['工具', String(tools.length)])}</table>
+    <h3>這台裝置</h3>
+    <p><label class="dim">新對話的工作目錄</label><input type="text" id="wsInput" value="${esc(store.get('ark.workspace') || '')}" placeholder="（伺服器預設）"></p>
+    ${(S.settingsPanels || []).length ? '<h3>外掛設定</h3>' : ''}${(S.settingsPanels || []).map(([p, u], i) => `<p><button class="btn ghost small" data-panel="${i}">${esc(u.title || u.id)}（${esc(p)}）</button></p>`).join('')}
+    <p><button class="btn ghost small" id="logout" data-read>登出這台裝置</button></p>`;
 }, () => {
   for (const b of $('panelBody').querySelectorAll('[data-panel]')) { const [p, u] = S.settingsPanels[+b.dataset.panel]; b.onclick = () => openPluginPanel(p, u); }
   // CSP forbids inline handlers: bind after rendering.

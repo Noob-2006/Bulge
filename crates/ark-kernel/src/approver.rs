@@ -41,6 +41,11 @@ pub enum Approval {
 
 pub trait Approver: Send + Sync {
     fn approve(&self, req: &ApprovalRequest) -> Approval;
+    /// [`Approver::approve`] with its own wait (dual control collects several people, so it
+    /// waits `[approvals.dual_control] expiry_secs` rather than `approvals.timeout_secs`).
+    fn approve_within(&self, req: &ApprovalRequest, _wait: Duration) -> Approval {
+        self.approve(req)
+    }
     fn ask(&self, session: &str, question: &str) -> Result<String, String>;
     /// Can a human answer at all? Headless policies cannot (exec `ask_fallback` applies).
     fn interactive(&self) -> bool {
@@ -212,12 +217,29 @@ pub enum PendingItem {
 /// sender or local user approved a tier 2/3 action. The decision itself is unchanged: this
 /// only calls [`Approver::answer`] and writes an `approval.answer` audit record on success.
 pub fn answer_by(approver: &dyn Approver, data: &std::path::Path, id: &str, answer: &str, who: &ark_security::audit::Actor, via: &str) -> bool {
+    answer_as(approver, data, id, answer, who, via).is_ok()
+}
+
+/// What one answer did.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Answered {
+    /// The wait ended (an ordinary answer, a dual-control deny, or the quorum was reached).
+    Final,
+    /// Dual control: the approval was counted; `have` of `need` so far.
+    Counted { have: u32, need: u32 },
+}
+
+/// [`answer_by`] with the reason a vote was refused (dual control) or the id unknown.
+pub fn answer_as(approver: &dyn Approver, data: &std::path::Path, id: &str, answer: &str, who: &ark_security::audit::Actor, via: &str) -> Result<Answered, String> {
+    if let Some(r) = vote(approver, data, id, answer, who, via) {
+        return r;
+    }
     let item = approver.pending().into_iter().find(|p| match p {
         PendingItem::Approval(r) => r.id == id,
         PendingItem::Question { id: q, .. } => q == id,
     });
     if !approver.answer(id, answer) {
-        return false;
+        return Err("no such pending item (already answered or timed out)".into());
     }
     let decision = ark_security::approvals::parse_answer(answer).0.to_string();
     let ev = match item {
@@ -231,7 +253,110 @@ pub fn answer_by(approver: &dyn Approver, data: &std::path::Path, id: &str, answ
         None => ark_security::audit::Event::new("approval.answer", who.clone(), id, &decision).detail(serde_json::json!({"via": via, "approved_by": who.label()})),
     };
     ark_security::audit::record(data, ev);
-    true
+    Ok(Answered::Final)
+}
+
+// ───────────────────────── dual control (four eyes) ─────────────────────────
+
+use ark_security::dual_control::{Outcome, Quorum};
+
+fn quorums() -> &'static Mutex<HashMap<String, Quorum>> {
+    static Q: std::sync::OnceLock<Mutex<HashMap<String, Quorum>>> = std::sync::OnceLock::new();
+    Q.get_or_init(Default::default)
+}
+
+/// Register an approval as dual-controlled before it is published; answers for `q.id` are
+/// then votes. The gate removes it again with [`close_quorum`] once the wait ends.
+pub fn open_quorum(q: Quorum) {
+    quorums().lock().unwrap_or_else(|p| p.into_inner()).insert(q.id.clone(), q);
+}
+
+pub fn close_quorum(id: &str) -> Option<Quorum> {
+    quorums().lock().unwrap_or_else(|p| p.into_inner()).remove(id)
+}
+
+/// The open dual-control state of approval `id` (for `gate.pending` and `ark gate show`).
+pub fn quorum(id: &str) -> Option<Quorum> {
+    quorums().lock().unwrap_or_else(|p| p.into_inner()).get(id).cloned()
+}
+
+/// The roles an answering principal holds: the app server passes the access label
+/// (`admin`, `user+auditor`, `scope:approve`); a chat sender gets its registered profile's
+/// role; the local socket user is the installation's admin.
+fn roles_of(data: &std::path::Path, who: &ark_security::audit::Actor) -> Vec<String> {
+    let mut r: Vec<String> = who.role.split('+').map(|s| s.trim().trim_start_matches("scope:").to_string()).filter(|s| !s.is_empty()).collect();
+    if r.is_empty() {
+        if who.kind == "local" {
+            r.push("admin".into());
+        } else if let Some(u) = crate::governance::registered_person(data, &who.label()) {
+            r.push(if u.role.trim().is_empty() { "user".into() } else { u.role.trim().to_string() });
+        }
+    }
+    // Legacy token scopes: `approve` is what a `user` may do.
+    r.into_iter().map(|x| if x == "approve" { "user".into() } else { x }).collect()
+}
+
+fn still_waiting(approver: &dyn Approver, id: &str) -> bool {
+    approver.pending().iter().any(|p| matches!(p, PendingItem::Approval(r) if r.id == id))
+}
+
+/// A vote on a dual-controlled approval, or `None` when `id` is not one.
+fn vote(approver: &dyn Approver, data: &std::path::Path, id: &str, answer: &str, who: &ark_security::audit::Actor, via: &str) -> Option<Result<Answered, String>> {
+    use ark_security::audit::{record, Event};
+    let mut map = quorums().lock().unwrap_or_else(|p| p.into_inner());
+    let q = map.get_mut(id)?;
+    let approve = matches!(ark_security::approvals::parse_answer(answer).0, "once" | "session" | "permanent");
+    let roles = roles_of(data, who);
+    let same = |a: &str, b: &str| crate::governance::same_person(data, a, b);
+    let label = who.label();
+    let outcome = q.vote(&label, &roles, approve, via, &same, ark_security::audit::now_ms());
+    let detail = |q: &Quorum, extra: Option<&str>| {
+        let mut d = serde_json::json!({"tool": q.tool, "via": via, "approved_by": label, "requester": q.requester, "required": q.required, "approvals": q.approvals(), "dual_control": true});
+        if let Some(e) = extra {
+            d["reason"] = e.into();
+        }
+        d
+    };
+    match outcome {
+        Outcome::Refused(why) => {
+            record(data, Event::new("approval.vote", who.clone(), id, "refused").session(&q.session).detail(detail(q, Some(&why))));
+            Some(Err(why))
+        }
+        Outcome::Recorded { have, need } => {
+            record(data, Event::new("approval.vote", who.clone(), id, "approve").session(&q.session).detail(detail(q, None)));
+            Some(Ok(Answered::Counted { have, need }))
+        }
+        Outcome::Approved(by) => {
+            let q = map.remove(id).expect("present");
+            drop(map);
+            record(data, Event::new("approval.vote", who.clone(), id, "approve").session(&q.session).detail(detail(&q, None)));
+            // The outcome is recorded (and the approvers named) *before* the waiting call is
+            // released, so the record always precedes the action it allowed.
+            if !still_waiting(approver, id) {
+                return Some(Err("the request is no longer waiting (expired)".into()));
+            }
+            let by = by.join(" + ");
+            ark_security::approvals::set_answered_by(id, &by);
+            let mut d = detail(&q, None);
+            d["approved_by"] = by.into();
+            record(data, Event::new("approval.answer", who.clone(), id, "once").session(&q.session).detail(d));
+            if !approver.answer(id, "once") {
+                return Some(Err("the request is no longer waiting (expired)".into()));
+            }
+            Some(Ok(Answered::Final))
+        }
+        Outcome::Denied(by) => {
+            let q = map.remove(id).expect("present");
+            drop(map);
+            if !still_waiting(approver, id) {
+                return Some(Err("the request is no longer waiting (expired)".into()));
+            }
+            ark_security::approvals::set_answered_by(id, &by);
+            record(data, Event::new("approval.answer", who.clone(), id, "deny").session(&q.session).detail(detail(&q, None)));
+            approver.answer(id, answer);
+            Some(Ok(Answered::Final))
+        }
+    }
 }
 
 #[derive(Default)]
@@ -268,13 +393,17 @@ impl Pending {
     }
 
     fn wait(&self, id: String, item: PendingItem) -> Option<String> {
+        let timeout = Duration::from_millis(self.timeout_ms.load(std::sync::atomic::Ordering::Relaxed));
+        self.wait_for(id, item, timeout)
+    }
+
+    fn wait_for(&self, id: String, item: PendingItem, timeout: Duration) -> Option<String> {
         {
             let mut s = self.state.lock().unwrap();
             s.open.insert(id.clone(), item.clone());
         }
         (self.notify)(item);
         let s = self.state.lock().unwrap();
-        let timeout = Duration::from_millis(self.timeout_ms.load(std::sync::atomic::Ordering::Relaxed));
         let (mut s, _) = self.cv.wait_timeout_while(s, timeout, |s| !s.answers.contains_key(&id)).unwrap();
         s.open.remove(&id);
         let a = s.answers.remove(&id);
@@ -293,9 +422,9 @@ impl Pending {
     }
 }
 
-impl Approver for Pending {
-    fn approve(&self, req: &ApprovalRequest) -> Approval {
-        let Some(answer) = self.wait(req.id.clone(), PendingItem::Approval(req.clone())) else { return Approval::Deny };
+impl Pending {
+    fn decision(req: &ApprovalRequest, answer: Option<String>) -> Approval {
+        let Some(answer) = answer else { return Approval::Deny };
         match ark_security::approvals::parse_answer(&answer) {
             ("once", _) => Approval::Once,
             ("session", _) => Approval::Always,
@@ -307,6 +436,15 @@ impl Approver for Pending {
                 Approval::Deny
             }
         }
+    }
+}
+
+impl Approver for Pending {
+    fn approve(&self, req: &ApprovalRequest) -> Approval {
+        Pending::decision(req, self.wait(req.id.clone(), PendingItem::Approval(req.clone())))
+    }
+    fn approve_within(&self, req: &ApprovalRequest, wait: Duration) -> Approval {
+        Pending::decision(req, self.wait_for(req.id.clone(), PendingItem::Approval(req.clone()), wait))
     }
     fn pending(&self) -> Vec<PendingItem> {
         self.list()

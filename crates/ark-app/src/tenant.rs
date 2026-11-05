@@ -27,11 +27,11 @@ use serde_json::{json, Value};
 /// What an organization-bound principal may call (everything else is installation-wide).
 pub const TENANT_METHODS: &[&str] = &[
     "ping", "initialize", "whoami", "models.list", "tools.list", "session.list", "session.create", "session.submit", "session.interrupt", "session.history", "session.view", "session.command", "gate.pending", "gate.answer", "approval.answer", "question.answer",
-    "events.subscribe", "subscribe", "unsubscribe", "session.attach", "audit.query", "usage.query", "tenancy.show", "kb.search", "kb.status",
+    "events.subscribe", "subscribe", "unsubscribe", "session.attach", "audit.query", "usage.query", "tenancy.show", "kb.search", "kb.status", "session.review.set", "session.review.get",
 ];
 
 /// Methods whose `params.id` names a session.
-const SESSION_METHODS: &[&str] = &["session.submit", "session.interrupt", "session.history", "session.view", "session.command", "session.attach", "subscribe"];
+const SESSION_METHODS: &[&str] = &["session.review.set", "session.review.get", "session.submit", "session.interrupt", "session.history", "session.view", "session.command", "session.attach", "subscribe"];
 
 pub fn not_found() -> (i32, String) {
     (-32004, "no such session".into())
@@ -235,7 +235,7 @@ pub(crate) mod harness {
 
     pub fn app(cfg: AppConfig) -> Arc<App> {
         let home = ark_core::tmp::scratch("ark-app-ent");
-        let paths = Paths { data: home.join("data"), config_dir: home.join("cfg"), runtime: home.join("run") };
+        let paths = Paths { data: home.join("data"), config_dir: home.join("cfg"), runtime: home.join("run"), ..Default::default() };
         std::fs::create_dir_all(&paths.data).unwrap();
         std::fs::create_dir_all(home.join("ws")).unwrap();
         let (pending, _cell) = ark_kernel::daemon::pending_approver(Duration::from_secs(1));

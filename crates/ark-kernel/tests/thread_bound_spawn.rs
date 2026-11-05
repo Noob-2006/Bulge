@@ -169,7 +169,7 @@ fn env_with(cfg_mut: impl FnOnce(&mut Config)) -> Env {
     let root = ark_core::tmp::scratch_path(format!("ark-thread-spawn-{}", rand_hex()));
     let ws = root.join("ws");
     std::fs::create_dir_all(&ws).unwrap();
-    let paths = Paths { data: root.join("data"), config_dir: root.join("cfg"), runtime: root.join("run") };
+    let paths = Paths { data: root.join("data"), config_dir: root.join("cfg"), runtime: root.join("run"), ..Default::default() };
     let mut cfg = Config::default();
     cfg.model.default = "main/m1".into();
     cfg.model.subagent = "child/c1".into();

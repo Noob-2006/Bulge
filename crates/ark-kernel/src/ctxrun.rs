@@ -219,7 +219,7 @@ mod tests {
     fn refs_attach_a_file_and_are_off_when_disabled() {
         let d = tmp("refs");
         std::fs::write(d.join("a.txt"), "hello ref").unwrap();
-        let paths = Paths { data: d.join("data"), config_dir: d.join("cfg"), runtime: d.join("run") };
+        let paths = Paths { data: d.join("data"), config_dir: d.join("cfg"), runtime: d.join("run"), ..Default::default() };
         let cfg = Config::default();
         let (m, w) = expand_refs(&cfg, &paths, &d, "look @file:a.txt", 100_000);
         assert!(m.contains("hello ref") && m.contains("Attached Context"), "{m}");

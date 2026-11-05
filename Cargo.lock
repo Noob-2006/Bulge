@@ -217,6 +217,7 @@ dependencies = [
  "libc",
  "regex",
  "ring",
+ "rustls",
  "serde",
  "serde_json",
  "toml",

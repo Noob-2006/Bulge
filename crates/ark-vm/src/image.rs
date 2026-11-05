@@ -334,7 +334,7 @@ impl GuestImage {
 /// use), then the installed share dir (`$ARK_SHARE_DIR`, `<exe>/../share/ark`,
 /// `/usr/{local/,}share/ark`: `vm/build-image.sh`), then a checkout the binary runs from.
 fn build_script_path() -> PathBuf {
-    build_script_in(std::env::var_os("ARK_REPO_ROOT").map(PathBuf::from), std::env::var_os("ARK_SHARE_DIR").map(PathBuf::from), std::env::current_exe().ok().as_deref(), &["/usr/local/share/ark", "/usr/share/ark"])
+    build_script_in(std::env::var_os("ARK_REPO_ROOT").map(PathBuf::from), std::env::var_os("ARK_SHARE_DIR").map(PathBuf::from), std::env::current_exe().ok().as_deref(), &["/usr/local/share/ark", "/usr/share/ark"]) // = ark_core::layout::system::SHARE (ark-vm stays dependency-free)
 }
 
 fn build_script_in(repo_root: Option<PathBuf>, share_env: Option<PathBuf>, exe: Option<&Path>, system: &[&str]) -> PathBuf {

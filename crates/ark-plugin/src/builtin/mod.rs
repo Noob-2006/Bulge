@@ -107,7 +107,7 @@ mod tests {
     fn paths(tag: &str) -> Paths {
         let d = ark_core::tmp::scratch_path(format!("ark-builtin-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
-        Paths { data: d.join("data"), config_dir: d.join("config"), runtime: d.join("run") }
+        Paths { data: d.join("data"), config_dir: d.join("config"), runtime: d.join("run"), ..Default::default() }
     }
 
     fn on(cfg: &mut Config, names: &[&str]) {

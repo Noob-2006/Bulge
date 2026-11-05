@@ -20,6 +20,16 @@
 //! project = "my-project"
 //! dataset = "analytics"                     # for sql_schema
 //! token = "{{secret:BQ_TOKEN}}"             # OAuth bearer token (e.g. from `gcloud auth print-access-token`)
+//! # Legacy enterprise databases through their stock clients (on PATH or `client = [...]`):
+//! [integrations.data.sources.erp]
+//! kind = "sqlserver"                        # sqlcmd; no user in the DSN = Kerberos (-E)
+//! dsn = "{{secret:ERP_DSN}}"                # sqlserver://user:password@sql01:1433/ERP?trust_server_certificate=true
+//! [integrations.data.sources.gl]
+//! kind = "oracle"                           # sqlplus 12.2+
+//! dsn = "{{secret:GL_DSN}}"                 # oracle://user:password@ora01:1521/SERVICE_NAME
+//! [integrations.data.sources.as400]
+//! kind = "odbc"                             # unixODBC isql; the DSN lives in odbc.ini
+//! dsn = "odbc://DB2PROD"
 //! ```
 //!
 //! The model names a **source**, never a connection string: credentials stay in the vault and
@@ -88,7 +98,7 @@ impl DataConfig {
     pub fn from_value(v: Value) -> Result<DataConfig, String> {
         let cfg: DataConfig = if v.is_null() { DataConfig::default() } else { serde_json::from_value(v).map_err(|e| format!("[integrations.data]: {e}"))? };
         for (name, s) in &cfg.sources {
-            let d = backends::dialect_of(&s.kind).ok_or_else(|| format!("[integrations.data.sources.{name}]: kind `{}` is not one of postgres, mysql, sqlite, clickhouse, bigquery", s.kind))?;
+            let d = backends::dialect_of(&s.kind).ok_or_else(|| format!("[integrations.data.sources.{name}]: kind `{}` is not one of postgres, mysql, sqlite, clickhouse, bigquery, sqlserver, oracle, odbc", s.kind))?;
             let has = |a: &Option<String>| a.as_deref().is_some_and(|x| !x.trim().is_empty());
             let ok = match d {
                 Dialect::Sqlite => has(&s.path),
@@ -168,6 +178,9 @@ fn execute(ctx: &ToolCtx, cfg: &DataConfig, s: &SourceCfg, sql: &str, max_rows: 
         Dialect::Postgres => backends::postgres(&dsn_of(ctx, s)?, &s.client, sql, &lim),
         Dialect::Mysql => backends::mysql(&dsn_of(ctx, s)?, &s.client, sql, &lim, s.kind == "mariadb"),
         Dialect::ClickHouse => backends::clickhouse(&dsn_of(ctx, s)?, sql, &lim),
+        Dialect::SqlServer => backends::sqlserver(&dsn_of(ctx, s)?, &s.client, sql, &lim),
+        Dialect::Oracle => backends::oracle(&dsn_of(ctx, s)?, &s.client, sql, &lim),
+        Dialect::Odbc => backends::odbc(&dsn_of(ctx, s)?, &s.client, sql, &lim),
         Dialect::BigQuery => {
             let token = match (&s.token, &s.token_env) {
                 (Some(t), _) if !t.trim().is_empty() => secret(ctx, t)?,
@@ -272,6 +285,10 @@ pub fn schema_sql(d: Dialect, s: &SourceCfg, table: Option<&str>) -> Result<Stri
         (Dialect::Sqlite, Some(t)) => format!("SELECT name, type, \"notnull\", pk FROM pragma_table_info('{}')", lit(t)),
         (Dialect::ClickHouse, None) => "SELECT database, name, engine FROM system.tables WHERE database NOT IN ('system','INFORMATION_SCHEMA','information_schema') ORDER BY 1, 2".into(),
         (Dialect::ClickHouse, Some(t)) => format!("SELECT name, type, default_kind FROM system.columns WHERE table = '{}'{} ORDER BY position", lit(t), schema.map(|s| format!(" AND database = '{}'", lit(s))).unwrap_or_default()),
+        (Dialect::SqlServer | Dialect::Odbc, None) => "SELECT TABLE_SCHEMA, TABLE_NAME, TABLE_TYPE FROM INFORMATION_SCHEMA.TABLES ORDER BY 1, 2".into(),
+        (Dialect::SqlServer | Dialect::Odbc, Some(t)) => format!("SELECT COLUMN_NAME, DATA_TYPE, IS_NULLABLE, COLUMN_DEFAULT FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME = '{}'{} ORDER BY TABLE_SCHEMA, ORDINAL_POSITION", lit(t), schema.map(|s| format!(" AND TABLE_SCHEMA = '{}'", lit(s))).unwrap_or_default()),
+        (Dialect::Oracle, None) => "SELECT owner, table_name FROM all_tables WHERE owner NOT IN ('SYS','SYSTEM','XDB','MDSYS','CTXSYS','ORDSYS','WMSYS','OUTLN','DBSNMP','APPQOSSYS','GSMADMIN_INTERNAL','LBACSYS','OJVMSYS','DVSYS','AUDSYS') ORDER BY 1, 2".into(),
+        (Dialect::Oracle, Some(t)) => format!("SELECT column_name, data_type, nullable, data_default FROM all_tab_columns WHERE table_name = UPPER('{}'){} ORDER BY owner, column_id", lit(t), schema.map(|s| format!(" AND owner = UPPER('{}')", lit(s))).unwrap_or_default()),
         (Dialect::BigQuery, t) => {
             let ds = schema.map(str::to_string).or_else(|| s.dataset.clone()).ok_or("BigQuery needs `dataset` on the source (or write dataset.table)")?;
             if !ident_ok(&ds) || ds.contains(' ') {

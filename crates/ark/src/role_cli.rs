@@ -555,7 +555,7 @@ mod tests {
 
     fn env() -> Env {
         let dir = ark_core::tmp::TempDir::new("ark-role-cli");
-        let paths = Paths { data: dir.join("data"), config_dir: dir.join("cfg"), runtime: dir.join("run") };
+        let paths = Paths { data: dir.join("data"), config_dir: dir.join("cfg"), runtime: dir.join("run"), ..Default::default() };
         std::fs::create_dir_all(&paths.data).unwrap();
         std::fs::create_dir_all(&paths.config_dir).unwrap();
         Env { _dir: dir, paths }

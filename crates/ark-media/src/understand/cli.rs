@@ -51,7 +51,7 @@ impl ToolHost for CliHost {
 
 /// A tool context rooted at `cwd` for running media tools from the CLI.
 pub fn cli_ctx(cwd: &Path) -> ToolCtx {
-    let home = ark_core::tool::expand_home("~/.local/share/ark");
+    let home = ark_core::layout::data_dir();
     ToolCtx { workspace: cwd.to_path_buf(), session_id: "cli".into(), artifacts: cwd.join(".ark").join("artifacts"), home, cancel: Cancel::new(), host: Arc::new(CliHost), secrets: Arc::new(|s: &str| s.to_string()) }
 }
 

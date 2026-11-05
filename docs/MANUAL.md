@@ -28,7 +28,7 @@ cargo build --release                       # 預設：所有聊天平台與模�
 install -m 755 target/release/ark ~/.local/bin/ark
 ```
 
-也可以改用 `packaging/install.sh`、`Dockerfile` 或 `flake.nix`。想要更小的執行檔（自架、只用自己的平台）見第 11 節與 [docs/BUILD.md](BUILD.md)。
+也可以改用 `packaging/install.sh`（一個指令：安裝、啟動服務與網頁主控台、印出一次性的瀏覽器設定精靈連結；`--system` 裝成系統服務，見 README）、`Dockerfile` 或 `flake.nix`。各模式的目錄配置見 [docs/paths.md](paths.md)。想要更小的執行檔（自架、只用自己的平台）見第 11 節與 [docs/BUILD.md](BUILD.md)。
 
 ### 1.3 `ark setup`（設定精靈）
 

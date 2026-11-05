@@ -122,7 +122,7 @@ fn longtask_outage_restart_resource_pause_and_envelope_cost_cap() {
     let root = tmp.path();
     let ws = root.join("ws");
     std::fs::create_dir_all(&ws).unwrap();
-    let paths = Paths { data: root.join("data"), config_dir: root.join("cfg"), runtime: root.join("run") };
+    let paths = Paths { data: root.join("data"), config_dir: root.join("cfg"), runtime: root.join("run"), ..Default::default() };
     std::fs::create_dir_all(&paths.data).unwrap();
     let progress = root.join("units.txt");
     let hour = 3_600_000u64;

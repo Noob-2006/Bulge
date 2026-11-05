@@ -134,7 +134,7 @@ impl Meetings {
                 .str("meeting.profile_dir")
                 .map(|d| ark_core::tool::expand_home(&d))
                 .unwrap_or_else(|| {
-                    ark_core::tool::expand_home("~/.local/share/ark/meeting-chrome")
+                    ark_core::layout::data_dir().join("meeting-chrome")
                 });
             cdp::launch(
                 &exe,

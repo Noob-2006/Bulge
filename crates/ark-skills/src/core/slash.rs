@@ -222,7 +222,7 @@ mod tests {
         assert!(collision_note("status").is_some() && collision_note("deploy").is_none());
         let d = ark_core::tmp::scratch_path(format!("ark-skslash-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
-        let paths = Paths { data: d.join("data"), config_dir: d.join("cfg"), runtime: d.join("run") };
+        let paths = Paths { data: d.join("data"), config_dir: d.join("cfg"), runtime: d.join("run"), ..Default::default() };
         let ws = d.join("ws");
         for n in ["deploy", "status"] {
             std::fs::create_dir_all(ws.join(".ark/skills").join(n)).unwrap();

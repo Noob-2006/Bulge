@@ -506,6 +506,7 @@ fn install(sb: &Sandbox, shell: &str, rel: &Path, extra_env: &[(&str, &str)]) ->
     let _ = std::fs::remove_dir_all(home.join(".local"));
     let mut c = Command::new(shell);
     c.arg(repo_root().join("packaging/install.sh"))
+        .arg("--no-start")
         .env_clear()
         .env("PATH", std::env::var_os("PATH").unwrap())
         .env("HOME", &home)
@@ -537,7 +538,7 @@ fn install_sh_installs_binary_and_share_under_posix_shells() {
         let out = if shell == "busybox" {
             let home = sb.join("home");
             let _ = std::fs::remove_dir_all(home.join(".local"));
-            Command::new("busybox").args(["sh"]).arg(repo_root().join("packaging/install.sh")).env_clear().env("PATH", std::env::var_os("PATH").unwrap()).env("HOME", &home).env("TMPDIR", sb.join("tmp")).env("ARK_RELEASE_BASE", format!("file://{}", rel.display())).output().unwrap()
+            Command::new("busybox").args(["sh"]).arg(repo_root().join("packaging/install.sh")).arg("--no-start").env_clear().env("PATH", std::env::var_os("PATH").unwrap()).env("HOME", &home).env("TMPDIR", sb.join("tmp")).env("ARK_RELEASE_BASE", format!("file://{}", rel.display())).output().unwrap()
         } else {
             install(&sb, shell, &rel, &[])
         };

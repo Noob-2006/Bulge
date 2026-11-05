@@ -85,7 +85,7 @@ pub fn parse_toggle(arg: &str, current: bool) -> Option<bool> {
 pub(crate) fn test_paths(tag: &str) -> Paths {
     // Removed when the test's thread ends (ark_core::tmp::scratch).
     let root = ark_core::tmp::scratch(&format!("ark-tuiprefs-{tag}"));
-    let p = Paths { data: root.join("data"), config_dir: root.join("config"), runtime: root.join("run") };
+    let p = Paths { data: root.join("data"), config_dir: root.join("config"), runtime: root.join("run"), ..Default::default() };
     std::fs::create_dir_all(&p.config_dir).unwrap();
     std::fs::create_dir_all(&p.data).unwrap();
     p

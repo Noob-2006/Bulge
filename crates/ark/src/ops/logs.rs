@@ -21,7 +21,7 @@ pub const MAX_BYTES: u64 = 5 * 1024 * 1024;
 pub const KEEP: usize = 5;
 
 pub fn dir(paths: &Paths) -> PathBuf {
-    paths.data.join("logs")
+    paths.log_dir()
 }
 
 fn level_rank(l: &str) -> u8 {
@@ -136,7 +136,7 @@ pub fn read(paths: &Paths, f: &Filter, limit: usize) -> Vec<Value> {
     let mut files: Vec<PathBuf> = (1..=KEEP).rev().map(|i| d.join(format!("ark.{i}.jsonl"))).collect();
     files.push(d.join("ark.jsonl"));
     let mut out: Vec<Value> = files.iter().filter_map(|p| std::fs::read_to_string(p).ok()).flat_map(|t| t.lines().filter_map(|l| serde_json::from_str::<Value>(l).ok()).collect::<Vec<_>>()).collect();
-    let stderr = paths.data.join("arkd.log");
+    let stderr = paths.daemon_log();
     if let Ok(t) = std::fs::read_to_string(&stderr) {
         let m = std::fs::metadata(&stderr).and_then(|m| m.modified()).ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map(|d| d.as_millis() as u64).unwrap_or(0);
         out.extend(t.lines().rev().take(2000).collect::<Vec<_>>().into_iter().rev().map(|l| arkd_line(l, m)));
@@ -217,7 +217,7 @@ mod tests {
     #[test]
     fn writes_rotates_and_filters() {
         let root = ark_core::tmp::scratch_path(format!("ark-logs-{}", ark_kernel::util::random_hex(4)));
-        let paths = Paths { data: root.join("data"), config_dir: root.join("c"), runtime: root.join("r") };
+        let paths = Paths { data: root.join("data"), config_dir: root.join("c"), runtime: root.join("r"), ..Default::default() };
         let w = Writer::new(dir(&paths), 300, 3);
         for i in 0..20u64 {
             let e = Event { seq: i, ts: 1_000_000 + i * 1000, kind: if i % 5 == 0 { EventKind::Error { message: format!("boom {i}") } } else { EventKind::Notice { level: "info".into(), text: format!("note {i}") } } };
@@ -232,7 +232,7 @@ mod tests {
         assert_eq!(parse_since("10m", 1_000_000), Some(400_000));
         assert_eq!(parse_since("1700000000", 0), Some(1_700_000_000_000));
         assert!(parse_since("5y", 0).is_none());
-        std::fs::write(paths.data.join("arkd.log"), "arkd: channel tg: reply failed: x\n").unwrap();
+        std::fs::write(paths.daemon_log(), "arkd: channel tg: reply failed: x\n").unwrap();
         assert!(read(&paths, &Filter { level: Some("error".into()), ..Default::default() }, 100).iter().any(|v| v["kind"] == "arkd"));
         let m = methods(paths.clone());
         assert!(m("logs.tail", &json!({"lines": 3})).unwrap().unwrap().as_array().unwrap().len() == 3);

@@ -145,6 +145,7 @@ impl AppConfig {
         if let Some(rb) = &c.rbac {
             rb.validate()?;
         }
+        c.exposure.proxy_auth.validate()?;
         Ok(c)
     }
 }

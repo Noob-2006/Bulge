@@ -15,9 +15,12 @@
 pub mod approvals;
 pub mod audit;
 pub mod audit_export;
+pub mod audit_report;
+pub mod audit_seal;
 pub mod broker;
 pub mod capability;
 pub mod credfiles;
+pub mod dual_control;
 pub mod envelope;
 pub mod exposure;
 pub mod egress_proxy;

@@ -1089,7 +1089,7 @@ mod tests {
         let d = ark_core::tmp::scratch_path(format!("ark-plugins-{tag}-{}", std::process::id()));
         let _ = fs::remove_dir_all(&d);
         fs::create_dir_all(&d).unwrap();
-        (d.clone(), Paths { data: d.join("data"), config_dir: d.join("config"), runtime: d.join("run") })
+        (d.clone(), Paths { data: d.join("data"), config_dir: d.join("config"), runtime: d.join("run"), ..Default::default() })
     }
 
     // ───────────────────────── A13: plugin manifest signatures ─────────────────────────

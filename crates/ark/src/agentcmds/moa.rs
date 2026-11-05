@@ -130,7 +130,7 @@ mod tests {
     #[test]
     fn list_configure_default_delete_roundtrip() {
         let r = ark_core::tmp::scratch_path(format!("ark-moa-cli-{}", ark_kernel::util::random_hex(8)));
-        let paths = Paths { data: r.join("d"), config_dir: r.join("c"), runtime: r.join("r") };
+        let paths = Paths { data: r.join("d"), config_dir: r.join("c"), runtime: r.join("r"), ..Default::default() };
         std::fs::create_dir_all(&paths.config_dir).unwrap();
         let c = cfg();
         // The built-in preset is always listed.
@@ -168,7 +168,7 @@ mod tests {
         // A `preset:` prefix that names a saved preset selects it; the turn then runs that
         // preset's advisors (here: one) instead of the default two.
         let r = ark_core::tmp::scratch_path(format!("ark-moa-slash-{}", ark_kernel::util::random_hex(8)));
-        let paths = Paths { data: r.join("d"), config_dir: r.join("c"), runtime: r.join("r") };
+        let paths = Paths { data: r.join("d"), config_dir: r.join("c"), runtime: r.join("r"), ..Default::default() };
         std::fs::create_dir_all(&paths.config_dir).unwrap();
         moa::save_preset(&paths, "one", Preset { reference_models: vec!["a/x".into()], aggregator: "b/y".into(), reference_reasoning: String::new() }).unwrap();
         assert!(cli(&a(&["show", "one"]), &paths, &cfg()).unwrap().contains("aggregator: b/y"));

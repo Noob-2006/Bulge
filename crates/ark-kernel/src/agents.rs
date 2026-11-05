@@ -1809,7 +1809,7 @@ mod tests {
 
     fn paths() -> Paths {
         let r = ark_core::tmp::scratch_path(format!("ark-agents-{}", crate::util::random_hex(8)));
-        Paths { data: r.join("data"), config_dir: r.join("cfg"), runtime: r.join("run") }
+        Paths { data: r.join("data"), config_dir: r.join("cfg"), runtime: r.join("run"), ..Default::default() }
     }
 
     #[test]

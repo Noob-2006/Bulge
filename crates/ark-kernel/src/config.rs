@@ -803,6 +803,8 @@ impl Config {
     pub fn validate(&self) -> Result<(), String> {
         self.ha.validate()?;
         self.workers.validate()?;
+        self.approvals.dual_control.validate()?;
+        self.audit.export.validate()?;
         match self.compliance.profile.as_str() {
             "" | "default" => {}
             "government" => {
@@ -948,25 +950,53 @@ fn short_runtime(dir: PathBuf) -> PathBuf {
     }
 }
 
-/// Filesystem layout. `ARK_HOME` overrides everything (tests, portable installs).
-#[derive(Debug, Clone)]
+/// Filesystem layout, resolved by [`ark_core::layout`] (user XDG, system FHS, or portable
+/// `ARK_HOME`; see its docs for the decision and the overrides). Code that needs one of ark's
+/// own directories takes it from here, never from a literal path.
+///
+/// `cache` / `logs` are optional so a hand-built `Paths { data, config_dir, runtime,
+/// ..Default::default() }` (tests) keeps everything under `data`; read them through
+/// [`Paths::cache_dir`] / [`Paths::log_dir`].
+#[derive(Debug, Clone, Default)]
 pub struct Paths {
     pub data: PathBuf,
     pub config_dir: PathBuf,
     pub runtime: PathBuf,
+    pub cache: Option<PathBuf>,
+    pub logs: Option<PathBuf>,
+    pub mode: ark_core::layout::Mode,
 }
 
 impl Paths {
     pub fn from_env() -> Paths {
-        if let Some(h) = std::env::var_os("ARK_HOME") {
-            let h = PathBuf::from(h);
-            return Paths { data: h.join("data"), config_dir: h.join("config"), runtime: short_runtime(h.join("run")) };
+        Self::from_layout(&ark_core::layout::detect())
+    }
+    pub fn from_layout(l: &ark_core::layout::Layout) -> Paths {
+        let (data, config_dir, runtime) = (l.data.clone(), l.config.clone(), short_runtime(l.runtime.clone()));
+        Paths { data, config_dir, runtime, cache: Some(l.cache.clone()), logs: Some(l.logs.clone()), mode: l.mode }
+    }
+    /// Re-downloadable files (models, voices, web cache).
+    pub fn cache_dir(&self) -> PathBuf {
+        self.cache.clone().unwrap_or_else(|| self.data.join("cache"))
+    }
+    /// `ark.jsonl`, command logs, per-run logs.
+    pub fn log_dir(&self) -> PathBuf {
+        self.logs.clone().unwrap_or_else(|| self.data.join("logs"))
+    }
+    /// The detached daemon's stdout/stderr (`ark daemon start`): in the data dir for user and
+    /// portable installs (where it always was), in the log dir for the system service.
+    pub fn daemon_log(&self) -> PathBuf {
+        match self.mode {
+            ark_core::layout::Mode::System => self.log_dir().join("arkd.log"),
+            _ => self.data.join("arkd.log"),
         }
-        let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("/tmp"));
-        let xdg = |var: &str, def: &str| std::env::var_os(var).map(PathBuf::from).filter(|p| p.is_absolute()).unwrap_or_else(|| home.join(def));
-        let data = xdg("XDG_DATA_HOME", ".local/share").join("ark");
-        let runtime = std::env::var_os("XDG_RUNTIME_DIR").map(|r| PathBuf::from(r).join("ark")).unwrap_or_else(|| data.join("run"));
-        Paths { data, config_dir: xdg("XDG_CONFIG_HOME", ".config").join("ark"), runtime: short_runtime(runtime) }
+    }
+    /// Default workspace of sessions the daemon / app server start.
+    pub fn default_workspace(&self) -> PathBuf {
+        match self.mode {
+            ark_core::layout::Mode::System => PathBuf::from(ark_core::layout::system::WORKSPACE),
+            _ => self.data.join("workspace"),
+        }
     }
     pub fn user_config(&self) -> PathBuf {
         self.config_dir.join("config.toml")

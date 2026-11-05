@@ -555,7 +555,7 @@ fn auth_report(mgr: &Manager) -> Value {
 pub fn register() {
     ark_core::registry::register_tool_provider("google-meet", 400, |env| {
         let cfg = env.config::<ark_kernel::config::Config>()?;
-        let paths = ark_kernel::config::Paths { data: env.data.clone(), config_dir: env.config_dir.clone(), runtime: env.runtime.clone() };
+        let paths = ark_kernel::config::Paths { data: env.data.clone(), config_dir: env.config_dir.clone(), runtime: env.runtime.clone(), ..Default::default() };
         Ok(tools(crate::meetings::manager(&paths), crate::meetings::google_meet_cfg(&cfg.meetings)))
     });
 }

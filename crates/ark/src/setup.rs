@@ -44,7 +44,7 @@ pub fn hint(err: &str) -> Option<&'static str> {
 }
 
 /// Providers offered by name; the rest stay reachable through "other".
-const MENU: &[(&str, &str, &str)] = &[
+pub(crate) const MENU: &[(&str, &str, &str)] = &[
     ("anthropic", "Anthropic (Claude)", "Anthropic（Claude）"),
     ("openai", "OpenAI", "OpenAI"),
     ("gemini", "Google Gemini", "Google Gemini"),
@@ -149,7 +149,7 @@ fn mask(k: &str) -> String {
 }
 
 /// Text-only models; drops embeddings, speech, images and the like from pickers.
-fn chat_models(all: Vec<String>) -> Vec<String> {
+pub(crate) fn chat_models(all: Vec<String>) -> Vec<String> {
     const SKIP: &[&str] = &["embed", "tts", "whisper", "dall-e", "moderation", "audio", "image", "transcribe", "realtime", "search", "rerank", "babbage", "davinci", "aqa", "imagen", "veo"];
     all.into_iter().filter(|m| !SKIP.iter().any(|s| m.to_lowercase().contains(s))).collect()
 }
@@ -719,7 +719,7 @@ pub fn run(paths: &Paths) -> Result<i32, String> {
     if let Some(backup) = &backup {
         io.say(&format!("  {} {}", t("原檔備份：", "Backup:"), backup.display()));
     }
-    let app_ws = root.get("app").and_then(|a| a.get("workspace")).and_then(|v| v.as_str()).map(std::path::PathBuf::from).unwrap_or_else(|| paths.data.join("workspace"));
+    let app_ws = root.get("app").and_then(|a| a.get("workspace")).and_then(|v| v.as_str()).map(std::path::PathBuf::from).unwrap_or_else(|| paths.default_workspace());
     crate::ops::wizard::post(&mut io, web || channel_added.is_some(), &app_ws)?;
     io.say(&format!("\n{}", t("接下來：", "Next:")));
     io.say(&format!("  ark chat                      {}", t("在終端機對話", "talk in the terminal")));

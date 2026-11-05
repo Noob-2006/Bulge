@@ -294,7 +294,7 @@ mod tests {
     use std::path::Path;
 
     fn paths(root: &Path) -> Paths {
-        Paths { data: root.join("data"), config_dir: root.join("cfg"), runtime: root.join("run") }
+        Paths { data: root.join("data"), config_dir: root.join("cfg"), runtime: root.join("run"), ..Default::default() }
     }
 
     #[test]

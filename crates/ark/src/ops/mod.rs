@@ -9,6 +9,7 @@
 use crate::args::Args;
 use crate::R;
 
+pub mod appcli;
 pub mod archive;
 pub mod backup;
 pub mod batch;
@@ -27,6 +28,7 @@ pub mod logs;
 pub mod migrate;
 pub mod miniswe;
 pub mod net;
+pub mod opsview;
 pub mod profile;
 pub mod secretsrc;
 pub mod rotate;

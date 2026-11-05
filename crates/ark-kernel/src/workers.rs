@@ -403,7 +403,7 @@ mod tests {
     #[test]
     fn sessions_are_spread_redispatched_after_a_crash_and_workers_reaped() {
         let d = ark_core::tmp::TempDir::new("ark-workers");
-        let paths = crate::config::Paths { data: d.path().join("data"), config_dir: d.path().join("cfg"), runtime: d.path().join("run") };
+        let paths = crate::config::Paths { data: d.path().join("data"), config_dir: d.path().join("cfg"), runtime: d.path().join("run"), ..Default::default() };
         let (pending, _cell) = crate::daemon::pending_approver(Duration::from_secs(5));
         let k = crate::kernel::new_kernel(crate::config::Config::default(), paths, Arc::new(NoModels), vec![], Arc::new(crate::vault::Vault::empty()), pending);
         let ids: Vec<String> = (0..4).map(|n| k.create_session(d.path(), Some("x/y"), None, Some(&format!("s{n}"))).unwrap()).collect();

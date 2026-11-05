@@ -4,6 +4,7 @@
 pub mod agents;
 pub mod approver;
 pub mod automation;
+pub mod change_control;
 pub mod checkpoint;
 pub mod coderun;
 pub mod commands;
@@ -41,6 +42,7 @@ pub mod reactions;
 pub mod roles;
 pub mod refs;
 pub mod secgate;
+pub mod session_review;
 pub mod selfrepo;
 pub mod shell;
 pub mod slash;

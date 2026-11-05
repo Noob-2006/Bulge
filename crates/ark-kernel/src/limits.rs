@@ -556,7 +556,7 @@ mod tests {
     /// A kernel over a temp data dir; `mutate` edits `[limits]` (and prices).
     fn kernel(tmp: &Tmp, mutate: impl FnOnce(&mut Config)) -> crate::kernel::Kernel {
         let root = tmp.0.clone();
-        let paths = Paths { data: root.join("data"), config_dir: root.join("cfg"), runtime: root.join("run") };
+        let paths = Paths { data: root.join("data"), config_dir: root.join("cfg"), runtime: root.join("run"), ..Default::default() };
         std::fs::create_dir_all(&paths.data).unwrap();
         std::fs::create_dir_all(&paths.config_dir).unwrap();
         let mut cfg = Config::default();

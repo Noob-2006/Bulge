@@ -311,7 +311,7 @@ mod tests {
     fn fixture(tag: &str) -> (std::path::PathBuf, Paths, std::path::PathBuf) {
         let d = ark_core::tmp::scratch_path(format!("ark-skilltool-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
-        let paths = Paths { data: d.join("data"), config_dir: d.join("config"), runtime: d.join("run") };
+        let paths = Paths { data: d.join("data"), config_dir: d.join("config"), runtime: d.join("run"), ..Default::default() };
         let ws = d.join("ws");
         std::fs::create_dir_all(ws.join(".ark/skills/deploy/scripts")).unwrap();
         std::fs::write(

@@ -603,7 +603,7 @@ mod tests {
     fn uninstall_plan_purges_profiles_and_keeps_a_managed_binary() {
         let t = ark_core::tmp::TempDir::new("ark-uninst");
         let root = t.path();
-        let paths = Paths { data: root.join("data"), config_dir: root.join("config"), runtime: root.join("run") };
+        let paths = Paths { data: root.join("data"), config_dir: root.join("config"), runtime: root.join("run"), ..Default::default() };
         for d in [&paths.data, &paths.config_dir] {
             std::fs::create_dir_all(d).unwrap();
         }
@@ -661,10 +661,10 @@ mod tests {
         // `.`/`..` are refused before canonicalisation can hide where they point.
         assert!(ok(&t.path().join("home/../home")).unwrap_err().contains(".."));
         // `plan` runs the same guard, so the CLI cannot skip it.
-        let bad = Paths { data: PathBuf::from("/usr"), config_dir: PathBuf::from("/etc"), runtime: PathBuf::from("/run") };
+        let bad = Paths { data: PathBuf::from("/usr"), config_dir: PathBuf::from("/etc"), runtime: PathBuf::from("/run"), ..Default::default() };
         let e = plan(&bad, true, false, false, Path::new("/opt/ark")).unwrap_err();
         assert!(e.contains("refusing to purge /usr") && e.contains("system directory"), "{e}");
-        let good = Paths { data: deep.join("data"), config_dir: deep.join("config"), runtime: deep.join("run") };
+        let good = Paths { data: deep.join("data"), config_dir: deep.join("config"), runtime: deep.join("run"), ..Default::default() };
         assert!(plan(&good, true, false, false, Path::new("/opt/ark")).is_ok());
     }
 
@@ -818,7 +818,7 @@ mod tests {
     fn rollback_can_restore_settings_and_data() {
         let t = ark_core::tmp::TempDir::new("ark-upd-data");
         let root = t.path();
-        let p = Paths { data: root.join("data"), config_dir: root.join("config"), runtime: root.join("run") };
+        let p = Paths { data: root.join("data"), config_dir: root.join("config"), runtime: root.join("run"), ..Default::default() };
         std::fs::create_dir_all(p.data.join("memory")).unwrap();
         std::fs::create_dir_all(&p.config_dir).unwrap();
         std::fs::write(p.user_config(), "identity = \"v1\"\n").unwrap();
@@ -841,7 +841,7 @@ mod tests {
     fn reset_scopes() {
         let t = ark_core::tmp::TempDir::new("ark-reset");
         let root = t.path();
-        let p = Paths { data: root.join("data"), config_dir: root.join("config"), runtime: root.join("run") };
+        let p = Paths { data: root.join("data"), config_dir: root.join("config"), runtime: root.join("run"), ..Default::default() };
         std::fs::create_dir_all(p.data.join("sessions")).unwrap();
         std::fs::create_dir_all(p.data.join("memory")).unwrap();
         std::fs::create_dir_all(p.data.join("backups")).unwrap();

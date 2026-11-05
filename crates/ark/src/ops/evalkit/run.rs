@@ -308,7 +308,7 @@ impl Runner {
             return Ok(k.clone());
         }
         let root = self.out.join(".home").join(slug(&s.label));
-        let paths = Paths { data: root.join("data"), config_dir: root.join("config"), runtime: root.join("run") };
+        let paths = Paths { data: root.join("data"), config_dir: root.join("config"), runtime: root.join("run"), ..Default::default() };
         for d in [&paths.data, &paths.config_dir, &paths.runtime] {
             std::fs::create_dir_all(d).map_err(|e| e.to_string())?;
         }

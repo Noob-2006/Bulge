@@ -80,8 +80,8 @@ pub fn render(d: &Daemon) -> String {
     gauge(&mut out, "audit_errors", "audit write / SIEM export failures in this process", ark_security::audit::errors().0 as f64);
     gauge(&mut out, "estop_engaged", "1 while the emergency stop is engaged", if ark_security::estop::is_engaged(&k.paths.data) { 1.0 } else { 0.0 });
     for sink in k.cfg.audit.export.sinks() {
-        let lag = ark_security::audit::head(&k.paths.data).seq.saturating_sub(ark_security::audit_export::cursor(&k.paths.data, sink));
-        out.push_str(&format!("ark_audit_export_lag{{sink=\"{}\"}} {lag}\n", esc(sink)));
+        let lag = ark_security::audit::head(&k.paths.data).seq.saturating_sub(ark_security::audit_export::cursor(&k.paths.data, &sink));
+        out.push_str(&format!("ark_audit_export_lag{{sink=\"{}\"}} {lag}\n", esc(&sink)));
     }
     for (name, r) in readiness(d).1 {
         out.push_str(&format!("ark_ready{{check=\"{}\"}} {}\n", esc(&name), if r.is_ok() { 1 } else { 0 }));

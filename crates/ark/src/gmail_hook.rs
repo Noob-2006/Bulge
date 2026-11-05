@@ -890,7 +890,7 @@ mod tests {
     #[test]
     fn webhook_gmail_cli_sets_up_reports_watches_and_resets() {
         let root = ark_core::tmp::scratch_path(format!("ark-gmail-cli-{}", ark_kernel::util::random_hex(8)));
-        let paths = ark_kernel::config::Paths { data: root.join("data"), config_dir: root.join("cfg"), runtime: root.join("run") };
+        let paths = ark_kernel::config::Paths { data: root.join("data"), config_dir: root.join("cfg"), runtime: root.join("run"), ..Default::default() };
         std::fs::create_dir_all(&paths.config_dir).unwrap();
         // Unrelated `[hooks_extra]` keys survive `setup` (it merges, never rewrites).
         std::fs::write(paths.user_config(), "[hooks_extra]\nbundled = [\"boot-md\"]\n").unwrap();

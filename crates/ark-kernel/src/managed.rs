@@ -39,7 +39,7 @@
 
 use std::path::{Path, PathBuf};
 
-pub const SYSTEM_DIR: &str = "/etc/ark";
+pub const SYSTEM_DIR: &str = ark_core::layout::system::CONFIG;
 
 /// What the system layer contributed, for `ark config managed` / `config.managed`.
 #[derive(Debug, Clone, Default, PartialEq, serde::Serialize)]

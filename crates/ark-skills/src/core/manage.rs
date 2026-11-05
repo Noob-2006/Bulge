@@ -625,7 +625,7 @@ mod tests {
     fn fixture(tag: &str) -> (PathBuf, Paths, PathBuf) {
         let d = ark_core::tmp::scratch_path(format!("ark-manage-{tag}-{}", std::process::id()));
         let _ = fs::remove_dir_all(&d);
-        let paths = Paths { data: d.join("data"), config_dir: d.join("config"), runtime: d.join("run") };
+        let paths = Paths { data: d.join("data"), config_dir: d.join("config"), runtime: d.join("run"), ..Default::default() };
         let ws = d.join("ws");
         fs::create_dir_all(ws.join(".ark/skills/proj/scripts")).unwrap();
         fs::write(ws.join(".ark/skills/proj/SKILL.md"), "---\nname: proj\ndescription: project skill\n---\nproj body\n").unwrap();

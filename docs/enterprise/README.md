@@ -9,6 +9,7 @@
 | [install.md](install.md) | 維運 | deb／rpm／簽章套件庫／離線包／容器映像／Helm／Ansible／Terraform／cloud-init 的安裝與驗證 |
 | [poc-guide.md](poc-guide.md) | PoC 負責人 | 兩週 PoC 計畫、驗收條件、逐步指令、退出與清除 |
 | [security-questionnaire.md](security-questionnaire.md) | 供應商風險管理 | CAIQ／SIG Lite 風格的預填問卷（約 90 題），每題附證據位置 |
+| [review-and-legacy-integration.md](review-and-legacy-integration.md) | 稽核、資安、IT 整合 | 雙人覆核、session 覆核、auditor 角色、稽核報告與簽章封存；CEF／LEEF／syslog TLS、Kerberos 前端、SQL Server／Oracle／ODBC、Nagios／SNMP、ServiceNow／Jira 變更單 |
 | [compliance-mapping.md](compliance-mapping.md) | 稽核、法遵 | SOC 2 信任服務準則與 ISO/IEC 27001:2022 附錄 A 的控制項對照：ark 提供什麼、證據在哪、客戶要補什麼 |
 
 ## 先讀這三件事

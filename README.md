@@ -26,12 +26,20 @@
 
 ## 安裝
 
+一個指令：安裝、啟動背景服務與網頁主控台，最後印出（並在桌面環境自動開啟）一次性的設定精靈連結。
+
 ```bash
-cargo build --release
-install -m 755 target/release/ark ~/.local/bin/ark
+curl --proto '=https' --tlsv1.2 -fsSL https://github.com/ark-agent/ark/releases/latest/download/install.sh | sh                 # 個人安裝，不需 sudo
+curl --proto '=https' --tlsv1.2 -fsSL https://github.com/ark-agent/ark/releases/latest/download/install.sh | sudo sh -s -- --system  # 系統服務
 ```
 
-或使用 [`packaging/install.sh`](packaging/install.sh)、[Dockerfile](Dockerfile)、[Nix flake](flake.nix)。
+在瀏覽器的設定精靈選模型供應商、貼金鑰（只存進保管庫）、挑預設模型、管理者登入方式（本機權杖或 OIDC）、工作目錄、安全模式、聊天平台；完成後精靈自動鎖定，ark 以新設定重啟並帶你進主控台。設定連結 30 分鐘內有效、只能用一次；需要新的連結：`ark setup link`。
+
+- 重跑同一個指令即升級；`--uninstall` 解除安裝（保留設定與資料），加 `--purge` 一併清除。
+- 其他選項：`--port`、`--version`、`--no-browser`、`--no-systemd`、`--local-binary PATH`、`--package FILE`（deb/rpm）、`--from-source`；`--help` 看全部。離線包解開後直接執行其中的 `install.sh`。
+- 沒有瀏覽器時用終端機精靈：`ark setup`（同一套套用邏輯）。目錄配置見 [docs/paths.md](docs/paths.md)，企業部署見 [docs/enterprise/install.md](docs/enterprise/install.md)。
+
+從原始碼：`cargo build --release && packaging/install.sh --local-binary target/release/ark`。也有 [Dockerfile](Dockerfile) 與 [Nix flake](flake.nix)。
 
 ## 快速開始
 
@@ -41,7 +49,7 @@ ark run "整理這個資料夾的 README，列出待辦"   # 單次執行
 ark chat                                 # 互動對話
 ```
 
-也可以跳過精靈：`ark secrets set ANTHROPIC_API_KEY`（或 OPENAI / DEEPSEEK…）後直接用預設模型。設定檔放在 `~/.config/ark/config.toml`，完整範例見 [docs/config-example.toml](docs/config-example.toml)。
+也可以跳過精靈：`ark secrets set ANTHROPIC_API_KEY`（或 OPENAI / DEEPSEEK…）後直接用預設模型。設定檔位置用 `ark config path` 查（個人安裝是 `~/.config/ark/config.toml`，系統服務是 `/etc/ark/config.toml`），完整範例見 [docs/config-example.toml](docs/config-example.toml)。
 
 ## 常駐服務與介面
 

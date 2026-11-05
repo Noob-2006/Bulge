@@ -79,6 +79,98 @@ pub struct ExposureConfig {
     /// With `behind_proxy`: the proxies whose `X-Forwarded-For` is believed (IPs or CIDRs).
     /// Empty = loopback only. A header from any other peer is ignored (ent-120).
     pub trusted_proxies: Vec<String>,
+    /// SSO done by a legacy front end (Apache `mod_auth_gssapi` / Kerberos SPNEGO, an
+    /// mTLS-terminating proxy, a web access manager): the user arrives in a header.
+    #[serde(skip_serializing_if = "ProxyAuthConfig::is_default")]
+    pub proxy_auth: ProxyAuthConfig,
+}
+
+/// `[app.exposure.proxy_auth]` — trusted reverse-proxy identity headers.
+///
+/// ```toml
+/// [app.exposure.proxy_auth]
+/// enabled = true
+/// proxies = ["10.20.0.5/32"]          # the TCP peer must be one of these (never X-Forwarded-For)
+/// user_header = "X-Remote-User"       # e.g. Apache: RequestHeader set X-Remote-User %{REMOTE_USER}s
+/// groups_header = "X-Remote-Groups"   # optional; split on `,` / `;`, mapped by [app.rbac] groups
+/// email_header = "X-Remote-Email"     # optional
+/// strip_realm = true                  # "alice@CORP.EXAMPLE" (Kerberos) → "alice"
+/// ```
+///
+/// The header is believed **only** when the connection itself comes from a listed proxy; from
+/// any other peer it is ignored (and the request needs another credential). The proxy must
+/// overwrite (not append to) the header, or a client could send its own.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ProxyAuthConfig {
+    pub enabled: bool,
+    pub proxies: Vec<String>,
+    pub user_header: String,
+    pub groups_header: String,
+    pub email_header: String,
+    pub strip_realm: bool,
+}
+
+impl Default for ProxyAuthConfig {
+    fn default() -> Self {
+        ProxyAuthConfig { enabled: false, proxies: vec![], user_header: "X-Remote-User".into(), groups_header: String::new(), email_header: String::new(), strip_realm: false }
+    }
+}
+
+/// What a trusted proxy asserted about the caller.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct ProxyIdentity {
+    pub user: String,
+    pub email: String,
+    pub groups: Vec<String>,
+}
+
+impl ProxyAuthConfig {
+    /// Untouched defaults (left out of config dumps).
+    pub fn is_default(&self) -> bool {
+        *self == ProxyAuthConfig::default()
+    }
+
+    pub fn validate(&self) -> Result<(), String> {
+        if !self.enabled {
+            return Ok(());
+        }
+        if self.proxies.is_empty() {
+            return Err("[app.exposure.proxy_auth] needs `proxies` (the reverse proxies allowed to assert identities)".into());
+        }
+        if self.proxies.iter().any(|p| matches!(p.trim(), "" | "0.0.0.0/0" | "::/0" | "*")) {
+            return Err("[app.exposure.proxy_auth] proxies: name the proxy hosts; an any-address entry would let every client choose its identity".into());
+        }
+        if self.user_header.trim().is_empty() {
+            return Err("[app.exposure.proxy_auth] user_header is empty".into());
+        }
+        Ok(())
+    }
+
+    /// The identity a request carries, if the TCP peer is a listed proxy and it set the user
+    /// header. `header` looks a request header up (case-insensitively).
+    pub fn identity(&self, peer: Option<SocketAddr>, header: &dyn Fn(&str) -> Option<String>) -> Option<ProxyIdentity> {
+        if !self.enabled {
+            return None;
+        }
+        let ip = peer?.ip();
+        if !self.proxies.iter().any(|r| ip_in(ip, r)) {
+            return None;
+        }
+        let mut user = header(&self.user_header)?.trim().to_string();
+        if self.strip_realm {
+            if let Some((u, _realm)) = user.split_once('@') {
+                user = u.to_string();
+            }
+        }
+        // `DOMAIN\user` from Windows front ends keeps its form; control characters never pass.
+        if user.is_empty() || user.len() > 256 || user.chars().any(|c| c.is_control()) {
+            return None;
+        }
+        let groups = if self.groups_header.is_empty() { vec![] } else { header(&self.groups_header).unwrap_or_default().split([',', ';']).map(|g| g.trim().to_string()).filter(|g| !g.is_empty()).collect() };
+        let email = if self.email_header.is_empty() { String::new() } else { header(&self.email_header).unwrap_or_default().trim().to_string() };
+        Some(ProxyIdentity { user, email, groups })
+    }
 }
 
 /// `[[app.exposure.client_identities]]`.
@@ -108,7 +200,7 @@ impl ClientIdentity {
 
 impl Default for ExposureConfig {
     fn default() -> Self {
-        ExposureConfig { allow_public: false, behind_proxy: false, tls: false, cert: None, key: None, client_auth: "off".into(), client_ca: None, client_identities: vec![], node_identities: vec![], rate_limit_per_min: 1200, trusted_proxies: vec![] }
+        ExposureConfig { allow_public: false, behind_proxy: false, tls: false, cert: None, key: None, client_auth: "off".into(), client_ca: None, client_identities: vec![], node_identities: vec![], rate_limit_per_min: 1200, trusted_proxies: vec![], proxy_auth: ProxyAuthConfig::default() }
     }
 }
 
@@ -245,7 +337,7 @@ impl Scope {
 const ADMIN_PREFIXES: &[&str] = &[
     "config.", "plugin.", "plugins.", "daemon.", "secret.", "secrets.", "vault.", "hook.", "hooks.", "skill.", "skills.", "provider.", "providers.", "channel.", "channels.", "node.", "nodes.", "device.", "devices.", "auth.", "policy.", "system.", "backup.",
 ];
-const APPROVE_METHODS: &[&str] = &["gate.answer", "approval.answer", "approvals.answer", "question.answer"];
+const APPROVE_METHODS: &[&str] = &["gate.answer", "approval.answer", "approvals.answer", "question.answer", "session.review.set"];
 const READ_METHODS: &[&str] = &[
     "ping", "initialize", "session.list", "session.history", "session.view", "gate.pending", "goal.list", "schedule.list", "models.list", "tools.list", "events.subscribe", "session.attach", "subscribe", "unsubscribe", "view.browser.list", "view.browser.frame", "view.desktop.state", "logbook.list", "whoami",
 ];

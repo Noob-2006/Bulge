@@ -576,7 +576,7 @@ fn shipped_catalog_carries_the_kill_list_and_an_honest_count() {
     // ③ install / resolve / show refuse it with the recorded reason (no network: the kill-list
     // check runs before any clone).
     let data = temp_data("killlist");
-    let paths = ark_kernel::config::Paths { data: data.join("data"), config_dir: data.join("config"), runtime: data.join("run") };
+    let paths = ark_kernel::config::Paths { data: data.join("data"), config_dir: data.join("config"), runtime: data.join("run"), ..Default::default() };
     let paths = &paths;
     let cfg = ark_kernel::config::Config::default();
     let cfg = &cfg;

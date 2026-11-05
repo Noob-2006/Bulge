@@ -213,7 +213,7 @@ mod tests {
     }
 
     fn app(home: &Path) -> Arc<App> {
-        let paths = Paths { data: home.join("data"), config_dir: home.join("cfg"), runtime: home.join("run") };
+        let paths = Paths { data: home.join("data"), config_dir: home.join("cfg"), runtime: home.join("run"), ..Default::default() };
         let (pending, _cell) = ark_kernel::daemon::pending_approver(Duration::from_secs(1));
         let k = ark_kernel::kernel::new_kernel(Config::default(), paths, Arc::new(NoRes), vec![], Arc::new(ark_kernel::vault::Vault::empty()), pending.clone());
         let d = Arc::new(Daemon::new(k, pending));

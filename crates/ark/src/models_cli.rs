@@ -1259,7 +1259,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(root.join("config")).unwrap();
         std::fs::create_dir_all(root.join("data")).unwrap();
-        Paths { data: root.join("data"), config_dir: root.join("config"), runtime: root.join("run") }
+        Paths { data: root.join("data"), config_dir: root.join("config"), runtime: root.join("run"), ..Default::default() }
     }
 
     #[test]

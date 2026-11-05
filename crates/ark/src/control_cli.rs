@@ -98,7 +98,7 @@ mod tests {
     fn paths() -> Paths {
         let root = ark_core::tmp::scratch_path(format!("ark-ctl-{}", ark_kernel::util::random_hex(6)));
         std::fs::create_dir_all(root.join("data")).unwrap();
-        Paths { data: root.join("data"), config_dir: root.join("config"), runtime: root.join("run") }
+        Paths { data: root.join("data"), config_dir: root.join("config"), runtime: root.join("run"), ..Default::default() }
     }
 
     /// `ark browser` with no subcommand prints its usage (exit 2), and `--help` reaches the

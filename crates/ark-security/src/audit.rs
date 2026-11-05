@@ -122,7 +122,7 @@ impl Event {
 
 const MAX_FIELD: usize = 500;
 /// Detail keys that carry a principal and are exempt from PII masking.
-pub const IDENTITY_KEYS: &[&str] = &["approved_by", "answered_by", "principal", "user", "subject", "issued_to", "custodian"];
+pub const IDENTITY_KEYS: &[&str] = &["approved_by", "answered_by", "principal", "user", "subject", "issued_to", "custodian", "requester", "approvals", "approvers", "owner", "reviewer"];
 static MAX_BYTES: AtomicU64 = AtomicU64::new(64 * 1024 * 1024);
 
 /// Rotate the live segment once it grows past `bytes` (`[audit] rotate_mb`).
@@ -222,12 +222,36 @@ fn clean(s: &str) -> String {
     crate::pii::mask(&s)
 }
 
+/// Detail keys that carry an identifier (session / approval / request ids): capped, never
+/// masked — an auditor joins audit records to sessions on them, so they must stay exact.
+pub const ID_KEYS: &[&str] = &["session", "session_id", "id", "approval_id", "request_id", "tool_use_id", "seq"];
+
+fn cap(s: &str) -> String {
+    s.chars().take(MAX_FIELD).collect()
+}
+
+/// An identifier rather than free text: one token of `[A-Za-z0-9._:/-]` that contains a
+/// letter and no `@`. Session ids (`20261105-091234-fac35b`) and approval ids have long digit
+/// runs that the card mask's Luhn check passes one time in ten; a bare card number (digits
+/// and separators only) is not id-shaped and is still masked.
+fn id_shaped(s: &str) -> bool {
+    !s.is_empty() && s.chars().any(|c| c.is_ascii_alphabetic()) && s.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | ':' | '/' | '-'))
+}
+
+fn clean_target(s: &str) -> String {
+    if id_shaped(s) {
+        cap(s)
+    } else {
+        clean(s)
+    }
+}
+
 fn clean_value(v: &Value) -> Value {
     match v {
         Value::String(s) => Value::String(clean(s)),
         Value::Array(a) => Value::Array(a.iter().take(64).map(clean_value).collect()),
         // Identity fields name *who* acted: capped, never masked.
-        Value::Object(m) => Value::Object(m.iter().take(64).map(|(k, v)| (k.clone(), if IDENTITY_KEYS.contains(&k.as_str()) { cap_value(v) } else { clean_value(v) })).collect()),
+        Value::Object(m) => Value::Object(m.iter().take(64).map(|(k, v)| (k.clone(), if IDENTITY_KEYS.contains(&k.as_str()) || ID_KEYS.contains(&k.as_str()) { cap_value(v) } else { clean_value(v) })).collect()),
         o => o.clone(),
     }
 }
@@ -297,12 +321,12 @@ pub fn emit(data: &Path, ev: Event) -> Result<u64, String> {
         "kind": ev.kind,
         // The actor is the point of the record: capped, never masked.
         "actor": cap_value(&serde_json::to_value(&ev.actor).unwrap_or(Value::Null)),
-        "target": clean(&ev.target),
+        "target": clean_target(&ev.target),
         "outcome": clean(&ev.outcome),
         "prev": h.hash,
     });
     if !ev.session.is_empty() {
-        body["session"] = Value::String(clean(&ev.session));
+        body["session"] = Value::String(cap(&ev.session));
     }
     if !ev.detail.is_null() {
         body["detail"] = clean_value(&ev.detail);
@@ -689,6 +713,29 @@ mod tests {
         assert_eq!(query(d, &q).len(), 1);
         assert_eq!(query(d, &Query { actor: Some("channel:slack:U1".into()), ..Default::default() }).len(), 1);
         assert_eq!(Actor::parse_label("sso:bob"), Actor::new("sso", "bob"));
+    }
+
+    /// Regression: session / approval ids with long digit runs used to come out as
+    /// `[card]-fac35b` because the digits happened to pass the Luhn check.
+    #[test]
+    fn ids_are_never_masked() {
+        let g = G(tmp());
+        let d = &g.0;
+        // "20261105091239" passes Luhn: exactly the shape that was being masked.
+        assert!(crate::pii::mask("20261105-091239").contains("[card]"), "precondition: the digit run alone is card-like");
+        let sid = "20261105-091239-fac35b";
+        let aid = "20261105-091239-3a1c9e";
+        emit(d, Event::new("approval.answer", Actor::new("sso", "ann"), aid, "once").session(sid).detail(json!({"session": sid, "id": aid, "note": "card 4111 1111 1111 1111"}))).unwrap();
+        emit(d, Event::new("x", Actor::system(), "4111-1111-1111-1111", "ok")).unwrap();
+        let all = all(d);
+        assert_eq!(all[0]["target"], aid);
+        assert_eq!(all[0]["session"], sid);
+        assert_eq!(all[0]["detail"]["session"], sid);
+        assert_eq!(all[0]["detail"]["id"], aid);
+        assert!(all[0]["detail"]["note"].as_str().unwrap().contains("[card]"), "free text is still masked");
+        assert_eq!(all[1]["target"], "[card]", "a bare card number is not an id");
+        assert_eq!(query(d, &Query { session: Some(sid.into()), ..Default::default() }).len(), 1);
+        assert!(verify(d, None).ok);
     }
 
     #[test]

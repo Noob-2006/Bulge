@@ -29,7 +29,10 @@
 
 - name: ark | state directories
   ansible.builtin.file: { path: "{{ item }}", state: directory, owner: "{{ ark_system_user }}", group: "{{ ark_system_user }}", mode: "0750" }
-  loop: ["{{ ark_home }}", "{{ ark_home }}/workspace"]
+  loop: ["{{ ark_home }}", "{{ ark_home }}/workspace", /var/cache/ark, /var/log/ark]
+
+- name: ark | config directory (root:ark 1770 -- ark writes config.toml and secrets, cannot replace root-owned policy)
+  ansible.builtin.file: { path: "{{ ark_config_dir }}", state: directory, owner: root, group: "{{ ark_system_user }}", mode: "01770" }
 
 - name: ark | unit, rendered by ark itself for this host's systemd
   ansible.builtin.shell: |

@@ -13,4 +13,8 @@ System instance (what a package installs; `ark service install --system` prints 
     sudo install -m 644 arkd-system.service /etc/systemd/system/arkd.service
     sudo systemctl enable --now arkd
 
-Dedicated account `ark`, state in `/var/lib/ark` (`ARK_HOME`), config in `/var/lib/ark/config/`.
+Dedicated account `ark`; FHS layout (`ARK_MODE=system`, see docs/paths.md): config and secrets in
+`/etc/ark` (root:ark 1770, next to the root-owned policy), state in `/var/lib/ark`, cache in
+`/var/cache/ark`, logs in `/var/log/ark`, socket in `/run/ark`. Installs from before ent-008
+(`ARK_HOME=/var/lib/ark`) keep working; their config is read from `/var/lib/ark/config` until
+`/etc/ark/config.toml` exists.

@@ -1,19 +1,32 @@
 #!/bin/sh
 # deb: postinst $1=configure | rpm: %post $1=1 (install) / 2 (upgrade). Never starts the daemon:
 # a package that opens a network-capable agent without the operator's configuration is wrong.
+# Layout (ent-008, ark_core::layout::system): config /etc/ark, state /var/lib/ark,
+# cache /var/cache/ark, logs /var/log/ark, runtime /run/ark.
 set -e
 if command -v systemd-sysusers >/dev/null 2>&1; then systemd-sysusers /usr/lib/sysusers.d/ark.conf 2>/dev/null || true; fi
 if command -v systemd-tmpfiles >/dev/null 2>&1; then
     systemd-tmpfiles --create /usr/lib/tmpfiles.d/ark.conf 2>/dev/null || true
 fi
 # Hosts where tmpfiles did not (or could not) run: same directories, same modes.
-for d in /var/lib/ark /var/lib/ark/workspace; do
+for d in /var/lib/ark /var/lib/ark/workspace /var/cache/ark /var/log/ark; do
     [ -d "$d" ] || { mkdir -p "$d" && chown ark:ark "$d" 2>/dev/null && chmod 0750 "$d"; } || true
 done
+chown root:ark /etc/ark 2>/dev/null && chmod 1770 /etc/ark 2>/dev/null || true
+# ent-008 migration: before this layout the system instance ran with ARK_HOME=/var/lib/ark and kept
+# its config in /var/lib/ark/config. Copy (never move) it to /etc/ark once; ark itself keeps
+# reading the old directory until /etc/ark/config.toml exists, and data stays where it is.
+old=/var/lib/ark/config
+if [ -f "$old/config.toml" ] && [ ! -e /etc/ark/config.toml ]; then
+    for f in config.toml secrets.toml secrets.enc secrets.key .env; do
+        [ -e "$old/$f" ] && [ ! -e "/etc/ark/$f" ] && cp -p "$old/$f" "/etc/ark/$f" || true
+    done
+    echo "ark: copied the system config from $old to /etc/ark (the old copy is kept; ark config path shows what is used)"
+fi
 # ent-025: the packaged unit is rendered for a current systemd. An older manager (RHEL/CentOS 7 =
 # 219) gets the same unit rewritten by ark itself, so the text never drifts from ops/service.rs.
 if command -v systemctl >/dev/null 2>&1 && [ -x /usr/bin/ark ]; then
-    if env -u ARK_HOME -u ARK_PROFILE /usr/bin/ark service print --system > /usr/lib/systemd/system/arkd.service.new 2>/dev/null \
+    if env -u ARK_HOME -u ARK_PROFILE -u ARK_MODE /usr/bin/ark service print --system > /usr/lib/systemd/system/arkd.service.new 2>/dev/null \
         && [ -s /usr/lib/systemd/system/arkd.service.new ]; then
         mv -f /usr/lib/systemd/system/arkd.service.new /usr/lib/systemd/system/arkd.service
     else
@@ -28,9 +41,11 @@ if command -v systemctl >/dev/null 2>&1 && [ -x /usr/bin/ark ]; then
     fi
 fi
 cat <<MSG
-ark installed. Next:
-  1. put your provider settings in /var/lib/ark/config/config.toml  (sudo -u ark ark setup ...)
+ark installed: config /etc/ark, state /var/lib/ark, logs /var/log/ark (ark config path). Next:
+  1. sudo -u ark ark setup bootstrap      (turns on the local web console, 127.0.0.1:8640)
   2. systemctl enable --now arkd
-  3. organisation policy (optional): /etc/ark/managed.toml  (example: /etc/ark/managed.toml.example)
+  3. sudo -u ark ark setup link           (one-time link to the browser setup wizard)
+     unattended instead: sudo -u ark ark setup --non-interactive --provider ... --model ...
+  4. organisation policy (optional): /etc/ark/managed.toml  (example: /etc/ark/managed.toml.example)
 MSG
 exit 0

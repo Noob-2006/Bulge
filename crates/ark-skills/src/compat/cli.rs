@@ -352,7 +352,7 @@ mod tests {
     }
 
     fn paths_at(d: &Path) -> Paths {
-        Paths { data: d.join("data"), config_dir: d.join("cfg"), runtime: d.join("run") }
+        Paths { data: d.join("data"), config_dir: d.join("cfg"), runtime: d.join("run"), ..Default::default() }
     }
 
     fn tree(d: &Path) -> PathBuf {

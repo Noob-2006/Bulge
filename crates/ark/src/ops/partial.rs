@@ -296,7 +296,7 @@ mod tests {
         let mut cfg = Config::default();
         cfg.model.default = "stub/m".into();
         cfg.checkpoint.enabled = false;
-        let paths = Paths { data: root.join("data"), config_dir: root.join("cfg"), runtime: root.join("run") };
+        let paths = Paths { data: root.join("data"), config_dir: root.join("cfg"), runtime: root.join("run"), ..Default::default() };
         let stub = Arc::new(Stub { summary: Mutex::new(None), seen: Mutex::new(vec![]) });
         let k = new_kernel(cfg, paths, Arc::new(Res(stub.clone())), vec![], Arc::new(ark_kernel::vault::Vault::empty()), Arc::new(Policy { allow_privilege: false, allow_egress: false }));
         Env { k, ws, stub }

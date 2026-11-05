@@ -389,7 +389,7 @@ pub(crate) mod testutil {
         let root = data();
         let ws = root.join("ws");
         std::fs::create_dir_all(&ws).unwrap();
-        let paths = crate::config::Paths { data: root.join("data"), config_dir: root.join("cfg"), runtime: root.join("run") };
+        let paths = crate::config::Paths { data: root.join("data"), config_dir: root.join("cfg"), runtime: root.join("run"), ..Default::default() };
         let mut cfg = crate::config::Config::default();
         cfg.model.default = "fake/m".into();
         cfg.checkpoint.enabled = false;

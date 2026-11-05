@@ -39,6 +39,7 @@ mod security_cli;
 mod session_cli;
 mod setup;
 mod setup_server;
+mod setup_web;
 mod slash;
 mod system_cli;
 mod telephony;
@@ -183,13 +184,7 @@ fn dispatch(raw: Vec<String>) -> R {
             println!("ark {} (log v{}, protocol v{})", env!("CARGO_PKG_VERSION"), ark_kernel::event::LOG_VERSION, daemon::PROTOCOL_VERSION);
             Ok(0)
         }
-        "setup" | "onboard" => {
-            if setup_server::wanted(&a, &setup_server::real_env) {
-                let plan = setup_server::plan(&a, &setup_server::real_env)?;
-                return Ok(setup_server::run(&Paths::from_env(), &plan, &setup_server::real_env, &mut setup_server::RealHost)?);
-            }
-            Ok(setup::run(&Paths::from_env())?)
-        }
+        "setup" | "onboard" => Ok(setup_web::dispatch(&a)?),
         "call" => cmd_call(&a),
         "run" => cmd_run(&a),
         "chat" => cmd_chat(&a),
@@ -243,12 +238,16 @@ fn dispatch(raw: Vec<String>) -> R {
         "acp-client" => cmd_acp_client(&a),
         "node" => cmd_node(&a),
         "nodes" => cmd_nodes(&a),
-        "app" => cmd_app(&a),
+        "app" => ops::appcli::cmd_app(&a),
         "data" => cmd_data(&a),
         "health" => {
             // For container health checks and monitors: is the daemon answering?
             if a.flag("ready") {
                 return ops::enterprise::health_ready(&a);
+            }
+            // Nagios / Icinga / Zabbix (external check) plugin: status line + perfdata, 0/1/2/3.
+            if a.flag("nagios") {
+                return ops::enterprise::health_nagios(&a);
             }
             match daemon::call(&Paths::from_env().socket(), "ping", json!({})) {
                 Ok(_) => Ok(0),
@@ -1307,6 +1306,8 @@ fn cmd_daemon(a: &Args) -> R {
             d.add_methods(ops::ui_methods::methods(&paths, c.k.clone(), ext_arc.as_deref()));
             d.add_methods(ops::webui::methods(&paths, c.k.clone(), ext_arc.as_deref()));
             d.add_methods(ops::dock::methods(c.k.clone()));
+            // First-run web wizard over ARP (admin credential); the page itself uses /setup/rpc.
+            d.add_methods(setup_web::methods(&paths));
             // ent-098: readiness for `ark health --ready` (the same checks as GET /ready).
             {
                 let weak = Arc::downgrade(&d);
@@ -1340,6 +1341,9 @@ fn cmd_daemon(a: &Args) -> R {
                 }
                 // Telegram Mini App launcher for the Control UI (`/controlui`); checks its own auth.
                 routes.extend(ops::miniapp::routes(Arc::new(ops::miniapp::env(&paths, &c.workspace, &token))));
+                // The setup wizard's RPC authenticates with its own one-time token (setup_web.rs).
+                routes.extend(setup_web::routes(Arc::new(setup_web::Env { paths: paths.clone(), allow_origins: app_cfg.allow_origins.clone() })));
+                host.extend(setup_web::METHODS.iter().map(|s| s.to_string()));
                 let app = Arc::new(ark_app::App { d: d.clone(), cfg: app_cfg.clone(), token, host_methods: host, routes });
                 let srv = ark_app::start(app)?;
                 eprintln!("arkd: app server on http://{} (UI, /arp, /v1, {})", srv.local_addr(), if app_cfg.a2a.enabled { "/a2a" } else { "no a2a" });
@@ -1354,6 +1358,9 @@ fn cmd_daemon(a: &Args) -> R {
                 let _ = t.join();
             }
             r?;
+            if setup_web::restart_requested() {
+                return Ok(setup_web::after_stop());
+            }
             Ok(0)
         }
         "start" => {
@@ -1362,10 +1369,12 @@ fn cmd_daemon(a: &Args) -> R {
                 return Ok(0);
             }
             std::fs::create_dir_all(&paths.data).map_err(|e| e.to_string())?;
-            let log = std::fs::OpenOptions::new().create(true).append(true).open(paths.data.join("arkd.log")).map_err(|e| e.to_string())?;
+            let log = std::fs::OpenOptions::new().create(true).append(true).open(paths.daemon_log()).map_err(|e| e.to_string())?;
             let exe = std::env::current_exe().map_err(|e| e.to_string())?;
             let mut cmd = std::process::Command::new(exe);
             cmd.arg("daemon").arg("run").stdin(std::process::Stdio::null()).stdout(log.try_clone().map_err(|e| e.to_string())?).stderr(log);
+            // Detached by us, not by a service manager: a restart after the setup wizard is ours to do.
+            cmd.env("ARK_DAEMON_DETACHED", "1").env_remove("NOTIFY_SOCKET").env_remove("INVOCATION_ID");
             for s in a.vals("set") {
                 cmd.arg("--set").arg(s);
             }
@@ -1390,7 +1399,7 @@ fn cmd_daemon(a: &Args) -> R {
                     return Ok(0);
                 }
                 if let Ok(Some(st)) = child.try_wait() {
-                    return Err(format!("arkd exited during startup ({st}); see {}", paths.data.join("arkd.log").display()).into());
+                    return Err(format!("arkd exited during startup ({st}); see {}", paths.daemon_log().display()).into());
                 }
                 std::thread::sleep(Duration::from_millis(100));
             }
@@ -1502,11 +1511,19 @@ fn cmd_gate(a: &Args) -> R {
             if items.is_empty() {
                 println!("nothing pending");
             }
+            if a.flag("json") {
+                println!("{}", serde_json::to_string_pretty(&items).unwrap_or_default());
+                return Ok(0);
+            }
             for i in items {
                 println!("{}  [{}] {} {}", i["id"].as_str().unwrap_or(""), i["kind"].as_str().unwrap_or(""), i["reason"].as_str().or(i["question"].as_str()).unwrap_or(""), i["summary"].as_str().map(|s| term::one_line(s, 100)).unwrap_or_default());
+                if let Some(line) = ops::enterprise::dual_control_line(&i["dual_control"]) {
+                    println!("{line}");
+                }
             }
             Ok(0)
         }
+        "policy" => ops::enterprise::out(serde_json::to_string_pretty(&daemon::call(&sock, "gate.policy.show", json!({}))?).unwrap_or_default()),
         "answer" => {
             let id = a.need(1, "id")?;
             let ans = a.rest(2);
@@ -1516,11 +1533,15 @@ fn cmd_gate(a: &Args) -> R {
             // An open question takes free text; an approval needs a decision word.
             let is_approval = daemon::call(&sock, "gate.pending", json!({}))?.as_array().is_some_and(|v| v.iter().any(|i| i["id"] == id && i["kind"] == "approval"));
             let ans = if is_approval { security_cli::resolve_answer(&ans, a.val("reason")).ok_or_else(|| Fail::Usage("answer with once|session|permanent|deny [reason…]".into()))? } else { ans };
-            daemon::call(&sock, "gate.answer", json!({"id": id, "answer": ans}))?;
-            println!("answered");
+            let r = daemon::call(&sock, "gate.answer", json!({"id": id, "answer": ans}))?;
+            if r["final"] == false {
+                println!("approval counted: {}/{} (dual control — another approver is needed)", r["approvals"], r["required"]);
+            } else {
+                println!("answered");
+            }
             Ok(0)
         }
-        other => usage(format!("unknown `gate {other}`")),
+        other => usage(format!("unknown `gate {other}` (list [--json] | answer <id> <once|deny …> | policy)")),
     }
 }
 
@@ -2069,7 +2090,7 @@ fn cmd_config(a: &Args) -> R {
     let paths = Paths::from_env();
     match a.pos(0).unwrap_or("show") {
         "path" => {
-            println!("user     {}\nproject  {}\nsecrets  {}\ndata     {}\nsocket   {}", paths.user_config().display(), project_config(&workspace(a)?).display(), paths.secrets().display(), paths.data.display(), paths.socket().display());
+            ops::confcli::print_paths(&paths, &project_config(&workspace(a)?), a.flag("json"));
             Ok(0)
         }
         "show" | "dump" => {
@@ -2690,47 +2711,6 @@ fn cmd_nodes(a: &Args) -> R {
     };
     println!("{}", serde_json::to_string_pretty(&r).unwrap_or_default());
     Ok(0)
-}
-
-/// App server helpers: token, open the UI, status.
-fn cmd_app(a: &Args) -> R {
-    let paths = Paths::from_env();
-    let ws = workspace(a)?;
-    let cfg = load_config(a, &ws, &paths)?;
-    let vault = load_vault(&paths)?;
-    let app = ark_app::AppConfig::parse(&cfg.app)?;
-    let token = app.token.as_deref().map(|t| vault.substitute(t)).filter(|t| !t.contains("{{secret:")).unwrap_or_default();
-    let url = format!("http://{}", app.listen);
-    match a.pos(0).unwrap_or("status") {
-        "token" => {
-            if token.is_empty() {
-                let t = ark_net::crypto::random_token(24);
-                println!("尚未設定 token。最簡單是執行 `ark setup`；或手動：\n  echo {t} | ark secrets set APP_TOKEN\n然後在 config.toml 加上：\n  [app]\n  enabled = true\n  token = \"{{{{secret:APP_TOKEN}}}}\"");
-            } else {
-                println!("{token}");
-            }
-            Ok(0)
-        }
-        "open" => {
-            if token.is_empty() {
-                return Err("set [app] token first (`ark app token`)".into());
-            }
-            // The token travels in the fragment, which browsers never send to servers or logs.
-            let link = format!("{url}/#token={token}");
-            let opened = ["chromium", "google-chrome", "brave-browser"].iter().any(|b| std::process::Command::new(b).arg(format!("--app={link}")).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).spawn().is_ok());
-            if !opened {
-                let _ = std::process::Command::new("xdg-open").arg(&link).spawn();
-            }
-            println!("{url}");
-            Ok(0)
-        }
-        "status" => {
-            println!("[app] {} on {url} · ui {} · openai api {} · nodes {} · a2a {}", if app.enabled { "enabled" } else { "disabled" }, app.ui, app.openai_api, app.nodes, app.a2a.enabled);
-            Ok(0)
-        }
-        "accounts" | "service-accounts" => ops::enterprise::accounts(&paths, a, 1),
-        other => Err(format!("unknown app subcommand `{other}` (token, open, status, accounts)").into()),
-    }
 }
 
 /// DM pairing: approve the one-time codes unknown senders receive under `dm_policy = "pairing"`.

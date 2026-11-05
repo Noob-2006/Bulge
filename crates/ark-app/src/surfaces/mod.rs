@@ -417,7 +417,7 @@ pub(crate) mod testkit {
     /// A kernel whose models are all the scripted fake, plus an Env over a temp data dir.
     pub fn env(tag: &str, replies: &[&str], surfaces: &str) -> (Arc<Env>, Arc<Fake>) {
         let root = temp(tag);
-        let paths = Paths { data: root.join("data"), config_dir: root.join("config"), runtime: root.join("run") };
+        let paths = Paths { data: root.join("data"), config_dir: root.join("config"), runtime: root.join("run"), ..Default::default() };
         // Test snippets are written relative to [surfaces]: `[diffs]` means `[surfaces.diffs]`.
         let scoped: String = surfaces.lines().map(|l| if let Some(r) = l.strip_prefix("[[") { format!("[[surfaces.{r}\n") } else if let Some(r) = l.strip_prefix('[') { format!("[surfaces.{r}\n") } else { format!("{l}\n") }).collect();
         let toml_cfg = format!("[model]\ndefault = \"fake/m\"\naux = \"fake/aux\"\n[surfaces]\n{scoped}");
@@ -539,7 +539,7 @@ mod tests {
     #[test]
     fn every_surface_tool_is_registered() {
         let root = testkit::temp("tools");
-        let paths = Paths { data: root.join("data"), config_dir: root.join("config"), runtime: root.join("run") };
+        let paths = Paths { data: root.join("data"), config_dir: root.join("config"), runtime: root.join("run"), ..Default::default() };
         std::fs::create_dir_all(&paths.config_dir).unwrap();
         std::fs::write(paths.user_config(), "[model]\ndefault = \"fake/m\"\n[surfaces.team_reports]\n[surfaces.team_reports.github]\ntoken = \"{{secret:GH}}\"\norgs = [\"acme\"]\n").unwrap();
         let cfg = Config::load(Some(&paths.user_config()), None, &[]).unwrap();
@@ -577,7 +577,7 @@ mod tests {
             }
         }
         let root = testkit::temp("slow");
-        let paths = Paths { data: root.join("d"), config_dir: root.join("c"), runtime: root.join("r") };
+        let paths = Paths { data: root.join("d"), config_dir: root.join("c"), runtime: root.join("r"), ..Default::default() };
         let cfg = Config::load(None, None, &["model.default=slow/x".into()]).unwrap();
         let vault = Arc::new(ark_kernel::vault::Vault::load(&paths.secrets()).unwrap());
         let k = ark_kernel::kernel::new_kernel(cfg, paths, Arc::new(R), vec![], vault, Arc::new(ark_kernel::approver::Policy { allow_privilege: false, allow_egress: false }));

@@ -131,7 +131,7 @@ mod tests {
     fn temp_paths() -> Paths {
         let root = ark_core::tmp::scratch_path(format!("ark-wire-{}", ark_kernel::util::random_hex(6)));
         std::fs::create_dir_all(root.join("data")).unwrap();
-        Paths { data: root.join("data"), config_dir: root.join("config"), runtime: root.join("run") }
+        Paths { data: root.join("data"), config_dir: root.join("config"), runtime: root.join("run"), ..Default::default() }
     }
 
     fn tool_ctx(ws: PathBuf) -> ToolCtx {

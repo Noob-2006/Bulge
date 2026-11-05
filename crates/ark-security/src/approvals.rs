@@ -283,6 +283,9 @@ pub struct ApprovalsConfig {
     pub exec: ExecPolicy,
     pub elevated: ElevatedConfig,
     pub forward: ForwardConfig,
+    /// Four-eyes approval for selected high-risk actions (`[approvals.dual_control]`).
+    #[serde(skip_serializing_if = "crate::dual_control::DualControlConfig::is_default")]
+    pub dual_control: crate::dual_control::DualControlConfig,
 }
 
 impl Default for ApprovalsConfig {
@@ -308,6 +311,7 @@ impl Default for ApprovalsConfig {
             exec: ExecPolicy::default(),
             elevated: ElevatedConfig::default(),
             forward: ForwardConfig::default(),
+            dual_control: Default::default(),
         }
     }
 }

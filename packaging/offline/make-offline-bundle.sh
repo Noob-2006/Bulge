@@ -50,6 +50,8 @@ cp -R "$DIST/." "$B/release/"
 install -m 0755 "$ROOT/packaging/release/verify-release.sh" "$B/tools/verify-release.sh"
 install -m 0755 "$ROOT/packaging/release/sbom.py" "$B/tools/sbom.py"
 install -m 0755 "$HERE/install-offline.sh" "$B/install-offline.sh"
+# the one-command installer: run from the bundle it installs release/ without any network
+install -m 0755 "$HERE/../install.sh" "$B/install.sh"
 if [ -n "$VMIMG" ]; then mkdir -p "$B/vm-image"; cp -R "$VMIMG/." "$B/vm-image/"; fi
 echo "$ARCH" > "$B/ARCH"
 ( cd "$B" && find . -path ./release -prune -o -type f ! -name 'BUNDLE.sha256*' -print | sed 's|^\./||' | sort | xargs sha256sum > BUNDLE.sha256 )

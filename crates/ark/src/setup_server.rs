@@ -302,7 +302,7 @@ pub fn run(paths: &Paths, plan: &Plan, env: Env, host: &mut dyn Host) -> Result<
         eprintln!("  {} {}", t("原檔備份：", "Backup:"), b.display());
     }
     if plan.service {
-        let ws = root.get("app").and_then(|a| a.get("workspace")).and_then(|v| v.as_str()).map(std::path::PathBuf::from).unwrap_or_else(|| paths.data.join("workspace"));
+        let ws = root.get("app").and_then(|a| a.get("workspace")).and_then(|v| v.as_str()).map(std::path::PathBuf::from).unwrap_or_else(|| paths.default_workspace());
         let _ = std::fs::create_dir_all(&ws);
         match host.install_service(&ws) {
             Ok(m) => {
@@ -338,7 +338,7 @@ mod tests {
 
     fn scratch(tag: &str) -> (ark_core::tmp::TempDir, Paths) {
         let root = ark_core::tmp::TempDir::new(&format!("ark-setupsrv-{tag}"));
-        let p = Paths { data: root.join("data"), config_dir: root.join("config"), runtime: root.join("run") };
+        let p = Paths { data: root.join("data"), config_dir: root.join("config"), runtime: root.join("run"), ..Default::default() };
         std::fs::create_dir_all(&p.config_dir).unwrap();
         std::fs::create_dir_all(&p.data).unwrap();
         (root, p)

@@ -363,7 +363,7 @@ mod tests {
         assert!(set_color(&p, "#bad", "#123456", None).is_err(), "keys are identifiers");
         assert!(set_color(&p, "ui_accent", "#fff", None).is_err(), "only #rrggbb is accepted");
         let pal = Palette::of(&load(&p, "default"));
-        assert_eq!(pal.status_bg, (0x33, 0x07, 0x16));
+        assert_eq!(pal.status_bg, (0x1f, 0x04, 0x11));
         // Palette resolution order: `status_bar_*` overrides the base key, `ui_accent`
         // refines `accent` only, and `status_bad` keeps following `banner_accent`.
         let synth = build(&json!({"name": "t", "colors": {"banner_accent": "#010203", "ui_accent": "#040506", "banner_title": "#070809", "ui_label": "#111213", "status_bar_strong": "#0a0b0c", "status_bar_bad": "#0d0e0f"}}));

@@ -332,7 +332,7 @@ mod tests {
     }
 
     fn paths_in(dir: &std::path::Path) -> Paths {
-        Paths { data: dir.join("data"), config_dir: dir.join("config"), runtime: dir.join("run") }
+        Paths { data: dir.join("data"), config_dir: dir.join("config"), runtime: dir.join("run"), ..Default::default() }
     }
 
     #[test]

@@ -138,7 +138,7 @@ pub fn validate_workspace_path(dir: &Path) -> Result<(), String> {
 /// `[app] workspace`: where sessions from the web UI and chat channels run.
 pub fn workspace_step(p: &mut dyn Prompt, root: &mut toml::Table, paths: &Paths) -> Result<Option<PathBuf>, String> {
     let current = root.get("app").and_then(|a| a.get("workspace")).and_then(|v| v.as_str()).map(String::from);
-    let default = current.clone().unwrap_or_else(|| paths.data.join("workspace").display().to_string());
+    let default = current.clone().unwrap_or_else(|| paths.default_workspace().display().to_string());
     p.say(&format!("\n{}", t("⑥ 預設工作目錄（網頁介面與聊天平台的對話在這裡執行）", "⑥ Default workspace (where web UI and chat sessions run)")));
     let ans = p.ask(t("  目錄", "  Directory"), &default)?;
     let dir = expand(ans.trim());
@@ -529,7 +529,7 @@ mod tests {
 
     fn paths() -> (PathBuf, Paths) {
         let root = ark_core::tmp::scratch_path(format!("ark-wiz-{}", ark_kernel::util::random_hex(6)));
-        let p = Paths { data: root.join("data"), config_dir: root.join("config"), runtime: root.join("run") };
+        let p = Paths { data: root.join("data"), config_dir: root.join("config"), runtime: root.join("run"), ..Default::default() };
         std::fs::create_dir_all(&p.config_dir).unwrap();
         (root, p)
     }

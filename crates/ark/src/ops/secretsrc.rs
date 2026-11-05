@@ -1407,7 +1407,7 @@ case "$ref" in op://v/openai/key) echo sk-op;; op://v/empty/x) echo "";; *) echo
     fn cli_setup_set_status_disable() {
         let d = root();
         script(&d, "op", "echo v");
-        let paths = Paths { data: d.join("data"), config_dir: d.join("config"), runtime: d.join("run") };
+        let paths = Paths { data: d.join("data"), config_dir: d.join("config"), runtime: d.join("run"), ..Default::default() };
         let p = |v: &[&str]| Args::parse(&v.iter().map(|s| s.to_string()).collect::<Vec<_>>()).unwrap();
         let mut t = toml::Table::new();
         let mut c = toml::Table::new();
@@ -1438,7 +1438,7 @@ echo "$BWS_ACCESS_TOKEN" > {0}/token
 [ "$BWS_ACCESS_TOKEN" = "0.tok" ] || {{ echo "unauthorized" >&2; exit 1; }}
 [ "$1 $2 $3 $4 $5" = "secret list p1 --output json" ] || exit 3
 echo '[{{"key":"K","value":"v"}}]'"#, d.display()));
-        let paths = Paths { data: d.join("data"), config_dir: d.join("config"), runtime: d.join("run") };
+        let paths = Paths { data: d.join("data"), config_dir: d.join("config"), runtime: d.join("run"), ..Default::default() };
         let p = |v: &[&str]| Args::parse(&v.iter().map(|s| s.to_string()).collect::<Vec<_>>()).unwrap();
         let env = env_with(&d, &[("BWS_T", "0.tok"), ("BWS_SERVER_URL", "https://vault.bitwarden.eu")]);
         let o = setup(&paths, Source::Bitwarden, &p(&["bitwarden", "setup", "--token-env", "BWS_T", "--project-id", "p1"]), &env).unwrap();
@@ -1468,7 +1468,7 @@ if [ "$1" = whoami ]; then
   echo '{{"url":"my-team"}}'; exit 0
 fi
 exit 4"#, d.display()));
-        let paths = Paths { data: d.join("data"), config_dir: d.join("config"), runtime: d.join("run") };
+        let paths = Paths { data: d.join("data"), config_dir: d.join("config"), runtime: d.join("run"), ..Default::default() };
         let p = |v: &[&str]| Args::parse(&v.iter().map(|s| s.to_string()).collect::<Vec<_>>()).unwrap();
         let mut c = toml::Table::new();
         c.insert("binary_path".into(), d.join("bin/op").display().to_string().into());
@@ -1495,7 +1495,7 @@ exit 4"#, d.display()));
     #[test]
     fn cli_command_source_and_sources_listing() {
         let d = root();
-        let paths = Paths { data: d.join("data"), config_dir: d.join("config"), runtime: d.join("run") };
+        let paths = Paths { data: d.join("data"), config_dir: d.join("config"), runtime: d.join("run"), ..Default::default() };
         let p = |v: &[&str]| Args::parse(&v.iter().map(|s| s.to_string()).collect::<Vec<_>>()).unwrap();
         assert!(run(&paths, &p(&["command", "setup"])).unwrap_err().contains("--helper"));
         let o = run(&paths, &p(&["cmd", "setup", "--helper", "echo CMD_TOK=1; echo SECOND=2"])).unwrap();
@@ -1505,7 +1505,7 @@ exit 4"#, d.display()));
         assert!(src.contains("Command helper (command):"), "{src}");
         assert!(src.contains("CMD_TOK") && src.contains("← command"), "{src}");
         // nothing configured → says so instead of printing an empty report
-        let fresh = Paths { data: d.join("data2"), config_dir: d.join("config2"), runtime: d.join("run2") };
+        let fresh = Paths { data: d.join("data2"), config_dir: d.join("config2"), runtime: d.join("run2"), ..Default::default() };
         assert!(run(&fresh, &p(&["sources"])).unwrap().contains("no external secret source enabled"));
     }
 

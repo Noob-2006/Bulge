@@ -155,7 +155,7 @@ mod tests {
         let dir = ark_core::tmp::scratch_path(format!("ark-meet-media-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        let paths = Paths { data: dir.join("data"), config_dir: dir.join("config"), runtime: dir.join("run") };
+        let paths = Paths { data: dir.join("data"), config_dir: dir.join("config"), runtime: dir.join("run"), ..Default::default() };
         assert!(media(&paths).is_none(), "no config file at all");
         std::fs::create_dir_all(paths.config_dir.clone()).unwrap();
         std::fs::write(paths.user_config(), "[meetings]\n").unwrap();

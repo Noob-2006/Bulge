@@ -48,7 +48,7 @@ pub fn share_dir_with(env: Option<PathBuf>, exe: Option<&Path>, system: &[&str])
 
 /// ark's shared data dir. See the module docs for the search order.
 pub fn share_dir() -> Option<PathBuf> {
-    share_dir_with(std::env::var_os("ARK_SHARE_DIR").map(PathBuf::from), std::env::current_exe().ok().as_deref(), &["/usr/local/share/ark", "/usr/share/ark"])
+    share_dir_with(std::env::var_os("ARK_SHARE_DIR").map(PathBuf::from), std::env::current_exe().ok().as_deref(), crate::layout::system::SHARE)
 }
 
 /// A file or directory shipped under the share dir (`rel` like `vm/build-image.sh`).

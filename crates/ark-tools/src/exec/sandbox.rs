@@ -201,15 +201,11 @@ pub fn host_home() -> PathBuf {
     std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default()
 }
 
-/// ark's own config/data dirs (`ARK_HOME`, else XDG), as the kernel computes them —
+/// ark's own config/data dirs (`ark_core::layout`, exactly what the kernel's `Paths` uses) —
 /// `credential_files` validation needs them to refuse ark's own secret store.
 fn ark_dirs() -> ark_security::paths::ArkDirs {
-    let home = host_home();
-    let xdg = |var: &str, def: &str| std::env::var_os(var).map(PathBuf::from).filter(|p| p.is_absolute()).unwrap_or_else(|| home.join(def));
-    match std::env::var_os("ARK_HOME").map(PathBuf::from) {
-        Some(h) => ark_security::paths::ArkDirs { config_dir: h.join("config"), data_dir: h.join("data") },
-        None => ark_security::paths::ArkDirs { config_dir: xdg("XDG_CONFIG_HOME", ".config").join("ark"), data_dir: xdg("XDG_DATA_HOME", ".local/share").join("ark") },
-    }
+    let l = ark_core::layout::detect();
+    ark_security::paths::ArkDirs { config_dir: l.config, data_dir: l.data }
 }
 
 /// `[exec] credential_files` as read-only sandbox mounts: `(host, container path, ro)` plus

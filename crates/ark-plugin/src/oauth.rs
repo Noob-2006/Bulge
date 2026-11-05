@@ -537,7 +537,7 @@ fn callback_page(ok: bool) -> String {
     let (title, msg) = if ok { ("授權完成", "已取得授權，可以關閉此分頁回到 ark。") } else { ("授權失敗", "沒有取得授權碼，請回到 ark 查看錯誤。") };
     format!(
         r##"<!doctype html><meta charset="utf-8"><title>ark · {title}</title>
-<style>body{{margin:0;height:100vh;display:grid;place-items:center;background:radial-gradient(120% 90% at 15% 0%,#650d27,#330716 40%,#12020a);color:#f7e9ec;font:16px system-ui,"Noto Sans TC",sans-serif}}
+<style>body{{margin:0;height:100vh;display:grid;place-items:center;background:radial-gradient(120% 90% at 15% 0%,#3a0820,#1f0411 40%,#0b0105);color:#f7e9ec;font:16px system-ui,"Noto Sans TC",sans-serif}}
 .c{{padding:32px 40px;border:1px solid rgba(245,184,61,.35);border-radius:16px;background:rgba(31,4,16,.7);text-align:center}}
 svg{{width:56px;height:56px;filter:drop-shadow(0 0 10px #ffd66b);animation:t 3s ease-in-out infinite}}@keyframes t{{50%{{transform:rotate(45deg) scale(1.1)}}}}h1{{color:#ffd66b;font-size:22px}}</style>
 <div class="c"><svg viewBox="-100 -100 200 200"><path d="M0-100C8-30 30-8 100 0C30 8 8 30 0 100C-8 30-30 8-100 0C-30-8-8-30 0-100Z" fill="#ffd66b"/></svg><h1>{title}</h1><p>{msg}</p></div>"##

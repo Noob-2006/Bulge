@@ -66,7 +66,7 @@ mod tests {
     impl Scratch {
         fn new() -> Scratch {
             let dir = ark_core::tmp::TempDir::new("ark-registry");
-            let paths = Paths { data: dir.join("data"), config_dir: dir.join("config"), runtime: dir.join("run") };
+            let paths = Paths { data: dir.join("data"), config_dir: dir.join("config"), runtime: dir.join("run"), ..Default::default() };
             std::fs::create_dir_all(&paths.data).unwrap();
             let ws = paths.data.join("ws");
             std::fs::create_dir_all(&ws).unwrap();

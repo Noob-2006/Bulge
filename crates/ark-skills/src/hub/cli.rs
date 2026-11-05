@@ -482,7 +482,7 @@ mod tests {
         let d = ark_core::tmp::scratch_path(format!("ark-skillscli-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(d.join("ws")).unwrap();
-        let paths = Paths { data: d.join("data"), config_dir: d.join("cfg"), runtime: d.join("run") };
+        let paths = Paths { data: d.join("data"), config_dir: d.join("cfg"), runtime: d.join("run"), ..Default::default() };
         let cfg = Config { skills: toml::from_str(&format!("tier1_advisory = false\n[hub]\nallow_private = true\ngithub_api = \"{base}/gh\"\ngithub_raw = \"{base}/raw\"\nclawhub = \"{base}/claw/api/v1\"\nskills_sh = \"{base}/ssh\"\nlobehub = \"{base}/lobe\"\nbrowse_sh = \"{base}/browse/api/skills\"\ntaps = [\"acme/skills\"]\n")).unwrap(), ..Default::default() };
         let c = Ctx { cfg: &cfg, paths: &paths, ws: &d.join("ws"), ask: None };
         let r = |v: &[&str]| run(&c, &a(v));
@@ -561,7 +561,7 @@ mod tests {
         let d = ark_core::tmp::scratch_path(format!("ark-sksubs-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(d.join("ws")).unwrap();
-        let paths = Paths { data: d.join("data"), config_dir: d.join("cfg"), runtime: d.join("run") };
+        let paths = Paths { data: d.join("data"), config_dir: d.join("cfg"), runtime: d.join("run"), ..Default::default() };
         let mut cfg = Config::default();
         cfg.model.default = "fake/m".into();
         cfg.skills = toml::from_str("[hub]\ngithub_api = \"http://127.0.0.1:9/gh\"\ngithub_raw = \"http://127.0.0.1:9/raw\"\nclawhub = \"http://127.0.0.1:9/claw\"\nskills_sh = \"http://127.0.0.1:9/ssh\"\nlobehub = \"http://127.0.0.1:9/lobe\"\nbrowse_sh = \"http://127.0.0.1:9/browse\"\n").unwrap();
@@ -600,7 +600,7 @@ mod tests {
         let sk = d.join("ws/.ark/skills/notes");
         std::fs::create_dir_all(&sk).unwrap();
         std::fs::write(sk.join("SKILL.md"), "---\nname: notes\ndescription: Keep notes\n---\nbody\n").unwrap();
-        let paths = Paths { data: d.join("data"), config_dir: d.join("cfg"), runtime: d.join("run") };
+        let paths = Paths { data: d.join("data"), config_dir: d.join("cfg"), runtime: d.join("run"), ..Default::default() };
         let cfg = Config::default();
         let c = Ctx { cfg: &cfg, paths: &paths, ws: &d.join("ws"), ask: None };
         let out = run(&c, &a(&["publish", "notes", "--to", "clawhub"])).unwrap();

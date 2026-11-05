@@ -193,7 +193,7 @@ mod tests {
         let d = ark_core::tmp::scratch_path(format!("ark-curcli2-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         let st = Store::at(&d);
-        let (cfg, paths) = (ark_kernel::config::Config::default(), ark_kernel::config::Paths { data: d.clone(), config_dir: d.join("cfg"), runtime: d.join("run") });
+        let (cfg, paths) = (ark_kernel::config::Config::default(), ark_kernel::config::Paths { data: d.clone(), config_dir: d.join("cfg"), runtime: d.join("run"), ..Default::default() });
         let s = Settings::from_table(&toml::Table::new());
         for n in ["busy", "quiet"] {
             std::fs::create_dir_all(st.skills.join(n)).unwrap();
@@ -229,7 +229,7 @@ mod tests {
         let d = ark_core::tmp::scratch_path(format!("ark-curcli-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         let st = Store::at(&d);
-        let (cfg, paths) = (ark_kernel::config::Config::default(), ark_kernel::config::Paths { data: d.clone(), config_dir: d.join("cfg"), runtime: d.join("run") });
+        let (cfg, paths) = (ark_kernel::config::Config::default(), ark_kernel::config::Paths { data: d.clone(), config_dir: d.join("cfg"), runtime: d.join("run"), ..Default::default() });
         let s = Settings::from_table(&toml::Table::new());
         std::fs::create_dir_all(st.skills.join("mine")).unwrap();
         std::fs::write(st.skills.join("mine/SKILL.md"), "---\nname: mine\ndescription: m\n---\n").unwrap();

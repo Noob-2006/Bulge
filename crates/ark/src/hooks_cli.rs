@@ -429,13 +429,13 @@ mod tests {
     fn doctor_warns_about_a_public_listener() {
         let root = ark_core::tmp::scratch_path(format!("ark-hooks-doctor-{}", ark_kernel::util::random_hex(8)));
         std::fs::create_dir_all(root.join("data")).unwrap();
-        let paths = Paths { data: root.join("data"), config_dir: root.join("cfg"), runtime: root.join("run") };
+        let paths = Paths { data: root.join("data"), config_dir: root.join("cfg"), runtime: root.join("run"), ..Default::default() };
         let cfg = Config { app: toml::from_str("enabled = true\nlisten = \"0.0.0.0:8640\"\ntoken = \"t\"").unwrap(), ..Default::default() };
         let c = Ctx { x: HooksExtra::parse(&cfg).unwrap(), cfg, paths, ws: root.clone() };
         assert_eq!(doctor(&c), 1, "a non-loopback app server without the layers is a warning");
         // The default config (no listeners) is healthy.
         let cfg = Config::default();
-        let c = Ctx { x: HooksExtra::parse(&cfg).unwrap(), cfg, paths: Paths { data: root.join("data"), config_dir: root.join("cfg"), runtime: root.join("run") }, ws: root.clone() };
+        let c = Ctx { x: HooksExtra::parse(&cfg).unwrap(), cfg, paths: Paths { data: root.join("data"), config_dir: root.join("cfg"), runtime: root.join("run"), ..Default::default() }, ws: root.clone() };
         assert_eq!(doctor(&c), 0);
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -450,7 +450,7 @@ mod tests {
         }))
         .unwrap();
         let root = ark_core::tmp::scratch_path(format!("ark-whtest-{}", ark_kernel::util::random_hex(8)));
-        let paths = Paths { data: root.join("data"), config_dir: root.join("cfg"), runtime: root.join("run") };
+        let paths = Paths { data: root.join("data"), config_dir: root.join("cfg"), runtime: root.join("run"), ..Default::default() };
         let cfg: Config = toml::from_str(&format!("[channels.hooks]\nkind = \"webhook\"\nlisten = \"{}\"\nsecret = \"{{{{secret:WH}}}}\"\n[channels.hooks.routes.gh]\nprompt = \"x\"\n", srv.local_addr())).unwrap();
         let file = ark_channel::webhook::subscriptions_path(&paths.data.join("channels"), "hooks");
         ark_channel::webhook::subscribe(&file, "dyn", json!({"secret": "dsecret"})).unwrap();

@@ -34,7 +34,7 @@ pub fn cli(cmd: &str, argv: &[String], cfg: &Config, paths: &Paths, ws: &Path) -
 pub fn register() {
     ark_core::registry::register_tool_provider("skills", 100, |env| {
         let cfg = env.config::<Config>()?;
-        let paths = Paths { data: env.data.clone(), config_dir: env.config_dir.clone(), runtime: env.runtime.clone() };
+        let paths = Paths { data: env.data.clone(), config_dir: env.config_dir.clone(), runtime: env.runtime.clone(), ..Default::default() };
         Ok(tools(cfg, &paths, &env.workspace))
     });
 }

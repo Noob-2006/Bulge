@@ -553,7 +553,7 @@ fn internal_logs(c: &WebCtx) -> PathBuf {
 }
 
 fn stderr_log(c: &WebCtx) -> PathBuf {
-    c.paths.data.join("arkd.log")
+    c.paths.daemon_log()
 }
 
 /// The daemon's own log files: the JSONL tap (`ark.jsonl`, rotated) and the stderr log.
@@ -1169,7 +1169,7 @@ mod tests {
         assert_eq!(ok(&c, "ui.logs.files", json!({}))["files"].as_array().unwrap().len(), 1);
         assert_eq!(err(&c, "ui.logs", json!({"file": "../secrets.toml"})).0, -32602);
         // The daemon's stderr log is listed and readable too.
-        std::fs::write(t.paths.data.join("arkd.log"), "arkd: channel tg: reply failed: x\n").unwrap();
+        std::fs::write(t.paths.daemon_log(), "arkd: channel tg: reply failed: x\n").unwrap();
         let l = ok(&c, "ui.logs", json!({"file": "arkd.log"}));
         assert_eq!(l["tail"][0]["target"], "arkd");
         assert_eq!(l["tail"][0]["level"], "error");

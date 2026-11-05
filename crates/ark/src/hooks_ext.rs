@@ -754,7 +754,7 @@ mod tests {
         d
     }
     fn paths(root: &Path) -> Paths {
-        Paths { data: root.join("data"), config_dir: root.join("cfg"), runtime: root.join("run") }
+        Paths { data: root.join("data"), config_dir: root.join("cfg"), runtime: root.join("run"), ..Default::default() }
     }
 
     #[test]
@@ -943,7 +943,7 @@ pub(crate) mod kernel_tests {
         let mut cfg: Config = toml::from_str(cfg_toml).unwrap();
         cfg.model.default = "stub/m".into();
         cfg.checkpoint.enabled = false;
-        let paths = Paths { data: root.join("data"), config_dir: root.join("cfg"), runtime: root.join("run") };
+        let paths = Paths { data: root.join("data"), config_dir: root.join("cfg"), runtime: root.join("run"), ..Default::default() };
         let stub = Arc::new(Stub(Mutex::new(vec![])));
         let k = new_kernel(cfg, paths, Arc::new(Res(stub.clone())), vec![], Arc::new(ark_kernel::vault::Vault::empty()), Arc::new(Policy { allow_privilege: false, allow_egress: false }));
         Env { k, ws, root, stub_seen: stub }

@@ -43,7 +43,7 @@ write_files:
           (command -v dnf >/dev/null 2>&1 && dnf install -y ark-agent) || yum install -y ark-agent
       fi
       # unattended setup as the service account; the key goes through the environment into the vault
-      ARK_SETUP_API_KEY=$(cat "$KEYFILE") ARK_HOME=/var/lib/ark \
+      ARK_SETUP_API_KEY=$(cat "$KEYFILE") ARK_MODE=system \
           setpriv --reuid=ark --regid=ark --clear-groups \
           /usr/bin/ark setup --non-interactive --no-service --provider anthropic --model claude-sonnet-4-5
       rm -f "$KEYFILE"

@@ -498,7 +498,7 @@ pub fn doctor_check(cfg: &BrowserConfig) -> Result<String, String> {
             if s["extension_connected"] == true {
                 Ok(format!("browser extension connected on 127.0.0.1:{}", s["listening"]))
             } else {
-                Err("no ark browser extension is connected: load ui/browser-extension in Chrome, open its options and paste the token from ~/.local/share/ark/browser/extension-token".into())
+                Err(format!("no ark browser extension is connected: load ui/browser-extension in Chrome, open its options and paste the token from {}", crate::launch::data_dir().join("browser/extension-token").display()))
             }
         }
         other => Ok(other.to_string()),

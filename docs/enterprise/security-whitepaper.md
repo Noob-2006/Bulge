@@ -52,7 +52,10 @@ ark 是一個讓大型語言模型（LLM）在你的機器上讀寫檔案、執�
 | 四種角色 | `admin`（全部）、`user`（聊天、核准、讀）、`operator`（唯讀中繼資料＋daemon／通道／節點維運，**不得**讀對話內容）、`auditor`（唯讀中繼資料＋稽核，**不得**讀對話內容）。所有 ARP 呼叫（HTTP、WebSocket、外掛路由）經同一個 `permits()`。 | `[app] tokens` 的 `scope`；ARP `whoami`、聊天 `/whoami` |
 | OIDC | `self_hosted` 登入可對接 IdP；角色決定順序：`ark users` 登記 → `rbac.users`（email／sub）→ `groups_claim` 對 `rbac.groups` → `default_role`（`none` 表示拒絕登入）。登入成功與拒絕都寫稽核。 | `[app.rbac]`、`ark users` |
 | 服務帳號 | `ark accounts issue|list|rotate|revoke|expiring`；token 只顯示一次，檔案只存 SHA-256，預設 90 天到期，輪替有寬限期。 | `ark accounts` |
-| 核准者身分 | 每個核准都記錄是誰、從哪個通道、哪個等級與工具；app server 由認證後的 principal 注入，用戶端自帶的 `_by` 會被剝除。 | 稽核 `approval.answer` |
+| 核准者身分 | 每個核准都記錄是誰、從哪個通道、哪個等級與工具；app server 由認證後的 principal 與其角色注入，用戶端自帶的 `_by`／`_by_role` 會被剝除。 | 稽核 `approval.answer` |
+| 雙人覆核（four-eyes） | `[approvals.dual_control]` 依工具名、gate 種類、規則文字或風險等級選出高風險動作，要求 N 位**不同**、且**不是該 session 擁有者**的核准者；可限定角色或名單、設到期；auditor 永遠不能投票；`/yolo`、持久授權、任務信封、smart 審查都不會讓它安靜通過。每次申請、每一票（含被拒的票與理由）、結果、逾期都寫稽核。可選擇同時在 ServiceNow／Jira 開變更單，變更單核准算一票、駁回即拒絕。 | `ark gate list|answer|policy`、ARP `gate.pending`／`gate.answer`，詳見 [review-and-legacy-integration.md](review-and-legacy-integration.md) |
+| Session 覆核 | 覆核者把 session 標記 `reviewed`／`flagged`／`cleared` 並附註；擁有者不能覆核自己的 session，auditor 不能標記。標記本身與稽核記錄（不含註記內文，只含其雜湊）分開保存。 | `ark session review`、ARP `session.review.*` |
+| 舊式 SSO 前端 | `[app.exposure.proxy_auth]`：Apache `mod_auth_gssapi`（Kerberos SPNEGO）、WAM、mTLS 終結代理把使用者與群組放進標頭；**只有 TCP 對端位於 `proxies` 清單時**才採信，再經同一套 `[app.rbac]` 對應角色。 | 白皮書本節、`review-and-legacy-integration.md` |
 | 系統層受管設定 | `/etc/ark/managed.toml` 與 `managed.d/*.toml` 是使用者設定之下的預設層；`[managed] locked` 列出的鍵在 user、project、`--set` 之後被強制回系統值。檔案須 root 擁有且 group／other 不可寫，否則拒絕載入。可鎖：風險 preset、允許模型、工具政策、出口主機、稽核、法遵。 | `ark config managed` |
 | 資料分級 | `[compliance] data_class` 搭配 `[compliance.classes]` 限制可用模型（類別未定義時 fail closed）。 | `Config::validate` |
 
@@ -60,8 +63,10 @@ ark 是一個讓大型語言模型（LLM）在你的機器上讀寫檔案、執�
 
 - **統一事件流**：`<data>/audit/events.jsonl`，每筆含 `seq、ts、kind、actor{kind,name,role,ip}、target、outcome、session、detail、prev、hash`。涵蓋 app 請求決策、登入、token 發行／輪替／撤銷、設定變更、核准、gate 決策、使用者登記異動、保留與保全、匯出、預算告警。
 - **防竄改**：SHA-256 雜湊鏈、`flock` 序列化多程序寫入、超過 `[audit] rotate_mb`（預設 64）自動輪替並將封存段改為 0400 加 `.seal`。`ark audit verify [--anchor HASH]` 能偵測改欄位、刪行、重排、截尾、封存段被改、seal 缺失。**限制**：能以相同 uid 執行的程序可以整條重寫；對策是匯出到外部 SIEM（每筆帶 hash）並用 `--anchor` 比對。
-- **匯出**：syslog（RFC 5424；UDP、TCP octet counting、unix socket）、Splunk HEC、OTLP/HTTP logs。各 sink 獨立游標，至少一次，斷線不丟。
-- **指標與就緒**：`/metrics`（Prometheus）、`/ready`、`ark health --ready`。
+- **簽章封存**：設 `[audit] seal_key`（`ark audit seal-key` 產生 Ed25519 種子）後，每個輪替段的 seal 都會被簽章（`.sig`）；設 `[audit] tsa_url` 時再向 RFC 3161 時戳機構取得時戳權杖。稽核人員只需公鑰（`[audit] seal_pubkey` 或 `ark audit verify --pubkey … --require-signed`）。**限制**：簽章金鑰若放在被稽核的主機上，能讀到它的人也能偽造簽章——金鑰應放在另一個帳號或 HSM 簽章服務；ark 檢查時戳權杖的狀態、訊息摘要與 nonce，但不驗證 TSA 的 CMS 憑證鏈（請以 `openssl ts -verify` 驗證）。
+- **匯出**：syslog（RFC 5424；UDP、TCP octet counting〔RFC 6587〕、TLS〔RFC 5425，可指定私有 CA〕、unix socket），訊息格式可選 JSON（rfc5424）、CEF（ArcSight）、LEEF 1.0（QRadar），可同時設多個具名 syslog sink；Splunk HEC、OTLP/HTTP logs。各 sink 獨立游標，至少一次，斷線不丟。
+- **稽核報告**：`ark audit report --from --to --format md|html|json`（ARP `audit.report`）把一段期間的登入、權限與身分異動、核准（含核准者與申請者）、被拒動作、設定變更、session 覆核整理成一份文件，附整條鏈的驗證結果與 head hash。產生報告本身也寫稽核。
+- **指標與就緒**：`/metrics`（Prometheus）、`/ready`、`ark health --ready`、`ark health --nagios`（Nagios／Icinga 外掛格式與 exit code）；`[alerts] targets` 可加 `snmp://community@nms` 送 SNMPv2c trap 給舊式 NMS。
 - **個資**：`[compliance.pii]` 可在寫入前遮罩 email、電話、Luhn 驗證的卡號、美國 SSN、台灣身分證、（選配）IPv4；匯出預設遮罩。稽核記錄的自由文字一律遮罩，身分欄位不遮。daemon 自身 stderr log 未遮罩。
 - **保留與保全**：`[compliance.retention]` 分別設 sessions、audit、broker、logs、exports 天數；daemon 每小時執行；`ark retention hold add` 建立法律保全，保全範圍不被清除；稽核只刪最舊的封存段，鏈保持可驗證。
 - **電子取證**：`ark ediscovery export` 產生遮罩後的 session JSON、`manifest.json`（每檔 sha256、查詢條件、當下稽核 head）與保管鏈；`ark ediscovery verify` 重算。
@@ -98,12 +103,12 @@ ark 是一個讓大型語言模型（LLM）在你的機器上讀寫檔案、執�
 ## 9. 已知限制（請務必讀）
 
 1. **模型可能做錯事。** 防線針對的是危害，不是正確性；tier 0／1 的錯誤（例如在沙箱內改錯檔）會被放行並記錄，靠 checkpoint 與快照回復。
-2. **同 uid 的程序等同擁有者。** 能以 `ark` 帳號執行程式的人，可讀 vault 解密後的記憶體、重寫稽核檔（鏈可驗但無法阻止整條重寫）。外部 SIEM 副本是解法。
+2. **同 uid 的程序等同擁有者。** 能以 `ark` 帳號執行程式的人，可讀 vault 解密後的記憶體、重寫稽核檔（鏈可驗但無法阻止整條重寫）。外部 SIEM 副本與放在別處的封存簽章金鑰是解法。同理，雙人覆核防的是網路上的使用者（SSO、token、聊天身分）；擁有 daemon 的本機帳號可以透過 unix socket 以任意名義作答，等同系統管理員。
 3. **金鑰庫的降級。** 沒有 keyring、TPM、密語或 `ARK_VAULT_KEY` 時，退回 0600 的明文 `secrets.toml`（`ark secrets backend` 會明說）。系統服務請設 `ARK_VAULT_KEY`（systemd `LoadCredential`）或密語檔，並可用 `ARK_VAULT_REQUIRE_ENCRYPTION=1` 讓它在無金鑰來源時直接失敗。
 4. **沒有 microVM 也沒有 namespace 沙箱的主機**（例如不允許 user namespace 的容器）：agent 在主機上執行，會明確標示 `NOT ISOLATED`。在 Kubernetes 上請改用 microVM 節點或把 pod 本身當隔離邊界。
 5. **語意型攻擊**（記憶或文件裡的誘導文字）無法靠掃描完全抓到；以降權與稽核降低影響。
 6. **靜態分析不是證明。** 指令與 effects 分類器可能漏判新式寫法；因此有第二層（沙箱、出口、核准）。
-7. **範圍。** 沒有集中管理台、沒有多叢集高可用、沒有內建 DLP 產品；`/etc/ark` 政策為檔案式，遠端下發需搭配你的組態管理（Ansible、Helm 已提供範例）。
+7. **範圍。** 高可用與集中管理有，但有前提：`[ha]` 讓多個 `arkd` 共用一個資料目錄（NFS、共享磁碟），以租約＋fencing token 選出唯一 leader，其餘為 standby（`ark ha status|stepdown`）；`[workers]` 把回合分派到 worker 程序（`ark workers status|dispatch`）；`ark cluster` 是多節點主控台（節點登錄、全節點檢視、以 Ed25519 簽章下發受管政策，節點只接受 `[managed] cluster_key` 驗得過且版本較新的政策）。**限制**：HA 依賴共享儲存本身的可用性與一致性（沒有內建複寫、沒有跨資料中心的多叢集）；不共用儲存的節點要由管理員登錄 URL 與讀取 token；沒有內建 DLP 產品；`/etc/ark` 以外的主機組態仍需你的組態管理（Ansible、Helm 已提供範例）。
 8. **文件性質。** 沒有第三方滲透測試報告或認證可附；`docs/risk-assessment.md` 為自評。
 
 ## 10. 部署者責任

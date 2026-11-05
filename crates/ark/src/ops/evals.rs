@@ -326,7 +326,7 @@ fn home() -> Home {
     let paths = ark_kernel::config::Paths {
         data: root.join("data"),
         config_dir: root.join("config"),
-        runtime: root.join("run"),
+        runtime: root.join("run"), ..Default::default()
     };
     for d in [&ws, &paths.data, &paths.config_dir, &paths.runtime] {
         std::fs::create_dir_all(d).unwrap_or_else(|e| panic!("create {}: {e}", d.display()));
@@ -1189,7 +1189,7 @@ fn eval_web_assets() -> Result<(), String> {
     }
     // Chat: commands complete from `command.list` and run through `command.run`; the action the
     // kernel returns (new_session / quit / local) is performed by the client.
-    for need in ["command.list", "command.run", "ui.upload", "ui.submit", "ui.upload.delete", "runSlash", "addToolCard", "data-i18n"] {
+    for need in ["command.list", "command.run", "ui.upload", "ui.submit", "ui.upload.delete", "runSlash", "addToolCall", "settleTool", "openPalette", "data-i18n"] {
         if !app.contains(need) {
             return Err(format!("app.js is missing {need}"));
         }

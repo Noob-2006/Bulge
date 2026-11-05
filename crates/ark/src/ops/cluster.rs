@@ -199,7 +199,7 @@ fn run(a: &Args) -> R {
             let out = a.val("out").map(PathBuf::from).unwrap_or_else(default_seed);
             let public = keygen(&out)?;
             print(a, &json!({"seed_file": out, "public_key": public}), |_| {
-                format!("signing seed written to {} (0600; keep it off the nodes)\npublic key: {public}\n\nPin it on every node in /etc/ark/managed.toml:\n  [managed]\n  cluster_key = \"{public}\"", out.display())
+                format!("signing seed written to {} (0600; keep it off the nodes)\npublic key: {public}\n\nPin it on every node in {}/managed.toml:\n  [managed]\n  cluster_key = \"{public}\"", out.display(), ark_kernel::managed::SYSTEM_DIR)
             });
         }
         ("cluster", "policy") => match rest(2) {

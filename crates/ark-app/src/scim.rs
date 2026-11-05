@@ -151,7 +151,7 @@ fn group_json(data: &Path, g: &Group, base: &str) -> Value {
 
 /// The registry API wants `Paths`; SCIM only ever touches `data`.
 fn paths_of(data: &Path) -> ark_kernel::config::Paths {
-    ark_kernel::config::Paths { data: data.to_path_buf(), config_dir: PathBuf::new(), runtime: PathBuf::new() }
+    ark_kernel::config::Paths { data: data.to_path_buf(), config_dir: PathBuf::new(), runtime: PathBuf::new(), ..Default::default() }
 }
 
 /// `attr eq "value"` (the only filter IdP provisioning clients send).
