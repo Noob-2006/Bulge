@@ -1288,6 +1288,7 @@ fn mcp_app_call(tools: &[(String, ark_plugin::ToolDef, Arc<ark_plugin::Client>)]
             input: args.clone(),
             gate: ark_kernel::gate::GateKind::Egress,
             reason: format!("the `{server}` app view wants to call `{name}`"),
+            tier: 0,
         };
         if k.approver.approve(&req) == Approval::Deny {
             return Err((-32001, "denied by the user".into()));
@@ -1308,6 +1309,8 @@ fn cmd_daemon(a: &Args) -> R {
         "run" => {
             let (pending, cell) = daemon::pending_approver(Duration::from_secs(600));
             let mut c = build_agent(a, pending.clone(), true)?;
+            // srv-017: `approvals.timeout_secs` is the wait, not a hard-coded 600 s.
+            pending.set_timeout(Duration::from_secs(c.k.cfg.approvals.timeout_secs.max(1)));
             let ext_arc: Option<Arc<ext::Ext>> = c.ext.take().map(Arc::new);
             let _ = cell.set(Arc::downgrade(&c.k));
             eprintln!("arkd {} listening on {}", env!("CARGO_PKG_VERSION"), sock.display());

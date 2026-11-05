@@ -17,6 +17,16 @@ pub struct ApprovalRequest {
     pub input: serde_json::Value,
     pub gate: GateKind,
     pub reason: String,
+    /// Risk tier (§0-1) of the call, 0 when the request is not tiered. Tier 3 is the hard
+    /// floor: surfaces offer no "always" and only the owner may answer it (srv-017/018).
+    pub tier: u8,
+}
+
+impl ApprovalRequest {
+    /// Tier 3: irreversible and outside the sandbox.
+    pub fn irreversible(&self) -> bool {
+        self.tier >= 3
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -42,6 +52,10 @@ pub trait Approver: Send + Sync {
     }
     /// Answer a pending approval/question by id (`/approve`, chat buttons). False if unknown.
     fn answer(&self, _id: &str, _answer: &str) -> bool {
+        false
+    }
+    /// Did approval `id` end because nobody answered in time (not an explicit deny)?
+    fn expired(&self, _id: &str) -> bool {
         false
     }
     /// Structured questions (Hermes `clarify`). Default: one `ask` per question with
@@ -195,6 +209,8 @@ pub enum PendingItem {
 struct PendingState {
     open: HashMap<String, PendingItem>,
     answers: HashMap<String, String>,
+    /// Ids whose wait ran out (bounded; read once by the gate).
+    expired: std::collections::HashSet<String>,
 }
 
 impl Pending {
@@ -232,7 +248,19 @@ impl Pending {
         let timeout = Duration::from_millis(self.timeout_ms.load(std::sync::atomic::Ordering::Relaxed));
         let (mut s, _) = self.cv.wait_timeout_while(s, timeout, |s| !s.answers.contains_key(&id)).unwrap();
         s.open.remove(&id);
-        s.answers.remove(&id)
+        let a = s.answers.remove(&id);
+        if a.is_none() {
+            if s.expired.len() > 1024 {
+                s.expired.clear();
+            }
+            s.expired.insert(id);
+        }
+        a
+    }
+
+    /// The configured wait (`approvals.timeout_secs`).
+    pub fn timeout(&self) -> Duration {
+        Duration::from_millis(self.timeout_ms.load(std::sync::atomic::Ordering::Relaxed))
     }
 }
 
@@ -256,6 +284,9 @@ impl Approver for Pending {
     }
     fn answer(&self, id: &str, answer: &str) -> bool {
         Pending::answer(self, id, answer)
+    }
+    fn expired(&self, id: &str) -> bool {
+        self.state.lock().unwrap().expired.remove(id)
     }
     fn ask(&self, session: &str, question: &str) -> Result<String, String> {
         let id = crate::util::new_id();
@@ -299,7 +330,7 @@ mod tests {
     use std::sync::Arc;
 
     fn req(id: &str) -> ApprovalRequest {
-        ApprovalRequest { id: id.into(), tool_use_id: String::new(), session: "s".into(), tool: "shell".into(), summary: "sudo x".into(), input: serde_json::Value::Null, gate: GateKind::Privilege, reason: "sudo".into() }
+        ApprovalRequest { id: id.into(), tool_use_id: String::new(), session: "s".into(), tool: "shell".into(), summary: "sudo x".into(), input: serde_json::Value::Null, gate: GateKind::Privilege, reason: "sudo".into(), tier: 0 }
     }
 
     #[test]
@@ -330,6 +361,9 @@ mod tests {
         // Nobody answers → deny after timeout, and the item is gone.
         assert_eq!(p.approve(&req("b")), Approval::Deny);
         assert!(p.list().is_empty());
+        assert!(p.expired("b"), "a timeout is told apart from an explicit deny");
+        assert!(!p.expired("b"), "read once");
+        assert!(!p.expired("a"), "an answered approval did not expire");
         assert!(p.ask("s", "q").is_err());
         // Garbage answer is a deny.
         let p3 = p.clone();

@@ -842,12 +842,50 @@ fn approval_text(req: &ark_kernel::approver::ApprovalRequest) -> String {
     let gate = format!("{:?}", req.gate).to_lowercase();
     let reason: String = req.reason.chars().take(300).collect();
     let summary: String = req.summary.chars().take(300).collect();
+    let deferred = req.id.starts_with(ark_kernel::secgate::DEFERRED_PREFIX);
+    if req.irreversible() {
+        // srv-018: the tier, the impact and that it cannot be undone, before any button.
+        return format!(
+            "🛑 TIER 3 — irreversible, outside the sandbox: {} ({gate})\nID: {}\n{reason}\n\nImpact: {summary}\n\nOnly the owner can approve this, once, after a second confirmation{}. Nothing is remembered.\nReply with: /approve {} confirm  |  /deny {}",
+            req.tool,
+            req.id,
+            if deferred { " (queued while nobody was there; the rest of the task kept running)" } else { "" },
+            req.id,
+            req.id
+        );
+    }
+    if deferred {
+        return format!("⏸ Queued for the owner ({}, tier {}): {}\nID: {}\n{reason}\n\n{summary}\n\nReply with: /approve {} | /deny {}", req.tool, req.tier, gate, req.id, req.id, req.id);
+    }
     format!("🔒 {} approval required ({gate})\nID: {}\n{reason}\n\n{summary}\n\nReply with: /approve {} allow-once|allow-always|deny", req.tool, req.id, req.id)
+}
+
+/// Where each forwarded approval went, so an expiry can be announced there (srv-017).
+fn forwarded_to() -> &'static Mutex<HashMap<String, Vec<(String, String, Option<String>)>>> {
+    static S: std::sync::OnceLock<Mutex<HashMap<String, Vec<(String, String, Option<String>)>>>> = std::sync::OnceLock::new();
+    S.get_or_init(Default::default)
+}
+
+/// Buttons for a forwarded approval. Tier 3 offers no "Allow Always" (the hard floor is never
+/// remembered) and its allow button only opens the second confirmation.
+fn approval_buttons(req: &ark_kernel::approver::ApprovalRequest) -> Vec<Vec<ark_channel::Button>> {
+    let b = |label: &str, choice: &str| ark_channel::Button { label: label.into(), data: format!("appr:{}:{choice}", req.id), url: None };
+    if req.irreversible() {
+        return vec![vec![b("Review & Allow Once", "once"), b("Deny", "deny")]];
+    }
+    if req.id.starts_with(ark_kernel::secgate::DEFERRED_PREFIX) {
+        return vec![vec![b("Allow", "once"), b("Deny", "deny")]];
+    }
+    // OpenClaw labels and decisions: `allow-once` / `allow-always` (a durable grant) /
+    // `deny`; the data keeps this tree's `once|always|deny` spelling.
+    vec![vec![b("Allow Once", "once"), b("Allow Always", "permanent"), b("Deny", "deny")]]
 }
 
 /// Send a pending approval to its session's chat (`mode = "session"`), to the configured
 /// targets (`mode = "targets"`) or both, with `appr:<id>:<choice>` buttons where the channel
-/// supports them; the receiving chat's peer may then answer it (`allow_forwarded`).
+/// supports them; the receiving chat's peer may then answer it (`allow_forwarded`). A call
+/// queued for the owner (cron / unattended, `q-` id) with no such chat goes to the owners'
+/// direct chats (`approvals.forward.owners`).
 fn forward_approval(hub: &Arc<Hub>, req: &ark_kernel::approver::ApprovalRequest) {
     use ark_security::approvals::ForwardMode;
     let cfg = &hub.k.cfg.approvals.forward;
@@ -869,6 +907,13 @@ fn forward_approval(hub: &Arc<Hub>, req: &ark_kernel::approver::ApprovalRequest)
             targets.push((t.channel.clone(), t.to.clone(), t.thread.clone()));
         }
     }
+    if targets.is_empty() && req.id.starts_with(ark_kernel::secgate::DEFERRED_PREFIX) {
+        for channel in hub.ext.channels.keys() {
+            for o in cfg.owners_of(channel) {
+                targets.push((channel.clone(), o, None));
+            }
+        }
+    }
     let text = approval_text(req);
     for (channel, chat, thread) in targets {
         let Some(ch) = hub.ext.channels.get(&channel).map(|(c, _)| c.clone()) else {
@@ -886,15 +931,33 @@ fn forward_approval(hub: &Arc<Hub>, req: &ark_kernel::approver::ApprovalRequest)
         }
         let mut out = Outbound { chat: chat.clone(), thread: thread.clone(), text: text.clone(), format: ark_channel::TextFormat::Markdown, ..Default::default() };
         if ch.caps().buttons {
-            // OpenClaw labels and decisions: `allow-once` / `allow-always` (a durable grant) /
-            // `deny`; the data keeps this tree's `once|always|deny` spelling.
-            let b = |label: &str, choice: &str| ark_channel::Button { label: label.into(), data: format!("appr:{}:{choice}", req.id), url: None };
-            out.buttons = vec![vec![b("Allow Once", "once"), b("Allow Always", "permanent"), b("Deny", "deny")]];
+            out.buttons = approval_buttons(req);
         }
         match hub.deliver.send(ch.as_ref(), &out) {
             // The forwarded chat's peer may answer this request without an approvers list.
-            Ok(_) => ark_security::approvals::allow_forwarded(&req.id, &channel, &chat),
+            Ok(_) => {
+                ark_security::approvals::allow_forwarded(&req.id, &channel, &chat);
+                let mut m = forwarded_to().lock().unwrap_or_else(|p| p.into_inner());
+                if m.len() > 1024 {
+                    m.clear();
+                }
+                m.entry(req.id.clone()).or_default().push((channel.clone(), chat.clone(), thread.clone()));
+            }
             Err(e) => eprintln!("arkd: approvals: forwarding {} to {channel} failed: {}", req.id, e.message),
+        }
+    }
+}
+
+/// srv-017: a forwarded approval that expired is announced where it was sent, so nobody
+/// presses a dead button believing it still matters.
+fn announce_expiry(hub: &Arc<Hub>, text: &str) {
+    let Some(rest) = text.strip_prefix("approval expired: ") else { return };
+    let id = rest.split_whitespace().next().unwrap_or("");
+    let Some(targets) = forwarded_to().lock().unwrap_or_else(|p| p.into_inner()).remove(id) else { return };
+    for (channel, chat, thread) in targets {
+        if let Some(ch) = hub.ext.channels.get(&channel).map(|(c, _)| c.clone()) {
+            let out = Outbound { chat, thread, text: format!("⏱ Approval {id} expired with no answer and was denied — silence is not consent. {}", rest.split_once(" — ").map(|x| x.1).unwrap_or("")), ..Default::default() };
+            let _ = hub.deliver.send(ch.as_ref(), &out);
         }
     }
 }
@@ -909,8 +972,14 @@ fn forward_loop(hub: Arc<Hub>, cancel: Cancel) {
 /// message published afterwards is missed).
 fn forward_loop_with(hub: Arc<Hub>, rx: Receiver<ark_kernel::kernel::BusMsg>, cancel: Cancel) {
     while !cancel.is_cancelled() {
-        if let Ok(ark_kernel::kernel::BusMsg::Pending(ark_kernel::approver::PendingItem::Approval(req))) = rx.recv_timeout(Duration::from_millis(250)) {
-            forward_approval(&hub, &req);
+        match rx.recv_timeout(Duration::from_millis(250)) {
+            Ok(ark_kernel::kernel::BusMsg::Pending(ark_kernel::approver::PendingItem::Approval(req))) => forward_approval(&hub, &req),
+            Ok(ark_kernel::kernel::BusMsg::Event { event, .. }) => {
+                if let ark_kernel::event::EventKind::Notice { text, .. } = &event.kind {
+                    announce_expiry(&hub, text);
+                }
+            }
+            _ => {}
         }
     }
 }
@@ -930,8 +999,15 @@ fn answer_approval(k: &Kernel, m: &Inbound, data: &str) -> Option<String> {
         // OpenClaw's `allow-always` is a durable grant, as is this tree's `permanent`.
         "permanent" | "allow-always" => "permanent",
         "deny" => "deny",
+        // srv-018: the second press on a tier-3 request.
+        "confirm" => "confirm",
         _ => return Some(format!("Unknown approval answer `{choice}`.")),
     };
+    // A call queued for the owner (cron / unattended): answered in the deferred queue.
+    if id.starts_with(ark_kernel::secgate::DEFERRED_PREFIX) {
+        let r = ark_kernel::secgate::answer_deferred(k, id, matches!(choice, "once" | "confirm"), &m.channel, &m.sender);
+        return Some(r.unwrap_or_else(|e| e));
+    }
     let Some(req) = k.approver.pending().into_iter().find_map(|p| match p {
         ark_kernel::approver::PendingItem::Approval(r) if r.id == id => Some(r),
         _ => None,
@@ -939,8 +1015,29 @@ fn answer_approval(k: &Kernel, m: &Inbound, data: &str) -> Option<String> {
         return Some(no_longer_available(id));
     };
     if !ark_kernel::secgate::approver_allowed(&k.cfg.approvals, &m.channel, &m.sender, std::slice::from_ref(&req)) {
+        if req.irreversible() {
+            return Some("❌ Tier-3 (irreversible) approvals can only be answered by the owner (approvals.forward.owners).".to_string());
+        }
         return Some("❌ You are not allowed to answer approvals here.".to_string());
     }
+    // srv-018: tier 3 is allow-once only and needs a second, explicit press by the same owner.
+    let choice = match (req.irreversible(), choice) {
+        (true, "once") => {
+            tier3_armed().lock().unwrap_or_else(|p| p.into_inner()).insert(id.to_string(), format!("{}:{}", m.channel, m.sender));
+            return Some(format!("{TIER3_CONFIRM} — {} cannot be undone. {}\nPress Confirm (or send /approve {id} confirm) to allow it once. id: {id}", req.tool, req.reason));
+        }
+        (true, "confirm") => {
+            let armed = tier3_armed().lock().unwrap_or_else(|p| p.into_inner()).remove(id);
+            if armed.as_deref() != Some(format!("{}:{}", m.channel, m.sender).as_str()) {
+                return Some(format!("Press \"Review & Allow Once\" first, then confirm. id: {id}"));
+            }
+            "once"
+        }
+        (true, "always" | "permanent") => return Some("Tier-3 approvals are allow-once only; nothing is remembered.".to_string()),
+        (false, "confirm") => "once",
+        (_, c) => c,
+    };
+    ark_security::approvals::set_answered_by(id, &format!("{}:{}", m.channel, m.sender));
     if !k.approver.answer(id, choice) {
         return Some(no_longer_available(id));
     }
@@ -951,6 +1048,14 @@ fn answer_approval(k: &Kernel, m: &Inbound, data: &str) -> Option<String> {
         _ => "❌ Denied",
     };
     Some(format!("{label} — id: {id}"))
+}
+
+const TIER3_CONFIRM: &str = "⚠️ Confirm tier 3";
+
+/// Tier-3 approvals whose first press arrived: id → `channel:sender` that must confirm.
+fn tier3_armed() -> &'static Mutex<HashMap<String, String>> {
+    static S: std::sync::OnceLock<Mutex<HashMap<String, String>>> = std::sync::OnceLock::new();
+    S.get_or_init(Default::default)
 }
 
 /// The upstream reply when an approval id no longer exists (`/approve` on a resolved or
@@ -1294,6 +1399,13 @@ fn handle_inbound(hub: &Arc<Hub>, ch: &Arc<dyn Channel>, m: Inbound) {
             // `appr:<id>:<choice>` buttons answer a pending approval right here; every other
             // button press resumes the conversation as a user message (below).
             if let Some(out) = answer_approval(k, &m, &callback.data) {
+                // The tier-3 second confirmation carries its own Confirm button.
+                if let (true, Some(id)) = (out.starts_with(TIER3_CONFIRM) && ch.caps().buttons, out.rsplit("id: ").next().filter(|_| out.contains("id: "))) {
+                    let mut o = Outbound { text: out.clone(), ..base_out(&to) };
+                    o.buttons = vec![vec![ark_channel::Button { label: "Confirm (irreversible)".into(), data: format!("appr:{}:confirm", id.trim()), url: None }, ark_channel::Button { label: "Deny".into(), data: format!("appr:{}:deny", id.trim()), url: None }]];
+                    let _ = hub.deliver.send(ch.as_ref(), &o);
+                    return;
+                }
                 return reply(hub, ch, &to, &out);
             }
             // A button press starts a turn too: while paused it gets the notice instead.
@@ -2090,6 +2202,7 @@ command = "/bin/cat"
                 input: json!({"command": "rm -rf build"}),
                 gate: ark_kernel::gate::GateKind::Exec,
                 reason: "exec policy".into(),
+                tier: 0,
             })]
         }
         fn answer(&self, id: &str, answer: &str) -> bool {
@@ -2240,6 +2353,7 @@ command = "/bin/cat"
             input: json!({"command": "rm -rf build"}),
             gate: ark_kernel::gate::GateKind::Exec,
             reason: "exec policy".into(),
+            tier: 0,
         }
     }
 
@@ -2319,6 +2433,94 @@ command = "/bin/cat"
         feed(&hub, &ch, Inbound { callback: Some(gone), ..msg("c1", "u1", "Dana", "", "m3") });
         assert!(ch.last().contains("no longer available"), "{}", ch.last());
         assert!(kit.k.store.list().is_empty(), "no session is opened for button presses");
+    }
+
+    /// A pending tier-3 approval (srv-017/018).
+    struct Tier3Approver {
+        answered: Mutex<Vec<(String, String)>>,
+    }
+
+    impl ark_kernel::approver::Approver for Tier3Approver {
+        fn approve(&self, _: &ark_kernel::approver::ApprovalRequest) -> ark_kernel::approver::Approval {
+            ark_kernel::approver::Approval::Deny
+        }
+        fn ask(&self, _: &str, _: &str) -> Result<String, String> {
+            Err("headless".into())
+        }
+        fn pending(&self) -> Vec<ark_kernel::approver::PendingItem> {
+            vec![ark_kernel::approver::PendingItem::Approval(ark_kernel::approver::ApprovalRequest { tier: 3, reason: "tier 3: deletes a bucket".into(), ..approval_req("ap-t3", "s1") })]
+        }
+        fn answer(&self, id: &str, answer: &str) -> bool {
+            self.answered.lock().unwrap().push((id.to_string(), answer.to_string()));
+            true
+        }
+    }
+
+    /// srv-017/018: a tier-3 approval is forwarded without "Allow Always", only the owner may
+    /// press it, and the first press only arms a second confirmation (same owner).
+    #[test]
+    fn tier_three_buttons_are_owner_only_and_need_a_second_confirmation() {
+        let kit = crate::testkit::kit();
+        let ch = Recorder::new();
+        let hub = test_hub_with(&kit, &[("test", ch.clone())]);
+        hub.router.bind(&ark_channel::router::RouteKey::chat("test", "c1"), "s1");
+        let outs = forward_once(&hub, &ch, ark_kernel::approver::ApprovalRequest { tier: 3, ..approval_req("ap-t3f", "s1") }, 1);
+        let labels: Vec<&str> = outs[0].buttons.iter().flatten().map(|b| b.label.as_str()).collect();
+        assert_eq!(labels, ["Review & Allow Once", "Deny"], "no Allow Always on the hard floor");
+        assert!(outs[0].text.contains("TIER 3") && outs[0].text.contains("Only the owner"), "{}", outs[0].text);
+
+        let mut cfg = Config::default();
+        cfg.approvals.forward.approvers.insert("test".into(), vec!["*".into()]);
+        cfg.approvals.forward.owners.insert("test".into(), vec!["owner1".into()]);
+        let ap = Arc::new(Tier3Approver { answered: Mutex::new(vec![]) });
+        let kit = kit_with_approver(cfg, ap.clone());
+        let ch = Recorder::new();
+        let hub = test_hub(&kit);
+        let press = |who: &str, choice: &str, n: &str| feed(&hub, &ch, Inbound { callback: Some(ark_channel::Callback { id: format!("cb{n}"), data: format!("appr:ap-t3:{choice}") }), ..msg("c1", who, who, "", n) });
+        press("mallory", "once", "1");
+        assert!(ch.last().contains("only be answered by the owner"), "{}", ch.last());
+        press("owner1", "permanent", "2");
+        assert!(ch.last().contains("allow-once only"), "{}", ch.last());
+        press("owner1", "confirm", "3");
+        assert!(ch.last().contains("first"), "confirm without the first press is refused: {}", ch.last());
+        press("owner1", "once", "4");
+        let outs = ch.outs();
+        let last = outs.last().unwrap();
+        assert!(last.text.starts_with(TIER3_CONFIRM), "{}", last.text);
+        assert!(last.buttons.iter().flatten().any(|b| b.data == "appr:ap-t3:confirm"), "{:?}", last.buttons);
+        assert!(ap.answered.lock().unwrap().is_empty(), "nothing is answered before the confirmation");
+        press("owner1", "confirm", "5");
+        assert_eq!(*ap.answered.lock().unwrap(), vec![("ap-t3".to_string(), "once".to_string())]);
+        assert!(ch.last().contains("Approved (once)"), "{}", ch.last());
+    }
+
+    /// srv-017: a call queued while nobody was there reaches the owner's direct chat, and an
+    /// expired approval is announced where it was sent.
+    #[test]
+    fn queued_approvals_reach_the_owner_and_expiry_is_announced() {
+        let kit = crate::testkit::kit_with(|c| {
+            c.approvals.forward.owners.insert("test".into(), vec!["owner1".into()]);
+        });
+        let ch = Recorder::new();
+        let hub = test_hub_with(&kit, &[("test", ch.clone())]);
+        let id = ark_security::approvals::defer(&kit.paths.data, "cron-s", "sh", "deletes a bucket", 3, "tier 3").unwrap();
+        let req = ark_kernel::approver::ApprovalRequest { id: format!("q-{id}"), tier: 3, ..approval_req("x", "cron-s") };
+        let outs = forward_once(&hub, &ch, req, 1);
+        assert_eq!(outs.len(), 1, "{outs:?}");
+        assert_eq!(outs[0].chat, "owner1", "no chat route: the owner's direct chat");
+        assert!(outs[0].text.contains("queued while nobody was there"), "{}", outs[0].text);
+        // The owner answers it from the chat; the queue records who.
+        let m = Inbound { callback: Some(ark_channel::Callback { id: "cbq".into(), data: format!("appr:q-{id}:once") }), ..msg("owner1", "owner1", "O", "", "mq") };
+        assert!(answer_approval(&kit.k, &m, &format!("appr:q-{id}:once")).unwrap().contains("answered by test:owner1"));
+        assert!(ark_security::approvals::deferred(&kit.paths.data).is_empty());
+
+        // Expiry: the notice the gate writes is relayed to the chat the approval went to.
+        hub.router.bind(&ark_channel::router::RouteKey::chat("test", "c9"), "s9");
+        let n = ch.outs().len();
+        forward_once(&hub, &ch, approval_req("ap-exp", "s9"), n + 1);
+        announce_expiry(&hub, "approval expired: ap-exp — sh was not answered within 600s and was denied (tier 2)");
+        let last = ch.outs().last().unwrap().clone();
+        assert!(last.chat == "c9" && last.text.contains("ap-exp") && last.text.contains("expired"), "{last:?}");
     }
 
     /// Without an `approvers` list the chat an approval was *forwarded to* may still answer

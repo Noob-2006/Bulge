@@ -214,7 +214,19 @@ ark webhook subscribe|list|rm|test …
 | `--allow-privilege`／`--allow-egress`／`--yes` | 旗標 | 無 TTY 時的 headless 核准者：對提權／外送直接答「一次」 | hardline；`exec` 仍走 `ask_fallback`（預設 deny） |
 | `ark pause` | 全域 | 停止新的自動工作（見第 2 節） | 已在跑的工作 |
 
-`smart` 在逾時或回覆無法解析時退回 ESCALATE（問人）；`auto` 退回 ASK。「沉默不是同意」：`[approvals] timeout_secs`（預設 600）到期視為**拒絕**。
+`smart` 在逾時或回覆無法解析時退回 ESCALATE（問人）；`auto` 退回 ASK。「沉默不是同意」：`[approvals] timeout_secs`（預設 600，daemon 啟動時套用）到期視為**拒絕**，閘門記錄寫 `deny (timeout)`，並在當初轉送核准的聊天室貼出「⏱ Approval … expired」。
+
+**遠端第 3 級核准（聊天軟體）：**
+- 第 3 級（VM 外且不可回復）的轉送訊息標明等級、影響與「不可回復」，按鈕只有 `Review & Allow Once`／`Deny`，**沒有 Allow Always**；任何「always」回答都降為一次，不寫入記憶或授權。
+- 只有 `[approvals.forward] owners`（`channel → [sender id]`；未設時用該 channel 明列、非 `*` 的 `approvers`）能回答第 3 級；`*`、被轉送的聊天對象都不算。兩者都沒設就只能在 CLI 處理。
+- 第一次按下只會出現二次確認（附 `Confirm (irreversible)` 按鈕，必須同一位 owner 按）；打字則是 `/approve <id> confirm`。
+- 閘門記錄與延後佇列會寫下核准者（`allow by telegram:42`、`queue.json` 的 `answered_by`）。
+- cron／無人值守 session 排進延後佇列的第 2／3 級呼叫也會推到聊天：有綁定聊天室就送那裡，否則直接私訊 `owners`；id 以 `q-` 開頭，按鈕或 `/approve q-<id>`／`/deny q-<id>` 回答（第 3 級同樣只限 owner）。
+
+```toml
+[approvals.forward]
+owners = { telegram = ["123456789"] }
+```
 
 ### 4.6 只卡那一條、逾時也能安全繼續
 

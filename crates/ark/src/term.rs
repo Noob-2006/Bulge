@@ -452,7 +452,7 @@ mod tests {
     use super::*;
 
     fn approval() -> ApprovalRequest {
-        ApprovalRequest { id: "1".into(), tool_use_id: "tu_1".into(), session: "s".into(), tool: "shell".into(), summary: "rm -rf /tmp/x".into(), input: serde_json::Value::Null, gate: ark_kernel::gate::GateKind::Privilege, reason: "recursive delete".into() }
+        ApprovalRequest { id: "1".into(), tool_use_id: "tu_1".into(), session: "s".into(), tool: "shell".into(), summary: "rm -rf /tmp/x".into(), input: serde_json::Value::Null, gate: ark_kernel::gate::GateKind::Privilege, reason: "recursive delete".into(), tier: 0 }
     }
 
     #[test]

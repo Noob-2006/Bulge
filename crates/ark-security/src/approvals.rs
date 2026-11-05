@@ -203,11 +203,29 @@ pub struct ForwardConfig {
     /// channel → sender ids allowed to answer approvals there. Without a list, the
     /// sender of a direct chat (or the session's own sender) may answer.
     pub approvers: BTreeMap<String, Vec<String>>,
+    /// srv-018: channel → sender ids of the *owner*. Only they may answer a tier-3
+    /// (irreversible) approval from a chat, and only after a second confirmation; wildcards
+    /// never count. Without an entry the explicit (non-`*`) `approvers` of that channel are
+    /// used; with neither, tier 3 is answered from the CLI only. Deferred tier-2/3 calls
+    /// (cron, unattended sessions) with no chat route are sent to these owners directly.
+    pub owners: BTreeMap<String, Vec<String>>,
 }
 
 impl Default for ForwardConfig {
     fn default() -> Self {
-        ForwardConfig { enabled: true, mode: ForwardMode::Session, targets: vec![], session_filter: vec![], approvers: BTreeMap::new() }
+        ForwardConfig { enabled: true, mode: ForwardMode::Session, targets: vec![], session_filter: vec![], approvers: BTreeMap::new(), owners: BTreeMap::new() }
+    }
+}
+
+impl ForwardConfig {
+    /// Owner ids for `channel` (explicit `owners`, else explicit non-wildcard `approvers`).
+    pub fn owners_of(&self, channel: &str) -> Vec<String> {
+        let pick = |m: &BTreeMap<String, Vec<String>>| m.get(channel).map(|l| l.iter().filter(|x| !x.trim().is_empty() && x.as_str() != "*").cloned().collect::<Vec<_>>()).filter(|l| !l.is_empty());
+        pick(&self.owners).or_else(|| pick(&self.approvers)).unwrap_or_default()
+    }
+    /// Is `sender` the owner on `channel` (tier-3 approvals)?
+    pub fn is_owner(&self, channel: &str, sender: &str) -> bool {
+        !sender.is_empty() && self.owners_of(channel).iter().any(|x| x == sender)
     }
 }
 
@@ -923,6 +941,26 @@ pub fn take_deny_reason(id: &str) -> Option<String> {
     reasons().lock().unwrap_or_else(|p| p.into_inner()).remove(id).filter(|r| !r.is_empty())
 }
 
+// ───────────────────────── who answered (srv-018) ─────────────────────────
+
+fn answered_by() -> &'static Mutex<HashMap<String, String>> {
+    static R: OnceLock<Mutex<HashMap<String, String>>> = OnceLock::new();
+    R.get_or_init(Default::default)
+}
+
+/// Record who answered approval `id` (`channel:sender`), for the gate record and the audit.
+pub fn set_answered_by(id: &str, who: &str) {
+    let mut m = answered_by().lock().unwrap_or_else(|p| p.into_inner());
+    if m.len() > 512 {
+        m.clear();
+    }
+    m.insert(id.to_string(), who.to_string());
+}
+
+pub fn take_answered_by(id: &str) -> Option<String> {
+    answered_by().lock().unwrap_or_else(|p| p.into_inner()).remove(id).filter(|r| !r.is_empty())
+}
+
 /// Parse an approval answer: `once|allow|yes|allow-once`, `session|always`,
 /// `permanent|allow-always`, `deny|no|reject [reason]`. Returns (choice, reason).
 pub fn parse_answer(s: &str) -> (&'static str, Option<String>) {
@@ -973,6 +1011,9 @@ pub struct Deferred {
     /// Allow-once grants expire like every other grant.
     #[serde(default)]
     pub status: String,
+    /// Who answered it (`cli`, `telegram:42`…) — srv-018 records the approver.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub answered_by: String,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -1001,7 +1042,7 @@ pub fn defer(data: &Path, session: &str, tool: &str, summary: &str, tier: u8, re
         return Ok(i.id.clone());
     }
     let id = new_id();
-    f.items.push(Deferred { id: id.clone(), session: session.into(), tool: tool.into(), summary: summary.chars().take(600).collect(), tier, reason: reason.into(), created_at: unix_now(), status: "pending".into() });
+    f.items.push(Deferred { id: id.clone(), session: session.into(), tool: tool.into(), summary: summary.chars().take(600).collect(), tier, reason: reason.into(), created_at: unix_now(), status: "pending".into(), answered_by: String::new() });
     if f.items.len() > 200 {
         let cut = f.items.len() - 200;
         f.items.drain(..cut);
@@ -1016,6 +1057,11 @@ pub fn defer(data: &Path, session: &str, tool: &str, summary: &str, tier: u8, re
 /// Answer a queued call. `allow` adds a grant for that exact gate reason so the agent's
 /// next attempt runs without asking; `deny` just closes the entry.
 pub fn resolve_deferred(data: &Path, id: &str, allow: bool, ttl_days: u64) -> Result<Option<Deferred>, String> {
+    resolve_deferred_by(data, id, allow, ttl_days, "cli")
+}
+
+/// [`resolve_deferred`], recording who answered.
+pub fn resolve_deferred_by(data: &Path, id: &str, allow: bool, ttl_days: u64, by: &str) -> Result<Option<Deferred>, String> {
     // The file lock is released before `add_grant_ttl` (which takes it again): the two
     // locks are not reentrant.
     let item = {
@@ -1027,6 +1073,7 @@ pub fn resolve_deferred(data: &Path, id: &str, allow: bool, ttl_days: u64) -> Re
             return Ok(None);
         }
         i.status = if allow { "allowed" } else { "denied" }.into();
+        i.answered_by = by.to_string();
         let item = i.clone();
         write_json(&path, &f)?;
         item

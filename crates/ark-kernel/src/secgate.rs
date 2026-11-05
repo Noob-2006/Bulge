@@ -437,6 +437,13 @@ impl Runtime {
     fn queue_for_owner(&self, log: &mut SessionLog, tool: &str, a: &risk::Assessment, reason: &str) -> Result<(String, String), StoreError> {
         let tier = a.tier;
         let id = ark_security::approvals::defer(&self.paths.data, &log.id, tool, &risk::describe(a), tier.as_u8(), reason).unwrap_or_default();
+        // srv-017: the queued call reaches the owner's chat too (buttons answer it there), not
+        // only `ark approvals queue`. `q-` marks a deferred id for the chat surfaces.
+        if !id.is_empty() {
+            let gate = if matches!(a.tier, Tier::Irreversible) { GateKind::Exec } else { GateKind::Egress };
+            let req = ApprovalRequest { id: format!("{DEFERRED_PREFIX}{id}"), tool_use_id: String::new(), session: log.id.clone(), tool: tool.into(), summary: risk::describe(a), input: Value::Null, gate, reason: reason.to_string(), tier: tier.as_u8() };
+            self.bus.publish(BusMsg::Pending(PendingItem::Approval(req)));
+        }
         self.append(log, EventKind::Gate { tool_use_id: String::new(), gate: "queue".into(), verdict: format!("queued (tier {})", tier.as_u8()), reason: reason.to_string() })?;
         let text = format!(
             "Queued for the owner as #{id} ({}). Nothing ran, and this branch is blocked; the rest of the task is not. Impact: {}. {} Tell the owner in your summary what is waiting — do not retry it in this turn.",
@@ -579,7 +586,7 @@ impl Runtime {
             // choice or durable grant makes this quiet. A human, or the queue.
             match context_of(&source) {
                 Context::Attended => {
-                    let (choice, extra) = self.decide(log, id, tool, input, &d, &commands)?;
+                    let (choice, extra) = self.decide(log, id, tool, input, &d, &commands, tier)?;
                     deny_extra = extra;
                     choice
                 }
@@ -597,7 +604,7 @@ impl Runtime {
                 Context::Attended => {
                     let mut d2 = Decision { gate: d.gate, reason: format!("{} [context contains untrusted external content: {}]", d.reason, tainted.as_deref().unwrap_or("")), ask: true, misses: d.misses.clone(), inline: d.inline };
                     d2.reason = d2.reason.trim_end().to_string();
-                    let (choice, extra) = self.decide(log, id, tool, input, &d2, &commands)?;
+                    let (choice, extra) = self.decide(log, id, tool, input, &d2, &commands, tier)?;
                     deny_extra = extra;
                     choice
                 }
@@ -643,7 +650,7 @@ impl Runtime {
                     "deny (unattended)".into()
                 }
                 Context::Attended => {
-                    let (choice, extra) = self.decide(log, id, tool, input, &d, &commands)?;
+                    let (choice, extra) = self.decide(log, id, tool, input, &d, &commands, tier)?;
                     deny_extra = extra;
                     choice
                 }
@@ -667,7 +674,8 @@ impl Runtime {
     }
 
     /// Reviewer + human (attended context). Returns (verdict label, text for the agent on deny).
-    fn decide(&self, log: &mut SessionLog, id: &str, tool: &str, input: &Value, d: &Decision, commands: &[String]) -> Result<(String, String), StoreError> {
+    #[allow(clippy::too_many_arguments)]
+    fn decide(&self, log: &mut SessionLog, id: &str, tool: &str, input: &Value, d: &Decision, commands: &[String], tier: Tier) -> Result<(String, String), StoreError> {
         let a = &self.cfg.approvals;
         let data = self.paths.data.clone();
         if d.gate == GateKind::Exec && !self.approver.interactive() {
@@ -715,7 +723,7 @@ impl Runtime {
         if smart_denied {
             reason.push_str(" [the smart reviewer flagged this as dangerous; once/deny only]");
         }
-        let req = ApprovalRequest { id: new_id(), tool_use_id: id.into(), session: log.id.clone(), tool: tool.into(), summary: head_tail(&redacted, 600).0, input: serde_json::from_str(&redacted).unwrap_or_default(), gate: d.gate, reason: reason.clone() };
+        let req = ApprovalRequest { id: new_id(), tool_use_id: id.into(), session: log.id.clone(), tool: tool.into(), summary: head_tail(&redacted, 600).0, input: serde_json::from_str(&redacted).unwrap_or_default(), gate: d.gate, reason: reason.clone(), tier: tier.as_u8() };
         self.bus.publish(BusMsg::Pending(PendingItem::Approval(req.clone())));
         let gname = format!("{:?}", d.gate).to_lowercase();
         let sid = log.id.clone();
@@ -737,9 +745,10 @@ impl Runtime {
             let _w = ap::human_wait(&log.id, Duration::from_secs(a.timeout_secs));
             self.approver.approve(&req)
         };
-        // A smart-DENY override is one operation: nothing persists.
+        // A smart-DENY override is one operation: nothing persists. Neither does a tier-3
+        // approval (srv-017): the hard floor asks every time, so "always" is never remembered.
         let answer = match answer {
-            Approval::Always | Approval::Permanent if smart_denied => Approval::Once,
+            Approval::Always | Approval::Permanent if smart_denied || tier.is_irreversible() => Approval::Once,
             Approval::Permanent if d.inline => Approval::Always,
             x => x,
         };
@@ -761,7 +770,17 @@ impl Runtime {
                 }
                 ("permanent", "allow (permanent)".to_string())
             }
+            Approval::Deny if self.approver.expired(&req.id) => {
+                // srv-017: silence is not consent, and the people waiting are told so.
+                let _ = self.append(log, EventKind::Notice { level: "warn".into(), text: format!("approval expired: {} — {tool} was not answered within {}s and was denied ({})", req.id, a.timeout_secs, tier.label()) });
+                ("deny", "deny (timeout)".to_string())
+            }
             Approval::Deny => ("deny", "deny".to_string()),
+        };
+        // srv-018: the record names who answered (a chat sender, else the operator's surface).
+        let label = match ap::take_answered_by(&req.id) {
+            Some(who) => format!("{label} by {who}"),
+            None => label,
         };
         if label.starts_with("allow") {
             ap::reset_denials(&log.id);
@@ -886,6 +905,10 @@ pub fn chat_command(k: &Runtime, line: &str, session: Option<&str>, who: Option<
     }
     Some(match name.as_str() {
         "approve" | "deny" => {
+            // `/approve q-<id>` / `/deny q-<id>`: a call queued for the owner (cron, unattended).
+            if let (Some((ch, sender, _)), Some(first)) = (who, args.split_whitespace().next().filter(|w| w.starts_with(DEFERRED_PREFIX))) {
+                return Some(answer_deferred(k, first, name == "approve", ch, sender).unwrap_or_else(|e| e));
+            }
             let all: Vec<ApprovalRequest> = k.approver.pending().into_iter().filter_map(|p| if let PendingItem::Approval(r) = p { Some(r) } else { None }).collect();
             let own = |r: &ApprovalRequest| session.is_none_or_eq(&r.session);
             // Chats see their own session's approvals plus any other they may answer (forwarded
@@ -932,6 +955,27 @@ pub fn chat_command(k: &Runtime, line: &str, session: Option<&str>, who: Option<
             if targets.is_empty() {
                 return Some("No pending approval here.".into());
             }
+            // srv-018: tier 3 from a chat needs the owner's second, explicit confirmation and is
+            // only ever allowed once.
+            let answer = match who {
+                Some((ch, sender, _)) if !answer.starts_with("deny") && targets.iter().any(|r| r.irreversible()) => {
+                    if !rest.split_whitespace().any(|w| w.eq_ignore_ascii_case("confirm")) {
+                        let r = targets.iter().find(|r| r.irreversible()).expect("checked");
+                        return Some(format!("⚠️ Tier 3 — irreversible, outside the sandbox: {} ({}). Only allow-once is possible. To approve, send: /approve {} confirm", r.tool, r.reason, r.id));
+                    }
+                    for r in &targets {
+                        ap::set_answered_by(&r.id, &format!("{ch}:{sender}"));
+                    }
+                    "once".to_string()
+                }
+                Some((ch, sender, _)) => {
+                    for r in &targets {
+                        ap::set_answered_by(&r.id, &format!("{ch}:{sender}"));
+                    }
+                    answer
+                }
+                None => answer,
+            };
             let n = targets.iter().filter(|r| k.approver.answer(&r.id, &answer)).count();
             format!("{} {n} approval(s): {}", if answer.starts_with("deny") { "Denied" } else { "Approved" }, answer.split_whitespace().next().unwrap_or(""))
         }
@@ -1192,6 +1236,11 @@ fn current_turns(k: &Runtime, session: &str) -> u64 {
 /// chat's id is its peer's id, so a group chat needs an `approvers` list). A session turn
 /// whose recorded source is exactly `channel:<channel>:<sender>` also counts. Fails closed.
 pub fn approver_allowed(a: &ap::ApprovalsConfig, channel: &str, sender: &str, pending: &[ApprovalRequest]) -> bool {
+    // srv-018: tier 3 is the owner's alone — no wildcard, no "whoever the chat was forwarded
+    // to". A stolen chat account of anyone else cannot approve an irreversible action.
+    if pending.iter().any(ApprovalRequest::irreversible) && !a.forward.is_owner(channel, sender) {
+        return false;
+    }
     if let Some(list) = a.forward.approvers.get(channel).or_else(|| a.forward.approvers.get("*")) {
         return list.iter().any(|x| x == sender || x == "*");
     }
@@ -1201,6 +1250,29 @@ pub fn approver_allowed(a: &ap::ApprovalsConfig, channel: &str, sender: &str, pe
     let own = format!("channel:{channel}:{sender}");
     let o = origins().lock().unwrap_or_else(|p| p.into_inner());
     pending.iter().all(|r| o.get(&r.session) == Some(&own) || ap::forwarded_allowed(&r.id, channel, sender))
+}
+
+/// Prefix of a deferred (queued-for-the-owner) approval id on chat surfaces.
+pub const DEFERRED_PREFIX: &str = "q-";
+
+/// Answer a deferred approval (`q-<id>`) from a chat: owner-only for tier 3, explicit
+/// approvers (or the owner) otherwise; records who answered. `Err` is the text for the chat.
+pub fn answer_deferred(k: &Runtime, id: &str, allow: bool, channel: &str, sender: &str) -> Result<String, String> {
+    let raw = id.strip_prefix(DEFERRED_PREFIX).unwrap_or(id);
+    let a = &k.cfg.approvals;
+    let Some(item) = ap::deferred(&k.paths.data).into_iter().find(|d| d.id == raw) else {
+        return Err(format!("That queued approval is no longer pending. id: {id}"));
+    };
+    let owner = a.forward.is_owner(channel, sender);
+    let approver = a.forward.approvers.get(channel).is_some_and(|l| l.iter().any(|x| x == sender)) || ap::forwarded_allowed(id, channel, sender);
+    if !(owner || (item.tier < 3 && approver)) {
+        return Err(if item.tier >= 3 { "❌ Tier-3 (irreversible) approvals can only be answered by the owner (approvals.forward.owners).".into() } else { "❌ You are not allowed to answer approvals here.".into() });
+    }
+    let by = format!("{channel}:{sender}");
+    match ap::resolve_deferred_by(&k.paths.data, raw, allow, a.grant_ttl_days, &by).map_err(|e| format!("error: {e}"))? {
+        Some(it) => Ok(format!("{} queued {} (tier {}) — answered by {by}; the agent's next attempt {}.", if allow { "✅ Allowed" } else { "❌ Denied" }, it.tool, it.tier, if allow { "runs" } else { "stays blocked" })),
+        None => Err(format!("That queued approval is no longer pending. id: {id}")),
+    }
 }
 
 /// Channel sender allowed to change approval policy (`/yolo`, `/exec`, `/pause`, `/resume`):
@@ -1306,6 +1378,7 @@ mod tests {
             input: Value::Null,
             gate: GateKind::Exec,
             reason: "exec policy".into(),
+            tier: 0,
         };
         let mut a = ap::ApprovalsConfig::default();
         assert!(!approver_allowed(&a, "telegram", "42", &[req("sec-unit-1", "sec-unit-s1")]), "no list, not forwarded");
