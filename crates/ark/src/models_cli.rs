@@ -1203,7 +1203,7 @@ mod tests {
 
     #[test]
     fn config_editing_keeps_comments_and_replaces_arrays() {
-        let d = std::env::temp_dir().join(format!("ark-cfgedit-{}", std::process::id()));
+        let d = ark_core::tmp::scratch_path(format!("ark-cfgedit-{}", std::process::id()));
         std::fs::create_dir_all(&d).unwrap();
         let f = d.join("c.toml");
         std::fs::write(&f, "# my config\n[model]\ndefault = \"a/b\" # keep\nfallback = [\n  \"x/y\",\n]\n\n[gate]\nprivilege = \"ask\"\n").unwrap();
@@ -1255,7 +1255,7 @@ mod tests {
     }
 
     fn paths(name: &str) -> Paths {
-        let root = std::env::temp_dir().join(format!("ark-models-{name}-{}", std::process::id()));
+        let root = ark_core::tmp::scratch_path(format!("ark-models-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(root.join("config")).unwrap();
         std::fs::create_dir_all(root.join("data")).unwrap();

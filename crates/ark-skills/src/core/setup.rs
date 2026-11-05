@@ -226,7 +226,7 @@ mod tests {
         let (ok, refused) = register_passthrough(&[EnvReq { name: "TENOR_API_KEY".into(), prompt: String::new(), help: None, required_for: None, optional: false }, EnvReq { name: "OPENAI_API_KEY".into(), prompt: String::new(), help: None, required_for: None, optional: false }]);
         assert_eq!((ok, refused), (vec!["TENOR_API_KEY".to_string()], vec!["OPENAI_API_KEY".to_string()]));
         assert!(passthrough_names().contains(&"TENOR_API_KEY".to_string()));
-        let d = std::env::temp_dir().join(format!("ark-setup-{}", std::process::id()));
+        let d = ark_core::tmp::scratch_path(format!("ark-setup-{}", std::process::id()));
         std::fs::create_dir_all(&d).unwrap();
         let v = ark_kernel::vault::Vault::load(&d.join("secrets.toml")).unwrap();
         let left = capture(&r, &v, |e| (e.name == "TENOR_API_KEY").then(|| "k123".to_string())).unwrap();

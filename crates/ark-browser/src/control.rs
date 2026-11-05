@@ -636,8 +636,9 @@ mod tests {
     #[test]
     fn connect_status_disconnect_and_use() {
         let _g = ENV.lock().unwrap();
+        crate::config::CDP_ENV_OPT_IN.with(|c| c.set(true));
         std::env::remove_var("BROWSER_CDP_URL");
-        let home = std::env::temp_dir().join(format!("ark-ctl-{}", std::process::id()));
+        let home = ark_core::tmp::scratch_path(format!("ark-ctl-{}", std::process::id()));
         let cfg = BrowserConfig::parse(&toml::Table::new()).unwrap();
         let (url, port) = fake_devtools();
         assert!(is_debug_ready(&url, Duration::from_secs(2)));
@@ -738,7 +739,7 @@ mod tests {
             1
         );
         // A real "browser" holding a temp profile: a process named chrome with --user-data-dir.
-        let dir = std::env::temp_dir().join(format!("ark-ctl-prof-{}", std::process::id()));
+        let dir = ark_core::tmp::scratch_path(format!("ark-ctl-prof-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let fake = dir.join("chrome");
         std::fs::copy("/bin/sh", &fake).unwrap();
@@ -768,7 +769,7 @@ mod tests {
     /// without `--user-data-dir` (the shape of every one of the user's own Chrome instances).
     #[test]
     fn close_profile_never_touches_a_browser_without_this_profile() {
-        let dir = std::env::temp_dir().join(format!("ark-ctl-safe-{}", std::process::id()));
+        let dir = ark_core::tmp::scratch_path(format!("ark-ctl-safe-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let fake = dir.join("chrome");
         std::fs::copy("/bin/sh", &fake).unwrap();
@@ -800,7 +801,7 @@ mod tests {
     /// every backend either says how it is ready or names what is missing, and never panics.
     #[test]
     fn doctor_reports_browser_readiness_per_backend() {
-        let dir = std::env::temp_dir().join(format!("ark-ctl-doc-{}", std::process::id()));
+        let dir = ark_core::tmp::scratch_path(format!("ark-ctl-doc-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let exe = dir.join("chromium");
         std::fs::copy("/bin/sh", &exe).unwrap();

@@ -172,7 +172,7 @@ fn oauth_bearer_refreshes_once_on_401() {
     });
     let srv = Server::bind("127.0.0.1:0", Opts::default(), h).unwrap();
     let base = format!("http://{}", srv.local_addr());
-    let dir = std::env::temp_dir().join(format!("ark-mcp-oauth-{}", std::process::id()));
+    let dir = ark_core::tmp::scratch_path(format!("ark-mcp-oauth-{}", std::process::id()));
     let mut cfg = http_cfg(&format!("{base}/mcp"));
     cfg.auth = Some("oauth".into());
     // Not logged in yet: a clear instruction instead of a network round trip.
@@ -312,7 +312,7 @@ fn bridge_filters_untrusted_and_spend_limit_effects() {
             Err("no".into())
         }
     }
-    let t = std::env::temp_dir();
+    let t = ark_core::tmp::scratch("ark-ws");
     let ctx = ToolCtx { workspace: t.clone(), session_id: "t".into(), artifacts: t.clone(), home: t, cancel: Cancel::new(), host: Arc::new(NoHost), secrets: Arc::new(|s: &str| s.to_string()) };
     let fx = tools[0].effects(&ctx, &json!({}));
     assert!(!fx.iter().any(|e| matches!(e, Effect::Remote { .. })), "read-only tools need no approval");

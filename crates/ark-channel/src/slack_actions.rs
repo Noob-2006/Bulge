@@ -557,6 +557,8 @@ mod tests {
 
     #[test]
     fn download_file_checks_scope_and_saves() {
+        // The production code saves under `<temp>/ark-slack-files`; remove it when this test ends.
+        let _clean = ark_core::tmp::scratch_path("ark-slack-files");
         let srv = FakeServer::start(|r, _| {
             let base = r.header("host").map(|h| format!("http://{h}")).unwrap_or_default();
             match (r.path.as_str(), form(r).first().map(|(_, v)| v.clone()).unwrap_or_default().as_str()) {

@@ -631,7 +631,7 @@ mod tests {
 
     #[test]
     fn website_blocklist_rules() {
-        let dir = std::env::temp_dir().join(format!("ark-wb-{}", std::process::id()));
+        let dir = ark_core::tmp::scratch_path(format!("ark-wb-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("shared.txt"), "# comment\nhttps://www.Tracker.io/path\n\n").unwrap();
         let bl = WebsiteBlocklist { enabled: true, domains: vec!["evil.com".into(), "*.ads.net".into()], shared_files: vec!["shared.txt".into(), "missing.txt".into()] };

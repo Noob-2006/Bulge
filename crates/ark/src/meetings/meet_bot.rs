@@ -618,7 +618,7 @@ mod tests {
     /// leave on duration expiry.
     #[test]
     fn bot_joins_scrapes_captions_speaks_and_leaves() {
-        let dir = std::env::temp_dir().join(format!("ark-meet-bot-{}", std::process::id()));
+        let dir = ark_core::tmp::scratch_path(format!("ark-meet-bot-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let drains = Arc::new(AtomicUsize::new(0));

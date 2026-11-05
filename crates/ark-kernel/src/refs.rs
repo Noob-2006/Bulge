@@ -594,7 +594,7 @@ mod tests {
     use std::fs;
 
     fn ws() -> PathBuf {
-        let d = std::env::temp_dir().join(format!("ark-refs-{}", crate::util::random_hex(8)));
+        let d = ark_core::tmp::scratch_path(format!("ark-refs-{}", crate::util::random_hex(8)));
         fs::create_dir_all(d.join("src/sub")).unwrap();
         d.canonicalize().unwrap()
     }

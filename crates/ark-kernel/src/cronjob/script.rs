@@ -169,7 +169,7 @@ mod tests {
     use super::*;
 
     fn data() -> PathBuf {
-        let d = std::env::temp_dir().join(format!("ark-cronscript-{}", crate::util::random_hex(8)));
+        let d = ark_core::tmp::scratch_path(format!("ark-cronscript-{}", crate::util::random_hex(8)));
         std::fs::create_dir_all(scripts_dir(&d)).unwrap();
         d
     }

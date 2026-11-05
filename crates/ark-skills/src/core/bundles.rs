@@ -234,7 +234,7 @@ mod tests {
 
     #[test]
     fn crud_and_cli() {
-        let d = std::env::temp_dir().join(format!("ark-bundles-{}", std::process::id()));
+        let d = ark_core::tmp::scratch_path(format!("ark-bundles-{}", std::process::id()));
         let _ = fs::remove_dir_all(&d);
         let st = Store::at(&d);
         let a = |s: &[&str]| s.iter().map(|x| x.to_string()).collect::<Vec<_>>();
@@ -257,7 +257,7 @@ mod tests {
 
     #[test]
     fn reload_diffs_and_defaults() {
-        let d = std::env::temp_dir().join(format!("ark-bundles-reload-{}", std::process::id()));
+        let d = ark_core::tmp::scratch_path(format!("ark-bundles-reload-{}", std::process::id()));
         let _ = fs::remove_dir_all(&d);
         let st = Store::at(&d);
         let a = |s: &[&str]| s.iter().map(|x| x.to_string()).collect::<Vec<_>>();

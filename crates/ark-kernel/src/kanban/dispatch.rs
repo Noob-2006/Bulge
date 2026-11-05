@@ -285,6 +285,19 @@ fn protocol_violation_streak(b: &BoardData, task: &str) -> u32 {
     n
 }
 
+/// Worker threads started by [`KernelSpawner`], by session id (tests only).
+#[cfg(test)]
+static WORKERS: Mutex<Option<HashMap<String, std::thread::JoinHandle<()>>>> = Mutex::new(None);
+
+/// Wait until the worker thread of `sid` has booked its exit (tests only).
+#[cfg(test)]
+pub(crate) fn join_worker(sid: &str) {
+    let h = WORKERS.lock().unwrap_or_else(|e| e.into_inner()).as_mut().and_then(|m| m.remove(sid));
+    if let Some(h) = h {
+        let _ = h.join();
+    }
+}
+
 impl Spawner for KernelSpawner {
     fn spawn(&self, job: &Job) -> Result<String, String> {
         let k = self.k.clone();
@@ -304,7 +317,7 @@ impl Spawner for KernelSpawner {
         log_line(&job.data, &job.slug, &t.id, &format!("run {} started: session {sid} ({})", job.run_id, job.lane));
         let job = job.clone();
         let sid2 = sid.clone();
-        std::thread::spawn(move || {
+        let worker = std::thread::spawn(move || {
             let exit = run_worker(&k, &job, &sid2);
             unregister_live(&sid2);
             k.set_session_tools(&sid2, vec![]);
@@ -313,6 +326,12 @@ impl Spawner for KernelSpawner {
                 eprintln!("arkd: kanban: booking worker exit for {}: {e}", job.task.id);
             }
         });
+        // Tests join the worker (the exit booking writes the board *after* the card is done, which
+        // would otherwise re-create a scratch tree the test had already removed).
+        #[cfg(test)]
+        WORKERS.lock().unwrap_or_else(|e| e.into_inner()).get_or_insert_with(HashMap::new).insert(sid.clone(), worker);
+        #[cfg(not(test))]
+        drop(worker);
         Ok(sid)
     }
     fn is_running(&self, session: &str) -> bool {

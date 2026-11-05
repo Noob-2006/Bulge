@@ -762,7 +762,7 @@ mod tests {
 
     #[test]
     fn oversized_context_is_spilled_with_a_preview() {
-        let d = std::env::temp_dir().join(format!("ark-hookspill-{}", crate::util::random_hex(6)));
+        let d = ark_core::tmp::scratch_path(format!("ark-hookspill-{}", crate::util::random_hex(6)));
         spill::configure(spill::SpillConfig { directory: d.display().to_string(), ..Default::default() });
         let h = hook(HookEvent::UserPrompt, "", "head -c 30000 /dev/zero | tr '\\0' a; echo END");
         let HookDecision::Context(c) = h.run(HookEvent::UserPrompt, &p()).unwrap() else { panic!("context expected") };

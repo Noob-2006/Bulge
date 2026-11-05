@@ -884,12 +884,12 @@ mod tests {
     }
 
     fn tmp() -> PathBuf {
-        std::env::temp_dir().join(format!("ark-gmail-{}", ark_kernel::util::random_hex(8))).join("state.json")
+        ark_core::tmp::scratch_path(format!("ark-gmail-{}", ark_kernel::util::random_hex(8))).join("state.json")
     }
 
     #[test]
     fn webhook_gmail_cli_sets_up_reports_watches_and_resets() {
-        let root = std::env::temp_dir().join(format!("ark-gmail-cli-{}", ark_kernel::util::random_hex(8)));
+        let root = ark_core::tmp::scratch_path(format!("ark-gmail-cli-{}", ark_kernel::util::random_hex(8)));
         let paths = ark_kernel::config::Paths { data: root.join("data"), config_dir: root.join("cfg"), runtime: root.join("run") };
         std::fs::create_dir_all(&paths.config_dir).unwrap();
         // Unrelated `[hooks_extra]` keys survive `setup` (it merges, never rewrites).

@@ -459,7 +459,7 @@ mod tests {
     use super::*;
 
     pub fn env(cfg: BrowserConfig) -> Env {
-        Env { cfg, home: std::env::temp_dir().join(format!("ark-mgr-{}-{}", std::process::id(), ark_net::crypto::random_token(4))), secrets: Arc::new(|s: &str| s.to_string()) }
+        Env { cfg, home: ark_core::tmp::scratch_path(format!("ark-mgr-{}-{}", std::process::id(), ark_net::crypto::random_token(4))), secrets: Arc::new(|s: &str| s.to_string()) }
     }
 
     #[test]

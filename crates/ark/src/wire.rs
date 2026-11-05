@@ -129,7 +129,7 @@ mod tests {
     }
 
     fn temp_paths() -> Paths {
-        let root = std::env::temp_dir().join(format!("ark-wire-{}", ark_kernel::util::random_hex(6)));
+        let root = ark_core::tmp::scratch_path(format!("ark-wire-{}", ark_kernel::util::random_hex(6)));
         std::fs::create_dir_all(root.join("data")).unwrap();
         Paths { data: root.join("data"), config_dir: root.join("config"), runtime: root.join("run") }
     }
@@ -194,7 +194,7 @@ mod tests {
             }
         });
         let cfg = Config { web: toml::from_str(&format!("[search]\nprovider = \"searxng\"\n[providers.searxng]\nbase_url = \"{url}\"\n")).unwrap(), ..Default::default() };
-        let ws = std::env::temp_dir().join(format!("ark-wire-ws-{}", ark_kernel::util::random_hex(4)));
+        let ws = ark_core::tmp::scratch_path(format!("ark-wire-ws-{}", ark_kernel::util::random_hex(4)));
         std::fs::create_dir_all(&ws).unwrap();
         let extra = tools(&cfg, &temp_paths(), &ws);
         let names: Vec<String> = extra.iter().map(|t| t.spec().name).collect();
@@ -215,7 +215,7 @@ mod tests {
     #[test]
     fn bad_web_table_keeps_the_other_tools() {
         let cfg = Config { web: toml::from_str("bogus = 1").unwrap(), ..Default::default() };
-        let t = tools(&cfg, &temp_paths(), std::env::temp_dir().as_path());
+        let t = tools(&cfg, &temp_paths(), ark_core::tmp::scratch("ark-ws").as_path());
         assert!(!t.iter().any(|x| x.spec().name == "web_search"), "the web tools are dropped, not guessed");
         let mut all = ark_tools::builtin_tools();
         merge_tools(&mut all, t);

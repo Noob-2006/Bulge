@@ -332,7 +332,7 @@ mod tests {
         assert_eq!((s.provider.as_deref(), s.enabled_toolsets.as_ref(), s.no_agent), (None, None, false));
         assert!(parse("---\nname: x\n---\n").unwrap().is_none());
         assert!(parse("---\nname: x\nmetadata:\n  ark:\n    blueprint:\n      prompt: p\n---\n").unwrap_err().contains("schedule is required"));
-        let d = std::env::temp_dir().join(format!("ark-bp-{}", std::process::id()));
+        let d = ark_core::tmp::scratch_path(format!("ark-bp-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(d.join("ws")).unwrap();
         let st = Store::at(&d);
@@ -378,7 +378,7 @@ mod tests {
             assert!(e.contains("invalid time") && e.contains(t), "{e}");
         }
         assert_eq!(fill(mp, &BTreeMap::from([("deliver".to_string(), "slack-dm".to_string())])).unwrap().deliver, "slack-dm", "strict=false");
-        let d = std::env::temp_dir().join(format!("ark-bp2-{}", std::process::id()));
+        let d = ark_core::tmp::scratch_path(format!("ark-bp2-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(d.join("ws")).unwrap();
         let st = Store::at(&d);

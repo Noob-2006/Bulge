@@ -1060,7 +1060,7 @@ mod tests {
     }
 
     fn kernel_cfg(f: impl FnOnce(&mut crate::config::Config)) -> (crate::kernel::Kernel, Tmp) {
-        let root = std::env::temp_dir().join(format!("ark-coord-{}", crate::util::random_hex(8)));
+        let root = ark_core::tmp::scratch_path(format!("ark-coord-{}", crate::util::random_hex(8)));
         std::fs::create_dir_all(root.join("ws")).unwrap();
         let paths = crate::config::Paths { data: root.join("data"), config_dir: root.join("cfg"), runtime: root.join("run") };
         std::fs::create_dir_all(&paths.config_dir).unwrap();

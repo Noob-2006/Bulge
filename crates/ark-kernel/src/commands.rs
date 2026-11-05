@@ -146,7 +146,7 @@ mod tests {
 
     #[test]
     fn discover_render_and_expand() {
-        let root = std::env::temp_dir().join(format!("ark-cmd-{}", crate::util::random_hex(6)));
+        let root = ark_core::tmp::scratch_path(format!("ark-cmd-{}", crate::util::random_hex(6)));
         let a = root.join("proj");
         let b = root.join("user");
         std::fs::create_dir_all(a.join("git")).unwrap();

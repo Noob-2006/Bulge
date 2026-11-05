@@ -228,7 +228,7 @@ mod tests {
 
     #[test]
     fn presets_validate_save_and_merge() {
-        let r = std::env::temp_dir().join(format!("ark-moa-{}", crate::util::random_hex(8)));
+        let r = ark_core::tmp::scratch_path(format!("ark-moa-{}", crate::util::random_hex(8)));
         let paths = Paths { data: r.join("d"), config_dir: r.join("c"), runtime: r.join("r") };
         let cfg = MoaConfig::default();
         let e = effective(&cfg, &paths);

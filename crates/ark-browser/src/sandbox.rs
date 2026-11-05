@@ -138,7 +138,7 @@ mod tests {
 
     #[test]
     fn refuses_host_network_and_stale_images() {
-        let dir = std::env::temp_dir().join(format!("ark-sbx-{}", std::process::id()));
+        let dir = ark_core::tmp::scratch_path(format!("ark-sbx-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let fake = dir.join("docker");
         std::fs::write(&fake, "#!/bin/sh\necho \"$@\" >> \"$(dirname \"$0\")/calls\"\ncase \"$1\" in image) echo old-contract ;; esac\n").unwrap();

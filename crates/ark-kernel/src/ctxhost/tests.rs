@@ -70,7 +70,7 @@ pub struct Kit {
 }
 
 fn temp_root(tag: &str) -> PathBuf {
-    let root = std::env::temp_dir().join(format!("ark-ctxhost-{tag}-{}", crate::util::random_hex(8)));
+    let root = ark_core::tmp::scratch_path(format!("ark-ctxhost-{tag}-{}", crate::util::random_hex(8)));
     std::fs::create_dir_all(&root).unwrap();
     root
 }

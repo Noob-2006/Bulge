@@ -225,7 +225,7 @@ mod tests {
     use std::path::PathBuf;
 
     fn fixture(tag: &str) -> PathBuf {
-        let d = std::env::temp_dir().join(format!("ark-search-{tag}-{}", std::process::id()));
+        let d = ark_core::tmp::scratch_path(format!("ark-search-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         d
     }

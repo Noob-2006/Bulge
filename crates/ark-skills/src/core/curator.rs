@@ -468,7 +468,7 @@ mod tests {
     /// whole-tree rollback restores only cron `skills` fields while leaving archives alone.
     #[test]
     fn snapshot_excludes_archive_and_restores_cron_skills() {
-        let d = std::env::temp_dir().join(format!("ark-curator3-{}", std::process::id()));
+        let d = ark_core::tmp::scratch_path(format!("ark-curator3-{}", std::process::id()));
         let _ = fs::remove_dir_all(&d);
         let st = Store::at(&d);
         let s = Settings::from_table(&toml::Table::new());
@@ -507,7 +507,7 @@ mod tests {
     /// and `run.json` carries the counters (Hermes `apply_automatic_transitions` + `curator_backup`).
     #[test]
     fn cron_protection_reactivation_and_snapshot_bounds() {
-        let d = std::env::temp_dir().join(format!("ark-curator2-{}", std::process::id()));
+        let d = ark_core::tmp::scratch_path(format!("ark-curator2-{}", std::process::id()));
         let _ = fs::remove_dir_all(&d);
         let st = Store::at(&d);
         let s = Settings::from_table(&toml::Table::new());
@@ -547,7 +547,7 @@ mod tests {
 
     #[test]
     fn transitions_gates_backup_and_reports() {
-        let d = std::env::temp_dir().join(format!("ark-curator-{}", std::process::id()));
+        let d = ark_core::tmp::scratch_path(format!("ark-curator-{}", std::process::id()));
         let _ = fs::remove_dir_all(&d);
         let st = Store::at(&d);
         let s = Settings::from_table(&toml::Table::new());

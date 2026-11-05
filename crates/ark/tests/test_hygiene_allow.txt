@@ -31,147 +31,18 @@
 #   `ark-tmp-`
 #   `ark-vault-`
 #   `ark-wire-`
-crates/ark-app/src/a2a.rs  # temp_dir
-crates/ark-app/src/acp.rs  # temp_dir
-crates/ark-app/src/acp_client.rs  # temp_dir
-crates/ark-app/src/browser_view.rs  # temp_dir
-crates/ark-app/src/computer/hermes.rs  # temp_dir
-crates/ark-app/src/computer/openclaw.rs  # temp_dir
-crates/ark-app/src/cron_fire.rs  # temp_dir
-crates/ark-app/src/logbook.rs  # temp_dir
-crates/ark-app/src/server.rs  # temp_dir
-crates/ark-app/src/session_share.rs  # temp_dir
-crates/ark-app/src/tui/battery.rs  # temp_dir
-crates/ark-app/src/tui/statusbar.rs  # temp_dir
-crates/ark-app/src/tui/ux.rs  # temp_dir
-crates/ark-browser/src/camofox.rs  # temp_dir
-crates/ark-browser/src/control.rs  # temp_dir
-crates/ark-browser/src/control/cua.rs  # temp_dir
-crates/ark-browser/src/control/screen.rs  # temp_dir
-crates/ark-browser/src/engine.rs  # temp_dir
-crates/ark-browser/src/extension.rs  # temp_dir
-crates/ark-browser/src/launch.rs  # temp_dir
-crates/ark-browser/src/lease.rs  # temp_dir
-crates/ark-browser/src/manager.rs  # temp_dir
-crates/ark-browser/src/sandbox.rs  # temp_dir
-crates/ark-browser/src/snapshot.rs  # temp_dir
-crates/ark-browser/src/tests_runtime.rs  # temp_dir
-crates/ark-browser/src/vault.rs  # temp_dir
-crates/ark-browser/src/view.rs  # temp_dir
-crates/ark-channel/src/discord_tools.rs  # temp_dir
 crates/ark-channel/src/line.rs  # temp_dir
 crates/ark-channel/src/qqbot.rs  # temp_dir
 crates/ark-channel/src/slack_actions.rs  # temp_dir
-crates/ark-core/src/tool.rs  # temp_dir
-crates/ark-kernel/src/agents.rs  # temp_dir
-crates/ark-kernel/src/automation.rs  # temp_dir
-crates/ark-kernel/src/coderun.rs  # temp_dir
-crates/ark-kernel/src/commands.rs  # temp_dir
-crates/ark-kernel/src/config.rs  # temp_dir
-crates/ark-kernel/src/context.rs  # temp_dir
-crates/ark-kernel/src/coord.rs  # temp_dir
-crates/ark-kernel/src/cronjob/chronos.rs  # temp_dir
-crates/ark-kernel/src/cronjob/incidents.rs  # temp_dir
-crates/ark-kernel/src/cronjob/script.rs  # temp_dir
-crates/ark-kernel/src/cronjob/tests.rs  # temp_dir
-crates/ark-kernel/src/ctxhost/tests.rs  # temp_dir
-crates/ark-kernel/src/decision.rs  # temp_dir
-crates/ark-kernel/src/devprompts.rs  # temp_dir
-crates/ark-kernel/src/engine.rs  # temp_dir
-crates/ark-kernel/src/heartbeat/tests.rs  # temp_dir
-crates/ark-kernel/src/hooks/spill.rs  # temp_dir
-crates/ark-kernel/src/i18n.rs  # temp_dir
-crates/ark-kernel/src/interp.rs  # temp_dir
-crates/ark-kernel/src/kanban/mod.rs  # temp_dir
-crates/ark-kernel/src/limits.rs  # temp_dir
-crates/ark-kernel/src/moa.rs  # temp_dir
-crates/ark-kernel/src/reaper.rs  # temp_dir
-crates/ark-kernel/src/refs.rs  # temp_dir
-crates/ark-kernel/src/selfrepo.rs  # temp_dir
-crates/ark-kernel/src/threads.rs  # temp_dir
-crates/ark-kernel/src/util.rs  # temp_dir
-crates/ark-kernel/src/verify.rs  # temp_dir
-crates/ark-kernel/src/wake.rs  # temp_dir
-crates/ark-kernel/src/worktree.rs  # temp_dir
-crates/ark-kernel/tests/agents_sessions.rs  # temp_dir
-crates/ark-kernel/tests/agents_tools.rs  # temp_dir
-crates/ark-kernel/tests/i18n_e2e.rs  # temp_dir
-crates/ark-kernel/tests/imgprep_send.rs  # temp_dir
-crates/ark-kernel/tests/runner.rs  # temp_dir
-crates/ark-kernel/tests/security.rs  # temp_dir
-crates/ark-kernel/tests/thread_bound_spawn.rs  # temp_dir
-crates/ark-media/src/meeting/mod.rs  # temp_dir
 crates/ark-media/src/store.rs  # temp_dir
 crates/ark-media/src/tts/prefs.rs  # temp_dir
 crates/ark-media/src/tts/tool.rs  # temp_dir
-crates/ark-memory/src/index.rs  # temp_dir
-crates/ark-memory/src/lib.rs  # temp_dir
 crates/ark-memory/src/migrate.rs  # +test-code HOME/kill
-crates/ark-memory/tests/host.rs  # temp_dir
-crates/ark-model/src/acp.rs  # temp_dir
-crates/ark-model/src/auth.rs  # temp_dir
-crates/ark-model/src/cli.rs  # temp_dir
-crates/ark-model/src/codex_app.rs  # temp_dir
-crates/ark-model/src/local.rs  # temp_dir
 crates/ark-model/src/login.rs  # temp_dir+test-code HOME/kill
 crates/ark-model/src/modelsdb.rs  # temp_dir
-crates/ark-model/src/muse.rs  # temp_dir
-crates/ark-model/src/store.rs  # temp_dir
-crates/ark-plugin/src/builtin/achievements.rs  # temp_dir
 crates/ark-plugin/src/builtin/disk_cleanup.rs  # temp_dir
-crates/ark-plugin/src/builtin/mod.rs  # temp_dir
-crates/ark-plugin/src/compat/hermes.rs  # temp_dir
-crates/ark-plugin/src/compat/mod.rs  # temp_dir
-crates/ark-plugin/src/compat/openclaw.rs  # temp_dir
-crates/ark-plugin/src/oauth.rs  # temp_dir
-crates/ark-plugin/src/relay.rs  # temp_dir
-crates/ark-plugin/tests/compat.rs  # temp_dir
-crates/ark-plugin/tests/fixture.rs  # temp_dir
-crates/ark-plugin/tests/mcp_ext.rs  # temp_dir
-crates/ark-plugin/tests/mcp_features.rs  # temp_dir
-crates/ark-plugin/tests/plugin_kinds.rs  # temp_dir
-crates/ark-plugin/tests/stream_hooks.rs  # temp_dir
-crates/ark-security/src/credfiles.rs  # temp_dir
-crates/ark-security/src/egress_proxy.rs  # dev-hosts cache dir under TMPDIR (production code, pid-scoped, removed by its owner)
-crates/ark-security/src/envelope.rs  # temp_dir
-crates/ark-security/src/estop.rs  # temp_dir
 crates/ark-security/src/glob.rs  # +test-code HOME/kill
-crates/ark-security/src/osv.rs  # temp_dir
 crates/ark-security/src/paths.rs  # temp_dir+test-code HOME/kill
-crates/ark-security/src/plugin_guard.rs  # temp_dir
-crates/ark-security/src/url_safety.rs  # temp_dir
-crates/ark-security/tests/broker.rs  # ark-broker-<pid>-<name> helper predates the guard; migrate to TempDir
-crates/ark-skills/src/compat/cli.rs  # temp_dir
-crates/ark-skills/src/core/blueprints.rs  # temp_dir
-crates/ark-skills/src/core/bundles.rs  # temp_dir
-crates/ark-skills/src/core/cli.rs  # temp_dir
-crates/ark-skills/src/core/curator.rs  # temp_dir
-crates/ark-skills/src/core/index.rs  # temp_dir
-crates/ark-skills/src/core/invoke.rs  # temp_dir
-crates/ark-skills/src/core/ledger.rs  # temp_dir
-crates/ark-skills/src/core/lint.rs  # temp_dir
-crates/ark-skills/src/core/manage.rs  # temp_dir
-crates/ark-skills/src/core/preprocess.rs  # temp_dir
-crates/ark-skills/src/core/review.rs  # temp_dir
-crates/ark-skills/src/core/search.rs  # temp_dir
-crates/ark-skills/src/core/setup.rs  # temp_dir
-crates/ark-skills/src/core/skilltool.rs  # temp_dir
-crates/ark-skills/src/core/slash.rs  # temp_dir
-crates/ark-skills/src/core/usage.rs  # temp_dir
-crates/ark-skills/src/hub/ast_audit.rs  # temp_dir
-crates/ark-skills/src/hub/cli.rs  # temp_dir
-crates/ark-skills/src/hub/evaluator.rs  # temp_dir
-crates/ark-skills/src/hub/http.rs  # temp_dir
-crates/ark-skills/src/hub/install.rs  # temp_dir
-crates/ark-skills/src/hub/model.rs  # temp_dir
-crates/ark-skills/src/hub/plugins.rs  # temp_dir
-crates/ark-skills/src/hub/sources.rs  # temp_dir
-crates/ark-skills/src/hub/sync.rs  # temp_dir
-crates/ark-skills/src/skill.rs  # temp_dir
-crates/ark-skills/tests/cli.rs  # temp_dir
-crates/ark-skills/tests/content.rs  # temp_dir
-crates/ark-skills/tests/hooks.rs  # temp_dir
-crates/ark-skills/tests/live.rs  # temp_dir
 crates/ark-tools/src/exec/container.rs  # +test-code HOME/kill
 crates/ark-tools/src/exec/local.rs  # temp_dir+test-code HOME/kill
 crates/ark-tools/src/exec/modal.rs  # +test-code HOME/kill
@@ -179,60 +50,8 @@ crates/ark-tools/src/exec/openshell.rs  # +test-code HOME/kill
 crates/ark-tools/src/exec/sandbox.rs  # +test-code HOME/kill
 crates/ark-tools/src/exec/ssh.rs  # temp_dir+test-code HOME/kill
 crates/ark-tools/src/exec/sync.rs  # +test-code HOME/kill
-crates/ark-tools/src/exec/vm.rs  # ark-vm-* socket/broker fixtures from the microVM work; migrate to TempDir
-crates/ark-tools/src/fs.rs  # temp_dir
 crates/ark-tools/src/web/http.rs  # temp_dir
 crates/ark-tools/src/web/providers/codex.rs  # temp_dir
 crates/ark-vm/src/pool.rs  # ark-vm owns its temp roots (snapshot dirs must outlive a guard); revisit with its owner
-crates/ark-vm/src/snapshot.rs  # same: snapshot scratch dir is handed to a long-lived struct
-crates/ark-vm/tests/boot_pool.rs  # e2e fixture root; ark-vm has no ark-core dev-dependency yet
-crates/ark/src/agentcmds/agents.rs  # temp_dir
-crates/ark/src/agentcmds/conversations.rs  # temp_dir
-crates/ark/src/agentcmds/moa.rs  # temp_dir
-crates/ark/src/agentcmds/sessions.rs  # temp_dir
-crates/ark/src/control_cli.rs  # temp_dir
-crates/ark/src/devtools.rs  # temp_dir
-crates/ark/src/exec_cli.rs  # temp_dir
-crates/ark/src/export.rs  # temp_dir
-crates/ark/src/ext/tests.rs  # temp_dir
-crates/ark/src/gmail_hook.rs  # temp_dir
-crates/ark/src/hooks_bundled.rs  # temp_dir
-crates/ark/src/hooks_cli.rs  # temp_dir
-crates/ark/src/hooks_ext.rs  # temp_dir
-crates/ark/src/main.rs  # temp_dir
-crates/ark/src/meetings/meet.rs  # temp_dir
-crates/ark/src/meetings/meet_bot.rs  # temp_dir
-crates/ark/src/meetings/mod.rs  # temp_dir
-crates/ark/src/meetings/teams/deliver.rs  # temp_dir
-crates/ark/src/meetings/teams/meetings.rs  # temp_dir
-crates/ark/src/meetings/teams/mod.rs  # temp_dir
-crates/ark/src/meetings/teams/store.rs  # temp_dir
-crates/ark/src/models_cli.rs  # temp_dir
-crates/ark/src/ops/archive.rs  # temp_dir
-crates/ark/src/ops/backup.rs  # temp_dir
-crates/ark/src/ops/completion.rs  # temp_dir
-crates/ark/src/ops/confcli.rs  # temp_dir
-crates/ark/src/ops/docker.rs  # temp_dir
-crates/ark/src/ops/doctor.rs  # temp_dir
-crates/ark/src/ops/envfile.rs  # temp_dir
-crates/ark/src/ops/evals.rs  # temp_dir
-crates/ark/src/ops/logs.rs  # temp_dir
-crates/ark/src/ops/migrate.rs  # temp_dir
-crates/ark/src/ops/partial.rs  # temp_dir
-crates/ark/src/ops/project.rs  # temp_dir
-crates/ark/src/ops/secretsrc.rs  # temp_dir
 crates/ark/src/ops/service.rs  # temp_dir
-crates/ark/src/ops/status.rs  # temp_dir
-crates/ark/src/ops/telemetry.rs  # temp_dir
-crates/ark/src/ops/toolcfg.rs  # temp_dir
-crates/ark/src/ops/trajcomp.rs  # temp_dir
-crates/ark/src/ops/ui_methods.rs  # temp_dir
 crates/ark/src/ops/wizard.rs  # temp_dir+test-code HOME/kill
-crates/ark/src/ops/worker.rs  # temp_dir
-crates/ark/src/ops/worktree.rs  # temp_dir
-crates/ark/src/plugin_backends.rs  # temp_dir
-crates/ark/src/security_cli.rs  # temp_dir
-crates/ark/src/slash.rs  # temp_dir
-crates/ark/src/web_cli.rs  # temp_dir
-crates/ark/src/wire.rs  # temp_dir
-crates/ark/src/worktree_session.rs  # temp_dir

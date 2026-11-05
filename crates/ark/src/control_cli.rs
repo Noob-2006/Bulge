@@ -96,7 +96,7 @@ mod tests {
     use super::*;
 
     fn paths() -> Paths {
-        let root = std::env::temp_dir().join(format!("ark-ctl-{}", ark_kernel::util::random_hex(6)));
+        let root = ark_core::tmp::scratch_path(format!("ark-ctl-{}", ark_kernel::util::random_hex(6)));
         std::fs::create_dir_all(root.join("data")).unwrap();
         Paths { data: root.join("data"), config_dir: root.join("config"), runtime: root.join("run") }
     }

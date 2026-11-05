@@ -247,7 +247,7 @@ fn min_body(name: &str) -> usize {
 }
 
 fn temp_data(tag: &str) -> PathBuf {
-    let d = std::env::temp_dir().join(format!("ark-skills-content-{tag}-{}", std::process::id()));
+    let d = ark_core::tmp::scratch_path(format!("ark-skills-content-{tag}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&d);
     std::fs::create_dir_all(&d).unwrap();
     d

@@ -212,7 +212,7 @@ mod tests {
 
     #[test]
     fn rules_fire_and_clean_skill_passes() {
-        let d = std::env::temp_dir().join(format!("ark-lint-{}/tool", std::process::id()));
+        let d = ark_core::tmp::scratch_path(format!("ark-lint-{}/tool", std::process::id()));
         let _ = fs::remove_dir_all(&d);
         fs::create_dir_all(d.join("scripts")).unwrap();
         fs::write(d.join("scripts/run.sh"), "systemctl restart x").unwrap();
@@ -234,7 +234,7 @@ mod tests {
 
     #[test]
     fn author_caps_size_and_sprawl_rules() {
-        let d = std::env::temp_dir().join(format!("ark-lint-meta-{}/sprawl", std::process::id()));
+        let d = ark_core::tmp::scratch_path(format!("ark-lint-meta-{}/sprawl", std::process::id()));
         let _ = fs::remove_dir_all(d.parent().unwrap());
         fs::create_dir_all(d.join("references")).unwrap();
         for i in 0..61 {

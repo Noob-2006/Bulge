@@ -269,7 +269,7 @@ pub fn leave_session(k: &crate::kernel::Kernel, session: &str) -> Result<Report,
 
 #[cfg(test)]
 pub(crate) fn test_repo(tag: &str) -> PathBuf {
-    let d = std::env::temp_dir().join(format!("ark-wt-{tag}-{}", crate::util::random_hex(8)));
+    let d = ark_core::tmp::scratch_path(format!("ark-wt-{tag}-{}", crate::util::random_hex(8)));
     std::fs::create_dir_all(&d).unwrap();
     git(&["init", "-q"], &d).unwrap();
     std::fs::write(d.join("a.txt"), "1").unwrap();
@@ -325,7 +325,7 @@ mod tests {
         remove(&repo, "two").unwrap();
         assert!(!Path::new(&two.path).exists());
         assert!(create(&repo, "../x").is_err());
-        let outside = std::env::temp_dir().join(format!("ark-nogit-{}", crate::util::random_hex(6)));
+        let outside = ark_core::tmp::scratch_path(format!("ark-nogit-{}", crate::util::random_hex(6)));
         std::fs::create_dir_all(&outside).unwrap();
         assert!(create(&outside, "x").unwrap_err().contains("not inside a git repository"));
         assert!(repo_root(&outside).is_none());

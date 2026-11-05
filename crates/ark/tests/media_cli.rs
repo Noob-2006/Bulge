@@ -6,8 +6,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 fn home(tag: &str) -> PathBuf {
-    let root = std::env::var_os("TMPDIR").map(PathBuf::from).unwrap_or_else(std::env::temp_dir);
-    let d = root.join(format!("ark-media-cli-{tag}-{}-{}", std::process::id(), line!()));
+    let d = ark_core::tmp::scratch_path(format!("ark-media-cli-{tag}-{}-{}", std::process::id(), line!()));
     std::fs::create_dir_all(&d).unwrap();
     d
 }

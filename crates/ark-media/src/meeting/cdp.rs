@@ -322,7 +322,12 @@ pub fn launch(exe: &Path, port: u16, profile_dir: &Path, headless: bool) -> Resu
     // the reason is in here instead of /dev/null.
     let log_path = profile_dir.join("browser.log");
     let log = std::fs::File::create(&log_path).map_err(|e| e.to_string())?;
+    // Chrome drops its own scratch (`com.google.Chrome.*`, fetcher and crash files) into $TMPDIR;
+    // keep it inside the profile so it goes away with the profile instead of the shared dir.
+    let chrome_tmp = profile_dir.join("tmp");
+    std::fs::create_dir_all(&chrome_tmp).map_err(|e| e.to_string())?;
     let mut cmd = std::process::Command::new(exe);
+    cmd.env("TMPDIR", &chrome_tmp);
     cmd.args(&args)
         .arg("about:blank")
         .stdin(std::process::Stdio::null())

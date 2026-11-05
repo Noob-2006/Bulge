@@ -330,7 +330,7 @@ mod tests {
         cfg.camofox.rewrite_loopback_urls = true;
         cfg.backend = "camofox".into();
         cfg.allow_private_urls = Some(true);
-        let home = std::env::temp_dir();
+        let home = ark_core::tmp::scratch("ark-ws");
         let cf = Camofox::default();
         let v = cf.navigate(&cfg, &home, "task1", "http://localhost:3000/").unwrap();
         assert_eq!(v["url_rewrite"]["to"], "http://host.docker.internal:3000/");

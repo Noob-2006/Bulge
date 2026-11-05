@@ -113,7 +113,7 @@ mod tests {
 
     #[test]
     fn lease_transitions() {
-        let home = std::env::temp_dir().join(format!("ark-lease-{}", std::process::id()));
+        let home = ark_core::tmp::scratch_path(format!("ark-lease-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&home);
         assert_eq!(agent_may_act(&home).unwrap(), 0);
         let l = acquire(&home, "viewer-1", "typing a password").unwrap();

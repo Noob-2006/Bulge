@@ -461,7 +461,7 @@ mod tests {
     use super::*;
 
     fn fixture(tag: &str) -> (std::path::PathBuf, Paths, std::path::PathBuf) {
-        let d = std::env::temp_dir().join(format!("ark-review-{tag}-{}", std::process::id()));
+        let d = ark_core::tmp::scratch_path(format!("ark-review-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         let paths = Paths { data: d.join("data"), config_dir: d.join("config"), runtime: d.join("run") };
         let ws = d.join("ws");
@@ -583,6 +583,14 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(20));
         }
         assert!(target.is_file(), "auto_apply writes the candidate at turn end");
+        // The background writer marks the candidate "written" after the skill file lands; let it
+        // finish before the scratch tree is removed, or it would re-create the tree afterwards.
+        for _ in 0..200 {
+            if candidates(&st).iter().all(|c| c.status == "written") {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
         assert!(std::fs::read_to_string(&target).unwrap().contains("1. Run `ark backup --all`"));
         // A turn that fails records nothing at all.
         let before = candidates(&st).len();

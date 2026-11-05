@@ -81,7 +81,7 @@ fn turn(k: &Kernel, ws: &std::path::Path, prompt: &str) -> String {
 
 #[test]
 fn kernel_tool_settled_feeds_skill_usage() {
-    let root = std::env::temp_dir().join(format!("ark-skhooks-{}", ark_kernel::util::random_hex(8)));
+    let root = ark_core::tmp::scratch_path(format!("ark-skhooks-{}", ark_kernel::util::random_hex(8)));
     let ws = root.join("ws");
     std::fs::create_dir_all(&ws).unwrap();
     let paths = Paths { data: root.join("data"), config_dir: root.join("cfg"), runtime: root.join("run") };

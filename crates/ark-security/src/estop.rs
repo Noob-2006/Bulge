@@ -60,7 +60,7 @@ mod tests {
 
     #[test]
     fn engage_state_and_resume() {
-        let d = std::env::temp_dir().join(format!("ark-estop-{}", std::process::id()));
+        let d = ark_core::tmp::scratch_path(format!("ark-estop-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         assert!(!is_engaged(&d) && paused_reply(&d).is_none());
         engage(&d, Some("maintenance")).unwrap();

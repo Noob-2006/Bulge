@@ -276,7 +276,7 @@ mod tests {
     #[test]
     fn key_resolution_order() {
         let v = Arc::new(Vault::empty());
-        let p = Providers::new(&BTreeMap::new(), v.clone()).unwrap().with_store(Store::new(std::env::temp_dir().join(format!("ark-prov-none-{}/auth.json", std::process::id()))));
+        let p = Providers::new(&BTreeMap::new(), v.clone()).unwrap().with_store(Store::new(ark_core::tmp::scratch_path(format!("ark-prov-none-{}/auth.json", std::process::id()))));
         // Use a provider whose env var is unlikely to be set in CI.
         std::env::remove_var("SILICONFLOW_API_KEY");
         assert!(p.key_source("siliconflow").is_err());
@@ -290,7 +290,7 @@ mod tests {
 
     #[test]
     fn aliases_resolve_and_store_keys_make_a_pool() {
-        let dir = std::env::temp_dir().join(format!("ark-prov-{}", std::process::id()));
+        let dir = ark_core::tmp::scratch_path(format!("ark-prov-{}", std::process::id()));
         let store = Store::new(dir.join("auth.json"));
         store.add("groq", ark_model::store::Entry::new("api_key", "a", Some("gsk-1".into())), None).unwrap();
         store.add("groq", ark_model::store::Entry::new("api_key", "b", Some("gsk-2".into())), None).unwrap();
@@ -306,7 +306,7 @@ mod tests {
 
     #[test]
     fn an_agent_profile_store_shadows_the_shared_pool() {
-        let root = std::env::temp_dir().join(format!("ark-agentprof-{}", std::process::id()));
+        let root = ark_core::tmp::scratch_path(format!("ark-agentprof-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).unwrap();
         let shared = Store::shared(&root);

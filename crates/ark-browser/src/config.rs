@@ -297,7 +297,7 @@ impl BrowserConfig {
     }
 
     pub fn cdp_override(&self) -> String {
-        std::env::var("BROWSER_CDP_URL").ok().filter(|s| !s.trim().is_empty()).unwrap_or_else(|| self.cdp_url.clone()).trim().to_string()
+        cdp_env().unwrap_or_else(|| self.cdp_url.clone()).trim().to_string()
     }
 
     /// The backend in effect (Hermes `browser_backend_name` precedence: CDP override >
@@ -385,6 +385,25 @@ pub fn valid_profile_name(n: &str) -> Result<(), String> {
     } else {
         Err(format!("invalid browser profile name `{n}` (lowercase letters, digits and -, at most 64)"))
     }
+}
+
+/// `BROWSER_CDP_URL`, as `/browser connect` sets it (Hermes behaviour: a process-wide override).
+///
+/// Unit tests run as parallel threads of one process, so in test builds only a thread that opted
+/// in through [`CDP_ENV_OPT_IN`] (the `/browser connect` test) sees it; otherwise the value that
+/// test sets would redirect every other CDP test to its fake endpoint.
+pub(crate) fn cdp_env() -> Option<String> {
+    #[cfg(test)]
+    if !CDP_ENV_OPT_IN.with(|c| c.get()) {
+        return None;
+    }
+    std::env::var("BROWSER_CDP_URL").ok().filter(|s| !s.trim().is_empty())
+}
+
+#[cfg(test)]
+thread_local! {
+    /// See [`cdp_env`].
+    pub(crate) static CDP_ENV_OPT_IN: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 #[cfg(test)]

@@ -162,7 +162,7 @@ mod tests {
     }
 
     fn kernel_with(cfg_mut: impl FnOnce(&mut Config), engine: Option<Arc<dyn ContextEngine>>) -> (crate::kernel::Kernel, Arc<Scripted>, Paths) {
-        let root = std::env::temp_dir().join(format!("ark-engine-tools-{}", crate::util::random_hex(8)));
+        let root = ark_core::tmp::scratch_path(format!("ark-engine-tools-{}", crate::util::random_hex(8)));
         let ws = root.join("ws");
         std::fs::create_dir_all(&ws).unwrap();
         let paths = Paths { data: root.join("data"), config_dir: root.join("cfg"), runtime: root.join("run") };

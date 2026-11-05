@@ -1219,7 +1219,7 @@ mod tests {
     // ── fixtures ──
 
     fn root(tag: &str) -> PathBuf {
-        let d = std::env::temp_dir().join(format!("ark-disk-cleanup-{}-{tag}", std::process::id()));
+        let d = ark_core::tmp::scratch_path(format!("ark-disk-cleanup-{}-{tag}", std::process::id()));
         let _ = fs::remove_dir_all(&d);
         fs::create_dir_all(d.join("data")).unwrap();
         d
@@ -1386,14 +1386,14 @@ mod tests {
 
         // Out of scope: system dirs, temp dirs that are not `ark-*`, Windows mounts.
         assert_eq!(c.guess_category(Path::new("/etc/test_x.py")), None);
-        let outside = std::env::temp_dir().join(format!("not-ark-disk-cleanup-{}/test_x.py", std::process::id()));
+        let outside = ark_core::tmp::scratch_path(format!("not-ark-disk-cleanup-{}/test_x.py", std::process::id()));
         write(&outside, "x");
         assert_eq!(c.guess_category(&outside), None, "a temp dir not named `ark-*` is out of scope");
         assert!(!c.is_safe_path(Path::new("/mnt/c/Users/x/test_a.py")));
         // In scope: `<home>` itself and `/tmp/ark-*`.
         assert!(c.is_safe_path(&h.join("scratch/test_new.py")));
-        assert!(c.is_safe_path(&std::env::temp_dir().join("ark-scope-probe/test_x.py")));
-        assert!(!c.is_safe_path(&std::env::temp_dir().join("notark-scope-probe/test_x.py")));
+        assert!(c.is_safe_path(&ark_core::tmp::scratch_path("ark-scope-probe/test_x.py")));
+        assert!(!c.is_safe_path(&ark_core::tmp::scratch_path("notark-scope-probe/test_x.py")));
 
         // Explicit tracking refuses out-of-scope and missing paths, and audits both.
         assert!(c.track(outside.to_str().unwrap(), "test").is_err());

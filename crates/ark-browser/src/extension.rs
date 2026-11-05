@@ -184,7 +184,7 @@ mod tests {
 
     #[test]
     fn relays_cdp_between_ark_and_the_extension() {
-        let dir = std::env::temp_dir().join(format!("ark-ext-{}", std::process::id()));
+        let dir = ark_core::tmp::scratch_path(format!("ark-ext-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let mut cfg = BrowserConfig::default();
         cfg.extension_control.enabled = true;

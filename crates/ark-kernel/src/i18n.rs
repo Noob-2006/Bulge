@@ -616,7 +616,7 @@ mod tests {
     }
 
     fn tmp_home() -> PathBuf {
-        let d = std::env::temp_dir().join(format!("ark-i18n-{}", crate::util::random_hex(8)));
+        let d = ark_core::tmp::scratch_path(format!("ark-i18n-{}", crate::util::random_hex(8)));
         fs::create_dir_all(&d).unwrap();
         d
     }
@@ -819,7 +819,7 @@ mod tests {
     #[test]
     fn display_language_config_key_reaches_the_engine() {
         let _g = lock();
-        let dir = std::env::temp_dir().join(format!("ark-i18n-cfg-{}", crate::util::random_hex(8)));
+        let dir = ark_core::tmp::scratch_path(format!("ark-i18n-cfg-{}", crate::util::random_hex(8)));
         fs::create_dir_all(&dir).unwrap();
         let file = dir.join("c.toml");
         fs::write(&file, "[display]\nlanguage = \"zh-TW\"\n").unwrap();

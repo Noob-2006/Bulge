@@ -18,7 +18,7 @@ fn fixture() -> Option<PathBuf> {
 }
 
 fn tmp(tag: &str) -> PathBuf {
-    let d = std::env::temp_dir().join(format!("ark-stream-{tag}-{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().subsec_nanos()));
+    let d = ark_core::tmp::scratch_path(format!("ark-stream-{tag}-{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().subsec_nanos()));
     std::fs::create_dir_all(&d).unwrap();
     d
 }

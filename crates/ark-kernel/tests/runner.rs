@@ -148,7 +148,7 @@ impl Approver for Yes {
 }
 
 fn env_with(cfg_mut: impl FnOnce(&mut Config), approver: Arc<dyn Approver>) -> Env {
-    let root = std::env::temp_dir().join(format!("ark-k-{}", rand_hex()));
+    let root = ark_core::tmp::scratch_path(format!("ark-k-{}", rand_hex()));
     let ws = root.join("ws");
     std::fs::create_dir_all(&ws).unwrap();
     let paths = Paths { data: root.join("data"), config_dir: root.join("cfg"), runtime: root.join("run") };

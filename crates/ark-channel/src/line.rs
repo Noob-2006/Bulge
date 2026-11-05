@@ -749,7 +749,9 @@ mod tests {
         assert_eq!(b1["messages"][0], json!({"type": "image", "originalContentUrl": "https://e.com/a.png", "previewImageUrl": "https://e.com/a.png"}));
         assert!(b1["messages"][1]["text"].as_str().unwrap().chars().count() <= MAX_MESSAGE);
         assert_eq!(b2["messages"].as_array().unwrap().len(), 2);
-        // Local file served through our listener with an unguessable token.
+        // Local file served through our listener with an unguessable token (the video's fallback
+        // preview image is written to a fixed name in the temp dir; remove it with the test).
+        let _clean = ark_core::tmp::scratch_path("ark-line-preview.png");
         let f = temp_dir("line").join("clip.mp4");
         std::fs::write(&f, b"MP4DATA").unwrap();
         l.send(&Outbound { media: vec![Media { kind: MediaKind::Video, path: Some(f.display().to_string()), ..Default::default() }], ..Outbound::text("Uamy", "") }).unwrap();

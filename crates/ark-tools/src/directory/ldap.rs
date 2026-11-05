@@ -166,7 +166,17 @@ fn run(p: &Provider, ctx: &ark_core::ToolCtx, filter: &str, attrs: &[&str], limi
     }
     argv.push(filter.to_string());
     argv.extend(attrs.iter().map(|s| s.to_string()));
-    let mut child = Command::new(&prog).args(&argv).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().map_err(|e| format!("cannot start `{prog}`: {e} (install the OpenLDAP client tools or set `client`)"))?;
+    // ETXTBSY: a just-written client script can still be open in a concurrently forked child.
+    let mut tries = 0;
+    let mut child = loop {
+        match Command::new(&prog).args(&argv).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn() {
+            Err(e) if e.raw_os_error() == Some(26) && tries < 20 => {
+                tries += 1;
+                std::thread::sleep(std::time::Duration::from_millis(25));
+            }
+            r => break r.map_err(|e| format!("cannot start `{prog}`: {e} (install the OpenLDAP client tools or set `client`)"))?,
+        }
+    };
     let mut out = child.stdout.take().ok_or("no stdout")?;
     let mut err = child.stderr.take().ok_or("no stderr")?;
     let t_out = std::thread::spawn(move || {

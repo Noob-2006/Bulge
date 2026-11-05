@@ -704,7 +704,7 @@ mod tests {
 
     #[test]
     fn edit_diffs_use_whole_files() {
-        let d = std::env::temp_dir().join(format!("ark-acp-diff-{}", std::process::id()));
+        let d = ark_core::tmp::scratch_path(format!("ark-acp-diff-{}", std::process::id()));
         std::fs::create_dir_all(&d).unwrap();
         std::fs::write(d.join("a.rs"), "fn a() {}\nfn b() {}\n").unwrap();
         let v = edit_diffs(&d, "edit", &json!({"path": "a.rs", "old_string": "fn b() {}", "new_string": "fn b() { 1 }"}));

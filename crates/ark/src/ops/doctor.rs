@@ -905,7 +905,7 @@ mod tests {
     use super::*;
 
     fn ctx(f: impl FnOnce(&mut Config)) -> Ctx {
-        let root = std::env::temp_dir().join(format!("ark-doc-{}", ark_kernel::util::random_hex(6)));
+        let root = ark_core::tmp::scratch_path(format!("ark-doc-{}", ark_kernel::util::random_hex(6)));
         let paths = Paths { data: root.join("data"), config_dir: root.join("config"), runtime: root.join("run") };
         for d in [&paths.data, &paths.config_dir, &paths.runtime, &root.join("ws")] {
             std::fs::create_dir_all(d).unwrap();
@@ -1056,7 +1056,7 @@ mod tests {
 
     #[test]
     fn repair_flow_fixes_and_validates() {
-        let stale_dir = std::env::temp_dir().join(format!("ark-doc-gone-{}", ark_kernel::util::random_hex(6)));
+        let stale_dir = ark_core::tmp::scratch_path(format!("ark-doc-gone-{}", ark_kernel::util::random_hex(6)));
         let mut c = ctx(|cfg| {
             cfg.trusted_projects = vec![stale_dir.display().to_string()];
             cfg.channels.insert("tg".into(), "kind = \"telegram\"\ntoken = \"{{secret:HAVE}}\"".parse().unwrap());
@@ -1150,7 +1150,7 @@ mod tests {
     #[test]
     fn gateway_services_and_exec_credentials() {
         let _g = crate::testkit::env_lock();
-        let root = std::env::temp_dir().join(format!("ark-doc-svc-{}", ark_kernel::util::random_hex(6)));
+        let root = ark_core::tmp::scratch_path(format!("ark-doc-svc-{}", ark_kernel::util::random_hex(6)));
         std::env::set_var("XDG_CONFIG_HOME", root.join("xdg"));
         let c = ctx(|cfg| {
             cfg.exec.insert("sudo_password_secret".into(), toml::Value::String("SUDO_PW".into()));

@@ -57,7 +57,7 @@ impl crate::kernel::Resolver for Res {
 }
 
 pub fn kernel(f: impl FnOnce(&mut Config)) -> (Kernel, Arc<Scripted>, PathBuf) {
-    let root = std::env::temp_dir().join(format!("ark-cronjob-{}", crate::util::random_hex(10)));
+    let root = ark_core::tmp::scratch_path(format!("ark-cronjob-{}", crate::util::random_hex(10)));
     let ws = root.join("ws");
     std::fs::create_dir_all(&ws).unwrap();
     let paths = crate::config::Paths { data: root.join("data"), config_dir: root.join("cfg"), runtime: root.join("run") };

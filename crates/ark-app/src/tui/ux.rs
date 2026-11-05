@@ -246,7 +246,7 @@ mod tests {
     #[test]
     fn footer_stash_and_activity() {
         let p = super::super::prefs::test_paths("ux");
-        let mut u = Ux::new(&std::env::temp_dir());
+        let mut u = Ux::new(&ark_core::tmp::scratch("ark-ws"));
         u.paths = p.clone();
         u.reload();
         let sw = |s: &str| s.chars().count();

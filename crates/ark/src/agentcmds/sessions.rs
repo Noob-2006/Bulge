@@ -1275,7 +1275,7 @@ mod tests {
     use super::*;
 
     fn tmp_store() -> Store {
-        let root = std::env::temp_dir().join(format!("ark-sessions-{}", ark_kernel::util::random_hex(10)));
+        let root = ark_core::tmp::scratch_path(format!("ark-sessions-{}", ark_kernel::util::random_hex(10)));
         let mut s = Store::new(root);
         s.sync = false;
         s
@@ -1450,7 +1450,7 @@ mod tests {
     #[test]
     fn import_claude_fixture() {
         let store = tmp_store();
-        let dir = std::env::temp_dir().join(format!("ark-claude-{}", ark_kernel::util::random_hex(8)));
+        let dir = ark_core::tmp::scratch_path(format!("ark-claude-{}", ark_kernel::util::random_hex(8)));
         let file = dir.join("projects/p1/abc.jsonl");
         std::fs::create_dir_all(file.parent().unwrap()).unwrap();
         let lines = [

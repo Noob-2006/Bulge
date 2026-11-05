@@ -8,7 +8,7 @@ use ark_kernel::config::{Config, Paths};
 use ark_skills::core::settings::Store;
 
 fn setup(tag: &str) -> (Paths, std::path::PathBuf, Config) {
-    let d = std::env::temp_dir().join(format!("ark-sklcli-{tag}-{}", ark_kernel::util::random_hex(6)));
+    let d = ark_core::tmp::scratch_path(format!("ark-sklcli-{tag}-{}", ark_kernel::util::random_hex(6)));
     let paths = Paths { data: d.join("data"), config_dir: d.join("cfg"), runtime: d.join("run") };
     let ws = d.join("ws");
     std::fs::create_dir_all(&ws).unwrap();

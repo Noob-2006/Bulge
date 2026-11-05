@@ -33,7 +33,7 @@ const B64: base64::engine::general_purpose::GeneralPurpose = base64::engine::gen
 
 /// The guest image, or `None` (with an explanation) when this machine has none.
 fn image() -> Option<(PathBuf, PathBuf)> {
-    let dir = std::env::var_os("ARK_VM_IMAGE_DIR").map(PathBuf::from).unwrap_or_else(|| std::env::temp_dir().join("ark-vm-image"));
+    let dir = std::env::var_os("ARK_VM_IMAGE_DIR").map(PathBuf::from).unwrap_or_else(|| ark_core::tmp::scratch_path("ark-vm-image"));
     let kernel = dir.join("vmlinux");
     let initramfs = dir.join("initramfs.cpio.gz");
     if kernel.is_file() && initramfs.is_file() {

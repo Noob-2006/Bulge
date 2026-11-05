@@ -873,7 +873,7 @@ mod tests {
     use crate::embed::LocalHash;
 
     pub fn tmp(tag: &str) -> PathBuf {
-        let d = std::env::temp_dir().join(format!("ark-memory-{tag}-{}-{}", std::process::id(), util::now_ms()));
+        let d = ark_core::tmp::scratch_path(format!("ark-memory-{tag}-{}-{}", std::process::id(), util::now_ms()));
         let _ = fs::remove_dir_all(&d);
         fs::create_dir_all(d.join("memory")).unwrap();
         d

@@ -71,7 +71,7 @@ mod tests {
 
     #[test]
     fn sandbox_binds_are_read_only_and_refuse_escapes() {
-        let home = std::env::temp_dir().join(format!("ark-cred-binds-{}", std::process::id()));
+        let home = ark_core::tmp::scratch_path(format!("ark-cred-binds-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&home);
         std::fs::create_dir_all(home.join(".config/gh")).unwrap();
         std::fs::write(home.join(".config/gh/hosts.yml"), "x").unwrap();
@@ -102,7 +102,7 @@ mod tests {
 
     #[test]
     fn entries_are_contained_and_existing() {
-        let home = std::env::temp_dir().join(format!("ark-cred-{}", std::process::id()));
+        let home = ark_core::tmp::scratch_path(format!("ark-cred-{}", std::process::id()));
         std::fs::create_dir_all(home.join(".config/gh")).unwrap();
         std::fs::write(home.join(".config/gh/hosts.yml"), "x").unwrap();
         std::os::unix::fs::symlink("/etc/hostname", home.join("escape")).unwrap_or(());

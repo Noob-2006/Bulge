@@ -827,7 +827,7 @@ mod tests {
                 crate::exposure::TokenConfig { token: "approve-token".into(), scope: "approve".into(), name: None, org: String::new(), team: String::new() },
             ],
             // Never the real cwd: a `session.create` here must not touch the repo.
-            workspace: Some(std::env::temp_dir().join(format!("ark-app-ws-{}", ark_kernel::util::random_hex(8))).display().to_string()),
+            workspace: Some(ark_core::tmp::scratch_path(format!("ark-app-ws-{}", ark_kernel::util::random_hex(8))).display().to_string()),
             ..AppConfig::default()
         };
         let a = app(cfg);

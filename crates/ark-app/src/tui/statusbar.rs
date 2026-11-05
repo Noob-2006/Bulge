@@ -323,7 +323,7 @@ mod tests {
         assert!(narrow.contains(&"m".to_string()) && narrow.contains(&"42%".to_string()));
         assert!(!narrow.contains(&"⇣6".to_string()) && !narrow.contains(&"◎ 33.3%".to_string()));
         // git branch from HEAD, detached sha, and a worktree `.git` file.
-        let root = std::env::temp_dir().join(format!("ark-sb-{}", ark_kernel::util::random_hex(6)));
+        let root = ark_core::tmp::scratch_path(format!("ark-sb-{}", ark_kernel::util::random_hex(6)));
         std::fs::create_dir_all(root.join(".git")).unwrap();
         std::fs::create_dir_all(root.join("sub/dir")).unwrap();
         std::fs::write(root.join(".git/HEAD"), "ref: refs/heads/feature/x\n").unwrap();

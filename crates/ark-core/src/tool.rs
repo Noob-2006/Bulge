@@ -262,7 +262,7 @@ mod image_tests {
         assert_eq!(base64_encode(b"Man"), "TWFu");
         assert_eq!(base64_encode(b"Ma"), "TWE=");
         assert_eq!(base64_encode(b"M"), "TQ==");
-        let d = std::env::temp_dir().join(format!("ark-core-img-{}", std::process::id()));
+        let d = crate::tmp::scratch_path(format!("ark-core-img-{}", std::process::id()));
         std::fs::create_dir_all(&d).unwrap();
         let png = d.join("a.png");
         std::fs::write(&png, b"\x89PNG\r\n\x1a\nrest").unwrap();

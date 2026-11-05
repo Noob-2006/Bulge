@@ -220,7 +220,7 @@ mod tests {
     #[test]
     fn reserved_and_invocation() {
         assert!(collision_note("status").is_some() && collision_note("deploy").is_none());
-        let d = std::env::temp_dir().join(format!("ark-skslash-{}", std::process::id()));
+        let d = ark_core::tmp::scratch_path(format!("ark-skslash-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         let paths = Paths { data: d.join("data"), config_dir: d.join("cfg"), runtime: d.join("run") };
         let ws = d.join("ws");

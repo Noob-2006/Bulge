@@ -211,7 +211,7 @@ mod tests {
 
     #[test]
     fn status_reports_the_posture_without_leaking_header_values() {
-        let data = std::env::temp_dir().join(format!("ark-tel-{}", ark_kernel::util::random_hex(6)));
+        let data = ark_core::tmp::scratch_path(format!("ark-tel-{}", ark_kernel::util::random_hex(6)));
         std::fs::create_dir_all(&data).unwrap();
         let t = cfg(|t| {
             t.enabled = true;

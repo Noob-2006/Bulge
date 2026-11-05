@@ -135,7 +135,7 @@ mod tests {
 
     #[test]
     fn sysfs_pmset_and_categories() {
-        let root = std::env::temp_dir().join(format!("ark-batt-{}", ark_kernel::util::random_hex(6)));
+        let root = ark_core::tmp::scratch_path(format!("ark-batt-{}", ark_kernel::util::random_hex(6)));
         for (d, files) in [("BAT0", vec![("type", "Battery"), ("capacity", "15"), ("status", "Discharging")]), ("AC", vec![("type", "Mains"), ("online", "0")]), ("hidpp_battery_0", vec![("type", "Battery"), ("scope", "Device"), ("capacity", "100")])] {
             std::fs::create_dir_all(root.join(d)).unwrap();
             for (f, v) in files {

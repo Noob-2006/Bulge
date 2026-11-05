@@ -333,7 +333,7 @@ mod tests {
         assert_eq!(code_hash(&c), code_hash(&c.to_lowercase().replace('-', " ")));
         assert_eq!(code_hash("ABCDE-0I1LO"), code_hash("abcde01110"), "O→0, I/L→1");
         assert_eq!(code_hash("x").len(), 43);
-        let dir = std::env::temp_dir().join(format!("ark-relay-{}", std::process::id()));
+        let dir = ark_core::tmp::scratch_path(format!("ark-relay-{}", std::process::id()));
         let path = dir.join("mcp-relay.json");
         let s = State::load_or_create(&path, "https://relay.example").unwrap();
         assert!(s.gateway_id().starts_with("gw_") && s.gateway_id().len() == 25);

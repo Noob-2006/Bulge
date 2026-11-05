@@ -528,7 +528,7 @@ mod tests {
     }
 
     fn paths() -> (PathBuf, Paths) {
-        let root = std::env::temp_dir().join(format!("ark-wiz-{}", ark_kernel::util::random_hex(6)));
+        let root = ark_core::tmp::scratch_path(format!("ark-wiz-{}", ark_kernel::util::random_hex(6)));
         let p = Paths { data: root.join("data"), config_dir: root.join("config"), runtime: root.join("run") };
         std::fs::create_dir_all(&p.config_dir).unwrap();
         (root, p)
@@ -611,13 +611,13 @@ mod tests {
         // unknown words are reported and skipped, picked-up names work too
         assert_eq!(app_recommendations_step(&mut s(&["figma, nope"]), &mut t, &apps).unwrap(), vec!["figma"]);
         // `.desktop` entries are read by Name=, directory scan is capped and deduped
-        let root = std::env::temp_dir().join(format!("ark-apps-{}", ark_kernel::util::random_hex(6)));
+        let root = ark_core::tmp::scratch_path(format!("ark-apps-{}", ark_kernel::util::random_hex(6)));
         std::fs::create_dir_all(root.join("Figma.app")).unwrap();
         std::fs::create_dir_all(root.join("notes")).unwrap();
         std::fs::write(root.join("jira.desktop"), "[Desktop Entry]\nName=Jira\nExec=jira\n").unwrap();
         std::fs::write(root.join("bad.desktop"), "[Desktop Entry]\nExec=x\n").unwrap();
         assert_eq!(installed_apps_in(&[root], 10), vec!["Figma".to_string(), "Jira".to_string()]);
-        assert_eq!(installed_apps_in(&[std::env::temp_dir().join("ark-nope-none")], 10).len(), 0);
+        assert_eq!(installed_apps_in(&[ark_core::tmp::scratch_path("ark-nope-none")], 10).len(), 0);
     }
 
     #[test]

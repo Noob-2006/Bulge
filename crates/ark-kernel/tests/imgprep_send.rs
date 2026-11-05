@@ -117,7 +117,7 @@ struct Env {
 }
 
 fn env(vision: bool) -> Env {
-    let root = std::env::temp_dir().join(format!("ark-imgprep-{}", rand_hex()));
+    let root = ark_core::tmp::scratch_path(format!("ark-imgprep-{}", rand_hex()));
     let ws = root.join("ws");
     std::fs::create_dir_all(&ws).unwrap();
     std::fs::write(ws.join("pic.png"), png(2400, 1200)).unwrap();

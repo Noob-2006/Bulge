@@ -334,7 +334,7 @@ mod tests {
     #[test]
     fn redirects_policy_and_cache() {
         let (base, log) = testserver::serve(vec![testserver::ok("/a.json", "{\"x\":1}"), ("/r".into(), 302, vec![("Location".into(), "/a.json".into())], vec![]), ("/loop".into(), 302, vec![("Location".into(), "/loop".into())], vec![])]);
-        let d = std::env::temp_dir().join(format!("ark-hubhttp-{}", std::process::id()));
+        let d = ark_core::tmp::scratch_path(format!("ark-hubhttp-{}", std::process::id()));
         let st = Store::at(&d);
         let mut s = Settings::from_table(&toml::Table::new());
         let h = Http::new(&s, &st);
@@ -361,7 +361,7 @@ mod tests {
             ("/gh/forbidden".into(), 403, vec![("X-RateLimit-Remaining".into(), "5".into())], vec![]),
             ("/other/limited".into(), 429, vec![("Retry-After".into(), "0".into())], vec![]),
         ]);
-        let d = std::env::temp_dir().join(format!("ark-hubhttp-rl-{}", std::process::id()));
+        let d = ark_core::tmp::scratch_path(format!("ark-hubhttp-rl-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         let st = Store::at(&d);
         let s = Settings::from_table(&toml::from_str(&format!("[hub]\nallow_private = true\ngithub_api = \"{base}/gh\"\n")).unwrap());
@@ -400,7 +400,7 @@ mod tests {
             ("/gh/stale".into(), 401, vec![], b"{}".to_vec()),
             ("/gh/anon".into(), 401, vec![], b"{}".to_vec()),
         ]);
-        let d = std::env::temp_dir().join(format!("ark-hubhttp-401-{}", std::process::id()));
+        let d = ark_core::tmp::scratch_path(format!("ark-hubhttp-401-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         let st = Store::at(&d);
         let cfg = |env: &str| {

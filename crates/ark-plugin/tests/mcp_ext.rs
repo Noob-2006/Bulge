@@ -29,7 +29,7 @@ fn fixture(extra: &[&str]) -> Option<McpServerConfig> {
 
 fn tmp(tag: &str) -> PathBuf {
     let n = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
-    let d = std::env::temp_dir().join(format!("ark-mcpx-{tag}-{}-{n}", std::process::id()));
+    let d = ark_core::tmp::scratch_path(format!("ark-mcpx-{tag}-{}-{n}", std::process::id()));
     std::fs::create_dir_all(&d).unwrap();
     d
 }

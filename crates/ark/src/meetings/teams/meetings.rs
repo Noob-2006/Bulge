@@ -262,7 +262,8 @@ fn download_artifact(client: &Client, r: &TeamsMeetingRef, a: &MeetingArtifact, 
 
 pub fn download_transcript_text(client: &Client, r: &TeamsMeetingRef, t: &MeetingArtifact) -> Result<String, MeetingsError> {
     // Unique per call: two pipeline runs (tests, a duplicate delivery) must not delete each other's file.
-    let dir = std::env::temp_dir().join(format!("ark-teams-transcript-{}-{}", std::process::id(), ark_kernel::util::random_hex(6)));
+    let guard = ark_core::tmp::TempDir::new("ark-teams-transcript");
+    let dir = guard.path().to_path_buf();
     std::fs::create_dir_all(&dir).map_err(|e| MeetingsError::Other(format!("cannot create {}: {e}", dir.display())))?;
     let dest = dir.join("transcript.vtt");
     let r2 = download_artifact(client, r, t, &dest, "transcript");

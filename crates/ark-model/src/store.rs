@@ -417,7 +417,7 @@ impl Drop for Lock {
 
 #[cfg(test)]
 pub(crate) fn temp_store(tag: &str) -> Store {
-    let d = std::env::temp_dir().join(format!(
+    let d = ark_core::tmp::scratch_path(format!(
         "ark-authstore-{tag}-{}-{}",
         std::process::id(),
         random_id()

@@ -744,7 +744,7 @@ mod tests {
     fn typed_sub_call_tools_are_registered_and_llm_task_runs() {
         let names: Vec<String> = tools().iter().map(|t| t.spec().name).collect();
         assert_eq!(names, ["llm_task", "decision_evaluate"]);
-        let root = std::env::temp_dir().join(format!("ark-decision-{}", crate::util::random_hex(8)));
+        let root = ark_core::tmp::scratch_path(format!("ark-decision-{}", crate::util::random_hex(8)));
         let paths = crate::config::Paths { data: root.join("d"), config_dir: root.join("c"), runtime: root.join("r") };
         std::fs::create_dir_all(&paths.config_dir).unwrap();
         let mut cfg = crate::config::Config::default();
@@ -802,7 +802,7 @@ mod tests {
     }
 
     fn decision_host(cfg_mut: impl FnOnce(&mut crate::config::Config), answers: &'static str) -> (crate::kernel::Kernel, crate::kernel::Host, std::path::PathBuf) {
-        let root = std::env::temp_dir().join(format!("ark-decision-run-{}", crate::util::random_hex(8)));
+        let root = ark_core::tmp::scratch_path(format!("ark-decision-run-{}", crate::util::random_hex(8)));
         let paths = crate::config::Paths { data: root.join("d"), config_dir: root.join("c"), runtime: root.join("r") };
         std::fs::create_dir_all(&paths.config_dir).unwrap();
         let mut cfg = crate::config::Config::default();

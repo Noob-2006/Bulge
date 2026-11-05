@@ -1296,7 +1296,7 @@ mod tests {
         assert!(sub.join("AGENTS.md").is_file());
         assert_eq!(ok(&c, "ui.agents.file.get", json!({"workspace": sub.display().to_string(), "name": "AGENTS.md"}))["content"], "sub\n");
         // `/etc`, a `..` climb and a symlink out of the workspace are refused for both methods.
-        let outside = std::env::temp_dir().join(format!("ark-ui-ws-{}", ark_kernel::util::random_hex(8)));
+        let outside = ark_core::tmp::scratch_path(format!("ark-ui-ws-{}", ark_kernel::util::random_hex(8)));
         std::fs::create_dir_all(&outside).unwrap();
         #[cfg(unix)]
         std::os::unix::fs::symlink(&outside, t.ws.join("escape")).unwrap();
@@ -1322,7 +1322,7 @@ mod tests {
         assert_eq!(std::fs::read_to_string(t.ws.join("AGENTS.md")).unwrap(), "# agents\n", "the allowed file is untouched");
         assert!(!c.paths.data.join("skills/pwned").exists(), "no skill was created");
         // A `trusted_projects` entry is a configured workspace too.
-        let trusted = std::env::temp_dir().join(format!("ark-ui-trusted-{}", ark_kernel::util::random_hex(8)));
+        let trusted = ark_core::tmp::scratch_path(format!("ark-ui-trusted-{}", ark_kernel::util::random_hex(8)));
         std::fs::create_dir_all(&trusted).unwrap();
         let t2 = crate::testkit::kit_with(|cfg| cfg.trusted_projects = vec![trusted.display().to_string()]);
         ok(&ctx(&t2), "ui.agents.file.set", json!({"workspace": trusted.display().to_string(), "name": "AGENTS.md", "content": "trusted\n"}));

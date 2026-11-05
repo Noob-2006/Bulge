@@ -385,7 +385,7 @@ mod tests {
     /// timestamp suffix counts (Hermes `restore_skill`), else the frontmatter name decides.
     #[test]
     fn restore_matches_exact_name_not_a_shared_prefix() {
-        let d = std::env::temp_dir().join(format!("ark-usage2-{}", std::process::id()));
+        let d = ark_core::tmp::scratch_path(format!("ark-usage2-{}", std::process::id()));
         let _ = fs::remove_dir_all(&d);
         let st = Store::at(&d);
         let s = Settings::from_table(&toml::Table::new());
@@ -413,7 +413,7 @@ mod tests {
 
     #[test]
     fn counters_provenance_archive_restore() {
-        let d = std::env::temp_dir().join(format!("ark-usage-{}", std::process::id()));
+        let d = ark_core::tmp::scratch_path(format!("ark-usage-{}", std::process::id()));
         let _ = fs::remove_dir_all(&d);
         let st = Store::at(&d);
         let s = Settings::from_table(&toml::Table::new());

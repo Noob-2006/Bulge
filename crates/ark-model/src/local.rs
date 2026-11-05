@@ -152,7 +152,7 @@ mod tests {
 
     #[test]
     fn starts_health_checks_and_restarts() {
-        let d = std::env::temp_dir().join(format!("ark-llama-{}", std::process::id()));
+        let d = ark_core::tmp::scratch_path(format!("ark-llama-{}", std::process::id()));
         std::fs::create_dir_all(&d).unwrap();
         let model = d.join("m.gguf");
         std::fs::write(&model, b"GGUF").unwrap();

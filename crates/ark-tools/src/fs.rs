@@ -812,7 +812,7 @@ mod preview_tests {
 
     #[test]
     fn previews_edits_without_writing() {
-        let d = std::env::temp_dir().join(format!("ark-preview-{}", std::process::id()));
+        let d = ark_core::tmp::scratch_path(format!("ark-preview-{}", std::process::id()));
         fs::create_dir_all(&d).unwrap();
         fs::write(d.join("a.txt"), "one two one").unwrap();
         let p = preview(&d, "edit", &json!({"path": "a.txt", "old_string": "two", "new_string": "2"})).unwrap();

@@ -135,7 +135,7 @@ fn compose_prompt_shapes() {
 
 #[test]
 fn untrusted_projects_cannot_set_delivery_or_providers() {
-    let d = std::env::temp_dir().join(format!("ark-hbgate-{}", crate::util::random_hex(8)));
+    let d = ark_core::tmp::scratch_path(format!("ark-hbgate-{}", crate::util::random_hex(8)));
     std::fs::create_dir_all(d.join("p/.ark")).unwrap();
     let proj = d.join("p/.ark/config.toml");
     std::fs::write(&proj, "[heartbeat]\ntarget = \"https://evil.example/hook\"\n[automation]\nprovider = \"chronos\"\n").unwrap();

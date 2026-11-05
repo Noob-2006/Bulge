@@ -290,7 +290,11 @@ impl VmManager {
             let _ = std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o700));
         }
         // Keep the audit trail pointing at the real location.
-        let _ = std::fs::write(dir.parent().unwrap_or(&dir).join(format!("{key}.run-dir")), p.display().to_string());
+        // (The parent may not exist yet at this point; without it the write below silently failed
+        // and the audit trail, and anything that wants to find the short dir again, pointed nowhere.)
+        let trail = dir.parent().unwrap_or(&dir);
+        let _ = std::fs::create_dir_all(trail);
+        let _ = std::fs::write(trail.join(format!("{key}.run-dir")), p.display().to_string());
         p
     }
 
@@ -878,7 +882,7 @@ mod tests {
     }
 
     fn data(tag: &str) -> PathBuf {
-        let d = std::env::temp_dir().join(format!("ark-vm-pool-{tag}-{}-{}", std::process::id(), crate::snapshot::now()));
+        let d = ark_core::tmp::scratch_path(format!("ark-vm-pool-{tag}-{}-{}", std::process::id(), crate::snapshot::now()));
         std::fs::create_dir_all(&d).unwrap();
         d
     }
@@ -889,8 +893,46 @@ mod tests {
         d
     }
 
+    /// Removes a manager's data tree *and* the short `$TMPDIR/arkvm-*` run dirs that
+    /// `run_dir_for` falls back to when the data path is deep (each is named by a `<key>.run-dir`
+    /// file inside the tree, so they must be read before the tree goes).
+    struct DataGuard(PathBuf);
+
+    impl Drop for DataGuard {
+        fn drop(&mut self) {
+            fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
+                let Ok(rd) = std::fs::read_dir(dir) else { return };
+                for e in rd.flatten() {
+                    let p = e.path();
+                    if p.is_dir() {
+                        walk(&p, out);
+                    } else if p.extension().is_some_and(|x| x == "run-dir") {
+                        if let Ok(s) = std::fs::read_to_string(&p) {
+                            out.push(PathBuf::from(s.trim()));
+                        }
+                    }
+                }
+            }
+            let mut shorts = Vec::new();
+            walk(&self.0, &mut shorts);
+            for s in shorts {
+                // Only the fallback location this module itself creates.
+                if s.starts_with(std::env::temp_dir()) && s.file_name().is_some_and(|n| n.to_string_lossy().starts_with("arkvm-")) {
+                    let _ = std::fs::remove_dir_all(&s);
+                }
+            }
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    thread_local! {
+        static GUARDS: std::cell::RefCell<Vec<DataGuard>> = const { std::cell::RefCell::new(Vec::new()) };
+    }
+
     fn mgr(tag: &str) -> (VmManager, PathBuf) {
-        let d = data(tag);
+        let d = std::env::temp_dir().join(format!("ark-vm-pool-{tag}-{}-{}", std::process::id(), crate::snapshot::now()));
+        std::fs::create_dir_all(&d).unwrap();
+        GUARDS.with(|g| g.borrow_mut().push(DataGuard(d.clone())));
         // Boot files exist (the fake never reads them) so the image lookup is
         // satisfied without building a guest image in a unit test.
         let cfg = VmConfig { kernel: d.join("vmlinux").display().to_string(), initramfs: d.join("initramfs.cpio.gz").display().to_string(), ..Default::default() };
@@ -936,8 +978,6 @@ mod tests {
         assert_eq!(std::fs::read_to_string(w.join("out.txt")).unwrap().trim(), "made", "guest writes come back");
         assert_eq!(out.synced.0, 1, "one file synced back");
         m.stop_all();
-        let _ = std::fs::remove_dir_all(&d);
-        let _ = std::fs::remove_dir_all(&w);
     }
 
     #[test]
@@ -958,8 +998,6 @@ mod tests {
         assert_eq!(r.name, snap.name);
         assert_eq!(std::fs::read_to_string(w.join("important.txt")).unwrap(), "keep me\n");
         m.stop_all();
-        let _ = std::fs::remove_dir_all(&d);
-        let _ = std::fs::remove_dir_all(&w);
     }
 
     #[test]
@@ -980,8 +1018,6 @@ mod tests {
         let _ = sess.send(&HostMsg::Signal { id: sess.id, force: true });
         sess.release();
         m.stop_all();
-        let _ = std::fs::remove_dir_all(&d);
-        let _ = std::fs::remove_dir_all(&w);
     }
 
     #[test]
@@ -998,19 +1034,15 @@ mod tests {
         std::thread::sleep(Duration::from_millis(1100));
         assert_eq!(m.gc_idle(), 1);
         assert!(m.status().is_empty());
-        let _ = std::fs::remove_dir_all(&d);
-        let _ = std::fs::remove_dir_all(&w);
     }
 
     #[test]
     fn without_a_vm_the_pool_refuses_instead_of_running_on_the_host() {
-        let (mut m, d) = mgr("novm");
+        let (mut m, _d) = mgr("novm");
         m.cfg.provider = "bwrap".into();
         let w = ws("novm");
         let e = m.exec(&VmExec::new("s1", TrustTier::Owner, &w, "true")).unwrap_err();
         assert!(e.contains("cannot start a microVM"), "{e}");
         assert!(e.contains("namespace"), "the isolation level is named: {e}");
-        let _ = std::fs::remove_dir_all(&d);
-        let _ = std::fs::remove_dir_all(&w);
     }
 }

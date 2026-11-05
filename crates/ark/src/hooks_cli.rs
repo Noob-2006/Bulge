@@ -427,7 +427,7 @@ mod tests {
 
     #[test]
     fn doctor_warns_about_a_public_listener() {
-        let root = std::env::temp_dir().join(format!("ark-hooks-doctor-{}", ark_kernel::util::random_hex(8)));
+        let root = ark_core::tmp::scratch_path(format!("ark-hooks-doctor-{}", ark_kernel::util::random_hex(8)));
         std::fs::create_dir_all(root.join("data")).unwrap();
         let paths = Paths { data: root.join("data"), config_dir: root.join("cfg"), runtime: root.join("run") };
         let cfg = Config { app: toml::from_str("enabled = true\nlisten = \"0.0.0.0:8640\"\ntoken = \"t\"").unwrap(), ..Default::default() };
@@ -449,7 +449,7 @@ mod tests {
             Response::text(202, "accepted")
         }))
         .unwrap();
-        let root = std::env::temp_dir().join(format!("ark-whtest-{}", ark_kernel::util::random_hex(8)));
+        let root = ark_core::tmp::scratch_path(format!("ark-whtest-{}", ark_kernel::util::random_hex(8)));
         let paths = Paths { data: root.join("data"), config_dir: root.join("cfg"), runtime: root.join("run") };
         let cfg: Config = toml::from_str(&format!("[channels.hooks]\nkind = \"webhook\"\nlisten = \"{}\"\nsecret = \"{{{{secret:WH}}}}\"\n[channels.hooks.routes.gh]\nprompt = \"x\"\n", srv.local_addr())).unwrap();
         let file = ark_channel::webhook::subscriptions_path(&paths.data.join("channels"), "hooks");

@@ -327,7 +327,7 @@ mod tests {
     use std::io::{Read, Write};
 
     fn paths() -> Paths {
-        let root = std::env::temp_dir().join(format!("ark-webcli-{}", ark_kernel::util::random_hex(6)));
+        let root = ark_core::tmp::scratch_path(format!("ark-webcli-{}", ark_kernel::util::random_hex(6)));
         std::fs::create_dir_all(root.join("data")).unwrap();
         std::fs::create_dir_all(root.join("config")).unwrap();
         Paths { data: root.join("data"), config_dir: root.join("config"), runtime: root.join("run") }
@@ -467,7 +467,7 @@ mod tests {
     #[test]
     fn registered_with_the_host_tool_set() {
         let p = paths();
-        let ws = std::env::temp_dir().join(format!("ark-webcli-ws-{}", ark_kernel::util::random_hex(6)));
+        let ws = ark_core::tmp::scratch_path(format!("ark-webcli-ws-{}", ark_kernel::util::random_hex(6)));
         std::fs::create_dir_all(&ws).unwrap();
         let cfg = Config { web: table("[search]\nprovider = \"tavily\"\n"), ..Default::default() };
         let all = crate::wire::tools(&cfg, &p, &ws);

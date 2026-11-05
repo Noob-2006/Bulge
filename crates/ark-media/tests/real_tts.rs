@@ -132,7 +132,7 @@ fn synth(m: &Media, text: &str) -> (String, Wav) {
 const SENTENCE: &str = "The quick brown fox jumps over the lazy dog.";
 
 fn tmp(tag: &str) -> PathBuf {
-    let d = std::env::temp_dir().join(format!("ark-real-tts-{tag}-{}", std::process::id()));
+    let d = ark_core::tmp::scratch_path(format!("ark-real-tts-{tag}-{}", std::process::id()));
     std::fs::create_dir_all(&d).expect("temp dir");
     d
 }
@@ -339,7 +339,7 @@ fn temp_wav_is_removed_after_synthesis() {
     };
     let _serial = serial();
     let leaked = || -> Vec<PathBuf> {
-        std::fs::read_dir(std::env::temp_dir())
+        std::fs::read_dir(ark_core::tmp::scratch("ark-ws"))
             .map(|d| {
                 d.flatten()
                     .map(|e| e.path())

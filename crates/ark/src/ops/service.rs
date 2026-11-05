@@ -744,7 +744,7 @@ mod tests {
 
     #[test]
     fn restart_storm_detection() {
-        let root = std::env::temp_dir().join(format!("ark-storm-{}", ark_kernel::util::random_hex(4)));
+        let root = ark_core::tmp::scratch_path(format!("ark-storm-{}", ark_kernel::util::random_hex(4)));
         let p = Paths { data: root.join("data"), config_dir: root.join("c"), runtime: root.join("r") };
         assert!(record_start(&p).is_none());
         assert!(record_start(&p).is_none());

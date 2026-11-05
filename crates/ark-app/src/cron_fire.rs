@@ -265,7 +265,7 @@ mod tests {
                 Err("none".into())
             }
         }
-        let root = std::env::temp_dir().join(format!("ark-cronfire-{}", ark_kernel::util::random_hex(8)));
+        let root = ark_core::tmp::scratch_path(format!("ark-cronfire-{}", ark_kernel::util::random_hex(8)));
         let paths = ark_kernel::config::Paths { data: root.join("data"), config_dir: root.join("cfg"), runtime: root.join("run") };
         ark_kernel::kernel::new_kernel(Default::default(), paths, Arc::new(R), vec![], Arc::new(ark_kernel::vault::Vault::empty()), Arc::new(ark_kernel::approver::Policy { allow_privilege: false, allow_egress: false }))
     }

@@ -11,7 +11,7 @@ use ark_kernel::i18n;
 use std::path::PathBuf;
 
 fn tmp(prefix: &str) -> PathBuf {
-    let d = std::env::temp_dir().join(format!("ark-i18n-e2e-{prefix}-{}", std::process::id()));
+    let d = ark_core::tmp::scratch_path(format!("ark-i18n-e2e-{prefix}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&d);
     std::fs::create_dir_all(&d).unwrap();
     d

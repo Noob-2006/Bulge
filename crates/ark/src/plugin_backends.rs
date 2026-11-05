@@ -452,10 +452,10 @@ mod tests {
         let names: Vec<String> = t.iter().map(|t| t.spec().name).collect();
         assert_eq!(names, ["image_generate", "video_generate"]);
         let ctx = ToolCtx {
-            workspace: std::env::temp_dir(),
+            workspace: ark_core::tmp::scratch("ark-ws"),
             session_id: "t".into(),
-            artifacts: std::env::temp_dir(),
-            home: std::env::temp_dir(),
+            artifacts: ark_core::tmp::scratch("ark-ws"),
+            home: ark_core::tmp::scratch("ark-ws"),
             cancel: Cancel::new(),
             host: Arc::new(NoHost),
             secrets: Arc::new(|s: &str| s.to_string()),

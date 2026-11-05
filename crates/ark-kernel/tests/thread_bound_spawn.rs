@@ -166,7 +166,7 @@ struct Env {
 }
 
 fn env_with(cfg_mut: impl FnOnce(&mut Config)) -> Env {
-    let root = std::env::temp_dir().join(format!("ark-thread-spawn-{}", rand_hex()));
+    let root = ark_core::tmp::scratch_path(format!("ark-thread-spawn-{}", rand_hex()));
     let ws = root.join("ws");
     std::fs::create_dir_all(&ws).unwrap();
     let paths = Paths { data: root.join("data"), config_dir: root.join("cfg"), runtime: root.join("run") };
@@ -313,7 +313,7 @@ fn visible_spawn_publishes_a_persistent_sidebar_session() {
     // …and it is listed without include_children while a hidden helper is not.
     let view2 = project(&e.k.store.read(&id).unwrap());
     assert!(view2.messages.len() > 1);
-    let hidden_ws = std::env::temp_dir().join(format!("ark-thread-vis-{}", rand_hex()));
+    let hidden_ws = ark_core::tmp::scratch_path(format!("ark-thread-vis-{}", rand_hex()));
     std::fs::create_dir_all(&hidden_ws).unwrap();
     let hidden = e.k.create_session(&hidden_ws, None, Some(&id), Some("hidden")).unwrap();
     let listed = tool_json(&e, &id, 1);

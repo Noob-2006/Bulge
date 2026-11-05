@@ -194,7 +194,9 @@ fn private_draft(path: &Path, text: &str) -> Result<(), String> {
 /// (`#`-comment lines from the template removed).
 pub fn compose(initial: &str) -> Result<String, String> {
     let editor = std::env::var("VISUAL").or_else(|_| std::env::var("EDITOR")).unwrap_or_else(|_| "vi".into());
-    let tmp = std::env::temp_dir().join(format!("ark-prompt-{}-{}.md", std::process::id(), ark_net::crypto::random_token(4)));
+    // Guard: the draft's directory is removed on every exit path (the 0600 file lives inside it).
+    let guard = ark_core::tmp::TempDir::new("ark-prompt");
+    let tmp = guard.path().join("prompt.md");
     let template = format!("{initial}\n<!-- Write your message above. Save and quit to send; leave it empty to cancel. -->\n");
     private_draft(&tmp, &template)?;
     let mut parts = editor.split_whitespace();

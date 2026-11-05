@@ -769,7 +769,7 @@ mod tests {
     }
 
     fn tmp(tag: &str) -> PathBuf {
-        let d = std::env::temp_dir().join(format!("ark-execcli-{tag}-{}", ark_kernel::util::random_hex(6)));
+        let d = ark_core::tmp::scratch_path(format!("ark-execcli-{tag}-{}", ark_kernel::util::random_hex(6)));
         std::fs::create_dir_all(&d).unwrap();
         d
     }

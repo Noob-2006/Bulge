@@ -428,7 +428,7 @@ mod tests {
 
     #[test]
     fn discover_nested_categories_first_root_wins() {
-        let base = std::env::temp_dir().join(format!("ark-skill-model-{}", std::process::id()));
+        let base = ark_core::tmp::scratch_path(format!("ark-skill-model-{}", std::process::id()));
         let _ = fs::remove_dir_all(&base);
         let (a, b) = (base.join("a"), base.join("b"));
         fs::create_dir_all(a.join("devops/deploy")).unwrap();
@@ -452,7 +452,7 @@ mod tests {
     /// reported in the OpenClaw summary shape.
     #[test]
     fn requirements_gate_bins_anybins_env_config_and_os() {
-        let base = std::env::temp_dir().join(format!("ark-skill-req-{}", std::process::id()));
+        let base = ark_core::tmp::scratch_path(format!("ark-skill-req-{}", std::process::id()));
         let _ = fs::remove_dir_all(&base);
         let mk = |n: &str, extra: &str| {
             let d = base.join(n);

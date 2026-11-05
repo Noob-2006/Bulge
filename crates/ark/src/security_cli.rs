@@ -1044,7 +1044,7 @@ mod tests {
 
     #[test]
     fn audit_flags_foot_guns() {
-        let root = std::env::temp_dir().join(format!("ark-audit-{}", std::process::id()));
+        let root = ark_core::tmp::scratch_path(format!("ark-audit-{}", std::process::id()));
         let paths = Paths { data: root.join("data"), config_dir: root.join("cfg"), runtime: root.join("run") };
         std::fs::create_dir_all(&paths.config_dir).unwrap();
         std::fs::create_dir_all(&paths.data).unwrap();
@@ -1072,7 +1072,7 @@ mod tests {
     /// A12: the audit reports the same layers the app server refuses to start without.
     #[test]
     fn audit_flags_public_exposure() {
-        let root = std::env::temp_dir().join(format!("ark-audit-exposure-{}", ark_kernel::util::random_hex(8)));
+        let root = ark_core::tmp::scratch_path(format!("ark-audit-exposure-{}", ark_kernel::util::random_hex(8)));
         let paths = Paths { data: root.join("data"), config_dir: root.join("cfg"), runtime: root.join("run") };
         std::fs::create_dir_all(&paths.config_dir).unwrap();
         std::fs::create_dir_all(&paths.data).unwrap();

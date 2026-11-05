@@ -292,7 +292,7 @@ mod tests {
     /// A non-Python file, a missing path and a symlink loop must not panic, hang or report anything.
     #[test]
     fn scan_path_ignores_non_python_and_does_not_follow_symlink_loops() {
-        let d = std::env::temp_dir().join(format!("ark-ast-{}", std::process::id()));
+        let d = ark_core::tmp::scratch_path(format!("ark-ast-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(d.join("pkg")).unwrap();
         std::fs::write(d.join("pkg/ok.py"), "m = __import__(name)\n").unwrap();

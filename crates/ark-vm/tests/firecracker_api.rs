@@ -128,11 +128,8 @@ fn handle(s: &mut UnixStream, seen: &Mutex<Vec<Record>>, status: &str, rbody: &s
 fn tmp_dir(tag: &str) -> PathBuf {
     use std::sync::atomic::AtomicUsize;
     static N: AtomicUsize = AtomicUsize::new(0);
-    let base = match std::env::var_os("TMPDIR") {
-        Some(t) if !t.is_empty() => PathBuf::from(t),
-        _ => PathBuf::from(env!("CARGO_TARGET_TMPDIR")),
-    };
-    let d = base.join(format!("fc-{tag}-{}-{}", std::process::id(), N.fetch_add(1, Ordering::SeqCst)));
+    // Removed when the test's thread ends (panic included): nothing stays behind in `$TMPDIR`.
+    let d = ark_core::tmp::scratch_path(format!("fc-{tag}-{}-{}", std::process::id(), N.fetch_add(1, Ordering::SeqCst)));
     std::fs::create_dir_all(&d).expect("create temp dir");
     d
 }

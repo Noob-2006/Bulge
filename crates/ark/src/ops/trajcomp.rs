@@ -531,7 +531,7 @@ mod tests {
         assert_eq!(conv.len(), traj().len() - 8 + 1);
         assert_eq!(r["compression_metrics"]["compression_region"]["turns_count"], 8);
         // directory mode with metrics file + sampling
-        let d = std::env::temp_dir().join(format!("ark-tc-{}", ark_kernel::util::random_hex(6)));
+        let d = ark_core::tmp::scratch_path(format!("ark-tc-{}", ark_kernel::util::random_hex(6)));
         std::fs::create_dir_all(d.join("in")).unwrap();
         std::fs::write(d.join("in/a.jsonl"), format!("{e}\n{}\n", json!({"conversations": [turn("human", 1)]}))).unwrap();
         let (out, agg) = run(&c, &d.join("in"), None, None, 42, false).unwrap();

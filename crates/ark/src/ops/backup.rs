@@ -436,7 +436,7 @@ mod tests {
     use super::*;
 
     fn paths() -> Paths {
-        let root = std::env::temp_dir().join(format!("ark-bk-{}", ark_kernel::util::random_hex(6)));
+        let root = ark_core::tmp::scratch_path(format!("ark-bk-{}", ark_kernel::util::random_hex(6)));
         let p = Paths { data: root.join("data"), config_dir: root.join("config"), runtime: root.join("run") };
         std::fs::create_dir_all(p.data.join("sessions")).unwrap();
         std::fs::create_dir_all(p.data.join("memory")).unwrap();

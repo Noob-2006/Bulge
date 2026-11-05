@@ -89,7 +89,28 @@ impl TempDir {
 impl Drop for TempDir {
     fn drop(&mut self) {
         if !self.keep {
-            let _ = std::fs::remove_dir_all(&self.path);
+            remove_tree(&self.path);
+        }
+    }
+}
+
+/// Remove `path` (tree or single file), retrying while it keeps coming back.
+///
+/// A background thread or a just-killed child can still be writing into the tree when the guard
+/// drops (`remove_dir_all` then fails with "directory not empty" half-way and leaves the rest).
+/// A few short retries make that race lose instead of leaking the directory.
+fn remove_tree(path: &Path) {
+    for attempt in 0..20 {
+        let gone = match std::fs::remove_dir_all(path) {
+            Ok(()) => true,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => true,
+            Err(_) => std::fs::remove_file(path).is_ok(),
+        };
+        if gone {
+            return;
+        }
+        if attempt < 19 {
+            std::thread::sleep(std::time::Duration::from_millis(25));
         }
     }
 }
@@ -125,6 +146,54 @@ pub fn scratch(prefix: &str) -> PathBuf {
     let dir = TempDir::new(prefix);
     let path = dir.path().to_path_buf();
     HELD.with(|held| held.borrow_mut().push(dir));
+    path
+}
+
+/// Register `<temp_dir>/<name>` for removal when the *current thread* ends and return the path.
+///
+/// Unlike [`scratch`] nothing is created: this is the drop-in for the old
+/// `std::env::temp_dir().join(name)` idiom, where the caller picks a unique `name` and creates
+/// the directory (or file) itself. Whatever exists at that path when the thread ends — a tree or
+/// a single file — is deleted, panic included. As with [`scratch`], hand the tree to a
+/// long-lived thread or a child process only if the test outlives it, otherwise use [`TempDir`].
+pub fn scratch_path(name: impl AsRef<Path>) -> PathBuf {
+    /// How many live threads asked for each path. Several tests may derive the same name (a
+    /// `pid`-only suffix), so the tree goes away when the *last* of them ends, not the first.
+    static HOLDERS: std::sync::Mutex<Vec<(PathBuf, usize)>> = std::sync::Mutex::new(Vec::new());
+    struct Doomed(PathBuf);
+    impl Drop for Doomed {
+        fn drop(&mut self) {
+            let last = {
+                let mut h = HOLDERS.lock().unwrap_or_else(|e| e.into_inner());
+                match h.iter().position(|(p, _)| *p == self.0) {
+                    Some(i) if h[i].1 > 1 => {
+                        h[i].1 -= 1;
+                        false
+                    }
+                    Some(i) => {
+                        h.swap_remove(i);
+                        true
+                    }
+                    None => true,
+                }
+            };
+            if last {
+                remove_tree(&self.0);
+            }
+        }
+    }
+    thread_local! {
+        static HELD: RefCell<Vec<Doomed>> = const { RefCell::new(Vec::new()) };
+    }
+    let path = std::env::temp_dir().join(name);
+    {
+        let mut h = HOLDERS.lock().unwrap_or_else(|e| e.into_inner());
+        match h.iter_mut().find(|(p, _)| *p == path) {
+            Some((_, n)) => *n += 1,
+            None => h.push((path.clone(), 1)),
+        }
+    }
+    HELD.with(|held| held.borrow_mut().push(Doomed(path.clone())));
     path
 }
 
@@ -214,6 +283,35 @@ mod tests {
         // The test owns it now.
         std::fs::remove_dir_all(&kept).unwrap();
         assert!(!kept.exists());
+    }
+
+    #[test]
+    fn scratch_path_removes_a_tree_or_a_file_when_the_last_holder_ends() {
+        let name = format!("ark-core-tmp-sp-{}", unique_suffix());
+        let (tree, file) = (std::env::temp_dir().join(&name), std::env::temp_dir().join(format!("{name}.txt")));
+        // Two threads derive the same name: the first to end must not pull the tree from the other.
+        let (registered_tx, registered_rx) = std::sync::mpsc::channel::<()>();
+        let (go_tx, go_rx) = std::sync::mpsc::channel::<()>();
+        let n1 = name.clone();
+        let first = std::thread::spawn(move || {
+            let p = scratch_path(&n1);
+            std::fs::create_dir_all(p.join("sub")).unwrap();
+            let f = scratch_path(format!("{n1}.txt"));
+            std::fs::write(f, b"x").unwrap();
+            registered_tx.send(()).unwrap();
+            go_rx.recv().unwrap();
+        });
+        registered_rx.recv().unwrap();
+        let n2 = name.clone();
+        let second = std::thread::spawn(move || {
+            let p = scratch_path(&n2);
+            go_tx.send(()).unwrap();
+            first.join().unwrap();
+            assert!(p.join("sub").is_dir(), "the first holder ending must leave the tree alone");
+        });
+        second.join().unwrap();
+        assert!(!tree.exists(), "gone once the last holder ended");
+        assert!(!file.exists(), "a plain file is removed as well");
     }
 
     #[test]

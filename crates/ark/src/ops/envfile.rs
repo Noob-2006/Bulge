@@ -164,7 +164,7 @@ mod tests {
 
     #[test]
     fn process_env_wins_and_reload_updates_ours() {
-        let d = std::env::temp_dir().join(format!("ark-env-{}", ark_kernel::util::random_hex(6)));
+        let d = ark_core::tmp::scratch_path(format!("ark-env-{}", ark_kernel::util::random_hex(6)));
         std::fs::create_dir_all(&d).unwrap();
         let f = d.join(".env");
         std::env::set_var("ARK_T_PRESET_X1", "process");

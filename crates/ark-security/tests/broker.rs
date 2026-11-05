@@ -11,7 +11,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 fn tmp(name: &str) -> PathBuf {
-    let d = std::env::temp_dir().join(format!("ark-broker-{}-{name}", std::process::id()));
+    let d = ark_core::tmp::scratch_path(format!("ark-broker-{}-{name}", std::process::id()));
     std::fs::create_dir_all(&d).unwrap();
     d
 }

@@ -225,15 +225,15 @@ mod tests {
 
     #[test]
     fn admission_rules() {
-        let root = std::env::temp_dir().join(format!("ark-wk-{}", ark_kernel::util::random_hex(4)));
+        let root = ark_core::tmp::scratch_path(format!("ark-wk-{}", ark_kernel::util::random_hex(4)));
         let inside = root.join("job");
         std::fs::create_dir_all(&inside).unwrap();
         let ok = json!({"turnId": "t", "prompt": "hi", "workspace": inside, "containmentRoot": root, "tools": ["read"]});
         let (ws, allow, deny) = admit(&ok).unwrap();
         assert!(ws.ends_with("job") && allow == Some(vec!["read".to_string()]) && deny.is_empty());
-        let esc = json!({"turnId": "t", "prompt": "hi", "workspace": std::env::temp_dir(), "containmentRoot": inside});
+        let esc = json!({"turnId": "t", "prompt": "hi", "workspace": ark_core::tmp::scratch("ark-ws"), "containmentRoot": inside});
         assert!(admit(&esc).unwrap_err().contains("escapes"));
-        std::os::unix::fs::symlink(std::env::temp_dir(), inside.join("link")).unwrap();
+        std::os::unix::fs::symlink(ark_core::tmp::scratch("ark-ws"), inside.join("link")).unwrap();
         let sym = json!({"turnId": "t", "prompt": "hi", "workspace": inside.join("link"), "containmentRoot": inside});
         assert!(admit(&sym).unwrap_err().contains("escapes"), "symlinks are resolved");
         assert!(admit(&json!({"turnId": "t", "workspace": inside, "containmentRoot": root})).unwrap_err().contains("prompt"));

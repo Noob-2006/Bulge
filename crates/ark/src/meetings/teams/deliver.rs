@@ -216,7 +216,7 @@ mod tests {
 
     #[test]
     fn sink_is_only_built_when_delivery_is_enabled() {
-        let paths = Paths { data: std::env::temp_dir().join("ark-teams-deliver"), config_dir: Default::default(), runtime: Default::default() };
+        let paths = Paths { data: ark_core::tmp::scratch_path("ark-teams-deliver"), config_dir: Default::default(), runtime: Default::default() };
         let client = Arc::new(Client::new(super::super::graph::Credentials::from_parts(Some("contoso".into()), Some("app".into()), Some("s3cret".into()), None, None).unwrap(), "https://graph.microsoft.com/v1.0"));
         assert!(teams_sink(&PipelineConfig::default(), &BTreeMap::new(), &paths, client.clone()).is_none(), "no teams_delivery → no sink");
         let pcfg = PipelineConfig { teams_delivery: Some([("enabled".to_string(), json!(true)), ("incoming_webhook_url".to_string(), json!("https://hook.example/x"))].into_iter().collect()), ..Default::default() };

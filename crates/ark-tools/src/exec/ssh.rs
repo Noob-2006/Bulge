@@ -362,6 +362,8 @@ mod tests {
 
     #[test]
     fn ssh_argv_push_pull_credentials_and_pty_honesty() {
+        // The ControlMaster socket directory lives at a fixed name in the temp dir.
+        let _clean = ark_core::tmp::scratch_path("ark-ssh");
         let _lock = fakecli::lock_path();
         let base = tmpdir("sshbase");
         let (remote_home, ws, home) = (base.join("remotehome"), base.join("ws"), base.join("arkhome"));

@@ -190,7 +190,7 @@ mod tests {
 
     #[test]
     fn usage_sort_pin_gates_and_ledger_compact() {
-        let d = std::env::temp_dir().join(format!("ark-curcli2-{}", std::process::id()));
+        let d = ark_core::tmp::scratch_path(format!("ark-curcli2-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         let st = Store::at(&d);
         let (cfg, paths) = (ark_kernel::config::Config::default(), ark_kernel::config::Paths { data: d.clone(), config_dir: d.join("cfg"), runtime: d.join("run") });
@@ -226,7 +226,7 @@ mod tests {
 
     #[test]
     fn curator_commands() {
-        let d = std::env::temp_dir().join(format!("ark-curcli-{}", std::process::id()));
+        let d = ark_core::tmp::scratch_path(format!("ark-curcli-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         let st = Store::at(&d);
         let (cfg, paths) = (ark_kernel::config::Config::default(), ark_kernel::config::Paths { data: d.clone(), config_dir: d.join("cfg"), runtime: d.join("run") });

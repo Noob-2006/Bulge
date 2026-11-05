@@ -99,8 +99,10 @@ pub fn run(dir: &Path, timeout: u64) -> Report {
 }
 
 pub fn run_with(bin: &Path, dir: &Path, timeout: u64) -> Report {
-    let out = std::env::temp_dir().join(format!("se-tier1-{}-{}", std::process::id(), ark_kernel::util::random_hex(4)));
-    if std::fs::create_dir_all(&out).is_err() {
+    // Guard: the report directory goes away on every exit path, early returns included.
+    let guard = ark_core::tmp::TempDir::new("se-tier1");
+    let out = guard.path().to_path_buf();
+    if !out.is_dir() {
         return unavailable("no temp dir");
     }
     let child = Command::new(bin).arg("validate").arg(dir).args(["--checks", TIER1_CHECKS, "--no-dedup", "-r", "json", "-o"]).arg(&out).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn();
@@ -185,7 +187,7 @@ mod tests {
         assert!(t.contains("2 finding(s)") && t.find("[SECRETS]").unwrap() < t.find("[LOW] SKILL.md:3").unwrap() && t.contains("not run: Security"), "{t}");
         assert_eq!(format(&unavailable("x"), 10), "");
         // A fake scanner on PATH writes the JSON report.
-        let d = std::env::temp_dir().join(format!("ark-se-{}", std::process::id()));
+        let d = ark_core::tmp::scratch_path(format!("ark-se-{}", std::process::id()));
         std::fs::create_dir_all(d.join("bin")).unwrap();
         let script = d.join("bin/skillevaluator");
         std::fs::write(&script, "#!/bin/sh\nfor a; do last=$a; done\necho '{\"results\":[{\"validator\":\"Lint\",\"passed\":true,\"findings\":[]}]}' > \"$last/skillevaluator-output-1.json\"\n").unwrap();
@@ -231,7 +233,7 @@ mod tests {
     /// "unavailable" — never a silent pass (`passed` is meaningless when `available` is false).
     #[test]
     fn unavailable_is_never_a_silent_pass() {
-        let d = std::env::temp_dir().join(format!("ark-se-unavail-{}", std::process::id()));
+        let d = ark_core::tmp::scratch_path(format!("ark-se-unavail-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         let r = run_with(&d.join("nope"), &d, 1);

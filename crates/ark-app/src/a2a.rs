@@ -770,7 +770,7 @@ mod tests {
         let (fast, long, bad, slow) = (peer(Some("short"), 0), peer(Some("a much longer answer"), 50), peer(None, 0), peer(Some("late"), 3000));
         let ra = |s: &Server, caps: &[&str]| RemoteAgent { url: format!("http://{}/a2a/v1", s.local_addr()), token: None, capabilities: caps.iter().map(|c| c.to_string()).collect() };
         let agents: BTreeMap<String, RemoteAgent> = [("fast", ra(&fast, &["code"])), ("long", ra(&long, &["code"])), ("bad", ra(&bad, &["code"])), ("slow", ra(&slow, &["research"]))].into_iter().map(|(n, a)| (n.to_string(), a)).collect();
-        let home = std::env::temp_dir().join(format!("ark-a2a-{}", std::process::id()));
+        let home = ark_core::tmp::scratch_path(format!("ark-a2a-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&home);
         let ctx = ToolCtx { workspace: home.clone(), session_id: "s".into(), artifacts: home.clone(), home: home.clone(), cancel: Cancel::new(), host: Arc::new(NoHost), secrets: Arc::new(|s: &str| s.to_string()) };
         let t = |n: &'static str| A2aTool { name: n, agents: agents.clone() };
@@ -792,6 +792,9 @@ mod tests {
         assert!(h.content.contains("[fast user] remember me") && h.content.contains("[fast agent] short"), "{}", h.content);
         assert!(t("a2a_list").call(&ctx, json!({})).content.contains("c-42"));
         assert!(t("a2a_history").call(&ctx, json!({"context_id": "unknown"})).is_error);
+        // The timed-out "slow" peer still answers ~3 s after its call and its detached thread then
+        // records the conversation; wait for it, or it re-creates `home` after the cleanup.
+        std::thread::sleep(Duration::from_millis(3000).saturating_sub(start.elapsed()) + Duration::from_millis(300));
         let _ = std::fs::remove_dir_all(&home);
     }
 }

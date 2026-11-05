@@ -37,7 +37,7 @@ fn paths_at(d: &std::path::Path) -> Paths {
 static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 fn env(tag: &str) -> (Kernel, Paths, PathBuf) {
-    let d = std::env::temp_dir().join(format!("ark-memory-host-{tag}-{}-{}", std::process::id(), NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)));
+    let d = ark_core::tmp::scratch_path(format!("ark-memory-host-{tag}-{}-{}", std::process::id(), NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)));
     let _ = std::fs::remove_dir_all(&d);
     std::fs::create_dir_all(d.join("memory")).unwrap();
     let paths = paths_at(&d);

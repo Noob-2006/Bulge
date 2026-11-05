@@ -1041,7 +1041,7 @@ mod tests {
         );
         assert!(parse_minted("", 0).is_err());
         assert!(parse_minted("a\nb", 0).is_err());
-        let dir = std::env::temp_dir().join(format!("ark-keycmd-{}", std::process::id()));
+        let dir = ark_core::tmp::scratch_path(format!("ark-keycmd-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let counter = dir.join("n");
         let k = KeyCmd::new(&format!(

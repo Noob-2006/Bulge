@@ -429,7 +429,7 @@ mod tests {
     }
 
     fn ws() -> PathBuf {
-        let d = std::env::temp_dir().join(format!("ark-interp-{}-{}", std::process::id(), crate::util::random_hex(4)));
+        let d = ark_core::tmp::scratch_path(format!("ark-interp-{}-{}", std::process::id(), crate::util::random_hex(4)));
         std::fs::create_dir_all(&d).unwrap();
         d
     }

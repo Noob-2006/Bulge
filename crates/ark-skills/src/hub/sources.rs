@@ -996,7 +996,7 @@ mod tests {
     }
 
     fn store(tag: &str) -> (std::path::PathBuf, Store) {
-        let d = std::env::temp_dir().join(format!("ark-hubsources-{tag}-{}", std::process::id()));
+        let d = ark_core::tmp::scratch_path(format!("ark-hubsources-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         (d.clone(), Store::at(&d))
     }

@@ -537,7 +537,7 @@ mod tests {
     }
 
     fn ctx(tag: &str) -> BackendCtx {
-        let base = std::env::temp_dir().join(format!("ark-vm-backend-{tag}-{}", std::process::id()));
+        let base = ark_core::tmp::scratch_path(format!("ark-vm-backend-{tag}-{}", std::process::id()));
         std::fs::create_dir_all(base.join("ws")).unwrap();
         std::fs::create_dir_all(base.join("home")).unwrap();
         BackendCtx { workspace: base.join("ws"), scope_key: format!("s-{tag}"), secrets: Arc::new(|s: &str| s.to_string()), home: base.join("home"), sandboxed: true }
@@ -681,7 +681,7 @@ mod tests {
     /// The adapter to A's daemon broker: one JSON line in, one out.
     #[test]
     fn the_socket_broker_speaks_the_daemons_protocol() {
-        let dir = std::env::temp_dir().join(format!("ark-vm-sockbroker-{}", std::process::id()));
+        let dir = ark_core::tmp::scratch_path(format!("ark-vm-sockbroker-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let sock = dir.join("broker.sock");
         let _ = std::fs::remove_file(&sock);

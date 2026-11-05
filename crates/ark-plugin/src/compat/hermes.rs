@@ -888,7 +888,7 @@ mod tests {
 
     #[test]
     fn compat_hermes_never_panics_on_broken_input() {
-        let d = std::env::temp_dir().join(format!("ark-compat-hm-bad-{}", std::process::id()));
+        let d = ark_core::tmp::scratch_path(format!("ark-compat-hm-bad-{}", std::process::id()));
         let _ = fs::remove_dir_all(&d);
         fs::create_dir_all(&d).unwrap();
         for body in ["", "- a\n- b\n", "name: [unclosed\n", "a: *anchor\n", "transport: 3\n", "a:\n  - x\n b: y\n"] {

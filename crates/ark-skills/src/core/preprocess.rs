@@ -165,7 +165,7 @@ mod tests {
 
     #[test]
     fn template_vars_and_inline_shell() {
-        let d = std::env::temp_dir().join(format!("ark-pre-{}", std::process::id()));
+        let d = ark_core::tmp::scratch_path(format!("ark-pre-{}", std::process::id()));
         std::fs::create_dir_all(&d).unwrap();
         let t = substitute_template_vars("run ${ARK_SKILL_DIR}/x.sh in ${HERMES_SESSION_ID}", Some(&d), Some("s1"));
         assert_eq!(t, format!("run {}/x.sh in s1", d.display()));

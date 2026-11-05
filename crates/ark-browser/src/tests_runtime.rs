@@ -10,7 +10,7 @@ use std::sync::Arc;
 use crate::tests::{ctx, tool, SERIAL};
 
 fn temp_dir(tag: &str) -> PathBuf {
-    let d = std::env::temp_dir().join(format!("ark-{tag}-{}-{}", std::process::id(), ark_net::crypto::random_token(4)));
+    let d = ark_core::tmp::scratch_path(format!("ark-{tag}-{}-{}", std::process::id(), ark_net::crypto::random_token(4)));
     std::fs::create_dir_all(&d).unwrap();
     d
 }

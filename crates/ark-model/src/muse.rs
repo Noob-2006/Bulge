@@ -828,7 +828,7 @@ for line in sys.stdin:
 "#;
 
     fn provider(scenario: &str, quirks: Vec<String>, timeout: u64) -> Muse {
-        let d = std::env::temp_dir().join(format!("ark-muse-{}-{}", std::process::id(), scenario));
+        let d = ark_core::tmp::scratch_path(format!("ark-muse-{}-{}", std::process::id(), scenario));
         std::fs::create_dir_all(&d).unwrap();
         let f = d.join("fake_muse.py");
         std::fs::write(&f, FAKE).unwrap();

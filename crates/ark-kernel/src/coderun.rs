@@ -401,7 +401,7 @@ mod tests {
     use super::*;
 
     fn dir() -> PathBuf {
-        let d = std::env::temp_dir().join(format!("ark-run-{}", crate::util::random_hex(6)));
+        let d = ark_core::tmp::scratch_path(format!("ark-run-{}", crate::util::random_hex(6)));
         std::fs::create_dir_all(&d).unwrap();
         d
     }

@@ -179,7 +179,7 @@ mod tests {
         let p = build_init_prompt("/w", Some("# Old rules"), "  mention the pnpm workspace ");
         assert!(p.contains("UPDATE the existing") && p.contains("MERGE DISCIPLINE") && p.contains("<<<EXISTING_AGENTS_MD\n# Old rules\nEXISTING_AGENTS_MD"));
         assert!(p.ends_with("mention the pnpm workspace"));
-        let ws = std::env::temp_dir().join(format!("ark-init-{}", crate::util::random_hex(6)));
+        let ws = ark_core::tmp::scratch_path(format!("ark-init-{}", crate::util::random_hex(6)));
         std::fs::create_dir_all(&ws).unwrap();
         assert!(!init_prompt_for(&ws, "").contains("MERGE"));
         std::fs::write(ws.join("AGENTS.md"), "\u{feff}keep me").unwrap();
@@ -198,7 +198,7 @@ mod tests {
         assert_eq!(path, Path::new("/w/.ark/plans/2026-11-03_120506-add-oauth-login.md"));
         assert!(plan_path(Path::new("/w"), "  ", 0, 0).ends_with("1970-01-01_000000-plan.md"));
         assert!(plan_path(Path::new("/w"), "部署 正式", 0, 0).to_string_lossy().ends_with("-部署-正式.md"));
-        let ws = std::env::temp_dir();
+        let ws = ark_core::tmp::scratch("ark-ws");
         assert!(expand_builtin("plan", "x", &ws, 480).unwrap().contains(".ark/plans/"));
     }
 }

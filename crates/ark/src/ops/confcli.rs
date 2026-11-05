@@ -431,7 +431,8 @@ fn merge_toml(base: &mut toml::Table, over: toml::Table) {
 fn edit(paths: &Paths) -> R {
     let editor = std::env::var("VISUAL").or_else(|_| std::env::var("EDITOR")).unwrap_or_else(|_| "vi".into());
     let cur = read_user(paths)?;
-    let tmp = std::env::temp_dir().join(format!("ark-config-{}.toml", std::process::id()));
+    let guard = ark_core::tmp::TempDir::new("ark-config");
+    let tmp = guard.path().join("config.toml");
     std::fs::write(&tmp, if cur.is_empty() { ark_kernel::config::SAMPLE } else { &cur }).map_err(|e| e.to_string())?;
     loop {
         let mut parts = editor.split_whitespace();
@@ -690,7 +691,7 @@ mod tests {
     use super::*;
 
     fn paths() -> Paths {
-        let root = std::env::temp_dir().join(format!("ark-confcli-{}", ark_kernel::util::random_hex(6)));
+        let root = ark_core::tmp::scratch_path(format!("ark-confcli-{}", ark_kernel::util::random_hex(6)));
         Paths { data: root.join("data"), config_dir: root.join("config"), runtime: root.join("run") }
     }
 

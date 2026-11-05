@@ -219,7 +219,7 @@ mod tests {
 
     fn dir() -> D {
         static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-        let d = std::env::temp_dir().join(format!("ark-env-{}-{}-{}", std::process::id(), now_ms(), N.fetch_add(1, std::sync::atomic::Ordering::Relaxed)));
+        let d = ark_core::tmp::scratch_path(format!("ark-env-{}-{}-{}", std::process::id(), now_ms(), N.fetch_add(1, std::sync::atomic::Ordering::Relaxed)));
         std::fs::create_dir_all(&d).unwrap();
         D(d)
     }

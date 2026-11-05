@@ -324,7 +324,7 @@ mod tests {
 
     #[test]
     fn only_shared_groups_text_only_paging_and_validation() {
-        let root = std::env::temp_dir().join(format!("ark-share-{}", ark_kernel::util::random_hex(6)));
+        let root = ark_core::tmp::scratch_path(format!("ark-share-{}", ark_kernel::util::random_hex(6)));
         let store = Store::new(root.join("sessions"));
         let a = session(&store, "team plan", Some("team"), None);
         let _private = session(&store, "secret", None, None);

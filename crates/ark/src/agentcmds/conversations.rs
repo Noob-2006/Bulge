@@ -263,7 +263,7 @@ mod tests {
         assert!(valid_ref(&r), "{r}");
         assert_eq!(r, conversation_ref("telegram", "default", "direct", "42", "", ""), "stable");
         assert_ne!(r, conversation_ref("telegram", "default", "group", "42", "", ""));
-        let root = std::env::temp_dir().join(format!("ark-conv-{}", ark_kernel::util::random_hex(6)));
+        let root = ark_core::tmp::scratch_path(format!("ark-conv-{}", ark_kernel::util::random_hex(6)));
         let paths = Paths { data: root.join("data"), config_dir: root.join("c"), runtime: root.join("r") };
         let m = Inbound { channel: "fake".into(), chat: "42".into(), sender: "u".into(), sender_name: "Dana".into(), text: "hi".into(), ..Default::default() };
         observe(&paths, &m);

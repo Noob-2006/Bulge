@@ -665,7 +665,7 @@ mod tests {
 
     #[test]
     fn devtools_port_file_and_stale_locks() {
-        let d = std::env::temp_dir().join(format!("ark-launch-{}", std::process::id()));
+        let d = ark_core::tmp::scratch_path(format!("ark-launch-{}", std::process::id()));
         std::fs::create_dir_all(&d).unwrap();
         std::fs::write(d.join("DevToolsActivePort"), "9333\n/devtools/browser/abc\n").unwrap();
         assert_eq!(active_port(&d), Some((9333, "/devtools/browser/abc".into())));
@@ -681,7 +681,7 @@ mod tests {
     #[test]
     #[cfg(feature = "personal")]
     fn real_profile_copy_skips_caches_and_resyncs_auth() {
-        let root = std::env::temp_dir().join(format!("ark-rp-{}", std::process::id()));
+        let root = ark_core::tmp::scratch_path(format!("ark-rp-{}", std::process::id()));
         let src = root.join("src");
         std::fs::create_dir_all(src.join("Profile 1/Cache")).unwrap();
         std::fs::create_dir_all(src.join("Profile 1/Network")).unwrap();

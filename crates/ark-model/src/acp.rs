@@ -796,7 +796,7 @@ mod tests {
     /// A fake ACP agent: a `python3 -I` script written to a temp dir. `body` gets `RECORD`
     /// (a path the test reads back) substituted.
     fn fake(name: &str, body: &str) -> (ProviderConfig, PathBuf) {
-        let d = std::env::temp_dir().join(format!("ark-acp-{}-{name}", std::process::id()));
+        let d = ark_core::tmp::scratch_path(format!("ark-acp-{}-{name}", std::process::id()));
         std::fs::create_dir_all(&d).unwrap();
         let record = d.join("record.json");
         let _ = std::fs::remove_file(&record);

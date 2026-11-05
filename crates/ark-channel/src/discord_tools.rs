@@ -490,10 +490,10 @@ mod tests {
             }
         }
         ToolCtx {
-            workspace: std::env::temp_dir(),
+            workspace: ark_core::tmp::scratch("ark-ws"),
             session_id: "s".into(),
-            artifacts: std::env::temp_dir(),
-            home: std::env::temp_dir(),
+            artifacts: ark_core::tmp::scratch("ark-ws"),
+            home: ark_core::tmp::scratch("ark-ws"),
             cancel: ark_core::Cancel::new(),
             host: Arc::new(H),
             secrets: Arc::new(|s: &str| s.to_string()),

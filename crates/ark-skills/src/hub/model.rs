@@ -346,7 +346,7 @@ mod tests {
         assert!(search_score("pdf tools", &m("pdf-tools", "PDF Tools", "")) > search_score("pdf tools", &m("x", "other", "has pdf tools inside")));
         let d = dedupe_by_trust(vec![SkillMeta { trust_level: "community".into(), ..m("a", "a", "") }, SkillMeta { trust_level: "builtin".into(), ..m("a", "a", "") }, m("b", "b", "")]);
         assert_eq!((d.len(), d[0].trust_level.as_str()), (2, "builtin"));
-        let dir = std::env::temp_dir().join(format!("ark-hubmodel-{}", std::process::id()));
+        let dir = ark_core::tmp::scratch_path(format!("ark-hubmodel-{}", std::process::id()));
         let st = Store::at(&dir);
         let l = Lock(&st);
         l.record_install("pdf", "github", "o/r/pdf", "community", "safe", "h", "pdf", &["SKILL.md".into()], Map::new()).unwrap();

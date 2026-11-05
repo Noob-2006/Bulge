@@ -54,7 +54,7 @@ mod tests {
     }
 
     fn repo(tag: &str) -> PathBuf {
-        let d = std::env::temp_dir().join(format!("ark-wtsess-{tag}-{}", ark_kernel::util::random_hex(6)));
+        let d = ark_core::tmp::scratch_path(format!("ark-wtsess-{tag}-{}", ark_kernel::util::random_hex(6)));
         std::fs::create_dir_all(&d).unwrap();
         git(&["init", "-q"], &d);
         std::fs::write(d.join("a.txt"), "1").unwrap();

@@ -287,7 +287,7 @@ mod tests {
     fn setup() -> (crate::cdp::fake::Fake, Manager, Env) {
         let f = fake();
         let cfg = BrowserConfig { backend: "cdp".into(), cdp_url: f.http.clone(), ..Default::default() };
-        let env = Env { cfg, home: std::env::temp_dir().join(format!("ark-view-{}-{}", std::process::id(), ark_net::crypto::random_token(4))), secrets: Arc::new(|s: &str| s.to_string()) };
+        let env = Env { cfg, home: ark_core::tmp::scratch_path(format!("ark-view-{}-{}", std::process::id(), ark_net::crypto::random_token(4))), secrets: Arc::new(|s: &str| s.to_string()) };
         (f, Manager::default(), env)
     }
 

@@ -911,7 +911,7 @@ mod tests {
 
     /// Temp layout (data/, config/, run/, ws/) — no process env is touched.
     fn temp_home(tag: &str) -> (Paths, PathBuf) {
-        let root = std::env::temp_dir().join(format!("ark-status-{tag}-{}", ark_kernel::util::random_hex(6)));
+        let root = ark_core::tmp::scratch_path(format!("ark-status-{tag}-{}", ark_kernel::util::random_hex(6)));
         let paths = Paths { data: root.join("data"), config_dir: root.join("config"), runtime: root.join("run") };
         let ws = root.join("ws");
         for d in [&paths.data, &paths.config_dir, &paths.runtime, &ws] {

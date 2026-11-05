@@ -1394,7 +1394,7 @@ pub(crate) mod tests {
         assert!(reqs[0].1.contains("client_id=hermes-cli"), "{}", reqs[0].1);
 
         // A stored login whose JWT ran out is redeemed from the refresh token before use.
-        let dir = std::env::temp_dir().join(format!("ark-nous-{}", std::process::id()));
+        let dir = ark_core::tmp::scratch_path(format!("ark-nous-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let store = crate::store::Store::new(dir.join("auth.json"));
         let id = store.upsert_login("nous", e).unwrap();
@@ -1495,7 +1495,7 @@ pub(crate) mod tests {
 
     #[test]
     fn imports_codex_and_claude_cli_logins() {
-        let h = std::env::temp_dir().join(format!("ark-imp-{}", std::process::id()));
+        let h = ark_core::tmp::scratch_path(format!("ark-imp-{}", std::process::id()));
         std::fs::create_dir_all(h.join(".codex")).unwrap();
         std::fs::create_dir_all(h.join(".claude")).unwrap();
         std::fs::write(

@@ -47,7 +47,7 @@ fn web_config_table_enables_link_understanding() {
             let _ = s.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes());
         }
     });
-    let dir = std::env::temp_dir().join(format!("ark-web-links-{}", std::process::id()));
+    let dir = ark_core::tmp::scratch_path(format!("ark-web-links-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let m = Inbound { channel: "test".into(), chat: "c1".into(), sender: "u1".into(), text: format!("look at {url}/page"), ..Default::default() };
     let key = RouteKey::chat("test", "c1");
@@ -78,7 +78,7 @@ command = "/bin/cat"
 /// `<file …>` block the model can read (OpenClaw src/media-understanding apply+format).
 #[test]
 fn inbound_documents_are_extracted_before_the_turn() {
-    let dir = std::env::temp_dir().join(format!("ark-ext-inbound-{}", ark_kernel::util::random_hex(6)));
+    let dir = ark_core::tmp::scratch_path(format!("ark-ext-inbound-{}", ark_kernel::util::random_hex(6)));
     std::fs::create_dir_all(&dir).unwrap();
     let kit = crate::testkit::kit();
     let doc = dir.join("notes.md");
@@ -94,7 +94,7 @@ fn inbound_documents_are_extracted_before_the_turn() {
 /// `[media.tts] auto` speaks channel replies through ark-media's provider stack.
 #[test]
 fn tts_auto_reply_speaks_when_the_policy_says_always() {
-    let dir = std::env::temp_dir().join(format!("ark-ext-tts-{}", ark_kernel::util::random_hex(6)));
+    let dir = ark_core::tmp::scratch_path(format!("ark-ext-tts-{}", ark_kernel::util::random_hex(6)));
     std::fs::create_dir_all(&dir).unwrap();
     let media = format!(
         "output_dir = {out:?}\n[tts]\nprovider = \"fake\"\nauto = \"always\"\nprefs_path = {prefs:?}\n[tts.providers.fake]\ncommand = \"printf ARK > {{output_path}}\"\n",
@@ -119,7 +119,7 @@ fn tts_auto_reply_speaks_when_the_policy_says_always() {
 /// through the real gateway path (`voice_note` → `auto_voice_reply`) and nothing else.
 #[test]
 fn tts_auto_reply_respects_a_per_chat_override() {
-    let dir = std::env::temp_dir().join(format!("ark-ext-ttschat-{}", ark_kernel::util::random_hex(6)));
+    let dir = ark_core::tmp::scratch_path(format!("ark-ext-ttschat-{}", ark_kernel::util::random_hex(6)));
     std::fs::create_dir_all(&dir).unwrap();
     let prefs = dir.join("prefs.json");
     let media = format!(
@@ -142,7 +142,7 @@ fn tts_auto_reply_respects_a_per_chat_override() {
 #[test]
 fn builtin_plugins_are_wired_into_the_real_tool_and_hook_lists() {
     use ark_kernel::hooks::HookEvent;
-    let d = std::env::temp_dir().join(format!("ark-ext-builtin-{}", std::process::id()));
+    let d = ark_core::tmp::scratch_path(format!("ark-ext-builtin-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&d);
     let ws = d.join("ws");
     std::fs::create_dir_all(ws.join(".ark/artifacts")).unwrap();
@@ -311,7 +311,7 @@ impl Resolver for EchoResolver {
 
 /// A kit whose kernel answers approvals with `ap` (testkit always builds a `Policy`).
 fn kit_with_approver(mut cfg: Config, ap: Arc<dyn ark_kernel::approver::Approver>) -> crate::testkit::Kit {
-    let root = std::env::temp_dir().join(format!("ark-ext-sec-{}", ark_kernel::util::random_hex(8)));
+    let root = ark_core::tmp::scratch_path(format!("ark-ext-sec-{}", ark_kernel::util::random_hex(8)));
     let ws = root.join("ws");
     std::fs::create_dir_all(&ws).unwrap();
     let paths = ark_kernel::config::Paths { data: root.join("data"), config_dir: root.join("config"), runtime: root.join("run") };
@@ -852,7 +852,7 @@ impl Resolver for HeldResolver {
 
 /// A kit whose provider blocks until the test releases it, so a turn is really in flight.
 fn kit_with_provider(cfg: Config, p: Arc<dyn Provider>) -> crate::testkit::Kit {
-    let root = std::env::temp_dir().join(format!("ark-ext-held-{}", ark_kernel::util::random_hex(8)));
+    let root = ark_core::tmp::scratch_path(format!("ark-ext-held-{}", ark_kernel::util::random_hex(8)));
     let ws = root.join("ws");
     std::fs::create_dir_all(&ws).unwrap();
     let paths = ark_kernel::config::Paths { data: root.join("data"), config_dir: root.join("config"), runtime: root.join("run") };

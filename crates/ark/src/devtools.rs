@@ -238,7 +238,7 @@ mod tests {
     /// its phase exit status becomes the command's status.
     #[test]
     fn verify_detects_saves_and_runs_a_manifest_recipe() {
-        let root = std::env::temp_dir().join(format!("ark-verify-{}", ark_kernel::util::random_hex(6)));
+        let root = ark_core::tmp::scratch_path(format!("ark-verify-{}", ark_kernel::util::random_hex(6)));
         std::fs::create_dir_all(root.join(".ark")).unwrap();
         let dir = root.display().to_string();
 

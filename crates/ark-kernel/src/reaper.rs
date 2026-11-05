@@ -601,7 +601,7 @@ mod tests {
 
     impl Tmp {
         fn new(tag: &str) -> Tmp {
-            let p = std::env::temp_dir().join(format!("ark-reaper-{tag}-{}-{}", std::process::id(), crate::util::random_hex(6)));
+            let p = ark_core::tmp::scratch_path(format!("ark-reaper-{tag}-{}-{}", std::process::id(), crate::util::random_hex(6)));
             let _ = std::fs::remove_dir_all(&p);
             std::fs::create_dir_all(&p).unwrap();
             Tmp(p)

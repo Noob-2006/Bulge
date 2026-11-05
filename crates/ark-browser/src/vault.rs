@@ -655,7 +655,7 @@ mod tests {
 
     #[test]
     fn local_store_and_external_managers() {
-        let home = std::env::temp_dir().join(format!("ark-vault-{}", std::process::id()));
+        let home = ark_core::tmp::scratch_path(format!("ark-vault-{}", std::process::id()));
         let it = add(&home, "login", "", "https://Login.Example.com/signin", BTreeMap::from([("identifier".into(), "me@x.example".into()), ("password".into(), "pw-123456".into()), ("totp_secret".into(), "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ".into())])).unwrap();
         assert_eq!((it.origin.as_str(), it.identifier_type.as_str(), it.label.as_str()), ("https://login.example.com", "email", "login.example.com"));
         let meta = it.meta("local");

@@ -1778,7 +1778,7 @@ mod tests {
         assert!(ok.contains(&t.ws.join("out/notes.md").display().to_string()), "{ok}");
         assert!(std::fs::read_to_string(t.ws.join("out/notes.md")).unwrap().contains("hello there"));
         // Absolute paths outside the root are refused for all three commands, and nothing is written.
-        let elsewhere = std::env::temp_dir().join(format!("ark-save-escape-{}", ark_kernel::util::random_hex(8)));
+        let elsewhere = ark_core::tmp::scratch_path(format!("ark-save-escape-{}", ark_kernel::util::random_hex(8)));
         std::fs::create_dir_all(&elsewhere).unwrap();
         let victim = elsewhere.join("victim.md");
         for line in [
@@ -2033,7 +2033,7 @@ mod tests {
 
     #[test]
     fn btw_answers_while_the_main_turn_is_busy() {
-        let root = std::env::temp_dir().join(format!("ark-btw-busy-{}", ark_kernel::util::random_hex(8)));
+        let root = ark_core::tmp::scratch_path(format!("ark-btw-busy-{}", ark_kernel::util::random_hex(8)));
         let ws = root.join("ws");
         std::fs::create_dir_all(&ws).unwrap();
         let paths = ark_kernel::config::Paths { data: root.join("data"), config_dir: root.join("config"), runtime: root.join("run") };

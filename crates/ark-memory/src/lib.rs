@@ -280,7 +280,7 @@ pub fn dreaming_tick(h: &Arc<Host>, now_ms: u64) -> Option<Result<String, String
 #[cfg(test)]
 pub fn tmp(tag: &str) -> PathBuf {
     static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let d = std::env::temp_dir().join(format!("ark-memory-{tag}-{}-{}", std::process::id(), N.fetch_add(1, std::sync::atomic::Ordering::Relaxed)));
+    let d = ark_core::tmp::scratch_path(format!("ark-memory-{tag}-{}-{}", std::process::id(), N.fetch_add(1, std::sync::atomic::Ordering::Relaxed)));
     let _ = std::fs::remove_dir_all(&d);
     std::fs::create_dir_all(d.join("memory")).unwrap();
     d

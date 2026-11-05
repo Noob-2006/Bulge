@@ -501,7 +501,7 @@ mod tests {
     use super::*;
 
     fn repo(tag: &str) -> PathBuf {
-        let d = std::env::temp_dir().join(format!("ark-owt-{tag}-{}", ark_kernel::util::random_hex(6)));
+        let d = ark_core::tmp::scratch_path(format!("ark-owt-{tag}-{}", ark_kernel::util::random_hex(6)));
         std::fs::create_dir_all(&d).unwrap();
         git(&["init", "-q"], &d).unwrap();
         std::fs::write(d.join("a.txt"), "1").unwrap();
@@ -578,7 +578,7 @@ mod tests {
         assert!(slash(&c, "list").unwrap().text.unwrap().contains("feat"));
         assert!(slash(&c, "prune --dry-run").unwrap().text.unwrap().contains("planned"));
         assert!(slash(&c, "bogus").is_err());
-        let c2 = Ctx { workspace: std::env::temp_dir(), ..c };
+        let c2 = Ctx { workspace: ark_core::tmp::scratch("ark-ws"), ..c };
         assert!(slash(&c2, "new").unwrap_err().contains("git repository"));
     }
 }

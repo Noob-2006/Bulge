@@ -623,7 +623,7 @@ mod tests {
     use super::*;
 
     fn fixture(tag: &str) -> (PathBuf, Paths, PathBuf) {
-        let d = std::env::temp_dir().join(format!("ark-manage-{tag}-{}", std::process::id()));
+        let d = ark_core::tmp::scratch_path(format!("ark-manage-{tag}-{}", std::process::id()));
         let _ = fs::remove_dir_all(&d);
         let paths = Paths { data: d.join("data"), config_dir: d.join("config"), runtime: d.join("run") };
         let ws = d.join("ws");

@@ -289,7 +289,7 @@ mod tests {
 
     #[test]
     fn record_rollback_and_gc() {
-        let d = std::env::temp_dir().join(format!("ark-ledger-{}", std::process::id()));
+        let d = ark_core::tmp::scratch_path(format!("ark-ledger-{}", std::process::id()));
         let _ = fs::remove_dir_all(&d);
         let st = Store::at(&d);
         let s = Settings::from_table(&toml::Table::new());
@@ -335,7 +335,7 @@ mod tests {
 
     #[test]
     fn compact_rewrites_and_gc_keeps_referenced() {
-        let d = std::env::temp_dir().join(format!("ark-ledger-compact-{}", std::process::id()));
+        let d = ark_core::tmp::scratch_path(format!("ark-ledger-compact-{}", std::process::id()));
         let _ = fs::remove_dir_all(&d);
         let st = Store::at(&d);
         let s = Settings::from_table(&toml::Table::new());

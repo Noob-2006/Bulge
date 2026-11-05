@@ -336,7 +336,7 @@ pub(crate) mod testutil {
     use std::sync::{Arc, Mutex};
 
     pub fn data() -> PathBuf {
-        let d = std::env::temp_dir().join(format!("ark-kanban-{}", crate::util::random_hex(10)));
+        let d = ark_core::tmp::scratch_path(format!("ark-kanban-{}", crate::util::random_hex(10)));
         std::fs::create_dir_all(&d).unwrap();
         d
     }

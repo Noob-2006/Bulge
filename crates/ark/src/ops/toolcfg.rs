@@ -704,7 +704,7 @@ mod tests {
 
     fn paths() -> Paths {
         let root =
-            std::env::temp_dir().join(format!("ark-tools-{}", ark_kernel::util::random_hex(6)));
+            ark_core::tmp::scratch_path(format!("ark-tools-{}", ark_kernel::util::random_hex(6)));
         let paths = Paths {
             data: root.join("data"),
             config_dir: root.join("config"),
@@ -842,7 +842,7 @@ mod tests {
     #[test]
     fn post_setup_allowlist_and_dry_run() {
         let dir =
-            std::env::temp_dir().join(format!("ark-hooks-{}", ark_kernel::util::random_hex(6)));
+            ark_core::tmp::scratch_path(format!("ark-hooks-{}", ark_kernel::util::random_hex(6)));
         std::fs::create_dir_all(&dir).unwrap();
         let marker = dir.join("marker");
         let touch = format!("touch {}", marker.display());

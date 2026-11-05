@@ -200,7 +200,7 @@ mod tests {
     use super::*;
 
     fn tmp() -> PathBuf {
-        let d = std::env::temp_dir().join(format!("ark-paths-{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        let d = ark_core::tmp::scratch_path(format!("ark-paths-{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
         std::fs::create_dir_all(&d).unwrap();
         d
     }

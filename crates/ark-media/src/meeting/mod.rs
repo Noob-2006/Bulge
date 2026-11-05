@@ -414,8 +414,8 @@ impl Meetings {
                         Err("could not decode the synthesized speech".to_string())
                     }
                 })?;
-        let dir = std::env::temp_dir().join(format!("ark-meeting-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+        let guard = ark_core::tmp::TempDir::new("ark-meeting");
+        let dir = guard.path().to_path_buf();
         let path = dir.join(format!("{}.wav", crate::store::stem("say")));
         std::fs::write(&path, crate::audio::wav_encode(&pcm, 48000, 1))
             .map_err(|e| e.to_string())?;

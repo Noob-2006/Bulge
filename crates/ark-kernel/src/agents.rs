@@ -1808,7 +1808,7 @@ mod tests {
     use super::*;
 
     fn paths() -> Paths {
-        let r = std::env::temp_dir().join(format!("ark-agents-{}", crate::util::random_hex(8)));
+        let r = ark_core::tmp::scratch_path(format!("ark-agents-{}", crate::util::random_hex(8)));
         Paths { data: r.join("data"), config_dir: r.join("cfg"), runtime: r.join("run") }
     }
 

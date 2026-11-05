@@ -10,8 +10,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 fn home(tag: &str) -> PathBuf {
-    let root = std::env::var_os("TMPDIR").map(PathBuf::from).unwrap_or_else(std::env::temp_dir);
-    let d = root.join(format!("ark-security-cli-{tag}-{}", std::process::id()));
+    let d = ark_core::tmp::scratch_path(format!("ark-security-cli-{tag}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&d);
     std::fs::create_dir_all(d.join("data").join("sessions")).unwrap();
     std::fs::create_dir_all(d.join("config")).unwrap();

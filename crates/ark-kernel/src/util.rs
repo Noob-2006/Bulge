@@ -140,7 +140,7 @@ mod tests {
 
     #[test]
     fn atomic_write_replaces_and_leaves_no_temp() {
-        let dir = std::env::temp_dir().join(format!("ark-util-{}", random_hex(8)));
+        let dir = ark_core::tmp::scratch_path(format!("ark-util-{}", random_hex(8)));
         let p = dir.join("x.txt");
         atomic_write(&p, b"one").unwrap();
         atomic_write(&p, b"two").unwrap();

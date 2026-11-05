@@ -20,7 +20,7 @@ fn fixture() -> Option<String> {
 }
 
 fn tmp(tag: &str) -> PathBuf {
-    let d = std::env::temp_dir().join(format!("ark-plugin-{tag}-{}-{}", std::process::id(), Instant::now().elapsed().as_nanos() ^ rand()));
+    let d = ark_core::tmp::scratch_path(format!("ark-plugin-{tag}-{}-{}", std::process::id(), Instant::now().elapsed().as_nanos() ^ rand()));
     std::fs::create_dir_all(&d).unwrap();
     d
 }
@@ -47,10 +47,12 @@ impl ToolHost for NoHost {
 
 fn ctx() -> ToolCtx {
     ToolCtx {
-        workspace: std::env::temp_dir(),
+        // Built on the server thread of the end-to-end test (a detached thread that outlives the
+        // test), so nothing here may be created: an existing directory these tools never write to.
+        workspace: std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")),
         session_id: "t".into(),
-        artifacts: std::env::temp_dir(),
-        home: std::env::temp_dir(),
+        artifacts: std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")),
+        home: std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")),
         cancel: Cancel::new(),
         host: Arc::new(NoHost),
         secrets: Arc::new(|s: &str| s.replace("{{secret:TOKEN}}", "s3cr\"et")),
@@ -219,7 +221,7 @@ fn tool_effects_and_secret_substitution() {
     let Some(cfg) = stdio(&[]) else { return };
     let mut cfgs = BTreeMap::new();
     cfgs.insert("fx".to_string(), cfg);
-    let reg = Registry::load(&cfgs, &dir, no_secrets());
+    let reg = Registry::load(&cfgs, &dir.join("cache"), no_secrets());
     let t = find(&reg.tools(), "mcp__fx__secret_echo").clone();
     let input = json!({"value": "{{secret:TOKEN}}"});
     // The gate sees the placeholder, the server gets the value.
@@ -281,7 +283,7 @@ fn streamable_http_json_sse_auth_and_errors() {
     let dir = tmp("http");
     let mut cfgs = BTreeMap::new();
     cfgs.insert("web".to_string(), cfg);
-    let reg = Registry::load(&cfgs, &dir, secrets);
+    let reg = Registry::load(&cfgs, &dir.join("cache"), secrets);
     assert!(reg.warnings().is_empty(), "{:?}", reg.warnings());
     let t = find(&reg.tools(), "mcp__web__echo").clone();
     assert!(matches!(&t.effects(&ctx(), &json!({}))[0], Effect::Net { dest, .. } if dest == &format!("http://127.0.0.1:{port}")));

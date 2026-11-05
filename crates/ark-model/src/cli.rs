@@ -419,7 +419,7 @@ mod tests {
     use super::*;
 
     fn script(name: &str, body: &str) -> String {
-        let d = std::env::temp_dir().join(format!("ark-cli-{}-{}", std::process::id(), name));
+        let d = ark_core::tmp::scratch_path(format!("ark-cli-{}-{}", std::process::id(), name));
         std::fs::create_dir_all(&d).unwrap();
         let p = d.join(name);
         std::fs::write(&p, format!("#!/bin/sh\n{body}\n")).unwrap();

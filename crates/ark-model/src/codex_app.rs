@@ -336,7 +336,7 @@ for line in sys.stdin:
 
     #[test]
     fn drives_a_turn_and_declines_approvals() {
-        let d = std::env::temp_dir().join(format!("ark-codexapp-{}", std::process::id()));
+        let d = ark_core::tmp::scratch_path(format!("ark-codexapp-{}", std::process::id()));
         std::fs::create_dir_all(&d).unwrap();
         let f = d.join("fake.py");
         std::fs::write(&f, FAKE).unwrap();

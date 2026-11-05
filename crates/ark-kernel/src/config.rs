@@ -1051,7 +1051,7 @@ mod tests {
 
     #[test]
     fn auxiliary_tasks_route_fall_back_and_skip_held_out_providers() {
-        let root = std::env::temp_dir().join(format!("ark-aux-{}", crate::util::random_hex(6)));
+        let root = ark_core::tmp::scratch_path(format!("ark-aux-{}", crate::util::random_hex(6)));
         std::fs::create_dir_all(&root).unwrap();
         let user = root.join("user.toml");
         std::fs::write(
@@ -1103,7 +1103,7 @@ model = "zai/glm-5.3"
 
     #[test]
     fn untrusted_project_cannot_add_hooks_or_servers() {
-        let root = std::env::temp_dir().join(format!("ark-trust-{}", crate::util::random_hex(6)));
+        let root = ark_core::tmp::scratch_path(format!("ark-trust-{}", crate::util::random_hex(6)));
         let ws = root.join("ws");
         std::fs::create_dir_all(ws.join(".ark")).unwrap();
         let user = root.join("user.toml");
@@ -1138,7 +1138,7 @@ model = "zai/glm-5.3"
     }
 
     fn tmp() -> PathBuf {
-        let d = std::env::temp_dir().join(format!("ark-cfg-{}", crate::util::random_hex(8)));
+        let d = ark_core::tmp::scratch_path(format!("ark-cfg-{}", crate::util::random_hex(8)));
         fs::create_dir_all(&d).unwrap();
         d
     }

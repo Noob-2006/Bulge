@@ -144,7 +144,7 @@ struct Env {
 }
 
 fn env_with(cfg_mut: impl FnOnce(&mut Config), workspace: Option<PathBuf>) -> Env {
-    let root = std::env::temp_dir().join(format!("ark-agents-tools-{}", rand_hex()));
+    let root = ark_core::tmp::scratch_path(format!("ark-agents-tools-{}", rand_hex()));
     let ws = workspace.unwrap_or_else(|| root.join("ws"));
     std::fs::create_dir_all(&ws).unwrap();
     let paths = Paths { data: root.join("data"), config_dir: root.join("cfg"), runtime: root.join("run") };
@@ -411,7 +411,7 @@ mod agents_tools {
 
     #[test]
     fn worktree_isolation_gives_the_child_its_own_checkout() {
-        let root = std::env::temp_dir().join(format!("ark-agents-wt-{}", rand_hex()));
+        let root = ark_core::tmp::scratch_path(format!("ark-agents-wt-{}", rand_hex()));
         std::fs::create_dir_all(&root).unwrap();
         let git = |args: &[&str], cwd: &Path| {
             let out = std::process::Command::new("git")
@@ -777,7 +777,7 @@ mod agents_tools {
                 Err("no host".into())
             }
         }
-        ToolCtx { workspace: std::env::temp_dir(), session_id: "s".into(), artifacts: std::env::temp_dir(), home: std::env::temp_dir(), cancel: Cancel::new(), host: Arc::new(NoHost), secrets: Arc::new(|_: &str| String::new()) }
+        ToolCtx { workspace: ark_core::tmp::scratch("ark-ws"), session_id: "s".into(), artifacts: ark_core::tmp::scratch("ark-ws"), home: ark_core::tmp::scratch("ark-ws"), cancel: Cancel::new(), host: Arc::new(NoHost), secrets: Arc::new(|_: &str| String::new()) }
     }
 
     #[test]

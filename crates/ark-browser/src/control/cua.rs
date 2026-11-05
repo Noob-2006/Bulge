@@ -1005,7 +1005,7 @@ mod tests {
     const MANIFEST: &str = r#"{"binary_version":"0.21.0","mcp_invocation":{"command":"cua-driver","args":["mcp"]},"subcommands":[{"name":"mcp","args":[{"name":"--socket"},{"name":"--grant"}]},{"name":"serve","args":[{"name":"--socket"},{"name":"--permission-mode"},{"name":"--capability-manifest"},{"name":"--approve-capability-manifest"},{"name":"--embedded"}]},{"name":"stop","args":[{"name":"--socket"}]}]}"#;
 
     fn scratch(tag: &str) -> PathBuf {
-        let d = std::env::temp_dir().join(format!("ark-cua-{tag}-{}", std::process::id()));
+        let d = ark_core::tmp::scratch_path(format!("ark-cua-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         d

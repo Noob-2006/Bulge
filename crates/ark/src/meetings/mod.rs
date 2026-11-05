@@ -131,7 +131,7 @@ mod tests {
     #[test]
     fn with_lock_serialises_and_releases() {
         use std::io::Write;
-        let dir = std::env::temp_dir().join(format!("ark-meet-lock-{}", std::process::id()));
+        let dir = ark_core::tmp::scratch_path(format!("ark-meet-lock-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let q = dir.join("say_queue.jsonl");
@@ -152,7 +152,7 @@ mod tests {
 
     #[test]
     fn media_is_none_without_media_config() {
-        let dir = std::env::temp_dir().join(format!("ark-meet-media-{}", std::process::id()));
+        let dir = ark_core::tmp::scratch_path(format!("ark-meet-media-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let paths = Paths { data: dir.join("data"), config_dir: dir.join("config"), runtime: dir.join("run") };

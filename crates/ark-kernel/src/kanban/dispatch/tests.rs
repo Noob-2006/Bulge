@@ -8,6 +8,16 @@ use super::*;
 use crate::kanban::ops::{self, Completion, NewTask};
 use crate::kanban::{boards, testutil, KanbanProfile};
 
+/// Join every kanban worker thread of `k`: a worker books its exit after the card is already
+/// `done`, and that write must not land in a scratch tree the test has already removed.
+fn finish_workers(k: &crate::kernel::Kernel) {
+    for s in k.store.list() {
+        if s.title.as_deref().is_some_and(|t| t.starts_with("kanban ")) {
+            join_worker(&s.id);
+        }
+    }
+}
+
 fn cfg() -> KanbanConfig {
     // `crash_grace_secs: 0` so a tick judges a vanished session immediately (no sleeping).
     KanbanConfig { enabled: true, dispatch: true, failure_limit: 2, crash_grace_secs: 0, ..Default::default() }
@@ -192,6 +202,7 @@ fn spawned_worker_gets_the_worker_tool_subset_and_loses_it_when_finished() {
     k.run(&sid, RunOpts::default()).unwrap();
     let last = p.seen.lock().unwrap().last().unwrap().tools.iter().map(|t| t.name.clone()).collect::<Vec<_>>();
     assert!(!last.iter().any(|n| n.starts_with("kanban_") || n.starts_with("workboard_")), "worker tools outlived the run: {last:?}");
+    finish_workers(&k);
 }
 
 #[test]
@@ -534,4 +545,5 @@ fn arkd_daemon_tick_is_gated_and_runs_the_card_when_enabled() {
     let b = store::read_board(&d, "default").unwrap();
     assert_eq!(b.runs_for(&live).iter().filter(|r| r.outcome.as_deref() == Some("completed")).count(), 1);
     assert_eq!(b.task(&live).unwrap().consecutive_failures, 0);
+    finish_workers(&k);
 }

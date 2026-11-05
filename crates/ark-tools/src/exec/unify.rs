@@ -465,6 +465,10 @@ fn run_in(backend: &dyn ExecBackend, spec: &EnvSpec) -> Result<EnvOutcome, Strin
     backend.before_exec()?;
     let child = backend.spawn(&req).map_err(|e| format!("{}: {e}", backend.id()))?;
     let (status, merged, timed_out) = supervise(child, spec.timeout)?;
+    // The wrapper's own `rm -f` never runs when the command was killed (timeout, cancel). The
+    // names carry this process's pid and a sequence number, so removing them host-side is safe and
+    // is what keeps a local backend's temp directory clean; a remote environment just has no such path.
+    let _ = (std::fs::remove_file(&out), std::fs::remove_file(&err));
     let mut outcome = split_streams(&merged);
     outcome.exit = status.and_then(|s| s.code);
     outcome.timed_out = timed_out;

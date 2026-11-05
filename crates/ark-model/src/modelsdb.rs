@@ -1124,7 +1124,7 @@ mod tests {
 
     /// Fresh temp dir per test (never `/tmp` by hand: `std::env::temp_dir()`).
     fn tmp(name: &str) -> PathBuf {
-        let d = std::env::temp_dir().join(format!("ark-mdev-{}-{name}", std::process::id()));
+        let d = ark_core::tmp::scratch_path(format!("ark-mdev-{}-{name}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         d
@@ -1255,7 +1255,7 @@ mod tests {
                 }
             }
         });
-        let dir = std::env::temp_dir().join(format!("ark-mdev-{}", std::process::id()));
+        let dir = ark_core::tmp::scratch_path(format!("ark-mdev-{}", std::process::id()));
         set_cache(dir.join("models-dev.json"));
         assert_eq!(refresh(Some(&url)).unwrap(), (1, true));
         assert!(!refresh(Some(&url)).unwrap().1, "304 keeps the cache");

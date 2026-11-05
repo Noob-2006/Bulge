@@ -489,7 +489,7 @@ mod tests {
         let _env = crate::testkit::env_lock();
         assert!(crate::ops::owns("project"), "project is registered in ops::MODULES");
         assert!(dispatch("storage", &Args::parse(&[]).unwrap(), &[]).is_none(), "other commands fall through");
-        let root = std::env::temp_dir().join(format!("ark-proj-{}", ark_kernel::util::random_hex(6)));
+        let root = ark_core::tmp::scratch_path(format!("ark-proj-{}", ark_kernel::util::random_hex(6)));
         std::fs::create_dir_all(&root).unwrap();
         let prev = std::env::var_os("ARK_HOME");
         std::env::set_var("ARK_HOME", &root);

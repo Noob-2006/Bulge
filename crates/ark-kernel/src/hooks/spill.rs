@@ -119,7 +119,7 @@ mod tests {
 
     #[test]
     fn small_passes_large_spills_privately() {
-        let d = std::env::temp_dir().join(format!("ark-spill-{}", crate::util::random_hex(6)));
+        let d = ark_core::tmp::scratch_path(format!("ark-spill-{}", crate::util::random_hex(6)));
         let c = SpillConfig { max_chars: 100, preview_head: 5, preview_tail: 4, directory: d.display().to_string(), ..Default::default() };
         assert_eq!(spill_if_oversized("short", "s", "hook", &c), "short");
         let big = format!("HEAD-{}-TAIL", "x".repeat(200));

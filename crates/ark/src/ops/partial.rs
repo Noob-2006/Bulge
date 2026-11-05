@@ -289,7 +289,7 @@ mod tests {
     }
 
     fn env() -> Env {
-        let root = std::env::temp_dir().join(format!("ark-partial-{}", ark_kernel::util::random_hex(8)));
+        let root = ark_core::tmp::scratch_path(format!("ark-partial-{}", ark_kernel::util::random_hex(8)));
         let ws = root.join("ws");
         std::fs::create_dir_all(&ws).unwrap();
         let ws = ws.canonicalize().unwrap();

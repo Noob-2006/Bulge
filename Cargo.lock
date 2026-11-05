@@ -267,6 +267,7 @@ dependencies = [
 name = "ark-vm"
 version = "0.1.0"
 dependencies = [
+ "ark-core",
  "ark-net",
  "base64",
  "libc",

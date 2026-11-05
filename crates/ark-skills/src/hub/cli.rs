@@ -479,7 +479,7 @@ mod tests {
         ]);
         let (base, log) = serve(routes);
         // browse.sh's skillMdUrl must be absolute: patch after the server knows its port.
-        let d = std::env::temp_dir().join(format!("ark-skillscli-{}", std::process::id()));
+        let d = ark_core::tmp::scratch_path(format!("ark-skillscli-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(d.join("ws")).unwrap();
         let paths = Paths { data: d.join("data"), config_dir: d.join("cfg"), runtime: d.join("run") };
@@ -558,7 +558,7 @@ mod tests {
         const SUBS: &[&str] = &[
             "list", "view", "search", "browse", "install", "inspect", "uninstall", "check", "update", "audit", "lint", "setup", "sync", "reset", "list-modified", "diff", "opt-out", "opt-in", "repair-official", "publish", "snapshot", "tap", "config", "enable", "disable", "trust", "untrust", "usage", "blueprint", "ledger", "rollback",
         ];
-        let d = std::env::temp_dir().join(format!("ark-sksubs-{}", std::process::id()));
+        let d = ark_core::tmp::scratch_path(format!("ark-sksubs-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(d.join("ws")).unwrap();
         let paths = Paths { data: d.join("data"), config_dir: d.join("cfg"), runtime: d.join("run") };
@@ -595,7 +595,7 @@ mod tests {
     /// path's preconditions (description, `--repo`, token) come first.
     #[test]
     fn publish_to_clawhub_is_a_pointer_like_upstream() {
-        let d = std::env::temp_dir().join(format!("ark-skpub-{}", std::process::id()));
+        let d = ark_core::tmp::scratch_path(format!("ark-skpub-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         let sk = d.join("ws/.ark/skills/notes");
         std::fs::create_dir_all(&sk).unwrap();

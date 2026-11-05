@@ -72,7 +72,7 @@ struct Fixture {
 }
 
 fn fixture(tag: &str) -> Fixture {
-    let root = std::env::temp_dir().join(format!("ark-skills-live-{tag}-{}", std::process::id()));
+    let root = ark_core::tmp::scratch_path(format!("ark-skills-live-{tag}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&root);
     let paths = Paths { data: root.join("data"), config_dir: root.join("cfg"), runtime: root.join("run") };
     let ws = root.join("ws");

@@ -309,7 +309,7 @@ mod tests {
     use ark_kernel::vault::Vault;
 
     fn fixture(tag: &str) -> (std::path::PathBuf, Paths, std::path::PathBuf) {
-        let d = std::env::temp_dir().join(format!("ark-skilltool-{tag}-{}", std::process::id()));
+        let d = ark_core::tmp::scratch_path(format!("ark-skilltool-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         let paths = Paths { data: d.join("data"), config_dir: d.join("config"), runtime: d.join("run") };
         let ws = d.join("ws");

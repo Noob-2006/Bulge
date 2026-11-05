@@ -91,7 +91,7 @@ fn cli_middleware_context_memory_node_and_ui_kinds() {
             Err("no".into())
         }
     }
-    let t = std::env::temp_dir();
+    let t = ark_core::tmp::scratch("ark-ws");
     let ctx = ark_core::ToolCtx { workspace: t.clone(), session_id: "t".into(), artifacts: t.clone(), home: t, cancel: Cancel::new(), host: Arc::new(NoHost), secrets: Arc::new(|s: &str| s.to_string()) };
     use ark_core::Tool;
     assert_eq!(tool.spec().name, "memory");
@@ -173,7 +173,7 @@ fn capability_backends_are_declared_and_served() {
 
 #[test]
 fn services_start_get_health_checked_restart_and_stop() {
-    let d = std::env::temp_dir().join(format!("ark-kinds-{}-{}", std::process::id(), Instant::now().elapsed().as_nanos()));
+    let d = ark_core::tmp::scratch_path(format!("ark-kinds-{}-{}", std::process::id(), Instant::now().elapsed().as_nanos()));
     std::fs::create_dir_all(&d).unwrap();
     let (log, sick) = (d.join("log"), d.join("sick"));
     let Some(h) = host(&["--log", log.to_str().unwrap(), "--sick", sick.to_str().unwrap()]) else { return };

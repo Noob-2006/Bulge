@@ -775,7 +775,7 @@ ENTRYPOINT ["/ark", "daemon", "run"]
     #[test]
     fn json_and_file_errors() {
         let dir =
-            std::env::temp_dir().join(format!("ark-docker-{}", ark_kernel::util::random_hex(6)));
+            ark_core::tmp::scratch_path(format!("ark-docker-{}", ark_kernel::util::random_hex(6)));
         std::fs::create_dir_all(&dir).unwrap();
         let p = dir.join("Dockerfile.bad");
         std::fs::write(&p, BAD).unwrap();

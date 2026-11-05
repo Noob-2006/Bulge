@@ -560,7 +560,7 @@ mod tests {
     /// stop on every package download; a new host still needs the gate or an envelope.
     #[test]
     fn builtin_dev_hosts_are_pre_authorised() {
-        let dir = std::env::temp_dir().join(format!("ark-devhosts-{}", std::process::id()));
+        let dir = ark_core::tmp::scratch_path(format!("ark-devhosts-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let c = EgressProxyConfig { mode: ProxyMode::Allowlist, ..Default::default() };
         let p = Policy::from_config(&c, UrlPolicy::default(), WebsiteBlocklist::default(), &dir, &[], &[]);

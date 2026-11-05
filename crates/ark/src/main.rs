@@ -1767,7 +1767,7 @@ mod schedule_cli_tests {
     impl Env {
         fn new() -> Env {
             let guard = crate::testkit::env_lock();
-            let root = std::env::temp_dir().join(format!("ark-sched-cli-{}", ark_kernel::util::random_hex(8)));
+            let root = ark_core::tmp::scratch_path(format!("ark-sched-cli-{}", ark_kernel::util::random_hex(8)));
             let ws = root.join("ws");
             std::fs::create_dir_all(&ws).unwrap();
             let old = std::env::var_os("ARK_HOME");
@@ -2830,7 +2830,7 @@ mod wiring_tests {
     #[test]
     fn build_agent_registers_the_media_surface() {
         let _g = ENV.lock().unwrap_or_else(|e| e.into_inner());
-        let root = std::path::PathBuf::from(std::env::var("TMPDIR").unwrap_or_else(|_| ".".into())).join(format!("ark-wire-{}-{}", std::process::id(), ark_kernel::util::random_hex(4)));
+        let root = ark_core::tmp::scratch_path(format!("ark-wire-{}-{}", std::process::id(), ark_kernel::util::random_hex(4)));
         let ws = root.join("ws");
         std::fs::create_dir_all(&ws).unwrap();
         let old = std::env::var_os("ARK_HOME");

@@ -351,7 +351,7 @@ mod tests {
     }
 
     fn data_with_jobs() -> (PathBuf, Vec<Job>) {
-        let d = std::env::temp_dir().join(format!("ark-chronos-{}", crate::util::random_hex(8)));
+        let d = ark_core::tmp::scratch_path(format!("ark-chronos-{}", crate::util::random_hex(8)));
         std::fs::create_dir_all(&d).unwrap();
         let a = crate::automation::add_job(&d, "@hourly", "a", &d, None, false, 0).unwrap();
         let b = crate::automation::add_job(&d, "@daily", "b", &d, None, false, 0).unwrap();

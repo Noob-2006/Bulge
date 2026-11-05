@@ -749,7 +749,7 @@ mod tests {
     use super::*;
 
     fn tmp(tag: &str) -> PathBuf {
-        let d = std::env::temp_dir().join(format!("ark-hx-{tag}-{}", ark_kernel::util::random_hex(8)));
+        let d = ark_core::tmp::scratch_path(format!("ark-hx-{tag}-{}", ark_kernel::util::random_hex(8)));
         std::fs::create_dir_all(&d).unwrap();
         d
     }
@@ -936,7 +936,7 @@ pub(crate) mod kernel_tests {
     }
 
     pub fn env(cfg_toml: &str) -> Env {
-        let root = std::env::temp_dir().join(format!("ark-hk-{}", ark_kernel::util::random_hex(8)));
+        let root = ark_core::tmp::scratch_path(format!("ark-hk-{}", ark_kernel::util::random_hex(8)));
         let ws = root.join("ws");
         std::fs::create_dir_all(&ws).unwrap();
         let ws = ws.canonicalize().unwrap();

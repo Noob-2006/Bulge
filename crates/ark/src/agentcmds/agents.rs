@@ -454,7 +454,7 @@ mod tests {
     use super::*;
 
     fn tmp_paths() -> Paths {
-        let root = std::env::temp_dir().join(format!("ark-agents-{}", ark_kernel::util::random_hex(8)));
+        let root = ark_core::tmp::scratch_path(format!("ark-agents-{}", ark_kernel::util::random_hex(8)));
         std::fs::create_dir_all(root.join("config")).unwrap();
         Paths { data: root.join("data"), config_dir: root.join("config"), runtime: root.join("run") }
     }

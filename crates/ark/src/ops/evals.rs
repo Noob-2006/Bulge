@@ -321,7 +321,7 @@ impl Drop for Home {
 
 fn home() -> Home {
     let lock = env_lock();
-    let root = std::env::temp_dir().join(format!("ark-eval-{}", ark_kernel::util::random_hex(8)));
+    let root = ark_core::tmp::scratch_path(format!("ark-eval-{}", ark_kernel::util::random_hex(8)));
     let ws = root.join("ws");
     let paths = ark_kernel::config::Paths {
         data: root.join("data"),

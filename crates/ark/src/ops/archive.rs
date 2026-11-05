@@ -394,7 +394,7 @@ mod tests {
         assert_eq!(back[2].data.len(), 700);
         assert!(safe_join(Path::new("/r"), "../etc/passwd").is_err());
         assert!(safe_join(Path::new("/r"), "/etc/passwd").is_err());
-        let root = std::env::temp_dir().join(format!("ark-tar-{}", ark_kernel::util::random_hex(4)));
+        let root = ark_core::tmp::scratch_path(format!("ark-tar-{}", ark_kernel::util::random_hex(4)));
         assert_eq!(extract(&back, &root).unwrap(), 2);
         assert_eq!(std::fs::read(root.join("dir/a.txt")).unwrap(), b"A");
         // The system tar reads ours.

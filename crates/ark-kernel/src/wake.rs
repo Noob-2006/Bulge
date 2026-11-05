@@ -66,7 +66,7 @@ mod tests {
 
     #[test]
     fn queue_and_drain() {
-        let d = std::env::temp_dir().join(format!("ark-wake-{}", crate::util::random_hex(8)));
+        let d = ark_core::tmp::scratch_path(format!("ark-wake-{}", crate::util::random_hex(8)));
         assert!(request(&d, " ", "now", "t").is_err());
         assert!(request(&d, "x", "later", "t").is_err());
         request(&d, "deploy finished", "next-heartbeat", "tool").unwrap();

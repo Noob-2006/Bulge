@@ -323,7 +323,7 @@ mod tests {
 
     #[test]
     fn compat_openclaw_never_panics_on_broken_input() {
-        let d = std::env::temp_dir().join(format!("ark-compat-oc-bad-{}", std::process::id()));
+        let d = ark_core::tmp::scratch_path(format!("ark-compat-oc-bad-{}", std::process::id()));
         let _ = fs::remove_dir_all(&d);
         fs::create_dir_all(&d).unwrap();
         for body in ["", "null", "[]", "{\"id\": 3}", "{\"id\": \"ok\", \"contracts\": 7}", "{\"id\": \"ok\", \"setup\": [1]}"] {

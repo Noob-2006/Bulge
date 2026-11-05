@@ -428,7 +428,7 @@ mod tests {
             ("/v1/query", r#"{"vulns":[{"id":"GHSA-2"}]}"#.into()),
         ]);
         std::env::set_var("OSV_ENDPOINT", format!("{url}/v1/query"));
-        let dir = std::env::temp_dir().join(format!("ark-osv-{}", std::process::id()));
+        let dir = ark_core::tmp::scratch_path(format!("ark-osv-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let args = vec!["-y".to_string(), "evil-mcp@1.0.0".to_string()];
         let r = check_package_for_malware("npx", &args, Some(&dir)).unwrap();

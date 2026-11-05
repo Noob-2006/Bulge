@@ -646,7 +646,7 @@ mod tests {
         let t = login_browser(&mcp, Some(&challenge), &OAuthConfig::default(), &Browser, Duration::from_secs(5)).unwrap();
         assert_eq!((t.access_token.as_str(), t.refresh_token.as_deref(), t.client_id.as_str()), ("at-1", Some("rt-1"), "cid-1"));
         assert_eq!(t.issuer, format!("http://{}/as", f.srv.local_addr()), "issuer bound to the tokens");
-        let dir = std::env::temp_dir().join(format!("ark-oauth-{}", std::process::id()));
+        let dir = ark_core::tmp::scratch_path(format!("ark-oauth-{}", std::process::id()));
         let store = Store::new(&dir, "srv");
         store.save(Tokens { expires_at: now() + 10, ..t }).unwrap();
         use std::os::unix::fs::PermissionsExt;
@@ -696,7 +696,7 @@ mod tests {
         let e = as_metadata(&format!("http://{}/as", srv.local_addr())).unwrap_err();
         assert!(e.contains("issuer mismatch"), "{e}");
         // Tokens remember their issuer; a different configured server is refused.
-        let dir = std::env::temp_dir().join(format!("ark-oauth-iss-{}", std::process::id()));
+        let dir = ark_core::tmp::scratch_path(format!("ark-oauth-iss-{}", std::process::id()));
         let st = Store::new(&dir, "s");
         st.save(Tokens { access_token: "a".into(), issuer: "https://as.example/t1".into(), ..Default::default() }).unwrap();
         assert!(st.check_issuer("https://as.example/t1").is_ok());

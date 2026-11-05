@@ -216,7 +216,7 @@ mod tests {
 
     #[test]
     fn writes_rotates_and_filters() {
-        let root = std::env::temp_dir().join(format!("ark-logs-{}", ark_kernel::util::random_hex(4)));
+        let root = ark_core::tmp::scratch_path(format!("ark-logs-{}", ark_kernel::util::random_hex(4)));
         let paths = Paths { data: root.join("data"), config_dir: root.join("c"), runtime: root.join("r") };
         let w = Writer::new(dir(&paths), 300, 3);
         for i in 0..20u64 {

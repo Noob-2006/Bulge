@@ -249,7 +249,7 @@ mod tests {
 
     #[test]
     fn view_routes_need_the_token_and_return_json() {
-        let home = std::env::temp_dir().join(format!("ark-bview-{}-{}", std::process::id(), ark_net::crypto::random_token(4)));
+        let home = ark_core::tmp::scratch_path(format!("ark-bview-{}-{}", std::process::id(), ark_net::crypto::random_token(4)));
         let srv = crate::server::start(app(&home)).unwrap();
         let base = format!("http://{}", srv.local_addr());
         for p in ["/view/browser", "/view/browser/frame", "/view/desktop", "/view/desktop/frame", "/view/novnc?ticket=x"] {
@@ -308,7 +308,7 @@ mod tests {
 
     #[test]
     fn view_panel_is_a_self_contained_page() {
-        let home = std::env::temp_dir().join(format!("ark-bview-panel-{}-{}", std::process::id(), ark_net::crypto::random_token(4)));
+        let home = ark_core::tmp::scratch_path(format!("ark-bview-panel-{}-{}", std::process::id(), ark_net::crypto::random_token(4)));
         let srv = crate::server::start(app(&home)).unwrap();
         let base = format!("http://{}", srv.local_addr());
         for p in ["/view/", "/view/ui"] {
@@ -346,7 +346,7 @@ mod tests {
 
     #[test]
     fn arp_methods_are_advertised_and_dispatched() {
-        let home = std::env::temp_dir().join(format!("ark-bview-arp-{}-{}", std::process::id(), ark_net::crypto::random_token(4)));
+        let home = ark_core::tmp::scratch_path(format!("ark-bview-arp-{}-{}", std::process::id(), ark_net::crypto::random_token(4)));
         let a = app(&home);
         let caps = a.capabilities();
         assert!(METHODS.iter().all(|m| caps["methods"].as_array().unwrap().iter().any(|x| x == m)), "{caps}");

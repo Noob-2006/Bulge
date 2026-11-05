@@ -1086,7 +1086,7 @@ mod tests {
     use std::sync::Arc;
 
     pub fn paths(tag: &str) -> (PathBuf, Paths) {
-        let d = std::env::temp_dir().join(format!("ark-plugins-{tag}-{}", std::process::id()));
+        let d = ark_core::tmp::scratch_path(format!("ark-plugins-{tag}-{}", std::process::id()));
         let _ = fs::remove_dir_all(&d);
         fs::create_dir_all(&d).unwrap();
         (d.clone(), Paths { data: d.join("data"), config_dir: d.join("config"), runtime: d.join("run") })

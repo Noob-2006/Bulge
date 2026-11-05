@@ -680,7 +680,7 @@ mod tests {
         let calls = Arc::new(Mutex::new(vec![]));
         let mut slot = slot_with(RecordingDesk { calls: calls.clone(), shots: 0 });
         let tool = ComputerTool::new(Arc::new(ComputerUseConfig::default()), "native");
-        let home = std::env::temp_dir().join(format!("ark-cu-enum-{}-{}", std::process::id(), ark_net::crypto::random_token(4)));
+        let home = ark_core::tmp::scratch_path(format!("ark-cu-enum-{}-{}", std::process::id(), ark_net::crypto::random_token(4)));
         let _ = std::fs::create_dir_all(&home);
         let ctx = crate::computer::fake_driver::ctx(&home, "sess-advertised");
         let first = tool.run(&ctx, &mut slot, "screenshot", &json!({"action": "screenshot"})).unwrap();
@@ -715,7 +715,7 @@ mod tests {
     #[test]
     fn backend_cua_is_reachable_and_unknown_backends_are_clear() {
         use crate::computer::fake_driver::{self, FakeDriver};
-        let home = std::env::temp_dir().join(format!("ark-cu-desk-{}-{}", std::process::id(), ark_net::crypto::random_token(4)));
+        let home = ark_core::tmp::scratch_path(format!("ark-cu-desk-{}-{}", std::process::id(), ark_net::crypto::random_token(4)));
         let _ = std::fs::create_dir_all(&home);
         let Some(f) = FakeDriver::install(&home, "cua-driver") else {
             eprintln!("skipped: python3 is unavailable");

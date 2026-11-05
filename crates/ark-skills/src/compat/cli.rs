@@ -346,7 +346,7 @@ mod tests {
     use super::*;
 
     fn tmp(tag: &str) -> PathBuf {
-        let d = std::env::temp_dir().join(format!("ark-compat-cli-{tag}-{}", std::process::id()));
+        let d = ark_core::tmp::scratch_path(format!("ark-compat-cli-{tag}-{}", std::process::id()));
         let _ = fs::remove_dir_all(&d);
         d
     }

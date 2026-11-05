@@ -743,7 +743,7 @@ mod tests {
         }));
         let ws = crate::cdp::resolve_ws(&f.http, None, Duration::from_secs(5)).unwrap();
         let c = Conn::connect(&ws, &[], Duration::from_secs(5)).unwrap();
-        let dir = std::env::temp_dir().join(format!("ark-engine-{}-{}", std::process::id(), ark_net::crypto::random_token(4)));
+        let dir = ark_core::tmp::scratch_path(format!("ark-engine-{}-{}", std::process::id(), ark_net::crypto::random_token(4)));
         (Browser::new("t", "cdp", c, Some(f.http.clone()), None, None, false, dir, Duration::from_secs(5), policy, 300, false), f)
     }
 

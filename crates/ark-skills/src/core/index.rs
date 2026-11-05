@@ -243,7 +243,7 @@ mod tests {
 
     #[test]
     fn segment_and_delta_notes() {
-        let d = std::env::temp_dir().join(format!("ark-index-{}", std::process::id()));
+        let d = ark_core::tmp::scratch_path(format!("ark-index-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         let paths = Paths { data: d.join("data"), config_dir: d.join("cfg"), runtime: d.join("run") };
         let ws = d.join("ws");
@@ -277,7 +277,7 @@ mod tests {
 
     #[test]
     fn no_index_means_no_baseline_and_rebuilds_stay_per_workspace() {
-        let d = std::env::temp_dir().join(format!("ark-index-ws-{}", std::process::id()));
+        let d = ark_core::tmp::scratch_path(format!("ark-index-ws-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         let paths = Paths { data: d.join("data"), config_dir: d.join("cfg"), runtime: d.join("run") };
         let (ws1, ws2) = (d.join("one"), d.join("two"));
@@ -314,7 +314,7 @@ mod tests {
     fn plugin_skills_are_indexed_and_announced() {
         // A plugin that ships `skills/lint/SKILL.md` is part of the index, grouped under the
         // plugin and named `plugin:skill` (Hermes `tools/skills_tool_plugin.py`).
-        let d = std::env::temp_dir().join(format!("ark-index-plugin-{}", std::process::id()));
+        let d = ark_core::tmp::scratch_path(format!("ark-index-plugin-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         let paths = Paths { data: d.join("data"), config_dir: d.join("cfg"), runtime: d.join("run") };
         let ws = d.join("ws");
@@ -340,7 +340,7 @@ mod tests {
     /// arriving as the next turn's note (the prompt baseline is untouched).
     #[test]
     fn reload_reports_the_difference_and_the_delta_still_announces_it() {
-        let d = std::env::temp_dir().join(format!("ark-index-reload-{}", std::process::id()));
+        let d = ark_core::tmp::scratch_path(format!("ark-index-reload-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         let paths = Paths { data: d.join("data"), config_dir: d.join("cfg"), runtime: d.join("run") };
         let ws = d.join("ws");

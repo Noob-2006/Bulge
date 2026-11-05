@@ -630,7 +630,7 @@ mod tests {
         assert_eq!((r.deleted_orphan, r.deleted_stale), (0, 1));
         assert!(store.maybe_auto_prune(7, 24, 0).is_none(), "interval marker");
         let r = store.prune(PruneOpts { retention_days: 0, delete_orphans: true, max_total_bytes: 0 });
-        assert_eq!(r.deleted_orphan, 1);
+        assert_eq!(r.deleted_orphan, 1, "{r:?}");
         assert_eq!(store.status().projects.len(), 1);
         let before = keep.count();
         let r = store.prune(PruneOpts { retention_days: 0, delete_orphans: true, max_total_bytes: 1 });

@@ -1894,7 +1894,7 @@ mod tests {
     // ── fixtures ──
 
     fn root(tag: &str) -> PathBuf {
-        let d = std::env::temp_dir().join(format!("ark-achievements-{}-{tag}", std::process::id()));
+        let d = ark_core::tmp::scratch_path(format!("ark-achievements-{}-{tag}", std::process::id()));
         let _ = fs::remove_dir_all(&d);
         fs::create_dir_all(d.join("data")).unwrap();
         d

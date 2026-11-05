@@ -352,7 +352,7 @@ mod tests {
 
     #[test]
     fn seed_update_modified_deleted_reset_optout() {
-        let d = std::env::temp_dir().join(format!("ark-sync-{}", std::process::id()));
+        let d = ark_core::tmp::scratch_path(format!("ark-sync-{}", std::process::id()));
         let _ = fs::remove_dir_all(&d);
         let b = d.join("bundled");
         for (n, body) in [("a", "A1"), ("b", "B1"), ("c", "C1")] {
@@ -390,7 +390,7 @@ mod tests {
 
     #[test]
     fn rename_recovery_v1_migration_backup_and_descriptions() {
-        let d = std::env::temp_dir().join(format!("ark-sync2-{}", std::process::id()));
+        let d = ark_core::tmp::scratch_path(format!("ark-sync2-{}", std::process::id()));
         let _ = fs::remove_dir_all(&d);
         let b = d.join("bundled");
         for (n, body) in [("x", "X1"), ("y", "Y1"), ("z", "Z1")] {

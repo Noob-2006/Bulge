@@ -165,9 +165,9 @@ mod tests {
 
     #[test]
     fn detects_worktree_rewrites_only_inside_root() {
-        let root = std::env::temp_dir().join(format!("ark-selfrepo-{}", std::process::id()));
+        let root = ark_core::tmp::scratch_path(format!("ark-selfrepo-{}", std::process::id()));
         std::fs::create_dir_all(root.join("sub")).unwrap();
-        let other = std::env::temp_dir();
+        let other = ark_core::tmp::scratch("ark-ws");
         for (cmd, op) in [
             ("git checkout main", "git checkout"),
             ("git reset --hard HEAD~1", "git reset"),

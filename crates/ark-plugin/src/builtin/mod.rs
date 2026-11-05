@@ -105,7 +105,7 @@ mod tests {
     use super::*;
 
     fn paths(tag: &str) -> Paths {
-        let d = std::env::temp_dir().join(format!("ark-builtin-{tag}-{}", std::process::id()));
+        let d = ark_core::tmp::scratch_path(format!("ark-builtin-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         Paths { data: d.join("data"), config_dir: d.join("config"), runtime: d.join("run") }
     }
@@ -119,7 +119,7 @@ mod tests {
     #[test]
     fn builtins_are_opt_in_and_compose_tools_hooks_and_slash() {
         let p = paths("a");
-        let ws = std::env::temp_dir();
+        let ws = ark_core::tmp::scratch("ark-ws");
         let mut cfg = Config::default();
         assert!(tools(&cfg, &p, &ws).is_empty() && hooks(&cfg, &p).is_empty() && slash(&cfg, &p).is_empty(), "off by default");
         for (n, _, _) in NAMES {

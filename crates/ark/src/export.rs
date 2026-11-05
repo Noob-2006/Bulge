@@ -758,7 +758,7 @@ mod tests {
 
     #[test]
     fn sharegpt_and_bundle_files() {
-        let dir = std::env::temp_dir().join(format!("ark-traj-{}", ark_kernel::util::random_hex(6)));
+        let dir = ark_core::tmp::scratch_path(format!("ark-traj-{}", ark_kernel::util::random_hex(6)));
         let p = save_sharegpt(&evs(), &[], &dir, None).unwrap();
         assert!(p.ends_with("failed_trajectories.jsonl"), "no clean turn end → failed");
         save_sharegpt(&evs(), &[], &dir, None).unwrap();

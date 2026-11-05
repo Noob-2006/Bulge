@@ -387,7 +387,7 @@ mod tests {
         }
         assert!(normalize_ref("x'); evil(").is_none() && normalize_ref("e").is_none());
         assert_eq!(query_lines("- button \"Save\" [ref=e1]\n- link \"Home\"", "SAVE button"), vec!["- button \"Save\" [ref=e1]"]);
-        let dir = std::env::temp_dir().join(format!("ark-snap-{}", std::process::id()));
+        let dir = ark_core::tmp::scratch_path(format!("ark-snap-{}", std::process::id()));
         let big = (0..500).map(|i| format!("- button \"b{i}\" [ref=e{i}]")).collect::<Vec<_>>().join("\n");
         let t = truncate_store(&big, 2000, &dir);
         assert!(t.len() <= 2000 && t.contains("more lines truncated — full snapshot: read path="), "{t}");
