@@ -9,6 +9,7 @@ pub mod imageevict;
 pub mod provider;
 pub mod registry;
 pub mod share;
+pub mod team;
 pub mod tmp;
 pub mod tool;
 pub mod types;

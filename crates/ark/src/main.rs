@@ -2278,6 +2278,8 @@ fn cmd_doctor(a: &Args) -> R {
             Err(e) => println!("· computer_use: {e}"),
         }
     }
+    // ent-085: keys past their rotation schedule (`ark secrets rotation`).
+    check("key rotation", ops::rotate::doctor_line(&paths));
     // ent-036/037/039: the outbound network policy every HTTP/TLS client is built with.
     for (k, v) in ark_net::http::describe() {
         if k == "ca" && v.contains("falling back") {

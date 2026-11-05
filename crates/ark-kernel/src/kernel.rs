@@ -1227,6 +1227,10 @@ impl Runtime {
                 }
             }
         }
+        // ent-086: the session owner's team picks that team's own model keys (if it has any).
+        // Cheap guard first: no registered user has a team → no owner lookup (session-log read).
+        let team = if crate::agents::users(&self.paths).iter().any(|u| !u.team.is_empty()) { crate::governance::owner_of(self, &log.id).team } else { String::new() };
+        let _team = ark_core::team::scope(&team);
         for (ci, m) in chain.iter().enumerate() {
             let (pid, mname) = split_model(m);
             let provider = match self.resolver.provider(pid) {

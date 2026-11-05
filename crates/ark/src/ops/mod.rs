@@ -25,6 +25,7 @@ pub mod miniswe;
 pub mod net;
 pub mod profile;
 pub mod secretsrc;
+pub mod rotate;
 pub mod service;
 pub mod slashops;
 pub mod status;
@@ -79,6 +80,7 @@ const MODULES: &[Module] = &[
     (service::COMMANDS, service::VALUE_FLAGS, service::BOOL_FLAGS, service::dispatch),
     (logs::COMMANDS, logs::VALUE_FLAGS, logs::BOOL_FLAGS, logs::dispatch),
     (telemetry::COMMANDS, telemetry::VALUE_FLAGS, telemetry::BOOL_FLAGS, telemetry::dispatch),
+    (rotate::COMMANDS, rotate::VALUE_FLAGS, rotate::BOOL_FLAGS, rotate::dispatch),
     (secretsrc::COMMANDS, secretsrc::VALUE_FLAGS, secretsrc::BOOL_FLAGS, secretsrc::dispatch),
     (status::COMMANDS, status::VALUE_FLAGS, status::BOOL_FLAGS, status::dispatch),
     (batch::COMMANDS, batch::VALUE_FLAGS, batch::BOOL_FLAGS, batch::dispatch),

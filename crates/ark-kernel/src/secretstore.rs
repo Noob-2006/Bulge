@@ -669,6 +669,60 @@ pub fn migrate(plaintext: &Path, opts: &Options) -> Result<(usize, Backend, Vec<
     Ok((n, backend, notes))
 }
 
+/// Re-encrypt the store under a fresh key (ent-085): a new passphrase (and salt), a new
+/// `ARK_VAULT_KEY`, a new keyring entry / TPM-sealed data key, or a different backend
+/// altogether (`new.backend`). The old store is opened with `old`; the new file is written,
+/// read back and compared before anything of the old key material is dropped, and the previous
+/// ciphertext is restored if any step fails.
+pub fn rekey(plaintext: &Path, old: &Options, new: &Options) -> Result<(usize, Backend, Vec<String>), String> {
+    let mut store = Store::open(plaintext, old)?;
+    if !store.backend.encrypted() {
+        return Err("the store is plaintext — run `ark secrets migrate` first".into());
+    }
+    let mut notes = vec![];
+    let backend = if new.backend.is_some() { pick_backend(plaintext, new, &mut notes)? } else { store.backend };
+    if !backend.encrypted() {
+        return Err("rekeying to plaintext is not allowed".into());
+    }
+    let previous = fs::read(&store.path).map_err(|e| format!("{}: {e}", store.path.display()))?;
+    let sealed = key_path(plaintext);
+    let sealed_bak = sealed.with_extension("key.prev");
+    store.backend = backend;
+    store.opts = new.clone();
+    store.key.clear();
+    store.salt.clear();
+    store.iterations = 0;
+    let result = (|| -> Result<(), String> {
+        match backend {
+            Backend::Keyring => {
+                let t = tool(&store.opts, KeyringTool::SecretService).ok_or("secret-tool is not installed")?;
+                let key = secretbox::random_key()?;
+                store_in_keyring(&t, &keyring_account(&store.path), &secretbox::hex(&key))?;
+                store.key = key.to_vec();
+            }
+            Backend::Tpm => {
+                if sealed.exists() {
+                    fs::rename(&sealed, &sealed_bak).map_err(|e| e.to_string())?;
+                }
+                store.prepare_key(true)?;
+            }
+            _ => store.prepare_key(true)?,
+        }
+        store.save()?;
+        store.verify_readback()
+    })();
+    if let Err(e) = result {
+        let _ = write_private(&store.path, &previous);
+        if sealed_bak.exists() {
+            let _ = fs::rename(&sealed_bak, &sealed);
+        }
+        return Err(format!("rekey failed, the previous store was restored: {e}"));
+    }
+    let _ = fs::remove_file(&sealed_bak);
+    notes.extend(store.notes.clone());
+    Ok((store.secrets.len(), backend, notes))
+}
+
 /// The backend recorded in an existing store, read from the header only: no key, no KDF, no
 /// subprocess. `ark status` must stay instant and must not unlock anything.
 pub fn peek_backend(plaintext: &Path) -> Option<Backend> {
@@ -787,6 +841,40 @@ mod tests {
         fs::write(&p, format!("#!/bin/sh\nset -e\ncase \"$1\" in\n  store) cat > '{}' ;;\n  lookup) [ -f '{}' ] && cat '{}' || exit 1 ;;\n  *) exit 2 ;;\nesac\n", entry.display(), entry.display(), entry.display())).unwrap();
         fs::set_permissions(&p, fs::Permissions::from_mode(0o755)).unwrap();
         p
+    }
+
+    /// ent-085: a new passphrase, a new raw key, a new keyring entry — and a failed rekey
+    /// leaves the old store intact.
+    #[test]
+    fn rekey_rotates_the_master_key_and_restores_on_failure() {
+        let d = tmpdir();
+        let p = d.join("secrets.toml");
+        let mut s = Store::open(&p, &passphrase_opts()).unwrap();
+        s.set("OPENAI_API_KEY", "sk-1").unwrap();
+        let before = fs::read_to_string(d.join("secrets.enc")).unwrap();
+        // Missing new passphrase: refused, old file byte-identical and still opens.
+        let broken = Options { passphrase: None, ..passphrase_opts() };
+        assert!(rekey(&p, &passphrase_opts(), &broken).is_err());
+        let broken2 = Options { backend: None, passphrase: None, ..passphrase_opts() };
+        assert!(rekey(&p, &passphrase_opts(), &broken2).unwrap_err().contains("restored"));
+        assert_eq!(fs::read_to_string(d.join("secrets.enc")).unwrap(), before);
+        // New passphrase: the old one no longer opens it, the new one does.
+        let new = Options { passphrase: Some("new passphrase 2026".into()), ..passphrase_opts() };
+        let (n, b, _) = rekey(&p, &passphrase_opts(), &new).unwrap();
+        assert_eq!((n, b), (1, Backend::Passphrase));
+        assert!(Store::open(&p, &passphrase_opts()).is_err());
+        assert_eq!(Store::open(&p, &new).unwrap().get("OPENAI_API_KEY"), Some("sk-1"));
+        // Switch backend: passphrase → env key.
+        let env = Options { backend: Some(Backend::Env), key: Some([7u8; 32]), ..bare_opts() };
+        assert_eq!(rekey(&p, &new, &env).unwrap().1, Backend::Env);
+        assert_eq!(Store::open(&p, &env).unwrap().get("OPENAI_API_KEY"), Some("sk-1"));
+        // Keyring (stand-in tool): a fresh key replaces the entry.
+        let kr = Options { backend: Some(Backend::Keyring), keyring_tool: Some(fake_secret_tool(&d)), creds_tool: Some(PathBuf::from("/nonexistent")), ..Default::default() };
+        rekey(&p, &env, &kr).unwrap();
+        let k1 = fs::read_to_string(d.join("entry")).unwrap();
+        rekey(&p, &kr, &Options { backend: None, ..kr.clone() }).unwrap();
+        assert_ne!(fs::read_to_string(d.join("entry")).unwrap(), k1, "a new keyring key");
+        assert_eq!(Store::open(&p, &kr).unwrap().get("OPENAI_API_KEY"), Some("sk-1"));
     }
 
     #[test]

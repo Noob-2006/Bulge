@@ -117,6 +117,33 @@ impl Providers {
         Ok(out)
     }
 
+    /// A team's own key for `cfg` (ent-086): the secret (vault, else environment) named like the
+    /// provider's key variable plus `__<TEAM>` — `OPENAI_API_KEY__ENG` for team `eng`. Feed it
+    /// from any secret source (`ark secrets vault set OPENAI_API_KEY__ENG ark/teams/eng#openai`).
+    pub fn team_key(&self, cfg: &ProviderConfig, team: &str) -> Option<String> {
+        let suffix = ark_core::team::secret_suffix(team);
+        if suffix.is_empty() {
+            return None;
+        }
+        cfg.key_env_names().iter().find_map(|n| {
+            let name = format!("{n}__{suffix}");
+            self.vault_key(&name).or_else(|| std::env::var(&name).ok()).filter(|v| !v.trim().is_empty())
+        })
+    }
+
+    /// `(team, provider)` pairs that have their own key, for `ark doctor` / `ark auth`.
+    pub fn team_keys(&self, teams: &[String]) -> Vec<(String, String)> {
+        let mut v = vec![];
+        for t in teams {
+            for (id, cfg) in &self.configs {
+                if self.team_key(cfg, t).is_some() {
+                    v.push((t.clone(), id.clone()));
+                }
+            }
+        }
+        v
+    }
+
     /// Where the key for a provider would come from (for `ark doctor`).
     pub fn key_source(&self, id: &str) -> Result<&'static str, String> {
         let c = self.config(id).ok_or_else(|| format!("unknown provider `{id}`"))?;
@@ -196,6 +223,21 @@ impl Resolver for Providers {
     fn provider(&self, id: &str) -> Result<Arc<dyn Provider>, String> {
         if let Some(p) = self.plugins.lock().unwrap().get(id) {
             return Ok(p.clone());
+        }
+        // ent-086: a team with its own key for this provider gets a provider built from it.
+        if let Some(team) = ark_core::team::current() {
+            if let Some(cfg) = self.config(id).cloned() {
+                if let Some(key) = self.team_key(&cfg, &team) {
+                    let ck = format!("{id}@team:{team}");
+                    if let Some(p) = self.cache.lock().unwrap().get(&ck) {
+                        return Ok(p.clone());
+                    }
+                    let idle = Duration::from_secs(cfg.idle_timeout_secs.unwrap_or(ark_model::DEFAULT_IDLE_SECS).max(1));
+                    let p = self.watched(&cfg.id, ark_model::build_with(&cfg, Arc::new(auth::Static::new(Some(key))), idle)?);
+                    self.cache.lock().unwrap().insert(ck, p.clone());
+                    return Ok(p);
+                }
+            }
         }
         if let Some(p) = self.cache.lock().unwrap().get(id) {
             return Ok(p.clone());
@@ -306,5 +348,30 @@ mod tests {
         assert!(p.provider("moa").is_ok());
         let p = Providers::new(&BTreeMap::new(), Arc::new(Vault::empty())).unwrap();
         assert!(p.provider("moa").err().unwrap().contains("references"));
+    }
+
+    /// ent-086: a session of team `eng` uses `OPENAI_API_KEY__ENG`, other sessions the shared key.
+    #[test]
+    fn team_scoped_keys_win_inside_the_team_scope() {
+        let v = Vault::empty();
+        v.set("GROQ_API_KEY", "gsk-shared").unwrap();
+        v.set("GROQ_API_KEY__ENG_PLATFORM", "gsk-eng").unwrap();
+        let tmp = ark_core::tmp::TempDir::new("ark-tmp-teamkeys");
+        let p = Providers::new(&BTreeMap::new(), Arc::new(v)).unwrap().with_store(Store::new(tmp.path().join("auth.json")));
+        let cfg = p.config("groq").unwrap().clone();
+        assert_eq!(p.team_key(&cfg, "eng-platform").as_deref(), Some("gsk-eng"));
+        assert_eq!(p.team_key(&cfg, "sales"), None);
+        let shared = p.provider("groq").unwrap();
+        let eng = {
+            let _t = ark_core::team::scope("eng-platform");
+            p.provider("groq").unwrap()
+        };
+        let sales = {
+            let _t = ark_core::team::scope("sales");
+            p.provider("groq").unwrap()
+        };
+        assert!(!Arc::ptr_eq(&shared, &eng), "the team gets its own provider");
+        assert!(Arc::ptr_eq(&shared, &sales), "a team without keys uses the shared one");
+        assert_eq!(p.team_keys(&["eng-platform".into(), "sales".into()]), vec![("eng-platform".to_string(), "groq".to_string())]);
     }
 }

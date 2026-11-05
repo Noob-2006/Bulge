@@ -647,4 +647,45 @@ mod tests {
         k.submit(&id, "mail bob@corp.example", "cli").unwrap();
         assert!(serde_json::to_string(&k.store.read(&id).unwrap()).unwrap().contains("bob@corp.example"), "off by default");
     }
+
+    /// ent-086: the model call of a session owned by a team member resolves its provider with
+    /// that team in scope (so the resolver can pick the team's own key); others resolve without.
+    #[test]
+    fn model_calls_carry_the_owners_team() {
+        struct Rec(std::sync::Mutex<Vec<Option<String>>>);
+        impl crate::kernel::Resolver for Rec {
+            fn provider(&self, id: &str) -> Result<std::sync::Arc<dyn ark_core::Provider>, String> {
+                self.0.lock().unwrap().push(ark_core::team::current());
+                Err(format!("no provider {id}"))
+            }
+        }
+        let tmp = ark_core::tmp::TempDir::new("ark-gov-team");
+        let root = tmp.path();
+        let paths = crate::config::Paths { data: root.join("data"), config_dir: root.join("cfg"), runtime: root.join("run") };
+        std::fs::create_dir_all(&paths.data).unwrap();
+        let mut cfg = crate::config::Config::default();
+        cfg.model.default = "fake/m".into();
+        cfg.checkpoint.enabled = false;
+        let rec = std::sync::Arc::new(Rec(Default::default()));
+        let k = crate::kernel::new_kernel(cfg, paths, rec.clone(), vec![], std::sync::Arc::new(crate::vault::Vault::empty()), std::sync::Arc::new(crate::approver::Policy { allow_privilege: false, allow_egress: false }));
+        let ann = crate::agents::user_add(&k.paths, "ann").unwrap();
+        crate::agents::user_update(&k.paths, &ann.id, |u| {
+            u.team = "eng".into();
+            Ok(())
+        })
+        .unwrap();
+        crate::agents::user_link_email(&k.paths, &ann.id, "ann@corp.example").unwrap();
+        let ws = root.join("ws");
+        std::fs::create_dir_all(&ws).unwrap();
+        let id = k.create_session(&ws, None, None, None).unwrap();
+        note_owner(&k.paths.data, &id, "sso:ann@corp.example");
+        k.submit(&id, "hi", "cli").unwrap();
+        let _ = k.run(&id, crate::kernel::RunOpts::default());
+        let other = k.create_session(&ws, None, None, None).unwrap();
+        k.submit(&other, "hi", "cli").unwrap();
+        let _ = k.run(&other, crate::kernel::RunOpts::default());
+        let seen = rec.0.lock().unwrap().clone();
+        assert!(seen.contains(&Some("eng".to_string())), "{seen:?}");
+        assert!(seen.contains(&None), "{seen:?}");
+    }
 }
