@@ -254,6 +254,44 @@ pub fn proc_start_time(pid: u32) -> Option<u64> {
 
 static REAPER_HOME: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
 
+/// `[exec.cgroups]` (ent-024): every local/bwrap/landlock command also gets its own cgroup —
+/// v1 or v2, whichever the host runs — when ark may write to its cgroup subtree (a systemd
+/// service with `Delegate=yes`, or root). The reaper then also finds members that escaped
+/// the process group, and the caps below apply per command. Off by default.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct CgroupConfig {
+    pub enabled: bool,
+    /// `memory.max` / `memory.limit_in_bytes` per command; 0 = no cap.
+    pub memory_mb: u64,
+    /// `pids.max` per command (fork-bomb guard); 0 = no cap.
+    pub pids_max: u64,
+}
+
+static CGROUPS: std::sync::OnceLock<(ark_vm::cgroup::Cgroups, CgroupConfig)> = std::sync::OnceLock::new();
+
+/// Turn on per-command cgroups (binary startup). `Err` says why not (no delegated subtree):
+/// commands still run, tracked by process group only.
+pub fn enable_cgroups(cfg: &CgroupConfig, root: &Path) -> Result<ark_vm::hostcaps::CgroupVersion, String> {
+    if !cfg.enabled {
+        return Err("[exec.cgroups] enabled = false".into());
+    }
+    let cg = ark_vm::cgroup::Cgroups::discover(root)?;
+    cg.prepare()?;
+    let v = cg.version;
+    let _ = CGROUPS.set((cg, cfg.clone()));
+    Ok(v)
+}
+
+/// Put `pid` into a fresh cgroup with the configured caps; the path for the reaper record.
+fn cgroup_for(pid: u32, session: &str) -> Option<String> {
+    let (cg, cfg) = CGROUPS.get()?;
+    let g = cg.create(&format!("{}-{pid}", if session.is_empty() { "exec" } else { session })).ok()?;
+    let _ = g.limit(cfg.memory_mb << 20, cfg.pids_max);
+    g.add(pid).ok()?;
+    Some(g.primary().display().to_string())
+}
+
 thread_local! {
     static REAPER_SCOPE: std::cell::RefCell<Option<(PathBuf, String, String)>> = const { std::cell::RefCell::new(None) };
 }
@@ -283,6 +321,10 @@ impl Drop for ReapScope {
 /// Append one `{"pgid":…,"start":…,"session":…,"tool":…,"ark_pid":…,"ts_ms":…}` line.
 /// Errors are ignored: the registry is a hint for the reaper, never a precondition.
 pub fn register_pgid(home: &Path, pgid: u32, session: &str, tool: &str) {
+    register_pgid_in(home, pgid, session, tool, None)
+}
+
+fn register_pgid_in(home: &Path, pgid: u32, session: &str, tool: &str, cgroup: Option<String>) {
     let dir = home.join("reaper");
     if std::fs::create_dir_all(&dir).is_err() {
         return;
@@ -295,6 +337,7 @@ pub fn register_pgid(home: &Path, pgid: u32, session: &str, tool: &str) {
         "tool": tool,
         "ark_pid": std::process::id(),
         "ts_ms": ts_ms,
+        "cgroup": cgroup,
     });
     if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(dir.join("procs.jsonl")) {
         let _ = writeln!(f, "{line}");
@@ -307,9 +350,11 @@ pub fn register_pgid(home: &Path, pgid: u32, session: &str, tool: &str) {
 fn register_child(pid: u32, kind: &str) {
     let scope = REAPER_SCOPE.with(|s| s.borrow().clone());
     let named = |t: &str| if kind.is_empty() { t.to_string() } else { kind.to_string() };
+    // A detached job is meant to outlive this ark: it is not put in a cgroup ark may reap.
+    let cg = |session: &str| if kind == "detached" { None } else { cgroup_for(pid, session) };
     match (scope, REAPER_HOME.get()) {
-        (Some((home, session, tool)), _) => register_pgid(&home, pid, &session, &named(&tool)),
-        (None, Some(home)) => register_pgid(home, pid, "", &named("exec")),
+        (Some((home, session, tool)), _) => register_pgid_in(&home, pid, &session, &named(&tool), cg(&session)),
+        (None, Some(home)) => register_pgid_in(home, pid, "", &named("exec"), cg("")),
         (None, None) => {}
     }
 }
@@ -497,11 +542,13 @@ pub struct BwrapConfig {
     /// Host directories mounted read-only to make a usable system.
     pub ro_paths: Vec<String>,
     pub extra_args: Vec<String>,
+    /// Apply ark's seccomp deny-list (`exec::seccomp`) with `bwrap --seccomp` (ent-023).
+    pub seccomp: bool,
 }
 
 impl Default for BwrapConfig {
     fn default() -> Self {
-        BwrapConfig { binary: "bwrap".into(), ro_paths: ["/usr", "/bin", "/sbin", "/lib", "/lib64", "/lib32", "/etc", "/opt", "/nix", "/run/current-system"].map(String::from).to_vec(), extra_args: vec![] }
+        BwrapConfig { binary: "bwrap".into(), ro_paths: ["/usr", "/bin", "/sbin", "/lib", "/lib64", "/lib32", "/etc", "/opt", "/nix", "/run/current-system"].map(String::from).to_vec(), extra_args: vec![], seccomp: true }
     }
 }
 
@@ -599,18 +646,39 @@ impl ExecBackend for BwrapBackend {
     }
     fn describe(&self) -> String {
         format!(
-            "bwrap: Linux namespace sandbox; workspace {} {}, network {}, home hidden, /tmp private, all capabilities dropped",
+            "bwrap: Linux namespace sandbox; workspace {} {}, network {}, home hidden, /tmp private, all capabilities dropped, seccomp {}",
             self.l.workspace.display(),
             if self.l.writable { "read-write" } else { "read-only" },
-            if self.l.network { "shared with host" } else { "disabled" }
+            if self.l.network { "shared with host" } else { "disabled" },
+            if self.cfg.seccomp && super::seccomp::program().is_some() { "deny-list on" } else { "off" }
         )
     }
     fn spawn(&self, req: &ExecRequest) -> io::Result<Box<dyn ExecChild>> {
         let mut cmd = Command::new(&self.cfg.binary);
-        cmd.args(self.args(req));
+        let mut args = self.args(req);
+        // ent-023: the seccomp deny-list travels as a pipe fd; only the child sees it (the
+        // pre-exec hook clears close-on-exec there), and the parent's copy closes on return.
+        let filter = if self.cfg.seccomp { super::seccomp::pipe_with_program()? } else { None };
+        let mut hook: Option<PreExec> = None;
+        if let Some(fd) = &filter {
+            use std::os::fd::AsRawFd;
+            let raw = fd.as_raw_fd();
+            let at = args.len().saturating_sub(3); // before `bash -c <script>`
+            args.splice(at..at, ["--seccomp".to_string(), raw.to_string()]);
+            hook = Some(Box::new(move || {
+                // SAFETY: fcntl on an fd this process owns, in the forked child before exec.
+                if unsafe { libc::fcntl(raw, libc::F_SETFD, 0) } != 0 {
+                    return Err(io::Error::last_os_error());
+                }
+                Ok(())
+            }));
+        }
+        cmd.args(args);
         let mut req = req.clone();
         req.cwd = None;
-        spawn_command(cmd, &req, None)
+        let child = spawn_command(cmd, &req, hook);
+        drop(filter);
+        child
     }
     fn temp_dir(&self) -> String {
         "/tmp".into()
@@ -847,6 +915,39 @@ mod tests {
         let _ = std::fs::remove_dir_all(&home);
     }
 
+    /// ent-024: with `[exec.cgroups]` on and a delegated (here: fake v2) subtree, a spawned
+    /// command lands in its own cgroup with the caps, and the reaper line names it.
+    #[test]
+    fn commands_get_their_own_cgroup_when_enabled() {
+        assert!(enable_cgroups(&CgroupConfig::default(), Path::new("/")).unwrap_err().contains("enabled = false"));
+        let root = tmpdir("cgroot");
+        let w = |rel: &str, body: &str| {
+            let p = root.join(rel);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, body).unwrap();
+        };
+        w("proc/self/cgroup", "0::/system.slice/ark.service\n");
+        w("sys/fs/cgroup/cgroup.controllers", "memory pids");
+        w("sys/fs/cgroup/system.slice/ark.service/cgroup.controllers", "memory pids");
+        let on = CgroupConfig { enabled: true, memory_mb: 512, pids_max: 100 };
+        assert_eq!(enable_cgroups(&on, &root).unwrap(), ark_vm::hostcaps::CgroupVersion::V2);
+        let home = tmpdir("cgreg");
+        let b = LocalBackend::new();
+        let scope = reap_scope(&home, "s-cg", "shell");
+        let mut c = b.spawn(&req("sleep 30")).unwrap();
+        drop(scope);
+        let pid = c.pid().unwrap();
+        let text = std::fs::read_to_string(home.join("reaper/procs.jsonl")).unwrap();
+        let line: serde_json::Value = serde_json::from_str(text.lines().last().unwrap()).unwrap();
+        let cg = PathBuf::from(line["cgroup"].as_str().expect("the cgroup is recorded"));
+        assert_eq!(cg, root.join(format!("sys/fs/cgroup/system.slice/ark.service/ark-exec/s-cg-{pid}")));
+        assert_eq!(std::fs::read_to_string(cg.join("cgroup.procs")).unwrap(), pid.to_string());
+        assert_eq!(std::fs::read_to_string(cg.join("memory.max")).unwrap(), (512u64 << 20).to_string());
+        assert_eq!(std::fs::read_to_string(cg.join("pids.max")).unwrap(), "100");
+        c.kill(true);
+        let _ = drain(c, Duration::from_secs(5));
+    }
+
     #[test]
     fn pty_is_a_terminal_and_resizes() {
         let b = LocalBackend::new();
@@ -971,6 +1072,16 @@ mod tests {
         let s = String::from_utf8_lossy(&out);
         assert!(!s.contains("inside") && s.contains("sandboxes/t/workspace"), "{s}");
         assert!(b.describe().contains("network disabled"));
+        // ent-023: the seccomp deny-list is on — a new user namespace or a keyring call from
+        // inside is refused, ordinary commands still run.
+        assert!(b.describe().contains("seccomp deny-list on"), "{}", b.describe());
+        if which("unshare").is_some() {
+            let (_, out) = drain(b.spawn(&req("unshare -U true 2>/dev/null; echo rc=$?; echo fine")).unwrap(), Duration::from_secs(10)).unwrap();
+            let s = String::from_utf8_lossy(&out);
+            assert!(s.contains("fine") && !s.contains("rc=0"), "unshare must be refused: {s}");
+        }
+        let off = BwrapConfig { seccomp: false, ..BwrapConfig::default() };
+        assert!(BwrapBackend::new(&off, &sb, &ctx).unwrap().describe().contains("seccomp off"));
     }
 
     #[test]

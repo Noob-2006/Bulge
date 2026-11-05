@@ -644,7 +644,7 @@ mod tests {
         let mut a = own_group();
         let mut b = own_group();
         for c in [&a, &b] {
-            let rec = crate::reaper::Record { pgid: c.id(), start: crate::reaper::start_time(c.id()), session: "s-proc".into(), tool: "shell".into(), ark_pid: std::process::id(), ts_ms: now_ms() };
+            let rec = crate::reaper::Record { pgid: c.id(), start: crate::reaper::start_time(c.id()), session: "s-proc".into(), tool: "shell".into(), ark_pid: std::process::id(), ts_ms: now_ms(), cgroup: None };
             crate::reaper::append(home, &rec).unwrap();
         }
         match check(&k, "s-proc") {

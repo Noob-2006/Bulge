@@ -11,6 +11,7 @@ pub mod hints;
 pub mod local;
 pub mod modal;
 pub mod sandbox;
+pub mod seccomp;
 pub mod openshell;
 pub mod ptyq;
 pub mod session;
@@ -94,6 +95,8 @@ pub struct ExecConfig {
     pub openshell: openshell::OpenShellConfig,
     /// `[exec.vm]`: the microVM backend (B1–B5). Default provider `auto`.
     pub vm: ark_vm::VmConfig,
+    /// `[exec.cgroups]`: one cgroup per command for cleanup and caps (ent-024).
+    pub cgroups: local::CgroupConfig,
 }
 
 impl Default for ExecConfig {
@@ -131,6 +134,7 @@ impl Default for ExecConfig {
             vercel: Value::Null,
             openshell: Default::default(),
             vm: Default::default(),
+            cgroups: Default::default(),
         }
     }
 }

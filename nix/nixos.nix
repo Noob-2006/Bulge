@@ -29,6 +29,7 @@ let cfg = config.services.ark; in {
         RestartSec = "5s";
         KillMode = "mixed";
         TimeoutStopSec = "30s";
+        Delegate = true; # ent-024: per-command cgroups ([exec.cgroups])
         NoNewPrivileges = true;
         RestrictSUIDSGID = true;
         LockPersonality = true;

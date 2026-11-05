@@ -137,6 +137,11 @@ pub struct Capabilities {
     pub initramfs: Option<PathBuf>,
     /// Host arch, for image selection.
     pub arch: String,
+    /// Container engines (the fallback when neither bwrap nor Landlock can run, ent-023/026).
+    pub docker: Option<PathBuf>,
+    pub podman: Option<PathBuf>,
+    /// Kernel features: Landlock ABI, user namespaces, seccomp, cgroups (ent-023/024/026).
+    pub host: crate::hostcaps::HostKernel,
 }
 
 impl Capabilities {
@@ -153,6 +158,9 @@ impl Capabilities {
             kernel,
             initramfs,
             arch: std::env::consts::ARCH.to_string(),
+            docker: which("docker"),
+            podman: which("podman"),
+            host: crate::hostcaps::HostKernel::detect(),
         }
     }
     /// Can a real microVM boot right now?
@@ -171,7 +179,7 @@ impl Capabilities {
         if self.runsc.is_some() {
             return Some(ProviderKind::Gvisor);
         }
-        if self.bwrap.is_some() {
+        if self.bwrap.is_some() && self.host.userns {
             return Some(ProviderKind::Bwrap);
         }
         None
@@ -188,7 +196,12 @@ impl Capabilities {
             format!("bwrap: {}", p(&self.bwrap)),
             format!("gvisor (runsc): {}", p(&self.runsc)),
             format!("best provider: {}", self.best().map(|k| k.name()).unwrap_or("none")),
+            format!("docker: {}", p(&self.docker)),
+            format!("podman: {}", p(&self.podman)),
         ]
+        .into_iter()
+        .chain(self.host.report())
+        .collect()
     }
     /// The warning tied to what `best()` would actually pick.
     pub fn warning(&self) -> Option<String> {

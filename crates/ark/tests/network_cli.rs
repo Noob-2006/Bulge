@@ -40,3 +40,18 @@ fn doctor_reports_the_network_policy_and_the_offline_switch() {
     assert!(out.contains("✗ network ca: CA bundle /nonexistent/corp-ca.pem"), "{out}");
     assert_eq!(code, 1);
 }
+
+/// ent-023/026: `ark sandbox explain` names the real isolation level, the kernel features it
+/// rests on and every step the fallback took (the decision table itself is unit-tested
+/// against fake RHEL 7/8, AL2 and Ubuntu kernels in `ark_vm::policy`).
+#[test]
+fn sandbox_explain_shows_the_host_kernel_and_the_fallback() {
+    let tmp = ark_core::tmp::TempDir::new("ark-tmp-sbx");
+    let (code, out) = ark(tmp.path(), &["sandbox", "explain"], &[]);
+    assert_eq!(code, 0, "{out}");
+    assert!(out.contains("host: kernel:") && out.contains("landlock:") && out.contains("user namespaces:") && out.contains("cgroups:"), "{out}");
+    assert!(out.contains("without a microVM this host isolates with:"), "{out}");
+    let (_, json) = ark(tmp.path(), &["sandbox", "explain", "--json"], &[]);
+    let v: serde_json::Value = serde_json::from_str(json.trim()).unwrap_or_else(|e| panic!("{e}: {json}"));
+    assert!(v["isolation"]["host_kernel"]["cgroup"].is_string() && v["isolation"]["namespace_fallback"]["backend"].is_string(), "{v}");
+}

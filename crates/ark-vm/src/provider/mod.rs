@@ -192,7 +192,7 @@ mod tests {
     use crate::config::VmConfig;
 
     fn caps_all() -> Capabilities {
-        Capabilities { kvm: true, firecracker: Some("/bin/true".into()), qemu: Some("/bin/true".into()), bwrap: Some("/bin/true".into()), runsc: None, kernel: Some("/bin/true".into()), initramfs: Some("/bin/true".into()), arch: "x86_64".into() }
+        Capabilities { kvm: true, firecracker: Some("/bin/true".into()), qemu: Some("/bin/true".into()), bwrap: Some("/bin/true".into()), runsc: None, kernel: Some("/bin/true".into()), initramfs: Some("/bin/true".into()), arch: "x86_64".into(), ..Default::default() }
     }
 
     #[test]

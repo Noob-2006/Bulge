@@ -66,6 +66,9 @@ pub struct Record {
     pub tool: String,
     pub ark_pid: u32,
     pub ts_ms: u64,
+    /// The command's own cgroup (ent-024, `[exec.cgroups]`): members that escaped the process
+    /// group (a double fork into a new session) are still in it and are reaped with it.
+    pub cgroup: Option<String>,
 }
 
 impl Record {
@@ -84,6 +87,7 @@ impl Record {
             tool: text("tool"),
             ark_pid: v.get("ark_pid").and_then(Value::as_u64).unwrap_or(0) as u32,
             ts_ms: v.get("ts_ms").and_then(Value::as_u64).unwrap_or(0),
+            cgroup: v.get("cgroup").and_then(Value::as_str).filter(|s| s.starts_with('/')).map(str::to_string),
         })
     }
     pub fn to_json(&self) -> Value {
@@ -94,6 +98,7 @@ impl Record {
             "tool": self.tool,
             "ark_pid": self.ark_pid,
             "ts_ms": self.ts_ms,
+            "cgroup": self.cgroup,
         })
     }
     /// `detached` groups (a job started with `detach: true`) are recorded but never reaped:
@@ -384,6 +389,27 @@ fn decide(home: &Path, rec: &Record, live: &BTreeMap<u32, bool>) -> Action {
     Action::Reap(why)
 }
 
+/// Live pids in a recorded cgroup (v1 and v2 both list them in `cgroup.procs`).
+fn cgroup_members(dir: &str) -> Vec<u32> {
+    std::fs::read_to_string(Path::new(dir).join("cgroup.procs")).unwrap_or_default().lines().filter_map(|l| l.trim().parse().ok()).collect()
+}
+
+/// SIGKILL every member of a cgroup ark created for one command (`cgroup.kill` where the
+/// kernel has it). Never ark itself, pid 0/1 or an ancestor. Returns how many were signalled.
+fn kill_cgroup(dir: &str) -> usize {
+    let me = std::process::id();
+    let members: Vec<u32> = cgroup_members(dir).into_iter().filter(|p| *p > 1 && *p != me && !is_our_own_or_ancestor_group(*p)).collect();
+    let kill = Path::new(dir).join("cgroup.kill");
+    if !members.is_empty() && kill.exists() && std::fs::write(&kill, "1").is_ok() {
+        return members.len();
+    }
+    for p in &members {
+        // SAFETY: kill(2) on a pid listed in a cgroup this ark instance created for the command.
+        unsafe { libc::kill(*p as i32, libc::SIGKILL) };
+    }
+    members.len()
+}
+
 /// Sweep every registry entry of `home`; `only` restricts reaping to one session
 /// ([`on_session_end`]).
 fn run(home: &Path, only: Option<&str>) -> SweepReport {
@@ -409,7 +435,22 @@ fn run(home: &Path, only: Option<&str>) -> SweepReport {
             keep.push(line.to_string());
             continue;
         }
-        match decide(home, &rec, &live) {
+        // ent-024: a recorded cgroup outlives its process group when a member double-forked.
+        let cg_live = rec.cgroup.as_deref().map(cgroup_members).unwrap_or_default();
+        let owner_done = rec.reapable() && rec.ark_pid > 1 && (!pid_alive(rec.ark_pid) || session_finished(home, &rec.session));
+        let decision = match decide(home, &rec, &live) {
+            Action::Drop(why) if !cg_live.is_empty() && !owner_done => Action::Keep(format!("{why}, but its cgroup still has {} member(s) and the owner is alive", cg_live.len())),
+            d => d,
+        };
+        if let (Some(cg), true) = (rec.cgroup.as_deref(), matches!(decision, Action::Reap(_) | Action::Drop(_))) {
+            if owner_done && !cg_live.is_empty() {
+                let n = kill_cgroup(cg);
+                rep.killed += usize::from(n > 0 && !matches!(decision, Action::Reap(_)));
+                append_log(home, &format!("killed {n} cgroup member(s) of {cg} session={} tool={}", rec.session, rec.tool));
+            }
+            let _ = std::fs::remove_dir(cg);
+        }
+        match decision {
             Action::Keep(why) => {
                 rep.alive += usize::from(live.get(&rec.pgid).copied().unwrap_or(false));
                 rep.skipped.push((rec.pgid, why));
@@ -608,7 +649,53 @@ mod tests {
     }
 
     fn record(pgid: u32, start: Option<u64>, ark_pid: u32) -> Record {
-        Record { pgid, start, session: "s-r5".into(), tool: "shell".into(), ark_pid, ts_ms: now_ms() }
+        Record { pgid, start, session: "s-r5".into(), tool: "shell".into(), ark_pid, ts_ms: now_ms(), cgroup: None }
+    }
+
+    /// ent-024: a command that escaped its process group (double fork) is still in the cgroup
+    /// ark made for it, and is reaped with it once the owner is gone; while the owner lives, the
+    /// line is kept even though the group leader exited.
+    #[test]
+    fn escaped_members_are_reaped_through_the_recorded_cgroup() {
+        let tmp = Tmp::new("cgroup");
+        let home = tmp.0.join("home");
+        let cg = tmp.0.join("fake-cgroup");
+        std::fs::create_dir_all(&cg).unwrap();
+        let mut escaped = Command::new("sleep").arg("60").stdin(Stdio::null()).process_group(0).spawn().expect("spawn sleep");
+        struct Guard<'a>(&'a mut Child);
+        impl Drop for Guard<'_> {
+            fn drop(&mut self) {
+                // SAFETY: our own child's group.
+                unsafe { libc::kill(-(self.0.id() as i32), libc::SIGKILL) };
+                let _ = self.0.wait();
+            }
+        }
+        let pid = escaped.id();
+        let g = Guard(&mut escaped);
+        std::fs::write(cg.join("cgroup.procs"), format!("{pid}\n")).unwrap();
+        let leader_gone = dead_pid();
+        let mut rec = record(leader_gone, Some(1), std::process::id());
+        rec.cgroup = Some(cg.display().to_string());
+        append(&home, &rec).unwrap();
+        // Owner (this process) alive: kept, nothing signalled.
+        let rep = sweep(&home);
+        assert_eq!(rep.killed, 0);
+        assert!(rep.skipped.iter().any(|(_, why)| why.contains("cgroup still has 1 member")), "{rep:?}");
+        assert!(alive(pid));
+        // Owner gone (the session finished): the escaped member is killed via the cgroup.
+        std::fs::create_dir_all(finished_dir(&home)).unwrap();
+        std::fs::write(session_marker(&home, "s-r5"), "{}").unwrap();
+        let rep = run(&home, Some("s-r5"));
+        assert_eq!(rep.killed, 1, "{rep:?}");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let _ = g.0.try_wait();
+        while std::path::Path::new(&format!("/proc/{pid}/stat")).exists() && std::time::Instant::now() < deadline {
+            let _ = g.0.try_wait();
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert!(!std::path::Path::new(&format!("/proc/{pid}/stat")).exists(), "the escaped member must be gone");
+        assert!(read(&home).is_empty(), "the line is reclaimed");
+        drop(g);
     }
 
     #[test]
