@@ -44,6 +44,10 @@ pub fn groups() -> BTreeMap<&'static str, &'static [&'static str]> {
         ("group:nodes", &["node_invoke"][..]),
         ("group:plan", &["todo", "skill", "ask_user", "tool_describe", "tool_call"][..]),
         ("group:media", &["image", "tts", "pdf", "image_generate", "vision"][..]),
+        // Professional-role tools (ark_tools::{data, directory, forge}); present only when configured.
+        ("group:data", &["sql_query", "sql_schema"][..]),
+        ("group:directory", &["directory_lookup"][..]),
+        ("group:forge", &["forge_read", "forge_write"][..]),
     ])
 }
 
@@ -53,18 +57,18 @@ pub fn profile(name: &str) -> Option<Option<Vec<String>>> {
     let expand = |names: &[&str]| -> Vec<String> { names.iter().flat_map(|n| g.get(n).map(|v| v.iter().map(|s| s.to_string()).collect()).unwrap_or_else(|| vec![n.to_string()])).collect() };
     Some(match name {
         "minimal" => Some(expand(&["ask_user", "todo", "tool_describe", "tool_call", "session_status"])),
-        "coding" => Some(expand(&["group:fs", "group:runtime", "group:web", "group:memory", "group:sessions", "group:agents", "group:plan", "group:media"])),
+        "coding" => Some(expand(&["group:fs", "group:runtime", "group:web", "group:memory", "group:sessions", "group:agents", "group:plan", "group:media", "group:forge"])),
         "messaging" => Some(expand(&["group:messaging", "group:memory", "group:web", "ask_user", "todo", "tool_describe", "tool_call", "session_status"])),
         // Professional roles (BATCH-next §3). DevOps/SRE: terminal, logs, process control,
         // scheduled checks, monitoring/integration connectors (MCP), sub-agents for parallel triage.
-        "devops" => Some(expand(&["group:fs", "group:runtime", "group:web", "group:memory", "group:sessions", "group:agents", "group:plan", "group:automation", "mcp__*"])),
+        "devops" => Some(expand(&["group:fs", "group:runtime", "group:web", "group:memory", "group:sessions", "group:agents", "group:plan", "group:automation", "group:forge", "mcp__*"])),
         // Security operations: read and analyse; no messaging, no automation, no remote nodes,
         // no delegation to external agents (offensive tooling is refused by the role policy).
         "secops" => Some(expand(&["group:fs", "group:runtime", "group:web", "group:memory", "group:plan", "group:sessions", "mcp__*"])),
         // Data analysis: files, a runtime for queries/notebooks, charts (media), DB connectors.
-        "data" => Some(expand(&["group:fs", "group:runtime", "group:web", "group:memory", "group:plan", "group:media", "group:sessions", "mcp__*"])),
+        "data" => Some(expand(&["group:fs", "group:runtime", "group:web", "group:memory", "group:plan", "group:media", "group:sessions", "group:data", "mcp__*"])),
         // IT support: ticket replies (messaging), diagnostics (runtime), knowledge base (web/memory).
-        "itsupport" => Some(expand(&["group:fs", "group:runtime", "group:web", "group:memory", "group:plan", "group:messaging", "group:sessions", "mcp__*"])),
+        "itsupport" => Some(expand(&["group:fs", "group:runtime", "group:web", "group:memory", "group:plan", "group:messaging", "group:sessions", "group:directory", "mcp__*"])),
         "full" => None,
         _ => return None,
     })
@@ -179,6 +183,22 @@ mod tests {
         assert!(!layer_allows(&l("secops"), "channel_send") && !layer_allows(&l("secops"), "a2a_send"));
         assert!(layer_allows(&l("itsupport"), "channel_send"), "IT support answers tickets");
         assert!(layer_allows(&l("data"), "image"), "charts");
+    }
+
+    /// The tools of ark_tools::{data, directory, forge} reach each role through its profile
+    /// and no other (the data analyst cannot comment on a pull request, support cannot run SQL).
+    #[test]
+    fn professional_tools_belong_to_their_role_profile() {
+        let l = |p: &str| Layer { profile: Some(p.into()), ..Default::default() };
+        let can = |p: &str, t: &str| layer_allows(&l(p), t);
+        for t in ["sql_query", "sql_schema"] {
+            assert!(can("data", t) && !can("itsupport", t) && !can("coding", t) && !can("secops", t) && !can("devops", t), "{t}");
+        }
+        assert!(can("itsupport", "directory_lookup") && !can("data", "directory_lookup") && !can("coding", "directory_lookup") && !can("secops", "directory_lookup"));
+        for t in ["forge_read", "forge_write"] {
+            assert!(can("coding", t) && can("devops", t) && !can("data", t) && !can("itsupport", t) && !can("secops", t) && !can("messaging", t), "{t}");
+        }
+        assert!(layer_allows(&l("full"), "sql_query"));
     }
 
     #[test]

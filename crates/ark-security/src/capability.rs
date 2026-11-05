@@ -482,6 +482,15 @@ const BUILTIN_ROWS: &[Row] = &[
     Row { net: PUBLIC_NET, ..row("tavily_extract") },
     Row { net: PUBLIC_NET, ..row("firecrawl_search") },
     Row { net: PUBLIC_NET, ..row("firecrawl_scrape") },
+    // Professional-role tools. Their endpoints are the operator's own (a LAN database, a
+    // self-hosted GitLab), named in `[integrations.*]`; `*` still keeps off the host's private
+    // space inside the VM, so a private target needs the operator's egress allowlist. The
+    // SQLite file is read through the workspace policy like any other file.
+    Row { fs_read: ALL_PATHS, net: PUBLIC_NET, ..row("sql_query") },
+    Row { fs_read: ALL_PATHS, net: PUBLIC_NET, ..row("sql_schema") },
+    Row { net: PUBLIC_NET, ..row("directory_lookup") },
+    Row { net: PUBLIC_NET, ..row("forge_read") },
+    Row { net: PUBLIC_NET, ..row("forge_write") },
 ];
 
 fn strings(v: &[&str]) -> Vec<String> {

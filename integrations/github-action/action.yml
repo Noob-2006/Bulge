@@ -1,0 +1,130 @@
+name: "ark agent"
+description: "Run the ark agent in CI: review a pull request, or fix a failing test suite."
+author: "ark"
+branding:
+  icon: "cpu"
+  color: "blue"
+
+inputs:
+  task:
+    description: "review (comment on a pull request), fix-tests (let ark fix a red test suite), or run (your own prompt)."
+    required: false
+    default: "review"
+  prompt:
+    description: "The prompt for task=run."
+    required: false
+    default: ""
+  test-command:
+    description: "task=fix-tests: the command that runs the tests, e.g. `npm test`."
+    required: false
+    default: ""
+  fix-attempts:
+    description: "task=fix-tests: how many fix rounds."
+    required: false
+    default: "2"
+  post-comment:
+    description: "task=review: post the review as a pull request comment (needs `pull-requests: write` for github-token)."
+    required: false
+    default: "true"
+  github-token:
+    description: "Token used ONLY to post the comment. It is never passed to the agent."
+    required: false
+    default: ${{ github.token }}
+  base-ref:
+    description: "Branch to diff against (default: the pull request's base branch, or main)."
+    required: false
+    default: ""
+  model:
+    description: "Model for the run (provider/model). Empty: the configured default. The provider API key goes in the step's `env:` (for example ANTHROPIC_API_KEY from a repository secret)."
+    required: false
+    default: ""
+  role:
+    description: "Role preset the agent runs as (swdev, secops, devops, ...)."
+    required: false
+    default: "swdev"
+  budget-usd:
+    description: "Spend cap for one agent run, in US dollars."
+    required: false
+    default: "2"
+  extra-instructions:
+    description: "Added to the prompt, e.g. house rules for the review."
+    required: false
+    default: ""
+  ark-version:
+    description: "ark release to install (vX.Y.Z, or latest). Pin it in production."
+    required: false
+    default: "latest"
+  ark-repo:
+    description: "owner/name of the repository the ark release comes from."
+    required: false
+    default: "ark-agent/ark"
+  install:
+    description: "Install ark from the release. Set to false when the runner image already has `ark`."
+    required: false
+    default: "true"
+
+outputs:
+  result-file:
+    description: "Path of the review (task=review), the patch (task=fix-tests) or the answer (task=run)."
+    value: ${{ steps.run.outputs.result-file }}
+  status:
+    description: "ok, or failed."
+    value: ${{ steps.run.outputs.status }}
+
+runs:
+  using: "composite"
+  steps:
+    - name: Install ark
+      if: ${{ inputs.install == 'true' }}
+      shell: sh
+      env:
+        ARK_REPO: ${{ inputs.ark-repo }}
+        ARK_VERSION: ${{ inputs.ark-version }}
+        ARK_INSTALL_DIR: ${{ runner.temp }}/ark-bin
+      run: |
+        # The installer verifies SHA256SUMS (and the release signature when ARK_RELEASE_PUBKEY is set).
+        ref="${ARK_VERSION}"; [ "$ref" = latest ] && ref=main
+        curl --proto '=https' --tlsv1.2 -fsSL "https://raw.githubusercontent.com/${ARK_REPO}/${ref}/packaging/install.sh" -o "${RUNNER_TEMP}/ark-install.sh"
+        if [ "${ARK_VERSION}" = latest ]; then sh "${RUNNER_TEMP}/ark-install.sh"; else sh "${RUNNER_TEMP}/ark-install.sh" --version "${ARK_VERSION}"; fi
+        echo "${ARK_INSTALL_DIR}" >> "$GITHUB_PATH"
+
+    - name: Run ark
+      id: run
+      shell: sh
+      env:
+        ARK_CI_ACTION_DIR: ${{ github.action_path }}
+        INPUT_TASK: ${{ inputs.task }}
+        ARK_CI_PROMPT: ${{ inputs.prompt }}
+        ARK_CI_TEST_CMD: ${{ inputs.test-command }}
+        ARK_CI_FIX_ATTEMPTS: ${{ inputs.fix-attempts }}
+        ARK_CI_BASE_BRANCH: ${{ github.base_ref || 'main' }}
+        ARK_CI_BASE_OVERRIDE: ${{ inputs.base-ref }}
+        ARK_CI_MODEL: ${{ inputs.model }}
+        ARK_CI_ROLE: ${{ inputs.role }}
+        ARK_CI_BUDGET_USD: ${{ inputs.budget-usd }}
+        ARK_CI_EXTRA: ${{ inputs.extra-instructions }}
+        ARK_CI_OUT: ${{ runner.temp }}/ark-ci
+        ARK_CI_PROVIDER: github
+        POST_COMMENT: ${{ inputs.post-comment }}
+        POST_TOKEN: ${{ inputs.github-token }}
+      run: |
+        # Both the script and its inputs come from this action's own checkout; the token reaches
+        # only the `post` step below, never the agent.
+        script="${ARK_CI_ACTION_DIR}/../ci/ark-ci.sh"
+        [ -n "${ARK_CI_BASE_OVERRIDE}" ] && export ARK_CI_BASE="${ARK_CI_BASE_OVERRIDE}"
+        status=ok
+        case "${INPUT_TASK}" in
+          review)    sh "$script" review || status=failed; result="${ARK_CI_OUT}/review.md" ;;
+          fix-tests) sh "$script" fix-tests || status=failed; result="${ARK_CI_OUT}/fix.patch" ;;
+          run)       sh "$script" run < /dev/null || status=failed; result="${ARK_CI_OUT}/result.md" ;;
+          *) echo "unknown task '${INPUT_TASK}' (review | fix-tests | run)" >&2; exit 2 ;;
+        esac
+        echo "result-file=${result}" >> "$GITHUB_OUTPUT"
+        echo "status=${status}" >> "$GITHUB_OUTPUT"
+        if [ -s "${result}" ] && [ "${INPUT_TASK}" != fix-tests ]; then
+          { echo '### ark'; cat "${result}"; } >> "$GITHUB_STEP_SUMMARY"
+        fi
+        if [ "${INPUT_TASK}" = review ] && [ "${POST_COMMENT}" = true ] && [ "${status}" = ok ] && [ -n "${GITHUB_REF##refs/heads/*}" ]; then
+          GITHUB_TOKEN="${POST_TOKEN}" sh "$script" post || echo "could not post the comment (is 'pull-requests: write' granted?)" >&2
+        fi
+        [ "${status}" = ok ]
