@@ -1,3 +1,6 @@
+//! File and process helpers shared by the tool implementations: temp files, atomic writes,
+//! bounded reads and child-process plumbing.
+
 use std::fs;
 use std::io::{self, Write as _};
 use std::path::{Path, PathBuf};

@@ -183,6 +183,44 @@ impl ZlibStream {
     }
 }
 
+/// Inflate one complete raw deflate stream (a gzip or zip member). Returns the data and how
+/// many input bytes the stream used; output is capped at `limit` bytes.
+pub fn inflate_raw(input: &[u8], limit: usize) -> Res<(Vec<u8>, usize)> {
+    let mut out = Vec::new();
+    let mut r = Bits { data: input, pos: 0, buf: 0, cnt: 0 };
+    loop {
+        let last = r.bits(1)? == 1;
+        match r.bits(2)? {
+            0 => {
+                r.align();
+                let d = r.data.get(r.pos..r.pos + 4).ok_or("truncated stored block")?;
+                let (len, nlen) = (u16::from_le_bytes([d[0], d[1]]), u16::from_le_bytes([d[2], d[3]]));
+                if len != !nlen {
+                    return Err("stored block length mismatch".into());
+                }
+                r.pos += 4;
+                out.extend_from_slice(r.data.get(r.pos..r.pos + len as usize).ok_or("truncated stored block")?);
+                r.pos += len as usize;
+                if out.len() > limit {
+                    return Err("inflated data too large".into());
+                }
+            }
+            1 => {
+                let (l, d) = fixed();
+                codes(&mut r, &mut out, &l, &d, limit)?;
+            }
+            2 => {
+                let (l, d) = dynamic(&mut r)?;
+                codes(&mut r, &mut out, &l, &d, limit)?;
+            }
+            _ => return Err("invalid deflate block type".into()),
+        }
+        if last {
+            return Ok((out, r.pos));
+        }
+    }
+}
+
 fn fixed() -> (Huff, Huff) {
     let mut l = [8u8; 288];
     l[144..256].fill(9);

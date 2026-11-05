@@ -24,12 +24,122 @@ pub enum Approval {
     Once,
     /// Same gate + reason allowed for the rest of the session.
     Always,
+    /// Durable grant (OpenClaw allow-always / Hermes permanent allowlist).
+    Permanent,
     Deny,
 }
 
 pub trait Approver: Send + Sync {
     fn approve(&self, req: &ApprovalRequest) -> Approval;
     fn ask(&self, session: &str, question: &str) -> Result<String, String>;
+    /// Can a human answer at all? Headless policies cannot (exec `ask_fallback` applies).
+    fn interactive(&self) -> bool {
+        true
+    }
+    /// Approvals waiting for an answer (asynchronous approvers only).
+    fn pending(&self) -> Vec<PendingItem> {
+        vec![]
+    }
+    /// Answer a pending approval/question by id (`/approve`, chat buttons). False if unknown.
+    fn answer(&self, _id: &str, _answer: &str) -> bool {
+        false
+    }
+    /// Structured questions (Hermes `clarify`). Default: one `ask` per question with
+    /// the choices rendered as a numbered list, answers parsed back.
+    fn clarify(&self, session: &str, questions: &[ClarifyQuestion]) -> ClarifyReply {
+        let mut answers = std::collections::BTreeMap::new();
+        for q in questions {
+            match self.ask(session, &render_question(q)) {
+                Ok(a) => {
+                    answers.insert(q.qid.clone(), parse_answer(q, &a));
+                }
+                Err(e) => {
+                    let outcome = if e.contains("in time") { "timed_out" } else if e.contains("headless") { "undelivered" } else { "cancelled" };
+                    return ClarifyReply { answers, outcome: outcome.into(), notice: Some(e) };
+                }
+            }
+        }
+        ClarifyReply { answers, outcome: "submitted".into(), notice: None }
+    }
+}
+
+/// One `clarify` question as the UI shows it (`choices` already carry the
+/// "(Recommended)" label on the first one).
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct ClarifyQuestion {
+    pub qid: String,
+    pub question: String,
+    #[serde(default)]
+    pub choices: Vec<String>,
+    #[serde(default)]
+    pub multi_select: bool,
+}
+
+/// How a clarify wait ended: `answers` maps qid → answer (None = skipped);
+/// `outcome` is submitted | cancelled | timed_out | undelivered.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct ClarifyReply {
+    pub answers: std::collections::BTreeMap<String, Option<serde_json::Value>>,
+    pub outcome: String,
+    pub notice: Option<String>,
+}
+
+pub const RECOMMENDED: &str = "(Recommended)";
+pub const SKIP_WORD: &str = "skip";
+
+pub fn strip_recommended(s: &str) -> String {
+    let t = s.trim();
+    if t.to_lowercase().ends_with(&RECOMMENDED.to_lowercase()) {
+        t[..t.len() - RECOMMENDED.len()].trim().to_string()
+    } else {
+        t.to_string()
+    }
+}
+
+/// Text form of a question for surfaces without native choice cards.
+pub fn render_question(q: &ClarifyQuestion) -> String {
+    if q.choices.is_empty() {
+        return q.question.clone();
+    }
+    let mut s = format!("{}\n", q.question);
+    for (i, c) in q.choices.iter().enumerate() {
+        s.push_str(&format!("  {}. {c}\n", i + 1));
+    }
+    s.push_str(&format!("  {}. Other (type your answer)\n", q.choices.len() + 1));
+    s.push_str(if q.multi_select { "Reply with one or more numbers (e.g. 1,3), or type your own answer; `skip` to skip." } else { "Reply with a number, or type your own answer; `skip` to skip." });
+    s
+}
+
+/// Map a typed reply onto a question: numbers / labels pick choices, `skip`
+/// skips, anything else is a free-text ("Other") answer.
+pub fn parse_answer(q: &ClarifyQuestion, raw: &str) -> Option<serde_json::Value> {
+    use serde_json::Value;
+    let t = raw.trim();
+    if t.is_empty() || t.eq_ignore_ascii_case(SKIP_WORD) {
+        return None;
+    }
+    let pick = |tok: &str| -> Option<String> {
+        let tok = tok.trim();
+        if let Ok(n) = tok.trim_end_matches('.').parse::<usize>() {
+            return q.choices.get(n.wrapping_sub(1)).map(|c| strip_recommended(c));
+        }
+        q.choices.iter().find(|c| strip_recommended(c).eq_ignore_ascii_case(&strip_recommended(tok))).map(|c| strip_recommended(c))
+    };
+    if q.choices.is_empty() {
+        return Some(Value::String(t.into()));
+    }
+    if q.multi_select {
+        if let Ok(Value::Array(a)) = serde_json::from_str::<Value>(t) {
+            let v: Vec<Value> = a.iter().filter_map(|x| x.as_str()).map(|x| Value::String(pick(x).unwrap_or_else(|| strip_recommended(x)))).collect();
+            return (!v.is_empty()).then_some(Value::Array(v));
+        }
+        let parts: Vec<Option<String>> = t.split(',').map(pick).collect();
+        if parts.iter().all(Option::is_some) {
+            return Some(Value::Array(parts.into_iter().flatten().map(Value::String).collect()));
+        }
+        return Some(Value::Array(vec![Value::String(t.into())]));
+    }
+    Some(Value::String(pick(t).unwrap_or_else(|| strip_recommended(t))))
 }
 
 /// Headless policy: fixed answers, no human.
@@ -43,6 +153,8 @@ impl Approver for Policy {
         let ok = match req.gate {
             GateKind::Privilege => self.allow_privilege,
             GateKind::Egress => self.allow_egress,
+            // Exec-policy and write approvals need a human (or an explicit allowlist).
+            GateKind::Exec | GateKind::Write => self.allow_privilege && self.allow_egress,
         };
         if ok {
             Approval::Once
@@ -53,11 +165,14 @@ impl Approver for Policy {
     fn ask(&self, _: &str, _: &str) -> Result<String, String> {
         Err("no human is attached to this session (headless). Proceed with your best judgement and state your assumptions.".into())
     }
+    fn interactive(&self) -> bool {
+        false
+    }
 }
 
 /// Approvals answered asynchronously over the daemon protocol, with a timeout.
 pub struct Pending {
-    timeout: Duration,
+    timeout_ms: std::sync::atomic::AtomicU64,
     state: Mutex<PendingState>,
     cv: Condvar,
     notify: Box<dyn Fn(PendingItem) + Send + Sync>,
@@ -66,7 +181,14 @@ pub struct Pending {
 #[derive(Debug, Clone)]
 pub enum PendingItem {
     Approval(ApprovalRequest),
-    Question { id: String, session: String, question: String },
+    Question {
+        id: String,
+        session: String,
+        question: String,
+        /// Pickable choices (clarify); empty = open-ended.
+        choices: Vec<String>,
+        multi: bool,
+    },
 }
 
 #[derive(Default)]
@@ -77,7 +199,12 @@ struct PendingState {
 
 impl Pending {
     pub fn new(timeout: Duration, notify: Box<dyn Fn(PendingItem) + Send + Sync>) -> Self {
-        Pending { timeout, state: Mutex::new(PendingState::default()), cv: Condvar::new(), notify }
+        Pending { timeout_ms: std::sync::atomic::AtomicU64::new(timeout.as_millis() as u64), state: Mutex::new(PendingState::default()), cv: Condvar::new(), notify }
+    }
+
+    /// `approvals.timeout_secs` once the config is loaded.
+    pub fn set_timeout(&self, t: Duration) {
+        self.timeout_ms.store(t.as_millis() as u64, std::sync::atomic::Ordering::Relaxed);
     }
 
     pub fn list(&self) -> Vec<PendingItem> {
@@ -102,7 +229,8 @@ impl Pending {
         }
         (self.notify)(item);
         let s = self.state.lock().unwrap();
-        let (mut s, _) = self.cv.wait_timeout_while(s, self.timeout, |s| !s.answers.contains_key(&id)).unwrap();
+        let timeout = Duration::from_millis(self.timeout_ms.load(std::sync::atomic::Ordering::Relaxed));
+        let (mut s, _) = self.cv.wait_timeout_while(s, timeout, |s| !s.answers.contains_key(&id)).unwrap();
         s.open.remove(&id);
         s.answers.remove(&id)
     }
@@ -110,16 +238,45 @@ impl Pending {
 
 impl Approver for Pending {
     fn approve(&self, req: &ApprovalRequest) -> Approval {
-        match self.wait(req.id.clone(), PendingItem::Approval(req.clone())).as_deref() {
-            Some("once") | Some("allow") | Some("yes") => Approval::Once,
-            Some("always") => Approval::Always,
-            _ => Approval::Deny,
+        let Some(answer) = self.wait(req.id.clone(), PendingItem::Approval(req.clone())) else { return Approval::Deny };
+        match ark_security::approvals::parse_answer(&answer) {
+            ("once", _) => Approval::Once,
+            ("session", _) => Approval::Always,
+            ("permanent", _) => Approval::Permanent,
+            (_, reason) => {
+                if let Some(r) = reason {
+                    ark_security::approvals::set_deny_reason(&req.id, &r);
+                }
+                Approval::Deny
+            }
         }
+    }
+    fn pending(&self) -> Vec<PendingItem> {
+        self.list()
+    }
+    fn answer(&self, id: &str, answer: &str) -> bool {
+        Pending::answer(self, id, answer)
     }
     fn ask(&self, session: &str, question: &str) -> Result<String, String> {
         let id = crate::util::new_id();
-        self.wait(id.clone(), PendingItem::Question { id, session: session.into(), question: question.into() })
+        self.wait(id.clone(), PendingItem::Question { id, session: session.into(), question: question.into(), choices: vec![], multi: false })
             .ok_or_else(|| "the user did not answer in time; continue with your best judgement".into())
+    }
+    /// One pending question per clarify entry, in order, each with its choices so
+    /// surfaces render pickable rows (web UI, channel buttons).
+    fn clarify(&self, session: &str, questions: &[ClarifyQuestion]) -> ClarifyReply {
+        let mut answers = std::collections::BTreeMap::new();
+        for q in questions {
+            let id = crate::util::new_id();
+            match self.wait(id.clone(), PendingItem::Question { id, session: session.into(), question: q.question.clone(), choices: q.choices.clone(), multi: q.multi_select }) {
+                Some(a) if a == "\u{0}cancel" => return ClarifyReply { answers, outcome: "cancelled".into(), notice: Some("the user cancelled the questions".into()) },
+                Some(a) => {
+                    answers.insert(q.qid.clone(), parse_answer(q, &a));
+                }
+                None => return ClarifyReply { answers, outcome: "timed_out".into(), notice: Some("the user did not answer in time".into()) },
+            }
+        }
+        ClarifyReply { answers, outcome: "submitted".into(), notice: None }
     }
 }
 
@@ -192,5 +349,65 @@ mod tests {
         assert!(!r.contains("s2", GateKind::Egress, "x"));
         assert!(!r.contains("s1", GateKind::Privilege, "x"));
         assert!(!r.contains("s1", GateKind::Egress, "y"));
+    }
+}
+
+#[cfg(test)]
+mod clarify_tests {
+    use super::*;
+    use serde_json::json;
+    use std::sync::Arc;
+
+    fn q(choices: &[&str], multi: bool) -> ClarifyQuestion {
+        ClarifyQuestion { qid: "q0".into(), question: "Which DB?".into(), choices: choices.iter().map(|s| s.to_string()).collect(), multi_select: multi }
+    }
+
+    #[test]
+    fn answers_map_onto_choices() {
+        let one = q(&["Postgres (Recommended)", "SQLite"], false);
+        assert_eq!(parse_answer(&one, "1"), Some(json!("Postgres")));
+        assert_eq!(parse_answer(&one, "sqlite"), Some(json!("SQLite")));
+        assert_eq!(parse_answer(&one, "MySQL please"), Some(json!("MySQL please")), "Other = free text");
+        assert_eq!(parse_answer(&one, "skip"), None);
+        let many = q(&["a", "b", "c"], true);
+        assert_eq!(parse_answer(&many, "1, 3"), Some(json!(["a", "c"])));
+        assert_eq!(parse_answer(&many, "[\"b\"]"), Some(json!(["b"])));
+        assert_eq!(parse_answer(&many, "none of these"), Some(json!(["none of these"])));
+        assert_eq!(parse_answer(&q(&[], false), "  free  "), Some(json!("free")));
+        let r = render_question(&one);
+        assert!(r.contains("1. Postgres (Recommended)") && r.contains("3. Other"));
+        assert_eq!(strip_recommended("x (recommended)"), "x");
+    }
+
+    #[test]
+    fn pending_clarify_publishes_choices_and_times_out() {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let s2 = seen.clone();
+        let p = Arc::new(Pending::new(Duration::from_millis(300), Box::new(move |i| s2.lock().unwrap().push(i))));
+        let p2 = p.clone();
+        let qs = vec![q(&["A", "B"], false), ClarifyQuestion { qid: "q1".into(), question: "Name?".into(), choices: vec![], multi_select: false }];
+        let qs2 = qs.clone();
+        let h = std::thread::spawn(move || p2.clarify("s", &qs2));
+        let wait_item = |n: usize| loop {
+            if let Some(PendingItem::Question { id, choices, .. }) = seen.lock().unwrap().get(n).cloned() {
+                break (id, choices);
+            }
+            std::thread::sleep(Duration::from_millis(2));
+        };
+        let (id, choices) = wait_item(0);
+        assert_eq!(choices, ["A", "B"]);
+        assert!(Approver::answer(p.as_ref(), &id, "2"));
+        let (id, _) = wait_item(1);
+        assert!(Approver::answer(p.as_ref(), &id, "Ada"));
+        let r = h.join().unwrap();
+        assert_eq!(r.outcome, "submitted");
+        assert_eq!(r.answers["q0"], Some(json!("B")));
+        assert_eq!(r.answers["q1"], Some(json!("Ada")));
+        let r = p.clarify("s", &qs);
+        assert_eq!(r.outcome, "timed_out");
+        assert!(r.answers.is_empty());
+        // Headless policy: undelivered.
+        let r = Policy { allow_privilege: false, allow_egress: false }.clarify("s", &qs);
+        assert_eq!(r.outcome, "undelivered");
     }
 }

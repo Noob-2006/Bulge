@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>ark browser relay — settings</title>
+    <link rel="stylesheet" href="options.css" />
+  </head>
+  <body>
+    <main>
+      <h1>ark browser relay</h1>
+      <p class="muted">
+        This extension lets a local <code>ark</code> agent drive your own tabs. It only talks to
+        <code>127.0.0.1</code> and never sends anything to the network.
+      </p>
+
+      <section>
+        <h2>Relay</h2>
+        <label for="port">Port</label>
+        <input id="port" type="number" min="1" max="65535" step="1" placeholder="18792" />
+        <p class="muted">
+          <code>browser.extension_control.port</code> in ark's config (default <code>18792</code>).
+        </p>
+
+        <label for="token">Pairing token</label>
+        <input id="token" type="password" spellcheck="false" autocomplete="off" placeholder="paste the token" />
+        <p class="muted">
+          Contents of <code>~/.local/share/ark/browser/extension-token</code> (created by
+          <code>ark browser extension</code>).
+        </p>
+
+        <div class="row">
+          <button id="save" class="primary" type="button">Save &amp; connect</button>
+          <button id="connect" type="button">Reconnect now</button>
+          <button id="disconnect" type="button">Disconnect</button>
+        </div>
+        <p id="status" class="status">Checking…</p>
+        <p id="message" class="muted"></p>
+      </section>
+
+      <section>
+        <h2>On the ark side</h2>
+        <ol class="muted">
+          <li><code>ark browser extension</code> — starts the loopback relay and prints the token path.</li>
+          <li>Load this folder (<code>ui/browser-extension</code>) via <code>chrome://extensions</code> → Developer mode → Load unpacked.</li>
+          <li>Paste the token above and press <strong>Save &amp; connect</strong>.</li>
+          <li>Set <code>browser.extension_control.enabled = true</code> and <code>browser.backend = "extension"</code>.</li>
+        </ol>
+      </section>
+    </main>
+    <script src="options.js"></script>
+  </body>
+</html>

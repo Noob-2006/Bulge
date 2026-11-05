@@ -205,10 +205,9 @@ impl Router {
             _ => None,
         };
         let enc = key.encode();
-        if cmd == Some(Command::New) {
-            st.routes.remove(&enc);
-        }
-        let session = st.routes.get(&enc).cloned();
+        // `/new` unbinds the chat; the old session is reported so the host can end it.
+        let previous = if cmd == Some(Command::New) { st.routes.remove(&enc) } else { None };
+        let session = st.routes.get(&enc).cloned().or(previous);
         let notice = match (&cfg.privacy_notice, cmd) {
             (Some(n), None) if st.noticed.insert(format!("{}\u{1f}{}", m.channel, m.sender)) => Some(n.clone()),
             _ => None,
@@ -309,7 +308,7 @@ mod tests {
         assert!(matches!(r.route(&msg("c", "1", "m5b", "/forget")), Action::Command { cmd: Command::Forget, session: Some(_), .. }));
         assert!(matches!(r.route(&msg("c", "1", "m6", "/deploy prod")), Action::Submit { .. }), "unknown slash text goes to the agent");
         assert!(matches!(r.route(&msg("c", "1", "m7", "   ")), Action::Ignore { .. }));
-        assert!(matches!(r.route(&msg("c", "1", "m8", "/new")), Action::Command { cmd: Command::New, session: None, .. }));
+        assert!(matches!(r.route(&msg("c", "1", "m8", "/new")), Action::Command { cmd: Command::New, session: Some(_), .. }), "the previous session is reported");
         assert!(matches!(r.route(&msg("c", "1", "m9", "hi")), Action::Submit { session: None, .. }), "/new cleared the binding");
         // LRU bound.
         for i in 0..SEEN_MAX + 10 {

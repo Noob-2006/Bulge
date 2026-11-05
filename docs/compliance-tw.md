@@ -50,3 +50,22 @@
 | 13 | 公部門機密 | 行政院指引、基本法 19 條 | 機密 session 禁止外送 | P2 | 待做 |
 | 14 | 風險自評 | 數發部框架、AIEC | `docs/risk-assessment.md` 逐子類對應 | P2 | ✅ 20 子類逐項對照 |
 | 15 | 追蹤待施行法規 | 個資法施行日、子法 | 本文件每季更新 | P2 | 持續 |
+
+## 7. 本輪（round 5 F 段）新增設計的合規影響
+
+F 段做的是「接別人的生態、送資料出去」，這幾項直接碰到跨境傳輸、最小化與人類監督，補列如下。
+
+| # | 要求 | 依據 | ark 實作 | 優先 | 狀態 |
+|---|---|---|---|---|---|
+| 16 | **追蹤資料出境要揭露、可關、可最小化** | 個資法 21 條（跨境）、8/9 條（告知）、基本法 4 條（隱私與資料治理） | `[telemetry]` 預設關閉；開啟後只送三種**無內容**事件（`gateway_health`、`gateway_diagnostic`、`cron_execution`），每個字串都先遮罩（秘密、email、UUID、電話）並限長 500；`ark telemetry status` 顯示 endpoint 與 header 名稱（值不顯示）。指向 LangSmith／任何 SaaS collector 等於出境，應在隱私政策中列為「委外處理者」 | P0 | ✅（本輪補上 LangSmith profile；文件 `docs/ecosystem/langsmith.md`） |
+| 17 | **代理人不得做授權外行為（B6）** | 數發部框架 B6、基本法 4 條人類自主 | 流程（`graph-flow`）與 `lobster` 在執行前宣告完整 `Effect`，由閘門一次判斷；流程內部的 `gate` 節點才會問人；每個 superstep 都有 checkpoint，可從任一舊點分支重跑（可回復 → 不需要事先詢問，見 GAPS 第 0 段） | P0 | ✅（本輪新增，`docs/ecosystem/graph-flows.md` §7） |
+| 18 | **第三方程式碼的來源與能力** | 基本法 4 條資安、框架 A1 | OpenClaw／Hermes 外掛匯入後仍受 `[plugins.<id>] trust` 與能力核准（`ark security plugins accept`）管制；`hermes_shim.py`／`openclaw_shim.mjs` 在**獨立行程**內執行原外掛，hook 失敗一律回 allow 並記 stderr（不阻塞 agent、也不假冒授權）；外掛需要的金鑰以 `{{secret:NAME}}` 參照，不寫進 config | P0 | 🚧（能力核准與 trust 已有；簽章與版本鎖定屬 A13，未做） |
+| 19 | **流程狀態的保存期限與當事人權利** | 個資法 3、11 條、27 條 | 流程 checkpoint 存於 `<data>/surfaces/graph/threads/<thread>/`，只含流程作者定義的狀態（建議不要放個資）；`ark data export/delete` 尚未涵蓋此目錄 | P1 | 🚧（待納入 `ark data` 與 `retention_days`） |
+| 20 | **對外 agent 互通的身分與界線** | 基本法 4 條問責、框架 B5 | A2A 用 bearer（app token 或 peer token）＋可選 HMAC 推播簽章；MCP 對外 server 走同一組閘門；ACP 的寫入／執行請求在 `approve-reads` 下會問人，無人可答時拒絕 | P1 | ✅（既有；本輪文件化） |
+| 21 | **告知「這是 AI」與「這是代理人」** | 基本法 4 條第 5 款 | 同第 10 列；與外部 agent 互通時，A2A agent card 的 `name`/`description` 應寫明是 AI agent | P2 | 🚧（`ai_label` 已有；agent card 文案靠使用者填） |
+
+### 7-1 風險自評要補的三句話
+
+1. 開啟 `[telemetry]` 就是**資料出境**：內容已最小化與遮罩，但「什麼時候送、送到哪」必須在隱私政策揭露，且預設關閉。
+2. 外掛／技能是**第三方程式碼**：ark 的閘門管的是它對外宣稱的 hook/tool/command，不是它行程內部的行為；不可信來源請用 `trust = "untrusted"`。
+3. 流程的 checkpoint 是**新的資料存放點**：目前不在 `ark data export/delete` 與保存期限之內，這一項要在下一輪補上（第 19 列）。

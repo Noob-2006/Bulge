@@ -72,7 +72,10 @@ impl SseParser {
             self.event = None;
             return;
         }
-        out.push(SseEvent { event: self.event.take(), data: std::mem::take(&mut self.data).join("\n") });
+        out.push(SseEvent {
+            event: self.event.take(),
+            data: std::mem::take(&mut self.data).join("\n"),
+        });
     }
 }
 
@@ -81,7 +84,10 @@ mod tests {
     use super::*;
 
     fn ev(e: Option<&str>, d: &str) -> SseEvent {
-        SseEvent { event: e.map(String::from), data: d.into() }
+        SseEvent {
+            event: e.map(String::from),
+            data: d.into(),
+        }
     }
 
     #[test]
@@ -104,7 +110,10 @@ mod tests {
         assert!(p.feed(b"data: {\"he").is_empty());
         assert!(p.feed(b"llo\":true}\r").is_empty());
         assert!(p.feed(b"\n").is_empty());
-        assert_eq!(p.feed(b"\r\ndata: [DONE]\n\n"), vec![ev(None, "{\"hello\":true}"), ev(None, "[DONE]")]);
+        assert_eq!(
+            p.feed(b"\r\ndata: [DONE]\n\n"),
+            vec![ev(None, "{\"hello\":true}"), ev(None, "[DONE]")]
+        );
     }
 
     #[test]
@@ -126,7 +135,8 @@ mod tests {
     #[test]
     fn malformed_lines_are_ignored_not_fatal() {
         let mut p = SseParser::new();
-        let out = p.feed(b"garbage without colon\nevent: only-event\n\n\xff\xfe: bad bytes\ndata: ok\n\n");
+        let out = p
+            .feed(b"garbage without colon\nevent: only-event\n\n\xff\xfe: bad bytes\ndata: ok\n\n");
         assert_eq!(out, vec![ev(None, "ok")]);
     }
 

@@ -1,0 +1,26 @@
+# Fixture: a stdio optional-MCP. Every entry in hermes-agent optional-mcps/ today is
+# URL-only, so this one is synthesised to pin the `transport.type: stdio` branch
+# (`command` / `args` / `env`, `${VAR}` → `{{secret:VAR}}`).
+manifest_version: 1
+
+name: demo-stdio
+description: Run a local MCP server over stdio.
+
+transport:
+  type: stdio
+  command: npx
+  args: ["-y", "@example/demo-mcp", "--readonly"]
+  env:
+    DEMO_TOKEN: "${DEMO_TOKEN}"
+    DEMO_REGION: eu
+
+auth:
+  type: none
+
+tools:
+  default_excluded:
+    - debug_dump
+
+source: https://example.com/demo-mcp
+post_install: |
+  No account needed.

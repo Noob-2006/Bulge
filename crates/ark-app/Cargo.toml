@@ -6,15 +6,32 @@ license.workspace = true
 
 # The app server: one protocol (ARP, JSON-RPC 2.0) for every UI — web, desktop,
 # terminal, editors (ACP), devices (nodes) and other agents (A2A).
+[features]
+default = ["channel", "providers"]
+# Chat channels: every platform (additive; `--no-default-features` keeps ark-channel's
+# always-compiled core only — see docs/BUILD.md).
+channel = ["ark-channel/all"]
+# Model adapters (Bedrock, Vertex/Gemini, agent CLIs, Agents API, managed llama.cpp):
+# additive; `--no-default-features` leaves only the core OpenAI/Anthropic/Responses formats.
+providers = ["ark-kernel/providers"]
+
 [dependencies]
 ark-core.workspace = true
-ark-kernel.workspace = true
+ark-security.workspace = true
+ark-kernel = { path = "../ark-kernel", default-features = false }
 ark-net.workspace = true
 ark-plugin.workspace = true
 ark-tools.workspace = true
+ark-browser.workspace = true
+# Features are chosen by this crate's `channel` feature (cargo cannot override
+# `default-features` through `workspace = true`).
+ark-channel = { path = "../ark-channel", default-features = false }
 serde.workspace = true
 serde_json.workspace = true
 toml.workspace = true
 libc.workspace = true
+regex.workspace = true
 ring.workspace = true
 ureq.workspace = true
+# Decode petdex WebP spritesheets (already in the tree through ark-media).
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp"] }

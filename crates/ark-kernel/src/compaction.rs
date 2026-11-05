@@ -37,6 +37,34 @@ pub fn cut_index(messages: &[Message], keep: usize) -> Option<usize> {
     })
 }
 
+/// Boundary for a partial ("up to here") compaction: the index of the first message kept
+/// verbatim, i.e. the start of the `keep_last`-th user turn counted from the end. The tail
+/// therefore always begins on a user turn, so the summary plus the kept conversation keeps the
+/// user↔assistant alternation providers validate.
+///
+/// `None` when the split would keep everything (no user turn, or only one exchange in the
+/// history): callers fall back to a full compaction instead of rotating the session for a no-op.
+/// Port of Hermes `split_history_for_partial_compress`.
+pub fn partial_cut_index(messages: &[Message], keep_last: usize) -> Option<usize> {
+    let keep_last = keep_last.max(1);
+    let mut boundary = None;
+    let mut seen = 0;
+    for idx in (0..messages.len()).rev() {
+        if crate::projection::is_user_turn(&messages[idx]) {
+            boundary = Some(idx);
+            seen += 1;
+            if seen >= keep_last {
+                break;
+            }
+        }
+    }
+    match boundary {
+        // `0` keeps everything: nothing older than the first ask would be summarised.
+        Some(0) | None => None,
+        Some(i) => Some(i),
+    }
+}
+
 pub fn render_transcript(messages: &[Message], per_block: usize) -> String {
     let mut out = String::new();
     for m in messages {
@@ -110,6 +138,7 @@ pub fn summarise(provider: &dyn Provider, model: &str, messages: &[Message], can
         temperature: None,
         cache_after_message: None,
         reasoning: None,
+        options: Default::default(),
     };
     for _ in 0..2 {
         if cancel.is_cancelled() {
@@ -178,6 +207,23 @@ mod tests {
     }
     fn long_history() -> Vec<Message> {
         vec![Message::user("please fix the parser bug in src/a.rs ".repeat(40)), tu("1"), tr("1", 3000), Message::assistant("fixed it")]
+    }
+
+    #[test]
+    fn partial_cut_lands_on_a_user_turn_or_falls_back() {
+        let ask = |t: &str| Message::user(t);
+        let msgs = vec![ask("one"), Message::assistant("a1"), ask("two"), tu("1"), tr("1", 5), Message::assistant("a2"), ask("three"), Message::assistant("a3")];
+        // Keep the last exchange: the boundary is the third ask.
+        assert_eq!(partial_cut_index(&msgs, 1), Some(6));
+        assert_eq!(partial_cut_index(&msgs, 2), Some(2), "tool results are not turn starts");
+        // As many exchanges as the history has: everything would be kept.
+        assert_eq!(partial_cut_index(&msgs, 3), None);
+        assert_eq!(partial_cut_index(&msgs, 99), None);
+        assert_eq!(partial_cut_index(&[ask("only"), Message::assistant("a")], 1), None);
+        assert_eq!(partial_cut_index(&[Message::assistant("a"), Message::assistant("b")], 1), None, "no user turns");
+        // Tool results are not turn starts: the tail still begins on an ask.
+        let only_results = vec![ask("go"), Message::assistant("a"), tr("9", 5)];
+        assert_eq!(partial_cut_index(&only_results, 1), None, "the single ask is the whole tail");
     }
 
     #[test]

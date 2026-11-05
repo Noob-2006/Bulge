@@ -852,11 +852,15 @@ fn consent_url_ok(url: &str) -> Result<(), String> {
     }
     use std::net::ToSocketAddrs;
     let addrs: Vec<std::net::IpAddr> = (host.as_str(), 443).to_socket_addrs().map_err(|_| format!("cannot resolve {host}"))?.map(|a| a.ip()).collect();
-    if addrs.iter().any(|ip| match ip {
-        std::net::IpAddr::V4(v) => v.is_private() || v.is_loopback() || v.is_link_local() || v.is_unspecified() || v.is_broadcast() || v.octets()[0] == 100 && v.octets()[1] & 0xc0 == 64,
-        std::net::IpAddr::V6(v) => v.is_loopback() || v.is_unspecified() || (v.segments()[0] & 0xfe00) == 0xfc00 || (v.segments()[0] & 0xffc0) == 0xfe80,
-    }) {
-        return Err(format!("consent upload host {host} resolves to a private address"));
+    consent_addresses_ok(&host, &addrs)
+}
+
+/// The address half of [`consent_url_ok`]: no private, loopback, link-local or metadata
+/// answer. Delegates to `ark_security::url_safety` (A14) so the Teams consent upload cannot
+/// drift away from the one SSRF table the rest of the tree uses.
+fn consent_addresses_ok(host: &str, addrs: &[std::net::IpAddr]) -> Result<(), String> {
+    if let Some(bad) = addrs.iter().find(|ip| ark_security::url_safety::is_blocked_ip(**ip)) {
+        return Err(format!("consent upload host {host} resolves to a private address ({bad})"));
     }
     Ok(())
 }
@@ -1610,6 +1614,27 @@ rBfXU4bsOl7nzb+HXQM2ROw=\n\
             assert!(Instant::now() < until, "request never came");
             std::thread::sleep(Duration::from_millis(20));
         }
+    }
+
+    #[test]
+    fn consent_upload_uses_the_shared_address_classifier() {
+        // A14: the Teams consent upload names Microsoft hosts, so the only thing left to decide
+        // is the address — and that decision is `ark_security::url_safety`'s, not a local copy
+        // of the private-range table.
+        let ip = |s: &str| s.parse::<std::net::IpAddr>().unwrap();
+        for blocked in ["127.0.0.1", "10.1.2.3", "192.168.0.7", "169.254.169.254", "100.100.100.200", "::1", "fe80::1", "fd00:ec2::254"] {
+            let e = consent_addresses_ok("files.example", &[ip(blocked)]).unwrap_err();
+            assert!(e.contains("private address") && e.contains(blocked), "{blocked}: {e}");
+            assert!(ark_security::url_safety::is_blocked_ip(ip(blocked)), "{blocked}: the shared verdict");
+        }
+        for ok in ["8.8.8.8", "20.190.151.7", "2603:1020::1"] {
+            assert!(consent_addresses_ok("files.example", &[ip(ok)]).is_ok(), "{ok}");
+        }
+        // One bad answer among good ones still refuses (no "first answer wins").
+        assert!(consent_addresses_ok("files.example", &[ip("8.8.8.8"), ip("10.0.0.1")]).is_err());
+        // The URL rules stay: https only, Microsoft hosts only.
+        assert!(consent_url_ok("http://files.example/x").unwrap_err().contains("https"));
+        assert!(consent_url_ok("https://evil.example/x").unwrap_err().contains("not allowed"));
     }
 
     #[test]

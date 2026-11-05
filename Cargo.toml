@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/ark-core", "crates/ark-kernel", "crates/ark-model", "crates/ark-tools", "crates/ark-plugin", "crates/ark-net", "crates/ark-channel", "crates/ark-app", "crates/ark"]
+members = ["crates/ark-core", "crates/ark-security", "crates/ark-kernel", "crates/ark-model", "crates/ark-tools", "crates/ark-plugin", "crates/ark-net", "crates/ark-channel", "crates/ark-skills", "crates/ark-memory", "crates/ark-browser", "crates/ark-media", "crates/ark-app", "crates/ark-vm", "crates/ark"]
 
 [workspace.package]
 version = "0.1.0"
@@ -23,6 +23,7 @@ ring = "0.17"
 base64 = "0.23"
 
 ark-core = { path = "crates/ark-core" }
+ark-security = { path = "crates/ark-security" }
 ark-kernel = { path = "crates/ark-kernel" }
 ark-model = { path = "crates/ark-model" }
 ark-tools = { path = "crates/ark-tools" }
@@ -30,6 +31,11 @@ ark-plugin = { path = "crates/ark-plugin" }
 ark-channel = { path = "crates/ark-channel" }
 ark-net = { path = "crates/ark-net" }
 ark-app = { path = "crates/ark-app" }
+ark-skills = { path = "crates/ark-skills" }
+ark-memory = { path = "crates/ark-memory" }
+ark-browser = { path = "crates/ark-browser" }
+ark-media = { path = "crates/ark-media" }
+ark-vm = { path = "crates/ark-vm" }
 
 [profile.release]
 opt-level = "s"
@@ -37,3 +43,10 @@ lto = true
 codegen-units = 1
 strip = true
 panic = "abort"
+
+# Size-first build: identical features, `opt-level = "z"` instead of "s".
+# `cargo build -p ark --profile slim` — measured cost/benefit in docs/BUILD.md.
+# It is a separate profile so the default `release` binary keeps its speed.
+[profile.slim]
+inherits = "release"
+opt-level = "z"

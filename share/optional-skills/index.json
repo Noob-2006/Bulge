@@ -1,0 +1,3288 @@
+{
+ "repo": "NousResearch/hermes-agent",
+ "prefix": "optional-skills",
+ "skills": [
+  {
+   "name": "agent-merge-conflict-arbiter",
+   "path": "autonomous-ai-agents/agent-merge-conflict-arbiter",
+   "description": "Neutral arbiter for merge conflicts between two agents.",
+   "tags": [
+    "Multi-Agent",
+    "Git",
+    "Merge-Conflict",
+    "Kanban",
+    "Arbitration"
+   ],
+   "files": [
+    "SKILL.md"
+   ]
+  },
+  {
+   "name": "antigravity-cli",
+   "path": "autonomous-ai-agents/antigravity-cli",
+   "description": "Operate the Antigravity CLI (agy): plugins, auth, sandbox.",
+   "tags": [
+    "Coding-Agent",
+    "Antigravity",
+    "CLI",
+    "Auth",
+    "Plugins",
+    "Sandbox"
+   ],
+   "files": [
+    "SKILL.md",
+    "references/cli-docs.md"
+   ]
+  },
+  {
+   "name": "blackbox",
+   "path": "autonomous-ai-agents/blackbox",
+   "description": "Delegate coding tasks to the Blackbox AI multi-model CLI.",
+   "tags": [
+    "Coding-Agent",
+    "Blackbox",
+    "Multi-Agent",
+    "Judge",
+    "Multi-Model"
+   ],
+   "files": [
+    "SKILL.md"
+   ]
+  },
+  {
+   "name": "dynamic-workflow",
+   "path": "autonomous-ai-agents/dynamic-workflow",
+   "description": "Plan-in-code fan-outs, adversarial verification, waves.",
+   "tags": [
+    "orchestration",
+    "fan-out",
+    "subagents",
+    "delegation",
+    "verification",
+    "migration",
+    "audit",
+    "research",
+    "campaign"
+   ],
+   "files": [
+    "SKILL.md"
+   ]
+  },
+  {
+   "name": "grok",
+   "path": "autonomous-ai-agents/grok",
+   "description": "Delegate coding to xAI Grok Build CLI (features, PRs).",
+   "tags": [
+    "Coding-Agent",
+    "Grok",
+    "xAI",
+    "Code-Review",
+    "Refactoring",
+    "Automation"
+   ],
+   "files": [
+    "SKILL.md"
+   ]
+  },
+  {
+   "name": "honcho",
+   "path": "autonomous-ai-agents/honcho",
+   "description": "Configure and troubleshoot Honcho memory for Hermes.",
+   "tags": [
+    "Honcho",
+    "Memory",
+    "Profiles",
+    "Observation",
+    "Dialectic",
+    "User-Modeling",
+    "Session-Summary"
+   ],
+   "files": [
+    "SKILL.md"
+   ]
+  },
+  {
+   "name": "openhands",
+   "path": "autonomous-ai-agents/openhands",
+   "description": "Delegate coding to OpenHands CLI (model-agnostic, LiteLLM).",
+   "tags": [
+    "Coding-Agent",
+    "OpenHands",
+    "Model-Agnostic",
+    "LiteLLM"
+   ],
+   "files": [
+    "SKILL.md"
+   ]
+  },
+  {
+   "name": "evm",
+   "path": "blockchain/evm",
+   "description": "Read-only EVM client: wallets, tokens, gas across 8 chains.",
+   "tags": [
+    "EVM",
+    "Ethereum",
+    "BNB",
+    "BSC",
+    "Base",
+    "Arbitrum",
+    "Polygon",
+    "Optimism",
+    "Avalanche",
+    "zkSync",
+    "Blockchain",
+    "Crypto",
+    "Web3",
+    "DeFi",
+    "NFT",
+    "ENS",
+    "Whale",
+    "Security"
+   ],
+   "files": [
+    "SKILL.md",
+    "scripts/evm_client.py"
+   ]
+  },
+  {
+   "name": "hyperliquid",
+   "path": "blockchain/hyperliquid",
+   "description": "Hyperliquid market data, account history, trade review.",
+   "tags": [
+    "Hyperliquid",
+    "Blockchain",
+    "Crypto",
+    "Trading",
+    "Perpetuals",
+    "Spot",
+    "DeFi"
+   ],
+   "files": [
+    "SKILL.md",
+    "scripts/hyperliquid_client.py"
+   ]
+  },
+  {
+   "name": "solana",
+   "path": "blockchain/solana",
+   "description": "Query Solana wallets, tokens, txs, and NFTs in USD.",
+   "tags": [
+    "Solana",
+    "Blockchain",
+    "Crypto",
+    "Web3",
+    "RPC",
+    "DeFi",
+    "NFT"
+   ],
+   "files": [
+    "SKILL.md",
+    "scripts/solana_client.py"
+   ]
+  },
+  {
+   "name": "one-three-one-rule",
+   "path": "communication/one-three-one-rule",
+   "description": "1-3-1 decision briefs: problem, three options, one pick.",
+   "tags": [
+    "communication",
+    "decision-making",
+    "proposals",
+    "trade-offs"
+   ],
+   "files": [
+    "SKILL.md"
+   ]
+  },
+  {
+   "name": "ai-presenter-video",
+   "path": "creative/ai-presenter-video",
+   "description": "Make a verified AI presenter video from script + image.",
+   "tags": [
+    "video",
+    "presenter",
+    "avatar",
+    "lipsync",
+    "tts",
+    "captions",
+    "creative"
+   ],
+   "files": [
+    "LICENSE",
+    "SKILL.md",
+    "assets/job.template.json",
+    "references/editing.md",
+    "references/generation.md",
+    "references/qa-recovery.md",
+    "scripts/finalize_delivery.sh",
+    "scripts/init_job.py",
+    "scripts/preflight.py"
+   ]
+  },
+  {
+   "name": "anatomy",
+   "path": "creative/anatomy",
+   "description": "Explain an idea as an interactive isometric machine figure.",
+   "tags": [
+    "isometric",
+    "svg",
+    "webgl",
+    "3d",
+    "diagram",
+    "explainer",
+    "illustration",
+    "docs",
+    "html",
+    "react"
+   ],
+   "files": [
+    "LICENSE.txt",
+    "SKILL.md",
+    "examples/arcade-cabinet/arcade-cabinet.css",
+    "examples/arcade-cabinet/build.mjs",
+    "examples/arcade-cabinet/live.js",
+    "examples/arcade-cabinet/parts.mjs",
+    "examples/arcade-cabinet/screen.mjs",
+    "examples/desk-computer/build.mjs",
+    "examples/dial-indicator/build.mjs",
+    "examples/raptor-engine/build.mjs",
+    "examples/raptor-engine/live.js",
+    "examples/raptor-engine/raptor.css",
+    "examples/ripple-tank/build.mjs",
+    "examples/ripple-tank/live.js",
+    "examples/ripple-tank/model.mjs",
+    "examples/ripple-tank/ripple.css",
+    "examples/spot-plate/art.tsx",
+    "examples/spot-plate/drops.ts",
+    "examples/spot-plate/fan.ts",
+    "examples/spot-plate/figure.tsx",
+    "examples/spot-plate/geometry.ts",
+    "examples/spot-plate/live.tsx",
+    "examples/spot-plate/rig.ts",
+    "examples/spot-plate/spot-plate.css",
+    "examples/test-rig/art.tsx",
+    "examples/test-rig/figure.tsx",
+    "examples/test-rig/geometry.ts",
+    "examples/test-rig/live.tsx",
+    "examples/test-rig/pose.ts",
+    "examples/test-rig/rig.ts",
+    "examples/test-rig/stretch.css",
+    "examples/test-rig/view.ts",
+    "examples/turning-dial/build.mjs",
+    "examples/turning-dial/dial.css",
+    "examples/turning-dial/live.js",
+    "examples/turning-dial/stress.mjs",
+    "kit/audit.mjs",
+    "kit/canvas-painter.mjs",
+    "kit/gl-shared.mjs",
+    "kit/gl.mjs",
+    "kit/iso-kit.mjs",
+    "kit/iso-kit.ts",
+    "kit/iso.css",
+    "kit/lathe.mjs",
+    "kit/react/draw.tsx",
+    "kit/react/live.tsx",
+    "kit/tube.mjs",
+    "kit/turn-audit.mjs",
+    "kit/turn-build.mjs",
+    "kit/turn-fixed.mjs",
+    "kit/turn.mjs",
+    "references/3d.md",
+    "references/craft.md",
+    "references/kit.md",
+    "references/motion.md",
+    "references/react.md",
+    "references/verify.md",
+    "references/walkthrough.md",
+    "references/webgl.md",
+    "scripts/capture.mjs",
+    "scripts/drive.mjs",
+    "scripts/inline-kit.mjs",
+    "scripts/line-ends.mjs",
+    "scripts/lines.mjs",
+    "scripts/turn-bench.mjs",
+    "scripts/turn-check.mjs",
+    "scripts/turn-fidelity.mjs"
+   ]
+  },
+  {
+   "name": "archify",
+   "path": "creative/archify",
+   "description": "Validated interactive HTML diagrams, upstream-maintained.",
+   "tags": [
+    "diagram",
+    "architecture",
+    "workflow",
+    "sequence",
+    "dataflow",
+    "state-machine",
+    "mermaid",
+    "html",
+    "svg"
+   ],
+   "files": [
+    "SKILL.md"
+   ]
+  },
+  {
+   "name": "ascii-art",
+   "path": "creative/ascii-art",
+   "description": "ASCII art: pyfiglet, cowsay, boxes, image-to-ascii.",
+   "tags": [
+    "ASCII",
+    "Art",
+    "Banners",
+    "Creative",
+    "Unicode",
+    "Text-Art",
+    "pyfiglet",
+    "figlet",
+    "cowsay",
+    "boxes"
+   ],
+   "files": [
+    "SKILL.md"
+   ]
+  },
+  {
+   "name": "audiocraft-audio-generation",
+   "path": "creative/audiocraft-audio-generation",
+   "description": "AudioCraft: MusicGen text-to-music, AudioGen text-to-sound.",
+   "tags": [
+    "Multimodal",
+    "Audio Generation",
+    "Text-to-Music",
+    "Text-to-Audio",
+    "MusicGen"
+   ],
+   "files": [
+    "SKILL.md",
+    "references/advanced-usage.md",
+    "references/troubleshooting.md"
+   ]
+  },
+  {
+   "name": "auteur",
+   "path": "creative/auteur",
+   "description": "Design and build cinematic, award-level web pages.",
+   "tags": [
+    "web-design",
+    "cinematic",
+    "scroll-animation",
+    "design-system",
+    "anti-slop",
+    "frontend"
+   ],
+   "files": [
+    "LICENSE",
+    "SKILL.md",
+    "references/ambient-backgrounds.md",
+    "references/assets.md",
+    "references/build.md",
+    "references/direct.md",
+    "references/motion.md",
+    "references/recon.md",
+    "references/scroll-cinema.md",
+    "references/scroll-flight.md",
+    "references/system.md",
+    "references/taste.md",
+    "references/verify.md",
+    "scripts/chromadiff.mjs",
+    "scripts/moodboard.mjs",
+    "scripts/motionqa.mjs",
+    "scripts/refscout.mjs",
+    "scripts/shoot.mjs",
+    "scripts/slopscan.mjs",
+    "scripts/source.mjs",
+    "scripts/systemscan.mjs",
+    "templates/CINEMA-QA.md",
+    "templates/COMMIT-SHEET.md",
+    "templates/DESIGN.md",
+    "templates/STORYBOARD.md",
+    "templates/SYSTEM-SHEET.md",
+    "templates/scroll-flight-engine.js"
+   ]
+  },
+  {
+   "name": "baoyu-article-illustrator",
+   "path": "creative/baoyu-article-illustrator",
+   "description": "Article illustrations: type × style × palette consistency.",
+   "tags": [
+    "article-illustration",
+    "creative",
+    "image-generation"
+   ],
+   "files": [
+    "PORT_NOTES.md",
+    "SKILL.md",
+    "prompts/system.md",
+    "references/palettes/macaron.md",
+    "references/palettes/mono-ink.md",
+    "references/palettes/neon.md",
+    "references/palettes/warm.md",
+    "references/prompt-construction.md",
+    "references/style-presets.md",
+    "references/styles.md",
+    "references/styles/blueprint.md",
+    "references/styles/chalkboard.md",
+    "references/styles/editorial.md",
+    "references/styles/elegant.md",
+    "references/styles/fantasy-animation.md",
+    "references/styles/flat-doodle.md",
+    "references/styles/flat.md",
+    "references/styles/ink-notes.md",
+    "references/styles/intuition-machine.md",
+    "references/styles/minimal.md",
+    "references/styles/nature.md",
+    "references/styles/notion.md",
+    "references/styles/pixel-art.md",
+    "references/styles/playful.md",
+    "references/styles/retro.md",
+    "references/styles/scientific.md",
+    "references/styles/screen-print.md",
+    "references/styles/sketch-notes.md",
+    "references/styles/sketch.md",
+    "references/styles/vector-illustration.md",
+    "references/styles/vintage.md",
+    "references/styles/warm.md",
+    "references/styles/watercolor.md",
+    "references/usage.md",
+    "references/workflow.md"
+   ]
+  },
+  {
+   "name": "baoyu-comic",
+   "path": "creative/baoyu-comic",
+   "description": "Knowledge comics (知识漫画): educational, biography, tutorial.",
+   "tags": [
+    "comic",
+    "knowledge-comic",
+    "creative",
+    "image-generation"
+   ],
+   "files": [
+    "PORT_NOTES.md",
+    "SKILL.md",
+    "references/analysis-framework.md",
+    "references/art-styles/chalk.md",
+    "references/art-styles/ink-brush.md",
+    "references/art-styles/ligne-claire.md",
+    "references/art-styles/manga.md",
+    "references/art-styles/minimalist.md",
+    "references/art-styles/realistic.md",
+    "references/auto-selection.md",
+    "references/base-prompt.md",
+    "references/character-template.md",
+    "references/layouts/cinematic.md",
+    "references/layouts/dense.md",
+    "references/layouts/four-panel.md",
+    "references/layouts/mixed.md",
+    "references/layouts/splash.md",
+    "references/layouts/standard.md",
+    "references/layouts/webtoon.md",
+    "references/ohmsha-guide.md",
+    "references/partial-workflows.md",
+    "references/presets/concept-story.md",
+    "references/presets/four-panel.md",
+    "references/presets/ohmsha.md",
+    "references/presets/shoujo.md",
+    "references/presets/wuxia.md",
+    "references/storyboard-template.md",
+    "references/tones/action.md",
+    "references/tones/dramatic.md",
+    "references/tones/energetic.md",
+    "references/tones/neutral.md",
+    "references/tones/romantic.md",
+    "references/tones/vintage.md",
+    "references/tones/warm.md",
+    "references/workflow.md"
+   ]
+  },
+  {
+   "name": "brag",
+   "path": "creative/brag",
+   "description": "Project launch video via Hyperframes, upstream-maintained.",
+   "tags": [
+    "video",
+    "launch-video",
+    "marketing",
+    "hyperframes",
+    "motion-graphics",
+    "share-copy"
+   ],
+   "files": [
+    "SKILL.md"
+   ]
+  },
+  {
+   "name": "brag-slim",
+   "path": "creative/brag-slim",
+   "description": "Launch video from a project or URL, upstream-maintained.",
+   "tags": [
+    "video",
+    "launch-video",
+    "marketing",
+    "motion-graphics",
+    "share-copy"
+   ],
+   "files": [
+    "SKILL.md"
+   ]
+  },
+  {
+   "name": "comfyui",
+   "path": "creative/comfyui",
+   "description": "Generate images, video, and audio via diffusion workflows.",
+   "tags": [
+    "comfyui",
+    "image-generation",
+    "stable-diffusion",
+    "flux",
+    "sd3",
+    "wan-video",
+    "hunyuan-video",
+    "creative",
+    "generative-ai",
+    "video-generation"
+   ],
+   "files": [
+    "SKILL.md",
+    "references/official-cli.md",
+    "references/rest-api.md",
+    "references/template-integrity.md",
+    "references/workflow-format.md",
+    "scripts/_common.py",
+    "scripts/auto_fix_deps.py",
+    "scripts/check_deps.py",
+    "scripts/comfyui_setup.sh",
+    "scripts/extract_schema.py",
+    "scripts/fetch_logs.py",
+    "scripts/hardware_check.py",
+    "scripts/health_check.py",
+    "scripts/run_batch.py",
+    "scripts/run_workflow.py",
+    "scripts/ws_monitor.py",
+    "tests/README.md",
+    "tests/conftest.py",
+    "tests/pytest.ini",
+    "tests/test_check_deps.py",
+    "tests/test_cloud_integration.py",
+    "tests/test_common.py",
+    "tests/test_extract_schema.py",
+    "tests/test_run_workflow.py",
+    "workflows/README.md",
+    "workflows/animatediff_video.json",
+    "workflows/flux_dev_txt2img.json",
+    "workflows/sd15_txt2img.json",
+    "workflows/sdxl_img2img.json",
+    "workflows/sdxl_inpaint.json",
+    "workflows/sdxl_txt2img.json",
+    "workflows/upscale_4x.json",
+    "workflows/wan_video_t2v.json"
+   ]
+  },
+  {
+   "name": "concept-diagrams",
+   "path": "creative/concept-diagrams",
+   "description": "Generate flat, minimal educational SVG visuals as HTML.",
+   "tags": [
+    "diagrams",
+    "svg",
+    "visualization",
+    "education",
+    "physics",
+    "chemistry",
+    "engineering"
+   ],
+   "files": [
+    "SKILL.md",
+    "examples/apartment-floor-plan-conversion.md",
+    "examples/automated-password-reset-flow.md",
+    "examples/autonomous-llm-research-agent-flow.md",
+    "examples/banana-journey-tree-to-smoothie.md",
+    "examples/commercial-aircraft-structure.md",
+    "examples/cpu-ooo-microarchitecture.md",
+    "examples/electricity-grid-flow.md",
+    "examples/feature-film-production-pipeline.md",
+    "examples/hospital-emergency-department-flow.md",
+    "examples/ml-benchmark-grouped-bar-chart.md",
+    "examples/place-order-uml-sequence.md",
+    "examples/smart-city-infrastructure.md",
+    "examples/smartphone-layer-anatomy.md",
+    "examples/sn2-reaction-mechanism.md",
+    "examples/wind-turbine-structure.md",
+    "references/dashboard-patterns.md",
+    "references/infrastructure-patterns.md",
+    "references/physical-shape-cookbook.md",
+    "templates/template.html"
+   ]
+  },
+  {
+   "name": "creative-ideation",
+   "path": "creative/creative-ideation",
+   "description": "Generate ideas via named methods from creative practice.",
+   "tags": [
+    "Creative",
+    "Ideation",
+    "Brainstorming",
+    "Methods",
+    "Inspiration"
+   ],
+   "files": [
+    "SKILL.md",
+    "references/anti-slop.md",
+    "references/exercises.md",
+    "references/full-prompt-library.md",
+    "references/heuristics.md",
+    "references/method-catalog.md",
+    "references/methods/affinity-diagrams.md",
+    "references/methods/analogy-and-blending.md",
+    "references/methods/biomimicry.md",
+    "references/methods/chance-and-remix.md",
+    "references/methods/compression-progress.md",
+    "references/methods/creative-discipline.md",
+    "references/methods/defamiliarization.md",
+    "references/methods/derive-and-mapping.md",
+    "references/methods/first-principles.md",
+    "references/methods/jobs-to-be-done.md",
+    "references/methods/lateral-provocations.md",
+    "references/methods/leverage-points.md",
+    "references/methods/oblique-strategies.md",
+    "references/methods/oulipo.md",
+    "references/methods/pataphysics.md",
+    "references/methods/pattern-languages.md",
+    "references/methods/polya.md",
+    "references/methods/premortem-and-inversion.md",
+    "references/methods/scamper.md",
+    "references/methods/story-skeletons.md",
+    "references/methods/triz-principles.md",
+    "references/methods/volume-generation.md"
+   ]
+  },
+  {
+   "name": "draw-your-font",
+   "path": "creative/draw-your-font",
+   "description": "Turn a handwriting photo into an installable TTF font.",
+   "tags": [
+    "font",
+    "handwriting",
+    "typography",
+    "ttf",
+    "woff",
+    "vision",
+    "creative"
+   ],
+   "files": [
+    "SKILL.md",
+    "references/troubleshooting.md"
+   ]
+  },
+  {
+   "name": "dream-loop",
+   "path": "creative/dream-loop",
+   "description": "Build stunning 3D scenes via a concept-art fidelity loop.",
+   "tags": [
+    "3d",
+    "games",
+    "webgl",
+    "threejs",
+    "image-generation",
+    "visual-fidelity",
+    "creative"
+   ],
+   "files": [
+    "LICENSE.txt",
+    "SKILL.md"
+   ]
+  },
+  {
+   "name": "excalidraw",
+   "path": "creative/excalidraw",
+   "description": "Hand-drawn Excalidraw JSON diagrams (arch, flow, seq).",
+   "tags": [
+    "Excalidraw",
+    "Diagrams",
+    "Flowcharts",
+    "Architecture",
+    "Visualization",
+    "JSON"
+   ],
+   "files": [
+    "SKILL.md",
+    "references/colors.md",
+    "references/dark-mode.md",
+    "references/examples.md",
+    "scripts/upload.py"
+   ]
+  },
+  {
+   "name": "heartmula",
+   "path": "creative/heartmula",
+   "description": "HeartMuLa: Suno-like song generation from lyrics + tags.",
+   "tags": [
+    "music",
+    "audio",
+    "generation",
+    "ai",
+    "heartmula",
+    "heartcodec",
+    "lyrics",
+    "songs"
+   ],
+   "files": [
+    "SKILL.md"
+   ]
+  },
+  {
+   "name": "hyperframes",
+   "path": "creative/hyperframes",
+   "description": "Render MP4/WebM videos from HTML compositions.",
+   "tags": [
+    "creative",
+    "video",
+    "animation",
+    "html",
+    "gsap",
+    "motion-graphics"
+   ],
+   "files": [
+    "SKILL.md",
+    "references/cli.md",
+    "references/composition.md",
+    "references/features.md",
+    "references/gsap.md",
+    "references/troubleshooting.md",
+    "references/website-to-video.md",
+    "scripts/setup.sh"
+   ]
+  },
+  {
+   "name": "impeccable",
+   "path": "creative/impeccable",
+   "description": "Frontend design guidance, upstream-maintained (impeccable).",
+   "tags": [
+    "design",
+    "frontend",
+    "ui",
+    "ux",
+    "web-design",
+    "anti-slop"
+   ],
+   "files": [
+    "SKILL.md"
+   ]
+  },
+  {
+   "name": "ip-as-logo",
+   "path": "creative/ip-as-logo",
+   "description": "Design minimal cute IP mascot marks readable at 32px.",
+   "tags": [
+    "logo",
+    "mascot",
+    "branding",
+    "ip-character",
+    "image-generation",
+    "creative"
+   ],
+   "files": [
+    "LICENSE",
+    "SKILL.md"
+   ]
+  },
+  {
+   "name": "kanban-video-orchestrator",
+   "path": "creative/kanban-video-orchestrator",
+   "description": "Plan and run multi-agent video production pipelines.",
+   "tags": [
+    "video",
+    "kanban",
+    "multi-agent",
+    "orchestration",
+    "production-pipeline"
+   ],
+   "files": [
+    "SKILL.md",
+    "assets/brief.md.tmpl",
+    "assets/setup.sh.tmpl",
+    "assets/soul.md.tmpl",
+    "references/examples.md",
+    "references/intake.md",
+    "references/kanban-setup.md",
+    "references/monitoring.md",
+    "references/role-archetypes.md",
+    "references/tool-matrix.md",
+    "scripts/bootstrap_pipeline.py",
+    "scripts/monitor.py"
+   ]
+  },
+  {
+   "name": "meme-generation",
+   "path": "creative/meme-generation",
+   "description": "Create meme PNGs from templates with Pillow text overlay.",
+   "tags": [
+    "creative",
+    "memes",
+    "humor",
+    "images"
+   ],
+   "files": [
+    "EXAMPLES.md",
+    "SKILL.md",
+    "scripts/.gitignore",
+    "scripts/generate_meme.py",
+    "scripts/templates.json"
+   ]
+  },
+  {
+   "name": "mono-color",
+   "path": "creative/mono-color",
+   "description": "Generate one- or two-ink editorial print poster images.",
+   "tags": [
+    "design",
+    "poster",
+    "print",
+    "duotone",
+    "risograph",
+    "editorial",
+    "image-generation"
+   ],
+   "files": [
+    "LICENSE.txt",
+    "SKILL.md",
+    "design-system/carriers.json",
+    "design-system/colors.json",
+    "design-system/compositions.json",
+    "design-system/imperfections.json",
+    "design-system/rhythm.json",
+    "design-system/typography.json",
+    "references/composition.md",
+    "references/quality-gate.md",
+    "references/visual-language.md"
+   ]
+  },
+  {
+   "name": "pixel-art",
+   "path": "creative/pixel-art",
+   "description": "Pixel art w/ era palettes (NES, Game Boy, PICO-8).",
+   "tags": [
+    "creative",
+    "pixel-art",
+    "arcade",
+    "snes",
+    "nes",
+    "gameboy",
+    "retro",
+    "image",
+    "video"
+   ],
+   "files": [
+    "ATTRIBUTION.md",
+    "SKILL.md",
+    "references/palettes.md",
+    "scripts/__init__.py",
+    "scripts/palettes.py",
+    "scripts/pixel_art.py",
+    "scripts/pixel_art_video.py"
+   ]
+  },
+  {
+   "name": "pretext",
+   "path": "creative/pretext",
+   "description": "Build creative browser demos with DOM-free text layout.",
+   "tags": [
+    "creative-coding",
+    "typography",
+    "pretext",
+    "ascii-art",
+    "canvas",
+    "generative",
+    "text-layout",
+    "kinetic-typography"
+   ],
+   "files": [
+    "SKILL.md",
+    "references/patterns.md",
+    "templates/donut-orbit.html",
+    "templates/hello-orb-flow.html"
+   ]
+  },
+  {
+   "name": "simple-english",
+   "path": "creative/simple-english",
+   "description": "Rewrite text to ASD-STE100 Simplified Technical English.",
+   "tags": [
+    "writing",
+    "documentation",
+    "ste",
+    "asd-ste100",
+    "technical-writing",
+    "editing",
+    "anti-ai-slop"
+   ],
+   "files": [
+    "SKILL.md",
+    "references/checklist.md",
+    "references/use-cases.md"
+   ]
+  },
+  {
+   "name": "sketch",
+   "path": "creative/sketch",
+   "description": "Throwaway HTML mockups: 2-3 design variants to compare.",
+   "tags": [
+    "sketch",
+    "mockup",
+    "design",
+    "ui",
+    "prototype",
+    "html",
+    "variants",
+    "exploration",
+    "wireframe",
+    "comparison"
+   ],
+   "files": [
+    "SKILL.md"
+   ]
+  },
+  {
+   "name": "social-media-content-calendar",
+   "path": "creative/social-media-content-calendar",
+   "description": "Plan multi-platform social campaigns: briefs to posting.",
+   "tags": [
+    "Social-Media",
+    "Content-Calendar",
+    "Campaigns",
+    "Publishing"
+   ],
+   "files": [
+    "SKILL.md"
+   ]
+  },
+  {
+   "name": "system-atlas",
+   "path": "creative/system-atlas",
+   "description": "Build explorable isometric architecture atlases as HTML.",
+   "tags": [
+    "architecture",
+    "diagrams",
+    "isometric",
+    "documentation"
+   ],
+   "files": [
+    "LICENSE.txt",
+    "SKILL.md",
+    "assets/build.mjs",
+    "assets/data.example.mjs",
+    "assets/template.html",
+    "references/design-language.md",
+    "references/process-and-lessons.md"
+   ]
+  },
+  {
+   "name": "tldraw-offline",
+   "path": "creative/tldraw-offline",
+   "description": "Drive and script tldraw offline canvases with an agent.",
+   "tags": [
+    "tldraw",
+    "canvas",
+    "whiteboard",
+    "document-script",
+    "diagramming"
+   ],
+   "files": [
+    "SKILL.md",
+    "scripts/counter.js",
+    "scripts/main.js",
+    "scripts/validate_shapes.mjs"
+   ]
+  },
+  {
+   "name": "unreal-mcp",
+   "path": "creative/unreal-mcp",
+   "description": "Automate Unreal Engine editor scenes, actors, and renders.",
+   "tags": [
+    "unreal",
+    "unreal-engine",
+    "ue5",
+    "3d",
+    "mcp",
+    "scenes",
+    "cinematics",
+    "lighting",
+    "gamedev"
+   ],
+   "files": [
+    "SKILL.md",
+    "references/advanced-workflows.md",
+    "references/pitfalls.md",
+    "references/recipes.md",
+    "references/scene-craft.md",
+    "references/tool-surface.md"
+   ]
+  },
+  {
+   "name": "jupyter-notebook",
+   "path": "data-science/jupyter-notebook",
+   "description": "Iterative Python via live Jupyter kernel (hamelnb).",
+   "tags": [
+    "jupyter",
+    "notebook",
+    "repl",
+    "data-science",
+    "exploration",
+    "iterative"
+   ],
+   "files": [
+    "SKILL.md"
+   ]
+  },
+  {
+   "name": "actual-setup",
+   "path": "devops/actual-setup",
+   "description": "Set up Actual Computer (actual.inc) inference in Hermes.",
+   "tags": [
+    "actual",
+    "actual-inc",
+    "provider",
+    "local-inference",
+    "relay",
+    "gguf",
+    "setup"
+   ],
+   "files": [
+    "SKILL.md",
+    "references/opencode.md"
+   ]
+  },
+  {
+   "name": "docker-management",
+   "path": "devops/docker-management",
+   "description": "Manage Docker containers, images, volumes, and Compose.",
+   "tags": [
+    "docker",
+    "containers",
+    "devops",
+    "infrastructure",
+    "compose",
+    "images",
+    "volumes",
+    "networks",
+    "debugging"
+   ],
+   "files": [
+    "SKILL.md"
+   ]
+  },
+  {
+   "name": "hermes-s6-container-supervision",
+   "path": "devops/hermes-s6-container-supervision",
+   "description": "Modify or debug s6 services in the Hermes Docker image.",
+   "tags": [
+    "docker",
+    "s6",
+    "supervision",
+    "gateway",
+    "profiles"
+   ],
+   "files": [
+    "SKILL.md"
+   ]
+  },
+  {
+   "name": "inference-sh-cli",
+   "path": "devops/inference-sh-cli",
+   "description": "Run 150+ AI apps (image, video, LLM) via inference.sh CLI.",
+   "tags": [
+    "AI",
+    "image-generation",
+    "video",
+    "LLM",
+    "search",
+    "inference",
+    "FLUX",
+    "Veo",
+    "Claude"
+   ],
+   "files": [
+    "SKILL.md",
+    "references/app-discovery.md",
+    "references/authentication.md",
+    "references/cli-reference.md",
+    "references/running-apps.md"
+   ]
+  },
+  {
+   "name": "pinggy-tunnel",
+   "path": "devops/pinggy-tunnel",
+   "description": "Zero-install localhost tunnels over SSH via Pinggy.",
+   "tags": [
+    "Pinggy",
+    "Tunnel",
+    "Networking",
+    "SSH",
+    "Webhook",
+    "Localhost"
+   ],
+   "files": [
+    "SKILL.md"
+   ]
+  },
+  {
+   "name": "setup-wizard-generator",
+   "path": "devops/setup-wizard-generator",
+   "description": "Generate a bash wizard guiding a human through manual setup.",
+   "tags": [
+    "wizard",
+    "setup",
+    "onboarding",
+    "credentials",
+    "secrets",
+    "migration",
+    "bash",
+    "human-in-the-loop"
+   ],
+   "files": [
+    "SKILL.md",
+    "templates/template.sh"
+   ]
+  },
+  {
+   "name": "watchers",
+   "path": "devops/watchers",
+   "description": "Poll RSS, JSON APIs, and GitHub with watermark dedup.",
+   "tags": [
+    "cron",
+    "polling",
+    "rss",
+    "github",
+    "http",
+    "automation",
+    "monitoring"
+   ],
+   "files": [
+    "SKILL.md",
+    "scripts/_watermark.py",
+    "scripts/watch_github.py",
+    "scripts/watch_http_json.py",
+    "scripts/watch_rss.py"
+   ]
+  },
+  {
+   "name": "adversarial-ux-test",
+   "path": "dogfood/adversarial-ux-test",
+   "description": "Roleplay a hostile user to find and triage UX pain points.",
+   "tags": [
+    "qa",
+    "ux",
+    "testing",
+    "adversarial",
+    "dogfood",
+    "personas",
+    "user-testing"
+   ],
+   "files": [
+    "SKILL.md"
+   ]
+  },
+  {
+   "name": "agentmail",
+   "path": "email/agentmail",
+   "description": "Use when an agent needs AgentMail CLI email inboxes.",
+   "tags": [
+    "Email",
+    "CLI",
+    "AgentMail",
+    "Communication"
+   ],
+   "files": [
+    "SKILL.md",
+    "references/core.md",
+    "references/mcp.md",
+    "references/signup.md",
+    "references/webhooks.md",
+    "references/websockets.md"
+   ]
+  },
+  {
+   "name": "3-statement-model",
+   "path": "finance/3-statement-model",
+   "description": "Build integrated IS/BS/CF financial workbooks in Excel.",
+   "tags": [
+    "finance",
+    "three-statement",
+    "income-statement",
+    "balance-sheet",
+    "cash-flow",
+    "excel",
+    "openpyxl",
+    "modeling"
+   ],
+   "files": [
+    "SKILL.md",
+    "references/formatting.md",
+    "references/formulas.md",
+    "references/sec-filings.md"
+   ]
+  },
+  {
+   "name": "comps-analysis",
+   "path": "finance/comps-analysis",
+   "description": "Build comparable-company valuation workbooks in Excel.",
+   "tags": [
+    "finance",
+    "valuation",
+    "comps",
+    "excel",
+    "openpyxl",
+    "modeling",
+    "investment-banking"
+   ],
+   "files": [
+    "SKILL.md"
+   ]
+  },
+  {
+   "name": "dcf-model",
+   "path": "finance/dcf-model",
+   "description": "Build discounted cash flow valuation workbooks in Excel.",
+   "tags": [
+    "finance",
+    "valuation",
+    "dcf",
+    "excel",
+    "openpyxl",
+    "modeling",
+    "investment-banking"
+   ],
+   "files": [
+    "SKILL.md",
+    "TROUBLESHOOTING.md",
+    "requirements.txt",
+    "scripts/validate_dcf.py"
+   ]
+  },
+  {
+   "name": "excel-author",
+   "path": "finance/excel-author",
+   "description": "Build auditable financial workbooks headless via openpyxl.",
+   "tags": [
+    "excel",
+    "openpyxl",
+    "finance",
+    "spreadsheet",
+    "modeling"
+   ],
+   "files": [
+    "SKILL.md",
+    "scripts/recalc.py"
+   ]
+  },
+  {
+   "name": "lbo-model",
+   "path": "finance/lbo-model",
+   "description": "Build leveraged buyout workbooks with IRR/MOIC in Excel.",
+   "tags": [
+    "finance",
+    "valuation",
+    "lbo",
+    "private-equity",
+    "excel",
+    "openpyxl",
+    "modeling"
+   ],
+   "files": [
+    "SKILL.md"
+   ]
+  },
+  {
+   "name": "merger-model",
+   "path": "finance/merger-model",
+   "description": "Build M&A accretion/dilution workbooks in Excel.",
+   "tags": [
+    "finance",
+    "m-and-a",
+    "merger",
+    "accretion-dilution",
+    "excel",
+    "openpyxl",
+    "modeling",
+    "investment-banking"
+   ],
+   "files": [
+    "SKILL.md"
+   ]
+  },
+  {
+   "name": "polymarket",
+   "path": "finance/polymarket",
+   "description": "Query Polymarket: markets, prices, orderbooks, history.",
+   "tags": [],
+   "files": [
+    "SKILL.md",
+    "references/api-endpoints.md",
+    "scripts/polymarket.py"
+   ]
+  },
+  {
+   "name": "pptx-author",
+   "path": "finance/pptx-author",
+   "description": "Build PowerPoint decks headless with python-pptx.",
+   "tags": [
+    "powerpoint",
+    "pptx",
+    "python-pptx",
+    "presentation",
+    "finance"
+   ],
+   "files": [
+    "SKILL.md"
+   ]
+  },
+  {
+   "name": "stocks",
+   "path": "finance/stocks",
+   "description": "Stock quotes, history, search, compare, crypto via Yahoo.",
+   "tags": [
+    "Stocks",
+    "Finance",
+    "Market",
+    "Crypto",
+    "Investing"
+   ],
+   "files": [
+    "SKILL.md",
+    "scripts/stocks_client.py"
+   ]
+  },
+  {
+   "name": "minecraft-modpack-server",
+   "path": "gaming/minecraft-modpack-server",
+   "description": "Host modded Minecraft servers (CurseForge, Modrinth).",
+   "tags": [],
+   "files": [
+    "SKILL.md"
+   ]
+  },
+  {
+   "name": "pokemon-player",
+   "path": "gaming/pokemon-player",
+   "description": "Play Pokemon via headless emulator + RAM reads.",
+   "tags": [],
+   "files": [
+    "SKILL.md"
+   ]
+  },
+  {
+   "name": "fitness-nutrition",
+   "path": "health/fitness-nutrition",
+   "description": "Workout planning, macros, and body metrics via wger/USDA.",
+   "tags": [
+    "health",
+    "fitness",
+    "nutrition",
+    "gym",
+    "workout",
+    "diet",
+    "exercise"
+   ],
+   "files": [
+    "SKILL.md",
+    "references/FORMULAS.md",
+    "scripts/body_calc.py",
+    "scripts/nutrition_search.py"
+   ]
+  },
+  {
+   "name": "neuroskill-bci",
+   "path": "health/neuroskill-bci",
+   "description": "Use live BCI cognitive and mood state from NeuroSkill.",
+   "tags": [
+    "BCI",
+    "neurofeedback",
+    "health",
+    "focus",
+    "EEG",
+    "cognitive-state",
+    "biometrics",
+    "neuroskill"
+   ],
+   "files": [
+    "SKILL.md",
+    "references/api.md",
+    "references/metrics.md",
+    "references/protocols.md"
+   ]
+  },
+  {
+   "name": "fastmcp",
+   "path": "mcp/fastmcp",
+   "description": "Build, test, and deploy Python MCP servers.",
+   "tags": [
+    "MCP",
+    "FastMCP",
+    "Python",
+    "Tools",
+    "Resources",
+    "Prompts",
+    "Deployment"
+   ],
+   "files": [
+    "SKILL.md",
+    "references/fastmcp-cli.md",
+    "scripts/scaffold_fastmcp.py",
+    "templates/api_wrapper.py",
+    "templates/database_server.py",
+    "templates/file_processor.py"
+   ]
+  },
+  {
+   "name": "mcp-oauth-remote-gateway",
+   "path": "mcp/mcp-oauth-remote-gateway",
+   "description": "Manual OAuth for remote MCP servers on headless gateways.",
+   "tags": [
+    "MCP",
+    "OAuth",
+    "PKCE",
+    "Remote-Deployment"
+   ],
+   "files": [
+    "SKILL.md",
+    "references/stripe-mcp-oauth-revocation.md",
+    "scripts/diagnose-oauth-mcp.py"
+   ]
+  },
+  {
+   "name": "mcporter",
+   "path": "mcp/mcporter",
+   "description": "List, auth, and call MCP servers/tools from the terminal.",
+   "tags": [
+    "MCP",
+    "Tools",
+    "API",
+    "Integrations",
+    "Interop"
+   ],
+   "files": [
+    "SKILL.md"
+   ]
+  },
+  {
+   "name": "openclaw-migration",
+   "path": "migration/openclaw-migration",
+   "description": "Import an OpenClaw setup (memories, skills) into Hermes.",
+   "tags": [
+    "Migration",
+    "OpenClaw",
+    "Hermes",
+    "Memory",
+    "Persona",
+    "Import"
+   ],
+   "files": [
+    "SKILL.md",
+    "scripts/openclaw_to_hermes.py"
+   ]
+  },
+  {
+   "name": "accelerate",
+   "path": "mlops/accelerate",
+   "description": "Run PyTorch training across GPUs with minimal changes.",
+   "tags": [
+    "Distributed Training",
+    "HuggingFace",
+    "Accelerate",
+    "DeepSpeed",
+    "FSDP",
+    "Mixed Precision",
+    "PyTorch",
+    "DDP",
+    "Unified API",
+    "Simple"
+   ],
+   "files": [
+    "SKILL.md",
+    "references/custom-plugins.md",
+    "references/megatron-integration.md",
+    "references/performance.md"
+   ]
+  },
+  {
+   "name": "chroma",
+   "path": "mlops/chroma",
+   "description": "Embedding database for RAG and semantic search.",
+   "tags": [
+    "RAG",
+    "Chroma",
+    "Vector Database",
+    "Embeddings",
+    "Semantic Search",
+    "Open Source",
+    "Self-Hosted",
+    "Document Retrieval",
+    "Metadata Filtering"
+   ],
+   "files": [
+    "SKILL.md",
+    "references/integration.md"
+   ]
+  },
+  {
+   "name": "clip",
+   "path": "mlops/clip",
+   "description": "Zero-shot image classification and image-text search.",
+   "tags": [
+    "Multimodal",
+    "CLIP",
+    "Vision-Language",
+    "Zero-Shot",
+    "Image Classification",
+    "OpenAI",
+    "Image Search",
+    "Cross-Modal Retrieval",
+    "Content Moderation"
+   ],
+   "files": [
+    "SKILL.md",
+    "references/applications.md"
+   ]
+  },
+  {
+   "name": "evaluating-llms-harness",
+   "path": "mlops/evaluation/evaluating-llms-harness",
+   "description": "lm-eval-harness: benchmark LLMs (MMLU, GSM8K, etc.).",
+   "tags": [
+    "Evaluation",
+    "LM Evaluation Harness",
+    "Benchmarking",
+    "MMLU",
+    "HumanEval",
+    "GSM8K",
+    "EleutherAI",
+    "Model Quality",
+    "Academic Benchmarks",
+    "Industry Standard"
+   ],
+   "files": [
+    "SKILL.md",
+    "references/api-evaluation.md",
+    "references/benchmark-guide.md",
+    "references/custom-tasks.md",
+    "references/distributed-eval.md"
+   ]
+  },
+  {
+   "name": "weights-and-biases",
+   "path": "mlops/evaluation/weights-and-biases",
+   "description": "W&B: log ML experiments, sweeps, model registry, dashboards.",
+   "tags": [
+    "MLOps",
+    "Weights And Biases",
+    "WandB",
+    "Experiment Tracking",
+    "Hyperparameter Tuning",
+    "Model Registry",
+    "Collaboration",
+    "Real-Time Visualization",
+    "PyTorch",
+    "TensorFlow",
+    "HuggingFace"
+   ],
+   "files": [
+    "SKILL.md",
+    "references/artifacts.md",
+    "references/integrations.md",
+    "references/sweeps.md"
+   ]
+  },
+  {
+   "name": "faiss",
+   "path": "mlops/faiss",
+   "description": "Fast vector similarity search at billion scale.",
+   "tags": [
+    "RAG",
+    "FAISS",
+    "Similarity Search",
+    "Vector Search",
+    "Facebook AI",
+    "GPU Acceleration",
+    "Billion-Scale",
+    "K-NN",
+    "HNSW",
+    "High Performance",
+    "Large Scale"
+   ],
+   "files": [
+    "SKILL.md",
+    "references/index_types.md"
+   ]
+  },
+  {
+   "name": "flash-attention",
+   "path": "mlops/flash-attention",
+   "description": "Speed up long-sequence transformer training and inference.",
+   "tags": [
+    "Optimization",
+    "Flash Attention",
+    "Attention Optimization",
+    "Memory Efficiency",
+    "Speed Optimization",
+    "Long Context",
+    "PyTorch",
+    "SDPA",
+    "H100",
+    "FP8",
+    "Transformers"
+   ],
+   "files": [
+    "SKILL.md",
+    "references/benchmarks.md",
+    "references/transformers-integration.md"
+   ]
+  },
+  {
+   "name": "guidance",
+   "path": "mlops/guidance",
+   "description": "Constrain LLM output with grammars; guarantee valid JSON.",
+   "tags": [
+    "Prompt Engineering",
+    "Guidance",
+    "Constrained Generation",
+    "Structured Output",
+    "JSON Validation",
+    "Grammar",
+    "Microsoft Research",
+    "Format Enforcement",
+    "Multi-Step Workflows"
+   ],
+   "files": [
+    "SKILL.md",
+    "references/backends.md",
+    "references/constraints.md",
+    "references/examples.md"
+   ]
+  },
+  {
+   "name": "huggingface-tokenizers",
+   "path": "mlops/huggingface-tokenizers",
+   "description": "Fast BPE/WordPiece tokenization and custom vocab training.",
+   "tags": [
+    "Tokenization",
+    "HuggingFace",
+    "BPE",
+    "WordPiece",
+    "Unigram",
+    "Fast Tokenization",
+    "Rust",
+    "Custom Tokenizer",
+    "Alignment Tracking",
+    "Production"
+   ],
+   "files": [
+    "SKILL.md",
+    "references/algorithms.md",
+    "references/integration.md",
+    "references/pipeline.md",
+    "references/training.md"
+   ]
+  },
+  {
+   "name": "llama-cpp",
+   "path": "mlops/inference/llama-cpp",
+   "description": "llama.cpp local GGUF inference + HF Hub model discovery.",
+   "tags": [
+    "llama.cpp",
+    "GGUF",
+    "Quantization",
+    "Hugging Face Hub",
+    "CPU Inference",
+    "Apple Silicon",
+    "Edge Deployment",
+    "AMD GPUs",
+    "Intel GPUs",
+    "NVIDIA",
+    "URL-first"
+   ],
+   "files": [
+    "SKILL.md",
+    "references/advanced-usage.md",
+    "references/hub-discovery.md",
+    "references/optimization.md",
+    "references/quantization.md",
+    "references/server.md",
+    "references/troubleshooting.md"
+   ]
+  },
+  {
+   "name": "outlines",
+   "path": "mlops/inference/outlines",
+   "description": "Outlines: structured JSON/regex/Pydantic LLM generation.",
+   "tags": [
+    "Prompt Engineering",
+    "Outlines",
+    "Structured Generation",
+    "JSON Schema",
+    "Pydantic",
+    "Local Models",
+    "Grammar-Based Generation",
+    "vLLM",
+    "Transformers",
+    "Type Safety"
+   ],
+   "files": [
+    "SKILL.md",
+    "references/backends.md",
+    "references/examples.md",
+    "references/json_generation.md"
+   ]
+  },
+  {
+   "name": "serving-llms-vllm",
+   "path": "mlops/inference/serving-llms-vllm",
+   "description": "vLLM: high-throughput LLM serving, OpenAI API, quantization.",
+   "tags": [
+    "vLLM",
+    "Inference Serving",
+    "PagedAttention",
+    "Continuous Batching",
+    "High Throughput",
+    "Production",
+    "OpenAI API",
+    "Quantization",
+    "Tensor Parallelism"
+   ],
+   "files": [
+    "SKILL.md",
+    "references/optimization.md",
+    "references/quantization.md",
+    "references/server-deployment.md",
+    "references/troubleshooting.md"
+   ]
+  },
+  {
+   "name": "instructor",
+   "path": "mlops/instructor",
+   "description": "Structured LLM outputs validated with Pydantic.",
+   "tags": [
+    "Prompt Engineering",
+    "Instructor",
+    "Structured Output",
+    "Pydantic",
+    "Data Extraction",
+    "JSON Parsing",
+    "Type Safety",
+    "Validation",
+    "Streaming",
+    "OpenAI",
+    "Anthropic"
+   ],
+   "files": [
+    "SKILL.md",
+    "references/examples.md",
+    "references/providers.md",
+    "references/validation.md"
+   ]
+  },
+  {
+   "name": "lambda-labs",
+   "path": "mlops/lambda-labs",
+   "description": "On-demand GPU cloud instances for ML training.",
+   "tags": [
+    "Infrastructure",
+    "GPU Cloud",
+    "Training",
+    "Inference",
+    "Lambda Labs"
+   ],
+   "files": [
+    "SKILL.md",
+    "references/advanced-usage.md",
+    "references/troubleshooting.md"
+   ]
+  },
+  {
+   "name": "llava",
+   "path": "mlops/llava",
+   "description": "Vision-language chat: VQA, captioning, image dialogue.",
+   "tags": [
+    "LLaVA",
+    "Vision-Language",
+    "Multimodal",
+    "Visual Question Answering",
+    "Image Chat",
+    "CLIP",
+    "Vicuna",
+    "Conversational AI",
+    "Instruction Tuning",
+    "VQA"
+   ],
+   "files": [
+    "SKILL.md",
+    "references/training.md"
+   ]
+  },
+  {
+   "name": "modal",
+   "path": "mlops/modal",
+   "description": "Serverless GPU cloud for ML jobs and model APIs.",
+   "tags": [
+    "Infrastructure",
+    "Serverless",
+    "GPU",
+    "Cloud",
+    "Deployment",
+    "Modal"
+   ],
+   "files": [
+    "SKILL.md",
+    "references/advanced-usage.md",
+    "references/troubleshooting.md"
+   ]
+  },
+  {
+   "name": "huggingface-hub",
+   "path": "mlops/models/huggingface-hub",
+   "description": "HuggingFace hf CLI: search/download/upload models, datasets.",
+   "tags": [],
+   "files": [
+    "SKILL.md"
+   ]
+  },
+  {
+   "name": "segment-anything-model",
+   "path": "mlops/models/segment-anything-model",
+   "description": "SAM: zero-shot image segmentation via points, boxes, masks.",
+   "tags": [
+    "Multimodal",
+    "Image Segmentation",
+    "Computer Vision",
+    "SAM",
+    "Zero-Shot"
+   ],
+   "files": [
+    "SKILL.md",
+    "references/advanced-usage.md",
+    "references/troubleshooting.md"
+   ]
+  },
+  {
+   "name": "nemo-curator",
+   "path": "mlops/nemo-curator",
+   "description": "Curate LLM training data: dedupe, filter, PII redaction.",
+   "tags": [
+    "Data Processing",
+    "NeMo Curator",
+    "Data Curation",
+    "GPU Acceleration",
+    "Deduplication",
+    "Quality Filtering",
+    "NVIDIA",
+    "RAPIDS",
+    "PII Redaction",
+    "Multimodal",
+    "LLM Training Data"
+   ],
+   "files": [
+    "SKILL.md",
+    "references/deduplication.md",
+    "references/filtering.md"
+   ]
+  },
+  {
+   "name": "obliteratus",
+   "path": "mlops/obliteratus",
+   "description": "OBLITERATUS: abliterate LLM refusals (diff-in-means).",
+   "tags": [
+    "Abliteration",
+    "Uncensoring",
+    "Refusal-Removal",
+    "LLM",
+    "Weight-Projection",
+    "SVD",
+    "Mechanistic-Interpretability",
+    "HuggingFace",
+    "Model-Surgery"
+   ],
+   "files": [
+    "SKILL.md",
+    "references/analysis-modules.md",
+    "references/methods-guide.md",
+    "templates/abliteration-config.yaml",
+    "templates/analysis-study.yaml",
+    "templates/batch-abliteration.yaml"
+   ]
+  },
+  {
+   "name": "peft",
+   "path": "mlops/peft",
+   "description": "Fine-tune large LLMs with LoRA on limited GPU memory.",
+   "tags": [
+    "Fine-Tuning",
+    "PEFT",
+    "LoRA",
+    "QLoRA",
+    "Parameter-Efficient",
+    "Adapters",
+    "Low-Rank",
+    "Memory Optimization",
+    "Multi-Adapter"
+   ],
+   "files": [
+    "SKILL.md",
+    "references/advanced-usage.md",
+    "references/troubleshooting.md"
+   ]
+  },
+  {
+   "name": "pinecone",
+   "path": "mlops/pinecone",
+   "description": "Managed vector DB for production RAG and search.",
+   "tags": [
+    "RAG",
+    "Pinecone",
+    "Vector Database",
+    "Managed Service",
+    "Serverless",
+    "Hybrid Search",
+    "Production",
+    "Auto-Scaling",
+    "Low Latency",
+    "Recommendations"
+   ],
+   "files": [
+    "SKILL.md",
+    "references/deployment.md"
+   ]
+  },
+  {
+   "name": "pytorch-fsdp",
+   "path": "mlops/pytorch-fsdp",
+   "description": "Fully sharded data-parallel training for large models.",
+   "tags": [
+    "Distributed Training",
+    "PyTorch",
+    "FSDP",
+    "Data Parallel",
+    "Sharding",
+    "Mixed Precision",
+    "CPU Offloading",
+    "FSDP2",
+    "Large-Scale Training"
+   ],
+   "files": [
+    "SKILL.md",
+    "references/common-patterns.md",
+    "references/index.md",
+    "references/other.md"
+   ]
+  },
+  {
+   "name": "pytorch-lightning",
+   "path": "mlops/pytorch-lightning",
+   "description": "Clean training loops with built-in distributed support.",
+   "tags": [
+    "PyTorch Lightning",
+    "Training Framework",
+    "Distributed Training",
+    "DDP",
+    "FSDP",
+    "DeepSpeed",
+    "High-Level API",
+    "Callbacks",
+    "Best Practices",
+    "Scalable"
+   ],
+   "files": [
+    "SKILL.md",
+    "references/callbacks.md",
+    "references/distributed.md",
+    "references/hyperparameter-tuning.md"
+   ]
+  },
+  {
+   "name": "qdrant",
+   "path": "mlops/qdrant",
+   "description": "Vector search engine for production RAG systems.",
+   "tags": [
+    "RAG",
+    "Vector Search",
+    "Qdrant",
+    "Semantic Search",
+    "Embeddings",
+    "Similarity Search",
+    "HNSW",
+    "Production",
+    "Distributed"
+   ],
+   "files": [
+    "SKILL.md",
+    "references/advanced-usage.md",
+    "references/troubleshooting.md"
+   ]
+  },
+  {
+   "name": "dspy",
+   "path": "mlops/research/dspy",
+   "description": "DSPy: declarative LM programs, auto-optimize prompts, RAG.",
+   "tags": [
+    "Prompt Engineering",
+    "DSPy",
+    "Declarative Programming",
+    "RAG",
+    "Agents",
+    "Prompt Optimization",
+    "LM Programming",
+    "Stanford NLP",
+    "Automatic Optimization",
+    "Modular AI"
+   ],
+   "files": [
+    "SKILL.md",
+    "references/examples.md",
+    "references/modules.md",
+    "references/optimizers.md"
+   ]
+  },
+  {
+   "name": "saelens",
+   "path": "mlops/saelens",
+   "description": "Train sparse autoencoders to interpret model features.",
+   "tags": [
+    "Sparse Autoencoders",
+    "SAE",
+    "Mechanistic Interpretability",
+    "Feature Discovery",
+    "Superposition"
+   ],
+   "files": [
+    "SKILL.md",
+    "references/README.md",
+    "references/api.md",
+    "references/tutorials.md"
+   ]
+  },
+  {
+   "name": "simpo",
+   "path": "mlops/simpo",
+   "description": "Reference-free preference alignment, simpler than DPO.",
+   "tags": [
+    "Post-Training",
+    "SimPO",
+    "Preference Optimization",
+    "Alignment",
+    "DPO Alternative",
+    "Reference-Free",
+    "LLM Alignment",
+    "Efficient Training"
+   ],
+   "files": [
+    "SKILL.md",
+    "references/datasets.md",
+    "references/hyperparameters.md",
+    "references/loss-functions.md"
+   ]
+  },
+  {
+   "name": "slime",
+   "path": "mlops/slime",
+   "description": "RL post-training for LLMs with Megatron and SGLang.",
+   "tags": [
+    "Reinforcement Learning",
+    "Megatron-LM",
+    "SGLang",
+    "GRPO",
+    "Post-Training",
+    "GLM"
+   ],
+   "files": [
+    "SKILL.md",
+    "references/api-reference.md",
+    "references/troubleshooting.md"
+   ]
+  },
+  {
+   "name": "stable-diffusion",
+   "path": "mlops/stable-diffusion",
+   "description": "Text-to-image generation, inpainting, and img2img.",
+   "tags": [
+    "Image Generation",
+    "Stable Diffusion",
+    "Diffusers",
+    "Text-to-Image",
+    "Multimodal",
+    "Computer Vision"
+   ],
+   "files": [
+    "SKILL.md",
+    "references/advanced-usage.md",
+    "references/troubleshooting.md"
+   ]
+  },
+  {
+   "name": "tensorrt-llm",
+   "path": "mlops/tensorrt-llm",
+   "description": "High-throughput LLM inference on NVIDIA GPUs.",
+   "tags": [
+    "Inference Serving",
+    "TensorRT-LLM",
+    "NVIDIA",
+    "Inference Optimization",
+    "High Throughput",
+    "Low Latency",
+    "Production",
+    "FP8",
+    "INT4",
+    "In-Flight Batching",
+    "Multi-GPU"
+   ],
+   "files": [
+    "SKILL.md",
+    "references/multi-gpu.md",
+    "references/optimization.md",
+    "references/serving.md"
+   ]
+  },
+  {
+   "name": "torchtitan",
+   "path": "mlops/torchtitan",
+   "description": "Pretrain LLMs at scale with PyTorch 4D parallelism.",
+   "tags": [
+    "Model Architecture",
+    "Distributed Training",
+    "TorchTitan",
+    "FSDP2",
+    "Tensor Parallel",
+    "Pipeline Parallel",
+    "Context Parallel",
+    "Float8",
+    "Llama",
+    "Pretraining"
+   ],
+   "files": [
+    "SKILL.md",
+    "references/checkpoint.md",
+    "references/custom-models.md",
+    "references/float8.md",
+    "references/fsdp.md"
+   ]
+  },
+  {
+   "name": "axolotl",
+   "path": "mlops/training/axolotl",
+   "description": "Axolotl: YAML LLM fine-tuning (LoRA, DPO, GRPO).",
+   "tags": [
+    "Fine-Tuning",
+    "Axolotl",
+    "LLM",
+    "LoRA",
+    "QLoRA",
+    "DPO",
+    "KTO",
+    "ORPO",
+    "GRPO",
+    "YAML",
+    "HuggingFace",
+    "DeepSpeed",
+    "Multimodal"
+   ],
+   "files": [
+    "SKILL.md",
+    "references/api.md",
+    "references/dataset-formats.md",
+    "references/index.md",
+    "references/other.md"
+   ]
+  },
+  {
+   "name": "trl-fine-tuning",
+   "path": "mlops/training/trl-fine-tuning",
+   "description": "TRL: SFT, DPO, GRPO, RLOO reward modeling for LLM RLHF.",
+   "tags": [
+    "Post-Training",
+    "TRL",
+    "Reinforcement Learning",
+    "Fine-Tuning",
+    "SFT",
+    "DPO",
+    "GRPO",
+    "RLOO",
+    "RLHF",
+    "Preference Alignment",
+    "HuggingFace"
+   ],
+   "files": [
+    "SKILL.md",
+    "references/dpo-variants.md",
+    "references/grpo-training.md",
+    "references/online-rl.md",
+    "references/reward-modeling.md",
+    "references/sft-training.md",
+    "templates/basic_grpo_training.py"
+   ]
+  },
+  {
+   "name": "unsloth",
+   "path": "mlops/training/unsloth",
+   "description": "Unsloth: 2-5x faster LoRA/QLoRA fine-tuning, less VRAM.",
+   "tags": [
+    "Fine-Tuning",
+    "Unsloth",
+    "Fast Training",
+    "LoRA",
+    "QLoRA",
+    "Memory-Efficient",
+    "Optimization",
+    "Llama",
+    "Mistral",
+    "Gemma",
+    "Qwen"
+   ],
+   "files": [
+    "SKILL.md",
+    "references/index.md",
+    "references/llms-full.md",
+    "references/llms-txt.md",
+    "references/llms.md"
+   ]
+  },
+  {
+   "name": "whisper",
+   "path": "mlops/whisper",
+   "description": "Transcribe and translate speech in 99 languages.",
+   "tags": [
+    "Whisper",
+    "Speech Recognition",
+    "ASR",
+    "Multimodal",
+    "Multilingual",
+    "OpenAI",
+    "Speech-To-Text",
+    "Transcription",
+    "Translation",
+    "Audio Processing"
+   ],
+   "files": [
+    "SKILL.md",
+    "references/languages.md"
+   ]
+  },
+  {
+   "name": "mpp-agent",
+   "path": "payments/mpp-agent",
+   "description": "Pay HTTP 402 APIs via Machine Payments Protocol (MPP).",
+   "tags": [
+    "Payments",
+    "MPP",
+    "HTTP-402",
+    "Tempo",
+    "Stripe"
+   ],
+   "files": [
+    "SKILL.md"
+   ]
+  },
+  {
+   "name": "stripe-link-cli",
+   "path": "payments/stripe-link-cli",
+   "description": "Agent payments via Stripe Link — cards, SPT, approvals.",
+   "tags": [
+    "Payments",
+    "Stripe",
+    "Link",
+    "Checkout",
+    "MPP"
+   ],
+   "files": [
+    "SKILL.md"
+   ]
+  },
+  {
+   "name": "stripe-projects",
+   "path": "payments/stripe-projects",
+   "description": "Provision SaaS services + sync creds via Stripe Projects.",
+   "tags": [
+    "Payments",
+    "Stripe",
+    "Projects",
+    "Provisioning",
+    "Infrastructure"
+   ],
+   "files": [
+    "SKILL.md"
+   ]
+  },
+  {
+   "name": "canvas",
+   "path": "productivity/canvas",
+   "description": "Fetch Canvas LMS courses and assignments via API token.",
+   "tags": [
+    "Canvas",
+    "LMS",
+    "Education",
+    "Courses",
+    "Assignments"
+   ],
+   "files": [
+    "SKILL.md",
+    "scripts/canvas_api.py"
+   ]
+  },
+  {
+   "name": "decision-questionnaire",
+   "path": "productivity/decision-questionnaire",
+   "description": "Turn an unanswerable decision into a questionnaire doc.",
+   "tags": [
+    "questionnaire",
+    "decision",
+    "async",
+    "stakeholder",
+    "discovery",
+    "communication"
+   ],
+   "files": [
+    "SKILL.md"
+   ]
+  },
+  {
+   "name": "here-now",
+   "path": "productivity/here-now",
+   "description": "Publish sites to {slug}.here.now and store files in Drives.",
+   "tags": [
+    "here.now",
+    "herenow",
+    "publish",
+    "deploy",
+    "hosting",
+    "static-site",
+    "web",
+    "share",
+    "URL",
+    "drive",
+    "storage"
+   ],
+   "files": [
+    "SKILL.md",
+    "scripts/drive.sh",
+    "scripts/publish.sh"
+   ]
+  },
+  {
+   "name": "live-dashboard",
+   "path": "productivity/live-dashboard",
+   "description": "Build self-updating dashboards from live sources.",
+   "tags": [
+    "dashboards",
+    "monitoring",
+    "status",
+    "automation",
+    "reporting"
+   ],
+   "files": [
+    "SKILL.md"
+   ]
+  },
+  {
+   "name": "memento-flashcards",
+   "path": "productivity/memento-flashcards",
+   "description": "Spaced-repetition flashcards: create, review, quiz, export.",
+   "tags": [
+    "Education",
+    "Flashcards",
+    "Spaced Repetition",
+    "Learning",
+    "Quiz",
+    "YouTube"
+   ],
+   "files": [
+    "SKILL.md",
+    "scripts/memento_cards.py",
+    "scripts/youtube_quiz.py"
+   ]
+  },
+  {
+   "name": "property-listings",
+   "path": "productivity/property-listings",
+   "description": "Present property and rental listings as desktop cards.",
+   "tags": [
+    "property",
+    "rental",
+    "real-estate",
+    "listings",
+    "desktop",
+    "cards"
+   ],
+   "files": [
+    "SKILL.md"
+   ]
+  },
+  {
+   "name": "shop",
+   "path": "productivity/shop",
+   "description": "Shop catalog search, checkout, order tracking, returns.",
+   "tags": [
+    "Shopping",
+    "E-commerce",
+    "Shop",
+    "Products",
+    "Orders",
+    "Returns",
+    "Checkout",
+    "Reorder"
+   ],
+   "files": [
+    "SKILL.md",
+    "references/catalog-mcp.md",
+    "references/direct-api.md",
+    "references/legal.md",
+    "references/safety.md"
+   ]
+  },
+  {
+   "name": "shopify",
+   "path": "productivity/shopify",
+   "description": "Query Shopify Admin/Storefront GraphQL APIs via curl.",
+   "tags": [
+    "Shopify",
+    "E-commerce",
+    "Commerce",
+    "API",
+    "GraphQL"
+   ],
+   "files": [
+    "SKILL.md"
+   ]
+  },
+  {
+   "name": "siyuan",
+   "path": "productivity/siyuan",
+   "description": "Query and edit a SiYuan knowledge base via its API.",
+   "tags": [
+    "SiYuan",
+    "Notes",
+    "Knowledge Base",
+    "PKM",
+    "API"
+   ],
+   "files": [
+    "SKILL.md"
+   ]
+  },
+  {
+   "name": "telephony",
+   "path": "productivity/telephony",
+   "description": "Provision Twilio numbers, SMS/MMS, and AI outbound calls.",
+   "tags": [
+    "telephony",
+    "phone",
+    "sms",
+    "mms",
+    "voice",
+    "twilio",
+    "bland.ai",
+    "vapi",
+    "calling",
+    "texting"
+   ],
+   "files": [
+    "SKILL.md",
+    "scripts/telephony.py"
+   ]
+  },
+  {
+   "name": "bioinformatics",
+   "path": "research/bioinformatics",
+   "description": "Gateway to 400+ genomics and computational biology skills.",
+   "tags": [
+    "bioinformatics",
+    "genomics",
+    "sequencing",
+    "biology",
+    "research",
+    "science"
+   ],
+   "files": [
+    "SKILL.md"
+   ]
+  },
+  {
+   "name": "blogwatcher",
+   "path": "research/blogwatcher",
+   "description": "Monitor blogs and RSS/Atom feeds via blogwatcher-cli tool.",
+   "tags": [
+    "RSS",
+    "Blogs",
+    "Feed-Reader",
+    "Monitoring"
+   ],
+   "files": [
+    "SKILL.md"
+   ]
+  },
+  {
+   "name": "darwinian-evolver",
+   "path": "research/darwinian-evolver",
+   "description": "Evolve prompts/regex/SQL/code with Imbue's evolution loop.",
+   "tags": [
+    "evolution",
+    "optimization",
+    "prompt-engineering",
+    "research"
+   ],
+   "files": [
+    "SKILL.md",
+    "scripts/parrot_openrouter.py",
+    "scripts/show_snapshot.py",
+    "templates/custom_problem_template.py"
+   ]
+  },
+  {
+   "name": "domain-intel",
+   "path": "research/domain-intel",
+   "description": "Passive recon of subdomains, SSL certs, WHOIS, and DNS.",
+   "tags": [
+    "Domains",
+    "OSINT",
+    "DNS",
+    "Research"
+   ],
+   "files": [
+    "SKILL.md",
+    "scripts/domain_intel.py"
+   ]
+  },
+  {
+   "name": "drug-discovery",
+   "path": "research/drug-discovery",
+   "description": "Drug discovery: ChEMBL search, drug-likeness, interactions.",
+   "tags": [
+    "science",
+    "chemistry",
+    "pharmacology",
+    "research",
+    "health"
+   ],
+   "files": [
+    "SKILL.md",
+    "references/ADMET_REFERENCE.md",
+    "scripts/chembl_target.py",
+    "scripts/ro5_screen.py"
+   ]
+  },
+  {
+   "name": "duckduckgo-search",
+   "path": "research/duckduckgo-search",
+   "description": "Free keyless web, news, and image search via ddgs.",
+   "tags": [
+    "search",
+    "duckduckgo",
+    "web-search",
+    "free",
+    "fallback"
+   ],
+   "files": [
+    "SKILL.md",
+    "scripts/duckduckgo.sh"
+   ]
+  },
+  {
+   "name": "gitnexus-explorer",
+   "path": "research/gitnexus-explorer",
+   "description": "Serve an interactive codebase knowledge graph web UI.",
+   "tags": [
+    "gitnexus",
+    "code-intelligence",
+    "knowledge-graph",
+    "visualization"
+   ],
+   "files": [
+    "SKILL.md",
+    "scripts/proxy.mjs"
+   ]
+  },
+  {
+   "name": "osint-investigation",
+   "path": "research/osint-investigation",
+   "description": "Follow the money via public records and sanctions data.",
+   "tags": [
+    "osint",
+    "investigation",
+    "public-records",
+    "sec",
+    "sanctions",
+    "corporate-registry",
+    "property",
+    "courts",
+    "due-diligence",
+    "journalism"
+   ],
+   "files": [
+    "SKILL.md",
+    "references/sources/courtlistener.md",
+    "references/sources/gdelt.md",
+    "references/sources/icij-offshore.md",
+    "references/sources/nyc-acris.md",
+    "references/sources/ofac-sdn.md",
+    "references/sources/opencorporates.md",
+    "references/sources/sec-edgar.md",
+    "references/sources/senate-ld.md",
+    "references/sources/usaspending.md",
+    "references/sources/wayback.md",
+    "references/sources/wikipedia.md",
+    "scripts/_http.py",
+    "scripts/_normalize.py",
+    "scripts/build_findings.py",
+    "scripts/entity_resolution.py",
+    "scripts/fetch_courtlistener.py",
+    "scripts/fetch_gdelt.py",
+    "scripts/fetch_icij_offshore.py",
+    "scripts/fetch_nyc_acris.py",
+    "scripts/fetch_ofac_sdn.py",
+    "scripts/fetch_opencorporates.py",
+    "scripts/fetch_sec_edgar.py",
+    "scripts/fetch_senate_ld.py",
+    "scripts/fetch_usaspending.py",
+    "scripts/fetch_wayback.py",
+    "scripts/fetch_wikipedia.py",
+    "scripts/timing_analysis.py",
+    "templates/source-template.md"
+   ]
+  },
+  {
+   "name": "parallel-cli",
+   "path": "research/parallel-cli",
+   "description": "Agent-native web search, deep research, and enrichment.",
+   "tags": [
+    "Research",
+    "Web",
+    "Search",
+    "Deep-Research",
+    "Enrichment",
+    "CLI"
+   ],
+   "files": [
+    "SKILL.md"
+   ]
+  },
+  {
+   "name": "pinecone-research",
+   "path": "research/pinecone-research",
+   "description": "Agent RAG and long-term memory with Pinecone.",
+   "tags": [
+    "RAG",
+    "Pinecone",
+    "Memory",
+    "Research",
+    "Vector Database",
+    "Agent",
+    "Retrieval"
+   ],
+   "files": [
+    "SKILL.md",
+    "scripts/memory_manager.py",
+    "scripts/rag_pipeline.py"
+   ]
+  },
+  {
+   "name": "qmd",
+   "path": "research/qmd",
+   "description": "Hybrid local search over notes, docs, and transcripts.",
+   "tags": [
+    "Search",
+    "Knowledge-Base",
+    "RAG",
+    "Notes",
+    "MCP",
+    "Local-AI"
+   ],
+   "files": [
+    "SKILL.md"
+   ]
+  },
+  {
+   "name": "research-paper-writing",
+   "path": "research/research-paper-writing",
+   "description": "Write ML papers for NeurIPS/ICML/ICLR: design→submit.",
+   "tags": [
+    "Research",
+    "Paper Writing",
+    "Experiments",
+    "ML",
+    "AI",
+    "NeurIPS",
+    "ICML",
+    "ICLR",
+    "ACL",
+    "AAAI",
+    "COLM",
+    "LaTeX",
+    "Citations",
+    "Statistical Analysis"
+   ],
+   "files": [
+    "SKILL.md",
+    "references/autoreason-methodology.md",
+    "references/checklists.md",
+    "references/citation-workflow.md",
+    "references/experiment-patterns.md",
+    "references/human-evaluation.md",
+    "references/paper-types.md",
+    "references/phase5-paper-drafting.md",
+    "references/reviewer-guidelines.md",
+    "references/sources.md",
+    "references/writing-guide.md",
+    "templates/README.md",
+    "templates/aaai2026/README.md",
+    "templates/aaai2026/aaai2026-unified-supp.tex",
+    "templates/aaai2026/aaai2026-unified-template.tex",
+    "templates/aaai2026/aaai2026.bib",
+    "templates/aaai2026/aaai2026.bst",
+    "templates/aaai2026/aaai2026.sty",
+    "templates/acl/README.md",
+    "templates/acl/acl.sty",
+    "templates/acl/acl_latex.tex",
+    "templates/acl/acl_lualatex.tex",
+    "templates/acl/acl_natbib.bst",
+    "templates/acl/anthology.bib.txt",
+    "templates/acl/custom.bib",
+    "templates/acl/formatting.md",
+    "templates/colm2025/README.md",
+    "templates/colm2025/colm2025_conference.bib",
+    "templates/colm2025/colm2025_conference.bst",
+    "templates/colm2025/colm2025_conference.pdf",
+    "templates/colm2025/colm2025_conference.sty",
+    "templates/colm2025/colm2025_conference.tex",
+    "templates/colm2025/fancyhdr.sty",
+    "templates/colm2025/math_commands.tex",
+    "templates/colm2025/natbib.sty",
+    "templates/iclr2026/fancyhdr.sty",
+    "templates/iclr2026/iclr2026_conference.bib",
+    "templates/iclr2026/iclr2026_conference.bst",
+    "templates/iclr2026/iclr2026_conference.pdf",
+    "templates/iclr2026/iclr2026_conference.sty",
+    "templates/iclr2026/iclr2026_conference.tex",
+    "templates/iclr2026/math_commands.tex",
+    "templates/iclr2026/natbib.sty",
+    "templates/icml2026/algorithm.sty",
+    "templates/icml2026/algorithmic.sty",
+    "templates/icml2026/example_paper.bib",
+    "templates/icml2026/example_paper.pdf",
+    "templates/icml2026/example_paper.tex",
+    "templates/icml2026/fancyhdr.sty",
+    "templates/icml2026/icml2026.bst",
+    "templates/icml2026/icml2026.sty",
+    "templates/icml2026/icml_numpapers.pdf",
+    "templates/neurips2025/Makefile",
+    "templates/neurips2025/extra_pkgs.tex",
+    "templates/neurips2025/main.tex",
+    "templates/neurips2025/neurips.sty"
+   ]
+  },
+  {
+   "name": "rss-feeds",
+   "path": "research/rss-feeds",
+   "description": "Read RSS, Atom, JSON feeds; discover feeds behind a page.",
+   "tags": [
+    "RSS",
+    "Atom",
+    "Feeds",
+    "Monitoring",
+    "Research",
+    "Blogs",
+    "Releases"
+   ],
+   "files": [
+    "SKILL.md",
+    "scripts/feed.py"
+   ]
+  },
+  {
+   "name": "scrapling",
+   "path": "research/scrapling",
+   "description": "Scrape sites with stealth browsing and Cloudflare bypass.",
+   "tags": [
+    "Web Scraping",
+    "Browser",
+    "Cloudflare",
+    "Stealth",
+    "Crawling",
+    "Spider"
+   ],
+   "files": [
+    "SKILL.md"
+   ]
+  },
+  {
+   "name": "searxng-search",
+   "path": "research/searxng-search",
+   "description": "Free keyless meta-search aggregating 70+ engines.",
+   "tags": [
+    "search",
+    "searxng",
+    "meta-search",
+    "self-hosted",
+    "free",
+    "fallback"
+   ],
+   "files": [
+    "SKILL.md",
+    "scripts/searxng.sh"
+   ]
+  },
+  {
+   "name": "1password",
+   "path": "security/1password",
+   "description": "Set up op CLI, sign in, and read or inject secrets.",
+   "tags": [
+    "security",
+    "secrets",
+    "1password",
+    "op",
+    "cli"
+   ],
+   "files": [
+    "SKILL.md",
+    "references/cli-examples.md",
+    "references/get-started.md"
+   ]
+  },
+  {
+   "name": "godmode",
+   "path": "security/godmode",
+   "description": "Jailbreak LLMs: Parseltongue, GODMODE, ULTRAPLINIAN.",
+   "tags": [
+    "jailbreak",
+    "red-teaming",
+    "G0DM0D3",
+    "Parseltongue",
+    "GODMODE",
+    "uncensoring",
+    "safety-bypass",
+    "prompt-engineering",
+    "L1B3RT4S"
+   ],
+   "files": [
+    "SKILL.md",
+    "references/jailbreak-templates.md",
+    "references/refusal-detection.md",
+    "scripts/auto_jailbreak.py",
+    "scripts/godmode_race.py",
+    "scripts/load_godmode.py",
+    "scripts/parseltongue.py",
+    "templates/prefill-subtle.json",
+    "templates/prefill.json"
+   ]
+  },
+  {
+   "name": "oss-forensics",
+   "path": "security/oss-forensics",
+   "description": "GitHub supply-chain forensics: recovery, IOCs, reporting.",
+   "tags": [
+    "Security",
+    "Forensics",
+    "GitHub",
+    "Supply-Chain"
+   ],
+   "files": [
+    "SKILL.md",
+    "references/evidence-types.md",
+    "references/github-archive-guide.md",
+    "references/investigation-templates.md",
+    "references/recovery-techniques.md",
+    "scripts/evidence-store.py",
+    "templates/forensic-report.md",
+    "templates/malicious-package-report.md"
+   ]
+  },
+  {
+   "name": "sherlock",
+   "path": "security/sherlock",
+   "description": "Find accounts for a username across 400+ platforms.",
+   "tags": [
+    "osint",
+    "security",
+    "username",
+    "social-media",
+    "reconnaissance"
+   ],
+   "files": [
+    "SKILL.md"
+   ]
+  },
+  {
+   "name": "unbroker",
+   "path": "security/unbroker",
+   "description": "Autonomously remove your info from data-broker sites.",
+   "tags": [
+    "privacy",
+    "data-broker",
+    "opt-out",
+    "ccpa",
+    "gdpr",
+    "security",
+    "doxxing"
+   ],
+   "files": [
+    "README.md",
+    "SKILL.md",
+    "assets/unbroker.png",
+    "references/brokers/addresses.json",
+    "references/brokers/advancedbackgroundchecks.json",
+    "references/brokers/beenverified.json",
+    "references/brokers/clustal.json",
+    "references/brokers/clustrmaps.json",
+    "references/brokers/cyberbackgroundchecks.json",
+    "references/brokers/familytreenow.json",
+    "references/brokers/fastpeoplesearch.json",
+    "references/brokers/intelius.json",
+    "references/brokers/mylife.json",
+    "references/brokers/nuwber.json",
+    "references/brokers/peekyou.json",
+    "references/brokers/peoplefinders.json",
+    "references/brokers/radaris.json",
+    "references/brokers/rehold.json",
+    "references/brokers/searchpeoplefree.json",
+    "references/brokers/socialcatfish.json",
+    "references/brokers/spokeo.json",
+    "references/brokers/thatsthem.json",
+    "references/brokers/truepeoplesearch.json",
+    "references/brokers/usphonebook.json",
+    "references/brokers/whitepages.json",
+    "references/legal/ccpa.md",
+    "references/legal/drop.md",
+    "references/legal/gdpr.md",
+    "references/methods.md",
+    "references/site-playbooks.md",
+    "references/state-machine.md",
+    "scripts/autopilot.py",
+    "scripts/badbool.py",
+    "scripts/brokers.py",
+    "scripts/cdp.py",
+    "scripts/config.py",
+    "scripts/crypto.py",
+    "scripts/dossier.py",
+    "scripts/email_modes.py",
+    "scripts/emailer.py",
+    "scripts/ledger.py",
+    "scripts/legal.py",
+    "scripts/paths.py",
+    "scripts/pdd.py",
+    "scripts/registry.py",
+    "scripts/report.py",
+    "scripts/scan.py",
+    "scripts/storage.py",
+    "scripts/tiers.py",
+    "scripts/vectors.py",
+    "templates/consent/authorization.md",
+    "templates/emails/ccpa-authorized-agent.txt",
+    "templates/emails/ccpa-deletion.txt",
+    "templates/emails/ccpa-indirect-deletion.txt",
+    "templates/emails/gdpr-erasure.txt",
+    "templates/emails/generic-optout.txt"
+   ]
+  },
+  {
+   "name": "web-pentest",
+   "path": "security/web-pentest",
+   "description": "Authorized web pentest: recon, proof-based exploits, report.",
+   "tags": [
+    "Security",
+    "Pentest",
+    "Web",
+    "Recon"
+   ],
+   "files": [
+    "SKILL.md",
+    "references/bypass-techniques.md",
+    "references/exploitation-techniques.md",
+    "references/scope-enforcement.md",
+    "references/vuln-taxonomy.md",
+    "scripts/recon-scan.sh",
+    "templates/authorization.md",
+    "templates/exploitation-queue.json",
+    "templates/pentest-report.md"
+   ]
+  },
+  {
+   "name": "openhue",
+   "path": "smart-home/openhue",
+   "description": "Control Philips Hue lights, scenes, rooms via OpenHue CLI.",
+   "tags": [
+    "Smart-Home",
+    "Hue",
+    "Lights",
+    "IoT",
+    "Automation"
+   ],
+   "files": [
+    "SKILL.md"
+   ]
+  },
+  {
+   "name": "reddit-reading",
+   "path": "social-media/reddit-reading",
+   "description": "Read Reddit: subreddits, search, threads, users. No browser.",
+   "tags": [
+    "Reddit",
+    "Social Media",
+    "Research",
+    "Discussions",
+    "Community"
+   ],
+   "files": [
+    "SKILL.md",
+    "scripts/reddit.py"
+   ]
+  },
+  {
+   "name": "ast-grep",
+   "path": "software-development/ast-grep",
+   "description": "AST-aware structural code search and rewrite via ast-grep.",
+   "tags": [
+    "ast",
+    "codemod",
+    "refactoring",
+    "structural-search",
+    "code-search",
+    "rewrite",
+    "tree-sitter"
+   ],
+   "files": [
+    "LICENSE",
+    "SKILL.md",
+    "install.ps1",
+    "install.sh",
+    "references/cli.md",
+    "references/install.md",
+    "references/patterns.md",
+    "references/pitfalls.md",
+    "references/recipes.md",
+    "references/sgconfig.md",
+    "references/yaml-rules.md",
+    "scripts/ast_grep_helper.py",
+    "tests/smoke.ps1",
+    "tests/smoke.sh"
+   ]
+  },
+  {
+   "name": "code-wiki",
+   "path": "software-development/code-wiki",
+   "description": "Generate wiki docs + Mermaid diagrams for any codebase.",
+   "tags": [
+    "Documentation",
+    "Mermaid",
+    "Architecture",
+    "Diagrams",
+    "Wiki",
+    "Code-Analysis"
+   ],
+   "files": [
+    "SKILL.md",
+    "templates/README.md",
+    "templates/architecture.md",
+    "templates/getting-started.md",
+    "templates/module.md"
+   ]
+  },
+  {
+   "name": "grill-me",
+   "path": "software-development/grill-me",
+   "description": "Adversarial plan interview before implementation.",
+   "tags": [
+    "planning",
+    "adversarial",
+    "interview",
+    "decision-tree",
+    "pre-implementation",
+    "review",
+    "alignment"
+   ],
+   "files": [
+    "SKILL.md"
+   ]
+  },
+  {
+   "name": "pr-lens",
+   "path": "software-development/pr-lens",
+   "description": "Draw code changes as animated architecture/data-flow SVGs.",
+   "tags": [
+    "diagrams",
+    "pull-requests",
+    "code-review",
+    "svg"
+   ],
+   "files": [
+    "LICENSE.txt",
+    "SKILL.md",
+    "references/config.md",
+    "references/example.graph.json",
+    "references/graph-document.md"
+   ]
+  },
+  {
+   "name": "rest-graphql-debug",
+   "path": "software-development/rest-graphql-debug",
+   "description": "Debug REST/GraphQL APIs: status codes, auth, schemas, repro.",
+   "tags": [
+    "api",
+    "rest",
+    "graphql",
+    "http",
+    "debugging",
+    "testing",
+    "curl",
+    "integration"
+   ],
+   "files": [
+    "SKILL.md"
+   ]
+  },
+  {
+   "name": "subagent-driven-development",
+   "path": "software-development/subagent-driven-development",
+   "description": "Execute plans via delegate_task subagents (2-stage review).",
+   "tags": [
+    "delegation",
+    "subagent",
+    "implementation",
+    "workflow",
+    "parallel"
+   ],
+   "files": [
+    "SKILL.md",
+    "references/context-budget-discipline.md",
+    "references/gates-taxonomy.md"
+   ]
+  },
+  {
+   "name": "cloudflare-temporary-deploy",
+   "path": "web-development/cloudflare-temporary-deploy",
+   "description": "Deploy a Worker live, no account, via wrangler --temporary.",
+   "tags": [
+    "cloudflare",
+    "workers",
+    "wrangler",
+    "deploy",
+    "temporary",
+    "agent",
+    "serverless",
+    "web-development"
+   ],
+   "files": [
+    "SKILL.md",
+    "scripts/parse_deploy_output.py"
+   ]
+  },
+  {
+   "name": "har-derived-api-client",
+   "path": "web-development/har-derived-api-client",
+   "description": "Record a site's XHR into a HAR, derive an HTTP client.",
+   "tags": [
+    "Browser",
+    "HAR",
+    "API",
+    "Reverse-Engineering",
+    "Playwright"
+   ],
+   "files": [
+    "SKILL.md",
+    "scripts/har_capture.py",
+    "scripts/har_capture_cdp.py",
+    "scripts/har_to_client.py"
+   ]
+  },
+  {
+   "name": "page-agent",
+   "path": "web-development/page-agent",
+   "description": "Embed an in-page natural-language GUI copilot in web apps.",
+   "tags": [
+    "web",
+    "javascript",
+    "agent",
+    "browser",
+    "gui",
+    "alibaba",
+    "embed",
+    "copilot",
+    "saas"
+   ],
+   "files": [
+    "SKILL.md"
+   ]
+  },
+  {
+   "name": "publish-site",
+   "path": "web-development/publish-site",
+   "description": "Versioned site deploys to GitHub/Cloudflare/Netlify Pages.",
+   "tags": [
+    "publish",
+    "deploy",
+    "hosting",
+    "github-pages",
+    "cloudflare-pages",
+    "netlify",
+    "static-site",
+    "versioning",
+    "rollback",
+    "web-development"
+   ],
+   "files": [
+    "SKILL.md"
+   ]
+  },
+  {
+   "name": "scrollcraft",
+   "path": "web-development/scrollcraft",
+   "description": "Premium scroll-driven landing pages; scroll = timeline.",
+   "tags": [
+    "web-development",
+    "landing-page",
+    "scrollytelling",
+    "animation",
+    "design",
+    "frontend"
+   ],
+   "files": [
+    "LICENSE.txt",
+    "SKILL.md",
+    "engine/scrollcraft.css",
+    "engine/scrollcraft.js",
+    "references/assets.md",
+    "references/device-diag.html",
+    "references/devices.md",
+    "references/feel.md",
+    "references/taste.md",
+    "references/template.html",
+    "references/uniqueness.md",
+    "references/verify.md",
+    "references/worldflight.md",
+    "references/worlds.md",
+    "scripts/doctor.mjs",
+    "scripts/encode.sh",
+    "scripts/kie.mjs",
+    "scripts/serve.mjs",
+    "scripts/shoot.mjs",
+    "scripts/workspace.mjs",
+    "scripts/worldflight-assert.mjs",
+    "templates/FINGERPRINTS.md"
+   ]
+  },
+  {
+   "name": "yuanbao",
+   "path": "yuanbao",
+   "description": "Yuanbao (元宝) groups: @mention users, query info/members.",
+   "tags": [
+    "yuanbao",
+    "mention",
+    "at",
+    "group",
+    "members",
+    "元宝",
+    "派",
+    "艾特"
+   ],
+   "files": [
+    "SKILL.md"
+   ]
+  }
+ ]
+}

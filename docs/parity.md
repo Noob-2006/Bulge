@@ -1,7 +1,15 @@
-# ark 與 OpenClaw / Hermes 功能對照（2026-11-02 盤點）
+# ark 與 OpenClaw / Hermes 功能對照（2026-11-02 盤點，2026-11-05 更新狀態與落差索引）
 
 來源：OpenClaw `4e4342b9`（MIT，© 2026 OpenClaw Foundation）、Hermes Agent `c627ec84`（MIT，© 2025 Nous Research）。
-轉寫時保留上游 MIT 版權聲明（見 `THIRD_PARTY_NOTICES.md`）。狀態：✅ 已完成（逐項缺口見第四節）　🚧 部分　⬜ 未做　🔌 需外部 sidecar（上游同樣如此）
+轉寫時保留上游 MIT 版權聲明（見 `THIRD_PARTY_NOTICES.md`）。
+
+> **本檔狀態：2026-11-05（第六輪更新）。** 這張表回答「某個平台／上游功能支援到什麼程度」，
+> 不是使用說明。安裝與操作見 [MANUAL.md](MANUAL.md)；crate 分層與登記規則見
+> [ARCHITECTURE.md](ARCHITECTURE.md)；建置、feature flags 與精簡執行檔見 [BUILD.md](BUILD.md)。
+>
+> 判準：**✅ = 已實作＋已接線＋有測試**；🚧 = 有實作但缺一項（多半是拿不到真實憑證／服務，或主機尚未接線）；
+> ⬜ = 未做；🔌 = 需要外部 sidecar（上游同樣如此）。每個 ✅ 都對應 `crates/` 裡的測試名稱，
+> 各段註記會區分「只對假伺服器測過」與「對真實服務實測」——前者不算真實服務驗證。
 
 ## 一、Channel（聯集 46 個）
 
@@ -198,3 +206,27 @@
 - qa-channel：JSONL inbox＋loopback HTTP 注入、outbox 紀錄、全部能力、可注入失敗（含 retry_after）。
 - homeassistant：WS 認證、subscribe `ark_message`（可選 state_changed、通知按鈕）、fire `ark_reply`、可選 notify.*、心跳重連、模組註解附 HA 自動化 YAML。
 - relay：token 與 Hermes auth.py 位元組一致、每 identity hello、descriptor→Caps、inbound（下次 poll ack）、outbound_result（逾時與 ambiguous）、interrupt、going_idle、send/edit/delete/typing/react/send_media/prompt、4401 重撥一次後視為撤銷；passthrough_forward（Discord interaction body 解成 Inbound：slash `/name 參數`、`hp1:` 按鈕 token→callback、modal 文字、thread 頻道型別 10–12→thread、沿用文字線的 chat_name，與 inbound 同樣下次 poll ack；其他平台直接 ack 丟棄）；draft 串流（`supports_draft_streaming` 且明列 `draft`→`Streaming::Native`，走 `stream_begin/update/finish`：Slack 以 `draft(final=true)` 封口、ack 遺失重試一次，Telegram 型預覽後以一般 `send` 送最終）；task cards（`Relay::task_card` / `task_card_stop`，card_id 與上游 `_card_key` 同推導）；`thread_create` / `thread_rename`（`Relay::create_thread` / `rename_thread`，含 no-clobber guard）。draft、task_card、thread 操作皆不對舊 connector fail-open。task cards 與 thread 操作目前只是 Relay 的公開方法，host 尚未接線；全部僅以假 connector 測試，未對真實 gateway-gateway 驗證。
+
+---
+
+## 五、目前狀態與已知落差索引（2026-11-05）
+
+表上的 ✅ 常有條件；這一節把「看起來完成、實際上有前提」的項目集中列出，並指向權威位置。
+使用面的完整說明（安裝、通道設定、安全模型、VM、艦隊、技能）在 [MANUAL.md](MANUAL.md)。
+
+| 主題 | 目前實際狀態 | 權威位置 |
+|---|---|---|
+| 通道數量 | `config::registry()` 有 56 個 kind 名稱（13 個別名）＝ **43 個平台**；加上 App Server 的 webchat、A2A、OpenAI 相容 API 共 46 條通道 | `crates/ark-channel/src/config.rs` |
+| 在哪些平台上實跑過 | Matrix（自架 Synapse）、IRC、Email、ntfy 有真實伺服器測試；其餘平台以假伺服器測 | 本檔第四節、`crates/ark-channel/tests/real_*.rs` |
+| 精簡建置 | 聊天平台與額外模型格式（Bedrock／Gemini／agent CLI／Agents API／llama.cpp）都可在編譯時移除，預設建置仍完整；被移除的 kind／format 在設定裡仍合法，只警告 | [BUILD.md](BUILD.md)、`cargo test -p ark-model --lib feature_wiring` |
+| 四級風險與硬底線 | 已實作：`Tier::{Sandboxed,Recoverable,Impactful,Irreversible}`、hardline floors、taint 降權、延後佇列 | `crates/ark-security/src/risk.rs`、`hardline.rs`、`crates/ark-kernel/src/secgate.rs` |
+| 任務信封 | 函式庫（`envelope::create`／`covers`／`active`）與 kernel 執行點已接，**還沒有 CLI／chat 指令／設定鍵** | `crates/ark-security/src/envelope.rs`、`crates/ark-kernel/src/secgate.rs` |
+| 授權期限 | 預設 7 天（`[approvals] grant_ttl_days`），讀取時過濾；`ark approvals list --all` 尚未接線 | `crates/ark-security/src/approvals.rs` |
+| microVM | `ark sandbox vm status／image build／verify／snapshot／snapshots／undo／gc` 可用；`[exec.vm.readonly]` 逐工作區覆寫未實作；daemon 尚未自動回收閒置 VM | `crates/ark-vm/src/`、`crates/ark/src/exec_cli.rs` |
+| 艦隊 | `ark fleet status／board／files／limits／resume`；檔案租約預設 1 小時、最長 7 天、過期自動釋放 | `crates/ark-kernel/src/coord.rs`、`limits.rs` |
+| 技能相容 | 直接讀 `.claude/skills`、`metadata.openclaw`、`metadata.hermes`；只結構化使用 `name`／`description`，其餘欄位按需解讀 | `crates/ark-skills/src/skill.rs` |
+| 核准疲勞統計 | **未實作**（沒有每日詢問次數／被拒比例／建議改預授權的統計） | `crates/ark-security/src/approvals.rs`（`status` 只報規則數） |
+| 瀏覽器／電腦操作 | CDP client 與 AT-SPI／xdotool 有實作；端到端只對本機 Chromium 驗證過一部分 | `crates/ark-browser`、`tests/real/chromium_real.sh` |
+
+維護方式：改動功能時同步更新對應段落與這裡的落差；`cargo test --workspace` 綠燈不代表表格正確，
+表格的正確性靠 `file:line` 與測試名稱人工核對。

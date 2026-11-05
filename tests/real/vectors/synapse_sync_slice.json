@@ -1,0 +1,102 @@
+{
+ "next_batch": "s61_14_0_1_1_1_1_16_0_1_1_1_1_1",
+ "rooms": {
+  "join": {
+   "!2tcFUMiP_Vx6zSWeU69X2_ViqqO6lutuxu6od5g3JmI": {
+    "timeline": {
+     "events": [
+      {
+       "content": {
+        "displayname": "ark",
+        "membership": "join"
+       },
+       "event_id": "$9Fw5z1nfLlHx5ZMuo03T2cFcwQnq8veN7imGVhDj3GE",
+       "origin_server_ts": 1793795668655,
+       "sender": "@ark:localhost",
+       "state_key": "@ark:localhost",
+       "type": "m.room.member",
+       "unsigned": {
+        "age": 1243269,
+        "membership": "join",
+        "prev_content": {
+         "displayname": "ark",
+         "membership": "invite"
+        },
+        "prev_sender": "@alice:localhost",
+        "replaces_state": "$WedsXNa7yFNQC_IvHZ7JdI8cgKm8Lu1W5aRdWYGVwVo"
+       }
+      },
+      {
+       "content": {
+        "body": "hello from a real synapse",
+        "msgtype": "m.text"
+       },
+       "event_id": "$00cvQjFk0X_5MieeiRlEzkitXaIMUTm5rnWEceUHR0c",
+       "origin_server_ts": 1793795668744,
+       "sender": "@alice:localhost",
+       "type": "m.room.message",
+       "unsigned": {
+        "age": 1243180,
+        "membership": "join"
+       }
+      }
+     ],
+     "limited": true,
+     "prev_batch": "t0"
+    },
+    "state": {
+     "events": []
+    }
+   },
+   "!R52xZDRJNMiX3Lhp4R27Shc8wzgggbZ9SJmORDTkszA": {
+    "timeline": {
+     "events": [
+      {
+       "content": {
+        "displayname": "ark",
+        "membership": "join"
+       },
+       "event_id": "$dPO9VMb2yxXBkOMGtnSYnUwXL8KxwNmk4Kxk6u6rNQA",
+       "origin_server_ts": 1793795761651,
+       "sender": "@ark:localhost",
+       "state_key": "@ark:localhost",
+       "type": "m.room.member",
+       "unsigned": {
+        "age": 1150273,
+        "membership": "join",
+        "prev_content": {
+         "displayname": "ark",
+         "membership": "invite"
+        },
+        "prev_sender": "@alice:localhost",
+        "replaces_state": "$SOxrCXQzSyflmZob89e6QTlFDNkKAQ77WwatqHY64Vc"
+       }
+      },
+      {
+       "content": {
+        "body": "ark says hi over synapse",
+        "m.mentions": {
+         "user_ids": []
+        },
+        "msgtype": "m.text"
+       },
+       "event_id": "$4c3CZryA7Y0FvuKIbtZRT-0JsV9qEnOxGo4qYSe7dFs",
+       "origin_server_ts": 1793795761691,
+       "sender": "@ark:localhost",
+       "type": "m.room.message",
+       "unsigned": {
+        "age": 1150233,
+        "membership": "join"
+       }
+      }
+     ],
+     "limited": true,
+     "prev_batch": "t0"
+    },
+    "state": {
+     "events": []
+    }
+   }
+  }
+ }
+}

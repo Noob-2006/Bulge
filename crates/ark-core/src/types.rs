@@ -88,7 +88,34 @@ pub struct ToolSchema {
     pub input_schema: Value,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+/// Per-request provider knobs beyond the conversation itself. Adapters send only
+/// what their wire understands; everything defaults to "provider default".
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct RequestOptions {
+    /// Fast mode / service tier: "priority" (OpenAI/xAI priority, Anthropic fast mode),
+    /// "ultrafast", "flex"; None = normal.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub service_tier: Option<String>,
+    /// OpenAI text verbosity: "low" | "medium" | "high".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verbosity: Option<String>,
+    /// Ask for strict (schema-enforced) tool arguments where supported.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub strict_tools: bool,
+    /// Server-side ("native") compaction threshold in tokens: `Some(n)` asks a provider that
+    /// owns the context (OpenAI Responses `context_management`) to compact itself once the
+    /// input crosses `n`. None = local compaction only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub native_compaction: Option<u64>,
+}
+
+impl RequestOptions {
+    pub fn is_default(&self) -> bool {
+        *self == RequestOptions::default()
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct ModelRequest {
     pub model: String,
     pub system: Vec<SystemSegment>,
@@ -100,9 +127,12 @@ pub struct ModelRequest {
     /// Index into `messages` after which a cache breakpoint should be placed (if supported).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cache_after_message: Option<usize>,
-    /// Reasoning effort: "off", "low", "medium" or "high"; None = provider default.
+    /// Reasoning effort: "off", "minimal", "low", "medium", "high", "xhigh" or "max";
+    /// None = provider default. Adapters clamp to what their wire accepts.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning: Option<String>,
+    #[serde(default, skip_serializing_if = "RequestOptions::is_default")]
+    pub options: RequestOptions,
 }
 
 impl ModelRequest {

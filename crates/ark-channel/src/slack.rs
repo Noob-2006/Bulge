@@ -42,6 +42,9 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{mpsc, Arc, Mutex};
 use std::time::{Duration, Instant};
 
+#[path = "slack_actions.rs"]
+mod actions;
+
 pub const DEFAULT_API: &str = "https://slack.com/api";
 /// Slack accepts 40k chars but truncates rendering; section blocks hold 3000.
 pub const MAX_MESSAGE: usize = 4000;
@@ -1306,6 +1309,14 @@ impl Channel for Slack {
             return Err(ChannelError::new(K::Auth, "slack returned a login page for the file (missing files:read scope?)"));
         }
         Ok(data)
+    }
+
+    fn message_action(&self, action: &str, args: &Value) -> Result<Value, ChannelError> {
+        self.action(action, args)
+    }
+
+    fn message_actions(&self) -> Vec<&'static str> {
+        actions::ACTIONS.to_vec()
     }
 
     fn stop(&self) {

@@ -1,3 +1,6 @@
+//! Small dependency-free helpers the kernel shares: time formatting and date arithmetic
+//! (`civil_from_days`), id generation and head/tail truncation.
+
 use std::fs;
 use std::io::{Read, Write};
 use std::path::Path;

@@ -2,10 +2,17 @@
 //! whose tools appear to the kernel as ordinary `ark_core::Tool`s, an MCP
 //! server that exposes Ark's tools to other agents, and the plugin protocol
 //! (MCP plus hooks, middleware, channels, commands, CLI, HTTP routes, UI panels,
-//! model providers, context engines, memory providers, node commands and services,
-//! see [`plugin`]).
+//! model providers, execution-environment providers, context engines, memory
+//! providers, node commands and services, see [`plugin`] and [`exec`]).
+//! Capability backends (TTS / STT / image / video / cloud browser / web search) are in
+//! [`backends`]; dashboard login providers are in [`dashboard_auth`].
 
+pub mod backends;
 pub mod bridge;
+pub mod builtin;
+pub mod compat;
+pub mod dashboard_auth;
+pub mod exec;
 pub mod events;
 pub mod mcp;
 pub mod oauth;
@@ -13,11 +20,14 @@ pub mod plugin;
 pub mod relay;
 pub mod schema;
 pub mod server;
+pub mod stream;
 mod transport;
+pub mod verify;
 
 pub use bridge::{LoadOpts, McpTool, PromptInfo, Registry};
 pub use mcp::{CallResult, Client, ToolDef};
-pub use plugin::{CliReply, CommandDecl, CommandReply, EngineDecl, HookDecision, HttpReply, NodeCommandDecl, PluginHost, PluginMemory, PluginProvider, ProviderDecl, RouteDecl, ServiceDecl, UiDecl};
+pub use stream::{StreamMeta, StreamTap, TappedProvider};
+pub use plugin::{AuthDecl, BackendDecl, CliReply, CommandDecl, CommandReply, EngineDecl, HookDecision, HttpReply, NodeCommandDecl, PluginAuth, PluginBackend, PluginHost, PluginMemory, PluginProvider, ProviderDecl, RouteDecl, ServiceDecl, UiDecl};
 pub use server::{serve, Server, ServerInfo};
 pub use transport::Notify;
 
@@ -90,6 +100,25 @@ pub struct McpServerConfig {
     pub events: bool,
     /// Public HTTPS base the server POSTs events to (ark's app server `/mcp-events`).
     pub events_url: Option<String>,
+    /// Plugin stream hooks (`on_stream_*`): observation is on, reasoning deltas are opt-in.
+    pub stream: StreamConfig,
+}
+
+/// `[plugins.<name>] stream`: plugin stream hooks (see [`crate::stream`]).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct StreamConfig {
+    /// Feed the plugin's declared `stream_hooks` observers. Off = no tap is built at all.
+    pub enabled: bool,
+    /// Also forward thinking deltas to observers (Hermes `plugins.stream_reasoning_deltas`,
+    /// default off: reasoning on the token path is opt-in).
+    pub reasoning_deltas: bool,
+}
+
+impl Default for StreamConfig {
+    fn default() -> Self {
+        StreamConfig { enabled: true, reasoning_deltas: false }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -152,6 +181,7 @@ impl Default for McpServerConfig {
             apps: true,
             events: false,
             events_url: None,
+            stream: StreamConfig::default(),
         }
     }
 }

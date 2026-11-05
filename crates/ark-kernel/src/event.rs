@@ -79,6 +79,50 @@ pub enum EventKind {
     Thinking { level: String },
     /// Session renamed (overrides the header's title).
     Title { title: String },
+    /// The named agent this session runs as (multi-agent) and the user it belongs to.
+    Agent {
+        agent: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        user: Option<String>,
+    },
+    /// Tool policy for this session (sub-agent toolsets, agent tool lists): `allow` = only these
+    /// (None = all), `deny` = never these. A later event replaces an earlier one.
+    Tools {
+        #[serde(default)]
+        allow: Option<Vec<String>>,
+        #[serde(default)]
+        deny: Vec<String>,
+    },
+    /// Conversation rewind (`/undo`, `/retry`): messages with `from_seq <= seq < this event` are gone.
+    Rewind { from_seq: u64, turns: u64 },
+    /// Session settings (`sessions` tool / CLI): only the fields present change.
+    Meta {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pinned: Option<bool>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        archived: Option<bool>,
+        /// Sidebar group; "" clears it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        group: Option<String>,
+        /// Short status line; "" clears it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        status: Option<String>,
+    },
+    /// The final answer must be submitted through `structured_output` and validate against this.
+    OutputSchema { schema: Value },
+    /// A validated `structured_output` submission.
+    Structured { value: Value },
+    /// Workspace checkpoint taken at the start of a turn (lets a rewind restore files too).
+    Checkpoint { id: String, turn: u64 },
+    /// Queued inbox entries dropped without running (`/discard`, `/queue rm`).
+    Discard { inbox: Vec<String> },
+    /// The session moved to another workspace (`/worktree new|exit`): later tool calls run there.
+    Workspace { path: String },
+    /// Fast mode / service tier for later requests ("" = config default, "normal", "fast",
+    /// "ultrafast", "flex", "auto", "cold").
+    Fast { tier: String },
+    /// Usage of an auxiliary call made for this session (compaction, review, sampling…).
+    AuxUsage { task: String, model: String, usage: Usage },
 }
 
 impl Event {

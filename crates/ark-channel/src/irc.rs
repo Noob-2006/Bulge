@@ -48,7 +48,9 @@ const READ_SLICE: Duration = Duration::from_millis(100);
 
 /// One parsed IRC line; a trailing parameter is the last element of `params`.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub(crate) struct Line {
+/// One parsed IRC line. Public so the recorded protocol vectors
+/// (`tests/real/vectors/irc_ngircd_session.txt`) can be replayed without a server.
+pub struct Line {
     pub tags: Vec<(String, String)>,
     pub prefix: Option<String>,
     pub command: String,
@@ -77,7 +79,8 @@ impl Line {
 }
 
 /// `[@tags] [:prefix] COMMAND params… [:trailing]`.
-pub(crate) fn parse_line(raw: &str) -> Option<Line> {
+/// Public so recorded vectors (real server output) can be replayed in tests.
+pub fn parse_line(raw: &str) -> Option<Line> {
     let mut rest = raw.trim_end_matches(['\r', '\n']).trim_start_matches(' ');
     let mut tags = Vec::new();
     if let Some(r) = rest.strip_prefix('@') {

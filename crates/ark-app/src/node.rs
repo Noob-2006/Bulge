@@ -22,7 +22,7 @@
 //!
 //! ARP methods: see [`METHODS`].
 
-mod a11y;
+pub(crate) mod a11y;
 mod cdp;
 mod talk;
 
@@ -356,14 +356,7 @@ fn connect(p: &Value, nonce: &str, tx: &mpsc::Sender<Value>) -> Result<Conn, Str
                 let _ = tx.send(json!({"jsonrpc": "2.0", "method": "node.pair.resolved", "params": {"decision": "approved", "deviceToken": token, "id": id}}));
                 return Ok(Conn::Bootstrapped);
             }
-            r.pending.retain(|x| x.created.elapsed() < Duration::from_secs(3600) && x.id != id);
-            if r.pending.len() >= 10 {
-                return Err("too many pending pairing requests".into());
-            }
-            const ALPHA: &[u8] = b"ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
-            let code: String = ark_net::crypto::random_bytes(8).iter().map(|b| ALPHA[*b as usize % ALPHA.len()] as char).collect();
-            eprintln!("arkd: node `{name}` ({id}, {platform}) asks to pair; approve with `ark nodes approve {code}`");
-            r.pending.push(PendingPair { code: code.clone(), id, name, platform, public_key: pk_hex.to_string(), created: Instant::now(), notify: Some(tx.clone()) });
+            let code = add_pending(&mut r, &id, &name, &platform, pk_hex, Some(tx.clone()))?;
             Ok(Conn::Pending(code))
         }
     }
@@ -383,9 +376,40 @@ fn command_meta(v: &Value, commands: &[String]) -> BTreeMap<String, Value> {
         .collect()
 }
 
+/// How long a pending pairing request stays approvable. After it the operator must ask the
+/// device to reconnect (`node.pair.list` no longer shows it).
+pub const PAIR_TTL: Duration = Duration::from_secs(3600);
+
+/// Drop pairing requests older than [`PAIR_TTL`].
+fn prune_pending(r: &mut Registry) {
+    r.pending.retain(|x| x.created.elapsed() < PAIR_TTL);
+}
+
+/// Record a device that asked to pair as a pending request and return its 8-char code. The
+/// `node.connect` handshake calls this for an unknown device; nothing is paired (and no
+/// token is issued) until [`approve`].
+pub fn request_pairing(id: &str, name: &str, platform: &str, public_key: &str) -> Result<String, String> {
+    add_pending(&mut reg().lock().unwrap(), id, name, platform, public_key, None)
+}
+
+fn add_pending(r: &mut Registry, id: &str, name: &str, platform: &str, public_key: &str, notify: Option<mpsc::Sender<Value>>) -> Result<String, String> {
+    let name: String = name.chars().take(80).collect();
+    r.pending.retain(|x| x.id != id);
+    prune_pending(r);
+    if r.pending.len() >= 10 {
+        return Err("too many pending pairing requests".into());
+    }
+    const ALPHA: &[u8] = b"ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+    let code: String = ark_net::crypto::random_bytes(8).iter().map(|b| ALPHA[*b as usize % ALPHA.len()] as char).collect();
+    eprintln!("arkd: node `{name}` ({id}, {platform}) asks to pair; approve with `ark nodes approve {code}`");
+    r.pending.push(PendingPair { code: code.clone(), id: id.into(), name, platform: platform.into(), public_key: public_key.into(), created: Instant::now(), notify });
+    Ok(code)
+}
+
 pub fn approve(code: &str) -> Result<String, String> {
     let mut r = reg().lock().unwrap();
-    let i = r.pending.iter().position(|p| p.code.eq_ignore_ascii_case(code.trim())).ok_or("no pending node with that code")?;
+    prune_pending(&mut r);
+    let i = r.pending.iter().position(|p| p.code.eq_ignore_ascii_case(code.trim())).ok_or("no pending node with that code (unknown, used or expired)")?;
     let p = r.pending.remove(i);
     let token = issue_token(&mut r, &p.id, &p.name, &p.platform, &p.public_key, vec![]);
     if let Some(tx) = &p.notify {
@@ -417,6 +441,15 @@ pub fn bootstrap_token(ttl: Duration) -> (String, u64) {
     r.bootstrap.retain(|(_, e)| *e > t);
     r.bootstrap.push((token_hash("bootstrap", &token), exp));
     (token, exp)
+}
+
+/// Invalidate every unused setup code (`/pair cleanup`); returns how many were active.
+pub fn clear_bootstrap() -> usize {
+    let mut r = reg().lock().unwrap();
+    let t = now_ms();
+    let n = r.bootstrap.iter().filter(|(_, e)| *e > t).count();
+    r.bootstrap.clear();
+    n
 }
 
 // ── queue (pure functions over the registry, unit-tested) ──
@@ -524,6 +557,14 @@ pub fn invoke(node: &str, command: &str, params: Value, timeout: Duration, queue
     };
     reg().lock().unwrap().calls.remove(&id);
     out
+}
+
+/// Connected nodes offering `command` whose id or display name matches `query` (all when empty).
+pub(crate) fn live_nodes_with(command: &str, query: &str) -> Vec<String> {
+    let r = reg().lock().unwrap();
+    let mut v: Vec<String> = r.live.iter().filter(|(id, l)| l.commands.iter().any(|c| c == command) && (query.is_empty() || id.as_str() == query || l.name.eq_ignore_ascii_case(query))).map(|(id, _)| id.clone()).collect();
+    v.sort();
+    v
 }
 
 fn send_to(node: &str, msg: Value) -> Result<(), String> {
@@ -644,10 +685,15 @@ pub fn methods() -> ark_kernel::daemon::MethodExt {
                 let sc = SetupCode { url, bootstrap_token: token, expires_at_ms: Some(exp), tls_fingerprint: fp };
                 Ok(json!({"code": sc.encode(), "url": sc.url, "expiresAtMs": exp}))
             }
-            "node.pair.list" => Ok(json!(reg().lock().unwrap().pending.iter().filter(|x| x.created.elapsed() < Duration::from_secs(3600)).cloned().collect::<Vec<_>>())),
+            "node.pair.list" => {
+                let mut r = reg().lock().unwrap();
+                prune_pending(&mut r);
+                Ok(json!(r.pending.clone()))
+            }
             "node.pair.approve" => approve(&s("code")).map(|id| json!({"approved": id})).map_err(|e| (-32001, e)),
             "node.pair.reject" => {
                 let mut r = reg().lock().unwrap();
+                prune_pending(&mut r);
                 let code = s("code");
                 let before = r.pending.len();
                 r.pending.retain(|x| !x.code.eq_ignore_ascii_case(&code));
@@ -735,7 +781,17 @@ pub const SCHEMAS: &[(&str, &[Param], bool)] = &[
     ("canvas.present", &[("url", "string", false), ("html", "string", false)], false),
     ("system.notify", &[("title", "string", false), ("body", "string", false)], false),
     ("system.run", &[("command", "string", true), ("stdin", "boolean", false), ("timeoutMs", "integer", false)], false),
-    ("file.fetch", &[("path", "string", true)], false),
+    ("file.fetch", &[("path", "string", true), ("maxBytes", "integer", false)], false),
+    ("dir.list", &[("path", "string", true), ("pageToken", "string", false), ("maxEntries", "integer", false)], false),
+    ("dir.fetch", &[("path", "string", true), ("maxBytes", "integer", false)], false),
+    ("file.write", &[("path", "string", true), ("contentBase64", "string", true), ("overwrite", "boolean", false), ("createParents", "boolean", false)], true),
+    ("canvas.hide", &[], false),
+    ("canvas.navigate", &[("url", "string", true)], false),
+    ("canvas.eval", &[("javaScript", "string", true)], true),
+    ("canvas.snapshot", &[("format", "string", false), ("maxWidth", "integer", false)], false),
+    ("canvas.a2ui.pushJSONL", &[("jsonl", "string", true)], false),
+    ("canvas.a2ui.push", &[("messages", "array", false)], false),
+    ("canvas.a2ui.reset", &[], false),
     ("fs.listDir", &[("path", "string", false)], false),
 ];
 
@@ -795,7 +851,7 @@ impl Tool for NodeInvoke {
     fn spec(&self) -> ToolSpec {
         ToolSpec {
             name: "node_invoke".into(),
-            description: "Run a command on a paired device (node). action=list shows nodes and their commands; describe {id} gives parameter schemas; invoke runs `command` with `params` on node `id` (e.g. system.run {command}, system.notify {title, body}, screen.snapshot, screen.record {durationMs}, computer.act {action, x, y, text, keys}, canvas.present {url|html}, camera.snap, location.get, file.fetch {path}, notifications.list, and phone commands such as photos.latest, contacts.search, calendar.events when a phone node offers them); queue=true runs it when an offline node reconnects; events shows what nodes reported.".into(),
+            description: "Run a command on a paired device (node). action=list shows nodes and their commands; describe {id} gives parameter schemas; invoke runs `command` with `params` on node `id` (e.g. system.run {command}, system.notify {title, body}, screen.snapshot, screen.record {durationMs}, computer.act {action, x, y, text, keys}, canvas.present {url|html}, canvas.navigate/eval/snapshot/a2ui.pushJSONL, camera.snap, location.get, file.fetch {path}, dir.list, dir.fetch, file.write {path, contentBase64}, notifications.list, and phone commands such as photos.latest, contacts.search, calendar.events when a phone node offers them); queue=true runs it when an offline node reconnects; events shows what nodes reported.".into(),
             input_schema: json!({"type": "object", "properties": {"action": {"type": "string", "enum": ["list", "describe", "invoke", "events", "queue"]}, "id": {"type": "string"}, "command": {"type": "string"}, "params": {"type": "object"}, "timeout_secs": {"type": "integer"}, "queue": {"type": "boolean"}}, "required": ["action"]}),
             parallel_safe: true,
             idempotent: false,
@@ -922,8 +978,10 @@ pub struct HostPolicy {
     pub canvas: bool,
     /// notifications.list / notifications.actions (dunst or mako).
     pub notifications: bool,
-    /// Directories file.fetch / fs.listDir may read.
+    /// Directories file.fetch / fs.listDir / dir.list / dir.fetch may read.
     pub read_roots: Vec<PathBuf>,
+    /// Directories file.write may write into (empty = file.write is not offered).
+    pub write_roots: Vec<PathBuf>,
     /// talk.ptt.*: record the microphone (pw-record or ffmpeg) and transcribe with `stt`.
     pub microphone: bool,
     pub stt: Option<talk::Stt>,
@@ -934,7 +992,7 @@ pub struct HostPolicy {
     pub plugins: BTreeMap<String, ark_plugin::McpServerConfig>,
 }
 
-fn which(bin: &str) -> Option<PathBuf> {
+pub(crate) fn which(bin: &str) -> Option<PathBuf> {
     std::env::var_os("PATH").and_then(|p| std::env::split_paths(&p).map(|d| d.join(bin)).find(|f| f.is_file()))
 }
 
@@ -951,13 +1009,41 @@ pub struct Ctl {
     pub input: Option<mpsc::Receiver<Option<Vec<u8>>>>,
 }
 
-fn run_cmd(argv: &[&str], timeout: Duration) -> Result<String, String> {
+pub(crate) fn run_cmd(argv: &[&str], timeout: Duration) -> Result<String, String> {
     run_ctl(argv, timeout, &Ctl::default(), false)
+}
+
+thread_local! {
+    /// Extra environment for commands spawned on this thread (`""` removes a variable).
+    static ENV: std::cell::RefCell<Vec<(String, String)>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Run `f` with `env` applied to every command node.rs spawns on this thread
+/// (computer_use on the Bot Desktop: its DISPLAY, XAUTHORITY and session bus).
+pub(crate) fn with_env<R>(env: &[(String, String)], f: impl FnOnce() -> R) -> R {
+    let prev = ENV.with(|e| std::mem::replace(&mut *e.borrow_mut(), env.to_vec()));
+    let r = f();
+    ENV.with(|e| *e.borrow_mut() = prev);
+    r
+}
+
+fn x11_override() -> bool {
+    ENV.with(|e| e.borrow().iter().any(|(k, v)| k == "DISPLAY" && !v.is_empty()))
 }
 
 fn run_ctl(argv: &[&str], timeout: Duration, ctl: &Ctl, stdin: bool) -> Result<String, String> {
     use std::process::Stdio;
-    let mut child = std::process::Command::new(argv[0]).args(&argv[1..]).stdin(if stdin { Stdio::piped() } else { Stdio::null() }).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().map_err(|e| format!("{}: {e}", argv[0]))?;
+    let mut cmd = std::process::Command::new(argv[0]);
+    ENV.with(|e| {
+        for (k, v) in e.borrow().iter() {
+            if v.is_empty() {
+                cmd.env_remove(k);
+            } else {
+                cmd.env(k, v);
+            }
+        }
+    });
+    let mut child = cmd.args(&argv[1..]).stdin(if stdin { Stdio::piped() } else { Stdio::null() }).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().map_err(|e| format!("{}: {e}", argv[0]))?;
     let mut pipe = child.stdin.take();
     let deadline = Instant::now() + timeout;
     loop {
@@ -1008,7 +1094,7 @@ pub enum Input {
     Ydotool,
 }
 
-fn input_backend() -> Option<Input> {
+pub(crate) fn input_backend() -> Option<Input> {
     let wayland = std::env::var_os("WAYLAND_DISPLAY").is_some();
     match (wayland, which("xdotool").is_some(), which("ydotool").is_some()) {
         (true, _, true) => Some(Input::Ydotool),
@@ -1283,18 +1369,24 @@ pub fn host_commands(policy: &HostPolicy) -> Vec<&'static str> {
     if policy.notifications && (which("dunstctl").is_some() || which("makoctl").is_some()) {
         c.extend(["notifications.list", "notifications.actions"]);
     }
+    c.extend(crate::surfaces::canvas::node_commands(policy.canvas, !policy.cdp_url.is_empty()).into_iter().filter(|x| !c.contains(x)).collect::<Vec<_>>());
+    c.extend(["dir.list", "dir.fetch"].into_iter().chain((!policy.write_roots.is_empty()).then_some("file.write")));
+    c.extend(crate::session_share::node_commands());
+    if policy.canvas && !policy.cdp_url.is_empty() && !c.contains(&"canvas.present") {
+        c.push("canvas.present");
+    }
     c
 }
 
-fn tmp_file(tag: &str, ext: &str) -> PathBuf {
+pub(crate) fn tmp_file(tag: &str, ext: &str) -> PathBuf {
     let dir = std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from).filter(|d| d.is_dir()).unwrap_or_else(std::env::temp_dir);
     dir.join(format!("ark-{tag}-{}-{}.{ext}", std::process::id(), ark_net::crypto::random_token(6)))
 }
 
-fn snapshot(t: Duration) -> Result<Vec<u8>, String> {
+pub(crate) fn snapshot(t: Duration) -> Result<Vec<u8>, String> {
     let tmp = tmp_file("shot", "png");
     let path = tmp.display().to_string();
-    if which("grim").is_some() { run_cmd(&["grim", &path], t) } else { run_cmd(&["import", "-window", "root", &path], t) }?;
+    if which("grim").is_some() && !x11_override() { run_cmd(&["grim", &path], t) } else { run_cmd(&["import", "-window", "root", &path], t) }?;
     let b = std::fs::read(&tmp).map_err(|e| e.to_string());
     let _ = std::fs::remove_file(&tmp);
     b
@@ -1307,6 +1399,10 @@ pub fn host_run(policy: &HostPolicy, command: &str, p: &Value) -> Result<Value, 
 pub fn host_run_ctl(policy: &HostPolicy, command: &str, p: &Value, ctl: &Ctl) -> Result<Value, String> {
     let t = Duration::from_millis(p["timeoutMs"].as_u64().unwrap_or(30_000).min(300_000));
     match command {
+        // Canvas over DevTools and file transfer (surfaces::canvas, surfaces::file_transfer).
+        c if crate::surfaces::canvas::node_handles(policy.canvas, !policy.cdp_url.is_empty(), c) => crate::surfaces::canvas::node_run(&policy.cdp_url, c, p, t),
+        c @ ("file.fetch" | "dir.list" | "dir.fetch" | "file.write") => crate::surfaces::file_transfer::node_run(&policy.read_roots, &policy.write_roots, c, p),
+        c if crate::session_share::handles(c) => crate::session_share::node_run(c, p),
         "system.which" => Ok(json!(which(p["bin"].as_str().unwrap_or("")).map(|x| x.display().to_string()))),
         "system.notify" => run_cmd(&["notify-send", p["title"].as_str().unwrap_or("ark"), p["body"].as_str().unwrap_or("")], t).map(|_| json!("shown")),
         "device.info" => Ok(json!({"hostname": std::fs::read_to_string("/etc/hostname").unwrap_or_default().trim(), "os": std::env::consts::OS, "arch": std::env::consts::ARCH, "kernel": std::fs::read_to_string("/proc/sys/kernel/osrelease").unwrap_or_default().trim(), "commands": host_commands(policy)})),
@@ -1318,17 +1414,6 @@ pub fn host_run_ctl(policy: &HostPolicy, command: &str, p: &Value, ctl: &Ctl) ->
             let mut out: Vec<Value> = std::fs::read_dir(&d).map_err(|e| e.to_string())?.flatten().take(500).map(|e| json!({"name": e.file_name().to_string_lossy(), "dir": e.file_type().map(|t| t.is_dir()).unwrap_or(false)})).collect();
             out.sort_by(|a, b| a["name"].as_str().cmp(&b["name"].as_str()));
             Ok(json!(out))
-        }
-        "file.fetch" => {
-            let f = PathBuf::from(p["path"].as_str().unwrap_or(""));
-            if !within(&policy.read_roots, &f) {
-                return Err("path is outside the node's read_roots".into());
-            }
-            let b = std::fs::read(&f).map_err(|e| e.to_string())?;
-            if b.len() > 8 << 20 {
-                return Err("file larger than 8 MB".into());
-            }
-            Ok(json!({"name": f.file_name().map(|n| n.to_string_lossy().into_owned()), "base64": ark_net::crypto::b64(&b)}))
         }
         "system.run" => {
             let cmd = p["command"].as_str().unwrap_or("");
@@ -1695,6 +1780,29 @@ mod tests {
         assert_eq!((items.len(), more), (1, false));
         enqueue_work(&mut r, "n", "status.request", "normal", 100, 0).unwrap();
         assert!(drain(&mut r, "n", 5, 2_000).0.is_empty(), "expired work is dropped");
+    }
+
+    /// A pairing code goes stale after an hour: it disappears from the list and can neither
+    /// be approved nor rejected any more (the device has to reconnect).
+    #[test]
+    fn stale_pairing_codes_cannot_be_approved() {
+        let id = format!("stale-{}", ark_net::crypto::random_token(4));
+        let code = request_pairing(&id, "old phone", "ios", &"ab".repeat(32)).unwrap();
+        let f = methods();
+        let listed = |f: &ark_kernel::daemon::MethodExt| f("node.pair.list", &json!({})).unwrap().unwrap().as_array().unwrap().iter().any(|p| p["code"] == code.as_str());
+        assert!(listed(&f), "a fresh request is listed");
+        // Age it past PAIR_TTL: no test waits an hour.
+        {
+            let mut r = reg().lock().unwrap();
+            for p in r.pending.iter_mut().filter(|p| p.id == id) {
+                p.created = Instant::now() - PAIR_TTL - Duration::from_secs(1);
+            }
+        }
+        assert!(!listed(&f), "an expired request is hidden from `node.pair.list`");
+        let (num, msg) = f("node.pair.approve", &json!({"code": code})).unwrap().unwrap_err();
+        assert_eq!(num, -32001);
+        assert!(msg.contains("expired"), "{msg}");
+        assert_eq!(f("node.pair.reject", &json!({"code": code})).unwrap().unwrap()["rejected"], false);
     }
 
     #[test]

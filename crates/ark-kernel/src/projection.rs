@@ -23,6 +23,10 @@ pub struct View {
     pub pending_inbox: Vec<Queued>,
     /// Reasoning effort set for this session, if any.
     pub thinking: Option<String>,
+    /// Fast mode / service tier set for this session, if any.
+    pub fast: Option<String>,
+    /// Tokens spent by auxiliary calls (compaction, review…), not part of `usage`.
+    pub aux_usage: Usage,
     pub title: Option<String>,
     /// Tool calls written ahead but never settled (crash mid-call).
     pub unsettled: Vec<Unsettled>,
@@ -32,6 +36,26 @@ pub struct View {
     pub turns: u64,
     pub compactions: u64,
     pub last_input_tokens: u64,
+    /// Named agent (multi-agent); None = the default agent.
+    pub agent: Option<String>,
+    pub user: Option<String>,
+    pub tool_allow: Option<Vec<String>>,
+    pub tool_deny: Vec<String>,
+    pub pinned: bool,
+    pub archived: bool,
+    pub group: Option<String>,
+    pub status: Option<String>,
+    pub output_schema: Option<Value>,
+    pub structured: Option<Value>,
+    /// (turn, checkpoint id) in log order.
+    pub checkpoints: Vec<(u64, String)>,
+    /// Seqs of the user messages that started a turn (rewind targets), oldest first.
+    pub user_turns: Vec<u64>,
+}
+
+/// Whether a user message is a human turn (not tool results / recovery notes).
+pub fn is_user_turn(m: &Message) -> bool {
+    m.role == Role::User && !m.content.is_empty() && !m.content.iter().any(|b| matches!(b, Block::ToolResult { .. }))
 }
 
 /// Queued input: (inbox id, source, text, attachments).
@@ -53,6 +77,8 @@ pub fn project(events: &[Event]) -> View {
     let mut called: Vec<Unsettled> = Vec::new();
     let mut settled: HashSet<String> = HashSet::new();
     let mut artifacts: HashMap<String, String> = HashMap::new();
+    let mut rewinds: Vec<(u64, u64)> = Vec::new();
+    let mut compactions: Vec<(u64, u64, String)> = Vec::new();
 
     for ev in events {
         match &ev.kind {
@@ -66,7 +92,9 @@ pub fn project(events: &[Event]) -> View {
             EventKind::System { segments } => v.system = segments.clone(),
             EventKind::Model { model } => v.model = model.clone(),
             EventKind::Thinking { level } => v.thinking = Some(level.clone()).filter(|l| !l.is_empty()),
-            EventKind::Title { title } => v.title = Some(title.clone()),
+            EventKind::Title { title } => v.title = Some(title.clone()).filter(|t| !t.is_empty()),
+            EventKind::Fast { tier } => v.fast = Some(tier.clone()).filter(|t| !t.is_empty()),
+            EventKind::AuxUsage { usage, .. } => v.aux_usage.add(usage),
             EventKind::Message { usage, inbox, .. } => {
                 if let Some(u) = usage {
                     v.usage.add(u);
@@ -77,6 +105,7 @@ pub fn project(events: &[Event]) -> View {
                 }
             }
             EventKind::Compaction { upto_seq, summary, pruned: p, .. } => {
+                compactions.push((ev.seq, *upto_seq, summary.clone()));
                 compaction = Some((*upto_seq, summary.clone()));
                 pruned.extend(p.iter().cloned());
                 v.compactions += 1;
@@ -96,9 +125,44 @@ pub fn project(events: &[Event]) -> View {
                 }
             }
             EventKind::TurnEnd { .. } => v.turns += 1,
+            EventKind::Discard { inbox } => consumed.extend(inbox.iter().cloned()),
+            EventKind::Workspace { path } => v.workspace = path.clone(),
+            EventKind::Agent { agent, user } => {
+                v.agent = Some(agent.clone()).filter(|a| !a.is_empty());
+                v.user = user.clone();
+            }
+            EventKind::Tools { allow, deny } => {
+                v.tool_allow = allow.clone();
+                v.tool_deny = deny.clone();
+            }
+            EventKind::Rewind { from_seq, .. } => {
+                rewinds.push((*from_seq, ev.seq));
+                // A summary covering rewound messages is void: older history comes back.
+                if compaction.as_ref().is_some_and(|(u, _)| from_seq < u) {
+                    compaction = compactions.iter().rev().find(|(_, u, _)| u <= from_seq).map(|(_, u, s)| (*u, s.clone()));
+                }
+            }
+            EventKind::Meta { pinned, archived, group, status } => {
+                if let Some(p) = pinned {
+                    v.pinned = *p;
+                }
+                if let Some(a) = archived {
+                    v.archived = *a;
+                }
+                if let Some(g) = group {
+                    v.group = Some(g.clone()).filter(|g| !g.is_empty());
+                }
+                if let Some(s) = status {
+                    v.status = Some(s.clone()).filter(|s| !s.is_empty());
+                }
+            }
+            EventKind::OutputSchema { schema } => v.output_schema = Some(schema.clone()).filter(|s| !s.is_null()),
+            EventKind::Structured { value } => v.structured = Some(value.clone()),
+            EventKind::Checkpoint { id, turn } => v.checkpoints.push((*turn, id.clone())),
             _ => {}
         }
     }
+    let rewound = |seq: u64| rewinds.iter().any(|(from, at)| *from <= seq && seq < *at);
 
     for ev in events {
         if let EventKind::Inbox { id, source, text, attachments } = &ev.kind {
@@ -114,10 +178,13 @@ pub fn project(events: &[Event]) -> View {
         push_merged(&mut v, Message::user(format!("[Summary of earlier conversation]\n{summary}")), *seq);
     }
     for ev in events {
-        if ev.seq < cutoff {
+        if ev.seq < cutoff || rewound(ev.seq) {
             continue;
         }
         if let EventKind::Message { message, .. } = &ev.kind {
+            if is_user_turn(message) && message.text().trim() != "" && !message.text().starts_with("[Your reply was cut off") {
+                v.user_turns.push(ev.seq);
+            }
             let mut m = message.clone();
             if !pruned.is_empty() {
                 for b in &mut m.content {

@@ -127,6 +127,18 @@ impl Io {
     }
 }
 
+impl crate::ops::wizard::Prompt for Io {
+    fn say(&self, s: &str) {
+        Io::say(self, s)
+    }
+    fn yes(&mut self, q: &str, default: bool) -> Result<bool, String> {
+        Io::yes(self, q, default)
+    }
+    fn ask(&mut self, q: &str, default: &str) -> Result<String, String> {
+        Io::ask(self, q, default)
+    }
+}
+
 fn mask(k: &str) -> String {
     let n = k.chars().count();
     if n <= 8 {
@@ -140,6 +152,111 @@ fn mask(k: &str) -> String {
 fn chat_models(all: Vec<String>) -> Vec<String> {
     const SKIP: &[&str] = &["embed", "tts", "whisper", "dall-e", "moderation", "audio", "image", "transcribe", "realtime", "search", "rerank", "babbage", "davinci", "aqa", "imagen", "veo"];
     all.into_iter().filter(|m| !SKIP.iter().any(|s| m.to_lowercase().contains(s))).collect()
+}
+
+// ── web search provider (OpenClaw `src/flows/search-setup.ts`) ──
+
+/// Providers that answer without any credential but are not keyless-ring members: a local
+/// server (Ollama), the Codex app-server and DuckDuckGo's public HTML endpoint.
+const KEY_FREE: &[&str] = &["ollama", "codex", "duckduckgo"];
+
+/// One row of the wizard's search step, resolved from the provider registry (pure, no I/O).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SearchOption {
+    pub id: &'static str,
+    pub label: &'static str,
+    /// Env var / vault name the step asks for; `None` = nothing to ask.
+    pub credential: Option<&'static str>,
+    /// `credential` is a server address, not a secret (SearXNG).
+    pub credential_is_url: bool,
+    /// Works with no credential at all (keyless ring member or a local server).
+    pub keyless: bool,
+    /// Already configured: the credential is the environment or the vault.
+    pub configured: bool,
+    /// Where to get the credential (upstream `entry.signupUrl`).
+    pub signup_url: &'static str,
+}
+
+/// The wizard's provider menu: every provider, sorted by label then id (upstream
+/// `resolveSearchProviderOptions` ends with a `localeCompare` on the label). `has` reports
+/// whether an environment variable / vault secret of that name is set.
+pub fn search_options(has: impl Fn(&str) -> bool) -> Vec<SearchOption> {
+    let mut opts: Vec<SearchOption> = ark_tools::web::providers::all()
+        .iter()
+        .map(|p| {
+            let keyless = p.keyless() || KEY_FREE.contains(&p.id());
+            SearchOption {
+                id: p.id(),
+                label: p.label(),
+                credential: if keyless { None } else { p.env_vars().first().copied() },
+                credential_is_url: p.id() == "searxng",
+                keyless,
+                configured: p.env_vars().iter().any(|v| has(v)),
+                signup_url: p.signup_url(),
+            }
+        })
+        .collect();
+    opts.sort_by(|a, b| a.label.to_lowercase().cmp(&b.label.to_lowercase()).then(a.id.cmp(b.id)));
+    opts
+}
+
+/// What one answer writes (upstream `applySearchProviderSelection`): the `[web.search]` pin, the
+/// per-provider entry and, for a typed key, the vault secret the entry references.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SearchWrite {
+    pub provider: String,
+    /// `[web.search] enabled`. `false` only when a key is required and none is available.
+    pub enabled: bool,
+    /// `[web.providers.<id>] <key> = <value>`.
+    pub provider_entry: Option<(&'static str, String)>,
+    /// Vault entry to store before the placeholder is written.
+    pub secret: Option<(&'static str, String)>,
+    /// The provider needs a credential and the user supplied none.
+    pub missing_credential: bool,
+}
+
+/// Decide what to write for `answer` (the key, the server URL, or "" to take an existing one).
+pub fn search_write(opt: &SearchOption, answer: &str) -> SearchWrite {
+    let answer = answer.trim();
+    let mut w = SearchWrite { provider: opt.id.to_string(), enabled: true, provider_entry: None, secret: None, missing_credential: false };
+    // Key-free providers write nothing but the pin.
+    let Some(var) = opt.credential else { return w };
+    if answer.is_empty() {
+        if !opt.configured {
+            w.enabled = false;
+            w.missing_credential = true;
+        }
+        return w;
+    }
+    if opt.credential_is_url {
+        w.provider_entry = Some(("base_url", answer.to_string()));
+    } else {
+        w.secret = Some((var, answer.to_string()));
+        w.provider_entry = Some(("api_key", format!("{{{{secret:{var}}}}}")));
+    }
+    w
+}
+
+/// Write a choice into the `[web]` table (the caller stores `secret` in the vault first).
+pub fn apply_search(root: &mut toml::Table, w: &SearchWrite) {
+    let web = table(root, "web");
+    let search = table(web, "search");
+    search.insert("provider".into(), w.provider.clone().into());
+    search.insert("enabled".into(), w.enabled.into());
+    if let Some((k, v)) = &w.provider_entry {
+        let providers = table(web, "providers");
+        let entry = table(providers, w.provider.as_str());
+        entry.insert((*k).to_string(), v.clone().into());
+    }
+}
+
+/// Write a choice into the `[web]` table, then keep a previously-disabled search off (upstream
+/// `preserveDisabledState`).
+pub fn apply_search_keeping_disabled(root: &mut toml::Table, w: &SearchWrite, was_off: bool) {
+    apply_search(root, w);
+    if was_off {
+        table(table(root, "web"), "search").insert("enabled".into(), false.into());
+    }
 }
 
 fn agent() -> ureq::Agent {
@@ -200,6 +317,10 @@ fn table<'a>(root: &'a mut toml::Table, key: &str) -> &'a mut toml::Table {
 pub fn run(paths: &Paths) -> Result<i32, String> {
     let mut io = Io::new();
     std::fs::create_dir_all(&paths.config_dir).map_err(|e| e.to_string())?;
+    // Security note + importing another agent's setup (before the config is read).
+    if !crate::ops::wizard::pre(&mut io, paths)? {
+        return Ok(1);
+    }
     let vault = Vault::load(&paths.secrets())?;
     let cfg_path = paths.user_config();
     let existing = std::fs::read_to_string(&cfg_path).ok();
@@ -265,7 +386,7 @@ pub fn run(paths: &Paths) -> Result<i32, String> {
                 tb.insert("api_key_env".into(), env.clone().into());
             }
             custom = Some(tb);
-            ProviderConfig { id, format: WireFormat::OpenAiChat, base_url: base, api_key_env: needs_key.then_some(env), api_key: None, headers: Default::default(), idle_timeout_secs: None }
+            ProviderConfig { id, format: WireFormat::OpenAiChat, base_url: base, api_key_env: needs_key.then_some(env), ..Default::default() }
         }
     };
     let local = prov.api_key_env.is_none();
@@ -279,10 +400,28 @@ pub fn run(paths: &Paths) -> Result<i32, String> {
         }
     }
 
-    // ── 2. key + model list (the list call doubles as the key check) ──
+    // ── 2. auth: the provider's login flow, or a key + model list (the list call doubles as
+    // the key check). OpenClaw `setup.model-auth.ts` offers both.
+    let mut logged_in = false;
+    if let Some(flow) = crate::ops::wizard::oauth_flow(&prov) {
+        io.say(&format!("\n{}", t("② 登入", "② Sign in")));
+        io.say(&format!("  {} `ark login {flow}`", t("這個供應商支援用瀏覽器登入，不必手動貼金鑰：", "This provider can sign you in with a browser instead of a pasted key:")));
+        if io.yes(&format!("  {}", t("現在登入？", "Sign in now?")), true)? {
+            match crate::models_cli::inline_login(flow, paths) {
+                Ok(msg) => {
+                    io.say(&format!("  {msg}"));
+                    logged_in = true;
+                }
+                Err(e) => io.say(&format!("  ✗ {e}\n  {}", t("改用手動貼金鑰", "falling back to a pasted key"))),
+            }
+        }
+    }
     let mut key: Option<String> = None;
     let mut models: Vec<String> = vec![];
-    if let Some(env) = prov.api_key_env.clone() {
+    if logged_in {
+        io.say(&format!("\n{}", t("② 已登入", "② Signed in")));
+        models = ark_model::list_models(&prov, None).unwrap_or_default();
+    } else if let Some(env) = prov.api_key_env.clone() {
         let found = std::env::var(&env).ok().filter(|v| !v.trim().is_empty()).map(|v| (v, t("環境變數", "environment"))).or_else(|| {
             let v = vault.substitute(&format!("{{{{secret:{env}}}}}"));
             (!v.starts_with("{{secret:")).then_some((v, t("保管庫", "vault")))
@@ -367,7 +506,7 @@ pub fn run(paths: &Paths) -> Result<i32, String> {
     let mut pc = prov.clone();
     pc.api_key = key.clone();
     let probe = ark_model::build(&pc).and_then(|p| {
-        let req = ark_core::ModelRequest { model: model.clone(), system: vec![], messages: vec![ark_core::Message::user("Reply with exactly: pong")], tools: vec![], max_tokens: 256, temperature: None, cache_after_message: None, reasoning: None };
+        let req = ark_core::ModelRequest { model: model.clone(), system: vec![], messages: vec![ark_core::Message::user("Reply with exactly: pong")], tools: vec![], max_tokens: 256, temperature: None, cache_after_message: None, reasoning: None, options: Default::default() };
         let t0 = Instant::now();
         p.complete(&req, &mut |_| {}, &ark_core::Cancel::new().with_deadline(Instant::now() + Duration::from_secs(60))).map(|r| (t0.elapsed(), r.message.text())).map_err(|e| e.to_string())
     });
@@ -381,19 +520,93 @@ pub fn run(paths: &Paths) -> Result<i32, String> {
         }
     }
 
+    // ── 4b. web search provider ──
+    // Upstream's own numbered section; no number here so the later shared steps keep theirs.
+    io.say(&format!("\n{}", t("✦ 網頁搜尋（web_search）", "✦ Web search")));
+    io.say(t("  Web search 讓 agent 上網查資料。有些供應商需要 API key，有些無需 key。", "  Web search lets your agent look things up online. Some providers need an API key, and some work key-free."));
+    let has_var = |v: &str| std::env::var(v).is_ok_and(|x| !x.trim().is_empty()) || vault.names().iter().any(|n| n == v);
+    let sopts = search_options(has_var);
+    let mut slabels: Vec<String> = sopts
+        .iter()
+        .map(|o| {
+            let hint = if o.keyless {
+                t("無需 key", "key-free").to_string()
+            } else if o.configured {
+                t("已設定", "configured").to_string()
+            } else if o.credential_is_url {
+                t("需要伺服器位址", "server address required").to_string()
+            } else {
+                t("需要 API key", "API key required").to_string()
+            };
+            format!("{}{}", o.label, paren(&hint))
+        })
+        .collect();
+    slabels.push(t("先跳過（之後用 `ark web providers` 檢視、`ark config set` 設定）", "Skip for now (see `ark web providers` later, set it with `ark config set`)").into());
+    let cur_search = root.get("web").and_then(|w| w.get("search")).and_then(|s| s.get("provider")).and_then(|p| p.as_str()).map(String::from);
+    // Upstream `preserveDisabledState`: a `[web.search] enabled = false` the operator wrote stays
+    // off even though picking a provider normally switches search on.
+    let search_off = root.get("web").and_then(|w| w.get("search")).and_then(|s| s.get("enabled")).and_then(|e| e.as_bool()) == Some(false);
+    let sdefault = cur_search
+        .as_deref()
+        .and_then(|id| sopts.iter().position(|o| o.id == id))
+        .or_else(|| sopts.iter().position(|o| o.configured && !o.keyless))
+        .unwrap_or(sopts.len());
+    let spick = io.choose(t("編號", "Number"), &slabels, sdefault)?;
+    if spick == sopts.len() {
+        io.say(t("  略過；web_search 會用自動偵測（或免 key 後援）", "  Skipped; web_search keeps autodetecting (with the key-free fallback)"));
+    } else {
+        let o = &sopts[spick];
+        let answer = match o.credential {
+            None => String::new(),
+            Some(var) if o.credential_is_url => io.ask(&format!("  {var}{}SearXNG {}", colon(), t("伺服器位址", "server address")), "")?,
+            Some(var) => {
+                if o.configured {
+                    io.say(&format!("  {var} {}{}{}", t("已設定", "is set"), colon(), t("按 Enter 沿用", "press Enter to keep it")));
+                }
+                io.secret(&format!("  {var}"))?
+            }
+        };
+        let sw = search_write(o, &answer);
+        if let Some((name, value)) = &sw.secret {
+            vault.set(name, value)?;
+            io.say(&format!("  {} {name}", t("已存入保管庫：", "Stored in vault:")));
+        }
+        apply_search_keeping_disabled(&mut root, &sw, search_off);
+        if search_off {
+            io.say(t("  web_search 原本就是停用（enabled = false），維持停用", "  web_search was already switched off (enabled = false); keeping it off"));
+        }
+        if sw.missing_credential {
+            io.say(&format!("  ! {}", t("沒有金鑰，web_search 在金鑰可用前不會運作（已寫入 enabled = false）", "No key stored — web_search won't work until a key is available (wrote enabled = false)")));
+            if !o.signup_url.is_empty() {
+                io.say(&format!("  {}{}", t("取得金鑰：", "Get your key at: "), o.signup_url));
+            }
+        } else {
+            io.say(&format!("  ✓ {}{}{}", t("已選擇", "Selected"), colon(), o.label));
+            // A live check, skipped for key-free providers (nothing to prove about a credential).
+            if !o.keyless && io.yes(t("  現在試搜一次？", "  Try one search now?"), true)? {
+                io.say(t("  搜尋中…", "  searching…"));
+                let probe_web = root.get("web").and_then(|w| w.as_table()).cloned().unwrap_or_default();
+                match crate::web_cli::search_once(&probe_web, paths, "ark setup web search check", 3) {
+                    Ok(v) => {
+                        let n = v["results"].as_array().map(|r| r.len()).unwrap_or(0);
+                        let first = v["results"][0]["title"].as_str().or_else(|| v["answer"].as_str()).unwrap_or("");
+                        io.say(&format!("  ✓ {} {} — {}", t("搜尋成功", "search works"), paren(&format!("{} {}", n, t("筆結果", "results"))), crate::term::one_line(first, 50)));
+                    }
+                    Err(e) => io.say(&format!("  ✗ {e}\n  {}", t("仍會儲存設定；可用 `ark web test` 再試", "the setup is still saved; retry with `ark web test`"))),
+                }
+            }
+        }
+    }
+
     // ── 5. web UI ──
     io.say(&format!("\n{}", t("④ 網頁介面", "④ Web UI")));
     let app_on = root.get("app").and_then(|a| a.get("enabled")).and_then(|v| v.as_bool()).unwrap_or(false);
     let web = io.yes(t("  啟用網頁介面（瀏覽器聊天、管理工作階段）？", "  Turn on the web UI (chat and sessions in a browser)?"), true)?;
-    if web {
-        if !vault.names().iter().any(|n| n == "APP_TOKEN") {
-            vault.set("APP_TOKEN", &ark_net::crypto::random_token(24))?;
-        }
-        let app = table(&mut root, "app");
-        app.insert("enabled".into(), true.into());
-        app.entry("token").or_insert_with(|| "{{secret:APP_TOKEN}}".into());
-    } else if app_on {
-        table(&mut root, "app").insert("enabled".into(), false.into());
+    // Gateway config + auth (OpenClaw `setup.gateway-config.ts`): the token is a vault reference;
+    // the wizard only mints the secret when the install has none.
+    let have_token = vault.names().iter().any(|n| n == "APP_TOKEN");
+    if let Some(secret) = crate::ops::wizard::gateway_config(&mut root, web || app_on, have_token) {
+        vault.set(secret, &ark_net::crypto::random_token(24))?;
     }
 
     // ── 6. one chat channel ──
@@ -438,31 +651,14 @@ pub fn run(paths: &Paths) -> Result<i32, String> {
                 if let (Some(n), Some(v)) = (app_name, &app_tok) {
                     vault.set(n, v)?;
                 }
-                let channels = table(&mut root, "channels");
-                let mut name = kind.to_string();
-                let mut i = 2;
-                while channels.contains_key(&name) {
-                    name = format!("{kind}{i}");
-                    i += 1;
-                }
-                let mut ch = toml::Table::new();
-                ch.insert("kind".into(), kind.into());
-                match kind {
-                    "slack" => {
-                        ch.insert("bot_token".into(), "{{secret:SLACK_BOT_TOKEN}}".into());
-                        ch.insert("app_token".into(), "{{secret:SLACK_APP_TOKEN}}".into());
-                    }
-                    _ => {
-                        ch.insert("token".into(), format!("{{{{secret:{tok_name}}}}}").into());
-                    }
-                }
-                // Strangers get a one-time code; you approve them with `ark pairing approve`.
-                ch.insert("dm_policy".into(), "pairing".into());
-                channels.insert(name.clone(), toml::Value::Table(ch));
-                channel_added = Some(name);
+                // Secret references + `dm_policy = "pairing"` (ops/wizard.rs::add_channel).
+                channel_added = Some(crate::ops::wizard::add_channel(&mut root, kind)?);
             }
         }
     }
+
+    // Default workspace + official connectors (ops/wizard.rs).
+    crate::ops::wizard::mid(&mut io, &mut root, paths)?;
 
     // ── 7. write, validate, roll back on error ──
     table(&mut root, "model").insert("default".into(), full.clone().into());
@@ -492,6 +688,8 @@ pub fn run(paths: &Paths) -> Result<i32, String> {
     if existing.is_some() {
         io.say(&format!("  {} {}", t("原檔備份：", "Backup:"), backup.display()));
     }
+    let app_ws = root.get("app").and_then(|a| a.get("workspace")).and_then(|v| v.as_str()).map(std::path::PathBuf::from).unwrap_or_else(|| paths.data.join("workspace"));
+    crate::ops::wizard::post(&mut io, web || channel_added.is_some(), &app_ws)?;
     io.say(&format!("\n{}", t("接下來：", "Next:")));
     io.say(&format!("  ark chat                      {}", t("在終端機對話", "talk in the terminal")));
     io.say(&format!("  ark run \"…\"                   {}", t("交辦一件事", "hand it one task")));
@@ -520,6 +718,100 @@ mod tests {
         assert_eq!(chat_models(vec!["gpt-x".into(), "text-embedding-3".into(), "whisper-1".into(), "gemini-2-flash".into()]), vec!["gpt-x", "gemini-2-flash"]);
         assert!(hint("provider `anthropic`: API key missing — set $X").is_some());
         assert!(hint("rate limited").is_none());
+    }
+
+    /// The search step's decision logic, with no terminal: what we ask for and what we write.
+    #[test]
+    fn search_step_options_and_writes() {
+        let opts = search_options(|v| v == "BRAVE_API_KEY");
+        let by = |id: &str| opts.iter().find(|o| o.id == id).expect(id).clone();
+        assert_eq!(by("brave").credential, Some("BRAVE_API_KEY"));
+        assert!(by("brave").configured && !by("brave").keyless);
+        assert_eq!((by("tavily").credential, by("tavily").configured), (Some("TAVILY_API_KEY"), false));
+        assert!(by("searxng").credential_is_url && by("searxng").credential == Some("SEARXNG_BASE_URL"));
+        assert!(by("duckduckgo").keyless && by("duckduckgo").credential.is_none(), "the keyless endpoint asks nothing");
+        assert!(by("ollama").keyless, "a local server needs no key");
+        assert!(by("exa").keyless, "keyless ring members ask nothing");
+
+        // A typed key is stored in the vault; the config only carries the placeholder.
+        let w = search_write(&by("brave"), "  bk-123  ");
+        assert!(w.enabled && !w.missing_credential);
+        assert_eq!(w.secret, Some(("BRAVE_API_KEY", "bk-123".to_string())));
+        assert_eq!(w.provider_entry, Some(("api_key", "{{secret:BRAVE_API_KEY}}".to_string())));
+        let mut root: toml::Table = "".parse().unwrap();
+        apply_search(&mut root, &w);
+        assert_eq!(root["web"]["search"]["provider"].as_str(), Some("brave"));
+        assert_eq!(root["web"]["search"]["enabled"].as_bool(), Some(true));
+        assert_eq!(root["web"]["providers"]["brave"]["api_key"].as_str(), Some("{{secret:BRAVE_API_KEY}}"));
+        let web: ark_tools::web::WebConfig = ark_tools::web::WebConfig::from_value(serde_json::to_value(&root["web"]).unwrap()).expect("[web] parses");
+        assert_eq!((web.search.provider.as_str(), web.search.enabled), ("brave", true));
+
+        // Key-free provider: enabled, nothing else written.
+        let w = search_write(&by("duckduckgo"), "");
+        assert!(w.enabled && w.secret.is_none() && w.provider_entry.is_none());
+        // SearXNG asks for a server address, never a secret.
+        let w = search_write(&by("searxng"), "http://127.0.0.1:8080");
+        assert!(w.secret.is_none());
+        assert_eq!(w.provider_entry, Some(("base_url", "http://127.0.0.1:8080".to_string())));
+        // Nothing available anywhere: provider pinned but disabled (upstream's behaviour).
+        let none = search_options(|_| false);
+        let tavily = none.iter().find(|o| o.id == "tavily").unwrap();
+        let w = search_write(tavily, "");
+        assert!(!w.enabled && w.missing_credential && w.secret.is_none());
+        // An empty answer with the key already in the environment keeps working.
+        let env = search_options(|v| v == "TAVILY_API_KEY");
+        let w = search_write(env.iter().find(|o| o.id == "tavily").unwrap(), "");
+        assert!(w.enabled && !w.missing_credential && w.secret.is_none() && w.provider_entry.is_none());
+        // Writing keeps the rest of `[web]` intact.
+        let mut root: toml::Table = "[web]\ncache_enabled = false\n[web.search]\nprovider = \"exa\"\nmax_results = 7\n".parse().unwrap();
+        apply_search(&mut root, &search_write(&by("tavily"), "tk"));
+        assert_eq!(root["web"]["cache_enabled"].as_bool(), Some(false));
+        assert_eq!(root["web"]["search"]["max_results"].as_integer(), Some(7));
+        assert_eq!(root["web"]["search"]["provider"].as_str(), Some("tavily"));
+    }
+
+    /// The menu is the upstream order (label, then id) and a disabled search stays disabled.
+    #[test]
+    fn search_step_menu_order_and_preserved_disabled_state() {
+        let opts = search_options(|_| false);
+        let labels: Vec<String> = opts.iter().map(|o| o.label.to_lowercase()).collect();
+        let mut sorted = labels.clone();
+        sorted.sort();
+        assert_eq!(labels, sorted, "the provider menu is sorted by label");
+        assert_eq!(opts.len(), ark_tools::web::providers::all().len(), "every provider is offered exactly once");
+        assert_eq!(opts.iter().find(|o| o.id == "brave").unwrap().signup_url, "https://brave.com/search/api/");
+
+        // Upstream `preserveDisabledState`: picking a provider keeps a written `enabled = false`.
+        let by = |id: &str| opts.iter().find(|o| o.id == id).expect(id).clone();
+        let mut root: toml::Table = "[web.search]\nenabled = false\nprovider = \"exa\"\n".parse().unwrap();
+        apply_search_keeping_disabled(&mut root, &search_write(&by("tavily"), "tk"), true);
+        assert_eq!(root["web"]["search"]["provider"].as_str(), Some("tavily"));
+        assert_eq!(root["web"]["search"]["enabled"].as_bool(), Some(false), "a disabled search stays disabled");
+        assert_eq!(root["web"]["providers"]["tavily"]["api_key"].as_str(), Some("{{secret:TAVILY_API_KEY}}"));
+        // Without a prior `enabled = false` the selection switches search on, as upstream does.
+        let mut root: toml::Table = "".parse().unwrap();
+        apply_search_keeping_disabled(&mut root, &search_write(&by("tavily"), "tk"), false);
+        assert_eq!(root["web"]["search"]["enabled"].as_bool(), Some(true));
+    }
+
+    /// What the wizard writes is what `ark web` reads: the pin resolves to the chosen provider.
+    #[test]
+    fn search_step_writes_a_route_the_cli_uses() {
+        let mut root: toml::Table = "".parse().unwrap();
+        let opts = search_options(|_| false);
+        let brave = opts.iter().find(|o| o.id == "brave").unwrap();
+        apply_search(&mut root, &search_write(brave, "bk-123"));
+        let st = crate::web_cli::status(root["web"].as_table().expect("[web] is a table"), Some(std::sync::Arc::new(|_: &str| None)), None);
+        assert_eq!(st["route"].as_str(), Some("brave"), "{st}");
+        assert_eq!(st["error"], Value::Null);
+
+        // SearXNG asks for a server address; it lands as `[web.providers.searxng] base_url`.
+        let mut root: toml::Table = "".parse().unwrap();
+        let searx = opts.iter().find(|o| o.id == "searxng").unwrap();
+        apply_search(&mut root, &search_write(searx, "http://127.0.0.1:8080"));
+        assert_eq!(root["web"]["providers"]["searxng"]["base_url"].as_str(), Some("http://127.0.0.1:8080"));
+        let st = crate::web_cli::status(root["web"].as_table().expect("[web] is a table"), Some(std::sync::Arc::new(|_: &str| None)), None);
+        assert_eq!(st["route"].as_str(), Some("searxng"), "{st}");
     }
 
     #[test]

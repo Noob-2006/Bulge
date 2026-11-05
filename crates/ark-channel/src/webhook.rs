@@ -2300,7 +2300,7 @@ mod tests {
 
     fn wire_peer(w: &Webhook, peer: &Arc<Peer>, cron: Option<crate::CronFire>) {
         let ch: Arc<dyn Channel> = peer.clone();
-        w.wire(&Wiring { peers: vec![("tg".into(), Arc::downgrade(&ch), Some("home".into()))], cron });
+        w.wire(&Wiring { peers: vec![("tg".into(), Arc::downgrade(&ch), Some("home".into()))], cron, session_origin: None });
     }
 
     #[test]

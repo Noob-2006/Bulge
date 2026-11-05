@@ -1,20 +1,12 @@
 use ark_core::tool::SpawnRequest;
 use ark_core::{Cancel, ToolCtx, ToolHost};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
-static SEQ: AtomicU64 = AtomicU64::new(0);
-
+/// A scratch dir for one test: `ark-tools-<tag>-*`, removed when the test's thread ends
+/// (`ark_core::tmp::scratch`), so the suite no longer leaves a tree behind per call.
 pub fn tmpdir(tag: &str) -> PathBuf {
-    let d = std::env::temp_dir().join(format!(
-        "ark-tools-{tag}-{}-{}",
-        std::process::id(),
-        SEQ.fetch_add(1, Ordering::Relaxed)
-    ));
-    let _ = std::fs::remove_dir_all(&d);
-    std::fs::create_dir_all(&d).unwrap();
-    d
+    ark_core::tmp::scratch(&format!("ark-tools-{tag}"))
 }
 
 #[derive(Default)]
@@ -43,11 +35,13 @@ impl ToolHost for FakeHost {
 }
 
 pub fn ctx_with(ws: PathBuf, host: Arc<dyn ToolHost>) -> ToolCtx {
+    // Unique per context: file-tool read tracking is keyed by session.
+    let session_id = format!("s-{}", ws.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default());
     ToolCtx {
         artifacts: ws.join(".artifacts"),
         home: ws.join(".home"),
         workspace: ws,
-        session_id: "s-test".into(),
+        session_id,
         cancel: Cancel::new(),
         host,
         secrets: Arc::new(|s: &str| s.replace("{{secret:TOKEN}}", "s3cr3t")),

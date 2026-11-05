@@ -44,6 +44,9 @@ const MEMBER_CACHE_TTL: Duration = Duration::from_secs(300);
 const RECALL_COMMANDS: [&str; 2] = ["Group.CallbackAfterRecallMsg", "C2C.CallbackAfterMsgWithDraw"];
 
 /// Hand-written protobuf wire format for the Yuanbao gateway (port of `yuanbao_proto.py`).
+#[path = "yuanbao_tools.rs"]
+mod tools;
+
 pub mod proto {
     use std::sync::atomic::{AtomicU32, Ordering};
 
@@ -1594,6 +1597,8 @@ struct Inner {
     members: Mutex<HashMap<String, (Instant, Members)>>,
     /// C2C chats that started from a group: account → group_code (echoed on send).
     dm_group: Mutex<HashMap<String, String>>,
+    /// Session → route (the agent tools default to the session's chat, like Hermes).
+    origin: Mutex<Option<crate::whatsapp::SessionOrigin>>,
 }
 
 pub struct Yuanbao {
@@ -2053,43 +2058,67 @@ impl Yuanbao {
             started: AtomicBool::new(false),
             members: Mutex::new(HashMap::new()),
             dm_group: Mutex::new(HashMap::new()),
+            origin: Mutex::new(None),
             cfg,
         };
         Ok(Yuanbao { inner: Arc::new(inner), rx: Mutex::new(rx) })
     }
 
     fn ensure_started(&self) {
-        if !self.inner.started.swap(true, Ordering::SeqCst) {
-            let i = self.inner.clone();
+        self.inner.ensure_started()
+    }
+
+    fn send_body(&self, chat: &str, body: Vec<Elem>, reply_to: Option<&str>) -> Result<String, ChannelError> {
+        self.inner.send_body(chat, body, reply_to)
+    }
+
+    fn send_text_chunk(&self, chat: &str, text: &str, reply_to: Option<&str>) -> Result<String, ChannelError> {
+        self.inner.send_text_chunk(chat, text, reply_to)
+    }
+
+    fn media_body(&self, m: &Media) -> Result<Vec<Elem>, ChannelError> {
+        self.inner.media_body(m)
+    }
+
+    fn heartbeat(&self, chat: &str, val: u64) -> Result<(), ChannelError> {
+        self.inner.heartbeat(chat, val)
+    }
+}
+
+/// Send side, shared by the channel and its agent tools (`yuanbao_tools`).
+impl Inner {
+    pub(super) fn ensure_started(self: &Arc<Self>) {
+        if !self.started.swap(true, Ordering::SeqCst) {
+            let i = self.clone();
             std::thread::Builder::new().name(format!("yuanbao {}", i.id)).spawn(move || i.run()).expect("spawn yuanbao thread");
         }
     }
 
-    fn send_body(&self, chat: &str, body: Vec<Elem>, reply_to: Option<&str>) -> Result<String, ChannelError> {
-        let bot = self.inner.bot_id();
+    pub(super) fn send_body(&self, chat: &str, body: Vec<Elem>, reply_to: Option<&str>) -> Result<String, ChannelError> {
+        let bot = self.bot_id();
         let (frame, id) = match chat.strip_prefix("group:") {
             Some(g) => proto::encode_send_group_message(g, &body, &bot, &format!("grp_{}", proto::next_seq()), "", "", None, reply_to.unwrap_or(""), ""),
             None => {
                 let to = chat.strip_prefix("direct:").unwrap_or(chat);
-                let group = self.inner.dm_group.lock().unwrap().get(to).cloned().unwrap_or_default();
+                let group = self.dm_group.lock().unwrap().get(to).cloned().unwrap_or_default();
                 proto::encode_send_c2c_message(to, &body, &bot, &format!("c2c_{}", proto::next_seq()), 0, None, &group, "")
             }
         };
-        self.inner.request(frame, &id).map(|_| id)
+        self.request(frame, &id).map(|_| id)
     }
 
     /// Text chunk with retry (1 s, 2 s backoff) on transient errors.
-    fn send_text_chunk(&self, chat: &str, text: &str, reply_to: Option<&str>) -> Result<String, ChannelError> {
+    pub(super) fn send_text_chunk(&self, chat: &str, text: &str, reply_to: Option<&str>) -> Result<String, ChannelError> {
         let mut attempt = 0;
         loop {
             let body = match chat.strip_prefix("group:") {
-                Some(g) if text.contains('@') => body_with_mentions(text, &self.inner.members(g)),
+                Some(g) if text.contains('@') => body_with_mentions(text, &self.members(g)),
                 _ => vec![Elem::text(text)],
             };
             match self.send_body(chat, body, reply_to) {
                 Ok(id) => return Ok(id),
-                Err(e) if e.is_retryable() && attempt < 2 && self.inner.fatal.lock().unwrap().is_none() => {
-                    std::thread::sleep(self.inner.cfg.timing.reconnect_base * 2u32.pow(attempt));
+                Err(e) if e.is_retryable() && attempt < 2 && self.fatal.lock().unwrap().is_none() => {
+                    std::thread::sleep(self.cfg.timing.reconnect_base * 2u32.pow(attempt));
                     attempt += 1;
                 }
                 Err(e) => return Err(e),
@@ -2097,7 +2126,7 @@ impl Yuanbao {
         }
     }
 
-    fn media_body(&self, m: &Media) -> Result<Vec<Elem>, ChannelError> {
+    pub(super) fn media_body(&self, m: &Media) -> Result<Vec<Elem>, ChannelError> {
         if m.kind == MediaKind::Sticker && m.path.is_none() && m.url.is_none() {
             // Catalogue sticker by id or name (TIMFaceElem, nothing to upload).
             let q = m.id.as_deref().filter(|i| !i.is_empty()).unwrap_or(&m.name);
@@ -2127,7 +2156,7 @@ impl Yuanbao {
         let mime = if m.mime.is_empty() { guess_mime(&name).to_string() } else { m.mime.clone() };
         let mime = if image && !mime.starts_with("image/") { "image/jpeg".to_string() } else { mime };
         let uuid = md5_hex(&bytes);
-        let (url, size, w, h) = self.inner.upload(&bytes, &name, &mime)?;
+        let (url, size, w, h) = self.upload(&bytes, &name, &mime)?;
         Ok(vec![if image {
             Elem {
                 msg_type: "TIMImageElem".into(),
@@ -2138,8 +2167,8 @@ impl Yuanbao {
         }])
     }
 
-    fn heartbeat(&self, chat: &str, val: u64) -> Result<(), ChannelError> {
-        let bot = self.inner.bot_id();
+    pub(super) fn heartbeat(&self, chat: &str, val: u64) -> Result<(), ChannelError> {
+        let bot = self.bot_id();
         if bot.is_empty() {
             return Ok(());
         }
@@ -2147,7 +2176,7 @@ impl Yuanbao {
             Some(g) => proto::encode_send_group_heartbeat(&bot, g, val, 0),
             None => proto::encode_send_private_heartbeat(&bot, chat.strip_prefix("direct:").unwrap_or(chat), val),
         };
-        self.inner.fire(frame)
+        self.fire(frame)
     }
 }
 
@@ -2277,6 +2306,14 @@ impl Channel for Yuanbao {
             _ => return Err(ChannelError::new(K::Fatal, "yuanbao attachment without resource id or url")),
         };
         crate::http::get_bytes(&url, &[], MEDIA_MAX as u64)
+    }
+
+    fn tools(&self) -> Vec<Arc<dyn ark_core::Tool>> {
+        tools::tools(&self.inner)
+    }
+
+    fn wire(&self, w: &crate::Wiring) {
+        *self.inner.origin.lock().unwrap() = w.session_origin.clone();
     }
 
     fn stop(&self) {
@@ -3003,5 +3040,107 @@ mod tests {
         let e = build(&ctx, missing.as_object().unwrap()).err().unwrap();
         assert!(e.contains("not set") && !e.contains("real-secret"));
         assert!(build(&ctx, json!({"app_id": " ", "app_secret": "x"}).as_object().unwrap()).is_err());
+    }
+
+    /// Hermes `tests/tools/test_yuanbao_tools.py` behaviours against the fake gateway:
+    /// group info, member listing / find / bots, DM by name (ambiguity → candidates),
+    /// stickers by name and id, and the error envelopes.
+    #[test]
+    fn agent_tools_query_members_dm_and_stickers() {
+        let api = api_server();
+        let log: Log = Arc::new(Mutex::new(Vec::new()));
+        let l2 = log.clone();
+        let url = ws_server(move |_, mut ws| {
+            auth(&mut ws);
+            let until = Instant::now() + Duration::from_secs(20);
+            while Instant::now() < until {
+                let Some((h, data)) = next(&mut ws, Duration::from_millis(200)) else { continue };
+                l2.lock().unwrap().push((h.clone(), data));
+                if h.cmd_type != CMD_REQUEST {
+                    continue;
+                }
+                let mut r = Vec::new();
+                match h.cmd.as_str() {
+                    "get_group_member_list" => {
+                        for (uid, nick, role) in [("u-bob", "Bob", 1u64), ("u-bobby", "Bobby", 1), ("u-yb", "元宝", 2), ("u-amy", "Amy", 0)] {
+                            let mut mem = Vec::new();
+                            s(&mut mem, 1, uid);
+                            s(&mut mem, 2, nick);
+                            v(&mut mem, 3, role);
+                            m(&mut r, 3, &mem);
+                        }
+                        v(&mut r, 5, 1);
+                    }
+                    "query_group_info" => {
+                        let mut gi = Vec::new();
+                        s(&mut gi, 1, "Team Pai");
+                        s(&mut gi, 2, "u-amy");
+                        s(&mut gi, 3, "Amy");
+                        v(&mut gi, 4, 4);
+                        m(&mut r, 3, &gi);
+                    }
+                    _ => {}
+                }
+                respond(&mut ws, &h, &r);
+            }
+        });
+        let y = yb(&api.url, &url, fast());
+        let tools = y.tools();
+        let names: Vec<String> = tools.iter().map(|t| t.spec().name).collect();
+        assert_eq!(names, ["yb_query_group_info_yb", "yb_query_group_members_yb", "yb_send_dm_yb", "yb_search_sticker_yb", "yb_send_sticker_yb"]);
+        let call = |n: usize, a: Value| {
+            let o = tools[n].call(&crate::testutil::tool_ctx(), a);
+            (o.is_error, serde_json::from_str::<Value>(&o.content).unwrap())
+        };
+        let (e, v) = call(0, json!({"group_code": "g1"}));
+        assert!(!e, "{v}");
+        assert_eq!((v["group_name"].as_str(), v["member_count"].as_u64(), v["owner"]["nickname"].as_str()), (Some("Team Pai"), Some(4), Some("Amy")));
+        assert_eq!(call(0, json!({})).1, json!({"success": false, "error": "group_code is required"}));
+
+        let (_, v) = call(1, json!({"group_code": "g1", "action": "list_all"}));
+        assert_eq!(v["members"].as_array().unwrap().len(), 4);
+        assert_eq!(v["members"][2], json!({"user_id": "u-yb", "nickname": "元宝", "role": "yuanbao_ai"}));
+        let (_, v) = call(1, json!({"group_code": "g1", "action": "list_bots"}));
+        assert_eq!(v["msg"], "Found 1 bot(s).");
+        let (_, v) = call(1, json!({"group_code": "g1", "action": "find", "name": "bob", "mention": true}));
+        assert_eq!((v["members"].as_array().unwrap().len(), v["mention_hint"].is_string()), (2, true));
+        let (_, v) = call(1, json!({"group_code": "g1", "action": "find", "name": "zed"}));
+        assert_eq!((v["success"].as_bool(), v["members"].as_array().unwrap().len()), (Some(false), 4));
+
+        // DM by name: ambiguous → candidates; unique → c2c message carrying the group code.
+        let (e, v) = call(2, json!({"group_code": "group:g1", "name": "bob", "message": "hi"}));
+        assert!(e && v["candidates"].as_array().unwrap().len() == 2, "{v}");
+        let (e, v) = call(2, json!({"group_code": "g1", "name": "amy", "message": "secret plan"}));
+        assert!(!e, "{v}");
+        assert_eq!((v["user_id"].as_str(), v["nickname"].as_str()), (Some("u-amy"), Some("Amy")));
+        let frames = || log.lock().unwrap().clone();
+        let c2c = frames().into_iter().find(|(h, _)| h.cmd == "send_c2c_message").unwrap();
+        let f = Fields::parse(&c2c.1).unwrap();
+        assert_eq!(f.str(2), "u-amy");
+        assert_eq!(decode_elem(&f.bytes(5)).content.text, "secret plan");
+        assert!(c2c.1.windows(2).any(|w| w == b"g1"), "group_code echoed on the C2C send");
+        assert_eq!(call(2, json!({"user_id": "u1"})).1["error"], "message or media_files is required");
+        assert_eq!(call(2, json!({"message": "x", "name": "bob"})).1["error"], "group_code is required when user_id is not provided");
+
+        // Stickers.
+        let (_, v) = call(3, json!({"query": "666"}));
+        assert!(v["results"].as_array().unwrap().iter().any(|r| r["sticker_id"] == "278"), "{v}");
+        let (e, v) = call(4, json!({"sticker": "六六六", "chat_id": "group:g1"}));
+        assert!(!e, "{v}");
+        assert_eq!(v["sticker"], json!({"sticker_id": "278", "name": "六六六"}));
+        let grp = frames().into_iter().rfind(|(h, _)| h.cmd == "send_group_message").unwrap();
+        let face = decode_elem(&Fields::parse(&grp.1).unwrap().bytes(6));
+        assert_eq!(face.msg_type, "TIMFaceElem");
+        assert!(call(4, json!({"sticker": "252", "chat_id": "direct:u-amy"})).1["sticker"]["name"] == "比心");
+        let (e, v) = call(4, json!({"sticker": "no such sticker zzz", "chat_id": "x"}));
+        assert!(e || v["success"] == true, "fuzzy lookup either finds one or reports not found");
+        assert_eq!(call(4, json!({"sticker": "比心"})).1["error"], "chat_id is required (no active yuanbao session detected)");
+        // With the host's route lookup the session's chat is the default target / group.
+        y.wire(&crate::Wiring { session_origin: Some(Arc::new(|_: &str| Some(crate::router::RouteKey::chat("yb", "group:g1")))), ..Default::default() });
+        assert_eq!(call(4, json!({"sticker": "比心"})).1["chat_id"], "group:g1");
+        assert_eq!(call(2, json!({"name": "amy", "message": "again"})).1["user_id"], "u-amy");
+        let fx = tools[2].effects(&crate::testutil::tool_ctx(), &json!({"user_id": "u-amy", "message": "m"}));
+        assert!(matches!(&fx[0], ark_core::Effect::Send { channel, .. } if channel == "yb"));
+        y.stop();
     }
 }

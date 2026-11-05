@@ -1,0 +1,404 @@
+//! App-side exposure helpers (GAPS-next A8–A12): the `[app.exposure]` / `[app.tokens]`
+//! config, the per-request scope ladder and the small pure predicates the server needs.
+//!
+//! The judgement itself lives in [`ark_security::exposure`] so the daemon, `ark security
+//! audit` and `ark doctor` cannot drift apart; this module only maps an [`AppConfig`] onto a
+//! [`Surface`] and enforces the result before the listener binds.
+//!
+//! ```toml
+//! [app]
+//! listen = "127.0.0.1:8640"          # the default: loopback only
+//! token = "{{secret:APP_TOKEN}}"     # admin
+//! tokens = [                          # scoped, additive; the token above stays admin
+//!   { token = "{{secret:WEB_READ}}",    scope = "read",    name = "status page" },
+//!   { token = "{{secret:WEB_WRITE}}",   scope = "write",   name = "chat bot" },
+//!   { token = "{{secret:APPROVE}}",     scope = "approve", name = "approval console" },
+//! ]
+//! [app.exposure]
+//! allow_public = false               # a non-loopback listen needs this
+//! behind_proxy = false               # an https reverse proxy terminates TLS for us
+//! tls = false                        # ark terminates TLS itself (not implemented yet)
+//! rate_limit_per_min = 1200          # per client IP; 0 turns it off (never for public binds)
+//! ```
+//!
+//! Scope ladder — a token may do what its scope and every lower one allows:
+//!
+//! | scope     | what it covers |
+//! |-----------|----------------|
+//! | `read`    | `GET`/WS subscriptions, `*.list`, `*.get`, `session.list|history|view`, `gate.pending`, `models.list`, `tools.list`, `view.*.frame` |
+//! | `write`   | `session.create|submit|command|interrupt`, `goal.start`, chat, approvals-free `view` input |
+//! | `approve` | `gate.answer`, `approval(s).answer`, `question.answer` |
+//! | `admin`   | `shutdown`, `config.*`, `plugin(s).*`, `daemon.*`, `secret(s).*`, `vault.*`, `hook(s).*`, `skill(s).*`, `channel(s).*`, `node(s).*`/`device(s).*` pairing — and **anything unrecognised** (fail closed) |
+//!
+//! Rationale for the two oddities: `send`-style chat counts as `write` because a chat
+//! message starts a session turn, and an unknown method costs `admin` because a future
+//! method must not be reachable by a token that was scoped before it existed.
+
+use crate::AppConfig;
+use ark_security::exposure as policy;
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use std::net::{IpAddr, SocketAddr};
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
+
+/// `[app.exposure]` — what it takes to expose a surface beyond loopback.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ExposureConfig {
+    /// Written on purpose by the operator: a non-loopback `listen` needs this.
+    pub allow_public: bool,
+    /// An https reverse proxy (or tunnel) terminates TLS in front of ark.
+    pub behind_proxy: bool,
+    /// ark terminates TLS itself. Not implemented yet: `check` accepts it, but the listener
+    /// is plain HTTP, so keep it false and use `behind_proxy`.
+    pub tls: bool,
+    /// Requests per minute per client IP; 0 = off (refused when public).
+    pub rate_limit_per_min: u32,
+}
+
+impl Default for ExposureConfig {
+    fn default() -> Self {
+        ExposureConfig { allow_public: false, behind_proxy: false, tls: false, rate_limit_per_min: 1200 }
+    }
+}
+
+/// `[app] tokens = [{ token = "…", scope = "read" }]`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TokenConfig {
+    pub token: String,
+    #[serde(default = "d_scope")]
+    pub scope: String,
+    /// Free-text label for logs/audit (never the token).
+    #[serde(default)]
+    pub name: Option<String>,
+}
+
+fn d_scope() -> String {
+    "read".into()
+}
+
+/// What a credential may do. Ordered: a larger scope may do everything a smaller one may.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum Scope {
+    #[default]
+    Read,
+    Write,
+    Approve,
+    Admin,
+}
+
+impl Scope {
+    pub fn parse(s: &str) -> Result<Scope, String> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "" | "read" => Ok(Scope::Read),
+            "write" => Ok(Scope::Write),
+            "approve" => Ok(Scope::Approve),
+            "admin" => Ok(Scope::Admin),
+            other => Err(format!("unknown token scope `{other}` (expected read, write, approve or admin)")),
+        }
+    }
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Scope::Read => "read",
+            Scope::Write => "write",
+            Scope::Approve => "approve",
+            Scope::Admin => "admin",
+        }
+    }
+    pub fn allows(self, need: Scope) -> bool {
+        self >= need
+    }
+}
+
+const ADMIN_PREFIXES: &[&str] = &[
+    "config.", "plugin.", "plugins.", "daemon.", "secret.", "secrets.", "vault.", "hook.", "hooks.", "skill.", "skills.", "provider.", "providers.", "channel.", "channels.", "node.", "nodes.", "device.", "devices.", "auth.", "policy.", "system.", "backup.",
+];
+const APPROVE_METHODS: &[&str] = &["gate.answer", "approval.answer", "approvals.answer", "question.answer"];
+const READ_METHODS: &[&str] = &[
+    "ping", "initialize", "session.list", "session.history", "session.view", "gate.pending", "goal.list", "schedule.list", "models.list", "tools.list", "events.subscribe", "session.attach", "subscribe", "unsubscribe", "view.browser.list", "view.browser.frame", "view.desktop.state", "logbook.list",
+];
+const WRITE_METHODS: &[&str] = &[
+    "session.create", "session.submit", "session.command", "session.interrupt", "goal.start", "goal.stop", "goal.cancel", "schedule.run", "view.browser.input", "view.desktop.takeover", "view.desktop.handback", "view.novnc", "chat.send", "message.send",
+];
+/// Suffixes that only ever report state (`surfaces.list`, `logs.tail`, `usage.status` …).
+const READ_SUFFIXES: &[&str] = &[".list", ".get", ".state", ".history", ".status", ".show", ".info", ".search", ".query", ".view", ".tail", ".describe"];
+
+/// The scope an ARP method needs; unknown methods cost `admin` (fail closed).
+pub fn required_scope(method: &str) -> Scope {
+    let m = method.trim();
+    if m.is_empty() {
+        return Scope::Admin;
+    }
+    if m == "shutdown" || ADMIN_PREFIXES.iter().any(|p| m.starts_with(p)) {
+        return Scope::Admin;
+    }
+    if APPROVE_METHODS.contains(&m) {
+        return Scope::Approve;
+    }
+    if WRITE_METHODS.contains(&m) {
+        return Scope::Write;
+    }
+    if READ_METHODS.contains(&m) || READ_SUFFIXES.iter().any(|s| m.ends_with(s)) {
+        return Scope::Read;
+    }
+    // `initialize` and friends aside, an unrecognised name is treated as configuration-grade.
+    Scope::Admin
+}
+
+/// Every ARP method the server knows what to do with, for tests and docs.
+pub fn method_scope_table() -> Vec<(&'static str, Scope)> {
+    let mut v: Vec<(&'static str, Scope)> = READ_METHODS.iter().map(|m| (*m, Scope::Read)).collect();
+    v.extend(WRITE_METHODS.iter().map(|m| (*m, Scope::Write)));
+    v.extend(APPROVE_METHODS.iter().map(|m| (*m, Scope::Approve)));
+    v.push(("shutdown", Scope::Admin));
+    v
+}
+
+/// Scope for a plain HTTP route of the app server (`/v1/*`, `/view/*`, `/plugins/*`).
+pub fn required_scope_http(method: &str, path: &str) -> Scope {
+    let get = method == "GET" || method == "HEAD";
+    if let Some(rest) = path.strip_prefix("/view/") {
+        return match rest {
+            _ if get && (rest.starts_with("browser/frame") || rest.starts_with("browser/list") || rest.starts_with("desktop/state")) => Scope::Read,
+            _ => Scope::Write,
+        };
+    }
+    if path == "/v1/models" {
+        return Scope::Read;
+    }
+    if path.starts_with("/v1/") {
+        // chat/completions and responses start turns.
+        return if get { Scope::Read } else { Scope::Write };
+    }
+    if path.starts_with("/plugins/") {
+        return if get { Scope::Read } else { Scope::Write };
+    }
+    Scope::Write
+}
+
+/// The app server as a [`policy::Surface`], with the auth strength the config actually gives it.
+pub fn surface(cfg: &AppConfig) -> policy::Surface<'_> {
+    policy::Surface {
+        name: "app server",
+        listen: &cfg.listen,
+        tls: cfg.exposure.tls,
+        behind_proxy: cfg.exposure.behind_proxy,
+        allow_public: cfg.exposure.allow_public,
+        auth: auth_strength(cfg),
+        origins: &cfg.allow_origins,
+        rate_limit: cfg.exposure.rate_limit_per_min > 0,
+        enabled: cfg.enabled,
+    }
+}
+
+/// What callers can prove. A bare token — even several, even scoped — is one shared string.
+pub fn auth_strength(cfg: &AppConfig) -> policy::AuthStrength {
+    if cfg.auth.enabled {
+        let provider = cfg.auth.provider.trim().to_ascii_lowercase();
+        return if provider.is_empty() || provider == "basic" { policy::AuthStrength::DashboardBasic } else { policy::AuthStrength::Provider };
+    }
+    let has_token = cfg.token.as_deref().is_some_and(|t| !t.trim().is_empty()) || !cfg.tokens.is_empty();
+    if has_token {
+        policy::AuthStrength::Token
+    } else {
+        policy::AuthStrength::None
+    }
+}
+
+/// Why the app server may not start, or `Ok(())`. Called before the socket is bound, so a
+/// misconfigured public bind never listens even briefly (A9: refuse, not warn).
+pub fn check_start(cfg: &AppConfig) -> Result<(), String> {
+    // `start` only runs for an enabled server; the surface is enabled by the time we judge it.
+    let mut s = surface(cfg);
+    s.enabled = true;
+    // Direct TLS is a policy layer the listener does not implement (it speaks plain HTTP); the
+    // honest fix is a TLS-terminating proxy, so we do not let `tls = true` stand in for one.
+    if s.tls && !s.behind_proxy && !policy::is_loopback(s.listen) {
+        return Err("[app.exposure] tls = true is not implemented (the listener speaks plain HTTP); terminate TLS in a reverse proxy and set [app.exposure] behind_proxy = true".into());
+    }
+    match policy::refusal(&s) {
+        Some(msg) => Err(msg),
+        None => Ok(()),
+    }
+}
+
+/// Is `origin` allowed to drive this server from `host`? Same-origin always is; a listed
+/// origin may be; `*` in the list is honoured only for loopback (for a public bind
+/// [`check_start`] refuses the wildcard outright).
+pub fn origin_allowed(origin: &str, host: &str, allow: &[String]) -> bool {
+    let origin = origin.trim();
+    if origin.is_empty() {
+        return true; // not a browser
+    }
+    if let Some((_, oh)) = origin.split_once("://") {
+        if !host.trim().is_empty() && oh.eq_ignore_ascii_case(host.trim()) {
+            return true;
+        }
+    }
+    allow.iter().any(|a| {
+        let a = a.trim();
+        a == "*" || a.eq_ignore_ascii_case(origin) || a.trim_end_matches('/').eq_ignore_ascii_case(origin.trim_end_matches('/'))
+    })
+}
+
+/// A request body is JSON if its media type says so (`application/json`, `…+json`).
+pub fn is_json_content_type(header: Option<&str>) -> bool {
+    let Some(h) = header else { return false };
+    let m = h.split(';').next().unwrap_or("").trim().to_ascii_lowercase();
+    m == "application/json" || (m.starts_with("application/") && m.ends_with("+json"))
+}
+
+static HITS: Mutex<Option<HashMap<IpAddr, Vec<Instant>>>> = Mutex::new(None);
+const WINDOW: Duration = Duration::from_secs(60);
+const MAX_PEERS: usize = 4096;
+
+/// Per-IP sliding-window limiter (A9 layer 4). In-process callers (`peer == None`:
+/// plugins, tests, host routes) are never limited; nothing here waits for a human.
+pub fn rate_ok(cfg: &ExposureConfig, peer: Option<SocketAddr>) -> bool {
+    let per_min = cfg.rate_limit_per_min;
+    if per_min == 0 {
+        return true;
+    }
+    let Some(peer) = peer else { return true };
+    let now = Instant::now();
+    let mut guard = HITS.lock().unwrap_or_else(|e| e.into_inner());
+    let map = guard.get_or_insert_with(HashMap::new);
+    if map.len() > MAX_PEERS {
+        map.retain(|_, v| v.last().is_some_and(|t| now.duration_since(*t) < WINDOW));
+    }
+    let q = map.entry(peer.ip()).or_default();
+    while q.first().is_some_and(|t| now.duration_since(*t) >= WINDOW) {
+        q.remove(0);
+    }
+    if q.len() as u32 >= per_min {
+        return false;
+    }
+    q.push(now);
+    true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::net::{Ipv4Addr, SocketAddrV4};
+
+    fn cfg_with(toml_src: &str) -> AppConfig {
+        AppConfig::parse(&toml::from_str(toml_src).unwrap()).unwrap()
+    }
+
+    #[test]
+    fn scope_ladder_and_method_mapping() {
+        assert!(Scope::Admin >= Scope::Approve && Scope::Approve >= Scope::Write && Scope::Write >= Scope::Read);
+        assert!(!Scope::Read.allows(Scope::Write) && Scope::Write.allows(Scope::Read));
+        assert_eq!(Scope::parse("ADMIN").unwrap(), Scope::Admin);
+        assert!(Scope::parse("root").is_err());
+        for (m, want) in [
+            ("session.list", Scope::Read),
+            ("session.view", Scope::Read),
+            ("surfaces.list", Scope::Read),
+            ("view.browser.frame", Scope::Read),
+            ("session.submit", Scope::Write),
+            ("session.create", Scope::Write),
+            ("chat.send", Scope::Write),
+            ("view.browser.input", Scope::Write),
+            ("gate.answer", Scope::Approve),
+            ("shutdown", Scope::Admin),
+            ("config.get", Scope::Admin),
+            ("plugin.restart", Scope::Admin),
+            ("something.new", Scope::Admin),
+            ("", Scope::Admin),
+        ] {
+            assert_eq!(required_scope(m), want, "{m}");
+        }
+        for (m, s) in method_scope_table() {
+            assert_eq!(required_scope(m), s, "{m}");
+        }
+        assert_eq!(required_scope_http("GET", "/v1/models"), Scope::Read);
+        assert_eq!(required_scope_http("POST", "/v1/chat/completions"), Scope::Write);
+        assert_eq!(required_scope_http("GET", "/view/browser/frame"), Scope::Read);
+        assert_eq!(required_scope_http("GET", "/view/desktop/frame"), Scope::Write);
+        assert_eq!(required_scope_http("POST", "/plugins/x/hook"), Scope::Write);
+    }
+
+    #[test]
+    fn default_config_is_loopback_with_rate_limit_and_no_public_opt_in() {
+        let c = AppConfig::default();
+        assert_eq!(c.listen, "127.0.0.1:8640");
+        assert!(!c.exposure.allow_public && c.exposure.rate_limit_per_min > 0);
+        assert!(check_start(&c).is_ok());
+        assert_eq!(auth_strength(&c), policy::AuthStrength::None);
+        let c = cfg_with("listen = \"127.0.0.1:1\"\ntoken = \"t\"");
+        assert_eq!(auth_strength(&c), policy::AuthStrength::Token);
+    }
+
+    #[test]
+    fn public_bind_is_refused_until_every_layer_is_configured() {
+        let bare = cfg_with("listen = \"0.0.0.0:8640\"\ntoken = \"{{secret:APP_TOKEN}}\"");
+        let err = check_start(&bare).unwrap_err();
+        assert!(err.contains("missing layer(s)") && err.contains("behind_proxy") && err.contains("app.auth") && err.contains("allow_origins"), "{err}");
+
+        let tls_ok = cfg_with("listen = \"0.0.0.0:8640\"\ntoken = \"t\"\nallow_origins = [\"https://ark.example\"]\n[exposure]\nallow_public = true\nbehind_proxy = true");
+        let err = check_start(&tls_ok).unwrap_err();
+        assert!(err.contains("strong auth") && !err.contains("TLS"), "{err}");
+        // Rate limiting is on by default; turning it off is what breaks a public bind.
+        let no_limit = cfg_with("listen = \"0.0.0.0:8640\"\ntoken = \"t\"\nallow_origins = [\"https://ark.example\"]\n[exposure]\nallow_public = true\nbehind_proxy = true\nrate_limit_per_min = 0\n[auth]\nenabled = true\nprovider = \"self_hosted\"\nsecret = \"x\"");
+        assert!(check_start(&no_limit).unwrap_err().contains("rate_limit_per_min"));
+
+        let full = cfg_with("listen = \"0.0.0.0:8640\"\ntoken = \"t\"\nallow_origins = [\"https://ark.example\"]\n[exposure]\nallow_public = true\nbehind_proxy = true\n[auth]\nenabled = true\nprovider = \"self_hosted\"\nsecret = \"x\"");
+        assert!(check_start(&full).is_ok(), "{:?}", check_start(&full));
+
+        // Direct TLS is accepted by the pure policy but not by the app server: it would be a
+        // plaintext listener wearing a TLS label.
+        let fake_tls = cfg_with("listen = \"0.0.0.0:8640\"\ntoken = \"t\"\nallow_origins = [\"https://ark.example\"]\n[exposure]\nallow_public = true\ntls = true\n[auth]\nenabled = true\nprovider = \"self_hosted\"\nsecret = \"x\"");
+        assert!(check_start(&fake_tls).unwrap_err().contains("behind_proxy"), "{:?}", check_start(&fake_tls));
+
+        // "basic" is a shared password: still one string, so still weak.
+        let basic = cfg_with("listen = \"0.0.0.0:8640\"\ntoken = \"t\"\nallow_origins = [\"https://ark.example\"]\n[exposure]\nallow_public = true\nbehind_proxy = true\n[auth]\nenabled = true\nprovider = \"basic\"\nsecret = \"x\"");
+        assert!(check_start(&basic).unwrap_err().contains("strong auth"));
+    }
+
+    #[test]
+    fn origins_and_content_type() {
+        let allow = vec!["https://ark.example".to_string()];
+        assert!(origin_allowed("https://ark.example", "box:8640", &allow));
+        assert!(origin_allowed("http://box:8640", "box:8640", &[]), "same origin");
+        assert!(!origin_allowed("https://evil.example", "box:8640", &allow));
+        assert!(origin_allowed("", "box:8640", &[]), "not a browser");
+        // `*` is honoured (a loopback-only convenience), but `check` refuses it on a public bind.
+        assert!(origin_allowed("https://any.example", "box:8640", &["*".into()]));
+        assert!(is_json_content_type(Some("application/json")));
+        assert!(is_json_content_type(Some("Application/JSON; charset=utf-8")));
+        assert!(is_json_content_type(Some("application/jsonrpc+json")));
+        assert!(!is_json_content_type(Some("text/plain")));
+        assert!(!is_json_content_type(Some("application/x-www-form-urlencoded")));
+        assert!(!is_json_content_type(None));
+    }
+
+    #[test]
+    fn rate_limit_counts_per_peer_and_ignores_in_process_callers() {
+        let cfg = ExposureConfig { rate_limit_per_min: 2, ..ExposureConfig::default() };
+        let peer = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(203, 0, 113, 7), 5555));
+        assert!(rate_ok(&cfg, None) && rate_ok(&cfg, None), "no peer, no limit");
+        assert!(rate_ok(&cfg, Some(peer)) && rate_ok(&cfg, Some(peer)));
+        assert!(!rate_ok(&cfg, Some(peer)), "third request in the window is refused");
+        let other = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(203, 0, 113, 8), 5555));
+        assert!(rate_ok(&cfg, Some(other)), "another client is unaffected");
+        let off = ExposureConfig { rate_limit_per_min: 0, ..ExposureConfig::default() };
+        for _ in 0..5 {
+            assert!(rate_ok(&off, Some(peer)));
+        }
+    }
+
+    #[test]
+    fn scoped_tokens_parse_from_toml() {
+        let c = cfg_with("token = \"admin-token\"\ntokens = [{ token = \"r\", scope = \"read\" }, { token = \"w\", scope = \"write\", name = \"bot\" }]");
+        assert_eq!(c.tokens.len(), 2);
+        assert_eq!(Scope::parse(&c.tokens[0].scope).unwrap(), Scope::Read);
+        assert_eq!(c.tokens[1].name.as_deref(), Some("bot"));
+        assert!(AppConfig::parse(&toml::from_str("tokens = [{ token = \"x\", scope = \"root\" }]").unwrap()).is_err());
+        assert!(AppConfig::parse(&toml::from_str("tokens = [{ token = \"x\", extra = 1 }]").unwrap()).is_err());
+    }
+}

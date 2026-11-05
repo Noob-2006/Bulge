@@ -8,7 +8,11 @@ use std::time::Duration;
 
 pub enum Reply {
     /// Plain response with a body.
-    Status { code: u16, headers: Vec<(&'static str, String)>, body: String },
+    Status {
+        code: u16,
+        headers: Vec<(&'static str, String)>,
+        body: String,
+    },
     /// 200 text/event-stream, one HTTP chunk per entry.
     Sse { chunks: Vec<String>, end: End },
     /// Read the request, never answer.
@@ -32,7 +36,10 @@ pub struct Recorded {
 
 impl Recorded {
     pub fn header(&self, k: &str) -> Option<&str> {
-        self.headers.iter().find(|(n, _)| n == k).map(|(_, v)| v.as_str())
+        self.headers
+            .iter()
+            .find(|(n, _)| n == k)
+            .map(|(_, v)| v.as_str())
     }
 }
 
@@ -43,12 +50,17 @@ pub struct Mock {
 
 impl Mock {
     pub fn request(&self) -> Recorded {
-        self.rx.recv_timeout(Duration::from_secs(5)).expect("server saw no request")
+        self.rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("server saw no request")
     }
 }
 
 pub fn sse(events: &[&str]) -> Reply {
-    Reply::Sse { chunks: events.iter().map(|e| format!("{e}\n\n")).collect(), end: End::Clean }
+    Reply::Sse {
+        chunks: events.iter().map(|e| format!("{e}\n\n")).collect(),
+        end: End::Clean,
+    }
 }
 
 pub fn serve(reply: Reply) -> Mock {
@@ -57,7 +69,9 @@ pub fn serve(reply: Reply) -> Mock {
     let (tx, rx) = mpsc::channel();
     std::thread::spawn(move || {
         let Ok((mut s, _)) = l.accept() else { return };
-        let Some(rec) = read_request(&mut s) else { return };
+        let Some(rec) = read_request(&mut s) else {
+            return;
+        };
         let _ = tx.send(rec);
         respond(s, reply);
     });
@@ -84,7 +98,11 @@ fn read_request(s: &mut TcpStream) -> Option<Recorded> {
         .filter_map(|l| l.split_once(':'))
         .map(|(k, v)| (k.trim().to_lowercase(), v.trim().to_string()))
         .collect();
-    let len: usize = headers.iter().find(|(k, _)| k == "content-length").and_then(|(_, v)| v.parse().ok()).unwrap_or(0);
+    let len: usize = headers
+        .iter()
+        .find(|(k, _)| k == "content-length")
+        .and_then(|(_, v)| v.parse().ok())
+        .unwrap_or(0);
     let mut body = buf[head_end..].to_vec();
     while body.len() < len {
         let n = s.read(&mut tmp).ok()?;
@@ -94,12 +112,20 @@ fn read_request(s: &mut TcpStream) -> Option<Recorded> {
         body.extend_from_slice(&tmp[..n]);
     }
     let body = serde_json::from_slice(&body).unwrap_or(Value::Null);
-    Some(Recorded { path, headers, body })
+    Some(Recorded {
+        path,
+        headers,
+        body,
+    })
 }
 
 fn respond(mut s: TcpStream, reply: Reply) {
     match reply {
-        Reply::Status { code, headers, body } => {
+        Reply::Status {
+            code,
+            headers,
+            body,
+        } => {
             let mut h = format!(
                 "HTTP/1.1 {code} X\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n",
                 body.len()

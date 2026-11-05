@@ -35,6 +35,8 @@ pub const MAX_MESSAGE: usize = 32000;
 const ROOM_TTL: Duration = Duration::from_secs(300);
 const ROOM_ERR_TTL: Duration = Duration::from_secs(30);
 const REPLAY_CAP: usize = 4096;
+/// How long an uploaded file's name is remembered as our own share echo.
+const UPLOAD_TTL: Duration = Duration::from_secs(900);
 
 pub struct Config {
     pub id: String,
@@ -65,6 +67,9 @@ pub struct NextcloudTalk {
     rx: Mutex<Receiver<Value>>,
     server: Mutex<Option<ark_net::httpd::Server>>,
     rooms: Mutex<HashMap<String, (Option<ChatType>, Instant)>>,
+    /// File names we shared into a conversation (name → forget-at): Talk sends the
+    /// resulting message back through our own webhook, authored by the API user.
+    uploads: Mutex<HashMap<String, Instant>>,
     uid: Mutex<Option<String>>,
 }
 
@@ -162,6 +167,7 @@ impl NextcloudTalk {
             rx: Mutex::new(rx),
             server: Mutex::new(Some(server)),
             rooms: Mutex::new(HashMap::new()),
+            uploads: Mutex::new(HashMap::new()),
             uid: Mutex::new(None),
         })
     }
@@ -304,6 +310,9 @@ impl NextcloudTalk {
         let meta_s = meta.to_string();
         let form = ark_net::form_encode(&[("path", &file_path), ("shareType", "10"), ("shareWith", room), ("permissions", "1"), ("talkMetaData", &meta_s)]);
         let v = self.api_json("POST", "/ocs/v2.php/apps/files_sharing/api/v1/shares?format=json", &[("content-type", "application/x-www-form-urlencoded".into())], form.into_bytes())?;
+        let mut up = self.uploads.lock().unwrap();
+        up.retain(|_, at| Instant::now() < *at);
+        up.insert(name, Instant::now() + UPLOAD_TTL);
         Ok(id_str(&v["ocs"]["data"]["id"]).unwrap_or_default())
     }
 
@@ -319,10 +328,22 @@ impl NextcloudTalk {
         Ok(id_str(&v["ocs"]["data"]["id"]))
     }
 
+    /// Our own file share echoing back through the webhook: authored by the API user
+    /// and carrying only files we uploaded (Talk copies them to `Talk/<name>` and the
+    /// share link is `/s/<token>`, so the name is what identifies them).
+    fn is_own_share(&self, m: &Inbound) -> bool {
+        let Some((u, _)) = self.api.as_ref() else { return false };
+        if m.media.is_empty() || !m.sender.eq_ignore_ascii_case(u) {
+            return false;
+        }
+        let now = Instant::now();
+        let up = self.uploads.lock().unwrap();
+        m.media.iter().all(|x| up.get(&x.name).is_some_and(|at| now < *at) || x.name.starts_with("ark-") || x.url.as_deref().is_some_and(|u| u.contains("/Ark/")))
+    }
+
     fn inbound_of(&self, v: &Value) -> Option<Inbound> {
         let mut m = parse(&self.id, v, &self.bot_name)?;
-        // Our own WebDAV share echoing back from the API user.
-        if self.api.as_ref().is_some_and(|(u, _)| m.sender.eq_ignore_ascii_case(u)) && !m.media.is_empty() && m.media.iter().all(|x| x.name.starts_with("ark-") || x.url.as_deref().is_some_and(|u| u.contains("/Ark/"))) {
+        if self.is_own_share(&m) {
             return None;
         }
         if let Some(k) = self.room_kind(&m.chat) {
@@ -870,6 +891,29 @@ mod tests {
         assert_eq!(t.fetch_media(&m).unwrap(), b"PDFBYTES");
         assert!(srv.requests().last().unwrap().header("authorization").unwrap().starts_with("Basic "));
         assert_eq!(talk(&srv.url, false).fetch_media(&m).unwrap(), b"PUBLIC", "public share fallback");
+    }
+
+    /// A file we shared comes back through the webhook authored by the API user.
+    /// Talk copies it to `Talk/<name>` and the link is `/s/<token>`, so only the
+    /// uploaded name (remembered for a while) identifies it as our own share.
+    #[test]
+    fn own_file_share_echo_from_the_api_user_is_dropped() {
+        let t = talk("http://127.0.0.1:1", true);
+        let note = |sender: &str, name: &str| {
+            json!({"type": "Activity", "actor": {"type": "Person", "id": sender, "name": "Ark API"}, "object": {"type": "Note", "id": "77", "name": "message", "content": json!({"message": "{file}", "parameters": {"file": {"type": "file", "id": "9", "name": name, "size": "8", "link": "https://cloud.example/s/tok", "mimetype": "text/plain"}}}).to_string()}, "target": {"type": "Collection", "id": "room1", "name": "Room"}})
+        };
+        // Not ours: a file the API user shared from somewhere else.
+        assert!(t.inbound_of(&note("users/arkapi", "notes.txt")).is_some());
+        t.uploads.lock().unwrap().insert("notes.txt".into(), Instant::now() + UPLOAD_TTL);
+        assert!(t.inbound_of(&note("users/arkapi", "notes.txt")).is_none(), "our own share echo");
+        // Only the API user's messages are ours; a peer sharing the same name is not.
+        assert!(t.inbound_of(&note("users/alice", "notes.txt")).is_some());
+        // And the memory expires.
+        t.uploads.lock().unwrap().insert("notes.txt".into(), Instant::now() - Duration::from_secs(1));
+        assert!(t.inbound_of(&note("users/arkapi", "notes.txt")).is_some(), "expired entries no longer match");
+        // Media-less messages from the API user are delivered (a person, not an echo).
+        let text = json!({"type": "Create", "actor": {"type": "Person", "id": "users/arkapi", "name": "Ark API"}, "object": {"type": "Note", "id": "78", "content": "hi"}, "target": {"id": "room1"}});
+        assert_eq!(t.inbound_of(&text).map(|m| m.text), Some("hi".to_string()));
     }
 
     #[test]

@@ -305,10 +305,14 @@ mod tests {
     use super::*;
     use ark_core::Message;
 
-    fn tmp() -> Store {
-        let mut s = Store::new(std::env::temp_dir().join(format!("ark-store-{}", crate::util::random_hex(10))));
+    /// A store on a self-removing temp dir. The guard is returned so the caller keeps it alive
+    /// for the whole test: `let (_dir, s) = tmp();`. (Previously every run left `ark-store-*`
+    /// behind in the temp directory — 800+ of them on the author's machine.)
+    fn tmp() -> (ark_core::tmp::TempDir, Store) {
+        let dir = ark_core::tmp::TempDir::new("ark-store");
+        let mut s = Store::new(dir.path().to_path_buf());
         s.sync = false;
-        s
+        (dir, s)
     }
     fn header(id: &str) -> EventKind {
         EventKind::Header { version: LOG_VERSION, session_id: id.into(), workspace: "/w".into(), model: "m".into(), parent: None, title: None }
@@ -319,7 +323,7 @@ mod tests {
 
     #[test]
     fn create_append_reopen() {
-        let s = tmp();
+        let (_dir, s) = tmp();
         let mut log = s.create(header("a1")).unwrap();
         log.append(msg("hello 世界")).unwrap();
         drop(log);
@@ -331,7 +335,7 @@ mod tests {
 
     #[test]
     fn second_writer_is_refused() {
-        let s = tmp();
+        let (_dir, s) = tmp();
         let _log = s.create(header("a2")).unwrap();
         match s.open("a2") {
             Err(StoreError::Locked(_)) => {}
@@ -343,7 +347,7 @@ mod tests {
 
     #[test]
     fn torn_tail_is_repaired() {
-        let s = tmp();
+        let (_dir, s) = tmp();
         let mut log = s.create(header("a3")).unwrap();
         log.append(msg("one")).unwrap();
         drop(log);
@@ -362,7 +366,7 @@ mod tests {
 
     #[test]
     fn complete_but_garbage_last_line_is_dropped() {
-        let s = tmp();
+        let (_dir, s) = tmp();
         drop(s.create(header("a4")).unwrap());
         let p = s.dir("a4").join("events.jsonl");
         let mut f = OpenOptions::new().append(true).open(&p).unwrap();
@@ -373,7 +377,7 @@ mod tests {
 
     #[test]
     fn mid_file_corruption_is_an_error() {
-        let s = tmp();
+        let (_dir, s) = tmp();
         let mut log = s.create(header("a5")).unwrap();
         log.append(msg("x")).unwrap();
         drop(log);
@@ -386,7 +390,7 @@ mod tests {
 
     #[test]
     fn seq_gap_is_corruption() {
-        let s = tmp();
+        let (_dir, s) = tmp();
         let mut log = s.create(header("a6")).unwrap();
         log.append(msg("x")).unwrap();
         log.append(msg("y")).unwrap();
@@ -399,7 +403,7 @@ mod tests {
 
     #[test]
     fn newer_version_refused_and_bad_ids_rejected() {
-        let s = tmp();
+        let (_dir, s) = tmp();
         let h = EventKind::Header { version: 99, session_id: "a7".into(), workspace: "/".into(), model: "m".into(), parent: None, title: None };
         drop(s.create(h).unwrap());
         assert!(matches!(s.open("a7"), Err(StoreError::Version(99))));
@@ -409,7 +413,7 @@ mod tests {
 
     #[test]
     fn search_finds_cjk_and_respects_limit() {
-        let s = tmp();
+        let (_dir, s) = tmp();
         let mut log = s.create(header("a8")).unwrap();
         log.append(msg("部署到正式環境")).unwrap();
         log.append(msg("Deploy again")).unwrap();
@@ -422,7 +426,7 @@ mod tests {
 
     #[test]
     fn remove_refuses_locked_session() {
-        let s = tmp();
+        let (_dir, s) = tmp();
         let log = s.create(header("a9")).unwrap();
         assert!(matches!(s.remove("a9"), Err(StoreError::Locked(_))));
         drop(log);

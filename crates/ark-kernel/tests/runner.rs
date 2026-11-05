@@ -67,7 +67,9 @@ impl Provider for Scripted {
         &self.id
     }
     fn caps(&self, _: &str) -> ModelCaps {
-        ModelCaps { context_window: self.window, max_output: 8192, tools: true, vision: false, explicit_cache: false }
+        // Vision-capable on purpose: the send path now degrades images for text-only models
+        // (tests/imgprep_send.rs pins that), so this fake keeps every image it is given.
+        ModelCaps { context_window: self.window, max_output: 8192, tools: true, vision: true, explicit_cache: false }
     }
     fn complete(&self, req: &ModelRequest, on: &mut dyn FnMut(StreamEvent), cancel: &Cancel) -> Result<ModelResponse, ProviderError> {
         self.seen.lock().unwrap().push(req.clone());
@@ -175,8 +177,24 @@ fn env_with(cfg_mut: impl FnOnce(&mut Config), approver: Arc<dyn Approver>) -> E
     add("boom", tool("boom", false, false, true, |_, _| panic!("kaboom")));
     add("sh", tool("sh", false, false, true, |_, i| ToolOutput::ok(format!("ran {}", i["cmd"].as_str().unwrap_or("")))));
     add("big", tool("big", false, true, true, |_, _| ToolOutput::ok("x".repeat(100_000))));
+    add("shell", tool("shell", false, false, true, |_, i| {
+        let out = std::process::Command::new("bash").arg("-c").arg(i["command"].as_str().unwrap_or("")).output().unwrap();
+        ToolOutput::ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+    }));
     add("leak", tool("leak", false, true, true, |_, _| ToolOutput::ok("token is supersecret-value-123")));
+    add("write", tool("write", false, false, true, |c, i| {
+        let p = c.workspace.join(i["path"].as_str().unwrap_or("f.txt"));
+        if let Some(d) = p.parent() {
+            let _ = std::fs::create_dir_all(d);
+        }
+        std::fs::write(&p, i["body"].as_str().unwrap_or("")).unwrap();
+        ToolOutput::ok(format!("wrote {}", p.display()))
+    }));
     add("hidden", tool("hidden", false, true, false, |_, _| ToolOutput::ok("hidden ran")));
+    add("wsfile", tool("wsfile", false, false, true, |c, i| {
+        std::fs::write(c.workspace.join(i["name"].as_str().unwrap_or("f.txt")), "x").unwrap();
+        ToolOutput::ok(format!("wrote in {}", c.workspace.display()))
+    }));
     add("spawn", tool("spawn", false, false, true, |c, i| match c.host.spawn_agent(serde_json::from_value(i.clone()).unwrap_or_default(), &c.cancel) {
         Ok(s) => ToolOutput::ok(s),
         Err(e) => ToolOutput::err(e),
@@ -850,7 +868,7 @@ fn images_thinking_titles_and_session_tools() {
     let e = env();
     let id = e.k.create_session(&e.ws, None, None, None).unwrap();
     e.k.set_thinking(&id, "high").unwrap();
-    assert!(e.k.set_thinking(&id, "max").is_err());
+    assert!(e.k.set_thinking(&id, "ludicrous").is_err());
     e.k.set_title(&id, "fix the build").unwrap();
     assert_eq!(e.k.store.list()[0].title.as_deref(), Some("fix the build"));
     let (t, calls) = tool("editor_tool", false, true, false, |c, _| ToolOutput::ok(format!("session {}", c.session_id)));
@@ -913,7 +931,7 @@ fn middleware_transforms_and_approval_events() {
     let (pre, pres) = fnhook(HookEvent::PreApprovalRequest, |_| Ok(HookDecision::Allow));
     let (post, posts) = fnhook(HookEvent::PostApprovalResponse, |_| Ok(HookDecision::Allow));
     e.k.add_hooks(vec![pre, post]);
-    e.p.call("sh", json!({"cmd": "sudo reboot"}));
+    e.p.call("sh", json!({"cmd": "sudo apt install x"}));
     e.p.text("ok");
     let id = start(&e, "x");
     e.k.run(&id, RunOpts::default()).unwrap();
@@ -975,4 +993,624 @@ fn context_engine_assembles_ingests_and_owns_compaction() {
     // Compaction: the engine's summary is recorded.
     assert!(e.k.compact(&id).unwrap());
     assert!(events(&e, &id).iter().any(|k| matches!(k, EventKind::Compaction { summary, .. } if summary == "engine summary")));
+}
+
+// ───────────── OpenClaw hook points ─────────────
+
+fn assistant_texts(e: &Env, id: &str) -> Vec<String> {
+    events(e, id)
+        .into_iter()
+        .filter_map(|k| match k {
+            EventKind::Message { message, .. } if message.role == Role::Assistant => Some(message.text()),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn before_agent_run_gate_and_before_agent_reply_answer_without_the_model() {
+    let e = env();
+    let (gate, seen) = fnhook(HookEvent::BeforeAgentRun, |p| Ok(if p["prompt"] == "forbidden" { HookDecision::Modify(json!({"outcome": "block", "reason": "internal detail", "message": "not on this channel"})) } else { HookDecision::Allow }));
+    let (reply, _) = fnhook(HookEvent::BeforeAgentReply, |p| Ok(if p["cleaned_body"] == "ping" { HookDecision::Modify(json!({"handled": true, "reply": {"text": "pong"}})) } else { HookDecision::Allow }));
+    e.k.add_hooks(vec![gate, reply]);
+    let id = start(&e, "forbidden");
+    let o = e.k.run(&id, RunOpts::default()).unwrap();
+    assert_eq!(o.text, "Your message could not be sent: not on this channel (blocked by test)");
+    assert!(!o.text.contains("internal detail"), "the internal reason is never shown");
+    assert!(e.p.requests().is_empty());
+    assert_eq!(seen.lock().unwrap()[0]["prompt"], "forbidden");
+    e.k.submit(&id, "ping", "cli").unwrap();
+    assert_eq!(e.k.run(&id, RunOpts::default()).unwrap().text, "pong");
+    assert!(e.p.requests().is_empty(), "handled by the hook");
+    e.k.submit(&id, "hello", "cli").unwrap();
+    e.p.text("model answer");
+    assert_eq!(e.k.run(&id, RunOpts::default()).unwrap().text, "model answer");
+    assert_eq!(assistant_texts(&e, &id).len(), 3, "transcript stays user/assistant alternating");
+    // A broken gate fails closed.
+    let e2 = env();
+    let (broken, _) = fnhook(HookEvent::BeforeAgentRun, |_| Err("crash".into()));
+    e2.k.add_hooks(vec![broken]);
+    let id = start(&e2, "x");
+    assert!(e2.k.run(&id, RunOpts::default()).unwrap().text.starts_with("Your message could not be sent"));
+    assert!(e2.p.requests().is_empty());
+}
+
+#[test]
+fn before_model_resolve_overrides_model_and_fallbacks_for_the_turn() {
+    let e = env();
+    let (resolve, seen) = fnhook(HookEvent::BeforeModelResolve, |p| Ok(match p["prompt"].as_str().unwrap() {
+        "use backup" => HookDecision::Modify(json!({"providerOverride": "backup", "modelOverride": "m9"})),
+        "no fallback" => HookDecision::Modify(json!({"fallbacks_override": []})),
+        _ => HookDecision::Allow,
+    }));
+    e.k.add_hooks(vec![resolve]);
+    e.fb.text("from backup");
+    let id = start(&e, "use backup");
+    assert_eq!(e.k.run(&id, RunOpts::default()).unwrap().text, "from backup");
+    assert!(e.p.requests().is_empty());
+    assert_eq!(e.fb.requests()[0].model, "m9");
+    assert_eq!(seen.lock().unwrap()[0]["model"], "main/m1");
+    // Next turn: back to the session model, and an empty fallback chain stops at the failure.
+    e.k.submit(&id, "no fallback", "cli").unwrap();
+    e.p.fail(ProviderErrorKind::Auth);
+    let o = e.k.run(&id, RunOpts::default()).unwrap();
+    assert!(!o.reason.ok(), "{:?}", o.reason);
+    assert_eq!(e.fb.requests().len(), 1, "fallback disabled for this turn");
+}
+
+#[test]
+fn turn_prepare_and_prompt_build_shape_every_request_of_the_turn() {
+    let e = env();
+    let (prep, preps) = fnhook(HookEvent::AgentTurnPrepare, |_| Ok(HookDecision::Modify(json!({"prependContext": "PRE-CTX", "append_context": "POST-CTX"}))));
+    let (build, _) = fnhook(HookEvent::BeforePromptBuild, |_| Ok(HookDecision::Modify(json!({"append_system_context": "SYS-TAIL", "prepend_system_context": "SYS-HEAD", "tools_allow": ["echo"]}))));
+    e.k.add_hooks(vec![prep, build]);
+    e.p.call("hidden", json!({}));
+    e.p.text("done");
+    let id = start(&e, "go");
+    e.k.run(&id, RunOpts::default()).unwrap();
+    let reqs = e.p.requests();
+    assert_eq!(reqs.len(), 2);
+    for r in &reqs {
+        assert_eq!(r.system.first().unwrap().text, "SYS-HEAD");
+        assert_eq!(r.system.last().unwrap().text, "SYS-TAIL");
+        assert!(r.tools.iter().all(|t| t.name == "echo"), "{:?}", r.tools.iter().map(|t| &t.name).collect::<Vec<_>>());
+        let first_user = format!("{:?}", r.messages[0]);
+        assert!(first_user.contains("PRE-CTX") && first_user.contains("POST-CTX"), "{first_user}");
+    }
+    assert!(tool_results(&e, &id)[0].0.contains("not available in this turn"));
+    assert_eq!(e.calls["hidden"].load(Ordering::SeqCst), 0);
+    assert!(!format!("{:?}", events(&e, &id)).contains("PRE-CTX"), "context is not persisted");
+    assert_eq!(preps.lock().unwrap()[0]["prompt"], "go");
+    // system_prompt replaces the system segments.
+    let e2 = env();
+    let (sp, _) = fnhook(HookEvent::BeforePromptBuild, |_| Ok(HookDecision::Modify(json!({"systemPrompt": "You are a pirate."}))));
+    e2.k.add_hooks(vec![sp]);
+    e2.p.text("arr");
+    let id = start(&e2, "hi");
+    e2.k.run(&id, RunOpts::default()).unwrap();
+    let r = &e2.p.requests()[0];
+    assert_eq!((r.system.len(), r.system[0].text.as_str()), (1, "You are a pirate."));
+}
+
+#[test]
+fn before_agent_finalize_requests_bounded_revisions() {
+    let e = env();
+    let (fin, seen) = fnhook(HookEvent::BeforeAgentFinalize, |p| Ok(if p["last_assistant_message"] == "draft" { HookDecision::Modify(json!({"action": "revise", "retry": {"instruction": "Add sources."}})) } else { HookDecision::Allow }));
+    e.k.add_hooks(vec![fin]);
+    e.p.text("draft");
+    e.p.text("final with sources");
+    let id = start(&e, "write");
+    assert_eq!(e.k.run(&id, RunOpts::default()).unwrap().text, "final with sources");
+    let reqs = e.p.requests();
+    assert!(format!("{:?}", reqs[1].messages.last().unwrap()).contains("[before_agent_finalize] Add sources."));
+    let seen = seen.lock().unwrap();
+    assert_eq!((seen[0]["stop_hook_active"].clone(), seen[1]["stop_hook_active"].clone()), (json!(false), json!(true)));
+    // A hook that always blocks is cut off after 3 revisions.
+    let e2 = env();
+    let (always, _) = fnhook(HookEvent::BeforeAgentFinalize, |_| Ok(HookDecision::Block("try again".into())));
+    e2.k.add_hooks(vec![always]);
+    for _ in 0..5 {
+        e2.p.text("answer");
+    }
+    let id = start(&e2, "x");
+    assert_eq!(e2.k.run(&id, RunOpts::default()).unwrap().reason, EndReason::Done);
+    assert_eq!(e2.p.requests().len(), 4, "1 answer + 3 revisions");
+    assert!(events(&e2, &id).iter().any(|k| matches!(k, EventKind::Notice { text, .. } if text.contains("revision limit"))));
+}
+
+#[test]
+fn before_message_write_rewrites_and_withholds_safely() {
+    let e = env();
+    let (w, _) = fnhook(HookEvent::BeforeMessageWrite, |p| {
+        let text = format!("{}", p["message"]);
+        Ok(if text.contains("SSN 123") {
+            HookDecision::Modify(json!({"role": "assistant", "content": [{"type": "text", "text": "SSN [redacted]"}]}))
+        } else if text.contains("drop me") {
+            HookDecision::Block("noise".into())
+        } else if text.contains("tool_use") {
+            HookDecision::Block("cannot drop tool calls".into())
+        } else {
+            HookDecision::Allow
+        })
+    });
+    e.k.add_hooks(vec![w]);
+    e.p.call("echo", json!({"text": "t"}));
+    e.p.text("your SSN 123");
+    let id = start(&e, "q");
+    e.k.run(&id, RunOpts::default()).unwrap();
+    let a = assistant_texts(&e, &id);
+    assert_eq!(a.last().unwrap(), "SSN [redacted]");
+    assert_eq!(tool_results(&e, &id).len(), 1, "tool call kept despite the block");
+    e.k.submit(&id, "drop me", "cli").unwrap();
+    e.p.text("fine");
+    e.k.run(&id, RunOpts::default()).unwrap();
+    let ev = format!("{:?}", events(&e, &id));
+    assert!(ev.contains("[message withheld by a before_message_write hook]"), "inbox message consumed as a placeholder");
+    assert!(ev.contains("before_message_write block ignored"));
+}
+
+#[test]
+fn resolve_exec_env_exports_variables_without_logging_them() {
+    let e = env();
+    let (env_hook, seen) = fnhook(HookEvent::ResolveExecEnv, |_| Ok(HookDecision::Modify(json!({"DEPLOY_TOKEN": "s3cr3t's", "bad-name": "x", "N": 5}))));
+    e.k.add_hooks(vec![env_hook]);
+    e.p.call("shell", json!({"command": "echo \"$DEPLOY_TOKEN/$N\""}));
+    e.p.text("ok");
+    let id = start(&e, "deploy");
+    e.k.run(&id, RunOpts::default()).unwrap();
+    assert_eq!(tool_results(&e, &id)[0].0, "s3cr3t's/5");
+    assert_eq!(seen.lock().unwrap()[0]["tool_name"], "shell");
+    let called = events(&e, &id).into_iter().find_map(|k| match k {
+        EventKind::ToolCalled { input, .. } => Some(input),
+        _ => None,
+    });
+    assert!(!called.unwrap().to_string().contains("export"), "write-ahead keeps the model's input");
+}
+
+struct Routes(Mutex<Vec<(Value, String)>>);
+impl ark_kernel::kernel::HostRoutes for Routes {
+    fn origin(&self, session: &str) -> Option<Value> {
+        Some(json!({"channel": "tg", "to": format!("chat-of-{session}")}))
+    }
+    fn deliver(&self, origin: &Value, text: &str) -> Result<(), String> {
+        self.0.lock().unwrap().push((origin.clone(), text.to_string()));
+        Ok(())
+    }
+}
+
+#[test]
+fn subagent_progress_delivery_target_and_before_reset() {
+    let e = env();
+    let routes = Arc::new(Routes(Mutex::new(vec![])));
+    ark_kernel::kernel::set_host_routes(routes.clone());
+    let (prog, progs) = fnhook(HookEvent::SubagentProgress, |_| Ok(HookDecision::Allow));
+    let (target, targets) = fnhook(HookEvent::SubagentDeliveryTarget, |_| Ok(HookDecision::Modify(json!({"origin": {"channel": "slack", "to": "C1"}}))));
+    let (reset, resets) = fnhook(HookEvent::BeforeReset, |_| Ok(HookDecision::Allow));
+    e.k.add_hooks(vec![prog, target, reset]);
+    e.p.call("spawn", json!({"task": "sub job"}));
+    e.p.text("child result");
+    e.p.text("parent done");
+    let id = start(&e, "delegate");
+    e.k.run(&id, RunOpts::default()).unwrap();
+    let progs = progs.lock().unwrap();
+    // The same event also carries the child's progress lines, without a `phase`.
+    let started = progs.iter().find(|p| p["phase"] == "started").expect("started event");
+    let ended = progs.iter().find(|p| p["phase"] == "ended").expect("ended event");
+    assert_eq!((started["phase"].as_str(), ended["phase"].as_str(), ended["outcome"].as_str()), (Some("started"), Some("ended"), Some("ok")));
+    assert_eq!(started["requester"]["to"], format!("chat-of-{id}"));
+    assert_eq!(targets.lock().unwrap()[0]["requester_origin"]["channel"], "tg");
+    let sent = routes.0.lock().unwrap().clone();
+    assert!(sent.iter().any(|(o, t)| o["channel"] == "slack" && t.contains("child result")), "{sent:?}");
+    e.k.end_session(&id, "new");
+    let r = resets.lock().unwrap();
+    assert_eq!(r[0]["reason"], "new");
+    assert!(r[0]["messages"].as_array().unwrap().iter().any(|m| m["text"] == "parent done"));
+    e.k.end_session(&id, "exit");
+    assert_eq!(r.len(), 1, "exit is not a reset");
+}
+
+#[test]
+fn host_emit_helpers_claim_and_collect() {
+    let e = env();
+    let (a, _) = fnhook(HookEvent::InboundClaim, |_| Ok(HookDecision::Allow));
+    let (b, _) = fnhook(HookEvent::InboundClaim, |_| Ok(HookDecision::Modify(json!({"handled": true, "reply": "mine"}))));
+    let (c, cs) = fnhook(HookEvent::InboundClaim, |_| Ok(HookDecision::Modify(json!({"handled": true, "reply": "late"}))));
+    let (h1, _) = fnhook(HookEvent::HeartbeatPromptContribution, |_| Ok(HookDecision::Modify(json!({"prepend_context": "P"}))));
+    let (h2, _) = fnhook(HookEvent::HeartbeatPromptContribution, |_| Ok(HookDecision::Context("C".into())));
+    e.k.add_hooks(vec![a, b, c, h1, h2]);
+    let (_, d) = e.k.emit_first(HookEvent::InboundClaim, json!({}), |d| matches!(d, HookDecision::Modify(v) if ark_kernel::hooks::handled(v).is_some())).unwrap();
+    assert!(matches!(d, HookDecision::Modify(v) if v["reply"] == "mine"));
+    assert!(cs.lock().unwrap().is_empty(), "a claim stops later hooks");
+    assert_eq!(ark_kernel::hooks::heartbeat_prompt(&e.k, "s", "/", "hb", "check in"), "P\n\ncheck in\n\nC");
+}
+
+#[test]
+fn queue_modes_followup_interrupt_and_edit() {
+    use ark_kernel::queue::{Mode, Settings};
+    // followup: input during a run waits and runs as its own turn afterwards.
+    let e = env();
+    e.p.push(|_| {
+        std::thread::sleep(Duration::from_millis(300));
+        Ok(resp(vec![Block::text("first done")], StopReason::EndTurn))
+    });
+    e.p.text("second done");
+    let id = start(&e, "task one");
+    e.k.set_queue(&id, Settings { mode: Mode::Followup, ..Default::default() });
+    let h = e.k.clone().start(&id, RunOpts::default());
+    std::thread::sleep(Duration::from_millis(100));
+    e.k.submit(&id, "task two", "cli").unwrap();
+    assert_eq!(e.k.queued(&id).len(), 1);
+    let o = h.join().unwrap().unwrap();
+    assert_eq!((o.text.as_str(), o.turns), ("second done", 2));
+    let reqs = e.p.requests();
+    assert!(!reqs[0].messages.iter().any(|m| m.text().contains("task two")), "not steered into turn one");
+    assert!(reqs[1].messages.last().unwrap().text().contains("task two"));
+
+    // interrupt: the running turn stops and the new input runs right away.
+    let e = env();
+    e.p.call("sleep", json!({"ms": 600}));
+    e.p.text("handled the new one");
+    let id = start(&e, "slow");
+    e.k.set_queue(&id, Settings { mode: Mode::Interrupt, ..Default::default() });
+    let h = e.k.clone().start(&id, RunOpts::default());
+    std::thread::sleep(Duration::from_millis(200));
+    e.k.submit(&id, "urgent", "cli").unwrap();
+    let o = h.join().unwrap().unwrap();
+    assert_eq!((o.text.as_str(), o.reason.clone()), ("handled the new one", EndReason::Done), "the interrupted turn was followed by a fresh one");
+    assert!(e.p.requests().last().unwrap().messages.last().unwrap().text().contains("urgent"));
+
+    // idle edits: remove / rewrite inbox entries; discarded ones never run.
+    let e = env();
+    let id = start(&e, "a");
+    e.k.submit(&id, "b", "cli").unwrap();
+    e.k.submit(&id, "c", "cli").unwrap();
+    assert_eq!(e.k.queued(&id).iter().map(|q| q.2.as_str()).collect::<Vec<_>>(), ["a", "b", "c"]);
+    e.k.edit_queue(&id, &|v| {
+        v.remove(1);
+        v[1].2 = "c2".into();
+        v.swap(0, 1);
+    })
+    .unwrap();
+    assert_eq!(e.k.queued(&id).iter().map(|q| q.2.as_str()).collect::<Vec<_>>(), ["c2", "a"]);
+    e.p.text("ok");
+    e.k.run(&id, RunOpts::default()).unwrap();
+    let sent = e.p.requests()[0].messages.last().unwrap().text();
+    assert!(sent.contains("c2") && sent.contains('a') && !sent.contains('b'), "{sent}");
+    assert!(Config::load(None, None, &["runner.busy_mode=sideways".into()]).is_err());
+}
+
+// ───────────── model settings (models stream) ─────────────
+
+#[test]
+fn aliases_allowlist_thinking_and_fast_reach_the_request() {
+    let e = env_with(
+        |c| {
+            c.model.aliases.insert("quick".into(), "backup/m2".into());
+            c.model.allow = vec!["main/*".into(), "backup/m2".into()];
+            c.model.thinking = "medium".into();
+        },
+        Arc::new(Yes),
+    );
+    let id = start(&e, "hi");
+    assert!(e.k.set_model(&id, "other/x").is_err(), "not allowed");
+    e.k.set_model(&id, "quick").unwrap();
+    e.k.set_fast(&id, "on").unwrap();
+    assert!(e.k.set_fast(&id, "warp").is_err());
+    e.fb.text("ok");
+    e.k.run(&id, RunOpts::default()).unwrap();
+    let r = &e.fb.requests()[0];
+    assert_eq!(r.model, "m2");
+    assert_eq!(r.reasoning.as_deref(), Some("medium"));
+    assert_eq!(r.options.service_tier.as_deref(), Some("priority"));
+    e.k.set_thinking(&id, "xhigh").unwrap();
+    e.k.set_fast(&id, "normal").unwrap();
+    e.k.submit(&id, "again", "cli").unwrap();
+    e.fb.text("ok2");
+    e.k.run(&id, RunOpts::default()).unwrap();
+    let r = e.fb.requests().pop().unwrap();
+    assert_eq!(r.reasoning.as_deref(), Some("xhigh"));
+    assert_eq!(r.options.service_tier, None);
+}
+
+#[test]
+fn cold_fast_mode_only_on_first_turn() {
+    let e = env_with(|c| c.model.fast = "cold".into(), Arc::new(Yes));
+    let id = start(&e, "one");
+    e.p.text("a");
+    e.k.run(&id, RunOpts::default()).unwrap();
+    e.k.submit(&id, "two", "cli").unwrap();
+    e.p.text("b");
+    e.k.run(&id, RunOpts::default()).unwrap();
+    let rs = e.p.requests();
+    assert_eq!(rs[0].options.service_tier.as_deref(), Some("priority"));
+    assert_eq!(rs[1].options.service_tier, None);
+}
+
+#[test]
+fn aux_compaction_usage_is_recorded_and_charged() {
+    let e = env_with(
+        |c| {
+            c.model.tasks.insert("compaction".into(), "backup/summ".into());
+            c.prices.insert("backup/summ".into(), ark_kernel::ledger::Price { input: 1.0, output: 1.0, cache_read: 0.0, cache_write: 0.0 });
+        },
+        Arc::new(Yes),
+    );
+    let id = start(&e, "question one");
+    e.p.text("answer one");
+    e.k.run(&id, RunOpts::default()).unwrap();
+    for i in 0..10 {
+        e.k.submit(&id, &format!("q{i} {}", "x".repeat(50)), "cli").unwrap();
+        e.p.text("a");
+        e.k.run(&id, RunOpts::default()).unwrap();
+    }
+    e.fb.text(&format!("SUMMARY: question one was asked. {}", "detail ".repeat(40)));
+    assert!(e.k.compact(&id).unwrap());
+    assert_eq!(e.fb.requests()[0].model, "summ", "per-task aux model");
+    let aux: Vec<_> = events(&e, &id).into_iter().filter_map(|k| match k {
+        EventKind::AuxUsage { task, model, usage } => Some((task, model, usage.input_tokens)),
+        _ => None,
+    }).collect();
+    assert_eq!(aux.len(), 1);
+    assert_eq!((aux[0].0.as_str(), aux[0].1.as_str()), ("compaction", "backup/summ"));
+    assert!(aux[0].2 >= 100);
+    let v = ark_kernel::projection::project(&e.k.store.read(&id).unwrap());
+    assert!(v.aux_usage.output_tokens >= 20);
+    // Inside a turn, aux calls charge the turn's ledger (no extra step).
+    let l = Ledger::new(Budget::default());
+    {
+        let _g = l.enter();
+        Ledger::charge_current(&Usage { input_tokens: 10, ..Default::default() }, None);
+    }
+    assert_eq!(l.snapshot().0, 10);
+}
+
+fn git_in(dir: &std::path::Path, args: &[&str]) -> String {
+    let o = std::process::Command::new("git").args(["-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false"]).args(args).current_dir(dir).output().unwrap();
+    String::from_utf8_lossy(&o.stdout).trim().to_string()
+}
+
+#[test]
+fn sub_agent_and_session_worktree_isolation() {
+    let e = env();
+    git_in(&e.ws, &["init", "-q"]);
+    std::fs::write(e.ws.join("a.txt"), "1").unwrap();
+    git_in(&e.ws, &["add", "."]);
+    git_in(&e.ws, &["commit", "-q", "-m", "init"]);
+    // `spawn worktree=true` (OpenClaw sessions_spawn `worktree`; config default delegation.worktree_isolation).
+    e.p.call("spawn", json!({"task":"edit files","worktree":true}));
+    e.p.call("wsfile", json!({"name":"child.txt"}));
+    e.p.text("child done");
+    e.p.text("parent done");
+    let id = start(&e, "delegate");
+    let o = e.k.run(&id, RunOpts::default()).unwrap();
+    assert_eq!(o.text, "parent done");
+    let child = e.k.store.list().into_iter().find(|s| s.parent.as_deref() == Some(id.as_str())).expect("child session");
+    let cws = ark_kernel::projection::project(&e.k.store.read(&child.id).unwrap()).workspace;
+    assert!(cws.contains("/.worktrees/subagent-"), "child ran in its own worktree: {cws}");
+    assert!(!e.ws.join("child.txt").exists(), "the parent's tree is untouched");
+    assert!(!std::path::Path::new(&cws).exists(), "finished worktree removed");
+    let archived = git_in(&e.ws, &["for-each-ref", "--format=%(refname)", "refs/ark/archive/"]);
+    assert!(archived.contains("refs/ark/archive/subagent-"), "uncommitted child work kept: {archived:?}");
+    let r = tool_results(&e, &id);
+    assert!(r[0].0.contains("[worktree: work kept on branch ark/subagent-"), "{r:?}");
+
+    // The session itself moves into a worktree: its next tool call runs there.
+    let info = ark_kernel::worktree::enter_session(&e.k, &id, Some("feat")).unwrap();
+    let ws = ark_kernel::projection::project(&e.k.store.read(&id).unwrap()).workspace;
+    assert_eq!(ws, info.path);
+    assert!(ws.ends_with(".worktrees/feat"), "{ws}");
+    e.p.call("wsfile", json!({"name":"in-wt.txt"}));
+    e.p.text("ok");
+    e.k.submit(&id, "write it", "cli").unwrap();
+    e.k.run(&id, RunOpts::default()).unwrap();
+    assert!(std::path::Path::new(&ws).join("in-wt.txt").exists() && !e.ws.join("in-wt.txt").exists());
+    let rep = ark_kernel::worktree::leave_session(&e.k, &id).unwrap();
+    assert!(rep.dirty && rep.pruned && rep.note.unwrap_or_default().contains("ark/feat"), "work kept on the branch");
+    let back = ark_kernel::projection::project(&e.k.store.read(&id).unwrap()).workspace;
+    assert_eq!(std::path::Path::new(&back).canonicalize().unwrap(), e.ws.canonicalize().unwrap());
+    assert!(ark_kernel::worktree::leave_session(&e.k, &id).unwrap_err().contains("not in a worktree"));
+
+    // Config default: every spawned child is isolated.
+    let e2 = env_with(|c| c.delegation.worktree_isolation = true, Arc::new(Policy { allow_privilege: false, allow_egress: false }));
+    git_in(&e2.ws, &["init", "-q"]);
+    std::fs::write(e2.ws.join("a.txt"), "1").unwrap();
+    git_in(&e2.ws, &["add", "."]);
+    git_in(&e2.ws, &["commit", "-q", "-m", "init"]);
+    e2.p.call("spawn", json!({"task":"look"}));
+    e2.p.text("child looked");
+    e2.p.text("done");
+    let id2 = start(&e2, "go");
+    e2.k.run(&id2, RunOpts::default()).unwrap();
+    let c2 = e2.k.store.list().into_iter().find(|s| s.parent.as_deref() == Some(id2.as_str())).unwrap();
+    assert!(ark_kernel::projection::project(&e2.k.store.read(&c2.id).unwrap()).workspace.contains("/.worktrees/subagent-"));
+    assert!(git_in(&e2.ws, &["branch", "--list", "ark/subagent-*"]).is_empty(), "a clean child's branch is deleted");
+}
+
+// ───────────── context features (Hermes §12) ─────────────
+
+/// `@file:` references are expanded into the user message the model sees.
+#[test]
+fn refs_attach_context_to_the_turn() {
+    let e = env();
+    std::fs::write(e.ws.join("notes.txt"), "the deploy command is make ship").unwrap();
+    e.p.text("thanks");
+    let id = start(&e, "what is in @file:notes.txt?");
+    e.k.run(&id, RunOpts::default()).unwrap();
+    let sent = e.p.requests();
+    let user = sent[0].messages.iter().find(|m| m.role == Role::User).unwrap().text();
+    assert!(user.contains("what is in @file:notes.txt?"), "{user}");
+    assert!(user.contains("the deploy command is make ship") && user.contains("Attached Context"), "{user}");
+
+    let e2 = env_with(|c| c.context.references = false, Arc::new(Policy { allow_privilege: false, allow_egress: false }));
+    std::fs::write(e2.ws.join("notes.txt"), "the deploy command is make ship").unwrap();
+    e2.p.text("ok");
+    let id2 = start(&e2, "what is in @file:notes.txt?");
+    e2.k.run(&id2, RunOpts::default()).unwrap();
+    let u2 = e2.p.requests()[0].messages.iter().find(|m| m.role == Role::User).unwrap().text();
+    assert!(!u2.contains("Attached Context"), "references off: {u2}");
+}
+
+/// A touched subdirectory's AGENTS.md rides along with the tool result, once.
+#[test]
+fn subdir_hints_ride_along_with_a_tool_result() {
+    let e = env();
+    std::fs::create_dir_all(e.ws.join("pkg")).unwrap();
+    std::fs::write(e.ws.join("pkg/AGENTS.md"), "pkg rules: run cargo test -p pkg").unwrap();
+    e.p.calls(vec![("echo", json!({"text":"x","path":"pkg/a.rs"})), ("echo", json!({"text":"y","path":"pkg/b.rs"}))]);
+    e.p.text("done");
+    let id = start(&e, "look at pkg");
+    e.k.run(&id, RunOpts::default()).unwrap();
+    let results = tool_results(&e, &id);
+    assert!(results[0].0.contains("pkg rules: run cargo test -p pkg"), "{:?}", results[0]);
+    assert!(!results[1].0.contains("pkg rules"), "hint is delivered once: {:?}", results[1]);
+}
+
+/// `context.verify_on_stop = "on"` keeps the turn going once after an edit.
+#[test]
+fn verify_on_stop_nudges_the_model_to_verify() {
+    let e = env_with(|c| {
+        c.context.verify_on_stop = "on".into();
+        c.context.max_verify_nudges = 1;
+    }, Arc::new(Policy { allow_privilege: false, allow_egress: false }));
+    e.p.call("write", json!({"path":"src/lib.rs","body":"x"}));
+    e.p.text("all done");
+    e.p.text("verified");
+    let id = start(&e, "change the code");
+    let out = e.k.run(&id, RunOpts::default()).unwrap();
+    assert_eq!(out.reason, EndReason::Done);
+    let texts: Vec<String> = events(&e, &id).into_iter().filter_map(|k| match k {
+        EventKind::Message { message, .. } => Some(message.text()),
+        _ => None,
+    }).collect();
+    assert!(texts.iter().any(|t| t.contains("have not verified")), "{texts:?}");
+    assert_eq!(e.p.requests().len(), 3, "edit, nudge, final reply");
+}
+
+/// Micro-compaction folds the oldest exchange into a rolling summary.
+#[test]
+fn micro_compaction_folds_the_oldest_exchange() {
+    let e = env_with(|c| {
+        c.compaction.micro_compact = true;
+        c.compaction.micro_compact_every_n_turns = 1;
+        c.compaction.keep_messages = 2;
+    }, Arc::new(Policy { allow_privilege: false, allow_egress: false }));
+    let summary = "## Goal\nanswer the first question\n## Progress\nfirst question was answered\n## Next steps\nnone, waiting for the next question";
+    for r in ["first reply", "second reply", "third reply"] {
+        e.p.text(r);
+    }
+    e.p.text(summary);
+    e.p.text(summary);
+    let id = start(&e, "first question");
+    e.k.run(&id, RunOpts::default()).unwrap();
+    e.k.submit(&id, "second question", "cli").unwrap();
+    e.k.run(&id, RunOpts::default()).unwrap();
+    e.k.submit(&id, "third question", "cli").unwrap();
+    e.k.run(&id, RunOpts::default()).unwrap();
+    let compactions: Vec<(u64, String)> = events(&e, &id).into_iter().filter_map(|k| match k {
+        EventKind::Compaction { upto_seq, summary, .. } => Some((upto_seq, summary)),
+        _ => None,
+    }).collect();
+    assert!(!compactions.is_empty(), "a micro pass wrote a Compaction event");
+    assert!(compactions.last().unwrap().1.contains("first question was answered"), "{compactions:?}");
+    let v = ark_kernel::projection::project(&e.k.store.read(&id).unwrap());
+    assert!(v.messages[0].text().contains("earlier conversation"), "{:?}", v.messages[0].text());
+    assert!(v.messages.iter().any(|m| m.text().contains("third question")), "tail kept");
+}
+
+/// `tool_search` is offered with the meta tools and ranks by keyword (BM25).
+#[test]
+fn tool_search_is_offered_and_finds_tools_by_keyword() {
+    let e = env();
+    e.p.call("tool_search", json!({"query":"sleep for a while"}));
+    e.p.text("done");
+    let id = start(&e, "find a tool");
+    e.k.run(&id, RunOpts::default()).unwrap();
+    let tools: Vec<String> = e.p.requests()[0].tools.iter().map(|t| t.name.clone()).collect();
+    assert!(tools.iter().any(|t| t == "tool_search"), "{tools:?}");
+    let results = tool_results(&e, &id);
+    assert!(results[0].0.contains("sleep"), "{:?}", results[0]);
+    // Off by config: no schema offered.
+    let e2 = env_with(|c| c.tools.tool_search.enabled = false, Arc::new(Policy { allow_privilege: false, allow_egress: false }));
+    e2.p.text("ok");
+    let id2 = start(&e2, "hi");
+    e2.k.run(&id2, RunOpts::default()).unwrap();
+    assert!(!e2.p.requests()[0].tools.iter().any(|t| t.name == "tool_search"));
+}
+
+/// C12: a brand-new model that does not know the reasoning parameter answers 400. The run
+/// must survive it: probe once, remember the model, retry without the parameter, and never
+/// send it to that model again — no user intervention, no failed session.
+#[test]
+fn a_model_that_rejects_the_reasoning_parameter_is_retried_without_it() {
+    let e = env_with(
+        |c| {
+            c.model.thinking = "high".into();
+            c.runner.max_retries = 2;
+        },
+        Arc::new(Policy { allow_privilege: false, allow_egress: false }),
+    );
+    e.p.push(|req| {
+        assert_eq!(req.reasoning.as_deref(), Some("high"), "the first probe carries the configured level");
+        Err(ProviderError::new(ProviderErrorKind::BadRequest, "unsupported parameter: thinking.type").with_status(400))
+    });
+    e.p.push(|req| {
+        assert!(req.reasoning.is_none(), "the retry omits the rejected parameter");
+        Ok(resp(vec![Block::text("answered without thinking")], StopReason::EndTurn))
+    });
+    // Second turn: the model is now known to reject it, so it is never sent again.
+    e.p.push(|req| {
+        assert!(req.reasoning.is_none(), "a remembered model is not probed twice");
+        Ok(resp(vec![Block::text("second answer")], StopReason::EndTurn))
+    });
+
+    let id = start(&e, "first");
+    let o = e.k.run(&id, RunOpts::default()).unwrap();
+    assert_eq!(o.reason, EndReason::Done, "{:?}", o.reason);
+    assert!(o.text.contains("answered without thinking"), "{}", o.text);
+    let notices: Vec<String> = events(&e, &id)
+        .into_iter()
+        .filter_map(|k| match k {
+            EventKind::Notice { level, text } if level == "warn" => Some(text),
+            _ => None,
+        })
+        .collect();
+    assert!(notices.iter().any(|t| t.contains("rejected the reasoning parameter")), "{notices:?}");
+
+    e.k.submit(&id, "second", "cli").unwrap();
+    let o2 = e.k.run(&id, RunOpts::default()).unwrap();
+    assert!(o2.reason.ok(), "{:?}", o2.reason);
+    assert_eq!(e.p.requests().len(), 3, "one probe, one retry, one clean second turn");
+}
+
+/// G19: the runtime window follows a window the endpoint taught us (recorded by `ark models
+/// list` through `contextpin::learn_from_endpoint`), so the compaction thresholds match the real
+/// endpoint instead of the catalogue guess.
+#[test]
+fn runtime_window_follows_a_window_learned_from_the_endpoint() {
+    let base = "http://127.0.0.1:6599/v1";
+    ark_model::contextpin::clear_learned();
+    let mut expected: Option<(Option<u64>, Option<u64>)> = None;
+    let e = env_with(
+        |c| {
+            c.compaction.native.enabled = true;
+            let mut t = toml::Table::new();
+            t.insert("base_url".into(), toml::Value::String(base.into()));
+            c.providers.insert("main".into(), t);
+            expected = Some((c.compaction.native_threshold(200_000), c.compaction.native_threshold(65_536)));
+        },
+        Arc::new(Yes),
+    );
+    let (catalogue, endpoint) = expected.unwrap();
+    assert_ne!(catalogue, endpoint, "the two windows must be distinguishable");
+    let id = start(&e, "hello");
+    e.p.text("one");
+    let _ = e.k.run(&id, RunOpts::default());
+    assert_eq!(e.p.requests()[0].options.native_compaction, catalogue, "before learning: the provider's own caps");
+    // What `ark models list` does when the endpoint reports its window.
+    assert_eq!(ark_model::contextpin::learn_from_endpoint("m1", base, 65_536), Some(65_536));
+    e.k.submit(&id, "again", "cli").unwrap();
+    e.p.text("two");
+    let _ = e.k.run(&id, RunOpts::default());
+    assert_eq!(e.p.requests().last().unwrap().options.native_compaction, endpoint, "after learning: the endpoint's number");
+    ark_model::contextpin::clear_learned();
 }

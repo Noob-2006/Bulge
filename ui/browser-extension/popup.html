@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>ark browser relay</title>
+    <link rel="stylesheet" href="popup.css" />
+  </head>
+  <body>
+    <header>
+      <h1>ark browser relay</h1>
+    </header>
+    <p id="status" class="status">Checking…</p>
+    <dl>
+      <dt>Relay</dt>
+      <dd id="relay">—</dd>
+      <dt>Tabs attached</dt>
+      <dd id="attached">0</dd>
+    </dl>
+    <p id="error" class="error" hidden></p>
+    <div class="row">
+      <button id="reconnect" type="button">Reconnect</button>
+      <button id="settings" type="button">Settings</button>
+    </div>
+    <script src="popup.js"></script>
+  </body>
+</html>

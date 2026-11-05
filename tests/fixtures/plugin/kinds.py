@@ -6,7 +6,7 @@ a model provider, a context engine, a memory provider, node commands and a servi
 Flags: --log FILE   append one JSON line per hook event / service call
        --sick FILE  service health reports not-ok while FILE exists
 """
-import json, sys, os, base64
+import json, sys, os, base64, re
 
 args = sys.argv[1:]
 def flag(name):
@@ -33,6 +33,10 @@ ARK = {
                        "params": {"type": "object", "properties": {"name": {"type": "string"}}}},
                       {"command": "kinds.wipe", "description": "Pretend to wipe", "dangerous": True}],
     "ui": [{"id": "dash", "title": "Kinds", "surface": "tab"}, {"id": "prefs", "title": "Kinds settings", "surface": "settings"}],
+    "backends": [{"kind": "tts", "id": "kinds-voice", "label": "Kinds Voice", "caps": {"voices": ["v1", "v2"]}},
+                 {"kind": "web_search", "id": "kinds-search", "label": "Kinds Search"},
+                 {"kind": "bogus", "id": "ignored"}],
+    "dashboard_auth": {"id": "kinds-auth", "label": "Kinds Auth"},
 }
 MEMORY = {"memory": [], "user": []}
 PANEL = """<!doctype html><html><head><title>kinds</title></head><body><h1>kinds panel</h1>
@@ -55,9 +59,13 @@ def last_user_text(req):
     return ""
 
 def last_user(messages):
+    # The user's own words: the kernel appends the turn's prefetched recall as a fenced
+    # `<recalled-context>` block to the user message (ark_kernel::lifecycle::fence), so strip
+    # those blocks before matching — the same thing ark's own `strip_fences` callers do.
     for m in reversed(messages or []):
         if m.get("role") == "user":
-            return "".join(b.get("text", "") for b in m.get("content", []) if b.get("type") == "text")
+            t = "".join(b.get("text", "") for b in m.get("content", []) if b.get("type") == "text")
+            return re.sub(r"\n\n<recalled-context.*?</recalled-context>", "", t, flags=re.S).strip()
     return ""
 
 def middleware(kind, phase, pl):
@@ -108,6 +116,35 @@ def handle(mid, method, p):
         text = " ".join(words)
         return {"message": {"role": "assistant", "content": [{"type": "text", "text": text}]}, "stop": "end_turn",
                 "usage": {"input_tokens": 3, "output_tokens": len(words)}, "model": "plug/" + req.get("model", "")}
+    if method == "ark/backend.call":
+        kind, bid, op, params = p.get("kind"), p.get("id"), p.get("op"), (p.get("params") or {})
+        log(kind="backend", bkind=kind, backend=bid, op=op, params=params)
+        if bid == "kinds-voice" and op == "synthesize":
+            if params.get("text") == "fail":
+                return {"error": "kinds tts failed"}
+            return {"audio_base64": base64.b64encode(b"ID3" + (params.get("text") or "").encode()).decode(),
+                    "mime": "audio/mpeg", "sample_rate": 24000}
+        if bid == "kinds-search" and op == "search":
+            return {"results": [{"title": "kinds result", "url": "https://example.test/kinds", "snippet": params.get("query", "")}],
+                    "answer": "kinds answer"}
+        return {"error": "unsupported " + str(kind) + "/" + str(op)}
+    if method == "ark/auth.login_start":
+        q = p.get("params") or {}
+        log(kind="auth", op="login_start", provider=p.get("id"), redirect_uri=q.get("redirect_uri"))
+        return {"url": "https://idp.example.test/authorize?client_id=kinds&state=kinds-state", "state": "kinds-state"}
+    if method in ("ark/auth.exchange", "ark/auth.verify"):
+        q = p.get("params") or {}
+        op = method.split(".", 1)[1]
+        log(kind="auth", op=op, provider=p.get("id"))
+        if op == "exchange" and q.get("state") != "kinds-state":
+            return {"error": "bad state"}
+        token = q.get("code") if op == "exchange" else q.get("token")
+        if token != "good":
+            return {"error": "invalid credentials"}
+        return {"subject": "kinds-user", "email": "u@example.test", "name": "Kinds User",
+                "expires_at": 1800000000, "admin": False}
+    if method == "ark/auth.refresh":
+        return {"error": "kinds auth cannot refresh"}
     if method == "ark/middleware":
         return middleware(p.get("kind"), p.get("phase"), p.get("payload") or {})
     if method == "ark/cli":

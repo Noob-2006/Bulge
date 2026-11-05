@@ -22,6 +22,9 @@
 //! one-time code (no credential sent; HTTP only on loopback) and persists the
 //! returned bot token to the channel state dir (0600).
 
+#[path = "clickclack_discussion.rs"]
+mod discussion;
+
 use crate::http::{Http, Payload};
 use crate::{
     sleep_cancellable, write_atomic, Caps, Channel, ChannelError, ChannelErrorKind as K, ChatType, Inbound, LenUnit, Markup, Media, MediaKind, Outbound, ReplyRef, Sent, Streaming,
@@ -656,6 +659,11 @@ impl Channel for ClickClack {
         }
     }
 
+    /// The session `discussion` tool (see [`discussion`]).
+    fn tools(&self) -> Vec<Arc<dyn ark_core::Tool>> {
+        vec![discussion::tool(&self.core)]
+    }
+
     fn stop(&self) {
         self.core.stop.cancel();
     }
@@ -776,6 +784,11 @@ pub fn build(ctx: &crate::config::Ctx, s: &serde_json::Map<String, Value>) -> Re
 
 fn s_of(v: &Value) -> String {
     v.as_str().unwrap_or("").to_string()
+}
+
+#[cfg(test)]
+fn discussion_hash_for_tests(s: &str) -> String {
+    ark_net::crypto::hex(&ark_net::crypto::sha256(s.as_bytes()))
 }
 
 #[cfg(test)]
@@ -1081,4 +1094,74 @@ mod tests {
         assert_eq!(parse_rfc3339("1970-01-01T00:00:00Z"), Some(0));
         assert_eq!(parse_rfc3339("2024-01-02T03:04:05.123+01:00"), Some(1704164645 - 3600));
     }
+
+    /// OpenClaw `discussions/tool.test.ts` + `service.test.ts`: open creates a managed public
+    /// channel bound to the session (adopted on re-open), read merges roots and complete
+    /// threads into the latest-N window as one record per line, close archives it.
+    #[test]
+    fn discussion_tool_opens_reads_and_closes() {
+        let archived = Arc::new(AtomicBool::new(false));
+        let a2 = archived.clone();
+        let srv = FakeServer::start(move |req, _| {
+            let p = req.path.as_str();
+            match (req.method.as_str(), p) {
+                ("GET", "/api/me") => ok(json!({"user": {"id": "usr_bot", "handle": "arkbot"}})),
+                ("GET", "/api/workspaces") => ok(json!({"workspaces": [{"id": "wsp_1", "slug": "team", "name": "Team"}]})),
+                ("GET", "/api/workspaces/wsp_1/channels") => ok(json!({"channels": [{"id": "chn_x", "name": "fix-parser"}]})),
+                ("POST", "/api/workspaces/wsp_1/channels") => {
+                    let b = req.json();
+                    assert_eq!((b["kind"].as_str(), b["external_managed"].as_bool(), b["name"].as_str()), (Some("public"), Some(true), Some("fix-parser-2")));
+                    ok(json!({"channel": {"id": "chn_d", "name": b["name"], "external_ref": b["external_ref"], "route_id": "r1"}}))
+                }
+                ("GET", "/api/channels/chn_d") => {
+                    let xr = format!("ark-discussion:{}", &super::discussion_hash_for_tests("sess-1")[..32]);
+                    ok(json!({"channel": {"id": "chn_d", "external_ref": xr, "archived": a2.load(Ordering::SeqCst)}}))
+                }
+                ("GET", p) if p.starts_with("/api/channels/chn_d/messages") => {
+                    if p.contains("before_seq=10") {
+                        ok(json!({"messages": [msg("m1", json!({"body": "first", "created_at": "2024-01-01T00:00:01Z", "author": {"display_name": "Amy"}}))], "oldest_seq": 9, "has_older": false}))
+                    } else {
+                        ok(json!({"messages": [
+                            msg("m3", json!({"body": "line\u{2028}two", "created_at": "2024-01-01T00:00:03Z", "author_id": "usr_bob", "author": {"handle": "bob"}})),
+                            msg("m2", json!({"body": "root", "created_at": "2024-01-01T00:00:02Z", "thread_state": {"reply_count": 1, "last_reply_at": "2024-01-01T00:00:04Z"}}))
+                        ], "oldest_seq": 10, "has_older": true}))
+                    }
+                }
+                ("GET", "/api/messages/m2/thread?limit=200") => ok(json!({"replies": [msg("r1", json!({"body": "reply", "created_at": "2024-01-01T00:00:04Z"}))]})),
+                ("PATCH", "/api/channels/chn_d") => {
+                    assert_eq!(req.json()["archived"], true);
+                    a2.store(true, Ordering::SeqCst);
+                    ok(json!({"channel": {"id": "chn_d"}}))
+                }
+                _ => (500, vec![], format!("unexpected {} {p}", req.method)),
+            }
+        });
+        let dir = temp_dir("ccd");
+        let c = cc(&srv.url, dir.join("cursor.json"));
+        let tools = c.tools();
+        assert_eq!(tools[0].spec().name, "discussion_cc");
+        let mut ctx = crate::testutil::tool_ctx();
+        ctx.session_id = "sess-1".into();
+        let r = tools[0].call(&ctx, json!({}));
+        assert!(r.content.starts_with("No discussion is bound"), "{}", r.content);
+        let r = tools[0].call(&ctx, json!({"action": "open", "title": "Fix parser"}));
+        assert!(!r.is_error && r.content.contains("chn_d"), "{}", r.content);
+        let saved: Value = serde_json::from_str(&std::fs::read_to_string(dir.join("cursor.json.discussions.json")).unwrap()).unwrap();
+        assert_eq!(saved["sess-1"]["channel_id"], "chn_d");
+        let r = tools[0].call(&ctx, json!({"limit": 3}));
+        assert!(!r.is_error, "{}", r.content);
+        let lines: Vec<&str> = r.content.split("\n\n").next().unwrap().lines().collect();
+        assert_eq!(lines.len(), 3, "{lines:?}");
+        assert_eq!(lines[0], "timestamp=\"2024-01-01T00:00:02Z\" [Author \"Amy\" id=\"usr_amy\"] text=\"root\"");
+        assert!(lines[1].contains("[Author \"bob\" id=\"usr_bob\"] text=\"line\\u2028two\""), "{}", lines[1]);
+        assert!(lines[2].ends_with("text=\"reply\""));
+        // Another session sees nothing; close archives and unbinds.
+        let mut other = crate::testutil::tool_ctx();
+        other.session_id = "sess-2".into();
+        assert!(tools[0].call(&other, json!({"action": "read"})).content.starts_with("No discussion"));
+        assert!(tools[0].call(&ctx, json!({"action": "close"})).content.starts_with("Archived"));
+        assert!(tools[0].call(&ctx, json!({})).content.starts_with("No discussion"));
+        assert!(tools[0].call(&ctx, json!({"action": "nuke"})).is_error);
+    }
 }
+

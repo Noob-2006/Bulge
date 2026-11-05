@@ -1,6 +1,8 @@
 """Scripted fake LLM provider speaking OpenAI Chat Completions and Anthropic
 Messages (streaming SSE). POST /__script with a JSON list to queue replies;
-GET /__requests returns what was received.
+GET /__requests returns what was received; GET /api.json is the models.dev-shaped
+metadata for the models below (ark takes context window and capabilities — image
+input included — from models.dev, not from /v1/models).
 
 Reply items:
   {"text": "..."}                         assistant text
@@ -17,6 +19,40 @@ LOCK = threading.Lock()
 QUEUE = []
 SEEN = []
 N = [0]
+
+# What this fake advertises for its models, in models.dev's `api.json` shape (the metadata ark
+# actually resolves capabilities from). `fake-model` accepts image input, so the send path must
+# forward images to it instead of substituting text (`crates/ark-kernel/src/imgprep.rs`).
+MODELS_DEV = {
+    "fake": {
+        "id": "fake",
+        "name": "Fake",
+        "models": {
+            "fake-model": {
+                "id": "fake-model",
+                "name": "Fake Model",
+                "attachment": True,
+                "modalities": {"input": ["text", "image"], "output": ["text"]},
+                "limit": {"context": 32768, "output": 4096},
+                "tool_call": True,
+            }
+        },
+    },
+    "fakeanth": {
+        "id": "fakeanth",
+        "name": "Fake Anthropic",
+        "models": {
+            "fake-claude": {
+                "id": "fake-claude",
+                "name": "Fake Claude",
+                "attachment": True,
+                "modalities": {"input": ["text", "image"], "output": ["text"]},
+                "limit": {"context": 200000, "output": 64000},
+                "tool_call": True,
+            }
+        },
+    },
+}
 
 
 def next_item():
@@ -46,6 +82,8 @@ class H(BaseHTTPRequestHandler):
         if self.path == "/__requests":
             with LOCK:
                 self.send_json(200, SEEN)
+        elif self.path == "/api.json":
+            self.send_json(200, MODELS_DEV)
         elif self.path.endswith("/models"):
             if self.headers.get("authorization") == "Bearer bad-key":
                 self.send_json(401, {"error": {"message": "invalid api key", "type": "authentication_error"}})

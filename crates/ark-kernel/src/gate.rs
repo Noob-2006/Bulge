@@ -35,6 +35,26 @@ pub struct GateConfig {
 pub enum GateKind {
     Privilege,
     Egress,
+    /// Exec approval policy (allowlist misses, ask=always, strict inline eval).
+    Exec,
+    /// Writes that need the user's say-so (agent policy files, memory/skill writes).
+    Write,
+}
+
+thread_local! {
+    static CWD: std::cell::RefCell<Option<std::path::PathBuf>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Judge with `cwd` as the directory relative script paths resolve against.
+pub fn with_cwd<R>(cwd: &Path, f: impl FnOnce() -> R) -> R {
+    let prev = CWD.with(|c| c.replace(Some(cwd.to_path_buf())));
+    let r = f();
+    CWD.with(|c| *c.borrow_mut() = prev);
+    r
+}
+
+fn current_cwd() -> std::path::PathBuf {
+    CWD.with(|c| c.borrow().clone()).or_else(|| std::env::current_dir().ok()).unwrap_or_else(|| "/".into())
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -69,15 +89,25 @@ impl Gates<'_> {
             Effect::Write { path } => (GateKind::Privilege, system_path(&path.to_string_lossy()).then(|| format!("writes system path {}", path.display()))),
             Effect::Exec { command } => {
                 let cmds = shell::parse(command);
-                if let Some(r) = privileged(&cmds) {
-                    (GateKind::Privilege, Some(r))
+                let top = if let Some(r) = privileged(&cmds) {
+                    self.apply(GateKind::Privilege, Some(r), None)
                 } else {
                     match self.shell_egress(&cmds) {
-                        Some(Ok(r)) => (GateKind::Egress, Some(r)),
+                        Some(Ok(r)) => self.apply(GateKind::Egress, Some(r), None),
                         Some(Err(r)) => return self.apply(GateKind::Egress, None, Some(r)),
-                        None => (GateKind::Egress, None),
+                        None => Verdict::Allow,
+                    }
+                };
+                // Interpreter one-liners and executed scripts (python -c, node -e, bash x.sh…).
+                let mut worst = top;
+                for f in crate::interp::judge_commands(self, &cmds, &current_cwd()) {
+                    let v = if f.hard { self.apply(f.gate, None, Some(f.reason)) } else { self.apply(f.gate, Some(f.reason), None) };
+                    worst = stricter(worst, v);
+                    if matches!(worst, Verdict::Deny { .. }) {
+                        break;
                     }
                 }
+                return worst;
             }
             Effect::Remote { dest, reason } => {
                 if self.denied_host(dest) {
@@ -104,6 +134,7 @@ impl Gates<'_> {
         let mode = match gate {
             GateKind::Privilege => self.cfg.privilege,
             GateKind::Egress => self.cfg.egress,
+            GateKind::Exec | GateKind::Write => Mode::Ask,
         };
         match mode {
             Mode::Allow => Verdict::Allow,
@@ -116,10 +147,10 @@ impl Gates<'_> {
         let host = host_of(dest);
         list.iter().any(|h| host == *h || host.ends_with(&format!(".{h}")))
     }
-    fn allowed_host(&self, dest: &str) -> bool {
+    pub(crate) fn allowed_host(&self, dest: &str) -> bool {
         Self::host_matches(&self.cfg.egress_allow, dest)
     }
-    fn denied_host(&self, dest: &str) -> bool {
+    pub(crate) fn denied_host(&self, dest: &str) -> bool {
         Self::host_matches(&self.cfg.egress_deny, dest)
     }
 
@@ -139,7 +170,7 @@ impl Gates<'_> {
     }
 
     /// Ok(reason) → ask/deny per mode; Err(reason) → hard deny (deny-listed host).
-    fn shell_egress(&self, cmds: &[Simple]) -> Option<Result<String, String>> {
+    pub(crate) fn shell_egress(&self, cmds: &[Simple]) -> Option<Result<String, String>> {
         for (idx, c) in cmds.iter().enumerate() {
             let Some(sender) = egress_sender(c) else { continue };
             for d in &sender.dests {
@@ -230,7 +261,7 @@ fn normalize(p: &str) -> String {
     format!("/{}", parts.join("/"))
 }
 
-fn sensitive_path(p: &str) -> bool {
+pub fn sensitive_path(p: &str) -> bool {
     let p = p.trim_start_matches('@');
     let lower = p.to_ascii_lowercase();
     let name = Path::new(&lower).file_name().and_then(|s| s.to_str()).unwrap_or("");

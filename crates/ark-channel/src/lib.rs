@@ -3,6 +3,7 @@
 //! Blocking std threads only; every network wait observes a `Cancel`.
 
 pub mod access;
+pub mod action_args;
 pub mod charset;
 pub mod chunk;
 pub mod config;
@@ -10,61 +11,251 @@ pub mod dave;
 pub mod deliver;
 pub mod markup;
 pub mod http;
+pub mod message_tool;
 pub mod router;
 pub mod telegram;
 pub mod tool;
 pub mod webhook;
 // Ported channels (see docs/parity.md).
-pub mod bluebubbles;
-pub mod buzz;
-pub mod clickclack;
-pub mod dingtalk;
+// Always compiled: the core transports, and every module another crate names directly
+// (`ark_channel::whatsapp` in the binary's telephony hook, `ark_channel::discord::zlib`
+// in the TUI's PNG decoder, `ark_channel::msteams`/`msgraph_webhook` in the Teams
+// meetings bridge, `ark_channel::dave`/`olm` in storage) or that another always-compiled
+// module here uses (`line`, `sms` are the shared helpers of the WhatsApp channel).
 pub mod discord;
+pub mod discord_transcripts;
 pub mod discord_voice;
-pub mod email;
-pub mod feishu;
-pub mod googlechat;
-pub mod homeassistant;
-pub mod imessage;
-pub mod irc;
 pub mod line;
-pub mod matrix;
-pub mod matrix_backup;
-pub mod matrix_e2ee;
-pub mod matrix_sas;
-pub mod matrix_trust;
-pub mod mattermost;
 pub mod mls;
 pub mod msgraph_webhook;
 pub mod msteams;
-pub mod nextcloud_talk;
-pub mod nostr;
 pub mod olm;
-pub mod ntfy;
 pub mod p256;
-pub mod photon;
-pub mod qa_channel;
-pub mod qqbot;
-pub mod raft;
-pub mod reef;
-pub mod relay;
-pub mod signal;
-pub mod simplex;
-pub mod secp256k1;
-pub mod slack;
 pub mod sms;
-pub mod synology_chat;
-pub mod tlon;
-pub mod twitch;
-pub mod wecom;
-pub mod wecom_callback;
-pub mod weixin;
 pub mod whatsapp;
 pub mod whatsapp_cloud;
-pub mod x;
-pub mod yuanbao;
-pub mod zalo;
-pub mod zalouser;
+
+/// Declare an optional platform module behind its cargo feature (see `docs/BUILD.md`).
+///
+/// Feature on: the real module. Feature off: nothing of it is compiled, and a stub keeps
+/// `config::registry()` (which names every kind, in `config.rs`) compiling — configuring
+/// such a kind then fails with "not compiled into this build" instead of "unknown kind".
+macro_rules! optional_channels {
+    ($( $feat:literal => $m:ident ),* $(,)?) => {
+        $(
+            #[cfg(feature = $feat)]
+            pub mod $m;
+            #[cfg(not(feature = $feat))]
+            pub mod $m {
+                use std::sync::Arc;
+                /// This platform was compiled out of the build.
+                pub fn build(
+                    _ctx: &crate::config::Ctx<'_>,
+                    _settings: &serde_json::Map<String, serde_json::Value>,
+                ) -> Result<Arc<dyn crate::Channel>, String> {
+                    Err(format!(
+                        "channel kind `{}` is not compiled into this build (cargo feature `{}` is off; see docs/BUILD.md)",
+                        stringify!($m),
+                        $feat
+                    ))
+                }
+            }
+        )*
+    };
+}
+
+optional_channels! {
+    "bluebubbles" => bluebubbles,
+    "buzz" => buzz,
+    "clickclack" => clickclack,
+    "dingtalk" => dingtalk,
+    "email" => email,
+    "feishu" => feishu,
+    "googlechat" => googlechat,
+    "homeassistant" => homeassistant,
+    "imessage" => imessage,
+    "irc" => irc,
+    "matrix" => matrix,
+    "matrix_backup" => matrix_backup,
+    "matrix_e2ee" => matrix_e2ee,
+    "matrix_sas" => matrix_sas,
+    "matrix_trust" => matrix_trust,
+    "mattermost" => mattermost,
+    "nextcloud_talk" => nextcloud_talk,
+    "nostr" => nostr,
+    "ntfy" => ntfy,
+    "photon" => photon,
+    "qa_channel" => qa_channel,
+    "qqbot" => qqbot,
+    "raft" => raft,
+    "reef" => reef,
+    "relay" => relay,
+    "signal" => signal,
+    "simplex" => simplex,
+    "secp256k1" => secp256k1,
+    "slack" => slack,
+    "synology_chat" => synology_chat,
+    "tlon" => tlon,
+    "twitch" => twitch,
+    "wecom" => wecom,
+    "wecom_callback" => wecom_callback,
+    "weixin" => weixin,
+    "x" => x,
+    "yuanbao" => yuanbao,
+    "zalo" => zalo,
+    "zalouser" => zalouser,
+}
+
+/// Keeps the feature wiring above honest: every optional platform is listed in
+/// `config::registry()` exactly once, the registry entry for a kind is the module's own
+/// `build`, and with its feature off that entry is the stub (which errors without doing
+/// any work). Cheap: no builder is ever called with real settings.
+#[cfg(test)]
+mod feature_wiring {
+    use crate::config::{registry, Builder, Ctx};
+
+    fn entry(kind: &str) -> Builder {
+        registry().into_iter().find(|(k, _)| *k == kind).map(|(_, b)| b).unwrap_or_else(|| panic!("kind `{kind}` is not in config::registry()"))
+    }
+
+    // Only reachable when some platform feature is off; the default build calls no builder.
+    #[allow(dead_code)]
+    fn stub_error(kind: &str) -> String {
+        let dir = crate::testutil::temp_dir("feature-wiring");
+        let secrets: crate::config::Secrets = std::sync::Arc::new(|_: &str| String::new());
+        let e = {
+            let ctx = Ctx { name: "probe", state_dir: &dir, secrets: &secrets };
+            entry(kind)(&ctx, &serde_json::Map::new()).err().unwrap_or_default()
+        };
+        let _ = std::fs::remove_dir_all(&dir);
+        e
+    }
+
+    macro_rules! wired {
+        ($( $feat:literal => $m:ident => $kind:literal ),* $(,)?) => {
+            $(
+                // The registry entry for a kind is always that module's own `build`; when the
+                // feature is off that `build` is the stub, which errors without any work.
+                #[cfg(feature = $feat)]
+                {
+                    let want: Builder = crate::$m::build;
+                    assert_eq!(entry($kind) as usize, want as usize, "kind `{}`: feature `{}` is on but the registry entry is not `{}::build`", $kind, $feat, stringify!($m));
+                }
+                #[cfg(not(feature = $feat))]
+                {
+                    let want: Builder = crate::$m::build;
+                    assert_eq!(entry($kind) as usize, want as usize, "kind `{}`: registry entry is not `{}::build`", $kind, stringify!($m));
+                    assert!(stub_error($kind).contains("not compiled into this build"), "kind `{}`: feature `{}` is off but the real module is compiled", $kind, $feat);
+                }
+            )*
+        };
+    }
+
+    #[test]
+    fn registry_lists_every_kind_once() {
+        let mut kinds: Vec<&str> = registry().iter().map(|(k, _)| *k).collect();
+        let total = kinds.len();
+        kinds.sort_unstable();
+        kinds.dedup();
+        assert_eq!(kinds.len(), total, "config::registry() lists a channel kind twice");
+        for required in ["telegram", "webhook", "whatsapp", "discord"] {
+            assert!(kinds.contains(&required), "core kind `{required}` is missing from the registry");
+        }
+    }
+
+    /// `[features]` maps names to names (cheap parse: cargo metadata is not available here).
+    fn manifest_features() -> std::collections::BTreeMap<String, Vec<String>> {
+        let manifest = include_str!("../Cargo.toml");
+        let section = manifest.split("[features]").nth(1).expect("`[features]` in Cargo.toml");
+        let body: String = section
+            .lines()
+            .take_while(|l| !l.trim_start().starts_with('['))
+            .filter(|l| !l.trim_start().starts_with('#'))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let mut map = std::collections::BTreeMap::new();
+        for chunk in body.split(']') {
+            let Some((name, items)) = chunk.split_once('=') else { continue };
+            let list = items.split('[').nth(1).unwrap_or("");
+            let list: Vec<String> = list.split(',').map(|v| v.trim().trim_matches('"').to_string()).filter(|v| !v.is_empty()).collect();
+            map.insert(name.trim().to_string(), list);
+        }
+        map
+    }
+
+    /// Every feature the module table below uses must be reachable from `all` (and `default`
+    /// must include `all`): forgetting one would silently drop a platform from the default
+    /// build, which must stay equivalent to the pre-feature binary.
+    #[test]
+    fn all_and_default_cover_every_platform_feature() {
+        let feats = manifest_features();
+        let expand = |name: &str| -> Vec<String> {
+            let mut seen = vec![name.to_string()];
+            let mut i = 0;
+            while i < seen.len() {
+                for dep in feats.get(&seen[i]).into_iter().flatten() {
+                    if !seen.contains(dep) {
+                        seen.push(dep.clone());
+                    }
+                }
+                i += 1;
+            }
+            seen
+        };
+        assert!(feats.get("default").is_some_and(|d| d.iter().any(|f| f == "all")), "`default` must include `all`: {feats:?}");
+        let reachable = expand("all");
+        let table = include_str!("lib.rs").split("optional_channels! {").nth(1).and_then(|s| s.split('}').next()).expect("optional_channels! table in lib.rs");
+        let mut checked = 0;
+        for line in table.lines() {
+            let Some((feat, _)) = line.split_once("=>") else { continue };
+            let feat = feat.trim().trim_matches('"');
+            assert!(feats.contains_key(feat), "feature `{feat}` is used in lib.rs but not declared in Cargo.toml `[features]`");
+            assert!(reachable.iter().any(|f| f == feat), "feature `{feat}` is not reachable from `all` in Cargo.toml");
+            checked += 1;
+        }
+        assert_eq!(checked, 39, "the optional platform table lost or gained entries (checked {checked})");
+    }
+
+    #[test]
+    fn every_platform_feature_is_wired() {
+        wired! {
+            "bluebubbles" => bluebubbles => "bluebubbles",
+            "buzz" => buzz => "buzz",
+            "clickclack" => clickclack => "clickclack",
+            "dingtalk" => dingtalk => "dingtalk",
+            "email" => email => "email",
+            "feishu" => feishu => "feishu",
+            "googlechat" => googlechat => "googlechat",
+            "homeassistant" => homeassistant => "homeassistant",
+            "imessage" => imessage => "imessage",
+            "irc" => irc => "irc",
+            "matrix" => matrix => "matrix",
+            "mattermost" => mattermost => "mattermost",
+            "nextcloud_talk" => nextcloud_talk => "nextcloud_talk",
+            "nostr" => nostr => "nostr",
+            "ntfy" => ntfy => "ntfy",
+            "photon" => photon => "photon",
+            "qa_channel" => qa_channel => "qa-channel",
+            "qqbot" => qqbot => "qqbot",
+            "raft" => raft => "raft",
+            "reef" => reef => "reef",
+            "relay" => relay => "relay",
+            "signal" => signal => "signal",
+            "simplex" => simplex => "simplex",
+            "slack" => slack => "slack",
+            "synology_chat" => synology_chat => "synology-chat",
+            "tlon" => tlon => "tlon",
+            "twitch" => twitch => "twitch",
+            "wecom" => wecom => "wecom",
+            "wecom_callback" => wecom_callback => "wecom_callback",
+            "weixin" => weixin => "weixin",
+            "x" => x => "x",
+            "yuanbao" => yuanbao => "yuanbao",
+            "zalo" => zalo => "zalo",
+            "zalouser" => zalouser => "zalouser",
+        }
+    }
+}
 
 #[cfg(test)]
 mod testutil;
@@ -418,6 +609,18 @@ pub trait Channel: Send + Sync {
     fn stream_finish(&self, _chat: &str, _handle: &str, _text: &str, _delta: &str) -> Result<(), ChannelError> {
         Ok(())
     }
+    /// Extended message actions for the `message` tool (OpenClaw's closed action vocabulary:
+    /// `poll`, `pin`, `unpin`, `list-pins`, `read`, `reactions`, `search`, `thread-create`,
+    /// `thread-list`, `member-info`, `channel-info`, `channel-list`, …). `args` is the tool
+    /// input as the model sent it (camelCase keys, `target` = chat id; polls arrive normalised
+    /// by `message::normalize_poll`). Returns a JSON result for the model.
+    fn message_action(&self, action: &str, _args: &serde_json::Value) -> Result<serde_json::Value, ChannelError> {
+        Err(unsupported(action))
+    }
+    /// The `message_action` names this channel implements (advertised to the model).
+    fn message_actions(&self) -> Vec<&'static str> {
+        Vec::new()
+    }
     /// Channel-specific agent tools (e.g. zalouser's friend / group lookup).
     fn tools(&self) -> Vec<std::sync::Arc<dyn ark_core::Tool>> {
         Vec::new()
@@ -437,6 +640,52 @@ pub struct Wiring {
     /// Every configured channel: name, channel (weak: no cycles), default chat.
     pub peers: Vec<(String, std::sync::Weak<dyn Channel>, Option<String>)>,
     pub cron: Option<CronFire>,
+    /// Session id → its route (channel, chat, sender), for requester-bound channel tools.
+    pub session_origin: Option<crate::whatsapp::SessionOrigin>,
+}
+
+static MENU: std::sync::RwLock<Vec<(String, String)>> = std::sync::RwLock::new(Vec::new());
+
+/// Commands channels register as native menus (Telegram `setMyCommands`, Discord application
+/// commands): (name, description). Set by the host from its slash-command table; empty = the
+/// channel's built-in short list.
+pub fn set_menu(cmds: Vec<(String, String)>) {
+    *MENU.write().unwrap() = cmds;
+}
+
+pub fn menu() -> Vec<(String, String)> {
+    MENU.read().unwrap().clone()
+}
+
+/// Telegram: names `[a-z0-9_]{1,32}` (hyphens become underscores), descriptions 1–256 chars, ≤100.
+pub fn telegram_menu(cmds: &[(String, String)]) -> Vec<serde_json::Value> {
+    let mut seen = std::collections::HashSet::new();
+    cmds.iter()
+        .filter_map(|(n, d)| {
+            let n = n.to_lowercase().replace('-', "_");
+            (n.len() <= 32 && !n.is_empty() && n.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_') && seen.insert(n.clone())).then(|| serde_json::json!({"command": n, "description": clip_desc(d, 256)}))
+        })
+        .take(100)
+        .collect()
+}
+
+/// Discord: CHAT_INPUT commands, names `[-_a-z0-9]{1,32}`, descriptions 1–100 chars, ≤100,
+/// each with an optional free-text `args` option (delivered as `/name args`).
+pub fn discord_menu(cmds: &[(String, String)]) -> Vec<serde_json::Value> {
+    cmds.iter()
+        .filter(|(n, _)| n.len() <= 32 && !n.is_empty() && n.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_' || b == b'-'))
+        .take(100)
+        .map(|(n, d)| serde_json::json!({"name": n, "description": clip_desc(d, 100), "type": 1, "options": [{"type": 3, "name": "args", "description": "arguments", "required": false}]}))
+        .collect()
+}
+
+fn clip_desc(d: &str, max: usize) -> String {
+    let d = if d.trim().is_empty() { "command" } else { d.trim() };
+    if d.chars().count() <= max {
+        d.to_string()
+    } else {
+        format!("{}…", d.chars().take(max - 1).collect::<String>())
+    }
 }
 
 pub fn unsupported(what: &str) -> ChannelError {
@@ -480,4 +729,20 @@ pub(crate) fn write_atomic(path: &std::path::Path, data: &[u8]) -> std::io::Resu
     let tmp = path.with_extension(format!("tmp{}", std::process::id()));
     std::fs::write(&tmp, data)?;
     std::fs::rename(&tmp, path)
+}
+
+#[cfg(test)]
+mod menu_tests {
+    #[test]
+    fn native_menus_follow_platform_rules() {
+        let cmds: Vec<(String, String)> = vec![("help".into(), "Show commands".into()), ("export-session".into(), "x".repeat(300)), ("Bad Name".into(), "no".into()), ("help".into(), "dup".into())];
+        let t = super::telegram_menu(&cmds);
+        assert_eq!(t.len(), 2);
+        assert_eq!(t[1]["command"], "export_session");
+        assert_eq!(t[1]["description"].as_str().unwrap().chars().count(), 256);
+        let d = super::discord_menu(&cmds);
+        assert_eq!(d[1]["name"], "export-session");
+        assert_eq!(d[1]["description"].as_str().unwrap().chars().count(), 100);
+        assert_eq!(d[0]["options"][0]["name"], "args");
+    }
 }

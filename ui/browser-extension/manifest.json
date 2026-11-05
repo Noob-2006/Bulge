@@ -1,0 +1,20 @@
+{
+  "manifest_version": 3,
+  "name": "ark browser relay",
+  "version": "1.0.0",
+  "description": "Relays your own Chrome tabs (via chrome.debugger) to the local ark agent over a loopback WebSocket.",
+  "minimum_chrome_version": "116",
+  "permissions": ["debugger", "tabs", "storage", "activeTab", "alarms"],
+  "host_permissions": ["http://127.0.0.1/*", "http://localhost/*"],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_title": "ark browser relay",
+    "default_popup": "popup.html"
+  },
+  "options_ui": {
+    "page": "options.html",
+    "open_in_tab": true
+  }
+}

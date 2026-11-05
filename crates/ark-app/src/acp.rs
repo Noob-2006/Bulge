@@ -138,7 +138,7 @@ impl Approver for AcpApprover {
 pub fn kind_of(tool: &str) -> &'static str {
     match tool {
         "read" | "memory" | "session_search" | "skill" | "a2a_history" | "a2a_list" => "read",
-        "write" | "edit" | "patch" => "edit",
+        "write" | "edit" | "patch" | "apply_patch" => "edit",
         "grep" | "glob" | "web_search" => "search",
         "shell" | "job" | "run" | "spawn" | "node_invoke" | "acp_delegate" => "execute",
         "web_fetch" | "a2a_call" | "a2a_discover" | "a2a_orchestrate" | "a2a_task" => "fetch",
@@ -167,7 +167,7 @@ fn diff_content(name: &str, input: &Value) -> Vec<Value> {
 /// Edits as whole-file diffs computed against the files in `ws` (before the call
 /// runs); snippet diffs when the preview fails (file gone, ambiguous edit).
 fn edit_diffs(ws: &Path, name: &str, input: &Value) -> Vec<Value> {
-    if !matches!(name, "write" | "edit" | "patch") {
+    if !matches!(name, "write" | "edit" | "patch" | "apply_patch") {
         return vec![];
     }
     match ark_tools::preview(ws, name, input) {
@@ -415,7 +415,7 @@ pub fn serve(k: Kernel, commands: Vec<(String, String)>, acp: AcpConfig, slot: A
     k.add_tap(Arc::new(move |sid: &str, ev: &ark_kernel::event::Event| {
         if let EventKind::ToolCalled { tool_use_id, name, input, .. } = &ev.kind {
             let ws = p2.cwds.lock().unwrap().get(sid).cloned();
-            if let Some(ws) = ws.filter(|_| matches!(name.as_str(), "write" | "edit" | "patch")) {
+            if let Some(ws) = ws.filter(|_| matches!(name.as_str(), "write" | "edit" | "patch" | "apply_patch")) {
                 p2.diffs.lock().unwrap().insert(tool_use_id.clone(), edit_diffs(&ws, name, input));
             }
         }

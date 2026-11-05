@@ -9,6 +9,7 @@
 <link rel="icon" href="/ui/star.svg" type="image/svg+xml">
 <link rel="stylesheet" href="/ui/theme.css">
 <link rel="stylesheet" href="/ui/app.css">
+<link rel="stylesheet" href="/ui/pages.css">
 </head>
 <body>
 <div class="starfield" id="starfield" aria-hidden="true"></div>
@@ -20,35 +21,48 @@
       <span class="star twinkle logo" style="--size:26px"></span>
       <div>
         <div class="brand-name">ark</div>
-        <div class="brand-sub" id="conn">尚未連線</div>
+        <div class="brand-sub" id="conn" data-i18n="conn.idle">尚未連線</div>
       </div>
     </header>
-    <button class="btn new" id="newSession">＋ 新對話</button>
+    <button class="btn new" id="newSession" data-i18n="new">＋ 新對話</button>
     <nav class="sessions" id="sessions" aria-label="對話清單"></nav>
     <nav class="plugin-panels" id="pluginPanels" aria-label="外掛面板"></nav>
     <footer class="side-foot">
-      <button class="btn ghost small" id="showNodes">裝置</button>
-      <button class="btn ghost small" id="showSettings">設定</button>
+      <button class="btn ghost small" id="showBoards" data-i18n="boards">儀表板</button>
+      <button class="btn ghost small" id="showBoardsAll" data-i18n="boards_all">總覽</button>
+      <button class="btn ghost small" id="showNodes" data-i18n="devices">裝置</button>
+      <button class="btn ghost small" id="showControl" data-i18n="control">控制台</button>
+      <button class="btn ghost small" id="showSettings" data-i18n="settings">設定</button>
     </footer>
   </aside>
 
   <main class="main">
     <header class="topbar">
       <button class="btn ghost small menu" id="menu" aria-label="開關側欄">☰</button>
-      <div class="title" id="title">選擇或建立一個對話</div>
+      <div class="title" id="title" data-i18n="pick">選擇或建立一個對話</div>
       <div class="status" id="status"></div>
+      <button class="btn ghost small" id="lang" title="Language">EN</button>
+      <select id="theme" class="theme-pick" title="Theme" aria-label="Theme">
+        <option value="crimson" data-i18n="theme.crimson">深緋紅</option>
+        <option value="midnight" data-i18n="theme.midnight">極夜</option>
+        <option value="daylight" data-i18n="theme.daylight">日光</option>
+      </select>
     </header>
 
     <section class="log" id="log" aria-live="polite"></section>
 
     <section class="pending" id="pending"></section>
 
+    <div class="attachments" id="attachments" hidden></div>
+    <div class="slash-menu panel cornered" id="slashMenu" hidden role="listbox" aria-label="Commands"></div>
     <form class="composer panel cornered" id="composer">
       <span class="star corner tl"></span><span class="star corner tr"></span><span class="star corner bl"></span><span class="star corner br"></span>
-      <textarea id="input" rows="1" placeholder="輸入訊息…" title="Enter 送出，Shift+Enter 換行" autocomplete="off"></textarea>
+      <button type="button" class="btn ghost small" id="attach" data-i18n="attach" title="Attach a file (or paste / drop one)">附加</button>
+      <input type="file" id="file" multiple hidden>
+      <textarea id="input" rows="1" placeholder="輸入訊息…  / 顯示指令" data-i18n-ph="input" title="Enter 送出，Shift+Enter 換行" autocomplete="off"></textarea>
       <div class="composer-actions">
-        <button type="button" class="btn ghost small" id="stop" hidden>停止</button>
-        <button type="submit" class="btn" id="send">送出</button>
+        <button type="button" class="btn ghost small" id="stop" hidden data-i18n="stop">停止</button>
+        <button type="submit" class="btn" id="send" data-i18n="send">送出</button>
       </div>
     </form>
   </main>
@@ -57,17 +71,17 @@
 <dialog id="login" class="panel cornered">
   <span class="star corner tl"></span><span class="star corner tr"></span><span class="star corner bl"></span><span class="star corner br"></span>
   <form method="dialog" id="loginForm">
-    <div class="dialog-head"><span class="star spin" style="--size:22px"></span><h2>連線到 ark</h2></div>
-    <p class="dim">輸入 App Server 的 token（<code>ark app token</code> 會顯示）。</p>
+    <div class="dialog-head"><span class="star spin" style="--size:22px"></span><h2 data-i18n="login">連線到 ark</h2></div>
+    <p class="dim" id="loginHint">輸入 App Server 的 token（<code>ark app token</code> 會顯示）。</p>
     <input id="token" type="password" autocomplete="current-password" placeholder="token" required>
-    <label class="check"><input type="checkbox" id="remember" checked> 記住這台裝置</label>
-    <menu><button class="btn" value="ok">連線</button></menu>
+    <label class="check"><input type="checkbox" id="remember" checked> <span data-i18n="remember">記住這台裝置</span></label>
+    <menu><button class="btn" value="ok" data-i18n="connect">連線</button></menu>
   </form>
 </dialog>
 
 <dialog id="panelDialog" class="panel cornered wide">
   <span class="star corner tl"></span><span class="star corner tr"></span><span class="star corner bl"></span><span class="star corner br"></span>
-  <div class="dialog-head"><h2 id="panelTitle"></h2><button class="btn ghost small" id="panelClose">關閉</button></div>
+  <div class="dialog-head"><h2 id="panelTitle"></h2><button class="btn ghost small" id="panelClose" data-i18n="close">關閉</button></div>
   <div id="panelBody"></div>
 </dialog>
 
@@ -76,5 +90,7 @@
 </template>
 
 <script src="/ui/app.js"></script>
+<script src="/ui/surfaces.js"></script>
+<script src="/ui/pages.js"></script>
 </body>
 </html>

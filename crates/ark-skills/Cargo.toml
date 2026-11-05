@@ -1,0 +1,28 @@
+[package]
+name = "ark-skills"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+# Model adapters that only some installs need (AWS Bedrock, Vertex/Gemini, the external
+# agent CLIs, the hosted Agents API, managed llama.cpp). `default` keeps the build
+# complete; the binary's `--no-default-features` build turns it off (docs/BUILD.md).
+default = ["providers"]
+providers = ["ark-kernel/providers"]
+
+[dependencies]
+ark-core.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+regex.workspace = true
+ureq.workspace = true
+ring.workspace = true
+base64.workspace = true
+libc.workspace = true
+ark-kernel = { path = "../ark-kernel", default-features = false }
+ark-tools.workspace = true # the `skill` writer (create/update/archive) behind this crate's view
+toml.workspace = true
+ark-security.workspace = true # Skills Guard, plugin guard, URL policy, env scrub
+ark-plugin.workspace = true # `ark plugins` lists/enables the built-in plugins (`ark_plugin::builtin`)
+miniz_oxide = "0.9" # ClawHub ZIP downloads (already in the tree via ark-media)

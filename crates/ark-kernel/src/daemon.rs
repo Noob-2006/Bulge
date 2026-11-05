@@ -67,7 +67,7 @@ impl Daemon {
     /// hosts list theirs via `capabilities`).
     pub const METHODS: &'static [&'static str] = &[
         "ping", "session.list", "session.create", "session.submit", "session.interrupt", "session.history", "session.view",
-        "gate.pending", "gate.answer", "goal.start", "goal.list", "schedule.list", "models.list", "tools.list", "shutdown", "session.attach", "events.subscribe",
+        "gate.pending", "gate.answer", "session.command", "goal.start", "goal.list", "schedule.list", "models.list", "tools.list", "shutdown", "session.attach", "events.subscribe",
     ];
 
     pub fn run(self: Arc<Self>) -> Result<(), String> {
@@ -94,6 +94,14 @@ impl Daemon {
         STOP.store(false, Ordering::SeqCst);
 
         self.resume();
+        // C7: the process-group supervisor. `ark-tools` registers every group it starts;
+        // this thread reaps the ones whose owner died (crash, SIGKILL, daemon restart). It
+        // only ever signals groups it recorded itself, and only when the recorded start time
+        // still matches — a recycled pid (the user's browser) is never touched.
+        let reap = self.k.cfg.limits.reap_interval_secs;
+        if reap > 0 {
+            crate::reaper::spawn_sweeper(self.k.paths.data.clone(), Duration::from_secs(reap));
+        }
         let me = self.clone();
         let sched = std::thread::spawn(move || me.scheduler_loop());
         sd_notify("READY=1\nSTATUS=arkd listening");
@@ -152,6 +160,10 @@ impl Daemon {
     }
 
     fn start_goal(&self, id: &str) -> bool {
+        if ark_security::estop::is_engaged(&self.k.paths.data) {
+            eprintln!("arkd: goal {id} not started: paused (ark resume)");
+            return false;
+        }
         if !self.busy_goals.lock().unwrap().insert(id.to_string()) {
             return false;
         }
@@ -166,6 +178,26 @@ impl Daemon {
     }
 
     /// Delete sessions older than `compliance.retention_days` (never a running one).
+    /// Retry the session of every due provider pause (`limits::due_pauses`). A pause that
+    /// keeps failing backs off (1 min → 1 h for transient, 15 min → 6 h for billing); the
+    /// session never dies and its log is untouched between attempts.
+    fn retry_paused(&self) -> usize {
+        if ark_security::estop::is_engaged(&self.k.paths.data) {
+            return 0;
+        }
+        let mut n = 0;
+        for p in crate::limits::due_pauses(&self.k.paths.data, crate::event::now_ms()) {
+            if p.session.is_empty() || self.k.is_running(&p.session) {
+                continue;
+            }
+            crate::limits::bump_pause(&self.k.paths.data, &p);
+            eprintln!("arkd: resuming paused session {} ({})", p.session, p.reason);
+            let _ = self.k.start(&p.session, Default::default());
+            n += 1;
+        }
+        n
+    }
+
     pub fn enforce_retention(&self) -> usize {
         let Some(days) = self.k.cfg.compliance.retention_days.filter(|d| *d > 0) else { return 0 };
         let cutoff = crate::event::now_ms().saturating_sub(days as u64 * 86_400_000);
@@ -186,10 +218,29 @@ impl Daemon {
         let tick = Duration::from_secs(self.k.cfg.schedule.tick_secs.max(1));
         let mut last = Instant::now() - tick;
         let mut last_retention = Instant::now() - Duration::from_secs(3600);
+        // C1/C2: paused sessions are retried on their own schedule (a transient network
+        // failure or a topped-up account resumes without the user doing anything).
+        let mut last_resume = Instant::now() - Duration::from_secs(30);
         while !STOP.load(Ordering::SeqCst) {
+            if last_resume.elapsed() >= Duration::from_secs(30) {
+                last_resume = Instant::now();
+                self.retry_paused();
+            }
             if last_retention.elapsed() >= Duration::from_secs(3600) {
                 last_retention = Instant::now();
                 self.enforce_retention();
+                let c = &self.k.cfg.checkpoint;
+                if c.auto_prune {
+                    let _ = crate::checkpoint::Store::new(&self.k.paths.data).maybe_auto_prune(c.retention_days, c.min_interval_hours, c.max_total_size_mb * 1024 * 1024);
+                }
+            }
+            // Global emergency stop: claim nothing (jobs stay due and run after `ark resume`).
+            if last.elapsed() >= tick && ark_security::estop::is_engaged(&self.k.paths.data) {
+                last = Instant::now();
+            }
+            // An external cron provider (chronos) owns firing: it calls back per job.
+            if last.elapsed() >= tick && crate::cronjob::chronos::owns_ticks(&self.k.paths.data) {
+                last = Instant::now();
             }
             if last.elapsed() >= tick {
                 last = Instant::now();
@@ -209,6 +260,8 @@ impl Daemon {
                     Err(e) => eprintln!("arkd: scheduler: {e}"),
                 }
             }
+            crate::kanban::dispatch::daemon_tick(&self.k);
+            crate::heartbeat::daemon_tick(&self.k);
             std::thread::sleep(Duration::from_millis(200));
         }
     }
@@ -283,6 +336,19 @@ impl Daemon {
                     Err((-32001, "no such pending item (already answered or timed out)".into()))
                 }
             }
+            // Security slash commands (/approve /deny /yolo /approvals /elevated /exec /pause /resume)
+            // for the TUI and web UI; `handled: false` when the line is not one of them.
+            "session.command" => {
+                let line = need("line")?;
+                let sid = s("id").filter(|i| !i.is_empty());
+                if let Some(i) = sid.as_deref().filter(|i| !k.store.exists(i)) {
+                    return Err((-32602, format!("no such session `{i}`")));
+                }
+                Ok(match crate::secgate::chat_command(k, &line, sid.as_deref(), None) {
+                    Some(text) => json!({"handled": true, "text": text}),
+                    None => json!({"handled": false}),
+                })
+            }
             "goal.start" => Ok(json!({"started": self.start_goal(&need("id")?)})),
             "goal.list" => automation::read_list::<Goal>(&automation::goals_path(&k.paths.data)).map(|g| json!(g)).map_err(|e| (-32000, e)),
             "schedule.list" => automation::read_list::<Job>(&automation::jobs_path(&k.paths.data)).map(|j| json!(j)).map_err(|e| (-32000, e)),
@@ -307,6 +373,7 @@ impl Daemon {
                 Ok(json!({"stopping": true}))
             }
             "" => Err((-32600, "missing method".into())),
+            m if m.starts_with("kanban.") || m.starts_with("board.") => crate::kanban::methods::call(k, m, p).unwrap_or_else(|| Err((-32601, format!("unknown method `{m}`")))),
             m => {
                 for f in self.ext.lock().unwrap().iter() {
                     if let Some(r) = f(m, p) {
@@ -398,7 +465,7 @@ fn pending_session(i: &PendingItem) -> &str {
 fn pending_json(i: PendingItem) -> Value {
     match i {
         PendingItem::Approval(a) => json!({"kind":"approval","id":a.id,"session":a.session,"tool":a.tool,"gate":format!("{:?}", a.gate).to_lowercase(),"reason":a.reason,"summary":a.summary}),
-        PendingItem::Question { id, session, question } => json!({"kind":"question","id":id,"session":session,"question":question}),
+        PendingItem::Question { id, session, question, choices, multi } => json!({"kind":"question","id":id,"session":session,"question":question,"choices":choices,"multi_select":multi}),
     }
 }
 
@@ -462,4 +529,38 @@ pub fn stream(sock: &Path, method: &str, params: Value, mut on: impl FnMut(&Valu
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod session_command_tests {
+    use super::*;
+
+    struct NoModels;
+    impl crate::kernel::Resolver for NoModels {
+        fn provider(&self, id: &str) -> Result<Arc<dyn ark_core::Provider>, String> {
+            Err(format!("no provider {id}"))
+        }
+    }
+
+    #[test]
+    fn session_command_runs_security_slash_commands() {
+        let root = std::env::temp_dir().join(format!("ark-daemon-cmd-{}", std::process::id()));
+        let paths = crate::config::Paths { data: root.join("data"), config_dir: root.join("cfg"), runtime: root.join("run") };
+        std::fs::create_dir_all(&root).unwrap();
+        let (pending, cell) = pending_approver(Duration::from_secs(5));
+        let k = crate::kernel::new_kernel(crate::config::Config::default(), paths, Arc::new(NoModels), vec![], Arc::new(crate::vault::Vault::empty()), pending.clone());
+        let _ = cell.set(Arc::downgrade(&k));
+        let d = Daemon::new(k.clone(), pending);
+        let id = k.create_session(&root, None, None, Some("t")).unwrap();
+        let r = d.call("session.command", &json!({"id": id, "line": "/yolo on"})).unwrap();
+        assert_eq!(r["handled"], true);
+        assert!(ark_security::approvals::yolo_active(&k.paths.data, &id));
+        let r = d.call("session.command", &json!({"id": id, "line": "/approvals"})).unwrap();
+        assert!(r["text"].as_str().unwrap().contains("yolo=true"), "{r}");
+        assert_eq!(d.call("session.command", &json!({"id": id, "line": "/compact"})).unwrap()["handled"], false);
+        assert!(d.call("session.command", &json!({"id": "nope-123", "line": "/yolo"})).is_err());
+        assert!(d.call("session.command", &json!({"id": id})).is_err());
+        assert!(Daemon::METHODS.contains(&"session.command"));
+        let _ = std::fs::remove_dir_all(&root);
+    }
 }

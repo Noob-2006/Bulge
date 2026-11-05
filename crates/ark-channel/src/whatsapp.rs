@@ -31,6 +31,42 @@ use std::time::{Duration, Instant};
 
 pub const MAX_MESSAGE: usize = 4096;
 
+#[path = "whatsapp_qr.rs"]
+pub(crate) mod qr;
+#[path = "whatsapp_tools.rs"]
+mod tools;
+pub use tools::{set_telephony_tts, TelephonyTts};
+
+/// Which route (channel, chat, sender) an ark session belongs to; installed by the host so
+/// requester-bound tools (`whatsapp_call`) can find the current requester.
+pub type SessionOrigin = Arc<dyn Fn(&str) -> Option<crate::router::RouteKey> + Send + Sync>;
+
+/// What the agent tools share with the channel.
+struct Shared {
+    id: String,
+    base: String,
+    http: Http,
+    /// Restart the supervised bridge (fresh pairing after its session was cleared).
+    bounce: Option<Box<dyn Fn() + Send + Sync>>,
+    session: Option<PathBuf>,
+    state_dir: PathBuf,
+    mode: String,
+    calls: bool,
+    meowcaller: String,
+    origin: std::sync::RwLock<Option<SessionOrigin>>,
+    login_poll: Duration,
+}
+
+impl Shared {
+    fn get(&self, path: &str) -> Result<Value, ChannelError> {
+        let r = self.http.call("GET", &format!("{}{path}", self.base), &[], Payload::None)?;
+        if !(200..300).contains(&r.status) {
+            return Err(classify(r.status, r.retry_after, &format!("whatsapp bridge {path}"), &r.body));
+        }
+        serde_json::from_str(&r.body).map_err(|e| ChannelError::new(K::Protocol, format!("whatsapp bridge {path}: bad JSON: {e}")))
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Child-process supervision (shared with photon and imessage).
 
@@ -164,6 +200,19 @@ impl Supervisor {
 
     pub fn pid(&self) -> Option<i32> {
         *self.st.pid.lock().unwrap()
+    }
+
+    /// SIGTERM the current child's process group; the keeper restarts it after the backoff.
+    pub fn bouncer(&self) -> Box<dyn Fn() + Send + Sync> {
+        let st = self.st.clone();
+        Box::new(move || {
+            if let Some(pid) = *st.pid.lock().unwrap() {
+                // SAFETY: plain kill(2) on the child's process group.
+                unsafe {
+                    libc::kill(-pid, libc::SIGTERM);
+                }
+            }
+        })
     }
 
     /// The child's last output lines (for error messages).
@@ -310,6 +359,7 @@ pub struct WhatsApp {
     read_receipts: bool,
     tmp: PathBuf,
     sup: Option<Supervisor>,
+    shared: Arc<Shared>,
 }
 
 impl WhatsApp {
@@ -378,6 +428,11 @@ impl WhatsApp {
     pub fn send_location(&self, chat: &str, lat: f64, lon: f64, name: Option<&str>, address: Option<&str>) -> Result<String, ChannelError> {
         let v = self.post("/send-location", &json!({"chatId": chat, "latitude": lat, "longitude": lon, "name": name, "address": address}))?;
         Ok(v["messageId"].as_str().unwrap_or("").to_string())
+    }
+
+    /// Route lookup for requester-bound tools (see [`SessionOrigin`]).
+    pub fn set_session_origin(&self, f: SessionOrigin) {
+        *self.shared.origin.write().unwrap() = Some(f);
     }
 
     pub fn supervisor_starts(&self) -> Option<u32> {
@@ -551,6 +606,17 @@ impl Channel for WhatsApp {
         }
     }
 
+    fn wire(&self, w: &crate::Wiring) {
+        if let Some(o) = &w.session_origin {
+            self.set_session_origin(o.clone());
+        }
+    }
+
+    /// `whatsapp_login`, plus `whatsapp_call` when `actions.calls` is on.
+    fn tools(&self) -> Vec<Arc<dyn ark_core::Tool>> {
+        tools::tools(&self.shared)
+    }
+
     fn stop(&self) {
         if let Some(s) = &self.sup {
             s.stop();
@@ -605,6 +671,12 @@ pub struct Settings {
     pub poll_interval_ms: u64,
     #[serde(default = "d_poll")]
     pub poll_timeout_secs: u64,
+    /// Opt-in agent actions (OpenClaw `channels.whatsapp.actions`): `calls` enables `whatsapp_call`.
+    #[serde(default)]
+    pub actions: BTreeMap<String, bool>,
+    /// MeowCaller binary for `whatsapp_call` (default `meowcaller` on PATH).
+    #[serde(default)]
+    pub meowcaller: Option<String>,
 }
 
 impl WhatsApp {
@@ -612,6 +684,7 @@ impl WhatsApp {
     pub fn open(id: &str, st: &Settings, state_dir: &std::path::Path) -> Result<WhatsApp, String> {
         let mut token = st.token.clone().filter(|t| !t.is_empty());
         let mut sup = None;
+        let mut session_dir = None;
         if let Some(dir) = &st.bridge_dir {
             let dir = expand_home(dir);
             let script = dir.join("bridge.js");
@@ -623,6 +696,7 @@ impl WhatsApp {
             }
             let tok = token.get_or_insert_with(|| ark_net::crypto::random_token(24)).clone();
             let session = st.session_dir.as_deref().map(expand_home).unwrap_or_else(|| state_dir.join(format!("{id}.whatsapp-session")));
+            session_dir = Some(session.clone());
             let media = state_dir.join(format!("{id}.whatsapp-media"));
             let mut env: BTreeMap<String, String> = BTreeMap::new();
             for (k, v) in [("WHATSAPP_ALLOWED_USERS", "*"), ("WHATSAPP_DM_POLICY", "open"), ("WHATSAPP_GROUP_POLICY", "open"), ("WHATSAPP_SEND_READ_RECEIPTS", if st.read_receipts { "true" } else { "false" })] {
@@ -648,15 +722,30 @@ impl WhatsApp {
         if let Some(t) = &token {
             http = http.bearer(t);
         }
+        let base = st.bridge_url.clone().unwrap_or_else(|| format!("http://127.0.0.1:{}", st.port)).trim_end_matches('/').to_string();
+        let shared = Arc::new(Shared {
+            id: id.to_string(),
+            base: base.clone(),
+            http: http.clone(),
+            bounce: sup.as_ref().map(Supervisor::bouncer),
+            session: session_dir,
+            state_dir: state_dir.to_path_buf(),
+            mode: st.mode.clone(),
+            calls: st.actions.get("calls").copied().unwrap_or(false),
+            meowcaller: st.meowcaller.clone().filter(|m| !m.trim().is_empty()).unwrap_or_else(|| tools::MEOWCALLER.into()),
+            origin: std::sync::RwLock::new(None),
+            login_poll: Duration::from_millis(500),
+        });
         Ok(WhatsApp {
             id: id.to_string(),
-            base: st.bridge_url.clone().unwrap_or_else(|| format!("http://127.0.0.1:{}", st.port)).trim_end_matches('/').to_string(),
+            base,
             http,
             poll_timeout: st.poll_timeout_secs,
             poll_interval: Duration::from_millis(st.poll_interval_ms.max(50)),
             read_receipts: st.read_receipts,
             tmp: state_dir.join(format!("{id}.whatsapp-outbox")),
             sup,
+            shared,
         })
     }
 }
@@ -860,5 +949,106 @@ mod tests {
         }
         // SAFETY: as above.
         assert_ne!(unsafe { libc::kill(pid, 0) }, 0, "child killed when the channel is dropped");
+    }
+
+    /// OpenClaw `agent-tools-login.test.ts` / `login-qr.test.ts` against a fake bridge:
+    /// start returns a scannable PNG data URL, wait reports refresh and success,
+    /// already-linked short-circuits, force without supervision refuses.
+    #[test]
+    fn login_tool_start_wait_and_relink_guard() {
+        let n = Arc::new(AtomicU32::new(0));
+        let n2 = n.clone();
+        let srv = FakeServer::start(move |req, _| {
+            assert_eq!(req.header("authorization"), Some("Bearer BT"));
+            let i = n2.fetch_add(1, Ordering::SeqCst);
+            let body = match i {
+                0 => json!({"status": "disconnected", "qr": null}),
+                1 | 2 => json!({"status": "disconnected", "qr": "2@first,KEY1,KEY2,ADV"}),
+                3 => json!({"status": "disconnected", "qr": "2@second,KEY1,KEY2,ADV"}),
+                _ => json!({"status": "connected", "qr": null}),
+            };
+            (200, vec![], body.to_string())
+        });
+        let w = wa(&srv.url, json!({}));
+        let mut tools = w.tools();
+        assert_eq!(tools.len(), 1, "whatsapp_call is opt-in");
+        let login = tools.remove(0);
+        assert_eq!(login.spec().name, "whatsapp_login_wa");
+        assert!(matches!(login.effects(&crate::testutil::tool_ctx(), &json!({"action": "start"}))[0], ark_core::Effect::Remote { .. }));
+        let ctx = crate::testutil::tool_ctx();
+        // /qr #0: no code yet → polled again (#1) → QR.
+        let r = login.call(&ctx, json!({"action": "start", "timeoutMs": 3000}));
+        assert!(!r.is_error && r.content.starts_with("Scan this QR in WhatsApp → Linked Devices."), "{}", r.content);
+        let url = r.content.split("![whatsapp-qr](").nth(1).unwrap().split(')').next().unwrap().to_string();
+        assert!(url.starts_with("data:image/png;base64,iVBOR"));
+        // #2 same code (keep waiting) → #3 new code → refreshed.
+        let r = login.call(&ctx, json!({"action": "wait", "currentQrDataUrl": url, "timeoutMs": 3000}));
+        assert!(r.content.starts_with("QR refreshed."), "{}", r.content);
+        let r = login.call(&ctx, json!({"action": "wait", "timeoutMs": 3000}));
+        assert!(r.content.starts_with("✅ Linked!"), "{}", r.content);
+        let r = login.call(&ctx, json!({"action": "start"}));
+        assert!(r.content.starts_with("WhatsApp is already linked"), "{}", r.content);
+        let r = login.call(&ctx, json!({"action": "start", "force": true}));
+        assert!(r.is_error && r.content.contains("not supervised"), "{}", r.content);
+        assert!(login.call(&ctx, json!({"action": "nope"})).is_error);
+        assert!(login.call(&ctx, json!({"action": "wait", "currentQrDataUrl": "http://x"})).is_error);
+    }
+
+    /// OpenClaw `agent-tools-call.test.ts`: requester-bound target, TTS → WAV, MeowCaller argv,
+    /// status/setup report, single active call, failure codes and window math.
+    #[test]
+    fn call_tool_places_requester_bound_calls_through_meowcaller() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = temp_dir("wa-call");
+        let bin = dir.join("meowcaller");
+        let log = dir.join("argv.log");
+        std::fs::write(&bin, format!("#!/bin/sh\necho \"$@\" > {}\nhead -c 4 \"$9\" >> {}\n[ \"$8\" = \"+15550001111\" ] && exit 0\nexit 3\n", log.display(), log.display())).unwrap();
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let st: Settings = serde_json::from_value(json!({"bridge_url": "http://127.0.0.1:9", "mode": "bot", "actions": {"calls": true}, "meowcaller": bin.display().to_string()})).unwrap();
+        let w = WhatsApp::open("whatsapp", &st, &dir).unwrap();
+        let tools = w.tools();
+        let call = tools.iter().find(|t| t.spec().name == "whatsapp_call").unwrap().clone();
+        let mut ctx = crate::testutil::tool_ctx();
+        ctx.session_id = "sess-a".into();
+        let v: Value = serde_json::from_str(&call.call(&ctx, json!({"action": "status"})).content).unwrap();
+        assert_eq!((v["binaryFound"].as_bool(), v["sessionStoreFound"].as_bool()), (Some(true), Some(false)));
+        assert!(v["setupCommand"].as_str().unwrap().contains("meowcaller pair --store"));
+        let e = call.call(&ctx, json!({"action": "call", "message": "hi"}));
+        assert!(e.is_error && e.content.contains("no session store"), "{}", e.content);
+        std::fs::create_dir_all(dir.join("whatsapp.whatsapp-calls")).unwrap();
+        std::fs::write(dir.join("whatsapp.whatsapp-calls/wa-voip.db"), b"db").unwrap();
+        assert!(call.call(&ctx, json!({"action": "call", "message": "hi"})).content.contains("known requester"));
+        w.set_session_origin(Arc::new(|s: &str| match s {
+            "sess-a" => Some(crate::router::RouteKey { channel: "whatsapp".into(), chat: "15550001111@s.whatsapp.net".into(), sender: None }),
+            "sess-b" => Some(crate::router::RouteKey { channel: "whatsapp".into(), chat: "120363@g.us".into(), sender: Some("15550002222@s.whatsapp.net".into()) }),
+            "sess-lid" => Some(crate::router::RouteKey { channel: "whatsapp".into(), chat: "999@lid".into(), sender: None }),
+            _ => None,
+        }));
+        assert!(call.call(&ctx, json!({"action": "call", "message": "hi"})).content.contains("text-to-speech"));
+        set_telephony_tts(Arc::new(|t: &str| Ok((vec![0u8; 16000 * 2 * (t.len().min(3))], 16000, "fake".into()))));
+        let r = call.call(&ctx, json!({"action": "call", "message": "hi"}));
+        assert!(!r.is_error, "{}", r.content);
+        let v: Value = serde_json::from_str(&r.content).unwrap();
+        assert_eq!((v["completed"].as_bool(), v["ttsProvider"].as_str(), v["callWindowSeconds"].as_u64()), (Some(true), Some("fake"), Some(117)));
+        let argv = std::fs::read_to_string(&log).unwrap();
+        assert!(argv.starts_with("notify --store ") && argv.contains("--answer-timeout 45s --max-duration 65s +15550001111 ") && argv.ends_with("RIFF"), "{argv}");
+        assert!(std::fs::read_dir(dir.join("whatsapp.whatsapp-calls")).unwrap().count() == 1, "temp audio removed");
+        ctx.session_id = "sess-b".into();
+        let r = call.call(&ctx, json!({"action": "call", "message": "hi"}));
+        assert!(r.is_error && r.content.contains("code 3"), "group sender is the target: {}", r.content);
+        ctx.session_id = "sess-lid".into();
+        assert!(call.call(&ctx, json!({"action": "call", "message": "hi"})).content.contains("phone number"));
+        assert!(call.call(&ctx, json!({"action": "call", "message": ""})).content.contains("message required"));
+        // Helpers.
+        assert_eq!(tools::requester_e164("whatsapp:+1 555 000 1111"), Some("+15550001111".into()));
+        assert_eq!(tools::requester_e164("1555000111:12@s.whatsapp.net"), Some("+1555000111".into()));
+        assert!(tools::call_window_ms(16000 * 2 * 61, 16000).is_err());
+        assert_eq!(tools::call_window_ms(16000 * 2 * 59, 16000).unwrap(), 174_000);
+        assert!(tools::wav_pcm16_mono(&[0], 8000).is_err());
+        let wsc: Settings = serde_json::from_value(json!({"bridge_url": "http://127.0.0.1:9", "actions": {"calls": true}, "meowcaller": bin.display().to_string()})).unwrap();
+        let selfchat = WhatsApp::open("whatsapp", &wsc, &dir).unwrap();
+        selfchat.set_session_origin(Arc::new(|_: &str| Some(crate::router::RouteKey { channel: "whatsapp".into(), chat: "15550001111@s.whatsapp.net".into(), sender: None })));
+        let c2 = selfchat.tools().into_iter().find(|t| t.spec().name == "whatsapp_call").unwrap();
+        assert!(c2.call(&ctx, json!({"action": "call", "message": "hi"})).content.contains("linked account itself"));
     }
 }

@@ -1,0 +1,10 @@
+{
+  "id": "demo-channel",
+  "name": "Demo Channel",
+  "description": "Declarative-only plugin: channels and config, no code.",
+  "categories": ["messaging"],
+  "activation": { "onStartup": false },
+  "channels": ["demo"],
+  "contracts": { "channelProviders": ["demo"] },
+  "skills": ["./skills", "../outside/skills"]
+}

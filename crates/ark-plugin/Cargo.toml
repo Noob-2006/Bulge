@@ -4,10 +4,21 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[features]
+# Model adapters that only some installs need (AWS Bedrock, Vertex/Gemini, the external
+# agent CLIs, the hosted Agents API, managed llama.cpp). `default` keeps the build
+# complete; the binary's `--no-default-features` build turns it off (docs/BUILD.md).
+default = ["providers"]
+providers = ["ark-kernel/providers"]
+
 [dependencies]
 ark-core.workspace = true
+ark-security.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 ureq.workspace = true
 libc.workspace = true
 ark-net.workspace = true
+toml.workspace = true # `[builtin_plugins.<name>]` settings tables
+ark-kernel = { path = "../ark-kernel", default-features = false } # built-in plugins (`src/builtin`: tools + Hook + Slash integration)
+fancy-regex = { version = "0.14", default-features = false, features = ["std", "unicode"] } # security-guidance rules use look-behind (already in the tree via ark-security)

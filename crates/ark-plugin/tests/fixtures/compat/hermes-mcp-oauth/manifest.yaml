@@ -1,0 +1,44 @@
+# Fixture: trimmed from hermes-agent optional-mcps/asana/manifest.yaml (the only
+# catalog entry with an `auth.oauth` block and `auth.env` prompts). Field names and
+# nesting are unchanged; prose and long comment blocks are removed.
+manifest_version: 1
+
+name: demo-oauth
+connector_slug: demo-oauth
+description: >-
+  Tasks, projects, and goals from a demo workspace.
+source: https://developers.example.com/docs/integrating-with-demos-mcp-server
+
+transport:
+  type: http
+  url: https://mcp.example.com/v2/mcp
+
+auth:
+  type: oauth
+  env:
+    - name: DEMO_CLIENT_ID
+      prompt: "Demo MCP app Client ID (developer console → your MCP app → OAuth)"
+      secret: false
+    - name: DEMO_CLIENT_SECRET
+      prompt: "Demo MCP app Client secret"
+  oauth:
+    client_id: "${DEMO_CLIENT_ID}"
+    client_secret: "${DEMO_CLIENT_SECRET}"
+    redirect_host: localhost
+    redirect_port: 27890
+
+tools:
+  default_excluded:
+    - whoami
+    - query-generic-sql
+
+suggest:
+  keywords:
+    - demo
+  hosts:
+    - example.com
+
+post_install: |
+  On first connection Hermes opens a browser to authorize with
+  Demo (or run `hermes mcp login demo-oauth`). Approve access,
+  then restart the session so tools load.

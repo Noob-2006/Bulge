@@ -15,6 +15,7 @@
 //!     "services": [{"name": "indexer", "health_secs": 30}],
 //!     "cli": [{"name": "kb", "description": "…", "args": "<sub> …"}],
 //!     "middleware": ["tool_request", "llm_execution"],
+//!     "stream_hooks": ["on_stream_start", "on_stream_delta", "on_stream_end", "on_tool_event"],
 //!     "context_engine": {"owns_compaction": true},
 //!     "memory": true,
 //!     "node_commands": [{"command": "kb.search", "description": "…", "dangerous": false, "params": {…}}],
@@ -54,6 +55,12 @@
 //! **CLI** — `ark <name> args…` → `ark/cli {name, argv, cwd, run_id}`; the plugin may stream
 //! `ark/cli.output {run_id, stream: "stdout"|"stderr", text}` and answers `{exit?, stdout?, stderr?}`.
 //!
+//! **Stream hooks** (Hermes `agent/plugin_stream_hooks.py`) — `ark/stream {event, stream_id, …}`
+//! notifications feed the observers a plugin lists under `stream_hooks`; they run on their own
+//! worker thread behind a bounded drop-oldest queue so plugin code never sits on the token path.
+//! A plugin that lists `stream_delta` under `hooks` is instead called inline (`ark/hook`) for each
+//! delta and may rewrite it with `{"decision": "modify", "input": "<text>"}`. See [`crate::stream`].
+//!
 //! **Middleware** (Hermes) — `ark/middleware {kind, phase?, payload}` → `{args}` (tool_request),
 //! `{request}` (llm_request), `{result}` (tool_execution), `{response}` (llm_execution) or nothing.
 //!
@@ -64,6 +71,17 @@
 //!
 //! **Memory provider** — `ark/memory.call {action, file, text?, old?, query?, session}` → `{text}`;
 //! `ark/memory.prompt {}` → `{text}` (static system-prompt block).
+//!
+//! **Capability backends** (Hermes `register_tts_provider` / `_transcription_provider` /
+//! `_image_gen_provider` / `_video_gen_provider` / `_browser_provider` / `_web_search_provider`) —
+//! `ark/backend.call {kind, id, op, params}` → the vendor envelope. Declared with
+//! `"backends": [{"kind": "tts", "id": "acme", "label": "…", "caps": {…}}]`; see
+//! [`crate::backends`] for the operations and payloads of each kind.
+//!
+//! **Dashboard auth** (Hermes `register_dashboard_auth_provider`) — `ark/auth.login_start`,
+//! `ark/auth.exchange`, `ark/auth.verify`, `ark/auth.refresh` → the session object. Declared with
+//! `"dashboard_auth": true` (the provider takes the plugin's name) or
+//! `"dashboard_auth": {"id": "acme", "label": "…"}`; see [`crate::dashboard_auth`].
 //!
 //! **Node commands** — run on `ark node` hosts: `ark/node.invoke {command, params}` → payload.
 //!
@@ -140,6 +158,28 @@ pub struct EngineDecl {
     pub owns_compaction: bool,
 }
 
+/// A backend provider of one capability family (Hermes `register_*_provider`; see
+/// [`crate::backends`]). `id` is what config selects it by; `caps` is the picker payload
+/// (`voices`, `models`, …).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct BackendDecl {
+    /// `tts`, `stt`, `image_gen`, `video_gen`, `browser` or `web_search`.
+    pub kind: String,
+    pub id: String,
+    pub label: String,
+    pub caps: Value,
+}
+
+/// The dashboard auth provider a plugin serves (Hermes `ctx.register_dashboard_auth_provider`;
+/// see [`crate::dashboard_auth`]). `id` is what `[app.auth] provider` selects it by.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AuthDecl {
+    pub id: String,
+    pub label: String,
+}
+
 /// A command `ark node` offers on behalf of the plugin (OpenClaw `registerNodeHostCommand`).
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -211,10 +251,16 @@ pub struct PluginHost {
     pub services: Vec<ServiceDecl>,
     pub cli: Vec<CommandDecl>,
     middleware: Vec<String>,
+    /// Observer events for streamed deltas/tool calls (Hermes `on_stream_*`).
+    stream_hooks: Vec<String>,
     pub context_engine: Option<EngineDecl>,
     pub memory: bool,
     pub node_commands: Vec<NodeCommandDecl>,
     pub ui: Vec<UiDecl>,
+    /// Capability backends this plugin serves ([`crate::backends`]).
+    pub backends: Vec<BackendDecl>,
+    /// The dashboard auth provider this plugin serves ([`crate::dashboard_auth`]).
+    pub dashboard_auth: Option<AuthDecl>,
     inbound: Mutex<Option<Receiver<(String, Value)>>>,
     streams: Streams,
     hook_timeout: Duration,
@@ -261,6 +307,7 @@ impl PluginHost {
             services: decls::<ServiceDecl>(get("services")).into_iter().filter(|s| !s.name.is_empty()).collect(),
             cli: decls::<CommandDecl>(get("cli")).into_iter().filter(|c| !c.name.is_empty()).collect(),
             middleware: strings(get("middleware")),
+            stream_hooks: strings(get("stream_hooks")).into_iter().filter(|h| crate::stream::STREAM_HOOKS.contains(&h.as_str())).collect(),
             context_engine: match get("context_engine") {
                 Some(Value::Bool(true)) => Some(EngineDecl::default()),
                 Some(v @ Value::Object(_)) => serde_json::from_value(v.clone()).ok(),
@@ -269,6 +316,13 @@ impl PluginHost {
             memory: get("memory").is_some_and(|v| v.as_bool() != Some(false) && !v.is_null()),
             node_commands: decls::<NodeCommandDecl>(get("node_commands")).into_iter().filter(|c| !c.command.is_empty()).collect(),
             ui: decls::<UiDecl>(get("ui")).into_iter().filter(|u| !u.id.is_empty() && u.id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')).collect(),
+            backends: decls::<BackendDecl>(get("backends")).into_iter().filter(|b| !b.id.is_empty() && crate::backends::Kind::parse(&b.kind).is_some()).collect(),
+            // `true` declares the provider under the plugin's own name; an object names it.
+            dashboard_auth: match get("dashboard_auth") {
+                Some(Value::Bool(true)) => Some(AuthDecl { id: name.into(), label: String::new() }),
+                Some(v @ Value::Object(_)) => serde_json::from_value::<AuthDecl>(v.clone()).ok().filter(|a| !a.id.trim().is_empty()),
+                _ => None,
+            },
             client,
             inbound: Mutex::new(Some(rx)),
             streams,
@@ -288,6 +342,11 @@ impl PluginHost {
     }
     pub fn middleware_kinds(&self) -> &[String] {
         &self.middleware
+    }
+    /// Stream observer events the plugin declared (`on_stream_start`, `on_stream_delta`,
+    /// `on_stream_end`, `on_tool_event`).
+    pub fn stream_hooks(&self) -> &[String] {
+        &self.stream_hooks
     }
     pub fn client(&self) -> &Arc<Client> {
         &self.client
@@ -504,6 +563,116 @@ impl PluginHost {
     /// The model providers this plugin registers, ready for the model registry.
     pub fn provider_impls(self: &Arc<Self>) -> Vec<(String, Arc<dyn Provider>)> {
         self.providers.iter().map(|d| (d.id.clone(), Arc::new(PluginProvider { host: self.clone(), decl: d.clone() }) as Arc<dyn Provider>)).collect()
+    }
+
+    /// The capability backends this plugin serves, ready for [`crate::backends::register`].
+    pub fn backend_impls(self: &Arc<Self>) -> Vec<Arc<dyn crate::backends::Backend>> {
+        self.backends.iter().filter_map(|d| crate::backends::Kind::parse(&d.kind).map(|k| Arc::new(PluginBackend { host: self.clone(), kind: k, decl: d.clone() }) as Arc<dyn crate::backends::Backend>)).collect()
+    }
+
+    /// `ark/backend.call {kind, id, op, params}` (a declared backend's one operation).
+    pub fn backend_call(&self, kind: &str, id: &str, op: &str, params: Value) -> Result<Value, String> {
+        if !self.backends.iter().any(|b| b.id == id && b.kind == kind) {
+            return Err(format!("plugin `{}` has no {kind} backend `{id}`", self.name));
+        }
+        let t = if op == "generate" { self.client.config().timeout().max(Duration::from_secs(300)) } else { CALL_TIMEOUT };
+        let r = self.client.request_timeout("ark/backend.call", json!({"kind": kind, "id": id, "op": op, "params": params}), t, &Cancel::new()).map_err(|e| format!("backend `{id}` {op}: {e}"))?;
+        match r.get("error") {
+            Some(Value::String(e)) if !e.is_empty() => Err(e.clone()),
+            _ => Ok(r),
+        }
+    }
+
+    /// The dashboard auth provider this plugin serves, ready for
+    /// [`crate::dashboard_auth::register`].
+    pub fn auth_impl(self: &Arc<Self>) -> Option<Arc<dyn crate::dashboard_auth::Provider>> {
+        self.dashboard_auth.as_ref().map(|d| Arc::new(PluginAuth { host: self.clone(), decl: d.clone() }) as Arc<dyn crate::dashboard_auth::Provider>)
+    }
+
+    /// `ark/auth.<method> {id, params}` — one step of the declared provider's login
+    /// (`login_start`, `exchange`, `verify`, `refresh`).
+    pub fn auth_call(&self, method: &str, params: Value) -> Result<Value, String> {
+        let Some(decl) = &self.dashboard_auth else {
+            return Err(format!("plugin `{}` is not a dashboard auth provider", self.name));
+        };
+        if !["login_start", "exchange", "verify", "refresh"].contains(&method) {
+            return Err(format!("dashboard auth provider `{}` does not serve `{method}` (it serves: login_start, exchange, verify, refresh)", decl.id));
+        }
+        let r = self
+            .client
+            .request_timeout(&format!("ark/auth.{method}"), json!({"id": decl.id, "params": params}), CALL_TIMEOUT, &Cancel::new())
+            .map_err(|e| format!("dashboard auth provider `{}` {method}: {e}", decl.id))?;
+        match r.get("error") {
+            Some(Value::String(e)) if !e.is_empty() => Err(e.clone()),
+            _ => Ok(r),
+        }
+    }
+}
+
+/// A capability backend served by a plugin process (`ark/backend.call`).
+pub struct PluginBackend {
+    host: Arc<PluginHost>,
+    kind: crate::backends::Kind,
+    decl: BackendDecl,
+}
+
+impl crate::backends::Backend for PluginBackend {
+    fn kind(&self) -> crate::backends::Kind {
+        self.kind
+    }
+    fn name(&self) -> &str {
+        &self.decl.id
+    }
+    fn label(&self) -> String {
+        if self.decl.label.trim().is_empty() { self.decl.id.clone() } else { self.decl.label.clone() }
+    }
+    fn available(&self) -> bool {
+        self.host.client().is_running()
+    }
+    fn caps(&self) -> Value {
+        self.decl.caps.clone()
+    }
+    fn call(&self, op: &str, params: Value) -> Result<Value, String> {
+        if !crate::backends::operations(self.kind).contains(&op) {
+            return Err(format!("{} backend `{}` does not serve `{op}` (it serves: {})", self.kind.as_str(), self.decl.id, crate::backends::operations(self.kind).join(", ")));
+        }
+        self.host.backend_call(self.kind.as_str(), &self.decl.id, op, params)
+    }
+}
+
+/// A dashboard auth provider served by a plugin process (`ark/auth.*`; see
+/// [`crate::dashboard_auth`]).
+pub struct PluginAuth {
+    host: Arc<PluginHost>,
+    decl: AuthDecl,
+}
+
+fn session_from_answer(v: &Value) -> Result<crate::dashboard_auth::Session, String> {
+    let subject = v.get("subject").and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty()).ok_or("dashboard auth answer has no `subject`")?;
+    let text = |k: &str| v.get(k).and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty()).map(str::to_string);
+    Ok(crate::dashboard_auth::Session { subject: subject.to_string(), email: text("email"), name: text("name"), expires_at: v.get("expires_at").and_then(Value::as_i64), admin: v.get("admin").and_then(Value::as_bool).unwrap_or(false) })
+}
+
+impl crate::dashboard_auth::Provider for PluginAuth {
+    fn name(&self) -> &str {
+        &self.decl.id
+    }
+    fn available(&self) -> bool {
+        self.host.client().is_running()
+    }
+    fn login_start(&self, redirect_uri: &str) -> Result<crate::dashboard_auth::LoginStart, String> {
+        let r = self.host.auth_call("login_start", json!({"redirect_uri": redirect_uri}))?;
+        let url = r.get("url").and_then(Value::as_str).map(str::trim).filter(|u| !u.is_empty()).ok_or("dashboard auth answer has no `url`")?;
+        Ok(crate::dashboard_auth::LoginStart { url: url.to_string(), state: r.get("state").and_then(Value::as_str).unwrap_or("").to_string() })
+    }
+    fn exchange(&self, code: &str, state: &str, redirect_uri: &str) -> Result<crate::dashboard_auth::Session, String> {
+        session_from_answer(&self.host.auth_call("exchange", json!({"code": code, "state": state, "redirect_uri": redirect_uri}))?)
+    }
+    fn verify(&self, token: &str) -> Result<crate::dashboard_auth::Session, String> {
+        session_from_answer(&self.host.auth_call("verify", json!({"token": token}))?)
+    }
+    fn refresh(&self, token: &str) -> Result<crate::dashboard_auth::Session, String> {
+        session_from_answer(&self.host.auth_call("refresh", json!({"token": token}))?)
     }
 }
 

@@ -151,6 +151,17 @@ impl Http {
         let mut hs: Vec<(String, String)> = self.headers.clone();
         hs.extend(extra.iter().map(|(k, v)| (k.to_string(), v.to_string())));
         let resp = match method {
+            // DELETE with a body (Feishu `children/batch_delete`).
+            "DELETE" if ctype.is_some() => {
+                let mut r = self.agent.delete(url).force_send_body();
+                if let Some(ct) = &ctype {
+                    r = r.header("content-type", ct.as_str());
+                }
+                for (k, v) in &hs {
+                    r = r.header(k.as_str(), v.as_str());
+                }
+                r.send(&bytes[..])
+            }
             "GET" | "DELETE" | "HEAD" => {
                 let mut r = match method {
                     "GET" => self.agent.get(url),

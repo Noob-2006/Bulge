@@ -44,7 +44,7 @@ fn commands_routes_providers_and_hooks_are_declared_and_served() {
     let ps = h.provider_impls();
     assert_eq!(ps[0].0, "plug");
     assert_eq!(ps[0].1.caps("parrot").context_window, 8000);
-    let req = ModelRequest { model: "parrot".into(), system: vec![], messages: vec![Message::user("hello there")], tools: vec![], max_tokens: 100, temperature: None, cache_after_message: None, reasoning: None };
+    let req = ModelRequest { model: "parrot".into(), system: vec![], messages: vec![Message::user("hello there")], tools: vec![], max_tokens: 100, temperature: None, cache_after_message: None, reasoning: None, options: Default::default() };
     let mut deltas = String::new();
     let resp = ps[0].1.complete(&req, &mut |e| if let StreamEvent::TextDelta(t) = e { deltas.push_str(&t) }, &Cancel::new()).unwrap();
     assert_eq!(resp.message.text(), "parrot says: hello there");
@@ -106,6 +106,69 @@ fn cli_middleware_context_memory_node_and_ui_kinds() {
     assert!(h.ui_render("dash", "").unwrap()["html"].as_str().unwrap().contains("kinds panel"));
     assert!(h.ui_render("ghost", "").is_err());
     assert_eq!(h.ui_call("dash", "count", json!({})).unwrap()["count"], 42);
+}
+
+#[test]
+fn dashboard_auth_provider_is_declared_and_served() {
+    let Some(h) = host(&[]) else { return };
+    use ark_plugin::dashboard_auth;
+    let decl = h.dashboard_auth.as_ref().expect("declared in initialize");
+    assert_eq!((decl.id.as_str(), decl.label.as_str()), ("kinds-auth", "Kinds Auth"));
+    let p = h.auth_impl().expect("one provider per plugin");
+    assert!(p.available());
+    // login_start → the IDP URL and the state the callback must carry back.
+    let start = p.login_start("https://ark.test/auth/callback").unwrap();
+    assert_eq!(start.state, "kinds-state");
+    assert!(start.url.starts_with("https://idp.example.test/authorize?"), "{}", start.url);
+    // verify: a credential presented later.
+    let s = p.verify("good").unwrap();
+    assert_eq!(s.subject, "kinds-user");
+    assert_eq!((s.email.as_deref(), s.name.as_deref(), s.expires_at), (Some("u@example.test"), Some("Kinds User"), Some(1_800_000_000)));
+    assert!(!s.admin);
+    assert_eq!(p.verify("bad").unwrap_err(), "invalid credentials");
+    // exchange: only the state minted by login_start works.
+    assert_eq!(p.exchange("good", "kinds-state", "https://ark.test/auth/callback").unwrap().subject, "kinds-user");
+    assert_eq!(p.exchange("good", "wrong", "https://ark.test/auth/callback").unwrap_err(), "bad state");
+    assert!(p.refresh("rt").is_err(), "the fixture cannot refresh");
+    assert!(h.auth_call("bogus", json!({})).unwrap_err().contains("does not serve"));
+    // The declared provider registers under its own id; built-in names stay reserved.
+    dashboard_auth::register(p.clone()).unwrap();
+    assert_eq!(dashboard_auth::find("kinds-auth").map(|x| x.name().to_string()), Some("kinds-auth".into()));
+    assert!(dashboard_auth::find("basic").is_none() && dashboard_auth::find("self_hosted").is_none());
+    dashboard_auth::clear();
+}
+
+#[test]
+fn capability_backends_are_declared_and_served() {
+    let Some(h) = host(&[]) else { return };
+    use ark_plugin::backends::{self, Kind};
+    // Declared kinds parse; an unknown kind is dropped at registration time.
+    assert_eq!(h.backends.iter().map(|b| b.id.as_str()).collect::<Vec<_>>(), ["kinds-voice", "kinds-search"]);
+    let impls = h.backend_impls();
+    assert_eq!(impls.iter().map(|b| (b.kind(), b.name().to_string())).collect::<Vec<_>>(), [(Kind::Tts, "kinds-voice".to_string()), (Kind::WebSearch, "kinds-search".to_string())]);
+    assert_eq!(impls[0].label(), "Kinds Voice");
+    assert_eq!(impls[0].caps()["voices"][1], "v2");
+    for b in impls {
+        backends::register(b).unwrap();
+    }
+    // Config selects it by name: `[media.tts] provider = "kinds-voice"`.
+    let tts = backends::select(Kind::Tts, "kinds-voice").expect("registered and reachable");
+    let out = tts.call("synthesize", json!({"text": "hi", "voice": "v1"})).unwrap();
+    assert_eq!(out["mime"], "audio/mpeg");
+    assert_eq!(out["sample_rate"], 24000);
+    let audio = ark_net::crypto::b64_decode(out["audio_base64"].as_str().unwrap()).unwrap();
+    assert_eq!(String::from_utf8_lossy(&audio), "ID3hi");
+    // A plugin-side failure surfaces as the user-visible error, not a transport error.
+    assert_eq!(tts.call("synthesize", json!({"text": "fail"})).unwrap_err(), "kinds tts failed");
+    // Wrong operation for the kind, and an undeclared (kind, id) pair.
+    assert!(tts.call("transcribe", json!({})).unwrap_err().contains("does not serve"));
+    assert!(h.backend_call("stt", "kinds-voice", "transcribe", json!({})).unwrap_err().contains("has no stt backend"));
+    let search = backends::find(Kind::WebSearch, "kinds-search").unwrap();
+    assert_eq!(search.call("search", json!({"query": "ark", "count": 3})).unwrap()["results"][0]["url"], "https://example.test/kinds");
+    // Bundled names always belong to the bundled provider.
+    assert!(backends::find(Kind::WebSearch, "brave").is_none());
+    assert!(backends::find(Kind::Tts, "openai").is_none());
+    backends::clear();
 }
 
 #[test]

@@ -1,0 +1,368 @@
+# Build layers, cargo features and what a slim binary costs
+
+Audit row **D6** (binary size / build cost). The default `ark` release binary is ~33 MB:
+every optional chat platform, every model adapter and every media subsystem is compiled
+in. This document describes the layers that exist, the exact commands for the default,
+slim and smallest builds, the measured sizes, and the size budget that keeps them from
+creeping.
+
+Everything here is measured, not estimated. The 2026-11-05 numbers were taken on Linux
+x86_64 in one **clean target directory** (so every configuration was compiled from the
+same tree state and the deltas are comparable), with the workspace release profile
+(`opt-level = "s"`, `lto = true`, `codegen-units = 1`, `strip = true`, `panic = "abort"`)
+unless noted.
+
+## TL;DR
+
+| Build | Command | Size | vs default |
+| --- | --- | --- | --- |
+| default (everything) | `cargo build -p ark --release` | 33 694 024 B (32.13 MiB) | — |
+| slim features | `cargo build -p ark --release --no-default-features` | 29 543 848 B (28.17 MiB) | **−4 150 176 B (−12.3 %)** |
+| slim profile (same code) | `cargo build -p ark --profile slim` | 28 947 688 B (27.61 MiB) | **−4 746 336 B (−14.1 %)** |
+| smallest | `cargo build -p ark --profile slim --no-default-features` | 25 474 120 B (24.29 MiB) | **−8 219 904 B (−24.4 %)** |
+
+Only two of these change what is compiled; the third row runs the *same* code with
+`opt-level = "z"` (see [The three levers](#the-three-levers-measured-separately)).
+
+`--no-default-features` still produces a working binary: it starts, parses config and runs
+everything except the channels and model adapters whose cargo feature is off. Configuring
+such a channel is not an error — it is skipped with a warning:
+
+```
+$ ARK_HOME=$TMPDIR/home-slim ./target/release/ark channel list      # slim binary
+ark: warning: channel kind `slack` is not compiled into this build (cargo feature `slack` is off; see docs/BUILD.md)
+no channels (configure [channels.<name>] kind = "telegram", "discord", "slack", "line"… — see docs/config-example.toml)
+
+$ ARK_HOME=$TMPDIR/home-slim ./target/release/ark channel list      # default binary, same config
+s                slack          dm: Allowlist · allow: (nobody — set allow)
+```
+
+The same holds for a model adapter that is not compiled in — the wire format stays a
+valid config value, only `build` refuses:
+
+```
+provider `bedrock`: the `bedrock` wire format is not compiled into this build
+(cargo feature `bedrock` of ark-model is off; see docs/BUILD.md)
+```
+
+Kinds still available in a slim build: `telegram`, `webhook`, `discord`, `msteams`,
+`teams`, `msgraph_webhook`, `whatsapp`, `whatsapp_cloud` (everything in the
+"cannot be gated" table below).
+
+## The three levers, measured separately
+
+| Lever | What is removed | Measured delta |
+| --- | --- | --- |
+| chat platforms (`--no-default-features` with `providers` still on) | the 24 optional platform families of `ark-channel` | −4 150 176 B (−12.3 %) |
+| model adapters (`providers` off) | Bedrock/SigV4, Gemini, agent CLIs, Agents API, managed llama.cpp | −2 368 B (±0.01 %, i.e. **not a size lever** — see below) |
+| `opt-level = "z"` (`--profile slim`, all features) | nothing; same code, size-first codegen | −4 746 336 B (−14.1 %) |
+| all of the above | everything optional, size-first codegen | −8 219 904 B (−24.4 %) |
+
+Two honest caveats:
+
+* **Measurement noise.** LTO lays sections out differently on every build; the same tree
+  re-measured gives ±0.3 %. One configuration even came out 86 KB *larger* while
+  compiling *less* (channels on, providers off: 33 780 112 B vs 33 694 024 B). Anything
+  below ~1 % is noise, which is why the budget check has a `--tolerance` knob.
+* **`providers` is a build-surface switch, not a size lever.** The five adapters share
+  the HTTP/SSE plumbing that stays behind either way, so dropping Bedrock, Gemini, the
+  agent CLIs, the Agents API and managed llama.cpp removes only ~2.4 KB of machine code.
+  It exists so a build can refuse to *contain* code paths it will never use (AWS SigV4,
+  spawning third-party agent CLIs) and so `--no-default-features` has one meaning:
+  everything optional is out. Do not expect it to shrink the binary.
+
+If you only want a smaller download, use `--profile slim` (14 %) or drop the chat
+platforms (12 %); the two together give 24 %.
+
+## How the split works
+
+The only supported way to drop a platform family is a cargo feature, and a family may
+only get one if it is *self-contained*: nothing outside `ark-channel` names its module,
+and no always-compiled module inside `ark-channel` uses it. The rule was applied by
+mapping the reference graph first:
+
+```sh
+grep -n "mod \|pub use" crates/ark-channel/src/lib.rs
+grep -rn "ark_channel::<module>" crates/ark-app crates/ark crates/ark-kernel | head -50
+grep -rn "ark_media::<module>"   crates --include=*.rs | grep -v ^crates/ark-media
+```
+
+With a feature **off** the module is not compiled at all. `config::registry()` in
+`config.rs` names every channel kind, so an off module keeps a tiny stub `build` that
+returns an error instead of compiling the platform:
+
+```text
+channel kind `slack` is not compiled into this build (cargo feature `slack` is off; see docs/BUILD.md)
+```
+
+That keeps the registry table (and therefore config parsing, `ark channel list`, the
+daemon's channel startup) identical in both builds without duplicating the table.
+
+Feature layering:
+
+```text
+crates/ark/Cargo.toml         default   = ["channel", "providers"]
+                              channel   = ["ark-channel/all", "ark-app/channel"]
+                              providers = ["ark-app/providers", "ark-kernel/providers",
+                                           "ark-memory/providers", "ark-plugin/providers",
+                                           "ark-skills/providers", "ark-model/full"]
+crates/ark-app/Cargo.toml     default = ["channel", "providers"]   channel = ["ark-channel/all"]
+crates/ark-kernel/Cargo.toml  default = ["providers"]              providers = ["ark-model/full"]
+crates/ark-model/Cargo.toml   default = ["full"]                   full = [bedrock, gemini, agent-cli, agents-api, local]
+crates/ark-channel/Cargo.toml default = ["all"]                    all = [ <every platform feature> ]
+```
+
+`ark-app` and `ark` take `ark-channel` with `default-features = false` (spelled as an
+explicit `path` dependency — this cargo cannot override `default-features` through
+`workspace = true`), so `-p ark --no-default-features` really reaches `ark-channel` with
+no platform enabled. Verified with `cargo tree -p ark --no-default-features -e features -i ark-channel`
+(no `ark-channel feature "…"` lines).
+
+The default build is unchanged: `default` → `channel` → `ark-channel/all` → every
+platform, i.e. exactly the pre-feature set of modules.
+
+## `ark-channel` features
+
+One feature per self-contained platform family, all `= []` (they gate code, not
+dependencies). `default = ["all"]`, `all` lists all of them.
+
+| feature | modules it compiles |
+| --- | --- |
+| `slack` | `slack` (+ its `slack_actions`) |
+| `mattermost` | `mattermost` |
+| `email` | `email` (IMAP/SMTP) |
+| `feishu` | `feishu` (also the `lark` kind) |
+| `googlechat` | `googlechat` |
+| `dingtalk` | `dingtalk` |
+| `wecom` | `wecom` |
+| `wecom_callback` | `wecom_callback` |
+| `weixin` | `weixin` (also `wechat`) |
+| `qqbot` | `qqbot` |
+| `yuanbao` | `yuanbao` (+ `yuanbao_tools`) |
+| `bluebubbles` | `bluebubbles` |
+| `nextcloud_talk` | `nextcloud_talk` |
+| `synology_chat` | `synology_chat` |
+| `zalo` | `zalo` |
+| `zalouser` | `zalouser` |
+| `tlon` | `tlon` (also `urbit`) |
+| `x` | `x` (also `twitter`) |
+| `clickclack` | `clickclack` (+ `clickclack_discussion`) |
+| `raft` | `raft` |
+| `qa_channel` | `qa_channel` |
+| `homeassistant` | `homeassistant` |
+| `relay` | `relay` |
+| `simplex` | `simplex` |
+| `ntfy` | `ntfy` |
+| `matrix` | `matrix`, `matrix_e2ee`, `matrix_backup`, `matrix_sas`, `matrix_trust`, `reef` |
+| `matrix_backup`, `matrix_e2ee`, `matrix_sas`, `matrix_trust`, `reef` | the individual pieces (pulled in by `matrix`) |
+| `nostr` | `nostr`, `buzz`, `secp256k1` |
+| `buzz`, `secp256k1` | the individual pieces (pulled in by `nostr`) |
+| `signal` | `signal`, `imessage`, `irc`, `twitch`, `photon` |
+| `imessage`, `irc`, `twitch`, `photon` | the individual pieces (pulled in by `signal`) |
+
+Families exist because of shared helpers found in step 1: the Signal client reuses
+`sms::redact_phones_in` and `line::*`, iMessage reuses `irc::now_secs`, Twitch builds on
+`irc`, Photon on `signal::http_stream`; the Matrix crypto stack (`matrix_e2ee`,
+`matrix_sas`, `matrix_trust`, `matrix_backup`) shares `olm` (always compiled: the binary
+uses `olm::hkdf` for its own storage) and `reef::canonical`; `buzz` (Nostr relay client)
+shares `secp256k1` and `nostr`'s event types.
+
+## `ark-model` provider features
+
+`ark-model` carries one feature per optional wire-format family. Every feature is
+`= []` (it gates code, not dependencies); `default = ["full"]`, and `full` lists all of
+them, so a default build is the complete set. Turning one off keeps the `WireFormat`
+variant and the preset table, so config parsing is identical in both builds.
+
+| feature | modules it compiles | what you lose when it is off | size effect |
+| --- | --- | --- | --- |
+| `bedrock` | `bedrock`, `sigv4`, `eventstream` | AWS Bedrock Converse/ConverseStream, SigV4 signing, binary event streams | ~1–2 KB |
+| `gemini` | `gemini` | the Gemini/Vertex `generateContent` adapter (the `vertex` quirk included) | <1 KB |
+| `agent-cli` | `cli`, `codex_app`, `acp`, `muse` | running `claude`/`gemini`/`codex exec`, `codex app-server`, ACP agents (`copilot --acp`), Meta Muse | ~1 KB |
+| `agents-api` | `agentsapi` | OpenAI Agents API (hosted agent sessions) | <1 KB |
+| `local` | `local` | managed llama.cpp (`model_path` in a provider config) | <1 KB |
+
+These are **surface** switches: measured together they remove 2 368 B.
+
+### What cannot be gated (and why)
+
+These stay in every build because a file outside `ark-channel` — or an always-compiled
+module inside it — names them; removing them needs edits in crates this row does not own:
+
+| modules | blocked by |
+| --- | --- |
+| `discord`, `discord_voice`, `discord_transcripts` | `ark-app/src/tui/png.rs` and `ark/src/ops/archive.rs` call `ark_channel::discord::zlib::inflate_raw` (zlib inflate lives in the Discord module) |
+| `dave`, `mls`, `p256` | `discord_voice`/`dave` (above); `ark/src/ops/storage.rs` uses `ark_channel::dave::scrypt` |
+| `whatsapp`, `whatsapp_cloud` | `ark/src/telephony.rs` uses `ark_channel::whatsapp::TelephonyTts`; `Wiring::session_origin` is typed `crate::whatsapp::SessionOrigin` in `lib.rs` |
+| `msteams`, `msgraph_webhook` | `ark/src/meetings/teams/{mod,deliver}.rs` builds `ark_channel::msteams::Teams` and installs `msgraph_webhook` schedulers |
+| `olm` | `ark/src/ops/storage.rs` (`olm::hkdf`) and the Matrix stack |
+| `sms`, `line` | shared helpers (`line::file_name`, `line::guess_mime`, `sms::redact_phones_in`) used by the always-compiled WhatsApp channel |
+| `telegram`, `webhook`, `http`, `access`, `router`, `config`, `deliver`, `tool`, `message_tool`, `action_args`, `chunk`, `charset`, `markup` | core transports and the router/tool surface, named by the binary and by `pub use` in `lib.rs` |
+
+The Discord family is the one worth revisiting: it is dead weight for a build without
+Discord, but its `zlib` helper is the tree's inflate implementation. Moving `zlib` into
+`ark-channel::http` (or a small `ark-core` helper) would let the whole
+`discord + discord_voice + discord_transcripts + dave + mls + p256` block
+(~700 KB of source, roughly 1 MB of the stripped binary) become one more feature.
+
+## Per-family cost (measured 2026-11-04, round 5)
+
+The per-family numbers below were taken on the round-5 tree; the deltas are still the
+right order of magnitude, the absolute sizes have drifted a few hundred KB since.
+
+Slim plus exactly one family, same release command line:
+
+| build | bytes | cost of the family |
+| --- | --- | --- |
+| `--no-default-features` | 29 012 392 | — |
+| `--no-default-features --features ark-channel/matrix` | 29 819 136 | **+806 744** (0.77 MiB) |
+| `--no-default-features --features ark-channel/signal` | 29 429 336 | **+416 944** (0.40 MiB) |
+
+The remaining ~3.63 MiB is the other 24 single-platform features (slack, email, feishu,
+wecom*, qqbot, tlon, x, clickclack, relay, …), each a few hundred KB of HTTP/JSON client.
+
+## Exact commands
+
+Environment used for the 2026-11-05 measurements:
+
+```sh
+export CARGO_INCREMENTAL=0
+export TMPDIR=/home/noob/.cache/ark-build/r5-d
+
+# default: every platform and subsystem (identical behaviour to before the split)
+cargo build -p ark --release
+stat -c %s target/release/ark            # 33694024
+
+# slim: no optional chat platform
+cargo build -p ark --release --no-default-features
+stat -c %s target/release/ark            # 29543848
+
+# pick families explicitly
+cargo build -p ark --release --no-default-features --features ark-channel/matrix
+cargo build -p ark --release --no-default-features --features "ark-channel/slack,ark-channel/ntfy"
+cargo build -p ark --release --no-default-features --features channel   # `default` = `channel`: everything
+```
+
+Checks that both halves of the split stay honest:
+
+```sh
+cargo test  -p ark-channel --lib feature_wiring                 # 3 tests, default features
+cargo test  -p ark-channel --lib --no-default-features feature_wiring
+cargo clippy -p ark-channel --all-targets -- -D warnings
+cargo check -p ark --no-default-features
+```
+
+Note: `crates/ark-channel/tests/*.rs` (the `real_*.rs` integration tests) use platform
+modules directly and therefore need the default features; run them without
+`--no-default-features`.
+
+## Tests that keep the wiring from rotting
+
+`crates/ark-channel/src/lib.rs`, `mod feature_wiring`:
+
+* `registry_lists_every_kind_once` — `config::registry()` lists every channel kind
+  exactly once (no duplicate kinds after the split) and still contains the core kinds.
+* `every_platform_feature_is_wired` — for every optional platform, `#[cfg(feature = …)]`
+  blocks assert that the registry entry for its kind is that module's own `build` when
+  the feature is on, and — when the feature is off — that the entry is the stub, whose
+  error says "not compiled into this build". No builder is ever called with real
+  settings, so the test is instant and does no I/O (it creates and removes one temp dir
+  only in the slim configuration).
+
+* `all_and_default_cover_every_platform_feature` — parses this crate's `Cargo.toml`
+  (`include_str!`, no cargo metadata at runtime), expands `all` through the feature graph
+  and asserts that `default` includes `all` and that every feature in the
+  `optional_channels!` table is reachable from it (and counts the table: 39 platforms).
+  Dropping one platform from `all` fails with "feature `ntfy` is not reachable from
+  `all`", which is exactly the way a default build could silently lose a platform.
+
+Adding a platform to `config.rs` without a feature, a feature without a kind, or a new
+platform feature that is missing from `all`, fails one of the tests.
+
+## `ark-media`: no split yet (analysis, not a TODO we could not do)
+
+The same procedure was applied to `ark-media`. Every subsystem is reachable from an
+always-compiled one, so no module qualifies:
+
+| candidate | referenced by (always compiled) |
+| --- | --- |
+| `docs` (PDF/OOXML/ODF extraction) | `inbound` (`crate::docs::extract`, `wrap_external`) |
+| `music_gen` | `understand` (`crate::music_gen::MusicGenerate`, `providers`) |
+| `meeting` | `stt` (`crate::meeting::platforms`, `meetings`, `Meetings::refresh_transcript`) |
+| `genrt`, `image_gen`, `video_gen`, `understand`, `stt`, `tts`, `voice`, `realtime`, `phone`, `audio`, `vision`, `store`, `http`, `proc`, `config`, `inbound` | named by `crates/ark/src/**` and `crates/ark-app/src/**` (`ark_media::tts`, `::stt`, `::voice`, `::inbound`, `::vision`, …) |
+
+So `cargo build -p ark --release --no-default-features` still compiles all of
+`ark-media` (and its `image` dependency): the 4.03 MiB saved above is entirely
+`ark-channel`. A real media split needs the same two-step first: move the shared
+helpers (`audio`, `proc`, `audio::*` codecs) into an ungated core, and stop `inbound`/
+`understand`/`stt` from naming the optional subsystems directly (a small
+`Vec<fn(&Arc<Media>) -> Vec<Arc<dyn Tool>>>` registry would do it). After that the big
+subsystems — `tts` 308 KB, `image_gen` 252 KB, `stt` 216 KB, `video_gen` 208 KB,
+`realtime` 200 KB, `phone` 160 KB, `meeting` 136 KB of source — become gateable.
+
+## Size budget (checked, not remembered)
+
+Sizes only grow if nobody watches them. Two pieces keep them honest:
+
+| Piece | What it does |
+| --- | --- |
+| `tools/size-budget.tsv` | the table: build name, cargo profile, features, **budget** in bytes, last measured size, and the exact command. One line per documented build. |
+| `tools/size-budget.sh` | builds every configuration in the table, compares `stat` size against the budget and exits 1 when any build is over (or missing). Builds into `${ARK_SIZE_TARGET_DIR:-~/.cache/ark-size-budget/target}`, never into `./target`, because each configuration overwrites `target/<profile>/ark` and `target/release/ark` is the binary the tests and e2e use. |
+| `crates/ark/tests/size_budget.rs` | the wiring test (`cargo test -p ark --test size_budget`, no build needed): the default build must stay complete (`default` ⊇ `channel` + `providers`, `ark-model`'s `full` must list every gated adapter), every row must name a real profile and real features, budgets must shrink in the documented order, and **every build name, measured size and budget must appear in this document**. |
+
+```sh
+tools/size-budget.sh                    # build + check every configuration (a few minutes)
+tools/size-budget.sh --only slim        # one configuration
+tools/size-budget.sh --json             # {"ok":true,"builds":[…]}
+tools/size-budget.sh --tolerance=1      # allow 1 % (LTO layout drift)
+```
+
+Current budgets (a ceiling, not a target — a change that adds a megabyte has to be a
+decision):
+
+| build | measured | budget | headroom |
+| --- | --- | --- | --- |
+| default | 33694024 | 36000000 | 6.9 % |
+| slim-features | 29543848 | 31000000 | 4.7 % |
+| slim-profile | 28947688 | 31000000 | 6.6 % |
+| slim | 25474120 | 27000000 | 5.7 % |
+
+Budgets are deliberately ~5 % above the measured size: they should catch a feature that
+adds megabytes, not punish normal code growth (which has its own review).
+
+## Build cost
+
+| Measurement | Value |
+| --- | --- |
+| clean `cargo build -p ark --release` (one configuration, empty target dir, 20 cores) | 215 s |
+| switching features and rebuilding the same target dir | 130–206 s per configuration |
+| a release-only target dir | 1.3 GB |
+| the full workspace `target/` with debug + `--all-targets` + test binaries | 83 GB (this audit round; it is what `cargo test --workspace` needs) |
+
+The bulk of the build time is not `ark` itself but the 117 dependency crates; feature
+switches rebuild most of `ark-channel`/`ark-model` and re-run LTO on the final binary,
+which is why each variant in the table costs minutes rather than seconds.
+
+## Why not `-C link-arg=--icf=all` or `build-std`?
+
+* `--icf=all` needs lld or gold; the workspace does not pin a linker and the default
+  GNU `ld` ignores the flag (a silently ignored flag is worse than no flag).
+* `build-std` is nightly-only and would make the documented `cargo build` command
+  unusable for users on stable.
+* `strip = "symbols"`, `lto = true`, `codegen-units = 1`, `panic = "abort"` are already
+  in `[profile.release]`; `opt-level` was the one remaining free knob, which is what
+  `[profile.slim]` uses.
+
+
+## Caveats
+
+* Numbers move with the tree: `cargo build -p ark --release` re-measured a few minutes
+  later on the same tree (other sessions committing) gave 33 302 568 and then
+  33 304 232 bytes, i.e. the delta below is what matters, not the absolute size. Default
+  and slim were measured back to back on one tree state (33 240 824 → 29 012 392).
+* A slim build emits two `dead_code` warnings inside `ark-channel`
+  (`msteams::pem_to_der`, `msteams::sign_rs256`): their only in-crate callers are
+  `googlechat`/`matrix`/`tlon`, which slim drops. The default build is warning-free.
+* Gating is per module, not per kind: `teams`, `twilio`, `imap`, `lark`, `urbit`,
+  `twitter`, `wechat`, `imsg`, `qa_channel`… aliases disappear together with their
+  platform.

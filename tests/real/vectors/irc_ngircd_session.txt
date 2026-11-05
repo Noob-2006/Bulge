@@ -1,0 +1,22 @@
+:ark-r5e.local CAP * LS :multi-prefix
+:ark-r5e.local CAP vec_r5 NAK :server-time message-tags echo-message account-tag
+:ark-r5e.local 001 vec_r5 :Welcome to the Internet Relay Network vec_r5!~vec@localhost
+:ark-r5e.local 002 vec_r5 :Your host is ark-r5e.local, running version ngircd-27 (x86_64/pc/linux-gnu)
+:ark-r5e.local 003 vec_r5 :This server has been started Wed Nov 04 2026 at 20:22:18 (CST)
+:ark-r5e.local 004 vec_r5 ark-r5e.local ngircd-27 abBcCFiIoqrRswx abehiIklmMnoOPqQrRstvVz
+:ark-r5e.local 005 vec_r5 RFC2812 IRCD=ngIRCd CHARSET=UTF-8 CASEMAPPING=ascii PREFIX=(qaohv)~&@%+ CHANTYPES=#&+ CHANMODES=beI,k,l,imMnOPQRstVz CHANLIMIT=#&+:10 :are supported on this server
+:ark-r5e.local 005 vec_r5 CHANNELLEN=50 NICKLEN=9 TOPICLEN=490 AWAYLEN=127 KICKLEN=400 MODES=5 MAXLIST=beI:50 EXCEPTS=e INVEX=I PENALTY FNC :are supported on this server
+:ark-r5e.local 251 vec_r5 :There are 1 users and 0 services on 1 servers
+:ark-r5e.local 254 vec_r5 1 :channels formed
+:ark-r5e.local 255 vec_r5 :I have 1 users, 0 services and 0 servers
+:ark-r5e.local 265 vec_r5 1 3 :Current local users: 1, Max: 3
+:ark-r5e.local 266 vec_r5 1 3 :Current global users: 1, Max: 3
+:ark-r5e.local 250 vec_r5 :Highest connection count: 3 (19 connections received)
+:ark-r5e.local 375 vec_r5 :- ark-r5e.local message of the day
+:ark-r5e.local 372 vec_r5 :- ark real irc test
+:ark-r5e.local 376 vec_r5 :End of MOTD command
+:vec_r5!~vec@localhost JOIN :#vec
+:ark-r5e.local 353 vec_r5 = #vec :@vec_r5
+:ark-r5e.local 366 vec_r5 #vec :End of NAMES list
+:vec_alice!~a@localhost JOIN :#vec
+:vec_alice!~a@localhost PRIVMSG #vec :hello from a recorded ngircd session

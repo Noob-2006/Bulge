@@ -26,6 +26,8 @@ timeout_secs = 60        # 一般請求逾時；provider 至少 120 s
   "middleware": ["tool_request", "tool_execution", "llm_request", "llm_execution"],
   "context_engine": {"owns_compaction": true},
   "memory": true,
+  "backends": [{"kind": "tts", "id": "acme", "label": "Acme Voice", "caps": {"voices": ["en-US-1"]}}],
+  "dashboard_auth": {"id": "acme-sso", "label": "Acme SSO"},
   "node_commands": [{"command": "kb.search", "description": "…", "dangerous": false, "params": {"type": "object"}}],
   "ui": [{"id": "dash", "title": "知識庫", "surface": "tab"}]
 }}}}
@@ -90,6 +92,26 @@ ark → 外掛：`{"name", "argv": [...], "cwd", "run_id"}`；執行中可送通
 
 設定 `[memory] provider = "<外掛>"`：內建的 `memory` 工具（MEMORY.md／USER.md）換成外掛版，動作 `read`、`search`（`query`）、`add`、`replace`、`remove`。
 ark → 外掛：`ark/memory.call {"action", "file": "memory"|"user", "text"?, "old"?, "query"?, "session"}` → `{"text"}` 或 `{"error"}`。啟動時 `ark/memory.prompt {}` → `{"text"}` 加進身分段（Hermes `system_prompt_block`，靜態）。
+
+## 能力後端（`ark/backend.call`，Hermes `register_*_provider`）
+
+一個外掛可以提供 ark 內建工具背後的一種後端，於 `capabilities.experimental.ark.backends` 宣告（`kind` = `tts`、`stt`、
+`image_gen`、`video_gen`、`browser`、`web_search`；`id` 就是 config 用來選它的名字，內建名稱如 `openai`／`brave`／`browserbase`
+永遠保留給內建 provider）。只有設定指名時才會用到外掛（`[media.tts] provider`、`[media.stt] provider`、`[media.image] provider`、
+`[media.video] provider`、`[browser] cloud_provider`、`[web.search] provider`），`auto` 永遠不會挑外掛。
+
+ark → 外掛：`ark/backend.call {"kind", "id", "op", "params"}` → 廠商 envelope，或 `{"error": "…"}`。
+`op` 依 kind：`tts` 的 `synthesize`（回 `{"audio_base64", "mime"?, "sample_rate"?}`）、`stt` 的 `transcribe`（回 `{"text", "language"?, "duration"?}`）、
+`image_gen`／`video_gen` 的 `generate`、`browser` 的 `create_session`／`close_session`／`cleanup`、`web_search` 的 `search`／`extract`。
+完整 payload 見 `ark_plugin::backends` 的文件。
+
+## Dashboard 登入（`ark/auth.*`，Hermes `dashboard_auth`）
+
+外掛宣告 `dashboard_auth`（`true` 或 `{"id", "label"}`）後，`[app.auth] provider = "<id>"` 就由它負責登入。
+ark → 外掛：`ark/auth.login_start {"redirect_uri"}` → `{"url", "state"}`；`ark/auth.exchange {"code", "state", "redirect_uri"}` → session；
+`ark/auth.verify {"token"}` → session；`ark/auth.refresh {"token"}` → session。session 形狀
+`{"subject", "email"?, "name"?, "expires_at"?, "admin"?}`；`{"error": "…"}` 表示這個憑證不被接受。
+內建 provider：`basic`（`[app.auth.basic.users]` 的帳密）與 `self_hosted`（通用 OIDC，Authorization Code + PKCE）。
 
 ## Node 指令（`ark/node.invoke`，OpenClaw `registerNodeHostCommand`）
 

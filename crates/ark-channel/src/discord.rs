@@ -51,6 +51,10 @@ use std::time::{Duration, Instant};
 
 #[path = "zlib.rs"]
 pub mod zlib;
+#[path = "discord_actions.rs"]
+mod actions;
+#[path = "discord_tools.rs"]
+mod tools;
 
 pub const DEFAULT_API: &str = "https://discord.com/api/v10";
 pub const MAX_MESSAGE: usize = 2000;
@@ -99,6 +103,8 @@ pub struct Config {
     /// Answer a mention in a text channel in a new thread started from it.
     pub auto_thread: bool,
     pub mentions: Mentions,
+    /// Allowlist for the `discord` / `discord_admin` tools (Hermes `discord.server_actions`); None = all.
+    pub server_actions: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -165,6 +171,7 @@ impl Config {
             identify_interval: Duration::from_secs(5),
             auto_thread: false,
             mentions: Mentions::default(),
+            server_actions: None,
         }
     }
 }
@@ -310,6 +317,8 @@ struct Inner {
     roles_fetched: Mutex<std::collections::HashSet<String>>,
     modals: Mutex<Lru<Modal>>,
     polls: Mutex<Lru<Option<PollMeta>>>,
+    /// Bot presence (version, op 3 `d`) from `set-presence`; every shard sends a newer version.
+    presence: Mutex<(u64, Option<Value>)>,
 }
 
 pub struct Discord {
@@ -320,6 +329,12 @@ pub struct Discord {
 }
 
 impl Discord {
+    /// The voice manager this channel runs (`[channels.<name>.voice]`), if any: the media
+    /// layer's `discord-voice` transcript source and the hosts talk to the bot through it.
+    pub fn voice_manager(&self) -> Option<Arc<VoiceManager>> {
+        self.inner.voice.clone()
+    }
+
     pub fn new(cfg: Config) -> Result<Discord, String> {
         if cfg.token.is_empty() {
             return Err(format!("channel {}: discord token is empty", cfg.id));
@@ -331,6 +346,11 @@ impl Discord {
             cfg.intents |= GUILD_VOICE_STATES;
         }
         let voice = cfg.voice.clone().map(|v| VoiceManager::new(&cfg.id, v));
+        // The `transcripts` tool's `discord-voice` source reads this manager (G8): without this
+        // the media layer has no Discord back-end and every capture says "not available".
+        if let Some(v) = &voice {
+            crate::discord_transcripts::install(v.clone());
+        }
         let gw_out = Arc::new(Mutex::new(Vec::new()));
         let inner = Arc::new(Inner {
                 agent: crate::http::agent(Duration::from_secs(60)),
@@ -350,6 +370,7 @@ impl Discord {
                 roles_fetched: Mutex::new(Default::default()),
                 modals: Mutex::new(Lru::new()),
                 polls: Mutex::new(Lru::new()),
+                presence: Mutex::new((0, None)),
             });
         if let Some(v) = &inner.voice {
             let w = Arc::downgrade(&inner);
@@ -410,6 +431,8 @@ enum Body<'a> {
     Json(&'a Value),
     /// payload_json + files: (filename, mime, bytes).
     Files(&'a Value, Vec<(String, String, Vec<u8>)>),
+    /// Pre-encoded body: (content type, bytes).
+    Raw(String, Vec<u8>),
 }
 
 fn multipart(payload: &Value, files: &[(String, String, Vec<u8>)]) -> (String, Vec<u8>) {
@@ -483,6 +506,11 @@ fn dc_error(what: &str, r: &RawResp) -> ChannelError {
 
 impl Inner {
     fn rest(&self, method: &str, path: &str, body: Body) -> Result<Value, ChannelError> {
+        self.rest_h(method, path, body, &[])
+    }
+
+    /// `rest` with extra request headers (`X-Audit-Log-Reason`).
+    fn rest_h(&self, method: &str, path: &str, body: Body, extra: &[(&str, &str)]) -> Result<Value, ChannelError> {
         let url = format!("{}{path}", self.cfg.api_base);
         let route = format!("{method} {}", path.split('?').next().unwrap_or(path));
         let auth = format!("Bot {}", self.cfg.token);
@@ -493,11 +521,13 @@ impl Inner {
                 let (c, b) = multipart(p, f);
                 (Some(c), b)
             }
+            Body::Raw(c, b) => (Some(c.clone()), b.clone()),
         };
         let mut attempt = 0;
         loop {
             self.wait_bucket(&route)?;
-            let headers = [("authorization", auth.as_str()), ("user-agent", "DiscordBot (https://github.com/ark, 1) ark")];
+            let mut headers = vec![("authorization", auth.as_str()), ("user-agent", "DiscordBot (https://github.com/ark, 1) ark")];
+            headers.extend_from_slice(extra);
             let err = match raw_call(&self.agent, method, &url, &headers, ctype.as_deref(), &bytes) {
                 Ok(r) => {
                     self.note_bucket(&route, &r);
@@ -648,12 +678,17 @@ impl Inner {
             return;
         }
         let Some(app) = self.me.lock().unwrap().clone().map(|m| m.app_id).filter(|a| !a.is_empty()) else { return };
-        let mut cmds = json!([
-            {"name": "new", "description": "開新對話", "type": 1},
-            {"name": "stop", "description": "中斷目前的工作", "type": 1},
-            {"name": "status", "description": "目前狀態", "type": 1},
-            {"name": "help", "description": "說明", "type": 1},
-        ]);
+        let menu = crate::menu();
+        let mut cmds = if menu.is_empty() {
+            json!([
+                {"name": "new", "description": "開新對話", "type": 1},
+                {"name": "stop", "description": "中斷目前的工作", "type": 1},
+                {"name": "status", "description": "目前狀態", "type": 1},
+                {"name": "help", "description": "說明", "type": 1},
+            ])
+        } else {
+            json!(crate::discord_menu(&menu).into_iter().filter(|c| c["name"] != "voice").collect::<Vec<_>>())
+        };
         if self.voice.is_some() {
             let choices: Vec<Value> = ["join", "leave", "status"].iter().map(|c| json!({"name": c, "value": c})).collect();
             cmds.as_array_mut().unwrap().push(json!({"name": "voice", "description": "語音頻道", "type": 1, "dm_permission": false, "options": [{"type": 3, "name": "mode", "description": "join / leave / status", "required": false, "choices": choices}]}));
@@ -813,6 +848,7 @@ fn run_connection(inner: &Inner, tx: &mpsc::Sender<Inbound>, stop: &Cancel, url:
     let mut heartbeat: Option<(Duration, Instant)> = None;
     let mut acked = true;
     let mut healthy = false;
+    let mut presence_sent = 0u64;
     let mut z = inner.cfg.compress.then(zlib::ZlibStream::default);
     loop {
         if stop.is_cancelled() {
@@ -845,6 +881,13 @@ fn run_connection(inner: &Inner, tx: &mpsc::Sender<Inbound>, stop: &Cancel, url:
                 if !send_json(&mut ws, v) {
                     return again(healthy);
                 }
+            }
+            let presence = inner.presence.lock().unwrap().clone();
+            if let (true, Some(d)) = (presence.0 > presence_sent, presence.1) {
+                if !send_json(&mut ws, &json!({"op": 3, "d": d})) {
+                    return again(healthy);
+                }
+                presence_sent = presence.0;
             }
         }
         let text = match ws.recv() {
@@ -889,6 +932,11 @@ fn run_connection(inner: &Inner, tx: &mpsc::Sender<Inbound>, stop: &Cancel, url:
                         let mut m = json!({"op": 2, "d": {"token": inner.cfg.token, "intents": inner.cfg.intents, "properties": {"os": std::env::consts::OS, "browser": "ark", "device": "ark"}}});
                         if let Some((id, n)) = shard {
                             m["d"]["shard"] = json!([id, n]);
+                        }
+                        let (version, presence) = inner.presence.lock().unwrap().clone();
+                        if let Some(p) = presence {
+                            m["d"]["presence"] = p;
+                            presence_sent = version;
                         }
                         m
                     }
@@ -2028,6 +2076,18 @@ impl Channel for Discord {
         crate::http::get_bytes(u, &[], 100 * 1024 * 1024)
     }
 
+    fn message_action(&self, action: &str, args: &Value) -> Result<Value, ChannelError> {
+        self.action(action, args)
+    }
+
+    fn message_actions(&self) -> Vec<&'static str> {
+        actions::ACTIONS.to_vec()
+    }
+
+    fn tools(&self) -> Vec<Arc<dyn ark_core::Tool>> {
+        tools::tools(&self.inner)
+    }
+
     fn stop(&self) {
         self.stop.cancel();
         if let Some(v) = &self.inner.voice {
@@ -2095,6 +2155,9 @@ struct Settings {
     auto_thread: bool,
     #[serde(default)]
     allow_mentions: Option<Mentions>,
+    /// Actions the `discord` / `discord_admin` tools may use (default: all).
+    #[serde(default)]
+    server_actions: Option<Vec<String>>,
 }
 
 #[derive(serde::Deserialize)]
@@ -2127,6 +2190,7 @@ pub fn build(ctx: &crate::config::Ctx, s: &serde_json::Map<String, Value>) -> Re
     cfg.max_concurrency = st.max_concurrency.filter(|n| *n > 0);
     cfg.auto_thread = st.auto_thread;
     cfg.mentions = st.allow_mentions.unwrap_or_default();
+    cfg.server_actions = st.server_actions;
     if st.voice {
         let mut v = VoiceConfig::default();
         let resolve = |field: &str, sp: Option<discord_voice::Speech>| -> Result<Option<discord_voice::Speech>, String> {

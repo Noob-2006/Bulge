@@ -99,10 +99,22 @@ impl FakeServer {
 }
 
 pub fn temp_dir(tag: &str) -> std::path::PathBuf {
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    static N: AtomicUsize = AtomicUsize::new(0);
-    let d = std::env::temp_dir().join(format!("ark-ch-{tag}-{}-{}", std::process::id(), N.fetch_add(1, Ordering::SeqCst)));
-    let _ = std::fs::remove_dir_all(&d);
-    std::fs::create_dir_all(&d).unwrap();
-    d
+    // Removed when the test's thread ends (ark_core::tmp::scratch): a plain `PathBuf` for the
+    // callers, no tree left in $TMPDIR after the suite.
+    ark_core::tmp::scratch(&format!("ark-ch-{tag}"))
+}
+
+/// A `ToolCtx` for channel-tool tests (no host services).
+pub fn tool_ctx() -> ark_core::ToolCtx {
+    struct H;
+    impl ark_core::ToolHost for H {
+        fn spawn_agent(&self, _: ark_core::tool::SpawnRequest, _: &ark_core::Cancel) -> Result<String, String> {
+            Err("no".into())
+        }
+        fn ask_user(&self, _: &str) -> Result<String, String> {
+            Err("no".into())
+        }
+    }
+    let d = ark_core::tmp::scratch("ark-ch-ctx");
+    ark_core::ToolCtx { workspace: d.clone(), session_id: "s".into(), artifacts: d.clone(), home: d, cancel: ark_core::Cancel::new(), host: Arc::new(H), secrets: Arc::new(|s: &str| s.to_string()) }
 }

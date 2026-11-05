@@ -1,0 +1,16 @@
+{
+  "id": "demo-search",
+  "name": "Demo Search",
+  "description": "OpenClaw demo plugin: web search provider with a CLI command and one tool.",
+  "categories": ["web"],
+  "activation": { "onStartup": true, "onConfigPaths": ["demoSearch"] },
+  "cliCommands": [ { "name": "demo", "description": "Query the demo search index", "hasSubcommands": true } ],
+  "setup": { "providers": [ { "id": "demo", "envVars": ["DEMO_API_KEY"] } ] },
+  "skills": ["./skills"],
+  "contracts": { "webSearchProviders": ["demo", "demo-llm"], "tools": ["demo_search"], "memoryProviders": ["memory-core"] },
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": { "demoSearch": { "type": "object", "properties": { "apiKey": { "type": ["string", "object"] }, "mode": { "type": "string", "enum": ["web", "llm-context"] } } } }
+  }
+}

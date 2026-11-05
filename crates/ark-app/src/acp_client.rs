@@ -652,6 +652,7 @@ fn terminal_create(st: &State, p: &Value) -> RpcResult {
         c.args(&args);
         c
     };
+    ark_security::envscrub::apply(&mut cmd, ark_security::envscrub::Surface::Terminal);
     cmd.current_dir(&cwd).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
     for e in p["env"].as_array().into_iter().flatten() {
         if let Some(n) = e["name"].as_str() {

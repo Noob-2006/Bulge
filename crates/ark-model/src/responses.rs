@@ -2,7 +2,7 @@
 //! as `{"id":..,"encrypted_content":..}` so stateless (`store:false`) tool loops keep them.
 
 use crate::http::{json, truncated};
-use crate::{caps_for, classify, data_url, finalize_usage, parse_args, thinking_budget, Conn};
+use crate::{caps_for, classify, data_url, finalize_usage, parse_args, reasoning, Conn, Style};
 use ark_core::*;
 use serde_json::{json, Value};
 
@@ -55,22 +55,60 @@ impl Responses {
             "include": ["reasoning.encrypted_content"],
         });
         let sys = req.system_text();
-        if !sys.is_empty() {
-            b["instructions"] = sys.into();
+        let codex = self.conn.quirk("codex");
+        if !sys.is_empty() || codex {
+            // The ChatGPT Codex backend requires `instructions`.
+            b["instructions"] = if sys.is_empty() {
+                "You are a helpful assistant.".into()
+            } else {
+                sys.into()
+            };
         }
-        if let Some(t) = req.temperature {
+        if codex || self.conn.quirk("no_max_tokens") {
+            // chatgpt.com/backend-api/codex rejects max_output_tokens and temperature.
+            b.as_object_mut().unwrap().remove("max_output_tokens");
+        }
+        if let Some(t) = req
+            .temperature
+            .filter(|_| !codex && !self.conn.quirk("no_temperature"))
+        {
             b["temperature"] = t.into();
         }
-        if thinking_budget(req.reasoning.as_deref()).is_some() {
-            b["reasoning"] = json!({"effort": req.reasoning, "summary": "auto"});
+        let wire = if self.conn.id.starts_with("xai") || self.conn.base.contains("api.x.ai") {
+            reasoning::XAI_WIRE
+        } else {
+            reasoning::RESPONSES_WIRE
+        };
+        if let Some(e) = self.conn.effort(wire, req) {
+            b["reasoning"] = if e == "off" {
+                json!({"effort": "none"})
+            } else {
+                json!({"effort": e, "summary": "auto"})
+            };
+        }
+        let first_party =
+            codex || crate::first_party(&self.conn, &["api.openai.com", "api.x.ai", "chatgpt.com"]);
+        if let Some(t) = req.options.service_tier.as_deref().filter(|_| first_party) {
+            b["service_tier"] = t.into();
+        }
+        if let Some(v) = req.options.verbosity.as_deref() {
+            b["text"] = json!({"verbosity": v});
         }
         if !req.tools.is_empty() {
+            let strict = req.options.strict_tools;
             b["tools"] = req
                 .tools
                 .iter()
-                .map(|t| json!({"type": "function", "name": t.name, "description": t.description, "parameters": t.input_schema}))
+                .map(|t| {
+                    let mut f = json!({"type": "function", "name": t.name, "description": t.description, "parameters": t.input_schema});
+                    if strict {
+                        f["strict"] = true.into();
+                    }
+                    f
+                })
                 .collect();
         }
+        crate::native_compact::apply(&mut b, req, &self.conn, codex);
         b
     }
 }
@@ -82,8 +120,13 @@ impl Provider for Responses {
     fn caps(&self, model: &str) -> ModelCaps {
         caps_for(model)
     }
-    fn complete(&self, req: &ModelRequest, on_event: &mut dyn FnMut(StreamEvent), cancel: &Cancel) -> Result<ModelResponse, ProviderError> {
-        let headers = self.conn.headers_with(self.conn.key.as_ref().map(|k| ("authorization", format!("Bearer {k}"))));
+    fn complete(
+        &self,
+        req: &ModelRequest,
+        on_event: &mut dyn FnMut(StreamEvent),
+        cancel: &Cancel,
+    ) -> Result<ModelResponse, ProviderError> {
+        let (base, headers, _) = self.conn.prepare(Style::Bearer)?;
         let mut content: Vec<Block> = Vec::new();
         let mut text = String::new();
         let mut thinking = String::new();
@@ -91,83 +134,119 @@ impl Provider for Responses {
         let mut status: Option<String> = None;
         let mut model = req.model.clone();
 
-        self.conn.http.post_sse(&self.conn.url("responses"), &headers, &self.body(req), cancel, |ev| {
-            let v = json(&ev.data)?;
-            let ty = v.get("type").and_then(Value::as_str).or(ev.event.as_deref()).unwrap_or("");
-            match ty {
-                "response.output_text.delta" => {
-                    let d = v["delta"].as_str().unwrap_or("");
-                    text.push_str(d);
-                    on_event(StreamEvent::TextDelta(d.into()));
-                }
-                "response.reasoning_summary_text.delta" | "response.reasoning_text.delta" => {
-                    let d = v["delta"].as_str().unwrap_or("");
-                    thinking.push_str(d);
-                    on_event(StreamEvent::ThinkingDelta(d.into()));
-                }
-                "response.output_item.added" if v["item"]["type"] == "function_call" => {
-                    on_event(StreamEvent::ToolUseStart {
-                        id: v["item"]["call_id"].as_str().unwrap_or("").into(),
-                        name: v["item"]["name"].as_str().unwrap_or("").into(),
-                    });
-                }
-                "response.output_item.done" => {
-                    let it = &v["item"];
-                    match it["type"].as_str() {
-                        Some("function_call") => {
-                            flush_text(&mut content, &mut text);
-                            let name = it["name"].as_str().unwrap_or("");
-                            if name.is_empty() {
-                                return Err(ProviderError::new(ProviderErrorKind::Protocol, "function_call without name"));
+        let mut body = self.body(req);
+        crate::native_compact::send_with_recovery(&mut body, &self.conn.id, &req.model, |b| {
+            self.conn.http.post_sse(
+                &self.conn.url_on(&base, "responses"),
+                &headers,
+                b,
+                cancel,
+                |ev| {
+                    let v = json(&ev.data)?;
+                    let ty = v
+                        .get("type")
+                        .and_then(Value::as_str)
+                        .or(ev.event.as_deref())
+                        .unwrap_or("");
+                    match ty {
+                        "response.output_text.delta" => {
+                            let d = v["delta"].as_str().unwrap_or("");
+                            text.push_str(d);
+                            on_event(StreamEvent::TextDelta(d.into()));
+                        }
+                        "response.reasoning_summary_text.delta" | "response.reasoning_text.delta" => {
+                            let d = v["delta"].as_str().unwrap_or("");
+                            thinking.push_str(d);
+                            on_event(StreamEvent::ThinkingDelta(d.into()));
+                        }
+                        "response.output_item.added" if v["item"]["type"] == "function_call" => {
+                            on_event(StreamEvent::ToolUseStart {
+                                id: v["item"]["call_id"].as_str().unwrap_or("").into(),
+                                name: v["item"]["name"].as_str().unwrap_or("").into(),
+                            });
+                        }
+                        "response.output_item.done" => {
+                            let it = &v["item"];
+                            match it["type"].as_str() {
+                                Some("function_call") => {
+                                    flush_text(&mut content, &mut text);
+                                    let name = it["name"].as_str().unwrap_or("");
+                                    if name.is_empty() {
+                                        return Err(ProviderError::new(
+                                            ProviderErrorKind::Protocol,
+                                            "function_call without name",
+                                        ));
+                                    }
+                                    content.push(Block::ToolUse {
+                                        id: it["call_id"]
+                                            .as_str()
+                                            .or(it["id"].as_str())
+                                            .unwrap_or("call_0")
+                                            .into(),
+                                        name: name.into(),
+                                        input: parse_args(it["arguments"].as_str().unwrap_or("")),
+                                    });
+                                }
+                                Some("reasoning") => {
+                                    let sig = it
+                                        .get("encrypted_content")
+                                        .filter(|e| e.is_string())
+                                        .map(|e| {
+                                            json!({"id": it["id"], "encrypted_content": e}).to_string()
+                                        });
+                                    content.push(Block::Thinking {
+                                        text: std::mem::take(&mut thinking),
+                                        signature: sig,
+                                    });
+                                }
+                                Some("message") => flush_text(&mut content, &mut text),
+                                _ => {}
                             }
-                            content.push(Block::ToolUse {
-                                id: it["call_id"].as_str().or(it["id"].as_str()).unwrap_or("call_0").into(),
-                                name: name.into(),
-                                input: parse_args(it["arguments"].as_str().unwrap_or("")),
-                            });
                         }
-                        Some("reasoning") => {
-                            let sig = it.get("encrypted_content").filter(|e| e.is_string()).map(|e| {
-                                json!({"id": it["id"], "encrypted_content": e}).to_string()
-                            });
-                            content.push(Block::Thinking { text: std::mem::take(&mut thinking), signature: sig });
+                        "response.completed" | "response.incomplete" => {
+                            let r = &v["response"];
+                            status = Some(ty.trim_start_matches("response.").to_string());
+                            if let Some(m) = r["model"].as_str() {
+                                model = m.into();
+                            }
+                            if let Some(u) = r.get("usage").filter(|u| u.is_object()) {
+                                let inp = u["input_tokens"].as_u64().unwrap_or(0);
+                                let cached = u["input_tokens_details"]["cached_tokens"]
+                                    .as_u64()
+                                    .unwrap_or(0);
+                                usage = Some(Usage {
+                                    input_tokens: inp.saturating_sub(cached),
+                                    output_tokens: u["output_tokens"].as_u64().unwrap_or(0),
+                                    cache_read_tokens: cached,
+                                    ..Default::default()
+                                });
+                            }
+                            return Ok(true);
                         }
-                        Some("message") => flush_text(&mut content, &mut text),
+                        "response.failed" => {
+                            let e = &v["response"]["error"];
+                            return Err(classify::from_stream_error(&json!({"error": e})));
+                        }
+                        "error" => return Err(classify::from_stream_error(&v)),
                         _ => {}
                     }
-                }
-                "response.completed" | "response.incomplete" => {
-                    let r = &v["response"];
-                    status = Some(ty.trim_start_matches("response.").to_string());
-                    if let Some(m) = r["model"].as_str() {
-                        model = m.into();
-                    }
-                    if let Some(u) = r.get("usage").filter(|u| u.is_object()) {
-                        let inp = u["input_tokens"].as_u64().unwrap_or(0);
-                        let cached = u["input_tokens_details"]["cached_tokens"].as_u64().unwrap_or(0);
-                        usage = Some(Usage {
-                            input_tokens: inp.saturating_sub(cached),
-                            output_tokens: u["output_tokens"].as_u64().unwrap_or(0),
-                            cache_read_tokens: cached,
-                            ..Default::default()
-                        });
-                    }
-                    return Ok(true);
-                }
-                "response.failed" => {
-                    let e = &v["response"]["error"];
-                    return Err(classify::from_stream_error(&json!({"error": e})));
-                }
-                "error" => return Err(classify::from_stream_error(&v)),
-                _ => {}
-            }
-            Ok(false)
+                    Ok(false)
+                },
+            )
         })?;
 
-        let Some(status) = status else { return Err(truncated("response.completed")) };
+        let Some(status) = status else {
+            return Err(truncated("response.completed"));
+        };
         flush_text(&mut content, &mut text);
         if !thinking.is_empty() {
-            content.insert(0, Block::Thinking { text: thinking, signature: None });
+            content.insert(
+                0,
+                Block::Thinking {
+                    text: thinking,
+                    signature: None,
+                },
+            );
         }
         let has_tools = content.iter().any(|b| matches!(b, Block::ToolUse { .. }));
         let stop = if has_tools {
@@ -177,14 +256,24 @@ impl Provider for Responses {
         } else {
             StopReason::EndTurn
         };
-        let message = Message { role: Role::Assistant, content };
+        let message = Message {
+            role: Role::Assistant,
+            content,
+        };
         let usage = finalize_usage(usage, req, &message);
-        Ok(ModelResponse { message, stop, usage, model })
+        Ok(ModelResponse {
+            message,
+            stop,
+            usage,
+            model,
+        })
     }
 }
 
 fn flush_text(content: &mut Vec<Block>, text: &mut String) {
     if !text.is_empty() {
-        content.push(Block::Text { text: std::mem::take(text) });
+        content.push(Block::Text {
+            text: std::mem::take(text),
+        });
     }
 }

@@ -145,6 +145,9 @@ input = {pin}
 output = {pout}
 cache_read = {pcache}
 
+[hooks_extra]
+auto_accept = true
+
 [[hooks]]
 event = "pre_tool"
 matcher = "*"

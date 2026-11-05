@@ -1,14 +1,13 @@
 //! The kernel: sessions, the turn/step runner, tool dispatch through the gates,
 //! retries and provider fallback, compaction, crash recovery and sub-agents.
 
-use crate::approver::{Approval, ApprovalRequest, Approver, PendingItem, Remembered};
+use crate::approver::{Approver, PendingItem, Remembered};
 use crate::checkpoint::Checkpoints;
 use crate::compaction;
 use crate::config::{Config, Paths};
 use crate::context::{self, split_model};
 use crate::engine::ContextEngine;
 use crate::event::{Event, EventKind, LOG_VERSION};
-use crate::gate::{Gates, Verdict};
 use crate::hooks::{self, Hook, HookDecision, HookEvent};
 use crate::ledger::{Budget, Ledger};
 use crate::projection::{project, Queued, View};
@@ -22,6 +21,9 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{mpsc, Arc, Mutex};
 use std::time::{Duration, Instant};
+
+mod hookpoints;
+pub use hookpoints::{history as hook_history, host_routes, set_host_routes, HostRoutes, BLOCK_MESSAGE_PREFIX};
 
 /// Interface: resolve a provider id to an implementation (lives in ark-model).
 pub trait Resolver: Send + Sync {
@@ -63,6 +65,10 @@ pub enum EndReason {
     Refusal,
     Stuck(String),
     Error(String),
+    /// Stoppable-and-resumable: the provider was unreachable or out of credit, or a resource
+    /// cap was hit. The state is the event log, so a later run continues from the same turn
+    /// (C1/C2/C8: pause instead of exiting). Text: why, and when the retry happens.
+    Paused(String),
 }
 
 impl EndReason {
@@ -77,6 +83,7 @@ impl EndReason {
             EndReason::Refusal => "refusal".into(),
             EndReason::Stuck(s) => format!("stuck: {s}"),
             EndReason::Error(s) => format!("error: {s}"),
+            EndReason::Paused(s) => format!("paused: {s}"),
         }
     }
     pub fn ok(&self) -> bool {
@@ -100,11 +107,20 @@ pub struct RunOpts {
     pub cancel: Option<Cancel>,
     /// Extra kernel tool for goal runs.
     pub goal_mode: bool,
+    /// Return when the inbox is empty even while background sub-agents still run
+    /// (their completions are queued in the inbox for a later run).
+    pub detach: bool,
 }
 
-struct Running {
+pub(crate) struct Running {
     cancel: Cancel,
     queue: Arc<Mutex<Vec<Queued>>>,
+    /// Settings changes for a running session (its log is held by the run).
+    events: Arc<Mutex<Vec<EventKind>>>,
+    /// Input held for later turns (`queue` modes other than steer).
+    later: Arc<Mutex<Vec<Queued>>>,
+    /// Set by `interrupt` mode: the cancelled turn is followed by a fresh one.
+    restart: Arc<std::sync::atomic::AtomicBool>,
 }
 
 pub struct Runtime {
@@ -117,30 +133,54 @@ pub struct Runtime {
     pub approver: Arc<dyn Approver>,
     pub remembered: Remembered,
     pub bus: Bus,
-    running: Mutex<HashMap<String, Running>>,
+    pub(crate) running: Mutex<HashMap<String, Running>>,
     /// Models whose provider rejected us (bad key, no credit): tried last until the
     /// cooldown passes, so each step doesn't pay for a doomed request first.
     benched: Mutex<HashMap<String, Instant>>,
+    /// C12: models that rejected a reasoning parameter (`400`). Later calls omit it, so a
+    /// brand-new model id costs one probe, not a broken session.
+    no_reasoning: Mutex<std::collections::HashSet<String>>,
     hooks: std::sync::RwLock<Vec<Arc<dyn Hook>>>,
     session_tools: std::sync::RwLock<HashMap<String, Vec<Arc<dyn Tool>>>>,
     taps: std::sync::RwLock<Vec<Tap>>,
     /// `context_engine = "<plugin>"`: shapes requests and may own compaction.
     engine: std::sync::RwLock<Option<Arc<dyn ContextEngine>>>,
+    /// In-process turn observers (memory providers, skill usage, curators).
+    lifecycles: std::sync::RwLock<Vec<Arc<dyn crate::lifecycle::Lifecycle>>>,
+    /// Native slash commands registered by the host (skills, memory, context, plugins).
+    slash: std::sync::RwLock<Vec<Arc<dyn crate::slash::Slash>>>,
     /// Test hook / determinism: override sleep between retries.
     pub retry_sleep: Option<Duration>,
+    /// Live and recently finished sub-agents (delegate_task, sessions_spawn…).
+    pub subagents: crate::subagents::Registry,
+    /// Sessions whose current turn a tool asked to end (sessions_yield, structured_output).
+    end_turn: Mutex<std::collections::HashSet<String>>,
+    /// Set by the daemon: an idle session that receives a sub-agent completion is started.
+    pub auto_resume: std::sync::atomic::AtomicBool,
+    /// Per-session `/queue` settings (busy-input behaviour); unset = `runner.busy_mode`.
+    pub queue_settings: Mutex<HashMap<String, crate::queue::Settings>>,
+    /// `/debug set` runtime overrides (OpenClaw `config/runtime-overrides.ts`): when set,
+    /// a validated config replaces `cfg` for turns started after it was applied.
+    runtime_cfg: std::sync::RwLock<Option<Config>>,
+    /// Per-session context state: subdirectory trackers, micro-compaction, verify loop
+    /// (`@`-references, subdirectory hints, `verify_on_stop`, BM25 tool search).
+    pub ctx: crate::ctxstate::CtxState,
 }
 
 pub type Kernel = Arc<Runtime>;
+
+/// One waiting input entry as reported by `Runtime::queued`: `(inbox id, source, text)`.
+pub type QueuedInput = (String, String, String);
 
 /// Synchronous event observer: runs on the appending thread before the bus sees
 /// the event (e.g. snapshot a file's text before the tool that edits it runs).
 pub type Tap = Arc<dyn Fn(&str, &Event) + Send + Sync>;
 
 #[derive(Default)]
-struct Fired {
-    block: Option<String>,
-    modified: Option<Value>,
-    context: Vec<String>,
+pub(crate) struct Fired {
+    pub(crate) block: Option<String>,
+    pub(crate) modified: Option<Value>,
+    pub(crate) context: Vec<String>,
 }
 
 const BENCH_COOLDOWN: Duration = Duration::from_secs(600);
@@ -148,8 +188,16 @@ const BENCH_COOLDOWN: Duration = Duration::from_secs(600);
 const MAX_BOOSTED_TOKENS: u32 = 32_768;
 
 pub fn new_kernel(cfg: Config, paths: Paths, resolver: Arc<dyn Resolver>, tools: Vec<Arc<dyn Tool>>, vault: Arc<Vault>, approver: Arc<dyn Approver>) -> Kernel {
+    let mut tools = tools;
+    // Sub-agent / multi-session / typed sub-call tools live next to the kernel: they reach
+    // it through `ToolHost::as_any` (Host::of), so every front end gets them without wiring.
+    tools.extend(crate::subagents::tools());
+    tools.extend(crate::agents::tools());
+    tools.extend(crate::coord::tools());
+    tools.extend(crate::decision::tools());
     let store = Store::new(paths.sessions());
-    Arc::new(Runtime { cfg, paths, store, resolver, tools, vault, approver, remembered: Remembered::default(), bus: Bus::default(), running: Mutex::new(HashMap::new()), benched: Mutex::new(HashMap::new()), hooks: Default::default(), session_tools: Default::default(), taps: Default::default(), engine: Default::default(), retry_sleep: None })
+    cfg.security.activate_at(Some(&paths.config_dir));
+    Arc::new(Runtime { cfg, paths, store, resolver, tools, vault, approver, remembered: Remembered::default(), bus: Bus::default(), running: Mutex::new(HashMap::new()), benched: Mutex::new(HashMap::new()), no_reasoning: Mutex::new(std::collections::HashSet::new()), hooks: Default::default(), session_tools: Default::default(), taps: Default::default(), engine: Default::default(), lifecycles: Default::default(), slash: Default::default(), retry_sleep: None, subagents: Default::default(), end_turn: Default::default(), auto_resume: Default::default(), queue_settings: Default::default(), runtime_cfg: Default::default(), ctx: Default::default() })
 }
 
 #[derive(Debug)]
@@ -178,14 +226,36 @@ const KERNEL_TOOL_SEARCH: &str = "session_search";
 const KERNEL_TOOL_GOAL_DONE: &str = "goal_done";
 
 impl Runtime {
+    /// The config turns started now should use: `/debug set` runtime overrides replace the
+    /// startup snapshot once they validate (OpenClaw `config/runtime-overrides.ts`).
+    pub fn cfg_now(&self) -> Config {
+        self.runtime_cfg.read().unwrap().clone().unwrap_or_else(|| self.cfg.clone())
+    }
+    /// Install (or clear) the runtime override snapshot; `None` restores the startup config.
+    pub fn set_runtime_cfg(&self, cfg: Option<Config>) {
+        *self.runtime_cfg.write().unwrap() = cfg;
+    }
+    pub fn runtime_cfg(&self) -> Option<Config> {
+        self.runtime_cfg.read().unwrap().clone()
+    }
     pub fn specs(&self) -> Vec<ToolSpec> {
-        self.tools.iter().map(|t| t.spec()).filter(|s| !self.cfg.tools.disabled.contains(&s.name)).collect()
+        let cfg = self.cfg_now();
+        let mut v: Vec<ToolSpec> = self.tools.iter().map(|t| t.spec()).filter(|s| !cfg.tools.disabled.contains(&s.name)).collect();
+        v.extend(self.engine_tools().iter().map(|t| t.spec()).filter(|s| !cfg.tools.disabled.contains(&s.name)));
+        v
+    }
+    /// Tools the active context engine brings (Hermes `ContextEngine.get_tool_schemas`).
+    fn engine_tools(&self) -> Vec<Arc<dyn Tool>> {
+        self.engine().map(|e| e.tools()).unwrap_or_default()
     }
     fn tool(&self, session: &str, name: &str) -> Option<Arc<dyn Tool>> {
-        if self.cfg.tools.disabled.iter().any(|d| d == name) {
+        if self.cfg_now().tools.disabled.iter().any(|d| d == name) {
             return None;
         }
-        self.tools.iter().find(|t| t.spec().name == name).cloned().or_else(|| self.session_tools.read().unwrap().get(session)?.iter().find(|t| t.spec().name == name).cloned())
+        if !self.tool_permitted(session, "", name) {
+            return None;
+        }
+        self.tools.iter().find(|t| t.spec().name == name).cloned().or_else(|| self.engine_tools().into_iter().find(|t| t.spec().name == name)).or_else(|| self.session_tools.read().unwrap().get(session)?.iter().find(|t| t.spec().name == name).cloned())
     }
 
     /// Short, token-cheap error: closest names instead of the whole catalog.
@@ -206,10 +276,13 @@ impl Runtime {
             crate::coderun::spec(),
             ToolSchema {
                 name: KERNEL_TOOL_SEARCH.into(),
-                description: "Search past sessions' messages (case-insensitive, works for Chinese). Returns session ids and snippets.".into(),
-                input_schema: json!({"type":"object","properties":{"query":{"type":"string"},"limit":{"type":"integer"}},"required":["query"]}),
+                description: "Search past sessions' messages (case-insensitive, works for Chinese). `query` searches all sessions; `session` + `read`/`scroll` reads one transcript; `after`/`before` (ISO dates or YYYY-MM-DD), `role` (user|assistant) and `session` filter the hits; `summary` groups them per session.".into(),
+                input_schema: crate::agents::session_search_schema(),
             },
         ];
+        if self.cfg.tools.tool_search.enabled {
+            v.push(crate::ctxrun::tool_search_schema());
+        }
         if goal_mode {
             v.push(ToolSchema {
                 name: KERNEL_TOOL_GOAL_DONE.into(),
@@ -220,11 +293,17 @@ impl Runtime {
         v
     }
 
-    fn append(&self, log: &mut SessionLog, kind: EventKind) -> Result<Event, StoreError> {
+    pub(crate) fn request_end_turn(&self, session: &str) {
+        self.end_turn.lock().unwrap().insert(session.to_string());
+    }
+
+    pub(crate) fn append(&self, log: &mut SessionLog, kind: EventKind) -> Result<Event, StoreError> {
+        let kind = if matches!(kind, EventKind::Message { .. }) && self.has_hooks(HookEvent::BeforeMessageWrite) { self.before_message_write(log, kind)? } else { kind };
         let ev = log.append(kind)?;
         for t in self.taps.read().unwrap().iter() {
             t(&log.id, &ev);
         }
+        crate::subagents::live_log(self, &log.id, &ev);
         if let (EventKind::Message { message, .. }, Some(e)) = (&ev.kind, self.engine()) {
             e.ingest(&log.id, message);
         }
@@ -237,6 +316,10 @@ impl Runtime {
     pub fn add_hooks(&self, hooks: Vec<Arc<dyn Hook>>) {
         self.hooks.write().unwrap().extend(hooks);
     }
+    /// Names of the installed hooks, in install order (`ark doctor`, tests).
+    pub fn hook_names(&self) -> Vec<String> {
+        self.hooks.read().unwrap().iter().map(|h| h.name()).collect()
+    }
     pub fn add_tap(&self, t: Tap) {
         self.taps.write().unwrap().push(t);
     }
@@ -245,6 +328,47 @@ impl Runtime {
     }
     fn engine(&self) -> Option<Arc<dyn ContextEngine>> {
         self.engine.read().unwrap().clone()
+    }
+    pub fn add_lifecycle(&self, l: Arc<dyn crate::lifecycle::Lifecycle>) {
+        self.lifecycles.write().unwrap().push(l);
+    }
+    fn lifecycles(&self) -> Vec<Arc<dyn crate::lifecycle::Lifecycle>> {
+        self.lifecycles.read().unwrap().clone()
+    }
+    /// Names of the registered observers (diagnostics and tests: proves a subsystem attached).
+    pub fn lifecycle_names(&self) -> Vec<String> {
+        self.lifecycles().iter().map(|l| l.name()).collect()
+    }
+    /// Builtin system segments plus those lifecycle observers contribute (same id replaces).
+    fn system_segments(&self, ws: &Path) -> Vec<SystemSegment> {
+        let cfg = self.cfg_now();
+        let mut segs = context::system_segments(&cfg, &self.paths, ws, &self.specs(), cfg.schedule.utc_offset_minutes);
+        let wss = ws.to_string_lossy();
+        for l in self.lifecycles() {
+            let Some(seg) = l.system_segment(&wss) else { continue };
+            if let Some(old) = segs.iter_mut().find(|s| s.id == seg.id) {
+                *old = seg;
+            } else {
+                let at = segs.iter().position(|s| s.id == "project").unwrap_or(segs.len());
+                segs.insert(at, seg);
+            }
+        }
+        segs.retain(|s| !s.text.trim().is_empty());
+        segs
+    }
+    pub fn add_slash(&self, s: Arc<dyn crate::slash::Slash>) {
+        self.slash.write().unwrap().push(s);
+    }
+    /// Registered native slash commands as (name, description).
+    pub fn slash_commands(&self) -> Vec<(String, String)> {
+        self.slash.read().unwrap().iter().flat_map(|s| s.commands()).collect()
+    }
+    /// Run `line` if it is a registered native slash command (`None` otherwise).
+    pub fn run_slash(self: &Arc<Self>, line: &str, session: Option<&str>, surface: &str) -> Option<Result<crate::slash::SlashReply, String>> {
+        let (name, args) = crate::slash::split(line)?;
+        let handlers = self.slash.read().unwrap().clone();
+        let ctx = crate::slash::SlashCtx { kernel: self.clone(), session: session.map(String::from), surface: surface.to_string() };
+        handlers.iter().find_map(|h| h.run(&ctx, name, args))
     }
 
     /// Fire a hook whose `field` a hook may replace; returns the replacement (warnings go to the log).
@@ -257,7 +381,7 @@ impl Runtime {
 
     /// Run every matching hook in order. A block wins immediately; modifications
     /// chain (each hook sees the previous one's input); broken hooks only warn.
-    fn fire(&self, log: Option<&mut SessionLog>, event: HookEvent, tool: Option<&str>, mut payload: Value, field: &str) -> Result<Fired, StoreError> {
+    pub(crate) fn fire(&self, log: Option<&mut SessionLog>, event: HookEvent, tool: Option<&str>, mut payload: Value, field: &str) -> Result<Fired, StoreError> {
         let hooks: Vec<_> = self.hooks.read().unwrap().iter().filter(|h| h.wants(event, tool)).cloned().collect();
         let mut fired = Fired::default();
         let mut warnings = Vec::new();
@@ -272,7 +396,7 @@ impl Runtime {
                     payload[field] = v.clone();
                     fired.modified = Some(v);
                 }
-                Ok(HookDecision::Context(c)) => fired.context.push(c),
+                Ok(HookDecision::Context(c)) => fired.context.push(hooks::spill::spill(&c, payload.get("session_id").and_then(Value::as_str).unwrap_or(""), "hook")),
                 Err(e) => warnings.push(format!("hook {} failed ({e}); continuing", h.name())),
             }
         }
@@ -304,6 +428,9 @@ impl Runtime {
 
     /// Fire `session_end` for a session the host is done with.
     pub fn end_session(&self, id: &str, reason: &str) {
+        if matches!(reason, "new" | "reset" | "idle" | "daily" | "forget") && self.has_hooks(HookEvent::BeforeReset) {
+            self.before_reset(id, reason);
+        }
         if self.has_hooks(HookEvent::SessionEnd) {
             let ws = self.store.open(id).map(|l| project(l.events()).workspace).unwrap_or_default();
             let mut p = hooks::payload(id, &ws, None, None, None, None);
@@ -315,7 +442,7 @@ impl Runtime {
     // ───────────────────────── public API ─────────────────────────
 
     pub fn create_session(&self, workspace: &Path, model: Option<&str>, parent: Option<&str>, title: Option<&str>) -> Result<String, KernelError> {
-        let model = model.unwrap_or(&self.cfg.model.default).to_string();
+        let model = self.cfg.resolve_model(model.unwrap_or(&self.cfg.model.default)).to_string();
         if !model.contains('/') {
             return Err(KernelError::Invalid(format!("model must be provider/model, got `{model}`")));
         }
@@ -332,7 +459,7 @@ impl Runtime {
             parent: parent.map(String::from),
             title: title.map(|t| t.chars().take(80).collect()),
         })?;
-        let mut segs = context::system_segments(&self.cfg, &self.paths, &ws, &self.specs(), self.cfg.schedule.utc_offset_minutes);
+        let mut segs = self.system_segments(&ws);
         let fired = self.fire(Some(&mut log), HookEvent::SessionStart, None, hooks::payload(&id, &ws.to_string_lossy(), None, None, None, None), "")?;
         if !fired.context.is_empty() {
             // Frozen with the other segments, so it stays cache-friendly.
@@ -367,15 +494,80 @@ impl Runtime {
             }
         }
         let text = text.as_str();
+        crate::secgate::note_source(id, source);
         let running = self.running.lock().unwrap();
         let inbox_id = new_id();
         if let Some(r) = running.get(id) {
-            r.queue.lock().unwrap().push((inbox_id, source.into(), text.into(), attachments));
+            let s = self.queue_for(id);
+            let item = (inbox_id, source.to_string(), text.to_string(), attachments);
+            match s.mode {
+                crate::queue::Mode::Steer => r.queue.lock().unwrap().push(item),
+                mode => {
+                    if let Some(n) = crate::queue::hold(&r.later, item, &s) {
+                        eprintln!("ark: session {id}: {n}");
+                    }
+                    if mode == crate::queue::Mode::Interrupt {
+                        r.restart.store(true, std::sync::atomic::Ordering::SeqCst);
+                        r.cancel.cancel();
+                    }
+                }
+            }
             return Ok(());
         }
         let mut log = self.store.open(id)?;
         self.append(&mut log, EventKind::Inbox { id: inbox_id, source: source.into(), text: text.into(), attachments })?;
         Ok(())
+    }
+
+    /// Effective `/queue` settings for a session.
+    pub fn queue_for(&self, id: &str) -> crate::queue::Settings {
+        self.queue_settings.lock().unwrap().get(id).copied().unwrap_or_else(|| crate::queue::Settings { mode: crate::queue::Mode::parse(&self.cfg.runner.busy_mode).unwrap_or_default(), ..Default::default() })
+    }
+
+    pub fn set_queue(&self, id: &str, s: crate::queue::Settings) {
+        self.queue_settings.lock().unwrap().insert(id.to_string(), s);
+    }
+
+    /// Input waiting for this session: held for later turns while running, or still in the
+    /// inbox. `(inbox id, source, text)`.
+    pub fn queued(&self, id: &str) -> Vec<QueuedInput> {
+        if let Some(r) = self.running.lock().unwrap().get(id) {
+            let mut v: Vec<_> = r.queue.lock().unwrap().iter().map(|q| (q.0.clone(), q.1.clone(), q.2.clone())).collect();
+            v.extend(r.later.lock().unwrap().iter().map(|q| (q.0.clone(), q.1.clone(), q.2.clone())));
+            return v;
+        }
+        self.store.open(id).map(|l| project(l.events()).pending_inbox.into_iter().map(|q| (q.0, q.1, q.2)).collect()).unwrap_or_default()
+    }
+
+    /// Edit the waiting input: `f` gets the list and may remove, reorder or rewrite entries.
+    /// Removed inbox entries are recorded as discarded so they never run.
+    pub fn edit_queue(&self, id: &str, f: &dyn Fn(&mut Vec<QueuedInput>)) -> Result<usize, KernelError> {
+        if let Some(r) = self.running.lock().unwrap().get(id) {
+            let mut l = r.later.lock().unwrap();
+            let mut v: Vec<_> = l.iter().map(|q| (q.0.clone(), q.1.clone(), q.2.clone())).collect();
+            f(&mut v);
+            let old = std::mem::take(&mut *l);
+            for (qid, src, t) in &v {
+                let att = old.iter().find(|o| &o.0 == qid).map(|o| o.3.clone()).unwrap_or_default();
+                l.push((qid.clone(), src.clone(), t.clone(), att));
+            }
+            return Ok(l.len());
+        }
+        let mut log = self.store.open(id)?;
+        let before = project(log.events()).pending_inbox;
+        let mut v: Vec<_> = before.iter().map(|q| (q.0.clone(), q.1.clone(), q.2.clone())).collect();
+        f(&mut v);
+        let unchanged = v.len() == before.len() && v.iter().zip(&before).all(|(a, b)| a.0 == b.0 && a.2 == b.2);
+        if unchanged {
+            return Ok(v.len());
+        }
+        // Rewrite: discard every old entry, re-add the new order.
+        self.append(&mut log, EventKind::Discard { inbox: before.iter().map(|q| q.0.clone()).collect() })?;
+        for (qid, src, t) in &v {
+            let att = before.iter().find(|o| &o.0 == qid).map(|o| o.3.clone()).unwrap_or_default();
+            self.append(&mut log, EventKind::Inbox { id: new_id(), source: src.clone(), text: t.clone(), attachments: att })?;
+        }
+        Ok(v.len())
     }
 
     pub fn interrupt(&self, id: &str) -> bool {
@@ -395,28 +587,50 @@ impl Runtime {
     }
 
     pub fn set_model(&self, id: &str, model: &str) -> Result<(), KernelError> {
+        let model = self.cfg.resolve_model(model.trim());
         if !model.contains('/') {
-            return Err(KernelError::Invalid("model must be provider/model".into()));
+            return Err(KernelError::Invalid(format!("model must be provider/model or an alias from model.aliases, got `{model}`")));
         }
-        let mut log = self.store.open(id)?;
-        self.append(&mut log, EventKind::Model { model: model.into() })?;
-        Ok(())
+        if !self.cfg.model_allowed(model) {
+            return Err(KernelError::Invalid(format!("model `{model}` is not in model.allow")));
+        }
+        self.record(id, EventKind::Model { model: model.into() })
     }
 
     /// Reasoning effort for the session's next requests ("" = provider default).
     pub fn set_thinking(&self, id: &str, level: &str) -> Result<(), KernelError> {
-        if !matches!(level, "" | "off" | "low" | "medium" | "high") {
-            return Err(KernelError::Invalid(format!("thinking level `{level}`: use off, low, medium or high")));
+        if !matches!(level, "" | "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max") {
+            return Err(KernelError::Invalid(format!("thinking level `{level}`: use off, minimal, low, medium, high, xhigh or max")));
         }
-        let mut log = self.store.open(id)?;
-        self.append(&mut log, EventKind::Thinking { level: level.into() })?;
-        Ok(())
+        self.record(id, EventKind::Thinking { level: level.into() })
+    }
+
+    /// Fast mode for the session's next requests ("" = config default).
+    pub fn set_fast(&self, id: &str, tier: &str) -> Result<(), KernelError> {
+        let t = match tier.trim().to_lowercase().as_str() {
+            "" | "default" | "inherit" => "",
+            "normal" | "off" | "standard" | "none" => "normal",
+            "fast" | "on" | "priority" => "fast",
+            "ultra" | "ultrafast" => "ultrafast",
+            "flex" => "flex",
+            "auto" => "auto",
+            "cold" => "cold",
+            other => return Err(KernelError::Invalid(format!("fast mode `{other}`: use on, off, ultrafast, flex, auto or cold"))),
+        };
+        self.record(id, EventKind::Fast { tier: t.into() })
+    }
+
+    /// Record an auxiliary call's usage on the session and charge the running turn's ledger.
+    fn aux_used(&self, log: &mut SessionLog, task: &str, model: &str, usage: Usage) {
+        if usage.input_tokens + usage.output_tokens + usage.cache_read_tokens == 0 {
+            return;
+        }
+        Ledger::charge_current(&usage, self.cfg.price(model));
+        let _ = self.append(log, EventKind::AuxUsage { task: task.into(), model: model.into(), usage });
     }
 
     pub fn set_title(&self, id: &str, title: &str) -> Result<(), KernelError> {
-        let mut log = self.store.open(id)?;
-        self.append(&mut log, EventKind::Title { title: title.chars().take(80).collect() })?;
-        Ok(())
+        self.record(id, EventKind::Title { title: title.chars().take(80).collect() })
     }
 
     /// Tools that exist only for one session (e.g. MCP servers an editor brought);
@@ -429,11 +643,13 @@ impl Runtime {
             st.insert(id.to_string(), tools);
         }
     }
-    fn session_specs(&self, id: &str) -> Vec<ToolSpec> {
+    fn session_specs(&self, id: &str, model: &str) -> Vec<ToolSpec> {
         let mut v = self.specs();
         if let Some(ts) = self.session_tools.read().unwrap().get(id) {
             v.extend(ts.iter().map(|t| ToolSpec { pinned: true, ..t.spec() }).filter(|s| !self.cfg.tools.disabled.contains(&s.name)));
         }
+        // Tool profiles / allow-deny groups (OpenClaw tool policy).
+        v.retain(|s| self.tool_permitted(id, model, &s.name));
         v
     }
 
@@ -446,14 +662,17 @@ impl Runtime {
 
     /// Run until the inbox is empty (or the run stops). Blocks the caller.
     pub fn run(self: &Arc<Self>, id: &str, opts: RunOpts) -> Result<Outcome, KernelError> {
-        let cancel = opts.cancel.as_ref().map(|c| c.child()).unwrap_or_default();
+        let mut cancel = opts.cancel.as_ref().map(|c| c.child()).unwrap_or_default();
         let queue = Arc::new(Mutex::new(Vec::new()));
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let later = Arc::new(Mutex::new(Vec::new()));
+        let restart = Arc::new(std::sync::atomic::AtomicBool::new(false));
         {
             let mut running = self.running.lock().unwrap();
             if running.contains_key(id) {
                 return Err(KernelError::AlreadyRunning(id.into()));
             }
-            running.insert(id.to_string(), Running { cancel: cancel.clone(), queue: queue.clone() });
+            running.insert(id.to_string(), Running { cancel: cancel.clone(), queue: queue.clone(), events: events.clone(), later: later.clone(), restart: restart.clone() });
         }
         struct Unregister<'a>(&'a Runtime, String);
         impl Drop for Unregister<'_> {
@@ -464,15 +683,27 @@ impl Runtime {
         let _guard = Unregister(self, id.to_string());
         let mut log = self.store.open(id)?;
         let ledger = opts.ledger.clone().unwrap_or_else(|| Ledger::new(self.cfg.budget.clone()));
+        if ledger.has_cost_cap() {
+            let model = project(log.events()).model;
+            if self.cfg.price(&model).is_none() {
+                let text = format!("no price known for `{model}`: the USD budget cannot be enforced (run `ark models refresh`, or add `[prices.\"{model}\"]`)");
+                self.append(&mut log, EventKind::Notice { level: "warn".into(), text })?;
+            }
+        }
         let mut total = Usage::default();
         let mut turns = 0;
         let mut text = String::new();
 
         let mut resume = self.recover(&mut log, &cancel)?;
+        self.recover_subagents(&mut log)?;
         let mut reason = EndReason::Idle;
         loop {
             self.drain_queue(&mut log, &queue)?;
             if project(log.events()).pending_inbox.is_empty() && !resume {
+                // Background sub-agents report back between turns: wait for them here.
+                if !opts.detach && self.await_children(&mut log, &queue, &cancel)? {
+                    continue;
+                }
                 break;
             }
             resume = false;
@@ -486,10 +717,36 @@ impl Runtime {
             total.add(&o.usage);
             text = o.text;
             reason = o.reason;
+            if (reason.ok() || reason == EndReason::Interrupted) && restart.swap(false, std::sync::atomic::Ordering::SeqCst) {
+                // `interrupt` mode: a new message stopped this turn; run it now.
+                cancel = opts.cancel.as_ref().map(|c| c.child()).unwrap_or_default();
+                if let Some(r) = self.running.lock().unwrap().get_mut(id) {
+                    r.cancel = cancel.clone();
+                }
+                self.drain_queue(&mut log, &later)?;
+                continue;
+            }
             if !reason.ok() {
                 break;
             }
+            let mode = self.queue_for(id).mode;
+            for (qid, source, t, attachments) in crate::queue::release(&later, mode) {
+                self.append(&mut log, EventKind::Inbox { id: qid, source, text: t, attachments })?;
+            }
         }
+        // Whatever is still held stays queued in the log for the next run.
+        self.drain_queue(&mut log, &later)?;
+        // A run that made progress is no longer paused (the marker only existed to make the
+        // retry happen); one that ended `Paused` keeps it for `limits::due_pauses`.
+        if reason.ok() {
+            let _ = crate::limits::resumed(&self.paths.data, id);
+        }
+        // C7: a sub-agent that ended must not leave process groups behind. Detached
+        // processes (explicitly asked to outlive ark) are recorded but never reaped.
+        if project(log.events()).parent.is_some() {
+            crate::reaper::on_session_end(&self.paths.data, id);
+        }
+        self.close_run(id, log)?;
         Ok(Outcome { reason, text, usage: total, turns })
     }
 
@@ -500,7 +757,25 @@ impl Runtime {
         std::thread::spawn(move || k.run(&id, opts))
     }
 
-    fn drain_queue(&self, log: &mut SessionLog, q: &Mutex<Vec<Queued>>) -> Result<(), StoreError> {
+    /// Append a settings event to a session, running or not.
+    pub fn record(&self, id: &str, kind: EventKind) -> Result<(), KernelError> {
+        {
+            let running = self.running.lock().unwrap();
+            if let Some(r) = running.get(id) {
+                r.events.lock().unwrap().push(kind);
+                return Ok(());
+            }
+        }
+        let mut log = self.store.open(id)?;
+        self.append(&mut log, kind)?;
+        Ok(())
+    }
+
+    pub(crate) fn drain_queue(&self, log: &mut SessionLog, q: &Mutex<Vec<Queued>>) -> Result<(), StoreError> {
+        let evs: Vec<EventKind> = self.running.lock().unwrap().get(&log.id).map(|r| std::mem::take(&mut *r.events.lock().unwrap())).unwrap_or_default();
+        for e in evs {
+            self.append(log, e)?;
+        }
         let items: Vec<_> = std::mem::take(&mut *q.lock().unwrap());
         for (id, source, text, attachments) in items {
             self.append(log, EventKind::Inbox { id, source, text, attachments })?;
@@ -549,7 +824,7 @@ impl Runtime {
                         ToolOutput::err(format!("[interrupted by a crash while running `{name}`; its side effects are unknown — inspect the state before retrying]"))
                     }
                 };
-                let content = self.vault.redact(&out.content);
+                let content = self.guard_tool_output(name, self.vault.redact(&out.content), out.is_error);
                 blocks.push(Block::ToolResult { tool_use_id: id.clone(), content, is_error: out.is_error });
             }
             self.append(log, EventKind::Message { message: Message { role: Role::User, content: blocks }, usage: None, model: None, inbox: None })?;
@@ -568,10 +843,29 @@ impl Runtime {
     // ───────────────────────── the turn ─────────────────────────
 
     fn turn(self: &Arc<Self>, log: &mut SessionLog, ledger: &Ledger, cancel: &Cancel, depth: u32, queue: &Mutex<Vec<Queued>>, goal_mode: bool) -> Result<Outcome, StoreError> {
+        let cfg = self.cfg_now();
         let turn_no = project(log.events()).turns;
         self.append(log, EventKind::TurnStart { turn: turn_no })?;
+        let _charge_aux_here = ledger.enter();
+        // Bounded fast mode (Hermes `/fast auto|cold`): this user turn runs fast for a window.
+        let fast_word = project(log.events()).fast.unwrap_or_else(|| cfg.model.fast.clone());
+        let fast_until = match fast_word.as_str() {
+            "auto" => Some(Instant::now() + Duration::from_secs(cfg.model.fast_auto_seconds)),
+            "cold" if turn_no == 0 => Some(Instant::now() + Duration::from_secs(cfg.model.fast_auto_seconds)),
+            _ => None,
+        };
         self.consume_inbox(log)?;
         self.checkpoint(log);
+        let mut th = match self.turn_start_hooks(log, depth)? {
+            Ok(th) => th,
+            Err(text) => {
+                // Answered by a hook (gate refusal or before_agent_reply): no model call.
+                let usage = Usage::default();
+                self.append(log, EventKind::TurnEnd { turn: turn_no, reason: EndReason::Done.label(), usage })?;
+                return Ok(Outcome { reason: EndReason::Done, text, usage, turns: 1 });
+            }
+        };
+        let _scope = hookpoints::ScopeGuard::set(&th);
 
         let mut usage = Usage::default();
         let mut steps = 0u64;
@@ -580,17 +874,46 @@ impl Runtime {
         let mut overflow_retry = false;
         let mut repeats: Vec<String> = Vec::new();
         let mut last_text = String::new();
-        let kernel_tools = self.kernel_tools(goal_mode);
-        let specs = self.session_specs(&log.id);
+        let mut structured_nudges = 0;
+        let start_view = project(log.events());
+        // A new turn: the edit → verify bookkeeping starts empty.
+        crate::ctxrun::reset_turn(&self.ctx, &log.id);
+        let kernel_tools: Vec<ToolSchema> = self.kernel_tools(goal_mode).into_iter().chain(start_view.output_schema.as_ref().map(crate::decision::structured_output_schema)).filter(|t| crate::subagents::tool_allowed(&start_view, &t.name)).collect();
+        crate::secgate::last_source(log);
+        let specs: Vec<ToolSpec> = self.session_specs(&log.id, &self.session_model(log)).into_iter().filter(|t| crate::subagents::tool_allowed(&start_view, &t.name)).collect();
+        let mut human_wait_seen = ark_security::approvals::human_wait_total(&log.id);
+        // C8 cadence: measure at most once per `[limits] check_interval_secs` (default 60 s);
+        // with no `[limits]` section `check` returns `Ok` without any I/O.
+        let limit_tick = Duration::from_secs(cfg.limits.check_interval_secs.max(5));
+        let mut last_limits = Instant::now();
 
         let reason = loop {
             if cancel.is_cancelled() {
                 break EndReason::Interrupted;
             }
+            // Time blocked on a human approval does not count against the wall budget.
+            let hw = ark_security::approvals::human_wait_total(&log.id);
+            ledger.pause(hw.saturating_sub(human_wait_seen));
+            human_wait_seen = hw;
             if let Err(e) = ledger.check() {
                 break EndReason::Budget(e.to_string());
             }
-            if steps >= self.cfg.runner.max_steps_per_turn {
+            // C8: resource caps (spend, processes, disk). Passive: it never asks, and a breach
+            // stops this session only — the fleet, cron jobs and the daemon keep running.
+            if last_limits.elapsed() >= limit_tick {
+                last_limits = Instant::now();
+                match crate::limits::check(self, &log.id) {
+                    crate::limits::Verdict::Pause(r) => {
+                        self.append(log, EventKind::Notice { level: "warn".into(), text: format!("paused: {r}") })?;
+                        break EndReason::Paused(format!("limits: {r}"));
+                    }
+                    crate::limits::Verdict::Warn(r) => {
+                        self.append(log, EventKind::Notice { level: "warn".into(), text: r })?;
+                    }
+                    crate::limits::Verdict::Ok => {}
+                }
+            }
+            if steps >= cfg.runner.max_steps_per_turn {
                 break EndReason::MaxSteps;
             }
             self.drain_queue(log, queue)?;
@@ -600,13 +923,19 @@ impl Runtime {
             if self.maybe_compact(log, &view, cancel)? {
                 view = project(log.events());
             }
-            let mut req = context::build_request(&view, &self.cfg, &specs, &kernel_tools, &view.model);
+            let model = th.model.clone().unwrap_or_else(|| view.model.clone());
+            let mut req = context::build_request(&view, &cfg, &specs, &kernel_tools, &model);
+            req.options.native_compaction = cfg.compaction.native_threshold(self.window(&model));
+            if fast_until.is_some_and(|u| Instant::now() < u) {
+                req.options.service_tier = Some("priority".into());
+            }
             self.assemble(log, &view, &mut req)?;
+            th.apply(&mut req);
             if boost > 0 {
                 req.max_tokens = req.max_tokens.saturating_mul(1 << boost).min(MAX_BOOSTED_TOKENS);
             }
             let req_max = req.max_tokens;
-            let resp = match self.call_model(log, &view.model, req, cancel)? {
+            let resp = match self.call_model(log, &model, req, cancel)? {
                 Ok(r) => r,
                 Err(e) if e.kind == ProviderErrorKind::ContextOverflow && !overflow_retry => {
                     overflow_retry = true;
@@ -618,15 +947,27 @@ impl Runtime {
                     continue;
                 }
                 Err(e) if e.kind == ProviderErrorKind::Cancelled => break EndReason::Interrupted,
+                // C1/C2: a transient failure or a drained account pauses the run instead of
+                // ending it. Nothing is lost (the log is the state), nothing is asked, and the
+                // daemon retries on its own (limits::due_pauses → bump_pause).
+                Err(e) if crate::limits::classify(self, &e).is_some() => {
+                    let (kind, wait) = crate::limits::classify(self, &e).unwrap_or((crate::limits::PauseKind::Transient, Duration::from_secs(60)));
+                    let why = format!("{} provider failure: {e}", kind.label());
+                    crate::limits::record_pause(&self.paths.data, &log.id, kind, &e.to_string(), wait);
+                    self.append(log, EventKind::Notice { level: "warn".into(), text: format!("paused ({why}); state saved, retrying automatically in {:.0} min", wait.as_secs_f32() / 60.0) })?;
+                    break EndReason::Paused(format!("{why}; retry in {}s", wait.as_secs()));
+                }
                 Err(e) => {
                     self.append(log, EventKind::Error { message: e.to_string() })?;
                     break EndReason::Error(e.to_string());
                 }
             };
             overflow_retry = false;
+            // The provider answered: a pause from an earlier attempt is over.
+            let _ = crate::limits::resumed(&self.paths.data, &log.id);
             steps += 1;
             usage.add(&resp.usage);
-            ledger.charge(&resp.usage, self.cfg.price(&view.model));
+            ledger.charge(&resp.usage, cfg.price(&model));
             let msg = sanitize_assistant(resp.message);
             let text = msg.text();
             let visible = !text.trim().is_empty();
@@ -651,7 +992,7 @@ impl Runtime {
                 for (_, name, input) in &uses {
                     repeats.push(format!("{name}:{input}"));
                 }
-                let lim = self.cfg.runner.repeat_limit.max(2);
+                let lim = cfg.runner.repeat_limit.max(2);
                 let streak = repeats.iter().rev().take_while(|s| *s == repeats.last().unwrap()).count();
                 if streak >= lim * 2 {
                     blocks.push(Block::text("[watchdog] stopping: the same call keeps repeating."));
@@ -666,13 +1007,16 @@ impl Runtime {
                     last_text = summary;
                     break if achieved { EndReason::Done } else { EndReason::Error("goal declared unachievable".into()) };
                 }
+                if self.end_turn.lock().unwrap().remove(&log.id) {
+                    break EndReason::Done;
+                }
                 if ledger.pressure() >= 0.9 {
                     self.append(log, EventKind::Notice { level: "warn".into(), text: "budget almost exhausted".into() })?;
                 }
                 continue;
             }
             match resp.stop {
-                StopReason::MaxTokens if continuations < self.cfg.runner.max_continuations => {
+                StopReason::MaxTokens if continuations < cfg.runner.max_continuations => {
                     continuations += 1;
                     self.append(log, EventKind::Message { message: Message::user("[Your reply was cut off by the output limit. Continue exactly where you stopped.]"), usage: None, model: None, inbox: None })?;
                 }
@@ -684,12 +1028,43 @@ impl Runtime {
                     if !project(log.events()).pending_inbox.is_empty() {
                         continue;
                     }
+                    // A session with an output contract ends only through `structured_output`.
+                    if view.output_schema.is_some() && structured_nudges < crate::decision::STRUCTURED_NUDGES {
+                        structured_nudges += 1;
+                        self.append(log, EventKind::Message { message: Message::user(crate::decision::STRUCTURED_NUDGE), usage: None, model: None, inbox: None })?;
+                        continue;
+                    }
+                    if let Some(instr) = self.finalize_revision(log, &mut th, &last_text)? {
+                        self.append(log, EventKind::Message { message: Message::user(instr), usage: None, model: None, inbox: None })?;
+                        continue;
+                    }
+                    // Edit → verify before finishing (Hermes `verify_hooks.py`): the built-in
+                    // nudge, `context.pre_verify` commands, or a registered `VerifyGate`.
+                    let src = crate::secgate::last_source(log);
+                    let messaging = !matches!(src.as_str(), "" | "cli" | "user" | "tui" | "web" | "chat");
+                    let ws = project(log.events()).workspace;
+                    if let Some(instr) = crate::ctxrun::verify_message(&self.cfg, &self.ctx, &log.id, &ws, &last_text, messaging) {
+                        self.append(log, EventKind::Message { message: Message::user(instr), usage: None, model: None, inbox: None })?;
+                        continue;
+                    }
                     break EndReason::Done;
                 }
             }
         };
         self.append(log, EventKind::TurnEnd { turn: turn_no, reason: reason.label(), usage })?;
-        if self.cfg.learn.enabled && reason == EndReason::Done && depth == 0 {
+        if reason.ok() && depth == 0 && cfg.compaction.micro_compact {
+            // Hermes micro-compaction runs after the turn, before the next request.
+            let _ = self.micro_pass(log, &Cancel::default());
+        }
+        let lcs = self.lifecycles();
+        if !lcs.is_empty() {
+            let v = project(log.events());
+            let prompt = v.messages.iter().rev().find(|m| m.role == Role::User && !m.content.iter().any(|b| matches!(b, Block::ToolResult { .. }))).map(|m| crate::lifecycle::strip_fences(&m.text())).unwrap_or_default();
+            for l in lcs {
+                l.turn_end(&log.id, &v.workspace, &prompt, &last_text, reason.ok());
+            }
+        }
+        if cfg.learn.enabled && reason == EndReason::Done && depth == 0 {
             self.review(log, cancel);
         }
         Ok(Outcome { reason, text: last_text, usage, turns: 1 })
@@ -719,8 +1094,29 @@ impl Runtime {
     }
 
     fn consume_inbox(&self, log: &mut SessionLog) -> Result<(), StoreError> {
-        for (id, source, text, attachments) in project(log.events()).pending_inbox {
-            let body = if source == "cli" || source == "user" { text } else { format!("[from {source}] {text}") };
+        let pending = project(log.events()).pending_inbox;
+        let ws = if pending.is_empty() { String::new() } else { project(log.events()).workspace };
+        let lcs = if pending.is_empty() { vec![] } else { self.lifecycles() };
+        for (id, source, text, attachments) in pending {
+            let mut body = if source == "cli" || source == "user" { text.clone() } else { format!("[from {source}] {text}") };
+            // `@file:` / `@folder:` / `@diff` / `@git:N` / `@url:` attach context to this turn
+            // (Hermes `context_references.py`); warnings ride along in the message.
+            if source == "cli" || source == "user" {
+                let wsdir = PathBuf::from(&ws);
+                let win = self.window(&self.session_model(log));
+                let (expanded, warnings) = crate::ctxrun::expand_refs(&self.cfg, &self.paths, &wsdir, &body, win);
+                if expanded != body {
+                    body = expanded;
+                }
+                for w in warnings {
+                    self.append(log, EventKind::Notice { level: "warn".into(), text: format!("@-reference: {w}") })?;
+                }
+            }
+            for l in &lcs {
+                if let Some(extra) = l.prefetch(&log.id, &ws, &text).filter(|t| !t.trim().is_empty()) {
+                    body.push_str(&crate::lifecycle::fence(&l.name(), &extra));
+                }
+            }
             let mut message = Message::user(body);
             message.content.extend(attachments);
             self.append(log, EventKind::Message { message, usage: None, model: None, inbox: Some(id) })?;
@@ -733,9 +1129,21 @@ impl Runtime {
             return;
         }
         let ws = PathBuf::from(project(log.events()).workspace);
-        let r = Checkpoints::new(&self.paths.data, &ws).and_then(|c| c.snapshot(&format!("session {}", log.id), self.cfg.checkpoint.max_files));
-        if let Err(e) = r {
-            let _ = self.append(log, EventKind::Notice { level: "info".into(), text: format!("checkpoint skipped: {e}") });
+        let turn = project(log.events()).turns;
+        let r = Checkpoints::new(&self.paths.data, &ws).and_then(|c| {
+            let c = c.with_limits(self.cfg.checkpoint.limits());
+            let id = c.snapshot(&format!("session {}", log.id), self.cfg.checkpoint.max_files)?;
+            // Unchanged workspace: this turn starts from the newest checkpoint.
+            Ok(id.or_else(|| c.list(1).ok().and_then(|l| l.first().map(|x| x.id.clone()))))
+        });
+        match r {
+            Ok(Some(id)) => {
+                let _ = self.append(log, EventKind::Checkpoint { id, turn });
+            }
+            Ok(None) => {}
+            Err(e) => {
+                let _ = self.append(log, EventKind::Notice { level: "info".into(), text: format!("checkpoint skipped: {e}") });
+            }
         }
     }
 
@@ -744,7 +1152,7 @@ impl Runtime {
     /// Retries with backoff, then falls back along the chain. Outer Err = store failure.
     fn call_model(&self, log: &mut SessionLog, model: &str, mut req: ModelRequest, cancel: &Cancel) -> Result<Result<ModelResponse, ProviderError>, StoreError> {
         let mut chain = vec![model.to_string()];
-        chain.extend(self.cfg.model.fallback.iter().filter(|m| *m != model).cloned());
+        chain.extend(hookpoints::fallbacks(&self.cfg.model.fallback).into_iter().filter(|m| m != model));
         {
             let mut benched = self.benched.lock().unwrap();
             benched.retain(|_, t| t.elapsed() < BENCH_COOLDOWN);
@@ -807,6 +1215,14 @@ impl Runtime {
                 }
             };
             req.model = mname.to_string();
+            // C12: this model already rejected a reasoning parameter once — do not send it again.
+            if req.reasoning.is_some() && self.no_reasoning.lock().unwrap().contains(m) {
+                req.reasoning = None;
+            }
+            // Wire-level image handling for THIS provider (Hermes image_eviction_policy +
+            // vision_message_prep): non-vision models get text stand-ins, vision models get old
+            // tool-result images retired once the request would cross a provider image limit.
+            crate::imgprep::prepare_in_place(&mut req, provider.caps(mname).vision, &session);
             if ci > 0 {
                 // Another provider cannot verify the previous one's reasoning signatures.
                 strip_thinking(&mut req);
@@ -833,6 +1249,15 @@ impl Runtime {
                     }
                     Err(e) => {
                         if matches!(e.kind, ProviderErrorKind::Cancelled | ProviderErrorKind::ContextOverflow | ProviderErrorKind::BadRequest) {
+                            // C12: a brand-new model that does not know a reasoning field answers
+                            // 400. Spend one probe, then remember the model and retry without it —
+                            // the user never sees the failure, and no other model is affected.
+                            if e.kind == ProviderErrorKind::BadRequest && req.reasoning.is_some() && names_a_reasoning_field(&e.message) {
+                                self.no_reasoning.lock().unwrap().insert(m.clone());
+                                req.reasoning = None;
+                                self.append(log, EventKind::Notice { level: "warn".into(), text: format!("{m} rejected the reasoning parameter ({}); retrying without it for this model", e.message.chars().take(120).collect::<String>()) })?;
+                                continue;
+                            }
                             return Ok(Err(e));
                         }
                         let mut retryable = e.is_retryable();
@@ -857,7 +1282,8 @@ impl Runtime {
                     }
                 }
             }
-            if matches!(last.kind, ProviderErrorKind::Auth) {
+            // Rejected (auth/credit) or still rate-limited after every retry: try it last for a while.
+            if matches!(last.kind, ProviderErrorKind::Auth | ProviderErrorKind::RateLimited { .. }) {
                 self.benched.lock().unwrap().insert(m.clone(), Instant::now());
             }
             if !last.allows_fallback() || no_fallback {
@@ -919,12 +1345,19 @@ impl Runtime {
 
     fn window(&self, model: &str) -> u64 {
         let (pid, m) = split_model(model);
+        // A window this endpoint reported about itself (its `/models` answer, recorded by
+        // `ark models list`) is more accurate than the catalogue guess — compaction thresholds
+        // follow it, so an endpoint that really has 32k does not overflow twice before pruning.
+        let base = self.cfg.providers.get(pid).and_then(|t| t.get("base_url")).and_then(|v| v.as_str()).unwrap_or("");
+        if let Some(w) = ark_model::contextpin::learned(m, base) {
+            return w;
+        }
         self.resolver.provider(pid).map(|p| p.caps(m).context_window).ok().filter(|w| *w > 0).unwrap_or(128_000)
     }
 
     fn maybe_compact(&self, log: &mut SessionLog, view: &View, cancel: &Cancel) -> Result<bool, StoreError> {
         let window = self.window(&view.model) as f64;
-        let used = if view.last_input_tokens > 0 { view.last_input_tokens } else { estimate_request_tokens(&ModelRequest { model: String::new(), system: view.system.clone(), messages: view.messages.clone(), tools: vec![], max_tokens: 0, temperature: None, cache_after_message: None, reasoning: None }) } as f64;
+        let used = if view.last_input_tokens > 0 { view.last_input_tokens } else { estimate_request_tokens(&ModelRequest { model: String::new(), system: view.system.clone(), messages: view.messages.clone(), tools: vec![], max_tokens: 0, temperature: None, cache_after_message: None, reasoning: None, options: Default::default() }) } as f64;
         let c = &self.cfg.compaction;
         if used < window * c.prune_threshold {
             return Ok(false);
@@ -957,7 +1390,7 @@ impl Runtime {
     /// rounds: the caller executes nothing, it returns the `tool_use` blocks). Returns
     /// (reply, model used, stop reason).
     pub fn sample(&self, model: Option<&str>, system: &str, messages: Vec<Message>, tools: Vec<ToolSchema>, max_tokens: u32, cancel: &Cancel) -> Result<(Message, String, StopReason), String> {
-        let m = model.filter(|m| !m.is_empty()).map(str::to_string).unwrap_or_else(|| self.cfg.aux_model().to_string());
+        let m = model.filter(|m| !m.is_empty()).map(|m| self.cfg.resolve_model(m).to_string()).unwrap_or_else(|| self.cfg.task_model("sampling").to_string());
         let (pid, name) = split_model(&m);
         let p = self.resolver.provider(pid)?;
         if !tools.is_empty() && !p.caps(name).tools {
@@ -972,8 +1405,10 @@ impl Runtime {
             temperature: None,
             cache_after_message: None,
             reasoning: None,
+            options: Default::default(),
         };
         let r = p.complete(&req, &mut |_| {}, cancel).map_err(|e| e.message)?;
+        Ledger::charge_current(&r.usage, self.cfg.price(&m));
         // Reasoning stays here: sampling results carry text and tool calls only.
         let content = r.message.content.into_iter().filter(|b| !matches!(b, Block::Thinking { .. })).collect();
         Ok((Message { role: Role::Assistant, content }, m, r.stop))
@@ -994,7 +1429,7 @@ impl Runtime {
         }
         let keep = owned.as_ref().and_then(|c| c.keep_messages).unwrap_or(self.cfg.compaction.keep_messages);
         let Some(cut) = compaction::cut_index(&view.messages, keep) else { return Ok(false) };
-        let aux = self.cfg.aux_model().to_string();
+        let aux = self.cfg.task_model("compaction").to_string();
         let (pid, m) = split_model(&aux);
         let before = estimate_tokens(&compaction::render_transcript(&view.messages, usize::MAX));
         let hp = |n: &str, v: Value| {
@@ -1011,24 +1446,73 @@ impl Runtime {
                 return Ok(false);
             }
         }
+        for l in self.lifecycles() {
+            l.pre_compress(&log.id, &view.workspace, &view.messages[..cut]);
+        }
         let (summary, fallback) = match (owned, self.resolver.provider(pid)) {
             (Some(c), _) => (c.summary, false),
-            (None, Ok(p)) => compaction::summarise(p.as_ref(), m, &view.messages[..cut], cancel),
+            (None, Ok(p)) => {
+                let metered = Metered { inner: p, usage: Mutex::new(Usage::default()) };
+                let r = compaction::summarise(&metered, m, &view.messages[..cut], cancel);
+                let u = *metered.usage.lock().unwrap();
+                self.aux_used(log, "compaction", &aux, u);
+                r
+            }
             (None, Err(_)) => (compaction::fallback_summary(&view.messages[..cut]), true),
         };
         if fallback {
             self.append(log, EventKind::Notice { level: "warn".into(), text: "summary model unavailable or low quality; used deterministic digest".into() })?;
         }
         self.append(log, EventKind::Compaction { upto_seq: view.message_seqs[cut], summary, pruned: vec![], tokens_before: before })?;
+        // The history was rewritten: micro-compaction starts over from the new summary.
+        crate::ctxrun::micro_reset(&self.ctx, &log.id);
         if self.has_hooks(HookEvent::PostCompact) {
             self.fire(Some(log), HookEvent::PostCompact, None, post, "")?;
         }
         // The cache breaks here anyway: refresh memory / project segments.
         let ws = PathBuf::from(&view.workspace);
-        let segs = context::system_segments(&self.cfg, &self.paths, &ws, &self.specs(), self.cfg.schedule.utc_offset_minutes);
+        let segs = self.system_segments(&ws);
         if segs != view.system {
             self.append(log, EventKind::System { segments: segs })?;
         }
+        Ok(true)
+    }
+
+    /// Micro-compaction (Hermes `agent/micro_compaction.py`): every N turns fold the oldest
+    /// un-absorbed exchange into a rolling summary, keeping the recent tail byte-identical.
+    /// The rolling summary is one `Compaction` event, so replays and rewinds still see what
+    /// the model saw.
+    fn micro_pass(&self, log: &mut SessionLog, cancel: &Cancel) -> Result<bool, StoreError> {
+        if !self.cfg.compaction.micro_compact {
+            return Ok(false);
+        }
+        let view = project(log.events());
+        let Some((start, end, _prev, defrag)) = crate::ctxrun::micro_plan(&self.cfg, &self.ctx, &log.id, &view) else { return Ok(false) };
+        let Some(&upto) = view.message_seqs.get(end) else { return Ok(false) };
+        if start >= end || end > view.messages.len() {
+            return Ok(false);
+        }
+        let aux = self.cfg.task_model("compaction").to_string();
+        let (pid, m) = split_model(&aux);
+        let Ok(p) = self.resolver.provider(pid) else { return Ok(false) };
+        let metered = Metered { inner: p, usage: Mutex::new(Usage::default()) };
+        let (fold, fallback) = compaction::summarise(&metered, m, &view.messages[start..end], cancel);
+        let u = *metered.usage.lock().unwrap();
+        self.aux_used(log, "micro_compaction", &aux, u);
+        if fallback || fold.trim().is_empty() {
+            // No usable summary: leave the history alone rather than lose detail.
+            return Ok(false);
+        }
+        let before = estimate_tokens(&compaction::render_transcript(&view.messages[start..end], usize::MAX));
+        let mut rolling = crate::ctxrun::micro_commit(&self.ctx, &log.id, &fold);
+        if defrag {
+            let (condensed, _) = compaction::summarise(&metered, m, &[Message::user(rolling.clone())], cancel);
+            if !condensed.trim().is_empty() {
+                crate::ctxrun::micro_defrag(&self.ctx, &log.id, &condensed);
+                rolling = crate::ctxrun::micro_summary(&self.ctx, &log.id).unwrap_or(rolling);
+            }
+        }
+        self.append(log, EventKind::Compaction { upto_seq: upto, summary: rolling, pruned: vec![], tokens_before: before })?;
         Ok(true)
     }
 
@@ -1070,6 +1554,10 @@ impl Runtime {
             } else {
                 (name.clone(), input.clone())
             };
+            if !crate::subagents::tool_allowed(view, &tname) {
+                results[i] = Some(ToolOutput::err(format!("tool `{tname}` is not available in this session")));
+                continue;
+            }
             match tname.as_str() {
                 "tool_describe" => {
                     crate::normalize::coerce(&json!({"properties":{"names":{"type":"array"}}}), &mut tinput);
@@ -1102,11 +1590,29 @@ impl Runtime {
                     results[i] = Some(if bad == names.len().min(12) { ToolOutput::err(text) } else { ToolOutput::ok(text) });
                     continue;
                 }
+                "tool_search" => {
+                    // BM25 over this session's tools (Hermes `tool_search.py`): the model asks
+                    // by keyword when it does not know the tool's name.
+                    crate::normalize::coerce(&json!({"properties":{"query":{"type":"string"},"limit":{"type":"integer"}}}), &mut tinput);
+                    let specs = self.session_specs(&log.id, &self.session_model(log));
+                    results[i] = Some(ToolOutput::ok(crate::ctxrun::tool_search(&specs, &self.cfg, &tinput)));
+                    continue;
+                }
                 KERNEL_TOOL_SEARCH => {
-                    let q = tinput.get("query").and_then(|v| v.as_str()).unwrap_or("");
-                    let lim = tinput.get("limit").and_then(|v| v.as_u64()).unwrap_or(10).min(50) as usize;
-                    let hits = self.store.search(q, lim);
-                    results[i] = Some(if hits.is_empty() { ToolOutput::ok("no matches") } else { ToolOutput::ok(hits.iter().map(|h| format!("{} #{}: {}", h.session, h.seq, h.snippet)).collect::<Vec<_>>().join("\n")) });
+                    crate::normalize::coerce(&crate::agents::session_search_schema(), &mut tinput);
+                    results[i] = Some(ToolOutput::ok(crate::agents::session_search(&self.store, &tinput)));
+                    continue;
+                }
+                crate::decision::STRUCTURED_OUTPUT if view.output_schema.is_some() => {
+                    let out = match crate::decision::check_structured(view.output_schema.as_ref().unwrap(), &tinput) {
+                        Ok(v) => {
+                            self.append(log, EventKind::Structured { value: v })?;
+                            self.end_turn.lock().unwrap().insert(log.id.clone());
+                            ToolOutput::ok("accepted: the structured result was recorded; the turn ends here.")
+                        }
+                        Err(e) => ToolOutput::err(e),
+                    };
+                    results[i] = Some(out);
                     continue;
                 }
                 KERNEL_TOOL_GOAL_DONE => {
@@ -1138,6 +1644,10 @@ impl Runtime {
                 results[i] = Some(ToolOutput::err(self.unknown_tool(&tname)));
                 continue;
             };
+            if let Some(refused) = hookpoints::tool_refused(&tname) {
+                results[i] = Some(ToolOutput::err(refused));
+                continue;
+            }
             crate::normalize::coerce(&tool.spec().input_schema, &mut tinput);
             if let Some(bad) = invalid_input(&tinput) {
                 results[i] = Some(ToolOutput::err(bad));
@@ -1155,6 +1665,7 @@ impl Runtime {
                 answered.push((i, tname, tinput));
                 continue;
             }
+            let tool = self.exec_env_tool(log, &view.workspace, &tname, tool)?;
             runnable.push((i, tool, tinput));
         }
 
@@ -1248,11 +1759,25 @@ impl Runtime {
 
         // Redact, spill, settle.
         let mut blocks = Vec::new();
+        let mut images = Vec::new();
         let ran: Vec<usize> = runnable.iter().map(|(i, _, _)| *i).collect();
         for (i, r) in results.into_iter().enumerate() {
             let id = &uses[i].0;
-            let out = r.unwrap_or_else(|| ToolOutput::err("not executed"));
+            let mut out = r.unwrap_or_else(|| ToolOutput::err("not executed"));
+            if ark_core::tool::IMAGE_TOOLS.contains(&uses[i].1.as_str()) {
+                // `read` of an image file: the model gets the picture itself.
+                let (text, imgs) = ark_core::tool::take_images(&out.content);
+                out.content = text;
+                let mut imgs: Vec<Block> = imgs.into_iter().map(|(media_type, data)| Block::Image { media_type, data }).collect();
+                // OpenClaw image-sanitization: shrink/re-encode before the model sees it
+                // (installed by the binary; a no-op in a bare kernel).
+                ark_core::tool::post_process_images(&mut imgs);
+                images.extend(imgs);
+            }
             let mut content = self.vault.redact(&out.content);
+            if ran.contains(&i) {
+                content = self.guard_tool_output(&uses[i].1, content, out.is_error);
+            }
             let mut artifact = None;
             if content.len() > self.cfg.runner.spill_bytes {
                 let path = log.artifacts().join(format!("{}.txt", sanitize_id(id)));
@@ -1263,66 +1788,26 @@ impl Runtime {
                 }
             }
             if ran.contains(&i) {
+                // A touched subdirectory's own rules (AGENTS.md / CLAUDE.md / .cursorrules)
+                // ride along with the first result that reached it (Hermes §12).
+                if let Some(hint) = crate::ctxrun::subdir_hint(&self.cfg, &self.ctx, &log.id, &PathBuf::from(&view.workspace), &uses[i].1, &uses[i].2) {
+                    content = format!("{content}\n\n{hint}");
+                }
+                crate::ctxrun::observe_tool(&self.cfg, &self.ctx, &log.id, &uses[i].1, &uses[i].2, out.is_error);
+                for l in self.lifecycles() {
+                    l.tool_settled(&log.id, &uses[i].1, &uses[i].2, out.is_error);
+                }
                 self.append(log, EventKind::ToolSettled { tool_use_id: id.clone(), is_error: out.is_error, bytes: out.content.len(), artifact, ui_resource: out.ui_resource.clone() })?;
             }
             blocks.push(Block::ToolResult { tool_use_id: id.clone(), content, is_error: out.is_error });
         }
+        blocks.extend(images);
         Ok((blocks, goal_done))
     }
 
-    /// Returns Some(error output) if the call must not run.
+    /// Returns Some(error output) if the call must not run (floors, gates, approvals: see secgate.rs).
     fn gate(&self, log: &mut SessionLog, id: &str, tool: &str, effects: &[Effect], input: &Value) -> Result<Option<ToolOutput>, StoreError> {
-        let verdict = Gates { cfg: &self.cfg.gate, vault: &self.vault }.judge(effects);
-        let (gate, reason, ask) = match verdict {
-            Verdict::Allow => return Ok(None),
-            Verdict::Ask { gate, reason } => (gate, reason, true),
-            Verdict::Deny { gate, reason } => (gate, reason, false),
-        };
-        let gname = format!("{gate:?}").to_lowercase();
-        let decision = if !ask {
-            "deny"
-        } else if self.remembered.contains(&log.id, gate, &reason) {
-            "allow (remembered)"
-        } else {
-            let redacted = self.vault.redact(&input.to_string());
-            let req = ApprovalRequest { id: new_id(), tool_use_id: id.into(), session: log.id.clone(), tool: tool.into(), summary: head_tail(&redacted, 600).0, input: serde_json::from_str(&redacted).unwrap_or_default(), gate, reason: reason.clone() };
-            self.bus.publish(BusMsg::Pending(PendingItem::Approval(req.clone())));
-            let sid = log.id.clone();
-            let ap = || {
-                let mut p = hooks::payload(&sid, "", Some(tool), Some(&req.input), None, None);
-                p["kind"] = "approval".into();
-                p["gate"] = gname.clone().into();
-                p["reason"] = reason.clone().into();
-                p["message"] = format!("{tool} needs approval: {reason}").into();
-                p
-            };
-            if self.has_hooks(HookEvent::Notification) {
-                self.fire(Some(log), HookEvent::Notification, None, ap(), "")?;
-            }
-            if self.has_hooks(HookEvent::PreApprovalRequest) {
-                self.fire(Some(log), HookEvent::PreApprovalRequest, None, ap(), "")?;
-            }
-            let (choice, d) = match self.approver.approve(&req) {
-                Approval::Once => ("once", "allow"),
-                Approval::Always => {
-                    self.remembered.insert(&log.id, gate, &reason);
-                    ("always", "allow (always)")
-                }
-                Approval::Deny => ("deny", "deny"),
-            };
-            if self.has_hooks(HookEvent::PostApprovalResponse) {
-                let mut p = ap();
-                p["choice"] = choice.into();
-                self.fire(Some(log), HookEvent::PostApprovalResponse, None, p, "")?;
-            }
-            d
-        };
-        self.append(log, EventKind::Gate { tool_use_id: id.into(), gate: gname.clone(), verdict: decision.into(), reason: reason.clone() })?;
-        if decision.starts_with("allow") {
-            Ok(None)
-        } else {
-            Ok(Some(ToolOutput::err(format!("Blocked by the {gname} gate: {reason}. Do not retry the same call; choose another approach or tell the user what they need to do."))))
-        }
+        self.security_gate(log, id, tool, effects, input)
     }
 
     /// Ok(Err(output)) = blocked by a hook; Ok(Ok(Some(input))) = input rewritten.
@@ -1351,11 +1836,15 @@ impl Runtime {
             return Ok(denied);
         }
         let timeout = Duration::from_secs(input.get("timeout_secs").and_then(|v| v.as_u64()).unwrap_or(300).clamp(1, 3600));
+        let (sid, reset) = (log.id.clone(), input.get("reset").and_then(|v| v.as_bool()).unwrap_or(false));
         let mut n = 0;
         let mut store_err: Option<StoreError> = None;
         let mut handle = |nested: crate::coderun::Nested| -> ToolOutput {
             n += 1;
             let nid = format!("{parent_id}.{n}");
+            if !crate::subagents::tool_allowed(view, &nested.tool) {
+                return ToolOutput::err(format!("tool `{}` is not available in this session", nested.tool));
+            }
             let Some(tool) = self.tool(&log.id, &nested.tool) else {
                 return ToolOutput::err(format!("unknown tool `{}`", nested.tool));
             };
@@ -1390,7 +1879,8 @@ impl Runtime {
             let _ = self.append(log, EventKind::ToolSettled { tool_use_id: nid, is_error: out.is_error, bytes: out.content.len(), artifact: None, ui_resource: None });
             ToolOutput { content: self.vault.redact(&out.content), is_error: out.is_error, ui_resource: None }
         };
-        let out = crate::coderun::run(&self.paths.runtime, &script, &lang, timeout, Path::new(&view.workspace), &ctx.cancel, &mut handle);
+        let req = crate::coderun::RunReq { script: &script, lang: &lang, timeout, workspace: Path::new(&view.workspace), session: &sid, reset, backend: None };
+        let out = crate::coderun::run_opts(&self.paths.runtime, &req, &ctx.cancel, &mut handle);
         if let Some(e) = store_err {
             return Err(e);
         }
@@ -1404,7 +1894,7 @@ impl Runtime {
     fn review(&self, log: &mut SessionLog, cancel: &Cancel) {
         let view = project(log.events());
         let tail: Vec<Message> = view.messages.iter().rev().take(12).rev().cloned().collect();
-        let aux = self.cfg.aux_model().to_string();
+        let aux = self.cfg.task_model("review").to_string();
         let (pid, m) = split_model(&aux);
         let Ok(p) = self.resolver.provider(pid) else { return };
         let prompt = format!(
@@ -1412,8 +1902,9 @@ impl Runtime {
 Reply ONLY with JSON: {{\"memory\": [\"...\"], \"user\": [\"...\"]}} (empty arrays if nothing is worth keeping). Never include secrets.\n\n{}",
             compaction::render_transcript(&tail, 1500)
         );
-        let req = ModelRequest { model: m.into(), system: vec![], messages: vec![Message::user(prompt)], tools: vec![], max_tokens: 1024, temperature: None, cache_after_message: None, reasoning: None };
+        let req = ModelRequest { model: m.into(), system: vec![], messages: vec![Message::user(prompt)], tools: vec![], max_tokens: 1024, temperature: None, cache_after_message: None, reasoning: None, options: Default::default() };
         let Ok(r) = p.complete(&req, &mut |_| {}, cancel) else { return };
+        self.aux_used(log, "review", &aux, r.usage);
         let text = r.message.text();
         let json_part = text.find('{').and_then(|a| text.rfind('}').map(|b| &text[a..=b]));
         let Some(Ok(v)) = json_part.map(serde_json::from_str::<Value>) else { return };
@@ -1426,6 +1917,28 @@ Reply ONLY with JSON: {{\"memory\": [\"...\"], \"user\": [\"...\"]}} (empty arra
         if crate::util::atomic_write(&path, self.vault.redact(&staged.to_string()).as_bytes()).is_ok() {
             let _ = self.append(log, EventKind::Notice { level: "info".into(), text: format!("{count} memory suggestion(s) staged; run `ark memory review`") });
         }
+    }
+}
+
+/// Counts the usage of every call through it (auxiliary accounting).
+struct Metered {
+    inner: Arc<dyn Provider>,
+    usage: Mutex<Usage>,
+}
+
+impl Provider for Metered {
+    fn id(&self) -> &str {
+        self.inner.id()
+    }
+    fn caps(&self, model: &str) -> ark_core::ModelCaps {
+        self.inner.caps(model)
+    }
+    fn complete(&self, req: &ModelRequest, on_event: &mut dyn FnMut(StreamEvent), cancel: &Cancel) -> Result<ModelResponse, ProviderError> {
+        let r = self.inner.complete(req, on_event, cancel);
+        if let Ok(x) = &r {
+            self.usage.lock().unwrap().add(&x.usage);
+        }
+        r
     }
 }
 
@@ -1515,6 +2028,11 @@ fn output_from(v: Value) -> ToolOutput {
 }
 
 /// A middleware's `response`: a full ModelResponse, or the `{text}` shorthand.
+fn names_a_reasoning_field(msg: &str) -> bool {
+    let l = msg.to_lowercase();
+    ["reasoning", "thinking", "output_config", "budget_tokens", "effort"].iter().any(|w| l.contains(w))
+}
+
 fn response_from(v: Value, model: &str) -> Option<ModelResponse> {
     if let Ok(mut r) = serde_json::from_value::<ModelResponse>(v.clone()) {
         if r.model.is_empty() {
@@ -1526,51 +2044,34 @@ fn response_from(v: Value, model: &str) -> Option<ModelResponse> {
     Some(ModelResponse { message: Message::assistant(t), stop: StopReason::EndTurn, usage: Usage { estimated: true, output_tokens: estimate_tokens(t), ..Default::default() }, model: model.to_string() })
 }
 
-struct Host {
-    rt: Arc<Runtime>,
-    session: String,
-    workspace: PathBuf,
-    depth: u32,
-    ledger: Ledger,
-    conversation: Vec<Message>,
+pub(crate) struct Host {
+    pub(crate) rt: Arc<Runtime>,
+    pub(crate) session: String,
+    pub(crate) workspace: PathBuf,
+    pub(crate) depth: u32,
+    pub(crate) ledger: Ledger,
+    pub(crate) conversation: Vec<Message>,
+}
+
+impl Host {
+    /// The kernel host behind a tool context (None for foreign hosts, e.g. tests).
+    pub(crate) fn of(ctx: &ToolCtx) -> Option<&Host> {
+        ctx.host.as_any()?.downcast_ref::<Host>()
+    }
 }
 
 impl ToolHost for Host {
     fn spawn_agent(&self, req: SpawnRequest, cancel: &Cancel) -> Result<String, String> {
-        if self.depth + 1 > self.rt.cfg.runner.max_spawn_depth {
-            return Err(format!("sub-agent depth limit ({}) reached; do the work yourself", self.rt.cfg.runner.max_spawn_depth));
-        }
-        let model = req.model.clone().filter(|m| !m.is_empty()).unwrap_or_else(|| self.rt.cfg.subagent_model().to_string());
-        let title: String = req.task.chars().take(60).collect();
-        let child = self.rt.create_session(&self.workspace, Some(&model), Some(&self.session), Some(&title)).map_err(|e| e.to_string())?;
-        let sub = |extra: Value| {
-            let mut p = hooks::payload(&self.session, &self.workspace.to_string_lossy(), None, None, None, Some(&req.task));
-            p["subagent_id"] = child.clone().into();
-            p["model"] = model.clone().into();
-            if let (Value::Object(m), Some(o)) = (extra, p.as_object_mut()) {
-                o.extend(m);
-            }
-            p
-        };
-        if let (Some(b), _) = self.rt.emit(HookEvent::SubagentStart, sub(json!({})), "") {
-            return Err(format!("sub-agent blocked by {b}"));
-        }
-        if req.fork {
-            let mut log = self.rt.store.open(&child).map_err(|e| e.to_string())?;
-            // Everything up to (not including) the assistant message that called spawn.
-            let upto = self.conversation.len().saturating_sub(1);
-            for m in &self.conversation[..upto] {
-                self.rt.append(&mut log, EventKind::Message { message: m.clone(), usage: None, model: None, inbox: None }).map_err(|e| e.to_string())?;
-            }
-        }
-        self.rt.submit(&child, &req.task, "parent").map_err(|e| e.to_string())?;
-        let o = self.rt.run(&child, RunOpts { ledger: Some(self.ledger.child(Budget::default())), depth: self.depth + 1, cancel: Some(cancel.clone()), goal_mode: false }).map_err(|e| e.to_string())?;
-        self.rt.emit(HookEvent::SubagentStop, sub(json!({"end_reason": o.reason.label(), "text": o.text, "tokens": o.usage.total()})), "");
-        let header = format!("[sub-agent {child} · {} · {} tokens]", o.reason.label(), o.usage.total());
-        if o.reason.ok() {
-            Ok(format!("{header}\n{}", o.text))
+        let spec = crate::subagents::ChildSpec { goal: req.task, model: req.model, fork: req.fork, tools: req.tools, worktree: req.worktree, plain: true, ..Default::default() };
+        let v = self.rt.delegate(self, vec![spec], crate::subagents::Mode::Sync, cancel)?;
+        let e: crate::subagents::Entry = serde_json::from_value(v["results"][0].clone()).map_err(|e| e.to_string())?;
+        let header = format!("[sub-agent {} · {} · {} tokens]", e.session_id, e.error.clone().unwrap_or_else(|| e.exit_reason.clone()), e.input_tokens + e.output_tokens);
+        // Worktree isolation: say where the child's work was kept (branch / archive ref).
+        let wt = e.worktree.as_ref().and_then(|w| w.note.clone()).map(|n| format!("\n[worktree: {n}]")).unwrap_or_default();
+        if e.status == "completed" {
+            Ok(format!("{header}\n{}{wt}", e.summary))
         } else {
-            Err(format!("{header}\n{}", o.text))
+            Err(format!("{header}\n{}{wt}", e.summary))
         }
     }
     fn ask_user(&self, question: &str) -> Result<String, String> {
@@ -1589,5 +2090,41 @@ impl ToolHost for Host {
     }
     fn progress(&self, text: &str) {
         self.rt.bus.publish(BusMsg::Delta { session: self.session.clone(), text: text.to_string(), thinking: true });
+    }
+    /// Screenshot analysis (Hermes auxiliary vision): the aux model when it has vision,
+    /// else the session's default model; neither → an error the tool reports.
+    fn analyze_image(&self, question: &str, media_type: &str, data: &str) -> Result<String, String> {
+        let pick = [self.rt.cfg.aux_model().to_string(), self.rt.cfg.model.default.clone()].into_iter().find(|m| {
+            let (pid, name) = split_model(m);
+            self.rt.resolver.provider(pid).is_ok_and(|p| p.caps(name).vision)
+        });
+        let m = pick.ok_or("no configured model has vision (set model.aux to a vision-capable model)")?;
+        let msg = Message { role: Role::User, content: vec![Block::Image { media_type: media_type.into(), data: data.into() }, Block::text(question)] };
+        let (r, _, _) = self.rt.sample(Some(&m), "Answer the question about the screenshot precisely and concisely.", vec![msg], vec![], 1024, &Cancel::new())?;
+        Ok(r.content.iter().filter_map(|b| if let Block::Text { text } = b { Some(text.as_str()) } else { None }).collect::<Vec<_>>().join("\n"))
+    }
+    fn as_any(&self) -> Option<&dyn std::any::Any> {
+        Some(self)
+    }
+    /// C9: a sub-agent (`depth > 0`) gets its own home for anything it *spawns*: its own
+    /// `ARK_HOME` (config, data, secrets), its own temp and cache dirs. A child that runs
+    /// `ark config set …` or `ark auth …` therefore breaks only its own throwaway home —
+    /// never the driver that spawned it. The kernel's own bookkeeping (board, leases,
+    /// sessions, reaper registry) stays under the real data dir, so coordination still works.
+    fn sandbox_env(&self) -> Vec<(String, String)> {
+        if self.depth == 0 || self.session.is_empty() {
+            return Vec::new();
+        }
+        let base = self.rt.paths.data.join("subagents").join(&self.session);
+        let (home, tmp, cache, cfg) = (base.join("home"), base.join("tmp"), base.join("cache"), base.join("config"));
+        for d in [&home, &tmp, &cache, &cfg] {
+            let _ = std::fs::create_dir_all(d);
+        }
+        vec![
+            ("ARK_HOME".into(), home.display().to_string()),
+            ("TMPDIR".into(), tmp.display().to_string()),
+            ("XDG_CACHE_HOME".into(), cache.display().to_string()),
+            ("XDG_CONFIG_HOME".into(), cfg.display().to_string()),
+        ]
     }
 }

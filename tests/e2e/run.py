@@ -39,7 +39,21 @@ base_url = "{BASE}/v1"
 enabled = true
 """
 open(os.path.join(HOME, "config", "config.toml"), "w").write(CONFIG)
-ENV = {**os.environ, "ARK_HOME": HOME, "FAKE_KEY": "test-key-not-secret", "NO_COLOR": "1", "XDG_RUNTIME_DIR": ""}
+# Never let a developer's real provider credentials reach the binary: the first-run / setup
+# paths pick a provider from the environment and would make a real (paid) API call.
+PROVIDER_KEYS = ("ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN",
+                 "OPENAI_API_KEY", "AZURE_OPENAI_API_KEY", "GEMINI_API_KEY", "GOOGLE_API_KEY",
+                 "MISTRAL_API_KEY", "DEEPSEEK_API_KEY", "XAI_API_KEY", "GROQ_API_KEY",
+                 "OPENROUTER_API_KEY", "TOGETHER_API_KEY", "FIREWORKS_API_KEY", "PERPLEXITY_API_KEY",
+                 "COHERE_API_KEY", "HF_TOKEN", "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY",
+                 "ARK_PROFILE", "ARK_AGENT")
+ENV = {k: v for k, v in os.environ.items() if k not in PROVIDER_KEYS and not k.endswith("_API_KEY")}
+ENV.update({"ARK_HOME": HOME, "FAKE_KEY": "test-key-not-secret", "NO_COLOR": "1", "XDG_RUNTIME_DIR": ""})
+# Offline by default: a fresh ARK_HOME otherwise downloads the ~6 MB models.dev price file on
+# the first model call (crates/ark/src/models_cli.rs `auto_refresh_prices`). Everything the
+# tests need is local (the fake provider and local fixture servers); a test that really needs
+# the network opts in through `online()`, which drops ARK_OFFLINE for its own subprocesses.
+ENV["ARK_OFFLINE"] = "1"
 ENV.pop("ARK_CALL_SOCK", None)
 
 failures = []
@@ -60,9 +74,22 @@ def ark(*args, stdin=None, timeout=60, cwd=WS, env=None):
     return p.returncode, p.stdout, p.stderr
 
 
+def online(env=None):
+    """Env for a test that deliberately needs the network: same as ENV without ARK_OFFLINE."""
+    e = dict(env or ENV)
+    e.pop("ARK_OFFLINE", None)
+    return e
+
+
+# E2E_ONLY=name1,name2 runs just those tests (development aid; the full run ignores it).
+ONLY = {x for x in os.environ.get("E2E_ONLY", "").split(",") if x}
+
+
 def test(fn):
     global passed
     name = fn.__name__
+    if ONLY and name not in ONLY:
+        return fn
     try:
         fn()
         passed += 1
@@ -89,6 +116,31 @@ def last_session():
 def events(sid):
     p = os.path.join(HOME, "data", "sessions", sid, "events.jsonl")
     return [json.loads(l) for l in open(p) if l.strip()]
+
+
+def session_dirs():
+    base = os.path.join(HOME, "data", "sessions")
+    return set(os.listdir(base)) if os.path.isdir(base) else set()
+
+
+def wait_tool_called(before, secs=30):
+    """Id of a session started after `before` whose log already has a `tool_called` event.
+
+    Read straight from disk: `ark session list` from the harness would race with the live
+    `ark run`. The interrupt tests use it so their signal lands during the tool, not during
+    the model request that precedes it (a fixed sleep is not enough on a loaded machine).
+    """
+    base = os.path.join(HOME, "data", "sessions")
+    deadline = time.time() + secs
+    while time.time() < deadline:
+        for sid in session_dirs() - before:
+            try:
+                if any(json.loads(l).get("type") == "tool_called" for l in open(os.path.join(base, sid, "events.jsonl")) if l.strip()):
+                    return sid
+            except (OSError, ValueError):
+                pass
+        time.sleep(0.1)
+    return None
 
 
 # ───────────── commands & usage errors ─────────────
@@ -137,20 +189,24 @@ def config_and_providers():
 @test
 def setup_wizard_from_scratch_then_run():
     home = os.path.join(ROOT, "fresh")
-    env = {**ENV, "ARK_HOME": home, "LANG": "C"}
+    # HOME too: the wizard looks for other agents' setups and installs shell completion there.
+    env = {**ENV, "ARK_HOME": home, "HOME": home, "LANG": "C"}
     c, out, _ = ark(env=env)
     check(c == 0 and "ark setup" in out, "first-run hint: " + out[-200:])
     c, _, err = ark("run", "hi", env=env)
     check(c == 1 and err.count("API key missing") == 1 and "ark setup" in err, "one error line plus the setup hint: " + err)
     script([{"text": "pong"}])
-    # Other → custom endpoint (after all presets), name, URL, needs key, bad key, good key,
-    # first listed model, web UI on, no chat platform.
+    # Security note accepted, Other → custom endpoint (after all presets), name, URL, needs key,
+    # bad key, good key, first listed model, web UI on, no chat platform, default workspace,
+    # no connectors, no service, no shell completion.
     n = len([l for l in ark("providers", "list", env=env)[1].splitlines() if l.strip()])
-    answers = ["11", str(n + 1), "fake", BASE + "/v1", "y", "bad-key", "good-key-not-secret", "1", "y", "1"]
+    # …then the web-search provider (18 = skip for now), web UI, chat platform, workspace,
+    # connectors, service, shell completion.
+    answers = ["y", "11", str(n + 1), "fake", BASE + "/v1", "y", "bad-key", "good-key-not-secret", "1", "18", "y", "1", "", "", "n", "n"]
     c, out, err = ark("setup", stdin="\n".join(answers) + "\n", env=env)
     check(c == 0 and "key rejected: " in err and "key works (" in err and "fake-embedding" not in err, err[-1500:])
     cfg = open(os.path.join(home, "config", "config.toml")).read()
-    check('default = "fake/fake-model"' in cfg and "good-key" not in cfg and "{{secret:APP_TOKEN}}" in cfg, cfg)
+    check('default = "fake/fake-model"' in cfg and "good-key" not in cfg and "{{secret:APP_TOKEN}}" in cfg and "workspace = " in cfg, cfg)
     c, out, _ = ark("secrets", "list", env=env)
     check("FAKE_API_KEY" in out and "APP_TOKEN" in out, out)
     script([{"text": "configured"}])
@@ -158,7 +214,7 @@ def setup_wizard_from_scratch_then_run():
     check(c == 0 and "configured" in out and seen()[0]["auth"] == "Bearer good-key-not-secret", out + err)
     # Running it again keeps the old file as a backup.
     script([{"text": "pong"}])
-    answers = ["11", str(n + 1), "fake", BASE + "/v1", "y", "y", "1", "n", "1"]
+    answers = ["y", "11", str(n + 1), "fake", BASE + "/v1", "y", "y", "1", "18", "n", "1", "", "", "n"]
     c, out, err = ark("setup", stdin="\n".join(answers) + "\n", env=env)
     check(c == 0 and "Backup:" in err and any(f.startswith("config.toml.bak.") for f in os.listdir(os.path.join(home, "config"))), err[-800:])
 
@@ -235,8 +291,17 @@ def secrets_are_substituted_but_never_logged():
     check(c == 0, err)
     c, _, err = ark("secrets", "set", "TOK", "inline-value")
     check(c == 2 and "stdin" in err, "value on argv refused")
-    mode = os.stat(os.path.join(HOME, "config", "secrets.toml")).st_mode & 0o777
-    check(mode == 0o600, oct(mode))
+    # A4: the secret lands in the encrypted store when a key source exists, otherwise in the
+    # 0600 plaintext file. Either way it must be 0600 and the value must not be readable.
+    cfgdir = os.path.join(HOME, "config")
+    store = os.path.join(cfgdir, "secrets.enc")
+    plain = os.path.join(cfgdir, "secrets.toml")
+    path = store if os.path.exists(store) else plain
+    mode = os.stat(path).st_mode & 0o777
+    check(mode == 0o600, "%s: %s" % (path, oct(mode)))
+    if os.path.exists(store):
+        check(not os.path.exists(plain), "the plaintext file is gone once encrypted")
+        check(b"sup3r-s3cret-value" not in open(store, "rb").read(), "no plaintext value on disk")
     script([{"tool": "shell", "args": {"command": "echo token={{secret:TOK}} > tok.txt; cat tok.txt"}}, {"text": "ok"}])
     c, out, err = ark("run", "use the token")
     check(c == 0, err)
@@ -311,12 +376,16 @@ def stalled_stream_times_out_and_falls_back():
 @test
 def sigint_interrupts_cleanly():
     script([{"tool": "shell", "args": {"command": "sleep 30"}}])
+    before = session_dirs()
     p = subprocess.Popen([ARK, "run", "sleep"], cwd=WS, env=ENV, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-    time.sleep(1.5)
+    # Signal only once the shell tool is really running: a fixed sleep is not enough on a
+    # loaded machine (the SIGINT would land in the model request and interrupt a turn that
+    # never had a tool to settle).
+    sid = wait_tool_called(before)
+    check(sid, "the shell tool never started")
     p.send_signal(signal.SIGINT)
     out, err = p.communicate(timeout=20)
     check(p.returncode == 130, f"exit {p.returncode}: {err}")
-    sid = last_session()
     ev = events(sid)
     check(ev[-1]["type"] == "turn_end" and ev[-1]["reason"] == "interrupted", ev[-1])
     check(any(e["type"] == "tool_settled" for e in ev), "tool settled after cancel")
@@ -326,14 +395,15 @@ def sigint_interrupts_cleanly():
 def kill_9_mid_tool_then_resume_recovers():
     marker = os.path.join(WS, "orphan.txt")
     script([{"tool": "shell", "args": {"command": "sleep 2.5 && echo late > orphan.txt"}}])
+    before = session_dirs()
     p = subprocess.Popen([ARK, "run", "slow"], cwd=WS, env=ENV, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    time.sleep(1.5)
+    sid = wait_tool_called(before)
+    check(sid, "the shell tool never started")
     p.kill()
     p.wait()
     time.sleep(2)
     # The command dies with ark; otherwise "side effects unknown" would be a lie.
     check(not os.path.exists(marker), "orphaned command kept running after ark was SIGKILLed")
-    sid = last_session()
     ev = events(sid)
     check(any(e["type"] == "tool_called" for e in ev) and not any(e["type"] == "tool_settled" for e in ev), "crashed mid-call")
     script([{"text": "I checked; continuing"}])
@@ -571,6 +641,9 @@ def shell_and_plugin_hooks_block_and_rewrite():
     blocked = os.path.join(ROOT, "hook-blocked")
     hook_log = os.path.join(ROOT, "hook-log")
     cfg = f"""
+[hooks_extra]
+auto_accept = true  # first-use consent: approve these test hooks
+
 [[hooks]]
 event = "pre_tool"
 matcher = "shell"
@@ -786,6 +859,9 @@ listen = "127.0.0.1:{port}"
 token = "{{{{secret:APP_TOKEN}}}}"
 nodes = true
 workspace = "{WS}"
+# A10: endpoints are opt-in, so the test that exercises the OpenAI-compatible API has to
+# enable it (the default is off and registers no route).
+openai_api = true
 
 [app.a2a]
 enabled = true
@@ -1142,7 +1218,12 @@ token = "{{{{secret:APP_TOKEN}}}}"
         body = json.dumps(seen()[-1]["body"])
         check("REWRITTEN [transformed]" in body and "FROM CACHE [transformed]" in body, body[-1500:])
         check("likes tea" in body and "Memory provider: kinds" in body, "memory provider served the tool and the prompt block")
-        check([m["action"] for m in logged("memory")] == ["add", "search"], logged("memory"))
+        # One add per user action: with `[memory] provider = "kinds"` the `memory` tool is the
+        # plugin's own, so the write reaches it through the tool call and must not be mirrored a
+        # second time (ark_memory::manager::tool_settled). First `search` = the turn's prefetch,
+        # last = the model's own `memory` search call.
+        acts = [m["action"] for m in logged("memory")]
+        check(acts == ["search", "add", "search"], acts)
         mws = {(m["mw"], m["phase"]) for m in logged("middleware")}
         check({("tool_request", None), ("tool_execution", "call"), ("tool_execution", "result"), ("llm_request", None), ("llm_execution", "call")} <= mws, mws)
         # llm_execution middleware answers without the provider.
@@ -1195,6 +1276,21 @@ def acp_agent_over_stdio():
         {"tool": "write", "args": {"path": "/etc/ark-e2e-denied", "content": "nope"}},
         {"text": "acp says hi"},
     ])
+    # Make the fake model advertise image input: ark resolves capabilities from models.dev
+    # metadata, and a model without vision has its images replaced by text stand-ins on the
+    # send path (crates/ark-kernel/src/imgprep.rs) before the provider ever sees them. Seed the
+    # models.dev cache with what the fake provider declares (GET /api.json) — the same metadata
+    # `ark models refresh` downloads — keeping whatever real entries are already cached.
+    md = os.path.join(HOME, "data", "models-dev.json")
+    os.makedirs(os.path.dirname(md), exist_ok=True)
+    try:
+        db = json.load(open(md))
+    except (FileNotFoundError, ValueError):
+        db = {}
+    for pid, p in json.loads(urllib.request.urlopen(BASE + "/api.json").read()).items():
+        db.setdefault(pid, {"id": pid, "name": p.get("name", pid), "models": {}}).setdefault("models", {}).update(p["models"])
+    with open(md, "w") as f:
+        json.dump(db, f)
     p = subprocess.Popen([ARK, "acp"], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=ENV, cwd=WS)
     def send(o):
         p.stdin.write(json.dumps(o) + "\n"); p.stdin.flush()
@@ -1319,12 +1415,96 @@ def acp_client_drives_external_agents():
         check("content: second" in res and "continue with session" in res, res[-600:])
 
 
+@test
+def model_auth_usage_and_slash_commands():
+    # Presets and aliases.
+    c, out, err = ark("models", "providers")
+    check(c == 0 and "bedrock" in out and "github-copilot" in out and "openai-codex" in out, out[:400] + err)
+    # Credential pool: two stored keys; the first is rejected (401) and the pool rotates.
+    env = {**ENV}
+    env.pop("FAKE_KEY", None)
+    for k in ["key-one-aaaa", "key-two-bbbb"]:
+        c, out, err = ark("auth", "add", "fake", "--api-key", k, env=env)
+        check(c == 0, err)
+    script([{"status": 401, "body": "invalid api key"}, {"text": "pooled ok"}])
+    c, out, err = ark("run", "hello", "--set", "model.fallback=[]", env=env)
+    check(c == 0 and "pooled ok" in out, out + err)
+    auths = [r["auth"] for r in seen()]
+    check(auths == ["Bearer key-one-aaaa", "Bearer key-two-bbbb"], auths)
+    c, out, err = ark("auth", "list", "fake", env=env)
+    check(c == 0 and "cooling down" in out and "invalid api key" in out, out)
+    c, out, err = ark("auth", "reset", "fake", env=env)
+    check(c == 0 and "2 credential" in out, out)
+    c, out, err = ark("auth", "remove", "fake", "0", env=env)
+    c, out, err = ark("auth", "remove", "fake", "0", env=env)
+    check(c == 0, err)
+    # Fallback chain management writes the user config.
+    c, out, err = ark("fallback", "add", "fake/other-model")
+    check(c == 0 and "fake/other-model" in out, out + err)
+    c, out, err = ark("fallback", "list")
+    check("fakeanth/fake-claude" in out and "fake/other-model" in out, out)
+    c, out, err = ark("fallback", "remove", "fake/other-model")
+    check(c == 0, err)
+    # Usage and insights read the session logs.
+    c, out, err = ark("usage", "--json")
+    check(c == 0 and json.loads(out)["models"].get("fake/fake-model", {}).get("calls", 0) >= 1, out[:300] + err)
+    c, out, err = ark("insights", "--days", "7")
+    check(c == 0 and "sessions" in out and "tools (" in out, out)
+    # Slash commands in chat: /think, /fast, /model with an alias, /usage.
+    script([{"text": "one"}, {"text": "two"}])
+    c, out, err = ark("chat", "--set", 'model.aliases.quick="fake/fake-quick"', stdin="/think high\n/fast on\n/model quick\nhello\n/usage\n/models\n/exit\n")
+    check(c == 0 and "thinking → high" in err and "fast mode → on" in err and "model → fake/fake-quick" in err, err[-800:])
+    body = seen()[-1]["body"]
+    check(body["model"] == "fake-quick" and body.get("reasoning_effort") == "high", body.get("model"))
+    check("total" in err and "context:" in err, err[-600:])
+
+
+
+# ───────────── dev workflow: verify, lsp, /init, /plan ─────────────
+
+@test
+def verify_lsp_init_plan():
+    proj = os.path.join(ROOT, "vproj")
+    os.makedirs(proj, exist_ok=True)
+    open(os.path.join(proj, "Makefile"), "w").write("build:\n\techo built\ntest:\n\techo tested\n")
+    c, out, err = ark("verify", proj, "--detect-only", "--json")
+    r = json.loads(out)
+    check(c == 0 and r["source"] == "detected" and r["recipe"]["kind"] == "make" and r["recipe"]["test"] == ["make test"], out + err)
+    c, out, err = ark("verify", proj)
+    check(c == 0 and "Result: OK" in out and "build" in out and "PASS" in out, out + err)
+    c, out, err = ark("verify", proj, "--save", "--phase", "test", "--json")
+    check(c == 0 and json.loads(out.splitlines()[-1])["ok"] and os.path.exists(os.path.join(proj, ".ark", "environment.json")), out + err)
+    c, out, err = ark("verify", os.path.join(ROOT, "nothing-here-x"))
+    check(c == 2, err)
+    empty = os.path.join(ROOT, "vempty")
+    os.makedirs(empty, exist_ok=True)
+    c, out, err = ark("verify", empty)
+    check(c == 1 and "No recognizable project" in err, err)
+    c, out, err = ark("lsp", "list")
+    check(c == 0 and "rust-analyzer" in out and "pyright" in out, out + err)
+    c, out, err = ark("lsp", "status", "--json")
+    check(c == 0 and json.loads(out)["service"]["enabled"] is True, out + err)
+    c, out, err = ark("lsp", "install", "gopls")
+    check(c == 1 and "does not download" in err, err)
+    # /init and /plan become ordinary turns carrying the built-in prompt.
+    script([{"text": "wrote AGENTS.md"}])
+    c, out, err = ark("init", "keep it short")
+    body = json.dumps(seen()[-1]["body"]["messages"])
+    check(c == 0 and "wrote AGENTS.md" in out and "[/init]" in body and "keep it short" in body, out + err)
+    script([{"text": "planned"}])
+    c, out, err = ark("plan", "add a cache layer")
+    body = json.dumps(seen()[-1]["body"]["messages"])
+    check(c == 0 and "plan mode" in body and ".ark/plans/" in body and "add-a-cache-layer.md" in body, body[-400:])
+    c, out, err = ark("plan")
+    check(c == 2, err)
+
+
 try:
     pass
 finally:
     srv.terminate()
     print(f"\n{passed} passed, {len(failures)} failed" + (f": {', '.join(failures)}" if failures else ""))
-    if not failures:
+    if not failures and not os.environ.get("ARK_E2E_KEEP"):
         shutil.rmtree(ROOT, ignore_errors=True)
     else:
         print("artifacts kept in", ROOT)

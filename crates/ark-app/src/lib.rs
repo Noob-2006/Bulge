@@ -10,15 +10,30 @@
 //! listen = "127.0.0.1:8640"
 //! token = "{{secret:APP_TOKEN}}"
 //! ```
+//!
+//! Beyond loopback the server refuses to start unless every layer is there (see
+//! [`exposure`]): `[app.exposure] allow_public = true`, TLS or `behind_proxy = true`,
+//! a real auth provider, a non-wildcard `[app] allow_origins`, and a rate limit.
+//! `[app] tokens = [{ token = "…", scope = "read" }]` adds scoped credentials next to the
+//! admin `token`.
 
 pub mod a2a;
 pub mod acp;
 pub mod acp_client;
+pub mod browser_view;
+pub mod computer;
+pub mod clip;
+pub mod exposure;
+pub mod logbook;
 pub mod conversations;
+pub mod cron_fire;
+pub mod dashboard_auth;
 pub mod node;
 pub mod openai;
 pub mod qr;
 pub mod server;
+pub mod session_share;
+pub mod surfaces;
 pub mod tui;
 pub mod ui;
 
@@ -51,7 +66,7 @@ pub struct AppConfig {
     pub allow_origins: Vec<String>,
     #[serde(default = "yes")]
     pub ui: bool,
-    #[serde(default = "yes")]
+    /// OpenAI-compatible API (`/v1/*`). Off by default: no route is registered while off.
     pub openai_api: bool,
     /// Accept device nodes on `/node`.
     pub nodes: bool,
@@ -60,11 +75,19 @@ pub struct AppConfig {
     pub max_conns: usize,
     /// Workspace for sessions created through the API.
     pub workspace: Option<String>,
+    /// Control UI terminal page (a PTY shell as the daemon's user); off by default.
+    pub terminal: bool,
+    /// Dashboard login (`[app.auth]`): off by default, so the app token stays the only credential.
+    pub auth: dashboard_auth::AuthConfig,
+    /// Scoped tokens (`{ token = "…", scope = "read" }`). `token` above stays admin.
+    pub tokens: Vec<exposure::TokenConfig>,
+    /// `[app.exposure]`: how far beyond loopback this server may go (A8/A9).
+    pub exposure: exposure::ExposureConfig,
 }
 
 impl Default for AppConfig {
     fn default() -> Self {
-        AppConfig { enabled: false, listen: d_listen(), token: None, allow_origins: vec![], ui: true, openai_api: true, nodes: false, a2a: a2a::A2aConfig::default(), max_conns: d_conns(), workspace: None }
+        AppConfig { enabled: false, listen: d_listen(), token: None, allow_origins: vec![], ui: true, openai_api: false, nodes: false, a2a: a2a::A2aConfig::default(), max_conns: d_conns(), workspace: None, terminal: false, auth: dashboard_auth::AuthConfig::default(), tokens: vec![], exposure: exposure::ExposureConfig::default() }
     }
 }
 
@@ -76,6 +99,18 @@ impl AppConfig {
         }
         if std::env::var("ARK_APP_ENABLED").is_ok_and(|v| v == "1" || v == "true") {
             c.enabled = true;
+        }
+        // A scoped token that names no scope, or a scope nobody implements, is a config error
+        // rather than a silently weaker or stronger credential.
+        for (i, tok) in c.tokens.iter_mut().enumerate() {
+            if tok.token.trim().is_empty() {
+                return Err(format!("[app] tokens[{i}] has an empty token"));
+            }
+            let scope = exposure::Scope::parse(&tok.scope).map_err(|e| format!("[app] tokens[{i}]: {e}"))?;
+            if tok.name.as_deref().is_some_and(|n| n.trim().is_empty()) {
+                tok.name = None;
+            }
+            tok.scope = scope.as_str().to_string();
         }
         Ok(c)
     }

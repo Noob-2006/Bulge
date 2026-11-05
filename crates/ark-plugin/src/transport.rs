@@ -162,6 +162,10 @@ fn push_log(buf: &Mutex<VecDeque<u8>>, bytes: &[u8]) {
 
 impl StdioConn {
     pub fn spawn(command: &str, args: &[String], env: &[(String, String)], cwd: Option<&PathBuf>, notify: Notify, on_req: OnRequest) -> Result<Arc<Self>, String> {
+        // npx/uvx/pipx packages: refuse known malware (OSV MAL-* advisories); fails open offline.
+        if let Some(blocked) = ark_security::osv::launch_check(command, args) {
+            return Err(blocked);
+        }
         // The child is spawned and reaped by a keeper thread that lives exactly as long
         // as the child: PDEATHSIG fires when the *spawning thread* dies, so spawning from
         // a short-lived caller thread would kill the server under us.
@@ -170,6 +174,7 @@ impl StdioConn {
         let pending: Pending = Arc::default();
         let stderr: Arc<Mutex<VecDeque<u8>>> = Arc::default();
         let mut cmd = Command::new(command);
+        ark_security::envscrub::apply(&mut cmd, ark_security::envscrub::Surface::Server);
         cmd.args(args).envs(env.iter().map(|(k, v)| (k, v))).stdin(PStdio::piped()).stdout(PStdio::piped()).stderr(PStdio::piped());
         if let Some(d) = cwd {
             cmd.current_dir(d);

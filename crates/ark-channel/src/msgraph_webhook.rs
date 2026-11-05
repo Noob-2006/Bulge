@@ -11,6 +11,11 @@
 //! otherwise 400. When bound to a non-loopback address, `allowed_source_cidrs` is
 //! mandatory and every request from outside it gets 403 before the body is parsed.
 //! Receive-only: `send` is `Unsupported` (Graph has no reply path).
+//!
+//! A host may claim the accepted notifications with [`set_notification_scheduler`] (upstream
+//! `MSGraphWebhookAdapter.set_notification_scheduler`, used by the Teams meeting pipeline): the
+//! scheduler then persists them before the 202 and no chat `Inbound` is produced. With nothing
+//! bound the behaviour is unchanged — accept, hand to `poll` as a chat message, drop.
 
 use crate::msteams::drain;
 use crate::webhook::render_template;
@@ -26,6 +31,29 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 pub const DEFAULT_PATH: &str = "/msgraph/webhook";
+
+/// A host that claims Graph notifications (upstream `set_notification_scheduler`). It receives each
+/// notification that passed the `resource`/`clientState` gates and answers `Ok(())` once the work is
+/// durable (the request then gets 202) or `Err(why)` (the request gets 503, so Graph retries).
+pub type NotificationScheduler = Arc<dyn Fn(&Value) -> Result<(), String> + Send + Sync>;
+
+fn process_scheduler() -> &'static Mutex<Option<NotificationScheduler>> {
+    static S: Mutex<Option<NotificationScheduler>> = Mutex::new(None);
+    &S
+}
+
+/// Bind (or, with `None`, unbind) the process-wide notification scheduler. This is the late-binding
+/// equivalent of upstream's per-adapter `set_notification_scheduler`, for hosts that do not hold this
+/// channel's instance (the Teams meeting pipeline binds it from `ark`'s wiring). A scheduler bound on
+/// an instance with [`MsGraphWebhook::set_notification_scheduler`] wins over this one.
+pub fn set_notification_scheduler(s: Option<NotificationScheduler>) {
+    *process_scheduler().lock().unwrap_or_else(|e| e.into_inner()) = s;
+}
+
+/// Whether the process-wide scheduler is bound (hosts log/verify their wiring with this).
+pub fn notification_scheduler_installed() -> bool {
+    process_scheduler().lock().unwrap_or_else(|e| e.into_inner()).is_some()
+}
 pub const DEFAULT_MAX_SEEN: usize = 5000;
 pub const DEFAULT_MAX_BODY: usize = 1_048_576;
 
@@ -80,6 +108,8 @@ struct Shared {
     accepted: AtomicU64,
     duplicates: AtomicU64,
     tx: Mutex<Sender<Inbound>>,
+    /// Upstream `_notification_scheduler`; `None` = ack then hand to `poll` as a chat message.
+    scheduler: Mutex<Option<NotificationScheduler>>,
 }
 
 pub struct MsGraphWebhook {
@@ -168,7 +198,16 @@ impl Shared {
         }
     }
 
-    /// accepted | duplicate | auth | other
+    /// The bound scheduler: an instance binding wins over the process-wide one.
+    fn bound_scheduler(&self) -> Option<NotificationScheduler> {
+        self.scheduler.lock().unwrap_or_else(|e| e.into_inner()).clone().or_else(|| process_scheduler().lock().unwrap_or_else(|e| e.into_inner()).clone())
+    }
+
+    fn seen_has(&self, key: &str) -> bool {
+        self.seen.lock().unwrap_or_else(|e| e.into_inner()).0.contains(key)
+    }
+
+    /// accepted | duplicate | auth | other | failed
     fn ingest(&self, n: &Value) -> &'static str {
         if !n.is_object() || !self.resource_accepted(n["resource"].as_str().unwrap_or("")) {
             return "other";
@@ -178,6 +217,26 @@ impl Shared {
             return "auth";
         }
         let receipt = n["id"].as_str().map(str::trim).filter(|s| !s.is_empty()).map(|id| format!("id:{id}"));
+        if let Some(schedule) = self.bound_scheduler() {
+            // A bound scheduler owns the notification (upstream `_schedule_notification` returns
+            // before `_admit_notification`): replays are deduped by receipt first, the scheduler
+            // persists the work before the 202, and no chat Inbound is produced.
+            if let Some(k) = &receipt {
+                if self.seen_has(k) {
+                    self.duplicates.fetch_add(1, Ordering::SeqCst);
+                    return "duplicate";
+                }
+            }
+            if schedule(n).is_err() {
+                // Not durable: the receipt is not remembered, so Graph's retry is reprocessed.
+                return "failed";
+            }
+            if let Some(k) = &receipt {
+                self.remember(k);
+            }
+            self.accepted.fetch_add(1, Ordering::SeqCst);
+            return "accepted";
+        }
         if let Some(k) = &receipt {
             if !self.remember(k) {
                 self.duplicates.fetch_add(1, Ordering::SeqCst);
@@ -214,7 +273,7 @@ impl Shared {
             return Response::empty(403);
         }
         if is_health && r.path != self.path {
-            return Response::json(200, &json!({"status": "ok", "platform": "msgraph_webhook", "webhook_path": self.path, "accepted": self.accepted.load(Ordering::SeqCst), "duplicates": self.duplicates.load(Ordering::SeqCst)}).to_string());
+            return Response::json(200, &json!({"status": "ok", "platform": "msgraph_webhook", "webhook_path": self.path, "accepted": self.accepted.load(Ordering::SeqCst), "duplicates": self.duplicates.load(Ordering::SeqCst), "notification_scheduler": self.bound_scheduler().is_some()}).to_string());
         }
         // Validation handshake (Graph uses GET or POST with the token in the query).
         if let Some(tok) = r.query("validationToken").filter(|t| !t.is_empty()) {
@@ -233,6 +292,8 @@ impl Shared {
                 "accepted" => accepted += 1,
                 "duplicate" => dup += 1,
                 "auth" => auth += 1,
+                // Upstream: an admission failure inside the batch is a 503 so Graph retries it.
+                "failed" => return Response::empty(503),
                 _ => other += 1,
             }
         }
@@ -281,6 +342,7 @@ impl MsGraphWebhook {
             accepted: AtomicU64::new(0),
             duplicates: AtomicU64::new(0),
             tx: Mutex::new(tx),
+            scheduler: Mutex::new(None),
         });
         let sh2 = sh.clone();
         let handler: ark_net::httpd::Handler = Arc::new(move |r| sh2.handle(r));
@@ -291,6 +353,13 @@ impl MsGraphWebhook {
 
     pub fn local_addr(&self) -> std::net::SocketAddr {
         self.server.local_addr()
+    }
+
+    /// Upstream `MSGraphWebhookAdapter.set_notification_scheduler`: hand every accepted notification
+    /// to `scheduler` (persisted before the 202, no chat Inbound) instead of queueing it for `poll`.
+    /// `None` restores the default "ack then drop" behaviour.
+    pub fn set_notification_scheduler(&self, scheduler: Option<NotificationScheduler>) {
+        *self.sh.scheduler.lock().unwrap_or_else(|e| e.into_inner()) = scheduler;
     }
 }
 
@@ -471,5 +540,42 @@ mod tests {
         let t = std::time::Instant::now();
         assert!(allowed.poll(&c).unwrap().is_empty());
         assert!(t.elapsed() < Duration::from_millis(200));
+    }
+
+    /// A bound scheduler owns the accepted notifications (upstream `set_notification_scheduler`):
+    /// each one is handed over before the 202, none becomes a chat `Inbound`, replays are deduped
+    /// without calling it, a failure is a 503 (Graph retries) and unbinding restores the default.
+    #[test]
+    fn notification_scheduler_claims_accepted_notifications() {
+        let w = MsGraphWebhook::new("g", opts("127.0.0.1:0", vec![])).unwrap();
+        let got = Arc::new(Mutex::new(Vec::<Value>::new()));
+        let fail = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (g, f) = (got.clone(), fail.clone());
+        let scheduler: NotificationScheduler = Arc::new(move |n: &Value| {
+            if f.load(Ordering::SeqCst) {
+                return Err("the pipeline store is unavailable".into());
+            }
+            g.lock().unwrap().push(n.clone());
+            Ok(())
+        });
+        w.set_notification_scheduler(Some(scheduler));
+        let a: std::net::SocketAddr = format!("127.0.0.1:{}", w.local_addr().port()).parse().unwrap();
+        assert_eq!(serde_json::from_str::<Value>(&req(a, "GET", "/health", "").2).unwrap()["notification_scheduler"], json!(true));
+        assert_eq!(req(a, "POST", "/msgraph/webhook", &json!({"value": [note("n1", "s3cret-state", "users/u1/messages")]}).to_string()).0, 202);
+        assert_eq!(got.lock().unwrap().len(), 1);
+        assert_eq!(got.lock().unwrap()[0]["id"], json!("n1"), "the scheduler gets the decoded notification");
+        assert!(w.poll(&Cancel::new()).unwrap().is_empty(), "no chat Inbound when a scheduler is bound");
+        assert_eq!(req(a, "POST", "/msgraph/webhook", &json!({"value": [note("n1", "s3cret-state", "users/u1/messages")]}).to_string()).0, 202);
+        assert_eq!(got.lock().unwrap().len(), 1, "a replay is deduped before the scheduler");
+        fail.store(true, Ordering::SeqCst);
+        assert_eq!(req(a, "POST", "/msgraph/webhook", &json!({"value": [note("n2", "s3cret-state", "users/u1/messages")]}).to_string()).0, 503, "a scheduler failure is retryable");
+        fail.store(false, Ordering::SeqCst);
+        assert_eq!(req(a, "POST", "/msgraph/webhook", &json!({"value": [note("n2", "s3cret-state", "users/u1/messages")]}).to_string()).0, 202, "the failed receipt was not remembered");
+        assert_eq!(got.lock().unwrap().len(), 2);
+        w.set_notification_scheduler(None);
+        assert_eq!(serde_json::from_str::<Value>(&req(a, "GET", "/health", "").2).unwrap()["notification_scheduler"], json!(false));
+        assert_eq!(req(a, "POST", "/msgraph/webhook", &json!({"value": [note("n3", "s3cret-state", "users/u1/messages")]}).to_string()).0, 202);
+        assert_eq!(w.poll(&Cancel::new()).unwrap().len(), 1, "unbound → the notification is a chat message again");
+        assert_eq!(got.lock().unwrap().len(), 2);
     }
 }

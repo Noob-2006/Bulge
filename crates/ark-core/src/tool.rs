@@ -83,6 +83,20 @@ pub trait ToolHost: Send + Sync {
     fn ask_user(&self, question: &str) -> Result<String, String>;
     /// Live progress from a long-running tool, shown by attached UIs (not logged).
     fn progress(&self, _text: &str) {}
+    /// The concrete host, for tools that live next to it (kernel session / sub-agent tools).
+    fn as_any(&self) -> Option<&dyn std::any::Any> {
+        None
+    }
+    /// Answer `question` about an image (base64 `data` of `media_type`) with a vision-capable
+    /// model; used by screenshot tools (browser_vision, computer_use capture).
+    fn analyze_image(&self, _question: &str, _media_type: &str, _data: &str) -> Result<String, String> {
+        Err("no vision model is available to this tool host".into())
+    }
+    /// Environment every process this session starts must carry (C9: a sub-agent never
+    /// inherits the driver's `ARK_HOME`). `key=value` pairs; default: nothing extra.
+    fn sandbox_env(&self) -> Vec<(String, String)> {
+        Vec::new()
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -95,6 +109,9 @@ pub struct SpawnRequest {
     pub fork: bool,
     #[serde(default)]
     pub tools: Option<Vec<String>>,
+    /// Run the child in its own git worktree (None = `delegation.worktree_isolation`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worktree: Option<bool>,
 }
 
 #[derive(Clone)]
@@ -151,4 +168,111 @@ pub fn arg_opt_u64(v: &Value, k: &str) -> Option<u64> {
 }
 pub fn arg_opt_bool(v: &Value, k: &str) -> Option<bool> {
     v.get(k).and_then(|x| x.as_bool())
+}
+
+/// Tools whose output may attach an image file for the model (`read` of a PNG/JPEG…,
+/// `vision_analyze`, `view_image`).
+/// Markers in any other tool's output (e.g. a `cat` of an untrusted file) are left as text.
+pub const IMAGE_TOOLS: &[&str] = &["read", "vision_analyze", "view_image"];
+/// Largest image attached to a tool result (provider limits are ~5 MB).
+pub const MAX_IMAGE_BYTES: u64 = 5 * 1024 * 1024;
+const IMAGE_MARKER: &str = "[[ark:image ";
+
+/// Installed by the binary (`ark_media::vision::post_tool_images`): shrink / re-encode the
+/// images a tool attached before the model sees them (OpenClaw `image-sanitization`).
+static IMAGE_POST: std::sync::OnceLock<fn(&mut Vec<crate::types::Block>) -> usize> = std::sync::OnceLock::new();
+
+/// Install the image post-processor (first install wins; see [`post_process_images`]).
+pub fn set_image_post(f: fn(&mut Vec<crate::types::Block>) -> usize) {
+    let _ = IMAGE_POST.set(f);
+}
+
+/// Run the installed image post-processor over tool images; 0 when none is installed.
+pub fn post_process_images(blocks: &mut Vec<crate::types::Block>) -> usize {
+    IMAGE_POST.get().map(|f| f(blocks)).unwrap_or(0)
+}
+
+/// Whether a post-processor is installed (the binary's image sanitizer).
+pub fn image_post_installed() -> bool {
+    IMAGE_POST.get().is_some()
+}
+
+/// Line a tool appends to its output to attach `path` (an image of `media_type`).
+pub fn image_marker(media_type: &str, path: &Path) -> String {
+    format!("{IMAGE_MARKER}{media_type} {}]]", path.display())
+}
+
+/// Media type from an image's magic bytes (PNG, JPEG, GIF, WebP).
+pub fn image_media_type(data: &[u8]) -> Option<&'static str> {
+    if data.starts_with(b"\x89PNG\r\n\x1a\n") {
+        Some("image/png")
+    } else if data.starts_with(&[0xff, 0xd8, 0xff]) {
+        Some("image/jpeg")
+    } else if data.starts_with(b"GIF87a") || data.starts_with(b"GIF89a") {
+        Some("image/gif")
+    } else if data.len() > 12 && &data[..4] == b"RIFF" && &data[8..12] == b"WEBP" {
+        Some("image/webp")
+    } else {
+        None
+    }
+}
+
+/// Split image markers out of a tool's output: (text without them, [(media_type, base64)]).
+/// Only real image files of at most MAX_IMAGE_BYTES are attached.
+pub fn take_images(content: &str) -> (String, Vec<(String, String)>) {
+    if !content.contains(IMAGE_MARKER) {
+        return (content.to_string(), vec![]);
+    }
+    let mut text = Vec::new();
+    let mut imgs = Vec::new();
+    for line in content.split('\n') {
+        let Some(rest) = line.trim().strip_prefix(IMAGE_MARKER).and_then(|r| r.strip_suffix("]]")) else {
+            text.push(line);
+            continue;
+        };
+        let Some((_, path)) = rest.split_once(' ') else { continue };
+        let ok = std::fs::metadata(path).is_ok_and(|m| m.is_file() && m.len() <= MAX_IMAGE_BYTES);
+        if let Some(data) = ok.then(|| std::fs::read(path).ok()).flatten() {
+            if let Some(mt) = image_media_type(&data) {
+                imgs.push((mt.to_string(), base64_encode(&data)));
+            }
+        }
+    }
+    (text.join("\n").trim_end().to_string(), imgs)
+}
+
+pub fn base64_encode(data: &[u8]) -> String {
+    const T: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(data.len().div_ceil(3) * 4);
+    for c in data.chunks(3) {
+        let n = (c[0] as u32) << 16 | (*c.get(1).unwrap_or(&0) as u32) << 8 | *c.get(2).unwrap_or(&0) as u32;
+        for (i, shift) in [18, 12, 6, 0].into_iter().enumerate() {
+            out.push(if i <= c.len() { T[(n >> shift) as usize & 63] as char } else { '=' });
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod image_tests {
+    use super::*;
+
+    #[test]
+    fn markers_attach_only_real_images() {
+        assert_eq!(base64_encode(b"Man"), "TWFu");
+        assert_eq!(base64_encode(b"Ma"), "TWE=");
+        assert_eq!(base64_encode(b"M"), "TQ==");
+        let d = std::env::temp_dir().join(format!("ark-core-img-{}", std::process::id()));
+        std::fs::create_dir_all(&d).unwrap();
+        let png = d.join("a.png");
+        std::fs::write(&png, b"\x89PNG\r\n\x1a\nrest").unwrap();
+        let fake = d.join("b.png");
+        std::fs::write(&fake, b"not an image").unwrap();
+        let out = format!("Read image a.png\n{}\n{}", image_marker("image/png", &png), image_marker("image/png", &fake));
+        let (text, imgs) = take_images(&out);
+        assert_eq!(text, "Read image a.png");
+        assert_eq!(imgs, vec![("image/png".to_string(), base64_encode(b"\x89PNG\r\n\x1a\nrest"))]);
+        assert_eq!(take_images("plain").0, "plain");
+        let _ = std::fs::remove_dir_all(&d);
+    }
 }

@@ -1,3 +1,7 @@
+//! The `spawn` tool: hand a self-contained task to a sub-agent and return its final answer
+//! (OpenClaw `sessions_spawn`, Hermes `agent/delegate`). Budget and depth are enforced by the
+//! kernel host, not here.
+
 use ark_core::tool::{arg_opt_bool, arg_opt_str, arg_str};
 use ark_core::tool::SpawnRequest;
 use ark_core::{Effect, Tool, ToolCtx, ToolOutput, ToolSpec};
@@ -14,7 +18,8 @@ impl Tool for Spawn {
                 "task":{"type":"string","description":"Complete brief: goal, context, what to return"},
                 "model":{"type":"string","description":"Optional model override (e.g. a cheaper one)"},
                 "fork":{"type":"boolean","default":false},
-                "tools":{"type":"array","items":{"type":"string"},"description":"Restrict the child's tools"}},
+                "tools":{"type":"array","items":{"type":"string"},"description":"Restrict the child's tools"},
+                "worktree":{"type":"boolean","description":"Run the sub-agent in its own git worktree (isolated branch); its work is kept on that branch"}},
                 "required":["task"]}),
             parallel_safe: true,
             idempotent: false,
@@ -44,6 +49,7 @@ impl Tool for Spawn {
             model: arg_opt_str(&input, "model").map(String::from),
             fork: arg_opt_bool(&input, "fork").unwrap_or(false),
             tools,
+            worktree: arg_opt_bool(&input, "worktree"),
         };
         match ctx.host.spawn_agent(req, &ctx.cancel) {
             Ok(answer) => ToolOutput::ok(answer),
@@ -91,11 +97,12 @@ mod tests {
     fn spawn_forwards_request() {
         let host = Arc::new(FakeHost::default());
         let c = ctx_with(tmpdir("spawn"), host.clone());
-        let o = Spawn.call(&c, json!({"task":"count files","model":"cheap","fork":true,"tools":["glob"]}));
+        let o = Spawn.call(&c, json!({"task":"count files","model":"cheap","fork":true,"tools":["glob"],"worktree":true}));
         assert_eq!(o.content, "done: count files");
         let got = host.spawned.lock().unwrap();
         assert_eq!(got[0].model.as_deref(), Some("cheap"));
         assert!(got[0].fork);
+        assert_eq!(got[0].worktree, Some(true));
         assert_eq!(got[0].tools.as_deref(), Some(&["glob".to_string()][..]));
         assert_eq!(Spawn.effects(&c, &json!({})), vec![Effect::Spawn]);
     }

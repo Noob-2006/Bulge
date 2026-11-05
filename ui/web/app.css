@@ -72,3 +72,87 @@ iframe.mcp-app.borderless { border: 0; }
 .plugin-panels { display: flex; flex-wrap: wrap; gap: 6px; padding: 4px 0; }
 .plugin-panels:empty { display: none; }
 iframe.plugin-panel { width: 100%; min-height: 360px; }
+
+/* work surfaces (surfaces.js) */
+.board-tabs { display: flex; gap: 6px; flex-wrap: wrap; margin: 8px 0; }
+.board-tabs .on { border-color: var(--gold-300); }
+.board-grid { display: grid; grid-template-columns: repeat(12, 1fr); gap: 10px; }
+.board-grid.expanded { grid-template-columns: 1fr; }
+.board-grid.expanded .board-cell { grid-column: 1 / -1 !important; }
+.board-cell { min-width: 0; }
+.board-head { font-size: 13px; margin-bottom: 4px; opacity: .8; }
+.board-cell.frameless iframe { border: 0; }
+.grant { border: 1px dashed var(--gold-300); border-radius: 8px; padding: 6px 10px; margin-bottom: 6px; }
+.card-progress progress { width: 100%; }
+.card-progress .steps { list-style: none; padding: 0; margin: 6px 0; }
+@media (max-width: 700px) { .board-grid { grid-template-columns: 1fr; } .board-cell { grid-column: 1 / -1 !important; } }
+
+/* ── themes ([data-theme] on <html>; theme.css keeps the crimson default) ── */
+:root[data-theme="midnight"] {
+  --bg: radial-gradient(120% 90% at 15% 0%, #14224a 0%, #0d1730 40%, #070d1c 72%, #04070f 100%);
+  --panel: linear-gradient(160deg, rgba(24, 42, 86, .6), rgba(7, 13, 28, .82));
+  --panel-solid: #0a1224;
+  --border: rgba(140, 180, 255, .26);
+  --border-strong: rgba(168, 200, 255, .55);
+  --text: #e8eefc;
+  --text-dim: #9fb0d0;
+  --gold-300: #cfe0ff; --gold-400: #a8c8ff; --gold-500: #6f9bff; --gold-600: #3f6ed6;
+  --accent: var(--gold-400);
+  --ok: #9be8c8; --danger: #ff8fa3;
+  --shadow: 0 10px 40px rgba(0, 0, 0, .55), inset 0 1px 0 rgba(168, 200, 255, .1);
+  color-scheme: dark;
+}
+:root[data-theme="midnight"] body { background-color: #04070f; }
+:root[data-theme="midnight"] .star { background: radial-gradient(circle, #dbe8ff 0%, rgba(168, 200, 255, .35) 45%, transparent 70%); }
+:root[data-theme="daylight"] {
+  --bg: radial-gradient(120% 90% at 12% 0%, #fff7ea 0%, #f6ecdf 45%, #efe2d2 100%);
+  --panel: linear-gradient(160deg, rgba(255, 255, 255, .92), rgba(250, 243, 233, .95));
+  --panel-solid: #fffaf2;
+  --border: rgba(150, 96, 40, .28);
+  --border-strong: rgba(150, 96, 40, .55);
+  --text: #2a1a12;
+  --text-dim: #7a6455;
+  --gold-300: #8a2f14; --gold-400: #a8441c; --gold-500: #b45309; --gold-600: #8a3d05;
+  --accent: var(--gold-400);
+  --ok: #1f7a53; --danger: #b3261e;
+  --shadow: 0 8px 30px rgba(90, 60, 30, .16), inset 0 1px 0 rgba(255, 255, 255, .7);
+  color-scheme: light;
+}
+:root[data-theme="daylight"] body { background-color: #f6ecdf; color: var(--text); }
+:root[data-theme="daylight"] .starfield { opacity: .25; }
+:root[data-theme="daylight"] .star { background: radial-gradient(circle, rgba(168, 84, 24, .8) 0%, rgba(168, 84, 24, .25) 45%, transparent 70%); }
+:root[data-theme="daylight"] .msg.tool .body,
+:root[data-theme="daylight"] .msg pre,
+:root[data-theme="daylight"] input[type=text],
+:root[data-theme="daylight"] input[type=password] { background: rgba(120, 90, 60, .07); }
+:root[data-theme="daylight"] dialog::backdrop { background: rgba(60, 40, 20, .35); }
+.theme-pick { background: rgba(0, 0, 0, .25); border: 1px solid var(--border); border-radius: 9px; color: var(--text); padding: 5px 8px; font: 12px var(--font); }
+:root[data-theme="daylight"] .theme-pick { background: rgba(255, 255, 255, .8); }
+
+/* ── slash command menu ── */
+.slash-menu { position: relative; z-index: 2; max-width: 900px; width: 100%; align-self: center; padding: 8px; max-height: 44vh; overflow-y: auto; display: grid; gap: 2px; }
+.slash-menu[hidden] { display: none; }
+.slash-hint { font-size: 11px; padding: 2px 8px 6px; }
+.slash-item { display: grid; grid-template-columns: minmax(90px, auto) minmax(0, auto) 1fr; gap: 8px; align-items: baseline; text-align: left; background: transparent; border: 1px solid transparent; border-radius: 9px; color: var(--text); padding: 6px 9px; cursor: pointer; font: 13px var(--font); }
+.slash-item b { color: var(--gold-300); font-weight: 600; }
+.slash-item .slash-args { font: 11.5px var(--mono); }
+.slash-item .slash-desc { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-dim); font-size: 12px; }
+.slash-item:hover, .slash-item.on { background: rgba(255, 214, 107, .09); border-color: var(--border); }
+:root[data-theme="daylight"] .slash-item:hover, :root[data-theme="daylight"] .slash-item.on { background: rgba(168, 84, 24, .08); }
+
+/* ── attachments (chips above the composer) ── */
+.attachments { display: flex; flex-wrap: wrap; gap: 6px; max-width: 900px; width: 100%; align-self: center; }
+.attachments[hidden] { display: none; }
+.att { display: inline-flex; align-items: center; gap: 6px; font: 12px var(--mono); color: var(--text); background: rgba(0, 0, 0, .25); border: 1px solid var(--border); border-radius: 999px; padding: 3px 4px 3px 10px; }
+:root[data-theme="daylight"] .att { background: rgba(120, 90, 60, .08); }
+.att .att-bytes { font-size: 10.5px; }
+.composer.drop { border-color: var(--border-strong); box-shadow: 0 0 0 2px rgba(255, 214, 107, .18) inset; }
+.composer #file { display: none; }
+
+/* ── tool cards ── */
+.msg.toolcard .body { padding: 8px 12px; }
+.msg.toolcard details summary { cursor: pointer; color: var(--gold-300); font: 12.5px var(--mono); }
+.msg.toolcard details[open] summary { margin-bottom: 6px; }
+.msg.toolcard .bad { color: var(--danger); margin-right: 6px; }
+details > summary { list-style: none; }
+details > summary::-webkit-details-marker { display: none; }

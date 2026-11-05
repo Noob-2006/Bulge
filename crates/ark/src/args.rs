@@ -3,8 +3,8 @@
 
 use std::collections::HashMap;
 
-pub const VALUE_FLAGS: &[&str] = &["model", "workspace", "set", "budget-tokens", "budget-usd", "max-steps", "session", "rounds", "from", "limit", "lang", "timeout", "url", "header", "cwd", "permission-mode", "relay", "setup-code", "ttl", "tls-fingerprint", "name"];
-pub const BOOL_FLAGS: &[&str] = &["yes", "allow-privilege", "allow-egress", "json", "quiet", "reuse", "user", "now", "help", "follow", "fork", "all", "device", "no-browser", "no-start", "list", "pair", "queue"];
+pub const VALUE_FLAGS: &[&str] = &["agent", "model", "workspace", "set", "budget-tokens", "budget-usd", "max-steps", "session", "rounds", "from", "limit", "lang", "timeout", "url", "header", "cwd", "permission-mode", "relay", "setup-code", "ttl", "tls-fingerprint", "name", "days", "type", "label", "priority", "api-key", "as", "min-count", "apply", "fail-on", "security", "ask", "ask-fallback", "reason", "phase", "port", "ready-timeout", "format", "out", "retention-days", "max-size-mb", "dataset", "env", "preset", "for-tool", "payload-file", "payload", "output-schema", "references", "aggregator", "ref-reasoning", "title", "min-messages", "max-messages"];
+pub const BOOL_FLAGS: &[&str] = &["yes", "allow-privilege", "allow-egress", "json", "quiet", "reuse", "user", "now", "help", "follow", "fork", "all", "device", "no-browser", "no-start", "list", "pair", "queue", "account", "billing", "import", "yolo", "exec", "deep", "fix", "supply-chain", "verbose", "detect-only", "save", "skip-start", "installed-only", "keep-orphans", "force", "no-redact", "public", "accept-hooks", "link", "default", "include-pinned", "include-archived", "check-only"];
 
 #[derive(Debug, Default)]
 pub struct Args {
@@ -51,7 +51,7 @@ impl Args {
                 let s = &r[1..];
                 (long(s).ok_or_else(|| format!("unknown option -{s}"))?.to_string(), None)
             };
-            if VALUE_FLAGS.contains(&name.as_str()) {
+            if VALUE_FLAGS.contains(&name.as_str()) || crate::ops::is_value_flag(&name) {
                 let v = match inline {
                     Some(v) => v,
                     None => {
@@ -61,7 +61,7 @@ impl Args {
                     }
                 };
                 a.vals.entry(name).or_default().push(v);
-            } else if BOOL_FLAGS.contains(&name.as_str()) {
+            } else if BOOL_FLAGS.contains(&name.as_str()) || crate::ops::is_bool_flag(&name) {
                 if inline.is_some() {
                     return Err(format!("--{name} takes no value"));
                 }

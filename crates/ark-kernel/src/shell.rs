@@ -11,6 +11,8 @@ pub struct Simple {
     /// Index of the pipeline this command belongs to, and its position in it.
     pub pipeline: usize,
     pub stage: usize,
+    /// Here-doc bodies and here-strings fed to this command's stdin (interpreter code).
+    pub stdin_docs: Vec<String>,
 }
 
 impl Simple {
@@ -29,6 +31,9 @@ enum Tok {
     Sep,
     Pipe,
     Redirect { write: bool },
+    /// Here-doc body / here-string attached to the current command.
+    Doc(String),
+    HereStr,
 }
 
 const MAX_DEPTH: usize = 6;
@@ -79,6 +84,12 @@ fn parse_into(cmd: &str, depth: usize, out: &mut Vec<Simple>, pipeline_id: &mut 
                     continue;
                 }
                 cur.argv.push(w)
+            }
+            Tok::Doc(b) => cur.stdin_docs.push(b),
+            Tok::HereStr => {
+                if let Some(Tok::Word(w)) = it.next() {
+                    cur.stdin_docs.push(w);
+                }
             }
             Tok::Redirect { write } => {
                 if let Some(Tok::Word(target)) = it.next() {
@@ -263,12 +274,15 @@ fn lex(s: &str) -> (Vec<Tok>, Vec<String>) {
                     if let Some(nl) = rest.find('\n') {
                         let body = &rest[nl + 1..];
                         let mut consumed = nl + 1;
+                        let mut doc = String::new();
                         for line in body.split_inclusive('\n') {
                             consumed += line.len();
                             if line.trim() == delim {
                                 break;
                             }
+                            doc.push_str(line);
                         }
+                        toks.push(Tok::Doc(doc));
                         let rest_chars = rest[..consumed.min(rest.len())].chars().count();
                         i += rest_chars;
                         toks.push(Tok::Sep);
@@ -276,6 +290,12 @@ fn lex(s: &str) -> (Vec<Tok>, Vec<String>) {
                         i = chars.len();
                     }
                 }
+                continue;
+            }
+            '<' if chars.get(i + 1) == Some(&'<') && chars.get(i + 2) == Some(&'<') => {
+                end_word(&mut word, &mut in_word, &mut toks);
+                toks.push(Tok::HereStr);
+                i += 3;
                 continue;
             }
             '>' | '<' => {
@@ -457,6 +477,10 @@ mod tests {
     fn heredoc_body_is_not_commands() {
         let p = parse("cat <<'EOF' > f.txt\nsudo rm -rf /\nEOF\necho done");
         assert_eq!(p.iter().map(|s| s.name()).collect::<Vec<_>>(), ["cat", "echo"]);
+        assert_eq!(p[0].stdin_docs, ["sudo rm -rf /\n"], "body kept as stdin data");
+        let p = parse("python3 - <<'PY'\nimport os\nPY\nnode <<< 'fetch(1)'");
+        assert_eq!(p[0].stdin_docs, ["import os\n"]);
+        assert_eq!(p[1].stdin_docs, ["fetch(1)"]);
     }
 
     #[test]

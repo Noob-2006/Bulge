@@ -1,0 +1,36 @@
+{
+  "approval": {
+    "heading": "⚑ {gate} 閘門 — {reason}",
+    "choices": "允許？[y] 一次  [a] 本次工作階段總是允許  [N] 拒絕："
+  },
+  "notice": {
+    "bullet": "• {text}",
+    "error": "錯誤：{message}",
+    "gate": "⚑ {gate} 閘門：{verdict} — {reason}",
+    "compacted": "• 已壓縮上下文（摘要約 {tokens} token）",
+    "tool_error": "  ✗ {text}"
+  },
+  "queue": {
+    "started": "已排入佇列；工作階段已啟動",
+    "running": "已排入佇列；工作階段正在執行（轉向）"
+  },
+  "help": {
+    "title": "指令",
+    "custom": "自訂與外掛",
+    "no_match": "沒有符合 `{filter}` 的指令",
+    "category": {
+      "session": "工作階段",
+      "info": "資訊",
+      "display": "顯示",
+      "tools": "工具",
+      "exit": "離開",
+      "configuration": "設定"
+    }
+  },
+  "status": {
+    "no_session": "尚無工作階段",
+    "running": "執行中",
+    "idle": "閒置",
+    "line": "工作階段 {id}{title}\n{state} · 模型 {model} · {messages} 則訊息 · {turns} 回合 · {tokens} token · 上下文 {context}{pct} · {compactions} 次壓縮\n佇列：{queue} · {waiting} 則等待中"
+  }
+}

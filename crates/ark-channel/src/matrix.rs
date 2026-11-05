@@ -253,6 +253,15 @@ fn msgtype_for(k: MediaKind) -> &'static str {
     }
 }
 
+/// Replay one recorded room event (see `tests/real/vectors/synapse_sync_slice.json`)
+/// as ark would turn it into an `Inbound`. Public for the vector tests.
+pub fn recorded_inbound(channel: &str, me: &str, room: &str, room_name: &str, is_dm: bool, ev: &Value) -> Option<Inbound> {
+    let none = |_: &str| -> Option<Vec<String>> { None };
+    let empty = |_: &str| String::new();
+    let no_sent = |_: &str| false;
+    event_inbound(&Ctx { channel, me, display_name: None, room, room_name, is_dm, process_notices: false, sent: &no_sent, prompt: &none, name_of: &empty }, ev)
+}
+
 /// What inbound parsing needs to know about us and the room.
 struct Ctx<'a> {
     channel: &'a str,
@@ -829,7 +838,10 @@ impl Matrix {
     /// Parse one timeline event with the room's context.
     fn with_ctx<R>(&self, me: &str, room: &str, f: impl FnOnce(&Ctx) -> R) -> R {
         let info = self.rooms.lock().unwrap().get(room).cloned().unwrap_or_default();
-        let is_dm = info.members.is_some_and(|n| n <= 2) || (self.dm_rooms.lock().unwrap().contains(room) && info.name.is_empty());
+        // Spec (and Hermes): `m.direct` is what marks a DM. Without it, only a
+        // nameless two-person room counts — a *named* room with two members is a
+        // group room (mention gating applies) even if it is not in `m.direct`.
+        let is_dm = self.dm_rooms.lock().unwrap().contains(room) || (info.members.is_some_and(|n| n <= 2) && info.name.is_empty());
         let dn = self.display_name.lock().unwrap().clone().filter(|n| !n.is_empty());
         let sent = self.sent.lock().unwrap().0.clone();
         let prompts = self.prompts.lock().unwrap().clone();

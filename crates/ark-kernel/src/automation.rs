@@ -11,6 +11,7 @@ use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::fs::{File, OpenOptions};
 use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, OnceLock};
 
 /// Read-modify-write a JSON list under an exclusive file lock.
 pub fn with_list<T: Serialize + DeserializeOwned, R>(path: &Path, f: impl FnOnce(&mut Vec<T>) -> R) -> Result<R, String> {
@@ -81,6 +82,9 @@ pub struct Job {
     pub last_result: Option<String>,
     #[serde(default)]
     pub budget: Budget,
+    /// Name, repeat, skills, script / no_agent, delivery, chaining… (`cronjob::JobExt`).
+    #[serde(default, flatten)]
+    pub ext: crate::cronjob::JobExt,
 }
 fn yes() -> bool {
     true
@@ -110,27 +114,46 @@ pub fn add_job(data: &Path, cron: &str, prompt: &str, workspace: &Path, model: O
         last_session: None,
         last_result: None,
         budget: Budget::default(),
+        ext: Default::default(),
     };
     with_list(&jobs_path(data), |v: &mut Vec<Job>| v.push(job.clone()))?;
+    crate::cronjob::fire_changed(None, "added", &job, serde_json::json!({"next_run_at_ms": job.next_run * 1000, "enabled": job.enabled}));
     Ok(job)
 }
 
 pub fn remove_job(data: &Path, id: &str) -> Result<bool, String> {
-    with_list(&jobs_path(data), |v: &mut Vec<Job>| {
+    let mut gone: Option<Job> = None;
+    let removed = with_list(&jobs_path(data), |v: &mut Vec<Job>| {
         let n = v.len();
+        gone = v.iter().find(|j| j.id == id).cloned();
         v.retain(|j| j.id != id);
         v.len() != n
-    })
+    })?;
+    if removed {
+        // The run log and incidents are durable history; the notepad belongs to the job.
+        let _ = crate::cronjob::incidents::clear_note(data, id);
+        crate::cronjob::incidents::forget_health(data, id);
+        if let Some(j) = gone {
+            crate::cronjob::fire_changed(None, "removed", &j, serde_json::json!({}));
+        }
+    }
+    Ok(removed)
 }
 
 pub fn set_job_enabled(data: &Path, id: &str, enabled: bool) -> Result<bool, String> {
-    with_list(&jobs_path(data), |v: &mut Vec<Job>| match v.iter_mut().find(|j| j.id == id) {
+    let mut changed: Option<Job> = None;
+    let ok = with_list(&jobs_path(data), |v: &mut Vec<Job>| match v.iter_mut().find(|j| j.id == id) {
         Some(j) => {
             j.enabled = enabled;
+            changed = Some(j.clone());
             true
         }
         None => false,
-    })
+    })?;
+    if let Some(j) = changed {
+        crate::cronjob::fire_changed(None, "updated", &j, serde_json::json!({"enabled": enabled, "paused": !enabled, "next_run_at_ms": j.next_run * 1000}));
+    }
+    Ok(ok)
 }
 
 /// Claim due jobs: advance `next_run` *before* running (a crash never re-fires a
@@ -148,6 +171,11 @@ pub fn claim_due(data: &Path, now: i64, offset: i32, busy: &[String]) -> Result<
                 j.last_result = Some("skipped: previous run still in progress".into());
                 continue;
             }
+            // Repeat count (one-shots are 1): the last allowed run disables the job.
+            j.ext.runs += 1;
+            if j.ext.repeat.is_some_and(|r| j.ext.runs >= r) {
+                j.enabled = false;
+            }
             j.last_run = Some(now);
             due.push(j.clone());
         }
@@ -155,8 +183,80 @@ pub fn claim_due(data: &Path, now: i64, offset: i32, busy: &[String]) -> Result<
     })
 }
 
+/// Content-free observer for one finished cron execution: `(job_id, ok, duration_ms)`.
+/// The binary registers it at startup (`ark/src/wire.rs::attach`) so monitoring can export a
+/// `cron_execution` event per executed job; the kernel never depends on the binary crate.
+pub type ExecObserver = Arc<dyn Fn(&str, bool, u64) + Send + Sync>;
+
+fn exec_observer() -> &'static Mutex<Option<ExecObserver>> {
+    static O: OnceLock<Mutex<Option<ExecObserver>>> = OnceLock::new();
+    O.get_or_init(|| Mutex::new(None))
+}
+
+/// Register the cron execution observer; a later call is ignored (first one wins).
+pub fn set_exec_observer(f: ExecObserver) -> bool {
+    let mut g = exec_observer().lock().unwrap_or_else(|e| e.into_inner());
+    if g.is_some() {
+        return false;
+    }
+    *g = Some(f);
+    true
+}
+
+/// Fire the observer (never holds the lock across the callback: it may re-enter).
+fn notify_exec(job_id: &str, ok: bool, duration_ms: u64) {
+    let f = exec_observer().lock().unwrap_or_else(|e| e.into_inner()).clone();
+    if let Some(f) = f {
+        f(job_id, ok, duration_ms);
+    }
+}
+
 /// Run one claimed job to completion; records the result.
 pub fn run_job(k: &Kernel, job: &Job) -> Result<String, String> {
+    run_job_with(k, job, None)
+}
+
+/// `run_job` with per-fire context (`cronjob_manage run prompt=…`, never persisted).
+/// Also the one place a finished execution is reported to the [`ExecObserver`], whichever
+/// caller fired it (daemon tick, `ark schedule run`, slash command, cron tool).
+pub fn run_job_with(k: &Kernel, job: &Job, extra: Option<&str>) -> Result<String, String> {
+    let started = std::time::Instant::now();
+    let r = run_job_inner(k, job, extra);
+    notify_exec(&job.id, r.is_ok(), started.elapsed().as_millis() as u64);
+    r
+}
+
+fn run_job_inner(k: &Kernel, job: &Job, extra: Option<&str>) -> Result<String, String> {
+    if ark_security::estop::is_engaged(&k.paths.data) {
+        return Err("paused by the emergency stop (`ark resume` to continue)".into());
+    }
+    // Runtime defense in depth: the prompt may have been edited on disk since creation.
+    if k.cfg.security.threat_scan.cron {
+        if let Some(m) = ark_security::threat::scan_cron_prompt(&job.prompt) {
+            return Err(m);
+        }
+    }
+    // Script / no_agent / skills / chaining / threat scan of the assembled prompt (cronjob.rs).
+    let prompt = match crate::cronjob::pre_run(k, job, extra) {
+        crate::cronjob::Prepared::Agent(p) => p,
+        crate::cronjob::Prepared::Direct { ok, text } => {
+            let r = if ok { if text.trim().is_empty() { "no_agent: empty output (nothing sent)".to_string() } else { "no_agent: delivered".to_string() } } else { format!("no_agent: error: {}", crate::util::head_tail(&text, 300).0) };
+            set_last_result(&k.paths.data, &job.id, &r)?;
+            return if ok { Ok(String::new()) } else { Err(text) };
+        }
+        crate::cronjob::Prepared::Skip(why) => {
+            set_last_result(&k.paths.data, &job.id, &format!("skipped: {why}"))?;
+            return Ok(String::new());
+        }
+        crate::cronjob::Prepared::SystemEvent(note) => {
+            set_last_result(&k.paths.data, &job.id, &note)?;
+            return Ok(String::new());
+        }
+        crate::cronjob::Prepared::Blocked(why) => {
+            set_last_result(&k.paths.data, &job.id, &format!("blocked: {why}"))?;
+            return Err(why);
+        }
+    };
     let ws = PathBuf::from(&job.workspace);
     let reuse = job.session.as_deref().filter(|s| !s.is_empty() && k.store.exists(s)).map(String::from);
     let id = match reuse {
@@ -170,9 +270,13 @@ pub fn run_job(k: &Kernel, job: &Job) -> Result<String, String> {
             }
         })?;
     }
-    k.submit(&id, &job.prompt, "schedule").map_err(|e| e.to_string())?;
+    k.submit(&id, &prompt, "schedule").map_err(|e| e.to_string())?;
     let ledger = Ledger::new(if job.budget == Budget::default() { k.cfg.budget.clone() } else { job.budget.clone() });
     let r = k.run(&id, RunOpts { ledger: Some(ledger), ..Default::default() });
+    match &r {
+        Ok(o) => crate::cronjob::post_run(k, job, Ok(o)),
+        Err(e) => crate::cronjob::post_run(k, job, Err(&e.to_string())),
+    }
     let result = match &r {
         Ok(o) => o.reason.label(),
         Err(e) => format!("error: {e}"),
@@ -184,6 +288,14 @@ pub fn run_job(k: &Kernel, job: &Job) -> Result<String, String> {
         }
     })?;
     r.map(|_| id).map_err(|e| e.to_string())
+}
+
+fn set_last_result(data: &Path, id: &str, r: &str) -> Result<(), String> {
+    with_list(&jobs_path(data), |v: &mut Vec<Job>| {
+        if let Some(j) = v.iter_mut().find(|j| j.id == id) {
+            j.last_result = Some(r.to_string());
+        }
+    })
 }
 
 // ───────────────────────── goals ─────────────────────────
@@ -211,6 +323,47 @@ pub struct Goal {
     pub budget: Budget,
     #[serde(default)]
     pub summary: String,
+    /// User-added criteria (`/subgoal`, Hermes `goals.py` subgoals): every round's prompt lists
+    /// them and the goal is only done when all of them are met too.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub subgoals: Vec<String>,
+}
+
+/// Numbered `- N. text` block (Hermes `render_subgoals_block`).
+pub fn render_subgoals(subgoals: &[String]) -> String {
+    subgoals.iter().enumerate().map(|(i, t)| format!("- {}. {t}", i + 1)).collect::<Vec<_>>().join("\n")
+}
+
+/// Append a criterion to an active/paused goal; returns its 1-based index.
+pub fn add_subgoal(data: &Path, goal_id: &str, text: &str) -> Result<usize, String> {
+    let text = text.trim();
+    if text.is_empty() {
+        return Err("subgoal text is empty".into());
+    }
+    with_list(&goals_path(data), |v: &mut Vec<Goal>| -> Result<usize, String> {
+        let g = v.iter_mut().find(|g| g.id == goal_id).ok_or_else(|| format!("no goal {goal_id}"))?;
+        g.subgoals.push(text.to_string());
+        Ok(g.subgoals.len())
+    })?
+}
+
+/// Remove a criterion by 1-based index; returns its text.
+pub fn remove_subgoal(data: &Path, goal_id: &str, index_1based: usize) -> Result<String, String> {
+    with_list(&goals_path(data), |v: &mut Vec<Goal>| -> Result<String, String> {
+        let g = v.iter_mut().find(|g| g.id == goal_id).ok_or_else(|| format!("no goal {goal_id}"))?;
+        if index_1based == 0 || index_1based > g.subgoals.len() {
+            return Err(format!("index out of range (1..{})", g.subgoals.len()));
+        }
+        Ok(g.subgoals.remove(index_1based - 1))
+    })?
+}
+
+/// Wipe all criteria; returns how many there were.
+pub fn clear_subgoals(data: &Path, goal_id: &str) -> Result<usize, String> {
+    with_list(&goals_path(data), |v: &mut Vec<Goal>| -> Result<usize, String> {
+        let g = v.iter_mut().find(|g| g.id == goal_id).ok_or_else(|| format!("no goal {goal_id}"))?;
+        Ok(std::mem::take(&mut g.subgoals).len())
+    })?
 }
 
 pub fn goals_path(data: &Path) -> PathBuf {
@@ -225,7 +378,7 @@ pub fn add_goal(k: &Kernel, objective: &str, workspace: &Path, max_rounds: u32, 
         return Err("max_rounds must be > 0".into());
     }
     let session = k.create_session(workspace, model, None, Some(&format!("goal: {objective}"))).map_err(|e| e.to_string())?;
-    let g = Goal { id: new_id(), objective: objective.into(), workspace: workspace.to_string_lossy().into(), session, status: GoalStatus::Active, max_rounds, rounds: 0, budget, summary: String::new() };
+    let g = Goal { id: new_id(), objective: objective.into(), workspace: workspace.to_string_lossy().into(), session, status: GoalStatus::Active, max_rounds, rounds: 0, budget, summary: String::new(), subgoals: vec![] };
     with_list(&goals_path(&k.paths.data), |v: &mut Vec<Goal>| v.push(g.clone()))?;
     Ok(g)
 }
@@ -274,11 +427,15 @@ pub fn run_goal(k: &Kernel, goal_id: &str) -> Result<Goal, String> {
             return Ok(current);
         }
         let left = goal.max_rounds - goal.rounds;
-        let prompt = if goal.rounds == 0 {
+        let mut prompt = if goal.rounds == 0 {
             format!("GOAL: {}\n\nWork autonomously toward this goal. Verify results with tools. When the goal is verifiably achieved — or proven impossible — call `goal_done`. You have {left} rounds.", goal.objective)
         } else {
             format!("Continue working toward the goal: {}\nRounds left: {left}. If it is achieved, verify and call `goal_done`.", goal.objective)
         };
+        // Criteria added mid-loop are read at each round boundary (Hermes `/subgoal`).
+        if !current.subgoals.is_empty() {
+            prompt.push_str(&format!("\n\nAdditional criteria the user added mid-loop:\n{}\n\nContinue working toward the goal AND all additional criteria. Only call `goal_done` with achieved=true when the goal and every additional criterion are verifiably complete.", render_subgoals(&current.subgoals)));
+        }
         let from_seq = k.store.read(&goal.session).map(|e| e.len() as u64).unwrap_or(0);
         k.submit(&goal.session, &prompt, "goal").map_err(|e| e.to_string())?;
         let o = k.run(&goal.session, RunOpts { ledger: Some(ledger.clone()), goal_mode: true, ..Default::default() }).map_err(|e| e.to_string())?;
@@ -288,6 +445,8 @@ pub fn run_goal(k: &Kernel, goal_id: &str) -> Result<Goal, String> {
             (_, Some((false, s))) => (GoalStatus::Failed, s),
             (EndReason::Interrupted, _) => (GoalStatus::Paused, "interrupted".into()),
             (EndReason::Budget(b), _) => (GoalStatus::Paused, b.clone()),
+            // C1/C2: paused for a transient/billing reason — keep the goal, it resumes.
+            (EndReason::Paused(w), _) => (GoalStatus::Paused, format!("paused: {w}")),
             (EndReason::Error(e), _) => (GoalStatus::Paused, format!("error: {e}")),
             (EndReason::Stuck(s), _) => (GoalStatus::Paused, format!("stuck: {s}")),
             _ if goal.rounds >= goal.max_rounds => (GoalStatus::Failed, format!("ran out of rounds; last: {}", o.text)),

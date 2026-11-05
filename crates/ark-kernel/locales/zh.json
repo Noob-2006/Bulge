@@ -1,0 +1,36 @@
+{
+  "approval": {
+    "heading": "⚑ {gate} 闸门 — {reason}",
+    "choices": "允许？[y] 一次  [a] 本会话总是允许  [N] 拒绝："
+  },
+  "notice": {
+    "bullet": "• {text}",
+    "error": "错误：{message}",
+    "gate": "⚑ {gate} 闸门：{verdict} — {reason}",
+    "compacted": "• 已压缩上下文（摘要约 {tokens} token）",
+    "tool_error": "  ✗ {text}"
+  },
+  "queue": {
+    "started": "已排队；会话已启动",
+    "running": "已排队；会话正在运行（转向）"
+  },
+  "help": {
+    "title": "命令",
+    "custom": "自定义与插件",
+    "no_match": "没有匹配 `{filter}` 的命令",
+    "category": {
+      "session": "会话",
+      "info": "信息",
+      "display": "显示",
+      "tools": "工具",
+      "exit": "退出",
+      "configuration": "配置"
+    }
+  },
+  "status": {
+    "no_session": "还没有会话",
+    "running": "运行中",
+    "idle": "空闲",
+    "line": "会话 {id}{title}\n{state} · 模型 {model} · {messages} 条消息 · {turns} 轮 · {tokens} token · 上下文 {context}{pct} · {compactions} 次压缩\n队列：{queue} · {waiting} 条等待中"
+  }
+}

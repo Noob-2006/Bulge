@@ -32,6 +32,7 @@ mod approval;
 mod comment;
 mod meeting;
 pub mod onboard;
+mod tools;
 
 use crate::http::{Http, Payload};
 use crate::{
@@ -128,6 +129,11 @@ pub struct Feishu {
     pub comment_retry_delay: Duration,
     /// Non-message event ids already handled (comment / meeting redeliveries).
     seen_events: Mutex<HashMap<String, Instant>>,
+    /// Agent tool families (`tools = { doc = true, perm = false, … }`; see [`tools`]).
+    pub tool_families: std::collections::BTreeMap<String, bool>,
+    pub media_max_mb: u64,
+    /// Session → route lookup (trusted requester for `feishu_doc` create grants).
+    origin: Arc<Mutex<Option<crate::whatsapp::SessionOrigin>>>,
 }
 
 const NAME_TTL: Duration = Duration::from_secs(600);
@@ -231,6 +237,9 @@ impl Feishu {
             comment_retries: 6,
             comment_retry_delay: Duration::from_secs(1),
             seen_events: Mutex::new(HashMap::new()),
+            tool_families: Default::default(),
+            media_max_mb: 30,
+            origin: Arc::new(Mutex::new(None)),
         })
     }
 
@@ -260,6 +269,11 @@ impl Feishu {
         let server = ark_net::httpd::Server::bind(listen, opts, handler).map_err(|e| format!("channel {}: cannot listen on {listen}: {e}", self.id))?;
         self.webhook = Some(server);
         Ok(self)
+    }
+
+    /// Route lookup for requester-bound tool behaviour (see [`crate::whatsapp::SessionOrigin`]).
+    pub fn set_session_origin(&self, f: crate::whatsapp::SessionOrigin) {
+        *self.origin.lock().unwrap() = Some(f);
     }
 
     /// Bound webhook address (tests bind port 0).
@@ -1439,6 +1453,26 @@ impl Channel for Feishu {
         crate::http::get_bytes(url, &[("authorization", &auth)], MAX_MEDIA)
     }
 
+    fn wire(&self, w: &crate::Wiring) {
+        if let Some(o) = &w.session_origin {
+            self.set_session_origin(o.clone());
+        }
+    }
+
+    fn message_action(&self, action: &str, args: &Value) -> Result<Value, ChannelError> {
+        tools::message_action(self, action, args)
+    }
+
+    fn message_actions(&self) -> Vec<&'static str> {
+        tools::MESSAGE_ACTIONS.to_vec()
+    }
+
+    /// `feishu_doc_read`, `feishu_doc`, `feishu_wiki`, `feishu_drive`, `feishu_chat`,
+    /// `feishu_app_scopes`, `feishu_bitable_*` (and `feishu_perm` when enabled).
+    fn tools(&self) -> Vec<Arc<dyn ark_core::Tool>> {
+        tools::tools(self, &self.tool_families, self.media_max_mb, self.origin.clone())
+    }
+
     fn stop(&self) {
         self.shared.stop.store(true, Ordering::SeqCst);
     }
@@ -1495,6 +1529,16 @@ struct Settings {
     /// Only these documents (`docx:<token>`, `<token>` or `*`); empty = all.
     #[serde(default)]
     comment_documents: Vec<String>,
+    /// Agent tool families: doc, chat, wiki, drive, scopes, bitable (default on), perm (default off).
+    #[serde(default)]
+    tools: std::collections::BTreeMap<String, bool>,
+    /// Upload limit for `feishu_doc` images/files.
+    #[serde(default = "d_media_mb")]
+    media_max_mb: u64,
+}
+
+fn d_media_mb() -> u64 {
+    30
 }
 
 fn d_true() -> bool {
@@ -1515,6 +1559,8 @@ pub fn build(ctx: &crate::config::Ctx, s: &serde_json::Map<String, Value>) -> Re
     f.approval_timeout = Duration::from_secs(st.approval_timeout_secs.max(1));
     f.comments = st.comments;
     f.comment_docs = st.comment_documents.clone();
+    f.tool_families = st.tools.clone();
+    f.media_max_mb = st.media_max_mb;
     let mode = st.mode.as_deref().unwrap_or(if st.listen.is_some() { "webhook" } else { "websocket" });
     match mode {
         "webhook" => {
@@ -2304,5 +2350,182 @@ mod tests {
         assert_eq!(ogg_duration_ms(&ogg), 2000);
         assert_eq!(ogg_duration_ms(b"not ogg"), 0);
         assert_eq!(emoji_type("❤️"), "HEART");
+    }
+
+    /// OpenClaw `docx.test.ts`, `wiki.test.ts`, `drive.test.ts`, `perm.test.ts`, `chat.test.ts`,
+    /// `bitable.test.ts` and Hermes `test_feishu_doc_tool.py` against a fake open platform.
+    #[test]
+    fn agent_tools_docs_wiki_drive_chat_bitable_and_message_actions() {
+        let srv = FakeServer::start(|r, _| {
+            if is_token(r) {
+                return token_reply();
+            }
+            let p = r.path.trim_start_matches("/open-apis");
+            let m = r.method.as_str();
+            let b = r.json();
+            match (m, p) {
+                ("GET", "/docx/v1/documents/D1/raw_content") => ok(json!({"content": "Hello doc"})),
+                ("GET", "/docx/v1/documents/D1") => ok(json!({"document": {"title": "Spec", "revision_id": 7}})),
+                ("GET", p) if p.starts_with("/docx/v1/documents/D1/blocks?") => ok(json!({"items": [
+                    {"block_id": "D1", "block_type": 1, "parent_id": ""},
+                    {"block_id": "b1", "block_type": 2, "parent_id": "D1"},
+                    {"block_id": "t1", "block_type": 31, "parent_id": "D1"}
+                ], "has_more": false})),
+                ("POST", "/docx/v1/documents/blocks/convert") => {
+                    let md = b["content"].as_str().unwrap_or("");
+                    if md.contains("FAILBIG") && md.len() > 300 {
+                        return (400, vec![], json!({"code": 1770001, "msg": "content too large"}).to_string());
+                    }
+                    let img = md.contains("![");
+                    let mut blocks = vec![json!({"block_id": "c2", "block_type": 2, "parent_id": "c1", "text": {"elements": [{"text_run": {"content": "child"}}]}}), json!({"block_id": "c1", "block_type": 3, "children": ["c2"]})];
+                    let mut roots = vec!["c1"];
+                    if img {
+                        blocks.push(json!({"block_id": "ci", "block_type": 27, "image": {}}));
+                        roots.push("ci");
+                    }
+                    ok(json!({"blocks": blocks, "first_level_block_ids": roots}))
+                }
+                ("DELETE", "/docx/v1/documents/D1/blocks/D1/children/batch_delete") => {
+                    assert!(b == json!({"start_index": 0, "end_index": 2}) || b == json!({"start_index": 1, "end_index": 2}), "{b}");
+                    ok(json!({}))
+                }
+                ("POST", "/docx/v1/documents/D1/blocks/D1/descendant") => {
+                    assert_eq!(b["descendants"][0]["block_id"], "c1", "pre-order: roots first");
+                    assert!(b["descendants"][1].get("parent_id").is_none(), "parent_id stripped");
+                    let mut kids = vec![json!({"block_id": "n1", "block_type": 3})];
+                    if b["children_id"].as_array().unwrap().len() == 2 {
+                        kids.push(json!({"block_id": "nimg", "block_type": 27}));
+                    }
+                    ok(json!({"children": kids}))
+                }
+                ("POST", "/drive/v1/medias/upload_all") => {
+                    assert!(r.body.contains("docx_image") || r.body.contains("docx_file"));
+                    ok(json!({"file_token": "FT1"}))
+                }
+                ("PATCH", p) if p.starts_with("/docx/v1/documents/D1/blocks/") => ok(json!({"block": {"block_id": p.rsplit('/').next().unwrap()}})),
+                ("GET", "/docx/v1/documents/D1/blocks/b1") => ok(json!({"block": {"block_id": "b1", "parent_id": "D1"}})),
+                ("GET", p) if p.starts_with("/docx/v1/documents/D1/blocks/D1/children") => ok(json!({"items": [{"block_id": "b0"}, {"block_id": "b1"}], "has_more": false})),
+                ("POST", "/docx/v1/documents") => ok(json!({"document": {"document_id": "NEW1", "title": b["title"]}})),
+                ("POST", p) if p.starts_with("/drive/v1/permissions/NEW1/members") => {
+                    assert_eq!(b, json!({"member_type": "openid", "member_id": "ou_req", "perm": "edit"}));
+                    ok(json!({"member": {}}))
+                }
+                ("GET", "/application/v6/scopes") => ok(json!({"scopes": [{"scope_name": "docx:document", "scope_type": "tenant", "grant_status": 1}, {"scope_name": "wiki:wiki", "scope_type": "tenant", "grant_status": 2}]})),
+                ("GET", p) if p.starts_with("/wiki/v2/spaces?") => ok(json!({"items": [], "has_more": false})),
+                ("GET", "/wiki/v2/spaces/get_node?token=WK1") => ok(json!({"node": {"node_token": "WK1", "obj_type": "bitable", "obj_token": "APP9", "title": "Tracker"}})),
+                ("POST", "/wiki/v2/spaces/7123/nodes") => ok(json!({"node": {"node_token": "N2", "obj_token": "O2", "obj_type": b["obj_type"], "title": b["title"]}})),
+                ("GET", p) if p == "/drive/v1/files" || p.starts_with("/drive/v1/files?") => ok(json!({"files": [{"token": "F1", "name": "a.docx", "type": "docx"}], "next_page_token": null})),
+                ("POST", "/drive/v1/metas/batch_query") => (200, vec![], json!({"code": 99991672, "msg": "no scope"}).to_string()),
+                ("GET", p) if p.starts_with("/drive/v1/files/F1/comments?") => ok(json!({"items": [{"comment_id": "C1", "user_id": "ou_a", "is_whole": true, "reply_list": {"replies": [{"reply_id": "R1", "content": {"elements": [{"type": "text_run", "text_run": {"text": "looks good"}}]}}]}}], "has_more": false})),
+                ("POST", "/drive/v1/files/F1/new_comments") => {
+                    assert_eq!(b["anchor"]["block_id"], "b1");
+                    ok(json!({"comment_id": "C9"}))
+                }
+                ("GET", "/im/v1/chats/oc_g") => ok(json!({"name": "Team", "chat_mode": "group", "user_count": "3"})),
+                ("GET", p) if p.starts_with("/im/v1/chats/oc_g/members") => ok(json!({"items": [{"member_id": "ou_a", "name": "Amy"}], "has_more": false})),
+                ("GET", p) if p.starts_with("/contact/v3/users/ou_a") => ok(json!({"user": {"open_id": "ou_a", "name": "Amy"}})),
+                ("GET", "/bitable/v1/apps/APP9") => ok(json!({"app": {"name": "Tracker"}})),
+                ("GET", "/bitable/v1/apps/APP9/tables") => ok(json!({"items": [{"table_id": "tbl1", "name": "Tasks"}]})),
+                ("GET", "/bitable/v1/apps/APP9/tables/tbl1/fields") => ok(json!({"items": [{"field_id": "f1", "field_name": "Name", "type": 1, "is_primary": true}, {"field_id": "f2", "field_name": "When", "type": 5}]})),
+                ("POST", "/bitable/v1/apps/APP9/tables/tbl1/records") => ok(json!({"record": {"record_id": "rec1", "fields": b["fields"]}})),
+                ("POST", "/im/v1/pins") => ok(json!({"pin": {"message_id": b["message_id"]}})),
+                ("GET", p) if p.starts_with("/im/v1/pins?") => ok(json!({"items": [{"message_id": "om_1", "chat_id": "oc_g"}], "has_more": false})),
+                ("GET", p) if p.starts_with("/im/v1/messages/om_1") => ok(json!({"items": [{"message_id": "om_1", "chat_id": "oc_g", "msg_type": "text", "body": {"content": "{\"text\":\"hi\"}"}}]})),
+                _ => (404, vec![], json!({"code": 404, "msg": format!("unexpected {m} {p}")}).to_string()),
+            }
+        });
+        let mut f = fs(&srv.url);
+        f.tool_families.insert("perm".into(), true);
+        let tools = f.tools();
+        let names: Vec<String> = tools.iter().map(|t| t.spec().name).collect();
+        assert_eq!(names.len(), 15, "{names:?}");
+        assert!(names.iter().all(|n| n.ends_with("_fs")), "non-default channel names are suffixed");
+        let tool = |n: &str| tools.iter().find(|t| t.spec().name == format!("{n}_fs")).unwrap().clone();
+        let ctx = crate::testutil::tool_ctx();
+        let run = |n: &str, a: Value| {
+            let o = tool(n).call(&ctx, a);
+            (o.is_error, serde_json::from_str::<Value>(&o.content).unwrap_or(Value::String(o.content.clone())))
+        };
+        assert_eq!(run("feishu_doc_read", json!({"doc_token": "D1"})).1, json!({"success": true, "content": "Hello doc"}));
+        let (_, v) = run("feishu_doc", json!({"action": "read", "doc_token": "D1"}));
+        assert_eq!((v["title"].as_str(), v["block_count"].as_u64(), v["block_types"]["Table"].as_u64()), (Some("Spec"), Some(3), Some(1)));
+        assert!(v["hint"].as_str().unwrap().contains("Table"));
+        // write: convert first, then clear the two body blocks, then insert pre-ordered descendants.
+        let (e, v) = run("feishu_doc", json!({"action": "write", "doc_token": "D1", "content": "# Title\n\nchild\n\n![pic](data/x.png)"}));
+        assert!(!e, "{v}");
+        assert_eq!((v["blocks_deleted"].as_u64(), v["blocks_added"].as_u64()), (Some(2), Some(3)));
+        let (e, v) = run("feishu_doc", json!({"action": "insert", "doc_token": "D1", "after_block_id": "b1", "content": "x"}));
+        assert!(!e && v["block_ids"] == json!(["n1"]), "{v}");
+        let calls = api_calls(&srv);
+        let ins = calls.iter().rev().find(|r| r.path.ends_with("/descendant")).unwrap();
+        assert_eq!(ins.json()["index"], 2, "after b1 (index 1) → 2");
+        // Oversized chunk: convert fails, halves retried.
+        let big = format!("FAILBIG\n\n{}\n\n{}", "a".repeat(200), "b".repeat(200));
+        assert!(!run("feishu_doc", json!({"action": "append", "doc_token": "D1", "content": big})).0);
+        let (_, v) = run("feishu_doc", json!({"action": "create", "title": "T", "content": "x"}));
+        assert!(v["error"].as_str().unwrap().contains("does not support content"));
+        let (_, v) = run("feishu_doc", json!({"action": "create", "title": "T"}));
+        assert_eq!(v["requester_permission_skipped_reason"], "trusted requester identity unavailable");
+        f.set_session_origin(Arc::new(|_: &str| Some(crate::router::RouteKey { channel: "fs".into(), chat: "oc_g".into(), sender: Some("ou_req".into()) })));
+        let (_, v) = run("feishu_doc", json!({"action": "create", "title": "T"}));
+        assert_eq!((v["url"].as_str(), v["requester_permission_added"].as_bool()), (Some("https://feishu.cn/docx/NEW1"), Some(true)));
+        let (e, v) = run("feishu_doc", json!({"action": "delete_block", "doc_token": "D1", "block_id": "b1"}));
+        assert!(!e && v["deleted_block_id"] == "b1", "{v}");
+        let (_, v) = run("feishu_doc", json!({"action": "color_text", "doc_token": "D1", "block_id": "b1", "content": "Revenue [green bold]+15%[/green] YoY [Q1]"}));
+        assert_eq!(v["segments"], 5);
+        let (e, v) = run("feishu_doc", json!({"action": "upload_image", "doc_token": "D1", "image": "data:image/png;base64,iVBORw0KGgo="}));
+        assert!(e, "image block creation is not faked: {v}");
+        let (_, v) = run("feishu_doc", json!({"action": "delete_table_rows", "doc_token": "D1", "block_id": "t1", "row_start": 1, "row_count": 2}));
+        assert_eq!(v["rows_deleted"], 2);
+        let patch = api_calls(&srv).into_iter().rev().find(|r| r.method == "PATCH").unwrap().json();
+        assert_eq!(patch, json!({"delete_table_rows": {"row_start_index": 1, "row_end_index": 3}}));
+        assert!(run("feishu_doc", json!({"action": "bogus"})).0);
+
+        let (_, v) = run("feishu_app_scopes", json!({}));
+        assert_eq!(v["summary"], "1 granted, 1 pending");
+        let (_, v) = run("feishu_wiki", json!({"action": "spaces"}));
+        assert!(v["hint"].as_str().unwrap().contains("Add the bot"));
+        let (e, v) = run("feishu_wiki", json!({"action": "create", "space_id": 7123}));
+        assert!(e && v["error"].as_str().unwrap().contains("must be a string"), "{v}");
+        let (_, v) = run("feishu_wiki", json!({"action": "create", "space_id": "7123", "title": "Notes"}));
+        assert_eq!((v["node_token"].as_str(), v["obj_type"].as_str()), (Some("N2"), Some("docx")));
+        assert!(run("feishu_wiki", json!({"action": "nodes", "space_id": "7123", "page_size": 99})).0);
+        // drive info falls back to the root listing without the metadata scope.
+        let (_, v) = run("feishu_drive", json!({"action": "info", "file_token": "F1", "type": "docx"}));
+        assert_eq!(v["name"], "a.docx");
+        let (_, v) = run("feishu_drive", json!({"action": "list_comments", "file_token": "F1"}));
+        assert_eq!(v["comments"][0]["replies"][0]["text"], "looks good");
+        assert!(run("feishu_drive", json!({"action": "add_comment", "file_token": "F1", "file_type": "doc", "block_id": "b1", "content": "x"})).1["error"].as_str().unwrap().contains("only supported for docx"));
+        assert_eq!(run("feishu_drive", json!({"action": "add_comment", "file_token": "F1", "block_id": "b1", "content": "x"})).1["comment_id"], "C9");
+        assert!(run("feishu_drive", json!({"action": "list", "page_size": 5})).0, "paging needs folder_token");
+        let (_, v) = run("feishu_chat", json!({"action": "member_info", "chat_id": "oc_g", "member_id": "ou_a"}));
+        assert_eq!(v["name"], "Amy");
+        let (e, v) = run("feishu_chat", json!({"action": "member_info", "chat_id": "oc_g", "member_id": "ou_stranger"}));
+        assert!(e && v["error"].as_str().unwrap().contains("not a member"), "{v}");
+        assert_eq!(run("feishu_chat", json!({"action": "info"})).1["error"], "chat_id is required for action info");
+        let (_, v) = run("feishu_bitable_get_meta", json!({"url": "https://x.feishu.cn/wiki/WK1"}));
+        assert_eq!((v["app_token"].as_str(), v["url_type"].as_str(), v["tables"][0]["table_id"].as_str()), (Some("APP9"), Some("wiki"), Some("tbl1")));
+        let (_, v) = run("feishu_bitable_list_fields", json!({"app_token": "APP9", "table_id": "tbl1"}));
+        assert_eq!(v["fields"][1]["type_name"], "DateTime");
+        let (_, v) = run("feishu_bitable_create_record", json!({"app_token": "APP9", "table_id": "tbl1", "fields": {"Name": "x"}}));
+        assert_eq!(v["record"]["record_id"], "rec1");
+        assert!(tool("feishu_bitable_create_record").effects(&ctx, &json!({})).iter().any(|e| matches!(e, ark_core::Effect::Net { .. })));
+        assert!(tool("feishu_drive").effects(&ctx, &json!({"action": "list"})).is_empty());
+        assert_eq!(tools::parse_bitable_url("https://a.feishu.cn/base/AbC1?table=tblX&view=v"), Some(("AbC1".into(), Some("tblX".into()), false)));
+        // perm is off unless enabled.
+        assert_eq!(fs(&srv.url).tools().len(), 14);
+
+        // Message actions for the `message` tool.
+        assert!(f.message_actions().contains(&"list-pins"));
+        let v = f.message_action("read", &json!({"messageId": "om_1"})).unwrap();
+        assert_eq!(v["message"]["chat_id"], "oc_g");
+        assert_eq!(f.message_action("pin", &json!({"messageId": "om_1"})).unwrap()["pin"]["message_id"], "om_1");
+        assert_eq!(f.message_action("list-pins", &json!({"chatId": "oc_g"})).unwrap()["pins"][0]["messageId"], "om_1");
+        let v = f.message_action("channel-info", &json!({"chatId": "oc_g", "includeMembers": true})).unwrap();
+        assert_eq!((v["channel"]["name"].as_str(), v["members"]["members"][0]["name"].as_str()), (Some("Team"), Some("Amy")));
+        assert!(f.message_action("member-info", &json!({"chatId": "oc_g", "memberId": "ou_nobody"})).is_err());
+        assert!(f.message_action("list-pins", &json!({})).unwrap_err().message.contains("requires chatId"));
+        assert!(f.message_action("poll", &json!({})).is_err());
+        assert_eq!(tools::color_elements("[red]a[/red]b[")[0]["text_run"]["text_element_style"]["text_color"], 1);
     }
 }

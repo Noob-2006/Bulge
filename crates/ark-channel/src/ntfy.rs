@@ -89,6 +89,13 @@ pub fn auth_header(token: &str) -> Option<String> {
     }
 }
 
+/// Replay one recorded stream event (see `tests/real/vectors/ntfy_stream_event.json`)
+/// as ark would turn it into an `Inbound`. Public for the vector tests; the hot path
+/// is `poll`.
+pub fn recorded_inbound(channel: &str, topic: &str, ev: &Value) -> Option<Inbound> {
+    inbound_of(channel, topic, ev, &VecDeque::new())
+}
+
 /// Header-safe value: plain ASCII as is, anything else RFC 2047 encoded (ntfy decodes it).
 fn header_value(s: &str) -> String {
     if s.bytes().all(|b| (0x20..0x7f).contains(&b)) {

@@ -20,6 +20,9 @@ use std::path::PathBuf;
 use std::sync::Mutex;
 use std::time::Duration;
 
+#[path = "telegram_actions.rs"]
+mod actions;
+
 pub const DEFAULT_BASE: &str = "https://api.telegram.org";
 /// Telegram counts message length in UTF-16 code units.
 pub const MAX_MESSAGE: usize = 4096;
@@ -135,12 +138,17 @@ impl Telegram {
         if !self.register_commands || self.commands_registered.swap(true, std::sync::atomic::Ordering::SeqCst) {
             return;
         }
-        let cmds = json!({"commands": [
-            {"command": "new", "description": "開新對話"},
-            {"command": "stop", "description": "中斷目前的工作"},
-            {"command": "status", "description": "目前狀態"},
-            {"command": "help", "description": "說明"},
-        ]});
+        let menu = crate::menu();
+        let cmds = if menu.is_empty() {
+            json!({"commands": [
+                {"command": "new", "description": "開新對話"},
+                {"command": "stop", "description": "中斷目前的工作"},
+                {"command": "status", "description": "目前狀態"},
+                {"command": "help", "description": "說明"},
+            ]})
+        } else {
+            json!({"commands": crate::telegram_menu(&menu)})
+        };
         let _ = self.call("setMyCommands", &cmds, &Cancel::new());
     }
 
@@ -342,6 +350,8 @@ fn utf16_slice(s: &str, off: usize, len: usize) -> String {
 
 fn keyboard(rows: &[Vec<crate::Button>]) -> Value {
     json!({"inline_keyboard": rows.iter().map(|r| r.iter().map(|b| match &b.url {
+        // `webapp:<https url>` opens a Telegram Mini App (private chats only).
+        Some(u) if u.starts_with("webapp:") => json!({"text": b.label, "web_app": {"url": &u["webapp:".len()..]}}),
         Some(u) => json!({"text": b.label, "url": u}),
         // callback_data is limited to 64 bytes.
         None => json!({"text": b.label, "callback_data": truncate_bytes(&b.data, 64)}),
@@ -471,6 +481,7 @@ impl Channel for Telegram {
             m["chat"]["type"].as_str().is_some_and(|t| t != "private") || m.get("reply_to_message").is_some()
         });
         let me = if needs_me { self.me() } else { self.me.lock().unwrap().clone() };
+        actions::observe(&self.id, &updates);
         Ok(updates.iter().filter_map(|u| inbound_of(&self.id, u, me.as_ref())).collect())
     }
 
@@ -545,6 +556,14 @@ impl Channel for Telegram {
         let path = f["file_path"].as_str().ok_or_else(|| ChannelError::new(K::Protocol, "getFile returned no file_path (file over 20 MB?)"))?;
         crate::http::get_bytes(&format!("{}/file/bot{}/{path}", self.base, self.token), &[], 20 * 1024 * 1024)
     }
+
+    fn message_action(&self, action: &str, args: &Value) -> Result<Value, ChannelError> {
+        self.action(action, args)
+    }
+
+    fn message_actions(&self) -> Vec<&'static str> {
+        actions::ACTIONS.to_vec()
+    }
 }
 
 fn d_poll() -> u64 {
@@ -609,6 +628,12 @@ mod tests {
 
     fn update(id: i64, text: &str) -> Value {
         json!({"update_id": id, "message": {"message_id": id * 10, "date": 1700000000, "chat": {"id": 1, "type": "private"}, "from": {"id": 42, "username": "amy"}, "text": text}})
+    }
+
+    #[test]
+    fn webapp_buttons_render_as_mini_app_launchers() {
+        let k = keyboard(&[vec![crate::Button { label: "Open".into(), data: String::new(), url: Some("webapp:https://h.ts.net/tg-miniapp/?channel=tg#launchTicket=x".into()) }]]);
+        assert_eq!(k["inline_keyboard"][0][0], json!({"text": "Open", "web_app": {"url": "https://h.ts.net/tg-miniapp/?channel=tg#launchTicket=x"}}));
     }
 
     #[test]

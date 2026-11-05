@@ -217,14 +217,31 @@ fn rel_of(base: &Path, p: &Path) -> String {
 
 pub struct Glob;
 
+/// Repeated identical search guard (Hermes search_files): warn at 3, block at 4.
+fn search_guard(ctx: &ToolCtx, kind: &str, input: &Value) -> Result<Option<String>, String> {
+    let n = crate::filestate::bump_consecutive(&ctx.session_id, kind, &input.to_string());
+    if n >= 4 {
+        return Err(format!("BLOCKED: You have run this exact search {n} times in a row. The results have NOT changed. You already have this information. STOP re-searching and proceed with your task."));
+    }
+    Ok((n >= 3).then(|| format!("[warning] You have run this exact search {n} times consecutively. The results have not changed. Use the information you already have.")))
+}
+
+/// Files a search must not surface (credential stores, `.env`).
+fn blocked(p: &Path) -> bool {
+    crate::filestate::read_block_error(p).is_some()
+}
+
 impl Tool for Glob {
     fn spec(&self) -> ToolSpec {
         ToolSpec {
             name: "glob".into(),
-            description: "Find files by glob pattern (`**` spans directories, `{a,b}` alternatives). Respects .gitignore. Newest first.".into(),
+            description: "Find files by glob pattern (`**` spans directories, `{a,b}` alternatives). Respects .gitignore. Newest first by default (order=discovery for traversal order); page with offset/limit.".into(),
             input_schema: json!({"type":"object","properties":{
                 "pattern":{"type":"string","description":"e.g. src/**/*.rs"},
-                "path":{"type":"string","description":"Directory to search (default: workspace)"}},
+                "path":{"type":"string","description":"Directory to search (default: workspace)"},
+                "order":{"type":"string","enum":["modified","discovery"],"default":"modified"},
+                "offset":{"type":"integer","minimum":0,"default":0,"description":"Skip the first N results"},
+                "limit":{"type":"integer","minimum":1,"maximum":5000,"default":500}},
                 "required":["pattern"]}),
             parallel_safe: true,
             idempotent: true,
@@ -241,14 +258,21 @@ impl Tool for Glob {
             Err(e) => return ToolOutput::err(e),
         };
         let base = ctx.resolve(arg_opt_str(&input, "path").unwrap_or("."));
+        if let Err(e) = crate::fs::contained(ctx, &base) {
+            return ToolOutput::err(e);
+        }
         match fs::metadata(&base) {
             Ok(m) if m.is_dir() => {}
             Ok(_) => return ToolOutput::err(format!("{} is not a directory", base.display())),
             Err(e) => return ToolOutput::err(io_err("search", &base, &e)),
         }
+        let warn = match search_guard(ctx, "glob", &input) {
+            Ok(w) => w,
+            Err(e) => return ToolOutput::err(e),
+        };
         let mut hits: Vec<(std::time::SystemTime, PathBuf)> = walk(&base)
             .into_iter()
-            .filter(|p| glob_match(pattern, &rel_of(&base, p)))
+            .filter(|p| glob_match(pattern, &rel_of(&base, p)) && !blocked(p))
             .map(|p| (fs::metadata(&p).and_then(|m| m.modified()).unwrap_or(std::time::UNIX_EPOCH), p))
             .collect();
         if hits.is_empty() {
@@ -259,12 +283,20 @@ impl Tool for Glob {
             };
             return ToolOutput::ok(format!("no files match {pattern}{hint}"));
         }
-        hits.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
-        let total = hits.len();
-        let mut out: Vec<String> = hits.iter().take(500).map(|(_, p)| display_path(&ctx.workspace, p)).collect();
-        if total > 500 {
-            out.push(format!("… {} more (narrow the pattern)", total - 500));
+        if arg_opt_str(&input, "order") != Some("discovery") {
+            hits.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
         }
+        let total = hits.len();
+        let offset = arg_opt_u64(&input, "offset").unwrap_or(0) as usize;
+        let limit = arg_opt_u64(&input, "limit").unwrap_or(500).clamp(1, 5000) as usize;
+        let mut out: Vec<String> = hits.iter().skip(offset).take(limit).map(|(_, p)| display_path(&ctx.workspace, p)).collect();
+        if out.is_empty() {
+            return ToolOutput::ok(format!("no results at offset {offset} ({total} total)"));
+        }
+        if offset + limit < total {
+            out.push(format!("… {} more (use offset={} to see more, or narrow the pattern)", total - offset - limit, offset + limit));
+        }
+        out.extend(warn);
         ToolOutput::ok(out.join("\n"))
     }
 }
@@ -275,12 +307,17 @@ impl Tool for Grep {
     fn spec(&self) -> ToolSpec {
         ToolSpec {
             name: "grep".into(),
-            description: "Search file contents with a regex. Output is path:line:text. Respects .gitignore, skips binary files.".into(),
+            description: "Search file contents with a regex. output_mode content (path:line:text, with optional context lines), files_with_matches (paths only) or count (matches per file). Respects .gitignore, skips binary files; page with offset.".into(),
             input_schema: json!({"type":"object","properties":{
                 "pattern":{"type":"string","description":"Rust regex syntax"},
                 "path":{"type":"string","description":"File or directory (default: workspace)"},
                 "glob":{"type":"string","description":"Only search files matching this glob, e.g. *.rs or src/**/*.ts"},
                 "case_insensitive":{"type":"boolean"},
+                "output_mode":{"type":"string","enum":["content","files_with_matches","count"],"default":"content"},
+                "context":{"type":"integer","minimum":0,"maximum":50,"description":"Lines of context before and after each match"},
+                "before":{"type":"integer","minimum":0,"maximum":50},
+                "after":{"type":"integer","minimum":0,"maximum":50},
+                "offset":{"type":"integer","minimum":0,"default":0,"description":"Skip the first N results"},
                 "max_results":{"type":"integer","minimum":1,"maximum":2000}},
                 "required":["pattern"]}),
             parallel_safe: true,
@@ -291,7 +328,12 @@ impl Tool for Grep {
     fn effects(&self, ctx: &ToolCtx, input: &Value) -> Vec<Effect> {
         vec![Effect::Read { path: ctx.resolve(arg_opt_str(input, "path").unwrap_or(".")) }]
     }
-    fn call(&self, ctx: &ToolCtx, input: Value) -> ToolOutput {
+    fn call(&self, ctx: &ToolCtx, mut input: Value) -> ToolOutput {
+        crate::util::alias(&mut input, "glob", &["file_glob", "include"]);
+        crate::util::rename(&mut input, "max_results", &["limit", "head_limit"]);
+        crate::util::rename(&mut input, "context", &["-C", "context_lines"]);
+        crate::util::rename(&mut input, "before", &["-B"]);
+        crate::util::rename(&mut input, "after", &["-A"]);
         let pattern = match arg_str(&input, "pattern") {
             Ok(p) => p,
             Err(e) => return ToolOutput::err(e),
@@ -304,17 +346,36 @@ impl Tool for Grep {
             Ok(r) => r,
             Err(e) => return ToolOutput::err(format!("invalid regex: {e}")),
         };
+        let mode = match arg_opt_str(&input, "output_mode").unwrap_or("content") {
+            "content" => "content",
+            "files_with_matches" | "files_only" | "files" => "files",
+            "count" => "count",
+            m => return ToolOutput::err(format!("output_mode `{m}`: use content, files_with_matches or count")),
+        };
         let max = arg_opt_u64(&input, "max_results").unwrap_or(200).clamp(1, 2000) as usize;
+        let offset = arg_opt_u64(&input, "offset").unwrap_or(0) as usize;
+        let ctxn = arg_opt_u64(&input, "context").unwrap_or(0).min(50) as usize;
+        let before = arg_opt_u64(&input, "before").map(|v| v.min(50) as usize).unwrap_or(ctxn);
+        let after = arg_opt_u64(&input, "after").map(|v| v.min(50) as usize).unwrap_or(ctxn);
         let base = ctx.resolve(arg_opt_str(&input, "path").unwrap_or("."));
+        if let Err(e) = crate::fs::contained(ctx, &base) {
+            return ToolOutput::err(e);
+        }
         let meta = match fs::metadata(&base) {
             Ok(m) => m,
             Err(e) => return ToolOutput::err(io_err("search", &base, &e)),
         };
+        let warn = match search_guard(ctx, "grep", &input) {
+            Ok(w) => w,
+            Err(e) => return ToolOutput::err(e),
+        };
         let files = if meta.is_dir() { walk(&base) } else { vec![base.clone()] };
         let filter = arg_opt_str(&input, "glob");
-        let mut out = Vec::new();
-        let mut truncated = false;
+        // Each result is one output group (a match with its context, a path, or a count line).
+        let mut results: Vec<String> = Vec::new();
         let mut skipped_binary = 0;
+        let mut omitted = 0;
+        let need = offset + max + 1;
         'files: for f in &files {
             if let Some(g) = filter {
                 let rel = rel_of(&base, f);
@@ -332,28 +393,85 @@ impl Tool for Grep {
                 continue;
             }
             let text = String::from_utf8_lossy(&data);
-            for (i, line) in text.lines().enumerate() {
-                if re.is_match(line) {
-                    if out.len() >= max {
-                        truncated = true;
-                        break 'files;
+            let lines: Vec<&str> = text.lines().collect();
+            let hits: Vec<usize> = lines.iter().enumerate().filter(|(_, l)| re.is_match(l)).map(|(i, _)| i).collect();
+            if hits.is_empty() {
+                continue;
+            }
+            if blocked(f) {
+                omitted += 1;
+                continue;
+            }
+            let shown = display_path(&ctx.workspace, f);
+            match mode {
+                "files" => results.push(shown),
+                "count" => results.push(format!("{shown}:{}", hits.len())),
+                _ if before == 0 && after == 0 => {
+                    for i in hits {
+                        results.push(format!("{shown}:{}:{}", i + 1, truncate_str(lines[i], 300)));
+                        if results.len() >= need {
+                            break 'files;
+                        }
                     }
-                    out.push(format!("{}:{}:{}", display_path(&ctx.workspace, f), i + 1, truncate_str(line, 300)));
+                }
+                _ => {
+                    // Merge overlapping windows like `rg -C`.
+                    let mut k = 0;
+                    while k < hits.len() {
+                        let start = hits[k].saturating_sub(before);
+                        let mut end = (hits[k] + after).min(lines.len() - 1);
+                        let mut group = vec![hits[k]];
+                        while k + 1 < hits.len() && hits[k + 1].saturating_sub(before) <= end + 1 {
+                            k += 1;
+                            end = (hits[k] + after).min(lines.len() - 1);
+                            group.push(hits[k]);
+                        }
+                        let block: Vec<String> = (start..=end).map(|i| format!("{shown}{}{}{}{}", if group.contains(&i) { ':' } else { '-' }, i + 1, if group.contains(&i) { ':' } else { '-' }, truncate_str(lines[i], 300))).collect();
+                        results.push(block.join("\n"));
+                        k += 1;
+                        if results.len() >= need {
+                            break 'files;
+                        }
+                    }
                 }
             }
+            if results.len() >= need {
+                break;
+            }
         }
+        if results.is_empty() {
+            let mut msg = format!("no matches in {} file(s)", files.len());
+            if omitted > 0 {
+                msg.push_str(&format!(" ({omitted} result file(s) omitted: credential or secret-bearing environment files)"));
+            }
+            return ToolOutput::ok(msg);
+        }
+        let truncated = results.len() > offset + max;
+        let mut out: Vec<String> = results.into_iter().skip(offset).take(max).collect();
         if out.is_empty() {
-            return ToolOutput::ok(format!("no matches in {} file(s)", files.len()));
+            return ToolOutput::ok(format!("no results at offset {offset}"));
         }
+        let sep = if mode == "content" && (before > 0 || after > 0) { "\n--\n" } else { "\n" };
+        let mut tail = Vec::new();
         if truncated {
-            out.push(format!("… stopped at {max} results (narrow the pattern or raise max_results)"));
+            tail.push(format!("… stopped at {max} results (use offset={} to see more, narrow the pattern or raise max_results)", offset + max));
         }
         if skipped_binary > 0 {
-            out.push(format!("({skipped_binary} binary file(s) skipped)"));
+            tail.push(format!("({skipped_binary} binary file(s) skipped)"));
         }
-        ToolOutput::ok(out.join("\n"))
+        if omitted > 0 {
+            tail.push(format!("({omitted} file(s) omitted: credential or secret-bearing environment files)"));
+        }
+        tail.extend(warn);
+        let mut text = std::mem::take(&mut out).join(sep);
+        for t in tail {
+            text.push('\n');
+            text.push_str(&t);
+        }
+        ToolOutput::ok(text)
     }
 }
+
 
 #[cfg(test)]
 mod tests {
@@ -457,5 +575,55 @@ mod tests {
         assert!(!o.is_error && o.content.starts_with("no matches"));
         let o = Grep.call(&c, json!({"pattern":"nested","path":"src/root_only.txt"}));
         assert_eq!(o.content, "src/root_only.txt:1:TODO nested");
+    }
+
+    #[test]
+    fn grep_modes_context_offset_and_guards() {
+        let c = ctx("grepm");
+        let w = &c.workspace;
+        fs::write(w.join("a.txt"), "one
+hit 1
+two
+three
+hit 2
+four
+").unwrap();
+        fs::write(w.join("b.txt"), "hit b\n").unwrap();
+        fs::write(w.join(".env"), "hit SECRET=1\n").unwrap();
+        let o = Grep.call(&c, json!({"pattern":"hit","output_mode":"count"}));
+        assert!(o.content.contains("a.txt:2") && o.content.contains("b.txt:1") && o.content.contains("omitted"), "{}", o.content);
+        assert!(!o.content.contains("SECRET"));
+        let o = Grep.call(&c, json!({"pattern":"hit","output_mode":"files_with_matches"}));
+        assert_eq!(o.content.lines().filter(|l| l.ends_with(".txt")).count(), 2);
+        let o = Grep.call(&c, json!({"pattern":"hit","path":"a.txt","context":1}));
+        assert_eq!(o.content, "a.txt-1-one\na.txt:2:hit 1\na.txt-3-two\na.txt-4-three\na.txt:5:hit 2\na.txt-6-four", "adjacent windows merge like rg");
+        fs::write(w.join("g.txt"), "hit\nx\ny\nz\nhit\n").unwrap();
+        let o = Grep.call(&c, json!({"pattern":"hit","path":"g.txt","context":1}));
+        assert_eq!(o.content, "g.txt:1:hit\ng.txt-2-x\n--\ng.txt-4-z\ng.txt:5:hit");
+        let o = Grep.call(&c, json!({"pattern":"hit","path":"a.txt","-A":2}));
+        assert!(o.content.starts_with("a.txt:2:hit 1\na.txt-3-two\na.txt-4-three\na.txt:5:hit 2"), "merged: {}", o.content);
+        let o = Grep.call(&c, json!({"pattern":"hit","path":"a.txt","max_results":1,"offset":1}));
+        assert!(o.content.starts_with("a.txt:5:hit 2"), "{}", o.content);
+        let o = Grep.call(&c, json!({"pattern":"hit","path":"a.txt","limit":1}));
+        assert!(o.content.contains("use offset=1"), "{}", o.content);
+        assert!(Grep.call(&c, json!({"pattern":"x","output_mode":"bogus"})).is_error);
+        let q = json!({"pattern":"four","path":"a.txt"});
+        Grep.call(&c, q.clone());
+        Grep.call(&c, q.clone());
+        assert!(Grep.call(&c, q.clone()).content.contains("3 times consecutively"));
+        assert!(Grep.call(&c, q).content.starts_with("BLOCKED"));
+    }
+
+    #[test]
+    fn glob_order_and_paging() {
+        let c = ctx("globp");
+        for n in ["b.rs", "a.rs", "c.rs"] {
+            fs::write(c.workspace.join(n), "").unwrap();
+        }
+        let o = Glob.call(&c, json!({"pattern":"*.rs","order":"discovery","limit":2}));
+        assert_eq!(o.content, "a.rs\nb.rs\n… 1 more (use offset=2 to see more, or narrow the pattern)");
+        let o = Glob.call(&c, json!({"pattern":"*.rs","order":"discovery","offset":2}));
+        assert_eq!(o.content, "c.rs");
+        assert!(Glob.call(&c, json!({"pattern":"*.rs","offset":9})).content.contains("no results at offset"));
     }
 }

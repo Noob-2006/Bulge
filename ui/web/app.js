@@ -11,6 +11,185 @@ const store = {
   del(k) { try { localStorage.removeItem(k); } catch {} },
 };
 
+// ── i18n: zh-Hant (default) and en, switchable per device ─────────────────────────────
+// Every shell string goes through `t()`; page bodies in pages.js stay in the configured
+// language of their own module (the Control UI is translated through `ui.pages` titles).
+const I18N = {
+  'zh-Hant': {
+    'conn.idle': '尚未連線', 'conn.connecting': '連線中…', 'conn.failed': '連線失敗', 'conn.ready': '已連線 · {v}', 'conn.down': '連線中斷，3 秒後重試',
+    'new': '＋ 新對話', 'boards': '儀表板', 'boards_all': '總覽', 'devices': '裝置', 'control': '控制台', 'settings': '設定',
+    'pick': '選擇或建立一個對話', 'input': '輸入訊息…  / 顯示指令', 'stop': '停止', 'send': '送出', 'working': '工作中',
+    'you': '你', 'tool_result': '工具結果', 'tool_call': '呼叫 {n}', 'tool_error': '工具失敗',
+    'approval': '需要核准：{gate}', 'deny': '拒絕', 'always': '本次對話都允許', 'once': '允許一次',
+    'ask': 'ark 想問你', 'answer': '回答', 'close': '關閉',
+    'no_sessions': '還沒有對話', 'start': '開始一段新對話吧', 'login': '連線到 ark',
+    'login_hint': '輸入 App Server 的 token（<code>ark app token</code> 會顯示）。', 'connect': '連線', 'remember': '記住這台裝置',
+    'slash_hint': '指令 · ↑↓ 選擇、Tab 補齊、Esc 關閉', 'attach': '附加', 'attached': '已附加 {n} 個檔案',
+    'too_big': '檔案太大（上限 8 MiB）', 'lang': 'EN', 'lang.name': 'English',
+    'theme': '主題', 'theme.crimson': '深緋紅', 'theme.midnight': '極夜', 'theme.daylight': '日光',
+    'not_a_command': '未知指令：{line}（/help 看清單）', 'local_only': '/{name} 只在終端機有效；這裡改用對應的頁面。',
+    'quit_web': '/quit 只關閉終端機；關掉這個分頁即可離開。', 'copied': '已複製最後一則回覆。',
+  },
+  en: {
+    'conn.idle': 'Not connected', 'conn.connecting': 'Connecting…', 'conn.failed': 'Connection failed', 'conn.ready': 'Connected · {v}', 'conn.down': 'Disconnected, retrying in 3s',
+    'new': '+ New chat', 'boards': 'Dashboards', 'boards_all': 'Overview', 'devices': 'Devices', 'control': 'Control', 'settings': 'Settings',
+    'pick': 'Pick or start a conversation', 'input': 'Message…  / for commands', 'stop': 'Stop', 'send': 'Send', 'working': 'Working',
+    'you': 'You', 'tool_result': 'Tool result', 'tool_call': 'Calling {n}', 'tool_error': 'Tool failed',
+    'approval': 'Approval needed: {gate}', 'deny': 'Deny', 'always': 'Always in this chat', 'once': 'Allow once',
+    'ask': 'ark asks', 'answer': 'Answer', 'close': 'Close',
+    'no_sessions': 'No conversations yet', 'start': 'Start a new conversation', 'login': 'Connect to ark',
+    'login_hint': 'Enter the App Server token (shown by <code>ark app token</code>).', 'connect': 'Connect', 'remember': 'Remember this device',
+    'slash_hint': 'Commands · ↑↓ pick, Tab complete, Esc close', 'attach': 'Attach', 'attached': '{n} file(s) attached',
+    'too_big': 'File too large (8 MiB max)', 'lang': '中文', 'lang.name': '繁體中文',
+    'theme': 'Theme', 'theme.crimson': 'Crimson', 'theme.midnight': 'Midnight', 'theme.daylight': 'Daylight',
+    'not_a_command': 'Unknown command: {line} (see /help)', 'local_only': '/{name} only works in a terminal; use the matching page here.',
+    'quit_web': '/quit closes the terminal UI; just close this tab to leave.', 'copied': 'Copied the last reply.',
+  },
+};
+let LANG = store.get('ark.lang') || 'zh-Hant';
+function t(key, vars) {
+  let s = (I18N[LANG] && I18N[LANG][key]) || I18N['zh-Hant'][key] || key;
+  for (const k in vars || {}) s = s.split('{' + k + '}').join(String(vars[k]));
+  return s;
+}
+function setLang(l, save) {
+  LANG = I18N[l] ? l : 'zh-Hant';
+  if (save !== false) store.set('ark.lang', LANG);
+  document.documentElement.lang = LANG === 'en' ? 'en' : 'zh-Hant';
+  applyI18n();
+}
+// Static strings: text (`data-i18n`), placeholder (`data-i18n-ph`), title (`data-i18n-title`).
+function applyI18n() {
+  for (const el of document.querySelectorAll('[data-i18n]')) el.textContent = t(el.dataset.i18n);
+  for (const el of document.querySelectorAll('[data-i18n-ph]')) el.placeholder = t(el.dataset.i18nPh);
+  for (const el of document.querySelectorAll('[data-i18n-title]')) el.title = t(el.dataset.i18nTitle);
+  const hint = document.getElementById('loginHint');
+  if (hint) hint.innerHTML = t('login_hint');
+  if ($('conn') && !S.arp) setConn(t('conn.idle'));
+  if ($('title') && !S.current) $('title').textContent = t('pick');
+  document.title = 'ark';
+}
+// ── themes: the shell's palette is theme.css; these variables re-tint it ──
+const THEMES = ['crimson', 'midnight', 'daylight'];
+function setTheme(name, save) {
+  const n = THEMES.includes(name) ? name : 'crimson';
+  if (n === 'crimson') document.documentElement.removeAttribute('data-theme');
+  else document.documentElement.setAttribute('data-theme', n);
+  if (save !== false) store.set('ark.theme', n);
+  const sel = $('theme');
+  if (sel) sel.value = n;
+  const meta = document.querySelector('meta[name=theme-color]');
+  if (meta) meta.content = n === 'daylight' ? '#f6ecdf' : n === 'midnight' ? '#0a1020' : '#330716';
+}
+// ── attachments: paste / drop / pick a file, upload it over ARP, attach to the next message ──
+const ATT = []; // {path, name, bytes}
+const ATT_MAX = 8 * 1024 * 1024;
+function readAsDataURL(f) {
+  return new Promise((res, rej) => {
+    const r = new FileReader();
+    r.onload = () => res(String(r.result));
+    r.onerror = () => rej(new Error('read failed'));
+    r.readAsDataURL(f);
+  });
+}
+function renderAtt() {
+  const box = $('attachments');
+  if (!box) return;
+  box.innerHTML = ATT.map((a, i) => `<span class="att" title="${esc(a.path)}">${esc(a.name)} <span class="dim">${a.bytes ? '<span class="att-bytes">' + Math.ceil(a.bytes / 1024) + 'K</span>' : ''}</span><button class="btn ghost small" data-rm="${i}" aria-label="remove">✕</button></span>`).join('');
+  box.hidden = !ATT.length;
+  for (const b of box.querySelectorAll('[data-rm]')) {
+    b.onclick = async () => {
+      const [a] = ATT.splice(Number(b.dataset.rm), 1);
+      if (a) { try { await S.arp.call('ui.upload.delete', { path: a.path }); } catch {} }
+      renderAtt();
+    };
+  }
+}
+async function addFiles(files) {
+  if (!files || !files.length || !S.arp) return;
+  for (const f of Array.from(files).slice(0, 8)) {
+    if (f.size > ATT_MAX) { addMsg('notice', '', esc(t('too_big'))); continue; }
+    try {
+      const data = await readAsDataURL(f);
+      const r = await S.arp.call('ui.upload', { name: f.name || 'paste.png', data });
+      ATT.push({ path: r.path, name: r.name || f.name, bytes: r.bytes || f.size });
+    } catch (e) { addMsg('notice', '', '⚠ ' + esc(e.message)); }
+  }
+  renderAtt();
+}
+
+// ── slash commands: complete from `command.list` and run through `command.run` ──
+const CMDS = { list: [], loaded: false };
+async function loadCommands() {
+  if (CMDS.loaded || !S.arp) return CMDS.list;
+  try { CMDS.list = (await S.arp.call('command.list')) || []; CMDS.loaded = true; } catch {}
+  return CMDS.list;
+}
+const SLASH = { open: false, items: [], idx: 0 };
+function slashWord() {
+  const v = $('input').value;
+  return v.startsWith('/') && !v.includes('\n') && !/\s/.test(v.slice(1)) ? v.slice(1).toLowerCase() : null;
+}
+async function updateSlashMenu() {
+  const q = slashWord();
+  if (q === null) return closeSlash();
+  const list = await loadCommands();
+  const pool = list.filter((c) => c && c.name);
+  const rank = (c) => (c.name.toLowerCase().startsWith(q) ? 0 : (c.aliases || []).some((a) => a.toLowerCase().startsWith(q)) ? 1 : c.name.toLowerCase().includes(q) ? 2 : 9);
+  SLASH.items = pool.map((c) => [rank(c), c]).filter(([r]) => r < 9).sort((a, b) => a[0] - b[0] || a[1].name.localeCompare(b[1].name)).slice(0, 12).map(([, c]) => c);
+  if (!SLASH.items.length) return closeSlash();
+  SLASH.open = true;
+  SLASH.idx = Math.min(SLASH.idx, SLASH.items.length - 1);
+  const menu = $('slashMenu');
+  menu.innerHTML = '<div class="slash-hint dim">' + esc(t('slash_hint')) + '</div>' + SLASH.items.map((c, i) =>
+    `<button type="button" class="slash-item${i === SLASH.idx ? ' on' : ''}" data-slash="${esc(c.name)}"><b>/${esc(c.name)}</b> <span class="dim">${esc((c.aliases || []).map((a) => '/' + a).join(' ') || '')}</span> <span class="slash-args dim">${esc(c.args || '')}</span> <span class="slash-desc">${esc(c.description || '')}</span></button>`).join('');
+  menu.hidden = false;
+  for (const b of menu.querySelectorAll('[data-slash]')) b.onclick = () => pickSlash(b.dataset.slash);
+}
+function closeSlash() { SLASH.open = false; SLASH.items = []; const m = $('slashMenu'); if (m) { m.hidden = true; m.innerHTML = ''; } }
+function pickSlash(name) {
+  $('input').value = '/' + name + ' ';
+  closeSlash();
+  $('input').focus();
+  autosize();
+}
+function moveSlash(d) {
+  if (!SLASH.open) return false;
+  SLASH.idx = (SLASH.idx + d + SLASH.items.length) % SLASH.items.length;
+  for (const [i, b] of [...$('slashMenu').querySelectorAll('[data-slash]')].entries()) b.classList.toggle('on', i === SLASH.idx);
+  return true;
+}
+// `command.run` reply: text (shown as a notice) + optional prompt (sent as a turn) + the
+// host action (`new_session`, `quit`, `local`) which the web UI performs itself.
+async function runSlash(line) {
+  if (!S.current) await newSession();
+  if (!S.current) return;
+  let r;
+  try { r = await S.arp.call('command.run', { line, session: S.current, surface: 'web' }); }
+  catch (e) { addMsg('notice', '', '⚠ ' + esc(e.message)); return; }
+  if (!r || r.handled === false) { addMsg('notice', '', esc(t('not_a_command', { line }))); return; }
+  if (r.text) addMsg('notice', '', md(String(r.text)));
+  if (r.action) await runAction(r.action);
+  if (r.prompt) await send(r.prompt, { raw: true });
+}
+async function runAction(a) {
+  if (a.kind === 'new_session') { await newSession(); if (a.clear) $('log').innerHTML = ''; return; }
+  if (a.kind === 'quit') { addMsg('notice', '', esc(t('quit_web'))); return; }
+  if (a.kind === 'local') {
+    const n = a.name || '';
+    if (n === 'clear' || n === 'redraw') { $('log').innerHTML = ''; if (S.current) openSession(S.current); return; }
+    if (n === 'copy') {
+      const msgs = [...$('log').querySelectorAll('.msg.assistant .body')];
+      const last = msgs[msgs.length - 1];
+      if (last) { try { await navigator.clipboard.writeText(last.innerText); addMsg('notice', '', esc(t('copied'))); } catch {} }
+      return;
+    }
+    if (n === 'statusbar' || n === 'palette' || n === 'compose' || n === 'paste') { addMsg('notice', '', esc(t('local_only', { name: n }))); return; }
+    if (a.arg) addMsg('notice', '', esc(a.arg));
+    return;
+  }
+}
+
 // ── starfield ──
 (function stars() {
   const f = $('starfield');
@@ -91,7 +270,7 @@ function setConn(text) { $('conn').textContent = text; }
 function setStatus(running) {
   S.running = running;
   $('stop').hidden = !running;
-  $('status').innerHTML = running ? '<span class="star pulse" style="--size:12px"></span> 工作中' : '';
+  $('status').innerHTML = running ? '<span class="star pulse" style="--size:12px"></span> ' + esc(t('working')) : '';
 }
 
 function addMsg(kind, who, html) {
@@ -104,6 +283,16 @@ function addMsg(kind, who, html) {
   return el;
 }
 
+// A tool call/result as a collapsible card (`<details>`), so a long transcript stays scannable.
+function addToolCard(title, body, collapsible, badge) {
+  const el = addMsg('tool toolcard', badge ? `<span class="bad">${esc(badge)}</span> ${esc(title)}` : esc(title), '');
+  const pre = `<pre>${esc(String(body).slice(0, 20000))}</pre>`;
+  el.querySelector('.body').innerHTML = collapsible
+    ? `<details><summary>${esc(title)}</summary>${pre}</details>`
+    : pre;
+  return el;
+}
+
 function textOf(m) {
   return (m.content || []).map((b) => (b.type === 'text' ? b.text : '')).join('');
 }
@@ -113,9 +302,17 @@ function renderEvent(ev) {
   if (k === 'message') {
     const m = ev.message;
     if (m.role === 'user') {
-      const t = (m.content || []).map((b) => b.type === 'text' ? b.text : b.type === 'tool_result' ? `↳ ${String(b.content).slice(0, 600)}` : '').join('');
-      const tool = (m.content || []).some((b) => b.type === 'tool_result');
-      if (t.trim()) addMsg(tool ? 'tool' : 'user', tool ? '工具結果' : '你', tool ? esc(t) : md(t));
+      const txt = (m.content || []).map((b) => b.type === 'text' ? b.text : '').join('');
+      const results = (m.content || []).filter((b) => b.type === 'tool_result');
+      if (results.length) {
+        // One card per result: the head shows the status, the body the (truncated) output.
+        for (const b of results) {
+          const body = typeof b.content === 'string' ? b.content : JSON.stringify(b.content, null, 1);
+          const collapsible = String(body).length > 400 || String(body).includes('\n');
+          addToolCard(txt && !results.length ? txt : t('tool_result'), String(body), collapsible, b.is_error ? t('tool_error') : '');
+        }
+        if (txt.trim()) addMsg('user', esc(t('you')), md(txt));
+      } else if (txt.trim()) addMsg('user', esc(t('you')), md(txt));
     } else {
       const t = textOf(m);
       if (S.streaming) {
@@ -126,7 +323,7 @@ function renderEvent(ev) {
         } else S.streaming.el.remove();
         S.streaming = null;
       } else if (t.trim()) addMsg('assistant', '<span class="star" style="--size:11px"></span> ark', md(t));
-      for (const b of m.content || []) if (b.type === 'tool_use') addMsg('tool', `呼叫 ${esc(b.name)}`, esc(JSON.stringify(b.input, null, 1)).slice(0, 2000));
+      for (const b of m.content || []) if (b.type === 'tool_use') addToolCard(t('tool_call', { n: '' }) + b.name, JSON.stringify(b.input, null, 1), true, '');
     }
   } else if (k === 'turn_start') setStatus(true);
   else if (k === 'turn_end') { setStatus(false); S.streaming = null; }
@@ -281,16 +478,42 @@ function onPending(p) {
   box.className = 'ask panel cornered';
   box.innerHTML = '<span class="star corner tl"></span><span class="star corner br"></span>';
   if (p.kind === 'approval') {
-    box.innerHTML += `<div class="q"><span class="star pulse" style="--size:18px"></span><div><strong>需要核准：${esc(p.gate)}</strong><div class="dim">${esc(p.tool)} — ${esc(p.reason)}</div><pre>${esc(p.summary || '')}</pre></div></div>
-      <div class="acts"><button class="btn danger small" data-a="deny">拒絕</button><button class="btn ghost small" data-a="always">本次對話都允許</button><button class="btn small" data-a="once">允許一次</button></div>`;
+    box.innerHTML += `<div class="q"><span class="star pulse" style="--size:18px"></span><div><strong>${esc(t('approval', { gate: p.gate }))}</strong><div class="dim">${esc(p.tool)} — ${esc(p.reason)}</div><pre>${esc(p.summary || '')}</pre></div></div>
+      <div class="acts"><button class="btn danger small" data-a="deny">${esc(t('deny'))}</button><button class="btn ghost small" data-a="always">${esc(t('always'))}</button><button class="btn small" data-a="once">${esc(t('once'))}</button></div>`;
   } else {
-    box.innerHTML += `<div class="q"><span class="star pulse" style="--size:18px"></span><div><strong>ark 想問你</strong><div>${md(p.question)}</div></div></div>
-      <input type="text" placeholder="你的回答"><div class="acts"><button class="btn small" data-a="answer">回答</button></div>`;
+    // `clarify` questions carry pickable choices (`choices`, `multi_select`); a plain
+    // question (ask_user) has none and stays a free-text box.
+    const choices = Array.isArray(p.choices) ? p.choices : [];
+    const multi = !!p.multi_select;
+    box._choices = choices;
+    box._multi = multi;
+    box._picked = new Set();
+    const acts = choices.length
+      ? `<div class="acts">${choices.map((c, i) => `<button class="btn ghost small" data-c="${esc(c)}" data-i="${i}">${esc(c)}</button>`).join('')}${multi ? '<button class="btn small" data-a="answer">送出</button>' : ''}</div>`
+      : `<input type="text" placeholder="${esc(t('answer'))}"><div class="acts"><button class="btn small" data-a="answer">${esc(t('answer'))}</button></div>`;
+    box.innerHTML += `<div class="q"><span class="star pulse" style="--size:18px"></span><div><strong>${esc(t('ask'))}</strong><div>${md(p.question)}</div>${multi ? '<div class="dim">可多選</div>' : ''}</div></div>${acts}`;
   }
   box.addEventListener('click', async (e) => {
-    const a = e.target.dataset.a;
+    const d = e.target.dataset;
+    if (d.c !== undefined && d.i !== undefined) {
+      // A choice was clicked: single-select answers at once, multi-select toggles.
+      if (box._multi) {
+        const i = Number(d.i);
+        if (box._picked.has(i)) { box._picked.delete(i); e.target.classList.remove('on'); }
+        else { box._picked.add(i); e.target.classList.add('on'); }
+        return;
+      }
+      try { await S.arp.call('gate.answer', { id: p.id, answer: d.c }); } catch (err) { addMsg('notice', '', esc(err.message)); }
+      box.remove(); S.pending.delete(p.id);
+      return;
+    }
+    const a = d.a;
     if (!a) return;
-    const answer = a === 'answer' ? box.querySelector('input').value : a;
+    let answer = a;
+    if (a === 'answer') {
+      const input = box.querySelector('input');
+      answer = input ? input.value : [...box._picked].sort((x, y) => x - y).map((i) => box._choices[i]).join(', ');
+    }
     try { await S.arp.call('gate.answer', { id: p.id, answer }); } catch (err) { addMsg('notice', '', esc(err.message)); }
     box.remove(); S.pending.delete(p.id);
   });
@@ -309,7 +532,7 @@ async function loadSessions() {
     b.onclick = () => openSession(s.id);
     nav.appendChild(b);
   }
-  if (!S.sessions.length) nav.innerHTML = '<div class="dim" style="padding:8px">還沒有對話</div>';
+  if (!S.sessions.length) nav.innerHTML = '<div class="dim" style="padding:8px">' + esc(t('no_sessions')) + '</div>';
 }
 
 async function openSession(id) {
@@ -334,12 +557,22 @@ async function newSession() {
   openSession(id);
 }
 
-async function send(text) {
-  if (!text.trim()) return;
+async function send(text, opts) {
+  if (!text.trim() && !ATT.length) return;
   if (!S.current) await newSession();
   if (!S.current) return;
-  try { await S.arp.call('session.submit', { id: S.current, text, source: 'web' }); setStatus(true); }
-  catch (e) { addMsg('notice', '', '⚠ ' + esc(e.message)); }
+  // `/…` lines are commands: the shared table in the kernel decides what they do, and the
+  // action they return (new_session / quit / local) is performed by this client.
+  if (text.trim().startsWith('/') && !(opts && opts.raw)) { closeSlash(); return runSlash(text.trim()); }
+  const uploads = ATT.map((a) => a.path);
+  try {
+    if (uploads.length) {
+      await S.arp.call('ui.submit', { id: S.current, text, uploads });
+      ATT.length = 0;
+      renderAtt();
+    } else await S.arp.call('session.submit', { id: S.current, text, source: 'web' });
+    setStatus(true);
+  } catch (e) { addMsg('notice', '', '⚠ ' + esc(e.message)); }
 }
 
 async function showPanel(title, fn, after) {
@@ -353,9 +586,9 @@ function row(cells) { return '<tr>' + cells.map((c) => `<td>${c}</td>`).join('')
 
 async function start(token) {
   S.arp = new Arp(token);
-  setConn('連線中…');
-  try { await S.arp.connect(); } catch (e) { setConn('連線失敗'); store.del('ark.token'); return askToken(); }
-  S.arp.on('ready', (p) => setConn(`已連線 · ${p.server.version}`));
+  setConn(t('conn.connecting'));
+  try { await S.arp.connect(); } catch (e) { setConn(t('conn.failed')); store.del('ark.token'); return askToken(); }
+  S.arp.on('ready', (p) => setConn(t('conn.ready', { v: p.server.version })));
   // Two subscriptions share the socket: the global one feeds the sidebar and approvals,
   // the session one feeds the transcript. Route by subscription id so nothing renders twice.
   S.arp.on('event', (p) => {
@@ -364,7 +597,7 @@ async function start(token) {
   });
   S.arp.on('delta', (p) => { if (p.subscription !== S.globalSub) onDelta(p); });
   S.arp.on('pending', (p) => { if (p.subscription === S.globalSub) onPending(p); });
-  S.arp.on('close', () => { setConn('連線中斷，3 秒後重試'); setTimeout(() => start(token), 3000); });
+  S.arp.on('close', () => { setConn(t('conn.down')); setTimeout(() => start(token), 3000); });
   // A second subscription follows every session for approvals and the sidebar.
   S.globalSub = S.arp.next;
   S.arp.call('subscribe', {}).catch(() => {});
@@ -372,7 +605,7 @@ async function start(token) {
   loadPluginPanels();
   for (const p of await S.arp.call('gate.pending')) onPending(p);
   if (!S.current && S.sessions[0]) openSession(S.sessions[0].id);
-  else if (!S.sessions.length) $('log').innerHTML = '<div class="empty"><span class="star twinkle"></span><div>開始一段新對話吧</div></div>';
+  else if (!S.sessions.length) $('log').innerHTML = '<div class="empty"><span class="star twinkle"></span><div>' + esc(t('start')) + '</div></div>';
 }
 
 function askToken() {
@@ -385,8 +618,26 @@ function askToken() {
 }
 
 // ── wiring ──
-$('composer').onsubmit = (e) => { e.preventDefault(); const t = $('input').value; $('input').value = ''; autosize(); send(t); };
-$('input').addEventListener('keydown', (e) => { if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); $('composer').requestSubmit(); } });
+$('composer').onsubmit = (e) => { e.preventDefault(); const text = $('input').value; $('input').value = ''; autosize(); closeSlash(); send(text); };
+$('input').addEventListener('keydown', (e) => {
+  if (SLASH.open && (e.key === 'ArrowDown' || e.key === 'ArrowUp')) { e.preventDefault(); moveSlash(e.key === 'ArrowDown' ? 1 : -1); return; }
+  if (SLASH.open && (e.key === 'Tab' || (e.key === 'Enter' && !e.shiftKey))) { e.preventDefault(); pickSlash(SLASH.items[SLASH.idx].name); return; }
+  if (SLASH.open && e.key === 'Escape') { e.preventDefault(); closeSlash(); return; }
+  if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); $('composer').requestSubmit(); }
+});
+$('input').addEventListener('input', () => { autosize(); updateSlashMenu(); });
+// Paste / drop files (images stay images: ui.upload + ui.submit build the content blocks).
+$('input').addEventListener('paste', (e) => { const f = e.clipboardData && e.clipboardData.files; if (f && f.length) { e.preventDefault(); addFiles(f); } });
+$('composer').addEventListener('dragover', (e) => { e.preventDefault(); $('composer').classList.add('drop'); });
+$('composer').addEventListener('dragleave', () => $('composer').classList.remove('drop'));
+$('composer').addEventListener('drop', (e) => { e.preventDefault(); $('composer').classList.remove('drop'); if (e.dataTransfer && e.dataTransfer.files.length) addFiles(e.dataTransfer.files); });
+$('attach').onclick = () => $('file').click();
+$('file').onchange = (e) => { addFiles(e.target.files); e.target.value = ''; };
+$('lang').onclick = () => { setLang(LANG === 'en' ? 'zh-Hant' : 'en'); $('lang').textContent = t('lang'); };
+$('theme').onchange = (e) => setTheme(e.target.value);
+setLang(LANG, false);
+setTheme(store.get('ark.theme') || 'crimson', false);
+$('lang').textContent = t('lang');
 function autosize() { const t = $('input'); t.style.height = 'auto'; t.style.height = Math.min(t.scrollHeight, innerHeight * 0.4) + 'px'; }
 $('input').addEventListener('input', autosize);
 $('newSession').onclick = newSession;
@@ -418,6 +669,7 @@ $('showSettings').onclick = () => showPanel('設定', async () => {
 
 if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js').catch(() => {});
 
+applyI18n();
 // Token: #token=… (from `ark app open`), saved token, or ask.
 const fromHash = new URLSearchParams(location.hash.slice(1)).get('token');
 if (fromHash) { store.set('ark.token', fromHash); history.replaceState(null, '', location.pathname); }

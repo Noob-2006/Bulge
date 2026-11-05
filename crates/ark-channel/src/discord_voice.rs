@@ -31,6 +31,8 @@ use crate::dave::{Dave, Out, OPUS_SILENCE};
 use crate::mls::Signer;
 use crate::{sleep_cancellable, ChannelError, ChannelErrorKind as K, ChatType, Inbound};
 use ark_core::Cancel;
+use ark_media::stt::transcripts::channel::{Heard, HeardSink};
+use ark_media::stt::transcripts::Capture as TranscriptCapture;
 use ark_net::ws::{Message, WebSocket};
 use ring::aead::{Aad, LessSafeKey, Nonce, UnboundKey, AES_256_GCM, CHACHA20_POLY1305};
 use serde_json::{json, Value};
@@ -38,7 +40,7 @@ use std::collections::{HashMap, VecDeque};
 use std::io::{self, Read, Write};
 use std::net::UdpSocket;
 use std::process::{Command, Stdio};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{mpsc, Arc, Condvar, Mutex, Weak};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -1268,6 +1270,35 @@ pub struct VoiceManager {
     /// Replies waiting to settle before being spoken (streamed replies grow by edits).
     replies: Mutex<HashMap<String, PendingReply>>,
     spoken: Mutex<VecDeque<String>>,
+    /// Live transcript taps (`media.transcripts` sessions, see [`crate::discord_transcripts`]).
+    taps: Mutex<Vec<Tap>>,
+    next_tap: AtomicU64,
+}
+
+/// One `media.transcripts` capture: every recognized line of `(guild, channel)` goes to `sink`.
+struct Tap {
+    id: u64,
+    guild: u64,
+    channel: u64,
+    sink: HeardSink,
+}
+
+/// The capture handle `media.transcripts` stops.
+struct TapCapture {
+    m: Arc<VoiceManager>,
+    id: u64,
+    active: bool,
+}
+
+impl TranscriptCapture for TapCapture {
+    fn stop(&mut self) -> Result<(), String> {
+        self.m.remove_tap(self.id);
+        self.active = false;
+        Ok(())
+    }
+    fn active(&self) -> bool {
+        self.active
+    }
 }
 
 struct PendingReply {
@@ -1296,6 +1327,8 @@ impl VoiceManager {
             events: tx,
             replies: Mutex::new(HashMap::new()),
             spoken: Mutex::new(VecDeque::new()),
+            taps: Mutex::new(Vec::new()),
+            next_tap: AtomicU64::new(1),
         });
         let weak = Arc::downgrade(&m);
         let _ = std::thread::Builder::new().name("discord voice events".into()).spawn(move || event_loop(weak, rx));
@@ -1309,6 +1342,49 @@ impl VoiceManager {
 
     pub fn set_inbound(&self, tx: mpsc::Sender<Inbound>) {
         *self.inbound.lock().unwrap() = Some(tx);
+    }
+
+    /// The bot is connected to Discord (`on_ready` ran) and `account` names this bot
+    /// (`""` / `default` = the only one). What `media.transcripts` asks before capturing.
+    pub fn ready_for_account(&self, account: &str) -> bool {
+        let a = account.trim();
+        *self.me.lock().unwrap() != 0 && (a.is_empty() || a == "default" || a.eq_ignore_ascii_case(&self.channel_name))
+    }
+
+    /// Tap every recognized line of one voice channel (`media.transcripts` capture).
+    pub fn open_transcripts(self: &Arc<Self>, guild: u64, channel: u64, sink: HeardSink) -> Box<dyn TranscriptCapture> {
+        let id = self.next_tap.fetch_add(1, Ordering::SeqCst);
+        self.taps.lock().unwrap().push(Tap { id, guild, channel, sink });
+        Box::new(TapCapture { m: self.clone(), id, active: true })
+    }
+
+    pub fn remove_tap(&self, id: u64) {
+        self.taps.lock().unwrap().retain(|t| t.id != id);
+    }
+
+    /// One recognized line of `(guild, channel)`: hand it to the transcript taps. Called with the
+    /// channel's STT output, so a `media.transcripts` session sees exactly what the agent sees.
+    pub fn heard(&self, guild: u64, channel: u64, speaker: Option<String>, text: &str) {
+        if text.trim().is_empty() {
+            return;
+        }
+        let heard = Heard { speaker, text: text.to_string() };
+        // Collected first: a sink writes to the transcript store and must not run under our lock.
+        let sinks: Vec<HeardSink> = self.taps.lock().unwrap().iter().filter(|t| t.guild == guild && t.channel == channel).map(|t| t.sink.clone()).collect();
+        for s in sinks {
+            s(heard.clone());
+        }
+    }
+
+    /// One take → text through the channel's `[channels.<name>.stt]` endpoint, with the whisper
+    /// hallucination filter applied. `Err` = nothing usable was said.
+    pub fn transcribe_pcm(&self, wav_bytes: &[u8]) -> Result<String, String> {
+        let Some(stt) = self.cfg.stt.as_ref() else { return Err("no STT endpoint configured".into()) };
+        let text = stt.transcribe(wav_bytes).map_err(|e| e.message)?;
+        if is_hallucination(&text) {
+            return Err("hallucination".into());
+        }
+        Ok(text)
     }
 
     fn send_gateway(&self, v: Value) {
@@ -1594,27 +1670,30 @@ impl VoiceManager {
     }
 
     fn on_utterance(&self, guild: u64, u: Utterance) {
-        let (Some(s), Some(stt)) = (self.session(guild), self.cfg.stt.as_ref()) else { return };
+        let Some(s) = self.session(guild) else { return };
         let binding = s.binding.lock().unwrap().clone();
         let text = (|| {
             let pcm = opus_to_pcm16k(&self.cfg.ffmpeg, &u.frames)?;
             if rms(&pcm) < 30.0 {
                 return Ok(String::new());
             }
-            stt.transcribe(&wav(&pcm, 16_000, 1)).map_err(|e| e.message)
+            self.transcribe_pcm(&wav(&pcm, 16_000, 1))
         })();
         let text = match text {
-            Ok(t) if !is_hallucination(&t) => t,
+            Ok(t) if !t.is_empty() => t,
             _ => return,
         };
         // Dropped if the session moved to another text channel while transcribing.
         if *s.binding.lock().unwrap() != binding {
             return;
         }
+        let name = self.user_name(guild, u.user);
         if self.cfg.echo {
             let safe: String = text.replace("@everyone", "@\u{200b}everyone").replace("@here", "@\u{200b}here").chars().take(1900).collect();
             self.post(binding.post_channel(), &format!("🎙️ <@{}>: {safe}", u.user));
         }
+        // `media.transcripts` sessions reading this channel (`transcripts start providerId = "discord-voice"`).
+        self.heard(guild, s.channel, Some(name.clone()).filter(|n| !n.is_empty()), &text);
         let ts = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0);
         let m = Inbound {
             channel: self.channel_name.clone(),
@@ -1623,7 +1702,7 @@ impl VoiceManager {
             chat_name: binding.chat_name.clone(),
             thread: binding.thread.clone(),
             sender: u.user.to_string(),
-            sender_name: self.user_name(guild, u.user),
+            sender_name: name,
             text,
             message_id: format!("vc:{guild}:{}:{}", u.ssrc, now_ms()),
             ts,
@@ -2167,5 +2246,57 @@ pub(crate) mod tests {
             assert!(m.session(5).is_none());
             assert!(m.command(5, 77, Binding { chat: "C1".into(), thread: None, chat_name: String::new() }, "status").contains("不在"));
         }
+    }
+
+    /// G8: building the Discord channel with `[channels.dc.voice]` installs the live voice
+    /// manager as the media layer's `discord-voice` transcript source, so a real install can
+    /// record a call (`transcripts start providerId = "discord-voice"`) — not just a test double.
+    /// A take the channel's own STT recognizes lands in a real `media.transcripts` session
+    /// (fake STT endpoint, no network, no gateway).
+    #[test]
+    fn the_media_transcript_source_reads_a_live_voice_channel() {
+        use ark_media::stt::transcripts::channel::DiscordVoiceSource;
+        use ark_media::stt::transcripts::sources::Sink;
+        use ark_media::stt::transcripts::{Session, SourceLocator, TranscriptSource, Utterance};
+        let (speech_url, seen) = speech_server();
+        let stt = Speech { url: speech_url, key: Some("sk-test".into()), format: Some("wav".into()), ..Default::default() };
+        let mut cfg = crate::discord::Config::new("dc", "TOKEN");
+        cfg.voice = Some(VoiceConfig { stt: Some(stt), ..Default::default() });
+        let channel = crate::discord::Discord::new(cfg).expect("discord channel");
+        let vm = channel.voice_manager().expect("voice manager");
+        // The production wiring: the media layer sees this manager, not nobody.
+        let src = ark_media::stt::transcripts::channel::discord_voice().expect("the live manager is the media layer's Discord back end");
+        assert!(!src.connected(""), "nothing to capture before READY");
+        vm.on_ready("1");
+        assert!(src.connected("") && src.connected("dc") && !src.connected("other"), "per-account readiness");
+
+        let m = ark_media::Media::new(ark_media::MediaConfig::from_toml("[transcripts]\nmodel_summary = false\n"));
+        let sess = Session {
+            session_id: "tr-dc".into(),
+            started_at: "2026-11-04T00:00:00Z".into(),
+            source: SourceLocator { provider_id: "discord-voice".into(), guild_id: Some("5".into()), channel_id: Some("999".into()), ..Default::default() },
+            ..Default::default()
+        };
+        let got: Arc<Mutex<Vec<Utterance>>> = Arc::new(Mutex::new(Vec::new()));
+        let g2 = got.clone();
+        let sink: Sink = Arc::new(move |u: Utterance| g2.lock().unwrap().push(u));
+        let mut cap = TranscriptSource::start(&DiscordVoiceSource, &m, &sess, sink).expect("capture starts");
+        assert!(cap.active());
+
+        // The channel's own recognizer (the fake `/audio/transcriptions` endpoint) turns a take
+        // into a line; `on_utterance` then fans it out (that is the call below).
+        let pcm: Vec<u8> = (0..1600i16).flat_map(|i| (i * 17).to_le_bytes()).collect();
+        let text = vm.transcribe_pcm(&wav(&pcm, 16_000, 1)).expect("recognized");
+        assert_eq!(text, "hello ark");
+        vm.heard(5, 999, Some("Amy".into()), &text);
+        vm.heard(5, 111, Some("Bob".into()), "another channel");
+        let got_rows = got.lock().unwrap().clone();
+        assert_eq!(got_rows.len(), 1, "one line, from the tapped channel: {got_rows:?}");
+        assert_eq!((got_rows[0].id.as_str(), got_rows[0].speaker.as_deref(), got_rows[0].text.as_str()), ("tr-dc-1", Some("Amy"), "hello ark"));
+        cap.stop().expect("stop");
+        assert!(!cap.active());
+        vm.heard(5, 999, Some("Amy".into()), "after stop");
+        assert_eq!(got.lock().unwrap().len(), 1, "stopping ends the tap");
+        assert!(seen.lock().unwrap().iter().any(|(p, _)| p == "/v1/audio/transcriptions"), "the take went through the channel's STT endpoint");
     }
 }

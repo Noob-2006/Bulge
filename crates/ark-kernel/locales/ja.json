@@ -1,0 +1,36 @@
+{
+  "approval": {
+    "heading": "⚑ {gate} ゲート — {reason}",
+    "choices": "許可しますか？[y] 今回のみ  [a] このセッションでは常に許可  [N] 拒否："
+  },
+  "notice": {
+    "bullet": "• {text}",
+    "error": "エラー: {message}",
+    "gate": "⚑ {gate} ゲート: {verdict} — {reason}",
+    "compacted": "• コンテキストを圧縮しました（約 {tokens} トークンを要約）",
+    "tool_error": "  ✗ {text}"
+  },
+  "queue": {
+    "started": "キューに追加しました。セッションを開始しました",
+    "running": "キューに追加しました。セッションは実行中です（ステアリング）"
+  },
+  "help": {
+    "title": "コマンド",
+    "custom": "カスタムとプラグイン",
+    "no_match": "`{filter}` に一致するコマンドはありません",
+    "category": {
+      "session": "セッション",
+      "info": "情報",
+      "display": "表示",
+      "tools": "ツール",
+      "exit": "終了",
+      "configuration": "設定"
+    }
+  },
+  "status": {
+    "no_session": "セッションはまだありません",
+    "running": "実行中",
+    "idle": "アイドル",
+    "line": "セッション {id}{title}\n{state} · モデル {model} · {messages} メッセージ · {turns} ターン · {tokens} トークン · コンテキスト {context}{pct} · 圧縮 {compactions} 回\nキュー: {queue} · 待機 {waiting}"
+  }
+}

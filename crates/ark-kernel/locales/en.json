@@ -1,0 +1,36 @@
+{
+  "approval": {
+    "heading": "⚑ {gate} gate — {reason}",
+    "choices": "Allow? [y] once  [a] always this session  [N] deny: "
+  },
+  "notice": {
+    "bullet": "• {text}",
+    "error": "error: {message}",
+    "gate": "⚑ {gate} gate: {verdict} — {reason}",
+    "compacted": "• context compacted (~{tokens} tokens summarised)",
+    "tool_error": "  ✗ {text}"
+  },
+  "queue": {
+    "started": "queued; session started",
+    "running": "queued; session already running (steering)"
+  },
+  "help": {
+    "title": "Commands",
+    "custom": "Custom & plugin",
+    "no_match": "no command matches `{filter}`",
+    "category": {
+      "session": "Session",
+      "info": "Info",
+      "display": "Display",
+      "tools": "Tools",
+      "exit": "Exit",
+      "configuration": "Configuration"
+    }
+  },
+  "status": {
+    "no_session": "no session yet",
+    "running": "running",
+    "idle": "idle",
+    "line": "session {id}{title}\n{state} · model {model} · {messages} messages · {turns} turns · {tokens} tokens · context {context}{pct} · {compactions} compactions\nqueue: {queue} · {waiting} waiting"
+  }
+}

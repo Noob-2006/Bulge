@@ -1,0 +1,24 @@
+[package]
+name = "ark-browser"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# Built-in browser: a Chrome DevTools Protocol client, managed Chromium profiles, cloud /
+# Camofox / Lightpanda / sandbox backends and the model-facing browser tools.
+# No new crates: WebSocket and TLS come from ark-net, HTTP from ureq.
+[features]
+# Exposes `cdp::fake` (a scriptable DevTools stub) to integration tests of dependent crates.
+test-util = []
+
+[dependencies]
+ark-core.workspace = true
+ark-net.workspace = true
+ark-security.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+toml.workspace = true
+ureq.workspace = true
+regex.workspace = true
+libc.workspace = true
+ring.workspace = true
