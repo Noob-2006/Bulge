@@ -554,7 +554,7 @@ pub fn default_fetch(url: &str) -> Result<String, String> {
     if !(url.starts_with("http://") || url.starts_with("https://")) {
         return Err("only http(s) URLs can be attached".into());
     }
-    let agent: ureq::Agent = ureq::Agent::config_builder().timeout_global(Some(Duration::from_secs(20))).http_status_as_error(false).max_redirects(5).build().into();
+    let agent: ureq::Agent = ark_net::http::builder().timeout_global(Some(Duration::from_secs(20))).http_status_as_error(false).max_redirects(5).build().into();
     let mut resp = agent.get(url).header("accept", "text/html,text/plain,application/json;q=0.9,*/*;q=0.5").call().map_err(|e| format!("request failed: {e}"))?;
     let status = resp.status().as_u16();
     let ctype = resp.headers().get("content-type").and_then(|v| v.to_str().ok()).unwrap_or("").to_ascii_lowercase();

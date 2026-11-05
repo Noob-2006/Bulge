@@ -318,9 +318,10 @@ fn detect_native(c: &Ctx) -> Result<Vec<Finding>, String> {
     const ID: &str = "core/doctor/native-status";
     let exec = exec_table(&c.paths);
     let backend = exec.get("backend").and_then(|v| v.as_str()).unwrap_or("local").to_string();
-    let lsm = std::fs::read_to_string("/sys/kernel/security/lsm").unwrap_or_default();
-    let landlock = lsm.split(',').any(|m| m.trim() == "landlock");
-    let userns = std::fs::read_to_string("/proc/sys/user/max_user_namespaces").ok().and_then(|s| s.trim().parse::<u64>().ok()).unwrap_or(1) > 0 && std::fs::read_to_string("/proc/sys/kernel/unprivileged_userns_clone").map(|s| s.trim() != "0").unwrap_or(true);
+    // ent-023/026: one kernel probe shared with the sandbox policy (`ark sandbox explain`).
+    let hk = ark_vm::hostcaps::HostKernel::detect();
+    let landlock = hk.landlock_abi > 0;
+    let userns = hk.userns;
     let bwrap = on_path(exec.get("bwrap").and_then(|b| b.get("binary")).and_then(|v| v.as_str()).unwrap_or("bwrap"));
     let needed = |b: &str| backend == b;
     let mut out = vec![];
@@ -330,7 +331,11 @@ fn detect_native(c: &Ctx) -> Result<Vec<Finding>, String> {
         (Some(_), false) => "bwrap: installed but unprivileged user namespaces are disabled".into(),
         (None, _) => "bwrap: not installed".into(),
     }).hint("Install bubblewrap (and enable user namespaces) to use exec.backend = \"bwrap\"."));
-    out.push(finding(ID, sev(landlock, needed("landlock")), if landlock { "landlock: enabled in this kernel".to_string() } else { "landlock: not in the kernel's active LSM list".to_string() }).hint("Boot a kernel with lsm=…,landlock to use exec.backend = \"landlock\"."));
+    out.push(finding(ID, sev(landlock, needed("landlock")), if landlock { format!("landlock: ABI {} in kernel {}", hk.landlock_abi, hk.release) } else if hk.version < (5, 13) { format!("landlock: unavailable (kernel {} < 5.13)", hk.release) } else { "landlock: not in the kernel's active LSM list".to_string() }).hint("Boot a kernel ≥ 5.13 with lsm=…,landlock to use exec.backend = \"landlock\"; on older kernels ark falls back to bwrap, a container engine or the host (`ark sandbox explain`)."));
+    if !userns {
+        out.push(finding(ID, Severity::Warning, format!("user namespaces: disabled ({})", hk.userns_blocker.clone().unwrap_or_default())).hint("bwrap and rootless podman cannot run; ark uses Landlock, docker or only its static gates (`ark sandbox explain` shows which). Enable with sysctl user.max_user_namespaces=15000."));
+    }
+    out.push(finding(ID, Severity::Info, format!("cgroups: {} (process cleanup and resource caps use it when a delegated subtree is writable)", hk.cgroup.label())));
     for b in ["docker", "podman"] {
         if needed(b) {
             let found = on_path(b);

@@ -536,7 +536,7 @@ fn download_capped_refuses_blocked_redirect_hops_without_connecting() {
     // The connect-time guard (the DNS-rebinding backstop) judges the dial itself, not just the
     // pre-flight resolution: with a strict policy the same loopback target is refused here too,
     // and nothing is dialled.
-    let cfg = ureq::Agent::config_builder().http_status_as_error(false).max_redirects(0).build();
+    let cfg = ark_net::http::builder().http_status_as_error(false).max_redirects(0).build();
     let guarded = ureq::Agent::with_parts(cfg, ureq::unversioned::transport::DefaultConnector::default(), HopResolver { url: ark_security::url_safety::UrlPolicy::default() });
     let e = guarded.get(&format!("http://127.0.0.1:{port}/x")).call().unwrap_err();
     assert!(matches!(&e, ureq::Error::Io(io) if io.kind() == std::io::ErrorKind::PermissionDenied && io.to_string().contains("private")), "{e}");

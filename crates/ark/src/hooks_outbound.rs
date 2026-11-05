@@ -178,7 +178,7 @@ pub fn build(event: HookEvent, t: &Target, body: Vec<u8>, delivery_id: &str, sec
 
 /// POST with bounded retries. Ok(status) on 2xx; Err(last error) otherwise.
 pub fn deliver(d: &Delivery, backoff: Duration) -> Result<u16, String> {
-    let agent: ureq::Agent = ureq::Agent::config_builder().http_status_as_error(false).max_redirects(0).timeout_global(Some(Duration::from_secs(d.timeout))).build().into();
+    let agent: ureq::Agent = ark_net::http::builder().http_status_as_error(false).max_redirects(0).timeout_global(Some(Duration::from_secs(d.timeout))).build().into();
     let mut last = String::new();
     for attempt in 1..=MAX_DELIVERY_ATTEMPTS {
         let mut req = agent.post(&d.url);

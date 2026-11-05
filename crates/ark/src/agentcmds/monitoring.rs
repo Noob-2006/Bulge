@@ -281,7 +281,8 @@ impl Otlp {
     }
 
     pub fn export(&self, batch: &[Value]) -> Result<u16, String> {
-        let agent: ureq::Agent = ureq::Agent::config_builder().http_status_as_error(false).max_redirects(0).timeout_global(Some(Duration::from_secs(10))).build().into();
+        ark_net::http::ensure_online("telemetry export")?;
+        let agent: ureq::Agent = ark_net::http::builder().http_status_as_error(false).max_redirects(0).timeout_global(Some(Duration::from_secs(10))).build().into();
         let mut req = agent.post(&self.url).header("content-type", "application/json");
         for (k, v) in &self.headers {
             req = req.header(k, v);
@@ -355,6 +356,10 @@ static ATTACHED: OnceLock<Arc<Otlp>> = OnceLock::new();
 pub fn attach(k: &Kernel) {
     let t = &k.cfg.telemetry;
     if !t.enabled || t.endpoint.trim().is_empty() || ATTACHED.get().is_some() {
+        return;
+    }
+    if let Err(e) = ark_net::http::ensure_online("telemetry export") {
+        eprintln!("ark: monitoring: {e}");
         return;
     }
     let o = Arc::new(Otlp::new(k));

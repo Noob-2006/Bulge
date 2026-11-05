@@ -133,7 +133,7 @@ fn write_private(path: &std::path::Path, data: &[u8]) -> std::io::Result<()> {
 }
 
 fn agent(timeout: Option<Duration>, per_read: Option<Duration>) -> ureq::Agent {
-    ureq::Agent::config_builder().http_status_as_error(false).timeout_connect(Some(Duration::from_secs(15))).timeout_global(timeout).timeout_per_read(per_read).build().into()
+    ark_net::http::builder().http_status_as_error(false).timeout_connect(Some(Duration::from_secs(15))).timeout_global(timeout).timeout_per_read(per_read).build().into()
 }
 
 fn multipart(parts: &[(String, String, String, Vec<u8>)]) -> (String, Vec<u8>) {

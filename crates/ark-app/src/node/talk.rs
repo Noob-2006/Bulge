@@ -158,7 +158,7 @@ pub fn transcribe(stt: &Stt, wav: &[u8]) -> Result<String, String> {
     }
     let boundary = format!("ark{}", ark_net::crypto::random_token(16));
     let body = multipart(&boundary, &fields, wav);
-    let agent: ureq::Agent = ureq::Agent::config_builder().http_status_as_error(false).timeout_global(Some(Duration::from_secs(120))).build().into();
+    let agent: ureq::Agent = ark_net::http::builder().http_status_as_error(false).timeout_global(Some(Duration::from_secs(120))).build().into();
     let mut r = agent.post(&url).header("content-type", &format!("multipart/form-data; boundary={boundary}"));
     let key = stt.key.clone().or_else(|| stt.key_env.as_deref().and_then(|k| std::env::var(k).ok()));
     if let Some(k) = key.filter(|k| !k.is_empty()) {

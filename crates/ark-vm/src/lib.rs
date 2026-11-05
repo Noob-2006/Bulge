@@ -16,8 +16,10 @@
 //! The `ark-tools` `vm` exec backend is the thin adapter from this crate to the
 //! `ExecBackend` trait; it deliberately contains no VM logic.
 
+pub mod cgroup;
 pub mod channel;
 pub mod config;
+pub mod hostcaps;
 pub mod image;
 pub mod isolation;
 pub mod limits;

@@ -137,7 +137,7 @@ pub fn chromium_download_url(cfg: &crate::config::BrowserConfig, explicit: Optio
     if base.ends_with(".zip") {
         return Ok(base.to_string());
     }
-    let body = ureq::get(CFT_INDEX)
+    let body = ark_net::http::agent().get(CFT_INDEX)
         .call()
         .map_err(|e| format!("Chrome for Testing index: {e}. Pass --url, or set browser.install_base_url to a zip URL."))?
         .body_mut()
@@ -166,7 +166,7 @@ pub fn install_chromium(cfg: &crate::config::BrowserConfig, home: &Path, explici
     }
     let url = chromium_download_url(cfg, explicit_url)?;
     log(&format!("   downloading {url}"));
-    let mut resp = ureq::get(&url).call().map_err(|e| format!("download {url}: {e}"))?;
+    let mut resp = ark_net::http::agent().get(&url).call().map_err(|e| format!("download {url}: {e}"))?;
     let body = resp.body_mut().with_config().limit(512 * 1024 * 1024).read_to_vec().map_err(|e| format!("download {url}: {e}"))?;
     if !body.starts_with(b"PK\x03\x04") {
         return Err(format!("{url} did not return a zip archive"));

@@ -21,6 +21,7 @@ toml.workspace = true
 regex.workspace = true
 libc.workspace = true
 ureq.workspace = true # decision provider HTTP (OpenAI /decisions)
+ark-net.workspace = true # ark_net::http::builder — the one outbound client builder (proxy/CA/offline)
 base64.workspace = true
 # SQLite index (sessions FTS5, unified memory table, chunk vectors, spilled tool output).
 # `bundled` compiles SQLite in statically: no system libsqlite3, works for the musl build.

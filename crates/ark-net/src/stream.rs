@@ -1,10 +1,11 @@
 //! A TCP or TLS client stream with read timeouts, for protocols ureq does not
 //! speak (WebSocket gateways, IRC, raw TCP). TLS uses rustls with the bundled
-//! Mozilla roots, the same trust store ureq uses.
+//! Mozilla roots, the same trust store ureq uses — or the `[network]` CA bundle, and
+//! through the `[network]` HTTP proxy (`CONNECT`) unless NO_PROXY matches (`crate::http`).
 
 use std::io::{self, Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, OnceLock, RwLock};
 use std::time::Duration;
 
 pub enum Stream {
@@ -12,31 +13,96 @@ pub enum Stream {
     Tls(Box<rustls::StreamOwned<rustls::ClientConnection, TcpStream>>),
 }
 
-fn tls_config() -> Arc<rustls::ClientConfig> {
-    static CFG: OnceLock<Arc<rustls::ClientConfig>> = OnceLock::new();
-    CFG.get_or_init(|| {
-        let roots = rustls::RootCertStore { roots: webpki_roots::TLS_SERVER_ROOTS.to_vec() };
-        let provider = Arc::new(rustls::crypto::ring::default_provider());
-        let cfg = rustls::ClientConfig::builder_with_provider(provider)
-            .with_safe_default_protocol_versions()
-            .expect("rustls protocol versions")
-            .with_root_certificates(roots)
-            .with_no_client_auth();
-        Arc::new(cfg)
-    })
-    .clone()
+fn tls_slot() -> &'static RwLock<Option<Arc<rustls::ClientConfig>>> {
+    static CFG: OnceLock<RwLock<Option<Arc<rustls::ClientConfig>>>> = OnceLock::new();
+    CFG.get_or_init(Default::default)
 }
 
-impl Stream {
-    pub fn connect(host: &str, port: u16, tls: bool, timeout: Duration) -> io::Result<Stream> {
-        let addr = (host, port)
-            .to_socket_addrs()?
-            .next()
-            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, format!("cannot resolve {host}")))?;
+/// Drop the cached TLS config (the CA bundle changed: `crate::http::configure`).
+pub(crate) fn reset_tls() {
+    *tls_slot().write().unwrap() = None;
+}
+
+/// The trust store for raw TLS streams: the `[network]` CA bundle when one is configured
+/// (ent-037, the same roots every ureq agent uses), else the bundled Mozilla roots.
+fn root_store() -> rustls::RootCertStore {
+    if let Some(certs) = crate::http::custom_roots() {
+        let mut roots = rustls::RootCertStore::empty();
+        let (ok, _bad) = roots.add_parsable_certificates(certs.iter().map(|c| rustls::pki_types::CertificateDer::from(c.der().to_vec())));
+        if ok > 0 {
+            return roots;
+        }
+        eprintln!("ark: warning: CA bundle has no usable certificates; using built-in roots");
+    }
+    rustls::RootCertStore { roots: webpki_roots::TLS_SERVER_ROOTS.to_vec() }
+}
+
+fn tls_config() -> Arc<rustls::ClientConfig> {
+    let cached = !crate::http::overridden();
+    if let Some(c) = tls_slot().read().unwrap().as_ref().filter(|_| cached) {
+        return c.clone();
+    }
+    let provider = Arc::new(rustls::crypto::ring::default_provider());
+    let cfg = Arc::new(rustls::ClientConfig::builder_with_provider(provider).with_safe_default_protocol_versions().expect("rustls protocol versions").with_root_certificates(root_store()).with_no_client_auth());
+    if cached {
+        *tls_slot().write().unwrap() = Some(cfg.clone());
+    }
+    cfg
+}
+
+/// Open a TCP connection to `host:port`, through the configured HTTP proxy (`CONNECT`) unless
+/// NO_PROXY says direct (ent-036: gateways and IRC follow the same proxy as HTTP).
+fn open_tcp(host: &str, port: u16, timeout: Duration) -> io::Result<TcpStream> {
+    let target = format!("{}:{port}", if host.contains(':') { format!("[{host}]") } else { host.to_string() });
+    let c = crate::http::current();
+    let proxy = crate::http::proxy_url(&c).filter(|_| !crate::http::is_direct(&format!("tcp://{target}/")));
+    if crate::http::offline() && !crate::http::offline_allows(&c, host) {
+        return Err(io::Error::new(io::ErrorKind::PermissionDenied, format!("offline mode: connection to {host} refused")));
+    }
+    let connect = |h: &str, p: u16| -> io::Result<TcpStream> {
+        let addr = (h, p).to_socket_addrs()?.next().ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, format!("cannot resolve {h}")))?;
         let tcp = TcpStream::connect_timeout(&addr, timeout)?;
         tcp.set_nodelay(true)?;
         tcp.set_read_timeout(Some(timeout))?;
         tcp.set_write_timeout(Some(timeout))?;
+        Ok(tcp)
+    };
+    let Some(proxy) = proxy else { return connect(host, port) };
+    let proxy = if proxy.contains("://") { proxy } else { format!("http://{proxy}") };
+    let pu = Url::parse(&proxy).map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, format!("proxy {proxy}: {e}")))?;
+    if !proxy.starts_with("http://") {
+        // SOCKS / HTTPS proxies are ureq-only; a raw stream goes direct rather than failing.
+        return connect(host, port);
+    }
+    let mut tcp = connect(&pu.host, pu.port)?;
+    let mut req = format!("CONNECT {target} HTTP/1.1\r\nHost: {target}\r\n");
+    if let Some((_, rest)) = proxy.split_once("://") {
+        if let Some((userinfo, _)) = rest.split('/').next().unwrap_or("").rsplit_once('@') {
+            use base64::Engine;
+            let up = urldecode(userinfo);
+            req.push_str(&format!("Proxy-Authorization: Basic {}\r\n", base64::engine::general_purpose::STANDARD.encode(up)));
+        }
+    }
+    req.push_str("\r\n");
+    tcp.write_all(req.as_bytes())?;
+    let mut head = Vec::new();
+    let mut b = [0u8; 1];
+    while !head.ends_with(b"\r\n\r\n") {
+        if tcp.read(&mut b)? == 0 || head.len() > 8192 {
+            return Err(io::Error::new(io::ErrorKind::ConnectionAborted, "proxy closed during CONNECT"));
+        }
+        head.push(b[0]);
+    }
+    let status = String::from_utf8_lossy(&head).lines().next().unwrap_or("").to_string();
+    if status.split_whitespace().nth(1) != Some("200") {
+        return Err(io::Error::other(format!("proxy refused CONNECT {target}: {status}")));
+    }
+    Ok(tcp)
+}
+
+impl Stream {
+    pub fn connect(host: &str, port: u16, tls: bool, timeout: Duration) -> io::Result<Stream> {
+        let tcp = open_tcp(host, port, timeout)?;
         if !tls {
             return Ok(Stream::Plain(tcp));
         }
@@ -259,5 +325,38 @@ mod tests {
         assert_eq!(urldecode("a%20b+c%E4%B8%AD%zz%"), "a b c中%zz%");
         assert_eq!(parse_query("a=1&b=x%20y&flag"), vec![("a".into(), "1".into()), ("b".into(), "x y".into()), ("flag".into(), String::new())]);
         assert_eq!(form_encode(&[("k", "v w"), ("x", "&")]), "k=v%20w&x=%26");
+    }
+
+    #[test]
+    fn raw_streams_tunnel_through_the_configured_proxy() {
+        use std::net::TcpListener;
+        // Fake proxy: answers CONNECT, then echoes one line back through the tunnel.
+        let l = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = l.local_addr().unwrap().port();
+        let h = std::thread::spawn(move || {
+            let (mut s, _) = l.accept().unwrap();
+            let mut head = Vec::new();
+            let mut b = [0u8; 1];
+            while !head.ends_with(b"\r\n\r\n") {
+                s.read_exact(&mut b).unwrap();
+                head.push(b[0]);
+            }
+            s.write_all(b"HTTP/1.1 200 Connection established\r\n\r\n").unwrap();
+            let mut buf = [0u8; 5];
+            s.read_exact(&mut buf).unwrap();
+            s.write_all(&buf).unwrap();
+            String::from_utf8_lossy(&head).to_string()
+        });
+        let c = crate::http::NetConfig { proxy: Some(format!("http://user:pw@127.0.0.1:{port}")), ..Default::default() };
+        crate::http::with_config(c, || {
+            let mut s = Stream::connect("10.255.255.2", 6667, false, Duration::from_secs(5)).unwrap();
+            s.write_all(b"PING\n").unwrap();
+            let mut buf = [0u8; 5];
+            s.read_exact(&mut buf).unwrap();
+            assert_eq!(&buf, b"PING\n");
+        });
+        let head = h.join().unwrap();
+        assert!(head.starts_with("CONNECT 10.255.255.2:6667 HTTP/1.1"), "{head}");
+        assert!(head.contains("Proxy-Authorization: Basic dXNlcjpwdw=="), "{head}");
     }
 }

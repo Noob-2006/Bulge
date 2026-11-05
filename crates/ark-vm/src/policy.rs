@@ -132,14 +132,9 @@ pub fn auto_with(caps: &Capabilities, cfg: &VmConfig, sandboxed: bool) -> Plan {
     }
     let why = blockers(caps);
     let fix = if caps.kvm { " Build the guest image (`ark sandbox vm image build`) for a microVM." } else { "" };
-    let backend = if caps.bwrap.is_some() {
-        "bwrap"
-    } else if cfg!(target_os = "linux") {
-        "landlock"
-    } else {
-        "local"
-    };
+    let (backend, degraded) = namespace_choice(caps);
     let level = isolation_of_backend(backend);
+    let degraded = if degraded.is_empty() { String::new() } else { format!(" Degraded: {}.", degraded.join("; ")) };
     if level != IsolationLevel::Host {
         return Plan {
             backend: backend.into(),
@@ -147,7 +142,7 @@ pub fn auto_with(caps: &Capabilities, cfg: &VmConfig, sandboxed: bool) -> Plan {
             level,
             origin: Origin::AutoFallback,
             warning: Some(format!(
-                "no microVM available ({why}); {} runs in a {} instead (host home and keys not mounted) — {}.{fix}",
+                "no microVM available ({why}); {} runs in a {} instead (host home and keys not mounted) — {}.{degraded}{fix}",
                 if sandboxed { "this session" } else { "the agent" },
                 level.label(),
                 level.warning().unwrap_or("weaker than a microVM")
@@ -159,7 +154,45 @@ pub fn auto_with(caps: &Capabilities, cfg: &VmConfig, sandboxed: bool) -> Plan {
             },
         };
     }
-    host_plan(&why, fix)
+    host_plan(&format!("{why}; {}", degraded.trim().trim_start_matches("Degraded: ").trim_end_matches('.')), fix)
+}
+
+/// The namespace-level fallback this host can actually run, and every step down it took on
+/// the way (ent-023/026): bwrap needs unprivileged user namespaces; Landlock needs kernel
+/// ≥ 5.13 with `landlock` in the LSM list; then a container engine (docker's root daemon works
+/// without user namespaces, rootless podman does not); else the host. The decision reads
+/// [`Capabilities::host`], so it is tested against fake kernels, not the CI machine.
+pub fn namespace_choice(caps: &Capabilities) -> (&'static str, Vec<String>) {
+    let h = &caps.host;
+    let mut degraded = vec![];
+    if caps.bwrap.is_some() {
+        if h.userns {
+            return ("bwrap", degraded);
+        }
+        degraded.push(format!("bwrap is installed but unprivileged user namespaces are disabled ({})", h.userns_blocker.as_deref().unwrap_or("sysctl")));
+    }
+    if cfg!(target_os = "linux") {
+        if h.landlock_abi >= 1 {
+            if h.landlock_abi < 4 {
+                degraded.push(format!("Landlock ABI {} restricts files only (a sandboxed session with network = \"none\" needs ABI 4 / kernel 6.7)", h.landlock_abi));
+            }
+            return ("landlock", degraded);
+        }
+        degraded.push(if h.version < (5, 13) && h.version != (0, 0) { format!("kernel {}.{} has no Landlock (needs 5.13+)", h.version.0, h.version.1) } else { "Landlock is not in the kernel's active LSM list".to_string() });
+    }
+    if caps.docker.is_some() {
+        degraded.push("using the docker container backend (shared kernel, root daemon)".into());
+        return ("docker", degraded);
+    }
+    if caps.podman.is_some() {
+        if h.userns {
+            degraded.push("using the rootless podman container backend (shared kernel)".into());
+            return ("podman", degraded);
+        }
+        degraded.push("podman is installed but rootless podman needs user namespaces".into());
+    }
+    degraded.push("no container engine (docker/podman) either: only the static gates (approvals, command policy, path rules) apply".into());
+    ("local", degraded)
 }
 
 /// The last resort: no microVM and no namespace sandbox. Never silent.
@@ -300,5 +333,50 @@ mod tests {
         let p = host_plan("/dev/kvm is missing", "");
         assert_eq!((p.backend.as_str(), p.level, p.origin), ("local", IsolationLevel::Host, Origin::AutoHost));
         assert!(p.warning.as_deref().unwrap_or("").starts_with("NOT ISOLATED"), "{p:?}");
+    }
+
+    /// ent-023/026: the fallback is decided from what the kernel can do, read from fake
+    /// `/proc` + `/sys` trees for the distributions enterprises run.
+    #[test]
+    fn old_kernels_degrade_step_by_step_and_say_why() {
+        use crate::hostcaps::{fake, HostKernel};
+        let t = crate::hostcaps::tests_support::ark_tmp("policy-degrade");
+        let host = |h: &fake::Host| {
+            let root = t.join(h.release);
+            fake::build(&root, h);
+            HostKernel::detect_in(&root)
+        };
+        let bwrap = Some(PathBuf::from("/usr/bin/bwrap"));
+        let docker = Some(PathBuf::from("/usr/bin/docker"));
+        let podman = Some(PathBuf::from("/usr/bin/podman"));
+        let plan = |caps: Capabilities| auto_with(&caps, &vm_cfg(), true);
+
+        // RHEL 8: bwrap installed, user namespaces off, no Landlock, no engine → host + static gates.
+        let p = plan(Capabilities { bwrap: bwrap.clone(), host: host(&fake::RHEL8), ..Default::default() });
+        assert_eq!((p.backend.as_str(), p.origin), ("local", Origin::AutoHost), "{p:?}");
+        let w = p.warning.unwrap();
+        assert!(w.starts_with("NOT ISOLATED") && w.contains("user.max_user_namespaces = 0") && w.contains("kernel 4.18 has no Landlock") && w.contains("static gates"), "{w}");
+        // … with docker: the container backend, and the steps down are named.
+        let p = plan(Capabilities { bwrap: bwrap.clone(), docker: docker.clone(), host: host(&fake::RHEL8), ..Default::default() });
+        assert_eq!((p.backend.as_str(), p.level), ("docker", IsolationLevel::Container), "{p:?}");
+        assert!(p.warning.as_deref().unwrap().contains("Degraded: bwrap is installed but unprivileged user namespaces are disabled"), "{p:?}");
+        // … rootless podman needs user namespaces: not chosen on RHEL 7.
+        let p = plan(Capabilities { podman: podman.clone(), host: host(&fake::RHEL7), ..Default::default() });
+        assert_eq!(p.backend, "local", "{p:?}");
+        assert!(p.warning.as_deref().unwrap().contains("rootless podman needs user namespaces"), "{p:?}");
+        // Amazon Linux 2 (4.14, user namespaces on): bwrap works, no Landlock needed.
+        let p = plan(Capabilities { bwrap: bwrap.clone(), host: host(&fake::AL2), ..Default::default() });
+        assert_eq!(p.backend, "bwrap", "{p:?}");
+        // Ubuntu 20.04 (5.4): no bwrap, no Landlock → rootless podman.
+        let p = plan(Capabilities { podman, host: host(&fake::UBUNTU20), ..Default::default() });
+        assert_eq!(p.backend, "podman", "{p:?}");
+        assert!(p.warning.as_deref().unwrap().contains("kernel 5.4 has no Landlock"), "{p:?}");
+        // A current kernel without bwrap → Landlock, no degradation note.
+        let p = plan(Capabilities { host: host(&fake::MODERN), ..Default::default() });
+        assert_eq!(p.backend, "landlock", "{p:?}");
+        assert!(!p.warning.as_deref().unwrap().contains("Degraded"), "{p:?}");
+        // Landlock ABI 3 (6.6): chosen, with the network caveat spelled out.
+        let p = plan(Capabilities { host: host(&fake::Host { release: "6.6.30", ..fake::MODERN }), ..Default::default() });
+        assert!(p.backend == "landlock" && p.warning.as_deref().unwrap().contains("ABI 3 restricts files only"), "{p:?}");
     }
 }

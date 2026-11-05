@@ -271,7 +271,7 @@ pub fn parse_message(v: &Value, include_body: bool, max_bytes: usize) -> Mail {
 
 impl Gmail {
     pub fn new(cfg: GmailCfg) -> Gmail {
-        let agent = ureq::Agent::config_builder().http_status_as_error(false).timeout_connect(Some(Duration::from_secs(15))).timeout_global(Some(Duration::from_secs(60))).build().into();
+        let agent = ark_net::http::builder().http_status_as_error(false).timeout_connect(Some(Duration::from_secs(15))).timeout_global(Some(Duration::from_secs(60))).build().into();
         Gmail { cfg, agent, token: Mutex::new(None) }
     }
 

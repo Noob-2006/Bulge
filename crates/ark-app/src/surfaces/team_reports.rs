@@ -240,7 +240,7 @@ struct Http {
 
 impl Http {
     fn new(base: &str, what: &str, headers: Vec<(String, String)>, token: String) -> Result<Http, String> {
-        let agent: ureq::Agent = ureq::Agent::config_builder().http_status_as_error(false).timeout_global(Some(Duration::from_secs(30))).build().into();
+        let agent: ureq::Agent = ark_net::http::builder().http_status_as_error(false).timeout_global(Some(Duration::from_secs(30))).build().into();
         Ok(Http { agent, base: check_base(base, what)?, headers, token, calls: 0, max_wait: 60 })
     }
 

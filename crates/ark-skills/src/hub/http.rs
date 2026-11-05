@@ -105,6 +105,7 @@ impl Http {
 
     /// The policy check applied to every hop.
     pub fn check(&self, url: &str) -> Result<(), String> {
+        ark_net::http::ensure_online("the skills hub")?;
         if let Some(m) = ark_security::url_safety::check_website_global(url) {
             return Err(m);
         }
@@ -173,7 +174,7 @@ impl Http {
 
     /// Guarded GET: None on a blocked hop, transport error or too many redirects.
     pub fn get(&self, url: &str) -> Option<Resp> {
-        let agent: ureq::Agent = ureq::Agent::config_builder().timeout_global(Some(Duration::from_secs(20))).http_status_as_error(false).max_redirects(0).build().into();
+        let agent: ureq::Agent = ark_net::http::builder().timeout_global(Some(Duration::from_secs(20))).http_status_as_error(false).max_redirects(0).build().into();
         let mut cur = url.to_string();
         for _ in 0..=MAX_REDIRECTS {
             if self.check(&cur).is_err() {
@@ -204,7 +205,7 @@ impl Http {
     /// One guarded request with a JSON body (`POST` / `PUT` / `PATCH`); no redirects.
     pub fn send_json(&self, method: &str, url: &str, body: &Value) -> Result<Resp, String> {
         self.check(url)?;
-        let agent: ureq::Agent = ureq::Agent::config_builder().timeout_global(Some(Duration::from_secs(30))).http_status_as_error(false).max_redirects(0).build().into();
+        let agent: ureq::Agent = ark_net::http::builder().timeout_global(Some(Duration::from_secs(30))).http_status_as_error(false).max_redirects(0).build().into();
         let data = serde_json::to_vec(body).unwrap_or_default();
         let mut req = match method {
             "PUT" => agent.put(url),
@@ -319,6 +320,16 @@ pub mod testserver {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn offline_mode_stops_the_hub_ent039() {
+        let s = Settings::from_table(&toml::Table::new());
+        let st = Store::at(std::path::Path::new("/nonexistent/ark-hub-offline"));
+        let h = Http::new(&s, &st);
+        let offline = ark_net::http::NetConfig { offline: true, ..Default::default() };
+        let e = ark_net::http::with_config(offline, || h.check("https://github.com/x/y")).unwrap_err();
+        assert!(e.contains("skills hub") && e.contains("offline"), "{e}");
+    }
 
     #[test]
     fn redirects_policy_and_cache() {

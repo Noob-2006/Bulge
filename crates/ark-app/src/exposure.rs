@@ -17,7 +17,14 @@
 //! [app.exposure]
 //! allow_public = false               # a non-loopback listen needs this
 //! behind_proxy = false               # an https reverse proxy terminates TLS for us
-//! tls = false                        # ark terminates TLS itself (not implemented yet)
+//! tls = false                        # ark terminates TLS itself (ent-121): needs cert + key
+//! cert = "/etc/ark/tls/server.pem"   # PEM chain
+//! key = "/etc/ark/tls/server.key"    # PEM private key
+//! client_auth = "off"                # mTLS: "optional" | "require" (needs client_ca)
+//! client_ca = "/etc/ark/tls/clients-ca.pem"
+//! client_identities = [              # verified certificate → access (scope or RBAC role)
+//!   { id = "spiffe://corp.example/ops/*", scope = "operator" },
+//! ]
 //! rate_limit_per_min = 1200          # per client IP; 0 turns it off (never for public binds)
 //! ```
 //!
@@ -50,9 +57,23 @@ pub struct ExposureConfig {
     pub allow_public: bool,
     /// An https reverse proxy (or tunnel) terminates TLS in front of ark.
     pub behind_proxy: bool,
-    /// ark terminates TLS itself. Not implemented yet: `check` accepts it, but the listener
-    /// is plain HTTP, so keep it false and use `behind_proxy`.
+    /// ark terminates TLS itself (`cert` + `key`; ent-121).
     pub tls: bool,
+    /// PEM certificate chain for `tls`.
+    pub cert: Option<String>,
+    /// PEM private key for `tls`.
+    pub key: Option<String>,
+    /// Mutual TLS: `off` (default), `optional` (verify when sent) or `require`.
+    pub client_auth: String,
+    /// PEM roots client certificates must chain to (mTLS).
+    pub client_ca: Option<String>,
+    /// Verified client certificates and what they may do. `id` is the certificate's identity —
+    /// its SPIFFE ID, another SAN URI, `dns:<name>` or `sha256:<fingerprint>` — exactly, or as a
+    /// prefix with a trailing `*`. `scope` takes a token scope or an RBAC role.
+    pub client_identities: Vec<ClientIdentity>,
+    /// Workload identities (SPIFFE IDs, exact or `prefix*`) that may connect as nodes without a
+    /// device token or operator approval (ent-059); needs `tls` with `client_auth`.
+    pub node_identities: Vec<String>,
     /// Requests per minute per client IP; 0 = off (refused when public).
     pub rate_limit_per_min: u32,
     /// With `behind_proxy`: the proxies whose `X-Forwarded-For` is believed (IPs or CIDRs).
@@ -60,9 +81,49 @@ pub struct ExposureConfig {
     pub trusted_proxies: Vec<String>,
 }
 
+/// `[[app.exposure.client_identities]]`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ClientIdentity {
+    pub id: String,
+    #[serde(default = "d_scope")]
+    pub scope: String,
+    #[serde(default)]
+    pub name: Option<String>,
+}
+
+impl ClientIdentity {
+    pub fn matches(&self, id: &str) -> bool {
+        match self.id.strip_suffix('*') {
+            Some(prefix) => id.starts_with(prefix),
+            None => self.id == id,
+        }
+    }
+}
+
 impl Default for ExposureConfig {
     fn default() -> Self {
-        ExposureConfig { allow_public: false, behind_proxy: false, tls: false, rate_limit_per_min: 1200, trusted_proxies: vec![] }
+        ExposureConfig { allow_public: false, behind_proxy: false, tls: false, cert: None, key: None, client_auth: "off".into(), client_ca: None, client_identities: vec![], node_identities: vec![], rate_limit_per_min: 1200, trusted_proxies: vec![] }
+    }
+}
+
+impl ExposureConfig {
+    pub fn client_auth_mode(&self) -> Result<ark_net::tlsd::ClientAuth, String> {
+        ark_net::tlsd::ClientAuth::parse(&self.client_auth).map_err(|e| format!("[app.exposure] {e}"))
+    }
+    /// The listener's TLS settings, when `tls = true`.
+    pub fn server_tls(&self) -> Option<ark_net::tlsd::ServerTls> {
+        self.tls.then(|| ark_net::tlsd::ServerTls {
+            cert: self.cert.clone().unwrap_or_default(),
+            key: self.key.clone().unwrap_or_default(),
+            client_ca: self.client_ca.clone(),
+            client_auth: self.client_auth_mode().unwrap_or_default(),
+        })
+    }
+    /// The access a verified client certificate identity maps to (first match wins).
+    pub fn client_access(&self, id: &str) -> Option<(&ClientIdentity, Result<Scope, crate::identity::Role>)> {
+        let c = self.client_identities.iter().find(|c| c.matches(id))?;
+        Some((c, Scope::parse(&c.scope).map_err(|_| crate::identity::Role::parse(&c.scope).unwrap_or(crate::identity::Role::Auditor))))
     }
 }
 
@@ -259,6 +320,10 @@ pub fn surface(cfg: &AppConfig) -> policy::Surface<'_> {
 
 /// What callers can prove. A bare token — even several, even scoped — is one shared string.
 pub fn auth_strength(cfg: &AppConfig) -> policy::AuthStrength {
+    // Required mutual TLS: every caller holds a device-bound key before any token is looked at.
+    if cfg.exposure.tls && cfg.exposure.client_auth_mode() == Ok(ark_net::tlsd::ClientAuth::Require) && cfg.exposure.client_ca.is_some() {
+        return policy::AuthStrength::Device;
+    }
     if cfg.auth.enabled {
         let provider = cfg.auth.provider.trim().to_ascii_lowercase();
         return if provider.is_empty() || provider == "basic" { policy::AuthStrength::DashboardBasic } else { policy::AuthStrength::Provider };
@@ -277,10 +342,11 @@ pub fn check_start(cfg: &AppConfig) -> Result<(), String> {
     // `start` only runs for an enabled server; the surface is enabled by the time we judge it.
     let mut s = surface(cfg);
     s.enabled = true;
-    // Direct TLS is a policy layer the listener does not implement (it speaks plain HTTP); the
-    // honest fix is a TLS-terminating proxy, so we do not let `tls = true` stand in for one.
-    if s.tls && !s.behind_proxy && !policy::is_loopback(s.listen) {
-        return Err("[app.exposure] tls = true is not implemented (the listener speaks plain HTTP); terminate TLS in a reverse proxy and set [app.exposure] behind_proxy = true".into());
+    // Native TLS (ent-121): `tls = true` only counts when the listener really can speak it —
+    // a certificate and key that load, and a client CA when mTLS is asked for.
+    cfg.exposure.client_auth_mode()?;
+    if let Some(t) = cfg.exposure.server_tls() {
+        t.config().map_err(|e| format!("[app.exposure] tls = true: {e}"))?;
     }
     match policy::refusal(&s) {
         Some(msg) => Err(msg),
@@ -418,10 +484,20 @@ mod tests {
         let full = cfg_with("listen = \"0.0.0.0:8640\"\ntoken = \"t\"\nallow_origins = [\"https://ark.example\"]\n[exposure]\nallow_public = true\nbehind_proxy = true\n[auth]\nenabled = true\nprovider = \"self_hosted\"\nsecret = \"x\"");
         assert!(check_start(&full).is_ok(), "{:?}", check_start(&full));
 
-        // Direct TLS is accepted by the pure policy but not by the app server: it would be a
-        // plaintext listener wearing a TLS label.
+        // `tls = true` without a loadable certificate is refused: it would be a plaintext
+        // listener wearing a TLS label.
         let fake_tls = cfg_with("listen = \"0.0.0.0:8640\"\ntoken = \"t\"\nallow_origins = [\"https://ark.example\"]\n[exposure]\nallow_public = true\ntls = true\n[auth]\nenabled = true\nprovider = \"self_hosted\"\nsecret = \"x\"");
-        assert!(check_start(&fake_tls).unwrap_err().contains("behind_proxy"), "{:?}", check_start(&fake_tls));
+        assert!(check_start(&fake_tls).unwrap_err().contains("certificate"), "{:?}", check_start(&fake_tls));
+        // Native TLS with a real certificate passes; required mTLS counts as strong auth on its
+        // own (A9 layer 2: a device-bound key), with no IdP in front.
+        let td = |f: &str| format!("{}/../ark-net/src/testdata/{f}", env!("CARGO_MANIFEST_DIR"));
+        let real_tls = cfg_with(&format!("listen = \"0.0.0.0:8640\"\ntoken = \"t\"\nallow_origins = [\"https://ark.example\"]\n[exposure]\nallow_public = true\ntls = true\ncert = {:?}\nkey = {:?}\nclient_auth = \"require\"\nclient_ca = {:?}", td("server.pem"), td("server.key"), td("ca.pem")));
+        assert_eq!(auth_strength(&real_tls), policy::AuthStrength::Device);
+        assert!(check_start(&real_tls).is_ok(), "{:?}", check_start(&real_tls));
+        let no_ca = cfg_with(&format!("listen = \"127.0.0.1:8640\"\ntoken = \"t\"\n[exposure]\ntls = true\ncert = {:?}\nkey = {:?}\nclient_auth = \"require\"", td("server.pem"), td("server.key")));
+        assert!(check_start(&no_ca).unwrap_err().contains("client_ca"));
+        let bad_mode = cfg_with("token = \"t\"\n[exposure]\nclient_auth = \"sometimes\"");
+        assert!(check_start(&bad_mode).unwrap_err().contains("client_auth"));
 
         // "basic" is a shared password: still one string, so still weak.
         let basic = cfg_with("listen = \"0.0.0.0:8640\"\ntoken = \"t\"\nallow_origins = [\"https://ark.example\"]\n[exposure]\nallow_public = true\nbehind_proxy = true\n[auth]\nenabled = true\nprovider = \"basic\"\nsecret = \"x\"");

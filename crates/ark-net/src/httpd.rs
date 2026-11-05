@@ -130,6 +130,8 @@ impl Default for Opts {
 pub struct Server {
     addr: SocketAddr,
     stop: Arc<AtomicBool>,
+    /// TLS mode: the plain server behind the terminator (`bind_tls`).
+    inner: Option<Box<Server>>,
 }
 
 impl Server {
@@ -139,7 +141,64 @@ impl Server {
         let stop = Arc::new(AtomicBool::new(false));
         let st = stop.clone();
         std::thread::Builder::new().name(format!("httpd {addr}")).spawn(move || accept_loop(l, st, opts, handler))?;
-        Ok(Server { addr, stop })
+        Ok(Server { addr, stop, inner: None })
+    }
+
+    /// Like [`Server::bind`], but speaking TLS (and mutual TLS when `tls.client_auth` asks for
+    /// it) on `addr` — see [`crate::tlsd`]. The handler sees the real peer address, and the
+    /// verified client certificate identity in the `x-ark-tls-client` header.
+    pub fn bind_tls(addr: &str, opts: Opts, handler: Handler, tls: &crate::tlsd::ServerTls) -> io::Result<Server> {
+        use crate::tlsd::{H_CLIENT, H_PEER, H_SECRET};
+        let cfg = tls.config().map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
+        let secret = Arc::new(crate::crypto::random_token(24));
+        let s2 = secret.clone();
+        let wrapped: Handler = Arc::new(move |mut r: Request| {
+            if !r.header(H_SECRET).is_some_and(|v| crate::crypto::ct_eq(v.as_bytes(), s2.as_bytes())) {
+                return Response::text(403, "forbidden");
+            }
+            let peer = r.header(H_PEER).and_then(|p| p.parse::<SocketAddr>().ok());
+            let client = r.header(H_CLIENT).map(str::to_string);
+            r.headers.retain(|(k, _)| !k.to_ascii_lowercase().starts_with("x-ark-tls-"));
+            r.head = r.head.split("\r\n").filter(|l| !l.to_ascii_lowercase().starts_with(H_SECRET)).collect::<Vec<_>>().join("\r\n");
+            if let Some(c) = client {
+                r.headers.push((H_CLIENT.into(), c));
+            }
+            r.peer = peer.or(r.peer);
+            handler(r)
+        });
+        let inner = Server::bind("127.0.0.1:0", opts.clone(), wrapped)?;
+        let inner_addr = inner.local_addr();
+        let l = TcpListener::bind(addr)?;
+        let addr = l.local_addr()?;
+        let stop = Arc::new(AtomicBool::new(false));
+        let st = stop.clone();
+        std::thread::Builder::new().name(format!("httpsd {addr}")).spawn(move || {
+            let live = Arc::new(AtomicUsize::new(0));
+            for conn in l.incoming() {
+                if st.load(Ordering::SeqCst) {
+                    break;
+                }
+                let Ok(s) = conn else { continue };
+                if live.load(Ordering::SeqCst) >= opts.max_conns {
+                    continue; // dropped before the handshake: no plaintext 503 on a TLS port
+                }
+                live.fetch_add(1, Ordering::SeqCst);
+                let (c, sec, lv, t) = (cfg.clone(), secret.clone(), live.clone(), opts.read_timeout);
+                let spawned = std::thread::Builder::new().name("httpsd conn".into()).spawn(move || {
+                    let _ = crate::tlsd::terminate(s, c, inner_addr, &sec, t);
+                    lv.fetch_sub(1, Ordering::SeqCst);
+                });
+                if spawned.is_err() {
+                    live.fetch_sub(1, Ordering::SeqCst);
+                }
+            }
+        })?;
+        Ok(Server { addr, stop, inner: Some(Box::new(inner)) })
+    }
+
+    /// Whether this server speaks TLS.
+    pub fn is_tls(&self) -> bool {
+        self.inner.is_some()
     }
     pub fn local_addr(&self) -> SocketAddr {
         self.addr
@@ -414,5 +473,52 @@ mod tests {
         let mut out = String::new();
         let _ = slow.read_to_string(&mut out);
         assert!(out.starts_with("HTTP/1.1 408"), "{out}");
+    }
+
+    #[test]
+    fn tls_and_mutual_tls_with_the_real_peer_and_client_identity() {
+        let td = |f: &str| format!("{}/src/testdata/{f}", env!("CARGO_MANIFEST_DIR"));
+        let tls = crate::tlsd::ServerTls { cert: td("server.pem"), key: td("server.key"), client_ca: Some(td("ca.pem")), client_auth: crate::tlsd::ClientAuth::Optional };
+        let h: Handler = Arc::new(|r: Request| {
+            Response::text(200, &format!("peer={} client={} forged={}", r.peer.map(|p| p.ip().to_string()).unwrap_or_default(), r.header("x-ark-tls-client").unwrap_or("-"), r.header("x-ark-tls-peer").unwrap_or("-")))
+        });
+        let srv = Server::bind_tls("127.0.0.1:0", Opts::default(), h, &tls).unwrap();
+        assert!(srv.is_tls());
+        let url = format!("https://localhost:{}/x", srv.local_addr().port());
+        let get = |c: crate::http::NetConfig, forged: bool| {
+            crate::http::with_config(c, || {
+                let a = crate::http::agent();
+                let mut rq = a.get(&url);
+                if forged {
+                    rq = rq.header("x-ark-tls-client", "spiffe://evil/admin").header("x-ark-tls-peer", "1.2.3.4:1");
+                }
+                rq.call().map(|mut r| r.body_mut().read_to_string().unwrap()).map_err(|e| e.to_string())
+            })
+        };
+        let trust = crate::http::NetConfig { ca_file: Some(td("ca.pem")), ..Default::default() };
+        // Server-only TLS (client sends no certificate): the peer is real, no identity, and a
+        // client cannot inject the terminator's headers.
+        let body = get(trust.clone(), true).unwrap();
+        assert_eq!(body, "peer=127.0.0.1 client=- forged=-");
+        // mTLS: the verified SPIFFE ID reaches the handler.
+        let with_cert = crate::http::NetConfig { client_cert: Some(td("client.pem")), client_key: Some(td("client.key")), ..trust.clone() };
+        assert_eq!(get(with_cert.clone(), false).unwrap(), "peer=127.0.0.1 client=spiffe://example.org/ark/node/n1 forged=-");
+        // Without our CA the server certificate is refused (custom roots only, ent-037).
+        assert!(get(crate::http::NetConfig::default(), false).is_err());
+        // A certificate from an untrusted issuer fails the handshake.
+        let rogue = crate::http::NetConfig { client_cert: Some(td("other.pem")), client_key: Some(td("other.key")), ..trust.clone() };
+        assert!(get(rogue, false).is_err());
+        // The plain server behind the terminator refuses requests that bypass it.
+        let inner = srv.inner.as_ref().unwrap().local_addr();
+        let r = crate::http::with_config(trust.clone(), || crate::http::agent().get(&format!("http://{inner}/x")).call().map(|r| r.status().as_u16()).unwrap_or_else(|e| if let ureq::Error::StatusCode(c) = e { c } else { 0 }));
+        assert_eq!(r, 403);
+        // Required client auth: a client without a certificate cannot connect at all.
+        let req = crate::tlsd::ServerTls { client_auth: crate::tlsd::ClientAuth::Require, ..tls };
+        let h2: Handler = Arc::new(|r: Request| Response::text(200, r.header("x-ark-tls-client").unwrap_or("-")));
+        let srv2 = Server::bind_tls("127.0.0.1:0", Opts::default(), h2, &req).unwrap();
+        let url2 = format!("https://localhost:{}/", srv2.local_addr().port());
+        let call2 = |c| crate::http::with_config(c, || crate::http::agent().get(&url2).call().map(|mut r| r.body_mut().read_to_string().unwrap()).map_err(|e| e.to_string()));
+        assert!(call2(trust).is_err());
+        assert_eq!(call2(with_cert).unwrap(), "spiffe://example.org/ark/node/n1");
     }
 }

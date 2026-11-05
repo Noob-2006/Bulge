@@ -16,6 +16,9 @@ RestartSec=5s
 # SIGTERM to arkd first (it interrupts runs and saves state), then the rest of the group.
 KillMode=mixed
 TimeoutStopSec=30s
+# ent-024: a delegated cgroup subtree, so `[exec.cgroups]` can give every command its own
+# cgroup (escaped double-forks are reaped, memory/pids caps apply) on cgroup v1 and v2.
+Delegate=yes
 # ark refuses sudo by policy; make that impossible rather than merely discouraged.
 NoNewPrivileges=yes
 RestrictSUIDSGID=yes

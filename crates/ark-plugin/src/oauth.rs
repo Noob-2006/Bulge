@@ -83,7 +83,7 @@ fn now() -> u64 {
 }
 
 fn agent() -> ureq::Agent {
-    ureq::Agent::config_builder().http_status_as_error(false).timeout_global(Some(Duration::from_secs(30))).build().into()
+    ark_net::http::builder().http_status_as_error(false).timeout_global(Some(Duration::from_secs(30))).build().into()
 }
 
 fn read_json(resp: ureq::http::Response<ureq::Body>) -> Result<(u16, Value), String> {

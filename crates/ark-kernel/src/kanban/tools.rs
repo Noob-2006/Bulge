@@ -288,7 +288,7 @@ fn fetch_err(url: &str, e: ureq::Error) -> String {
 /// is decided by `ark_security::url_safety` (SSRF ranges, cloud-metadata floor, website
 /// blocklist) and the connection dials only the vetted addresses. Returns (bytes, content-type).
 pub fn download_capped(url: &str, max: u64, policy: &FetchPolicy) -> Result<(Vec<u8>, Option<String>), String> {
-    let cfg = ureq::Agent::config_builder().http_status_as_error(false).max_redirects(0).timeout_global(Some(Duration::from_secs(30))).build();
+    let cfg = ark_net::http::builder().http_status_as_error(false).max_redirects(0).timeout_global(Some(Duration::from_secs(30))).build();
     let agent = ureq::Agent::with_parts(cfg, ureq::unversioned::transport::DefaultConnector::default(), HopResolver { url: policy.url.clone() });
     let mut cur = url.to_string();
     for _ in 0..6 {

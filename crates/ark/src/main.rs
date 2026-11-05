@@ -2272,6 +2272,14 @@ fn cmd_doctor(a: &Args) -> R {
                 let pid = ark_kernel::context::split_model(&m).0;
                 check(&format!("model {m}"), p.key_source(pid).map(|s| format!("key from {s}")));
             }
+            // ent-086: which teams have their own model keys (`<KEY_ENV>__<TEAM>`).
+            let mut teams: Vec<String> = ark_kernel::agents::users(&paths).into_iter().map(|u| u.team).filter(|t| !t.is_empty()).collect();
+            teams.sort();
+            teams.dedup();
+            if !teams.is_empty() {
+                let own = p.team_keys(&teams);
+                println!("· team model keys: {}", teams.iter().map(|t| { let ps: Vec<&str> = own.iter().filter(|(x, _)| x == t).map(|(_, id)| id.as_str()).collect(); format!("{t}={}", if ps.is_empty() { "shared".to_string() } else { ps.join("+") }) }).collect::<Vec<_>>().join(", "));
+            }
         }
     }
     let tool = |bin: &str| std::process::Command::new(bin).arg("--version").output().map(|o| String::from_utf8_lossy(&o.stdout).lines().next().unwrap_or("").to_string()).map_err(|e| e.to_string());
@@ -2301,6 +2309,16 @@ fn cmd_doctor(a: &Args) -> R {
             Ok(cc) if cc.enabled() == Some(true) => println!("✓ computer_use: enabled ({})", ark_app::computer::driver_kind(&cc, &paths.data)),
             Ok(_) => println!("· computer_use: off (set [computer_use] enabled = true, or `ark computer-use status`)"),
             Err(e) => println!("· computer_use: {e}"),
+        }
+    }
+    // ent-085: keys past their rotation schedule (`ark secrets rotation`).
+    check("key rotation", ops::rotate::doctor_line(&paths));
+    // ent-036/037/039: the outbound network policy every HTTP/TLS client is built with.
+    for (k, v) in ark_net::http::describe() {
+        if k == "ca" && v.contains("falling back") {
+            check("network ca", Err(v));
+        } else {
+            println!("· network {k}: {v}");
         }
     }
     let sock = paths.socket();

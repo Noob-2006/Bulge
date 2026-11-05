@@ -29,7 +29,7 @@ pub struct Api {
 
 impl Api {
     pub fn new(base: &str, headers: Vec<(String, String)>) -> Api {
-        let agent = ureq::Agent::config_builder().http_status_as_error(false).timeout_connect(Some(Duration::from_secs(30))).timeout_global(Some(Duration::from_secs(3600))).build().into();
+        let agent = ark_net::http::builder().http_status_as_error(false).timeout_connect(Some(Duration::from_secs(30))).timeout_global(Some(Duration::from_secs(3600))).build().into();
         Api { base: base.trim_end_matches('/').to_string(), headers, query: String::new(), agent, retry_delay: Duration::from_millis(100) }
     }
 

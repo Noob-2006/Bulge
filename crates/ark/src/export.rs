@@ -364,7 +364,7 @@ pub fn hf_token(vault: &Vault, secret: &str) -> Option<String> {
 }
 
 fn http() -> ureq::Agent {
-    ureq::Agent::config_builder().http_status_as_error(false).timeout_global(Some(std::time::Duration::from_secs(60))).build().into()
+    ark_net::http::builder().http_status_as_error(false).timeout_global(Some(std::time::Duration::from_secs(60))).build().into()
 }
 
 fn body_json(r: ureq::http::Response<ureq::Body>) -> (u16, Value, String) {

@@ -58,7 +58,7 @@ impl Managed {
 
     fn healthy(port: u16) -> bool {
         let url = format!("http://127.0.0.1:{port}/health");
-        let a: ureq::Agent = ureq::Agent::config_builder()
+        let a: ureq::Agent = ark_net::http::builder()
             .http_status_as_error(false)
             .timeout_global(Some(Duration::from_secs(3)))
             .proxy(None)

@@ -406,7 +406,7 @@ fn fetch(cu: &Cu) -> Result<PathBuf, String> {
         .artifact
         .clone()
         .ok_or("cua-driver does not publish a build for this platform")?;
-    let mut resp = ureq::get(&a.url)
+    let mut resp = ark_net::http::agent().get(&a.url)
         .call()
         .map_err(|e| format!("download {}: {e}", a.url))?;
     let body = resp

@@ -164,9 +164,17 @@ pub enum Source {
     Bitwarden,
     OnePassword,
     Command,
+    /// HashiCorp Vault KV v2 (ent-081, `secretsrc_cloud`).
+    Vault,
+    Aws,
+    Gcp,
+    Azure,
 }
 
-pub const ALL: &[Source] = &[Source::Bitwarden, Source::OnePassword, Source::Command];
+#[path = "secretsrc_cloud.rs"]
+pub mod cloud;
+
+pub const ALL: &[Source] = &[Source::Bitwarden, Source::OnePassword, Source::Command, Source::Vault, Source::Aws, Source::Gcp, Source::Azure];
 
 impl Source {
     pub fn name(self) -> &'static str {
@@ -174,6 +182,10 @@ impl Source {
             Source::Bitwarden => "bitwarden",
             Source::OnePassword => "onepassword",
             Source::Command => "command",
+            Source::Vault => "vault",
+            Source::Aws => "aws",
+            Source::Gcp => "gcp",
+            Source::Azure => "azure",
         }
     }
     pub fn label(self) -> &'static str {
@@ -181,6 +193,10 @@ impl Source {
             Source::Bitwarden => "Bitwarden Secrets Manager",
             Source::OnePassword => "1Password",
             Source::Command => "Command helper",
+            Source::Vault => "HashiCorp Vault",
+            Source::Aws => "AWS Secrets Manager",
+            Source::Gcp => "GCP Secret Manager",
+            Source::Azure => "Azure Key Vault",
         }
     }
     pub fn parse(s: &str) -> Option<Source> {
@@ -188,11 +204,15 @@ impl Source {
             "bitwarden" | "bw" | "bws" => Source::Bitwarden,
             "onepassword" | "op" | "1password" => Source::OnePassword,
             "command" | "cmd" => Source::Command,
+            "vault" | "hashicorp" | "hashicorp-vault" => Source::Vault,
+            "aws" | "aws-secrets-manager" => Source::Aws,
+            "gcp" | "gcp-secret-manager" => Source::Gcp,
+            "azure" | "azure-key-vault" | "keyvault" => Source::Azure,
             _ => return None,
         })
     }
     pub fn shape(self) -> Shape {
-        if self == Source::OnePassword { Shape::Mapped } else { Shape::Bulk }
+        if matches!(self, Source::Bitwarden | Source::Command) { Shape::Bulk } else { Shape::Mapped }
     }
     fn override_default(self) -> bool {
         self != Source::Command
@@ -202,7 +222,9 @@ impl Source {
         match self {
             Source::Bitwarden => s(c, "access_token_env", "BWS_ACCESS_TOKEN"),
             Source::OnePassword => s(c, "service_account_token_env", "OP_SERVICE_ACCOUNT_TOKEN"),
-            Source::Command => String::new(),
+            Source::Vault if s(c, "auth", "token") == "approle" => s(c, "secret_id_env", "VAULT_SECRET_ID"),
+            Source::Vault => s(c, "token_env", "VAULT_TOKEN"),
+            Source::Command | Source::Aws | Source::Gcp | Source::Azure => String::new(),
         }
     }
     pub fn remediation(self, k: ErrorKind, c: &toml::Table) -> String {
@@ -213,6 +235,8 @@ impl Source {
             (Source::OnePassword, ErrorKind::AuthFailed) => format!("Run `ark secrets onepassword token --access-token …` with a fresh service-account token ({te}), or `op signin` for an interactive session."),
             (Source::OnePassword, ErrorKind::BinaryMissing) => "Install the 1Password CLI (https://developer.1password.com/docs/cli/get-started/) or set onepassword.binary_path.".into(),
             (Source::Command, ErrorKind::NotConfigured) => "Set command.command in secret_sources.toml to a fast, non-interactive helper that prints KEY=VALUE lines.".into(),
+            (Source::Vault, ErrorKind::AuthFailed) => format!("Vault refused the credential — refresh ${te} (or the AppRole secret id) and check the policy grants read on the bound paths."),
+            (Source::Aws | Source::Gcp | Source::Azure, ErrorKind::AuthFailed) => format!("The {n} CLI is not authorised — check its login / instance identity and the secret's access policy."),
             (Source::Command, ErrorKind::Internal) => "Run the helper manually in a shell to see its real error — ark discards helper stderr so diagnostics can't leak secret material.".into(),
             (_, ErrorKind::NotConfigured) => format!("Run `ark secrets {n} setup` to finish configuration."),
             (_, ErrorKind::BinaryMissing) => format!("Install the helper CLI (see `ark secrets {n} status`)."),
@@ -227,6 +251,8 @@ impl Source {
             Source::Bitwarden => fetch_bitwarden(c, env, data, use_cache),
             Source::OnePassword => fetch_onepassword(c, env, data, use_cache),
             Source::Command => fetch_command(c, env),
+            Source::Vault => cloud::fetch_vault(c, env, data, use_cache),
+            Source::Aws | Source::Gcp | Source::Azure => cloud::fetch_cloud(self.name(), c, env, data, use_cache),
         }
     }
 }
@@ -793,7 +819,7 @@ pub fn ordered_enabled(t: &toml::Table) -> (Vec<Source>, Vec<String>) {
     let en: Vec<Source> = order.into_iter().filter(|s| b(&section(t, s.name()), "enabled", false)).collect();
     let mapped = en.iter().filter(|s| s.shape() == Shape::Mapped).copied();
     let bulk = en.iter().filter(|s| s.shape() == Shape::Bulk).copied();
-    let warn = if unknown.is_empty() { vec![] } else { vec![format!("sources names unknown source(s): {} (known: bitwarden, onepassword, command)", unknown.join(", "))] };
+    let warn = if unknown.is_empty() { vec![] } else { vec![format!("sources names unknown source(s): {} (known: bitwarden, onepassword, command, vault, aws, gcp, azure)", unknown.join(", "))] };
     (mapped.chain(bulk).collect(), warn)
 }
 
@@ -930,6 +956,19 @@ pub fn status_text(paths: &Paths, src: Source) -> String {
                 o += &format!("    {k} → {}\n", v.as_str().unwrap_or("?"));
             }
         }
+        Source::Vault | Source::Aws | Source::Gcp | Source::Azure => {
+            let (refs, _) = cloud::bindings(&c);
+            let wh = match src {
+                Source::Vault => format!("  address            {}\n  auth               {}\n  mount              {}\n  credential env     {te} ({})\n", { let a = s(&c, "addr", ""); if a.is_empty() { env.get("VAULT_ADDR").cloned().unwrap_or_else(|| "(unset)".into()) } else { a } }, s(&c, "auth", "token"), s(&c, "mount", "secret"), if env.get(&te).is_some_and(|v| !v.trim().is_empty()) { "set" } else { "missing" }),
+                Source::Aws => format!("  region             {}\n", s(&c, "region", "(CLI default)")),
+                Source::Gcp => format!("  project            {}\n", s(&c, "project", "(CLI default)")),
+                _ => format!("  vault name         {}\n", s(&c, "vault_name", "(unset)")),
+            };
+            o += &format!("{wh}  bindings           {}\n", refs.len());
+            for (k, v) in &refs {
+                o += &format!("    {k} → {v}\n");
+            }
+        }
         Source::Command => {
             o += &format!("  command            {}\n  timeout (s)        {}\n  override existing  {}\n", if s(&c, "command", "").is_empty() { "(unset)" } else { "(set)" }, f(&c, "helper_timeout_seconds", COMMAND_TIMEOUT), yn(b(&c, "override_existing", false)));
         }
@@ -1006,7 +1045,7 @@ pub fn run(paths: &Paths, a: &Args) -> Result<String, String> {
         }
         return Ok(o.trim_end().to_string());
     }
-    let src = Source::parse(which).ok_or("usage: ark secrets bitwarden|onepassword|command|sources <status|setup|sync|token|set|remove|disable>")?;
+    let src = Source::parse(which).ok_or("usage: ark secrets bitwarden|onepassword|command|vault|aws|gcp|azure|sources <status|setup|sync|token|set|remove|disable>")?;
     let env = proc_env();
     match a.pos(1).unwrap_or("status") {
         "status" => Ok(status_text(paths, src)),
@@ -1048,18 +1087,18 @@ pub fn run(paths: &Paths, a: &Args) -> Result<String, String> {
                         let bin = find_op(&c, &env).ok_or("the op CLI was not found — cannot verify. Re-run with --no-verify to store anyway.")?;
                         op_whoami(&bin, &s(&c, "account", ""), &tok, &env).map_err(|e| format!("✗ New token was rejected — nothing was changed. ({e})"))?;
                     }
-                    Source::Command => {}
+                    _ => {}
                 }
             }
             let p = save_env_value(paths, &te, &tok)?;
             clear_caches(&paths.data);
             Ok(format!("stored {te} in {}", p.display()))
         }
-        "set" if src == Source::OnePassword => {
-            let (n, r) = (a.need(2, "NAME")?.to_string(), a.need(3, "op://ref")?.to_string());
+        "set" if src.shape() == Shape::Mapped => {
+            let (n, r) = (a.need(2, "NAME")?.to_string(), a.need(3, "reference")?.to_string());
             let mut probe = toml::Table::new();
             probe.insert(n.clone(), r.clone().into());
-            let (ok, warn) = validate_refs(&probe);
+            let (ok, warn) = if src == Source::OnePassword { validate_refs(&probe) } else { cloud::bindings(&toml::Table::from_iter([("env".to_string(), toml::Value::Table(probe))])) };
             if ok.is_empty() {
                 return Err(warn.join("; "));
             }
@@ -1070,7 +1109,7 @@ pub fn run(paths: &Paths, a: &Args) -> Result<String, String> {
             })?;
             Ok(format!("{n} → {}", r.trim()))
         }
-        "remove" if src == Source::OnePassword => {
+        "remove" if src.shape() == Shape::Mapped => {
             let n = a.need(2, "NAME")?.to_string();
             let mut found = false;
             set_enabled(paths, src, |c| {
@@ -1156,6 +1195,23 @@ fn setup(paths: &Paths, src: Source, a: &Args, env: &HashMap<String, String>) ->
             save_config(paths, &t)?;
             clear_caches(&paths.data);
             Ok(format!("✓ 1Password enabled (op at {}). Bind variables with `ark secrets onepassword set NAME op://vault/item/field`.", op.display()))
+        }
+        Source::Vault | Source::Aws | Source::Gcp | Source::Azure => {
+            // Non-interactive: `--set key=value` style keys come from flags we already parse,
+            // the rest from `ark config`-like edits of secret_sources.toml; setup only enables.
+            for (flag, key) in [("server-url", if src == Source::Vault { "addr" } else { "" }), ("token-env", "token_env")] {
+                if let (Some(v), false) = (a.val(flag), key.is_empty()) {
+                    c.insert(key.into(), v.into());
+                }
+            }
+            c.insert("enabled".into(), true.into());
+            c.entry("env").or_insert(toml::Value::Table(toml::Table::new()));
+            c.entry("cache_ttl_seconds").or_insert(300.into());
+            let mut t = load_config(paths);
+            t.insert(src.name().into(), toml::Value::Table(c));
+            save_config(paths, &t)?;
+            clear_caches(&paths.data);
+            Ok(format!("✓ {} enabled. Bind variables with `ark secrets {} set NAME <reference>` (see docs/enterprise-network-secrets.md), then `ark secrets {} sync`.", src.label(), src.name(), src.name()))
         }
         Source::Command => {
             let cmd = a.val("helper").map(String::from).unwrap_or_else(|| s(&c, "command", ""));

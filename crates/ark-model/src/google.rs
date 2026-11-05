@@ -152,7 +152,7 @@ impl TokenSource {
                 // The metadata server is reached directly: it is a credential source here, never a model endpoint.
                 let url =
                     format!("{host}/computeMetadata/v1/instance/service-accounts/default/token");
-                let agent: ureq::Agent = ureq::Agent::config_builder()
+                let agent: ureq::Agent = ark_net::http::builder()
                     .http_status_as_error(false)
                     .timeout_global(Some(Duration::from_secs(5)))
                     .proxy(None)

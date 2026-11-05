@@ -92,7 +92,7 @@ pub struct Client {
 
 impl Client {
     pub fn new(portal_url: &str, token: &str) -> Client {
-        let agent: ureq::Agent = ureq::Agent::config_builder().timeout_global(Some(Duration::from_secs(15))).http_status_as_error(false).build().into();
+        let agent: ureq::Agent = ark_net::http::builder().timeout_global(Some(Duration::from_secs(15))).http_status_as_error(false).build().into();
         Client { portal_url: portal_url.trim_end_matches('/').to_string(), token: token.to_string(), agent }
     }
 

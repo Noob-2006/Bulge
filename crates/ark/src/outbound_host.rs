@@ -37,7 +37,7 @@ fn send(channels: &BTreeMap<String, (Arc<dyn Channel>, Option<String>)>, secrets
 pub fn post_webhook(url: &str, secret: Option<&str>, p: &Payload) -> Result<String, String> {
     let ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
     let body = json!({"event": p.event, "text": p.text, "data": p.data, "ts": ts}).to_string();
-    let agent: ureq::Agent = ureq::Agent::config_builder().timeout_global(Some(Duration::from_secs(15))).http_status_as_error(false).build().into();
+    let agent: ureq::Agent = ark_net::http::builder().timeout_global(Some(Duration::from_secs(15))).http_status_as_error(false).build().into();
     let mut req = agent.post(url).header("Content-Type", "application/json").header("User-Agent", concat!("ark/", env!("CARGO_PKG_VERSION"))).header("X-Ark-Event", &p.event);
     if let Some(s) = secret.filter(|s| !s.is_empty()) {
         req = req.header(SIGNATURE_HEADER, &format!("sha256={}", ark_net::crypto::hex(&ark_net::crypto::hmac_sha256(s.as_bytes(), body.as_bytes()))));

@@ -439,7 +439,7 @@ fn http() -> ureq::Agent {
 }
 
 fn http_for(t: Duration) -> ureq::Agent {
-    ureq::Agent::config_builder().http_status_as_error(false).timeout_global(Some(t)).build().into()
+    ark_net::http::builder().http_status_as_error(false).timeout_global(Some(t)).build().into()
 }
 
 /// POST JSON; returns (status, body).

@@ -167,7 +167,7 @@ fn blocked(msg: String) -> ureq::Error {
 /// A ureq agent whose every connection passes the SSRF guard. Redirects are not followed
 /// (callers follow them by hand so each hop meets the host policy too).
 pub fn guarded_agent(policy: Arc<SsrfPolicy>, timeout_secs: u64) -> ureq::Agent {
-    let cfg = ureq::Agent::config_builder().timeout_global(Some(std::time::Duration::from_secs(timeout_secs.max(1)))).http_status_as_error(false).max_redirects(0).build();
+    let cfg = ark_net::http::builder().timeout_global(Some(std::time::Duration::from_secs(timeout_secs.max(1)))).http_status_as_error(false).max_redirects(0).build();
     let proxy_host = cfg.proxy().map(|p| normalize_host(p.host()));
     ureq::Agent::with_parts(cfg, ureq::unversioned::transport::DefaultConnector::default(), GuardResolver { policy, proxy_host })
 }

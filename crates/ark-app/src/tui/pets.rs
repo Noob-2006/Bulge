@@ -142,7 +142,7 @@ impl Petdex {
         https && (h == self.host || h.ends_with(&format!(".{}", self.host)))
     }
     fn agent(&self) -> ureq::Agent {
-        ureq::Agent::config_builder().timeout_global(Some(self.timeout)).build().into()
+        ark_net::http::builder().timeout_global(Some(self.timeout)).build().into()
     }
     fn get(&self, url: &str, limit: u64) -> Result<Vec<u8>, String> {
         let mut r = self.agent().get(url).header("User-Agent", UA).call().map_err(|e| format!("{url}: {e}"))?;

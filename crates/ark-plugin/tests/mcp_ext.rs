@@ -270,7 +270,7 @@ fn events_subscribe_verify_deliver_dedupe_gap_terminate_unsubscribe() {
                 let d = &v["params"]["delivery"];
                 let body = json!({"type": "verification", "challenge": "ch-123"}).to_string();
                 let sig = ark_plugin::events::sign_standard_webhook(body.as_bytes(), d["secret"].as_str().unwrap(), "msg_v", now());
-                let resp = ureq::post(d["url"].as_str().unwrap()).header("webhook-id", "msg_v").header("webhook-timestamp", &now().to_string()).header("webhook-signature", &sig).send(body.as_bytes());
+                let resp = ark_net::http::agent().post(d["url"].as_str().unwrap()).header("webhook-id", "msg_v").header("webhook-timestamp", &now().to_string()).header("webhook-signature", &sig).send(body.as_bytes());
                 let echoed: Value = resp.ok().and_then(|mut r| r.body_mut().read_to_string().ok()).and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default();
                 if echoed["challenge"] != "ch-123" {
                     return Response::json(200, &json!({"jsonrpc": "2.0", "id": id, "error": {"code": -32602, "message": "callback verification failed"}}).to_string());
@@ -299,7 +299,7 @@ fn events_subscribe_verify_deliver_dedupe_gap_terminate_unsubscribe() {
     let post = |body: Value, secret: &str, id: &str| -> u16 {
         let b = body.to_string();
         let sig = ark_plugin::events::sign_standard_webhook(b.as_bytes(), secret, id, now());
-        let a: ureq::Agent = ureq::Agent::config_builder().http_status_as_error(false).build().into();
+        let a: ureq::Agent = ark_net::http::builder().http_status_as_error(false).build().into();
         a.post(&format!("{hub_base}/{route}")).header("webhook-id", id).header("webhook-timestamp", &now().to_string()).header("webhook-signature", &sig).send(b.as_bytes()).unwrap().status().as_u16()
     };
     let ev = json!({"eventId": "e-1", "name": "push", "timestamp": "2026-11-02T00:00:00Z", "data": {"ref": "main"}, "cursor": "c-1"});

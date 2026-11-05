@@ -406,7 +406,7 @@ pub fn route_target(cfg: &Config, paths: &Paths, channel: &str, route: &str, sec
 /// Hermes `_cmd_test`: POST with a GitHub-style signature; returns (status, body).
 pub fn webhook_test(url: &str, secret: &str, payload: &str) -> Result<(u16, String), String> {
     let sig = format!("sha256={}", ark_net::crypto::hex(&ark_net::crypto::hmac_sha256(secret.as_bytes(), payload.as_bytes())));
-    let agent: ureq::Agent = ureq::Agent::config_builder().http_status_as_error(false).timeout_global(Some(std::time::Duration::from_secs(10))).build().into();
+    let agent: ureq::Agent = ark_net::http::builder().http_status_as_error(false).timeout_global(Some(std::time::Duration::from_secs(10))).build().into();
     let mut r = agent.post(url).header("content-type", "application/json").header("X-Hub-Signature-256", &sig).header("X-GitHub-Event", "test").send(payload.as_bytes()).map_err(|e| format!("{e} — is the daemon running? (ark daemon start)"))?;
     let s = r.status().as_u16();
     Ok((s, r.body_mut().read_to_string().unwrap_or_default()))

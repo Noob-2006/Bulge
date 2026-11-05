@@ -810,7 +810,7 @@ fn github_http_get(url: &str, token: Option<&str>) -> Result<Value, String> {
         Some(t) if !t.is_empty() => s.replace(t, "[redacted]"),
         _ => s.to_string(),
     };
-    let agent: ureq::Agent = ureq::Agent::config_builder().http_status_as_error(false).timeout_global(Some(Duration::from_secs(GITHUB_ACTIONS_TIMEOUT_SECS))).build().into();
+    let agent: ureq::Agent = ark_net::http::builder().http_status_as_error(false).timeout_global(Some(Duration::from_secs(GITHUB_ACTIONS_TIMEOUT_SECS))).build().into();
     let mut r = agent.get(url).header("accept", "application/vnd.github+json").header("x-github-api-version", "2022-11-28").header("user-agent", "ark-surfaces-widgets");
     if let Some(t) = token {
         r = r.header("authorization", format!("Bearer {t}"));

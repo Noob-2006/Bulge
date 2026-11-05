@@ -93,7 +93,7 @@ fn pick_image(res: ImageResult, fetch: &dyn Fn(&str) -> Result<Vec<u8>, String>)
 }
 
 fn fetch_url(url: &str) -> Result<Vec<u8>, String> {
-    let agent: ureq::Agent = ureq::Agent::config_builder().timeout_global(Some(std::time::Duration::from_secs(60))).build().into();
+    let agent: ureq::Agent = ark_net::http::builder().timeout_global(Some(std::time::Duration::from_secs(60))).build().into();
     let mut r = agent.get(url).call().map_err(|e| format!("could not fetch generated image: {e}"))?;
     r.body_mut().with_config().limit(64 << 20).read_to_vec().map_err(|e| e.to_string())
 }

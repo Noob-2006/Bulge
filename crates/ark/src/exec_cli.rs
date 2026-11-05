@@ -370,6 +370,16 @@ fn render_explain(v: &Value) -> String {
         if let Some(w) = i["warning"].as_str() {
             out.push(format!("warning: {w}"));
         }
+        if let Some(r) = i["host_kernel"]["report"].as_array() {
+            out.push(format!("host: {}", r.iter().filter_map(|x| x.as_str()).collect::<Vec<_>>().join(" · ")));
+        }
+        if !i["namespace_fallback"].is_null() {
+            let nf = &i["namespace_fallback"];
+            out.push(format!("without a microVM this host isolates with: {} ({})", nf["backend"].as_str().unwrap_or("?"), nf["level"].as_str().unwrap_or("?")));
+            for d in nf["degraded"].as_array().into_iter().flatten().filter_map(|x| x.as_str()) {
+                out.push(format!("  degraded: {d}"));
+            }
+        }
         if !i["vm"].is_null() {
             out.push(format!("microVM: provider {} ({}), {} running", i["vm"]["provider"].as_str().unwrap_or(""), i["vm"]["level"].as_str().unwrap_or(""), i["vm"]["running"]));
             if let Some(w) = i["vm"]["warning"].as_str() {
@@ -407,6 +417,12 @@ fn isolation_report(cfg: &ExecConfig, plan: &ark_vm::policy::Plan, sandbox_plan:
         "sandbox_backend_rank": sandbox.rank(),
         "warning": host.warning().or_else(|| sandbox.warning()),
     });
+    // ent-023/024/026: what this kernel gives a namespace sandbox, and the steps down the
+    // fallback took on this machine (no Landlock, no user namespaces, cgroup v1 …).
+    let caps = ark_vm::isolation::Capabilities::detect(None, None);
+    let (fallback, degraded) = ark_vm::policy::namespace_choice(&caps);
+    v["host_kernel"] = json!({"report": caps.host.report(), "landlock_abi": caps.host.landlock_abi, "userns": caps.host.userns, "seccomp": caps.host.seccomp, "cgroup": caps.host.cgroup});
+    v["namespace_fallback"] = json!({"backend": fallback, "level": ark_vm::isolation::isolation_of_backend(fallback).label(), "degraded": degraded});
     if cfg.backend == "vm" || cfg.sandbox.backend == "vm" {
         let mgr = ark_tools::exec::vm::manager_for(&cfg.vm, Path::new(""));
         let (kind, warning) = mgr.selection();
@@ -573,6 +589,7 @@ pub fn install(paths: &Paths) -> Arc<ExecEnv> {
         }
     };
     let remote = cfg.backend != "local" || (cfg.sandbox.mode != "off" && cfg.sandbox.backend != "local");
+    let cgroups = cfg.cgroups.clone();
     let env = Arc::new(ExecEnv::new(cfg));
     // Plugin-provided execution environments (Hermes `agent/terminal_env_provider.py`): the
     // archive's providers become `exec.backend = "<name>"` options, configured by
@@ -619,6 +636,12 @@ pub fn install(paths: &Paths) -> Arc<ExecEnv> {
     // C7: where the reaper registry lives (`<data>/reaper/procs.jsonl`). Every exec/shell
     // call adds the process groups it starts; the daemon's sweeper reclaims the orphaned ones.
     ark_tools::exec::local::set_reaper_home(&paths.data);
+    // ent-024: per-command cgroups (v1 or v2) when ark may write to its subtree.
+    if cgroups.enabled {
+        if let Err(e) = ark_tools::exec::local::enable_cgroups(&cgroups, Path::new("/")) {
+            eprintln!("ark: warning: [exec.cgroups]: {e}; commands are tracked by process group only");
+        }
+    }
     if remote {
         let (home, installed) = (paths.data.clone(), env.clone());
         let vault = Arc::new(ark_kernel::vault::Vault::load(&paths.secrets()).unwrap_or_else(|_| ark_kernel::vault::Vault::empty()));
