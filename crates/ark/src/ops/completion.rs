@@ -17,6 +17,7 @@ pub const SUBS: &[(&str, &[&str])] = &[
     ("schedule", &["add", "list", "rm", "enable", "disable", "run"]),
     ("goal", &["add", "list", "show", "run", "pause", "resume", "cancel"]),
     ("memory", &["show", "add", "review", "accept", "reject"]),
+    ("index", &["status", "sync", "rebuild", "bench"]),
     ("checkpoint", &["list", "restore"]),
     ("config", &["path", "show", "init", "get", "set", "unset", "edit", "patch", "schema", "file", "env-path", "check", "migrate", "backups", "restore", "validate"]),
     ("secrets", &["set", "list", "rm", "sources", "test", "import"]),

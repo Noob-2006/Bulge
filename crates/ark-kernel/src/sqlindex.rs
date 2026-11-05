@@ -16,6 +16,7 @@
 
 use crate::event::{Event, EventKind};
 use ark_core::{Block, Message, Role};
+pub use rusqlite;
 use rusqlite::{params, Connection, OptionalExtension};
 use std::collections::HashMap;
 use std::fs;
@@ -192,7 +193,7 @@ pub fn vec_to_blob(v: &[f32]) -> Vec<u8> {
 }
 
 pub fn blob_to_vec(b: &[u8]) -> Vec<f32> {
-    b.chunks_exact(4).map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect()
+    b.as_chunks::<4>().0.iter().map(|c| f32::from_le_bytes(*c)).collect()
 }
 
 // ───────────────────────── sessions ─────────────────────────

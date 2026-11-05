@@ -147,6 +147,7 @@ version = "0.1.0"
 dependencies = [
  "ark-core",
  "ark-kernel",
+ "ark-security",
  "ark-tools",
  "base64",
  "regex",

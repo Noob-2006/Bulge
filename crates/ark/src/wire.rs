@@ -69,6 +69,8 @@ pub fn owns(cmd: &str, argv: &[String]) -> bool {
         "skills" | "skill" | "bundles" | "bundle" | "curator" | "journey" | "hub" => true,
         // `ark wiki …`: the compiled wiki vault lives in ark-memory.
         "wiki" => true,
+        // `ark index status|sync|rebuild|bench`: the SQLite index (ark-kernel sqlindex + ark-memory).
+        "index" => true,
         // `ark plugin` / `ark plugin list` stay in main.rs; lifecycle subcommands live in ark-skills.
         "plugin" | "plugins" => !(sub.is_empty() || sub == "list" || sub.starts_with('-')),
         // `ark memory show|add` stay in main.rs; `review`/`pending`/`accept`/`reject` come from
@@ -91,7 +93,7 @@ pub fn cli(cmd: &str, argv: &[String]) -> Result<i32, String> {
         "system" => crate::system_cli::system(argv, &paths, &cfg),
         "web" => crate::web_cli::cli(argv, &paths, &cfg),
         "suggestions" => crate::system_cli::suggestions(argv, &paths, &cfg, &ws),
-        "memory" | "journey" | "wiki" => ark_memory::host::cli(cmd, argv, &cfg, &paths, &ws),
+        "memory" | "journey" | "wiki" | "index" => ark_memory::host::cli(cmd, argv, &cfg, &paths, &ws),
         _ => ark_skills::host::cli(cmd, argv, &cfg, &paths, &ws),
     }
 }

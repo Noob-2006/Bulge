@@ -83,6 +83,7 @@ USAGE
   ark suggestions [accept N | dismiss N | catalog | clear]   suggested automations
   ark web providers [--json] | test <query> [--count N] [--json] | fetch <url> [--text] [--json]   web search providers, route, one fetch
   ark memory show | add <text…> [--user] | review | accept <n|all> | reject <n|all>
+  ark index status | sync | rebuild | bench <session>   SQLite index (session FTS, memories, retrieval); rebuildable from the logs
   ark checkpoint list | restore <id> | status | prune [--retention-days N] [--max-size-mb N] [--keep-orphans] [--force] | clear [--force]
   ark sandbox list [--json] | recreate (--all|--session ID|--agent DIR) [--force] | explain [--session ID] [--json]
   ark config path|show|init|get <key>|validate
@@ -204,7 +205,7 @@ const BUILTINS: &[&str] = &[
     "hooks", "hook", "kanban", "meet", "teams", "teams-pipeline", "web", "browser", "screen", "computer-use",
     "sandbox", "system", "suggestions", "worktree", "agents", "users", "moa",
     "infer", "capability", "voice", "stt", "transcripts",
-    "status", "telemetry", "evals", "tools", "docker", "fleet",
+    "status", "telemetry", "evals", "tools", "docker", "fleet", "index",
 ];
 
 fn dispatch(raw: Vec<String>) -> R {
