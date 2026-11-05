@@ -309,8 +309,10 @@ pub fn check(rt: &Runtime, session: &str) -> Verdict {
     let cfg = rt.cfg.limits.clone();
     // A pause stays in force until somebody resumes it; re-measuring must not silently undo it.
     // (No measurement while paused: `status.json` keeps the numbers that caused the pause.)
-    if let Some(reason) = paused(&home, session) {
-        return Verdict::Pause(reason);
+    // Only a *resource* pause blocks: a provider pause (transient / billing) is what the
+    // daemon's retry is trying to end, so it must reach the model (gen1-305).
+    if let Some(p) = pause_info(&home, session).filter(|p| PauseKind::from_label(&p.kind).is_none()) {
+        return Verdict::Pause(p.reason);
     }
     if !cfg.enabled() {
         return Verdict::Ok;

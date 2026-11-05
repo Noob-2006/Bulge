@@ -187,11 +187,17 @@ impl Daemon {
     /// keeps failing backs off (1 min → 1 h for transient, 15 min → 6 h for billing); the
     /// session never dies and its log is untouched between attempts.
     fn retry_paused(&self) -> usize {
+        self.retry_paused_at(crate::event::now_ms())
+    }
+
+    /// [`Self::retry_paused`] against an explicit clock: the long-task harness (gen1-305)
+    /// fast-forwards hours of backoff without waiting for them.
+    pub fn retry_paused_at(&self, now_ms: u64) -> usize {
         if ark_security::estop::is_engaged(&self.k.paths.data) {
             return 0;
         }
         let mut n = 0;
-        for p in crate::limits::due_pauses(&self.k.paths.data, crate::event::now_ms()) {
+        for p in crate::limits::due_pauses(&self.k.paths.data, now_ms) {
             if p.session.is_empty() || self.k.is_running(&p.session) {
                 continue;
             }

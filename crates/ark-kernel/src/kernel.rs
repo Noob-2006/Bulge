@@ -845,7 +845,17 @@ impl Runtime {
             EventKind::TurnEnd { .. } => Some(false),
             _ => None,
         });
-        Ok(changed || (open_turn == Some(true) && view.messages.last().is_some_and(|m| m.role == Role::User)))
+        // A turn that ended `paused` (provider outage, resource cap) with the model owing an
+        // answer: the daemon's retry (or a human resume) must continue it. Before this, a
+        // retried pause found an empty inbox, ended `Idle` and cleared the pause marker — the
+        // task was silently dropped instead of resumed (found by the gen1-305 long-task run).
+        let paused_turn = log.events().iter().rev().find_map(|e| match &e.kind {
+            EventKind::TurnEnd { reason, .. } => Some(reason.starts_with("paused")),
+            EventKind::TurnStart { .. } => Some(false),
+            _ => None,
+        });
+        let owed = view.messages.last().is_some_and(|m| m.role == Role::User);
+        Ok(changed || ((open_turn == Some(true) || paused_turn == Some(true)) && owed))
     }
 
     // ───────────────────────── the turn ─────────────────────────
@@ -893,7 +903,12 @@ impl Runtime {
         // C8 cadence: measure at most once per `[limits] check_interval_secs` (default 60 s);
         // with no `[limits]` section `check` returns `Ok` without any I/O.
         let limit_tick = Duration::from_secs(cfg.limits.check_interval_secs.max(5));
-        let mut last_limits = Instant::now();
+        // First check on the first step (gen1-305): a session resumed while already over a cap
+        // pauses at once instead of spending for another `limit_tick`.
+        let mut last_limits = Instant::now().checked_sub(limit_tick).unwrap_or_else(Instant::now);
+        // gen1-305: the task envelope's spend cap, checked every step against the session's
+        // whole log (it survives daemon restarts and spans turns, unlike the per-run ledger).
+        let envelope_cap = ark_security::envelope::active(&self.paths.data, &log.id).and_then(|e| e.spend_usd.filter(|c| *c > 0.0).map(|c| (e.label, c)));
 
         let reason = loop {
             if cancel.is_cancelled() {
@@ -905,6 +920,14 @@ impl Runtime {
             human_wait_seen = hw;
             if let Err(e) = ledger.check() {
                 break EndReason::Budget(e.to_string());
+            }
+            if let Some((label, cap)) = &envelope_cap {
+                let spent = crate::limits::session_spend(self, &log.id);
+                if spent >= *cap {
+                    let r = format!("task envelope `{label}` spend cap reached: ${spent:.2} of ${cap:.2}");
+                    self.append(log, EventKind::Notice { level: "warn".into(), text: format!("stopped: {r}") })?;
+                    break EndReason::Budget(r);
+                }
             }
             // C8: resource caps (spend, processes, disk). Passive: it never asks, and a breach
             // stops this session only — the fleet, cron jobs and the daemon keep running.

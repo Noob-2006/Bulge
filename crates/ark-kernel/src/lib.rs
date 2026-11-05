@@ -67,3 +67,5 @@ pub mod governance;
 pub mod managed;
 pub mod reaper;
 pub mod coord;
+#[cfg(test)]
+mod longtask_tests;
