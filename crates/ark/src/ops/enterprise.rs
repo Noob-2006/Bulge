@@ -60,6 +60,20 @@ pub fn parse_when(v: &str, now: u64) -> Result<u64, String> {
     crate::ops::audit::parse_ts(v, "time")
 }
 
+/// `ark health --ready` (ent-098): can the daemon do work — model reachable, channels
+/// connected, audit writable (the same checks as `GET /ready`). Exit 1 when not ready.
+pub fn health_ready(a: &Args) -> R {
+    let v = ark_kernel::daemon::call(&Paths::from_env().socket(), "health.ready", json!({}))?;
+    if a.flag("json") {
+        println!("{v}");
+    } else {
+        for c in v["checks"].as_array().into_iter().flatten() {
+            println!("{} {:<20} {}", if c["ok"] == true { "ok  " } else { "FAIL" }, c["name"].as_str().unwrap_or(""), c["detail"].as_str().or(c["error"].as_str()).unwrap_or(""));
+        }
+    }
+    Ok(if v["ready"] == true { 0 } else { 1 })
+}
+
 // ───────────────────────── service accounts ─────────────────────────
 
 /// `off` = index of the subcommand (0 for `ark accounts`, 1 for `ark app accounts`).

@@ -77,6 +77,7 @@ pub fn render(d: &Daemon) -> String {
     gauge(&mut out, "approvals_pending", "approvals and questions waiting for a human", pending as f64);
     gauge(&mut out, "audit_seq", "sequence number of the newest audit record", ark_security::audit::head(&k.paths.data).seq as f64);
     gauge(&mut out, "audit_write_errors", "audit records that could not be written", AUDIT_ERRORS.load(Ordering::Relaxed) as f64);
+    gauge(&mut out, "audit_errors", "audit write / SIEM export failures in this process", ark_security::audit::errors().0 as f64);
     gauge(&mut out, "estop_engaged", "1 while the emergency stop is engaged", if ark_security::estop::is_engaged(&k.paths.data) { 1.0 } else { 0.0 });
     for sink in k.cfg.audit.export.sinks() {
         let lag = ark_security::audit::head(&k.paths.data).seq.saturating_sub(ark_security::audit_export::cursor(&k.paths.data, sink));

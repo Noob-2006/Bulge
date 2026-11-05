@@ -219,7 +219,8 @@ impl Daemon {
         let subst = self.k.vault_substitute();
         for (sink, r) in ark_security::audit_export::pump(&self.k.paths.data, cfg, &|s: &str| subst(s)) {
             if let Err(e) = r {
-                eprintln!("arkd: audit export to {sink}: {e}");
+                // Surfaced through `/metrics` (`ark_audit_errors`) and `/ready`; the cursor stays.
+                ark_security::audit::note_error(&format!("audit export to {sink}: {e}"));
             }
         }
     }

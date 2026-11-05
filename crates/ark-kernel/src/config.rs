@@ -753,8 +753,9 @@ impl Config {
             }
             merge(&mut merged, t);
         }
+        let mut notes: Vec<String> = vec![];
         if !dropped.is_empty() {
-            eprintln!("ark: ignoring {} from untrusted project config (add the workspace to `trusted_projects` in your user config)", dropped.join(", "));
+            notes.push(format!("ignoring {} from untrusted project config (add the workspace to `trusted_projects` in your user config)", dropped.join(", ")));
         }
         for s in sets {
             let (k, v) = s.split_once('=').ok_or_else(|| format!("--set expects key=value, got `{s}`"))?;
@@ -762,7 +763,10 @@ impl Config {
         }
         let overridden = crate::managed::enforce(&mut merged, &sys, &locked);
         if !overridden.is_empty() {
-            eprintln!("ark: {} locked by system policy ({}); your value is ignored", overridden.join(", "), sys_files.join(", "));
+            notes.push(format!("{} locked by system policy ({}); your value is ignored", overridden.join(", "), sys_files.join(", ")));
+        }
+        for n in &notes {
+            eprintln!("ark: {n}");
         }
         let mut cfg: Config = toml::Value::Table(merged).try_into().map_err(|e: toml::de::Error| format!("config: {}", e.message()))?;
         cfg.managed = crate::managed::Managed { files: sys_files, locked, overridden };

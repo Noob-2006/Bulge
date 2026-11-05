@@ -750,7 +750,6 @@ fn callback(app: &App, r: &Request) -> Response {
                 with_session_roles(cfg, &s, &roles, kind, redirect("/"))
             }
             Err(e) => {
-                eprintln!("arkd: dashboard auth: login refused: {e}");
                 audit_login(app, r, kind, s.email.as_deref().unwrap_or(&s.subject), "deny", json!({"subject": s.subject, "groups": groups, "reason": e}));
                 failed(403)
             }

@@ -317,17 +317,8 @@ fn dispatch(raw: Vec<String>) -> R {
         "data" => cmd_data(&a),
         "health" => {
             // For container health checks and monitors: is the daemon answering?
-            // `--ready` (ent-098): can it do work — model reachable, channels connected, audit writable.
             if a.flag("ready") {
-                let v = daemon::call(&Paths::from_env().socket(), "health.ready", json!({}))?;
-                if a.flag("json") {
-                    println!("{v}");
-                } else {
-                    for c in v["checks"].as_array().into_iter().flatten() {
-                        println!("{} {:<20} {}", if c["ok"] == true { "ok  " } else { "FAIL" }, c["name"].as_str().unwrap_or(""), c["detail"].as_str().or(c["error"].as_str()).unwrap_or(""));
-                    }
-                }
-                return Ok(if v["ready"] == true { 0 } else { 1 });
+                return ops::enterprise::health_ready(&a);
             }
             match daemon::call(&Paths::from_env().socket(), "ping", json!({})) {
                 Ok(_) => Ok(0),

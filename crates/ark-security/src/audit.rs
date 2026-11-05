@@ -317,8 +317,23 @@ pub fn emit(data: &Path, ev: Event) -> Result<u64, String> {
 /// (the request itself already happened or was refused).
 pub fn record(data: &Path, ev: Event) {
     if let Err(e) = emit(data, ev) {
-        eprintln!("ark: {e}");
+        note_error(&e);
     }
+}
+
+static WRITE_ERRORS: AtomicU64 = AtomicU64::new(0);
+static LAST_ERROR: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
+
+/// Remember a failure (audit write or SIEM export) for `/metrics` and `/ready`; libraries do
+/// not print.
+pub fn note_error(e: &str) {
+    WRITE_ERRORS.fetch_add(1, Ordering::Relaxed);
+    *LAST_ERROR.lock().unwrap_or_else(|p| p.into_inner()) = e.to_string();
+}
+
+/// `(failures so far, last message)`.
+pub fn errors() -> (u64, String) {
+    (WRITE_ERRORS.load(Ordering::Relaxed), LAST_ERROR.lock().unwrap_or_else(|p| p.into_inner()).clone())
 }
 
 /// Close the live segment: move it into `archive/` read-only and write its seal.
