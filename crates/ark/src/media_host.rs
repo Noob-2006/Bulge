@@ -27,6 +27,7 @@ pub fn media(cfg: &Config, vault: Arc<Vault>) -> Arc<Media> {
 /// Wire ark-media into a running kernel: the model callbacks, the per-session image hooks and
 /// the background-generation completion sink. Idempotent (the slots are `OnceLock`s).
 pub fn install(k: &Kernel, m: &Arc<Media>) {
+    ark_media::set_shared(m.clone());
     ark_media::set_llm(Arc::new(KernelLlm { k: k.clone() }));
     ark_media::set_agent(Arc::new(KernelAgent { k: k.clone() }));
     ark_media::vision::install_tool_hooks(m);

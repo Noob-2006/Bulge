@@ -522,12 +522,25 @@ impl Receiver {
 
 // ---------------------------------------------------------------- speech services
 
-/// An OpenAI-compatible speech endpoint (`[channels.x.stt]` / `[channels.x.tts]`).
+/// A speech service for the voice channel (`[channels.x.stt]` / `[channels.x.tts]`).
+///
+/// `engine` (gen1-309):
+/// * `"http"` (default) — an OpenAI-compatible endpoint at `url`;
+/// * `"realtime"` — ark's realtime transcription providers (`[media.realtime]`: OpenAI,
+///   Deepgram, ElevenLabs, Mistral, xAI) streamed per utterance; `provider` picks one
+///   (default `[media.realtime] stt_provider`). For TTS it means ark's `[media.tts]` stack;
+/// * `"media"` — ark's batch `[media.stt]` / `[media.tts]` providers (`provider` = an STT id).
 #[derive(Debug, Clone, Default, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Speech {
-    /// API base (`https://api.openai.com/v1`) or the full endpoint URL.
+    /// API base (`https://api.openai.com/v1`) or the full endpoint URL (`engine = "http"`).
+    #[serde(default)]
     pub url: String,
+    #[serde(default)]
+    pub engine: Option<String>,
+    /// Provider id/alias for `engine = "realtime" | "media"`.
+    #[serde(default)]
+    pub provider: Option<String>,
     #[serde(default)]
     pub key: Option<String>,
     #[serde(default)]
@@ -553,7 +566,56 @@ impl Speech {
         }
     }
 
+    fn engine(&self) -> &str {
+        self.engine.as_deref().map(str::trim).filter(|e| !e.is_empty()).unwrap_or("http")
+    }
+
+    fn media(&self) -> Result<std::sync::Arc<ark_media::Media>, ChannelError> {
+        ark_media::shared().ok_or_else(|| ChannelError::new(K::Fatal, format!("speech engine `{}` needs ark's [media] stack, which is not running in this process", self.engine())))
+    }
+
+    /// One utterance through a realtime transcription provider: stream the PCM in 20 ms frames,
+    /// finish, and join the final segments.
+    fn transcribe_realtime(&self, wav: &[u8]) -> Result<String, ChannelError> {
+        let m = self.media()?;
+        let pcm = ark_media::audio::wav_decode(wav).map_err(|e| ChannelError::new(K::Protocol, e))?;
+        let ch = pcm.channels.max(1) as usize;
+        let mono: Vec<i16> = if ch == 1 { pcm.samples } else { pcm.samples.chunks(ch).map(|f| (f.iter().map(|&x| x as i32).sum::<i32>() / f.len() as i32) as i16).collect() };
+        let fail = |e: String| ChannelError::new(K::Network, format!("realtime STT: {e}"));
+        let mut s = ark_media::realtime::open_stt(&m, self.provider.as_deref(), pcm.sample_rate, self.language.as_deref()).map_err(fail)?;
+        let mut events = vec![];
+        let frame = (pcm.sample_rate as usize / 50).max(1);
+        for chunk in mono.chunks(frame) {
+            s.send_audio(chunk).map_err(fail)?;
+            events.extend(s.poll().map_err(fail)?);
+        }
+        events.extend(s.finish().map_err(fail)?);
+        let mut out = vec![];
+        for e in events {
+            match e {
+                ark_media::realtime::SttEvent::Final(t) if !t.trim().is_empty() => out.push(t.trim().to_string()),
+                ark_media::realtime::SttEvent::Error(e) => return Err(fail(e)),
+                _ => {}
+            }
+        }
+        Ok(out.join(" "))
+    }
+
     pub fn transcribe(&self, wav: &[u8]) -> Result<String, ChannelError> {
+        match self.engine() {
+            "realtime" => return self.transcribe_realtime(wav),
+            "media" => {
+                let m = self.media()?;
+                let req = ark_media::stt::SttRequest::new(wav.to_vec(), "audio/wav");
+                let r = match self.provider.as_deref() {
+                    Some(p) => ark_media::stt::transcribe_with(&m, p, &req, &Cancel::new()),
+                    None => ark_media::stt::transcribe(&m, &req, &Cancel::new()),
+                };
+                return r.map(|(_, t)| t.text.trim().to_string()).map_err(|e| ChannelError::new(K::Network, format!("STT: {e}")));
+            }
+            "http" => {}
+            other => return Err(ChannelError::new(K::Fatal, format!("unknown speech engine `{other}` (http, realtime, media)"))),
+        }
         let model = self.model.clone().unwrap_or_else(|| "whisper-1".into());
         let mut parts: Vec<(&str, &str, &str, &[u8])> = vec![("model", "", "", model.as_bytes()), ("response_format", "", "", b"json"), ("file", "speech.wav", "audio/wav", wav)];
         if let Some(l) = &self.language {
@@ -568,6 +630,19 @@ impl Speech {
     }
 
     pub fn synthesize(&self, text: &str) -> Result<Vec<u8>, ChannelError> {
+        match self.engine() {
+            "realtime" | "media" => {
+                let m = self.media()?;
+                let mut req = ark_media::tts::TtsRequest::new(text);
+                req.voice = self.voice.clone();
+                req.model = self.model.clone();
+                req.format = Some(self.format.clone().unwrap_or_else(|| "opus".into()));
+                let (_, sp) = ark_media::tts::synthesize(&m, &req, &Cancel::new()).map_err(|e| ChannelError::new(K::Network, format!("TTS: {e}")))?;
+                return Ok(sp.audio.bytes);
+            }
+            "http" => {}
+            other => return Err(ChannelError::new(K::Fatal, format!("unknown speech engine `{other}` (http, realtime, media)"))),
+        }
         let body = json!({
             "model": self.model.clone().unwrap_or_else(|| "tts-1".into()),
             "input": text,
@@ -2300,3 +2375,61 @@ pub(crate) mod tests {
         assert!(seen.lock().unwrap().iter().any(|(p, _)| p == "/v1/audio/transcriptions"), "the take went through the channel's STT endpoint");
     }
 }
+
+/// gen1-309: the voice channel on ark's realtime transcription and `[media]` TTS providers.
+#[cfg(test)]
+mod realtime_speech_tests {
+    use super::*;
+    use std::net::TcpListener;
+
+    /// A Deepgram-shaped realtime server: takes binary audio, answers the `Finalize` with the
+    /// final transcript (what `[media.realtime]` deepgram speaks).
+    fn fake_deepgram(said: &'static str) -> (String, std::sync::mpsc::Receiver<usize>) {
+        let l = TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/v1", l.local_addr().unwrap());
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let Ok((mut s, _)) = l.accept() else { return };
+            let Ok((head, rest)) = ark_net::ws::read_head(&mut s, 64 * 1024) else { return };
+            let Ok(mut ws) = WebSocket::accept(s, &head, rest) else { return };
+            let mut bytes = 0;
+            loop {
+                match ws.recv_blocking() {
+                    Ok(Message::Binary(b)) => bytes += b.len(),
+                    Ok(Message::Text(t)) if t.contains("Finalize") => {
+                        let _ = tx.send(bytes);
+                        let _ = ws.send_text(&json!({"type": "Results", "from_finalize": true, "is_final": true, "speech_final": true, "channel": {"alternatives": [{"transcript": said}]}}).to_string());
+                    }
+                    Ok(Message::Text(_)) | Ok(Message::Ping(_)) | Ok(Message::Pong(_)) => {}
+                    _ => break,
+                }
+            }
+        });
+        (url, rx)
+    }
+
+    #[test]
+    fn discord_voice_transcribes_with_realtime_stt_and_speaks_with_media_tts() {
+        let (url, heard) = fake_deepgram("hello from the voice channel");
+        let dir = ark_core::tmp::TempDir::new("ark-dv-rt");
+        let tts_out = dir.path().join("tts.ogg");
+        let cfg = format!(
+            "[realtime]\nconnect_timeout_ms = 3000\nclose_timeout_ms = 2000\nreconnect_attempts = 1\n[providers.deepgram]\napi_key = \"k\"\nbase_url = \"{url}\"\n[tts]\nprovider = \"fake\"\n[tts.providers.fake]\ncommand = \"printf OggS-fake-voice > {{output_path}}; cp {{output_path}} {out}\"\nformat = \"opus\"\n",
+            out = tts_out.display()
+        );
+        ark_media::set_shared(ark_media::Media::new(ark_media::MediaConfig::from_toml(&cfg)));
+        // One second of 48 kHz stereo, as the voice socket decodes it.
+        let samples: Vec<i16> = (0..48_000 * 2).map(|i| ((i as f32 * 0.05).sin() * 8000.0) as i16).collect();
+        let wav = ark_media::audio::wav_encode(&samples, 48_000, 2);
+        let stt: Speech = serde_json::from_value(json!({"engine": "realtime", "provider": "deepgram"})).unwrap();
+        assert_eq!(stt.transcribe(&wav).unwrap(), "hello from the voice channel");
+        let sent = heard.recv_timeout(std::time::Duration::from_secs(5)).unwrap();
+        assert_eq!(sent, 48_000 * 2, "the utterance was streamed as mono PCM16");
+        let tts: Speech = serde_json::from_value(json!({"engine": "media"})).unwrap();
+        assert_eq!(tts.synthesize("hi").unwrap(), b"OggS-fake-voice");
+        // Configuration mistakes are reported, not ignored.
+        let bad: Speech = serde_json::from_value(json!({"engine": "carrier-pigeon"})).unwrap();
+        assert!(bad.transcribe(&wav).unwrap_err().message.contains("unknown speech engine"));
+    }
+}
+

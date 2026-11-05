@@ -57,6 +57,17 @@ pub trait Agent: Send + Sync {
 static LLM: OnceLock<Arc<dyn Llm>> = OnceLock::new();
 static AGENT: OnceLock<Arc<dyn Agent>> = OnceLock::new();
 
+/// The host's `[media]` stack, for subsystems that live outside the tool registry (a Discord
+/// voice channel using the realtime STT / TTS providers, gen1-309). Replaceable (tests).
+static SHARED: std::sync::Mutex<Option<Arc<Media>>> = std::sync::Mutex::new(None);
+
+pub fn set_shared(m: Arc<Media>) {
+    *SHARED.lock().unwrap_or_else(|e| e.into_inner()) = Some(m);
+}
+pub fn shared() -> Option<Arc<Media>> {
+    SHARED.lock().unwrap_or_else(|e| e.into_inner()).clone()
+}
+
 pub fn set_llm(l: Arc<dyn Llm>) {
     let _ = LLM.set(l);
 }
