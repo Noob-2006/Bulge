@@ -40,6 +40,7 @@ pub struct Category {
 pub fn label(id: &str) -> &'static str {
     match id {
         "system_prompt" => "System prompt",
+        "role" => "Professional role",
         "tool_definitions" => "Tool definitions",
         "rules" => "Rules",
         "skills" => "Skills",
@@ -82,12 +83,19 @@ fn conversation_tokens(v: &View) -> u64 {
 /// The eight upstream categories in declaration order. Zero-token rows are dropped (they read
 /// as "not configured"), except `conversation`.
 pub fn categories(v: &View, specs: &[ToolSpec]) -> Vec<Category> {
-    let (mut system_prompt, mut rules, mut skills, mut memory) = (0usize, 0usize, 0usize, 0usize);
+    let (mut system_prompt, mut rules, mut skills, mut memory, mut role) = (0usize, 0usize, 0usize, 0usize, 0usize);
+    // The L0 professional core lives inside the identity; it is counted with the role.
+    let core = ark_kernel::roles::core_text(&ark_kernel::config::Config::default()).unwrap_or_default();
     for s in &v.system {
         match s.id.as_str() {
             "project" => rules += s.text.len(),
             "skills" => skills += s.text.len(),
             "memory" => memory += s.text.len(),
+            "role" => role += s.text.len(),
+            "identity" if !core.is_empty() && s.text.contains(&core) => {
+                role += core.len();
+                system_prompt += s.text.len() - core.len();
+            }
             // identity, the tool index and /personality all live in the prompt proper.
             _ => system_prompt += s.text.len(),
         }
@@ -106,6 +114,7 @@ pub fn categories(v: &View, specs: &[ToolSpec]) -> Vec<Category> {
         });
     let all = [
         Category { id: "system_prompt", glyph: "■", tokens: est(system_prompt) },
+        Category { id: "role", glyph: "▪", tokens: est(role) },
         Category { id: "tool_definitions", glyph: "▣", tokens: schema_chars(&builtin) },
         Category { id: "rules", glyph: "▩", tokens: est(rules) },
         Category { id: "skills", glyph: "▤", tokens: est(skills) },
@@ -488,5 +497,23 @@ mod tests {
         v.last_input_tokens = 0;
         let p = payload(&v, &[], 0);
         assert_eq!((p["context_source"].as_str(), p["context_estimated"].as_bool(), p["context_percent"].as_u64()), (Some("local_estimate"), Some(true), Some(0)));
+    }
+
+    /// The professional role (L0 core inside the identity + the `role` segment) is its own row.
+    #[test]
+    fn role_tokens_are_their_own_category() {
+        let core = ark_kernel::roles::core_text(&ark_kernel::config::Config::default()).unwrap();
+        let v = View {
+            system: vec![
+                SystemSegment { id: "identity".into(), text: format!("You are Ark.\n\n{core}"), cache: false },
+                SystemSegment { id: "role".into(), text: "# Professional role: x [role:x]\n".repeat(10), cache: false },
+            ],
+            ..Default::default()
+        };
+        let cats = categories(&v, &[]);
+        let role = cats.iter().find(|c| c.id == "role").unwrap().tokens;
+        let sys = cats.iter().find(|c| c.id == "system_prompt").unwrap().tokens;
+        assert!(role > 250 && sys < 10, "core counted with the role: role {role}, system {sys}");
+        assert!(report(&v, &[], 100_000, &CompactionConfig::default(), false).contains("Professional role"));
     }
 }

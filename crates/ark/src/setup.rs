@@ -657,6 +657,22 @@ pub fn run(paths: &Paths) -> Result<i32, String> {
         }
     }
 
+    // ── 6b. professional role (role_cli.rs): an occupation for the default agent ──
+    io.say(&format!("\n{}", t("✦ 職業角色（之後可用 `ark role use` 更改）", "✦ Professional role (change it later with `ark role use`)")));
+    let rows = crate::role_cli::setup_choices(zh());
+    let cur_role = root.get("role").and_then(|r| r.get("active")).and_then(|v| v.as_str()).map(String::from);
+    let rdefault = cur_role.as_deref().and_then(|c| rows.iter().position(|r| r.1.as_deref() == Some(c))).unwrap_or(0);
+    let mut rpick = rows[io.choose(t("編號", "Number"), &rows.iter().map(|r| r.0.clone()).collect::<Vec<_>>(), rdefault)?].1.clone();
+    if rpick.as_deref() == Some("") {
+        let words = io.ask(t("  ISCO 代碼或職業名稱", "  ISCO code or occupation"), cur_role.as_deref().unwrap_or(""))?;
+        let cfg_now = Config::load(None, None, &[]).unwrap_or_default();
+        rpick = crate::role_cli::pick(&cfg_now, &words).unwrap_or_else(|e| {
+            io.say(&format!("  ! {e}\n  {}", t("略過；之後可用 `ark role use` 設定", "skipped; set it later with `ark role use`")));
+            None
+        });
+    }
+    crate::role_cli::setup_apply(&mut root, rpick.as_deref());
+
     // Default workspace + official connectors (ops/wizard.rs).
     crate::ops::wizard::mid(&mut io, &mut root, paths)?;
 

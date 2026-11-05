@@ -18,6 +18,23 @@ jobs:
       - run: cargo build --release --locked
       - name: end-to-end
         run: python3 -I tests/e2e/run.py target/release/ark
+      # 7-4-5: every role pack through Skills Guard, the manifest digest, and roles.sig when
+      # the tree is signed (release builds; an unsigned dev tree is reported, not failed).
+      - name: role packs — Skills Guard scan + signature
+        env:
+          ARK_SHARE_DIR: share
+        run: target/release/ark role verify
+  roles:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      # 7-4-3 token budgets, 7-4-4 no person names (hashed list in share/roles/names.sha256;
+      # never a silent pass), structure, isco format, boundaries.toml, presets.toml. The
+      # internal provenance tree is not in the repo: check.py reports it as skipped.
+      - name: role packs — budgets, names, structure
+        run: python3 -I share/roles/check.py --quiet
+      - name: role packs — name check self-test
+        run: python3 -I share/roles/check.py --self-test
   deny:
     runs-on: ubuntu-24.04
     steps:

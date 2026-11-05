@@ -23,10 +23,10 @@ pub const USAGE: &str = "\
 ark agents <subcommand>
   list [--json]                              every agent (including `main`)
   add <id> [--name N] [--model p/m] [--workspace DIR] [--identity TEXT]
-           [--role coordinator|researcher|writer|reviewer] [--allow a,b] [--deny c]
+           [--role ROLE] [--allow a,b] [--deny c]
            [--default] [--bind channel[:account] [--peer KIND:ID]]
   update <id> [--name N] [--model p/m] [--workspace DIR] [--identity TEXT]
-              [--allow a,b] [--deny c] [--default]
+              [--role ROLE] [--allow a,b] [--deny c] [--default]
   set-identity <id> <text|@file>             replace the persona / standing instructions
   delete|rm <id>                             delete an agent and its bindings (`main` stays)
   bind <id> <channel[:account]> [--peer KIND:ID]
@@ -34,7 +34,10 @@ ark agents <subcommand>
   bindings [--json]                          every routing binding (user config + agents.toml)
   show <id>                                  the effective settings of one agent
 
-<id>: lowercase letter first, then lowercase letters, digits, `-` or `_` (max 64).";
+<id>: lowercase letter first, then lowercase letters, digits, `-` or `_` (max 64).
+ROLE: a team seed (coordinator, researcher, writer, reviewer: seeds the identity) or an
+occupation — ISCO code, 中英文職業名 or preset (devops, swdev, secops, data, itsupport); the
+agent then works with that role's rules, tool profile and boundaries (`ark role list`).";
 
 /// Value flags of `ark agents` (OpenClaw's `--identity`, `--peer`, `--allow`, `--deny` are ours:
 /// the global parser does not know them, so the dispatcher hands this command its raw arguments).
@@ -198,16 +201,27 @@ fn run(o: &Opts, paths: &Paths) -> Result<String, String> {
     }
 }
 
+/// `--role`: a team seed as-is, else an occupation resolved to its preset id / pack slug
+/// (ISCO code, Chinese or English name); ambiguous or unknown words are an error that lists
+/// the choices.
+fn occupation(paths: &Paths, raw: &str) -> Result<String, String> {
+    let r = raw.trim().to_ascii_lowercase();
+    if r.is_empty() || agents::role_identity(&r).is_some() {
+        return Ok(r);
+    }
+    let cfg = config(paths)?;
+    crate::role_cli::pick(&cfg, raw).map(|id| id.unwrap_or_default()).map_err(|e| format!("--role: {e}"))
+}
+
 fn cmd_add(o: &Opts, paths: &Paths) -> Result<String, String> {
     let id = o.need(1, "id")?;
     if id == "main" {
         return Err("`main` is the built-in default agent (use `ark agents update main …` for its identity)".into());
     }
-    let role = o.val("role").unwrap_or("").trim().to_ascii_lowercase();
+    let role = occupation(paths, o.val("role").unwrap_or(""))?;
     let identity = match o.val("identity") {
         Some(v) => v.to_string(),
-        None if !role.is_empty() => agents::role_identity(&role).ok_or_else(|| format!("--role `{role}`: use coordinator, researcher, writer or reviewer"))?.to_string(),
-        None => String::new(),
+        None => agents::role_identity(&role).unwrap_or_default().to_string(),
     };
     let def = AgentDef {
         name: o.val("name").map(one_line).unwrap_or_else(|| id.to_string()),
@@ -263,7 +277,7 @@ fn cmd_update(o: &Opts, paths: &Paths) -> Result<String, String> {
     // Nothing to change?
     let touched = ["name", "model", "workspace", "identity", "allow", "deny", "role"].iter().any(|k| o.val(k).is_some()) || o.flag("default");
     if !touched {
-        return Err("nothing to update: pass --name, --model, --workspace, --identity, --allow, --deny or --default".into());
+        return Err("nothing to update: pass --name, --model, --workspace, --identity, --role, --allow, --deny or --default".into());
     }
     let mut changes: Vec<String> = Vec::new();
     if let Some(m) = o.val("model").map(str::trim).filter(|m| !m.is_empty()) {
@@ -271,13 +285,8 @@ fn cmd_update(o: &Opts, paths: &Paths) -> Result<String, String> {
             return Err(format!("--model `{m}`: use provider/model (e.g. anthropic/claude-sonnet-5-5)"));
         }
     }
-    if let Some(r) = o.val("role").map(|r| r.trim().to_ascii_lowercase()).filter(|r| !r.is_empty()) {
-        if agents::role_identity(&r).is_none() {
-            return Err(format!("--role `{r}`: use coordinator, researcher, writer or reviewer"));
-        }
-    }
     let identity = o.val("identity").map(|s| s.trim().to_string());
-    let role = o.val("role").map(|r| r.trim().to_ascii_lowercase());
+    let role = o.val("role").map(|r| occupation(paths, r)).transpose()?;
     let name = o.val("name").map(one_line);
     let model = o.val("model").map(|s| s.trim().to_string());
     let workspace = o.val("workspace").map(|s| s.trim().to_string());
@@ -484,7 +493,7 @@ mod tests {
         r(&p, &["add", "rev", "--role", "reviewer"]).unwrap();
         let show = r(&p, &["show", "rev"]).unwrap();
         assert!(show.contains("identity: You are a reviewer") && show.contains("role: reviewer"), "{show}");
-        assert!(r(&p, &["add", "rev2", "--role", "bogus"]).unwrap_err().contains("--role `bogus`"));
+        assert!(r(&p, &["add", "rev2", "--role", "bogus"]).unwrap_err().contains("--role: no role matches `bogus`"));
 
         // bind / bindings / unbind
         let b = r(&p, &["bind", "writer", "slack:work", "--peer", "group:C123"]).unwrap();
@@ -559,5 +568,27 @@ mod tests {
         // own flags parse from raw arguments (the dispatcher hands these over unparsed)
         assert!(Opts::parse(&["add".into(), "x".into(), "--identity".into(), "hi".into()], VALUE_FLAGS, BOOL_FLAGS).is_ok());
         assert!(Opts::parse(&["add".into(), "x".into(), "--nope".into()], VALUE_FLAGS, BOOL_FLAGS).is_err());
+    }
+
+    /// `--role` takes an occupation (ISCO code / name / preset) as well as the four team seeds,
+    /// so a channel binding gives that chat a professional agent.
+    #[test]
+    fn add_with_an_occupation_role_and_bind_it() {
+        let p = tmp_paths();
+        let out = r(&p, &["add", "ops", "--role", "2522", "--bind", "telegram"]).unwrap();
+        assert!(out.contains("created agent `ops`"), "{out}");
+        let a = agents::all(&Config::default(), &p).remove("ops").unwrap();
+        assert_eq!((a.role.as_str(), a.identity.as_str()), ("systems-administration", ""));
+        assert_eq!(agents::resolve(&Config::default(), &p, "ops").unwrap().role.as_deref(), Some("systems-administration"));
+        r(&p, &["add", "sec", "--role", "資安維運"]).unwrap();
+        assert_eq!(agents::all(&Config::default(), &p)["sec"].role, "secops");
+        r(&p, &["add", "lead", "--role", "coordinator"]).unwrap();
+        let lead = agents::all(&Config::default(), &p).remove("lead").unwrap();
+        assert!(lead.identity.contains("coordinate") && agents::resolve(&Config::default(), &p, "lead").unwrap().role.is_none());
+        let e = r(&p, &["add", "x", "--role", "2149"]).unwrap_err();
+        assert!(e.contains("several roles"), "{e}");
+        r(&p, &["update", "ops", "--role", "devops"]).unwrap();
+        assert_eq!(agents::all(&Config::default(), &p)["ops"].role, "devops");
+        let _ = std::fs::remove_dir_all(p.data.parent().unwrap());
     }
 }
