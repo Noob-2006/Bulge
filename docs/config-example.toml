@@ -181,3 +181,22 @@ command = "~/.config/ark/hooks/check-shell.sh"
 # url = "https://hooks.example.com/ark"
 # events = ["pre_tool", "session_end"]
 # secret = "{{secret:HOOK_SECRET}}"
+
+# ───────────── 專業角色工具（資料／IT 支援／軟體開發），細節見 docs/professional-tools.md ─────────────
+# 憑證一律走保險庫 `ark secrets set NAME`；模型只指名「來源」，看不到連線字串。
+# [integrations.data]
+# max_rows = 1000                      # 每次查詢最多列數（上限 10000）
+# [integrations.data.sources.warehouse]
+# kind = "postgres"                    # postgres | mysql | mariadb | sqlite | clickhouse | bigquery
+# dsn = "{{secret:WAREHOUSE_DSN}}"     # postgres://user:password@host:5432/db?sslmode=require
+# description = "orders and customers (read replica)"
+# [integrations.directory.providers.corp]
+# kind = "ad"                          # ldap | ad | entra | okta（只讀查詢，沒有任何異動操作）
+# uri = "ldaps://dc1.corp.example:636"
+# base_dn = "DC=corp,DC=example"
+# bind_dn = "CN=svc-ark,OU=Service,DC=corp,DC=example"
+# bind_password = "{{secret:LDAP_BIND_PW}}"
+# [integrations.forge.hosts.gitlab]
+# kind = "gitlab"                      # github | gitlab（自架填 api_base；寫入一律第 2 級核准）
+# api_base = "https://gitlab.example.com/api/v4"
+# token = "{{secret:GITLAB_TOKEN}}"
