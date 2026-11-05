@@ -342,6 +342,8 @@ mod tests {
         for m in ["config.set", "shutdown", "channels.restart", "schedule.list", "goal.list", "audit.verify", "view.browser.list"] {
             assert_eq!(arp(&a, "acme-admin", m, json!({}))["error"]["code"], -32003, "{m}");
         }
+        // …and the same holds for the HTTP form of the live view.
+        assert_eq!(a.handle(req("GET", "/view/browser", &[("authorization", "Bearer acme-admin")], "")).status, 403);
         // Approvals of another tenant cannot be answered (the item looks absent).
         assert_eq!(arp(&a, "eng-tok", "gate.answer", json!({"id": "nope", "answer": "yes"}))["error"]["code"], -32001);
         // Streams: another tenant's event never passes the filter.

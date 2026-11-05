@@ -1374,6 +1374,13 @@ fn sessions_create(host: &Host, input: &Value) -> Result<Value, String> {
             return Err(format!("no user `{u}` (see `ark users`; omit `user` to create an unattached session)"));
         }
     }
+    // ent-050: `user` must not move the new session into another tenant.
+    if let Some(u) = user.as_deref().and_then(|u| get_user(&rt.paths, u)) {
+        let target = crate::tenancy::user_tenant(&crate::tenancy::registry(&rt.paths.data), &u);
+        if !crate::tenancy::may_attach(crate::tenancy::session_tenants(&rt.paths.data).get(&host.session), &target) {
+            return Err(format!("user `{}` belongs to another organization or team; sessions stay inside the caller's tenant", u.id));
+        }
+    }
     let model = arg_str(input, &["model"]);
     let title = arg_str(input, &["title", "label"]);
     let ws = arg_str(input, &["workspace", "cwd"]).map(|w| ark_core::tool::expand_home(&w)).unwrap_or_else(|| host.workspace.clone());

@@ -280,6 +280,12 @@ impl App {
                 Response::upgrade(Box::new(move |s, head, rest| me.ws_session(s, &head, rest, proto, p)))
             }
             (_, path) if path.starts_with("/view/") => {
+                // The live browser / desktop belong to the whole installation, not to a tenant
+                // (ent-050): tenant-bound callers get the same refusal as over ARP (`view.*`).
+                if crate::tenant::bound(self, &p) {
+                    self.audit_request(&p, &r.path, "deny", json!({"http": r.method, "reason": "tenant"}));
+                    return forbidden_msg("the live browser / desktop view is installation-wide; tenant-bound accounts cannot open it");
+                }
                 if let Err(e) = p.access.permits_http(&r.method, &r.path) {
                     self.audit_request(&p, &r.path, "deny", json!({"http": r.method}));
                     return forbidden_msg(&e);

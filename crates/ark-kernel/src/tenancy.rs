@@ -386,6 +386,16 @@ pub fn session_tenants(data: &Path) -> BTreeMap<String, Tenant> {
 
 /// The tenant a registered user's own data goes to (organization from the profile, else from
 /// the team's registry entry).
+/// May a session in `caller`'s tenant create a session for a user in `target`? Unstamped
+/// callers (single-tenant installs, local CLI) are unrestricted; a stamped caller stays in its
+/// organization, and a team-scoped caller in its team.
+pub fn may_attach(caller: Option<&Tenant>, target: &Tenant) -> bool {
+    match caller {
+        None => true,
+        Some(c) => c.org() == target.org() && (c.team.is_empty() || c.team == target.team),
+    }
+}
+
 pub fn user_tenant(reg: &Registry, user: &crate::agents::User) -> Tenant {
     let org = if !user.org.is_empty() && user.org != "*" { user.org.clone() } else if !user.team.is_empty() { team_org(reg, &user.team) } else { DEFAULT_ORG.into() };
     Tenant { org: if org == DEFAULT_ORG { String::new() } else { org }, team: user.team.clone(), project: String::new() }
@@ -403,6 +413,17 @@ pub fn user_viewer(reg: &Registry, user: &crate::agents::User, admin: bool) -> V
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sessions_cannot_be_created_for_users_of_another_tenant() {
+        let t = |org: &str, team: &str| Tenant { org: org.into(), team: team.into(), project: String::new() };
+        assert!(may_attach(None, &t("acme", "ops")), "unstamped caller");
+        assert!(may_attach(Some(&t("acme", "")), &t("acme", "ops")), "org-wide caller, own org");
+        assert!(may_attach(Some(&t("acme", "ops")), &t("acme", "ops")));
+        assert!(!may_attach(Some(&t("acme", "ops")), &t("acme", "sales")), "other team");
+        assert!(!may_attach(Some(&t("acme", "")), &t("globex", "")), "other org");
+        assert!(may_attach(Some(&t("", "")), &t("default", "")), "empty org is the default org");
+    }
 
     #[test]
     fn registry_viewers_and_stamps() {
