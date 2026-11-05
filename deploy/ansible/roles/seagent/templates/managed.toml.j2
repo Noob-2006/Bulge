@@ -1,0 +1,16 @@
+# Managed by Ansible - do not edit by hand. Read by seagent from /etc/seagent (see: seagent config managed).
+{% macro emit(tbl, prefix) -%}
+{% set scalars = tbl | dict2items | rejectattr('value', 'mapping') | list %}
+{% set tables = tbl | dict2items | selectattr('value', 'mapping') | list %}
+{% if scalars and prefix %}
+
+[{{ prefix }}]
+{% endif %}
+{% for kv in scalars %}
+{{ kv.key }} = {{ kv.value | to_json }}
+{% endfor %}
+{% for kv in tables %}
+{{ emit(kv.value, (prefix ~ '.' if prefix else '') ~ kv.key) }}
+{% endfor %}
+{%- endmacro -%}
+{{ emit(seagent_managed_policy, '') }}

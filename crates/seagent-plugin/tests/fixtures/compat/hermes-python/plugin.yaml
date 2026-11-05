@@ -1,0 +1,22 @@
+# Fixture: Hermes plugin manifest (fields of plugins/security-guidance and
+# plugins/google_meet + requires_env as in plugins/model-providers/*).
+name: guard-demo
+version: 0.2.0
+description: "Block writes that contain known-dangerous patterns (fixture for seagent's compat importer)."
+author: NousResearch
+kind: standalone
+platforms:
+  - linux
+  - macos
+provides_tools:
+  - guard_demo_check
+provides_hooks:
+  - pre_tool_call
+  - transform_tool_result
+  # Synthetic: no seagent event has this name, so the import must say so instead of
+  # inventing a mapping (no real manifest here declares it).
+  - experiment_hook
+requires_env:
+  - GUARD_DEMO_KEY
+optional_env:
+  - GUARD_DEMO_MODE

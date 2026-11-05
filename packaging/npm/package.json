@@ -1,0 +1,14 @@
+{
+  "name": "@se-agent/seagent",
+  "version": "0.1.0",
+  "description": "SE Agent (System Engineering Agent): self-hosted, Linux-first AI agent runtime. Installs the signed static release binary.",
+  "license": "MIT",
+  "homepage": "https://github.com/se-agent/System-Engineering-Agent",
+  "repository": { "type": "git", "url": "git+https://github.com/se-agent/System-Engineering-Agent.git", "directory": "packaging/npm" },
+  "bin": { "seagent": "bin/seagent.js" },
+  "scripts": { "postinstall": "node install.js" },
+  "files": ["bin/seagent.js", "install.js", "README.md"],
+  "os": ["linux"],
+  "cpu": ["x64", "arm64"],
+  "engines": { "node": ">=18" }
+}

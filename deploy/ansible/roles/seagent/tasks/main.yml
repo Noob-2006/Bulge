@@ -1,0 +1,61 @@
+---
+- name: seagent | refuse unsupported inputs early
+  ansible.builtin.assert:
+    that:
+      - seagent_install_method in ['repo', 'package', 'tarball']
+      - ansible_system == 'Linux'
+      - ansible_architecture in ['x86_64', 'aarch64']
+      - seagent_install_method != 'repo' or (seagent_repo_url | length > 0 and seagent_repo_key_url | length > 0)
+      - seagent_install_method != 'package' or (seagent_package_src | length > 0 and seagent_package_checksum | length > 0)
+      - seagent_install_method != 'tarball' or (seagent_tarball_src | length > 0 and seagent_tarball_checksum | length > 0)
+    fail_msg: "see roles/seagent/README.md: set seagent_install_method and the variables it needs"
+
+- name: seagent | install
+  ansible.builtin.include_tasks: "install_{{ seagent_install_method }}.yml"
+
+- name: seagent | organisation policy in /etc/seagent/managed.toml
+  ansible.builtin.template:
+    src: managed.toml.j2
+    dest: /etc/seagent/managed.toml
+    owner: root
+    group: root
+    mode: "0644"
+    # seagent refuses a policy file anyone else could write; this role writes exactly what it accepts
+    validate: "/bin/sh -c 'test -s %s'"
+  when: seagent_managed_policy | length > 0
+  notify: restart seagentd
+
+- name: seagent | unattended setup (runs once; secrets only in this task's environment)
+  ansible.builtin.command:
+    argv: >-
+      {{ [seagent_bin, 'setup', '--non-interactive', '--no-service', '--provider', seagent_provider]
+         + (['--model', seagent_model] if seagent_model | length else [])
+         + (['--base-url', seagent_base_url] if seagent_base_url | length else [])
+         + (['--channel', seagent_channel] if seagent_channel | length else [])
+         + (['--owner', seagent_owner] if seagent_owner | length else []) }}
+  environment:
+    SEAGENT_MODE: system   # FHS layout: config /etc/seagent, state /var/lib/seagent (docs/paths.md)
+    SEAGENT_SETUP_API_KEY: "{{ seagent_api_key }}"
+    SEAGENT_SETUP_CHANNEL_TOKEN: "{{ seagent_channel_token }}"
+  become: true
+  become_user: "{{ seagent_system_user }}"
+  become_method: "{{ seagent_become_method }}"
+  become_flags: "{{ seagent_become_flags | default(omit, true) }}"
+  no_log: "{{ seagent_setup_no_log }}"   # keep true: the task's environment carries the API key
+  args:
+    # setup rewrites config.toml (and keeps a .bak) on every run, so it only runs when there is none;
+    # set seagent_setup_force=true to apply changed provider/model/channel variables to an existing host
+    creates: "{{ omit if seagent_setup_force | bool else seagent_config_dir ~ '/config.toml' }}"
+  when: seagent_provider | length > 0
+  notify: restart seagentd
+
+- name: seagent | the system service (units come from the package; tarball installs get one printed by seagent itself)
+  ansible.builtin.service:
+    name: seagentd
+    enabled: "{{ seagent_service_enabled }}"
+    state: "{{ seagent_service_state }}"
+  when: seagent_service_enabled | bool and ansible_service_mgr == 'systemd'
+
+- name: seagent | prove it answers
+  ansible.builtin.command: "{{ seagent_bin }} --version"
+  changed_when: false

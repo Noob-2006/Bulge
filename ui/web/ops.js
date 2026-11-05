@@ -1,7 +1,7 @@
-// ark web UI: the operations views — overview (this host, agents, devices, alerts, audit
+// seagent web UI: the operations views — overview (this host, agents, devices, alerts, audit
 // tail), agents (delegation tree + fleet board), devices (nodes, pairing, cluster), approvals
 // (every open gate / question across sessions) and audit (filterable, hash-chain verify).
-// Data: `ui.ops.status` (crates/ark/src/ops/opsview.rs, polled every 3 s while connected),
+// Data: `ui.ops.status` (crates/seagent/src/ops/opsview.rs, polled every 3 s while connected),
 // `ui.fleet`, `ui.devices`, `cluster.status`, `audit.query`, `audit.verify`, `gate.answer`.
 // Uses app.js globals: S, $, esc, t, VIEWS, showView, openSession, answerPending, toast, LANG.
 'use strict';
@@ -127,7 +127,7 @@ function renderOps(el, live) {
     <dt>${L('核心', 'Kernel')}</dt><dd>${ov(h.kernel)} · ${ov(h.arch)}</dd>
     <dt>CPU</dt><dd>${ov(h.cpus)} ${L('核', 'cores')} · ${pct(h.cpu_pct)}</dd>
     <dt>${L('開機', 'Uptime')}</dt><dd>${dur(h.uptime_s)}</dd>
-    <dt>arkd</dt><dd>v${ov(dm.version)} · pid ${ov((dm.proc || {}).pid)} · ${dur((d.ts - dm.started_ms) / 1000)}</dd>
+    <dt>seagentd</dt><dd>v${ov(dm.version)} · pid ${ov((dm.proc || {}).pid)} · ${dur((d.ts - dm.started_ms) / 1000)}</dd>
     <dt>RSS</dt><dd>${size((dm.proc || {}).rss_bytes)} · ${ov((dm.proc || {}).threads)} thr · ${ov((dm.proc || {}).fds)} fd</dd>
     <dt>${L('網路', 'Net')}</dt><dd>↓ ${rate((h.net || {}).rx_bps)} · ↑ ${rate((h.net || {}).tx_bps)}</dd>
     <dt>${L('模型', 'Model')}</dt><dd>${ov(dm.model)}</dd>
@@ -137,7 +137,7 @@ function renderOps(el, live) {
   // Alerts + services
   html += `<section>${secH('06', L('告警', 'Alerts'))}${alerts.length ? alerts.map((a) => `<div class="alert"><span class="light ${a.severity === 'error' ? 'crit' : 'warn'}" style="margin-top:6px"></span><div><div>${ov(a.title)}</div>${a.detail ? `<div class="d">${ov(a.detail)}</div>` : ''}</div></div>`).join('') : `<div class="none"><span class="star ok" style="--size:9px"></span> ${L('沒有告警', 'No alerts')}</div>`}
     ${secH('07', L('服務', 'Services'))}<div class="slist">
-      <div class="srow"><span class="light ok"></span><span>arkd<span class="sub">${ov((dm.paths || {}).data)}</span></span><span class="r">v${ov(dm.version)}</span></div>
+      <div class="srow"><span class="light ok"></span><span>seagentd<span class="sub">${ov((dm.paths || {}).data)}</span></span><span class="r">v${ov(dm.version)}</span></div>
       ${(d.channels || []).map((c) => `<div class="srow"><span class="light ok"></span><span>${ov(c.name)}<span class="sub">${ov(c.kind)}</span></span><span class="r">${L('頻道', 'channel')}</span></div>`).join('')}
       ${(d.mcp || []).map((m) => `<div class="srow"><span class="light ${m.running ? 'ok' : ''}"></span><span>${ov(m.name)}<span class="sub">MCP · ${ov(m.tools)} ${L('個工具', 'tools')}</span></span><span class="r">${m.running ? L('執行', 'up') : L('待命', 'idle')}</span></div>`).join('')}
       ${OPS.devices ? (OPS.devices.nodes || []).map((n) => `<div class="srow"><span class="light ok"></span><span>${ov(n.name || n.id)}<span class="sub">${ov(n.platform || '')}</span></span><span class="r">${L('裝置', 'node')}</span></div>`).join('') : ''}
@@ -236,10 +236,10 @@ VIEWS.devices = {
       + `<div class="kpi"><span class="k">Workers</span><span class="v">${ov((cl && cl.workers && cl.workers.count) || 0)}</span><span class="s">${cl && cl.workers ? `${ov(cl.workers.completed)} ${L('完成', 'done')}` : L('未啟用', 'off')}</span></div>`
       + '</div><div class="cols">';
     if (dev.error) h += `<p class="bad c12">${ov(dev.error)}</p>`;
-    h += `<section class="c7">${secH('01', L('裝置節點', 'Device nodes'))}<div class="slist">${nodes.length ? nodes.map((n) => `<div class="srow"><span class="light ok"></span><span><strong>${ov(n.name || n.id)}</strong> <span class="faint mono">${ov(n.id)}</span><span class="sub">${ov(n.platform || '—')} · ${(n.commands || []).length} ${L('個指令', 'commands')}</span></span><span class="r">${L('連線自', 'since')} ${ago(n.connected_since && n.connected_since < 1e12 ? n.connected_since * 1000 : n.connected_since)}</span></div>`).join('') : `<div class="none">${L('沒有節點連線。在另一台機器執行', 'No nodes connected. On another machine run')} <code>ark node --setup-code CODE</code>.</div>`}
+    h += `<section class="c7">${secH('01', L('裝置節點', 'Device nodes'))}<div class="slist">${nodes.length ? nodes.map((n) => `<div class="srow"><span class="light ok"></span><span><strong>${ov(n.name || n.id)}</strong> <span class="faint mono">${ov(n.id)}</span><span class="sub">${ov(n.platform || '—')} · ${(n.commands || []).length} ${L('個指令', 'commands')}</span></span><span class="r">${L('連線自', 'since')} ${ago(n.connected_since && n.connected_since < 1e12 ? n.connected_since * 1000 : n.connected_since)}</span></div>`).join('') : `<div class="none">${L('沒有節點連線。在另一台機器執行', 'No nodes connected. On another machine run')} <code>seagent node --setup-code CODE</code>.</div>`}
       ${paired.filter((p) => !p.connected).map((p) => `<div class="srow"><span class="light"></span><span>${ov(p.name || p.id)}<span class="sub">${ov(p.platform || '—')}</span></span><span class="r faint">${L('離線', 'offline')}</span></div>`).join('')}</div>
       ${pending.length ? secH('02', L('等待配對', 'Pending pairing')) + '<div class="slist">' + pending.map((p) => `<div class="srow"><span class="light warn"></span><span>${ov(p.name || p.id)}<span class="sub">${ov(p.platform || '')} · code ${ov(p.code || '')}</span></span><span class="r"><button class="btn small" data-pair="${ov(p.code || p.id)}" data-write>${L('核准', 'Approve')}</button></span></div>`).join('') + '</div>' : ''}</section>`;
-    h += `<section class="c7">${secH('03', L('桌面與虛擬機', 'Desktops & VMs'))}<div class="slist">${(desks || []).map((d) => `<div class="srow"><span class="light ${d.running ? 'ok' : ''}"></span><span><strong>${ov(d.label || d.id)}</strong> <span class="faint mono">${ov(d.id)}</span><span class="sub">${ov(d.kind)}${d.accel ? ' · ' + ov(d.accel) : ''} · ${ov(d.width)}×${ov(d.height)} · ${d.controller === 'human' ? L('人工控制中', 'human in control') : L('代理控制', 'agent in control')}${d.kind === 'vm' && !d.imageBuilt ? ' · ' + L('映像未建置（ark vm desktop build）', 'image not built (ark vm desktop build)') : ''}</span></span><span class="r">${d.kind === 'vm' && d.imageBuilt ? (d.running ? `<button class="btn ghost small" data-vmstop="${ov(d.id)}" data-write>${L('關機', 'Stop')}</button>` : `<button class="btn small" data-vmstart="${ov(d.id)}" data-write>${L('啟動', 'Start')}</button>`) : (d.running ? L('執行中', 'running') : L('未執行', 'off'))}</span></div>`).join('') || `<div class="none">${L('沒有桌面。', 'No desktops.')}</div>`}</div></section>`;
+    h += `<section class="c7">${secH('03', L('桌面與虛擬機', 'Desktops & VMs'))}<div class="slist">${(desks || []).map((d) => `<div class="srow"><span class="light ${d.running ? 'ok' : ''}"></span><span><strong>${ov(d.label || d.id)}</strong> <span class="faint mono">${ov(d.id)}</span><span class="sub">${ov(d.kind)}${d.accel ? ' · ' + ov(d.accel) : ''} · ${ov(d.width)}×${ov(d.height)} · ${d.controller === 'human' ? L('人工控制中', 'human in control') : L('代理控制', 'agent in control')}${d.kind === 'vm' && !d.imageBuilt ? ' · ' + L('映像未建置（seagent vm desktop build）', 'image not built (seagent vm desktop build)') : ''}</span></span><span class="r">${d.kind === 'vm' && d.imageBuilt ? (d.running ? `<button class="btn ghost small" data-vmstop="${ov(d.id)}" data-write>${L('關機', 'Stop')}</button>` : `<button class="btn small" data-vmstart="${ov(d.id)}" data-write>${L('啟動', 'Start')}</button>`) : (d.running ? L('執行中', 'running') : L('未執行', 'off'))}</span></div>`).join('') || `<div class="none">${L('沒有桌面。', 'No desktops.')}</div>`}</div></section>`;
     h += `<section class="c5">${secH('04', L('叢集', 'Cluster'), `<button data-page="cluster">${L('管理 →', 'Manage →')}</button>`)}<div class="slist">${(cnodes.length ? cnodes : [{ node: (cl && cl.self) || 'local', alive: true, self: true, role: ha.role || 'single' }]).map((n) => `<div class="srow"><span class="light ${n.alive ? 'ok' : 'crit'}"></span><span><strong>${ov(n.node)}</strong>${n.self ? ` <span class="faint">${L('本機', 'this')}</span>` : ''}<span class="sub">${ov(n.role || '—')} · ${ov(n.version || '')} ${ov(n.advertise || n.url || '')}</span></span><span class="r">${ov((n.running || []).length)} ${L('執行', 'run')}</span></div>`).join('')}</div></section>`;
     h += '</div></div>';
     el.innerHTML = h;
@@ -308,7 +308,7 @@ VIEWS.audit = {
         const r = await S.arp.call('audit.report', { from_ms: Date.now() - 30 * 86400000, to_ms: Date.now(), format: 'html' });
         const a = document.createElement('a');
         a.href = URL.createObjectURL(new Blob([r.text || JSON.stringify(r, null, 2)], { type: 'text/html' }));
-        a.download = `ark-audit-report-${new Date().toISOString().slice(0, 10)}.html`;
+        a.download = `seagent-audit-report-${new Date().toISOString().slice(0, 10)}.html`;
         a.click();
       } catch (e) { toast(e.message, true); }
     };
@@ -321,7 +321,7 @@ VIEWS.audit = {
       const csv = 'seq,ts,kind,actor_kind,actor,role,ip,target,outcome,session\n' + rows.map((r) => [r.seq, new Date(r.ts).toISOString(), r.kind, (r.actor || {}).kind, (r.actor || {}).name, (r.actor || {}).role, (r.actor || {}).ip, r.target, r.outcome, r.session].map(cell).join(',')).join('\n');
       const a = document.createElement('a');
       a.href = URL.createObjectURL(new Blob([csv], { type: 'text/csv' }));
-      a.download = `ark-audit-${Date.now()}.csv`;
+      a.download = `seagent-audit-${Date.now()}.csv`;
       a.click();
     };
   },

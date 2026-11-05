@@ -1,5 +1,5 @@
 // Offline shell for the installed app; live data always comes from the server.
-const CACHE = 'ark-shell-v5';
+const CACHE = 'seagent-shell-v5';
 const SHELL = ['/', '/ui/theme.css', '/ui/app.css', '/ui/pages.css', '/ui/app.js', '/ui/surfaces.js', '/ui/pages.js', '/ui/ops.js', '/ui/work.js', '/ui/star.svg', '/ui/icon.svg'];
 self.addEventListener('install', (e) => e.waitUntil(caches.open(CACHE).then((c) => c.addAll(SHELL))));
 self.addEventListener('activate', (e) => e.waitUntil(caches.keys().then((ks) => Promise.all(ks.filter((k) => k !== CACHE).map((k) => caches.delete(k))))));

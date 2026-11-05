@@ -1,76 +1,85 @@
 # One nfpm definition for both .deb and .rpm (ent-006/007). Why nfpm and not cargo-deb +
-# cargo-generate-rpm: ark ships a prebuilt *static musl* binary plus a large share/ tree, two
+# cargo-generate-rpm: seagent ships a prebuilt *static musl* binary plus a large share/ tree, two
 # distro families need the same file layout, and nfpm needs no cargo plugin or rpmbuild/dpkg
 # on the build host (it is a single Go binary; CI and build-packages.sh run it from its
 # container). The cargo plugins would build the binary themselves (glibc, wrong baseline).
 #
 # Everything is substituted from the environment by packaging/nfpm/build-packages.sh:
-#   VERSION, ARCH (amd64|arm64), ARK_BIN, STAGE
-name: ark-agent
+#   VERSION, ARCH (amd64|arm64), SEAGENT_BIN, STAGE
+name: seagent
 arch: ${ARCH}
 platform: linux
 version: ${VERSION}
 release: "1"
 section: utils
 priority: optional
-maintainer: ark maintainers <ark@users.noreply.github.com>
+maintainer: seagent maintainers <seagent@users.noreply.github.com>
 description: |
-  ark agent runtime (daemon, CLI, tools, sandboxing, audit).
-  Static binary with bundled skills, roles and plugin catalog under /usr/share/ark.
-homepage: https://github.com/ark-agent/ark
+  SE Agent (System Engineering Agent): agent runtime with daemon, CLI, tools, sandboxing, audit.
+  Static binary with bundled skills, roles and plugin catalog under /usr/share/seagent.
+homepage: https://github.com/se-agent/System-Engineering-Agent
 license: MIT
-# The distribution name is `ark-agent`: Debian, Ubuntu, Fedora and openSUSE already ship a KDE
-# archiver called `ark` (also /usr/bin/ark), and with the plain name apt would silently prefer the
-# distro package (its epoch wins). The binary stays `ark`; the conflict is declared, not overwritten.
+# The product was called `ark` and shipped as `ark-agent` (KDE's archiver owns the name `ark`).
+# `seagent` takes over from it: an upgrade replaces the old package in place.
 conflicts:
-  - ark
+  - ark-agent
+replaces:
+  - ark-agent
+provides:
+  - ark-agent
 # Static musl build: nothing to depend on. git and certificates are what the agent uses at run time.
 recommends:
   - git
   - ca-certificates
 contents:
-  - src: ${ARK_BIN}
+  - src: ${SEAGENT_BIN}
     expand: true
-    dst: /usr/bin/ark
+    dst: /usr/bin/seagent
     file_info: { mode: 0755 }
   # skills, roles, catalogs, vm builder, sandbox-browser sources, units, managed-by-package marker
-  # (ark_core::share finds /usr/share/ark from /usr/bin/ark; `ark update` refuses to replace it)
-  - src: ${STAGE}/usr/share/ark
+  # (seagent_core::share finds /usr/share/seagent from /usr/bin/seagent; `seagent update` refuses to replace it)
+  - src: ${STAGE}/usr/share/seagent
     expand: true
-    dst: /usr/share/ark
+    dst: /usr/share/seagent
     type: tree
-  - src: ${STAGE}/usr/share/doc/ark
+  - src: ${STAGE}/usr/share/doc/seagent
     expand: true
-    dst: /usr/share/doc/ark
+    dst: /usr/share/doc/seagent
     type: tree
   # systemd: the system instance, generated from ops/service.rs (render_unit). postinstall.sh
-  # rewrites it for systemd < 245 with `ark service print --system` (ent-025).
-  - src: ${STAGE}/usr/lib/systemd/system/arkd.service
+  # rewrites it for systemd < 245 with `seagent service print --system` (ent-025).
+  - src: ${STAGE}/usr/lib/systemd/system/seagentd.service
     expand: true
-    dst: /usr/lib/systemd/system/arkd.service
+    dst: /usr/lib/systemd/system/seagentd.service
     file_info: { mode: 0644 }
-  - src: ${STAGE}/usr/lib/sysusers.d/ark.conf
+  - src: ${STAGE}/usr/lib/sysusers.d/seagent.conf
     expand: true
-    dst: /usr/lib/sysusers.d/ark.conf
+    dst: /usr/lib/sysusers.d/seagent.conf
     file_info: { mode: 0644 }
-  - src: ${STAGE}/usr/lib/tmpfiles.d/ark.conf
+  - src: ${STAGE}/usr/lib/tmpfiles.d/seagent.conf
     expand: true
-    dst: /usr/lib/tmpfiles.d/ark.conf
+    dst: /usr/lib/tmpfiles.d/seagent.conf
     file_info: { mode: 0644 }
-  # /etc/ark: administrator policy (ark_kernel::managed) and, since ent-008, the system instance's
-  # config.toml + secrets (ark_core::layout::system::CONFIG). root:ark 1770: the service account
+  # /etc/seagent: administrator policy (seagent_kernel::managed) and, since ent-008, the system instance's
+  # config.toml + secrets (seagent_core::layout::system::CONFIG). root:seagent 1770: the service account
   # can create and rewrite its own files, the sticky bit stops it replacing root-owned policy, and
   # the policy loader refuses any policy file not owned by root. The directories belong to the
   # package, the files in them never do, so an upgrade or removal cannot touch policy or config.
-  - dst: /etc/ark
+  - dst: /etc/seagent
     type: dir
-    file_info: { mode: 01770, owner: root, group: ark }
-  - dst: /etc/ark/managed.d
+    file_info: { mode: 01770, owner: root, group: seagent }
+  - dst: /etc/seagent/managed.d
     type: dir
     file_info: { mode: 0755 }
-  - src: ${STAGE}/usr/share/ark/examples/managed.toml
+  # OpenRC (Alpine): the systemd files above are inert there; this is the service.
+  - src: ${STAGE}/etc/init.d/seagentd
     expand: true
-    dst: /etc/ark/managed.toml.example
+    dst: /etc/init.d/seagentd
+    packager: apk
+    file_info: { mode: 0755 }
+  - src: ${STAGE}/usr/share/seagent/examples/managed.toml
+    expand: true
+    dst: /etc/seagent/managed.toml.example
     type: config|noreplace
     file_info: { mode: 0644 }
 scripts:
@@ -85,4 +94,11 @@ rpm:
 deb:
   compression: gzip
   fields:
-    Bugs: https://github.com/ark-agent/ark/issues
+    Bugs: https://github.com/se-agent/System-Engineering-Agent/issues
+archlinux:
+  packager: SE Agent maintainers <seagent@users.noreply.github.com>
+  pkgbase: seagent
+apk:
+  # Unsigned here; the release workflow signs with its abuild key (`apk add --allow-untrusted`
+  # for a local file).
+  signature: {}

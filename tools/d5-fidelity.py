@@ -7,8 +7,8 @@ Reports, per skill, how many upstream body lines (>=3 words) are missing from th
 import re, os, glob, json, sys
 
 W = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-HERMES = '/home/noob/hermes-agent'
-OPENCLAW = '/home/noob/openclaw'
+HERMES = os.environ.get('SEAGENT_UPSTREAM_HERMES') or sys.exit('set SEAGENT_UPSTREAM_HERMES to a Hermes checkout')
+OPENCLAW = os.environ.get('SEAGENT_UPSTREAM_OPENCLAW') or sys.exit('set SEAGENT_UPSTREAM_OPENCLAW to an OpenClaw checkout')
 
 def split(p):
     t = open(p, encoding='utf-8').read()
@@ -25,23 +25,23 @@ NAMED = ("1password blogwatcher blucli camsnap clawhub diagram-maker eightctl ge
 CUSTODIAN = ["add-model-provider", "cloud-image-bake", "configure-channel", "diagnose-gateway"]
 NA_MAC = ["apple-notes", "apple-reminders", "bear-notes", "things-mac", "peekaboo", "model-usage"]
 
-ark = {}
+seagent = {}
 for p in glob.glob(os.path.join(W, 'share/skills/**/SKILL.md'), recursive=True):
-    ark.setdefault(p.split('/')[-2], p)
+    seagent.setdefault(p.split('/')[-2], p)
 
 rows = []
 def check(name, up_path):
-    if name not in ark:
-        rows.append({'name': name, 'up': up_path, 'ark': None, 'lines': 0, 'missing': [], 'ratio': 0})
+    if name not in seagent:
+        rows.append({'name': name, 'up': up_path, 'seagent': None, 'lines': 0, 'missing': [], 'ratio': 0})
         return
     _, up = split(up_path)
-    _, a = split(ark[name])
+    _, a = split(seagent[name])
     an = norm(a)
     lines = [l for l in up.split('\n') if len(l.split()) >= 3]
     miss = [l for l in lines if norm(l) not in an]
-    rows.append({'name': name, 'up': up_path, 'ark': os.path.relpath(ark[name], W),
+    rows.append({'name': name, 'up': up_path, 'seagent': os.path.relpath(seagent[name], W),
                  'lines': len(lines), 'missing': miss,
-                 'ratio': round(os.path.getsize(ark[name]) / max(os.path.getsize(up_path), 1), 3)})
+                 'ratio': round(os.path.getsize(seagent[name]) / max(os.path.getsize(up_path), 1), 3)})
 
 for n in NAMED:
     check(n, os.path.join(OPENCLAW, 'skills', n, 'SKILL.md'))
@@ -51,10 +51,10 @@ for n in NA_MAC:
     check(n, os.path.join(OPENCLAW, 'skills', n, 'SKILL.md'))
 
 for r in rows:
-    if r['ark'] is None:
-        print(f"{r['name']:26s} NO ARK FILE")
+    if r['seagent'] is None:
+        print(f"{r['name']:26s} NO SEAGENT FILE")
         continue
-    print(f"{r['name']:26s} lines={r['lines']:4d} missing={len(r['missing']):3d} ratio={r['ratio']:.2f} {r['ark']}")
+    print(f"{r['name']:26s} lines={r['lines']:4d} missing={len(r['missing']):3d} ratio={r['ratio']:.2f} {r['seagent']}")
     for l in r['missing'][:5]:
         print('      -', norm(l)[:110])
 

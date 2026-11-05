@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Regenerate crates/ark-channel/src/testdata/zlib/discord-stream.json.
+"""Regenerate crates/seagent-channel/src/testdata/zlib/discord-stream.json.
 
 Each stream is one zlib context flushed with Z_SYNC_FLUSH per message, the way
 Discord's `compress=zlib-stream` gateway transport sends it. `frames` lists the
@@ -44,7 +44,7 @@ out = {
     "fixed": stream(msgs, strategy=zlib.Z_FIXED),
     "gateway": stream([
         j({"op": 10, "d": {"heartbeat_interval": 45000}, "s": None, "t": None}),
-        j({"op": 0, "s": 1, "t": "READY", "d": {"v": 10, "session_id": "S1", "resume_gateway_url": "ws://unused", "user": {"id": "B", "username": "ark", "bot": True}, "application": {"id": "APP"}, "guilds": []}}),
+        j({"op": 0, "s": 1, "t": "READY", "d": {"v": 10, "session_id": "S1", "resume_gateway_url": "ws://unused", "user": {"id": "B", "username": "seagent", "bot": True}, "application": {"id": "APP"}, "guilds": []}}),
         j({"op": 0, "s": 2, "t": "MESSAGE_CREATE", "d": {"id": "10", "type": 0, "channel_id": "D1", "author": {"id": "U1", "username": "amy"}, "content": "compressed hello", "mentions": [], "attachments": []}}),
         j({"op": 11}),
     ], split={2}),

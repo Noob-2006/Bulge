@@ -1,0 +1,51 @@
+[Unit]
+Description=SE Agent daemon (system)
+Documentation=https://github.com/se-agent/System-Engineering-Agent
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+Type=notify
+NotifyAccess=main
+User=seagent
+Group=seagent
+Environment=SEAGENT_MODE=system
+StateDirectory=seagent seagent/workspace
+StateDirectoryMode=0750
+CacheDirectory=seagent
+LogsDirectory=seagent
+RuntimeDirectory=seagent
+RuntimeDirectoryMode=0750
+ReadWritePaths=-/etc/seagent
+ExecStart=/usr/bin/seagent daemon run -w /var/lib/seagent/workspace
+WorkingDirectory=/var/lib/seagent/workspace
+Restart=on-failure
+RestartSec=5s
+# SIGTERM to seagentd first (it interrupts runs and saves state), then the rest of the group.
+KillMode=mixed
+TimeoutStopSec=30s
+# ent-024: a delegated cgroup subtree, so `[exec.cgroups]` can give every command its own
+# cgroup (escaped double-forks are reaped, memory/pids caps apply) on cgroup v1 and v2.
+Delegate=yes
+# seagent refuses sudo by policy; make that impossible rather than merely discouraged.
+NoNewPrivileges=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+SystemCallArchitectures=native
+RestrictRealtime=yes
+UMask=0077
+# A system manager can apply the full sandbox (user units cannot without user namespaces).
+PrivateTmp=yes
+ProtectSystem=full
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+# Not set on purpose: MemoryDenyWriteExecute (breaks Node/V8 bridges), ProtectHome and
+# RestrictNamespaces (the sandboxes seagent may run need them).
+
+[Install]
+WantedBy=multi-user.target

@@ -55,8 +55,8 @@ async function refresh() {
     status = null;
   }
   if (!status) {
-    const stored = await chrome.storage.local.get({ arkStatus: null });
-    status = stored.arkStatus;
+    const stored = await chrome.storage.local.get({ seagentStatus: null });
+    status = stored.seagentStatus;
   }
   const view = describe(status);
   statusLine.textContent = view.text;

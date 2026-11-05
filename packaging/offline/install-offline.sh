@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Install ark from an air-gapped bundle. No network is used, none is needed. The only commands
+# Install seagent from an air-gapped bundle. No network is used, none is needed. The only commands
 # it runs are tar/install/sha256sum/openssl, and (with --package) your package manager.
 #
 #   ./install-offline.sh [--prefix DIR] [--package] [--key release-key.pub.pem] [--vm-image-dir DIR] [--no-verify]
@@ -53,36 +53,36 @@ fi
 
 say "[4/4] install"
 if [ "$PKG" = 1 ]; then
-    if command -v rpm >/dev/null 2>&1 && ls "$HERE"/release/ark-agent-*."$ARCH".rpm >/dev/null 2>&1; then
-        rpm -Uvh "$HERE"/release/ark-agent-*."$ARCH".rpm
-    elif command -v dpkg >/dev/null 2>&1 && ls "$HERE"/release/ark-agent_*.deb >/dev/null 2>&1; then
+    if command -v rpm >/dev/null 2>&1 && ls "$HERE"/release/seagent-*."$ARCH".rpm >/dev/null 2>&1; then
+        rpm -Uvh "$HERE"/release/seagent-*."$ARCH".rpm
+    elif command -v dpkg >/dev/null 2>&1 && ls "$HERE"/release/seagent_*.deb >/dev/null 2>&1; then
         case "$ARCH" in x86_64) da=amd64 ;; aarch64) da=arm64 ;; esac
-        dpkg -i "$HERE"/release/ark-agent_*_"$da".deb
+        dpkg -i "$HERE"/release/seagent_*_"$da".deb
     else
         die "--package: no matching package manager/package in the bundle (use the tarball install)"
     fi
     P=/usr
 else
     t=$(mktemp -d); trap 'rm -rf "$t"' EXIT
-    tar -xzf "$HERE/release/ark-$ARCH-unknown-linux-musl.tar.gz" -C "$t"
+    tar -xzf "$HERE/release/seagent-$ARCH-unknown-linux-musl.tar.gz" -C "$t"
     install -d "$PREFIX/bin" "$PREFIX/share"
-    install -m 0755 "$t/bin/ark" "$PREFIX/bin/ark.new" && mv -f "$PREFIX/bin/ark.new" "$PREFIX/bin/ark"
-    rm -rf "$PREFIX/share/ark.new" && cp -R "$t/share/ark" "$PREFIX/share/ark.new" && rm -rf "$PREFIX/share/ark" && mv "$PREFIX/share/ark.new" "$PREFIX/share/ark"
+    install -m 0755 "$t/bin/seagent" "$PREFIX/bin/seagent.new" && mv -f "$PREFIX/bin/seagent.new" "$PREFIX/bin/seagent"
+    rm -rf "$PREFIX/share/seagent.new" && cp -R "$t/share/seagent" "$PREFIX/share/seagent.new" && rm -rf "$PREFIX/share/seagent" && mv "$PREFIX/share/seagent.new" "$PREFIX/share/seagent"
     P=$PREFIX
 fi
 if [ -d "$HERE/vm-image" ]; then
-    dest=${VMDIR:-$P/share/ark/vm-image}
+    dest=${VMDIR:-$P/share/seagent/vm-image}
     mkdir -p "$dest/image" && cp -R "$HERE/vm-image/." "$dest/image/"
-    say "microVM guest image copied to $dest/image; point ark at it:  ark config set exec.vm.image_dir=$dest"
+    say "microVM guest image copied to $dest/image; point seagent at it:  seagent config set exec.vm.image_dir=$dest"
 fi
 if [ -f "$HERE/browser/chrome-linux64.zip" ]; then
     # Hash already checked against BUNDLE.sha256 above; unpack the pinned Chrome for Testing
-    # where ark's browser discovery looks (<share>/browsers/chrome-linux64/chrome).
-    mkdir -p "$P/share/ark/browsers" && rm -rf "$P/share/ark/browsers/chrome-linux64"
-    if command -v unzip >/dev/null 2>&1; then unzip -q -o "$HERE/browser/chrome-linux64.zip" -d "$P/share/ark/browsers"; else python3 -I -c 'import sys,zipfile; zipfile.ZipFile(sys.argv[1]).extractall(sys.argv[2])' "$HERE/browser/chrome-linux64.zip" "$P/share/ark/browsers"; fi
-    chmod 0755 "$P/share/ark/browsers/chrome-linux64/chrome" "$P/share/ark/browsers/chrome-linux64/chrome_crashpad_handler" 2>/dev/null || true
-    cp "$HERE/browser/VERSION" "$P/share/ark/browsers/chrome-linux64/.ark-version" 2>/dev/null || true
-    say "bundled Chrome for Testing → $P/share/ark/browsers/chrome-linux64 (prefer it: ark config set browser.prefer_bundled=true)"
+    # where seagent's browser discovery looks (<share>/browsers/chrome-linux64/chrome).
+    mkdir -p "$P/share/seagent/browsers" && rm -rf "$P/share/seagent/browsers/chrome-linux64"
+    if command -v unzip >/dev/null 2>&1; then unzip -q -o "$HERE/browser/chrome-linux64.zip" -d "$P/share/seagent/browsers"; else python3 -I -c 'import sys,zipfile; zipfile.ZipFile(sys.argv[1]).extractall(sys.argv[2])' "$HERE/browser/chrome-linux64.zip" "$P/share/seagent/browsers"; fi
+    chmod 0755 "$P/share/seagent/browsers/chrome-linux64/chrome" "$P/share/seagent/browsers/chrome-linux64/chrome_crashpad_handler" 2>/dev/null || true
+    cp "$HERE/browser/VERSION" "$P/share/seagent/browsers/chrome-linux64/.seagent-version" 2>/dev/null || true
+    say "bundled Chrome for Testing → $P/share/seagent/browsers/chrome-linux64 (prefer it: seagent config set browser.prefer_bundled=true)"
 fi
-"$P/bin/ark" --version
-say "installed. Next: ark doctor"
+"$P/bin/seagent" --version
+say "installed. Next: seagent doctor"

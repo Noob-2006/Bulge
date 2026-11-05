@@ -1,13 +1,13 @@
-// ark first-run setup wizard. Talks to POST /setup/rpc (JSON-RPC 2.0) with the one-time setup
-// token from the URL fragment (#token=…) in the x-ark-setup-token header. The token is removed
+// seagent first-run setup wizard. Talks to POST /setup/rpc (JSON-RPC 2.0) with the one-time setup
+// token from the URL fragment (#token=…) in the x-seagent-setup-token header. The token is removed
 // from the address bar at once so it does not linger in history or screenshots.
 'use strict';
 (function () {
   const $ = (id) => document.getElementById(id);
   const frag = new URLSearchParams(location.hash.replace(/^#/, ''));
-  const token = frag.get('token') || sessionStorage.getItem('ark.setup') || '';
+  const token = frag.get('token') || sessionStorage.getItem('seagent.setup') || '';
   if (frag.get('token')) {
-    sessionStorage.setItem('ark.setup', token);
+    sessionStorage.setItem('seagent.setup', token);
     history.replaceState(null, '', location.pathname);
   }
   let seq = 0;
@@ -15,7 +15,7 @@
   async function rpc(method, params) {
     const r = await fetch('/setup/rpc', {
       method: 'POST',
-      headers: { 'content-type': 'application/json', 'x-ark-setup-token': token },
+      headers: { 'content-type': 'application/json', 'x-seagent-setup-token': token },
       body: JSON.stringify({ jsonrpc: '2.0', id: ++seq, method, params: params || {} }),
       credentials: 'omit',
       cache: 'no-store',
@@ -112,7 +112,7 @@
     say(st, '寫入設定中…');
     try {
       const r = await rpc('setup.apply', params);
-      sessionStorage.removeItem('ark.setup');
+      sessionStorage.removeItem('seagent.setup');
       for (const id of ['apiKey', 'oidcSecret', 'channelToken']) $(id).value = '';
       $('wizard').hidden = true;
       $('intro').hidden = true;

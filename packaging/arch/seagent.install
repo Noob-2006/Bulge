@@ -1,0 +1,17 @@
+# pacman runs systemd-sysusers / systemd-tmpfiles hooks for the files this package ships.
+post_install() {
+    chown root:seagent /etc/seagent 2>/dev/null || true
+    cat <<MSG
+SE Agent installed: config /etc/seagent, state /var/lib/seagent (seagent config path). Next:
+  1. sudo -u seagent seagent setup bootstrap
+  2. systemctl enable --now seagentd
+  3. sudo -u seagent seagent setup link
+Per-user instead of a system service: run `seagent setup` as yourself.
+MSG
+}
+post_upgrade() {
+    systemctl try-restart seagentd.service >/dev/null 2>&1 || true
+}
+pre_remove() {
+    systemctl disable --now seagentd.service >/dev/null 2>&1 || true
+}

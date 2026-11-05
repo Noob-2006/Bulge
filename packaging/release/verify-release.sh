@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Verify a downloaded ark release directory, offline, without touching $HOME.
+# Verify a downloaded seagent release directory, offline, without touching $HOME.
 #
 # What a downloader needs to be sure of, in the order that makes the other checks meaningful:
 #   1. the detached Ed25519 signature over SHA256SUMS  — proves the checksum list is ours;
@@ -86,7 +86,7 @@ else
     die "neither sha256sum nor shasum found in PATH"
 fi
 
-SCRATCH=$(mktemp -d "${TMPDIR:-/tmp}/ark-verify-XXXXXX")
+SCRATCH=$(mktemp -d "${TMPDIR:-/tmp}/seagent-verify-XXXXXX")
 trap 'rm -rf "$SCRATCH"' EXIT
 
 printf '%s: verifying %s\n' "$PROG" "$DIR"

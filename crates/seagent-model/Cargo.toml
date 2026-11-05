@@ -1,0 +1,36 @@
+[package]
+name = "seagent-model"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+# Wire-format adapters that cost binary size but that not every install needs
+# (AWS Bedrock, Vertex/Gemini, the external agent CLIs, the hosted Agents API,
+# managed llama.cpp). `default` is the complete set — the build is byte-for-byte
+# the same feature-wise as before these features existed. See docs/BUILD.md.
+default = ["full"]
+full = ["bedrock", "gemini", "agent-cli", "agents-api", "local"]
+# AWS Bedrock Converse/ConverseStream: SigV4 signing + the event-stream decoder.
+bedrock = []
+# Gemini / Vertex `generateContent` adapter (the `vertex` quirk keeps working).
+gemini = []
+# External agent CLIs run once per request: `claude`/`gemini`/`codex exec`,
+# `codex app-server` (JSON-RPC), ACP (`copilot --acp`) and Meta Muse.
+agent-cli = []
+# OpenAI Agents API (hosted agent sessions, streamed turns).
+agents-api = []
+# Managed llama.cpp: `model_path` in a provider config starts the server.
+local = []
+
+[dependencies]
+seagent-core.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+toml.workspace = true # [auxiliary.<task>] passthrough tables (aux.rs)
+ureq.workspace = true
+libc.workspace = true
+ring.workspace = true
+seagent-net.workspace = true
+# Child-process env scrub (`envscrub::apply`): a provider CLI is third-party code.
+seagent-security.workspace = true

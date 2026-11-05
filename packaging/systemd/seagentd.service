@@ -1,0 +1,34 @@
+[Unit]
+Description=SE Agent daemon
+Documentation=https://github.com/se-agent/System-Engineering-Agent
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+Type=notify
+NotifyAccess=main
+ExecStart=%h/.local/bin/seagent daemon run -w %h
+WorkingDirectory=%h
+Restart=on-failure
+RestartSec=5s
+# SIGTERM to seagentd first (it interrupts runs and saves state), then the rest of the group.
+KillMode=mixed
+TimeoutStopSec=30s
+# ent-024: a delegated cgroup subtree, so `[exec.cgroups]` can give every command its own
+# cgroup (escaped double-forks are reaped, memory/pids caps apply) on cgroup v1 and v2.
+Delegate=yes
+# seagent refuses sudo by policy; make that impossible rather than merely discouraged.
+NoNewPrivileges=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+SystemCallArchitectures=native
+RestrictRealtime=yes
+UMask=0077
+# Not set on purpose: MemoryDenyWriteExecute (breaks Node/V8 bridges), ProtectHome (seagent works
+# in $HOME), RestrictNamespaces (breaks sandboxes seagent may run). PrivateTmp/ProtectKernel* need
+# unprivileged user namespaces in user units; enable them in a drop-in if your distro allows.
+
+[Install]
+WantedBy=default.target

@@ -1,9 +1,9 @@
-# External agents for side-by-side runs (`ark evals bench --agents ID[=MODEL],…`).
+# External agents for side-by-side runs (`seagent evals bench --agents ID[=MODEL],…`).
 #
-# ark never embeds these tools: it writes one command line per attempt to
+# seagent never embeds these tools: it writes one command line per attempt to
 # <out>/external/commands.sh (run in that attempt's prepared working directory) and reads
-# what the command printed. `--exec-external` makes ark start them itself; otherwise review
-# the script, run it, then `ark evals collect <out>`.
+# what the command printed. `--exec-external` makes seagent start them itself; otherwise review
+# the script, run it, then `seagent evals collect <out>`.
 #
 # Placeholders, substituted per argument (no shell involved): {prompt} {model} {workdir}.
 # `output` says how stdout is read: json (one document), jsonl (event stream) or text.
@@ -42,9 +42,9 @@ install = "npm install -g opencode-ai"
 notes = "non-interactive run; model as provider/model"
 
 [[agent]]
-id = "ark"
-name = "ark (as an external command, for parity checks)"
-bin = "ark"
+id = "seagent"
+name = "seagent (as an external command, for parity checks)"
+bin = "seagent"
 args = ["run", "--yes", "{prompt}"]
 model_args = ["--model", "{model}"]
 output = "text"

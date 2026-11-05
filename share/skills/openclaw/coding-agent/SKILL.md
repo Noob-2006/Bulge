@@ -34,7 +34,7 @@ metadata:
 
 Use for background feature builds, PR reviews, large refactors, and issue-to-PR loops. Do not use
 for simple edits, read-only lookup, ACP thread-bound work, or any run inside the agent's own state
-directory (`$ARK_HOME`, the configured data dir, or an active session's tree).
+directory (`$SEAGENT_HOME`, the configured data dir, or an active session's tree).
 
 ## Hard rules
 
@@ -132,7 +132,7 @@ Write the worker prompt to a file first. This avoids shell quoting bugs when the
 notification block contains quotes or newlines.
 
 ```bash
-PROMPT=$(mktemp -t ark-worker-prompt.XXXXXX)
+PROMPT=$(mktemp -t seagent-worker-prompt.XXXXXX)
 cat >"$PROMPT" <<'EOF'
 Task.
 <mandatory Git preparation block>
@@ -204,7 +204,7 @@ remote, so the Git preparation block does not apply:
 ```bash
 SCRATCH=$(mktemp -d)
 git -C "$SCRATCH" init
-PROMPT=$(mktemp -t ark-worker-prompt.XXXXXX)
+PROMPT=$(mktemp -t seagent-worker-prompt.XXXXXX)
 cat >"$PROMPT" <<'EOF'
 Build X.
 <notification block>
@@ -232,5 +232,5 @@ job action=start pty=true notify=true cwd:$SCRATCH \
 ---
 
 Transcribed from OpenClaw `skills/coding-agent/SKILL.md` (MIT, © OpenClaw contributors); the
-launch surfaces are adapted from OpenClaw's `bash pty:true background:true` form to ark's `job`
+launch surfaces are adapted from OpenClaw's `bash pty:true background:true` form to seagent's `job`
 and `process` tools.

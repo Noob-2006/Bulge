@@ -2,8 +2,8 @@
 #
 # A preset is a named bundle over the layered packs: the L2 packs it assembles (each pulls
 # its L1 and the L0 core through `extends`), the tool profile it narrows the session to
-# (crates/ark-security/src/toolpolicy.rs), and the role's default permissions. `ark role use
-# <id>` / `/role <id>` / `ark agents add --role <id>` select it like any pack.
+# (crates/seagent-security/src/toolpolicy.rs), and the role's default permissions. `seagent role use
+# <id>` / `/role <id>` / `seagent agents add --role <id>` select it like any pack.
 #
 # [preset.policy] keys (all optional; a role only ever tightens what the config allows):
 #   approval        relaxed | standard | strict — the approval preset ([approvals] preset);

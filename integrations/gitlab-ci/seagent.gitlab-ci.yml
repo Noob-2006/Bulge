@@ -1,0 +1,72 @@
+# seagent in GitLab CI: merge request review and test fixing.
+#
+# Use it from your .gitlab-ci.yml:
+#
+#   include:
+#     - project: 'platform/ci-templates'      # where you keep this file (or `remote:` its raw URL)
+#       ref: v1
+#       file: '/seagent.gitlab-ci.yml'
+#   variables:
+#     SEAGENT_VERSION: "v1.4.0"                   # pin the release
+#     SEAGENT_CI_MODEL: "anthropic/claude-sonnet-4-5"
+#
+# CI/CD variables to define (Settings > CI/CD > Variables, masked and protected):
+#   ANTHROPIC_API_KEY (or the key of the provider you use)   - for the model
+#   GITLAB_TOKEN   a project access token with `api` scope   - only to post the review note;
+#                  it is removed from the environment of the agent process
+# Self-managed GitLab: nothing to change; the template uses $CI_API_V4_URL.
+#
+# The jobs below are manual-free for merge request pipelines (`seagent-review`) and manual for
+# `seagent-fix-tests` (it runs your test command, so you choose when).
+
+.seagent-base:
+  image: ${SEAGENT_IMAGE:-debian:stable-slim}
+  variables:
+    SEAGENT_VERSION: latest
+    SEAGENT_REPO: se-agent/System-Engineering-Agent
+    SEAGENT_CI_OUT: .seagent-ci
+    SEAGENT_CI_PROVIDER: gitlab
+    GIT_DEPTH: "0"                       # the review diffs against the target branch
+  before_script:
+    - |
+      if ! command -v seagent >/dev/null 2>&1; then
+        (apt-get update -qq && apt-get install -y -qq --no-install-recommends ca-certificates curl git jq >/dev/null) 2>/dev/null || true
+        ref="$SEAGENT_VERSION"; [ "$ref" = latest ] && ref=main
+        curl --proto '=https' --tlsv1.2 -fsSL "https://raw.githubusercontent.com/$SEAGENT_REPO/$ref/packaging/install.sh" -o /tmp/seagent-install.sh
+        if [ "$SEAGENT_VERSION" = latest ]; then SEAGENT_INSTALL_DIR=/usr/local/bin sh /tmp/seagent-install.sh; else SEAGENT_INSTALL_DIR=/usr/local/bin sh /tmp/seagent-install.sh --version "$SEAGENT_VERSION"; fi
+      fi
+    - seagent --version
+    # seagent-ci.sh comes from the same place as this template; copy it into your repo or fetch it:
+    - 'test -f integrations/ci/seagent-ci.sh || curl --proto "=https" --tlsv1.2 -fsSL "https://raw.githubusercontent.com/$SEAGENT_REPO/${SEAGENT_VERSION/latest/main}/integrations/ci/seagent-ci.sh" -o /tmp/seagent-ci.sh'
+    - export SEAGENT_CI_SCRIPT="$( [ -f integrations/ci/seagent-ci.sh ] && echo integrations/ci/seagent-ci.sh || echo /tmp/seagent-ci.sh )"
+
+seagent-review:
+  extends: .seagent-base
+  stage: test
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event" && $CI_MERGE_REQUEST_SOURCE_PROJECT_ID == $CI_PROJECT_ID'
+  variables:
+    SEAGENT_CI_BASE_BRANCH: $CI_MERGE_REQUEST_TARGET_BRANCH_NAME
+  script:
+    - git fetch origin "$CI_MERGE_REQUEST_TARGET_BRANCH_NAME" --depth=200 || true
+    - sh "$SEAGENT_CI_SCRIPT" review
+    - if [ -n "${GITLAB_TOKEN:-}" ]; then sh "$SEAGENT_CI_SCRIPT" post; else echo "GITLAB_TOKEN not set - review not posted (see the job artifact)"; fi
+  artifacts:
+    when: always
+    expire_in: 1 week
+    paths: [.seagent-ci/review.md]
+  allow_failure: true                  # a review is advice; it must not block the merge
+
+seagent-fix-tests:
+  extends: .seagent-base
+  stage: test
+  rules:
+    - if: '$SEAGENT_CI_TEST_CMD && $CI_PIPELINE_SOURCE == "merge_request_event" && $CI_MERGE_REQUEST_SOURCE_PROJECT_ID == $CI_PROJECT_ID'
+      when: manual
+      allow_failure: true
+  script:
+    - sh "$SEAGENT_CI_SCRIPT" fix-tests
+  artifacts:
+    when: always
+    expire_in: 1 week
+    paths: [.seagent-ci/fix.patch, .seagent-ci/test.log]

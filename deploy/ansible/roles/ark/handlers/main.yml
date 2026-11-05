@@ -1,8 +1,0 @@
----
-- name: reload and restart arkd
-  ansible.builtin.systemd: { name: arkd, daemon_reload: true, state: restarted }
-  when: ark_service_enabled | bool and ansible_service_mgr == 'systemd'
-
-- name: restart arkd
-  ansible.builtin.service: { name: arkd, state: restarted }
-  when: ark_service_enabled | bool and ansible_service_mgr == 'systemd'

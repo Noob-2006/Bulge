@@ -1,14 +1,14 @@
 ---
 # Air-gapped site: the tarball comes from the offline bundle on the controller, nothing is downloaded.
-- name: ark agent hosts (offline)
-  hosts: ark
+- name: seagent agent hosts (offline)
+  hosts: seagent
   become: true
   roles:
-    - role: ark
+    - role: seagent
       vars:
-        ark_install_method: tarball
-        ark_tarball_src: "{{ playbook_dir }}/../bundle/release/ark-{{ ansible_architecture }}-unknown-linux-musl.tar.gz"
-        ark_tarball_checksum: "sha256:{{ vault_ark_tarball_sha256 }}"   # from the verified release/SHA256SUMS
-        ark_provider: openai
-        ark_base_url: http://llm.internal:8000/v1
-        ark_model: local-model
+        seagent_install_method: tarball
+        seagent_tarball_src: "{{ playbook_dir }}/../bundle/release/seagent-{{ ansible_architecture }}-unknown-linux-musl.tar.gz"
+        seagent_tarball_checksum: "sha256:{{ vault_seagent_tarball_sha256 }}"   # from the verified release/SHA256SUMS
+        seagent_provider: openai
+        seagent_base_url: http://llm.internal:8000/v1
+        seagent_model: local-model

@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Generate and validate an SPDX 2.3 SBOM for the ark workspace.
+"""Generate and validate an SPDX 2.3 SBOM for the seagent workspace.
 
 Why this exists: `deny.toml` proves that the *set* of dependencies is acceptable at build time,
 but a release needs a machine-readable inventory that ships next to the artifacts. A user who
-downloads `ark` should be able to answer "which crate at which version, under which license, with
+downloads `seagent` should be able to answer "which crate at which version, under which license, with
 which checksum?" without this git checkout and without a network connection.
 
 Design decisions, and the reason behind each:
@@ -46,7 +46,7 @@ SPDX_VERSION = "SPDX-2.3"
 DATA_LICENSE = "CC0-1.0"
 DOCUMENT_ID = "SPDXRef-DOCUMENT"
 NOASSERTION = "NOASSERTION"
-CREATOR = "Tool: ark-sbom-1.0"
+CREATOR = "Tool: seagent-sbom-1.0"
 CRATES_IO_DOWNLOAD = "https://crates.io/api/v1/crates/{name}/{version}/download"
 
 # Crate names/versions are already tame, but a version may carry build metadata (`1.0.0+abc`) and
@@ -252,10 +252,10 @@ def build_document(root):
     for pkg in locked:
         by_name.setdefault(pkg["name"], []).append(pkg)
 
-    # `ark` is the binary crate this release ships; everything else in the workspace is a library
+    # `seagent` is the binary crate this release ships; everything else in the workspace is a library
     # it links. Falling back to the alphabetically first member keeps the document valid for a
     # renamed or hypothetical workspace instead of crashing.
-    root_key = ("ark", None) if any(n == "ark" for n, _ in members) else sorted(members)[0]
+    root_key = ("seagent", None) if any(n == "seagent" for n, _ in members) else sorted(members)[0]
     root_pkg = _resolve_dep(root_key[0], by_name)
     if root_pkg is None:
         raise SystemExit("sbom: root crate %r missing from Cargo.lock" % (root_key[0],))
@@ -342,8 +342,8 @@ def build_document(root):
         "spdxVersion": SPDX_VERSION,
         "dataLicense": DATA_LICENSE,
         "SPDXID": DOCUMENT_ID,
-        "name": "ark-%s" % root_pkg["version"],
-        "documentNamespace": "https://spdx.org/spdxdocs/ark-%s-%s"
+        "name": "seagent-%s" % root_pkg["version"],
+        "documentNamespace": "https://spdx.org/spdxdocs/seagent-%s-%s"
         % (sanitize(root_pkg["version"]), digest),
         "creationInfo": {"created": _created_timestamp(), "creators": [CREATOR]},
         "packages": entries,
@@ -452,7 +452,7 @@ def _load_document(path):
 def main(argv):
     parser = argparse.ArgumentParser(
         prog="sbom.py",
-        description="Generate or validate the SPDX 2.3 SBOM for the ark workspace.",
+        description="Generate or validate the SPDX 2.3 SBOM for the seagent workspace.",
         epilog="Exit status: 0 = ok, 1 = document invalid, 2 = usage error.",
     )
     parser.add_argument("--out", metavar="FILE", default="-",
@@ -466,12 +466,12 @@ def main(argv):
 
     root = args.root or default_root()
     # Checking a *downloaded* document must not require the workspace: `verify-release.sh` runs
-    # `--check` on an unpacked dist directory on a machine that has no ark checkout at all.
+    # `--check` on an unpacked dist directory on a machine that has no seagent checkout at all.
     if args.check and args.out != "-":
         document = _load_document(args.out)
     else:
         if not os.path.isfile(os.path.join(root, "Cargo.lock")):
-            raise SystemExit("sbom: %s does not look like the ark workspace (no Cargo.lock)" % root)
+            raise SystemExit("sbom: %s does not look like the seagent workspace (no Cargo.lock)" % root)
         document = build_document(root)
 
     if args.check:

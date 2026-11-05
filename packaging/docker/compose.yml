@@ -1,23 +1,23 @@
-# ark behind a TLS-terminating reverse proxy. The app server binds loopback INSIDE the ark
+# seagent behind a TLS-terminating reverse proxy. The app server binds loopback INSIDE the seagent
 # container; the proxy shares that network namespace, so nothing else can reach it.
-#   export ARK_APP_TOKEN=$(openssl rand -hex 24)
+#   export SEAGENT_APP_TOKEN=$(openssl rand -hex 24)
 #   docker compose -f packaging/docker/compose.yml up -d
 services:
-  ark:
-    image: ark:latest
+  seagent:
+    image: seagent:latest
     init: true
     environment:
-      ARK_APP_ENABLED: "1"
-      ARK_APP_TOKEN: "${ARK_APP_TOKEN:?set ARK_APP_TOKEN}"
+      SEAGENT_APP_ENABLED: "1"
+      SEAGENT_APP_TOKEN: "${SEAGENT_APP_TOKEN:?set SEAGENT_APP_TOKEN}"
     volumes:
-      - ark-data:/data
+      - seagent-data:/data
       - ./work:/work
     ports:
       - "127.0.0.1:8443:8443"   # the proxy's port, published on the host loopback only
   proxy:
     image: caddy:2
-    network_mode: "service:ark"
+    network_mode: "service:seagent"
     command: caddy reverse-proxy --from :8443 --to 127.0.0.1:8640
-    depends_on: [ark]
+    depends_on: [seagent]
 volumes:
-  ark-data: {}
+  seagent-data: {}

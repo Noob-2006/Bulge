@@ -1,4 +1,4 @@
-// ark web / desktop UI: an ARP (JSON-RPC 2.0 over WebSocket) client.
+// seagent web / desktop UI: an ARP (JSON-RPC 2.0 over WebSocket) client.
 // Same methods and events as the terminal UI and the unix-socket daemon protocol.
 // Layout: a rail (navigation + conversations) and one view at a time — the operations views
 // (ops.js), the chat transcript, or a Control UI page (pages.js / surfaces.js).
@@ -22,12 +22,12 @@ const I18N = {
     'new': '新對話', 'boards': '儀表板', 'boards_all': '所有儀表板', 'devices': '裝置', 'control': '控制台', 'settings': '設定',
     'nav.ops': '總覽', 'nav.chat': '對話', 'nav.agents': '代理', 'nav.approvals': '核准', 'nav.audit': '稽核', 'nav.sessions': '對話紀錄',
     'filter': '搜尋對話', 'back': '← 返回', 'palette': '指令', 'palette_ph': '跳到頁面、對話或指令…', 'jump': '↓ 最新', 'send_hint': 'Enter 送出 · Shift+Enter 換行',
-    'pick': '選擇或建立一個對話', 'input': '交代 ark 要做的事…  輸入 / 顯示指令', 'stop': '停止', 'send': '送出', 'working': '工作中',
+    'pick': '選擇或建立一個對話', 'input': '交代 SE Agent 要做的事…  輸入 / 顯示指令', 'stop': '停止', 'send': '送出', 'working': '工作中',
     'you': '你', 'tool_result': '工具結果', 'tool_call': '呼叫 {n}', 'tool_error': '失敗', 'tool_ok': '完成', 'tool_run': '執行中', 'gate.egress': '連網', 'gate.exec': '執行', 'gate.fs': '檔案', 'gate.privilege': '權限',
     'approval': '需要核准 · {gate}', 'deny': '拒絕', 'always': '本次對話都允許', 'once': '允許一次',
-    'ask': 'ark 想問你', 'answer': '回答', 'close': '關閉',
-    'no_sessions': '還沒有對話', 'start': '開始一段新對話', 'start_sub': '交代任務、貼上檔案，或輸入 / 看所有指令。ark 會在需要時請你核准。', 'login': '連線到 ark',
-    'login_hint': '輸入 App Server 的 token（<code>ark app token</code> 會顯示）。', 'connect': '連線', 'remember': '記住這台裝置',
+    'ask': 'SE Agent 想問你', 'answer': '回答', 'close': '關閉',
+    'no_sessions': '還沒有對話', 'start': '開始一段新對話', 'start_sub': '交代任務、貼上檔案，或輸入 / 看所有指令。SE Agent 會在需要時請你核准。', 'login': '連線到 SE Agent',
+    'login_hint': '輸入 App Server 的 token（<code>seagent app token</code> 會顯示）。', 'connect': '連線', 'remember': '記住這台裝置',
     'slash_hint': '指令 · ↑↓ 選擇、Tab 補齊、Esc 關閉', 'attach': '附加', 'attached': '已附加 {n} 個檔案',
     'too_big': '檔案太大（上限 8 MiB）', 'lang': 'EN', 'lang.name': 'English',
     'theme': '主題', 'theme.crimson': '深緋紅', 'theme.midnight': '極夜', 'theme.daylight': '日光',
@@ -42,12 +42,12 @@ const I18N = {
     'new': 'New chat', 'boards': 'Dashboards', 'boards_all': 'All dashboards', 'devices': 'Devices', 'control': 'Control', 'settings': 'Settings',
     'nav.ops': 'Overview', 'nav.chat': 'Chat', 'nav.agents': 'Agents', 'nav.approvals': 'Approvals', 'nav.audit': 'Audit', 'nav.sessions': 'Conversations',
     'filter': 'Search conversations', 'back': '← Back', 'palette': 'Commands', 'palette_ph': 'Jump to a page, conversation or command…', 'jump': '↓ Latest', 'send_hint': 'Enter to send · Shift+Enter for newline',
-    'pick': 'Pick or start a conversation', 'input': 'Tell ark what to do…  / for commands', 'stop': 'Stop', 'send': 'Send', 'working': 'Working',
+    'pick': 'Pick or start a conversation', 'input': 'Tell seagent what to do…  / for commands', 'stop': 'Stop', 'send': 'Send', 'working': 'Working',
     'you': 'You', 'tool_result': 'Tool result', 'tool_call': 'Calling {n}', 'tool_error': 'failed', 'tool_ok': 'done', 'tool_run': 'running', 'gate.egress': 'network', 'gate.exec': 'exec', 'gate.fs': 'files', 'gate.privilege': 'privilege',
     'approval': 'Approval needed · {gate}', 'deny': 'Deny', 'always': 'Always in this chat', 'once': 'Allow once',
-    'ask': 'ark asks', 'answer': 'Answer', 'close': 'Close',
-    'no_sessions': 'No conversations yet', 'start': 'Start a conversation', 'start_sub': 'Describe a task, paste files, or type / for every command. ark asks before anything risky.', 'login': 'Connect to ark',
-    'login_hint': 'Enter the App Server token (shown by <code>ark app token</code>).', 'connect': 'Connect', 'remember': 'Remember this device',
+    'ask': 'SE Agent asks', 'answer': 'Answer', 'close': 'Close',
+    'no_sessions': 'No conversations yet', 'start': 'Start a conversation', 'start_sub': 'Describe a task, paste files, or type / for every command. SE Agent asks before anything risky.', 'login': 'Connect to SE Agent',
+    'login_hint': 'Enter the App Server token (shown by <code>seagent app token</code>).', 'connect': 'Connect', 'remember': 'Remember this device',
     'slash_hint': 'Commands · ↑↓ pick, Tab complete, Esc close', 'attach': 'Attach', 'attached': '{n} file(s) attached',
     'too_big': 'File too large (8 MiB max)', 'lang': '中文', 'lang.name': '繁體中文',
     'theme': 'Theme', 'theme.crimson': 'Crimson', 'theme.midnight': 'Midnight', 'theme.daylight': 'Daylight',
@@ -58,7 +58,7 @@ const I18N = {
     'review': 'Review', 'reviewed': 'Mark reviewed', 'flagged': 'Flag', 'review_note': 'Review note (optional)', 'review_done': 'Review recorded: {s}',
   },
 };
-let LANG = store.get('ark.lang') || 'zh-Hant';
+let LANG = store.get('seagent.lang') || 'zh-Hant';
 function t(key, vars) {
   let s = (I18N[LANG] && I18N[LANG][key]) || I18N['zh-Hant'][key] || key;
   for (const k in vars || {}) s = s.split('{' + k + '}').join(String(vars[k]));
@@ -66,7 +66,7 @@ function t(key, vars) {
 }
 function setLang(l, save) {
   LANG = I18N[l] ? l : 'zh-Hant';
-  if (save !== false) store.set('ark.lang', LANG);
+  if (save !== false) store.set('seagent.lang', LANG);
   document.documentElement.lang = LANG === 'en' ? 'en' : 'zh-Hant';
   applyI18n();
 }
@@ -80,7 +80,7 @@ function applyI18n() {
   // The connection line is live state, not a static string: re-render it in the new language.
   if ($('conn')) setConn(...(S.conn || ['conn.idle']));
   if ($('title') && !S.current && S.view === 'chat') $('title').textContent = t('pick');
-  document.title = 'ark';
+  document.title = 'SE Agent';
 }
 // ── themes: the shell's palette is theme.css; these variables re-tint it ──
 const THEMES = ['crimson', 'midnight', 'daylight'];
@@ -88,7 +88,7 @@ function setTheme(name, save) {
   const n = THEMES.includes(name) ? name : 'crimson';
   if (n === 'crimson') document.documentElement.removeAttribute('data-theme');
   else document.documentElement.setAttribute('data-theme', n);
-  if (save !== false) store.set('ark.theme', n);
+  if (save !== false) store.set('seagent.theme', n);
   const sel = $('theme');
   if (sel) sel.value = n;
   const meta = document.querySelector('meta[name=theme-color]');
@@ -125,7 +125,7 @@ function showView(name, opts) {
   $('side').classList.remove('open');
   if (!(opts && opts.keepHash)) history.replaceState(null, '', name === 'page' ? location.pathname : '#view=' + name);
   if (VIEWS[name] && S.arp) VIEWS[name].render($('view-' + name));
-  if (name !== 'page') store.set('ark.view', name);
+  if (name !== 'page') store.set('seagent.view', name);
 }
 // pages.js / surfaces.js still talk to the page view as the old dialog: `.open`, `.close()`,
 // `.showModal()`.
@@ -345,7 +345,7 @@ class Arp {
   }
   connect() {
     const proto = location.protocol === 'https:' ? 'wss' : 'ws';
-    this.ws = new WebSocket(`${proto}://${location.host}/arp`, ['arp', `ark.token.${this.token}`]);
+    this.ws = new WebSocket(`${proto}://${location.host}/arp`, ['arp', `seagent.token.${this.token}`]);
     this.ready = new Promise((ok, fail) => {
       this.ws.onopen = () => ok();
       this.ws.onerror = () => fail(new Error('連線失敗'));
@@ -488,7 +488,7 @@ function settleTool(b) {
 function textOf(m) {
   return (m.content || []).map((b) => (b.type === 'text' ? b.text : '')).join('');
 }
-const ARK = '<span class="star" style="--size:9px"></span> ark<button type="button" class="msg-copy" data-msgcopy>' + '⧉' + '</button>';
+const SEAGENT = '<span class="star" style="--size:9px"></span> SE Agent<button type="button" class="msg-copy" data-msgcopy>' + '⧉' + '</button>';
 
 function renderEvent(ev) {
   const k = ev.type;
@@ -505,11 +505,11 @@ function renderEvent(ev) {
       if (S.streaming) {
         // The final message replaces what was streamed so far.
         if (tx.trim()) {
-          S.streaming.el.querySelector('.who').innerHTML = ARK;
+          S.streaming.el.querySelector('.who').innerHTML = SEAGENT;
           S.streaming.el.querySelector('.body').innerHTML = md(tx);
         } else S.streaming.el.remove();
         S.streaming = null;
-      } else if (tx.trim()) addMsg('assistant', ARK, md(tx));
+      } else if (tx.trim()) addMsg('assistant', SEAGENT, md(tx));
       for (const b of m.content || []) if (b.type === 'tool_use') addToolCall(b);
     }
   } else if (k === 'turn_start') setStatus(true);
@@ -617,7 +617,7 @@ window.addEventListener('message', async (e) => {
       st.ready = true;
       return reply({
         protocolVersion: (m.params && m.params.protocolVersion) || '2026-01-26',
-        hostInfo: { name: 'ark', version: '1' },
+        hostInfo: { name: 'seagent', version: '1' },
         hostCapabilities: { serverTools: {}, openLinks: {} },
         hostContext: { theme: document.documentElement.dataset.theme === 'daylight' ? 'light' : 'dark', displayMode: 'inline', availableDisplayModes: ['inline'], containerDimensions: { width: st.frame.clientWidth, maxHeight: 1200 }, locale: navigator.language, timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone, platform: 'web' },
       });
@@ -647,13 +647,13 @@ window.addEventListener('message', async (e) => {
       return fail(-32001, 'declined');
     }
     default:
-      return fail(-32601, `method ${m.method} not supported by ark`);
+      return fail(-32601, `method ${m.method} not supported by seagent`);
   }
 });
 
 function onDelta(p) {
   if (p.session !== S.current) return;
-  if (!S.streaming) S.streaming = { el: addMsg('assistant', '<span class="star spin" style="--size:9px"></span> ark', ''), text: '', think: '' };
+  if (!S.streaming) S.streaming = { el: addMsg('assistant', '<span class="star spin" style="--size:9px"></span> SE Agent', ''), text: '', think: '' };
   if (p.thinking) S.streaming.think += p.text; else S.streaming.text += p.text;
   const th = S.streaming.think && !S.streaming.text ? `<div class="thinking">${esc(S.streaming.think.slice(-600))}</div>` : '';
   S.streaming.el.querySelector('.body').innerHTML = th + md(S.streaming.text);
@@ -807,7 +807,7 @@ function emptyChat() {
 
 async function openSession(id) {
   S.current = id; S.streaming = null; S.tools = new Map(); S.stick = true;
-  store.set('ark.session', id);
+  store.set('seagent.session', id);
   $('log').innerHTML = '';
   showView('chat');
   const s = S.sessions.find((x) => x.id === id);
@@ -855,7 +855,7 @@ function newSession() {
   S.current = null;
   $('log').innerHTML = '';
   S.creating = (async () => {
-    const ws = store.get('ark.workspace') || '';
+    const ws = store.get('seagent.workspace') || '';
     // No workspace chosen: the server uses [app] workspace (or its own directory), never "/".
     const { id } = await S.arp.call('session.create', ws ? { workspace: ws, title: '網頁對話' } : { title: '網頁對話' }).catch((e) => (toast(e.message, true), {}));
     if (!id) { if (prev && !S.current) await openSession(prev); return; }
@@ -1000,8 +1000,8 @@ async function start(token) {
   try { for (const p of await S.arp.call('gate.pending')) onPending(p); } catch {}
   // Start where the person left off: a deep link, the last view, or the overview.
   const h = new URLSearchParams(location.hash.slice(1));
-  const want = h.get('view') || store.get('ark.view') || 'ops';
-  const last = store.get('ark.session');
+  const want = h.get('view') || store.get('seagent.view') || 'ops';
+  const last = store.get('seagent.session');
   if (want === 'chat') {
     const id = (last && S.sessions.some((s) => s.id === last)) ? last : (S.sessions[0] && S.sessions[0].id);
     if (id) openSession(id); else { showView('chat'); emptyChat(); }
@@ -1013,7 +1013,7 @@ function askToken() {
   $('login').showModal();
   $('loginForm').onsubmit = () => {
     const tk = $('token').value.trim();
-    if ($('remember').checked) store.set('ark.token', tk);
+    if ($('remember').checked) store.set('seagent.token', tk);
     start(tk);
   };
 }
@@ -1038,7 +1038,7 @@ $('file').onchange = (e) => { addFiles(e.target.files); e.target.value = ''; };
 $('lang').onclick = () => { setLang(LANG === 'en' ? 'zh-Hant' : 'en'); $('lang').textContent = t('lang'); renderSessions(); if (S.view && S.view !== 'page') showView(S.view, { keepHash: true }); };
 $('theme').onchange = (e) => setTheme(e.target.value);
 setLang(LANG, false);
-setTheme(store.get('ark.theme') || 'crimson', false);
+setTheme(store.get('seagent.theme') || 'crimson', false);
 $('lang').textContent = t('lang');
 function autosize() { const ta = $('input'); ta.style.height = 'auto'; ta.style.height = Math.min(ta.scrollHeight, innerHeight * 0.4) + 'px'; }
 $('newSession').onclick = newSession;
@@ -1057,7 +1057,7 @@ $('jump').onclick = () => { S.stick = true; stick(true); $('jump').hidden = true
 for (const b of document.querySelectorAll('.nav-item[data-view]')) {
   b.addEventListener('click', () => {
     const v = b.dataset.view;
-    if (v === 'chat') { const id = S.current || store.get('ark.session') || (S.sessions[0] && S.sessions[0].id); if (id && S.sessions.some((s) => s.id === id)) openSession(id); else { showView('chat'); emptyChat(); } }
+    if (v === 'chat') { const id = S.current || store.get('seagent.session') || (S.sessions[0] && S.sessions[0].id); if (id && S.sessions.some((s) => s.id === id)) openSession(id); else { showView('chat'); emptyChat(); } }
     else showView(v);
   });
 }
@@ -1068,23 +1068,23 @@ $('showSettings').onclick = () => showPanel(t('settings'), async () => {
   const tools = await S.arp.call('tools.list');
   return `<h3>模型</h3><table class="kv">${row(['預設模型', `<code>${esc(m.default)}</code>`])}${row(['備援', esc((m.fallback || []).join(', ') || '—')])}${row(['輔助模型', `<code>${esc(m.aux || '—')}</code>`])}${row(['工具', String(tools.length)])}</table>
     <h3>這台裝置</h3>
-    <p><label class="dim">新對話的工作目錄</label><input type="text" id="wsInput" value="${esc(store.get('ark.workspace') || '')}" placeholder="（伺服器預設）"></p>
+    <p><label class="dim">新對話的工作目錄</label><input type="text" id="wsInput" value="${esc(store.get('seagent.workspace') || '')}" placeholder="（伺服器預設）"></p>
     ${(S.settingsPanels || []).length ? '<h3>外掛設定</h3>' : ''}${(S.settingsPanels || []).map(([p, u], i) => `<p><button class="btn ghost small" data-panel="${i}">${esc(u.title || u.id)}（${esc(p)}）</button></p>`).join('')}
     <p><button class="btn ghost small" id="logout" data-read>登出這台裝置</button></p>`;
 }, () => {
   for (const b of $('panelBody').querySelectorAll('[data-panel]')) { const [p, u] = S.settingsPanels[+b.dataset.panel]; b.onclick = () => openPluginPanel(p, u); }
   // CSP forbids inline handlers: bind after rendering.
-  $('wsInput').onchange = (e) => store.set('ark.workspace', e.target.value);
-  $('logout').onclick = () => { store.del('ark.token'); location.reload(); };
+  $('wsInput').onchange = (e) => store.set('seagent.workspace', e.target.value);
+  $('logout').onclick = () => { store.del('seagent.token'); location.reload(); };
 });
 
 if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js').catch(() => {});
 
 applyI18n();
-// Token: #token=… (from `ark app open`), saved token, or ask.
+// Token: #token=… (from `seagent app open`), saved token, or ask.
 const fromHash = new URLSearchParams(location.hash.slice(1)).get('token');
-if (fromHash) { store.set('ark.token', fromHash); history.replaceState(null, '', location.pathname); }
-const saved = fromHash || store.get('ark.token');
+if (fromHash) { store.set('seagent.token', fromHash); history.replaceState(null, '', location.pathname); }
+const saved = fromHash || store.get('seagent.token');
 saved ? start(saved) : askToken();
 // A link with #token=… opened on an already-loaded page.
 addEventListener('hashchange', () => { if (new URLSearchParams(location.hash.slice(1)).get('token')) location.reload(); });

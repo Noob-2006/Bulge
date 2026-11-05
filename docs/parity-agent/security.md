@@ -1,7 +1,7 @@
-# ark security：egress 代理（egress_proxy）
+# seagent security：egress 代理（egress_proxy）
 
 對應 Hermes `hermes_cli/proxy`（iron-proxy）與 OpenClaw `src/secrets/egress-proxy`。
-實作在 `crates/ark-security/src/egress_proxy.rs`，本檔只記設定面與限制。
+實作在 `crates/seagent-security/src/egress_proxy.rs`，本檔只記設定面與限制。
 
 ## 設定鍵
 
@@ -23,9 +23,9 @@ value  = "Bearer {{secret:SERVICE_TOKEN}}"     # 由 Secrets 回呼展開，chil
 
 ## 啟動點
 
-* `crates/ark-kernel/src/kernel.rs` 的 `new_kernel` 呼叫 `SecurityConfig::activate()`；
+* `crates/seagent-kernel/src/kernel.rs` 的 `new_kernel` 呼叫 `SecurityConfig::activate()`；
   `activate()` 之後呼叫 `SecurityConfig::activate_egress(data_dir, secrets)`，
-  data_dir 由 `ARK_HOME` 推導（未設定就用記憶體 ring，不自己建目錄）；
+  data_dir 由 `SEAGENT_HOME` 推導（未設定就用記憶體 ring，不自己建目錄）；
   JSONL 連線記錄寫到 `<data>/egress/proxy.jsonl`。
 * `activate_egress` 內用 `Policy::from_config` 組策略，再 `ensure_started`
   （一個 process 一個代理；之後的呼叫只更新政策，不會重啟）。
@@ -48,14 +48,14 @@ value  = "Bearer {{secret:SERVICE_TOKEN}}"     # 由 Secrets 回呼展開，chil
 5. docker/podman 沙箱不是繼承 host 環境：需要 `[exec.docker] proxy_port` =
    `running_port()`，容器才會經由 `host.docker.internal:<port>` 走同一個代理。
 
-測試：`cargo test -p ark-security` —— 單元測試
+測試：`cargo test -p seagent-security` —— 單元測試
 `egress_proxy::tests::{host_rules_and_config_shape, connect_tunnels_to_allowed_host_and_denies_others,
 ssrf_targets_are_refused_even_when_resolved, absolute_uri_is_forwarded_with_injection}`、
 `tests::egress_proxy_toml_table_parses`，整合測試 `tests/egress_activation.rs`。
 
 ## 直譯器 egress 閘的殘餘風險（interp）
 
-實作在 `crates/ark-kernel/src/interp.rs`：`gate.rs` 的 `Effect::Exec` 分支呼叫
+實作在 `crates/seagent-kernel/src/interp.rs`：`gate.rs` 的 `Effect::Exec` 分支呼叫
 `interp::judge_commands`，`secgate::explain` / `approvals test` 另外用 `interp::inline_evals`
 支援 `approvals.strict_inline_eval`。這一層是**靜態讀字串**，不是執行期隔離——它提高繞過成本，
 不保證繞不過去。下面把「抓得到什麼」與「抓不到什麼」分開寫清楚。
@@ -108,7 +108,7 @@ ssrf_targets_are_refused_even_when_resolved, absolute_uri_is_forwarded_with_inje
 2. `[exec] backend = "bwrap"`（或 `"landlock"`、`"docker"`、`"podman"`）＋
    `[exec.sandbox] network = "none"`；docker/podman 後端會下 `--network none`，容器內連 proxy
    變數都不轉發。這是核心層斷網：直譯器怎麼寫都連不出去。
-3. OS 層 network namespace / seccomp / LSM（eBPF）：ark **目前沒有內建**產生 profile 的能力，
+3. OS 層 network namespace / seccomp / LSM（eBPF）：SE Agent **目前沒有內建**產生 profile 的能力，
    要自己接（bwrap/landlock 後端已經用掉一部分，其餘留給外部沙箱）。
 
 ### 4. 結論
@@ -117,6 +117,6 @@ ssrf_targets_are_refused_even_when_resolved, absolute_uri_is_forwarded_with_inje
 防線是 sandbox 與網路政策（`network = "none"` / egress proxy / OS netns）。處理不受信任的輸入時，
 請假設直譯器閘會被繞過，並以沙箱為準。
 
-測試：`cargo test -p ark --test security_cli`（`approvals test` 的 exit 0/2/3、`suggest` 的
+測試：`cargo test -p seagent --test security_cli`（`approvals test` 的 exit 0/2/3、`suggest` 的
 allowlist 提案與 `--apply`、`exec-policy show|set|preset`、`pause|resume`）；`interp` 的單元測試在
-`crates/ark-kernel/src/interp.rs` 的 `tests` 模組。
+`crates/seagent-kernel/src/interp.rs` 的 `tests` 模組。

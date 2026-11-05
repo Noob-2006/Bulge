@@ -1,21 +1,21 @@
-// ark browser relay — MV3 service worker.
+// seagent browser relay — MV3 service worker.
 //
-// Connects to `ws://127.0.0.1:<port>/extension` (ark: `ark browser extension`,
+// Connects to `ws://127.0.0.1:<port>/extension` (seagent: `seagent browser extension`,
 // browser.extension_control.port, default 18792), authenticates with the token
-// from `<ark home>/browser/extension-token`, and then relays raw CDP JSON frames
+// from `<seagent home>/browser/extension-token`, and then relays raw CDP JSON frames
 // to/from `chrome.debugger`. Reference implementation: OpenClaw's
-// chrome-extension (MIT), rewritten for the ark relay protocol.
+// chrome-extension (MIT), rewritten for the seagent relay protocol.
 //
 // Protocol
-//   ext → ark  {"type":"hello","token":"…","version":1,"userAgent":"…"}
-//   ark → ext  {"type":"welcome","version":1}          (pairing done)
-//   ark → ext  {"type":"error","error":"bad token"}    (then close 4401)
-//   ark → ext  {"type":"attach"} / {"type":"detach"}   (ark's CDP client came/went)
+//   ext → seagent  {"type":"hello","token":"…","version":1,"userAgent":"…"}
+//   seagent → ext  {"type":"welcome","version":1}          (pairing done)
+//   seagent → ext  {"type":"error","error":"bad token"}    (then close 4401)
+//   seagent → ext  {"type":"attach"} / {"type":"detach"}   (seagent's CDP client came/went)
 //   both ways  raw CDP JSON: {"id":1,"method":"Page.navigate","params":{…},"sessionId":"…"}
 
 const DEFAULT_PORT = 18792;
 const PROTOCOL_VERSION = 1;
-const RECONNECT_ALARM = "ark-reconnect";
+const RECONNECT_ALARM = "seagent-reconnect";
 const MAX_BACKOFF_MS = 30000;
 const RELAY_PATH = "/extension";
 
@@ -105,7 +105,7 @@ function setStatus(state, extra) {
     updatedAt: Date.now(),
   };
   try {
-    void chrome.storage.local.set({ arkStatus: status });
+    void chrome.storage.local.set({ seagentStatus: status });
   } catch (e) {
     // storage can be unavailable while the worker is shutting down; harmless.
   }
@@ -273,7 +273,7 @@ async function attachAll(port) {
     try {
       await attachTab(tab.id, epoch);
       if (!attachedTabs.has(tab.id)) continue;
-      // Start the domains ark's browser tools expect (events go back as CDP events).
+      // Start the domains seagent's browser tools expect (events go back as CDP events).
       await dbgSend(tab.id, "Page.enable", {}).catch(() => {});
       await dbgSend(tab.id, "Runtime.enable", {}).catch(() => {});
     } catch (e) {
@@ -312,7 +312,7 @@ function forgetSession(tabId) {
 
 function newSession(tabId) {
   forgetSession(tabId);
-  const sid = "ark-session-" + ++sessionSeq;
+  const sid = "seagent-session-" + ++sessionSeq;
   sessionToTab.set(sid, tabId);
   tabToSession.set(tabId, sid);
   return sid;
@@ -322,7 +322,7 @@ function tabForSession(sessionId) {
   if (!sessionId) return undefined;
   const direct = sessionToTab.get(sessionId);
   if (direct !== undefined) return direct;
-  // ark may echo the target id as the session id; both are String(tab.id).
+  // seagent may echo the target id as the session id; both are String(tab.id).
   const asTab = Number(sessionId);
   if (Number.isInteger(asTab) && attachedTabs.has(asTab)) return asTab;
   if (attachedTabs.size === 1) return [...attachedTabs][0];
@@ -369,7 +369,7 @@ async function route(method, params, sessionId) {
       const tabId = Number(params.targetId);
       if (!Number.isInteger(tabId)) throw new Error("no such target: " + String(params.targetId));
       await attachTab(tabId);
-      // ark always asks for flattened sessions; the session id is ours either way.
+      // seagent always asks for flattened sessions; the session id is ours either way.
       return { sessionId: newSession(tabId) };
     }
     case "Target.detachFromTarget": {
@@ -387,7 +387,7 @@ async function route(method, params, sessionId) {
         try {
           await attachTab(tab.id);
         } catch (e) {
-          // the tab exists but may not be attachable yet; ark can retry
+          // the tab exists but may not be attachable yet; seagent can retry
         }
       }
       return { targetId: tab && tab.id !== undefined ? String(tab.id) : "" };
@@ -436,7 +436,7 @@ async function route(method, params, sessionId) {
   }
 }
 
-// Forward chrome.debugger events to ark as plain CDP events.
+// Forward chrome.debugger events to seagent as plain CDP events.
 chrome.debugger.onEvent.addListener((source, method, params) => {
   if (!paired) return;
   const sessionId = source && source.tabId !== undefined ? tabToSession.get(source.tabId) : undefined;

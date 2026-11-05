@@ -1,0 +1,80 @@
+# Architecture-lint baseline (audit D2/D3/D7). Read by crates/seagent/tests/arch_lint.rs.
+#
+# Grandfather list: every entry must shrink. Two kinds of line:
+#   size    <path> <note>   the file is over 3000 lines; <note> names the split it waits for
+#   println <path> <count>  `println!` in a library crate, grandfathered at <count> uses
+#
+# A `size` entry must disappear when the file is split; a `println` count may only go down.
+# Deleting a line for a file that no longer needs it fails the test, so nothing here rots.
+
+size crates/seagent-channel/src/email.rs split by responsibility: transport / MIME / tools submodules  # 3219 lines, 2026-11-04
+size crates/seagent-channel/src/yuanbao.rs split by responsibility: platform transport vs. payload handling  # 3146 lines, 2026-11-04
+println crates/seagent-app/src/acp.rs 1
+println crates/seagent-app/src/computer/hermes.rs 1
+println crates/seagent-app/src/computer/openclaw.rs 1
+println crates/seagent-app/src/cron_fire.rs 1
+println crates/seagent-app/src/dashboard_auth.rs 4
+println crates/seagent-app/src/logbook.rs 2
+println crates/seagent-app/src/node.rs 9
+println crates/seagent-app/src/surfaces/team_reports.rs 2
+println crates/seagent-browser/src/cloud.rs 4
+println crates/seagent-browser/src/launch.rs 3
+println crates/seagent-browser/src/tests.rs 2
+println crates/seagent-channel/src/deliver.rs 1
+println crates/seagent-channel/src/discord.rs 1
+println crates/seagent-channel/src/discord_voice.rs 2
+println crates/seagent-channel/src/googlechat.rs 1
+println crates/seagent-channel/src/matrix.rs 7
+println crates/seagent-channel/src/matrix_e2ee.rs 13
+println crates/seagent-channel/src/matrix_trust.rs 24
+println crates/seagent-channel/src/msteams.rs 1
+println crates/seagent-channel/src/slack.rs 3
+println crates/seagent-channel/src/webhook.rs 11
+println crates/seagent-channel/src/zalouser.rs 2
+println crates/seagent-kernel/src/config.rs 1
+println crates/seagent-kernel/src/cronjob/chronos.rs 1
+println crates/seagent-kernel/src/daemon.rs 4
+println crates/seagent-kernel/src/heartbeat.rs 1
+println crates/seagent-kernel/src/i18n.rs 1
+println crates/seagent-kernel/src/kanban/dispatch.rs 3
+println crates/seagent-kernel/src/kernel.rs 2
+println crates/seagent-kernel/src/kernel/hookpoints.rs 2
+println crates/seagent-kernel/src/reaper.rs 1
+println crates/seagent-kernel/src/secgate.rs 2
+println crates/seagent-kernel/src/subagents.rs 2
+println crates/seagent-media/src/meeting/tests.rs 5
+println crates/seagent-media/src/realtime/live.rs 2
+println crates/seagent-media/src/tts/normalize.rs 1
+println crates/seagent-media/src/understand/cli.rs 1
+println crates/seagent-media/src/voice/mode.rs 3
+println crates/seagent-memory/src/bootstrap.rs 1
+println crates/seagent-memory/src/dreaming.rs 1
+println crates/seagent-memory/src/flush.rs 1
+println crates/seagent-memory/src/host.rs 3
+println crates/seagent-memory/src/lib.rs 1
+println crates/seagent-memory/src/manager.rs 2
+println crates/seagent-memory/src/retaindb.rs 1
+println crates/seagent-memory/src/vector.rs 1
+println crates/seagent-model/src/acp.rs 2
+println crates/seagent-model/src/local.rs 1
+println crates/seagent-model/src/net.rs 1
+println crates/seagent-model/src/store.rs 1
+println crates/seagent-plugin/src/builtin/security_guidance.rs 1
+println crates/seagent-plugin/src/plugin.rs 3
+println crates/seagent-security/src/egress_proxy.rs 2
+println crates/seagent-security/src/lib.rs 1
+println crates/seagent-security/src/osv.rs 1
+println crates/seagent-security/src/url_safety.rs 1
+println crates/seagent-skills/src/compat/cli.rs 3
+println crates/seagent-skills/src/compat/skill.rs 2
+println crates/seagent-skills/src/core.rs 1
+println crates/seagent-skills/src/hub/mod.rs 2
+println crates/seagent-skills/src/yaml.rs 3
+println crates/seagent-tools/src/exec/local.rs 2
+println crates/seagent-tools/src/exec/modal.rs 2
+println crates/seagent-tools/src/exec/sandbox.rs 1
+println crates/seagent-tools/src/exec/vercel.rs 1
+println crates/seagent-tools/src/exec/vm.rs 2
+println crates/seagent-tools/src/web/links.rs 2
+println crates/seagent-tools/src/web/ssrf.rs 1
+println crates/seagent-vm/src/bin/seagent-vm-guest.rs 13

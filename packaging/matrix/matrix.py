@@ -3,10 +3,11 @@
 
   python3 -I packaging/matrix/matrix.py --dist DIST_DIR [--only al2023,rocky9] [--out report.md] [--json out.json]
 
-DIST_DIR needs ark-agent_*_amd64.deb, ark-agent-*.x86_64.rpm and ark-x86_64-unknown-linux-musl.tar.gz. One
-container per distro (named ark-test-pkg-<id>, removed afterwards, also on Ctrl-C), host networking so
+DIST_DIR needs seagent_*_amd64.deb, seagent-*.x86_64.rpm, seagent-*-x86_64.pkg.tar.zst, seagent_*_x86_64.apk
+and seagent-x86_64-unknown-linux-musl.tar.gz. One
+container per distro (named seagent-test-pkg-<id>, removed afterwards, also on Ctrl-C), host networking so
 the fake model server of tests/e2e/fake_provider.py (this process starts and stops it) is reachable
-on 127.0.0.1. No real model, no real network traffic from ark. Needs podman or docker and python3.
+on 127.0.0.1. No real model, no real network traffic from seagent. Needs podman or docker and python3.
 Exit 0 when every distro passed; rows marked "best_effort" (CentOS 7, openSUSE Leap) are reported but never fail the run.
 """
 import argparse, json, os, shutil, signal, subprocess, sys, time, urllib.request
@@ -32,7 +33,7 @@ def post(url, obj):
 
 
 def run_one(d, dist, base, timeout):
-    name = "ark-test-pkg-" + d["id"]
+    name = "seagent-test-pkg-" + d["id"]
     rm(name)
     LIVE.add(name)
     post(base + "/__script", [{"text": "pong from the fake model"}])

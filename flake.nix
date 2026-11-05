@@ -1,5 +1,5 @@
 {
-  description = "ark — self-hosted Linux-first AI agent";
+  description = "seagent — self-hosted Linux-first AI agent";
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
     crane.url = "github:ipetkov/crane";
@@ -13,15 +13,15 @@
         # The UI files under ui/ are embedded with include_str!, so keep them in the source.
         src = pkgs.lib.cleanSourceWith {
           src = ./.;
-          filter = path: type: (craneLib.filterCargoSources path type) || (builtins.match ".*/ui/.*" path != null) || (builtins.match ".*/crates/ark-channel/data/.*" path != null);
+          filter = path: type: (craneLib.filterCargoSources path type) || (builtins.match ".*/ui/.*" path != null) || (builtins.match ".*/crates/seagent-channel/data/.*" path != null);
         };
-        common = { inherit src; strictDeps = true; pname = "ark"; };
+        common = { inherit src; strictDeps = true; pname = "seagent"; };
         cargoArtifacts = craneLib.buildDepsOnly common;
-        ark = craneLib.buildPackage (common // { inherit cargoArtifacts; cargoExtraArgs = "--bin ark"; doCheck = false; });
+        seagent = craneLib.buildPackage (common // { inherit cargoArtifacts; cargoExtraArgs = "--bin seagent"; doCheck = false; });
       in {
-        packages.default = ark;
+        packages.default = seagent;
         checks = {
-          inherit ark;
+          inherit seagent;
           clippy = craneLib.cargoClippy (common // { inherit cargoArtifacts; cargoClippyExtraArgs = "--all-targets -- -D warnings"; });
           tests = craneLib.cargoTest (common // { inherit cargoArtifacts; });
         };

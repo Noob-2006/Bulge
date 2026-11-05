@@ -4,7 +4,7 @@ name: skill-creator
 description: "Author or review AgentSkills: create, repair, validate, or restructure SKILL.md files and bundled resources."
 homepage: https://github.com/openclaw/openclaw
 metadata:
-  ark:
+  seagent:
     tags: [authoring, skills]
 ---
 
@@ -47,7 +47,7 @@ tasks.
 
 5. Validate.
    - Run `skill action=workshop operation=validate content=<the SKILL.md>` (or
-     `ark skills lint <name>`) and execute every touched helper's focused test.
+     `seagent skills lint <name>`) and execute every touched helper's focused test.
    - **Done when:** frontmatter passes, resource pointers resolve, and every touched helper passes
      its focused test.
 
@@ -55,7 +55,7 @@ tasks.
 
 Required: `name`, `description`.
 
-ark also reads `metadata.ark` (`tags`, `related_skills`, `config`), `homepage`, `license`,
+SE Agent also reads `metadata.seagent` (`tags`, `related_skills`, `config`), `homepage`, `license`,
 `allowed-tools`, `user-invocable`, `disable-model-invocation`, `requires` (`bins`, `anyBins`, `env`,
 `config`, `os`) and Hermes' `platforms`. Add optional fields only when they change runtime behavior
 or discovery: `requires` hides a skill from the index when this host cannot run it.
@@ -70,4 +70,4 @@ or discovery: `requires` hides a skill from the index when this host cannot run 
 
 Transcribed from OpenClaw `skills/skill-creator/SKILL.md` (MIT, © OpenClaw contributors). Its
 upstream `scripts/quick_validate.py` and `scripts/package_skill.py` are Apache-2.0 and are not
-shipped here; `ark skills lint` and `skill action=workshop operation=validate` replace them.
+shipped here; `seagent skills lint` and `skill action=workshop operation=validate` replace them.

@@ -1,0 +1,10 @@
+apiVersion: v2
+name: seagent
+description: seagent agent runtime as a single-replica, hardened StatefulSet
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+kubeVersion: ">=1.25.0-0"
+home: https://github.com/se-agent/System-Engineering-Agent
+sources: ["https://github.com/se-agent/System-Engineering-Agent"]
+keywords: [agent, llm, seagent]

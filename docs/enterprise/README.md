@@ -1,4 +1,4 @@
-# ark 企業導入文件
+# SE Agent 企業導入文件
 
 給資安、法遵、IT 架構與採購人員看的一組文件。**每一句都對應程式裡已經做出來的功能**；做不到的、要客戶自己負責的、目前沒有的，都明寫在「限制」或「客戶責任」欄，不用行銷語氣掩蓋。
 
@@ -10,13 +10,13 @@
 | [poc-guide.md](poc-guide.md) | PoC 負責人 | 兩週 PoC 計畫、驗收條件、逐步指令、退出與清除 |
 | [security-questionnaire.md](security-questionnaire.md) | 供應商風險管理 | CAIQ／SIG Lite 風格的預填問卷（約 90 題），每題附證據位置 |
 | [review-and-legacy-integration.md](review-and-legacy-integration.md) | 稽核、資安、IT 整合 | 雙人覆核、session 覆核、auditor 角色、稽核報告與簽章封存；CEF／LEEF／syslog TLS、Kerberos 前端、SQL Server／Oracle／ODBC、Nagios／SNMP、ServiceNow／Jira 變更單 |
-| [compliance-mapping.md](compliance-mapping.md) | 稽核、法遵 | SOC 2 信任服務準則與 ISO/IEC 27001:2022 附錄 A 的控制項對照：ark 提供什麼、證據在哪、客戶要補什麼 |
+| [compliance-mapping.md](compliance-mapping.md) | 稽核、法遵 | SOC 2 信任服務準則與 ISO/IEC 27001:2022 附錄 A 的控制項對照：SE Agent 提供什麼、證據在哪、客戶要補什麼 |
 
 ## 先讀這三件事
 
-1. **ark 是自行部署的軟體，不是 SaaS。** 沒有供應商端的雲端服務在處理你的資料；資料留在你的主機（`/var/lib/ark`）。唯一的外送是你自己設定的模型供應商、聊天平台與你自己指定的 SIEM／OTLP 端點。遙測預設關閉。
-2. **ark 本身沒有取得 SOC 2 報告或 ISO 27001 驗證。** `compliance-mapping.md` 是「ark 能幫你的組織滿足哪些控制項」的對照，不是認證主張。
-3. **白皮書與問卷會隨程式更新。** 文件裡的指令與設定鍵，都能在對應版本的 `ark help`、`docs/MANUAL.md` 找到；對不上就是文件的錯，請回報。
+1. **SE Agent 是自行部署的軟體，不是 SaaS。** 沒有供應商端的雲端服務在處理你的資料；資料留在你的主機（`/var/lib/seagent`）。唯一的外送是你自己設定的模型供應商、聊天平台與你自己指定的 SIEM／OTLP 端點。遙測預設關閉。
+2. **SE Agent 本身沒有取得 SOC 2 報告或 ISO 27001 驗證。** `compliance-mapping.md` 是「SE Agent 能幫你的組織滿足哪些控制項」的對照，不是認證主張。
+3. **白皮書與問卷會隨程式更新。** 文件裡的指令與設定鍵，都能在對應版本的 `seagent help`、`docs/MANUAL.md` 找到；對不上就是文件的錯，請回報。
 
 ## 相關既有文件
 

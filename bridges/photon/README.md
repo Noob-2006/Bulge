@@ -1,18 +1,18 @@
 # Photon sidecar
 
-A small Node process that bridges ark's `kind = "photon"` channel to
+A small Node process that bridges seagent's `kind = "photon"` channel to
 [Photon](https://photon.codes)'s Spectrum SDK (`spectrum-ts`, TypeScript only),
 which gives you an iMessage line without running your own Mac relay.
 
 Adapted from the Hermes Agent Photon sidecar
 (`plugins/platforms/photon/sidecar`, MIT License, Copyright (c) 2025 Nous
-Research — see `LICENSE.hermes`). The only ark change: requests may
+Research — see `LICENSE.hermes`). The only SE Agent change: requests may
 authenticate with `Authorization: Bearer <token>` as well as the original
 `X-Hermes-Sidecar-Token: <token>` header.
 
 ## Install (once)
 
-ark never installs packages for you:
+SE Agent never installs packages for you:
 
 ```sh
 cd bridges/photon
@@ -24,24 +24,24 @@ or Hermes' `hermes photon setup`).
 
 ## Run
 
-Let ark supervise it:
+Let SE Agent supervise it:
 
 ```toml
 [channels.imsg]
 kind = "photon"
-sidecar_dir = "/path/to/ark/bridges/photon"
+sidecar_dir = "/path/to/seagent/bridges/photon"
 project_id = "…"
 project_secret = "{{secret:PHOTON_PROJECT_SECRET}}"
 port = 8789                     # loopback port of the sidecar
 allow = ["+886912345678"]
 ```
 
-ark generates the shared token, spawns `node index.mjs` with
+SE Agent generates the shared token, spawns `node index.mjs` with
 `PHOTON_PROJECT_ID`, `PHOTON_PROJECT_SECRET`, `PHOTON_SIDECAR_PORT`,
 `PHOTON_SIDECAR_TOKEN` and `PHOTON_SIDECAR_BIND=127.0.0.1`, restarts it with
-backoff when it exits and kills it when ark stops (Linux: `PR_SET_PDEATHSIG`).
+backoff when it exits and kills it when SE Agent stops (Linux: `PR_SET_PDEATHSIG`).
 
-Or run it yourself and give ark `sidecar_url` and `token`:
+Or run it yourself and give SE Agent `sidecar_url` and `token`:
 
 ```sh
 PHOTON_PROJECT_ID=... PHOTON_PROJECT_SECRET=... \
@@ -65,7 +65,7 @@ are JSON POSTs answering `{"ok": true, …}` (or `{"ok": false, "error",
 | POST | `/send-effect` | `{spaceId, text, effect}` → `{messageId}` |
 | POST | `/react` | `{spaceId, messageId, emoji}` → `{reactionId}` |
 | POST | `/unreact` | `{spaceId, messageId, reactionId?}` |
-| POST | `/unsend` | `{spaceId, messageId}` — retract one of our messages (ark) |
+| POST | `/unsend` | `{spaceId, messageId}` — retract one of our messages (seagent) |
 | POST | `/typing` | `{spaceId, state: "start"\|"stop"}` |
 | POST | `/healthz` | `{stream: …}` |
 | POST | `/probe` | upstream liveness: `{alive: true}` or 503 |

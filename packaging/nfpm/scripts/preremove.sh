@@ -4,8 +4,8 @@ set -e
 case "$1" in
     remove|purge|0)
         if [ -d /run/systemd/system ]; then
-            systemctl stop arkd.service >/dev/null 2>&1 || true
-            systemctl disable arkd.service >/dev/null 2>&1 || true
+            systemctl stop seagentd.service >/dev/null 2>&1 || true
+            systemctl disable seagentd.service >/dev/null 2>&1 || true
         fi ;;
 esac
 exit 0

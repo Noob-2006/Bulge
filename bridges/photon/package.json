@@ -1,8 +1,8 @@
 {
-  "name": "ark-photon-sidecar",
+  "name": "seagent-photon-sidecar",
   "private": true,
   "version": "0.4.0",
-  "description": "Spectrum-ts bridge for the ark photon channel (adapted from Hermes Agent, MIT).",
+  "description": "Spectrum-ts bridge for the seagent photon channel (adapted from Hermes Agent, MIT).",
   "type": "module",
   "main": "index.mjs",
   "scripts": {

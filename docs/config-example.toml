@@ -1,6 +1,6 @@
-# ark 完整設定範例：~/.config/ark/config.toml
-# 每個鍵都可以省略。秘密一律放 `ark secrets set NAME`，這裡用 {{secret:NAME}} 引用。
-# 專案目錄的 .ark/config.toml 也會被讀取，但 hooks / mcp / plugins / channels / providers / app
+# seagent 完整設定範例：~/.config/seagent/config.toml
+# 每個鍵都可以省略。秘密一律放 `seagent secrets set NAME`，這裡用 {{secret:NAME}} 引用。
+# 專案目錄的 .seagent/config.toml 也會被讀取，但 hooks / mcp / plugins / channels / providers / app
 # 只有在本檔的 trusted_projects 列出該目錄時才生效。
 
 # ───────────── 模型 ─────────────
@@ -25,7 +25,7 @@ egress_deny = []
 utc_offset_minutes = 480            # 排程時區 UTC+8
 
 # ───────────── 子行程環境清洗 ─────────────
-# 子行程（shell、背景工作、code mode、hooks、MCP、外掛、sandbox）看不到 ark 管的憑證。
+# 子行程（shell、背景工作、code mode、hooks、MCP、外掛、sandbox）看不到 seagent 管的憑證。
 # env_passthrough 只放寬「名稱長得像憑證」這條啟發式規則（例如 *_TOKEN，但值其實是中介資料：
 # build tag、資源 id）；它永遠不會放行憑證本身——Tier-1 秘密（GITHUB_TOKEN、各家 bot token）、
 # provider 金鑰（OPENAI_API_KEY…）、env_strip 命中的名稱、AUXILIARY_*_API_KEY 一律移除。
@@ -42,7 +42,7 @@ env_passthrough = ["BUILD_ID"]
 # 主機家目錄與金鑰不掛入、owner session 保留網路，並印出「no microVM available（原因）＋怎麼修」。
 # 連 namespace 沙箱都沒有才留在主機，警告開頭是「NOT ISOLATED」（srv-015：能隔離就不要詢問）。
 # 寫死名稱（local/vm/bwrap/…）就照寫的用，不會被改寫；測試環境要固定主機執行就寫 backend = "local"。
-# `ark sandbox explain` 的 `execution plan:` 就是同一個答案。
+# `seagent sandbox explain` 的 `execution plan:` 就是同一個答案。
 # backend = "vm"
 # [exec.sandbox]
 # backend = "auto"    # 沙箱化的 session 也用同一個決策（VM 優先）
@@ -51,13 +51,13 @@ env_passthrough = ["BUILD_ID"]
 # ───────────── microVM 執行環境（GAPS B1–B5）─────────────
 [exec.vm]
 # auto = 有 KVM 就用 Firecracker，其次 QEMU；都沒有才退回 bwrap 並在
-# `ark sandbox explain` / 系統提示裡標明隔離等級較低（不會靜默降級）。
+# `seagent sandbox explain` / 系統提示裡標明隔離等級較低（不會靜默降級）。
 provider = "auto"                   # auto | firecracker | qemu | gvisor | bwrap
 allow_fallback = true               # false = 寧可拒絕執行，也不要降級
-# 客體映像：`ark sandbox vm image build`（packaging/vm/build-image.sh）會下載
-# 官方 kernel 與 Alpine rootfs、放入 ark-vm-guest，並寫 manifest.json。
-# kernel   = "~/.local/share/ark/vm/image/vmlinux"
-# initramfs = "~/.local/share/ark/vm/image/initramfs.cpio.gz"
+# 客體映像：`seagent sandbox vm image build`（packaging/vm/build-image.sh）會下載
+# 官方 kernel 與 Alpine rootfs、放入 seagent-vm-guest，並寫 manifest.json。
+# kernel   = "~/.local/share/seagent/vm/image/vmlinux"
+# initramfs = "~/.local/share/seagent/vm/image/initramfs.cpio.gz"
 firecracker = "firecracker"         # 或 <data>/vm/bin/firecracker（免 root 的解壓縮檔）
 vcpu = 2
 memory_mb = 1024
@@ -66,7 +66,7 @@ cpu_seconds = 0                     # 每個 VM 的 CPU 總額度（0 = 不限�
 idle_timeout_secs = 1800            # 閒置回收
 workspace_access = "rw"             # rw = 靠快照回復（預設）；ro 只給明確標示的敏感目錄
 workspace_max_mb = 512              # 同步上限，超過就拒絕而不是默默截斷
-network = "broker"                  # 客體沒有網卡，只能經 ark-broker 向 daemon 請求
+network = "broker"                  # 客體沒有網卡，只能經 seagent-broker 向 daemon 請求
 snapshots = true                    # 破壞性指令先快照再放行（undo 取代詢問）
 snapshot_keep = 20
 trust_tiers = true                  # owner / stranger / untrusted 各自獨立的 VM 與工作區
@@ -84,7 +84,7 @@ exclude_tools = ["*delete*"]
 
 [mcp.github]
 url = "https://api.githubcopilot.com/mcp/"
-auth = "oauth"                      # 之後執行 ark mcp login github（或 --device）
+auth = "oauth"                      # 之後執行 seagent mcp login github（或 --device）
 trust = "untrusted"                 # 非唯讀工具每次都要核准
 keepalive_secs = 120
 
@@ -104,7 +104,7 @@ tasks = true                        # taskSupport = "optional" 的工具也以 t
 task_timeout_secs = 900             # 單一 task／URL elicitation 的上限
 apps = true                         # MCP Apps：宣告 io.modelcontextprotocol/ui，網頁 UI 以沙箱 iframe 呈現 ui://
 events = true                       # MCP events：mcp__tracker__events 工具（list/subscribe/unsubscribe）
-events_url = "https://ark.example.com/mcp-events"   # app server 對外 HTTPS 位址 + /mcp-events
+events_url = "https://seagent.example.com/mcp-events"   # app server 對外 HTTPS 位址 + /mcp-events
 sampling = { enabled = true, tools = true, max_tool_rounds = 8 }
 oauth = { authorization_server = "https://auth.tracker.example" }   # 設定後 token 的 issuer 必須相符
 
@@ -147,20 +147,20 @@ privacy_notice = "本帳號由 AI 自動回覆。"
 kind = "webhook"
 listen = "127.0.0.1:8787"
 token = "{{secret:HOOK_TOKEN}}"
-outbound_url = "https://example.com/ark"
+outbound_url = "https://example.com/seagent"
 allow = ["*"]
 
 # ───────────── App Server（Web／桌面／手機／API／裝置／A2A）─────────────
 [app]
 enabled = true
 listen = "127.0.0.1:8640"
-token = "{{secret:APP_TOKEN}}"       # ark app token 會教你產生
-nodes = true                         # 接受 ark node 裝置
+token = "{{secret:APP_TOKEN}}"       # seagent app token 會教你產生
+nodes = true                         # 接受 seagent node 裝置
 workspace = "/home/me/work"          # API 建立的對話用的工作目錄
 
 [app.a2a]
 enabled = true
-name = "my-ark"
+name = "my-seagent"
 peers = { helper = "{{secret:A2A_HELPER_TOKEN}}" }
 agents = { research = { url = "https://research.example.com/a2a/v1", token = "{{secret:RESEARCH_TOKEN}}" } }
 
@@ -168,9 +168,9 @@ agents = { research = { url = "https://research.example.com/a2a/v1", token = "{{
 [[hooks]]
 event = "pre_tool"
 matcher = "shell"
-command = "~/.config/ark/hooks/check-shell.sh"
+command = "~/.config/seagent/hooks/check-shell.sh"
 
-# 首次使用需同意：新的 [[hooks]] 指令要先 `ark hooks approve`（或 --accept-hooks / 互動確認）才會執行。
+# 首次使用需同意：新的 [[hooks]] 指令要先 `seagent hooks approve`（或 --accept-hooks / 互動確認）才會執行。
 # [hooks_extra]
 # auto_accept = false
 # bundled = ["command-logger", "session-memory"]   # boot-md, bootstrap-extra-files, compaction-notifier
@@ -178,38 +178,38 @@ command = "~/.config/ark/hooks/check-shell.sh"
 # mode = "idle"          # none | daily | idle
 # idle_minutes = 240
 # [[hooks_extra.outbound]]
-# url = "https://hooks.example.com/ark"
+# url = "https://hooks.example.com/seagent"
 # events = ["pre_tool", "session_end"]
 # secret = "{{secret:HOOK_SECRET}}"
 
 # ───────────── 高可用、worker 擴充、集中管理台（docs/ARCHITECTURE.md §7）─────────────
-# 多個 arkd 指向同一個資料目錄（NFS／共用磁碟），以租約選主；只有 leader 跑排程、通道與 session。
+# 多個 seagentd 指向同一個資料目錄（NFS／共用磁碟），以租約選主；只有 leader 跑排程、通道與 session。
 # [ha]
 # enabled = true
-# node_id = "arkd-a"            # 預設主機名稱
+# node_id = "seagentd-a"            # 預設主機名稱
 # lease_secs = 10               # leader 沉默這麼久，standby 才接手
 # renew_secs = 0                # 0 = lease_secs / 3
 # dir = ""                      # 租約目錄，預設 <data>/ha
-# advertise = "https://arkd-a.corp:8640"   # standby 把客戶端導向 leader 時顯示的位址
-# index_dir = "/var/lib/ark-local/index"   # SQLite 索引放節點本機（不要放 NFS）
+# advertise = "https://seagentd-a.corp:8640"   # standby 把客戶端導向 leader 時顯示的位址
+# index_dir = "/var/lib/seagent-local/index"   # SQLite 索引放節點本機（不要放 NFS）
 #
 # [workers]
-# count = 4                     # leader 維持的 `ark worker` 程序數；0 = session 在 daemon 內跑
-# dispatch = "all"              # all：所有 session 交給 worker；explicit：只有 `ark workers dispatch`
-# command = []                  # 預設本執行檔；可改 ["ssh", "host2", "ark", "worker", "--internal-worker-ipc"]
+# count = 4                     # leader 維持的 `seagent worker` 程序數；0 = session 在 daemon 內跑
+# dispatch = "all"              # all：所有 session 交給 worker；explicit：只有 `seagent workers dispatch`
+# command = []                  # 預設本執行檔；可改 ["ssh", "host2", "seagent", "worker", "--internal-worker-ipc"]
 # restart_backoff_ms = 500
 #
 # [cluster]
 # enabled = true                # 沒開 [ha] 也寫入節點註冊（管理台看得到）
 # name = ""                     # 沒開 [ha] 時的節點名稱
 # console_url = "https://console.corp:8640"         # 從管理台拉取已簽章的受管政策
-# console_token = "{{secret:ARK_CONSOLE_TOKEN}}"    # 唯讀 token 即可
+# console_token = "{{secret:SEAGENT_CONSOLE_TOKEN}}"    # 唯讀 token 即可
 # pull_secs = 300
 # heartbeat_secs = 5
-# 公鑰釘在 /etc/ark/managed.toml：[managed] cluster_key = "ed25519:…"（ark cluster keygen 產生）
+# 公鑰釘在 /etc/seagent/managed.toml：[managed] cluster_key = "ed25519:…"（seagent cluster keygen 產生）
 
 # ───────────── 專業角色工具（資料／IT 支援／軟體開發），細節見 docs/professional-tools.md ─────────────
-# 憑證一律走保險庫 `ark secrets set NAME`；模型只指名「來源」，看不到連線字串。
+# 憑證一律走保險庫 `seagent secrets set NAME`；模型只指名「來源」，看不到連線字串。
 # [integrations.data]
 # max_rows = 1000                      # 每次查詢最多列數（上限 10000）
 # [integrations.data.sources.warehouse]
@@ -220,7 +220,7 @@ command = "~/.config/ark/hooks/check-shell.sh"
 # kind = "ad"                          # ldap | ad | entra | okta（只讀查詢，沒有任何異動操作）
 # uri = "ldaps://dc1.corp.example:636"
 # base_dn = "DC=corp,DC=example"
-# bind_dn = "CN=svc-ark,OU=Service,DC=corp,DC=example"
+# bind_dn = "CN=svc-seagent,OU=Service,DC=corp,DC=example"
 # bind_password = "{{secret:LDAP_BIND_PW}}"
 # [integrations.forge.hosts.gitlab]
 # kind = "gitlab"                      # github | gitlab（自架填 api_base；寫入一律第 2 級核准）

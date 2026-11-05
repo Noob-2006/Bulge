@@ -1,38 +1,38 @@
-# NixOS: services.ark.enable = true;  (system instance, user `ark`; FHS layout of ark_core::layout::system:
-# config /etc/ark, state /var/lib/ark, cache /var/cache/ark, logs /var/log/ark, runtime /run/ark)
+# NixOS: services.seagent.enable = true;  (system instance, user `seagent`; FHS layout of seagent_core::layout::system:
+# config /etc/seagent, state /var/lib/seagent, cache /var/cache/seagent, logs /var/log/seagent, runtime /run/seagent)
 self: { config, lib, pkgs, ... }:
-let cfg = config.services.ark; in {
-  options.services.ark = {
-    enable = lib.mkEnableOption "ark agent daemon";
+let cfg = config.services.seagent; in {
+  options.services.seagent = {
+    enable = lib.mkEnableOption "seagent agent daemon";
     package = lib.mkOption { type = lib.types.package; default = self.packages.${pkgs.stdenv.hostPlatform.system}.default; };
     path = lib.mkOption { type = lib.types.listOf lib.types.package; default = with pkgs; [ bash coreutils git nodejs ]; };
   };
   config = lib.mkIf cfg.enable {
-    users.users.ark = { isSystemUser = true; group = "ark"; home = "/var/lib/ark"; };
-    users.groups.ark = { };
-    # /etc/ark: config + secrets of the instance next to root-owned policy (sticky: ark cannot replace root files)
-    systemd.tmpfiles.rules = [ "d /etc/ark 1770 root ark -" ];
-    systemd.services.arkd = {
-      description = "ark agent daemon";
+    users.users.seagent = { isSystemUser = true; group = "seagent"; home = "/var/lib/seagent"; };
+    users.groups.seagent = { };
+    # /etc/seagent: config + secrets of the instance next to root-owned policy (sticky: seagent cannot replace root files)
+    systemd.tmpfiles.rules = [ "d /etc/seagent 1770 root seagent -" ];
+    systemd.services.seagentd = {
+      description = "seagent agent daemon";
       wantedBy = [ "multi-user.target" ];
       after = [ "network-online.target" ];
       wants = [ "network-online.target" ];
       path = cfg.path;
-      environment = { ARK_MODE = "system"; };
+      environment = { SEAGENT_MODE = "system"; };
       serviceConfig = {
         Type = "notify";
         NotifyAccess = "main";
-        User = "ark";
-        Group = "ark";
-        StateDirectory = [ "ark" "ark/workspace" ];
+        User = "seagent";
+        Group = "seagent";
+        StateDirectory = [ "seagent" "seagent/workspace" ];
         StateDirectoryMode = "0750";
-        CacheDirectory = "ark";
-        LogsDirectory = "ark";
-        RuntimeDirectory = "ark";
+        CacheDirectory = "seagent";
+        LogsDirectory = "seagent";
+        RuntimeDirectory = "seagent";
         RuntimeDirectoryMode = "0750";
-        ReadWritePaths = [ "-/etc/ark" ];
-        WorkingDirectory = "/var/lib/ark";
-        ExecStart = "${cfg.package}/bin/ark daemon run -w /var/lib/ark/workspace";
+        ReadWritePaths = [ "-/etc/seagent" ];
+        WorkingDirectory = "/var/lib/seagent";
+        ExecStart = "${cfg.package}/bin/seagent daemon run -w /var/lib/seagent/workspace";
         Restart = "on-failure";
         RestartSec = "5s";
         KillMode = "mixed";

@@ -1,19 +1,19 @@
 # zalouser bridge
 
 A Node sidecar that holds a Zalo **personal account** session through
-[`zca-js`](https://github.com/RFS-ADRENO/zca-js) and exposes it to ark's
+[`zca-js`](https://github.com/RFS-ADRENO/zca-js) and exposes it to seagent's
 `zalouser` channel over a bearer-protected HTTP API on loopback. zca-js call
 shapes follow OpenClaw's `extensions/zalouser` (MIT).
 
 Unofficial API: Zalo may restrict accounts used this way. Use a dedicated account.
 
-## Install and run (manual; ark never installs anything)
+## Install and run (manual; SE Agent never installs anything)
 
 ```sh
 cd bridges/zalouser
 npm install            # installs zca-js 2.2.0 only
 ZALOUSER_BRIDGE_TOKEN=$(openssl rand -hex 24) \
-ZALOUSER_DATA_DIR=$HOME/.local/state/ark/zalouser \
+ZALOUSER_DATA_DIR=$HOME/.local/state/seagent/zalouser \
 node bridge.mjs
 ```
 
@@ -33,16 +33,16 @@ scan it with the Zalo app. The session cookies are saved and refreshed on each
 login; later starts restore them. If the saved session is rejected the bridge
 falls back to a new QR login. A closed listener reconnects with backoff.
 
-## ark config
+## seagent config
 
 ```toml
 [channels.zalo_me]
 kind = "zalouser"
 token = "{{secret:ZALOUSER_BRIDGE_TOKEN}}"
 bridge_url = "http://127.0.0.1:3920"
-# Optional: let ark start and restart the sidecar (env vars are set for it).
-command = ["node", "/opt/ark/bridges/zalouser/bridge.mjs"]
-# data_dir = "/var/lib/ark/zalouser"   # default: ark's state dir
+# Optional: let seagent start and restart the sidecar (env vars are set for it).
+command = ["node", "/opt/seagent/bridges/zalouser/bridge.mjs"]
+# data_dir = "/var/lib/seagent/zalouser"   # default: seagent's state dir
 # profile = "default"
 allow = ["123456789"]
 ```
@@ -101,4 +101,4 @@ The bridge drops its own messages (`isSelf`).
 `replyTo` quotes a message the bridge has seen recently (last 500). `/send-media`
 with `kind = "audio"` uploads the file and sends it as a voice message (caption
 first, as a separate text). Reaction `icon`s are Zalo codes (`/-strong`, `/-heart`,
-`:>`, `:o`, `:-((`, `:-h`); ark maps emoji to them.
+`:>`, `:o`, `:-((`, `:-h`); SE Agent maps emoji to them.

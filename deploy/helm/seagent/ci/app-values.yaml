@@ -1,0 +1,3 @@
+config: { mode: setup, provider: anthropic, model: claude-sonnet-4-5, channel: telegram, owner: "12345", existingSecret: seagent-secrets }
+app: { enabled: true }
+networkPolicy: { ingressFrom: [{ namespaceSelector: { matchLabels: { name: ingress } } }] }

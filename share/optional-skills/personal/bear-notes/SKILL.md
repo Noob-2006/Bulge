@@ -110,4 +110,4 @@ timeout = "5s"
 
 ## Platform note
 
-This skill is transcribed verbatim from `openclaw/skills/bear-notes` (MIT, © OpenClaw contributors). It drives macOS-only tooling (`grizzly`, the bear-notes CLI that talks to the Bear app), so on Linux/Windows ark will discover it but the commands cannot run until the binary exists on a macOS host with Bear installed and running. Nothing in this file is expected to work without macOS; ark's requirement gating (`requires.bins`/`os`) is what suppresses it elsewhere.
+This skill is transcribed verbatim from `openclaw/skills/bear-notes` (MIT, © OpenClaw contributors). It drives macOS-only tooling (`grizzly`, the bear-notes CLI that talks to the Bear app), so on Linux/Windows SE Agent will discover it but the commands cannot run until the binary exists on a macOS host with Bear installed and running. Nothing in this file is expected to work without macOS; seagent's requirement gating (`requires.bins`/`os`) is what suppresses it elsewhere.

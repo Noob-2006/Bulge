@@ -1,11 +1,11 @@
 #!/usr/bin/env node
 /**
- * WhatsApp (Baileys) bridge for ark.
+ * WhatsApp (Baileys) bridge for seagent.
  *
  * Adapted from the Hermes Agent WhatsApp bridge (scripts/whatsapp-bridge),
  * MIT License, Copyright (c) 2025 Nous Research — see LICENSE.hermes.
- * ark changes: optional bearer-token auth (ARK_WHATSAPP_BRIDGE_TOKEN),
- * GET /qr pairing status, ~/.ark default paths, no default reply prefix,
+ * seagent changes: optional bearer-token auth (SEAGENT_WHATSAPP_BRIDGE_TOKEN),
+ * GET /qr pairing status, ~/.seagent default paths, no default reply prefix,
  * POST /delete and POST /react (Baileys `{delete: key}` / `{react: {text, key}}`).
  *
  * Standalone Node.js process that connects to WhatsApp via Baileys
@@ -20,14 +20,14 @@
  *   POST /typing         - Send typing indicator { chatId }
  *   GET  /chat/:id       - Get chat info
  *   GET  /health         - Health check
- *   GET  /qr             - Pairing status { status, qr } (ark)
+ *   GET  /qr             - Pairing status { status, qr } (seagent)
  *   POST /send-poll      - Send a poll { chatId, question, options, selectableCount? }
  *   POST /read           - Read receipt { key }
- *   POST /delete         - Revoke a message for everyone { chatId, messageId } (ark)
- *   POST /react          - React { chatId, messageId, emoji } ('' removes) (ark)
+ *   POST /delete         - Revoke a message for everyone { chatId, messageId } (seagent)
+ *   POST /react          - React { chatId, messageId, emoji } ('' removes) (seagent)
  *
  * Usage:
- *   node bridge.js --port 3000 --session ~/.ark/whatsapp/session
+ *   node bridge.js --port 3000 --session ~/.seagent/whatsapp/session
  */
 
 import { makeWASocket, useMultiFileAuthState, DisconnectReason, fetchLatestBaileysVersion, downloadMediaMessage, getAggregateVotesInPollMessage, decryptPollVote, getKeyAuthor, jidNormalizedUser } from '@whiskeysockets/baileys';
@@ -106,16 +106,16 @@ const SEND_READ_RECEIPTS =
   ['1', 'true', 'yes', 'on'].includes(process.env.WHATSAPP_SEND_READ_RECEIPTS.toLowerCase());
 
 const PORT = parseInt(getArg('port', '3000'), 10);
-const SESSION_DIR = getArg('session', path.join(process.env.HOME || '~', '.ark', 'whatsapp', 'session'));
+const SESSION_DIR = getArg('session', path.join(process.env.HOME || '~', '.seagent', 'whatsapp', 'session'));
 // Cache directories: the Python gateway passes the profile-aware paths via
 // env (HERMES_HOME-aware, new cache/ layout).  Fall back to the legacy
 // hardcoded locations for bridges launched outside the gateway.
 const IMAGE_CACHE_DIR = process.env.HERMES_IMAGE_CACHE_DIR
-  || path.join(process.env.HOME || '~', '.ark', 'image_cache');
+  || path.join(process.env.HOME || '~', '.seagent', 'image_cache');
 const DOCUMENT_CACHE_DIR = process.env.HERMES_DOCUMENT_CACHE_DIR
-  || path.join(process.env.HOME || '~', '.ark', 'document_cache');
+  || path.join(process.env.HOME || '~', '.seagent', 'document_cache');
 const AUDIO_CACHE_DIR = process.env.HERMES_AUDIO_CACHE_DIR
-  || path.join(process.env.HOME || '~', '.ark', 'audio_cache');
+  || path.join(process.env.HOME || '~', '.seagent', 'audio_cache');
 
 // Self-hash of this script file.  Reported in /health so the Python gateway
 // can detect a running bridge that predates the current bridge.js and
@@ -402,7 +402,7 @@ function enqueueDeliveryStatus(args) {
 
 let sock = null;
 let connectionState = 'disconnected';
-// ark: latest pairing QR (null once paired), served by GET /qr.
+// seagent: latest pairing QR (null once paired), served by GET /qr.
 let latestQr = null;
 
 function emitPairEvent(event) {
@@ -424,7 +424,7 @@ async function startSocket() {
     auth: state,
     logger,
     printQRInTerminal: false,
-    browser: ['ark', 'Chrome', '120.0'],
+    browser: ['seagent', 'Chrome', '120.0'],
     syncFullHistory: false,
     markOnlineOnConnect: false,
     // Required for Baileys 7.x: without this, incoming messages that need
@@ -835,9 +835,9 @@ async function startSocket() {
 const app = express();
 app.use(express.json());
 
-// ark: shared bearer token. When ARK_WHATSAPP_BRIDGE_TOKEN is set (ark sets it
+// seagent: shared bearer token. When SEAGENT_WHATSAPP_BRIDGE_TOKEN is set (seagent sets it
 // when it supervises the bridge), every request must carry it.
-const BRIDGE_TOKEN = process.env.ARK_WHATSAPP_BRIDGE_TOKEN || '';
+const BRIDGE_TOKEN = process.env.SEAGENT_WHATSAPP_BRIDGE_TOKEN || '';
 app.use((req, res, next) => {
   if (!BRIDGE_TOKEN) return next();
   const got = Buffer.from(String(req.headers.authorization || ''));
@@ -1147,7 +1147,7 @@ app.post('/read', async (req, res) => {
   }
 });
 
-// ark: the full message key of a message we have seen (inbound messages and our own
+// seagent: the full message key of a message we have seen (inbound messages and our own
 // sends are in messageStore). Unknown ids fall back to a key built from the chat:
 // fromMe when we sent it this session; a group message from someone else needs its
 // participant, so it must still be in the store.
@@ -1157,7 +1157,7 @@ function messageKeyFor(chatId, messageId) {
   return { remoteJid: chatId, id: messageId, fromMe: recentlySentIds.has(messageId) };
 }
 
-// ark: delete for everyone (WhatsApp "revoke"). Own messages always; other people's
+// seagent: delete for everyone (WhatsApp "revoke"). Own messages always; other people's
 // only in groups where the linked account is an admin (the server enforces this).
 app.post('/delete', async (req, res) => {
   if (!sock || connectionState !== 'connected') {
@@ -1176,7 +1176,7 @@ app.post('/delete', async (req, res) => {
   }
 });
 
-// ark: one reaction per message per sender; an empty emoji removes ours.
+// seagent: one reaction per message per sender; an empty emoji removes ours.
 app.post('/react', async (req, res) => {
   if (!sock || connectionState !== 'connected') {
     return res.status(503).json({ error: 'Not connected to WhatsApp' });
@@ -1220,7 +1220,7 @@ app.get('/chat/:id', async (req, res) => {
   });
 });
 
-// ark: pairing status. `qr` is the raw QR payload while waiting for a scan.
+// seagent: pairing status. `qr` is the raw QR payload while waiting for a scan.
 app.get('/qr', (req, res) => {
   res.json({ status: connectionState, qr: latestQr });
 });

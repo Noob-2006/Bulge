@@ -1,0 +1,154 @@
+{{- if and (eq .Values.config.mode "setup") (not .Values.config.existingSecret) }}
+{{- fail "config.mode=setup needs config.existingSecret (a Secret with the model key); create it with kubectl, do not put keys in values" }}
+{{- end }}
+{{- if and .Values.app.enabled (not .Values.config.existingSecret) }}
+{{- fail "app.enabled needs config.existingSecret with the app token" }}
+{{- end }}
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "seagent.fullname" . }}
+  labels: {{- include "seagent.labels" . | nindent 4 }}
+spec:
+  replicas: 1
+  serviceName: {{ include "seagent.fullname" . }}
+  selector:
+    matchLabels: {{- include "seagent.selector" . | nindent 6 }}
+  template:
+    metadata:
+      labels: {{- include "seagent.selector" . | nindent 8 }}
+      annotations:
+        checksum/config: {{ printf "%s%s%s" .Values.managedPolicy .Values.config.toml (toJson .Values.config) | sha256sum }}
+        {{- with .Values.podAnnotations }}{{ toYaml . | nindent 8 }}{{- end }}
+    spec:
+      serviceAccountName: {{ if .Values.serviceAccount.create }}{{ include "seagent.fullname" . }}{{ else }}default{{ end }}
+      automountServiceAccountToken: {{ .Values.automountServiceAccountToken }}
+      securityContext: {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- if eq .Values.config.mode "setup" }}
+      initContainers:
+        - name: setup
+          image: {{ include "seagent.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext: {{- toYaml .Values.securityContext | nindent 12 }}
+          # `seagent setup` rewrites config.toml (and keeps a backup) on each run: only on a fresh volume.
+          # The key reaches it through the environment, never through argv.
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              test -f /data/config/config.toml && { echo "seagent: config.toml exists, keeping it"; exit 0; }
+              set -- setup --non-interactive --no-service --provider "$SEAGENT_PROVIDER" --model "$SEAGENT_MODEL"
+              [ -n "$SEAGENT_BASE_URL" ] && set -- "$@" --base-url "$SEAGENT_BASE_URL"
+              [ -n "$SEAGENT_CHANNEL" ] && set -- "$@" --channel "$SEAGENT_CHANNEL"
+              [ -n "$SEAGENT_OWNER" ] && set -- "$@" --owner "$SEAGENT_OWNER"
+              exec seagent "$@"
+          env:
+            - { name: SEAGENT_HOME, value: /data }
+            - { name: HOME, value: /data }
+            - { name: SEAGENT_PROVIDER, value: {{ .Values.config.provider | quote }} }
+            - { name: SEAGENT_MODEL, value: {{ .Values.config.model | quote }} }
+            - { name: SEAGENT_BASE_URL, value: {{ .Values.config.baseUrl | quote }} }
+            - { name: SEAGENT_CHANNEL, value: {{ .Values.config.channel | quote }} }
+            - { name: SEAGENT_OWNER, value: {{ .Values.config.owner | quote }} }
+            - name: SEAGENT_SETUP_API_KEY
+              valueFrom: { secretKeyRef: { name: {{ .Values.config.existingSecret }}, key: {{ .Values.config.apiKeyKey }} } }
+            {{- if .Values.config.channel }}
+            - name: SEAGENT_SETUP_CHANNEL_TOKEN
+              valueFrom: { secretKeyRef: { name: {{ .Values.config.existingSecret }}, key: {{ .Values.config.channelTokenKey }} } }
+            {{- end }}
+          volumeMounts:
+            - { name: data, mountPath: /data }
+            - { name: tmp, mountPath: /tmp }
+      {{- end }}
+      containers:
+        - name: seagent
+          image: {{ include "seagent.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext: {{- toYaml .Values.securityContext | nindent 12 }}
+          args: ["daemon", "run", "-w", "/work"]
+          env:
+            - { name: SEAGENT_HOME, value: /data }
+            - { name: HOME, value: /data }
+            {{- if eq .Values.config.mode "file" }}
+            {{- if .Values.config.existingSecret }}
+            - name: {{ .Values.config.apiKeyEnv }}
+              valueFrom: { secretKeyRef: { name: {{ .Values.config.existingSecret }}, key: {{ .Values.config.apiKeyKey }} } }
+            {{- end }}
+            {{- end }}
+            {{- if .Values.app.enabled }}
+            - { name: SEAGENT_APP_ENABLED, value: "1" }
+            - name: SEAGENT_APP_TOKEN
+              valueFrom: { secretKeyRef: { name: {{ .Values.config.existingSecret }}, key: {{ .Values.app.tokenKey }} } }
+            {{- end }}
+            {{- with .Values.extraEnv }}{{ toYaml . | nindent 12 }}{{- end }}
+          readinessProbe:
+            exec: { command: ["seagent", "health"] }
+            initialDelaySeconds: 5
+            periodSeconds: 15
+          livenessProbe:
+            exec: { command: ["seagent", "health"] }
+            initialDelaySeconds: 30
+            periodSeconds: 30
+            failureThreshold: 4
+          resources: {{- toYaml .Values.resources | nindent 12 }}
+          volumeMounts:
+            - { name: data, mountPath: /data }
+            - { name: work, mountPath: /work }
+            - { name: tmp, mountPath: /tmp }
+            {{- if .Values.managedPolicy }}
+            - { name: policy, mountPath: /etc/seagent/managed.d, readOnly: true }
+            {{- end }}
+            {{- if and (eq .Values.config.mode "file") .Values.config.toml }}
+            - { name: config, mountPath: /data/config/config.toml, subPath: config.toml, readOnly: true }
+            {{- end }}
+        {{- if .Values.app.enabled }}
+        - name: proxy
+          image: {{ .Values.app.proxyImage }}
+          securityContext: {{- toYaml .Values.securityContext | nindent 12 }}
+          args: ["caddy", "reverse-proxy", "--from", ":{{ .Values.app.port }}", "--to", "127.0.0.1:8640"]
+          ports: [{ name: app, containerPort: {{ .Values.app.port }}, protocol: TCP }]
+          env:
+            - { name: XDG_DATA_HOME, value: /tmp/caddy }
+            - { name: XDG_CONFIG_HOME, value: /tmp/caddy }
+          volumeMounts:
+            - { name: tmp, mountPath: /tmp }
+        {{- end }}
+      volumes:
+        - name: tmp
+          emptyDir: { medium: Memory, sizeLimit: 256Mi }
+        {{- if .Values.managedPolicy }}
+        - name: policy
+          configMap: { name: {{ include "seagent.fullname" . }}, defaultMode: 0644, items: [{ key: 10-chart.toml, path: 10-chart.toml }] }
+        {{- end }}
+        {{- if and (eq .Values.config.mode "file") .Values.config.toml }}
+        - name: config
+          configMap: { name: {{ include "seagent.fullname" . }}, defaultMode: 0644, items: [{ key: config.toml, path: config.toml }] }
+        {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity: {{- toYaml . | nindent 8 }}
+      {{- end }}
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: {{ toJson .Values.persistence.accessModes }}
+        {{- with .Values.persistence.storageClassName }}
+        storageClassName: {{ . | quote }}
+        {{- end }}
+        resources: { requests: { storage: {{ .Values.persistence.size }} } }
+    - metadata:
+        name: work
+      spec:
+        accessModes: {{ toJson .Values.persistence.accessModes }}
+        {{- with .Values.persistence.storageClassName }}
+        storageClassName: {{ . | quote }}
+        {{- end }}
+        resources: { requests: { storage: {{ .Values.workspace.size }} } }

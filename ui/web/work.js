@@ -1,6 +1,6 @@
-// ark web UI: the workspace pane beside the transcript — the agent's browser tabs and
+// seagent web UI: the workspace pane beside the transcript — the agent's browser tabs and
 // desktops (the host Bot Desktop, desktop VMs), live, with take-over / hand-back.
-// Data: crates/ark-app/src/browser_view.rs — view.browser.list|frame|input,
+// Data: crates/seagent-app/src/browser_view.rs — view.browser.list|frame|input,
 // view.desktop.list|state|frame|input|takeover|handback. The agent and a human never act at
 // once: input is accepted only from the viewer holding the desktop lease, and while a human
 // holds it the agent's screen actions are refused.
@@ -12,12 +12,12 @@ const WL = (zh, en) => (LANG === 'en' ? en : zh);
 // A random id for this tab: the lease remembers which viewer took control.
 const VIEWER = (() => {
   let v = null;
-  try { v = sessionStorage.getItem('ark.viewer'); } catch {}
+  try { v = sessionStorage.getItem('seagent.viewer'); } catch {}
   if (!v) {
     const a = new Uint8Array(12);
     crypto.getRandomValues(a);
     v = 'web-' + Array.from(a, (b) => b.toString(16).padStart(2, '0')).join('');
-    try { sessionStorage.setItem('ark.viewer', v); } catch {}
+    try { sessionStorage.setItem('seagent.viewer', v); } catch {}
   }
   return v;
 })();

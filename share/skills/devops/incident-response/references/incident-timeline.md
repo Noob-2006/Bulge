@@ -2,7 +2,7 @@
 
 ## Sources, in order of trust
 1. Monitoring data (Prometheus / Grafana): first bad datapoint, recovery datapoint.
-2. Change records: `deploy action=history` and the audit log (`ark audit events --kind deploy`),
+2. Change records: `deploy action=history` and the audit log (`seagent audit events --kind deploy`),
    CI/CD runs, config management, feature-flag changes.
 3. Logs: first occurrence of each new error type.
 4. Human actions: pages, acknowledgements, chat decisions (PagerDuty `incident` timeline).

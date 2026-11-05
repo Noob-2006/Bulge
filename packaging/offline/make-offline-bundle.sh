@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
 # Air-gapped install bundle (ent-029): one tarball that carries everything and needs no network.
 #
-#   make-offline-bundle.sh --dist DIST_DIR --arch x86_64|aarch64 --out ark-offline-<ver>-<arch>.tar.gz
+#   make-offline-bundle.sh --dist DIST_DIR --arch x86_64|aarch64 --out seagent-offline-<ver>-<arch>.tar.gz
 #                          [--vm-image DIR] [--key release-key.pem] [--with-browser [--browser-zip FILE]]
 #
-# DIST_DIR is a verified release directory (verify-release.sh passes on it): ark-<triple>.tar.gz,
+# DIST_DIR is a verified release directory (verify-release.sh passes on it): seagent-<triple>.tar.gz,
 # optional *.deb/*.rpm, sbom.spdx.json, SHA256SUMS, SHA256SUMS.sig, release-key.pub.pem.
-# Bundle layout (top directory ark-offline/):
+# Bundle layout (top directory seagent-offline/):
 #   release/        the dist directory, byte for byte (its own signature still verifies)
-#   vm-image/       optional microVM guest image (`ark sandbox vm image build` output: vmlinux, initramfs, manifest)
+#   vm-image/       optional microVM guest image (`seagent sandbox vm image build` output: vmlinux, initramfs, manifest)
 #   browser/        with --with-browser: the pinned Chrome for Testing chrome-linux64.zip (sha256
 #                   checked here and again by install.sh --with-browser / install-offline.sh)
 #   tools/          verify-release.sh, sbom.py, install-offline.sh helpers
@@ -21,7 +21,7 @@ HERE=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 ROOT=$(cd -- "$HERE/../.." && pwd)
 die() { printf '%s: %s\n' "$PROG" "$*" >&2; exit 1; }
 DIST="" ARCH="" OUT="" VMIMG="" KEY="" BROWSER=0 BROWSER_ZIP=""
-# Pinned Chrome for Testing (same values as packaging/install.sh and ark_browser::launch).
+# Pinned Chrome for Testing (same values as packaging/install.sh and seagent_browser::launch).
 CFT_VERSION=157.0.8103.38
 CFT_SHA256=8cdeb344e9b2cefe59f4aea8d1d93d5d93054c03cde217665c16fc1f62e72a66
 while [ $# -gt 0 ]; do
@@ -40,18 +40,18 @@ while [ $# -gt 0 ]; do
 done
 [ -d "$DIST" ] && [ -n "$OUT" ] || die "usage: $PROG --dist DIR --arch ARCH --out FILE"
 case "$ARCH" in x86_64|aarch64) ;; *) die "--arch must be x86_64 or aarch64" ;; esac
-[ -f "$DIST/ark-$ARCH-unknown-linux-musl.tar.gz" ] || die "$DIST/ark-$ARCH-unknown-linux-musl.tar.gz is missing"
+[ -f "$DIST/seagent-$ARCH-unknown-linux-musl.tar.gz" ] || die "$DIST/seagent-$ARCH-unknown-linux-musl.tar.gz is missing"
 # Never bundle something that does not verify: the installer would refuse it on the far side anyway.
 if [ -f "$DIST/SHA256SUMS.sig" ]; then
-    "$ROOT/packaging/release/verify-release.sh" "$DIST" --key "${ARK_RELEASE_PUBKEY:-$DIST/release-key.pub.pem}" >/dev/null || die "the release directory does not verify"
+    "$ROOT/packaging/release/verify-release.sh" "$DIST" --key "${SEAGENT_RELEASE_PUBKEY:-$DIST/release-key.pub.pem}" >/dev/null || die "the release directory does not verify"
 fi
 if [ -n "$VMIMG" ]; then
     [ -f "$VMIMG/manifest.json" ] || die "--vm-image: no manifest.json in $VMIMG"
 fi
 EPOCH=${SOURCE_DATE_EPOCH:-$(git -C "$ROOT" log -1 --format=%ct 2>/dev/null || echo 0)}
-STAGE=$(mktemp -d "${TMPDIR:-/tmp}/ark-offline.XXXXXX")
+STAGE=$(mktemp -d "${TMPDIR:-/tmp}/seagent-offline.XXXXXX")
 trap 'rm -rf "$STAGE"' EXIT
-B=$STAGE/ark-offline
+B=$STAGE/seagent-offline
 mkdir -p "$B/release" "$B/tools"
 cp -R "$DIST/." "$B/release/"
 install -m 0755 "$ROOT/packaging/release/verify-release.sh" "$B/tools/verify-release.sh"
@@ -72,5 +72,5 @@ echo "$ARCH" > "$B/ARCH"
 if [ -n "$KEY" ]; then "$ROOT/packaging/release/sign.sh" "$B/BUNDLE.sha256" "$KEY" "$B/BUNDLE.sha256.sig" >/dev/null; fi
 find "$STAGE" -type d -exec chmod 0755 {} +
 OUT_ABS=$(cd -- "$(dirname -- "$OUT")" && pwd)/$(basename -- "$OUT")
-( cd "$STAGE" && tar --sort=name --mtime="@$EPOCH" --owner=0 --group=0 --numeric-owner --format=gnu -cf - ark-offline | gzip -n -9 > "$OUT_ABS" )
+( cd "$STAGE" && tar --sort=name --mtime="@$EPOCH" --owner=0 --group=0 --numeric-owner --format=gnu -cf - seagent-offline | gzip -n -9 > "$OUT_ABS" )
 echo "$OUT_ABS"

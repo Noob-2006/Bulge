@@ -1,16 +1,16 @@
 #!/usr/bin/env bash
-# Assemble one release tarball: the binary plus everything ark needs at run time.
+# Assemble one release tarball: the binary plus everything seagent needs at run time.
 #
-#   make-tarball.sh <triple> <ark-binary> <out.tar.gz> [--vm-agent PATH]
+#   make-tarball.sh <triple> <seagent-binary> <out.tar.gz> [--vm-agent PATH]
 #
 # Layout (a prefix, so `tar -xzf … -C ~/.local` and `-C /usr/local` both work):
-#   bin/ark
-#   share/ark/{skills,optional-skills,optional-mcps,plugin-catalog,roles,blueprints.json}
-#   share/ark/vm/{build-image.sh,README.md[,ark-vm-guest]}     microVM guest image builder
-#   share/ark/sandbox-browser/…                                sandbox-browser image sources
-#   share/ark/systemd/{arkd.service,arkd-system.service,…}     generated units, sysusers, tmpfiles
-#   share/doc/ark/{README.md,THIRD_PARTY_NOTICES.md}
-# `ark` finds share/ark at run time through <exe>/../share/ark (see ark_core::share).
+#   bin/seagent
+#   share/seagent/{skills,optional-skills,optional-mcps,plugin-catalog,roles,blueprints.json}
+#   share/seagent/vm/{build-image.sh,README.md[,seagent-vm-guest]}     microVM guest image builder
+#   share/seagent/sandbox-browser/…                                sandbox-browser image sources
+#   share/seagent/systemd/{seagentd.service,seagentd-system.service,…}     generated units, sysusers, tmpfiles
+#   share/doc/seagent/{README.md,THIRD_PARTY_NOTICES.md}
+# `seagent` finds share/seagent at run time through <exe>/../share/seagent (see seagent_core::share).
 #
 # Deterministic: sorted entries, fixed owner/mtime (SOURCE_DATE_EPOCH, default = HEAD commit
 # time), `gzip -n`. Same inputs, same bytes.
@@ -21,7 +21,7 @@ PROG=$(basename "$0")
 ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)
 die() { printf '%s: %s\n' "$PROG" "$*" >&2; exit 1; }
 
-[ $# -ge 3 ] || die "usage: $PROG <triple> <ark-binary> <out.tar.gz> [--vm-agent PATH]"
+[ $# -ge 3 ] || die "usage: $PROG <triple> <seagent-binary> <out.tar.gz> [--vm-agent PATH]"
 TRIPLE=$1 BIN=$2 OUT=$3
 shift 3
 AGENT=""
@@ -36,24 +36,24 @@ done
 [ -d "$ROOT/share/skills" ] || die "$ROOT/share/skills is missing; run from a full checkout"
 
 EPOCH=${SOURCE_DATE_EPOCH:-$(git -C "$ROOT" log -1 --format=%ct 2>/dev/null || echo 0)}
-STAGE=$(mktemp -d "${TMPDIR:-/tmp}/ark-tarball.XXXXXX")
+STAGE=$(mktemp -d "${TMPDIR:-/tmp}/seagent-tarball.XXXXXX")
 trap 'rm -rf "$STAGE"' EXIT
 
-install -D -m 0755 "$BIN" "$STAGE/bin/ark"
-S=$STAGE/share/ark
-mkdir -p "$S" "$STAGE/share/doc/ark"
+install -D -m 0755 "$BIN" "$STAGE/bin/seagent"
+S=$STAGE/share/seagent
+mkdir -p "$S" "$STAGE/share/doc/seagent"
 cp -R "$ROOT/share/." "$S/"
 mkdir -p "$S/vm" "$S/sandbox-browser" "$S/systemd"
 install -m 0755 "$ROOT/packaging/vm/build-image.sh" "$S/vm/build-image.sh"
 install -m 0644 "$ROOT/packaging/vm/README.md" "$S/vm/README.md"
 if [ -n "$AGENT" ]; then
     [ -f "$AGENT" ] || die "no such vm agent: $AGENT"
-    install -m 0755 "$AGENT" "$S/vm/ark-vm-guest"
+    install -m 0755 "$AGENT" "$S/vm/seagent-vm-guest"
 fi
 cp -R "$ROOT/packaging/sandbox-browser/." "$S/sandbox-browser/"
 cp "$ROOT"/packaging/systemd/* "$S/systemd/"
 for f in README.md THIRD_PARTY_NOTICES.md; do
-    [ -f "$ROOT/$f" ] && install -m 0644 "$ROOT/$f" "$STAGE/share/doc/ark/$f"
+    [ -f "$ROOT/$f" ] && install -m 0644 "$ROOT/$f" "$STAGE/share/doc/seagent/$f"
 done
 echo "$TRIPLE" > "$S/TARGET"
 # Normalise modes: dirs 755, files 644 unless executable already.

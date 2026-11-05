@@ -1,13 +1,13 @@
 ---
-upstream: "ark-original"
+upstream: "seagent-original"
 name: sql-data-analysis
 description: "Answer data questions with read-only SQL, check the result, then report; includes cleaning."
 version: 1.0.0
-author: ark
+author: SE Agent
 license: MIT
 platforms: [linux, macos]
 metadata:
-  ark:
+  seagent:
     tags: [sql, data, analytics, report, csv, xlsx, postgres, mysql, sqlite, clickhouse, bigquery]
     category: productivity
     related_skills: [xlsx, pdf]

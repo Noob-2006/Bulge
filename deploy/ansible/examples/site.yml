@@ -1,19 +1,19 @@
 ---
 # ansible-playbook -i inventory examples/site.yml --ask-vault-pass
-# Secrets live in ansible-vault (group_vars/ark/vault.yml), never in this file.
-- name: ark agent hosts
-  hosts: ark
+# Secrets live in ansible-vault (group_vars/seagent/vault.yml), never in this file.
+- name: seagent agent hosts
+  hosts: seagent
   become: true
   roles:
-    - role: ark
+    - role: seagent
       vars:
-        ark_install_method: repo
-        ark_repo_url: https://packages.example.com/ark
-        ark_repo_key_url: https://packages.example.com/ark/ark-archive-keyring.gpg   # RPM hosts: .../RPM-GPG-KEY-ark
-        ark_provider: anthropic
-        ark_model: claude-sonnet-4-5
-        ark_api_key: "{{ vault_ark_api_key }}"
-        ark_managed_policy:
+        seagent_install_method: repo
+        seagent_repo_url: https://packages.example.com/seagent
+        seagent_repo_key_url: https://packages.example.com/seagent/seagent-archive-keyring.gpg   # RPM hosts: .../RPM-GPG-KEY-seagent
+        seagent_provider: anthropic
+        seagent_model: claude-sonnet-4-5
+        seagent_api_key: "{{ vault_seagent_api_key }}"
+        seagent_managed_policy:
           managed:
             locked: ["approvals.preset", "gate.egress_allow"]
           approvals:

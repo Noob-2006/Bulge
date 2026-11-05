@@ -5,7 +5,7 @@ turns them into agent runs. Each route verifies the signature first, drops event
 not match its filters, renders a prompt, and hands the run to an agent. Nothing here needs
 the forge token to be reachable from the internet; only the webhook listener is exposed.
 
-## GitHub: issue labeled `ark`, or a PR comment starting with `/ark`
+## GitHub: issue labeled `seagent`, or a PR comment starting with `/seagent`
 
 ```toml
 [channels.forgehooks]
@@ -15,10 +15,10 @@ secret = "{{secret:FORGE_WEBHOOK_SECRET}}"   # the same string you enter on the 
 
 [channels.forgehooks.routes.github-issue]
 events = ["issues"]
-prompt = "Issue {issue.number} in {repository.full_name} was labeled 'ark': {issue.title}. Use the forge-issue-to-pr skill. Read the issue with forge_read first."
+prompt = "Issue {issue.number} in {repository.full_name} was labeled 'seagent': {issue.title}. Use the forge-issue-to-pr skill. Read the issue with forge_read first."
 filters = [
   { field = "action", in = ["labeled"] },
-  { field = "label.name", in = ["ark"] },
+  { field = "label.name", in = ["seagent"] },
 ]
 coalesce = { key = "issue.number", window_seconds = 30, max_wait_seconds = 300 }
 
@@ -39,7 +39,7 @@ secret, and the events listed. The route verifies `X-Hub-Signature-256`.
 [channels.forgehooks.routes.gitlab-issue]
 events = ["Issue Hook"]                      # X-Gitlab-Event
 prompt = "Issue !{object_attributes.iid} in {project.path_with_namespace}: {object_attributes.title}. Use the forge-issue-to-pr skill."
-filters = [{ field = "object_attributes.action", in = ["open", "update"] }, { field = "labels.0.title", in = ["ark"] }]
+filters = [{ field = "object_attributes.action", in = ["open", "update"] }, { field = "labels.0.title", in = ["seagent"] }]
 
 [channels.forgehooks.routes.gitlab-mr-note]
 events = ["Note Hook"]
@@ -54,7 +54,7 @@ outbound requests if it is on a private network.
 ## Which agent runs it
 
 Bind the route's session to a named agent that has the software-development role and the
-forge tools (`ark agents add forge-dev --role swdev`, then the channel binding in
+forge tools (`seagent agents add forge-dev --role swdev`, then the channel binding in
 `agents.toml`). The `swdev` tool profile includes `forge_read` and `forge_write`.
 
 ## Safety notes

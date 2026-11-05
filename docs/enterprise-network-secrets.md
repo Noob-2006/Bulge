@@ -1,22 +1,22 @@
 # Enterprise network, isolation and secrets
 
-What ark does in a corporate network, on old kernels, and with an enterprise secret manager.
-Every setting below is shown by `ark doctor`; isolation is shown by `ark sandbox explain`.
+What SE Agent does in a corporate network, on old kernels, and with an enterprise secret manager.
+Every setting below is shown by `seagent doctor`; isolation is shown by `seagent sandbox explain`.
 
 ## Network (`[network]`)
 
-One client builder (`ark_net::http::builder`) creates every outbound HTTP client — model
+One client builder (`seagent_net::http::builder`) creates every outbound HTTP client — model
 providers, channels, web tools, A2A, MCP, telemetry, update, skills hub — and the raw TLS
 streams (WebSocket gateways, IRC, SMTP/IMAP) use the same roots and proxy. A lint test
-(`crates/ark/tests/http_client_lint.rs`) fails the build when code creates a client elsewhere.
+(`crates/seagent/tests/http_client_lint.rs`) fails the build when code creates a client elsewhere.
 
 ```toml
 [network]
 proxy = "http://proxy.corp:3128"          # else $HTTPS_PROXY / $HTTP_PROXY / $ALL_PROXY
 no_proxy = ["10.0.0.0/8", "*.corp.example", "vault.corp:8200"]   # + $NO_PROXY
-ca_file = "/etc/pki/tls/certs/corp-bundle.pem"  # replaces the bundled roots; else $ARK_CA_BUNDLE / $SSL_CERT_FILE / …
-client_cert = "/etc/ark/tls/svid.pem"     # optional client certificate for every outbound TLS
-client_key = "/etc/ark/tls/svid.key"
+ca_file = "/etc/pki/tls/certs/corp-bundle.pem"  # replaces the bundled roots; else $SEAGENT_CA_BUNDLE / $SSL_CERT_FILE / …
+client_cert = "/etc/seagent/tls/svid.pem"     # optional client certificate for every outbound TLS
+client_key = "/etc/seagent/tls/svid.key"
 offline = false                           # see below
 offline_allow = ["llm-gateway.corp"]      # still reachable when offline
 ```
@@ -26,11 +26,11 @@ Loopback always goes direct. Raw TLS streams tunnel through an `http://` proxy w
 
 ### Fully offline
 
-`[network] offline = true` (or `ARK_NETWORK_OFFLINE=1`) is one switch: no update check, no
+`[network] offline = true` (or `SEAGENT_NETWORK_OFFLINE=1`) is one switch: no update check, no
 models.dev price refresh, no skills hub, no telemetry export, and the web tools are not offered
 to the model. As a second line, every client refuses public hosts; loopback, private ranges,
 `*.localhost`, the NO_PROXY hosts and `offline_allow` stay reachable (an air-gapped LAN model or
-an on-prem Vault). `ARK_OFFLINE=1` keeps its older, narrower meaning: no automatic background
+an on-prem Vault). `SEAGENT_OFFLINE=1` keeps its older, narrower meaning: no automatic background
 downloads (the test suite runs under it).
 
 ## Native TLS and mutual TLS for the app server
@@ -38,12 +38,12 @@ downloads (the test suite runs under it).
 ```toml
 [app.exposure]
 tls = true
-cert = "/etc/ark/tls/server.pem"
-key = "/etc/ark/tls/server.key"
+cert = "/etc/seagent/tls/server.pem"
+key = "/etc/seagent/tls/server.key"
 client_auth = "require"                   # off | optional | require
-client_ca = "/etc/ark/tls/clients-ca.pem"
+client_ca = "/etc/seagent/tls/clients-ca.pem"
 client_identities = [ { id = "spiffe://corp.example/ops/*", scope = "operator" } ]
-node_identities = [ "spiffe://corp.example/ark/node/*" ]
+node_identities = [ "spiffe://corp.example/seagent/node/*" ]
 ```
 
 Required mTLS counts as device-bound authentication for the public-exposure check (A9). A
@@ -71,13 +71,13 @@ other identity or token can take the node over. Cloud IAM identities that federa
 bwrap runs with a seccomp deny-list (`[exec.bwrap] seccomp = true`): keyrings, mounts and new
 namespaces, kexec/modules, bpf, perf, userfaultfd, handle-based opens, `ptrace`.
 
-`[exec.cgroups] enabled = true` gives every command its own cgroup (v1 or v2) when ark runs in
+`[exec.cgroups] enabled = true` gives every command its own cgroup (v1 or v2) when SE Agent runs in
 a delegated subtree (the shipped systemd units set `Delegate=yes`): `memory_mb` and `pids_max`
 caps apply, and the reaper also kills processes that escaped their process group.
 
 ## Secret sources
 
-`<config>/secret_sources.toml`, managed with `ark secrets <source> setup|set|remove|status|sync`.
+`<config>/secret_sources.toml`, managed with `seagent secrets <source> setup|set|remove|status|sync`.
 All of them pull values into the environment at process start (cached, never blocking start-up).
 
 | source | how | auth |
@@ -95,12 +95,12 @@ addr = "https://vault.corp:8200"
 mount = "secret"
 auth = "approle"
 role_id = "8f0c…"
-env = { OPENAI_API_KEY = "ark/providers#openai", OPENAI_API_KEY__ENG = "ark/teams/eng#openai" }
+env = { OPENAI_API_KEY = "seagent/providers#openai", OPENAI_API_KEY__ENG = "seagent/teams/eng#openai" }
 
 [aws]
 enabled = true
 region = "eu-west-1"
-env = { ANTHROPIC_API_KEY = "prod/ark#anthropic" }   # `#key` picks a field of a JSON secret
+env = { ANTHROPIC_API_KEY = "prod/seagent#anthropic" }   # `#key` picks a field of a JSON secret
 
 [gcp]
 enabled = true
@@ -117,17 +117,17 @@ Vault traffic follows `[network]` (proxy, internal CA).
 
 ## Key rotation
 
-* `ark secrets rekey [--new-backend passphrase|env|keyring|tpm]` — re-encrypt the local vault
-  under a new key: `ARK_VAULT_NEW_PASSPHRASE_FILE` / `ARK_VAULT_NEW_PASSPHRASE` /
-  `ARK_VAULT_NEW_KEY`; the old key comes from the usual `ARK_VAULT_*`. A failure restores the
+* `seagent secrets rekey [--new-backend passphrase|env|keyring|tpm]` — re-encrypt the local vault
+  under a new key: `SEAGENT_VAULT_NEW_PASSPHRASE_FILE` / `SEAGENT_VAULT_NEW_PASSPHRASE` /
+  `SEAGENT_VAULT_NEW_KEY`; the old key comes from the usual `SEAGENT_VAULT_*`. A failure restores the
   previous file.
-* `ark secrets rotate NAME --value-stdin | --generate | --rotate-command CMD` — store a new
+* `seagent secrets rotate NAME --value-stdin | --generate | --rotate-command CMD` — store a new
   value; when the `vault` source binds NAME, a new KV version is written to Vault (other fields
   of the secret are kept), so every host picks it up.
-* `ark secrets rotation set NAME --every-days 30 --rotate-command "/usr/local/bin/new-openai-key"`
-  and `ark secrets rotation run` (from cron or a systemd timer) — scheduled rotation; `ark
-  secrets rotation status` and `ark doctor` show overdue keys.
-* `ark app token rotate [--token-name NAME]` — a new app token in the secret `[app] token`
+* `seagent secrets rotation set NAME --every-days 30 --rotate-command "/usr/local/bin/new-openai-key"`
+  and `seagent secrets rotation run` (from cron or a systemd timer) — scheduled rotation; `SE Agent
+  secrets rotation status` and `seagent doctor` show overdue keys.
+* `seagent app token rotate [--token-name NAME]` — a new app token in the secret `[app] token`
   references (`{{secret:APP_TOKEN}}`); restart the daemon afterwards.
 * Node device tokens: `node.token.rotate` (or SPIFFE identities, above).
 
@@ -135,8 +135,8 @@ Rotations are recorded in the audit stream (`secret.rotate`) without values.
 
 ## Per-team model keys
 
-A session is charged to its owner (`ark users team <id> <team>`); its model calls use the
+A session is charged to its owner (`seagent users team <id> <team>`); its model calls use the
 team's own key when one exists: the secret named like the provider's key variable plus
 `__<TEAM>` (upper-case, non-alphanumerics → `_`), e.g. `OPENAI_API_KEY__ENG_PLATFORM` for team
-`eng-platform`. Set it in the vault (`ark secrets set`) or bind it from any secret source.
+`eng-platform`. Set it in the vault (`seagent secrets set`) or bind it from any secret source.
 Teams without their own key use the shared one.

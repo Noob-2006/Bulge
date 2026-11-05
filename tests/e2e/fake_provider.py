@@ -1,7 +1,7 @@
 """Scripted fake LLM provider speaking OpenAI Chat Completions and Anthropic
 Messages (streaming SSE). POST /__script with a JSON list to queue replies;
 GET /__requests returns what was received; GET /api.json is the models.dev-shaped
-metadata for the models below (ark takes context window and capabilities — image
+metadata for the models below (seagent takes context window and capabilities — image
 input included — from models.dev, not from /v1/models).
 
 Reply items:
@@ -20,9 +20,9 @@ QUEUE = []
 SEEN = []
 N = [0]
 
-# What this fake advertises for its models, in models.dev's `api.json` shape (the metadata ark
+# What this fake advertises for its models, in models.dev's `api.json` shape (the metadata seagent
 # actually resolves capabilities from). `fake-model` accepts image input, so the send path must
-# forward images to it instead of substituting text (`crates/ark-kernel/src/imgprep.rs`).
+# forward images to it instead of substituting text (`crates/seagent-kernel/src/imgprep.rs`).
 MODELS_DEV = {
     "fake": {
         "id": "fake",

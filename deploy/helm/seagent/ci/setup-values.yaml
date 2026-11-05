@@ -1,0 +1,6 @@
+config: { mode: setup, provider: openai, model: gpt-5, existingSecret: seagent-secrets }
+managedPolicy: |
+  [managed]
+  locked = ["approvals.preset"]
+  [approvals]
+  preset = "standard"

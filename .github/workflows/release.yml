@@ -2,11 +2,11 @@ name: release
 # Tag push v* builds four Linux binaries, checks them, smoke-tests them on real old/other distros,
 # bundles share/ (skills, roles, catalogs, VM builder), and publishes tarballs + SHA256SUMS +
 # SBOM (+ Ed25519 signature when the signing secret is set) + build attestation.
-# Asset names are the contract `ark update` and install.sh rely on:
-#   ark-<triple>.tar.gz   (bin/ark, share/ark/…), SHA256SUMS, SHA256SUMS.sig, sbom.spdx.json, install.sh
-# Packages (ent-006/007/027/028/029): ark_<ver>-1_<arch>.deb, ark-<ver>-1.<arch>.rpm (nfpm, from the
-# musl binary), ark-apt-repo.tar.gz / ark-yum-repo.tar.gz (signed with ARK_REPO_GPG_KEY), and
-# ark-offline-<ver>-<arch>.tar.gz (air-gapped bundle). All except the offline bundle are inside SHA256SUMS.
+# Asset names are the contract `seagent update` and install.sh rely on:
+#   seagent-<triple>.tar.gz   (bin/seagent, share/seagent/…), SHA256SUMS, SHA256SUMS.sig, sbom.spdx.json, install.sh
+# Packages (ent-006/007/027/028/029): seagent_<ver>-1_<arch>.deb, seagent-<ver>-1.<arch>.rpm (nfpm, from the
+# musl binary), seagent-apt-repo.tar.gz / seagent-yum-repo.tar.gz (signed with SEAGENT_REPO_GPG_KEY), and
+# seagent-offline-<ver>-<arch>.tar.gz (air-gapped bundle). All except the offline bundle are inside SHA256SUMS.
 on:
   push:
     tags: ["v*"]
@@ -15,7 +15,7 @@ permissions:
 env:
   # Same inputs, same bytes: no build path or clock leaks into the binary (packaging/release/repro-check.sh).
   CARGO_INCREMENTAL: "0"
-  RUSTFLAGS: "--remap-path-prefix=${{ github.workspace }}=/build/ark --remap-path-prefix=/home/runner/.cargo=/cargo"
+  RUSTFLAGS: "--remap-path-prefix=${{ github.workspace }}=/build/seagent --remap-path-prefix=/home/runner/.cargo=/cargo"
 jobs:
   build:
     strategy:
@@ -40,20 +40,20 @@ jobs:
           t='${{ matrix.target }}'
           export SOURCE_DATE_EPOCH="$(git log -1 --format=%ct)"
           case "$t" in *-gnu) zt="$t.2.28" ;; *) zt="$t" ;; esac
-          cargo zigbuild --release --locked --target "$zt" --bin ark
+          cargo zigbuild --release --locked --target "$zt" --bin seagent
           # The microVM guest agent is x86_64 and must be static: ship it with the x86_64 musl bundle.
           agent=""
           if [ "$t" = x86_64-unknown-linux-musl ]; then
-            cargo zigbuild --release --locked --target "$t" -p ark-vm --bin ark-vm-guest
-            agent="--vm-agent target/$t/release/ark-vm-guest"
+            cargo zigbuild --release --locked --target "$t" -p seagent-vm --bin seagent-vm-guest
+            agent="--vm-agent target/$t/release/seagent-vm-guest"
           fi
           # ent-004: musl is really static, gnu really stays within glibc 2.28.
-          packaging/release/check-binary.sh "$t" "target/$t/release/ark" --max-glibc 2.28
-          packaging/release/make-tarball.sh "$t" "target/$t/release/ark" "ark-$t.tar.gz" $agent
+          packaging/release/check-binary.sh "$t" "target/$t/release/seagent" --max-glibc 2.28
+          packaging/release/make-tarball.sh "$t" "target/$t/release/seagent" "seagent-$t.tar.gz" $agent
       - uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
         with:
-          name: ark-${{ matrix.target }}
-          path: ark-*.tar.gz
+          name: seagent-${{ matrix.target }}
+          path: seagent-*.tar.gz
   # The binaries must actually start where we claim they do: glibc 2.28 (AlmaLinux 8), Alpine
   # (musl), and native arm64 hardware (Graviton-class). Also runs install.sh from the artifacts.
   smoke:
@@ -71,31 +71,31 @@ jobs:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
       - uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6
         with:
-          name: ark-${{ matrix.target }}
+          name: seagent-${{ matrix.target }}
           path: dist
       - name: version and share/ inside ${{ matrix.image }}
         run: |
           set -euo pipefail
           t='${{ matrix.target }}'
-          mkdir -p "x/$t" && tar -xzf "dist/ark-$t.tar.gz" -C "x/$t"
-          docker run --rm -v "$PWD/x/$t:/ark:ro" ${{ matrix.image }} sh -c '
+          mkdir -p "x/$t" && tar -xzf "dist/seagent-$t.tar.gz" -C "x/$t"
+          docker run --rm -v "$PWD/x/$t:/seagent:ro" ${{ matrix.image }} sh -c '
             set -e
-            /ark/bin/ark version
-            test -f /ark/share/ark/blueprints.json
-            test -d /ark/share/ark/skills -a -d /ark/share/ark/roles -a -d /ark/share/ark/plugin-catalog -a -d /ark/share/ark/optional-mcps
+            /seagent/bin/seagent version
+            test -f /seagent/share/seagent/blueprints.json
+            test -d /seagent/share/seagent/skills -a -d /seagent/share/seagent/roles -a -d /seagent/share/seagent/plugin-catalog -a -d /seagent/share/seagent/optional-mcps
             # bundled share/ is found next to the binary, no env var
-            env -u ARK_SHARE_DIR ARK_HOME=/tmp/h /ark/bin/ark skills list >/dev/null'
+            env -u SEAGENT_SHARE_DIR SEAGENT_HOME=/tmp/h /seagent/bin/seagent skills list >/dev/null'
       - name: install.sh inside ${{ matrix.image }} (musl artifact only)
         if: endsWith(matrix.target, '-musl')
         run: |
           set -euo pipefail
           t='${{ matrix.target }}'
-          (cd dist && sha256sum "ark-$t.tar.gz" > SHA256SUMS)
-          docker run --rm -v "$PWD:/src:ro" -v "$PWD/dist:/rel:ro" -e ARK_RELEASE_BASE=file:///rel ${{ matrix.image }} sh -c '
+          (cd dist && sha256sum "seagent-$t.tar.gz" > SHA256SUMS)
+          docker run --rm -v "$PWD:/src:ro" -v "$PWD/dist:/rel:ro" -e SEAGENT_RELEASE_BASE=file:///rel ${{ matrix.image }} sh -c '
             set -e
             sh /src/packaging/install.sh --no-start
-            ~/.local/bin/ark version
-            test -d ~/.local/lib/ark/share/skills'
+            ~/.local/bin/seagent version
+            test -d ~/.local/lib/seagent/share/skills'
   # ent-006/007: .deb and .rpm from the static musl binary (one nfpm definition, packaging/nfpm).
   packages:
     needs: build
@@ -110,20 +110,20 @@ jobs:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
       - uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6
         with:
-          name: ark-${{ matrix.triple }}
+          name: seagent-${{ matrix.triple }}
           path: dist-in
       - name: build .deb and .rpm
         run: |
           set -euo pipefail
           SOURCE_DATE_EPOCH="$(git log -1 --format=%ct)"; export SOURCE_DATE_EPOCH
-          mkdir -p x out && tar -xzf "dist-in/ark-${{ matrix.triple }}.tar.gz" -C x
-          packaging/nfpm/build-packages.sh --bin x/bin/ark --arch '${{ matrix.arch }}' --out out
+          mkdir -p x out && tar -xzf "dist-in/seagent-${{ matrix.triple }}.tar.gz" -C x
+          packaging/nfpm/build-packages.sh --bin x/bin/seagent --arch '${{ matrix.arch }}' --out out
       - uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
         with:
           name: pkg-${{ matrix.arch }}
           path: out/*
-  # ent-009..017: install the packages on real distributions, run `ark --version`, `ark doctor`,
-  # `ark setup --non-interactive` and one offline conversation against tests/e2e/fake_provider.py.
+  # ent-009..017: install the packages on real distributions, run `seagent --version`, `seagent doctor`,
+  # `seagent setup --non-interactive` and one offline conversation against tests/e2e/fake_provider.py.
   # Best-effort rows (CentOS 7, openSUSE Leap) are reported but cannot block a release.
   distro-matrix:
     needs: [build, packages]
@@ -133,7 +133,7 @@ jobs:
       - uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6
         with: { name: pkg-amd64, path: dist }
       - uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6
-        with: { name: ark-x86_64-unknown-linux-musl, path: dist }
+        with: { name: seagent-x86_64-unknown-linux-musl, path: dist }
       - name: matrix
         run: python3 -I packaging/matrix/matrix.py --dist dist --out matrix.md --json matrix.json
       - name: signed apt + yum repositories install and verify (ent-027/028)
@@ -146,7 +146,7 @@ jobs:
       - if: always()
         uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
         with: { name: distro-matrix, path: "matrix.*" }
-  # ent-027/028: signed repositories. Without ARK_REPO_GPG_KEY (an ASCII-armoured secret key without
+  # ent-027/028: signed repositories. Without SEAGENT_REPO_GPG_KEY (an ASCII-armoured secret key without
   # passphrase, in a repository secret) the repositories are not built and the release says so.
   repos:
     needs: packages
@@ -157,11 +157,11 @@ jobs:
         with: { pattern: "pkg-*", path: pkgs, merge-multiple: true }
       - name: build repositories
         env:
-          REPO_KEY: ${{ secrets.ARK_REPO_GPG_KEY }}
+          REPO_KEY: ${{ secrets.SEAGENT_REPO_GPG_KEY }}
         run: |
           set -euo pipefail
           if [ -z "${REPO_KEY:-}" ]; then
-            echo "::warning::ARK_REPO_GPG_KEY is not set: the apt/yum repositories are NOT built for this release"
+            echo "::warning::SEAGENT_REPO_GPG_KEY is not set: the apt/yum repositories are NOT built for this release"
             mkdir -p out; exit 0
           fi
           export GNUPGHOME="$RUNNER_TEMP/gnupg"; mkdir -m 700 "$GNUPGHOME"
@@ -171,10 +171,10 @@ jobs:
           mkdir -p debs rpms out repo
           cp pkgs/*.deb debs/; cp pkgs/*.rpm rpms/
           packaging/repo/make-apt-repo.py --debs debs --out repo/apt --key-id "$KID"
-          packaging/repo/make-yum-repo.sh --rpms rpms --out repo/rpm --key-id "$KID" --base-url "${{ vars.ARK_REPO_BASE_URL || 'https://packages.example.com/ark' }}/rpm" --container
-          tar --sort=name --owner=0 --group=0 --numeric-owner --mtime="@$SOURCE_DATE_EPOCH" -czf out/ark-apt-repo.tar.gz -C repo apt
-          tar --sort=name --owner=0 --group=0 --numeric-owner --mtime="@$SOURCE_DATE_EPOCH" -czf out/ark-yum-repo.tar.gz -C repo rpm
-          gpg --batch --armor --export "$KID" > out/ark-repo-signing-key.asc
+          packaging/repo/make-yum-repo.sh --rpms rpms --out repo/rpm --key-id "$KID" --base-url "${{ vars.SEAGENT_REPO_BASE_URL || 'https://packages.example.com/seagent' }}/rpm" --container
+          tar --sort=name --owner=0 --group=0 --numeric-owner --mtime="@$SOURCE_DATE_EPOCH" -czf out/seagent-apt-repo.tar.gz -C repo apt
+          tar --sort=name --owner=0 --group=0 --numeric-owner --mtime="@$SOURCE_DATE_EPOCH" -czf out/seagent-yum-repo.tar.gz -C repo rpm
+          gpg --batch --armor --export "$KID" > out/seagent-repo-signing-key.asc
           rm -rf "$GNUPGHOME"
       - uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
         with: { name: repos, path: out/*, if-no-files-found: ignore }
@@ -198,11 +198,11 @@ jobs:
       - uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6
         with:
           path: dist
-          pattern: "{ark-*,pkg-*,repos}"
+          pattern: "{seagent-*,pkg-*,repos}"
           merge-multiple: true
       - name: SBOM, checksums, signature
         env:
-          SIGNING_KEY: ${{ secrets.ARK_RELEASE_SIGNING_KEY }}
+          SIGNING_KEY: ${{ secrets.SEAGENT_RELEASE_SIGNING_KEY }}
         run: |
           set -euo pipefail
           export SOURCE_DATE_EPOCH="$(git log -1 --format=%ct)"
@@ -216,7 +216,7 @@ jobs:
             printf '%s\n' "$SIGNING_KEY" > "$RUNNER_TEMP/release-key.pem"
             openssl pkey -in "$RUNNER_TEMP/release-key.pem" -pubout -out release-key.pub.pem
           else
-            echo "::warning::ARK_RELEASE_SIGNING_KEY is not set: this release is NOT signed (SHA256SUMS + attestation only)"
+            echo "::warning::SEAGENT_RELEASE_SIGNING_KEY is not set: this release is NOT signed (SHA256SUMS + attestation only)"
           fi
           LC_ALL=C sha256sum $(ls | grep -v '^SHA256SUMS' ) | sort -k2 > SHA256SUMS
           if [ -f "$RUNNER_TEMP/release-key.pem" ]; then
@@ -229,7 +229,7 @@ jobs:
       # SHA256SUMS + signature); built after signing, shipped next to it.
       - name: offline bundles
         env:
-          SIGNING_KEY: ${{ secrets.ARK_RELEASE_SIGNING_KEY }}
+          SIGNING_KEY: ${{ secrets.SEAGENT_RELEASE_SIGNING_KEY }}
         run: |
           set -euo pipefail
           SOURCE_DATE_EPOCH="$(git log -1 --format=%ct)"; export SOURCE_DATE_EPOCH
@@ -237,18 +237,18 @@ jobs:
           keyarg=()
           if [ -n "${SIGNING_KEY:-}" ]; then umask 077; printf '%s\n' "$SIGNING_KEY" > "$RUNNER_TEMP/k.pem"; keyarg=(--key "$RUNNER_TEMP/k.pem"); fi
           for arch in x86_64 aarch64; do
-            packaging/offline/make-offline-bundle.sh --dist dist --arch "$arch" --out "offline/ark-offline-$ver-$arch.tar.gz" "${keyarg[@]}"
+            packaging/offline/make-offline-bundle.sh --dist dist --arch "$arch" --out "offline/seagent-offline-$ver-$arch.tar.gz" "${keyarg[@]}"
           done
           rm -f "$RUNNER_TEMP/k.pem"
-          (cd offline && sha256sum ark-offline-* > ark-offline.SHA256SUMS)
-      # SLSA build provenance; verify with: gh attestation verify ark-*.tar.gz -R <owner>/ark
+          (cd offline && sha256sum seagent-offline-* > seagent-offline.SHA256SUMS)
+      # SLSA build provenance; verify with: gh attestation verify seagent-*.tar.gz -R <owner>/seagent
       - uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4
         with:
           subject-path: |
-            dist/ark-*.tar.gz
+            dist/seagent-*.tar.gz
             dist/*.deb
             dist/*.rpm
-            offline/ark-offline-*.tar.gz
+            offline/seagent-offline-*.tar.gz
       - run: gh release create "$GITHUB_REF_NAME" dist/* offline/* --verify-tag --repo "$GITHUB_REPOSITORY"
         env:
           GH_TOKEN: ${{ github.token }}

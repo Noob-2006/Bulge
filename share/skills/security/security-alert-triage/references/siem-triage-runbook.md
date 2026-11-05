@@ -4,7 +4,7 @@
 ```toml
 [integrations.wazuh]            # the Wazuh indexer (OpenSearch), not the manager API
 url = "https://wazuh-indexer.internal:9200"
-user = "ark-ro"                 # role with read on wazuh-alerts-*
+user = "seagent-ro"                 # role with read on wazuh-alerts-*
 password = "{{secret:WAZUH_RO_PASSWORD}}"
 min_level = 7
 

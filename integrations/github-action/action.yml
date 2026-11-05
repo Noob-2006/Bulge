@@ -1,13 +1,13 @@
-name: "ark agent"
-description: "Run the ark agent in CI: review a pull request, or fix a failing test suite."
-author: "ark"
+name: "seagent agent"
+description: "Run the seagent agent in CI: review a pull request, or fix a failing test suite."
+author: "seagent"
 branding:
   icon: "cpu"
   color: "blue"
 
 inputs:
   task:
-    description: "review (comment on a pull request), fix-tests (let ark fix a red test suite), or run (your own prompt)."
+    description: "review (comment on a pull request), fix-tests (let seagent fix a red test suite), or run (your own prompt)."
     required: false
     default: "review"
   prompt:
@@ -50,16 +50,16 @@ inputs:
     description: "Added to the prompt, e.g. house rules for the review."
     required: false
     default: ""
-  ark-version:
-    description: "ark release to install (vX.Y.Z, or latest). Pin it in production."
+  seagent-version:
+    description: "seagent release to install (vX.Y.Z, or latest). Pin it in production."
     required: false
     default: "latest"
-  ark-repo:
-    description: "owner/name of the repository the ark release comes from."
+  seagent-repo:
+    description: "owner/name of the repository the seagent release comes from."
     required: false
-    default: "ark-agent/ark"
+    default: "se-agent/System-Engineering-Agent"
   install:
-    description: "Install ark from the release. Set to false when the runner image already has `ark`."
+    description: "Install seagent from the release. Set to false when the runner image already has `seagent`."
     required: false
     default: "true"
 
@@ -74,55 +74,55 @@ outputs:
 runs:
   using: "composite"
   steps:
-    - name: Install ark
+    - name: Install seagent
       if: ${{ inputs.install == 'true' }}
       shell: sh
       env:
-        ARK_REPO: ${{ inputs.ark-repo }}
-        ARK_VERSION: ${{ inputs.ark-version }}
-        ARK_INSTALL_DIR: ${{ runner.temp }}/ark-bin
+        SEAGENT_REPO: ${{ inputs.seagent-repo }}
+        SEAGENT_VERSION: ${{ inputs.seagent-version }}
+        SEAGENT_INSTALL_DIR: ${{ runner.temp }}/seagent-bin
       run: |
-        # The installer verifies SHA256SUMS (and the release signature when ARK_RELEASE_PUBKEY is set).
-        ref="${ARK_VERSION}"; [ "$ref" = latest ] && ref=main
-        curl --proto '=https' --tlsv1.2 -fsSL "https://raw.githubusercontent.com/${ARK_REPO}/${ref}/packaging/install.sh" -o "${RUNNER_TEMP}/ark-install.sh"
-        if [ "${ARK_VERSION}" = latest ]; then sh "${RUNNER_TEMP}/ark-install.sh"; else sh "${RUNNER_TEMP}/ark-install.sh" --version "${ARK_VERSION}"; fi
-        echo "${ARK_INSTALL_DIR}" >> "$GITHUB_PATH"
+        # The installer verifies SHA256SUMS (and the release signature when SEAGENT_RELEASE_PUBKEY is set).
+        ref="${SEAGENT_VERSION}"; [ "$ref" = latest ] && ref=main
+        curl --proto '=https' --tlsv1.2 -fsSL "https://raw.githubusercontent.com/${SEAGENT_REPO}/${ref}/packaging/install.sh" -o "${RUNNER_TEMP}/seagent-install.sh"
+        if [ "${SEAGENT_VERSION}" = latest ]; then sh "${RUNNER_TEMP}/seagent-install.sh"; else sh "${RUNNER_TEMP}/seagent-install.sh" --version "${SEAGENT_VERSION}"; fi
+        echo "${SEAGENT_INSTALL_DIR}" >> "$GITHUB_PATH"
 
-    - name: Run ark
+    - name: Run seagent
       id: run
       shell: sh
       env:
-        ARK_CI_ACTION_DIR: ${{ github.action_path }}
+        SEAGENT_CI_ACTION_DIR: ${{ github.action_path }}
         INPUT_TASK: ${{ inputs.task }}
-        ARK_CI_PROMPT: ${{ inputs.prompt }}
-        ARK_CI_TEST_CMD: ${{ inputs.test-command }}
-        ARK_CI_FIX_ATTEMPTS: ${{ inputs.fix-attempts }}
-        ARK_CI_BASE_BRANCH: ${{ github.base_ref || 'main' }}
-        ARK_CI_BASE_OVERRIDE: ${{ inputs.base-ref }}
-        ARK_CI_MODEL: ${{ inputs.model }}
-        ARK_CI_ROLE: ${{ inputs.role }}
-        ARK_CI_BUDGET_USD: ${{ inputs.budget-usd }}
-        ARK_CI_EXTRA: ${{ inputs.extra-instructions }}
-        ARK_CI_OUT: ${{ runner.temp }}/ark-ci
-        ARK_CI_PROVIDER: github
+        SEAGENT_CI_PROMPT: ${{ inputs.prompt }}
+        SEAGENT_CI_TEST_CMD: ${{ inputs.test-command }}
+        SEAGENT_CI_FIX_ATTEMPTS: ${{ inputs.fix-attempts }}
+        SEAGENT_CI_BASE_BRANCH: ${{ github.base_ref || 'main' }}
+        SEAGENT_CI_BASE_OVERRIDE: ${{ inputs.base-ref }}
+        SEAGENT_CI_MODEL: ${{ inputs.model }}
+        SEAGENT_CI_ROLE: ${{ inputs.role }}
+        SEAGENT_CI_BUDGET_USD: ${{ inputs.budget-usd }}
+        SEAGENT_CI_EXTRA: ${{ inputs.extra-instructions }}
+        SEAGENT_CI_OUT: ${{ runner.temp }}/seagent-ci
+        SEAGENT_CI_PROVIDER: github
         POST_COMMENT: ${{ inputs.post-comment }}
         POST_TOKEN: ${{ inputs.github-token }}
       run: |
         # Both the script and its inputs come from this action's own checkout; the token reaches
         # only the `post` step below, never the agent.
-        script="${ARK_CI_ACTION_DIR}/../ci/ark-ci.sh"
-        [ -n "${ARK_CI_BASE_OVERRIDE}" ] && export ARK_CI_BASE="${ARK_CI_BASE_OVERRIDE}"
+        script="${SEAGENT_CI_ACTION_DIR}/../ci/seagent-ci.sh"
+        [ -n "${SEAGENT_CI_BASE_OVERRIDE}" ] && export SEAGENT_CI_BASE="${SEAGENT_CI_BASE_OVERRIDE}"
         status=ok
         case "${INPUT_TASK}" in
-          review)    sh "$script" review || status=failed; result="${ARK_CI_OUT}/review.md" ;;
-          fix-tests) sh "$script" fix-tests || status=failed; result="${ARK_CI_OUT}/fix.patch" ;;
-          run)       sh "$script" run < /dev/null || status=failed; result="${ARK_CI_OUT}/result.md" ;;
+          review)    sh "$script" review || status=failed; result="${SEAGENT_CI_OUT}/review.md" ;;
+          fix-tests) sh "$script" fix-tests || status=failed; result="${SEAGENT_CI_OUT}/fix.patch" ;;
+          run)       sh "$script" run < /dev/null || status=failed; result="${SEAGENT_CI_OUT}/result.md" ;;
           *) echo "unknown task '${INPUT_TASK}' (review | fix-tests | run)" >&2; exit 2 ;;
         esac
         echo "result-file=${result}" >> "$GITHUB_OUTPUT"
         echo "status=${status}" >> "$GITHUB_OUTPUT"
         if [ -s "${result}" ] && [ "${INPUT_TASK}" != fix-tests ]; then
-          { echo '### ark'; cat "${result}"; } >> "$GITHUB_STEP_SUMMARY"
+          { echo '### seagent'; cat "${result}"; } >> "$GITHUB_STEP_SUMMARY"
         fi
         if [ "${INPUT_TASK}" = review ] && [ "${POST_COMMENT}" = true ] && [ "${status}" = ok ] && [ -n "${GITHUB_REF##refs/heads/*}" ]; then
           GITHUB_TOKEN="${POST_TOKEN}" sh "$script" post || echo "could not post the comment (is 'pull-requests: write' granted?)" >&2

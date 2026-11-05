@@ -1,13 +1,13 @@
 # LangChain 系列解剖：agent 迴圈、持久化、interrupt、工具、追蹤
 
-上游快照（唯讀）：`/home/noob/.cache/ark-build/r5-f/lc/`。以下短名都相對於它：
+上游快照（唯讀）：`$HOME/.cache/seagent-build/r5-f/lc/`。以下短名都相對於它：
 
 - `factory.py`、`structured_output.py`、`middleware/*.py` = `langchain/libs/langchain_v1/langchain/agents/`
 - `lg/…` = `langgraph/libs/langgraph/langgraph/`（例 `lg/types.py`、`pregel/_loop.py`、`graph/message.py`、`channels/binop.py`）
 - `checkpoint/**` = `langgraph/libs/checkpoint/langgraph/checkpoint/`（含 `store/`、`serde/`）
 - `deepagents/…` = `deepagents/libs/deepagents/deepagents/`（例 `deepagents/graph.py`、`deepagents/middleware/summarization.py`）
 - `schemas.py`、`client.py`、`run_trees.py`、`_internal/**`、`processor.py` = `langsmith-sdk/python/langsmith/`
-- ark 的路徑相對於本 repo 根。
+- SE Agent 的路徑相對於本 repo 根。
 
 標記「未確認」＝該行為的實作檔不在本次 clone 內，我不憑記憶補。`middleware/types.py` 專指 LangChain v1 的 `AgentMiddleware` 檔；LangGraph 的型別檔一律寫 `lg/types.py`。
 
@@ -249,36 +249,36 @@ docstring 明確寫「需要 checkpointer、用 `Command(resume=…)` 續跑」�
 6. metadata 放 `langsmith.metadata.<key>`（不是 resource），因為 LangSmith 用它們查詢（`processor.py:221-227` 的 `set_metadata` 說明 threads 檢視需要）。
 7. `service.name` 放 resource；`langsmith.internal_provider` 是 SDK 自用標記，自建 exporter 可省。
 
-## 6. ark 缺什麼／該借鏡什麼
+## 6. SE Agent 缺什麼／該借鏡什麼
 
 原則：**保護不能吃掉自主性——能隔離或回復就不要問人**。凡是「每步都等核准」一律標不採用。
 
-| 上游機制 | 上游出處 | ark 現況 | 決定 |
+| 上游機制 | 上游出處 | SE Agent 現況 | 決定 |
 |---|---|---|---|
-| model↔tools 迴圈（有未回應 tool call 就回 tools，否則結束） | `factory.py:1991-2042`、`2072-2111` | `crates/ark-app/src/surfaces/lobster.rs:538` 的 `run_stages` 是線性 stage pipeline，只能用 `Ran::Halted` 停住；ark 的 turn 迴圈在 `crates/ark-kernel` 內，沒有顯式規則 | 採用概念（把結束條件寫成可檢驗規則）；不引入圖引擎 |
-| middleware hook 作為圖節點（狀態更新會被 checkpoint） | `factory.py:1636-1713`、`middleware/types.py:431-673` | `crates/ark/src/agentcmds/monitoring.rs:285-304` 的 `MonitoringHook` 是旁觀式：`run(&self, e, p) -> Result<HookDecision, String>`，不改 state、不持久化 | 部分採用：加「可回傳 state patch 的 before_model/after_model」；不採用「每個 hook 一個 checkpoint」 |
+| model↔tools 迴圈（有未回應 tool call 就回 tools，否則結束） | `factory.py:1991-2042`、`2072-2111` | `crates/seagent-app/src/surfaces/lobster.rs:538` 的 `run_stages` 是線性 stage pipeline，只能用 `Ran::Halted` 停住；SE Agent 的 turn 迴圈在 `crates/seagent-kernel` 內，沒有顯式規則 | 採用概念（把結束條件寫成可檢驗規則）；不引入圖引擎 |
+| middleware hook 作為圖節點（狀態更新會被 checkpoint） | `factory.py:1636-1713`、`middleware/types.py:431-673` | `crates/seagent/src/agentcmds/monitoring.rs:285-304` 的 `MonitoringHook` 是旁觀式：`run(&self, e, p) -> Result<HookDecision, String>`，不改 state、不持久化 | 部分採用：加「可回傳 state patch 的 before_model/after_model」；不採用「每個 hook 一個 checkpoint」 |
 | structured output 用假工具 + 失敗以 ToolMessage 回饋 | `structured_output.py:339-355`、`factory.py:1474-1475`、`1330-1346` | `lobster.rs:697-710`（`llm.invoke`）已在做同一件事：把 schema 驗證錯誤接回 prompt 重試，但只在單一工具呼叫內；agent 迴圈層遇到工具錯誤仍整段失敗 | 採用（把同一招上移到 turn 層） |
-| superstep/BSP + channel reducer | `pregel/_loop.py:650-730`、`channels/binop.py:127-149`、`graph/message.py:204-244` | `crates/ark-kernel/src/store.rs:1-7` 是 append-only JSONL 事件日誌（每 session 一檔、預設 fsync），狀態靠重放推導 | 部分採用：日誌已有，缺「reducer」與「同輪更新一次套用」的邊界 |
-| `BaseCheckpointSaver`（per-thread 鏈 + `pending_writes` + `parent_config`） | `checkpoint/base/__init__.py:199-345`、`140-148` | 無 per-run 復原點。中斷只有全域 ESTOP（`crates/ark/src/security_cli.rs:412-432`）與 lobster 的 paused 檔 | **採用（最大缺口）**：JSONL 已足夠當 WAL，補「每輪快照 + 父指標」即可 time travel |
+| superstep/BSP + channel reducer | `pregel/_loop.py:650-730`、`channels/binop.py:127-149`、`graph/message.py:204-244` | `crates/seagent-kernel/src/store.rs:1-7` 是 append-only JSONL 事件日誌（每 session 一檔、預設 fsync），狀態靠重放推導 | 部分採用：日誌已有，缺「reducer」與「同輪更新一次套用」的邊界 |
+| `BaseCheckpointSaver`（per-thread 鏈 + `pending_writes` + `parent_config`） | `checkpoint/base/__init__.py:199-345`、`140-148` | 無 per-run 復原點。中斷只有全域 ESTOP（`crates/seagent/src/security_cli.rs:412-432`）與 lobster 的 paused 檔 | **採用（最大缺口）**：JSONL 已足夠當 WAL，補「每輪快照 + 父指標」即可 time travel |
 | `durability="sync"/"async"/"exit"` | `lg/types.py:98-104`、`pregel/main.py:2691-2692`、`3079-3081` | `store.rs:38-42` 只有 `sync: bool`（每筆 fsync），沒有「每輪」與「離開時」 | 採用：三檔比一顆 bool 更貼近取捨（daemon async / CLI sync / 批次 exit） |
-| `interrupt()` 整節點重跑 + `Command(resume=…)` + id=ns 雜湊 | `lg/types.py:903-1046`、`918`、`634-646` | `lobster.rs:1054-1082` 的 `Paused` 存 `resume_at`/`step`；resume 時**不重跑**已完成 stage，直接從下一 stage 開始（`1414-1464`），token 一次性（`1409` 先刪檔） | 部分採用：ark 的「不重跑」比 LangGraph 更安全（無 idempotent 問題），代價是無法在 stage 中途改參數重試。採用「resume 值可按位置定址」，不採用「整節點重跑」 |
-| 靜態斷點 `interrupt_before/after` | `factory.py:1912-1913`、`pregel/_algo.py:156-181` | 無。lobster 的 `approve`/`ask` 是**寫在 pipeline 裡**的 stage（`lobster.rs:655-671`），要在腳本明寫 | 不採用「每步斷點」；保留「任意 stage 間插 gate」的心智模型（ark 已等價） |
+| `interrupt()` 整節點重跑 + `Command(resume=…)` + id=ns 雜湊 | `lg/types.py:903-1046`、`918`、`634-646` | `lobster.rs:1054-1082` 的 `Paused` 存 `resume_at`/`step`；resume 時**不重跑**已完成 stage，直接從下一 stage 開始（`1414-1464`），token 一次性（`1409` 先刪檔） | 部分採用：SE Agent 的「不重跑」比 LangGraph 更安全（無 idempotent 問題），代價是無法在 stage 中途改參數重試。採用「resume 值可按位置定址」，不採用「整節點重跑」 |
+| 靜態斷點 `interrupt_before/after` | `factory.py:1912-1913`、`pregel/_algo.py:156-181` | 無。lobster 的 `approve`/`ask` 是**寫在 pipeline 裡**的 stage（`lobster.rs:655-671`），要在腳本明寫 | 不採用「每步斷點」；保留「任意 stage 間插 gate」的心智模型（SE Agent 已等價） |
 | `HumanInTheLoopMiddleware`（每個受管工具先問） | `middleware/human_in_the_loop.py:397-421`、`810-816` | lobster 只有顯式 `approve` stage 與 `required_approver` 檢查（`lobster.rs:1399-1408`） | **不採用**「每步都等核准」：違反「能隔離或回復就不要問人」。只採它的 `when` predicate（`human_in_the_loop.py:358-386`）對高風險工具開啟 |
-| `update_state` 產生 `source="update"` 分支 | `pregel/main.py:2613-2620`、`1751-1756` | `crates/ark-kernel/src/automation.rs:17-41` 的 `with_list` 只讀改寫「現狀」，`goals.json` 沒有歷史 | 採用：goal 每輪寫一筆快照，才能回答「第 3 輪為什麼走歪」 |
+| `update_state` 產生 `source="update"` 分支 | `pregel/main.py:2613-2620`、`1751-1756` | `crates/seagent-kernel/src/automation.rs:17-41` 的 `with_list` 只讀改寫「現狀」，`goals.json` 沒有歷史 | 採用：goal 每輪寫一筆快照，才能回答「第 3 輪為什麼走歪」 |
 | `add_messages`（by-id 合併、墓碑） | `graph/message.py:204-244` | 事件日誌 append-only（`store.rs:108`、`290`），訊息無 id，改歷史只能再寫一則 | 採用 id 化：沒有 message id 就無法編輯歷史上某一則或去重 |
-| `BackendProtocol`（ls/read/grep/glob/write/edit/delete/upload/download + 標準錯誤碼） | `deepagents/backends/protocol.py:404-433`、`41-55` | lobster 只有 `exec` 與 `state.get/set`（`lobster.rs:655-682`）；檔案存取靠 `crates/ark-tools/src/fs.rs` 直接碰真檔案系統 | 採用錯誤碼與「部分成功」語意；不採用「虛擬檔案系統當預設」——ark 賣點是本機真檔案 |
+| `BackendProtocol`（ls/read/grep/glob/write/edit/delete/upload/download + 標準錯誤碼） | `deepagents/backends/protocol.py:404-433`、`41-55` | lobster 只有 `exec` 與 `state.get/set`（`lobster.rs:655-682`）；檔案存取靠 `crates/seagent-tools/src/fs.rs` 直接碰真檔案系統 | 採用錯誤碼與「部分成功」語意；不採用「虛擬檔案系統當預設」——SE Agent 賣點是本機真檔案 |
 | `StoreBackend`（跨 thread、namespace factory） | `deepagents/backends/store.py:90-118` | lobster kv 是 `<data>/lobster/kv/<key>.json`（`lobster.rs:420-429`），**所有 session 共用同一組 key** | 採用 namespace：至少加 `session/workspace` 前綴，否則兩個 workflow 會互踩 `state.set` |
-| `task` 子代理（子對話不進父 context） | `deepagents/middleware/subagents.py:647-660`、`782-787`、`865` | ark 有 `spawn`（`crates/ark/src/ops/context.rs:30`）與 `acp_delegate`（`crates/ark-app/src/acp_client.rs:761`）；`automation.rs:416-441` 的 goal 迴圈每輪重下 prompt，但沒有「父層只收摘要」的硬邊界 | 採用：明文規定子代理只回最後一則訊息 + 結構化欄位 |
-| summarization（依 profile fraction 觸發，摘要前先落檔） | `deepagents/middleware/summarization.py:288-325`、`1895-1913` | 無自動壓縮；`crates/ark-kernel/src/context.rs:73-80` 只注入技能索引，長 session 靠使用者自己開新的 | 採用（含先落檔）：`conversation_history/*.md` 正合 ark 的檔案優先風格 |
-| `write_todos`（每輪最多一次） | `langchain/libs/langchain_v1/langchain/agents/middleware/todo.py:174-186`、`deepagents/libs/deepagents/deepagents/profiles/harness/_openai_codex.py:77` | ark 已有 `todo` 工具與 goal/subgoal（`automation.rs:326-345`） | 不採用 middleware 版：缺的只是「每輪最多一次」的約束 |
+| `task` 子代理（子對話不進父 context） | `deepagents/middleware/subagents.py:647-660`、`782-787`、`865` | SE Agent 有 `spawn`（`crates/seagent/src/ops/context.rs:30`）與 `acp_delegate`（`crates/seagent-app/src/acp_client.rs:761`）；`automation.rs:416-441` 的 goal 迴圈每輪重下 prompt，但沒有「父層只收摘要」的硬邊界 | 採用：明文規定子代理只回最後一則訊息 + 結構化欄位 |
+| summarization（依 profile fraction 觸發，摘要前先落檔） | `deepagents/middleware/summarization.py:288-325`、`1895-1913` | 無自動壓縮；`crates/seagent-kernel/src/context.rs:73-80` 只注入技能索引，長 session 靠使用者自己開新的 | 採用（含先落檔）：`conversation_history/*.md` 正合 SE Agent 的檔案優先風格 |
+| `write_todos`（每輪最多一次） | `langchain/libs/langchain_v1/langchain/agents/middleware/todo.py:174-186`、`deepagents/libs/deepagents/deepagents/profiles/harness/_openai_codex.py:77` | SE Agent 已有 `todo` 工具與 goal/subgoal（`automation.rs:326-345`） | 不採用 middleware 版：缺的只是「每輪最多一次」的約束 |
 | LangSmith run 模型 + `dotted_order` + `/runs/batch` | `schemas.py:313-372`、`run_trees.py:1692-1698`、`client.py:3333-3390` | `monitoring.rs:1-16`、`285-304` 只送 gateway health / diagnostic / cron 事件，**沒有 turn/tool 層 trace** | 部分採用：不需要它的儲存後端，但需要「run 樹 + dotted order」把一個 turn 的工具呼叫排成時間軸 |
-| OTLP：`langsmith.span.kind`、`Langsmith-Project`、UUID 派生 id | `_internal/otel/_otel_exporter.py:101-127`、`processor.py:129-133`、`_internal/_otel_utils.py:6-29` | `monitoring.rs:259-265` 每事件一 span：`traceId`/`spanId` **隨機**、`start==end`、`kind=1`、attribute 只有 `ark.*`（`196-208`）、resource 無 project（`228-236`） | 採用（若要接 LangSmith）：現在進得了 collector、進不了 trace 檢視。改動很小：`random_hex(32)` 換成 turn 的 uuid，再補 3 個 attribute |
-| Skills 漸進揭露（metadata 先、`SKILL.md` 按需） | `deepagents/middleware/skills.py:914-948` | `crates/ark-skills/src/core/invoke.rs:188-210` 把整份 `SKILL.md` 注入成一則使用者訊息 | 部分採用：索引與內文已分開（`context.rs:73-80` 只放索引），可再補「先給 metadata、模型再要內文」 |
+| OTLP：`langsmith.span.kind`、`Langsmith-Project`、UUID 派生 id | `_internal/otel/_otel_exporter.py:101-127`、`processor.py:129-133`、`_internal/_otel_utils.py:6-29` | `monitoring.rs:259-265` 每事件一 span：`traceId`/`spanId` **隨機**、`start==end`、`kind=1`、attribute 只有 `seagent.*`（`196-208`）、resource 無 project（`228-236`） | 採用（若要接 LangSmith）：現在進得了 collector、進不了 trace 檢視。改動很小：`random_hex(32)` 換成 turn 的 uuid，再補 3 個 attribute |
+| Skills 漸進揭露（metadata 先、`SKILL.md` 按需） | `deepagents/middleware/skills.py:914-948` | `crates/seagent-skills/src/core/invoke.rs:188-210` 把整份 `SKILL.md` 注入成一則使用者訊息 | 部分採用：索引與內文已分開（`context.rs:73-80` 只放索引），可再補「先給 metadata、模型再要內文」 |
 
-### 我認為 ark 最該抄的三件事
+### 我認為 SE Agent 最該抄的三件事
 
-1. **每輪 checkpoint + `parent_config`**（`checkpoint/base/__init__.py:140-148`、`pregel/_loop.py:766`）：這是「能回復就不要問人」的技術前提。ark 已有 append-only JSONL，補可定址快照與父指標，就能不打斷 agent 地做事後追查與分支重跑。
-2. **錯誤變成 ToolMessage，而不是例外**（`tools/base.py:1115-1129`、`factory.py:1330-1346`）：ark 的 stage／工具失敗目前會讓整段工作結束；把錯誤當資料餵回模型，比加 approval gate 更能保護自主性。
+1. **每輪 checkpoint + `parent_config`**（`checkpoint/base/__init__.py:140-148`、`pregel/_loop.py:766`）：這是「能回復就不要問人」的技術前提。SE Agent 已有 append-only JSONL，補可定址快照與父指標，就能不打斷 agent 地做事後追查與分支重跑。
+2. **錯誤變成 ToolMessage，而不是例外**（`tools/base.py:1115-1129`、`factory.py:1330-1346`）：SE Agent 的 stage／工具失敗目前會讓整段工作結束；把錯誤當資料餵回模型，比加 approval gate 更能保護自主性。
 3. **run 樹 + dotted order 的追蹤格式**（`run_trees.py:1692-1698`、`_internal/otel/_otel_exporter.py:101-127`）：`monitoring.rs` 只送點事件，看不出一個 turn 內工具呼叫的先後與耗時；用同一組 UUID 派生 trace/span id，就能同時滿足自架 collector 與 LangSmith 的檢視。
 
 ## 附錄：未確認與已知落差

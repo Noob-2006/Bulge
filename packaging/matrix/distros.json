@@ -14,5 +14,7 @@
   {"id": "debian12",  "image": "docker.io/library/debian:12",               "kind": "deb", "label": "Debian 12",             "ent": "ent-014"},
   {"id": "debian13",  "image": "docker.io/library/debian:trixie-slim",      "kind": "deb", "label": "Debian 13",             "ent": "ent-014"},
   {"id": "leap15",   "best_effort": true,  "image": "docker.io/opensuse/leap:15.6",              "kind": "rpm", "label": "openSUSE Leap 15 (best effort)", "ent": "ent-015"},
-  {"id": "alpine",    "image": "docker.io/library/alpine:3.22",             "kind": "tar", "label": "Alpine 3.22 (musl, tarball only)", "ent": "ent-004"}
+  {"id": "arch",      "image": "docker.io/library/archlinux:latest",        "kind": "pacman", "label": "Arch Linux (pacman)",  "ent": "pkg-arch"},
+  {"id": "alpine",    "image": "docker.io/library/alpine:3.22",             "kind": "apk", "label": "Alpine 3.22 (apk, OpenRC)", "ent": "ent-004"},
+  {"id": "alpine-tar","image": "docker.io/library/alpine:3.22",             "kind": "tar", "label": "Alpine 3.22 (musl tarball)", "ent": "ent-004"}
 ]

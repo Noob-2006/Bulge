@@ -1,0 +1,57 @@
+# Grandfather list for `crates/seagent/tests/test_hygiene.rs`. Every line is a file that still
+# needs fixing; the list may only shrink.
+#
+# Two rules the lint enforces:
+#   1. a file that calls `env::temp_dir()` directly must instead use `seagent_core::tmp::TempDir`
+#      (`TempDir::new(prefix)` / `TempDir::new_in(base, prefix)`), which deletes its tree on drop;
+#   2. test code must not signal processes it did not start (`Command::new("kill")`, "pkill",
+#      "killall") and must not read the real `$HOME` (`env::var("HOME")` / `env::var_os("HOME")`)
+#      — tests get `SEAGENT_HOME`/a scratch home of their own.
+#
+# Entries are sorted and carry a reason column. Removing a line is the point: fix the file, then
+# delete its line. A line for a file that no longer matches is itself a lint failure, so the list
+# cannot rot. Do not add a line to silence a new leak in code you are writing.
+#
+# Temp-dir name prefixes used by the test suite (also the ones `seagent system temp-clean` knows;
+# keep the two in sync). New tests should reuse the closest family, e.g. `TempDir::new("seagent-ch-tg")`:
+#   `.seagent-sync-`
+#   `seagent-agent-`
+#   `seagent-auto-`
+#   `seagent-ch-`
+#   `seagent-cfg-`
+#   `seagent-ckpt-`
+#   `seagent-core-tmp-`
+#   `seagent-k-`
+#   `seagent-kernel-`
+#   `seagent-media-`
+#   `seagent-mem-`
+#   `seagent-plugin-`
+#   `seagent-run-`
+#   `seagent-store-`
+#   `seagent-tmp-`
+#   `seagent-vault-`
+#   `seagent-wire-`
+crates/seagent-channel/src/line.rs  # temp_dir
+crates/seagent-channel/src/qqbot.rs  # temp_dir
+crates/seagent-channel/src/slack_actions.rs  # temp_dir
+crates/seagent-media/src/store.rs  # temp_dir
+crates/seagent-media/src/tts/prefs.rs  # temp_dir
+crates/seagent-media/src/tts/tool.rs  # temp_dir
+crates/seagent-memory/src/migrate.rs  # +test-code HOME/kill
+crates/seagent-model/src/login.rs  # temp_dir+test-code HOME/kill
+crates/seagent-model/src/modelsdb.rs  # temp_dir
+crates/seagent-plugin/src/builtin/disk_cleanup.rs  # temp_dir
+crates/seagent-security/src/glob.rs  # +test-code HOME/kill
+crates/seagent-security/src/paths.rs  # temp_dir+test-code HOME/kill
+crates/seagent-tools/src/exec/container.rs  # +test-code HOME/kill
+crates/seagent-tools/src/exec/local.rs  # temp_dir+test-code HOME/kill
+crates/seagent-tools/src/exec/modal.rs  # +test-code HOME/kill
+crates/seagent-tools/src/exec/openshell.rs  # +test-code HOME/kill
+crates/seagent-tools/src/exec/sandbox.rs  # +test-code HOME/kill
+crates/seagent-tools/src/exec/ssh.rs  # temp_dir+test-code HOME/kill
+crates/seagent-tools/src/exec/sync.rs  # +test-code HOME/kill
+crates/seagent-tools/src/web/http.rs  # temp_dir
+crates/seagent-tools/src/web/providers/codex.rs  # temp_dir
+crates/seagent-vm/src/pool.rs  # seagent-vm owns its temp roots (snapshot dirs must outlive a guard); revisit with its owner
+crates/seagent/src/ops/service.rs  # temp_dir
+crates/seagent/src/ops/wizard.rs  # temp_dir+test-code HOME/kill

@@ -1,14 +1,14 @@
-# 飛書 / 釘釘 / 企業微信：官方規格 ↔ OpenClaw ↔ Hermes ↔ opencode ↔ ark
+# 飛書 / 釘釘 / 企業微信：官方規格 ↔ OpenClaw ↔ Hermes ↔ opencode ↔ SE Agent
 
-> **驗證狀態：ark 未對真實飛書、釘釘、企業微信驗證。** 沒有企業自建應用、沒有 app secret、沒有機器人；ark 行為僅由原始碼與 `FakeServer`／假 WebSocket 測試佐證。長連線（飛書 protobuf、釘釘 Stream、WeCom openws）在真實網路上是否會被中間設備重置，完全未測。
+> **驗證狀態：SE Agent 未對真實飛書、釘釘、企業微信驗證。** 沒有企業自建應用、沒有 app secret、沒有機器人；SE Agent 行為僅由原始碼與 `FakeServer`／假 WebSocket 測試佐證。長連線（飛書 protobuf、釘釘 Stream、WeCom openws）在真實網路上是否會被中間設備重置，完全未測。
 > 比較來源：`open.feishu.cn/document/server-docs/event-subscription-guide/overview`、`open.dingtalk.com/document/orgapp/stream`（這兩頁為 JS 渲染，`web_fetch` 只取到空殼，故協定細節以原始碼與公開規格為準，未能核對者標 ❓）＋ 上游原始碼。
 > 圖例：❓ = 未確認；`—` = 該專案無此通道。
 
-**opencode**：三個平台都沒有對應實作。`/home/noob/.cache/ark-build/r5-e/opencode` 的 `packages/` 無任何 channel / bot / webhook 模組，`README.md:20` 自述為 "The open source AI coding agent"；`grep -rIl -iE "feishu|dingtalk|wecom|larksuite" packages/*/src` → **0 命中**（`webhook` 只命中 `elevenlabs-transcription.ts`）。以下三表 opencode 欄一律 `—`。
+**opencode**：三個平台都沒有對應實作。`$HOME/.cache/seagent-build/r5-e/opencode` 的 `packages/` 無任何 channel / bot / webhook 模組，`README.md:20` 自述為 "The open source AI coding agent"；`grep -rIl -iE "feishu|dingtalk|wecom|larksuite" packages/*/src` → **0 命中**（`webhook` 只命中 `elevenlabs-transcription.ts`）。以下三表 opencode 欄一律 `—`。
 
 ## 一、飛書 / Lark（`feishu`、`lark`）
 
-| 面向 | 官方規格 | OpenClaw (OC) | Hermes (HE) | ark |
+| 面向 | 官方規格 | OpenClaw (OC) | Hermes (HE) | SE Agent |
 |---|---|---|---|---|
 | 傳輸與端點 | 事件訂閱兩種：Webhook（HTTPS POST，需 `url_verification` 握手）或長連線 WebSocket（SDK 內建）；出站 `POST /open-apis/im/v1/messages?receive_id_type=`、`…/messages/{id}/reply` | `@larksuiteoapi/node-sdk 1.74.0`（`package.json`），WS 與 webhook 皆走 SDK，見 `extensions/feishu/src/client.ts:480`、`feishu-ingress.ts` | `feishu/adapter.py`，`websockets` + aiohttp，兩者其一 | **自寫 protobuf WS**：`feishu.rs:6-8` `POST /callback/ws/endpoint` 換 `wss://`，二進位 `Frame`（`sum`/`seq` 分片、回應 `{"code":200}`）；`:10-13` 另支援 webhook |
 | 認證 | `tenant_access_token`（`auth/v3/tenant_access_token/internal`，約 2 小時）；lark 域名為 `open.larksuite.com` | SDK 快取 | SDK 快取 | `:291-293` 自己換 token，`:22` 快取至到期前並在「token invalid」時刷新 |
@@ -25,13 +25,13 @@
 
 ## 二、釘釘（`dingtalk`，Stream Mode）
 
-| 面向 | 官方規格 | OpenClaw (OC) | Hermes (HE) | ark |
+| 面向 | 官方規格 | OpenClaw (OC) | Hermes (HE) | SE Agent |
 |---|---|---|---|---|
 | 傳輸與端點 | `POST /v1.0/gateway/connections/open`（clientId/clientSecret + subscriptions）→ WebSocket endpoint + 一次性 ticket；frame `{specVersion, type, headers, data}`，以 `messageId` ACK | —（無 DingTalk 通道；`src/channels/bundled-channel-ids.generated.ts` 無此 id） | `dingtalk/adapter.py`，`dingtalk-stream` SDK | `:4-9` 自己開 WS、自己 ACK；`:43` `BOT_TOPIC=/v1.0/im/bot/messages/get`；`:317-322` 開連線 |
 | 認證 | clientId（AppKey）+ clientSecret → ticket；OpenAPI 另用 `oauth2/accessToken` | — | SDK | 同上，`:317` 直接帶 secret 換 ticket |
 | 入站事件 | `CALLBACK` frames：text / richText / picture / file / audio / video / 卡片；`SYSTEM` ping、`disconnect` | — | SDK + `inbound.py:9` 型別對映 | `:9-10` 六種訊息型別 + `isInAtList` → `mentioned`；群組 gating 交給 host |
 | 出站格式 | 首選回 `sessionWebhook`（markdown/text），有效期見 `sessionWebhookExpiredTime`；失效則走 OpenAPI `robot/oToMessages/batchSend`（單聊）/ `robot/groupMessages/send`（群） | — | 同（sessionWebhook 為主） | `:11-13` 同策略，`:12` 留 5 分鐘安全邊際；`:429` sessionWebhook POST |
-| 長度上限與分段 | 文字/markdown 上限 ❓（ark 與 HE 都用 20000 字元） | — | `adapter.py:64` `MAX_MESSAGE_LENGTH=20000` | `:45` `MAX_MESSAGE=20000`、`:953` `chunk::split` |
+| 長度上限與分段 | 文字/markdown 上限 ❓（SE Agent 與 HE 都用 20000 字元） | — | `adapter.py:64` `MAX_MESSAGE_LENGTH=20000` | `:45` `MAX_MESSAGE=20000`、`:953` `chunk::split` |
 | 速率限制 | 機器人每分鐘訊息數上限 ❓（常見說法 20 則/分鐘）；超限 errcode 130101 | — | ❓ | `:174` `130101/130102/90018/90002` → `RateLimited`；無本地配額 |
 | 重連與重試 | `disconnect` frame 或連線中斷後重連 | — | `adapter.py:65` `RECONNECT_BACKOFF=[2,5,10,30,60]`、`:66-67` 連續 5 次相同錯誤 → 斷路器 300 秒 | 同 backoff（`:47` `BACKOFF=[2,5,10,30,60]`、`:64`）；無斷路器 ❓ |
 | 錯誤碼處理 | `{code,message}`（OpenAPI）或 `{errcode,errmsg}`（oapi/webhook） | — | SDK 拋錯 | `:162-187` 兩種格式都解析；`:174` 限流、其餘 `Protocol`；`:187` 非 JSON 交 `classify()` |
@@ -42,13 +42,13 @@
 
 ## 三、企業微信（`wecom` 智能機器人 / `wecom_callback` 自建應用）
 
-| 面向 | 官方規格 | OpenClaw (OC) | Hermes (HE) | ark |
+| 面向 | 官方規格 | OpenClaw (OC) | Hermes (HE) | SE Agent |
 |---|---|---|---|---|
 | 傳輸與端點 | 智能機器人：`wss://openws.work.weixin.qq.com`，`aibot_subscribe` 訂閱、`ping` 心跳；自建應用：`GET/POST` 回呼 URL（XML） | —（無 WeCom 通道） | `wecom/adapter.py:50` `DEFAULT_WS_URL`、`:52-56` `aibot_*` 指令；`callback_adapter.py` | `wecom.rs:5-7` 背景執行緒持有 socket、`ping` 30 秒（`:102`）；`wecom_callback.rs:4-11` XML 回呼 |
 | 認證 | 自建應用：`gettoken(corpid, corpsecret)` → `access_token`；機器人：`bot_id` + `secret` + `device_id` | — | 同 | `wecom.rs:4` `aibot_subscribe(bot_id/secret/device_id)`；`wecom_callback.rs:14` `gettoken` 快取，40001/42001 刷新 |
 | 入站事件 | 機器人：`aibot_msg_callback`（text/image/mixed/voice/file/video/appmsg/quote）、`aibot_event_callback`（`template_card_event`）；應用：XML 明文或 `Encrypt` | — | `adapter.py:53-59` 指令集合 | `wecom.rs:13-14` 同；群組只有被 @ 才收得到，會自動剝掉開頭 `@Bot`；`wecom_callback.rs:12` 簽章先驗再解密 |
 | 出站格式 | 機器人：`aibot_respond_msg`（被動）、`aibot_send_msg`（主動）、`msgtype: stream`；應用：`message/send`（text/markdown/image/voice/video/file） | — | `streaming.py`、`send_queue.py` | `wecom.rs:18-22` 被動優先（群組必須），主動 fallback；`:22` 原生 `stream` 幀；`wecom_callback.rs:14` 五種型別 |
-| 長度上限與分段 | 應用圖文訊息 2048 bytes；機器人 markdown ❓（ark 與 HE 都用 4000 字元） | — | `adapter.py:61` `MAX_MESSAGE_LENGTH=4000` | `wecom.rs:46` 4000 字元、`:48` `MAX_STREAM_BYTES=20480`、`:49` 中間幀上限 85；`wecom_callback.rs:36` **2048 bytes**（`:542` `len_unit: Bytes`） |
+| 長度上限與分段 | 應用圖文訊息 2048 bytes；機器人 markdown ❓（SE Agent 與 HE 都用 4000 字元） | — | `adapter.py:61` `MAX_MESSAGE_LENGTH=4000` | `wecom.rs:46` 4000 字元、`:48` `MAX_STREAM_BYTES=20480`、`:49` 中間幀上限 85；`wecom_callback.rs:36` **2048 bytes**（`:542` `len_unit: Bytes`） |
 | 速率限制 | 每對話每分鐘訊息數上限（errcode 846607） | — | `send_queue.py` 對應 | `wecom.rs:23-25` 30 則/分鐘切成「一般池 24 + 控制池 6」（`:62` `ERR_RATE_LIMIT`、`:105` `rate_per_min`），核准提示與串流收尾走控制池 |
 | 重連與重試 | 斷線重連；`disconnected_event`（被別人接管）應停止重連 | — | `adapter.py:65` backoff `[2,5,10,30,60]` | `wecom.rs:6` 同 backoff（`:103`）、`:7` `disconnected_event` 停止重連；`:8` 以 `headers.req_id` 對應請求 |
 | 錯誤碼處理 | 40001/42001 = token；846607 = 速率；45009 = API 頻率 | — | ❓ | `wecom_callback.rs:14` 40001/42001 刷新 token；`wecom.rs:62` 846607 → 本地配額；其餘交 `classify()` |
@@ -57,23 +57,23 @@
 | 互動元件 | 模板卡片 `template_card` / `button_interaction`；事件 `template_card_event` | — | `adapter.py` 卡片 | `wecom.rs:21` 按鈕 = `button_interaction` 模板卡；`wecom_callback.rs:541` `buttons: false`（自建應用的回呼模式不支援按鈕） |
 | 已知差異 | 自建應用的被動回覆必須快速回 `success`（官方為 5 秒 ❓ 未在可讀頁面核對），實際內容要另外主動送 | — | 同 | `wecom_callback.rs:13` 一律立刻回 `success`，之後用主動 API 送；`wecom.rs:18-19` 群組一定要用被動 `aibot_respond_msg`（綁最近一則入站 `req_id`） |
 
-## ark 的選擇與差異
+## SE Agent 的選擇與差異
 
 - **三套長連線全部自己寫，不用 SDK。** 飛書 protobuf 幀（`feishu.rs:6-9`）、釘釘 ticket + frame ACK（`dingtalk.rs:4-9`）、WeCom openws（`wecom.rs:5-9`）都是手刻；HE 三者都靠官方 SDK（`lark`、`dingtalk-stream`），OC 只做飛書且靠 `@larksuiteoapi/node-sdk`。代價是協定細節（分片、心跳、`disconnected_event`）要自己維護，好處是零 Python/Node 執行期依賴。
 - **飛書同時支援 WS 與 webhook，且兩條路餵同一個佇列**（`feishu.rs:5`）；OC 與 HE 多半二選一。
 - **WeCom 有雙實作。** `wecom.rs`（智能機器人 WS）與 `wecom_callback.rs`（自建應用 XML 回呼）並存，且 callback 版支援多應用共用一個 listener（`wecom_callback.rs:16-18`，chat id 變成 `<app>:<user>`）；上游只有 Hermes 兩者都有。
-- **WeCom 的 30 則/分鐘被做成顯式雙池配額**（`wecom.rs:23-25`、`:898`），不是被動接 846607 再重試——這是 ark 相對 HE `send_queue.py` 最實質的差異：核准提示永遠送得出去。
+- **WeCom 的 30 則/分鐘被做成顯式雙池配額**（`wecom.rs:23-25`、`:898`），不是被動接 846607 再重試——這是 SE Agent 相對 HE `send_queue.py` 最實質的差異：核准提示永遠送得出去。
 - **長度單位不一致是刻意的。** 飛書/釘釘/WeCom 機器人用「字元」（4000/20000/4000），WeCom 自建應用用「bytes」（2048，`wecom_callback.rs:36`、`:542`），因為 WeCom 應用 API 就是以 byte 計。
-- **釘釘不做模板就沒有真按鈕。** 沒有 `button_template_id` 時 `caps().buttons=false`（`dingtalk.rs:848`），按鈕退化成「1. 2. 3.」文字；同理沒有 `card_template_id` 就沒有串流（`:851`）。這點 ark 直接反映在能力宣告上，而不是假裝支援。
+- **釘釘不做模板就沒有真按鈕。** 沒有 `button_template_id` 時 `caps().buttons=false`（`dingtalk.rs:848`），按鈕退化成「1. 2. 3.」文字；同理沒有 `card_template_id` 就沒有串流（`:851`）。這點 SE Agent 直接反映在能力宣告上，而不是假裝支援。
 - **釘釘 typing 是假的。** 用 emotion 回應模擬「思考中/完成」（`dingtalk.rs:21-22`），飛書則直接宣告 `typing:false`（`feishu.rs:1294`）——官方都沒有 typing API。
 
 ## 上游實作位置
 
 - OpenClaw：只有 `extensions/feishu/`（`@larksuiteoapi/node-sdk 1.74.0`）；**沒有 DingTalk / WeCom 通道** —— `src/channels/bundled-channel-ids.generated.ts` 的 28 個 id 中不含 `dingtalk`、`wecom`、`weixin`。
 - Hermes：`plugins/platforms/feishu/`（5684 行）、`plugins/platforms/dingtalk/`（1061 行，`dingtalk-stream` SDK）、`plugins/platforms/wecom/`（2171 行，含 `callback_adapter.py`、`wecom_crypto.py`、`send_queue.py`）。
-- ark：`feishu.rs`（2531 行，另有 `feishu/` 子目錄：`approval.rs`、`comment.rs`、`meeting.rs`、`onboard.rs`、`tools.rs`）、`dingtalk.rs`（1602 行）、`wecom.rs`（1961 行）、`wecom_callback.rs`（1040 行）。
+- SE Agent：`feishu.rs`（2531 行，另有 `feishu/` 子目錄：`approval.rs`、`comment.rs`、`meeting.rs`、`onboard.rs`、`tools.rs`）、`dingtalk.rs`（1602 行）、`wecom.rs`（1961 行）、`wecom_callback.rs`（1040 行）。
 
-## ark 的測試覆蓋（全部離線，無真實長連線）
+## SE Agent 的測試覆蓋（全部離線，無真實長連線）
 
 - 飛書：`:1628` 七種訊息 + mention + thread + 卡片回呼；`:1682` 加解密已知答案；`:1718`/`:1992` webhook 明文與加密簽章；`:1751` 名稱快取；`:1803` 核准卡一次性。
 - 釘釘：`:1216` 每幀 ACK、ping 回聲、斷線重連；`:1317` 卡片回呼走 Stream；`:1372` sessionWebhook → OpenAPI fallback；`:1422` 外站 webhook 被拒；`:1479` AI Card 三段生命週期。
@@ -85,6 +85,6 @@
 - 飛書：沒有企業自建應用，`tenant_access_token` 從未真的換過；WS `Frame` 用假 server 模擬，真實 protobuf 分片（`sum`/`seq`）行為未驗。
 - 飛書：`MAX_SKEW_SECS=3600`（`feishu.rs:55`）的時間窗是否與官方一致 ❓；卡片 `card.action.trigger` 的 payload 變體未全覆蓋。
 - 釘釘：沒有 AppKey/AppSecret，`gateway/connections/open` 的 ticket 流程從未對釘釘跑過；20 則/分鐘的實際限流未觀察。
-- 釘釘：AI Card（`card_template_id`）與按鈕模板（`button_template_id`）都需要先在釘釘後台建模板，ark 從未用真實模板 ID 跑過。
+- 釘釘：AI Card（`card_template_id`）與按鈕模板（`button_template_id`）都需要先在釘釘後台建模板，SE Agent 從未用真實模板 ID 跑過。
 - WeCom：沒有 `bot_id`/`secret`，`aibot_subscribe` 未實跑；30 則/分鐘的雙池配額只用假時鐘驗證（`wecom.rs:1662`）。
 - WeCom callback：`corpid`、`EncodingAESKey` 都是測試值，WXBizMsgCrypt 的真實互通（含 corp id 不符的拒絕路徑）未驗。

@@ -1,6 +1,6 @@
 # Third-party notices
 
-ark is MIT-licensed. Parts of it were ported (rewritten in Rust) from the projects
+SE Agent is MIT-licensed. Parts of it were ported (rewritten in Rust) from the projects
 below, whose behaviour and protocols they follow. Their licenses apply to those
 derived parts; the original notices are reproduced here.
 
@@ -13,29 +13,29 @@ Google Chat, Feishu, Signal, iMessage/imsg, IRC, Nostr, Buzz, Twitch, Nextcloud 
 Synology Chat, Zalo, Zalo personal, Tlon, X, ClickClack, Reef, Raft, QA channel, SMS,
 WhatsApp, A2A), channel contract and access policy (DM pairing, mention gating), ACP
 agent behaviour, node protocol, MCP client behaviour, `apply_patch` envelope parser and
-tolerant update matcher (crates/ark-tools/src/patchfmt.rs), `tools.fs.workspaceOnly` containment.
-Also: the doctor health-check lint/repair flows and tool-schema rules (`crates/ark/src/ops/doctor.rs`)
-and the setup wizard security note (`crates/ark/src/ops/wizard.rs`).
+tolerant update matcher (crates/seagent-tools/src/patchfmt.rs), `tools.fs.workspaceOnly` containment.
+Also: the doctor health-check lint/repair flows and tool-schema rules (`crates/seagent/src/ops/doctor.rs`)
+and the setup wizard security note (`crates/seagent/src/ops/wizard.rs`).
 Also: the `triage` repair-prompt structure, limits and coding-agent handoff table
-(`crates/ark/src/ops/triage.rs`), the storage marker / `OCSTOR1` encrypted-object format
+(`crates/seagent/src/ops/triage.rs`), the storage marker / `OCSTOR1` encrypted-object format
 (`storage.rs`), the debug-proxy query presets and coverage report (`proxy.rs`), and the
 wide-area DNS-SD zone layout (`dns.rs`).
 Also: the `transcripts` tool, transcript store/summary heuristics and model-notes prompt, and
-the manual transcript source (`crates/ark-media/src/stt/transcripts/`); Deepgram STT request shape.
+the manual transcript source (`crates/seagent-media/src/stt/transcripts/`); Deepgram STT request shape.
 Also: video/music generation provider request shapes, capability tables (Kie families, DashScope Wan
-geometry, Novita/Together/Z.AI/PixVerse limits) and runtime guards (`crates/ark-media/src/video_gen/`,
+geometry, Novita/Together/Z.AI/PixVerse limits) and runtime guards (`crates/seagent-media/src/video_gen/`,
 `music_gen/`), media-understanding body format and inbound placeholders (`inbound/`), the
 capability CLI metadata (`understand/cli.rs`), and the media-understanding provider registry —
 provider ids, default models, base URLs and the image/video capability matrix for openai,
 anthropic, google, openrouter, deepinfra, minimax, zai, qwen, moonshot, ollama and llama-cpp
-(`crates/ark-media/src/understand/mod.rs`, from `src/media-understanding/`, `extensions/*/media-understanding-provider.ts`
+(`crates/seagent-media/src/understand/mod.rs`, from `src/media-understanding/`, `extensions/*/media-understanding-provider.ts`
 and each extension's `openclaw.plugin.json` `mediaUnderstandingProviderMetadata`).
 Also: the voice-call carrier request/webhook shapes, TwiML/Plivo XML and webhook signature
-algorithms (`crates/ark-media/src/phone/`), and the meeting-bot platform URL rules and DOM
-selectors for Google Meet, Teams, Zoom and Slack huddles (`crates/ark-media/src/meeting/`).
+algorithms (`crates/seagent-media/src/phone/`), and the meeting-bot platform URL rules and DOM
+selectors for Google Meet, Teams, Zoom and Slack huddles (`crates/seagent-media/src/meeting/`).
 Also: the model-provider agent harnesses — the OpenAI Agents API hosted-session flow
 (`extensions/agentsapi`) and the Muse Code MSP stdio runtime (`extensions/muse`), both
-`crates/ark-model/src/agentsapi.rs` / `muse.rs`.
+`crates/seagent-model/src/agentsapi.rs` / `muse.rs`.
 
 ## Hermes Agent — MIT License
 
@@ -46,40 +46,40 @@ Signal, Matrix, Mattermost, Email, SMS, DingTalk, Feishu, WeCom, WeCom callback,
 QQ Bot, Yuanbao, BlueBubbles, Photon, Google Chat, Teams, LINE, IRC, ntfy, SimpleX, Buzz,
 Raft, A2A, webhook ingress, MS Graph webhook, relay), the OpenAI-compatible API server,
 delivery ledger, pairing store, MCP OAuth/sampling/elicitation behaviour, ACP adapter,
-file tools: fuzzy find-and-replace strategies and escape-drift correction (crates/ark-tools/src/fuzzy.rs),
+file tools: fuzzy find-and-replace strategies and escape-drift correction (crates/seagent-tools/src/fuzzy.rs),
 V4A patch parser (patchfmt.rs), document extraction (extract.rs), read tracking / file-state
 registry / write guards / binary-extension lists (filestate.rs), post-write lint (lint.rs).
 `bridges/whatsapp/` and `bridges/photon/` contain Hermes sidecar sources (see
 `LICENSE.hermes` in each directory).
 Also transcribed: the LSP server registry and diagnostics report format (`agent/lsp`,
-`crates/ark-tools/src/lsp.rs`), the verify recipe tables and runner (`agent/verify`, itself
-ported from superagent-ai/grok-cli, MIT; `crates/ark-kernel/src/verify.rs`), the `/init` and
-`/plan` prompt texts and the reaction lexicon (`crates/ark-kernel/src/devprompts.rs`,
+`crates/seagent-tools/src/lsp.rs`), the verify recipe tables and runner (`agent/verify`, itself
+ported from superagent-ai/grok-cli, MIT; `crates/seagent-kernel/src/verify.rs`), the `/init` and
+`/plan` prompt texts and the reaction lexicon (`crates/seagent-kernel/src/devprompts.rs`,
 `reactions.rs`).
 Also transcribed: the FAL video family table and payload rules, xAI edit/extend and
-`video_analyze` prompts/limits/error texts (`crates/ark-media/src/video_gen/hosted.rs`,
+`video_analyze` prompts/limits/error texts (`crates/seagent-media/src/video_gen/hosted.rs`,
 `understand/mod.rs`), inbound voice-note markers (`inbound/mod.rs`).
-Transcribed data: the optional-mcps catalog (`crates/ark/src/mcp_presets.json`, 65 vendor MCP
+Transcribed data: the optional-mcps catalog (`crates/seagent/src/mcp_presets.json`, 65 vendor MCP
 manifests), the session-export HTML template and Lucide-style icons
-(`crates/ark/src/export_template.html`, `export_icons.rs`), and the trajectory system prompt
-(`crates/ark-kernel/src/trajectory.rs`).
-Ops ports (`crates/ark/src/ops/`): external secret sources (`secretsrc.rs`, from
+(`crates/seagent/src/export_template.html`, `export_icons.rs`), and the trajectory system prompt
+(`crates/seagent-kernel/src/trajectory.rs`).
+Ops ports (`crates/seagent/src/ops/`): external secret sources (`secretsrc.rs`, from
 `agent/secret_sources`), the toolset distribution table and batch runner (`batch.rs`), the
 mini-SWE runner prompts (`miniswe.rs`) and the trajectory compressor summary prompt
 (`trajcomp.rs`).
 Also: the `dump` / `debug share` report layout, paste upload/auto-delete flow (`debugdump.rs`),
 the safe console command engine (`console.rs`), worktree audit/prune/restore rules
 (`worktree.rs`), the projects store (`project.rs`) and the multiplex preflight (`multiplex.rs`).
-Terminal UX ports (`crates/ark-app/src/tui/`, `crates/ark/src/ops/rooms.rs`): the built-in skin
+Terminal UX ports (`crates/seagent-app/src/tui/`, `crates/seagent/src/ops/rooms.rs`): the built-in skin
 palettes, branding and spinner tables (`skins.json`, from `hermes_cli/skin_engine.py`), the
 petdex pet geometry/state taxonomy and sprite-generation prompts (`pets.rs`, from `agent/pet`),
 the kaomoji busy-indicator faces (`indicator.rs`, from ui-tui), and the hosted-room Discussion
 policy and member prompt (`rooms.rs`, from `gateway/hosted_room_discussion.py`).
-Media speech ports (`crates/ark-media/src/stt/`, `voice/`): the STT provider dispatch,
+Media speech ports (`crates/seagent-media/src/stt/`, `voice/`): the STT provider dispatch,
 chunking and whisper.cpp model pins (URLs + SHA-256), the faster-whisper anti-hallucination
 settings, the Whisper hallucination phrase list, stop-phrase and TTS-echo guards, voice-mode
 silence/barge-in state machines and the wake-word engine wrappers.
-Media TTS ports (`crates/ark-media/src/tts/{tool,commands,prefs,stream}.rs`): the
+Media TTS ports (`crates/seagent-media/src/tts/{tool,commands,prefs,stream}.rs`): the
 `text_to_speech` / `talk_voice` tool schemas and provider/voice resolution, the `/tts` and
 `/voice` command texts and subcommand sets, the auto-reply policy
 (`off|always|inbound|tagged`, length caps, voice-bubble formatting), the per-chat
@@ -87,9 +87,9 @@ Media TTS ports (`crates/ark-media/src/tts/{tool,commands,prefs,stream}.rs`): th
 the sentence-chunked streaming reader (Hermes `tools/tts_tool*.py`, `hermes_cli/commands.py` +
 `cli_voice_mixin.py`; OpenClaw `src/agents/tools/tts-tool.ts`, `src/tts/`,
 `extensions/talk-voice`, `src/auto-reply/commands-registry*`).
-The `/image <path> [prompt]` path/prompt split in `crates/ark-app/src/clip.rs`
+The `/image <path> [prompt]` path/prompt split in `crates/seagent-app/src/clip.rs`
 (`split_path_input`) is Hermes `hermes_cli/cli_terminal_input.py::_split_path_input`.
-Browser/desktop control ports (`crates/ark-browser/src/control*`): the `/browser` command texts and
+Browser/desktop control ports (`crates/seagent-browser/src/control*`): the `/browser` command texts and
 system notes, the Bot Desktop launcher script (`control/launcher.sh`, from
 `tools/bot_desktop/launcher.sh`), package tables and the cua-driver runtime contract / release pins.
 Also: the sandbox-browser container image (`packaging/sandbox-browser`: Dockerfile, entrypoint plus
@@ -102,7 +102,7 @@ the Basic-auth CDP relay, from OpenClaw `scripts/docker/sandbox/Dockerfile.brows
 Copyright (c) 2024 Discord
 
 Ported: DAVE key fingerprints, pairwise verification fingerprints, displayable codes and
-the generic persisted signature key format (`crates/ark-channel/src/dave.rs`), with
+the generic persisted signature key format (`crates/seagent-channel/src/dave.rs`), with
 libdave's JS test vectors.
 
 The full MIT license text:
@@ -128,9 +128,9 @@ The full MIT license text:
 
 Copyright © WHATWG (Apple, Google, Mozilla, Microsoft).
 
-`crates/ark-channel/data/` (Big5, gb18030, jis0208, jis0212, EUC-KR, gb18030 ranges, the
+`crates/seagent-channel/data/` (Big5, gb18030, jis0208, jis0212, EUC-KR, gb18030 ranges, the
 single-byte indexes and the encoding labels) is generated by `tools/gen_charset_tables.py`
-from https://encoding.spec.whatwg.org/ index files; `crates/ark-channel/src/charset.rs`
+from https://encoding.spec.whatwg.org/ index files; `crates/seagent-channel/src/charset.rs`
 implements that standard's decoder algorithms.
 
 > Redistribution and use in source and binary forms, with or without modification, are
@@ -157,7 +157,7 @@ implements that standard's decoder algorithms.
 
 ## Anthropic claude-plugins-official — Apache License 2.0
 
-The `security-guidance` rule table (`crates/ark-security/src/guidance.rs`: 25 rule names,
+The `security-guidance` rule table (`crates/seagent-security/src/guidance.rs`: 25 rule names,
 regex/substring triggers, file gates and reminder texts) is transcribed verbatim from
 `plugins/security-guidance/hooks/patterns.py` in
 https://github.com/anthropics/claude-plugins-official (commit `0bde168`, 2026-05-26), as forked by
@@ -182,8 +182,8 @@ dependencies — MIT and/or Apache-2.0 (webpki-roots: CDLA-Permissive-2.0; ring:
 plus OpenSSL/BoringSSL notices). Run `cargo tree --format "{p} {l}"` for the full list.
 
 Also: the Tavily plugin's dedicated tools and the GitHub plugin, ported to Rust
-(`crates/ark-tools/src/web/vendor_tools.rs`, `crates/ark-tools/src/web/github.rs`,
-`crates/ark/src/web_cli.rs`, the `search-setup` step in `crates/ark/src/setup.rs`):
+(`crates/seagent-tools/src/web/vendor_tools.rs`, `crates/seagent-tools/src/web/github.rs`,
+`crates/seagent/src/web_cli.rs`, the `search-setup` step in `crates/seagent/src/setup.rs`):
 `extensions/tavily` (both tool schemas, argument validation, the per-tool key errors and the
 score / published / answer / failed-URL shaping) and `extensions/github` (`github_read` /
 `github_search` schemas, target and search-parameter validation, the reader document with its
@@ -191,15 +191,15 @@ score / published / answer / failed-URL shaping) and `extensions/github` (`githu
 the API error text) — MIT.
 
 Also: partial ("up to here") compaction, the `/recap` command and OpenAI server-side compaction
-(`crates/ark/src/ops/partial.rs`, `crates/ark/src/ops/recap.rs`, `crates/ark-model/src/native_compact.rs`)
+(`crates/seagent/src/ops/partial.rs`, `crates/seagent/src/ops/recap.rs`, `crates/seagent-model/src/native_compact.rs`)
 are ports of Hermes `hermes_cli/partial_compress.py` + `agent/conversation_compression_manual.py`,
 `hermes_cli/session_recap.py` and `agent/native_compaction.py` (argument parsing and limits, the
 preview report wording, the recap line layout and preview/escape limits, the native-compaction
 eligibility gates, threshold clamp and rejection detection) — MIT.
 
 Also: the Google Meet bot and the Microsoft Teams meeting pipeline
-(`crates/ark/src/meetings/{mod,meet,meet_bot,fakecdp}.rs` and
-`crates/ark/src/meetings/teams/{mod,cli,graph,meetings,models,pipeline,sinks,store,subs}.rs`)
+(`crates/seagent/src/meetings/{mod,meet,meet_bot,fakecdp}.rs` and
+`crates/seagent/src/meetings/teams/{mod,cli,graph,meetings,models,pipeline,sinks,store,subs}.rs`)
 are ports of Hermes `plugins/google_meet` (the `meet_*` tool schemas and messages, the
 `--json` CLI, the caption observer JS, the say-queue lock, the session-end cleanup and the
 lobby/duration exit reasons) and Hermes `plugins/teams_pipeline` with `tools/microsoft_graph_auth.py`
@@ -208,17 +208,17 @@ resolution, the durable job store buckets and timestamps, the pipeline states an
 the summary prompt/JSON/heuristic rendering, the Notion/Linear writers, subscription maintenance
 and the operator CLI) — MIT.
 
-Also: send-path image preparation (`crates/ark-kernel/src/imgprep.rs`: the conditional block
+Also: send-path image preparation (`crates/seagent-kernel/src/imgprep.rs`: the conditional block
 ceiling with the 2000 px many-image dimension probe, the batch/floor retire-count step function,
 the byte budget, the latched retire set, and the non-vision text stand-in wording) is a port of
 Hermes `agent/image_eviction_policy.py` and `agent/vision_message_prep.py` — MIT.
 
-Also: the i18n engine and its catalogs (`crates/ark-kernel/src/i18n.rs`,
-`crates/ark-kernel/locales/*.json` and the alias / endonym tables) are a port of Hermes
+Also: the i18n engine and its catalogs (`crates/seagent-kernel/src/i18n.rs`,
+`crates/seagent-kernel/locales/*.json` and the alias / endonym tables) are a port of Hermes
 `agent/i18n.py`, `agent/i18n_layers.py` and `agent/i18n_languages.py` (the layer order, language
 resolution, alias map, fallback chain and format-argument behaviour) — MIT.
 
-Also: the context host (`crates/ark-kernel/src/ctxhost.rs` and `crates/ark-kernel/src/ctxhost/`:
+Also: the context host (`crates/seagent-kernel/src/ctxhost.rs` and `crates/seagent-kernel/src/ctxhost/`:
 `/context`, `/compact`/`/compress`, `/title`, `/btw`, `/personality`, the background title
 generator, SOUL.md seeding, the coding-posture segment and the local toolchain probe) ports
 Hermes `hermes_cli/commands.py`, `hermes_cli/partial_compress.py`, `agent/title_generator.py`,
@@ -236,7 +236,7 @@ Each `SKILL.md` carries its origin in the front-matter:
 
 ```yaml
 upstream: "<repo>/<path> (MIT)"          # verbatim transcription
-upstream: "<repo>/<path> (MIT) — adapted for ark"   # rewritten for ark's own surfaces
+upstream: "<repo>/<path> (MIT) — adapted for seagent"   # rewritten for seagent's own surfaces
 ```
 
 Source corpora and what was taken from each:
@@ -244,12 +244,12 @@ Source corpora and what was taken from each:
 - **`hermes-agent/skills/**`** (Hermes Agent, NousResearch, MIT) — 55 bundled skills transcribed
   verbatim into `share/skills/<category>/<name>/` together with their `references/`, `scripts/`,
   `templates/` and `assets/` trees, plus two adapted ports
-  (`share/skills/autonomous-ai-agents/ark-agent/` from `autonomous-ai-agents/hermes-agent`, and
-  `share/skills/software-development/ark-skill-authoring/` from
+  (`share/skills/autonomous-ai-agents/seagent-agent/` from `autonomous-ai-agents/hermes-agent`, and
+  `share/skills/software-development/seagent-skill-authoring/` from
   `software-development/hermes-agent-skill-authoring`). One upstream skill,
   `software-development/inspecting-hermes-desktop-dom`, is **not** transcribed: it documents the
   Hermes Electron desktop app (its dev-server CDP port, `HERMES_DESKTOP_*` variables and
-  `data-slot` selectors), which ark does not ship.
+  `data-slot` selectors), which SE Agent does not ship.
 - **`hermes-agent/optional-skills/**`** (MIT) — 153 skills are **not vendored**: only the catalog
   `share/optional-skills/index.json` (name, path, description, tags, file list) ships, and the
   content is fetched from the upstream repository on demand by the hub's `official` source.
@@ -263,11 +263,11 @@ Source corpora and what was taken from each:
   The macOS-only skills (`apple-notes`, `apple-reminders`, `bear-notes`, `things-mac`,
   `peekaboo`, `model-usage`) are transcribed too, with a `## Platform note` / `## Prerequisites`
   section stating the macOS + binary requirement. Two more are transcribed with their launch
-  surface adapted to ark's `job` / `process` tools: `openclaw/skills/coding-agent` →
+  surface adapted to seagent's `job` / `process` tools: `openclaw/skills/coding-agent` →
   `share/skills/openclaw/coding-agent/` and `openclaw/skills/skill-creator` →
   `share/skills/openclaw/skill-creator/`. skill-creator's upstream `scripts/`
   (`quick_validate.py`, `package_skill.py`) are **Apache-2.0**, Copyright Anthropic, and are
-  **not** vendored: `ark skills lint` and `skill action=workshop operation=validate` replace them.
+  **not** vendored: `seagent skills lint` and `skill action=workshop operation=validate` replace them.
 - **`openclaw/custodian-skills/**`** (MIT) — all four skills (`add-model-provider`,
   `cloud-image-bake`, `configure-channel`, `diagnose-gateway`) transcribed verbatim into
   `share/skills/custodian/`.
@@ -279,15 +279,15 @@ Text inside these skills remains under the upstream MIT licences:
 - OpenClaw — MIT, Copyright (c) 2026 OpenClaw Foundation.
 
 The Rust code that loads, indexes, gates, syncs and installs these skills
-(`crates/ark-skills/**`) is a port of the same two projects' skill systems and is covered by the
+(`crates/seagent-skills/**`) is a port of the same two projects' skill systems and is covered by the
 notices above; the catalog files `share/optional-mcps/index.json` and
 `share/plugin-catalog/index.json` and `share/blueprints.json` are likewise generated from
 Hermes' `optional-mcps/`, `plugin-catalog/` and `cron/blueprint_catalog.py`.
 
-Also: the skills system (`crates/ark-skills/src/core/{index,preprocess,setup,invoke,slash,skilltool}.rs`,
-`crates/ark-skills/src/skill.rs`) is a port of Hermes `agent/skills_index_delta.py` (the note prefix,
+Also: the skills system (`crates/seagent-skills/src/core/{index,preprocess,setup,invoke,slash,skilltool}.rs`,
+`crates/seagent-skills/src/skill.rs`) is a port of Hermes `agent/skills_index_delta.py` (the note prefix,
 added/removed heads, `accurate again` wording, `: ` row split and the no-index/no-note rule),
-`agent/skill_preprocessing.py` (`${HERMES_*}`/`${ARK_*}` tokens, single-line `` !`cmd` `` snippets,
+`agent/skill_preprocessing.py` (`${HERMES_*}`/`${SEAGENT_*}` tokens, single-line `` !`cmd` `` snippets,
 the 4000-character inline-shell cap and the `[inline-shell …]` markers, community-hub provenance
 gate), `agent/skill_commands.py` (activation note, stacked/bundle scaffold headers, the 5-skill
 stack limit, core-command collision note), `tools/skills_tool.py` (`skill_view` payload: rendered
@@ -298,16 +298,16 @@ files), `tools/skills_tool_setup.py` (`missing env $NAME` note, readiness merge 
 the hub CLI); plus OpenClaw `src/skills/runtime/env-overrides.ts` (`skills.entries.*.env`/`apiKey`
 injection: an externally managed value wins, dangerous names stay blocked) — MIT.
 
-Also: the skill library maintenance modules (`crates/ark-skills/src/core/{curator,cli,settings,bundles,blueprints,ledger,usage,lint}.rs`) are ports of Hermes `agent/curator.py`, `agent/curator_backup.py`, `hermes_cli/curator.py`, `hermes_cli/bundles.py`, `agent/skill_bundles.py`, `tools/blueprints.py`, `cron/blueprint_catalog.py`, `tools/skill_ledger.py`, `tools/skill_usage.py` and `tools/skill_linter.py` (the lifecycle states and gates, the review prompt and report layout, the snapshot/rollback layout and keep bound, the CLI subcommand sets and messages, the bundle YAML shape and `/`+bundle invocation text, the blueprint catalog slot schema and job-spec mapping, the content-addressed ledger with delta entries and blob GC, and every linter rule, severity and message) — MIT.
+Also: the skill library maintenance modules (`crates/seagent-skills/src/core/{curator,cli,settings,bundles,blueprints,ledger,usage,lint}.rs`) are ports of Hermes `agent/curator.py`, `agent/curator_backup.py`, `hermes_cli/curator.py`, `hermes_cli/bundles.py`, `agent/skill_bundles.py`, `tools/blueprints.py`, `cron/blueprint_catalog.py`, `tools/skill_ledger.py`, `tools/skill_usage.py` and `tools/skill_linter.py` (the lifecycle states and gates, the review prompt and report layout, the snapshot/rollback layout and keep bound, the CLI subcommand sets and messages, the bundle YAML shape and `/`+bundle invocation text, the blueprint catalog slot schema and job-spec mapping, the content-addressed ledger with delta entries and blob GC, and every linter rule, severity and message) — MIT.
 
-Also: the skills security scanner (`crates/ark-security/src/skills_guard.rs`) is a port of Hermes `tools/skills_guard.py` (the 134-rule threat table and its severities, the trust × verdict `INSTALL_POLICY`, the `.skillignore`/`.clawhubignore` matcher, the structural limits and the report/summary layout, `skills-guard-v10`), with Hermes home paths (`.hermes/config.yaml`, `.hermes/SOUL.md`, `~/.hermes/.env`) mapped to ark's (`~/.config/ark/config.toml`, workspace `SOUL.md`, `~/.config/ark/secrets.toml`); the advisory NVIDIA SkillEvaluator wrapper (`crates/ark-skills/src/hub/evaluator.rs`) ports `tools/skillevaluator_scan.py` (argv, `-o` report file, timeout, tier ordering, red credential line); and the Python dynamic-import deep audit (`crates/ark-skills/src/hub/ast_audit.rs`) ports `tools/skills_ast_audit.py` — MIT.
+Also: the skills security scanner (`crates/seagent-security/src/skills_guard.rs`) is a port of Hermes `tools/skills_guard.py` (the 134-rule threat table and its severities, the trust × verdict `INSTALL_POLICY`, the `.skillignore`/`.clawhubignore` matcher, the structural limits and the report/summary layout, `skills-guard-v10`), with Hermes home paths (`.hermes/config.yaml`, `.hermes/SOUL.md`, `~/.hermes/.env`) mapped to seagent's (`~/.config/seagent/config.toml`, workspace `SOUL.md`, `~/.config/seagent/secrets.toml`); the advisory NVIDIA SkillEvaluator wrapper (`crates/seagent-skills/src/hub/evaluator.rs`) ports `tools/skillevaluator_scan.py` (argv, `-o` report file, timeout, tier ordering, red credential line); and the Python dynamic-import deep audit (`crates/seagent-skills/src/hub/ast_audit.rs`) ports `tools/skills_ast_audit.py` — MIT.
 
-Also: the hub registry adapters (`crates/ark-skills/src/hub/{sources,http}.rs`) port Hermes `tools/skills_hub_{official,github,clawhub,skillssh,sources,search}.py` (catalog ranking, tap provider labels, GitHub rate-limit/backoff and 401-reject handling, ClawHub exact-slug resolution and owner guards, skills.sh id discovery, well-known/browse.sh/LobeHub metadata, the SSRF/redirect policy) and the install/search layer (`crates/ark-skills/src/hub/{install,cli,model,zip,sync}.rs`) ports `tools/skills_hub{,_install,_models}.py`, `hermes_cli/skills_hub.py`, `hermes_cli/subcommands/skills.py`, `tools/skills_sync*.py` and OpenClaw `src/skills/lifecycle/clawhub*.ts` / `src/infra/clawhub-spec.ts` (ClawHub `@version` pinning) — MIT.
+Also: the hub registry adapters (`crates/seagent-skills/src/hub/{sources,http}.rs`) port Hermes `tools/skills_hub_{official,github,clawhub,skillssh,sources,search}.py` (catalog ranking, tap provider labels, GitHub rate-limit/backoff and 401-reject handling, ClawHub exact-slug resolution and owner guards, skills.sh id discovery, well-known/browse.sh/LobeHub metadata, the SSRF/redirect policy) and the install/search layer (`crates/seagent-skills/src/hub/{install,cli,model,zip,sync}.rs`) ports `tools/skills_hub{,_install,_models}.py`, `hermes_cli/skills_hub.py`, `hermes_cli/subcommands/skills.py`, `tools/skills_sync*.py` and OpenClaw `src/skills/lifecycle/clawhub*.ts` / `src/infra/clawhub-spec.ts` (ClawHub `@version` pinning) — MIT.
 
-Also: the plugin lifecycle and built-in plugins (`crates/ark-plugin/src/builtin/*.rs`) are ports of Hermes
+Also: the plugin lifecycle and built-in plugins (`crates/seagent-plugin/src/builtin/*.rs`) are ports of Hermes
 `plugins/disk-cleanup/{__init__.py,disk_cleanup.py}` (tracked.json atomic write + `.bak` restore, the
 test/temp/cron-output reseating rules, the prompt-only research/chrome-profile/500 MB buckets, the
-HERMES_HOME + `/tmp/hermes-*` scope mapped to ark's data home + `/tmp/ark-*`, `cleanup.log` line
+HERMES_HOME + `/tmp/hermes-*` scope mapped to seagent's data home + `/tmp/seagent-*`, `cleanup.log` line
 formats, `/disk-cleanup` subcommands and help text), Hermes `plugins/security-guidance/{__init__.py,
 patterns.py}` (the 25 rules with Anthropic PBC's `claude-plugins-official`
 `plugins/security-guidance/hooks/patterns.py` pattern data and reminder text, Apache-2.0, forked by
@@ -315,25 +315,25 @@ NousResearch; the warn/block modes and the `⚠️ Security guidance` block) and
 `plugins/hermes-achievements` (`dashboard/plugin_api.py`; MIT, originally by @PCinkusz, vendored in
 hermes-agent — the 60-achievement catalog with stable ids, the per-session metrics, the tiered and
 multi-condition evaluation, `state.json`/`scan_checkpoint.json`/`scan_snapshot.json` layout and the
-`/achievements` payload shape). The plugin stream hooks in `crates/ark-plugin/src/stream.rs` follow
+`/achievements` payload shape). The plugin stream hooks in `crates/seagent-plugin/src/stream.rs` follow
 Hermes `agent/plugin_stream_hooks.py` + `agent/stream_delivery.py` (the `on_stream_start`/
 `on_stream_delta`/`on_stream_end` observer names and payload fields, the per-consumer 1024-event
 drop-oldest queue that keeps plugin code off the token path, and the opt-in reasoning deltas) — MIT.
 
-Also: `tokenjuice` (`crates/ark-tools/src/tokenjuice/`) is a port of tokenjuice 0.8.5 (MIT,
+Also: `tokenjuice` (`crates/seagent-tools/src/tokenjuice/`) is a port of tokenjuice 0.8.5 (MIT,
 github.com/vincentkoc/tokenjuice) as vendored by OpenClaw `extensions/tokenjuice`: the reducer
 families (table/search/diff/log/JSON/JSONL), their thresholds (240-char floor, budget/min-gain
 ratios), the verbatim-command list and the `[tokenjuice …]` completeness markers — MIT.
 
-Also: the ACP runtime (`crates/ark-model/src/acp.rs`) is a port of Hermes
+Also: the ACP runtime (`crates/seagent-model/src/acp.rs`) is a port of Hermes
 `agent/copilot_acp_client.py` + `agent/acp_openai_bridge.py` (the ACP v1 handshake, the
 `session/set_config_option` / legacy `session/set_model` model selection, `session/prompt`
 streaming updates, the `fs/read_text_file` / `fs/write_text_file` / `session/request_permission`
 server→client answers and the deprecated `gh copilot` banner check) — MIT.
 
-Also: per-task auxiliary routing (`crates/ark-model/src/aux.rs`) follows Hermes
+Also: per-task auxiliary routing (`crates/seagent-model/src/aux.rs`) follows Hermes
 `agent/auxiliary_task_config.py` (route keys travel as one unit) and `agent/auxiliary_health.py`
 (the `_FALLBACK_REASONS` classes and their quarantine TTLs); the Nous Portal agent-key slots
-(`crates/ark-model/src/nous.rs`) follow `hermes_cli/auth_nous.py` (`_set_nous_agent_key_from_invoke_jwt`,
+(`crates/seagent-model/src/nous.rs`) follow `hermes_cli/auth_nous.py` (`_set_nous_agent_key_from_invoke_jwt`,
 `_nous_invoke_jwt_status`, `_agent_key_is_usable`, `_unusable_invoke_jwt_error`) and the
-context-length pin (`crates/ark-model/src/contextpin.rs`) follows `agent/context_pin.py` — MIT.
+context-length pin (`crates/seagent-model/src/contextpin.rs`) follows `agent/context_pin.py` — MIT.

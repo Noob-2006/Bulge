@@ -1,7 +1,7 @@
 # exec 串流稽核結果
 
 **編譯／測試**：`cargo build --workspace --all-targets` 成功；`cargo test --workspace --no-fail-fast` 通過 839、失敗 3、忽略 2。
-- 失敗：`ark_tools::exec::local::tests::bwrap_hides_home_and_blocks_network`（`only the header line: no routes without network: inside1`），也就是 bwrap 沙箱內**仍看得到網路路由**，網路隔離**沒有生效**。這是本串流的真實缺陷，或至少在此機器上不成立。
+- 失敗：`seagent_tools::exec::local::tests::bwrap_hides_home_and_blocks_network`（`only the header line: no routes without network: inside1`），也就是 bwrap 沙箱內**仍看得到網路路由**，網路隔離**沒有生效**。這是本串流的真實缺陷，或至少在此機器上不成立。
 - coderun 兩個測試（`coderun::tests::script_output_exit_codes_and_nested_protocol`、`failures_timeout_cancel_and_bad_lang`）在五個副本都失敗，原因是稽核規定的 TMPDIR 路徑過長，Unix socket 超過 SUN_LEN（`cannot bind …/call-*.sock: path must be shorter than SUN_LEN`）。這是環境造成的，與本串流程式無關。
 - 原始輸出：`audit/exec-tests.txt`
 
@@ -12,10 +12,10 @@
 
 ## 差異範圍
 
-`git diff --stat HEAD`：33 檔、+11661/−140。另有未追蹤 `crates/ark-tools/src/exec/ansi.rs`、`crates/ark-tools/src/tokenjuice/json.rs`。
+`git diff --stat HEAD`：33 檔、+11661/−140。另有未追蹤 `crates/seagent-tools/src/exec/ansi.rs`、`crates/seagent-tools/src/tokenjuice/json.rs`。
 
-- 新增且已接上：`ark-tools/src/{fuzzy,patchfmt,extract,zip,filestate,lint}.rs`，經 `fs.rs`（read/write/edit/patch/新工具 `apply_patch`）與 `search.rs`（grep/glob 新參數）使用；`ark-core/src/tool.rs` 圖片標記 + `ark-kernel/src/kernel.rs` 把 `read` 的圖片轉成 `Block::Image`；`ark-app/src/acp.rs` 把 `apply_patch` 視為 edit。
-- 新增但**未接上**：整個 `ark-tools/src/exec/`（`ExecEnv`、`ExecConfig`、local/bwrap/landlock、sandbox 政策、sync、modal/daytona/vercel）與 `ark-core/src/exec.rs`（`ExecBackend` trait、`install_selector`/`backend_for`）。`shell.rs`、`job.rs`、`ark-kernel/src/coderun.rs` 完全未改（`git status` 無 M），仍直接 `Command::new("bash")`；全 repo 沒有任何地方呼叫 `exec::install`、`exec::global`、`ExecConfig::parse`、`install_selector`、`backend_for`、`sandbox::wrap_all`、`configure_files`。`config.rs`、`main.rs` 未改，故 `[exec]`、`[files]` 設定使用者無法設定。
+- 新增且已接上：`seagent-tools/src/{fuzzy,patchfmt,extract,zip,filestate,lint}.rs`，經 `fs.rs`（read/write/edit/patch/新工具 `apply_patch`）與 `search.rs`（grep/glob 新參數）使用；`seagent-core/src/tool.rs` 圖片標記 + `seagent-kernel/src/kernel.rs` 把 `read` 的圖片轉成 `Block::Image`；`seagent-app/src/acp.rs` 把 `apply_patch` 視為 edit。
+- 新增但**未接上**：整個 `seagent-tools/src/exec/`（`ExecEnv`、`ExecConfig`、local/bwrap/landlock、sandbox 政策、sync、modal/daytona/vercel）與 `seagent-core/src/exec.rs`（`ExecBackend` trait、`install_selector`/`backend_for`）。`shell.rs`、`job.rs`、`seagent-kernel/src/coderun.rs` 完全未改（`git status` 無 M），仍直接 `Command::new("bash")`；全 repo 沒有任何地方呼叫 `exec::install`、`exec::global`、`ExecConfig::parse`、`install_selector`、`backend_for`、`sandbox::wrap_all`、`configure_files`。`config.rs`、`main.rs` 未改，故 `[exec]`、`[files]` 設定使用者無法設定。
 - **stub**：`exec/container.rs`（docker/podman）、`ssh.rs`、`singularity.rs`、`openshell.rs` 都只回 `Err("… not implemented yet")`；`session.rs`（持久 shell 狀態）只有 cwd 欄位。
 - **未編譯**：`exec/ansi.rs`、`tokenjuice/` 沒有任何 `mod` 宣告（lib.rs、exec/mod.rs 皆無）。
 - 沒有新增模型工具 `process`、`terminal`、`read_terminal`、`close_terminal`、`execute_code`；`builtin_tools()` 只多了 `ApplyPatch`。
@@ -32,7 +32,7 @@
 
 | 項目 | 上游來源 | 狀態 | 證據或缺口 |
 |---|---|---|---|
-| 單一 ExecBackend 抽象 | brief；Hermes tools/environments/*；OC src/agents/sandbox | 🚧 | `ark-core/src/exec.rs` trait + `exec/mod.rs::build_backend/ExecEnv::backend`，測試 `provider_registry_and_quoting`、`config_defaults_and_validation`；shell/job/run 都沒用它，沒有 `install()` 呼叫，`[exec]` 讀不到 |
+| 單一 ExecBackend 抽象 | brief；Hermes tools/environments/*；OC src/agents/sandbox | 🚧 | `seagent-core/src/exec.rs` trait + `exec/mod.rs::build_backend/ExecEnv::backend`，測試 `provider_registry_and_quoting`、`config_defaults_and_validation`；shell/job/run 都沒用它，沒有 `install()` 呼叫，`[exec]` 讀不到 |
 | terminal：PTY | Hermes terminal_tool.py；OC exec pty | 🚧 | `exec/local.rs::open_pty/spawn_command`，測試 `pty_is_a_terminal_and_resizes`；`shell` 工具沒有 pty 參數，也不經過 backend |
 | terminal：背景早返回 / yieldMs / background | Hermes terminal_background；OC exec yieldMs/background | 🚧 | 只有 `ExecConfig.yield_ms/foreground_max_timeout` 欄位與 `spawn_detached` 原語（測試 `kill_and_detached_survival_files`）；工具端沒有實作。基線 `shell` 只保證背景子行程不擋回傳（`background_process_does_not_block_return`） |
 | process：write/submit/send-keys/paste/close/clear/remove/handoff | Hermes process_registry.py；OC bash-tools.process.ts | 🚧 | 只有 `ExecChild::write_stdin` 原語（local.rs，測試 `local_merged_output_exit_and_stdin`）；`job` 沒有這些 action，也沒有 `process` 工具 |
@@ -41,7 +41,7 @@
 | sudo 密碼管線 | Hermes terminal_sudo | ⬜ | 只有 `ExecConfig.sudo_password_secret` 欄位，沒有改寫/餵密碼的程式碼 |
 | 失敗輸出提示 | Hermes terminal_hints.py（§1/§6） | ⬜ | 只有 `failure_hints` 欄位 |
 | 工具輸出上限／頭尾截斷 | Hermes tool_output_limits.py；OC tool-result-limits.ts | ✅ | 基線 `shell.rs` 截斷，測試 `output_is_capped_head_and_tail` |
-| 大結果存檔（spill） | Hermes tool_result_storage.py | ✅ | kernel runner spill，測試 `ark-kernel/tests/runner.rs::secrets_are_redacted_and_large_output_spilled` |
+| 大結果存檔（spill） | Hermes tool_result_storage.py | ✅ | kernel runner spill，測試 `seagent-kernel/tests/runner.rs::secrets_are_redacted_and_large_output_spilled` |
 | read_terminal / close_terminal | Hermes terminal 工具組 | ⬜ | 沒有工具 |
 | process：list/poll/log/wait/kill | Hermes process_manage；OC process | ✅ | 基線 `job`（start/output/wait/kill/list），測試 `start_poll_wait_kill_and_isolation` |
 | process：200KB 滾動緩衝 | Hermes process_registry.py | 🚧 | `job` 存完整記錄檔並取尾端（`large_output_is_tailed_and_secrets_substituted`）；`process_buffer_bytes` 設定沒人用 |
@@ -62,7 +62,7 @@
 | execute_code env 清洗 | Hermes code_execution_env.py | ⬜ | coderun 未改；`sandbox.rs::sanitize_forwarded` 存在但沒人呼叫 |
 | execute_code 呼叫預算 | Hermes code_execution_rpc.py | ⬜ | 沒有 |
 | PTY 查詢回應 | Hermes pty_query_responder.py | ⬜ | 沒有 |
-| hook 輸出溢出存檔 | Hermes hook_output_spill.py | ⬜ | `ark-kernel/src/hooks.rs` 未改 |
+| hook 輸出溢出存檔 | Hermes hook_output_spill.py | ⬜ | `seagent-kernel/src/hooks.rs` 未改 |
 | 本機 OS 沙箱（bubblewrap / Landlock，網路命名空間） | brief；OC sandbox | 🚧 | `local.rs::BwrapBackend/LandlockBackend`，測試 `bwrap_hides_home_and_blocks_network`（**實測失敗：沙箱內仍有網路路由**）、`landlock_restricts_writes_and_home`（通過）；未接上任何工具，沒有 seccomp |
 | docker 後端（強化、egress 代理） | Hermes environments/docker.py, docker_egress.py；OC sandbox/docker*.ts | 🚧 | `exec/container.rs` stub：`ContainerBackend::new` 回 `Err("container backend not implemented yet")`；沒有 cap-drop/PID 限制/egress 代理 |
 | podman 後端 | OC podman-runtime.ts | 🚧 | 同上 stub |
@@ -73,7 +73,7 @@
 | vercel_sandbox 後端 | Hermes environments/vercel_sandbox.py | 🚧 | `vercel.rs` 真的 REST + 假伺服器測試 `create_run_logs_sync_snapshot_restore`、`needs_token`；未接上 |
 | OpenShell 後端 | OC extensions/openshell | 🚧 | `exec/openshell.rs` stub，回 Err |
 | MXC 後端 | OC extensions/mxc | N/A | 只有 Windows 的 ProcessContainer |
-| 外掛執行環境 provider | Hermes agent/terminal_env_provider.py | 🚧 | `exec::register_provider`，測試 `provider_registry_and_quoting`；ark-plugin 沒有註冊點，整個 ExecEnv 也沒接上 |
+| 外掛執行環境 provider | Hermes agent/terminal_env_provider.py | 🚧 | `exec::register_provider`，測試 `provider_registry_and_quoting`；seagent-plugin 沒有註冊點，整個 ExecEnv 也沒接上 |
 | 遠端檔案同步／憑證檔直通 | Hermes file_sync.py, credential_files.py | 🚧 | `sync.rs`，測試 `push_pull_mirror_raw`、`push_pull_mirror_base64`、`credential_files_land_under_remote_home`、`tar_roundtrip_with_long_names_and_links`；只有雲端後端用，而雲端後端本身沒接上 |
 | 沙箱模式 off/non-main/all | OC sandbox/types.ts | 🚧 | `ExecEnv::sandboxed`，測試 `sandbox_mode_selects_per_session`；沒有裝 main-session 分類器，設定讀不到 |
 | 沙箱範圍 session/agent/shared | OC sandbox/types.ts | 🚧 | `ExecEnv::scope_key`（同一測試）；未接上 |

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Start a real Mattermost (team edition) + Postgres for the ark Mattermost
-# integration test (`crates/ark-channel/tests/real_mattermost.rs`).
+# Start a real Mattermost (team edition) + Postgres for the seagent Mattermost
+# integration test (`crates/seagent-channel/tests/real_mattermost.rs`).
 #
 #   eval "$(./tests/real/mattermost_up.sh --keep)"   # start, print env, leave it running
 #   ./tests/real/mattermost_up.sh                    # start, print env, remove it again
@@ -10,37 +10,37 @@
 # (and the network) this script created is removed on exit, on success and on
 # failure alike. Nothing else is ever touched.
 #
-# Only the containers/networks named `ark-test-mm*` are touched; nothing in
-# `$HOME`/`$ARK_HOME` is read or written. The stack is:
+# Only the containers/networks named `seagent-test-mm*` are touched; nothing in
+# `$HOME`/`$SEAGENT_HOME` is read or written. The stack is:
 #
-#   ark-test-mm-db   postgres:16-alpine
-#   ark-test-mm-web  mattermost/mattermost-team-edition:latest  -> 127.0.0.1:28065
+#   seagent-test-mm-db   postgres:16-alpine
+#   seagent-test-mm-web  mattermost/mattermost-team-edition:latest  -> 127.0.0.1:28065
 #
 # On success it prints the environment the test expects:
 #
-#   export ARK_REAL_MATTERMOST_URL=http://127.0.0.1:28065
-#   export ARK_REAL_MATTERMOST_TOKEN=<bot personal access token>
-#   export ARK_REAL_MATTERMOST_CHANNEL=<public channel id>
-#   export ARK_REAL_MATTERMOST_TEAM=<team id>
-#   export ARK_REAL_MATTERMOST_PEER_TOKEN=<human personal access token>
-#   export ARK_REAL_MATTERMOST_PEER_ID=<human user id>
-#   export ARK_REAL_MATTERMOST_BOT_ID=<bot user id>
-#   export ARK_REAL_MATTERMOST_BOT2_TOKEN=<second bot token>
-#   export ARK_REAL_MATTERMOST_BOT2_ID=<second bot user id>
+#   export SEAGENT_REAL_MATTERMOST_URL=http://127.0.0.1:28065
+#   export SEAGENT_REAL_MATTERMOST_TOKEN=<bot personal access token>
+#   export SEAGENT_REAL_MATTERMOST_CHANNEL=<public channel id>
+#   export SEAGENT_REAL_MATTERMOST_TEAM=<team id>
+#   export SEAGENT_REAL_MATTERMOST_PEER_TOKEN=<human personal access token>
+#   export SEAGENT_REAL_MATTERMOST_PEER_ID=<human user id>
+#   export SEAGENT_REAL_MATTERMOST_BOT_ID=<bot user id>
+#   export SEAGENT_REAL_MATTERMOST_BOT2_TOKEN=<second bot token>
+#   export SEAGENT_REAL_MATTERMOST_BOT2_ID=<second bot user id>
 set -euo pipefail
 
-NET=ark-test-mm
-DB=ark-test-mm-db
-WEB=ark-test-mm-web
+NET=seagent-test-mm
+DB=seagent-test-mm-db
+WEB=seagent-test-mm-web
 PORT=28065
 URL="http://127.0.0.1:${PORT}"
-ADMIN_EMAIL=admin@ark.test
-ADMIN_USER=arkadmin
-ADMIN_PASS='Ark-Admin-1!'
-PEER_EMAIL=peer@ark.test
-PEER_USER=arkpeer
-PEER_PASS='Ark-Peer-1!'
-BOT_USER=arkbot
+ADMIN_EMAIL=admin@seagent.test
+ADMIN_USER=seagentadmin
+ADMIN_PASS='Seagent-Admin-1!'
+PEER_EMAIL=peer@seagent.test
+PEER_USER=seagentpeer
+PEER_PASS='Seagent-Peer-1!'
+BOT_USER=seagentbot
 
 log() { printf '%s\n' "$*" >&2; }
 die() { log "error: $*"; exit 1; }
@@ -80,7 +80,7 @@ podman network create "$NET" >/dev/null
 MADE_NET=1
 
 podman run -d --name "$DB" --network "$NET" --network-alias "$DB" \
-  -e POSTGRES_USER=mmuser -e POSTGRES_PASSWORD=arkmmtest -e POSTGRES_DB=mattermost \
+  -e POSTGRES_USER=mmuser -e POSTGRES_PASSWORD=seagentmmtest -e POSTGRES_DB=mattermost \
   docker.io/library/postgres:16-alpine >/dev/null
 log "started $DB"
 
@@ -95,7 +95,7 @@ log "postgres ready"
 podman run -d --name "$WEB" --network "$NET" \
   -p "127.0.0.1:${PORT}:8065" \
   -e MM_SQLSETTINGS_DRIVERNAME=postgres \
-  -e "MM_SQLSETTINGS_DATASOURCE=postgres://mmuser:arkmmtest@${DB}:5432/mattermost?sslmode=disable&connect_timeout=10" \
+  -e "MM_SQLSETTINGS_DATASOURCE=postgres://mmuser:seagentmmtest@${DB}:5432/mattermost?sslmode=disable&connect_timeout=10" \
   -e "MM_SERVICESETTINGS_SITEURL=${URL}" \
   -e MM_SERVICESETTINGS_ENABLESECURITYFIXALERT=false \
   -e MM_SERVICESETTINGS_ENABLEUSERACCESSTOKENS=true \
@@ -140,12 +140,12 @@ ADMIN_TOKEN=$(curl -sS -D - -o /dev/null -X POST -H 'Content-Type: application/j
 [ -n "$ADMIN_TOKEN" ] || die "admin login failed"
 log "admin logged in"
 
-TEAM=$(api POST /api/v4/teams "$ADMIN_TOKEN" "{\"name\":\"arktest\",\"display_name\":\"Ark Test\",\"type\":\"O\"}")
+TEAM=$(api POST /api/v4/teams "$ADMIN_TOKEN" "{\"name\":\"seagenttest\",\"display_name\":\"SE Agent Test\",\"type\":\"O\"}")
 TEAM_ID=$(printf '%s' "$TEAM" | jget id)
 [ -n "$TEAM_ID" ] || { log "create team: $TEAM"; die "could not create team"; }
 log "created team $TEAM_ID"
 
-CHAN=$(api POST /api/v4/channels "$ADMIN_TOKEN" "{\"team_id\":\"$TEAM_ID\",\"name\":\"ark-e2e\",\"display_name\":\"Ark E2E\",\"type\":\"O\"}")
+CHAN=$(api POST /api/v4/channels "$ADMIN_TOKEN" "{\"team_id\":\"$TEAM_ID\",\"name\":\"seagent-e2e\",\"display_name\":\"SE Agent E2E\",\"type\":\"O\"}")
 CHAN_ID=$(printf '%s' "$CHAN" | jget id)
 [ -n "$CHAN_ID" ] || { log "create channel: $CHAN"; die "could not create channel"; }
 log "created channel $CHAN_ID"
@@ -156,7 +156,7 @@ PEER_ID=$(printf '%s' "$PEER" | jget id)
 [ -n "$PEER_ID" ] || { log "create peer: $PEER"; die "could not create the peer user"; }
 
 token_for() { # user_id -> personal access token
-  api POST "/api/v4/users/$1/tokens" "$ADMIN_TOKEN" '{"description":"ark test"}' | jget token
+  api POST "/api/v4/users/$1/tokens" "$ADMIN_TOKEN" '{"description":"seagent test"}' | jget token
 }
 PEER_TOKEN=$(token_for "$PEER_ID")
 [ -n "$PEER_TOKEN" ] || die "could not create the peer access token"
@@ -164,14 +164,14 @@ PEER_TOKEN=$(token_for "$PEER_ID")
 # The bot: `POST /bots` creates the bot account itself (pre-creating a user
 # with the same username makes the call fail with username_exists); posts made
 # with it carry `props.from_bot`.
-BOT=$(api POST /api/v4/bots "$ADMIN_TOKEN" "{\"username\":\"$BOT_USER\",\"display_name\":\"Ark Bot\",\"description\":\"ark integration test\"}")
+BOT=$(api POST /api/v4/bots "$ADMIN_TOKEN" "{\"username\":\"$BOT_USER\",\"display_name\":\"SE Agent Bot\",\"description\":\"seagent integration test\"}")
 BOT_ID=$(printf '%s' "$BOT" | jget user_id)
 [ -n "$BOT_ID" ] || { log "create bot: $BOT"; die "could not create the bot account"; }
 BOT_TOKEN=$(token_for "$BOT_ID")
 [ -n "$BOT_TOKEN" ] || die "could not create the bot access token"
 
 # A second bot, so the test can prove another bot's posts arrive with is_bot.
-BOT2=$(api POST /api/v4/bots "$ADMIN_TOKEN" '{"username":"arkbot2","display_name":"Ark Bot 2","description":"other bot"}')
+BOT2=$(api POST /api/v4/bots "$ADMIN_TOKEN" '{"username":"seagentbot2","display_name":"SE Agent Bot 2","description":"other bot"}')
 BOT2_ID=$(printf '%s' "$BOT2" | jget user_id)
 [ -n "$BOT2_ID" ] || { log "create bot2: $BOT2"; die "could not create the second bot"; }
 BOT2_TOKEN=$(token_for "$BOT2_ID")
@@ -207,15 +207,15 @@ ME=$(api GET /api/v4/users/me "$BOT_TOKEN")
 [ "$(printf '%s' "$ME" | jget id)" = "$BOT_ID" ] || { log "bot token /users/me: $ME"; die "bot token does not work"; }
 
 cat <<EOF
-export ARK_REAL_MATTERMOST_URL=$URL
-export ARK_REAL_MATTERMOST_TOKEN=$BOT_TOKEN
-export ARK_REAL_MATTERMOST_CHANNEL=$CHAN_ID
-export ARK_REAL_MATTERMOST_TEAM=$TEAM_ID
-export ARK_REAL_MATTERMOST_PEER_TOKEN=$PEER_TOKEN
-export ARK_REAL_MATTERMOST_PEER_ID=$PEER_ID
-export ARK_REAL_MATTERMOST_BOT_ID=$BOT_ID
-export ARK_REAL_MATTERMOST_BOT2_TOKEN=$BOT2_TOKEN
-export ARK_REAL_MATTERMOST_BOT2_ID=$BOT2_ID
+export SEAGENT_REAL_MATTERMOST_URL=$URL
+export SEAGENT_REAL_MATTERMOST_TOKEN=$BOT_TOKEN
+export SEAGENT_REAL_MATTERMOST_CHANNEL=$CHAN_ID
+export SEAGENT_REAL_MATTERMOST_TEAM=$TEAM_ID
+export SEAGENT_REAL_MATTERMOST_PEER_TOKEN=$PEER_TOKEN
+export SEAGENT_REAL_MATTERMOST_PEER_ID=$PEER_ID
+export SEAGENT_REAL_MATTERMOST_BOT_ID=$BOT_ID
+export SEAGENT_REAL_MATTERMOST_BOT2_TOKEN=$BOT2_TOKEN
+export SEAGENT_REAL_MATTERMOST_BOT2_ID=$BOT2_ID
 EOF
 if [ "$KEEP" = 1 ]; then
   log "stack ready; remove it with: $0 --down"

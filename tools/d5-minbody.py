@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate the MIN_BODY table for crates/ark-skills/tests/content.rs.
+"""Generate the MIN_BODY table for crates/seagent-skills/tests/content.rs.
 
 For every bundled skill the test asserts that the ported body keeps at least 60% of the
 character count of the upstream body it claims to carry (adapted ports: 50%), so the
@@ -12,22 +12,23 @@ Usage: python3 tools/d5-minbody.py            # check + print stats
 import re, os, glob, sys
 
 W = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-HERMES, OPENCLAW = '/home/noob/hermes-agent', '/home/noob/openclaw'
+HERMES = os.environ.get('SEAGENT_UPSTREAM_HERMES') or sys.exit('set SEAGENT_UPSTREAM_HERMES to a Hermes checkout')
+OPENCLAW = os.environ.get('SEAGENT_UPSTREAM_OPENCLAW') or sys.exit('set SEAGENT_UPSTREAM_OPENCLAW to an OpenClaw checkout')
 
 def body(path):
     t = open(path, encoding='utf-8').read()
     m = re.match(r'^---\n(.*?)\n---\n', t, re.S)
     return t[len(m.group(0)):] if m else t
 
-ARK = {}
+SEAGENT = {}
 for p in glob.glob(os.path.join(W, 'share/skills/**/SKILL.md'), recursive=True):
-    ARK.setdefault(p.split('/')[-2], p)
+    SEAGENT.setdefault(p.split('/')[-2], p)
 
-# ark renamed two Hermes-internal skills when adapting them for ark.
-UPSTREAM_NAME = {'ark-agent': 'hermes-agent', 'ark-skill-authoring': 'hermes-agent-skill-authoring'}
+# seagent renamed two Hermes-internal skills when adapting them for seagent.
+UPSTREAM_NAME = {'seagent-agent': 'hermes-agent', 'seagent-skill-authoring': 'hermes-agent-skill-authoring'}
 
 rows = []
-for name, path in sorted(ARK.items()):
+for name, path in sorted(SEAGENT.items()):
     h = os.path.join(HERMES, 'skills')
     hits = glob.glob(f'{h}/**/{UPSTREAM_NAME.get(name, name)}/SKILL.md', recursive=True)
     o = f'{OPENCLAW}/skills/{name}/SKILL.md'
@@ -45,7 +46,7 @@ for name, path in sorted(ARK.items()):
     up = sum(sizes) if merged else max(sizes, default=0)
     cur = len(body(path))
     frac = 0.6
-    if name in ('ark-agent', 'ark-skill-authoring'):
+    if name in ('seagent-agent', 'seagent-skill-authoring'):
         frac = 0.5
     if up == 0:
         # no upstream (none currently): fixed floor

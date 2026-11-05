@@ -7,14 +7,14 @@
 #
 # The two usual sources of "not reproducible" are (a) the build directory embedded in debug info
 # and panic locations and (b) wall-clock/ordering effects. (a) is removed with
-# `--remap-path-prefix=<copy>=/build/ark`, which is exactly what a distributor would do; whatever
+# `--remap-path-prefix=<copy>=/build/seagent`, which is exactly what a distributor would do; whatever
 # still differs afterwards is (b) and is a real bug (hash-map iteration order, parallel codegen
 # inputs, build scripts reading the clock). SOURCE_DATE_EPOCH is pinned for the same reason.
 #
-# Cost: --quick (default) builds the `ark` binary twice in the dev profile — roughly one to two
-# minutes on a machine with warm crate sources. --full (or ARK_REPRO_FULL=1) builds the whole
+# Cost: --quick (default) builds the `seagent` binary twice in the dev profile — roughly one to two
+# minutes on a machine with warm crate sources. --full (or SEAGENT_REPRO_FULL=1) builds the whole
 # workspace and compares every `.rlib` as well, which takes several minutes. This is why
-# `crates/ark/tests/supply_chain.rs` only checks that this script parses, never runs it.
+# `crates/seagent/tests/supply_chain.rs` only checks that this script parses, never runs it.
 #
 # Usage: repro-check.sh [--quick|--full] [--keep] [--root DIR]
 set -euo pipefail
@@ -28,8 +28,8 @@ ROOT=$(cd -- "$SCRIPT_DIR/../.." && pwd)
 MODE=quick
 KEEP=0
 
-# `ARK_REPRO_FULL=1` is the knob the checklist uses; an explicit flag always wins over it.
-if [ "${ARK_REPRO_FULL:-0}" = "1" ]; then
+# `SEAGENT_REPRO_FULL=1` is the knob the checklist uses; an explicit flag always wins over it.
+if [ "${SEAGENT_REPRO_FULL:-0}" = "1" ]; then
     MODE=full
 fi
 
@@ -39,14 +39,14 @@ Usage: $PROG [--quick|--full] [--keep] [--root DIR]
 
 Build the same tree twice from two different absolute paths and compare the artifacts.
 
-  --quick   compare only the \`ark\` binary, dev profile (default; ~1-2 minutes)
+  --quick   compare only the \`seagent\` binary, dev profile (default; ~1-2 minutes)
   --full    compare the binary and every workspace .rlib (several minutes)
   --keep    keep the scratch tree under \$TMPDIR for inspection
   --root    workspace root (default: two levels above this script)
   --help    show this help
 
 Environment:
-  ARK_REPRO_FULL=1   same as --full
+  SEAGENT_REPRO_FULL=1   same as --full
   SOURCE_DATE_EPOCH  fixed at 1700000000 for both builds
 
 Exit status: 0 = all artifacts identical, 1 = at least one DIFF, 2 = usage error.
@@ -82,7 +82,7 @@ export SOURCE_DATE_EPOCH=1700000000
 export CARGO_INCREMENTAL=0
 export CARGO_NET_OFFLINE=true
 
-SCRATCH=$(mktemp -d "${TMPDIR:-/tmp}/ark-repro-XXXXXX")
+SCRATCH=$(mktemp -d "${TMPDIR:-/tmp}/seagent-repro-XXXXXX")
 cleanup() {
     if [ "$KEEP" -eq 1 ]; then
         printf '%s: scratch tree kept at %s\n' "$PROG" "$SCRATCH" >&2
@@ -113,15 +113,15 @@ if [ "$MODE" = full ]; then
     BUILD_ARGS=(--workspace)
     printf '%s: full mode — building the whole workspace twice; this takes minutes\n' "$PROG"
 else
-    BUILD_ARGS=(-p ark --bin ark)
-    printf '%s: quick mode — building only the `ark` binary (use --full for the rlib set)\n' "$PROG"
+    BUILD_ARGS=(-p seagent --bin seagent)
+    printf '%s: quick mode — building only the `seagent` binary (use --full for the rlib set)\n' "$PROG"
 fi
 
 build() {
     local dir=$1 target=$2 log=$3
     printf '%s: building %s -> %s\n' "$PROG" "$dir" "$target"
     if ! ( cd "$dir" && CARGO_TARGET_DIR="$target" \
-            RUSTFLAGS="${RUSTFLAGS:-} --remap-path-prefix=$dir=/build/ark" \
+            RUSTFLAGS="${RUSTFLAGS:-} --remap-path-prefix=$dir=/build/seagent" \
             cargo build --offline --locked "${BUILD_ARGS[@]}" ) >"$log" 2>&1; then
         tail -n 40 "$log" >&2
         die "build failed in $dir (full log: $log)"
@@ -134,8 +134,8 @@ hash_file() { "${SHA256[@]}" "$1" | cut -d' ' -f1; }
 collect() {
     local target=$1 out=$2
     : > "$out"
-    [ -f "$target/debug/ark" ] || die "no binary at $target/debug/ark"
-    printf 'bin/ark\t%s\n' "$(hash_file "$target/debug/ark")" >> "$out"
+    [ -f "$target/debug/seagent" ] || die "no binary at $target/debug/seagent"
+    printf 'bin/seagent\t%s\n' "$(hash_file "$target/debug/seagent")" >> "$out"
     if [ "$MODE" = full ]; then
         local rlib
         for rlib in "$target"/debug/deps/*.rlib; do

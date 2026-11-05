@@ -1,11 +1,11 @@
-// Photon Spectrum sidecar for ark.
+// Photon Spectrum sidecar for seagent.
 //
 // Adapted from the Hermes Agent Photon sidecar (plugins/platforms/photon/sidecar),
 // MIT License, Copyright (c) 2025 Nous Research — see LICENSE.hermes.
-// ark change: `Authorization: Bearer <PHOTON_SIDECAR_TOKEN>` is accepted as an
+// seagent change: `Authorization: Bearer <PHOTON_SIDECAR_TOKEN>` is accepted as an
 // alternative to the `X-Hermes-Sidecar-Token` header; sent messages are kept in
 // `knownMessages` and `POST /unsend` retracts one (spectrum-ts `space.unsend`, the
-// call /unreact already uses). ark supervises this process
+// call /unreact already uses). seagent supervises this process
 // (restart with backoff, kill on exit); it never runs `npm install` itself.
 //
 // Original description:
@@ -42,7 +42,7 @@
 //   - POST /unreact     -> {"ok": true} | 400 soft failure
 //       body: {"spaceId": "...", "messageId": "<target msg id>",
 //              "reactionId": "..." | null (restart-recovery fallback)}
-//   - POST /unsend      -> {"ok": true} (ark) | 400 "message not found"
+//   - POST /unsend      -> {"ok": true} (seagent) | 400 "message not found"
 //       body: {"spaceId": "...", "messageId": "<one of our sent messages>"}
 //   - POST /send-poll   -> {"ok": true, "messageId": "..."}
 //       body: {"spaceId": "...", "title": "...", "options": ["...", "..."]}
@@ -1214,7 +1214,7 @@ const server = http.createServer(async (req, res) => {
       return badRequest(res, "no tracked reaction for message");
     }
     if (req.url === "/unsend") {
-      // ark: retract one of our own messages. Only outbound messages can be
+      // seagent: retract one of our own messages. Only outbound messages can be
       // unsent; the provider rejects anything else.
       const { spaceId, messageId } = body || {};
       if (!spaceId || !messageId) {

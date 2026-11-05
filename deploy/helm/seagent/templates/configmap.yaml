@@ -1,0 +1,16 @@
+{{- if or .Values.managedPolicy (and (eq .Values.config.mode "file") .Values.config.toml) }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "seagent.fullname" . }}
+  labels: {{- include "seagent.labels" . | nindent 4 }}
+data:
+  {{- with .Values.managedPolicy }}
+  10-chart.toml: |
+    {{- . | nindent 4 }}
+  {{- end }}
+  {{- if and (eq .Values.config.mode "file") .Values.config.toml }}
+  config.toml: |
+    {{- .Values.config.toml | nindent 4 }}
+  {{- end }}
+{{- end }}

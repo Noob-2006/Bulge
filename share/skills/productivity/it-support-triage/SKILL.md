@@ -1,13 +1,13 @@
 ---
-upstream: "ark-original"
+upstream: "seagent-original"
 name: it-support-triage
 description: "First-line IT support: classify tickets, self-serve fixes, accounts and permissions, escalate."
 version: 1.0.0
-author: ark
+author: SE Agent
 license: MIT
 platforms: [linux, macos]
 metadata:
-  ark:
+  seagent:
     tags: [it-support, helpdesk, ticket, account, permissions, ldap, active-directory, entra, okta, troubleshooting]
     category: productivity
     related_skills: [diagnose-gateway]

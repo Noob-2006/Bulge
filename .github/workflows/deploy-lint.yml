@@ -16,12 +16,12 @@ jobs:
       - uses: azure/setup-helm@1a275c3b69536ee54be43f2070a358922e12c8d4 # v4
       - run: |
           set -euo pipefail
-          for v in deploy/helm/ark/ci/*.yaml; do
-            helm lint deploy/helm/ark -f "$v"
-            helm template r deploy/helm/ark -f "$v" > /dev/null
+          for v in deploy/helm/seagent/ci/*.yaml; do
+            helm lint deploy/helm/seagent -f "$v"
+            helm template r deploy/helm/seagent -f "$v" > /dev/null
           done
           # the chart must refuse an unconfigured install instead of rendering a broken one
-          if helm template r deploy/helm/ark >/dev/null 2>&1; then echo "chart rendered without existingSecret" >&2; exit 1; fi
+          if helm template r deploy/helm/seagent >/dev/null 2>&1; then echo "chart rendered without existingSecret" >&2; exit 1; fi
   terraform:
     runs-on: ubuntu-24.04
     steps:
@@ -38,14 +38,14 @@ jobs:
           cd deploy/ansible
           export ANSIBLE_ROLES_PATH="$PWD/roles"
           for p in examples/*.yml; do "$RUNNER_TEMP/v/bin/ansible-playbook" --syntax-check -i localhost, "$p"; done
-          "$RUNNER_TEMP/v/bin/ansible-lint" --profile production roles/ark examples || true
+          "$RUNNER_TEMP/v/bin/ansible-lint" --profile production roles/seagent examples || true
   cloud-init:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
       - run: |
           sudo apt-get install -y -qq cloud-init >/dev/null
-          cloud-init schema --config-file deploy/cloud-init/ark.yaml
+          cloud-init schema --config-file deploy/cloud-init/seagent.yaml
   dockerfiles:
     runs-on: ubuntu-24.04
     steps:
@@ -53,8 +53,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
       - run: |
-          cargo build --locked -p ark --bin ark
-          for f in Dockerfile Dockerfile.ubi Dockerfile.distroless; do target/debug/ark docker check --file "$f"; done
+          cargo build --locked -p seagent --bin seagent
+          for f in Dockerfile Dockerfile.ubi Dockerfile.distroless; do target/debug/seagent docker check --file "$f"; done
   packaging-scripts:
     runs-on: ubuntu-24.04
     steps:

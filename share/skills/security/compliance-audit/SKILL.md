@@ -1,9 +1,9 @@
 ---
-upstream: "ark/skills original to ark (MIT)"
+upstream: "seagent/skills original to SE Agent (MIT)"
 name: compliance-audit
 description: "Run executable compliance checklists (CIS-style Linux, 資通安全管理法 對照) and turn results into evidence and a remediation plan."
 version: 1.0.0
-author: ark
+author: SE Agent
 license: MIT
 platforms: [linux]
 metadata:
@@ -36,7 +36,7 @@ input is unreadable without root reports `skip`, never a guessed `pass`.
 ## Procedure
 
 1. **Scope.** Which hosts, which checklist, which benchmark version or legal basis the
-   organisation adopted. This tool checks the host it runs on; for other hosts, run ark there
+   organisation adopted. This tool checks the host it runs on; for other hosts, run SE Agent there
    (or a node) rather than reaching over SSH with broad credentials.
 2. **Run.** `compliance_check checklist=["cis-linux","tw-csma"] output=reports/compliance-<host>.md`.
    Use `section=` to re-run one area after a fix, `only_failed=true` for a short list.

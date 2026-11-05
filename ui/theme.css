@@ -1,6 +1,6 @@
-/* ark 視覺系統：瑞士國際主義（網格、無襯線、靠左對齊、層級靠字級與留白）
+/* seagent 視覺系統：瑞士國際主義（網格、無襯線、靠左對齊、層級靠字級與留白）
    × 深緋紅底 × 金絲線（1px 金色細線）與四角內凹金星。
-   Web UI、桌面殼與文件頁共用；TUI 以 ANSI truecolor 對應同一組色票（crates/ark-app/src/tui/theme.rs）。 */
+   Web UI、桌面殼與文件頁共用；TUI 以 ANSI truecolor 對應同一組色票（crates/seagent-app/src/tui/theme.rs）。 */
 :root {
   /* 深緋紅：近黑的血紅底，層次只差一點點亮度 */
   --crimson-950: #0b0105;

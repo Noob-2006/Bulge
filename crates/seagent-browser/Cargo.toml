@@ -1,0 +1,27 @@
+[package]
+name = "seagent-browser"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# Built-in browser: a Chrome DevTools Protocol client, managed Chromium profiles, cloud /
+# Camofox / Lightpanda / sandbox backends and the model-facing browser tools.
+# No new crates: WebSocket and TLS come from seagent-net, HTTP from ureq.
+[features]
+# Personal-desktop browser bridges (gen1-306): the Chrome-extension relay and importing
+# the user's real Chrome profile. Off by default; `seagent --features personal` turns it on.
+personal = []
+# Exposes `cdp::fake` (a scriptable DevTools stub) to integration tests of dependent crates.
+test-util = []
+
+[dependencies]
+seagent-core.workspace = true
+seagent-net.workspace = true
+seagent-security.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+toml.workspace = true
+ureq.workspace = true
+regex.workspace = true
+libc.workspace = true
+ring.workspace = true

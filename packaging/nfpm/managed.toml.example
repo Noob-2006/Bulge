@@ -1,7 +1,7 @@
-# /etc/ark/managed.toml — organisation policy (root-owned, 0644). Copy this file to
-# /etc/ark/managed.toml and edit. Everything here is a default under the user and project
+# /etc/seagent/managed.toml — organisation policy (root-owned, 0644). Copy this file to
+# /etc/seagent/managed.toml and edit. Everything here is a default under the user and project
 # layers, except keys listed in `[managed] locked`, which nobody below can change.
-# Check the result with:  ark config managed
+# Check the result with:  seagent config managed
 [managed]
 locked = ["approvals.preset", "gate.egress_allow", "audit"]
 

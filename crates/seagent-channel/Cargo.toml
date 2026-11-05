@@ -1,0 +1,105 @@
+[package]
+name = "seagent-channel"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# One cargo feature per self-contained platform family (see docs/BUILD.md). `default`
+# keeps every platform compiled in — a build without `--no-default-features` is the
+# historical one, byte for byte. With a feature off the module is not compiled and its
+# `build` in `config::registry()` becomes a stub that errors when that kind is configured.
+[features]
+default = ["all"]
+# Everything on: the default.
+all = [
+    "slack",
+    "mattermost",
+    "email",
+    "feishu",
+    "googlechat",
+    "dingtalk",
+    "wecom",
+    "wecom_callback",
+    "weixin",
+    "qqbot",
+    "yuanbao",
+    "bluebubbles",
+    "nextcloud_talk",
+    "synology_chat",
+    "zalo",
+    "zalouser",
+    "tlon",
+    "x",
+    "clickclack",
+    "raft",
+    "qa_channel",
+    "homeassistant",
+    "relay",
+    "simplex",
+    "ntfy",
+    "matrix",
+    "nostr",
+    "signal",
+]
+
+slack = []
+mattermost = []
+email = []
+feishu = []
+googlechat = []
+dingtalk = []
+wecom = []
+wecom_callback = []
+weixin = []
+qqbot = []
+yuanbao = []
+bluebubbles = []
+nextcloud_talk = []
+synology_chat = []
+zalo = []
+zalouser = []
+tlon = []
+x = []
+clickclack = []
+raft = []
+qa_channel = []
+homeassistant = []
+relay = []
+simplex = []
+ntfy = []
+
+# Matrix client plus its crypto/backup/trust state machines and the canonical-JSON
+# helper (`reef`) they share.
+matrix = ["matrix_backup", "matrix_e2ee", "matrix_sas", "matrix_trust", "reef"]
+matrix_backup = []
+matrix_e2ee = []
+matrix_sas = []
+matrix_trust = []
+reef = []
+
+# Nostr client, its relay client (`buzz`) and the secp256k1 primitives both use.
+nostr = ["buzz", "secp256k1"]
+buzz = []
+secp256k1 = []
+
+# Signal/iMessage/Photon/Twitch share their SMS, line and IRC helpers, so they travel together.
+signal = ["imessage", "irc", "twitch", "photon"]
+imessage = []
+irc = []
+twitch = []
+photon = []
+
+[dependencies]
+seagent-core.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+ureq.workspace = true
+libc.workspace = true
+seagent-net.workspace = true
+# The `transcripts` tool's `discord-voice` source (media side) reads this crate's voice manager.
+seagent-media.workspace = true
+# A14: the Teams consent-upload guard classifies addresses with `seagent_security::url_safety`
+# instead of keeping a second private-range table here.
+seagent-security.workspace = true
+ring.workspace = true
+base64.workspace = true

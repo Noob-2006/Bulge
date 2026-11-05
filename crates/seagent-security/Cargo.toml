@@ -1,0 +1,31 @@
+[package]
+name = "seagent-security"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# Security policy helpers shared by the kernel, tools, plugins and the CLI: approval
+# floors and state, threat patterns, env scrubbing, URL/path policy, OSV checks.
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+regex.workspace = true
+ureq.workspace = true
+seagent-net.workspace = true # seagent_net::http::builder — the one outbound client builder (proxy/CA/offline)
+libc.workspace = true
+# Skills Guard: Hermes' scan table uses look-around (27 of 134 patterns).
+fancy-regex = { version = "0.14", default-features = false, features = ["std", "unicode"] }
+# A13/A18: Ed25519 signature verification for plugin/skill manifests and release
+# artifacts, plus the SHA-256 digest every integrity check is built on (already in the
+# tree via rustls; no new transitive dependency).
+ring.workspace = true
+# Manifest signatures and detached `.sig` files are base64, not hex (already in the tree).
+base64.workspace = true
+
+[dev-dependencies]
+# `[security.egress_proxy]` is a real TOML table; the config test parses TOML, not JSON.
+toml.workspace = true
+# Test-only: `seagent_core::tmp::TempDir` (self-removing temp dirs in the test helpers).
+seagent-core.workspace = true
+# Test-only: the TLS syslog sink test (RFC 5425) runs a loopback rustls listener (already in the tree).
+rustls.workspace = true

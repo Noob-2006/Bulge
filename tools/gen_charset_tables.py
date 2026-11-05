@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""Pack the WHATWG Encoding Standard indexes into crates/ark-channel/data/ for charset.rs.
+"""Pack the WHATWG Encoding Standard indexes into crates/seagent-channel/data/ for charset.rs.
 
 Usage (download into a fresh empty directory first; the inputs are data, never executed):
     mkdir /tmp/whatwg && cd /tmp/whatwg
     for f in big5 gb18030 gb18030-ranges jis0208 jis0212 euc-kr ibm866 iso-8859-2 ... ; do
         curl -fO https://encoding.spec.whatwg.org/index-$f.txt; done
     curl -fO https://encoding.spec.whatwg.org/encodings.json
-    python3 -I tools/gen_charset_tables.py /tmp/whatwg crates/ark-channel/data
+    python3 -I tools/gen_charset_tables.py /tmp/whatwg crates/seagent-channel/data
 
 Outputs (all little-endian):
     <name>.bin       u16 first pointer, u16 count, count × u16 code point (0 = unmapped)

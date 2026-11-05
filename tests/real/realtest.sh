@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Real-environment suite (gen1-303/304/305/308, gen2-518, new-001): every `#[ignore]` case
-# gated on ARK_REAL_TESTS=1, run in one go, with a summary at the end.
+# gated on SEAGENT_REAL_TESTS=1, run in one go, with a summary at the end.
 #
 #   tests/real/realtest.sh                 # everything this host can run
 #   tests/real/realtest.sh --only browser  # browser | backends | desktop | webui | longtask | orphans
@@ -8,20 +8,20 @@
 #
 # Needs: cargo, a Chromium-family browser (browser, webui), podman (backends, desktop, ssh),
 # bwrap. docker is optional (its case reports SKIPPED without a client).
-# Creates only `ark-test-realtest-*` containers, the `localhost/ark-test-realtest` image and
-# files under $TMPDIR/ark-realtest-$$; all of it is removed on exit (also on Ctrl-C).
+# Creates only `seagent-test-realtest-*` containers, the `localhost/seagent-test-realtest` image and
+# files under $TMPDIR/seagent-realtest-$$; all of it is removed on exit (also on Ctrl-C).
 set -uo pipefail
 cd "$(dirname "$0")/../.."
 ROOT_DIR=$PWD
-export TMPDIR="${TMPDIR:-/tmp}" ARK_OFFLINE=1 ARK_REAL_TESTS=1
-WORK="$TMPDIR/ark-realtest-$$"
+export TMPDIR="${TMPDIR:-/tmp}" SEAGENT_OFFLINE=1 SEAGENT_REAL_TESTS=1
+WORK="$TMPDIR/seagent-realtest-$$"
 mkdir -p "$WORK/tmp"
 # Everything the tests create under $TMPDIR (scratch homes, the ssh ControlPath dir) lands
 # in $WORK and goes with it.
 export TMPDIR="$WORK/tmp"
-IMAGE=localhost/ark-test-realtest:latest
-SSHD="ark-test-realtest-sshd-$$"
-DESK="ark-test-realtest-desktop-$$"
+IMAGE=localhost/seagent-test-realtest:latest
+SSHD="seagent-test-realtest-sshd-$$"
+DESK="seagent-test-realtest-desktop-$$"
 ONLY="" RMI=0
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -63,13 +63,13 @@ ensure_image() {
 }
 
 if want orphans; then
-  suite orphans cargo test -q -p ark-core proc:: -- --test-threads=1
-  suite orphans2 cargo test -q -p ark-browser --lib tests_real::launcher -- --test-threads=1
-  suite orphans3 cargo test -q -p ark --test daemon_orphan
+  suite orphans cargo test -q -p seagent-core proc:: -- --test-threads=1
+  suite orphans2 cargo test -q -p seagent-browser --lib tests_real::launcher -- --test-threads=1
+  suite orphans3 cargo test -q -p seagent --test daemon_orphan
 fi
 
 if want browser; then
-  suite browser cargo test -p ark-browser --lib tests_real -- --ignored --test-threads=1
+  suite browser cargo test -p seagent-browser --lib tests_real -- --ignored --test-threads=1
 fi
 
 if want backends; then
@@ -81,40 +81,40 @@ if want backends; then
          sh -c 'ssh-keygen -A >/dev/null && exec /usr/sbin/sshd -D -e' >/dev/null; then
       PORT=$(podman port "$SSHD" 22/tcp | head -1 | sed 's/.*://')
       for _ in $(seq 1 50); do (exec 3<>"/dev/tcp/127.0.0.1/$PORT") 2>/dev/null && break; sleep 0.2; done
-      SSH_ENV=(ARK_REAL_SSH_PORT="$PORT" ARK_REAL_SSH_KEY="$WORK/key" ARK_REAL_SSH_USER=root)
+      SSH_ENV=(SEAGENT_REAL_SSH_PORT="$PORT" SEAGENT_REAL_SSH_KEY="$WORK/key" SEAGENT_REAL_SSH_USER=root)
     fi
   fi
-  suite backends env "${SSH_ENV[@]}" cargo test -p ark-tools --lib real_backend -- --ignored --test-threads=1 --nocapture
+  suite backends env "${SSH_ENV[@]}" cargo test -p seagent-tools --lib real_backend -- --ignored --test-threads=1 --nocapture
   podman rm -f -t 1 "$SSHD" >/dev/null 2>&1 || true
 fi
 
 if want desktop; then
   if command -v podman >/dev/null && ensure_image; then
-    BIN=$(cargo test -p ark-app --lib --no-run --message-format=json 2>/dev/null | python3 -I -c 'import json,sys
+    BIN=$(cargo test -p seagent-app --lib --no-run --message-format=json 2>/dev/null | python3 -I -c 'import json,sys
 for l in sys.stdin:
     m = json.loads(l)
-    if m.get("reason") == "compiler-artifact" and m.get("target", {}).get("name") == "ark_app" and m.get("profile", {}).get("test") and m.get("executable"):
+    if m.get("reason") == "compiler-artifact" and m.get("target", {}).get("name") == "seagent_app" and m.get("profile", {}).get("test") and m.get("executable"):
         print(m["executable"])' | tail -1)
     suite desktop podman run --rm --name "$DESK" --userns=keep-id --user "$(id -u):$(id -g)" \
-      -e HOME=/tmp/h -e TMPDIR=/tmp -e ARK_REAL_TESTS=1 -e ARK_REAL_DESKTOP=1 -e ARK_OFFLINE=1 \
-      -v "$BIN:/t/ark-app-tests:ro" "$IMAGE" \
-      sh -c 'mkdir -p /tmp/h && exec /t/ark-app-tests --ignored --exact computer::tests_real::real_bot_desktop_computer_use --test-threads=1'
+      -e HOME=/tmp/h -e TMPDIR=/tmp -e SEAGENT_REAL_TESTS=1 -e SEAGENT_REAL_DESKTOP=1 -e SEAGENT_OFFLINE=1 \
+      -v "$BIN:/t/seagent-app-tests:ro" "$IMAGE" \
+      sh -c 'mkdir -p /tmp/h && exec /t/seagent-app-tests --ignored --exact computer::tests_real::real_bot_desktop_computer_use --test-threads=1'
   else
     record desktop SKIP "podman missing or image build failed"
   fi
 fi
 
 if want webui; then
-  suite webui cargo test -p ark --test webui_browser -- --ignored --test-threads=1
+  suite webui cargo test -p seagent --test webui_browser -- --ignored --test-threads=1
 fi
 
 if want longtask; then
-  suite longtask cargo test -p ark-kernel --lib longtask -- --test-threads=1
+  suite longtask cargo test -p seagent-kernel --lib longtask -- --test-threads=1
 fi
 
 echo
 echo "================ realtest summary ================"
 printf '%s\n' "${SUMMARY[@]}"
-echo "leftover ark-test-realtest containers: $(podman ps -a --format '{{.Names}}' 2>/dev/null | grep -c "ark-test-realtest-.*-$$" || true)"
+echo "leftover seagent-test-realtest containers: $(podman ps -a --format '{{.Names}}' 2>/dev/null | grep -c "seagent-test-realtest-.*-$$" || true)"
 printf '%s\n' "${SUMMARY[@]}" | grep -q ' FAIL ' && exit 1
 exit 0

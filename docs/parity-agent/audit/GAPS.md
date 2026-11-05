@@ -14,12 +14,12 @@
 |---|---|---|---|---|---|---|---|
 | web | 網路搜尋／擷取 | 可編譯；1 個真實失敗 | 0 | 39 | 4 | 0 | 43 |
 | media | 媒體：視覺、語音、生成 | **無法編譯**（image_gen 宣告 15 個不存在的模組） | 0 | 9 | 59 | 3 | 71 |
-| browser | 瀏覽器與電腦操作 | **無法編譯**（ark-app 3 處） | 0 | 56 | 4 | 0 | 60 |
+| browser | 瀏覽器與電腦操作 | **無法編譯**（seagent-app 3 處） | 0 | 56 | 4 | 0 | 60 |
 | exec | 終端機、程序、沙箱後端 | 可編譯；1 個真實失敗（bwrap 網路隔離無效） | 17 | 29 | 15 | 1 | 62 |
 | security | 核准與安全 | 可編譯；2 個失敗（skills_guard） | 29 | 17 | 1 | 3 | 50 |
 | agents | 委派、session、多代理 | 可編譯；1 個真實失敗（decision 機率對應） | 35 | 45 | 13 | 2 | 95 |
 | automation | 排程、看板、訊息工具 | **無法編譯**（parked worktree 合併損壞，kernel 53 個錯誤） | 17 | 60 | 34 | 1 | 112 |
-| skills | 技能、記憶、上下文 | 可編譯；2 個真實失敗（ark-memory） | 21 | 56 | 98 | 9 | 184 |
+| skills | 技能、記憶、上下文 | 可編譯；2 個真實失敗（seagent-memory） | 21 | 56 | 98 | 9 | 184 |
 | ops | 指令、UI、維運 | 可編譯；全過 | 119 | 41 | 76 | 17 | 253 |
 | models | 模型供應商與用量 | 可編譯；全過，e2e 37/37 | 122 | 7 | 0 | 4 | 133 |
 | **合計** | | | **360** | **359** | **304** | **40** | **1063** |
@@ -29,9 +29,9 @@
 ## 共通問題（先修這些，成本最低）
 
 1. **三份副本無法編譯**：media、browser、automation。browser 只差 3 處編譯錯誤，修好就能讓約 39 項由 🚧 轉 ✅。
-2. **大量程式「寫了沒接線」**：web 的 17 家搜尋供應商、exec 的 ExecBackend、agents 的 Runtime::delegate、skills 的 ark-memory／refs／toolsearch、security 的審批轉發，都沒有註冊成工具或指令。接線是這輪最划算的工作。
+2. **大量程式「寫了沒接線」**：web 的 17 家搜尋供應商、exec 的 ExecBackend、agents 的 Runtime::delegate、skills 的 seagent-memory／refs／toolsearch、security 的審批轉發，都沒有註冊成工具或指令。接線是這輪最划算的工作。
 3. **空殼模組**：ops 有 6 個已註冊但沒內容（telemetry、doctor、secretsrc、batch、evals、status）；media 的 TTS／STT／視覺等是骨架；skills 的 hub／Guard／ledger 是 stub。
-4. **迴歸**：skills 副本把 `ark memory accept/reject` 導到 stub；ops 的 TUI 忽略 /new、/clear、/quit；security 的 `/pause` 不會真的停。
+4. **迴歸**：skills 副本把 `seagent memory accept/reject` 導到 stub；ops 的 TUI 忽略 /new、/clear、/quit；security 的 `/pause` 不會真的停。
 5. **跨組重複**：SSRF（web `ssrf.rs` 與 security `url_safety`）、env 清洗（security 與 exec）、網站封鎖清單（web 與 security），合併時要擇一。
 
 ## 各組剩餘缺口（依使用者影響排序）
@@ -52,12 +52,12 @@
 12. web-readability／web_fetch 供應商鏈 — 缺被 web_fetch 呼叫。
 13. tavily_search / tavily_extract — `vendor_tools.rs` 空殼，缺兩個專用工具。
 14. github_read / github_search — `github.rs` 空殼，全缺。
-15. web CLI 指令 — 缺 `ark web providers`（錯誤訊息已引用）等。
+15. web CLI 指令 — 缺 `seagent web providers`（錯誤訊息已引用）等。
 16. Wizard web search 設定 — setup.rs 缺搜尋供應商步驟。
 
 ### media：媒體：視覺、語音、生成
 
-1. 🚧 接線：沒有任何 crate 依賴 `ark-media`；`ark_media::tools()` 沒有註冊進工具清單（ark-tools/lib.rs 或 kernel），`[media]` 設定也沒有接進主設定。
+1. 🚧 接線：沒有任何 crate 依賴 `seagent-media`；`seagent_media::tools()` 沒有註冊進工具清單（seagent-tools/lib.rs 或 kernel），`[media]` 設定也沒有接進主設定。
 2. ⬜ 編譯錯誤：`image_gen/mod.rs` 引用了 15 個不存在的模組和 `video_gen::vydra`，整個 crate（以及 workspace 的 build）會失敗。
 3. ⬜ inbound 媒體理解（OpenClaw media understanding pipeline／Hermes gateway 語音自動轉錄）：`inbound::understand()` 是骨架，channel 附件不會被轉錄、描述或抽取。
 4. ⬜ STT：沒有 faster-whisper、whisper.cpp、groq/openai/deepinfra/mistral/xai/elevenlabs 雲端供應商，沒有切段，也沒有 command/plugin/streaming。
@@ -88,7 +88,7 @@
 
 ### browser：瀏覽器與電腦操作
 
-0. 🚧 **編譯錯誤（擋住全部 39 列 ✅）**：`ark-app/src/server.rs:166` match 型別、`browser_view.rs:213/223` ureq API 不符、`ark-browser/src/cloud.rs:288-318` 參數數量。修好後需跑 `cargo test -p ark-browser`（含 `--ignored real_chromium_end_to_end`，本機有 chromium）。
+0. 🚧 **編譯錯誤（擋住全部 39 列 ✅）**：`seagent-app/src/server.rs:166` match 型別、`browser_view.rs:213/223` ureq API 不符、`seagent-browser/src/cloud.rs:288-318` 參數數量。修好後需跑 `cargo test -p seagent-browser`（含 `--ignored real_chromium_end_to_end`，本機有 chromium）。
 
 1. 🚧 computer_use（Hermes）：沒有註冊任何本機 `computer_use` 工具，沒配對 node 就不能控制桌面；`computer/backend.rs`、`config.rs` 沒宣告 `mod`，不會編譯。
 2. 🚧 computer（OpenClaw gateway 本機）：沒有本機 `computer` 工具；zoom/drag/set_value/menus 仍只有 node 版的子集。
@@ -97,8 +97,8 @@
 5. 🚧 本機 Chromium 自動安裝：找不到瀏覽器只回錯誤，不會下載安裝。
 6. 🚧 Bot Desktop：沒有無頭 Xvfb/Xfce＋RFB 啟動器，只有 lease 狀態機。
 7. ⬜ /browser 斜線指令：`control.rs` 只有一行註解。
-8. ⬜ browser close-profile CLI：沒有 `ark browser` 子指令。
-9. ⬜ screen status/start/stop/install CLI：不存在（manager 卻假設 `ark screen start` 會寫 env 檔）。
+8. ⬜ browser close-profile CLI：沒有 `seagent browser` 子指令。
+9. ⬜ screen status/start/stop/install CLI：不存在（manager 卻假設 `seagent screen start` 會寫 env 檔）。
 10. ⬜ computer-use install/status/doctor/permissions/grant CLI：不存在。
 11. 🚧 Sandbox browser（noVNC）：程式在，但 `packaging/sandbox-browser` 映像（Dockerfile）缺，啟動必失敗。
 12. 🚧 extension router：relay 在，但 `ui/browser-extension` 擴充本體缺。
@@ -110,8 +110,8 @@
 18. 🚧 act drag：無測試。
 19. 🚧 browser focus：工具層無測試。
 20. 🚧 browser close（分頁）：工具層無測試。
-21. 🚧 Doctor 瀏覽器就緒：只有工具 action，沒接到 `ark doctor`。
-22. （✅* 7 列：get_images、vault fill、status、start/stop、act select、act evaluate、download/text）只由 `#[ignore] real_chromium_end_to_end` 覆蓋，本機有 chromium/google-chrome，需執行 `cargo test -p ark-browser -- --ignored real_` 確認；失敗則降為 🚧。
+21. 🚧 Doctor 瀏覽器就緒：只有工具 action，沒接到 `seagent doctor`。
+22. （✅* 7 列：get_images、vault fill、status、start/stop、act select、act evaluate、download/text）只由 `#[ignore] real_chromium_end_to_end` 覆蓋，本機有 chromium/google-chrome，需執行 `cargo test -p seagent-browser -- --ignored real_` 確認；失敗則降為 🚧。
 
 ### exec：終端機、程序、沙箱後端
 
@@ -202,7 +202,7 @@
 17. /retry（H§8）：無。
 18. /branch（H§8）：聊天內無、無依回合分支。
 19. Multi-agent routing/bindings（O§8）：`agents::route` 未接到 channel 路由；無 CLI。
-20. agents add/delete/bind（O§6）：無 `ark agents` CLI。
+20. agents add/delete/bind（O§6）：無 `seagent agents` CLI。
 21. sessions_create（O§1）：`create_agent_session` 零呼叫端，無工具。
 22. agents_list（O§1）：無工具。
 23. sessions_list（O§1）：無 in-agent 工具。
@@ -214,7 +214,7 @@
 29. users registry（O§8）：無 CLI，channel 不辨識使用者。
 30. users CLI（O§6）：無。
 31. /moa（H§8）：`moa_turn` 零呼叫端，無斜線指令、無 turn 層級測試。
-32. moa CLI（H§9）：無 `ark moa`。
+32. moa CLI（H§9）：無 `seagent moa`。
 33. worktree 隔離（H§15）：spawn 不建 worktree。
 34. Worktrees per-session（O§8）：不可達。
 35. git worktree 管理（H§23）：無 CLI。
@@ -242,13 +242,13 @@
 
 ### automation：排程、看板、訊息工具
 
-1. 【全域】合併損壞：hooks.rs 少 19 個 HookEvent 變體、main.rs 缺 5 個 mod 宣告、config 的 `kanban` 型別錯誤、缺 `surfaces` 欄位。整個 workspace 無法編譯，既有的 shell hooks 與 `ark webhook` 也因此退步。PROJECT_GATED 缺 `hooks_extra`（安全問題）。
+1. 【全域】合併損壞：hooks.rs 少 19 個 HookEvent 變體、main.rs 缺 5 個 mod 宣告、config 的 `kanban` 型別錯誤、缺 `surfaces` 欄位。整個 workspace 無法編譯，既有的 shell hooks 與 `seagent webhook` 也因此退步。PROJECT_GATED 缺 `hooks_extra`（安全問題）。
 2. automations／cronjob 模型工具（O§1 automations、H§1 cronjob_manage）：完全沒有，無 add/update/remove/list/run/runs/wake。
 3. cron 投遞（H§14 deliver/failure_deliver、O§8 announce/webhook）：outbound.rs 投遞層已存在，但 Job 沒有 deliver 欄，也沒人呼叫 deliver；沒有 `@at` 一次性排程。
 4. message 工具（O§1 message）：沒有模型工具。channel 端只有 discord/slack/telegram 的擴充動作；`normalize_poll` 不存在；send/edit/delete/react 沒有統一入口；其他 channel 沒實作。
 5. Heartbeat（O§8 Heartbeat、O§1 heartbeat_respond、H§14 Session heartbeat、H§8 /heartbeat）：沒有執行器、active hours、投遞與回應工具；wake.rs 只是佇列。
 6. Kanban 工具層（H§5 共 11 列工具）：tools/tests.rs 空，沒有工具層測試；orchestrator 工具（kanban_list/unblock）未註冊給任何 session。
-7. Kanban 派工器（H§5）：dispatch/tests.rs 空；沒有 `ark kanban` CLI、`/kanban`（H§8）。
+7. Kanban 派工器（H§5）：dispatch/tests.rs 空；沒有 `seagent kanban` CLI、`/kanban`（H§8）。
 8. workboard_*（O§2）：39 個工具未註冊，workboard/tests.rs 空。
 9. Surfaces 九項（canvas、show_widget、dashboard、gateway、progress_card、lobster、diffs、file transfer、team-reports，以及 O§8 session cards）：只差 config `surfaces` 欄位；gateway 缺 config.apply。
 10. Hooks 群（O§8 pre-run／message pipeline／subagent／misc／bundled／gmail／auto-reset、H§14 outbound webhooks／shell hooks、H§9／O§6 hooks CLI 與 webhook test）：parked/wt-hooks 可補。補完後仍缺 cron_changed/cron_reconciled 觸發點與 heartbeat contribution 執行器。
@@ -259,35 +259,35 @@
 15. kanban 儀表板（H§5）：沒有 web UI 頁面；Boards（O§8）有兩套重疊實作，且受合併損壞阻擋。
 16. kanban PR acceptance（H§5）：受 cfg 型別錯誤阻擋，工具路徑無測試。
 17. conversations_list／conversations_turn ⬜、conversations_send 🚧（O§1）：未改動。
-18. message CLI（O§6）：`ark channel send` 只能送文字，`message_action` 沒接 CLI。
+18. message CLI（O§6）：`seagent channel send` 只能送文字，`message_action` 沒接 CLI。
 19. system CLI（O§6 events/heartbeat/presence）：不存在。
 20. /loop（H§8、H§14、O§5）、/dashboard、/workboard、/card（O§5）、/subgoal 與 Subgoals（H§8、H§14）：不存在或只有 schedule 近似。
 21. cron 技能/腳本/no_agent、prompt 威脅掃描、incidents/runs/notepad、chronos、自動化建議（H§14）；cron CLI 缺 edit/runs/incidents/notepad/doctor（H§9）。
 22. 元寶工具 ×5、Google Meet ×5、Teams 會議管線（H§3）：完全沒有（config 只有 `meetings` 空骨架）。
 23. whatsapp_login/whatsapp_call、discussion（clickclack）、session-share、logbook（O§2）：完全沒有。
-24. Flows（O§8）：只有 `ark setup`。webhooks CLI（O§6）沒有 Gmail setup 輔助指令。
+24. Flows（O§8）：只有 `seagent setup`。webhooks CLI（O§6）沒有 Gmail setup 輔助指令。
 25. context_engine 執行期工具（H§3）：engine 沒有自帶工具的通道（未改動）。
 
 ### skills：技能、記憶、上下文
 
-1. /memory（H§8）：`ark memory accept|reject` 被 `wire::owns` 導到 `ark_memory::host::cli` 的 stub，現在一律報錯（迴歸；e2e run.py:442 會失敗）。
-2. memory_search（O§1）：`MemorySearch` 與 hybrid index 已寫好，但 `ark_memory::host::tools` 回傳空；要改成呼叫 `Host::new` 加 `ark_memory::tools(&h)`。
+1. /memory（H§8）：`seagent memory accept|reject` 被 `wire::owns` 導到 `seagent_memory::host::cli` 的 stub，現在一律報錯（迴歸；e2e run.py:442 會失敗）。
+2. memory_search（O§1）：`MemorySearch` 與 hybrid index 已寫好，但 `seagent_memory::host::tools` 回傳空；要改成呼叫 `Host::new` 加 `seagent_memory::tools(&h)`。
 3. memory_get（O§1）：同上，未註冊。
 4. embeddings providers（O§3）：程式完整，但沒有使用端（要等 memory_search 接線）。
 5. MemoryManager（H§11）：`lifecycles()` 從沒被傳給 `add_lifecycle`，prefetch/sync/pre_compress 都不會發生。
 6. Memory flush before compaction（O§8）：`Flush` 未註冊。
 7. active-memory（O§2）：`ActiveMemory` 未註冊；它的測試失敗。
-8. /active-memory（O§5）：`ark_memory::slash` 沒有包成 `Slash` 註冊。
+8. /active-memory（O§5）：`seagent_memory::slash` 沒有包成 `Slash` 註冊。
 9. dreaming（O§2）：`dreaming_tick` 沒有排程器呼叫。
 10. /dreaming（O§5）：未註冊。
 11. memory_recall/store/forget（O§2）：`VectorMemory` 工具與 `AutoMemory` 都未註冊。
-12. wiki_*（O§2）：`wiki.rs` 沒有工具或 CLI 接線（`ark memory wiki` 會進 stub）。
+12. wiki_*（O§2）：`wiki.rs` 沒有工具或 CLI 接線（`seagent memory wiki` 會進 stub）。
 13. （✅ 列的附帶缺口）內建 MEMORY.md / USER.md（H§11）的字元上限、write_approval 設定：設定不生效（`set_limits` 從未被呼叫）。
 14. memory 工具（H§1）：威脅掃描 `WRITE_SCANNER` 沒有接到 `threats::scan`。
 15. 記憶寫入威脅掃描（H§11）：同上。
 16. 記憶 context 圍欄（H§11）：沒有 lifecycle，所以 fence 不會生效；`StreamScrubber` 沒接到輸出；fence 測試失敗。
 17. 記憶查詢改寫（H§11）：`rewrite.rs` 未接線。
-18. memory setup/status/off/reset（H§9）：`ark_memory::cli::run` 已實作，但 host 是 stub。
+18. memory setup/status/off/reset（H§9）：`seagent_memory::cli::run` 已實作，但 host 是 stub。
 19. Memory host SDK（O§8）：`events.rs` 未接線，沒有查詢 API。
 20. 記憶 provider 遷移/OAuth（H§11）：未接線，也沒有 CLI 或路由。
 21. Honcho profile（H§11）：未接線。
@@ -299,7 +299,7 @@
 27. skill_manage（H§1）：沒有 patch、批次、guard、lint、ledger、核准閘。
 28. skills_search（O§1）：沒有搜尋工具。
 29. skill_workshop（O§1）：沒有 test/publish。
-30. Skill loading + gating（O§9）：沒有 requires bins/env/os 篩選；`ark_skills::skill::discover` 未使用。
+30. Skill loading + gating（O§9）：沒有 requires bins/env/os 篩選；`seagent_skills::skill::discover` 未使用。
 31. 技能必要 env 與秘密收集（H§10）：沒有 required_environment_variables 處理。
 32. Skill env/API-key 注入（O§9）：沒有。
 33. SKILL.md 前處理（H§10）：沒有。
@@ -308,7 +308,7 @@
 36. /<skill-name>（H§8）：native slash 框架在，但沒有技能處理器。
 37. /skill <name>（O§5）：同上。
 38. /skills（H§8）：沒有。
-39. skills CLI 27 子指令（H§9）：`ark skills` 只回 stub 錯誤。
+39. skills CLI 27 子指令（H§9）：`seagent skills` 只回 stub 錯誤。
 40. skills CLI list/info/check/search/install（O§6）：同上。
 41. Hub：官方 optional-skills（H§10）：hub 全是 stub。
 42. Hub：GitHub taps（H§10）：同上。
@@ -352,7 +352,7 @@
 80. 驗證迴圈 pre_verify（H§12）：`verify::TurnState`、`VerifyGate` 從未使用。
 81. /compress（H§8）：沒有 `here N`、`--preview`。
 82. 部分壓縮（H§12）：沒有。
-83. /compact（O§5）：只在 `ark chat`。
+83. /compact（O§5）：只在 `seagent chat`。
 84. /context（H§8）：只有 `/status`。
 85. /context（O§5）：沒有。
 86. context 用量拆解（H§12）：沒有。
@@ -397,13 +397,13 @@
 4. Web UI 頁面（O§10 17 ⬜＋H§22 Web 儀表板）：`ui/web` 未改動；Config/Channels/Cron/Usage/Secrets/Terminal/Dashboards/Skills 等頁面全無，`ui_methods.rs` 空殼；Logs 只有後端 `logs.tail`。
 5. Batch runner／evals（H§21）：`ops/batch.rs`、`ops/evals.rs` 空殼；mini_swe_runner、trajectory_compressor、toolset_distributions 皆無。
 6. /restart（H§8 🚧、O§5 ⬜）：`service::restart_detached` 已寫但無呼叫者，無斜線；/activation、/allowlist 卻要使用者「/restart」。
-7. `ark status`（H§9、O§6）：`ops/status.rs` 空殼，無全元件狀態彙整。
+7. `seagent status`（H§9、O§6）：`ops/status.rs` 空殼，無全元件狀態彙整。
 8. TUI 斜線 action（H§22 TUI、H§8 /statusbar /redraw…）：TUI 忽略 `action`，/new /clear /quit /copy 等在 TUI 無效；無狀態列（H§22 ⬜、/statusbar 🚧）、無指令面板（/palette 🚧）、無 live dock（⬜）。
 9. 顯示偏好未套用：/verbose 只在頻道、/timestamps 只在 /history、/focus 與 /trace 無消費端（H§8、O§5）。
-10. 精靈步驟（O§11）：security note、migration import、workspace、service install、official plugins、completion 推薦皆未進 `ark setup`；model auth 只有 API key、gateway/channel 部分；H§20 onboarding 情境提示無。
+10. 精靈步驟（O§11）：security note、migration import、workspace、service install、official plugins、completion 推薦皆未進 `seagent setup`；model auth 只有 API key、gateway/channel 部分；H§20 onboarding 情境提示無。
 11. /update 斜線只檢查（H§8、O§5）；O§6 uninstall、configure 無測試；/allowlist、/activation、/send、/platforms 無測試（O§5、H§8）。
-12. `ark tools` 無每平台開關／post-setup（H§9）。
-13. /prompt (/compose) 只在 `ark chat`，compose 無測試（H§8）。
+12. `seagent tools` 無每平台開關／post-setup（H§9）。
+13. /prompt (/compose) 只在 `seagent chat`，compose 無測試（H§8）。
 14. /debug、dump、debug share（H§8、H§9、O§5 /debug）：無除錯報告。
 15. /diagnostics、/openclaw、/dashboard、/pair、/controlui（O§5）：無。
 16. worktree（H§8 /worktree、H§9 worktree、O§6 worktrees）：無。
@@ -420,4 +420,4 @@
 4. copilot-acp（H§17）：不是 ACP 客戶端，只用 `copilot -p` 文字輸出，沒有串流事件與工具呼叫。
 5. /login（O§5）：聊天內不能完成登入，只顯示指引。
 6. nous（H§17）：缺 agent-key 換發與續期，直接用 OAuth access token；client_id 寫死 `hermes-cli`。
-7. `ark model`（H§9）：已接線，但沒有任何測試跑這條路徑。
+7. `seagent model`（H§9）：已接線，但沒有任何測試跑這條路徑。

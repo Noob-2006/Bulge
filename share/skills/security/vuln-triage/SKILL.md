@@ -1,9 +1,9 @@
 ---
-upstream: "ark/skills original to ark (MIT)"
+upstream: "seagent/skills original to SE Agent (MIT)"
 name: vuln-triage
 description: "Turn scanner output into a short, ranked fix list: parse, de-duplicate, rank by exploitability, group by fix, open tickets."
 version: 1.0.0
-author: ark
+author: SE Agent
 license: MIT
 platforms: [linux, macos, windows]
 metadata:

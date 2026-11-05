@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-"""Regenerate ark's bundled skills and hub catalogs from the Hermes and OpenClaw checkouts
-(both MIT). Usage: port_skills.py <hermes-agent> <openclaw> <ark-share-dir>
+"""Regenerate seagent's bundled skills and hub catalogs from the Hermes and OpenClaw checkouts
+(both MIT). Usage: port_skills.py <hermes-agent> <openclaw> <seagent-share-dir>
 
 - share/skills/<category>/<name>/   Hermes skills/ (minus Hermes-internal ones) and OpenClaw
   skills/ + custodian-skills/ (category "openclaw" / "custodian"); when both ship a skill of the
   same name the Hermes one is primary and the upstream OpenClaw procedure is appended verbatim
   under `## OpenClaw procedure (upstream openclaw/skills/<name>, MIT, verbatim)`.
   Hand-maintained skills (see PRESERVE) are copied aside and restored after the rebuild, so
-  `ark-agent`, `ark-skill-authoring` and the hand-placed macOS ports survive a regeneration.
+  `seagent-agent`, `seagent-skill-authoring` and the hand-placed macOS ports survive a regeneration.
 - share/optional-skills/index.json  catalog of Hermes optional-skills/ (installed via the hub
   "official" source, fetched from the upstream repo on demand; not vendored).
 - share/plugin-catalog/index.json   Hermes plugin-catalog/*.yaml.
@@ -19,19 +19,19 @@ import yaml
 
 hermes, openclaw, share = sys.argv[1], sys.argv[2], sys.argv[3]
 # Hermes-internal product docs: `hermes-agent` and `hermes-agent-skill-authoring` ship here as the
-# adapted ark ports (see PRESERVE); `inspecting-hermes-desktop-dom` is N/A (Hermes Electron app).
+# adapted seagent ports (see PRESERVE); `inspecting-hermes-desktop-dom` is N/A (Hermes Electron app).
 HERMES_SKIP = {"hermes-agent", "hermes-agent-skill-authoring", "inspecting-hermes-desktop-dom"}
-# macOS-only / OpenClaw-app-only skills and ones ark covers natively. bear-notes/things-mac/peekaboo/
+# macOS-only / OpenClaw-app-only skills and ones seagent covers natively. bear-notes/things-mac/peekaboo/
 # model-usage are transcribed by hand (PRESERVE) with a `## Platform note`; apple-notes/apple-reminders
 # exist as Hermes ports and pick up the OpenClaw procedure through the merge branch (not skipped).
 OPENCLAW_SKIP = {"bear-notes", "control-ui", "mcporter", "model-usage", "node-connect", "peekaboo", "things-mac", "coding-agent", "skill-creator"}
 SKIP_FILES = {".DS_Store"}
 # Hand-maintained skill directories (repo-relative), copied aside before the rebuild and put back
 # afterwards; the generator never writes these from upstream. Keep the list in sync with
-# `share/skills/**` and `crates/ark-skills/tests/content.rs`.
+# `share/skills/**` and `crates/seagent-skills/tests/content.rs`.
 PRESERVE = [
-    "skills/autonomous-ai-agents/ark-agent",          # adapted from hermes-agent
-    "skills/software-development/ark-skill-authoring",  # adapted from hermes-agent-skill-authoring
+    "skills/autonomous-ai-agents/seagent-agent",          # adapted from hermes-agent
+    "skills/software-development/seagent-skill-authoring",  # adapted from hermes-agent-skill-authoring
     "skills/apple/bear-notes",
     "skills/apple/things-mac",
     "skills/apple/peekaboo",
@@ -97,7 +97,7 @@ def merge_openclaw_inline(dest, src, name):
 
 out_skills = os.path.join(share, "skills")
 # Stash the hand-maintained skills before the rebuild wipes the tree.
-stash = tempfile.mkdtemp(prefix="ark-skills-preserve-")
+stash = tempfile.mkdtemp(prefix="seagent-skills-preserve-")
 kept = []
 for rel in PRESERVE:
     src = os.path.join(share, rel)

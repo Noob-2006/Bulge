@@ -1,7 +1,7 @@
 {
-  "name": "ark-zalouser-bridge",
+  "name": "seagent-zalouser-bridge",
   "version": "0.1.0",
-  "description": "Zalo personal-account sidecar for ark (zca-js), loopback HTTP API with bearer auth",
+  "description": "Zalo personal-account sidecar for seagent (zca-js), loopback HTTP API with bearer auth",
   "private": true,
   "type": "module",
   "license": "MIT",

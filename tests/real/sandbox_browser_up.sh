@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Build (and verify) the sandbox-browser image the `sandbox` backend drives, then print
-# the environment `crates/ark-browser/tests/real_sandbox_browser.rs` needs.
+# the environment `crates/seagent-browser/tests/real_sandbox_browser.rs` needs.
 #
 #   eval "$(./tests/real/sandbox_browser_up.sh)"            # build if missing, print env
 #   eval "$(./tests/real/sandbox_browser_up.sh --rebuild)"  # force a rebuild first
@@ -8,13 +8,13 @@
 #
 # The image is `packaging/sandbox-browser` (Debian + Chromium + Xvfb + x11vnc + noVNC +
 # the authenticated CDP relay). Nothing else is built or touched, and no container is
-# left behind: the test starts and removes its own (`ark-sbx-browser-*`).
+# left behind: the test starts and removes its own (`seagent-sbx-browser-*`).
 #
-# Container CLI: $ARK_DOCKER, else docker, else podman (same resolution as ark itself).
+# Container CLI: $SEAGENT_DOCKER, else docker, else podman (same resolution as seagent itself).
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-IMAGE="ark-sandbox-browser:trixie-slim"
+IMAGE="seagent-sandbox-browser:trixie-slim"
 CONTRACT=2026-11-cdp-relay-auth
 
 REBUILD=0
@@ -29,10 +29,10 @@ for a in "$@"; do
 done
 
 cli() {
-  if [ -n "${ARK_DOCKER:-}" ]; then printf '%s\n' "$ARK_DOCKER"
+  if [ -n "${SEAGENT_DOCKER:-}" ]; then printf '%s\n' "$SEAGENT_DOCKER"
   elif command -v docker >/dev/null 2>&1; then printf 'docker\n'
   elif command -v podman >/dev/null 2>&1; then printf 'podman\n'
-  else echo "no container CLI: install docker or podman, or set ARK_DOCKER" >&2; return 1; fi
+  else echo "no container CLI: install docker or podman, or set SEAGENT_DOCKER" >&2; return 1; fi
 }
 CLI=$(cli) || exit 1
 
@@ -53,11 +53,11 @@ if [ "$REBUILD" -eq 1 ] || ! have_image; then
   "$CLI" build --network=host -t "$IMAGE" "$ROOT/packaging/sandbox-browser" >&2
 fi
 
-label=$("$CLI" image inspect --format '{{index .Config.Labels "org.ark.sandbox-browser.contract"}}' "$IMAGE")
+label=$("$CLI" image inspect --format '{{index .Config.Labels "org.seagent.sandbox-browser.contract"}}' "$IMAGE")
 if [ "$label" != "$CONTRACT" ]; then
-  echo "image $IMAGE has contract label '$label', ark expects '$CONTRACT' — rebuild it: $0 --rebuild" >&2
+  echo "image $IMAGE has contract label '$label', seagent expects '$CONTRACT' — rebuild it: $0 --rebuild" >&2
   exit 1
 fi
 
-printf 'export ARK_REAL_SANDBOX_IMAGE=%s\n' "$IMAGE"
-printf 'export ARK_DOCKER=%s\n' "$CLI"
+printf 'export SEAGENT_REAL_SANDBOX_IMAGE=%s\n' "$IMAGE"
+printf 'export SEAGENT_DOCKER=%s\n' "$CLI"

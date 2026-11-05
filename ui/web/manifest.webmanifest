@@ -1,7 +1,7 @@
 {
-  "name": "ark",
-  "short_name": "ark",
-  "description": "ark agent",
+  "name": "SE Agent",
+  "short_name": "SE Agent",
+  "description": "SE Agent — System Engineering Agent",
   "start_url": "/",
   "display": "standalone",
   "background_color": "#12020a",

@@ -1,0 +1,8 @@
+---
+- name: reload and restart seagentd
+  ansible.builtin.systemd: { name: seagentd, daemon_reload: true, state: restarted }
+  when: seagent_service_enabled | bool and ansible_service_mgr == 'systemd'
+
+- name: restart seagentd
+  ansible.builtin.service: { name: seagentd, state: restarted }
+  when: seagent_service_enabled | bool and ansible_service_mgr == 'systemd'

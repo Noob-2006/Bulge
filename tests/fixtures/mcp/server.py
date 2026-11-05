@@ -3,7 +3,7 @@
 
 Flags: --touch FILE    append "started" to FILE on startup (proves lazy start)
        --proto V       answer initialize with protocol version V
-       --plugin        advertise ark hooks (pre_tool) and channel "loop"
+       --plugin        advertise seagent hooks (pre_tool) and channel "loop"
        --token T       (http) require "Authorization: Bearer T"
        --stderr        write noise to stderr on startup
        --instructions S
@@ -172,7 +172,7 @@ def handle(m, stdio=True):
     if method == "initialize":
         caps = {"tools": {"listChanged": True}, "resources": {}, "prompts": {}}
         if EXT: caps["tasks"] = {"list": {}, "cancel": {}, "requests": {"tools": {"call": {}}}}
-        if PLUGIN: caps["experimental"] = {"ark": {"version": 1, "hooks": ["pre_tool"], "channels": ["loop"]}}
+        if PLUGIN: caps["experimental"] = {"seagent": {"version": 1, "hooks": ["pre_tool"], "channels": ["loop"]}}
         r = {"protocolVersion": PROTO, "capabilities": caps, "serverInfo": {"name": "fixture", "version": "1"}}
         if flag("--instructions"): r["instructions"] = flag("--instructions")
         return ok(r)
@@ -196,17 +196,17 @@ def handle(m, stdio=True):
     if method == "prompts/get":
         f = (p.get("arguments") or {}).get("file", "?")
         return ok({"messages": [{"role": "user", "content": {"type": "text", "text": "Please review " + f}}]})
-    if PLUGIN and method == "ark/hook":
+    if PLUGIN and method == "seagent/hook":
         s = json.dumps(p.get("payload"))
         if "forbidden" in s: return ok({"decision": "deny", "reason": "fixture forbids it"})
         if "hang" in s: time.sleep(2)
         if "rewrite" in s: return ok({"decision": "modify", "input": {"text": "rewritten"}})
         return ok({"decision": "allow"})
-    if PLUGIN and method == "ark/channel.send":
+    if PLUGIN and method == "seagent/channel.send":
         msg = p.get("message") or {}
         def later():
             time.sleep(0.05)
-            send({"jsonrpc": "2.0", "method": "ark/channel.inbound", "params": {"channel": p.get("channel"), "message": {"chat": msg.get("chat"), "sender": "echo-bot", "text": "echo: " + str(msg.get("text"))}}})
+            send({"jsonrpc": "2.0", "method": "seagent/channel.inbound", "params": {"channel": p.get("channel"), "message": {"chat": msg.get("chat"), "sender": "echo-bot", "text": "echo: " + str(msg.get("text"))}}})
         threading.Thread(target=later).start()
         return ok({"id": "m1"})
     return err(-32601, "method not found: " + str(method))

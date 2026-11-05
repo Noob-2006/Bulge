@@ -3,14 +3,14 @@
 #
 #   ./tests/real/nextcloud_up.sh --keep   # boot, print the env line, leave it running
 #   eval "$(./tests/real/nextcloud_up.sh --keep)"   # …and load it into the shell
-#   cargo test -p ark-channel --test real_nextcloud_talk
+#   cargo test -p seagent-channel --test real_nextcloud_talk
 #   ./tests/real/nextcloud_up.sh --down   # remove the containers this script made
 #
 # Without --keep it boots, verifies the whole stack (user, room, bot, send and read
 # back through OCS as a second user), prints the env line and removes its containers
 # again — a smoke test of the harness itself. `--keep` leaves them for the test.
 #
-# Only containers/network/volume named `ark-test-nc*` are ever touched. Everything
+# Only containers/network/volume named `seagent-test-nc*` are ever touched. Everything
 # here is a throwaway local install with throwaway credentials.
 #
 # Image: docker.io/library/nextcloud:29.0.7-apache (SQLite, no separate DB).
@@ -21,22 +21,22 @@ set -euo pipefail
 
 IMAGE=docker.io/library/nextcloud:29.0.7-apache
 TALK_VER=19.0.9
-NET=ark-test-nc
-WEB=ark-test-nc-web
-DATA=ark-test-nc-data
+NET=seagent-test-nc
+WEB=seagent-test-nc-web
+DATA=seagent-test-nc-data
 PORT=28090
 HOOK_PORT=28091
 BASE="http://127.0.0.1:$PORT"
-ADMIN=arkadmin
-ADMIN_PASS='ark-e2e-Admin-1'
-PEER=arkpeer
-PEER_PASS='ark-e2e-Peer-1'
-BOTUSER=arkbot
-BOTUSER_PASS='ark-e2e-Botuser-1'
-BOT_NAME=Ark
-ROOM_NAME=ark-e2e
+ADMIN=seagentadmin
+ADMIN_PASS='seagent-e2e-Admin-1'
+PEER=seagentpeer
+PEER_PASS='seagent-e2e-Peer-1'
+BOTUSER=seagentbot
+BOTUSER_PASS='seagent-e2e-Botuser-1'
+BOT_NAME=seagent
+ROOM_NAME=seagent-e2e
 TARBALL_URL="https://github.com/nextcloud-releases/spreed/releases/download/v$TALK_VER/spreed-v$TALK_VER.tar.gz"
-CACHE="${TMPDIR:-/home/noob/.cache/ark-build/r6-be/nc}"
+CACHE="${TMPDIR:-"${XDG_CACHE_HOME:-$HOME/.cache}/seagent-build/r6-be/nc"}"
 TARBALL="$CACHE/spreed-v$TALK_VER.tar.gz"
 
 KEEP=0
@@ -137,13 +137,13 @@ occ app:enable spreed >/dev/null || die "cannot enable spreed"
 occ app:enable spreed >/dev/null 2>&1 || true
 log "Talk $(occ app:list 2>/dev/null | grep -o 'spreed: [0-9.]*' || echo enabled)"
 
-# Second user (the "human" whose messages must reach ark) and the API user whose
-# app password ark uses for room lookups / WebDAV.
+# Second user (the "human" whose messages must reach seagent) and the API user whose
+# app password seagent uses for room lookups / WebDAV.
 for u in "$PEER" "$BOTUSER"; do
   occ user:get "$u" >/dev/null 2>&1 && occ user:delete "$u" >/dev/null 2>&1 || true
 done
-podman exec -u www-data -e OC_PASS="$PEER_PASS" "$WEB" php /var/www/html/occ user:add --password-from-env --display-name "Ark Peer" "$PEER" >/dev/null || die "cannot create $PEER"
-podman exec -u www-data -e OC_PASS="$BOTUSER_PASS" "$WEB" php /var/www/html/occ user:add --password-from-env --display-name "Ark API user" "$BOTUSER" >/dev/null || die "cannot create $BOTUSER"
+podman exec -u www-data -e OC_PASS="$PEER_PASS" "$WEB" php /var/www/html/occ user:add --password-from-env --display-name "SE Agent Peer" "$PEER" >/dev/null || die "cannot create $PEER"
+podman exec -u www-data -e OC_PASS="$BOTUSER_PASS" "$WEB" php /var/www/html/occ user:add --password-from-env --display-name "SE Agent API user" "$BOTUSER" >/dev/null || die "cannot create $BOTUSER"
 
 # App password for the API user (falls back to the login password where the
 # occ subcommand is missing).
@@ -156,7 +156,7 @@ if occ list user 2>/dev/null | grep -q 'user:add-app-password'; then
 fi
 
 # Room + the peer (the human) and the API user as participants: the API user's app
-# password only authenticates ark's room lookups/WebDAV, but the test also posts as
+# password only authenticates seagent's room lookups/WebDAV, but the test also posts as
 # it, and posting to a conversation requires being in it.
 ROOM=$(ocs POST /ocs/v2.php/apps/spreed/api/v4/room -d "roomType=3" -d "roomName=$ROOM_NAME" | sed -n 's/.*"token":"\([^"]*\)".*/\1/p')
 [ -n "$ROOM" ] || die "cannot create a conversation: $(ocs POST /ocs/v2.php/apps/spreed/api/v4/room -d 'roomType=3' -d "roomName=$ROOM_NAME")"
@@ -171,7 +171,7 @@ log "conversation $ROOM with $ADMIN + $PEER + $BOTUSER"
 SECRET=$( (head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n') )
 [ ${#SECRET} -ge 40 ] || die "bot secret too short"
 HOOK="http://host.containers.internal:$HOOK_PORT/nextcloud-talk-webhook"
-occ talk:bot:install --feature webhook --feature response --feature reaction "$BOT_NAME" "$SECRET" "$HOOK" "ark e2e bot" >/dev/null || die "talk:bot:install"
+occ talk:bot:install --feature webhook --feature response --feature reaction "$BOT_NAME" "$SECRET" "$HOOK" "seagent e2e bot" >/dev/null || die "talk:bot:install"
 BOT_LIST=$(occ talk:bot:list)
 BOT_ID=$(printf '%s\n' "$BOT_LIST" | grep -F "$BOT_NAME" | grep -o '[0-9]\+' | head -1)
 [ -n "$BOT_ID" ] || die "cannot find the bot id in: $BOT_LIST"
@@ -184,13 +184,13 @@ SELF=$(ocs_as "$PEER" "$PEER_PASS" POST "/ocs/v2.php/apps/spreed/api/v1/chat/$RO
 printf '%s' "$SELF" | grep -q '"status":"ok"' || die "peer cannot post: $SELF"
 MSG=$(ocs_as "$PEER" "$PEER_PASS" GET "/ocs/v2.php/apps/spreed/api/v1/chat/$ROOM?lookIntoFuture=0&limit=50&noStatusUpdate=1&setReadMarker=0&markNotificationsAsRead=0")
 printf '%s' "$MSG" | grep -q 'nc-up self check' || die "peer cannot read back: $MSG"
-# WebDAV write path (what ark uses for attachments): a cold instance can 500 on the
+# WebDAV write path (what seagent uses for attachments): a cold instance can 500 on the
 # first write, so prove it here before the tests depend on it.
-curl -sS -o /dev/null -w '%{http_code}' -u "$ADMIN:$ADMIN_PASS" -X MKCOL "$BASE/remote.php/dav/files/$ADMIN/Ark-nc-up" | grep -qE '201|405' || die "WebDAV MKCOL failed"
-DAVCODE=$(curl -sS -o /dev/null -w '%{http_code}' -u "$ADMIN:$ADMIN_PASS" -X PUT -H 'content-type: text/plain' --data-binary 'nc-up' "$BASE/remote.php/dav/files/$ADMIN/Ark-nc-up/probe.txt")
+curl -sS -o /dev/null -w '%{http_code}' -u "$ADMIN:$ADMIN_PASS" -X MKCOL "$BASE/remote.php/dav/files/$ADMIN/Seagent-nc-up" | grep -qE '201|405' || die "WebDAV MKCOL failed"
+DAVCODE=$(curl -sS -o /dev/null -w '%{http_code}' -u "$ADMIN:$ADMIN_PASS" -X PUT -H 'content-type: text/plain' --data-binary 'nc-up' "$BASE/remote.php/dav/files/$ADMIN/Seagent-nc-up/probe.txt")
 if [ "$DAVCODE" != 201 ] && [ "$DAVCODE" != 204 ]; then
   sleep 1
-  DAVCODE=$(curl -sS -o /dev/null -w '%{http_code}' -u "$ADMIN:$ADMIN_PASS" -X PUT -H 'content-type: text/plain' --data-binary 'nc-up' "$BASE/remote.php/dav/files/$ADMIN/Ark-nc-up/probe.txt")
+  DAVCODE=$(curl -sS -o /dev/null -w '%{http_code}' -u "$ADMIN:$ADMIN_PASS" -X PUT -H 'content-type: text/plain' --data-binary 'nc-up' "$BASE/remote.php/dav/files/$ADMIN/Seagent-nc-up/probe.txt")
 fi
 [ "$DAVCODE" = 201 ] || [ "$DAVCODE" = 204 ] || die "WebDAV PUT failed ($DAVCODE)"
 
@@ -201,6 +201,6 @@ fi
 GW=$(podman network inspect "$NET" --format '{{(index .Subnets 0).Gateway}}' 2>/dev/null || true)
 if [ -n "$GW" ]; then occ security:bruteforce:reset "$GW" >/dev/null 2>&1 || true; fi
 
-ENV_LINE="export ARK_REAL_NEXTCLOUD_URL=$BASE ARK_REAL_NEXTCLOUD_USER=$BOTUSER ARK_REAL_NEXTCLOUD_PASSWORD=$APP_PASS ARK_REAL_NEXTCLOUD_PEER=$PEER ARK_REAL_NEXTCLOUD_PEER_PASSWORD=$PEER_PASS ARK_REAL_NEXTCLOUD_ADMIN=$ADMIN ARK_REAL_NEXTCLOUD_ADMIN_PASSWORD=$ADMIN_PASS ARK_REAL_NEXTCLOUD_ROOM=$ROOM ARK_REAL_NEXTCLOUD_BOT_ID=$BOT_ID ARK_REAL_NEXTCLOUD_BOT_NAME=$BOT_NAME ARK_REAL_NEXTCLOUD_BOT_SECRET=$SECRET ARK_REAL_NEXTCLOUD_WEBHOOK_PORT=$HOOK_PORT"
+ENV_LINE="export SEAGENT_REAL_NEXTCLOUD_URL=$BASE SEAGENT_REAL_NEXTCLOUD_USER=$BOTUSER SEAGENT_REAL_NEXTCLOUD_PASSWORD=$APP_PASS SEAGENT_REAL_NEXTCLOUD_PEER=$PEER SEAGENT_REAL_NEXTCLOUD_PEER_PASSWORD=$PEER_PASS SEAGENT_REAL_NEXTCLOUD_ADMIN=$ADMIN SEAGENT_REAL_NEXTCLOUD_ADMIN_PASSWORD=$ADMIN_PASS SEAGENT_REAL_NEXTCLOUD_ROOM=$ROOM SEAGENT_REAL_NEXTCLOUD_BOT_ID=$BOT_ID SEAGENT_REAL_NEXTCLOUD_BOT_NAME=$BOT_NAME SEAGENT_REAL_NEXTCLOUD_BOT_SECRET=$SECRET SEAGENT_REAL_NEXTCLOUD_WEBHOOK_PORT=$HOOK_PORT"
 echo "$ENV_LINE"
 log "stack ready"

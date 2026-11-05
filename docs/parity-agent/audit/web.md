@@ -1,7 +1,7 @@
 # web 串流稽核結果
 
 **編譯／測試**：`cargo build --workspace --all-targets` 成功；`cargo test --workspace --no-fail-fast` 通過 872、失敗 3、忽略 2。
-- 失敗：`ark_tools::web::truncate::tests::head_tail_window_with_spill`（`char_len(&out) < 4000 + 700` 斷言失敗，**本串流真實缺陷**，影響 web_extract 的截斷與存檔）。
+- 失敗：`seagent_tools::web::truncate::tests::head_tail_window_with_spill`（`char_len(&out) < 4000 + 700` 斷言失敗，**本串流真實缺陷**，影響 web_extract 的截斷與存檔）。
 - coderun 兩個測試（`coderun::tests::script_output_exit_codes_and_nested_protocol`、`failures_timeout_cancel_and_bad_lang`）在五個副本都失敗，原因是稽核規定的 TMPDIR 路徑過長，Unix socket 超過 SUN_LEN（`cannot bind …/call-*.sock: path must be shorter than SUN_LEN`）。這是環境造成的，與本串流程式無關。
 - 原始輸出：`audit/web-tests.txt`
 
@@ -13,19 +13,19 @@
 ## 差異範圍
 
 - `git diff --stat HEAD`：45 檔、+11246／−1（含兩份 inventory 共 1404 行）。
-- 實際程式：新目錄 `crates/ark-tools/src/web/`（約 10,100 行，舊 `web.rs` 已 staged 刪除並**原封不動**搬成 `web/fetch.rs`，`diff` 完全相同）。
+- 實際程式：新目錄 `crates/seagent-tools/src/web/`（約 10,100 行，舊 `web.rs` 已 staged 刪除並**原封不動**搬成 `web/fetch.rs`，`diff` 完全相同）。
   - 子模組：cache, config, content, extract, fetch, github, html, http, keyless, links, markdown, pdf, policy, readability, search, ssrf, truncate, vendor_tools, xsearch, testutil
   - providers/：brave, codex, deepseek, duckduckgo, exa, firecrawl, gemini, keenable, kimi, minimax, ollama, openai_native, parallel, perplexity, searxng, tavily, xai
 - **空殼檔**（只有一行 `//! (stub — being implemented)`）：`web/extract.rs`、`web/github.rs`、`web/vendor_tools.rs`。
-- 共用檔改動：`ark-tools/src/lib.rs` 只把 `mod web` 改成 `pub mod web`（**未新增任何工具註冊**）；`ark-tools/Cargo.toml` 加 `ark-net`；`crates/ark/src/ext.rs` 加 `link_understanding()` 並在 `handle_inbound` 呼叫。
+- 共用檔改動：`seagent-tools/src/lib.rs` 只把 `mod web` 改成 `pub mod web`（**未新增任何工具註冊**）；`seagent-tools/Cargo.toml` 加 `seagent-net`；`crates/seagent/src/ext.rs` 加 `link_understanding()` 並在 `handle_inbound` 呼叫。
 - 無未追蹤檔（全部已 `git add`）。
 
 ## 關鍵結論（影響所有列）
 
-1. **新工具全部未接線**：`builtin_tools()`（`ark-tools/src/lib.rs:29`）仍只有舊的 `WebFetch`；`WebSearch`（search.rs:267）、`XSearch`（xsearch.rs:26）、`FirecrawlSearchTool`/`FirecrawlScrapeTool`（providers/firecrawl.rs:328/421）在整個 workspace 中只在各自的 `#[cfg(test)]` 裡被建構。kernel、main.rs、ark-app 都沒有引用。模型無法呼叫任何新工具。
-2. **`[web]` 設定無法寫入**：kernel `Config`（`ark-kernel/src/config.rs:11`）是 `deny_unknown_fields`，且沒有 `web` 欄位 → 使用者在 config.toml 寫 `[web]` 會解析失敗；`ext.rs::link_understanding` 從序列化的 Config 取 `"web"` 永遠是 `Null` → `WebConfig` 預設 `links.enabled=false` → 連結理解永遠不會執行。
+1. **新工具全部未接線**：`builtin_tools()`（`seagent-tools/src/lib.rs:29`）仍只有舊的 `WebFetch`；`WebSearch`（search.rs:267）、`XSearch`（xsearch.rs:26）、`FirecrawlSearchTool`/`FirecrawlScrapeTool`（providers/firecrawl.rs:328/421）在整個 workspace 中只在各自的 `#[cfg(test)]` 裡被建構。kernel、main.rs、seagent-app 都沒有引用。模型無法呼叫任何新工具。
+2. **`[web]` 設定無法寫入**：kernel `Config`（`seagent-kernel/src/config.rs:11`）是 `deny_unknown_fields`，且沒有 `web` 欄位 → 使用者在 config.toml 寫 `[web]` 會解析失敗；`ext.rs::link_understanding` 從序列化的 Config 取 `"web"` 永遠是 `Null` → `WebConfig` 預設 `links.enabled=false` → 連結理解永遠不會執行。
 3. **`web_fetch` 完全沒升級**：`web/fetch.rs` 與 HEAD 的 `web.rs` 位元組相同：無 SSRF、無 readability、無 PDF、無快取、無截斷存檔、無 firecrawl 後援。`ssrf.rs`、`readability.rs`、`pdf.rs`、`truncate.rs`、`cache.rs` 的 `DiskCache`/`fetch_memo` 都是**孤兒模組**（只被自己的測試或 links.rs 使用）。
-4. 錯誤訊息提到 `ark web providers`，但 `crates/ark/src/main.rs` 無此子指令。
+4. 錯誤訊息提到 `seagent web providers`，但 `crates/seagent/src/main.rs` 無此子指令。
 5. 品質面：provider 程式碼是真的 HTTP 請求/回應解析（非回 "unsupported" 的假實作），每個都有 FakeServer 測試；問題純粹是接線與入口。
 
 ## 統計
@@ -42,7 +42,7 @@
 
 ## 逐列狀態
 
-測試名稱均位於 `ark_tools::web::<模組>::tests::<名稱>`。
+測試名稱均位於 `seagent_tools::web::<模組>::tests::<名稱>`。
 
 | 項目 | 上游來源 | 狀態 | 證據或缺口 |
 |---|---|---|---|
@@ -86,9 +86,9 @@
 | 搜尋供應商 ollama | OpenClaw §3 extensions/ollama | 🚧 | `providers/ollama.rs`（本機 experimental→/api/web_search→Cloud）；測試 `ollama::tests::local_fallthrough_and_cloud`。缺：未接線 |
 | 搜尋供應商 codex-native | OpenClaw §3 extensions/codex | 🚧 | `providers/codex.rs`（對 app-server 跑受限 turn）；測試 `codex::tests::{bounded_turn_against_fake_app_server,projection_and_errors}`。缺：未接線 |
 | web_fetch 供應商 firecrawl＋readability 抽取器 | OpenClaw §3 extensions/firecrawl, web-readability | 🚧 | 零件都在（firecrawl scrape、readability），但 web_fetch 未使用；無 fetch 後援鏈 |
-| 連結理解（入站訊息自動摘要連結） | OpenClaw §8 src/link-understanding | 🚧 | `web/links.rs` `apply_link_understanding`（擷取裸連結、去重、max_links、scope 規則、SSRF 守衛抓取、blocklist、CLI processor 管線、範本）；`crates/ark/src/ext.rs` `handle_inbound` 有呼叫；測試 `links::tests::{end_to_end_fetch_process_and_enrich,blocks_loopback_and_private_targets,scope_rules_first_match_and_default,...}` 共 15 個。**缺：kernel Config 無 `web` 欄位且 `deny_unknown_fields` → 無法開啟，實際永遠停用**；無 ext.rs 層的測試 |
-| Wizard：web search 設定 | OpenClaw §11 src/flows/search-setup.ts | ⬜ | `crates/ark/src/setup.rs` 無搜尋供應商步驟 |
-| web 相關 CLI／斜線指令（如錯誤訊息提到的 `ark web providers`） | brief「related slash/CLI commands」 | ⬜ | `crates/ark/src/main.rs` 無 `web` 子指令；錯誤訊息指向不存在的指令 |
+| 連結理解（入站訊息自動摘要連結） | OpenClaw §8 src/link-understanding | 🚧 | `web/links.rs` `apply_link_understanding`（擷取裸連結、去重、max_links、scope 規則、SSRF 守衛抓取、blocklist、CLI processor 管線、範本）；`crates/seagent/src/ext.rs` `handle_inbound` 有呼叫；測試 `links::tests::{end_to_end_fetch_process_and_enrich,blocks_loopback_and_private_targets,scope_rules_first_match_and_default,...}` 共 15 個。**缺：kernel Config 無 `web` 欄位且 `deny_unknown_fields` → 無法開啟，實際永遠停用**；無 ext.rs 層的測試 |
+| Wizard：web search 設定 | OpenClaw §11 src/flows/search-setup.ts | ⬜ | `crates/seagent/src/setup.rs` 無搜尋供應商步驟 |
+| web 相關 CLI／斜線指令（如錯誤訊息提到的 `seagent web providers`） | brief「related slash/CLI commands」 | ⬜ | `crates/seagent/src/main.rs` 無 `web` 子指令；錯誤訊息指向不存在的指令 |
 
 附註（非本串流擁有）：網站黑名單（Hermes §6 website_policy，屬 security）在 `web/policy.rs` 已實作（`[web.blocklist]` domains＋shared_files；測試 `policy::tests::{enforce_gate,rules_and_matching}`），但只有 `links.rs` 使用。
 
@@ -108,5 +108,5 @@
 12. web-readability／web_fetch 供應商鏈 — 缺被 web_fetch 呼叫。
 13. tavily_search / tavily_extract — `vendor_tools.rs` 空殼，缺兩個專用工具。
 14. github_read / github_search — `github.rs` 空殼，全缺。
-15. web CLI 指令 — 缺 `ark web providers`（錯誤訊息已引用）等。
+15. web CLI 指令 — 缺 `seagent web providers`（錯誤訊息已引用）等。
 16. Wizard web search 設定 — setup.rs 缺搜尋供應商步驟。

@@ -122,4 +122,4 @@ options and prerequisites.
 
 ## Platform note
 
-This skill is transcribed verbatim from `openclaw/skills/peekaboo` (MIT, © OpenClaw contributors). It drives macOS-only tooling (`peekaboo`, the macOS UI automation CLI, which needs macOS Screen Recording and Accessibility permissions), so on Linux/Windows ark will discover it but the commands cannot run until the binary exists on a macOS host with those screen permissions granted. Nothing in this file is expected to work without macOS; ark's requirement gating (`requires.bins`/`os`) is what suppresses it elsewhere.
+This skill is transcribed verbatim from `openclaw/skills/peekaboo` (MIT, © OpenClaw contributors). It drives macOS-only tooling (`peekaboo`, the macOS UI automation CLI, which needs macOS Screen Recording and Accessibility permissions), so on Linux/Windows SE Agent will discover it but the commands cannot run until the binary exists on a macOS host with those screen permissions granted. Nothing in this file is expected to work without macOS; seagent's requirement gating (`requires.bins`/`os`) is what suppresses it elsewhere.

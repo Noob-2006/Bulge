@@ -1,8 +1,8 @@
-// ark web UI: Control UI pages (OpenClaw ui/src/pages/*) — channels, skills, skill workshop,
+// seagent web UI: Control UI pages (OpenClaw ui/src/pages/*) — channels, skills, skill workshop,
 // cron, usage, config, secrets, terminal, dashboards/apps/portals, workboard, agents, claws,
 // lobsterdex, memory import, meetings, worktrees, cloud workers, search, systems, custodian,
 // labs, about, profile, and this file's own model providers / devices / plugins / logs pages.
-// Backed by `ui.*` ARP methods (crates/ark/src/ops/ui_methods.rs and ops/webui.rs) plus the
+// Backed by `ui.*` ARP methods (crates/seagent/src/ops/ui_methods.rs and ops/webui.rs) plus the
 // kernel's kanban.*/schedule.list and pairing.* methods.
 // Uses app.js globals: S, $, esc, showPanel, row, openSession, openPluginPanel; surfaces.js: showBoards, openBoard.
 'use strict';
@@ -44,7 +44,7 @@ function shrink(file, max) {
 }
 const NOTE = '<p class="cp-note dim"></p>';
 
-// Pages this file adds on top of `ui.pages` (crates/ark/src/ops/ui_methods.rs). `showControl`
+// Pages this file adds on top of `ui.pages` (crates/seagent/src/ops/ui_methods.rs). `showControl`
 // appends them to the nav group each one declares, so the Rust page order stays authoritative.
 const EXTRA_PAGES = ['fleet', 'cluster', 'models', 'devices', 'plugins', 'logs'];
 
@@ -69,10 +69,10 @@ const PAGES = {
         v((ch.allow || []).join(', ') || '—'), v((ch.admins || []).join(', ') || '—'), v((ch.credentials || []).join(', ') || '—')]);
     }
     h += '</table>';
-    if (!c.channels.length) h = '<p class="dim">尚未設定頻道。執行 <code>ark channels add</code> 或 <code>ark setup</code>。</p>';
+    if (!c.channels.length) h = '<p class="dim">尚未設定頻道。執行 <code>seagent channels add</code> 或 <code>seagent setup</code>。</p>';
     const pend = pair.pending || [];
     if (pend.length) h += '<h3>等待配對的使用者</h3><p class="dim">配對碼 1 小時內有效；輸入對方收到的配對碼以核准。</p><table class="kv">' + pend.map((p, i) => row([v(p.channel), v(p.sender_name || p.sender), `<span class="dim">${when(p.created)}</span>`, `<input type="text" data-code="${i}" placeholder="配對碼" size="8">`, `<button class="btn small" data-approve="${v(p.channel)}" data-idx="${i}">核准</button>`])).join('') + '</table>';
-    return h + NOTE + '<p class="dim">變更頻道設定後需重新啟動 daemon（/restart）。憑證請在「秘密」頁或 <code>ark channels</code> 設定。</p>';
+    return h + NOTE + '<p class="dim">變更頻道設定後需重新啟動 daemon（/restart）。憑證請在「秘密」頁或 <code>seagent channels</code> 設定。</p>';
   }, after() {
     for (const s of qa('[data-ch]')) s.onchange = () => act(() => call('ui.channels.set', { name: s.dataset.ch, key: 'dm_policy', value: JSON.stringify(s.value) }), '已儲存；重新啟動後生效');
     for (const b of qa('[data-enable]')) b.onchange = () => act(() => call('ui.channels.set', { name: b.dataset.enable, key: 'enabled', value: String(b.checked) }), '已儲存；重新啟動後生效');
@@ -390,18 +390,18 @@ const PAGES = {
   } },
 
   worktrees: { title: 'Worktrees', group: '控制', async render() {
-    const ws = store.get('ark.workspace') || '';
+    const ws = store.get('seagent.workspace') || '';
     let list;
     try { list = await call('ui.worktrees.list', ws ? { workspace: ws } : {}); } catch (e) { return `<p class="dim">${v(e.message)}</p>`; }
-    return '<table class="kv"><tr><th>路徑</th><th>分支</th><th>HEAD</th><th></th></tr>' + list.map((w) => row([v(w.path), v(w.branch), `<code>${v(w.head)}</code>`, w.ark ? `<button class="btn ghost small" data-rm="${v(w.path)}">移除</button>` : ''])).join('') + '</table>' +
-      '<h3>新增 worktree</h3><p><input type="text" id="wtName" placeholder="名稱（英數、- _ .）"> <button class="btn small" id="wtCreate">在 ark/&lt;名稱&gt; 分支建立</button></p>' +
-      '<p><button class="btn ghost small" id="wtDry" data-read>預覽清理</button> <button class="btn ghost small" id="wtPrune">清理空的 ark worktree</button></p>' + NOTE;
+    return '<table class="kv"><tr><th>路徑</th><th>分支</th><th>HEAD</th><th></th></tr>' + list.map((w) => row([v(w.path), v(w.branch), `<code>${v(w.head)}</code>`, w.seagent ? `<button class="btn ghost small" data-rm="${v(w.path)}">移除</button>` : ''])).join('') + '</table>' +
+      '<h3>新增 worktree</h3><p><input type="text" id="wtName" placeholder="名稱（英數、- _ .）"> <button class="btn small" id="wtCreate">在 seagent/&lt;名稱&gt; 分支建立</button></p>' +
+      '<p><button class="btn ghost small" id="wtDry" data-read>預覽清理</button> <button class="btn ghost small" id="wtPrune">清理空的 seagent worktree</button></p>' + NOTE;
   }, after() {
-    const ws = store.get('ark.workspace') || undefined;
+    const ws = store.get('seagent.workspace') || undefined;
     for (const b of qa('[data-rm]')) b.onclick = async () => { if (confirm(`移除 ${b.dataset.rm}？未提交的變更會遺失。`) && await act(() => call('ui.worktrees.remove', { name: b.dataset.rm, workspace: ws }))) openPage('worktrees'); };
     if ($('wtCreate')) $('wtCreate').onclick = async () => { if (await act(() => call('ui.worktrees.create', { name: $('wtName').value.trim(), workspace: ws }), '已建立 worktree')) openPage('worktrees'); };
     if ($('wtDry')) $('wtDry').onclick = () => act(() => call('ui.worktrees.prune', { dry_run: true, workspace: ws }), (r) => r.pruned.length ? '會清理：' + r.pruned.join(', ') : '沒有可清理的');
-    if ($('wtPrune')) $('wtPrune').onclick = async () => { if (confirm('清理沒有提交、乾淨的 ark worktree？') && await act(() => call('ui.worktrees.prune', { dry_run: false, workspace: ws }))) openPage('worktrees'); };
+    if ($('wtPrune')) $('wtPrune').onclick = async () => { if (confirm('清理沒有提交、乾淨的 seagent worktree？') && await act(() => call('ui.worktrees.prune', { dry_run: false, workspace: ws }))) openPage('worktrees'); };
   } },
 
   'cloud-workers': { title: '雲端工作環境', group: '控制', async render() {
@@ -421,7 +421,7 @@ const PAGES = {
     $('wsProv').onchange = async (e) => { if (await act(() => call('ui.websearch.set', { provider: e.target.value }), '已儲存')) openPage('search'); };
     $('wsTest').onclick = async () => {
       $('wsResult').textContent = '測試中…';
-      const r = await act(() => call('ui.websearch.test', { query: 'ark web ui', run: true }));
+      const r = await act(() => call('ui.websearch.test', { query: 'seagent web ui', run: true }));
       $('wsResult').textContent = r ? (r.ok ? `${r.provider}：${r.count} 筆、${r.took_ms} ms` : '失敗：' + r.error) : '';
     };
     $('sessQ').onchange = async (e) => {
@@ -457,7 +457,7 @@ const PAGES = {
       const a = S.cpAlerts[+b.dataset.ask];
       const r = await act(() => call('session.create', { title: '看守：' + a.title }));
       if (!r) return;
-      await call('session.submit', { id: r.id, text: `ark 的看守頁回報了這個問題，請調查原因並提出修正（先不要改設定）：\n\n${a.title}\n${a.detail || ''}`, source: 'web' });
+      await call('session.submit', { id: r.id, text: `SE Agent 的看守頁回報了這個問題，請調查原因並提出修正（先不要改設定）：\n\n${a.title}\n${a.detail || ''}`, source: 'web' });
       $('panelDialog').close(); await loadSessions(); openSession(r.id);
     };
   } },
@@ -469,7 +469,7 @@ const PAGES = {
 
   about: { title: '關於', group: '設定', async render() {
     const a = await call('ui.about');
-    return `<table class="kv">${row(['ark', v(a.version)])}${row(['平台', v(a.target)])}${row(['授權', v(a.license)])}${row(['Profile', v(a.profile)])}${row(['更新頻道', v(a.update_channel)])}</table>
+    return `<table class="kv">${row(['SE Agent', v(a.version)])}${row(['平台', v(a.target)])}${row(['授權', v(a.license)])}${row(['Profile', v(a.profile)])}${row(['更新頻道', v(a.update_channel)])}</table>
       <h3>上游</h3><ul>${a.upstreams.map((u) => `<li>${v(u.name)}（${v(u.license)}） <a href="${v(u.url)}" target="_blank" rel="noopener">${v(u.url)}</a></li>`).join('')}</ul>`;
   } },
 
@@ -477,7 +477,7 @@ const PAGES = {
     const p = await call('ui.profile');
     return `<p>${p.avatar ? `<img class="cp-avatar" src="${v(p.avatar)}" alt="">` : ''}</p>
       <p><input type="text" id="pfName" placeholder="顯示名稱" value="${v(p.display_name || '')}"></p><p><input type="file" id="pfAvatar" accept="image/png,image/jpeg,image/webp"></p><p><button class="btn" id="pfSave">儲存</button></p>
-      <table class="kv">${row(['Profile', v(p.profile)])}${row(['所有 profile', v((p.profiles || []).join(', '))])}${row(['模型', v(p.model)])}</table><p class="dim">切換 profile：<code>ark profile use &lt;name&gt;</code></p>${NOTE}`;
+      <table class="kv">${row(['Profile', v(p.profile)])}${row(['所有 profile', v((p.profiles || []).join(', '))])}${row(['模型', v(p.model)])}</table><p class="dim">切換 profile：<code>seagent profile use &lt;name&gt;</code></p>${NOTE}`;
   }, after() {
     $('pfSave').onclick = async () => {
       const f = $('pfAvatar').files[0];
@@ -575,7 +575,7 @@ const PAGES = {
       `<span class="dim">${when(e.ts_ms)}</span>`, v(e.kind || ''), `<code>${v((e.session || '').slice(0, 10))}</code>`, v(e.text || ''),
     ])).join('') + '</table>' : '<p class="dim">公告板是空的。</p>';
     const paused = ((d.limits || {}).paused) || [];
-    if (paused.length) h += `<h3>暫停中</h3><p class="dim">${paused.map((p) => `${v(p.session)}：${v(p.reason)}（<code>ark fleet resume ${v(p.session)}</code>）`).join('<br>')}</p>`;
+    if (paused.length) h += `<h3>暫停中</h3><p class="dim">${paused.map((p) => `${v(p.session)}：${v(p.reason)}（<code>seagent fleet resume ${v(p.session)}</code>）`).join('<br>')}</p>`;
     return h;
   } },
 
@@ -598,16 +598,16 @@ const PAGES = {
       v(n.policy_version ?? '—'),
       n.source === 'remote' ? `<button class="btn ghost small" data-rmnode="${v(n.name || n.node)}">移除</button>` : '',
     ])).join('') + '</table>';
-    h += `<details><summary>登記遠端節點</summary><p class="dim">不共用資料目錄的節點：填它的 app 位址與存放唯讀 token 的金庫秘密名稱（<code>ark secrets set NAME …</code>）。推送政策需要另一個存 admin token 的秘密。</p>
+    h += `<details><summary>登記遠端節點</summary><p class="dim">不共用資料目錄的節點：填它的 app 位址與存放唯讀 token 的金庫秘密名稱（<code>seagent secrets set NAME …</code>）。推送政策需要另一個存 admin token 的秘密。</p>
       <input id="clName" placeholder="名稱"> <input id="clUrl" placeholder="https://node:8640"> <input id="clTok" placeholder="唯讀 token 秘密名稱"> <input id="clAdm" placeholder="admin token 秘密名稱（選填）"> <button class="btn small" id="clAdd">登記</button></details>`;
     if (w) h += `<h3>Worker 池</h3><p class="dim">${v(w.count)} 個 · 派送 ${v(w.dispatch)} · 完成 ${v(w.completed)} · 重派 ${v(w.redispatched)} · 佇列 ${v((w.queue || []).length)}</p>` + '<table class="kv"><tr><th>#</th><th>pid</th><th>狀態</th><th>重啟</th><th>上次結束</th></tr>' + (w.workers || []).map((x) => row([v(x.index), v(x.pid ?? '—'), x.session ? `執行 <code>${v(x.session)}</code>` : x.alive ? '閒置' : '<span class="bad">停止</span>', v(x.restarts), v(x.last_exit || '')])).join('') + '</table>';
     const agents = d.agents || [];
     h += '<h3>代理</h3><table class="kv"><tr><th>節點</th><th>具名代理</th><th>執行中</th><th>子代理</th></tr>' + agents.map((a) => row([v(a.node), v((a.agents || []).join(', ') || '（預設）'), v(a.running), v(a.fleet ? `${a.fleet.running || 0} 執行 / ${a.fleet.done || 0} 完成` : '—')])).join('') + '</table>';
     const sess = (d.sessions || []).filter((x) => x.running).concat((d.sessions || []).filter((x) => !x.running).slice(0, 20));
     h += '<h3>Session</h3><table class="kv"><tr><th></th><th>id</th><th>節點</th><th>標題</th><th>訊息</th><th>更新</th></tr>' + sess.map((x) => row([x.running ? '<span class="ok">▶</span>' : '', `<code>${v(x.id)}</code>`, v(x.node || '—'), v(x.title || ''), v(x.messages ?? ''), `<span class="dim">${when(x.updated_ms)}</span>`])).join('') + '</table>';
-    h += `<h3>受管政策</h3><p>釘選公鑰：${p.pinned_key_id ? `<code>${v(p.pinned_key_id)}</code>` : '<span class="dim">未設定（/etc/ark/managed.toml 的 <code>[managed] cluster_key</code>）</span>'} · 生效 v${v(p.active_version ?? '—')} · 已安裝 v${v(p.installed ? p.installed.version : '—')} · 已發佈 v${v(p.published ? p.published.version : '—')}${p.restart_required ? ' · <span class="bad">重新啟動 arkd 才會生效</span>' : ''}</p>
+    h += `<h3>受管政策</h3><p>釘選公鑰：${p.pinned_key_id ? `<code>${v(p.pinned_key_id)}</code>` : '<span class="dim">未設定（/etc/seagent/managed.toml 的 <code>[managed] cluster_key</code>）</span>'} · 生效 v${v(p.active_version ?? '—')} · 已安裝 v${v(p.installed ? p.installed.version : '—')} · 已發佈 v${v(p.published ? p.published.version : '—')}${p.restart_required ? ' · <span class="bad">重新啟動 seagentd 才會生效</span>' : ''}</p>
       ${p.error ? `<p class="bad">${v(p.error)}</p>` : ''}
-      <details><summary>發佈已簽章的政策</summary><p class="dim">在管理員電腦上 <code>ark cluster policy sign policy.toml --version N</code> 產生 bundle，貼上 JSON。節點只接受用釘選公鑰簽、版本更新的 bundle。</p>
+      <details><summary>發佈已簽章的政策</summary><p class="dim">在管理員電腦上 <code>seagent cluster policy sign policy.toml --version N</code> 產生 bundle，貼上 JSON。節點只接受用釘選公鑰簽、版本更新的 bundle。</p>
       <textarea id="clBundle" rows="6" style="width:100%"></textarea><br><button class="btn small" id="clPub">發佈</button> <button class="btn ghost small" id="clPush">推送到遠端節點</button> <button class="btn ghost small" id="clPull">立即拉取</button></details>${NOTE}`;
     return h;
   }, after() {
@@ -632,7 +632,7 @@ const PAGES = {
       `${(n.commands || []).length} 個`,
       `<span class="dim">${when(n.connected_since)}</span>`,
       `<button class="btn ghost small" data-ren="${v(n.id)}" data-name="${v(n.name || '')}"${isPaired(n.id) ? '' : ' disabled'}>重新命名</button> <button class="btn ghost small" data-rm="${v(n.id)}" data-name="${v(n.name || '')}">移除</button>`,
-    ])).join('') + '</table>' : '<p class="dim">沒有節點連線。在另一台機器執行 <code>ark node connect</code>。</p>';
+    ])).join('') + '</table>' : '<p class="dim">沒有節點連線。在另一台機器執行 <code>seagent node connect</code>。</p>';
     h += '<h3>已配對</h3>';
     h += paired.length ? '<table class="kv"><tr><th>裝置</th><th>平台</th><th>狀態</th><th>核准時間</th><th>佇列</th><th></th></tr>' + paired.map((p) => row([
       `<strong>${v(p.name || p.id)}</strong> <code>${v(p.id)}</code>`,
@@ -647,7 +647,7 @@ const PAGES = {
       `<code>${v(p.code)}</code>`, v(p.name || p.id || ''), v(p.platform || '—'),
       `<button class="btn small" data-approve="${v(p.code)}">核准</button> <button class="btn ghost small" data-reject="${v(p.code)}">拒絕</button>`,
     ])).join('') + '</table>' : '<p class="dim">沒有等待中的配對請求。</p>';
-    return h + NOTE + '<p class="dim">配對碼在 1 小時內有效；也可以在主機上執行 <code>ark nodes approve &lt;code&gt;</code>。</p>';
+    return h + NOTE + '<p class="dim">配對碼在 1 小時內有效；也可以在主機上執行 <code>seagent nodes approve &lt;code&gt;</code>。</p>';
   }, after() {
     for (const b of qa('[data-ren]')) b.onclick = async () => {
       const name = (prompt('新的裝置名稱', b.dataset.name || '') || '').trim();
@@ -740,7 +740,7 @@ const PAGES = {
     q('#logLimit').onchange = (e) => { CP.log = { ...cpLogParams(), limit: +e.target.value }; reload(); };
     q('#logGrep').onkeydown = (e) => { if (e.key === 'Enter') { CP.log = { ...cpLogParams(), grep: e.target.value.trim() }; reload(); } };
     q('#logRefresh').onclick = poll;
-    q('#logDownload').onclick = () => download(`ark-${String(CP.logFile || 'log').split('/').pop()}`, CP.logTail.map((r) => `${when(r.ts)} ${r.level || 'info'} ${r.target || ''} ${r.text}`).join('\n') + '\n', 'text/plain');
+    q('#logDownload').onclick = () => download(`seagent-${String(CP.logFile || 'log').split('/').pop()}`, CP.logTail.map((r) => `${when(r.ts)} ${r.level || 'info'} ${r.target || ''} ${r.text}`).join('\n') + '\n', 'text/plain');
   } },
 };
 

@@ -1,12 +1,12 @@
-# ARP：ark 統一協議（`ark/2`）
+# ARP：SE Agent 統一協議（`seagent/2`）
 
-ark 的每一個介面都講同一套協議：網頁、桌面 App、手機（PWA）、終端機 TUI、腳本、編輯器（ACP 橋接）、裝置（node）。
+SE Agent 的每一個介面都講同一套協議：網頁、桌面 App、手機（PWA）、終端機 TUI、腳本、編輯器（ACP 橋接）、裝置（node）。
 ARP 是 JSON-RPC 2.0，傳輸層有三種，方法與事件完全相同：
 
 | 傳輸 | 位置 | 驗證 | 用途 |
 |---|---|---|---|
-| Unix socket（每行一個 JSON） | `$XDG_RUNTIME_DIR/ark/arkd.sock`（0600） | 檔案權限 | CLI、TUI、本機腳本 |
-| WebSocket | `GET /arp` | `Authorization: Bearer`、`?token=` 或子協議 `ark.token.<t>` | Web／桌面／手機 UI、遠端用戶端 |
+| Unix socket（每行一個 JSON） | `$XDG_RUNTIME_DIR/seagent/seagentd.sock`（0600） | 檔案權限 | CLI、TUI、本機腳本 |
+| WebSocket | `GET /arp` | `Authorization: Bearer`、`?token=` 或子協議 `seagent.token.<t>` | Web／桌面／手機 UI、遠端用戶端 |
 | HTTP | `POST /arp`（一次一個請求） | Bearer | curl、自動化 |
 
 App Server 由 daemon 啟動（`[app] enabled = true`），同一個 port 上另有：
@@ -17,7 +17,7 @@ OpenAI 相容 API（`/v1/models`、`/v1/chat/completions`、`/v1/responses`）�
 WebSocket 連上後，伺服器先送 `ready` 通知；也可以隨時呼叫 `initialize`：
 
 ```json
-{"jsonrpc":"2.0","method":"ready","params":{"protocol":"ark/2","server":{"name":"ark","version":"0.1.0"},
+{"jsonrpc":"2.0","method":"ready","params":{"protocol":"seagent/2","server":{"name":"seagent","version":"0.1.0"},
  "methods":["ping","session.list",…],"events":["event","delta","pending","heartbeat"],
  "features":{"openai":true,"a2a":false,"nodes":true,"ui":true}}}
 ```
@@ -40,7 +40,7 @@ WebSocket 連上後，伺服器先送 `ready` 通知；也可以隨時呼叫 `in
 | `channels.list`、`mcp.list` | | channel 能力、MCP 狀態 |
 | `mcp.app_call` | `server, name, arguments, session?` | MCP Apps 視圖的 `tools/call` 代理：只限伺服器標為 app 可見的工具；非唯讀（或 untrusted 伺服器）先走 egress 核准；回傳 CallToolResult |
 | `plugins.ui` | `plugin, id, query?` | 外掛 UI 面板的 HTML：`{html, csp?}`（網頁 UI 以 MCP Apps 同樣的 sandbox srcdoc iframe＋CSP 呈現） |
-| `plugins.ui_call` | `plugin, id, method, params?` | 面板 iframe 的 JSON-RPC 請求（postMessage）代理到外掛 `ark/ui.call` |
+| `plugins.ui_call` | `plugin, id, method, params?` | 面板 iframe 的 JSON-RPC 請求（postMessage）代理到外掛 `seagent/ui.call` |
 | `pairing.list`、`pairing.approve`、`pairing.revoke` | `channel, code` / `channel, sender` | DM 配對 |
 | `node.list`、`node.describe`、`node.invoke`、`node.pair.list`、`node.pair.approve`、`node.pair.reject`、`node.remove` | | 裝置 |
 | `subscribe` | `{}` 或 `{id, from_seq?}` | 開始串流；有 `id` 時先重播該 session 紀錄 |
@@ -53,7 +53,7 @@ WebSocket 連上後，伺服器先送 `ready` 通知；也可以隨時呼叫 `in
 
 每個串流訊息的 `params.subscription` 是當初 `subscribe` 請求的 id，用戶端據此分流。
 
-- `event {session, event}`：session 紀錄的每一筆事件（`header`、`message`、`tool_called`、`tool_settled`、`gate`、`turn_start`、`turn_end`、`notice`、`error`…，格式見 `crates/ark-kernel/src/event.rs`）。MCP Apps 工具的 `tool_settled` 帶 `ui_resource {server, tool, uri, html, csp, permissions, prefersBorder, toolInput, toolResult, path}`，網頁 UI 以 `sandbox="allow-scripts"` 的 srcdoc iframe 呈現，postMessage 橋接 `ui/initialize`、`ui/notifications/initialized`、`ui/notifications/tool-input`／`tool-result`、`tools/call`（→ `mcp.app_call`）、`ui/notifications/size-changed`、`ui/open-link`（需確認）。
+- `event {session, event}`：session 紀錄的每一筆事件（`header`、`message`、`tool_called`、`tool_settled`、`gate`、`turn_start`、`turn_end`、`notice`、`error`…，格式見 `crates/seagent-kernel/src/event.rs`）。MCP Apps 工具的 `tool_settled` 帶 `ui_resource {server, tool, uri, html, csp, permissions, prefersBorder, toolInput, toolResult, path}`，網頁 UI 以 `sandbox="allow-scripts"` 的 srcdoc iframe 呈現，postMessage 橋接 `ui/initialize`、`ui/notifications/initialized`、`ui/notifications/tool-input`／`tool-result`、`tools/call`（→ `mcp.app_call`）、`ui/notifications/size-changed`、`ui/open-link`（需確認）。
 - `delta {session, text, thinking}`：串流中的文字或思考增量。
 - `pending {kind: approval|question, id, session, …}`：需要人回應。
 - `heartbeat`：每 15 秒，兼作斷線偵測。
@@ -61,18 +61,18 @@ WebSocket 連上後，伺服器先送 `ready` 通知；也可以隨時呼叫 `in
 ## 裝置協議（`/node`）
 
 1. 伺服器送 `connect.challenge {nonce}`。
-2. 裝置送 `node.connect {id, name, platform, caps, commands, publicKey, signature, deviceToken?, bootstrapToken?}`，`signature` 是 Ed25519 對 `ark-node|v1|<id>|<nonce>` 的簽章。
-3. 新裝置會拿到 8 碼配對碼；管理員 `ark nodes approve <code>` 後，裝置收到 `node.pair.resolved {deviceToken}`，之後以 token＋簽章連線。帶有效 `bootstrapToken`（setup code，一次性）的新裝置直接核准。
+2. 裝置送 `node.connect {id, name, platform, caps, commands, publicKey, signature, deviceToken?, bootstrapToken?}`，`signature` 是 Ed25519 對 `seagent-node|v1|<id>|<nonce>` 的簽章。
+3. 新裝置會拿到 8 碼配對碼；管理員 `seagent nodes approve <code>` 後，裝置收到 `node.pair.resolved {deviceToken}`，之後以 token＋簽章連線。帶有效 `bootstrapToken`（setup code，一次性）的新裝置直接核准。
 4. 伺服器送 `node.invoke.request {id, command, params, timeoutMs}`，必要時再送 `node.invoke.input {id, seq, data, eof?}`（`system.run {stdin: true}` 的標準輸入）或 `node.invoke.cancel {id}`；裝置回 `node.invoke.progress` 或 `node.invoke.result {id, ok, payload, error}`。
 5. 離線佇列：`node.invoke {queue: true, ttlMs?}` 對離線的已配對裝置排隊（預設 10 分鐘）；裝置連上時收到 `node.pending {count}`，呼叫 `node.pending.pull` → `{actions}`，執行後回結果並 `node.pending.ack {ids}`。工作項目 `node.pending.enqueue {nodeId, type: status.request|location.request}`（同型別合併，預設 24 小時）由裝置 `node.pending.drain {maxItems}` 取走。
 6. 裝置可送 `node.event {event, payload}`（`node.events` 查詢）；`node.token.rotate {id}` 讓伺服器發 `node.token.rotated {deviceToken}`，舊 token 立即失效。
 
 ARP 方法：`node.list`、`node.describe`（含指令參數 schema）、`node.rename`、`node.invoke`、`node.invoke.cancel`、`node.invoke.input`、`node.pending.enqueue`、`node.queue`、`node.events`、`node.token.rotate`、`node.setup.create`、`node.pair.list/approve/reject`、`node.remove`。
 
-Setup code 與 OpenClaw 相同：base64url(JSON `{url, bootstrapToken, expiresAtMs, tlsFingerprint?}`)。`ark nodes setup-code [--url ws://…] [--ttl 分鐘] [--tls-fingerprint SHA256]` 在終端機顯示 QR code（byte 模式、EC M、版本 1–10），裝置端 `ark node --setup-code <code>`；有 `tlsFingerprint` 時裝置只接受該憑證（wss）。
+Setup code 與 OpenClaw 相同：base64url(JSON `{url, bootstrapToken, expiresAtMs, tlsFingerprint?}`)。`seagent nodes setup-code [--url ws://…] [--ttl 分鐘] [--tls-fingerprint SHA256]` 在終端機顯示 QR code（byte 模式、EC M、版本 1–10），裝置端 `seagent node --setup-code <code>`；有 `tlsFingerprint` 時裝置只接受該憑證（wss）。
 
-Linux 裝置：`ark node --url ws://主機:8640/node`。允許的指令由裝置端 `~/.config/ark/node.toml` 決定（`run = "deny" | "allowlist" | "full"`、`allow`、`camera`、`screen`（含 `screen.record`，ffmpeg x11grab 或 wf-recorder）、`location`、`computer`（`computer.act`：X11 用 xdotool、Wayland 用 ydotool，預設關）、`canvas`（`canvas.present` 以預設瀏覽器開 URL/HTML）、`notifications`（dunst/mako 的 `notifications.list/actions`）、`read_roots`、`microphone`＋`[stt]`（`talk.ptt.start/stop/cancel/once`：pw-record 或 ffmpeg 錄音，OpenAI 相容 `/audio/transcriptions` 轉寫；`url`、`key` 或 `key_env`、`model`、`language`）、`cdp_url`（computer.act 瀏覽器動作，只接受本機 `http://127.0.0.1:<port>`）、`[plugins.<名>]`（外掛的 `node_commands` 由此裝置提供）），伺服器無法越權。`computer = true` 時 computer.act 也有 v2 動作：`list_apps`、`list_windows`、`get_accessibility_tree`／`get_window_state`、`set_value`、`bring_to_front`、以 `elementRef` 點擊（AT-SPI：有 python3-gi 用 Atspi，否則 `gdbus`）、`launch_app`（`gtk-launch` 桌面項目 id）、`get_browser_state`、`browser_navigate`、`browser_click`、`browser_type`（CDP）。外掛指令在 `node.connect` 以 `commandMeta {指令: {description, dangerous, params}}` 告知伺服器，`node.describe` 顯示其 schema，`dangerous` 者先經 egress 閘門。手機 App 專屬指令（photos、contacts、calendar、reminders、sms…）ark 沒有裝置端，但裝置宣告了就能呼叫，參數依內建 schema 檢查，危險指令一律先經 egress 閘門詢問。
+Linux 裝置：`seagent node --url ws://主機:8640/node`。允許的指令由裝置端 `~/.config/seagent/node.toml` 決定（`run = "deny" | "allowlist" | "full"`、`allow`、`camera`、`screen`（含 `screen.record`，ffmpeg x11grab 或 wf-recorder）、`location`、`computer`（`computer.act`：X11 用 xdotool、Wayland 用 ydotool，預設關）、`canvas`（`canvas.present` 以預設瀏覽器開 URL/HTML）、`notifications`（dunst/mako 的 `notifications.list/actions`）、`read_roots`、`microphone`＋`[stt]`（`talk.ptt.start/stop/cancel/once`：pw-record 或 ffmpeg 錄音，OpenAI 相容 `/audio/transcriptions` 轉寫；`url`、`key` 或 `key_env`、`model`、`language`）、`cdp_url`（computer.act 瀏覽器動作，只接受本機 `http://127.0.0.1:<port>`）、`[plugins.<名>]`（外掛的 `node_commands` 由此裝置提供）），伺服器無法越權。`computer = true` 時 computer.act 也有 v2 動作：`list_apps`、`list_windows`、`get_accessibility_tree`／`get_window_state`、`set_value`、`bring_to_front`、以 `elementRef` 點擊（AT-SPI：有 python3-gi 用 Atspi，否則 `gdbus`）、`launch_app`（`gtk-launch` 桌面項目 id）、`get_browser_state`、`browser_navigate`、`browser_click`、`browser_type`（CDP）。外掛指令在 `node.connect` 以 `commandMeta {指令: {description, dangerous, params}}` 告知伺服器，`node.describe` 顯示其 schema，`dangerous` 者先經 egress 閘門。手機 App 專屬指令（photos、contacts、calendar、reminders、sms…）SE Agent 沒有裝置端，但裝置宣告了就能呼叫，參數依內建 schema 檢查，危險指令一律先經 egress 閘門詢問。
 
 ## 版本
 
-`ark/2` 向下相容 daemon 原本的 `ARP v1`（同樣的 unix socket 方法）；新增的只有方法與欄位，不會改變既有語意。
+`seagent/2` 向下相容 daemon 原本的 `ARP v1`（同樣的 unix socket 方法）；新增的只有方法與欄位，不會改變既有語意。

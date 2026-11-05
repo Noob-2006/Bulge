@@ -1,0 +1,45 @@
+---
+- name: seagent | binary path
+  ansible.builtin.set_fact:
+    seagent_bin: "{{ seagent_tarball_prefix }}/bin/seagent"
+
+- name: seagent | hash the tarball on the controller
+  ansible.builtin.stat:
+    path: "{{ seagent_tarball_src }}"
+    checksum_algorithm: sha256
+  delegate_to: localhost
+  become: false
+  register: seagent_tar_stat
+
+- name: seagent | refuse a tarball that is not the pinned one (hash from the verified SHA256SUMS)
+  ansible.builtin.assert:
+    that: seagent_tar_stat.stat.checksum == (seagent_tarball_checksum | regex_replace('^sha256:', ''))
+    fail_msg: "sha256 of {{ seagent_tarball_src | basename }} does not match seagent_tarball_checksum"
+
+- name: seagent | unpack bin/ and share/seagent (the layout seagent_core::share finds next to the binary)
+  ansible.builtin.unarchive:
+    src: "{{ seagent_tarball_src }}"
+    dest: "{{ seagent_tarball_prefix }}"
+    owner: root
+    group: root
+  notify: restart seagentd
+
+- name: seagent | the dedicated account and its directories (what the package's scriptlets do)
+  ansible.builtin.user: { name: "{{ seagent_system_user }}", system: true, home: "{{ seagent_home }}", shell: /usr/sbin/nologin, create_home: false }
+
+- name: seagent | state directories
+  ansible.builtin.file: { path: "{{ item }}", state: directory, owner: "{{ seagent_system_user }}", group: "{{ seagent_system_user }}", mode: "0750" }
+  loop: ["{{ seagent_home }}", "{{ seagent_home }}/workspace", /var/cache/seagent, /var/log/seagent]
+
+- name: seagent | config directory (root:seagent 1770 -- seagent writes config.toml and secrets, cannot replace root-owned policy)
+  ansible.builtin.file: { path: "{{ seagent_config_dir }}", state: directory, owner: root, group: "{{ seagent_system_user }}", mode: "01770" }
+
+- name: seagent | unit, rendered by seagent itself for this host's systemd
+  ansible.builtin.shell: |
+    set -e
+    env -u SEAGENT_HOME {{ seagent_bin }} service print --system > /etc/systemd/system/seagentd.service.new
+    mv /etc/systemd/system/seagentd.service.new /etc/systemd/system/seagentd.service
+  args: { executable: /bin/sh }
+  changed_when: true
+  when: ansible_service_mgr == 'systemd'
+  notify: reload and restart seagentd

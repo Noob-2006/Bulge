@@ -73,7 +73,7 @@ case "$KEY_TYPE" in
 esac
 
 # Scratch space for the self-check, under $TMPDIR, never $HOME.
-SCRATCH=$(mktemp -d "${TMPDIR:-/tmp}/ark-sign-XXXXXX")
+SCRATCH=$(mktemp -d "${TMPDIR:-/tmp}/seagent-sign-XXXXXX")
 trap 'rm -rf "$SCRATCH"' EXIT
 
 sig_b64() {

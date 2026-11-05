@@ -62,9 +62,9 @@ CJK_RE = r"[\u3400-\u9fff\u3040-\u30ff\uac00-\ud7af]"
 
 
 def find_root():
-    """$ARK_AUDIT_ROOT, else the nearest ancestor holding audit/personas/MASTER.json, else
+    """$SEAGENT_AUDIT_ROOT, else the nearest ancestor holding audit/personas/MASTER.json, else
     three levels up."""
-    env = os.environ.get("ARK_AUDIT_ROOT")
+    env = os.environ.get("SEAGENT_AUDIT_ROOT")
     if env:
         return os.path.abspath(env)
     cur = HERE

@@ -1,12 +1,12 @@
-# Size budgets for the ark release binaries (audit row D6).
+# Size budgets for the seagent release binaries (audit row D6).
 # Columns: name <TAB> cargo profile <TAB> features <TAB> budget bytes <TAB> measured bytes <TAB> command
 # name          — the build name used in docs/BUILD.md and in this table
 # profile       — `release` (opt-level="s") or `slim` (opt-level="z", see the workspace Cargo.toml)
-# features      — `default`, `none` (--no-default-features) or an explicit comma list of `ark` features
+# features      — `default`, `none` (--no-default-features) or an explicit comma list of `seagent` features
 # budget        — ceiling in bytes; tools/size-budget.sh fails when a build exceeds it
 # measured      — size measured on 2026-11-05 (a clean target dir, same tree as the numbers in docs/BUILD.md)
-# command       — the exact command that produces the binary (target/<profile>/ark)
-default	release	default	36000000	33694024	cargo build -p ark --release
-slim-features	release	none	31000000	29543848	cargo build -p ark --release --no-default-features
-slim-profile	slim	default	31000000	28947688	cargo build -p ark --profile slim
-slim	slim	none	27000000	25474120	cargo build -p ark --profile slim --no-default-features
+# command       — the exact command that produces the binary (target/<profile>/seagent)
+default	release	default	36000000	33694024	cargo build -p seagent --release
+slim-features	release	none	31000000	29543848	cargo build -p seagent --release --no-default-features
+slim-profile	slim	default	31000000	28947688	cargo build -p seagent --profile slim
+slim	slim	none	27000000	25474120	cargo build -p seagent --profile slim --no-default-features

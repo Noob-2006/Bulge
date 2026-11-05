@@ -1,8 +1,8 @@
 # syntax=docker/dockerfile:1
-# ark on Red Hat UBI 9 minimal (ent-019): for OpenShift / RHEL shops that may only run Red Hat
+# seagent on Red Hat UBI 9 minimal (ent-019): for OpenShift / RHEL shops that may only run Red Hat
 # base images. Static musl binary (no glibc coupling to the UBI release) + git and certificates.
-#   docker build -f Dockerfile.ubi -t ark:ubi .
-#   docker run -d --init --name ark -v ark-data:/data -v "$PWD":/work ark:ubi
+#   docker build -f Dockerfile.ubi -t seagent:ubi .
+#   docker run -d --init --name seagent -v seagent-data:/data -v "$PWD":/work seagent:ubi
 # OpenShift runs containers under an arbitrary uid in group 0: /data and /work are group-writable
 # for gid 0 and the image sets no fixed uid in the config, only a numeric default (USER 10001).
 FROM lukemathwalker/cargo-chef:latest-rust-alpine AS chef
@@ -17,26 +17,26 @@ FROM chef AS builder
 COPY --from=planner /app/recipe.json recipe.json
 RUN cargo chef cook --release --locked --recipe-path recipe.json
 COPY . .
-RUN cargo build --release --locked --bin ark
+RUN cargo build --release --locked --bin seagent
 
 FROM registry.access.redhat.com/ubi9/ubi-minimal:latest
-LABEL org.opencontainers.image.title="ark" org.opencontainers.image.licenses="MIT" \
-      org.opencontainers.image.source="https://github.com/ark-agent/ark"
+LABEL org.opencontainers.image.title="seagent" org.opencontainers.image.licenses="MIT" \
+      org.opencontainers.image.source="https://github.com/se-agent/System-Engineering-Agent"
 RUN microdnf install -y --nodocs --setopt=install_weak_deps=0 git-core shadow-utils \
  && microdnf clean all \
- && useradd -m -u 10001 -g 0 -s /sbin/nologin ark \
+ && useradd -m -u 10001 -g 0 -s /sbin/nologin seagent \
  && mkdir -p /data /work && chown 10001:0 /data /work && chmod 2770 /data /work \
  && microdnf remove -y shadow-utils && microdnf clean all
-COPY --from=builder /app/target/release/ark /usr/bin/ark
-COPY --from=builder /app/share/ /usr/share/ark/
-COPY --from=builder /app/packaging/vm/build-image.sh /app/packaging/vm/README.md /usr/share/ark/vm/
-COPY --from=builder /app/packaging/sandbox-browser/ /usr/share/ark/sandbox-browser/
-ENV ARK_HOME=/data XDG_RUNTIME_DIR="" ARK_SHARE_DIR=/usr/share/ark HOME=/data
+COPY --from=builder /app/target/release/seagent /usr/bin/seagent
+COPY --from=builder /app/share/ /usr/share/seagent/
+COPY --from=builder /app/packaging/vm/build-image.sh /app/packaging/vm/README.md /usr/share/seagent/vm/
+COPY --from=builder /app/packaging/sandbox-browser/ /usr/share/seagent/sandbox-browser/
+ENV SEAGENT_HOME=/data XDG_RUNTIME_DIR="" SEAGENT_SHARE_DIR=/usr/share/seagent HOME=/data
 VOLUME ["/data", "/work"]
 USER 10001
 WORKDIR /work
 EXPOSE 8640
-HEALTHCHECK --interval=30s --timeout=3s --start-period=10s CMD ["ark", "health"]
+HEALTHCHECK --interval=30s --timeout=3s --start-period=10s CMD ["seagent", "health"]
 # ubi-minimal has no tini: run with `--init` (podman/docker) or `shareProcessNamespace: true`.
-ENTRYPOINT ["/usr/bin/ark"]
+ENTRYPOINT ["/usr/bin/seagent"]
 CMD ["daemon", "run", "-w", "/work"]

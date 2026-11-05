@@ -1,4 +1,4 @@
-/* ark web/desktop UI layout. Tokens, buttons, inputs and stars come from theme.css.
+/* seagent web/desktop UI layout. Tokens, buttons, inputs and stars come from theme.css.
    Grid: rail (fixed) | main; main = topbar + one view at a time. Spacing unit 4px. */
 .app { position: relative; z-index: 1; display: grid; grid-template-columns: 252px minmax(0, 1fr); height: 100vh; height: 100dvh; }
 

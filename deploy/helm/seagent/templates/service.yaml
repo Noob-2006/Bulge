@@ -1,0 +1,12 @@
+{{- if .Values.app.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "seagent.fullname" . }}
+  labels: {{- include "seagent.labels" . | nindent 4 }}
+spec:
+  type: ClusterIP
+  selector: {{- include "seagent.selector" . | nindent 4 }}
+  ports:
+    - { name: app, port: {{ .Values.app.port }}, targetPort: app, protocol: TCP }
+{{- end }}

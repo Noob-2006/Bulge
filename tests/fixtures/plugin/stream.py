@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""Test ark plugin for stream hooks (stdlib only).
+"""Test seagent plugin for stream hooks (stdlib only).
 
 Declares the four stream observers plus an inline `stream_delta` hook:
-  * `ark/stream` notifications are appended to --log as one JSON line each;
-  * `ark/hook` on `stream_delta` rewrites any delta containing `SECRET` to `<redacted>`
+  * `seagent/stream` notifications are appended to --log as one JSON line each;
+  * `seagent/hook` on `stream_delta` rewrites any delta containing `SECRET` to `<redacted>`
     (tests the synchronous, fail-open rewrite path);
-  * `ark/hook` on `stream_delta` blocks for --slow seconds when the delta is `SLOW`
+  * `seagent/hook` on `stream_delta` blocks for --slow seconds when the delta is `SLOW`
     (tests that a slow hook cannot hang the reply).
 """
 import json, sys, time
@@ -17,7 +17,7 @@ def flag(name, default=None):
 LOG = flag("--log")
 SLOW = float(flag("--slow", "0"))
 
-ARK = {
+SEAGENT = {
     "version": 1,
     "hooks": ["stream_delta"],
     "stream_hooks": ["on_stream_start", "on_stream_delta", "on_stream_end", "on_tool_event"],
@@ -33,10 +33,10 @@ def send(m):
 
 def handle(method, p):
     if method == "initialize":
-        return {"protocolVersion": "2025-06-18", "capabilities": {"experimental": {"ark": ARK}}, "serverInfo": {"name": "streamtap", "version": "1"}}
+        return {"protocolVersion": "2025-06-18", "capabilities": {"experimental": {"seagent": SEAGENT}}, "serverInfo": {"name": "streamtap", "version": "1"}}
     if method == "ping":
         return {}
-    if method == "ark/hook":
+    if method == "seagent/hook":
         ev, pl = p.get("event"), p.get("payload") or {}
         text = pl.get("input")
         log({"t": "hook", "event": ev, "input": text})
@@ -56,7 +56,7 @@ for line in sys.stdin:
     except ValueError: continue
     if "method" not in m: continue
     if m.get("id") is None:
-        if m["method"] == "ark/stream":
+        if m["method"] == "seagent/stream":
             body = dict(m.get("params") or {})
             body.pop("plugin", None)
             rec = {"t": "stream"}

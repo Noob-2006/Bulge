@@ -1,13 +1,13 @@
 ---
-upstream: "ark-original"
+upstream: "seagent-original"
 name: forge-issue-to-pr
 description: "Issue to pull request: branch, fix, test, open the PR, answer review. GitHub and GitLab."
 version: 1.0.0
-author: ark
+author: SE Agent
 license: MIT
 platforms: [linux, macos]
 metadata:
-  ark:
+  seagent:
     tags: [github, gitlab, issue, pull-request, merge-request, review, webhook, ci]
     category: software-development
     related_skills: [github, requesting-code-review, test-driven-development, systematic-debugging]
@@ -61,8 +61,8 @@ workspace. This skill is the procedure; `github` covers the `gh` CLI route.
 
 ## Triggering it
 
-A webhook from the forge can start this loop: GitHub `issues` labeled `ark`, or a PR
-comment `/ark fix`; GitLab issue events and MR notes. `references/webhook-trigger.md` has
+A webhook from the forge can start this loop: GitHub `issues` labeled `seagent`, or a PR
+comment `/seagent fix`; GitLab issue events and MR notes. `references/webhook-trigger.md` has
 the channel configuration, signature verification, filters, the prompt template and the
 safety notes. A polling alternative that needs no inbound port is the `forge-pr-sweep`
 blueprint.

@@ -1,12 +1,12 @@
 """Real-model stress campaign: drive every tool, extension and command through
 each provider, then audit the event logs for errors and token anomalies.
 
-Usage: python3 -I tests/stress/campaign.py <ark-binary> <secrets.toml> <out-dir> [model ...]
+Usage: python3 -I tests/stress/campaign.py <seagent-binary> <secrets.toml> <out-dir> [model ...]
 The secrets file is copied (0600) into a fresh home per model; nothing else is shared.
 """
 import json, os, shutil, statistics, subprocess, sys, threading, time, http.server
 
-ARK = os.path.abspath(sys.argv[1])
+SEAGENT = os.path.abspath(sys.argv[1])
 SECRETS = os.path.abspath(sys.argv[2])
 OUT = os.path.abspath(sys.argv[3])
 MODELS = sys.argv[4:] or ["deepseek/deepseek-chat", "mistral/mistral-small-latest", "openai/gpt-5-nano", "anthropic/claude-haiku-4-5"]
@@ -28,7 +28,7 @@ SINK = []
 
 class H(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
-        body = b"<html><body><h1>Ark test page</h1><p>The secret word is <b>pelican</b>.</p></body></html>"
+        body = b"<html><body><h1>SE Agent test page</h1><p>The secret word is <b>pelican</b>.</p></body></html>"
         self.send_response(200)
         self.send_header("Content-Type", "text/html")
         self.send_header("Content-Length", str(len(body)))
@@ -78,7 +78,7 @@ SCENARIOS = {
         "3) 呼叫 mcp__fx__big，n=40000，只回報拿到的長度，不要讀全文。\n"
         "4) 呼叫 mcp__pl__echo，text 為 'forbidden test'（預期被擋，說明原因），再呼叫一次 text 為 'please rewrite this'，回報實際回傳內容。\n"
         "5) 用 channel_send 送『壓力測試通知』到 hook 頻道（chat 用 ops）。\n"
-        "6) 用 run 工具寫一個 bash 腳本，在裡面用 ark-call 呼叫 mcp__fx__echo（text=from-script）與 glob（pattern='**/*.py'），只輸出摘要。\n"
+        "6) 用 run 工具寫一個 bash 腳本，在裡面用 seagent-call 呼叫 mcp__fx__echo（text=from-script）與 glob（pattern='**/*.py'），只輸出摘要。\n"
         f"7) 用 web_fetch 讀 http://127.0.0.1:{PORT}/page，回報頁面中的 secret word。\n"
         "最後逐項回報。"
     ),
@@ -112,13 +112,13 @@ def setup(model):
     ws = os.path.join(OUT, tag, "ws")
     shutil.rmtree(os.path.join(OUT, tag), ignore_errors=True)
     os.makedirs(os.path.join(home, "config"))
-    os.makedirs(os.path.join(ws, ".ark", "commands"))
+    os.makedirs(os.path.join(ws, ".seagent", "commands"))
     os.makedirs(os.path.join(ws, "tmp_dir"))
     shutil.copy(SECRETS, os.path.join(home, "config", "secrets.toml"))
     os.chmod(os.path.join(home, "config", "secrets.toml"), 0o600)
     open(os.path.join(ws, ".env"), "w").write("API_TOKEN=sk-live-51Hxxxxxxxxxxxxxxxxxxxxxxxxxx\n")
     open(os.path.join(ws, "README.md"), "w").write("# demo\nTODO: write docs\n")
-    open(os.path.join(ws, ".ark", "commands", "audit.md"), "w").write(
+    open(os.path.join(ws, ".seagent", "commands", "audit.md"), "w").write(
         "---\ndescription: Audit a directory for TODOs\n---\n"
         "用 grep 在 $1 與整個專案中找出 TODO 與 FIXME，然後用 write 把結果整理成 AUDIT.md（含檔名與行號），最後回報找到幾個。")
     audit_log = os.path.join(OUT, tag, "hook-audit.log")
@@ -158,7 +158,7 @@ command = "{sys.executable}"
 args = ["{FX}", "--instructions", "Test server: arithmetic, resources and failure simulations."]
 
 [mcp.self]
-command = "{ARK}"
+command = "{SEAGENT}"
 args = ["mcp", "serve", "-w", "{ws}"]
 
 [plugins.pl]
@@ -176,11 +176,11 @@ allow = ["*"]
 
 
 def run_one(model, name, prompt, home, ws, log):
-    env = {**os.environ, "ARK_HOME": home, "NO_COLOR": "1"}
-    env.pop("ARK_CALL_SOCK", None)
+    env = {**os.environ, "SEAGENT_HOME": home, "NO_COLOR": "1"}
+    env.pop("SEAGENT_CALL_SOCK", None)
     t = time.time()
     try:
-        p = subprocess.run([ARK, "run", "--json", prompt], cwd=ws, env=env, capture_output=True, text=True, timeout=900)
+        p = subprocess.run([SEAGENT, "run", "--json", prompt], cwd=ws, env=env, capture_output=True, text=True, timeout=900)
         code, out, err = p.returncode, p.stdout, p.stderr
     except subprocess.TimeoutExpired as e:
         code, out, err = -999, e.stdout or "", (e.stderr or "") + "\nTIMEOUT"

@@ -24,7 +24,7 @@ function render(status) {
     text = "Not paired — open settings";
     cls = "warn";
   } else if (status.paired || status.state === "connected") {
-    text = "Paired with ark";
+    text = "Paired with seagent";
     cls = "ok";
   } else if (status.state === "connecting") {
     text = "Connecting…";
@@ -52,8 +52,8 @@ async function refresh() {
     status = null;
   }
   if (!status) {
-    const stored = await chrome.storage.local.get({ arkStatus: null });
-    status = stored.arkStatus;
+    const stored = await chrome.storage.local.get({ seagentStatus: null });
+    status = stored.seagentStatus;
   }
   render(status);
 }

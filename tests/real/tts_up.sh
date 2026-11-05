@@ -1,16 +1,16 @@
 #!/usr/bin/env bash
-# Real local Piper (piper1-gpl) for ark's `[media.tts.piper]` path — E5.
+# Real local Piper (piper1-gpl) for seagent's `[media.tts.piper]` path — E5.
 #
 # Installs a pinned `piper-tts` into a venv and one voice under $TMPDIR, verifies the
-# binary really runs, and prints the env vars `crates/ark-media/tests/real_tts.rs` needs:
+# binary really runs, and prints the env vars `crates/seagent-media/tests/real_tts.rs` needs:
 #
 #   export TMPDIR=/some/scratch/dir          # required: nothing is written outside it
 #   eval "$(tests/real/tts_up.sh)"           # ~150 MB of downloads on the first run
-#   cargo test -p ark-media --test real_tts
+#   cargo test -p seagent-media --test real_tts
 #
 # Idempotent: a second call reuses the venv/voice and only re-verifies them (~2 s).
 # No root, no `pip --user`, no writes to $HOME (uv's cache and the venv both live under
-# $TMPDIR), and /tmp is refused because ark's own temp dir must stay inside $TMPDIR.
+# $TMPDIR), and /tmp is refused because seagent's own temp dir must stay inside $TMPDIR.
 #
 # Downloads (piper-tts 1.8.0 ships only wheels, no linux tarball):
 #   piper-tts 32.6 MiB + onnxruntime 22.7 MiB + numpy 16.0 MiB + 4 small deps
@@ -38,10 +38,10 @@ export PYTHONNOUSERSITE=1
 say() { echo "tts_up: $*" >&2; }
 
 # Already installed by an earlier run (or handed in by the caller): reuse it.
-if [ -n "${ARK_REAL_PIPER:-}" ] && [ -x "${ARK_REAL_PIPER}" ] && [ -n "${ARK_REAL_PIPER_VOICE:-}" ] && [ -f "${ARK_REAL_PIPER_VOICE}" ]; then
-  PIPER="$ARK_REAL_PIPER"
-  MODEL="$ARK_REAL_PIPER_VOICE"
-  say "reusing ARK_REAL_PIPER=$PIPER"
+if [ -n "${SEAGENT_REAL_PIPER:-}" ] && [ -x "${SEAGENT_REAL_PIPER}" ] && [ -n "${SEAGENT_REAL_PIPER_VOICE:-}" ] && [ -f "${SEAGENT_REAL_PIPER_VOICE}" ]; then
+  PIPER="$SEAGENT_REAL_PIPER"
+  MODEL="$SEAGENT_REAL_PIPER_VOICE"
+  say "reusing SEAGENT_REAL_PIPER=$PIPER"
 elif [ -x "$PIPER" ] && [ -f "$MODEL" ] && [ -f "$MODEL.json" ]; then
   say "piper-tts $VERSION and $VOICE already present in $ROOT"
 else
@@ -61,7 +61,7 @@ else
       "$VENV/bin/python" -m pip install --no-cache-dir --disable-pip-version-check "piper-tts==$VERSION" >&2
     fi
   fi
-  # 2. One voice: ark's own downloader (`python -m piper.download_voices`), which is the
+  # 2. One voice: seagent's own downloader (`python -m piper.download_voices`), which is the
   #    same path `[media.tts.piper] voice = "<name>"` uses.
   if [ ! -f "$MODEL" ] || [ ! -f "$MODEL.json" ]; then
     say "downloading voice $VOICE"
@@ -88,8 +88,8 @@ print(f"tts_up: smoke wav {w.getnframes() / w.getframerate():.2f}s @ {w.getframe
 PY
 rm -rf "$SMOKE"
 
-# 4. What the test needs. `piper --help` above is the "binary runs" check; ARK_HOME is
+# 4. What the test needs. `piper --help` above is the "binary runs" check; SEAGENT_HOME is
 #    left to the test, which forces its own throwaway one.
-echo "export ARK_REAL_PIPER=$(printf '%q' "$PIPER")"
-echo "export ARK_REAL_PIPER_VOICE=$(printf '%q' "$MODEL")"
+echo "export SEAGENT_REAL_PIPER=$(printf '%q' "$PIPER")"
+echo "export SEAGENT_REAL_PIPER_VOICE=$(printf '%q' "$MODEL")"
 say "done (piper-tts $VERSION, voice $VOICE)"

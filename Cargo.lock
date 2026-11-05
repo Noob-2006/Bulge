@@ -18,266 +18,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "ark"
-version = "0.1.0"
-dependencies = [
- "ark-app",
- "ark-browser",
- "ark-channel",
- "ark-core",
- "ark-kernel",
- "ark-media",
- "ark-memory",
- "ark-model",
- "ark-net",
- "ark-plugin",
- "ark-security",
- "ark-skills",
- "ark-tools",
- "ark-vm",
- "base64",
- "libc",
- "mimalloc",
- "regex",
- "ring",
- "serde",
- "serde_json",
- "toml",
- "ureq",
-]
-
-[[package]]
-name = "ark-app"
-version = "0.1.0"
-dependencies = [
- "ark-browser",
- "ark-channel",
- "ark-core",
- "ark-kernel",
- "ark-net",
- "ark-plugin",
- "ark-security",
- "ark-tools",
- "ark-vm",
- "image",
- "libc",
- "quick-xml",
- "regex",
- "ring",
- "serde",
- "serde_json",
- "toml",
- "ureq",
-]
-
-[[package]]
-name = "ark-browser"
-version = "0.1.0"
-dependencies = [
- "ark-core",
- "ark-net",
- "ark-security",
- "libc",
- "regex",
- "ring",
- "serde",
- "serde_json",
- "toml",
- "ureq",
-]
-
-[[package]]
-name = "ark-channel"
-version = "0.1.0"
-dependencies = [
- "ark-core",
- "ark-media",
- "ark-net",
- "ark-security",
- "base64",
- "libc",
- "ring",
- "serde",
- "serde_json",
- "ureq",
-]
-
-[[package]]
-name = "ark-core"
-version = "0.1.0"
-dependencies = [
- "libc",
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "ark-kernel"
-version = "0.1.0"
-dependencies = [
- "ark-core",
- "ark-model",
- "ark-net",
- "ark-security",
- "base64",
- "libc",
- "regex",
- "rusqlite",
- "serde",
- "serde_json",
- "toml",
- "ureq",
-]
-
-[[package]]
-name = "ark-media"
-version = "0.1.0"
-dependencies = [
- "ark-core",
- "ark-net",
- "ark-security",
- "base64",
- "image",
- "libc",
- "miniz_oxide 0.9.1",
- "serde",
- "serde_json",
- "toml",
- "ureq",
-]
-
-[[package]]
-name = "ark-memory"
-version = "0.1.0"
-dependencies = [
- "ark-core",
- "ark-kernel",
- "ark-net",
- "ark-security",
- "ark-tools",
- "base64",
- "regex",
- "ring",
- "serde",
- "serde_json",
- "toml",
- "ureq",
-]
-
-[[package]]
-name = "ark-model"
-version = "0.1.0"
-dependencies = [
- "ark-core",
- "ark-net",
- "ark-security",
- "libc",
- "ring",
- "serde",
- "serde_json",
- "toml",
- "ureq",
-]
-
-[[package]]
-name = "ark-net"
-version = "0.1.0"
-dependencies = [
- "base64",
- "ring",
- "rustls",
- "serde",
- "ureq",
- "webpki-roots",
-]
-
-[[package]]
-name = "ark-plugin"
-version = "0.1.0"
-dependencies = [
- "ark-core",
- "ark-kernel",
- "ark-net",
- "ark-security",
- "fancy-regex",
- "libc",
- "serde",
- "serde_json",
- "toml",
- "ureq",
-]
-
-[[package]]
-name = "ark-security"
-version = "0.1.0"
-dependencies = [
- "ark-core",
- "ark-net",
- "base64",
- "fancy-regex",
- "libc",
- "regex",
- "ring",
- "rustls",
- "serde",
- "serde_json",
- "toml",
- "ureq",
-]
-
-[[package]]
-name = "ark-skills"
-version = "0.1.0"
-dependencies = [
- "ark-core",
- "ark-kernel",
- "ark-net",
- "ark-plugin",
- "ark-security",
- "ark-tools",
- "base64",
- "libc",
- "miniz_oxide 0.9.1",
- "regex",
- "ring",
- "serde",
- "serde_json",
- "toml",
- "ureq",
-]
-
-[[package]]
-name = "ark-tools"
-version = "0.1.0"
-dependencies = [
- "ark-core",
- "ark-net",
- "ark-security",
- "ark-vm",
- "base64",
- "libc",
- "regex",
- "ring",
- "rusqlite",
- "serde",
- "serde_json",
- "toml",
- "ureq",
-]
-
-[[package]]
-name = "ark-vm"
-version = "0.1.0"
-dependencies = [
- "ark-core",
- "ark-net",
- "base64",
- "libc",
- "serde",
- "serde_json",
-]
-
-[[package]]
 name = "autocfg"
 version = "1.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -792,6 +532,266 @@ name = "rustversion"
 version = "1.0.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cf54715a573b99ac80df0bc206da022bcd442c974952c7b9720069370852e21f"
+
+[[package]]
+name = "seagent"
+version = "0.1.0"
+dependencies = [
+ "base64",
+ "libc",
+ "mimalloc",
+ "regex",
+ "ring",
+ "seagent-app",
+ "seagent-browser",
+ "seagent-channel",
+ "seagent-core",
+ "seagent-kernel",
+ "seagent-media",
+ "seagent-memory",
+ "seagent-model",
+ "seagent-net",
+ "seagent-plugin",
+ "seagent-security",
+ "seagent-skills",
+ "seagent-tools",
+ "seagent-vm",
+ "serde",
+ "serde_json",
+ "toml",
+ "ureq",
+]
+
+[[package]]
+name = "seagent-app"
+version = "0.1.0"
+dependencies = [
+ "image",
+ "libc",
+ "quick-xml",
+ "regex",
+ "ring",
+ "seagent-browser",
+ "seagent-channel",
+ "seagent-core",
+ "seagent-kernel",
+ "seagent-net",
+ "seagent-plugin",
+ "seagent-security",
+ "seagent-tools",
+ "seagent-vm",
+ "serde",
+ "serde_json",
+ "toml",
+ "ureq",
+]
+
+[[package]]
+name = "seagent-browser"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "regex",
+ "ring",
+ "seagent-core",
+ "seagent-net",
+ "seagent-security",
+ "serde",
+ "serde_json",
+ "toml",
+ "ureq",
+]
+
+[[package]]
+name = "seagent-channel"
+version = "0.1.0"
+dependencies = [
+ "base64",
+ "libc",
+ "ring",
+ "seagent-core",
+ "seagent-media",
+ "seagent-net",
+ "seagent-security",
+ "serde",
+ "serde_json",
+ "ureq",
+]
+
+[[package]]
+name = "seagent-core"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "seagent-kernel"
+version = "0.1.0"
+dependencies = [
+ "base64",
+ "libc",
+ "regex",
+ "rusqlite",
+ "seagent-core",
+ "seagent-model",
+ "seagent-net",
+ "seagent-security",
+ "serde",
+ "serde_json",
+ "toml",
+ "ureq",
+]
+
+[[package]]
+name = "seagent-media"
+version = "0.1.0"
+dependencies = [
+ "base64",
+ "image",
+ "libc",
+ "miniz_oxide 0.9.1",
+ "seagent-core",
+ "seagent-net",
+ "seagent-security",
+ "serde",
+ "serde_json",
+ "toml",
+ "ureq",
+]
+
+[[package]]
+name = "seagent-memory"
+version = "0.1.0"
+dependencies = [
+ "base64",
+ "regex",
+ "ring",
+ "seagent-core",
+ "seagent-kernel",
+ "seagent-net",
+ "seagent-security",
+ "seagent-tools",
+ "serde",
+ "serde_json",
+ "toml",
+ "ureq",
+]
+
+[[package]]
+name = "seagent-model"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "ring",
+ "seagent-core",
+ "seagent-net",
+ "seagent-security",
+ "serde",
+ "serde_json",
+ "toml",
+ "ureq",
+]
+
+[[package]]
+name = "seagent-net"
+version = "0.1.0"
+dependencies = [
+ "base64",
+ "ring",
+ "rustls",
+ "serde",
+ "ureq",
+ "webpki-roots",
+]
+
+[[package]]
+name = "seagent-plugin"
+version = "0.1.0"
+dependencies = [
+ "fancy-regex",
+ "libc",
+ "seagent-core",
+ "seagent-kernel",
+ "seagent-net",
+ "seagent-security",
+ "serde",
+ "serde_json",
+ "toml",
+ "ureq",
+]
+
+[[package]]
+name = "seagent-security"
+version = "0.1.0"
+dependencies = [
+ "base64",
+ "fancy-regex",
+ "libc",
+ "regex",
+ "ring",
+ "rustls",
+ "seagent-core",
+ "seagent-net",
+ "serde",
+ "serde_json",
+ "toml",
+ "ureq",
+]
+
+[[package]]
+name = "seagent-skills"
+version = "0.1.0"
+dependencies = [
+ "base64",
+ "libc",
+ "miniz_oxide 0.9.1",
+ "regex",
+ "ring",
+ "seagent-core",
+ "seagent-kernel",
+ "seagent-net",
+ "seagent-plugin",
+ "seagent-security",
+ "seagent-tools",
+ "serde",
+ "serde_json",
+ "toml",
+ "ureq",
+]
+
+[[package]]
+name = "seagent-tools"
+version = "0.1.0"
+dependencies = [
+ "base64",
+ "libc",
+ "regex",
+ "ring",
+ "rusqlite",
+ "seagent-core",
+ "seagent-net",
+ "seagent-security",
+ "seagent-vm",
+ "serde",
+ "serde_json",
+ "toml",
+ "ureq",
+]
+
+[[package]]
+name = "seagent-vm"
+version = "0.1.0"
+dependencies = [
+ "base64",
+ "libc",
+ "seagent-core",
+ "seagent-net",
+ "serde",
+ "serde_json",
+]
 
 [[package]]
 name = "serde"

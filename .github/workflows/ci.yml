@@ -17,25 +17,25 @@ jobs:
       - run: cargo test --workspace --locked
       - run: cargo build --release --locked
       - name: end-to-end
-        run: python3 -I tests/e2e/run.py target/release/ark
+        run: python3 -I tests/e2e/run.py target/release/seagent
       # The tarball + installer path, on a stock Alpine (busybox sh/wget/tar, musl): the bundle
       # layout, checksum verification and share/ install must work without curl, bash or sudo.
       - name: install.sh on Alpine
         run: |
           set -euo pipefail
           mkdir -p dist
-          packaging/release/make-tarball.sh x86_64-unknown-linux-musl target/release/ark dist/ark-x86_64-unknown-linux-musl.tar.gz
-          (cd dist && sha256sum ark-*.tar.gz > SHA256SUMS)
-          docker run --rm -v "$PWD/packaging:/src:ro" -v "$PWD/dist:/rel:ro" -e ARK_RELEASE_BASE=file:///rel alpine:3.20 sh -c '
+          packaging/release/make-tarball.sh x86_64-unknown-linux-musl target/release/seagent dist/seagent-x86_64-unknown-linux-musl.tar.gz
+          (cd dist && sha256sum seagent-*.tar.gz > SHA256SUMS)
+          docker run --rm -v "$PWD/packaging:/src:ro" -v "$PWD/dist:/rel:ro" -e SEAGENT_RELEASE_BASE=file:///rel alpine:3.20 sh -c '
             set -e
             sh /src/install.sh --no-start
-            test -x ~/.local/bin/ark && test -f ~/.local/lib/ark/share/blueprints.json'
+            test -x ~/.local/bin/seagent && test -f ~/.local/lib/seagent/share/blueprints.json'
       # 7-4-5: every role pack through Skills Guard, the manifest digest, and roles.sig when
       # the tree is signed (release builds; an unsigned dev tree is reported, not failed).
       - name: role packs — Skills Guard scan + signature
         env:
-          ARK_SHARE_DIR: share
-        run: target/release/ark role verify
+          SEAGENT_SHARE_DIR: share
+        run: target/release/seagent role verify
   hygiene:
     # Secret scan (working tree + all history) and shell/YAML syntax of everything CI cannot run.
     runs-on: ubuntu-24.04

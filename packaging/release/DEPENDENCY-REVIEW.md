@@ -44,19 +44,19 @@ Run from the repository root. `cargo deny` is the only external tool required
 | 5 | **Build script / proc-macro / `unsafe` scrutiny** | `cargo tree -p <crate> --edges build` and `ls ~/.cargo/registry/src/*/<crate>-<ver>/build.rs` — a `build.rs` runs arbitrary code on every developer and release machine; a proc-macro runs inside `rustc`. Read it. Then look for `unsafe`: `grep -rn 'unsafe' ~/.cargo/registry/src/*/<crate>-<ver>/src | wc -l`, and read every hit. `#![forbid(unsafe_code)]` at the top is the answer you want. |
 | 6 | **Duplicate versions** | `cargo tree --duplicates` and `cargo deny check bans`. `multiple-versions = "warn"` in `deny.toml`; every *new* duplicate needs a sentence in the PR saying why it cannot be deduped. |
 | 7 | **Typosquat / provenance** | The crate must exist on crates.io with a repository link that points at the upstream project, and be published by the same owner as the previous version. Diff the crate name against the one you meant (`serde_jsno` vs `serde_json`), check the download count is not single digits, and prefer the crate the upstream project itself links to. |
-| 8 | **Cost** | Binary size and build time are tracked in [docs/BUILD.md](../../docs/BUILD.md). Compare `stat -c %s target/release/ark` before/after; a dependency that adds >1 % to the release binary needs a note. |
+| 8 | **Cost** | Binary size and build time are tracked in [docs/BUILD.md](../../docs/BUILD.md). Compare `stat -c %s target/release/seagent` before/after; a dependency that adds >1 % to the release binary needs a note. |
 | 9 | **Release artifacts follow** | The SBOM is generated from `Cargo.lock`, so any change here changes `sbom.spdx.json`; the next release regenerates it (see [README.md](README.md)). Nothing to do in the PR beyond leaving the lockfile consistent. |
 
 ## Security advisories (OSV)
 
-`ark` ships its own OSV check: `ark security audit --supply-chain` feeds every `Cargo.lock` entry
+`seagent` ships its own OSV check: `seagent security audit --supply-chain` feeds every `Cargo.lock` entry
 to OSV and reports findings by severity (`--fail-on high` for gating, `--format json` for tooling).
 It is the same data `cargo deny check advisories` uses (`RUSTSEC` is mirrored into OSV), so either
 command is an acceptable source; run both if you have cargo-deny installed.
 
 Triage a finding like this, and record the outcome in the PR that fixes or accepts it:
 
-1. **Is it reachable?** Which crate/feature activates the dependency, and does `ark` use the
+1. **Is it reachable?** Which crate/feature activates the dependency, and does `seagent` use the
    affected API? `cargo tree -i <crate>` answers the first half; read the advisory for the second.
    An advisory in a build-only or unused-feature dependency is still fixed, just not urgently.
 2. **Severity + exploitability**: prefer the upstream advisory's CVSS and its "affected functions"
@@ -72,7 +72,7 @@ Triage a finding like this, and record the outcome in the PR that fixes or accep
 
 ## Cadence
 
-* **Weekly**: `ark security audit --supply-chain` (or `cargo deny check advisories`) on `main`.
+* **Weekly**: `seagent security audit --supply-chain` (or `cargo deny check advisories`) on `main`.
 * **Monthly**: `cargo update --dry-run` review, pick the patch/minor bumps, run the full test suite
   and regenerate the SBOM. Group bumps into one PR so the review effort is amortised.
 * **Every release**: `cargo deny check` is part of the release checklist; a release is not cut on a
@@ -97,7 +97,7 @@ Triage a finding like this, and record the outcome in the PR that fixes or accep
 ## Current direct-dependency budget
 
 Derived from the `#` comments in the root `Cargo.toml` (`[workspace.dependencies]`). Path
-dependencies inside the workspace (`ark-core`, `ark-kernel`, …) are not budgeted: they are this
+dependencies inside the workspace (`seagent-core`, `seagent-kernel`, …) are not budgeted: they are this
 repository and are reviewed as code.
 
 | Crate | Version | Why it is here (from `Cargo.toml`) |
@@ -108,7 +108,7 @@ repository and are reviewed as code.
 | `ureq` | 3 | Blocking HTTP + TLS with the smallest dependency tree (`rustls` feature) |
 | `regex` | 1 | `grep` tool and secret-pattern matching |
 | `libc` | 0.2 | Process groups / signals for the shell tool |
-| `rustls` | 0.23 | Already pulled in by `ureq`; used directly by `ark-net` for WebSocket, webhook signatures, OAuth PKCE |
+| `rustls` | 0.23 | Already pulled in by `ureq`; used directly by `seagent-net` for WebSocket, webhook signatures, OAuth PKCE |
 | `webpki-roots` | 1 | Trust anchors for `rustls` — *no reason comment in `Cargo.toml` yet* (see gaps) |
 | `ring` | 0.17 | Ed25519/HMAC primitives for signing and secret sealing — *no reason comment yet* |
 | `base64` | 0.23 | Encoding for tokens, signatures and attachments — *no reason comment yet* |

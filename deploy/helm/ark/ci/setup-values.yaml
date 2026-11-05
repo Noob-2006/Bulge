@@ -1,6 +1,0 @@
-config: { mode: setup, provider: openai, model: gpt-5, existingSecret: ark-secrets }
-managedPolicy: |
-  [managed]
-  locked = ["approvals.preset"]
-  [approvals]
-  preset = "standard"

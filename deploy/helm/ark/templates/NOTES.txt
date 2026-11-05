@@ -1,6 +1,0 @@
-ark is starting in StatefulSet {{ include "ark.fullname" . }} (1 replica).
-  kubectl exec -it sts/{{ include "ark.fullname" . }} -c ark -- ark doctor
-  kubectl exec -it sts/{{ include "ark.fullname" . }} -c ark -- ark chat
-{{- if not .Values.app.enabled }}
-The app API is off (nothing listens on the network). Chat over `kubectl exec` or your chat channel.
-{{- end }}

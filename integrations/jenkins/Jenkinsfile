@@ -1,69 +1,69 @@
-// ark in Jenkins (declarative pipeline): review the change, and on request fix the tests.
+// seagent in Jenkins (declarative pipeline): review the change, and on request fix the tests.
 //
 // Needs: a Linux agent with git, curl and a shell; Jenkins credentials
-//   ark-provider-key   (Secret text)  the model provider key; exposed as ANTHROPIC_API_KEY below
-//   ark-review-token   (Secret text)  GitHub or GitLab token that may comment on the change
+//   seagent-provider-key   (Secret text)  the model provider key; exposed as ANTHROPIC_API_KEY below
+//   seagent-review-token   (Secret text)  GitHub or GitLab token that may comment on the change
 // For multibranch pipelines Jenkins sets CHANGE_ID / CHANGE_TARGET on pull requests.
-// Pin ARK_VERSION to a release; the installer verifies SHA256SUMS.
+// Pin SEAGENT_VERSION to a release; the installer verifies SHA256SUMS.
 pipeline {
     agent any
     options { timeout(time: 30, unit: 'MINUTES'); timestamps(); disableConcurrentBuilds(abortPrevious: true) }
     parameters {
-        booleanParam(name: 'FIX_TESTS', defaultValue: false, description: 'Let ark try to fix a failing test suite (never pushes; leaves a patch)')
+        booleanParam(name: 'FIX_TESTS', defaultValue: false, description: 'Let seagent try to fix a failing test suite (never pushes; leaves a patch)')
         string(name: 'TEST_COMMAND', defaultValue: 'make test', description: 'Used by FIX_TESTS')
     }
     environment {
-        ARK_VERSION  = 'v1.4.0'
-        ARK_REPO     = 'ark-agent/ark'
-        ARK_CI_OUT   = "${env.WORKSPACE}/.ark-ci"
-        ARK_CI_MODEL = 'anthropic/claude-sonnet-4-5'
-        ARK_CI_BASE_BRANCH = "${env.CHANGE_TARGET ?: 'main'}"
-        ARK_CI_PR_NUMBER   = "${env.CHANGE_ID ?: ''}"
-        PATH = "${env.WORKSPACE}/.ark-bin:${env.PATH}"
+        SEAGENT_VERSION  = 'v1.4.0'
+        SEAGENT_REPO     = 'se-agent/System-Engineering-Agent'
+        SEAGENT_CI_OUT   = "${env.WORKSPACE}/.seagent-ci"
+        SEAGENT_CI_MODEL = 'anthropic/claude-sonnet-4-5'
+        SEAGENT_CI_BASE_BRANCH = "${env.CHANGE_TARGET ?: 'main'}"
+        SEAGENT_CI_PR_NUMBER   = "${env.CHANGE_ID ?: ''}"
+        PATH = "${env.WORKSPACE}/.seagent-bin:${env.PATH}"
     }
     stages {
-        stage('Install ark') {
+        stage('Install seagent') {
             steps {
                 sh '''
-                    mkdir -p .ark-bin
-                    if ! command -v ark >/dev/null 2>&1; then
-                        ref="$ARK_VERSION"; [ "$ref" = latest ] && ref=main
-                        curl --proto '=https' --tlsv1.2 -fsSL "https://raw.githubusercontent.com/$ARK_REPO/$ref/packaging/install.sh" -o .ark-install.sh
-                        ARK_INSTALL_DIR="$PWD/.ark-bin" sh .ark-install.sh --version "$ARK_VERSION"
+                    mkdir -p .seagent-bin
+                    if ! command -v seagent >/dev/null 2>&1; then
+                        ref="$SEAGENT_VERSION"; [ "$ref" = latest ] && ref=main
+                        curl --proto '=https' --tlsv1.2 -fsSL "https://raw.githubusercontent.com/$SEAGENT_REPO/$ref/packaging/install.sh" -o .seagent-install.sh
+                        SEAGENT_INSTALL_DIR="$PWD/.seagent-bin" sh .seagent-install.sh --version "$SEAGENT_VERSION"
                     fi
-                    ark --version
-                    test -f integrations/ci/ark-ci.sh || curl --proto '=https' --tlsv1.2 -fsSL "https://raw.githubusercontent.com/$ARK_REPO/$ARK_VERSION/integrations/ci/ark-ci.sh" -o .ark-ci.sh
+                    seagent --version
+                    test -f integrations/ci/seagent-ci.sh || curl --proto '=https' --tlsv1.2 -fsSL "https://raw.githubusercontent.com/$SEAGENT_REPO/$SEAGENT_VERSION/integrations/ci/seagent-ci.sh" -o .seagent-ci.sh
                 '''
             }
         }
         stage('Review') {
             when { expression { return env.CHANGE_ID != null } }      // pull request builds only
             steps {
-                // The provider key is visible to ark; the posting token is not (ark-ci.sh strips it).
-                withCredentials([string(credentialsId: 'ark-provider-key', variable: 'ANTHROPIC_API_KEY')]) {
-                    sh 'git fetch origin "$ARK_CI_BASE_BRANCH" --depth=200 || true; sh "$(ls integrations/ci/ark-ci.sh .ark-ci.sh 2>/dev/null | head -1)" review'
+                // The provider key is visible to seagent; the posting token is not (seagent-ci.sh strips it).
+                withCredentials([string(credentialsId: 'seagent-provider-key', variable: 'ANTHROPIC_API_KEY')]) {
+                    sh 'git fetch origin "$SEAGENT_CI_BASE_BRANCH" --depth=200 || true; sh "$(ls integrations/ci/seagent-ci.sh .seagent-ci.sh 2>/dev/null | head -1)" review'
                 }
-                archiveArtifacts artifacts: '.ark-ci/review.md', allowEmptyArchive: true
+                archiveArtifacts artifacts: '.seagent-ci/review.md', allowEmptyArchive: true
             }
         }
         stage('Post review') {
-            when { allOf { expression { return env.CHANGE_ID != null }; expression { return fileExists('.ark-ci/review.md') } } }
+            when { allOf { expression { return env.CHANGE_ID != null }; expression { return fileExists('.seagent-ci/review.md') } } }
             steps {
                 // GitHub: GITHUB_TOKEN + GITHUB_REPOSITORY (owner/name); GitLab: GITLAB_TOKEN + CI_API_V4_URL + CI_PROJECT_ID.
-                withCredentials([string(credentialsId: 'ark-review-token', variable: 'GITHUB_TOKEN')]) {
-                    sh 'ARK_CI_PROVIDER=github GITHUB_REPOSITORY="${GITHUB_REPOSITORY:?set GITHUB_REPOSITORY=owner/name}" sh "$(ls integrations/ci/ark-ci.sh .ark-ci.sh 2>/dev/null | head -1)" post'
+                withCredentials([string(credentialsId: 'seagent-review-token', variable: 'GITHUB_TOKEN')]) {
+                    sh 'SEAGENT_CI_PROVIDER=github GITHUB_REPOSITORY="${GITHUB_REPOSITORY:?set GITHUB_REPOSITORY=owner/name}" sh "$(ls integrations/ci/seagent-ci.sh .seagent-ci.sh 2>/dev/null | head -1)" post'
                 }
             }
         }
         stage('Fix tests') {
             when { expression { return params.FIX_TESTS } }
             steps {
-                withCredentials([string(credentialsId: 'ark-provider-key', variable: 'ANTHROPIC_API_KEY')]) {
-                    sh 'ARK_CI_TEST_CMD="$TEST_COMMAND" sh "$(ls integrations/ci/ark-ci.sh .ark-ci.sh 2>/dev/null | head -1)" fix-tests'
+                withCredentials([string(credentialsId: 'seagent-provider-key', variable: 'ANTHROPIC_API_KEY')]) {
+                    sh 'SEAGENT_CI_TEST_CMD="$TEST_COMMAND" sh "$(ls integrations/ci/seagent-ci.sh .seagent-ci.sh 2>/dev/null | head -1)" fix-tests'
                 }
-                archiveArtifacts artifacts: '.ark-ci/fix.patch, .ark-ci/test.log', allowEmptyArchive: true
+                archiveArtifacts artifacts: '.seagent-ci/fix.patch, .seagent-ci/test.log', allowEmptyArchive: true
             }
         }
     }
-    post { always { sh 'rm -f .ark-install.sh' } }
+    post { always { sh 'rm -f .seagent-install.sh' } }
 }

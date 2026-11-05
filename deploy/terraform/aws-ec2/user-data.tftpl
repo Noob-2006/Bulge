@@ -1,16 +1,16 @@
-Content-Type: multipart/mixed; boundary="==ARK=="
+Content-Type: multipart/mixed; boundary="==SEAGENT=="
 MIME-Version: 1.0
 
---==ARK==
+--==SEAGENT==
 Content-Type: text/x-shellscript; charset="us-ascii"
 
 #!/bin/sh
-# Runs before cloud-config: put the model key where ark-firstboot expects it (0600, root only).
+# Runs before cloud-config: put the model key where seagent-firstboot expects it (0600, root only).
 umask 077
-aws secretsmanager get-secret-value --region ${region} --secret-id ${secret_id} --query SecretString --output text > /run/ark-api-key
+aws secretsmanager get-secret-value --region ${region} --secret-id ${secret_id} --query SecretString --output text > /run/seagent-api-key
 
---==ARK==
+--==SEAGENT==
 Content-Type: text/cloud-config; charset="us-ascii"
 
-${ark_cloud_config}
---==ARK==--
+${seagent_cloud_config}
+--==SEAGENT==--

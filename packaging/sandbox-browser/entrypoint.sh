@@ -1,44 +1,44 @@
 #!/usr/bin/env bash
-# ark sandbox browser entrypoint (OpenClaw `scripts/sandbox-browser-entrypoint.sh`, MIT).
+# seagent sandbox browser entrypoint (OpenClaw `scripts/sandbox-browser-entrypoint.sh`, MIT).
 #
 # Runs a headed (or headless) Chromium plus:
 #   * Xvfb            virtual display :1, 1280x800x24        (headed only)
 #   * Chromium        --remote-debugging-port=9223 on loopback
-#   * CDP relay       0.0.0.0:9222, requires `Authorization: Basic ark:<token>`,
+#   * CDP relay       0.0.0.0:9222, requires `Authorization: Basic seagent:<token>`,
 #                     proxies to 127.0.0.1:9223 (HTTP + WebSocket upgrade alike)
 #   * x11vnc          -localhost -rfbport 5900                (headed + noVNC only)
 #   * websockify      --web=/usr/share/novnc 6080 -> 127.0.0.1:5900 (noVNC only)
 #
-# ark starts this container with ARK_BROWSER_CDP_AUTH_TOKEN always set; the relay is
+# seagent starts this container with SEAGENT_BROWSER_CDP_AUTH_TOKEN always set; the relay is
 # the only way into the browser's CDP endpoint, and it fails closed without a token.
 set -Eeuo pipefail
 
 export DBUS_SESSION_BUS_ADDRESS=/dev/null
 
-CDP_PORT="${ARK_BROWSER_CDP_PORT:-9222}"
-CHROME_CDP_PORT="${ARK_BROWSER_CHROME_CDP_PORT:-9223}"
-VNC_PORT="${ARK_BROWSER_VNC_PORT:-5900}"
-NOVNC_PORT="${ARK_BROWSER_NOVNC_PORT:-6080}"
-AUTO_START_TIMEOUT_MS="${ARK_BROWSER_AUTO_START_TIMEOUT_MS:-12000}"
-CDP_AUTH_TOKEN="${ARK_BROWSER_CDP_AUTH_TOKEN:-}"
-CDP_SOURCE_RANGE="${ARK_BROWSER_CDP_SOURCE_RANGE:-}"
-ENABLE_NOVNC="${ARK_BROWSER_ENABLE_NOVNC:-1}"
-HEADLESS="${ARK_BROWSER_HEADLESS:-0}"
-ALLOW_NO_SANDBOX="${ARK_BROWSER_NO_SANDBOX:-0}"
-NOVNC_PASSWORD="${ARK_BROWSER_NOVNC_PASSWORD:-}"
-DISABLE_GRAPHICS_FLAGS="${ARK_BROWSER_DISABLE_GRAPHICS_FLAGS:-1}"
-DISABLE_EXTENSIONS="${ARK_BROWSER_DISABLE_EXTENSIONS:-1}"
-RENDERER_PROCESS_LIMIT="${ARK_BROWSER_RENDERER_PROCESS_LIMIT:-2}"
-CHROMIUM_BIN="${ARK_BROWSER_CHROMIUM:-chromium}"
-DISPLAY_NUM="${ARK_BROWSER_DISPLAY:-:1}"
+CDP_PORT="${SEAGENT_BROWSER_CDP_PORT:-9222}"
+CHROME_CDP_PORT="${SEAGENT_BROWSER_CHROME_CDP_PORT:-9223}"
+VNC_PORT="${SEAGENT_BROWSER_VNC_PORT:-5900}"
+NOVNC_PORT="${SEAGENT_BROWSER_NOVNC_PORT:-6080}"
+AUTO_START_TIMEOUT_MS="${SEAGENT_BROWSER_AUTO_START_TIMEOUT_MS:-12000}"
+CDP_AUTH_TOKEN="${SEAGENT_BROWSER_CDP_AUTH_TOKEN:-}"
+CDP_SOURCE_RANGE="${SEAGENT_BROWSER_CDP_SOURCE_RANGE:-}"
+ENABLE_NOVNC="${SEAGENT_BROWSER_ENABLE_NOVNC:-1}"
+HEADLESS="${SEAGENT_BROWSER_HEADLESS:-0}"
+ALLOW_NO_SANDBOX="${SEAGENT_BROWSER_NO_SANDBOX:-0}"
+NOVNC_PASSWORD="${SEAGENT_BROWSER_NOVNC_PASSWORD:-}"
+DISABLE_GRAPHICS_FLAGS="${SEAGENT_BROWSER_DISABLE_GRAPHICS_FLAGS:-1}"
+DISABLE_EXTENSIONS="${SEAGENT_BROWSER_DISABLE_EXTENSIONS:-1}"
+RENDERER_PROCESS_LIMIT="${SEAGENT_BROWSER_RENDERER_PROCESS_LIMIT:-2}"
+CHROMIUM_BIN="${SEAGENT_BROWSER_CHROMIUM:-chromium}"
+DISPLAY_NUM="${SEAGENT_BROWSER_DISPLAY:-:1}"
 
-export HOME="${HOME:-/home/ark}"
+export HOME="${HOME:-/home/seagent}"
 export XDG_CONFIG_HOME="${XDG_CONFIG_HOME:-${HOME}/.config}"
 export XDG_CACHE_HOME="${XDG_CACHE_HOME:-${HOME}/.cache}"
 export DISPLAY="${DISPLAY_NUM}"
 
-PROFILE_DIR="${ARK_BROWSER_PROFILE_DIR:-/tmp/ark-browser-profile}"
-LOG_DIR="/tmp/ark-browser"
+PROFILE_DIR="${SEAGENT_BROWSER_PROFILE_DIR:-/tmp/seagent-browser-profile}"
+LOG_DIR="/tmp/seagent-browser"
 LOG_FILE="${LOG_DIR}/sandbox.log"
 
 XVFB_PID=""
@@ -65,25 +65,25 @@ validate_uint() {
   fi
 }
 
-validate_uint "ARK_BROWSER_CDP_PORT" "${CDP_PORT}" 1 65535
-validate_uint "ARK_BROWSER_CHROME_CDP_PORT" "${CHROME_CDP_PORT}" 1 65535
-validate_uint "ARK_BROWSER_VNC_PORT" "${VNC_PORT}" 1 65535
-validate_uint "ARK_BROWSER_NOVNC_PORT" "${NOVNC_PORT}" 1 65535
-validate_uint "ARK_BROWSER_AUTO_START_TIMEOUT_MS" "${AUTO_START_TIMEOUT_MS}" 1 2147483647
+validate_uint "SEAGENT_BROWSER_CDP_PORT" "${CDP_PORT}" 1 65535
+validate_uint "SEAGENT_BROWSER_CHROME_CDP_PORT" "${CHROME_CDP_PORT}" 1 65535
+validate_uint "SEAGENT_BROWSER_VNC_PORT" "${VNC_PORT}" 1 65535
+validate_uint "SEAGENT_BROWSER_NOVNC_PORT" "${NOVNC_PORT}" 1 65535
+validate_uint "SEAGENT_BROWSER_AUTO_START_TIMEOUT_MS" "${AUTO_START_TIMEOUT_MS}" 1 2147483647
 if [[ -n "${RENDERER_PROCESS_LIMIT}" ]]; then
-  validate_uint "ARK_BROWSER_RENDERER_PROCESS_LIMIT" "${RENDERER_PROCESS_LIMIT}" 0 2147483647
+  validate_uint "SEAGENT_BROWSER_RENDERER_PROCESS_LIMIT" "${RENDERER_PROCESS_LIMIT}" 0 2147483647
 fi
 
 if [[ "${CDP_PORT}" == "${CHROME_CDP_PORT}" ]]; then
-  log "ERROR: ARK_BROWSER_CDP_PORT and ARK_BROWSER_CHROME_CDP_PORT must differ; ${CDP_PORT} is reserved for the authenticated CDP relay"
+  log "ERROR: SEAGENT_BROWSER_CDP_PORT and SEAGENT_BROWSER_CHROME_CDP_PORT must differ; ${CDP_PORT} is reserved for the authenticated CDP relay"
   exit 1
 fi
 
 # Fail closed: with no token the relay cannot authenticate anyone, and Chromium's raw
 # CDP port is loopback-only, so there would be nothing to connect to. Refuse to run.
 if [[ -z "${CDP_AUTH_TOKEN}" ]]; then
-  log "WARNING: ARK_BROWSER_CDP_AUTH_TOKEN is unset; an unauthenticated CDP relay would expose the browser."
-  log "ERROR: ARK_BROWSER_CDP_AUTH_TOKEN is required (the CDP relay refuses to start without a token)."
+  log "WARNING: SEAGENT_BROWSER_CDP_AUTH_TOKEN is unset; an unauthenticated CDP relay would expose the browser."
+  log "ERROR: SEAGENT_BROWSER_CDP_AUTH_TOKEN is required (the CDP relay refuses to start without a token)."
   exit 1
 fi
 
@@ -187,7 +187,7 @@ if [[ "${HEADLESS}" == "1" ]]; then
   CHROME_ARGS+=("--headless=new")
 fi
 
-# Sandboxing stays on unless ark explicitly asks for --no-sandbox.
+# Sandboxing stays on unless seagent explicitly asks for --no-sandbox.
 if [[ "${ALLOW_NO_SANDBOX}" == "1" ]]; then
   CHROME_ARGS+=("--no-sandbox" "--disable-setuid-sandbox")
 fi
@@ -235,12 +235,12 @@ if (( cdp_ready == 0 )); then
 fi
 log "CDP ready. Starting the authenticated relay on 0.0.0.0:${CDP_PORT}"
 
-ARK_BROWSER_CDP_PORT="${CDP_PORT}" \
-ARK_BROWSER_CHROME_CDP_PORT="${CHROME_CDP_PORT}" \
-ARK_BROWSER_CDP_AUTH_TOKEN="${CDP_AUTH_TOKEN}" \
-ARK_BROWSER_CDP_SOURCE_RANGE="${CDP_SOURCE_RANGE}" \
+SEAGENT_BROWSER_CDP_PORT="${CDP_PORT}" \
+SEAGENT_BROWSER_CHROME_CDP_PORT="${CHROME_CDP_PORT}" \
+SEAGENT_BROWSER_CDP_AUTH_TOKEN="${CDP_AUTH_TOKEN}" \
+SEAGENT_BROWSER_CDP_SOURCE_RANGE="${CDP_SOURCE_RANGE}" \
 python3 - >>"${LOG_FILE}" 2>&1 <<'PY' &
-"""ark CDP relay: Basic-auth gate in front of Chromium's loopback DevTools port.
+"""seagent CDP relay: Basic-auth gate in front of Chromium's loopback DevTools port.
 
 Every accepted connection is authenticated from its HTTP request headers and then
 relayed byte-for-byte to Chromium, which means `GET /json/version`, `PUT /json/new`
@@ -258,23 +258,23 @@ import sys
 import time
 
 LISTEN_HOST = "0.0.0.0"
-LISTEN_PORT = int(os.environ["ARK_BROWSER_CDP_PORT"])
+LISTEN_PORT = int(os.environ["SEAGENT_BROWSER_CDP_PORT"])
 UPSTREAM_HOST = "127.0.0.1"
-UPSTREAM_PORT = int(os.environ["ARK_BROWSER_CHROME_CDP_PORT"])
-AUTH_USER = os.environ.get("ARK_BROWSER_CDP_AUTH_USER", "ark")
-AUTH_TOKEN = os.environ.get("ARK_BROWSER_CDP_AUTH_TOKEN", "")
-SOURCE_RANGE = os.environ.get("ARK_BROWSER_CDP_SOURCE_RANGE", "").strip()
+UPSTREAM_PORT = int(os.environ["SEAGENT_BROWSER_CHROME_CDP_PORT"])
+AUTH_USER = os.environ.get("SEAGENT_BROWSER_CDP_AUTH_USER", "seagent")
+AUTH_TOKEN = os.environ.get("SEAGENT_BROWSER_CDP_AUTH_TOKEN", "")
+SOURCE_RANGE = os.environ.get("SEAGENT_BROWSER_CDP_SOURCE_RANGE", "").strip()
 MAX_HEADER_BYTES = 65536
 HEADER_READ_TIMEOUT_SECONDS = 5.0
 
 if not AUTH_TOKEN:
-    print("[sandbox] ERROR: CDP relay needs ARK_BROWSER_CDP_AUTH_TOKEN", file=sys.stderr, flush=True)
+    print("[sandbox] ERROR: CDP relay needs SEAGENT_BROWSER_CDP_AUTH_TOKEN", file=sys.stderr, flush=True)
     raise SystemExit(1)
 
 try:
     SOURCE_NETWORK = ipaddress.ip_network(SOURCE_RANGE, strict=False) if SOURCE_RANGE else None
 except ValueError:
-    print(f"[sandbox] ERROR: invalid ARK_BROWSER_CDP_SOURCE_RANGE: {SOURCE_RANGE}", file=sys.stderr, flush=True)
+    print(f"[sandbox] ERROR: invalid SEAGENT_BROWSER_CDP_SOURCE_RANGE: {SOURCE_RANGE}", file=sys.stderr, flush=True)
     raise SystemExit(1)
 
 EXPECTED_BASIC = "Basic " + base64.b64encode(f"{AUTH_USER}:{AUTH_TOKEN}".encode()).decode()
@@ -358,7 +358,7 @@ class Handler(socketserver.BaseRequestHandler):
         if not has_auth(header_bytes):
             client.sendall(
                 b"HTTP/1.1 401 Unauthorized\r\n"
-                b'WWW-Authenticate: Basic realm="ark CDP"\r\n'
+                b'WWW-Authenticate: Basic realm="seagent CDP"\r\n'
                 b"Connection: close\r\n"
                 b"Content-Length: 0\r\n\r\n"
             )
@@ -401,7 +401,7 @@ while (( $(date +%s%3N) < relay_deadline )); do
   if ! kill -0 "${CDP_RELAY_PID}" 2>/dev/null; then
     fail "CDP relay exited during startup"
   fi
-  if curl -fsS --max-time 0.5 -u "ark:${CDP_AUTH_TOKEN}" "http://127.0.0.1:${CDP_PORT}/json/version" >/dev/null 2>&1; then
+  if curl -fsS --max-time 0.5 -u "seagent:${CDP_AUTH_TOKEN}" "http://127.0.0.1:${CDP_PORT}/json/version" >/dev/null 2>&1; then
     relay_ready=1
     break
   fi
@@ -423,7 +423,7 @@ if [[ "${ENABLE_NOVNC}" == "1" && "${HEADLESS}" != "1" ]]; then
     NOVNC_PASSWORD="$(< /proc/sys/kernel/random/uuid)"
     NOVNC_PASSWORD="${NOVNC_PASSWORD//-/}"
     NOVNC_PASSWORD="${NOVNC_PASSWORD:0:8}"
-    log "ARK_BROWSER_NOVNC_PASSWORD unset; generated a random VNC password"
+    log "SEAGENT_BROWSER_NOVNC_PASSWORD unset; generated a random VNC password"
   fi
 
   x11vnc -storepasswd "${NOVNC_PASSWORD}" "${HOME}/.vnc/passwd" >/dev/null 2>>"${LOG_FILE}"
@@ -440,7 +440,7 @@ elif [[ "${ENABLE_NOVNC}" == "1" ]]; then
   log "noVNC requested but headless=1: skipping x11vnc/websockify"
 fi
 
-log "Container running. CDP: 0.0.0.0:${CDP_PORT} (Basic ark:<token>) -> 127.0.0.1:${CHROME_CDP_PORT}"
+log "Container running. CDP: 0.0.0.0:${CDP_PORT} (Basic seagent:<token>) -> 127.0.0.1:${CHROME_CDP_PORT}"
 if [[ -n "${WEBSOCKIFY_PID}" ]]; then
   log "noVNC: http://<host>:${NOVNC_PORT}/vnc.html?autoconnect=1 (password protected)"
 else

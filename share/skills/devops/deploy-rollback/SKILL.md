@@ -1,9 +1,9 @@
 ---
-upstream: "ark/skills original to ark (MIT)"
+upstream: "seagent/skills original to SE Agent (MIT)"
 name: deploy-rollback
 description: "Deploy and roll back safely with the deploy tool: dry-run and diff first, approval to apply, prepared rollback, audit trail."
 version: 1.0.0
-author: ark
+author: SE Agent
 license: MIT
 platforms: [linux]
 metadata:

@@ -31,7 +31,7 @@ point at an internal mirror). The first call may ask for approval; add the host 
 - Every create is in the audit log (`ticket.create`) with the summary and the resulting key.
 
 ## Weekly automation
-`ark` blueprint `vuln-triage` (catalog) runs this procedure on a schedule and delivers the
+`seagent` blueprint `vuln-triage` (catalog) runs this procedure on a schedule and delivers the
 ranked list and drafted tickets for approval. It never creates tickets on its own.
 
 ## False positives and accepted risk

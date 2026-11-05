@@ -1,0 +1,24 @@
+#!/sbin/openrc-run
+# SE Agent system daemon for OpenRC (Alpine and other systemd-free hosts); the systemd unit is
+# packaging/systemd/seagentd-system.service. Same account, layout and working directory.
+name="seagentd"
+description="SE Agent (System Engineering Agent) daemon"
+command="/usr/bin/seagent"
+command_args="daemon run -w /var/lib/seagent/workspace"
+command_user="seagent:seagent"
+command_background=true
+pidfile="/run/seagent/seagentd.pid"
+directory="/var/lib/seagent/workspace"
+output_log="/var/log/seagent/seagentd.log"
+error_log="/var/log/seagent/seagentd.log"
+export SEAGENT_MODE=system
+umask 0077
+
+depend() {
+    need net
+    after firewall
+}
+
+start_pre() {
+    checkpath -d -m 0750 -o seagent:seagent /run/seagent /var/lib/seagent /var/lib/seagent/workspace /var/cache/seagent /var/log/seagent
+}

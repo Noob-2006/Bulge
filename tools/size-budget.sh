@@ -1,5 +1,5 @@
 #!/bin/bash
-# Size budget check for the ark release binaries (audit row D6).
+# Size budget check for the seagent release binaries (audit row D6).
 #
 # Reads tools/size-budget.tsv, builds each listed configuration, compares the stripped
 # binary against its budget and fails if any build is over. The numbers behind the
@@ -12,9 +12,9 @@
 #   tools/size-budget.sh --tolerance=N   # allow N % over a budget (LTO layout drifts ~0.3 %
 #                                        # between runs on the same tree)
 #
-# Builds go to ${ARK_SIZE_TARGET_DIR:-$XDG_CACHE_HOME/ark-size-budget/target} (default
-# ~/.cache/ark-size-budget/target), NOT to ./target: this script replaces the binary of
-# each configuration in turn, and target/release/ark is the one the tests and e2e use.
+# Builds go to ${SEAGENT_SIZE_TARGET_DIR:-$XDG_CACHE_HOME/seagent-size-budget/target} (default
+# ~/.cache/seagent-size-budget/target), NOT to ./target: this script replaces the binary of
+# each configuration in turn, and target/release/seagent is the one the tests and e2e use.
 #
 # Exit codes: 0 all within budget, 1 over budget or missing, 2 usage/environment error.
 set -u
@@ -42,7 +42,7 @@ while [ $# -gt 0 ]; do
 done
 [ -f "$budget_file" ] || { echo "size-budget: $budget_file missing" >&2; exit 2; }
 
-export CARGO_TARGET_DIR=${ARK_SIZE_TARGET_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}/ark-size-budget/target}
+export CARGO_TARGET_DIR=${SEAGENT_SIZE_TARGET_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}/seagent-size-budget/target}
 export CARGO_INCREMENTAL=0
 mkdir -p "$CARGO_TARGET_DIR" 2>/dev/null || { echo "size-budget: cannot create $CARGO_TARGET_DIR" >&2; exit 2; }
 
@@ -64,13 +64,13 @@ while IFS=$'\t' read -r name profile features budget last command; do
     *) args+=(--no-default-features --features "$features") ;;
   esac
   if [ "$build" = 1 ]; then
-    if ! cargo build -p ark "${args[@]}" >/dev/null 2>&1; then
+    if ! cargo build -p seagent "${args[@]}" >/dev/null 2>&1; then
       rows+=("$name|$budget|0|build failed")
       fail=1
       continue
     fi
   fi
-  bin="$CARGO_TARGET_DIR/$profile/ark"
+  bin="$CARGO_TARGET_DIR/$profile/seagent"
   if [ ! -f "$bin" ]; then
     rows+=("$name|$budget|0|missing $bin (run without --no-build)")
     fail=1

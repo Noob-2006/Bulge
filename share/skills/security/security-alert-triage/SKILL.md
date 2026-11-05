@@ -1,9 +1,9 @@
 ---
-upstream: "ark/skills original to ark (MIT)"
+upstream: "seagent/skills original to SE Agent (MIT)"
 name: security-alert-triage
 description: "Triage SIEM and AppSec alerts (Wazuh, Elastic Security, Splunk, Semgrep): group, enrich, decide true or false positive, escalate."
 version: 1.0.0
-author: ark
+author: SE Agent
 license: MIT
 platforms: [linux, macos, windows]
 metadata:

@@ -1,0 +1,38 @@
+---
+# How seagent gets onto the host:
+#   repo     - the signed apt/yum repository from packaging/repo (set seagent_repo_url + seagent_repo_key_url)
+#   package  - a .deb/.rpm you host yourself or ship from the controller (seagent_package_src)
+#   tarball  - the static release tarball (any distro, also air-gapped: seagent_tarball_src on the controller)
+seagent_install_method: repo
+seagent_version: "0.1.0"
+
+seagent_repo_url: ""            # e.g. https://packages.example.com/seagent   (apt: <url>/apt, yum: <url>/rpm/$basearch)
+seagent_repo_key_url: ""        # public key: apt keyring (.gpg/.asc) or RPM-GPG-KEY-seagent
+seagent_package_src: ""         # path on the controller or https URL of the .deb/.rpm
+seagent_package_checksum: ""    # "sha256:<hex>" from the verified SHA256SUMS - REQUIRED for method package
+seagent_tarball_src: ""         # path on the controller of seagent-<arch>-unknown-linux-musl.tar.gz
+seagent_tarball_checksum: ""   # "sha256:<hex>" from the verified SHA256SUMS - REQUIRED for method tarball
+seagent_tarball_prefix: /usr/local
+
+# Unattended `seagent setup` (flags/env of crates/seagent/src/setup_server.rs). Secrets only travel in the
+# environment of that one command, never in argv or a file this role writes.
+seagent_provider: ""            # anthropic, openai, ... ; empty = skip setup (you manage config.toml yourself)
+seagent_model: ""
+seagent_base_url: ""            # local / custom OpenAI-compatible endpoint
+seagent_api_key: ""             # put it in ansible-vault; no_log is set on every task that sees it
+seagent_channel: ""             # telegram | discord
+seagent_channel_token: ""
+seagent_owner: ""
+seagent_become_method: sudo      # how to become the `seagent` account (su needs seagent_become_flags: "-s /bin/sh": the account has no login shell)
+seagent_become_flags: ""
+seagent_setup_no_log: true       # set false only to debug with a throw-away key
+seagent_setup_force: false      # re-run setup on a host that already has a config.toml
+
+# Organisation policy -> /etc/seagent/managed.toml (root:root 0644). Any TOML-able structure.
+seagent_managed_policy: {}
+
+seagent_system_user: seagent
+seagent_home: /var/lib/seagent          # state (home of the account); seagent_core::layout::system::DATA
+seagent_config_dir: /etc/seagent        # config + secrets of the system instance (ent-008)
+seagent_service_enabled: true
+seagent_service_state: started

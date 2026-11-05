@@ -1,0 +1,41 @@
+# Maintainer: SE Agent maintainers <seagent@users.noreply.github.com>
+# AUR `seagent-bin`: the signed release tarball (static musl), the same files the deb/rpm ship.
+# Rendered by packaging/arch/mkpkgbuild.sh (version and checksums filled in from a release).
+pkgname=seagent-bin
+pkgver=@VERSION@
+pkgrel=1
+pkgdesc="SE Agent (System Engineering Agent): self-hosted, Linux-first AI agent runtime"
+arch=('x86_64' 'aarch64')
+url="https://github.com/se-agent/System-Engineering-Agent"
+license=('MIT')
+depends=()
+optdepends=('git: version control tools'
+            'qemu-system-x86: desktop and tool-isolation VMs'
+            'chromium: browser tools'
+            'libsecret: keyring-backed secret store')
+provides=('seagent')
+conflicts=('seagent' 'ark-agent')
+replaces=('ark-agent')
+install=seagent.install
+source_x86_64=("@BASE@/seagent-x86_64-unknown-linux-musl.tar.gz")
+source_aarch64=("@BASE@/seagent-aarch64-unknown-linux-musl.tar.gz")
+sha256sums_x86_64=('@SHA_X86_64@')
+sha256sums_aarch64=('@SHA_AARCH64@')
+
+package() {
+    install -Dm0755 "$srcdir/bin/seagent" "$pkgdir/usr/bin/seagent"
+    install -dm0755 "$pkgdir/usr/share/seagent"
+    cp -R "$srcdir/share/seagent/." "$pkgdir/usr/share/seagent/"
+    : > "$pkgdir/usr/share/seagent/managed-by-package"
+    install -Dm0644 "$srcdir/share/seagent/systemd/seagentd-system.service" "$pkgdir/usr/lib/systemd/system/seagentd.service"
+    install -Dm0644 "$srcdir/share/seagent/systemd/seagent-sysusers.conf" "$pkgdir/usr/lib/sysusers.d/seagent.conf"
+    install -Dm0644 "$srcdir/share/seagent/systemd/seagent-tmpfiles.conf" "$pkgdir/usr/lib/tmpfiles.d/seagent.conf"
+    install -dm1770 "$pkgdir/etc/seagent"
+    install -dm0755 "$pkgdir/etc/seagent/managed.d"
+    for f in README.md THIRD_PARTY_NOTICES.md; do
+        [ -f "$srcdir/share/doc/seagent/$f" ] && install -Dm0644 "$srcdir/share/doc/seagent/$f" "$pkgdir/usr/share/doc/seagent/$f"
+    done
+    install -Dm0644 /dev/stdin "$pkgdir/usr/share/licenses/$pkgname/LICENSE" <<'LICENSE'
+See /usr/share/doc/seagent/THIRD_PARTY_NOTICES.md and https://github.com/se-agent/System-Engineering-Agent/blob/main/LICENSE
+LICENSE
+}

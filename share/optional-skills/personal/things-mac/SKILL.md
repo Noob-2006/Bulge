@@ -89,4 +89,4 @@ Notes
 
 ## Platform note
 
-This skill is transcribed verbatim from `openclaw/skills/things-mac` (MIT, © OpenClaw contributors). It drives macOS-only tooling (`things`, the Things 3 CLI), so on Linux/Windows ark will discover it but the commands cannot run until the binary exists on a macOS host with Things 3 installed. Nothing in this file is expected to work without macOS; ark's requirement gating (`requires.bins`/`os`) is what suppresses it elsewhere.
+This skill is transcribed verbatim from `openclaw/skills/things-mac` (MIT, © OpenClaw contributors). It drives macOS-only tooling (`things`, the Things 3 CLI), so on Linux/Windows SE Agent will discover it but the commands cannot run until the binary exists on a macOS host with Things 3 installed. Nothing in this file is expected to work without macOS; seagent's requirement gating (`requires.bins`/`os`) is what suppresses it elsewhere.

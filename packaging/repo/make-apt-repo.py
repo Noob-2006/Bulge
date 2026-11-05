@@ -2,13 +2,13 @@
 """Signed apt repository from .deb files (ent-028). Stdlib + dpkg-deb + gpg; no reprepro/aptly.
 
   make-apt-repo.py --debs DIR --out REPO --key-id KEYID [--gnupghome DIR] [--passphrase-file F]
-                   [--suite stable] [--component main] [--origin ark]
+                   [--suite stable] [--component main] [--origin seagent]
 
 Layout (a "classic" repository, works with `deb [signed-by=…] URL stable main`):
-  REPO/pool/main/a/ark/<file>.deb
+  REPO/pool/main/a/seagent/<file>.deb
   REPO/dists/<suite>/main/binary-<arch>/Packages{,.gz}
   REPO/dists/<suite>/{Release,Release.gpg,InRelease}
-  REPO/ark-archive-keyring.gpg (binary, for signed-by=) and ark-archive-keyring.asc
+  REPO/seagent-archive-keyring.gpg (binary, for signed-by=) and seagent-archive-keyring.asc
 Deterministic given the same inputs and SOURCE_DATE_EPOCH. Never touches the network.
 """
 import argparse, gzip, hashlib, os, shutil, subprocess, sys, time
@@ -50,7 +50,7 @@ def main():
     p.add_argument("--passphrase-file")
     p.add_argument("--suite", default="stable")
     p.add_argument("--component", default="main")
-    p.add_argument("--origin", default="ark")
+    p.add_argument("--origin", default="seagent")
     a = p.parse_args()
     debs = sorted(f for f in os.listdir(a.debs) if f.endswith(".deb"))
     if not debs:
@@ -59,7 +59,7 @@ def main():
     date = time.strftime("%a, %d %b %Y %H:%M:%S +0000", time.gmtime(epoch))
     out = os.path.abspath(a.out)
     shutil.rmtree(os.path.join(out, "dists"), ignore_errors=True)
-    pool = os.path.join(out, "pool", a.component, "a", "ark")
+    pool = os.path.join(out, "pool", a.component, "a", "seagent")
     os.makedirs(pool, exist_ok=True)
     by_arch = {}
     for d in debs:
@@ -67,7 +67,7 @@ def main():
         shutil.copyfile(os.path.join(a.debs, d), dst)
         arch = run("dpkg-deb", "--field", dst, "Architecture").stdout.strip()
         dg = digests(dst)
-        block = field_block(dst) + "\nFilename: pool/%s/a/ark/%s\nSize: %d\nMD5sum: %s\nSHA1: %s\nSHA256: %s\n" % (
+        block = field_block(dst) + "\nFilename: pool/%s/a/seagent/%s\nSize: %d\nMD5sum: %s\nSHA1: %s\nSHA256: %s\n" % (
             a.component, d, os.path.getsize(dst), dg["md5"], dg["sha1"], dg["sha256"])
         by_arch.setdefault(arch, []).append(block)
     dist = os.path.join(out, "dists", a.suite)
@@ -82,7 +82,7 @@ def main():
         files += [(rel, text), (rel + ".gz", gz)]
     rel_lines = ["Origin: " + a.origin, "Label: " + a.origin, "Suite: " + a.suite, "Codename: " + a.suite, "Date: " + date,
                  "Architectures: " + " ".join(sorted(by_arch)), "Components: " + a.component,
-                 "Description: ark agent runtime packages"]
+                 "Description: seagent agent runtime packages"]
     for name, algo in (("MD5Sum", "md5"), ("SHA1", "sha1"), ("SHA256", "sha256")):
         rel_lines.append(name + ":")
         for rel, data in files:
@@ -93,11 +93,11 @@ def main():
     run(*g, "--clearsign", "--output", os.path.join(dist, "InRelease"), release)
     run(*g, "--armor", "--detach-sign", "--output", os.path.join(dist, "Release.gpg"), release)
     asc = run(*(["gpg"] + (["--homedir", a.gnupghome] if a.gnupghome else []) + ["--batch", "--armor", "--export", a.key_id])).stdout
-    open(os.path.join(out, "ark-archive-keyring.asc"), "w").write(asc)
+    open(os.path.join(out, "seagent-archive-keyring.asc"), "w").write(asc)
     gpgbin = run(*(["gpg"] + (["--homedir", a.gnupghome] if a.gnupghome else []) + ["--batch", "--export", a.key_id]), text=False).stdout
-    open(os.path.join(out, "ark-archive-keyring.gpg"), "wb").write(gpgbin)
+    open(os.path.join(out, "seagent-archive-keyring.gpg"), "wb").write(gpgbin)
     print("apt repository: %s  (%d package(s), arch: %s)" % (out, len(debs), ", ".join(sorted(by_arch))))
-    print("client: install -m0644 ark-archive-keyring.gpg /etc/apt/keyrings/ && echo 'deb [signed-by=/etc/apt/keyrings/ark-archive-keyring.gpg] <URL> %s %s' > /etc/apt/sources.list.d/ark.list" % (a.suite, a.component))
+    print("client: install -m0644 seagent-archive-keyring.gpg /etc/apt/keyrings/ && echo 'deb [signed-by=/etc/apt/keyrings/seagent-archive-keyring.gpg] <URL> %s %s' > /etc/apt/sources.list.d/seagent.list" % (a.suite, a.component))
 
 
 main()

@@ -13,7 +13,7 @@ variable "disk_gb" {
   default = 30
 }
 variable "egress_cidrs" {
-  description = "Where ark may connect on 443; narrow this to your proxy/model endpoints."
+  description = "Where seagent may connect on 443; narrow this to your proxy/model endpoints."
   type        = list(string)
   default     = ["0.0.0.0/0"]
 }

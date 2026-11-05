@@ -1,0 +1,53 @@
+#cloud-config
+# seagent agent server on first boot (Ubuntu/Debian/RHEL family/Amazon Linux 2023). Needs outbound
+# HTTPS to your package mirror only. Replace the three placeholders; pass the API key through your
+# cloud's secret mechanism (the example reads it from a file the platform writes, 0600) - never
+# paste it in user-data, which is readable from the instance metadata service.
+#
+# Tested flow (deploy/README.md): the same `seagent setup` flags are run in the distro matrix.
+write_files:
+  - path: /etc/seagent/managed.toml
+    owner: root:root
+    permissions: "0644"
+    defer: true                       # after the package created /etc/seagent
+    content: |
+      [managed]
+      locked = ["approvals.preset", "gate.egress_allow"]
+      [approvals]
+      preset = "standard"
+      [gate]
+      egress_allow = ["api.anthropic.com"]
+  - path: /usr/local/sbin/seagent-firstboot
+    owner: root:root
+    permissions: "0755"
+    content: |
+      #!/bin/sh
+      set -eu
+      REPO=https://packages.example.com/seagent            # <-- your mirror of packaging/repo output
+      KEYFILE=/run/seagent-api-key                          # <-- written by the platform, 0600, deleted below
+      if command -v apt-get >/dev/null 2>&1; then
+          install -d -m 0755 /etc/apt/keyrings
+          curl -fsSL "$REPO/seagent-archive-keyring.gpg" -o /etc/apt/keyrings/seagent-archive-keyring.gpg
+          echo "deb [signed-by=/etc/apt/keyrings/seagent-archive-keyring.gpg] $REPO/apt stable main" > /etc/apt/sources.list.d/seagent.list
+          apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y seagent
+      else
+          cat > /etc/yum.repos.d/seagent.repo <<REPOEOF
+      [seagent]
+      name=seagent agent runtime
+      baseurl=$REPO/rpm/\$basearch
+      enabled=1
+      gpgcheck=1
+      repo_gpgcheck=1
+      gpgkey=$REPO/rpm/RPM-GPG-KEY-seagent
+      REPOEOF
+          (command -v dnf >/dev/null 2>&1 && dnf install -y seagent) || yum install -y seagent
+      fi
+      # unattended setup as the service account; the key goes through the environment into the vault
+      SEAGENT_SETUP_API_KEY=$(cat "$KEYFILE") SEAGENT_MODE=system \
+          setpriv --reuid=seagent --regid=seagent --clear-groups \
+          /usr/bin/seagent setup --non-interactive --no-service --provider anthropic --model claude-sonnet-4-5
+      rm -f "$KEYFILE"
+      systemctl enable --now seagentd
+runcmd:
+  - [/usr/local/sbin/seagent-firstboot]
+  - [/usr/bin/seagent, doctor]

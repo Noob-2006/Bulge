@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# Real-service integration tests for ark's channels.
+# Real-service integration tests for seagent's channels.
 #
 # Starts the services this machine can self-host, runs the opt-in tests in
-# `crates/ark-channel/tests/real_*.rs`, then removes every container it started.
-# Nothing here touches $HOME or the real $ARK_HOME: the tests get addresses in
+# `crates/seagent-channel/tests/real_*.rs`, then removes every container it started.
+# Nothing here touches $HOME or the real $SEAGENT_HOME: the tests get addresses in
 # env vars and scratch dirs under $TMPDIR.
 #
 #   ./tests/real/run.sh              # everything
@@ -21,12 +21,12 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-TMPDIR_REAL="${TMPDIR:-/tmp}/ark-real-$$"
+TMPDIR_REAL="${TMPDIR:-/tmp}/seagent-real-$$"
 mkdir -p "$TMPDIR_REAL"
 export TMPDIR="$TMPDIR_REAL"
 export CARGO_INCREMENTAL=0
 
-PREFIX=ark-real
+PREFIX=seagent-real
 PORTS=(25860 25825 25843 25880 28008 26667 25999)
 WITH_MATRIX=1
 WITH_WHATSAPP=1
@@ -68,7 +68,7 @@ cleanup() {
     [ -n "$p" ] && kill "$p" >/dev/null 2>&1 || true
   done
   for s in "${started_stacks[@]:-}"; do
-    # Each helper removes only the ark-test-<stack>* containers it created.
+    # Each helper removes only the seagent-test-<stack>* containers it created.
     [ -n "$s" ] && "$ROOT/tests/real/${s}_up.sh" --down >/dev/null 2>&1 || true
   done
   rm -rf "$TMPDIR_REAL"
@@ -91,17 +91,17 @@ podman rm -f "$PREFIX-ntfy" >/dev/null 2>&1 || true
 podman run -d --name "$PREFIX-ntfy" -p 25860:80 docker.io/binwiederhier/ntfy:latest serve --listen-http :80 >/dev/null
 started_containers+=("$PREFIX-ntfy")
 wait_http http://127.0.0.1:25860/v1/health 60
-export ARK_REAL_NTFY_URL=http://127.0.0.1:25860
+export SEAGENT_REAL_NTFY_URL=http://127.0.0.1:25860
 
 # --- SMTP + IMAP (GreenMail) --------------------------------------------
 podman rm -f "$PREFIX-mail" >/dev/null 2>&1 || true
 podman run -d --name "$PREFIX-mail" -p 25825:3025 -p 25843:3143 -p 25880:8080 \
-  -e GREENMAIL_OPTS='-Dgreenmail.setup.test.all -Dgreenmail.hostname=0.0.0.0 -Dgreenmail.users=ark:secret@localhost,alice:secret@localhost' \
+  -e GREENMAIL_OPTS='-Dgreenmail.setup.test.all -Dgreenmail.hostname=0.0.0.0 -Dgreenmail.users=seagent:secret@localhost,alice:secret@localhost' \
   docker.io/greenmail/standalone >/dev/null
 started_containers+=("$PREFIX-mail")
-wait_http http://127.0.0.1:25880/api/user/ark@localhost/messages 120
-export ARK_REAL_IMAP=127.0.0.1:25843 ARK_REAL_SMTP=127.0.0.1:25825 ARK_REAL_MAIL_API=http://127.0.0.1:25880
-export ARK_REAL_MAIL_USER=ark ARK_REAL_MAIL_PASS=secret ARK_REAL_MAIL_ADDR=ark@localhost
+wait_http http://127.0.0.1:25880/api/user/seagent@localhost/messages 120
+export SEAGENT_REAL_IMAP=127.0.0.1:25843 SEAGENT_REAL_SMTP=127.0.0.1:25825 SEAGENT_REAL_MAIL_API=http://127.0.0.1:25880
+export SEAGENT_REAL_MAIL_USER=seagent SEAGENT_REAL_MAIL_PASS=secret SEAGENT_REAL_MAIL_ADDR=seagent@localhost
 
 # --- IRC (ngircd, from the distro package, no root) ---------------------
 if command -v ngircd >/dev/null 2>&1; then
@@ -117,12 +117,12 @@ fi
 if [ -x "$NGIRCD" ]; then
   cat > "$TMPDIR_REAL/ngircd.conf" <<EOF
 [Global]
-    Name = ark-real.local
-    Info = ark real-service test ircd
+    Name = seagent-real.local
+    Info = seagent real-service test ircd
     Ports = 26667
     Listen = 127.0.0.1
     PidFile = $TMPDIR_REAL/ngircd.pid
-    MotdPhrase = ark real irc test
+    MotdPhrase = seagent real irc test
     Ident = no
     DNS = no
 [Options]
@@ -133,7 +133,7 @@ EOF
   "$NGIRCD" -f "$TMPDIR_REAL/ngircd.conf" -n > "$TMPDIR_REAL/ngircd.log" 2>&1 &
   started_pids+=("$!")
   for _ in $(seq 1 20); do (exec 3<>/dev/tcp/127.0.0.1/26667) 2>/dev/null && break; sleep 0.5; done
-  export ARK_REAL_IRC_ADDR=127.0.0.1:26667
+  export SEAGENT_REAL_IRC_ADDR=127.0.0.1:26667
 else
   echo "ngircd not available: skipping the IRC tests" >&2
 fi
@@ -163,10 +163,10 @@ PY
   podman run -d --name "$PREFIX-synapse" -p 28008:8008 -v "$SYNDATA:/data" --user 991:991 docker.io/matrixdotorg/synapse:latest >/dev/null
   started_containers+=("$PREFIX-synapse")
   wait_http http://127.0.0.1:28008/_matrix/client/versions 180
-  podman exec "$PREFIX-synapse" register_new_matrix_user -u ark -p arkpass123 -a -c /data/homeserver.yaml http://localhost:8008 >/dev/null 2>&1 || true
+  podman exec "$PREFIX-synapse" register_new_matrix_user -u seagent -p seagentpass123 -a -c /data/homeserver.yaml http://localhost:8008 >/dev/null 2>&1 || true
   podman exec "$PREFIX-synapse" register_new_matrix_user -u alice -p alicepass123 --no-admin -c /data/homeserver.yaml http://localhost:8008 >/dev/null 2>&1 || true
-  export ARK_REAL_MATRIX_HS=http://127.0.0.1:28008 ARK_REAL_MATRIX_USER=@ark:localhost ARK_REAL_MATRIX_PASS=arkpass123
-  export ARK_REAL_MATRIX_PEER=@alice:localhost ARK_REAL_MATRIX_PEER_PASS=alicepass123
+  export SEAGENT_REAL_MATRIX_HS=http://127.0.0.1:28008 SEAGENT_REAL_MATRIX_USER=@seagent:localhost SEAGENT_REAL_MATRIX_PASS=seagentpass123
+  export SEAGENT_REAL_MATRIX_PEER=@alice:localhost SEAGENT_REAL_MATRIX_PEER_PASS=alicepass123
 fi
 
 # --- WhatsApp bridge (real Baileys process, unpaired) -------------------
@@ -175,15 +175,15 @@ if [ "$WITH_WHATSAPP" -eq 1 ] && command -v node >/dev/null 2>&1 && [ -d "$ROOT/
   node "$ROOT/bridges/whatsapp/bridge.js" --port 25999 --session "$TMPDIR_REAL/wa-session" --mode bot > "$TMPDIR_REAL/wa.log" 2>&1 &
   started_pids+=("$!")
   for _ in $(seq 1 60); do curl -sf -m 2 http://127.0.0.1:25999/health >/dev/null 2>&1 && break; sleep 1; done
-  export ARK_REAL_WA_BRIDGE=http://127.0.0.1:25999
+  export SEAGENT_REAL_WA_BRIDGE=http://127.0.0.1:25999
 else
   echo "whatsapp bridge not run (node or bridges/whatsapp/node_modules missing)" >&2
 fi
 
 # --- whisper.cpp STT (bring your own build) -----------------------------
-if [ -n "${ARK_REAL_WHISPER_CPP:-}" ]; then
+if [ -n "${SEAGENT_REAL_WHISPER_CPP:-}" ]; then
   mkdir -p "$TMPDIR_REAL/whisper-models"
-  export ARK_REAL_WHISPER_MODELS="$TMPDIR_REAL/whisper-models"
+  export SEAGENT_REAL_WHISPER_MODELS="$TMPDIR_REAL/whisper-models"
 fi
 
 # --- Mattermost + Postgres (real API v4 + websocket) ---------------------
@@ -234,18 +234,18 @@ fi
 cd "$ROOT"
 status=0
 for t in real_ntfy real_email real_irc real_matrix real_whatsapp real_media real_mattermost real_nextcloud_talk vectors; do
-  echo "=== cargo test -p ark-channel --test $t"
-  # real_irc's cases share one ircd, one channel (#ark) and assert "nothing else arrived
+  echo "=== cargo test -p seagent-channel --test $t"
+  # real_irc's cases share one ircd, one channel (#seagent) and assert "nothing else arrived
   # yet", so they must not interleave; the others use separate rooms/users per test.
   if [ "$t" = real_irc ]; then
-    cargo test -p ark-channel --test "$t" -- --test-threads=1 2>&1 | tail -n 6 || status=1
+    cargo test -p seagent-channel --test "$t" -- --test-threads=1 2>&1 | tail -n 6 || status=1
   else
-    cargo test -p ark-channel --test "$t" 2>&1 | tail -n 6 || status=1
+    cargo test -p seagent-channel --test "$t" 2>&1 | tail -n 6 || status=1
   fi
 done
-echo "=== cargo test -p ark-media --test real_tts"
-cargo test -p ark-media --test real_tts 2>&1 | tail -n 6 || status=1
-echo "=== cargo test -p ark-browser --test real_sandbox_browser"
-cargo test -p ark-browser --test real_sandbox_browser 2>&1 | tail -n 8 || status=1
+echo "=== cargo test -p seagent-media --test real_tts"
+cargo test -p seagent-media --test real_tts 2>&1 | tail -n 6 || status=1
+echo "=== cargo test -p seagent-browser --test real_sandbox_browser"
+cargo test -p seagent-browser --test real_sandbox_browser 2>&1 | tail -n 8 || status=1
 echo "=== done (status $status); services will be removed"
 exit $status

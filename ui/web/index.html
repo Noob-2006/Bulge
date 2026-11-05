@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="theme-color" content="#0b0105">
-<title>ark</title>
+<title>SE Agent</title>
 <link rel="manifest" href="/manifest.webmanifest">
 <link rel="icon" href="/ui/star.svg" type="image/svg+xml">
 <link rel="stylesheet" href="/ui/theme.css">
@@ -19,7 +19,7 @@
     <header class="brand">
       <span class="star glow twinkle logo" style="--size:22px"></span>
       <div class="brand-text">
-        <div class="brand-name">ark</div>
+        <div class="brand-name">SE Agent</div>
         <div class="brand-sub" id="conn">尚未連線</div>
       </div>
     </header>
@@ -145,8 +145,8 @@
 <dialog id="login" class="modal cornered">
   <span class="star corner tl"></span><span class="star corner tr"></span><span class="star corner bl"></span><span class="star corner br"></span>
   <form method="dialog" id="loginForm">
-    <div class="modal-head"><span class="star glow spin" style="--size:20px"></span><h2 data-i18n="login">連線到 ark</h2></div>
-    <p class="dim" id="loginHint">輸入 App Server 的 token（<code>ark app token</code> 會顯示）。</p>
+    <div class="modal-head"><span class="star glow spin" style="--size:20px"></span><h2 data-i18n="login">連線到 SE Agent</h2></div>
+    <p class="dim" id="loginHint">輸入 App Server 的 token（<code>seagent app token</code> 會顯示）。</p>
     <input id="token" type="password" autocomplete="current-password" placeholder="token" required>
     <label class="check"><input type="checkbox" id="remember" checked> <span data-i18n="remember">記住這台裝置</span></label>
     <menu><button class="btn" value="ok" data-i18n="connect">連線</button></menu>

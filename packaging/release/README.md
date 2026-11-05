@@ -1,10 +1,10 @@
 # Release packaging — checklist and tooling
 
-Everything in this directory is release plumbing for the `ark` binary. A tag push (`v*`) runs
+Everything in this directory is release plumbing for the `seagent` binary. A tag push (`v*`) runs
 `.github/workflows/release.yml`, which performs steps 3-8 below for all four Linux targets
 (`make-tarball.sh`, `check-binary.sh`, `sbom.py`, `sign.sh`, `verify-release.sh`, `repro-check.sh`);
 the checklist stays the manual fallback and the description of what CI does. Signing happens in CI
-only when the repository secret `ARK_RELEASE_SIGNING_KEY` (the PEM from `gen-key.sh`) is set;
+only when the repository secret `SEAGENT_RELEASE_SIGNING_KEY` (the PEM from `gen-key.sh`) is set;
 without it the release is published unsigned with a warning (SHA256SUMS + attestation only).
 
 | File | What it does |
@@ -14,7 +14,7 @@ without it the release is published unsigned with a warning (SHA256SUMS + attest
 | `sign.sh` | Detached base64 Ed25519 signature over `SHA256SUMS`; refuses group/world-readable keys. |
 | `verify-release.sh` | Verifies a downloaded dist directory: signature → per-file hashes → no extra files → SBOM parses. |
 | `repro-check.sh` | Builds the tree twice from different paths and compares artifact hashes. |
-| `make-tarball.sh` | Deterministic `ark-<triple>.tar.gz`: `bin/ark` + `share/ark/` (skills, roles, catalogs, VM builder, sandbox-browser sources, systemd units). |
+| `make-tarball.sh` | Deterministic `seagent-<triple>.tar.gz`: `bin/seagent` + `share/seagent/` (skills, roles, catalogs, VM builder, sandbox-browser sources, systemd units). |
 | `check-binary.sh` | CI gate: musl binaries are static, gnu binaries need no glibc newer than 2.28, CPU matches the triple. |
 | `DEPENDENCY-REVIEW.md` | The process for adding/bumping a crate, the dependency budget, advisory triage. |
 
@@ -27,9 +27,9 @@ Do this offline, on the machine that will cut releases, and store the private ke
 repository:
 
 ```sh
-packaging/release/gen-key.sh --out-dir ~/ark-release-keys
-# ~/ark-release-keys/release-key.pem      0600   <- never commit, upload or copy to CI
-# ~/ark-release-keys/release-key.pub.pem  0644   <- published with every release
+packaging/release/gen-key.sh --out-dir ~/seagent-release-keys
+# ~/seagent-release-keys/release-key.pem      0600   <- never commit, upload or copy to CI
+# ~/seagent-release-keys/release-key.pub.pem  0644   <- published with every release
 ```
 
 Back the private key up (offline medium or password manager). Losing it means re-issuing the key
@@ -46,7 +46,7 @@ Run from the repository root. `VERSION` is the number in `[workspace.package]` o
 - [ ] `git status` clean; `Cargo.lock` committed.
 - [ ] Every dependency change went through [DEPENDENCY-REVIEW.md](DEPENDENCY-REVIEW.md) (reviewer
       line in the PR).
-- [ ] No known reachable advisory: `ark security audit --supply-chain --fail-on high`
+- [ ] No known reachable advisory: `seagent security audit --supply-chain --fail-on high`
       (or `cargo deny check advisories`).
 
 **1. Version bump**
@@ -66,10 +66,10 @@ Run from the repository root. `VERSION` is the number in `[workspace.package]` o
 TAG_EPOCH=$(git log -1 --format=%ct)          # release time = commit time, not now
 rm -rf dist && mkdir -p dist
 export SOURCE_DATE_EPOCH=$TAG_EPOCH
-cargo build -p ark --release
-cp target/release/ark                     dist/
+cargo build -p seagent --release
+cp target/release/seagent                     dist/
 cp README.md THIRD_PARTY_NOTICES.md       dist/
-cp ~/ark-release-keys/release-key.pub.pem dist/
+cp ~/seagent-release-keys/release-key.pub.pem dist/
 ```
 
 **4. SBOM**
@@ -96,28 +96,28 @@ itself, and `verify-release.sh` knows that).
 **6. Sign**
 
 ```sh
-packaging/release/sign.sh dist/SHA256SUMS ~/ark-release-keys/release-key.pem
+packaging/release/sign.sh dist/SHA256SUMS ~/seagent-release-keys/release-key.pem
 # -> dist/SHA256SUMS.sig  (base64, 64 bytes of Ed25519, self-verified before it is written)
 ```
 
 **7. Reproducible-build check**
 
 ```sh
-packaging/release/repro-check.sh            # quick: the `ark` binary, ~1-2 minutes
+packaging/release/repro-check.sh            # quick: the `seagent` binary, ~1-2 minutes
 packaging/release/repro-check.sh --full     # whole workspace + every .rlib, several minutes
 ```
 
 Exit 0 = every artifact hash matched across the two build paths. Exit 1 = a DIFF table; the
 release is blocked until the cause is understood. Shipped code does not embed
-`env!("CARGO_MANIFEST_DIR")` any more (a test in `crates/ark/tests/supply_chain.rs` enforces it):
-the share directory and the VM image builder are located at run time (`ark_core::share`,
-`ark-vm/src/image.rs`), so the build directory no longer leaks into the binary. The release
+`env!("CARGO_MANIFEST_DIR")` any more (a test in `crates/seagent/tests/supply_chain.rs` enforces it):
+the share directory and the VM image builder are located at run time (`seagent_core::share`,
+`seagent-vm/src/image.rs`), so the build directory no longer leaks into the binary. The release
 workflow also passes `--remap-path-prefix` and `SOURCE_DATE_EPOCH`.
 
 **8. Verify what you are about to publish**
 
 ```sh
-packaging/release/verify-release.sh dist --key ~/ark-release-keys/release-key.pub.pem
+packaging/release/verify-release.sh dist --key ~/seagent-release-keys/release-key.pub.pem
 ```
 
 This runs exactly the checks a downloader runs: signature over `SHA256SUMS`, every listed file,
@@ -125,11 +125,11 @@ no unlisted files, SBOM parses. If it fails, go back to step 3 — do not publis
 directory.
 
 **9. Publish** (release page / mirror), all from `dist/`:
-`ark`, `README.md`, `THIRD_PARTY_NOTICES.md`, `sbom.spdx.json`, `SHA256SUMS`, `SHA256SUMS.sig`,
+`seagent`, `README.md`, `THIRD_PARTY_NOTICES.md`, `sbom.spdx.json`, `SHA256SUMS`, `SHA256SUMS.sig`,
 `release-key.pub.pem`.
 
 **10. After the release**
-- [ ] Tag pushed: `git tag -s v$VERSION -m "ark $VERSION" && git push origin v$VERSION`.
+- [ ] Tag pushed: `git tag -s v$VERSION -m "seagent $VERSION" && git push origin v$VERSION`.
 - [ ] Release notes state the SBOM file name and the repro-check result (including any accepted
       exception from step 7).
 - [ ] Archive the `dist/` directory and its `SHA256SUMS.sig` — the signature cannot be
@@ -138,7 +138,7 @@ directory.
 ## Verifying a download (what a user runs)
 
 ```sh
-tar xf ark-$VERSION.tar.gz && cd ark-$VERSION
+tar xf seagent-$VERSION.tar.gz && cd seagent-$VERSION
 packaging/release/verify-release.sh . --key release-key.pub.pem   # or verify-release.sh alone
 ```
 

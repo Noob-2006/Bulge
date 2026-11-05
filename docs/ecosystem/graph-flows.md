@@ -1,8 +1,8 @@
-# ark 的持久化流程：LangGraph 對照、與 lobster 的分工
+# SE Agent 的持久化流程：LangGraph 對照、與 lobster 的分工
 
-這一頁說明 F2 的實作：`crates/ark-app/src/surfaces/graph.rs`（工具名 `graph-flow`）——LangGraph
-的執行模型（superstep、channel reducer、checkpoint、interrupt、time travel）在 ark 裡的等價物，
-以及它與既有 `lobster`（`crates/ark-app/src/surfaces/lobster.rs`）的分工。上游依據見
+這一頁說明 F2 的實作：`crates/seagent-app/src/surfaces/graph.rs`（工具名 `graph-flow`）——LangGraph
+的執行模型（superstep、channel reducer、checkpoint、interrupt、time travel）在 SE Agent 裡的等價物，
+以及它與既有 `lobster`（`crates/seagent-app/src/surfaces/lobster.rs`）的分工。上游依據見
 [`langchain-internals.md`](langchain-internals.md)（Pregel `tick()`/`after_tick()`、`BaseCheckpointSaver`、
 `interrupt()` 可續跑例外、`durability` 三檔）。
 
@@ -16,19 +16,19 @@
 | 續跑 | 只能續「剛剛停下的那一個」 | 可續最新，也可**指定任何舊 checkpoint**（time travel／分支） |
 | 適合 | 重複性的資料處理管線（抓資料→過濾→摘要→送出） | 需要狀態機、迴圈、重試策略、長時間等待人核准的流程 |
 
-兩者都是 ark 的工具（`lobster`、`graph-flow`），共用同一組安全模型：都在呼叫前宣告
-`Effect`（`Tool::effects`），由 ark 既有的閘門一次性判斷整個流程，而不是每個節點問一次
+兩者都是 SE Agent 的工具（`lobster`、`graph-flow`），共用同一組安全模型：都在呼叫前宣告
+`Effect`（`Tool::effects`），由 SE Agent 既有的閘門一次性判斷整個流程，而不是每個節點問一次
 （設計原則 §0：不要讓長期任務卡在核准）。
 
-## 2. 對照表：LangGraph → ark
+## 2. 對照表：LangGraph → SE Agent
 
-| LangGraph | ark `graph-flow` | 備註 |
+| LangGraph | SE Agent `graph-flow` | 備註 |
 |---|---|---|
-| `StateGraph(state_schema)` | `{"state": {"<ch>: {"reducer": …, "default": …}}}` | ark 的 channel 無型別，靠 reducer 決定合併方式 |
+| `StateGraph(state_schema)` | `{"state": {"<ch>: {"reducer": …, "default": …}}}` | SE Agent 的 channel 無型別，靠 reducer 決定合併方式 |
 | `LastValue` | `"reducer": "last"`（預設） | 後寫蓋前寫 |
 | `BinaryOperatorAggregate` / `add`（list） | `"reducer": "append"` | 純量自動包成 list，陣列攤平 |
 | `add`（str） | `"reducer": "concat"` | 字串串接／陣列串接，兩者都保留型別 |
-| `add_messages` | 未實作 | ark 的訊息歷史在 kernel，不在流程層；流程只帶摘要與指標 |
+| `add_messages` | 未實作 | SE Agent 的訊息歷史在 kernel，不在流程層；流程只帶摘要與指標 |
 | `add`（數字） | `"reducer": "sum"` | 整數保持整數 |
 | dict merge | `"reducer": "merge"` | 淺合併 |
 | `add_node("x", fn)` | `nodes.x = {kind: run\|tool\|llm\|set\|gate\|noop}` | 見 §3 |
@@ -36,11 +36,11 @@
 | `add_conditional_edges(a, router, map)` | `{"from": "a", "router": [{"when": "…", "to": "b"}], "default": "c"}` | `when` 是一條小條件式（§4），規則依序比對 |
 | `interrupt()` | `{"kind": "gate", "mode": "approval"\|"input"}` | 節點被重跑一次並拿到答案（與上游一致：副作用要放在 gate 之後或做成幂等） |
 | `interrupt_before` / `interrupt_after` | 同名規格欄位 | 停在 superstep 邊界，不需要節點裡有 gate |
-| `Command(resume=…)` | `action=resume` + `approve` / `response` | `response` 會先用 gate 的 `schema` 驗證（`ark_plugin::schema::validate`） |
+| `Command(resume=…)` | `action=resume` + `approve` / `response` | `response` 會先用 gate 的 `schema` 驗證（`seagent_plugin::schema::validate`） |
 | `BaseCheckpointSaver.put/get/list` | `<data>/surfaces/graph/threads/<thread>/<step>-<id>.json`＋`latest.json` | 每個 checkpoint 有 `parent`、`step`、`status`、`next`、`state`、`graph`、`input` |
 | `configurable.thread_id` | `threadId`（`a-z0-9-_`，≤64） | 路徑穿越一律拒絕 |
 | `checkpoint_ns`（子圖） | 未實作 | 子流程請用兩個 thread，或在工具裡再叫 `graph-flow` |
-| `durability: sync/async/exit` | 永遠 sync（先寫檔再進下一步） | ark 的流程一次 superstep 就是一次 commit；沒有背景寫入執行緒 |
+| `durability: sync/async/exit` | 永遠 sync（先寫檔再進下一步） | SE Agent 的流程一次 superstep 就是一次 commit；沒有背景寫入執行緒 |
 | `update_state` / time travel | `action=resume` + `checkpointId`（從舊點分支）、`action=status` 看歷史 | 分支不覆寫舊 checkpoint，parent 鏈保留 |
 | `BaseStore`（跨 thread 長期記憶） | 未實作；用 `memory` 工具或 `lobster` 的 `state.*` | 流程狀態與長期記憶刻意分開 |
 | `recursion_limit` | `[surfaces.graph] max_steps`（預設 64） | 超過即 `status: "error"` 並留下 checkpoint |
@@ -50,7 +50,7 @@
 | kind | 做什麼 | 主要欄位 | 寫入 |
 |---|---|---|---|
 | `run` | `sh -c`（或 `argv`）跑一個指令 | `cmd` / `argv` / `stdin` / `cwd` / `timeout_ms` / `save_json` | `save`（預設 `result`）＝stdout |
-| `tool` | 呼叫 ark 既有的工具 | `tool` / `args`（字串可含 `{{path}}`） | `save`＝工具輸出（`save_json` 時解析） |
+| `tool` | 呼叫 SE Agent 既有的工具 | `tool` / `args`（字串可含 `{{path}}`） | `save`＝工具輸出（`save_json` 時解析） |
 | `llm` | `llm-task`：JSON-only 的模型呼叫 | `prompt` / `schema` / `model` | `save`＝已驗證的 JSON |
 | `set` | 只寫狀態（不產生副作用） | `state: {ch: value}` | 逐個 channel |
 | `gate` | 停下來等人 | `mode` / `message` / `schema` / `save` | 續跑後寫入答案（approval→bool、input→JSON） |
@@ -74,7 +74,7 @@
    `interrupted`。續跑時 gate 重跑一次並拿到答案。
 5. 逾時／取消：每個節點有自己的 timeout，整體有 `max_steps`；逾時會 kill 自己啟動的子行程。
 
-**與上游不同的地方（誠實列出）：** 同一批節點是循序執行而非平行（ark 的工具呼叫共用
+**與上游不同的地方（誠實列出）：** 同一批節點是循序執行而非平行（SE Agent 的工具呼叫共用
 `ToolCtx`，先求語意正確）；沒有 `checkpoint_ns` 子圖；沒有跨 thread 的 Store；`interrupt_after`
 的 resuming 只會繼續往下，不會重跑節點（上游的 `Command(resume)` 一定是重跑）。
 
@@ -108,7 +108,7 @@ ARP 方法 `graph.threads` 讓 Web UI 列出所有流程（與 `lobster.runs` �
 
 ## 8. 測試
 
-`cargo test -p ark-app --lib surfaces::graph`：15 個測試，涵蓋
+`cargo test -p seagent-app --lib surfaces::graph`：15 個測試，涵蓋
 
 - 規格驗證（打錯欄位名、未知節點種類、懸空邊、保留名 `START`/`END`、gate 模式）；
 - 模板與條件式（型別保留、缺少路徑、`and/or/not/contains/in`）；

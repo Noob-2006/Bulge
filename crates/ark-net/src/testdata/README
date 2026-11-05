@@ -1,4 +1,0 @@
-Test-only PKI for ark-net TLS/mTLS tests (ent-037/121/059). Generated with openssl; the CA
-private key was discarded. None of these keys protect anything: they only sign "localhost",
-"127.0.0.1" and spiffe://example.org/ark/node/n1 for loopback tests. other.* is a self-signed
-client that no test CA trusts (negative tests).

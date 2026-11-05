@@ -4,7 +4,7 @@ name: images
 # build would take hours emulated), pushed by digest, merged into one multi-arch manifest per tag,
 # then signed keyless with cosign (GitHub OIDC -> Sigstore) and shipped with BuildKit SBOM and
 # max-mode provenance attestations. Verify:
-#   cosign verify ghcr.io/<owner>/ark:<tag> --certificate-identity-regexp 'https://github.com/<owner>/ark/.*' \
+#   cosign verify ghcr.io/<owner>/seagent:<tag> --certificate-identity-regexp 'https://github.com/<owner>/seagent/.*' \
 #     --certificate-oidc-issuer https://token.actions.githubusercontent.com
 on:
   push:
@@ -13,7 +13,7 @@ on:
 permissions:
   contents: read
 env:
-  IMAGE: ghcr.io/${{ github.repository_owner }}/ark
+  IMAGE: ghcr.io/${{ github.repository_owner }}/seagent
 jobs:
   smoke:
     # Every flavour must start before anything is pushed.
@@ -33,12 +33,12 @@ jobs:
           context: .
           file: ${{ matrix.file }}
           load: true
-          tags: ark:smoke-${{ matrix.variant }}
+          tags: seagent:smoke-${{ matrix.variant }}
           cache-from: type=gha,scope=${{ matrix.variant }}
       - name: starts, non-root, share/ present
         run: |
           set -euo pipefail
-          img='ark:smoke-${{ matrix.variant }}'
+          img='seagent:smoke-${{ matrix.variant }}'
           docker run --rm "$img" --version
           uid="$(docker image inspect "$img" --format '{{.Config.User}}')"
           test -n "$uid" && test "$uid" != root && test "$uid" != 0

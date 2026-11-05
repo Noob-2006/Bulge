@@ -1,11 +1,11 @@
-# Bot Desktop image for OSWorld runs (`ark evals bench --suite osworld:…`).
+# Bot Desktop image for OSWorld runs (`seagent evals bench --suite osworld:…`).
 #
-# Build:  podman build -t localhost/ark-bot-desktop:latest -f share/evals/osworld/Containerfile .
-# Each task runs in a fresh container named ark-test-eval-osworld-* (removed afterwards);
-# the host's ark binary is mounted read-only at /usr/local/bin/ark and `ark screen start`
+# Build:  podman build -t localhost/seagent-bot-desktop:latest -f share/evals/osworld/Containerfile .
+# Each task runs in a fresh container named seagent-test-eval-osworld-* (removed afterwards);
+# the host's seagent binary is mounted read-only at /usr/local/bin/seagent and `seagent screen start`
 # brings up the same Xvnc + Xfce desktop computer_use drives on a host.
 #
-# The package list is the Bot Desktop's (crates/ark-browser/src/control/screen.rs, apt),
+# The package list is the Bot Desktop's (crates/seagent-browser/src/control/screen.rs, apt),
 # plus the input tools computer_use uses and the applications OSWorld's task domains open.
 # Trim the application list to the domains you run.
 FROM docker.io/library/debian:bookworm-slim
@@ -17,7 +17,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       curl ca-certificates git xdg-utils \
       libreoffice-calc libreoffice-writer libreoffice-impress gimp vlc thunderbird chromium \
     && rm -rf /var/lib/apt/lists/*
-RUN mkdir -p /ark && chmod 700 /ark
-ENV ARK_HOME=/ark
+RUN mkdir -p /seagent && chmod 700 /seagent
+ENV SEAGENT_HOME=/seagent
 WORKDIR /root
 CMD ["sleep", "infinity"]

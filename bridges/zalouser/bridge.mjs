@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// ark zalouser bridge: a Zalo personal-account session (zca-js) behind a small
+// seagent zalouser bridge: a Zalo personal-account session (zca-js) behind a small
 // bearer-protected loopback HTTP API. See README.md for the protocol.
 // The zca-js call shapes follow OpenClaw's extensions/zalouser (MIT).
 
@@ -338,7 +338,7 @@ const routes = {
     recent.delete(String(b.msgId));
     return { ok: true };
   },
-  // Lookups behind ark's `zalouser` tool (upstream listZaloFriendsMatching / listZaloGroupsMatching / getZaloUserInfo).
+  // Lookups behind seagent's `zalouser` tool (upstream listZaloFriendsMatching / listZaloGroupsMatching / getZaloUserInfo).
   "GET /friends": async (_b, url) => {
     const a = requireApi();
     const q = url.searchParams.get("query");

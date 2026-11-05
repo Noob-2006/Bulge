@@ -1,9 +1,9 @@
 ---
-upstream: "ark/skills original to ark (MIT)"
+upstream: "seagent/skills original to SE Agent (MIT)"
 name: incident-response
 description: "Investigate an alert or outage: scope impact, query metrics and logs, build a timeline, find the cause, hand off or roll back."
 version: 1.0.0
-author: ark
+author: SE Agent
 license: MIT
 platforms: [linux, macos]
 metadata:

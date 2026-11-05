@@ -1,4 +1,4 @@
-"""A scripted ACP agent for tests of ark's ACP client (stdio NDJSON JSON-RPC).
+"""A scripted ACP agent for tests of seagent's ACP client (stdio NDJSON JSON-RPC).
 
 Prompt text decides what it does:
   read:<path>              fs/read_text_file (line 2, limit 1) and echo the content

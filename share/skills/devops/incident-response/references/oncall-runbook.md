@@ -1,6 +1,6 @@
 # On-call runbook: the first 15 minutes
 
-Applies to any page from Alertmanager, Grafana or PagerDuty that reaches an ark session
+Applies to any page from Alertmanager, Grafana or PagerDuty that reaches an seagent session
 (webhook route, scheduled `incident-triage` blueprint, or a human asking).
 
 ## 0–2 min: own it

@@ -1,0 +1,29 @@
+[package]
+name = "seagent-skills"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+# Model adapters that only some installs need (AWS Bedrock, Vertex/Gemini, the external
+# agent CLIs, the hosted Agents API, managed llama.cpp). `default` keeps the build
+# complete; the binary's `--no-default-features` build turns it off (docs/BUILD.md).
+default = ["providers"]
+providers = ["seagent-kernel/providers"]
+
+[dependencies]
+seagent-core.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+regex.workspace = true
+ureq.workspace = true
+seagent-net.workspace = true # seagent_net::http::builder — the one outbound client builder (proxy/CA/offline)
+ring.workspace = true
+base64.workspace = true
+libc.workspace = true
+seagent-kernel = { path = "../seagent-kernel", default-features = false }
+seagent-tools.workspace = true # the `skill` writer (create/update/archive) behind this crate's view
+toml.workspace = true
+seagent-security.workspace = true # Skills Guard, plugin guard, URL policy, env scrub
+seagent-plugin.workspace = true # `seagent plugins` lists/enables the built-in plugins (`seagent_plugin::builtin`)
+miniz_oxide = "0.9" # ClawHub ZIP downloads (already in the tree via seagent-media)

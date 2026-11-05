@@ -1,4 +1,4 @@
-// ark web UI: agent work surfaces — session dashboards (show_widget / dashboard),
+// seagent web UI: agent work surfaces — session dashboards (show_widget / dashboard),
 // progress cards, the dashboards gallery and paused lobster workflows.
 // Uses app.js globals: S, $, esc, appDoc, showPanel, row.
 'use strict';
@@ -12,7 +12,7 @@ function widgetFrame(w) {
   f.setAttribute('referrerpolicy', 'no-referrer');
   f.title = w.title || w.name;
   if (w.url) {
-    // session:website: a live HTTPS site, isolated from ark (no token, no tools).
+    // session:website: a live HTTPS site, isolated from seagent (no token, no tools).
     f.setAttribute('sandbox', 'allow-scripts allow-forms allow-popups allow-same-origin');
     f.src = w.url;
   } else {
@@ -83,11 +83,11 @@ async function showBoards() {
 // Widgets talk to the host with postMessage: size reports and user-initiated prompts.
 window.addEventListener('message', (e) => {
   const m = e.data;
-  if (!m || typeof m !== 'object' || typeof m.type !== 'string' || !m.type.startsWith('ark:widget-')) return;
+  if (!m || typeof m !== 'object' || typeof m.type !== 'string' || !m.type.startsWith('seagent:widget-')) return;
   const frame = [...document.querySelectorAll('iframe')].find((f) => f.contentWindow === e.source);
   if (!frame) return;
-  if (m.type === 'ark:widget-size' && Number.isFinite(m.height)) frame.style.height = Math.min(2000, Math.max(60, m.height + 4)) + 'px';
-  if (m.type === 'ark:widget-prompt' && typeof m.prompt === 'string' && S.current) {
+  if (m.type === 'seagent:widget-size' && Number.isFinite(m.height)) frame.style.height = Math.min(2000, Math.max(60, m.height + 4)) + 'px';
+  if (m.type === 'seagent:widget-prompt' && typeof m.prompt === 'string' && S.current) {
     S.arp.call('session.submit', { id: S.current, text: m.prompt.slice(0, 4000), source: 'widget' }).catch(() => {});
   }
 });

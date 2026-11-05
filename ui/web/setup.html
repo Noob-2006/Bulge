@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="referrer" content="no-referrer">
-<title>ark 初始設定</title>
+<title>SE Agent 初始設定</title>
 <link rel="icon" href="/ui/star.svg" type="image/svg+xml">
 <link rel="stylesheet" href="/ui/theme.css">
 <style>
@@ -59,7 +59,7 @@
 <body>
 <div class="setup-shell">
 <aside class="steps" aria-label="設定步驟">
-  <div class="brand"><span class="star glow twinkle" style="--size:22px" aria-hidden="true"></span><div><b>ark</b><span class="sub">初始設定</span></div></div>
+  <div class="brand"><span class="star glow twinkle" style="--size:22px" aria-hidden="true"></span><div><b>SE Agent</b><span class="sub">初始設定</span></div></div>
   <ol id="stepNav">
     <li><a href="#stepProvider"><span class="n">01</span>模型供應商</a></li>
     <li><a href="#stepModel"><span class="n">02</span>預設模型</a></li>
@@ -74,14 +74,14 @@
 <main class="setup" id="setup">
   <header>
     <span class="kicker">First-run setup</span>
-    <h1>讓 ark 開始工作</h1>
+    <h1>讓 SE Agent 開始工作</h1>
   </header>
   <p class="hint" id="intro">這個一次性連結只能完成一次設定；完成後精靈會自動鎖定。金鑰只存進保管庫，不會顯示在畫面上，也不會寫進設定檔。</p>
 
   <section id="blocked" class="notice" hidden>
     <h2>無法使用設定精靈</h2>
     <p id="blockedReason" class="error"></p>
-    <p class="hint">在主機上執行 <code>ark setup link</code> 取得新的一次性連結；設定已完成時用 <code>ark app open</code> 開啟主控台。</p>
+    <p class="hint">在主機上執行 <code>seagent setup link</code> 取得新的一次性連結；設定已完成時用 <code>seagent app open</code> 開啟主控台。</p>
   </section>
 
   <form id="wizard" hidden novalidate>
@@ -158,7 +158,7 @@
 
     <fieldset id="stepService">
       <legend>07　服務</legend>
-      <div class="choice"><input type="checkbox" id="autostart" name="autostart" checked><label for="autostart">開機時自動啟動 ark</label></div>
+      <div class="choice"><input type="checkbox" id="autostart" name="autostart" checked><label for="autostart">開機時自動啟動 SE Agent</label></div>
       <p class="hint" id="modeHint"></p>
     </fieldset>
 
@@ -171,7 +171,7 @@
   <section id="done" hidden>
     <h2>設定完成</h2>
     <ul class="log" id="doneLog"></ul>
-    <p>ark 正在以新設定重新啟動，數秒後會自動前往主控台。</p>
+    <p>SE Agent 正在以新設定重新啟動，數秒後會自動前往主控台。</p>
     <p><a id="consoleLink" href="/">開啟主控台</a></p>
   </section>
 </main>
