@@ -247,6 +247,8 @@ dependencies = [
  "base64",
  "libc",
  "regex",
+ "ring",
+ "rusqlite",
  "serde",
  "serde_json",
  "toml",

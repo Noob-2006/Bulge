@@ -13,6 +13,10 @@ pub mod documents {
     pub use crate::extract::{extract, html_text, is_extractable};
 }
 mod zip;
+pub mod data;
+pub mod directory;
+pub mod forge;
+pub mod pro_http;
 pub mod filestate;
 mod lint;
 mod job;

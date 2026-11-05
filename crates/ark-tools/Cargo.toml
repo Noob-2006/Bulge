@@ -16,3 +16,5 @@ ureq.workspace = true
 toml.workspace = true # post-write TOML syntax lint (existing workspace dep)
 ark-vm.workspace = true # microVM exec backend (B1): the `vm` backend delegates to ark-vm
 base64.workspace = true # base64 frames on the guest channel (ark-vm protocol)
+rusqlite = { version = "0.40", features = ["bundled"] } # sql_query on local SQLite files (opened read-only); same build as ark-kernel's index
+ring.workspace = true # RS256 JWT for GitHub App installation tokens (forge)
