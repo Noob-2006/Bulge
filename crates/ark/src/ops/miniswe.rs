@@ -30,7 +30,7 @@ pub enum Env {
     Docker { bin: String, id: String, cwd: String },
 }
 
-fn run_capture(mut cmd: Command, timeout: Duration) -> Result<(String, i32), String> {
+pub(crate) fn run_capture(mut cmd: Command, timeout: Duration) -> Result<(String, i32), String> {
     let mut child = cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().map_err(|e| e.to_string())?;
     let (mut so, mut se) = (child.stdout.take().unwrap(), child.stderr.take().unwrap());
     let ho = std::thread::spawn(move || {
@@ -61,13 +61,23 @@ fn run_capture(mut cmd: Command, timeout: Duration) -> Result<(String, i32), Str
 }
 
 impl Env {
+    #[cfg(test)]
     pub fn create(kind: &str, image: &str, cwd: Option<&Path>, docker_bin: &str) -> Result<Env, String> {
+        Env::create_named(kind, image, cwd, docker_bin, None)
+    }
+    /// Like [`Env::create`]; a container gets `--name NAME` (evaluation runs name theirs
+    /// `ark-test-eval-*` so they are recognisable and never confused with the user's own).
+    pub fn create_named(kind: &str, image: &str, cwd: Option<&Path>, docker_bin: &str, name: Option<&str>) -> Result<Env, String> {
         match kind {
             "local" => Ok(Env::Local { cwd: cwd.map(Path::to_path_buf).unwrap_or_else(std::env::temp_dir) }),
             "docker" => {
                 let cwd = cwd.map(|p| p.display().to_string()).unwrap_or_else(|| "/tmp".into());
                 let mut c = Command::new(docker_bin);
-                c.args(["run", "-d", "--rm", "-w", &cwd, image, "sleep", "infinity"]);
+                c.args(["run", "-d", "--rm"]);
+                if let Some(n) = name {
+                    c.args(["--name", n]);
+                }
+                c.args(["-w", &cwd, image, "sleep", "infinity"]);
                 let (out, code) = run_capture(c, Duration::from_secs(600))?;
                 if code != 0 {
                     return Err(format!("docker run failed: {}", out.trim()));
@@ -76,6 +86,20 @@ impl Env {
             }
             "modal" => Err("the modal environment needs Modal's hosted sandboxes, which ark does not drive; use --env docker".into()),
             o => Err(format!("Unknown environment type: {o}. Use 'local' or 'docker'")),
+        }
+    }
+    /// The container id (docker env only).
+    pub fn container_id(&self) -> Option<&str> {
+        match self {
+            Env::Docker { id, .. } => Some(id),
+            Env::Local { .. } => None,
+        }
+    }
+    /// The container CLI (docker env only).
+    pub fn container_bin(&self) -> Option<&str> {
+        match self {
+            Env::Docker { bin, .. } => Some(bin),
+            Env::Local { .. } => None,
         }
     }
     pub fn kind(&self) -> &'static str {
@@ -122,6 +146,17 @@ pub struct Runner {
     pub docker_bin: String,
     pub max_iterations: u32,
     pub command_timeout: u64,
+    /// `--name` for the docker env's container (None = runtime-chosen).
+    pub container_name: Option<String>,
+}
+
+/// Removes the task container even when the loop or a caller's hook panics.
+struct EnvGuard<'a>(&'a Env);
+
+impl Drop for EnvGuard<'_> {
+    fn drop(&mut self) {
+        self.0.cleanup();
+    }
 }
 
 fn tools_json() -> String {
@@ -171,7 +206,14 @@ pub fn to_hermes(messages: &[Message], task: &str) -> Vec<Value> {
 
 impl Runner {
     pub fn run_task(&self, task: &str) -> Result<Value, String> {
-        let env = Env::create(&self.env_kind, &self.image, self.cwd.as_deref(), &self.docker_bin)?;
+        self.run_task_then(task, &mut |_| {})
+    }
+
+    /// Run the task, then call `after` with the still-live environment (graders, patch
+    /// extraction) before it is torn down.
+    pub fn run_task_then(&self, task: &str, after: &mut dyn FnMut(&Env)) -> Result<Value, String> {
+        let env = Env::create_named(&self.env_kind, &self.image, self.cwd.as_deref(), &self.docker_bin, self.container_name.as_deref())?;
+        let _guard = EnvGuard(&env);
         let mut messages = vec![Message::user(task)];
         let (mut calls, mut completed) = (0u32, false);
         let tool = ToolSchema { name: "terminal".into(), description: TERMINAL_DESCRIPTION.into(), input_schema: terminal_schema() };
@@ -208,7 +250,7 @@ impl Runner {
                 break;
             }
         }
-        env.cleanup();
+        after(&env);
         Ok(json!({"conversations": to_hermes(&messages, task), "completed": completed, "api_calls": calls, "metadata": {"model": self.model, "env_type": env.kind(), "timestamp": ark_kernel::trajectory::iso_ms(ark_kernel::event::now_ms()).trim_end_matches('Z')}}))
     }
 
@@ -252,6 +294,7 @@ pub fn cli(a: &Args) -> R {
         docker_bin: "docker".into(),
         max_iterations: a.num::<u32>("max-iterations")?.unwrap_or(15),
         command_timeout: a.num::<u64>("command-timeout")?.unwrap_or(60),
+        container_name: None,
     };
     match (a.val("task"), a.val("prompts")) {
         (Some(t), _) => {
@@ -301,13 +344,11 @@ mod tests {
     }
 
     fn runner(cmds: Vec<&'static str>, cwd: &Path, env: &str, bin: &str) -> Runner {
-        Runner { provider: Arc::new(Script(Mutex::new(cmds), Mutex::new(0))), model: "m".into(), env_kind: env.into(), image: "python:3.11-slim".into(), cwd: Some(cwd.into()), docker_bin: bin.into(), max_iterations: 5, command_timeout: 5 }
+        Runner { provider: Arc::new(Script(Mutex::new(cmds), Mutex::new(0))), model: "m".into(), env_kind: env.into(), image: "python:3.11-slim".into(), cwd: Some(cwd.into()), docker_bin: bin.into(), max_iterations: 5, command_timeout: 5, container_name: None }
     }
 
     fn dir() -> PathBuf {
-        let d = std::env::temp_dir().join(format!("ark-swe-{}", ark_kernel::util::random_hex(6)));
-        std::fs::create_dir_all(&d).unwrap();
-        d
+        ark_core::tmp::scratch("ark-swe")
     }
 
     #[test]

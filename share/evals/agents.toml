@@ -1,0 +1,52 @@
+# External agents for side-by-side runs (`ark evals bench --agents ID[=MODEL],…`).
+#
+# ark never embeds these tools: it writes one command line per attempt to
+# <out>/external/commands.sh (run in that attempt's prepared working directory) and reads
+# what the command printed. `--exec-external` makes ark start them itself; otherwise review
+# the script, run it, then `ark evals collect <out>`.
+#
+# Placeholders, substituted per argument (no shell involved): {prompt} {model} {workdir}.
+# `output` says how stdout is read: json (one document), jsonl (event stream) or text.
+# Flags change between releases: check `<bin> --help` for the version you have installed.
+# These tools act on the working directory without asking; run them in a container or VM
+# when the task is untrusted.
+
+[[agent]]
+id = "claude-code"
+name = "Claude Code"
+bin = "claude"
+args = ["-p", "{prompt}", "--output-format", "json", "--permission-mode", "acceptEdits"]
+model_args = ["--model", "{model}"]
+output = "json"
+install = "npm install -g @anthropic-ai/claude-code"
+notes = "headless print mode; the JSON result carries usage and total_cost_usd"
+
+[[agent]]
+id = "codex"
+name = "OpenAI Codex CLI"
+bin = "codex"
+args = ["exec", "--json", "--skip-git-repo-check", "--full-auto", "{prompt}"]
+model_args = ["-m", "{model}"]
+output = "jsonl"
+install = "npm install -g @openai/codex"
+notes = "non-interactive exec; the JSONL event stream carries token usage"
+
+[[agent]]
+id = "opencode"
+name = "OpenCode"
+bin = "opencode"
+args = ["run", "--format", "json", "{prompt}"]
+model_args = ["--model", "{model}"]
+output = "jsonl"
+install = "npm install -g opencode-ai"
+notes = "non-interactive run; model as provider/model"
+
+[[agent]]
+id = "ark"
+name = "ark (as an external command, for parity checks)"
+bin = "ark"
+args = ["run", "--yes", "{prompt}"]
+model_args = ["--model", "{model}"]
+output = "text"
+install = "see docs/BUILD.md"
+notes = "the same agent through its CLI instead of the in-process runner"

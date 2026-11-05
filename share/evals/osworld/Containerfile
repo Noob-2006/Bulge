@@ -1,0 +1,23 @@
+# Bot Desktop image for OSWorld runs (`ark evals bench --suite osworld:…`).
+#
+# Build:  podman build -t localhost/ark-bot-desktop:latest -f share/evals/osworld/Containerfile .
+# Each task runs in a fresh container named ark-test-eval-osworld-* (removed afterwards);
+# the host's ark binary is mounted read-only at /usr/local/bin/ark and `ark screen start`
+# brings up the same Xvnc + Xfce desktop computer_use drives on a host.
+#
+# The package list is the Bot Desktop's (crates/ark-browser/src/control/screen.rs, apt),
+# plus the input tools computer_use uses and the applications OSWorld's task domains open.
+# Trim the application list to the domains you run.
+FROM docker.io/library/debian:bookworm-slim
+ENV DEBIAN_FRONTEND=noninteractive LANG=C.UTF-8
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      tigervnc-standalone-server xfce4-panel xfwm4 xfdesktop4 xfce4-settings xfce4-terminal \
+      dbus-x11 x11-xserver-utils x11-utils x11-xkb-utils xauth fonts-dejavu-core \
+      xdotool wmctrl at-spi2-core python3 python3-gi gir1.2-atspi-2.0 \
+      curl ca-certificates git xdg-utils \
+      libreoffice-calc libreoffice-writer libreoffice-impress gimp vlc thunderbird chromium \
+    && rm -rf /var/lib/apt/lists/*
+RUN mkdir -p /ark && chmod 700 /ark
+ENV ARK_HOME=/ark
+WORKDIR /root
+CMD ["sleep", "infinity"]

@@ -221,7 +221,6 @@ crates/ark/src/ops/envfile.rs  # temp_dir
 crates/ark/src/ops/evals.rs  # temp_dir
 crates/ark/src/ops/logs.rs  # temp_dir
 crates/ark/src/ops/migrate.rs  # temp_dir
-crates/ark/src/ops/miniswe.rs  # temp_dir
 crates/ark/src/ops/partial.rs  # temp_dir
 crates/ark/src/ops/project.rs  # temp_dir
 crates/ark/src/ops/secretsrc.rs  # temp_dir
