@@ -503,7 +503,7 @@ fn build_agent(a: &Args, approver: Arc<dyn Approver>, with_channels: bool) -> Re
         Ok(acp) => tools.push(Arc::new(ark_app::acp_client::AcpDelegate { cfg: acp, gate: cfg.gate.clone(), vault: vault.clone() })),
         Err(e) => eprintln!("ark: warning: {e}"),
     }
-    match ark_browser::tools(&cfg.browser) {
+    match ark_browser::tools(&ark_app::computer::browser_table(&cfg.browser, &cfg.computer_use, &cfg.desktop_vm)) {
         Ok(b) => tools.extend(b),
         Err(e) => eprintln!("ark: warning: {e}"),
     }

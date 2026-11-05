@@ -288,6 +288,16 @@ mod tests {
     use super::*;
 
     #[test]
+    fn the_guest_browser_offers_devtools_through_the_relay_only() {
+        let ud = user_data(&DesktopConfig::default());
+        let launch = ud.lines().find(|l| l.contains("--remote-debugging-port=")).unwrap();
+        assert!(launch.contains("--remote-debugging-port=9222") && launch.contains("--user-data-dir="), "{launch}");
+        assert!(!ud.contains("--remote-debugging-address"), "DevTools stays on guest loopback");
+        assert!(ud.contains("TCP-LISTEN:9223,fork,reuseaddr TCP:127.0.0.1:9222") && ud.contains("systemctl enable ark-cdp-relay.service"));
+        assert!(DesktopConfig::default().packages().iter().any(|p| p == "socat"));
+    }
+
+    #[test]
     fn the_text_helper_survives_and_never_leaks_the_port() {
         // Found on a real VM: xclip stayed in the background holding the virtio port (one
         // opener only), so every text after the first timed out; a SIGPIPE or a failed `exec`

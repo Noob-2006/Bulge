@@ -46,7 +46,11 @@ write_files:
       xset s off -dpms 2>/dev/null
       sleep 3
       url=$(cat /run/ark/start-url 2>/dev/null || echo about:blank)
-      exec chromium --no-first-run --no-default-browser-check --password-store=basic --disable-features=Translate,MediaRouter --start-maximized "$url"
+      # DevTools on guest loopback (ark's browser tools drive this window through it; the
+      # relay below carries it to the host). Chromium ignores --remote-debugging-port on its
+      # default profile directory, hence the explicit one.
+      exec chromium --no-first-run --no-default-browser-check --password-store=basic --disable-features=Translate,MediaRouter --start-maximized \
+        --user-data-dir="$HOME/.config/ark-chromium" --remote-debugging-port=9222 "$url"
   - path: /etc/xdg/autostart/ark-chromium.desktop
     content: |
       [Desktop Entry]
@@ -54,6 +58,20 @@ write_files:
       Name=Chromium (ark)
       Exec=/usr/local/bin/ark-start-browser
       X-GNOME-Autostart-enabled=true
+  # The host reaches the DevTools port only through QEMU's user-mode hostfwd to guest port
+  # 9223 (bound to 127.0.0.1 on the host); nothing else can route into a user-mode guest.
+  - path: /etc/systemd/system/ark-cdp-relay.service
+    content: |
+      [Unit]
+      Description=ark: relay Chromium DevTools to the host
+      After=network-online.target
+      [Service]
+      ExecStart=/usr/bin/socat TCP-LISTEN:9223,fork,reuseaddr TCP:127.0.0.1:9222
+      Restart=always
+      RestartSec=2
+      DynamicUser=yes
+      [Install]
+      WantedBy=multi-user.target
   # Text channel for characters a US keyboard cannot type (CJK …): the host writes one
   # base64 line per text to virtio-serial port org.ark.text; the session pastes it (xclip +
   # ctrl+v via xdotool) and answers "ok".
@@ -118,6 +136,7 @@ write_files:
       udevadm control --reload-rules || true
       systemctl set-default graphical.target
       systemctl enable lightdm
+      systemctl enable ark-cdp-relay.service
       # Later boots have no seed: do not wait on datasources.
       touch /etc/cloud/cloud-init.disabled
       apt-get clean

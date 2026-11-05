@@ -80,6 +80,15 @@ idle_timeout_secs = 0     # 0 = 不自動停
 - `set_value`、`focus_app`、元素編號、點擊時的修飾鍵回傳 `unsupported_action`；
 - 核准範圍獨立：`desktop:vm:<name>:<action>`（主機上的授權不會延伸到 VM）。
 
+## 代理的瀏覽器在 VM 裡
+
+`[computer_use] target = "vm:<name>"` 且 `[desktop_vm] enabled = true` 時，`browser` / `browser_*` 工具直接操作那台 VM 桌面上的 Chromium，主控台右側看到的就是代理正在用的那個視窗；`[browser]` 自己設了 `backend`、`cdp_url` 或 `desktop_vm` 時以它為準。
+
+- 客體 Chromium 以 `--remote-debugging-port=9222`（只聽客體 loopback）啟動，`ark-cdp-relay.service`（socat）把它轉到客體 9223；QEMU user 網路以 `hostfwd` 只綁主機 `127.0.0.1` 的隨機埠，寫在 `<data>/vm/desktop/<name>/cdp.url`（VM 停止時刪除）。
+- 和 `cdp_url` 一樣，同一台主機上的其他本機使用者也連得到這個 loopback 埠；多人共用的主機請用 `network = "none"`（瀏覽器就不轉出）或另設 `[browser]`。
+- 接手控制時，VM 的租約同時擋下 computer use 與瀏覽器工具。
+- 需要 2026-11-05 以後建的映像（`IMAGE_LAYOUT = 3`）；舊映像請 `ark vm desktop build` 後 `ark vm desktop reset <name>`。
+
 ## 內建瀏覽器
 
 - `install.sh --with-browser`：把固定版本的 Chrome for Testing（`157.0.8103.38`，zip sha256 `8cdeb344…2a66`）驗證後解到 `<share>/browsers/chrome-linux64/`。

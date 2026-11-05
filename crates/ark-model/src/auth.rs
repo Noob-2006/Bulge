@@ -32,6 +32,28 @@ impl Cred {
     }
 }
 
+/// A pasted key as typed at a terminal: bracketed-paste markers and surrounding
+/// whitespace removed. Err when what is left cannot go in an HTTP header.
+pub fn clean_key(raw: &str) -> Result<String, String> {
+    let k = raw.replace("\x1b[200~", "").replace("\x1b[201~", "");
+    let k = k.trim();
+    check_key(k)?;
+    Ok(k.to_string())
+}
+
+/// Keys are visible ASCII. Anything else (an Escape from a terminal, a space, a
+/// full-width character) would fail as "failed to parse header value" on every call.
+pub fn check_key(k: &str) -> Result<(), String> {
+    match k.chars().find(|c| !('!'..='~').contains(c)) {
+        None => Ok(()),
+        Some(c) => Err(format!(
+            "the key contains {} (U+{:04X}), which an API key never has — it was likely mistyped or mangled by a terminal paste",
+            if c.is_control() { "a control character" } else if c.is_whitespace() { "whitespace" } else { "a non-ASCII character" },
+            c as u32
+        )),
+    }
+}
+
 pub trait CredSource: Send + Sync {
     fn get(&self) -> Result<Cred, ProviderError>;
     /// The last request was rejected (401): drop caches / force a refresh. True when a
@@ -767,6 +789,21 @@ impl Provider for Pool {
 mod tests {
     use super::*;
     use ark_core::{Message, Role, StopReason, Usage};
+
+    #[test]
+    fn a_pasted_key_loses_paste_markers_and_a_mangled_one_is_refused() {
+        assert_eq!(clean_key("\x1b[200~sk-abc123\x1b[201~\n").unwrap(), "sk-abc123");
+        assert_eq!(clean_key("  sk-abc123 \r\n").unwrap(), "sk-abc123");
+        for bad in ["\x1b", "sk-ab c", "sk-ａｂｃ", "sk-\x7fx"] {
+            assert!(clean_key(bad).is_err(), "{bad:?} accepted");
+        }
+        let e = crate::usable_key("deepseek", &Cred::token("\x1b")).unwrap_err();
+        assert_eq!(e.kind, K::Auth);
+        assert!(!e.is_retryable());
+        assert!(e.message.contains("control character") && e.message.contains("ark setup"), "{}", e.message);
+        assert!(crate::usable_key("deepseek", &Cred::token("sk-ok")).is_ok());
+        assert!(crate::usable_key("local", &Cred::default()).is_ok());
+    }
 
     struct Fake {
         fail: Mutex<Vec<Option<ProviderError>>>,

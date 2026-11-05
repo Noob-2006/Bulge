@@ -240,9 +240,7 @@ fn run(env: &Env, ctx: &ToolCtx, p: &Value) -> Result<Reply, String> {
     }
     let url = s(p, "targetUrl").or(s(p, "url")).filter(|_| matches!(action, "open" | "navigate"));
     let b = browser_for(env, ctx, p, url)?;
-    if b.info.lock().unwrap().contains_key("bot_desktop") {
-        crate::lease::agent_may_act(&env.home)?;
-    }
+    crate::lease::agent_may_act(&crate::manager::lease_home(&env.home, &b.key))?;
     match action {
         "tabs" => {
             let tabs = b.tabs(None)?;

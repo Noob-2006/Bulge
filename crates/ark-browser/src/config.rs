@@ -14,6 +14,9 @@ pub struct BrowserConfig {
     pub backend: String,
     /// A browser the user runs with --remote-debugging-port (http://host:port or ws://…).
     pub cdp_url: String,
+    /// Drive the Chromium on this desktop VM's screen (`ark vm desktop`), so a person
+    /// watching the VM sees every step. Set by ark when `[computer_use] target = "vm:<name>"`.
+    pub desktop_vm: String,
     /// Chromium-family executable for managed profiles ("" = search).
     pub executable: String,
     pub headless: bool,
@@ -165,6 +168,7 @@ impl Default for BrowserConfig {
             enabled: toml::Value::String("auto".into()),
             backend: String::new(),
             cdp_url: String::new(),
+            desktop_vm: String::new(),
             executable: String::new(),
             headless: true,
             no_sandbox: toml::Value::String("auto".into()),
@@ -206,8 +210,9 @@ impl Default for BrowserConfig {
 /// Documented defaults (printed by `ark config` docs and checked by a test).
 pub const DEFAULTS: &str = r#"[browser]
 enabled = "auto"            # "auto": browser tools appear when a browser is reachable; true / false
-backend = ""                # "" auto | local | cdp | browserbase | browser-use | firecrawl | camofox | lightpanda | sandbox | extension
+backend = ""                # "" auto | local | cdp | vm | browserbase | browser-use | firecrawl | camofox | lightpanda | sandbox | extension
 cdp_url = ""                # attach to your Chrome: http://127.0.0.1:9222 (started with --remote-debugging-port)
+desktop_vm = ""             # drive the Chromium on this desktop VM (set for you when [computer_use] target = "vm:<name>")
 executable = ""             # Chromium/Chrome/Brave/Edge binary for managed profiles ("" = search)
 headless = true
 no_sandbox = "auto"         # --no-sandbox when root, in a container, or AppArmor blocks user namespaces
@@ -315,6 +320,9 @@ impl BrowserConfig {
         }
         if !self.cdp_override().is_empty() {
             return "cdp".into();
+        }
+        if !self.desktop_vm.trim().is_empty() {
+            return "vm".into();
         }
         let local = || if self.engine() == "lightpanda" { "lightpanda".to_string() } else { "local".to_string() };
         match self.cloud_provider.trim().to_ascii_lowercase().as_str() {

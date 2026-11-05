@@ -309,6 +309,18 @@ pub(crate) enum Style {
     None,
 }
 
+/// A stored key that cannot go in a header is an auth problem, not a network one: it
+/// fails the same way every time, so it is never retried and the message says what to do.
+pub(crate) fn usable_key(provider: &str, cred: &Cred) -> Result<(), ark_core::ProviderError> {
+    match cred.token.as_deref().map(auth::check_key) {
+        Some(Err(e)) => Err(ark_core::ProviderError::new(
+            ark_core::ProviderErrorKind::Auth,
+            format!("{provider}: {e}; enter it again with `ark setup` or `ark secrets set <KEY_NAME>`"),
+        )),
+        _ => Ok(()),
+    }
+}
+
 /// Connection details shared by every adapter.
 pub(crate) struct Conn {
     pub id: String,
@@ -366,6 +378,7 @@ impl Conn {
         default: Style,
     ) -> Result<(String, Vec<(String, String)>, Cred), ark_core::ProviderError> {
         let cred = self.cred.get()?;
+        usable_key(&self.id, &cred)?;
         let mut h: Vec<(String, String)> = Vec::new();
         if let Some(k) = cred.token.as_deref().filter(|k| !k.is_empty()) {
             match self.style(default) {
@@ -564,6 +577,7 @@ pub fn list_models_with(
         return Ok(cfg.models.clone());
     }
     let c = cred.get().map_err(|e| format!("{}: {e}", cfg.id))?;
+    usable_key(&cfg.id, &c).map_err(|e| e.to_string())?;
     let base = match c.base.clone() {
         Some(b) => b,
         None => cfg.resolved_base()?,

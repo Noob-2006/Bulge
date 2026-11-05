@@ -117,6 +117,23 @@ pub fn tools_with(t: &toml::Table, desktop_vm: &toml::Table) -> Result<Vec<Arc<d
     Ok(v)
 }
 
+/// The `[browser]` table the browser tools get. With `[computer_use] target = "vm:<name>"`
+/// (and `[desktop_vm]` on) the agent's browser is that VM's Chromium — the window a person
+/// watches and can take over — unless `[browser]` names its own backend or CDP endpoint.
+pub fn browser_table(browser: &toml::Table, computer_use: &toml::Table, desktop_vm: &toml::Table) -> toml::Table {
+    let mut b = browser.clone();
+    let own = |k: &str| b.get(k).and_then(|v| v.as_str()).is_some_and(|s| !s.trim().is_empty());
+    if own("backend") || own("cdp_url") || own("desktop_vm") {
+        return b;
+    }
+    let vm = ComputerUseConfig::parse(computer_use).ok().and_then(|c| c.target.strip_prefix("vm:").map(str::to_string));
+    let on = ark_vm::desktop::DesktopConfig::parse(desktop_vm).is_ok_and(|d| d.enabled);
+    if let (Some(vm), true) = (vm, on) {
+        b.insert("desktop_vm".into(), toml::Value::String(vm));
+    }
+    b
+}
+
 /// The human-takeover refusal both tools return (Hermes `human_has_control`).
 pub(crate) fn refused(action: &str, e: &str) -> String {
     serde_json::json!({"ok": false, "action": action, "code": "human_has_control", "error": e}).to_string()
@@ -194,4 +211,27 @@ mod tests {
     }
 }
 
+#[cfg(test)]
+mod browser_table_tests {
+    use super::browser_table;
 
+    fn t(s: &str) -> toml::Table {
+        toml::from_str(s).unwrap()
+    }
+
+    #[test]
+    fn a_vm_target_puts_the_agent_browser_on_that_vm() {
+        let (cu, on) = (t("target = \"vm:desk\""), t("enabled = true"));
+        assert_eq!(browser_table(&t(""), &cu, &on).get("desktop_vm").and_then(|v| v.as_str()), Some("desk"));
+        // Its own backend / endpoint wins; a host target or a disabled [desktop_vm] changes nothing.
+        for own in ["backend = \"local\"", "cdp_url = \"http://127.0.0.1:9222\""] {
+            assert!(browser_table(&t(own), &cu, &on).get("desktop_vm").is_none(), "{own}");
+        }
+        assert!(browser_table(&t(""), &t("target = \"host\""), &on).get("desktop_vm").is_none());
+        assert!(browser_table(&t(""), &cu, &t("enabled = false")).get("desktop_vm").is_none());
+        // The browser crate reads the VM's endpoint where the VM writes it.
+        let vms = ark_vm::desktop::DesktopVms::new(Default::default(), std::path::Path::new("/d"), std::path::Path::new("/c"), std::path::Path::new("/r"));
+        assert_eq!(vms.vm_dir("desk").join(ark_vm::desktop::CDP_FILE), ark_browser::manager::vm_home(std::path::Path::new("/d"), "desk").join(ark_browser::manager::VM_CDP_FILE));
+        assert_eq!(vms.lease_home("desk"), ark_browser::manager::lease_home(std::path::Path::new("/d"), "vm:desk"));
+    }
+}

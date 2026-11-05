@@ -29,14 +29,19 @@ async function workTargets() {
   let list = null;
   try { list = await S.arp.call('view.browser.list', S.current ? { session: S.current } : {}); } catch {}
   const mine = list && list.session ? list.session.targetId : null;
+  // A desktop VM's Chromium is the agent's browser there: show it as that desktop (the screen
+  // a person sees, panel and all), not as a separate tab.
+  const skey = list && list.session ? String(list.session.key || '') : '';
+  const agentDesk = skey.startsWith('vm:') ? skey : null;
   for (const b of (list && list.browsers) || []) {
+    if (String(b.key || '').startsWith('vm:')) continue;
     for (const tb of b.tabs || []) out.push({ kind: 'tab', key: b.key, targetId: tb.targetId, title: tb.title || tb.url || 'tab', url: tb.url || '', agent: tb.targetId === mine, novnc: b.novnc });
   }
   // Desktops: every running target the daemon knows (host Bot Desktop, desktop VMs).
   let desks = null;
   try { desks = await S.arp.call('view.desktop.list', {}); } catch {}
   // Stopped desktop VMs stay listed so they can be started from here.
-  for (const d of Array.isArray(desks) ? desks : []) if (d.running || (d.kind === 'vm' && d.imageBuilt)) out.push({ kind: 'desktop', id: d.id, title: d.label || d.id, width: d.width, height: d.height, vm: d.kind === 'vm', running: !!d.running, controller: d.controller });
+  for (const d of Array.isArray(desks) ? desks : []) if (d.running || (d.kind === 'vm' && d.imageBuilt)) out.push({ kind: 'desktop', id: d.id, title: d.label || d.id, width: d.width, height: d.height, vm: d.kind === 'vm', running: !!d.running, controller: d.controller, agent: d.id === agentDesk });
   return { targets: out, mine };
 }
 
@@ -55,7 +60,7 @@ async function workRefresh() {
   W.targets = targets;
   // Follow the agent's current tab unless the person picked one; keep the pick while it lives.
   const still = W.cur && targets.find((x) => tabKey(x) === tabKey(W.cur));
-  if (!still || (!W.pinned && mine && W.cur.targetId !== mine)) W.cur = targets.find((x) => x.agent) || still || targets[0] || null;
+  if (!still || (!W.pinned && mine && !still.agent && targets.some((x) => x.agent))) W.cur = targets.find((x) => x.agent) || still || targets[0] || null;
   else W.cur = still;
   workRenderTabs();
   $('workBar').hidden = !(W.cur && W.cur.kind === 'tab');
@@ -139,7 +144,12 @@ async function workShow(on) {
 // .input), pixels of the screen for a desktop (view.desktop.input).
 function workPoint(e) {
   const img = $('workFrame');
-  const r = img.getBoundingClientRect();
+  const b = img.getBoundingClientRect();
+  // The picture inside the element (object-fit: contain leaves bars on two sides).
+  const s = Math.min(b.width / (img.naturalWidth || 1), b.height / (img.naturalHeight || 1));
+  const r = { width: img.naturalWidth * s, height: img.naturalHeight * s };
+  r.left = b.left + (b.width - r.width) / 2;
+  r.top = b.top + (b.height - r.height) / 2;
   const fx = Math.min(1, Math.max(0, (e.clientX - r.left) / r.width));
   const fy = Math.min(1, Math.max(0, (e.clientY - r.top) / r.height));
   const ping = $('workPing');

@@ -44,6 +44,8 @@ pub const BASE_PACKAGES: &[&str] = &[
     "xfce4-settings",
     "xfce4-terminal",
     "thunar",
+    // Relays the guest Chromium's DevTools port to the NIC so the host's hostfwd reaches it.
+    "socat",
     "dbus-x11",
     "at-spi2-core",
     "chromium",

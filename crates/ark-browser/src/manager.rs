@@ -29,6 +29,21 @@ pub struct Env {
     pub secrets: SecretFn,
 }
 
+/// Where a desktop VM keeps its state (`ark_vm::desktop::DesktopVms::vm_dir`): the takeover
+/// lease lives under it, and while it runs, `cdp.url` names its Chromium's DevTools endpoint.
+pub fn vm_home(home: &std::path::Path, vm: &str) -> PathBuf {
+    home.join("vm").join("desktop").join(vm)
+}
+pub const VM_CDP_FILE: &str = "cdp.url";
+
+/// The lease that governs browser `key`: a VM's own for its Chromium, else the Bot Desktop's.
+pub fn lease_home(home: &std::path::Path, key: &str) -> PathBuf {
+    match key.strip_prefix("vm:") {
+        Some(vm) => vm_home(home, vm),
+        None => home.to_path_buf(),
+    }
+}
+
 impl Env {
     pub fn dir(&self) -> PathBuf {
         self.home.join("browser")
@@ -147,6 +162,7 @@ impl Manager {
         let backend = env.cfg.backend();
         match backend.as_str() {
             "cdp" => "cdp".into(),
+            "vm" => format!("vm:{}", env.cfg.desktop_vm.trim()),
             "lightpanda" => "lightpanda".into(),
             "sandbox" => "sandbox".into(),
             "extension" => "extension".into(),
@@ -194,6 +210,14 @@ impl Manager {
             let ws = cdp::resolve_ws(&strip_userinfo(&url), auth.as_deref(), Duration::from_secs(10)).map_err(|e| format!("{e}. Start a Chromium-family browser with --remote-debugging-port and check browser.cdp_url."))?;
             let http = (!url.starts_with("ws")).then(|| strip_userinfo(&url));
             return self.wrap(env, key, Endpoint { kind: "cdp", ws, http, auth, pid: None, owned: false, bridge: false });
+        }
+        if let Some(vm) = key.strip_prefix("vm:") {
+            let url = std::fs::read_to_string(vm_home(&env.home, vm).join(VM_CDP_FILE)).map(|s| s.trim().to_string()).unwrap_or_default();
+            if url.is_empty() {
+                return Err(format!("desktop VM `{vm}` is not running (or was started before it offered its browser): start it with `ark vm desktop start {vm}` or from the console's Devices view, then retry"));
+            }
+            let ws = cdp::resolve_ws(&url, None, Duration::from_secs(10)).map_err(|e| format!("the Chromium on desktop VM `{vm}` does not answer yet ({e}); it starts about 10 s after the VM boots — retry shortly"))?;
+            return self.wrap(env, key, Endpoint { kind: "vm", ws, http: Some(url), auth: None, pid: None, owned: false, bridge: false });
         }
         if key == "lightpanda" {
             let l = launch::lightpanda_serve(&dir.join("lightpanda"), !cfg.private_allowed())?;

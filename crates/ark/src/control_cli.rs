@@ -66,7 +66,7 @@ pub fn cli(cmd: &str, argv: &[String], cfg: &Config, paths: &Paths) -> i32 {
     let mut io = Term;
     let t = computer_use_table(cfg);
     match cmd {
-        "browser" => match ark_browser::BrowserConfig::parse(&cfg.browser) {
+        "browser" => match ark_browser::BrowserConfig::parse(&ark_app::computer::browser_table(&cfg.browser, &cfg.computer_use, &cfg.desktop_vm)) {
             Ok(c) => browser_command(&c, &paths.data, argv, &mut io),
             Err(e) => {
                 io.line(&e);

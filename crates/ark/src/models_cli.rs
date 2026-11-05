@@ -241,7 +241,13 @@ fn read_secret(prompt: &str) -> String {
         unsafe { libc::tcsetattr(0, libc::TCSANOW, &old) };
         eprintln!();
     }
-    s.trim().to_string()
+    match ark_model::auth::clean_key(&s) {
+        Ok(k) => k,
+        Err(e) => {
+            eprintln!("{e}");
+            String::new()
+        }
+    }
 }
 
 fn status_of(e: &Entry) -> String {

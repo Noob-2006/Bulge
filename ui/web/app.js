@@ -23,7 +23,7 @@ const I18N = {
     'nav.ops': '總覽', 'nav.chat': '對話', 'nav.agents': '代理', 'nav.approvals': '核准', 'nav.audit': '稽核', 'nav.sessions': '對話紀錄',
     'filter': '搜尋對話', 'back': '← 返回', 'palette': '指令', 'palette_ph': '跳到頁面、對話或指令…', 'jump': '↓ 最新', 'send_hint': 'Enter 送出 · Shift+Enter 換行',
     'pick': '選擇或建立一個對話', 'input': '交代 ark 要做的事…  輸入 / 顯示指令', 'stop': '停止', 'send': '送出', 'working': '工作中',
-    'you': '你', 'tool_result': '工具結果', 'tool_call': '呼叫 {n}', 'tool_error': '失敗', 'tool_ok': '完成', 'tool_run': '執行中',
+    'you': '你', 'tool_result': '工具結果', 'tool_call': '呼叫 {n}', 'tool_error': '失敗', 'tool_ok': '完成', 'tool_run': '執行中', 'gate.egress': '連網', 'gate.exec': '執行', 'gate.fs': '檔案', 'gate.privilege': '權限',
     'approval': '需要核准 · {gate}', 'deny': '拒絕', 'always': '本次對話都允許', 'once': '允許一次',
     'ask': 'ark 想問你', 'answer': '回答', 'close': '關閉',
     'no_sessions': '還沒有對話', 'start': '開始一段新對話', 'start_sub': '交代任務、貼上檔案，或輸入 / 看所有指令。ark 會在需要時請你核准。', 'login': '連線到 ark',
@@ -43,7 +43,7 @@ const I18N = {
     'nav.ops': 'Overview', 'nav.chat': 'Chat', 'nav.agents': 'Agents', 'nav.approvals': 'Approvals', 'nav.audit': 'Audit', 'nav.sessions': 'Conversations',
     'filter': 'Search conversations', 'back': '← Back', 'palette': 'Commands', 'palette_ph': 'Jump to a page, conversation or command…', 'jump': '↓ Latest', 'send_hint': 'Enter to send · Shift+Enter for newline',
     'pick': 'Pick or start a conversation', 'input': 'Tell ark what to do…  / for commands', 'stop': 'Stop', 'send': 'Send', 'working': 'Working',
-    'you': 'You', 'tool_result': 'Tool result', 'tool_call': 'Calling {n}', 'tool_error': 'failed', 'tool_ok': 'done', 'tool_run': 'running',
+    'you': 'You', 'tool_result': 'Tool result', 'tool_call': 'Calling {n}', 'tool_error': 'failed', 'tool_ok': 'done', 'tool_run': 'running', 'gate.egress': 'network', 'gate.exec': 'exec', 'gate.fs': 'files', 'gate.privilege': 'privilege',
     'approval': 'Approval needed · {gate}', 'deny': 'Deny', 'always': 'Always in this chat', 'once': 'Allow once',
     'ask': 'ark asks', 'answer': 'Answer', 'close': 'Close',
     'no_sessions': 'No conversations yet', 'start': 'Start a conversation', 'start_sub': 'Describe a task, paste files, or type / for every command. ark asks before anything risky.', 'login': 'Connect to ark',
@@ -77,7 +77,8 @@ function applyI18n() {
   for (const el of document.querySelectorAll('[data-i18n-title]')) el.title = t(el.dataset.i18nTitle);
   const hint = document.getElementById('loginHint');
   if (hint) hint.innerHTML = t('login_hint');
-  if ($('conn') && !S.arp) setConn(t('conn.idle'));
+  // The connection line is live state, not a static string: re-render it in the new language.
+  if ($('conn')) setConn(...(S.conn || ['conn.idle']));
   if ($('title') && !S.current && S.view === 'chat') $('title').textContent = t('pick');
   document.title = 'ark';
 }
@@ -373,9 +374,10 @@ class Arp {
 // ── app state ──
 const S = { arp: null, sessions: [], current: null, sub: null, streaming: null, running: false, pending: new Map(), tools: new Map(), view: null, back: null, usage: null };
 
-function setConn(text, state) {
+function setConn(key, vars, state) {
+  S.conn = [key, vars, state];
   const c = $('conn');
-  c.textContent = text;
+  c.textContent = key === 'conn.ready' && !vars ? t(key, { v: '' }).replace(' · v', '') : t(key, vars);
   c.classList.toggle('live', state === 'live');
   c.classList.toggle('down', state === 'down');
 }
@@ -416,6 +418,12 @@ function addMsg(kind, who, html) {
 function toolArg(name, input) {
   if (!input || typeof input !== 'object') return '';
   if (Array.isArray(input.items)) return `${input.action || ''} · ${input.items.length} ${LANG === 'en' ? 'items' : '項'}`;
+  // Action tools (browser, computer_use, vm…): the action, then what it acts on.
+  if (typeof input.action === 'string' && input.action) {
+    const on = ['url', 'targetUrl', 'text', 'ref', 'selector', 'key', 'name'].map((k) => input[k]).find((v) => typeof v === 'string' && v);
+    const at = Array.isArray(input.coordinate) ? `(${input.coordinate.join(', ')})` : '';
+    return [input.action, on ? on.split('\n')[0].slice(0, 160) : at].filter(Boolean).join(' ');
+  }
   for (const k of ['command', 'cmd', 'path', 'file_path', 'file', 'url', 'query', 'pattern', 'task', 'name', 'prompt']) {
     if (typeof input[k] === 'string' && input[k]) return input[k].split('\n')[0].slice(0, 200);
   }
@@ -443,7 +451,16 @@ function toolInput(name, input) {
   }
   return `<pre class="in">${esc(JSON.stringify(i, null, 2).slice(0, 20000))}</pre>`;
 }
+// A gate record as one readable line: what was checked, the verdict, and why (the rule's own
+// "[tier N: …]" detail stays in the session log and the audit view).
+function gateLine(ev) {
+  const names = { egress: t('gate.egress'), exec: t('gate.exec'), fs: t('gate.fs'), privilege: t('gate.privilege') };
+  const reason = String(ev.reason || '').replace(/\s*\[tier \d+: [^\]]*\]$/, '');
+  return `<span class="gate-k">${esc(names[ev.gate] || ev.gate)}</span> · ${esc(ev.verdict)} — ${esc(reason)}`;
+}
 function addToolCall(b) {
+  // `tool_call` is the wrapper for tools outside the pinned set: show the tool it calls.
+  if (b.name === 'tool_call' && b.input && typeof b.input.name === 'string') b = { ...b, name: b.input.name, input: b.input.input || {} };
   const el = addMsg('tool', '', '');
   const det = document.createElement('details');
   det.className = 'tl run';
@@ -499,7 +516,7 @@ function renderEvent(ev) {
   else if (k === 'turn_end') { setStatus(false); S.streaming = null; }
   else if (k === 'notice') addMsg('notice', '', esc(ev.text));
   else if (k === 'error') addMsg('notice err', '', esc(ev.message));
-  else if (k === 'gate') addMsg('notice', '', `${esc(ev.gate)} · ${esc(ev.verdict)} — ${esc(ev.reason)}`);
+  else if (k === 'gate') addMsg('notice', '', gateLine(ev));
   else if (k === 'tool_settled' && ev.ui_resource) renderApp(ev.ui_resource);
 }
 
@@ -830,17 +847,27 @@ $('reviewDlg').addEventListener('close', async () => {
   loadReview();
 });
 
-async function newSession() {
-  const ws = store.get('ark.workspace') || '';
-  // No workspace chosen: the server uses [app] workspace (or its own directory), never "/".
-  const { id } = await S.arp.call('session.create', ws ? { workspace: ws, title: '網頁對話' } : { title: '網頁對話' }).catch((e) => (toast(e.message, true), {}));
-  if (!id) return;
-  await loadSessions();
-  await openSession(id);
+// The switch happens at once (a message typed while the server creates the session must not
+// land in the previous one): `send` waits on `S.creating`.
+function newSession() {
+  if (S.creating) return S.creating;
+  const prev = S.current;
+  S.current = null;
+  $('log').innerHTML = '';
+  S.creating = (async () => {
+    const ws = store.get('ark.workspace') || '';
+    // No workspace chosen: the server uses [app] workspace (or its own directory), never "/".
+    const { id } = await S.arp.call('session.create', ws ? { workspace: ws, title: '網頁對話' } : { title: '網頁對話' }).catch((e) => (toast(e.message, true), {}));
+    if (!id) { if (prev && !S.current) await openSession(prev); return; }
+    await loadSessions();
+    await openSession(id);
+  })().finally(() => { S.creating = null; });
+  return S.creating;
 }
 
 async function send(text, opts) {
   if (!text.trim() && !ATT.length) return;
+  if (S.creating) await S.creating;
   if (!S.current) await newSession();
   if (!S.current) return;
   // `/…` lines are commands: the shared table in the kernel decides what they do, and the
@@ -933,11 +960,11 @@ document.addEventListener('keydown', (e) => {
 
 async function start(token) {
   S.arp = new Arp(token);
-  setConn(t('conn.connecting'));
+  setConn('conn.connecting');
   // A failed connect is usually the daemon restarting: keep the saved token and retry. Only
   // when it has never worked in this page (likely a wrong token) ask for one, pre-filled.
   try { await S.arp.connect(); } catch (e) {
-    setConn(t('conn.failed'), 'down');
+    setConn('conn.failed', null, 'down');
     S.fails = (S.fails || 0) + 1;
     if (S.connected || S.fails < 3) { setTimeout(() => start(token), Math.min(10000, 1500 * S.fails)); return; }
     $('token').value = token;
@@ -945,7 +972,7 @@ async function start(token) {
   }
   S.connected = true;
   S.fails = 0;
-  S.arp.on('ready', (p) => setConn(t('conn.ready', { v: p.server.version }), 'live'));
+  S.arp.on('ready', (p) => setConn('conn.ready', { v: p.server.version }, 'live'));
   // Two subscriptions share the socket: the global one feeds the rail and approvals,
   // the session one feeds the transcript. Route by subscription id so nothing renders twice.
   S.arp.on('event', (p) => {
@@ -958,11 +985,11 @@ async function start(token) {
   });
   S.arp.on('delta', (p) => { if (p.subscription !== S.globalSub) onDelta(p); });
   S.arp.on('pending', (p) => { if (p.subscription === S.globalSub) onPending(p); });
-  S.arp.on('close', () => { if (S.arp && S.arp.token !== token) return; setConn(t('conn.down'), 'down'); setTimeout(() => start(token), 3000); });
+  S.arp.on('close', () => { if (S.arp && S.arp.token !== token) return; setConn('conn.down', null, 'down'); setTimeout(() => start(token), 3000); });
   // After the handlers: the server's `ready` notification must not arrive unobserved.
   try { S.me = await S.arp.call('whoami'); } catch { S.me = null; }
   applyAccess(S.me);
-  if ($('conn').textContent === t('conn.connecting')) setConn(t('conn.ready', { v: '' }).replace(' · v', ''), 'live');
+  if (S.conn && S.conn[0] === 'conn.connecting') setConn('conn.ready', null, 'live');
   // A second subscription follows every session for approvals and the rail.
   S.globalSub = S.arp.next;
   S.arp.call('subscribe', {}).catch(() => {});

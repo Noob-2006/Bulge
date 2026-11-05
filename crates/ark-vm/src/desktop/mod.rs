@@ -11,7 +11,10 @@
 //!   `input-send-event` ([`qmp::deliver`]);
 //! * QEMU's own VNC server on a private unix socket (`vnc.sock`) for full-rate viewers, and
 //!   the QMP socket (`qmp.sock`), both in `<runtime>/dvm/<name>/` (0700);
-//! * user-mode NAT networking (`network = "user"`), or none;
+//! * user-mode NAT networking (`network = "user"`), or none; with it, the guest Chromium's
+//!   DevTools port is forwarded to a free port on host loopback and named in
+//!   `<data>/vm/desktop/<name>/cdp.url` while the VM runs, so ark's browser tools drive the
+//!   window a person sees (any local user can reach a loopback port, as with `cdp_url`);
 //! * a persistent copy-on-write disk per VM: `<data>/vm/desktop/<name>/disk.qcow2` on top of
 //!   the provisioned image in `<cache>/desktop-vm/` ([`image`]);
 //! * the human-takeover control lease (same format as the Bot Desktop one) lives in
@@ -40,7 +43,17 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 /// Bumped when the image layout (what the provisioner sets up) changes incompatibly.
-pub const IMAGE_LAYOUT: u32 = 2;
+pub const IMAGE_LAYOUT: u32 = 3;
+
+/// `<vm_dir>/cdp.url`: read by ark-browser (`manager::VM_CDP_FILE`) to drive the guest Chromium.
+pub const CDP_FILE: &str = "cdp.url";
+/// Guest port of the DevTools relay (`ark-cdp-relay.service` in the image).
+const GUEST_CDP_PORT: u16 = 9223;
+
+/// A port on host loopback nobody listens on right now (QEMU binds it a moment later).
+fn free_loopback_port() -> Result<u16, String> {
+    std::net::TcpListener::bind("127.0.0.1:0").and_then(|l| l.local_addr()).map(|a| a.port()).map_err(|e| format!("no free loopback port for the VM browser: {e}"))
+}
 
 /// VM names: `[a-z0-9][a-z0-9-]{0,31}` (they become directory names and QEMU `-name`).
 pub fn valid_name(n: &str) -> Result<(), String> {
@@ -100,6 +113,8 @@ pub struct VmStatus {
     pub image_built: bool,
     pub qmp: String,
     pub vnc: String,
+    /// The guest Chromium's DevTools endpoint on host loopback (running, user networking).
+    pub cdp: Option<String>,
     pub console_log: String,
     pub started_at: Option<u64>,
     pub idle_secs: Option<u64>,
@@ -179,6 +194,10 @@ impl DesktopVms {
     fn disk_path(&self, name: &str) -> PathBuf {
         self.vm_dir(name).join("disk.qcow2")
     }
+    /// The guest Chromium's DevTools URL on the host while `name` runs (see `cmdline`).
+    pub fn cdp_url(&self, name: &str) -> Option<String> {
+        std::fs::read_to_string(self.vm_dir(name).join(CDP_FILE)).ok().map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
+    }
     /// The `home` the human-takeover lease of this VM lives under (`<home>/bot-desktop/lease.json`).
     pub fn lease_home(&self, name: &str) -> PathBuf {
         self.vm_dir(name)
@@ -251,6 +270,7 @@ impl DesktopVms {
             image_built: self.image_built(),
             qmp: self.qmp_path(name).display().to_string(),
             vnc: self.vnc_path(name).display().to_string(),
+            cdp: pid.and_then(|_| self.cdp_url(name)),
             console_log: self.vm_dir(name).join("console.log").display().to_string(),
             started_at: pid.and(st["started_at"].as_u64()),
             idle_secs: pid.and_then(|_| self.idle_secs(name)),
@@ -263,7 +283,8 @@ impl DesktopVms {
     }
 
     /// The QEMU arguments for `name` (split out so tests can assert the machine shape).
-    pub fn cmdline(&self, name: &str, image_disk: &Path, accel: &str) -> Vec<String> {
+    /// `cdp_port`: host loopback port forwarded to the guest's DevTools relay (user networking).
+    pub fn cmdline(&self, name: &str, image_disk: &Path, accel: &str, cdp_port: Option<u16>) -> Vec<String> {
         let c = &self.cfg;
         // VGA memory: two full frames at 32 bpp, rounded up to a power of two (≥ 16 MiB).
         let vgamem = ((c.width as u64 * c.height as u64 * 8) >> 20).max(16).next_power_of_two();
@@ -300,7 +321,8 @@ impl DesktopVms {
             format!("type=11,value=ark-res={}x{},value=ark-url={url}", c.width, c.height),
         ];
         if c.network == "user" {
-            a.extend(["-netdev".into(), "user,id=n0".into(), "-device".into(), "virtio-net-pci,netdev=n0".into()]);
+            let fwd = cdp_port.map(|p| format!(",hostfwd=tcp:127.0.0.1:{p}-:{GUEST_CDP_PORT}")).unwrap_or_default();
+            a.extend(["-netdev".into(), format!("user,id=n0{fwd}"), "-device".into(), "virtio-net-pci,netdev=n0".into()]);
         } else {
             a.extend(["-nic".into(), "none".into()]);
         }
@@ -354,7 +376,9 @@ impl DesktopVms {
             run_tool(&qemu_img, &["create", "-q", "-f", "qcow2", "-F", "qcow2", "-b", &img.display().to_string(), &disk.display().to_string()])?;
         }
         let (acc, warn) = accel(&self.cfg);
-        let out = Command::new(&qemu).args(self.cmdline(name, &disk, acc)).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).output().map_err(|e| format!("start {}: {e}", qemu.display()))?;
+        let _ = std::fs::remove_file(vm.join(CDP_FILE));
+        let cdp_port = if self.cfg.network == "user" { Some(free_loopback_port()?) } else { None };
+        let out = Command::new(&qemu).args(self.cmdline(name, &disk, acc, cdp_port)).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).output().map_err(|e| format!("start {}: {e}", qemu.display()))?;
         if !out.status.success() {
             return Err(format!("qemu failed to start the desktop VM: {}", String::from_utf8_lossy(&out.stderr).trim()));
         }
@@ -368,6 +392,9 @@ impl DesktopVms {
         }
         let state = json!({"started_at": now_s(), "accel": acc, "warning": warn, "image": img.display().to_string(), "width": self.cfg.width, "height": self.cfg.height});
         std::fs::write(vm.join("state.json"), state.to_string()).map_err(|e| e.to_string())?;
+        if let Some(p) = cdp_port {
+            std::fs::write(vm.join(CDP_FILE), format!("http://127.0.0.1:{p}\n")).map_err(|e| e.to_string())?;
+        }
         self.touch(name);
         Ok(self.status(name))
     }
@@ -387,6 +414,7 @@ impl DesktopVms {
         for f in ["qmp.sock", "vnc.sock", "text.sock", "qemu.pid", "screen", "last_used"] {
             let _ = std::fs::remove_file(self.run_dir(name).join(f));
         }
+        let _ = std::fs::remove_file(self.vm_dir(name).join(CDP_FILE));
     }
 
     fn kill(&self, name: &str) {

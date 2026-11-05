@@ -288,7 +288,8 @@ pub fn call(c: &Ctx, method: &str, p: &Value) -> R {
 
 fn with_app<T>(app: &App, f: impl FnOnce(&Ctx) -> T) -> T {
     let home = app.d.k.paths.data.clone();
-    let cfg = BrowserConfig::parse(&app.d.k.cfg.browser).unwrap_or_default();
+    let k = &app.d.k.cfg;
+    let cfg = BrowserConfig::parse(&crate::computer::browser_table(&k.browser, &k.computer_use, &k.desktop_vm)).unwrap_or_default();
     let vms = desktop_vms(app);
     f(&Ctx { home: &home, cfg: &cfg, m: manager::global(), vms: &vms })
 }

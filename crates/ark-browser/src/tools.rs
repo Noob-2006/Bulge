@@ -46,8 +46,8 @@ pub fn current(env: &Env, sid: &str, url: Option<&str>) -> Result<(Arc<Browser>,
 /// Every browser honours the human-takeover lease: a person may take over any of them from
 /// the web console (`view.browser.input` needs the lease), so while they hold it the agent
 /// neither acts on nor reads the page (they may be typing a credential).
-fn fence(env: &Env, _b: &Browser) -> Result<(), String> {
-    crate::lease::agent_may_act(&env.home)?;
+fn fence(env: &Env, b: &Browser) -> Result<(), String> {
+    crate::lease::agent_may_act(&manager::lease_home(&env.home, &b.key))?;
     Ok(())
 }
 

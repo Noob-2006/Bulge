@@ -240,6 +240,33 @@ fn a_human_takeover_fences_every_browser_tool() {
 }
 
 #[test]
+fn the_desktop_vm_backend_drives_the_vm_chromium_under_the_vm_lease() {
+    let _g = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    let cfg = BrowserConfig { desktop_vm: "desk".into(), enabled: toml::Value::Boolean(true), ..Default::default() };
+    assert_eq!(cfg.backend(), "vm");
+    let c = ctx("vmb", "sess-vmb");
+    let (ok, _, raw) = call(&cfg, &c, "browser_navigate", json!({"url": "https://app.example/"}));
+    assert!(!ok && raw.contains("desktop VM `desk` is not running") && raw.contains("ark vm desktop start desk"), "{raw}");
+    // The VM is up: it names its Chromium's DevTools endpoint.
+    let f = fake_page();
+    let vm = crate::manager::vm_home(&c.home, "desk");
+    std::fs::create_dir_all(&vm).unwrap();
+    std::fs::write(vm.join(crate::manager::VM_CDP_FILE), format!("{}\n", f.http)).unwrap();
+    let (ok, _, raw) = call(&cfg, &c, "browser_navigate", json!({"url": "https://app.example/"}));
+    assert!(ok, "{raw}");
+    // A person takes over the VM from the console: its lease, not the host's, fences the tools.
+    crate::lease::acquire(&vm, "web-viewer-0002", "checking the page").unwrap();
+    let (ok, _, raw) = call(&cfg, &c, "browser_click", json!({"ref": "e1"}));
+    let oc = tool(&cfg, "browser").call(&c, json!({"action": "snapshot"}));
+    crate::lease::release(&vm, Some("web-viewer-0002"), false).unwrap();
+    let (after, _, raw2) = call(&cfg, &c, "browser_click", json!({"ref": "e1"}));
+    crate::manager::global().stop("vm:desk");
+    assert!(!ok && raw.contains("human has taken over"), "{raw}");
+    assert!(format!("{oc:?}").contains("human has taken over"), "{oc:?}");
+    assert!(after, "after hand-back: {raw2}");
+}
+
+#[test]
 fn openclaw_browser_tool_against_a_fake_cdp_browser() {
     let _g = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     let f = fake_page();

@@ -461,7 +461,16 @@ pub fn run(paths: &Paths) -> Result<i32, String> {
                 if k.is_empty() {
                     return Err(t("沒有輸入金鑰", "no key entered").into());
                 }
-                key = Some(k);
+                match ark_model::auth::clean_key(&k) {
+                    Ok(k) => key = Some(k),
+                    Err(e) => {
+                        io.say(&format!("  ✗ {}{}{e}", t("金鑰格式不對，請重新貼上", "that key is malformed; paste it again"), colon()));
+                        if attempt == 2 {
+                            return Err(t("金鑰格式錯誤三次", "malformed key three times").into());
+                        }
+                        continue;
+                    }
+                }
             }
             io.say(t("  驗證中…", "  checking…"));
             match ark_model::list_models(&prov, key.as_deref()) {

@@ -693,7 +693,10 @@ impl Runtime {
                 }
             }
         };
-        self.append(log, EventKind::Gate { tool_use_id: id.into(), gate: gname.clone(), verdict: decision.clone(), reason: format!("{} [tier {}: {}]", d.reason, tier.as_u8(), risk::describe(&assessment)) })?;
+        // The policy reason is often the risk description itself: say it once.
+        let desc = risk::describe(&assessment);
+        let reason = if d.reason.contains(&desc) { d.reason.clone() } else { format!("{} [tier {}: {desc}]", d.reason, tier.as_u8()) };
+        self.append(log, EventKind::Gate { tool_use_id: id.into(), gate: gname.clone(), verdict: decision.clone(), reason })?;
         // `/elevated on` never skips the record: the run happened without a prompt, so the
         // session log says what ran and why.
         if elevated == ap::Elevated::On && decision == "allow (elevated on)" {

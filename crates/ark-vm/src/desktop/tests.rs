@@ -113,12 +113,19 @@ fn lifecycle_frames_and_input_over_qmp() {
     let after = qmp.events().iter().filter(|e| e["type"] == "key" && e["data"]["key"]["data"] == "ret").count();
     assert_eq!(after - before, 2, "one Enter (down + up) between the lines");
     assert!(args.contains("virtserialport,chardev=arktext,name=org.ark.text"), "{args}");
+    // The guest Chromium's DevTools relay is forwarded to host loopback only, and named for
+    // ark's browser tools while the VM runs.
+    let cdp = v.status("desk").cdp.expect("a running VM offers its browser");
+    let port = cdp.strip_prefix("http://127.0.0.1:").unwrap();
+    assert!(args.contains(&format!("user,id=n0,hostfwd=tcp:127.0.0.1:{port}-:9223")), "{args}");
+    assert_eq!(std::fs::read_to_string(v.vm_dir("desk").join(super::CDP_FILE)).unwrap().trim(), cdp);
 
     // Stop: ACPI power-off, then quit, then the process is gone and the run dir is clean.
     assert!(v.stop("desk").unwrap());
     let cmds = qmp.commands();
     assert!(cmds.contains(&"system_powerdown".to_string()) && cmds.contains(&"quit".to_string()), "{cmds:?}");
     assert!(!v.status("desk").running);
+    assert!(!v.vm_dir("desk").join(super::CDP_FILE).exists(), "a stopped VM offers no browser");
     assert!(!v.qmp_path("desk").with_file_name("qemu.pid").exists());
     assert!(!v.stop("desk").unwrap(), "stopping a stopped VM is a no-op");
     assert!(v.screenshot("desk").unwrap_err().contains("not running"));

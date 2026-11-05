@@ -1084,7 +1084,7 @@ fn cmd_mcp(c: &Ctx, a: &str) -> Result<Reply, String> {
 /// `/browser connect|disconnect|status|use` (Hermes `_handle_browser_command`): the reply,
 /// the config key `/browser use` persists, and the note for the model.
 fn cmd_browser(c: &Ctx, a: &str) -> Result<Reply, String> {
-    let bcfg = ark_browser::BrowserConfig::parse(&c.k.cfg.browser)?;
+    let bcfg = ark_browser::BrowserConfig::parse(&ark_app::computer::browser_table(&c.k.cfg.browser, &c.k.cfg.computer_use, &c.k.cfg.desktop_vm))?;
     let r = ark_browser::control::browser_slash(&bcfg, &paths(c).data, a);
     let mut text = r.text;
     if let Some((key, value)) = &r.config {
