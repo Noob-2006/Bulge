@@ -37,6 +37,11 @@ base_url = "{BASE}/v1"
 
 [checkpoint]
 enabled = true
+
+# srv-015: an unconfigured ark isolates the agent (microVM, else bwrap/Landlock). The e2e rig
+# pins the host backend so it never depends on KVM or user namespaces.
+[exec]
+backend = "local"
 """
 open(os.path.join(HOME, "config", "config.toml"), "w").write(CONFIG)
 # Never let a developer's real provider credentials reach the binary: the first-run / setup

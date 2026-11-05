@@ -8,11 +8,14 @@
 //! * **never a silent downgrade**: every weaker choice carries a warning that
 //!   names the level and the reason, and the caller (explain/doctor/log) shows
 //!   it. [`Plan::warning`] is `None` only for a real microVM.
-//! * **an unprovisioned host is not a sandboxed host**: when `/dev/kvm` works but
-//!   the guest image was never built, ark says "no isolation, build the image"
-//!   instead of quietly wrapping the operator's own shell in bwrap. A *sandboxed*
-//!   session (one that opted into isolation) does fall back to bwrap/Landlock,
-//!   because there the alternative is no isolation at all.
+//! * **isolate before asking** (GAPS-next §0, srv-015): when no microVM can boot
+//!   (no KVM, or the guest image was never built) *every* session — the owner's
+//!   main session included — falls back to a namespace sandbox (bwrap, else
+//!   Landlock) where the host home and its keys are not visible, with a warning
+//!   that names the reason and the fix. Only when no namespace sandbox exists
+//!   either does a session run on the host, and that plan says so loudly
+//!   ([`Origin::AutoHost`]). `[exec] backend = "local"` is the explicit opt-out
+//!   (test rigs, operators who want the old behaviour).
 //!
 //! `[exec] backend = "auto"` is the default here; an explicit backend name is
 //! always honoured verbatim (this module only answers the `auto` question).
@@ -128,37 +131,48 @@ pub fn auto_with(caps: &Capabilities, cfg: &VmConfig, sandboxed: bool) -> Plan {
         };
     }
     let why = blockers(caps);
-    if sandboxed {
-        let backend = if caps.bwrap.is_some() {
-            "bwrap"
-        } else if cfg!(target_os = "linux") {
-            "landlock"
-        } else {
-            "local"
-        };
-        let level = isolation_of_backend(backend);
+    let fix = if caps.kvm { " Build the guest image (`ark sandbox vm image build`) for a microVM." } else { "" };
+    let backend = if caps.bwrap.is_some() {
+        "bwrap"
+    } else if cfg!(target_os = "linux") {
+        "landlock"
+    } else {
+        "local"
+    };
+    let level = isolation_of_backend(backend);
+    if level != IsolationLevel::Host {
         return Plan {
             backend: backend.into(),
             provider: None,
             level,
-            origin: if level == IsolationLevel::Host { Origin::AutoHost } else { Origin::AutoFallback },
+            origin: Origin::AutoFallback,
             warning: Some(format!(
-                "no microVM available ({why}); this session runs in a {} instead — {}",
+                "no microVM available ({why}); {} runs in a {} instead (host home and keys not mounted) — {}.{fix}",
+                if sandboxed { "this session" } else { "the agent" },
                 level.label(),
                 level.warning().unwrap_or("weaker than a microVM")
             )),
-            reason: "auto: no microVM, sandboxed session falls back to a namespace sandbox".into(),
+            reason: if sandboxed {
+                "auto: no microVM, sandboxed session falls back to a namespace sandbox".into()
+            } else {
+                "auto: no microVM, the agent still runs isolated in a namespace sandbox (isolate before asking)".into()
+            },
         };
     }
+    host_plan(&why, fix)
+}
+
+/// The last resort: no microVM and no namespace sandbox. Never silent.
+pub fn host_plan(why: &str, fix: &str) -> Plan {
     Plan {
         backend: "local".into(),
         provider: None,
         level: IsolationLevel::Host,
         origin: Origin::AutoHost,
         warning: Some(format!(
-            "no microVM available ({why}); tool calls run directly on this machine as the ark user. Build the guest image (`ark sandbox vm image build`) to isolate them."
+            "NOT ISOLATED: no microVM ({why}) and no namespace sandbox; tool calls run directly on this machine as the ark user and can read its home directory and keys. Install bubblewrap or build the guest image (`ark sandbox vm image build`).{fix}"
         )),
-        reason: "auto: no microVM and no sandbox requested — host, with a warning".into(),
+        reason: "auto: no microVM and no namespace sandbox — host, with a warning".into(),
     }
 }
 
@@ -266,15 +280,25 @@ mod tests {
     }
 
     #[test]
-    fn an_unprovisioned_host_is_not_called_sandboxed() {
-        let d = PathBuf::from("/nonexistent-data");
-        let p = auto(&Query { requested: "auto", cfg: &vm_cfg(), data: &d, sandboxed: false });
-        if p.uses_microvm() {
-            return; // this machine has the image at a default path
-        }
-        // Host plan: named `local`, warned, and it tells the operator how to fix it.
-        assert_eq!(p.backend, "local", "{p:?}");
-        assert_eq!(p.origin, Origin::AutoHost);
-        assert!(p.warning.as_deref().unwrap_or("").to_lowercase().contains("build the guest image"), "{p:?}");
+    fn an_unprovisioned_host_still_isolates_the_main_session() {
+        // srv-015: KVM but no image, unsandboxed (owner) session → namespace sandbox, warned,
+        // with the fix named — not the host.
+        let caps = Capabilities { kvm: true, bwrap: Some(PathBuf::from("/usr/bin/bwrap")), ..Default::default() };
+        let p = auto_with(&caps, &vm_cfg(), false);
+        assert_eq!((p.backend.as_str(), p.origin), ("bwrap", Origin::AutoFallback), "{p:?}");
+        let w = p.warning.as_deref().unwrap_or("");
+        assert!(w.contains("host home and keys not mounted") && w.to_lowercase().contains("build the guest image"), "{w}");
+        // No KVM at all: same namespace fallback, nothing about building an image.
+        let caps = Capabilities { kvm: false, bwrap: Some(PathBuf::from("/usr/bin/bwrap")), ..Default::default() };
+        let p = auto_with(&caps, &vm_cfg(), false);
+        assert_eq!(p.backend, "bwrap", "{p:?}");
+        assert!(p.warning.as_deref().unwrap_or("").contains("/dev/kvm"), "{p:?}");
+    }
+
+    #[test]
+    fn the_host_plan_is_the_last_resort_and_says_not_isolated() {
+        let p = host_plan("/dev/kvm is missing", "");
+        assert_eq!((p.backend.as_str(), p.level, p.origin), ("local", IsolationLevel::Host, Origin::AutoHost));
+        assert!(p.warning.as_deref().unwrap_or("").starts_with("NOT ISOLATED"), "{p:?}");
     }
 }
