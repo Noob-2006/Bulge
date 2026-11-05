@@ -185,10 +185,21 @@ fn bundled_roots() -> Vec<(PathBuf, Source)> {
     vec![(share_dir().join("skills"), Source::Bundled)]
 }
 
+/// Skills written for ark itself carry `upstream: "ark-original"`; they have no upstream body to
+/// measure a size floor against, so the transcription audits below skip them and
+/// [`ark_original_skills_are_complete_and_well_formed`] holds them to their own rules.
+fn is_original(s: &skill::Skill) -> bool {
+    std::fs::read_to_string(&s.file).is_ok_and(|t| t.lines().take(12).any(|l| l.trim() == "upstream: \"ark-original\""))
+}
+
 fn corpus() -> Vec<skill::Skill> {
-    let all = skill::discover(&bundled_roots());
+    let all: Vec<skill::Skill> = skill::discover(&bundled_roots()).into_iter().filter(|s| !is_original(s)).collect();
     assert!(!all.is_empty(), "no bundled skills discovered under {}", share_dir().display());
     all
+}
+
+fn original_corpus() -> Vec<skill::Skill> {
+    skill::discover(&bundled_roots()).into_iter().filter(is_original).collect()
 }
 
 fn read(path: &Path) -> String {
@@ -295,6 +306,62 @@ fn no_bundled_skill_is_a_stub() {
     let mut thin: Vec<&str> = all.iter().filter(|s| min_body(&s.name) < 300).map(|s| s.name.as_str()).collect();
     thin.sort_unstable();
     assert_eq!(thin, ["nano-pdf", "openai-whisper"], "unexpected ultra-short skills: {thin:?}");
+}
+
+// ───────────── (c2) skills written for ark (no upstream to transcribe) ─────────────
+
+/// The professional-role skills (BATCH-next §3: pro-022/035/036/041/042) are ark's own. They must
+/// exist, say who they are for, keep their references on disk, and name only tools ark ships.
+#[test]
+fn ark_original_skills_are_complete_and_well_formed() {
+    let all = original_corpus();
+    let by_name: BTreeMap<&str, &skill::Skill> = all.iter().map(|s| (s.name.as_str(), s)).collect();
+    // (skill, references it routes to, tools its text relies on)
+    let expected: &[(&str, &[&str], &[&str])] = &[
+        ("sql-data-analysis", &["references/schema-exploration.md", "references/data-cleaning.md", "references/report-template.md", "references/example-flow.md"], &["sql_query", "sql_schema"]),
+        ("it-support-triage", &["references/account-provisioning.md", "references/permission-requests.md", "references/ticket-flow.md"], &["directory_lookup", "ask_user"]),
+        ("forge-issue-to-pr", &["references/webhook-trigger.md", "references/review-reply.md"], &["forge_read", "forge_write"]),
+        ("forge-pr-sweep", &[], &["forge_read"]),
+    ];
+    for (name, refs, tools) in expected {
+        let s = by_name.get(name).unwrap_or_else(|| panic!("ark-original skill `{name}` is missing"));
+        let (front, body) = parsed(s);
+        assert_eq!(front["name"].as_str(), Some(*name));
+        assert_eq!(s.dir.file_name().and_then(|f| f.to_str()), Some(*name), "directory name");
+        assert!(!s.description.trim().is_empty() && s.description.chars().count() <= skill::MAX_DESCRIPTION, "{name}: description");
+        assert!(front["license"].as_str().is_some() && front["author"].as_str().is_some(), "{name}: license/author");
+        assert!(body.chars().count() >= 1800, "{name}: body is only {} chars", body.chars().count());
+        for r in *refs {
+            let text = read(&s.dir.join(r));
+            assert!(text.chars().count() >= 800, "{name}/{r} is a stub");
+            assert!(body.contains(r), "{name}: SKILL.md does not route to {r}");
+        }
+        for t in *tools {
+            assert!(body.contains(t), "{name}: does not mention `{t}`");
+        }
+        let (mut fence, mut h1) = (false, 0);
+        for line in body.lines() {
+            if line.starts_with("```") {
+                fence = !fence;
+            } else if !fence && line.starts_with("# ") {
+                h1 += 1;
+            }
+        }
+        assert!(!fence && h1 == 1, "{name}: fences balanced, exactly one H1 (found {h1})");
+    }
+    assert_eq!(all.len(), expected.len(), "an ark-original skill is not covered by this audit: {:?}", all.iter().map(|s| &s.name).collect::<Vec<_>>());
+    // The sweep is a blueprint: it parses and schedules something sensible.
+    let sweep = by_name["forge-pr-sweep"];
+    let spec = ark_skills::core::blueprints::parse(&read(&sweep.file)).expect("blueprint block parses").expect("it is a blueprint");
+    assert_eq!(spec.skill, "forge-pr-sweep");
+    assert!(spec.schedule.split_whitespace().count() == 5 && spec.prompt.as_deref().is_some_and(|p| p.contains("forge_read")), "{spec:?}");
+    assert_eq!(spec.deliver, "local");
+    // Every tool a skill names exists in ark: the names appear in the tool crates.
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../ark-tools/src");
+    for t in ["sql_query", "sql_schema", "directory_lookup", "forge_read", "forge_write"] {
+        let found = ["data/mod.rs", "directory/mod.rs", "forge/mod.rs"].iter().any(|f| read(&root.join(f)).contains(&format!("\"{t}\".into()")));
+        assert!(found, "tool `{t}` named by a skill is not defined in ark-tools");
+    }
 }
 
 // ───────────── (b) optional-skills: 153 entries, resolvable through the catalog types ─────────────

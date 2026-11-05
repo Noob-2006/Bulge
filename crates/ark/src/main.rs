@@ -31,6 +31,7 @@ mod models_cli;
 mod ops;
 mod outbound_host;
 mod plugin_backends;
+mod pro_tools;
 mod providers;
 mod registry_init;
 mod role_cli;

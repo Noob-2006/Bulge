@@ -54,6 +54,11 @@ const BUILTIN_TOOL_NAMES: &[&str] = &[
     "tavily_extract",
     "firecrawl_search",
     "firecrawl_scrape",
+    "sql_query",
+    "sql_schema",
+    "directory_lookup",
+    "forge_read",
+    "forge_write",
 ];
 
 fn argv(v: &[&str]) -> Vec<String> {
