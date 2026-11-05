@@ -68,12 +68,26 @@ fn infer_reports_tts_providers() {
 
 /// `ark voice status`: the voice-mode requirements report (recorder, STT, TTS, wake word).
 #[test]
+#[cfg(feature = "personal")]
 fn voice_status_reports_the_voice_stack() {
     let h = home("voice-status");
     let (code, text) = ark(&h, &["voice", "status"]);
     assert_eq!(code, 0, "{text}");
     for key in ["\"recorder\"", "\"stt_provider\"", "\"tts_provider\"", "\"wake_word\"", "\"stop_hint\""] {
         assert!(text.contains(key), "`ark voice status` is missing {key}:\n{text}");
+    }
+}
+
+/// gen1-306: the default binary carries no voice mode / wake word / GPT-Live, and says how
+/// to get them instead of failing obscurely.
+#[test]
+#[cfg(not(feature = "personal"))]
+fn default_build_has_no_voice_mode() {
+    let h = home("voice-off");
+    for args in [&["voice", "status"][..], &["voice", "live"][..], &["voice"][..]] {
+        let (code, text) = ark(&h, args);
+        assert_ne!(code, 0, "{args:?}: {text}");
+        assert!(text.contains("--features personal"), "{args:?}: {text}");
     }
 }
 

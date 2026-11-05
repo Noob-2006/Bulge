@@ -181,8 +181,30 @@ fn share_dir() -> PathBuf {
     skill::share_dir().expect("share dir with skills/")
 }
 
+/// Shipped skill trees: the bundled set, plus the personal/consumer skills (Apple apps, smart
+/// home, music) that ship as optional skills — not loaded until installed (gen1-306). The
+/// content floors below apply to both.
 fn bundled_roots() -> Vec<(PathBuf, Source)> {
-    vec![(share_dir().join("skills"), Source::Bundled)]
+    vec![(share_dir().join("skills"), Source::Bundled), (share_dir().join("optional-skills/personal"), Source::Bundled)]
+}
+
+/// gen1-306: the personal-desktop / consumer skills are opt-in.
+const PERSONAL: &[&str] = &["apple-notes", "apple-reminders", "bear-notes", "findmy", "imessage", "peekaboo", "things-mac", "spotify-player", "openhue", "sonoscli", "blucli", "eightctl"];
+
+#[test]
+fn personal_skills_are_optional_and_installable_from_the_catalog() {
+    let loaded = skill::discover(&[(share_dir().join("skills"), Source::Bundled)]);
+    for n in PERSONAL {
+        assert!(!loaded.iter().any(|s| s.name == *n), "{n} is still a default (bundled) skill");
+        assert!(share_dir().join("optional-skills/personal").join(n).join("SKILL.md").is_file(), "{n} is not shipped as an optional skill");
+    }
+    let idx: Value = serde_json::from_str(&read(&share_dir().join("optional-skills/index.json"))).unwrap();
+    let paths: BTreeSet<&str> = idx["skills"].as_array().unwrap().iter().filter_map(|e| e["path"].as_str()).collect();
+    for n in PERSONAL {
+        // openhue: the catalog already carries Hermes' `smart-home/openhue` under that name.
+        let want = if *n == "openhue" { "smart-home/openhue".to_string() } else { format!("personal/{n}") };
+        assert!(paths.contains(want.as_str()), "{n} missing from the optional-skills index");
+    }
 }
 
 fn corpus() -> Vec<skill::Skill> {
@@ -253,7 +275,7 @@ fn bundled_corpus_covers_every_required_skill_name() {
 
     // Category folders of the shipped tree (Hermes layout) must survive discovery.
     let cats: BTreeSet<&str> = all.iter().filter_map(|s| s.category.as_deref()).collect();
-    for c in ["apple", "autonomous-ai-agents", "creative", "custodian", "devops", "email", "media", "note-taking", "openclaw", "productivity", "research", "social-media", "software-development", "web"] {
+    for c in ["autonomous-ai-agents", "creative", "custodian", "devops", "email", "media", "note-taking", "openclaw", "productivity", "research", "social-media", "software-development", "web"] {
         assert!(cats.contains(c), "category `{c}` disappeared from the corpus");
     }
 }
@@ -313,7 +335,11 @@ fn catalog_entries() -> Vec<Value> {
 
 #[test]
 fn optional_skill_catalog_has_153_resolvable_entries() {
-    let entries = catalog_entries();
+    let all_entries = catalog_entries();
+    // gen1-306: ark's own opt-in personal skills (shipped under optional-skills/personal/).
+    let personal = all_entries.iter().filter(|e| e["path"].as_str().is_some_and(|p| p.starts_with("personal/"))).count();
+    assert_eq!(personal, PERSONAL.len() - 1, "personal optional skills in the catalog (openhue: smart-home/openhue)");
+    let entries: Vec<Value> = all_entries.into_iter().filter(|e| !e["path"].as_str().is_some_and(|p| p.starts_with("personal/"))).collect();
     assert_eq!(entries.len(), 153, "Hermes optional-skills has 153 skills");
     assert!(!share_dir().join("optional-skills").join("skills").exists(), "optional skills must not be vendored as files");
 
@@ -351,7 +377,7 @@ fn optional_skill_catalog_has_153_resolvable_entries() {
     let http = Http::new(&settings, &store);
     let official = Official { http: &http };
     let listed = HubSource::search(&official, "", 10_000);
-    assert_eq!(listed.len(), 153, "official source must list all 153 skills");
+    assert_eq!(listed.len(), 153 + personal, "official source must list all 153 Hermes skills plus the personal ones");
     for e in &entries {
         let path = e["path"].as_str().unwrap();
         let meta = HubSource::inspect(&official, &format!("official/{path}"))
@@ -406,7 +432,7 @@ fn optional_skills_install_through_the_hub() {
 
     // Every one is recorded in the lock file, so `check`/`update`/`uninstall` can see it.
     let lock = model::Lock(&store).list();
-    assert_eq!(lock.len(), 153, "lock must record every install");
+    assert_eq!(lock.len(), catalog_entries().len(), "lock must record every install (153 Hermes + the personal ones)");
     let discovered = skill::discover(&[(store.skills.clone(), Source::User)]);
     assert!(discovered.len() >= 153, "installed skills are not discoverable: {}", discovered.len());
     let _ = std::fs::remove_dir_all(&data);

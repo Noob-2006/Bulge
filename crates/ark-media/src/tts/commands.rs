@@ -323,7 +323,10 @@ fn voice_status(m: &Media, c: &CommandCtx) -> String {
     let p = prefs::load(m);
     let provider = tts_tool::talk_provider(m);
     let voice = p.talk_voice.clone().or_else(|| m.cfg.str("talk.voice"));
+    #[cfg(feature = "personal")]
     let wake = if m.cfg.bool_or("voice.wake_word", false) { crate::voice::wake::phrase(m) } else { "off".into() };
+    #[cfg(not(feature = "personal"))]
+    let wake = if m.cfg.bool_or("voice.wake_word", false) { "unavailable (build with --features personal)".to_string() } else { "off".into() };
     let mut lines = vec![
         "🎙 Voice status".to_string(),
         format!("Voice mode: {} (start it with `ark voice`)", if prefs::voice_mode(m) { "✅ enabled" } else { "❌ disabled" }),

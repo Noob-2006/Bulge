@@ -119,6 +119,14 @@ pub fn cli(cmd: &str, argv: &[String], k: &Kernel, quiet: bool) -> Result<i32, S
     }
 }
 
+/// Default build (gen1-306): voice mode, the wake word and GPT-Live are personal-desktop
+/// front-ends, compiled only with `--features personal`.
+#[cfg(not(feature = "personal"))]
+fn voice(_argv: &[String], _m: &Arc<Media>, _k: &Kernel, _quiet: bool) -> Result<i32, String> {
+    Err("`ark voice` (voice mode, wake word, GPT-Live) is not part of this build: it is a personal-desktop feature — rebuild with `cargo build -p ark --features personal`. Speech in chats (TTS/STT, Discord voice) works without it.".into())
+}
+
+#[cfg(feature = "personal")]
 /// `ark voice [status|live] [--continuous] [--wake] [--no-speak] [--no-barge-in] [--session ID] [--max-turns N]`
 fn voice(argv: &[String], m: &Arc<Media>, k: &Kernel, quiet: bool) -> Result<i32, String> {
     let word = argv.first().map(String::as_str).unwrap_or("");
@@ -154,6 +162,7 @@ fn voice(argv: &[String], m: &Arc<Media>, k: &Kernel, quiet: bool) -> Result<i32
     }
 }
 
+#[cfg(feature = "personal")]
 /// Flags of `ark voice` (Hermes `voice_mode` CLI switches).
 fn voice_flags(argv: &[String]) -> Result<ark_media::voice::VoiceFlags, String> {
     let mut f = ark_media::voice::VoiceFlags::default();
@@ -177,6 +186,7 @@ fn voice_flags(argv: &[String]) -> Result<ark_media::voice::VoiceFlags, String> 
     Ok(f)
 }
 
+#[cfg(feature = "personal")]
 struct LiveFlags {
     provider: Option<String>,
     model: Option<String>,
@@ -184,6 +194,7 @@ struct LiveFlags {
     max_seconds: u32,
 }
 
+#[cfg(feature = "personal")]
 fn live_flags(argv: &[String]) -> Result<LiveFlags, String> {
     let (mut p, mut mo, mut v, mut secs) = (None, None, None, 0u32);
     let mut i = 0;

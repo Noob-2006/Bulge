@@ -12,6 +12,12 @@ pub mod config;
 pub mod control;
 pub mod engine;
 pub mod exec;
+/// The Chrome-extension relay is a personal-desktop bridge (gen1-306): built with
+/// `--features personal`; otherwise a stub that explains how to get it.
+#[cfg(feature = "personal")]
+pub mod extension;
+#[cfg(not(feature = "personal"))]
+#[path = "extension_off.rs"]
 pub mod extension;
 pub mod keys;
 pub mod launch;

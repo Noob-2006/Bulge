@@ -512,6 +512,7 @@ fn real_binary(name: &str) -> Option<PathBuf> {
 }
 
 const SKIP: &[&str] = &["Extensions", "Local Extension Settings", "Service Worker", "IndexedDB", "Crash Reports", "Crashpad", "Snapshots", "optimization_guide_model_store", "Safe Browsing", "SafetyTips", "OnDeviceHeadSuggestModel", "segmentation_platform", "Sync Data", "Shared Dictionary", "RunningChromeVersion", "SingletonSocket", "Cookies", "Login Data", "Login Data For Account", "Web Data", "BrowserMetrics-spare.pma"];
+#[cfg(feature = "personal")]
 const AUTH_FILES: &[&str] = &["Cookies", "Network/Cookies", "Login Data", "Login Data For Account", "Web Data", "Preferences"];
 
 fn skip(name: &str) -> bool {
@@ -538,8 +539,16 @@ fn copy_tree(src: &Path, dst: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
+/// Default build (gen1-306): importing the user's real Chrome profile (cookies, logins) is a
+/// personal-desktop feature compiled only with `--features personal`.
+#[cfg(not(feature = "personal"))]
+pub fn snapshot_real_profile(_rb: &RealBrowser, _dst: &Path, _pin: &str) -> Result<String, String> {
+    Err("importing your real Chrome profile is not part of this build (a personal-desktop feature): rebuild ark with `--features personal`.".into())
+}
+
 /// Copy the real profile into `dst` (first time: the tree; every launch: cookies/logins).
 /// Returns the source profile name.
+#[cfg(feature = "personal")]
 pub fn snapshot_real_profile(rb: &RealBrowser, dst: &Path, pin: &str) -> Result<String, String> {
     let src_root = &rb.data_dir;
     let local_state: serde_json::Value = std::fs::read_to_string(src_root.join("Local State")).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default();
@@ -670,6 +679,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "personal")]
     fn real_profile_copy_skips_caches_and_resyncs_auth() {
         let root = std::env::temp_dir().join(format!("ark-rp-{}", std::process::id()));
         let src = root.join("src");

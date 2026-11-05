@@ -354,6 +354,7 @@ fn image_slash_attaches_the_file_to_the_next_chat_message() {
 /// take → STT → agent turn → spoken reply. The microphone (`record_command`) and the player
 /// (`[media.tts] player`) are local scripts, so no audio device or provider is touched.
 #[test]
+#[cfg(feature = "personal")] // voice mode is a personal-desktop feature (gen1-306)
 fn ark_voice_runs_one_talk_mode_turn() {
     let h = home("talk");
     let model = Srv::start(|_, _path, _| text_turn("It is noon."));

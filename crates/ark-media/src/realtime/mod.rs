@@ -39,8 +39,10 @@
 //! `MISTRAL_API_KEY`, `XAI_API_KEY`, `GEMINI_API_KEY`/`GOOGLE_API_KEY`.
 
 pub mod conn;
+#[cfg(feature = "personal")]
 pub mod live;
 mod stt;
+#[cfg(feature = "personal")]
 mod voice;
 
 use crate::Media;
@@ -286,6 +288,8 @@ pub const STT_PROVIDERS: &[ProviderInfo] = &[
     },
 ];
 
+/// Speech-to-speech providers: personal voice front-ends only (`--features personal`, gen1-306).
+#[cfg(feature = "personal")]
 pub const VOICE_PROVIDERS: &[ProviderInfo] = &[
     ProviderInfo {
         id: "openai",
@@ -371,6 +375,7 @@ pub fn open_stt(
     Ok(Box::new(stt::Session::open(m, proto, rate)?))
 }
 
+#[cfg(feature = "personal")]
 /// Open a speech-to-speech session (`provider` = id/alias, `None` = `[media.realtime] voice_provider`).
 pub fn open_voice(
     m: &Media,
@@ -393,3 +398,5 @@ pub fn tools(_m: &Arc<crate::Media>) -> Vec<Arc<dyn ark_core::Tool>> {
 
 #[cfg(test)]
 mod tests;
+#[cfg(all(test, feature = "personal"))]
+mod tests_voice;
