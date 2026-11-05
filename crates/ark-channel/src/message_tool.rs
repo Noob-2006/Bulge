@@ -135,7 +135,7 @@ fn pick<'a>(targets: &'a Targets, hint: Option<&'a str>) -> Result<&'a str, Stri
 }
 
 /// Which channel, chat and thread a call addresses.
-fn resolve(targets: &Targets, input: &Value) -> Result<(String, Option<String>, Option<String>), String> {
+fn resolve(targets: &Targets, input: &Value, session: Option<&str>) -> Result<(String, Option<String>, Option<String>), String> {
     let names: Vec<&str> = targets.keys().map(String::as_str).collect();
     let mut hint = None;
     let mut chat = None;
@@ -160,9 +160,20 @@ fn resolve(targets: &Targets, input: &Value) -> Result<(String, Option<String>, 
     if let Some(t) = aa::s(input, &["threadId", "thread_id", "thread"]) {
         thread = Some(t);
     }
+    // Nothing addressed: answer in the chat this session came from (so "send me the file"
+    // lands where it was asked), when that chat's channel is one of ours.
+    if chat.is_none() && hint.is_none() {
+        if let Some((c, ch)) = session.and_then(crate::outfile::origin_of) {
+            if targets.contains_key(&c) {
+                hint = Some(c);
+                chat = Some(ch);
+            }
+        }
+    }
     let name = pick(targets, hint.as_deref())?.to_string();
     if chat.is_none() {
-        chat = targets.get(&name).and_then(|(_, d)| d.clone());
+        // `/sethome` beats the configured default chat.
+        chat = crate::outfile::effective_default(&name, targets.get(&name).and_then(|(_, d)| d.as_ref()));
     }
     Ok((name, chat, thread))
 }
@@ -180,8 +191,16 @@ pub struct Outcome {
 
 /// The single dispatch path shared by the tool and `ark message` (`message_cli`).
 pub fn dispatch(targets: &Targets, input: &Value) -> Result<Outcome, String> {
+    let cwd = std::env::current_dir().unwrap_or_default();
+    dispatch_in(targets, input, &cwd, &[], None)
+}
+
+/// [`dispatch`] for a tool call: `base` resolves relative file paths, `roots` are the folders
+/// files may be sent from (see [`crate::outfile::authorize`]), `session` lets an unaddressed
+/// message go to the chat the session came from.
+pub fn dispatch_in(targets: &Targets, input: &Value, base: &std::path::Path, roots: &[std::path::PathBuf], session: Option<&str>) -> Result<Outcome, String> {
     let action = action_of(input);
-    let (name, chat, thread) = resolve(targets, input)?;
+    let (name, chat, thread) = resolve(targets, input, session)?;
     let channel = &targets.get(&name).ok_or_else(|| format!("unknown channel `{name}`"))?.0;
     if CHAT_ACTIONS.contains(&action.as_str()) && chat.is_none() {
         return Err(format!("pass `chat` (or `target`): channel `{name}` has no default chat"));
@@ -206,7 +225,12 @@ pub fn dispatch(targets: &Targets, input: &Value) -> Result<Outcome, String> {
     let chat_str = chat.clone().unwrap_or_default();
     match action.as_str() {
         "send" | "reply" => {
-            let text = text_of(input).ok_or_else(|| format!("`text` is empty; action={action} needs a message body"))?;
+            let media = crate::outfile::media_from_input(input, base, roots)?;
+            let text = match text_of(input) {
+                Some(t) => t,
+                None if !media.is_empty() => String::new(),
+                None => return Err(format!("`text` is empty; action={action} needs a message body (or `media` files)")),
+            };
             let reply_to = if action == "reply" {
                 Some(aa::req(input, &["replyTo", "reply_to", "messageId", "message_id"]).map_err(|e| e.message)?)
             } else {
@@ -222,15 +246,20 @@ pub fn dispatch(targets: &Targets, input: &Value) -> Result<Outcome, String> {
                     _ => TextFormat::Plain,
                 },
                 silent: aa::flag(input, "silent") == Some(true),
+                media: media.clone(),
                 ..Default::default()
             };
+            if !media.is_empty() && !channel.caps().media {
+                return Err(format!("channel `{name}` cannot carry files"));
+            }
             let sent = channel.send(&out).map_err(|e| format!("{action} to {name}/{chat_str} failed: {e}"))?;
+            let files = if media.is_empty() { String::new() } else { format!(" + {} file(s)", media.len()) };
             let summary = match sent.first() {
-                Some(id) => format!("sent {} chars to {name}/{chat_str} (messageId {id})", text.chars().count()),
-                None => format!("sent {} chars to {name}/{chat_str}", text.chars().count()),
+                Some(id) => format!("sent {} chars{files} to {name}/{chat_str} (messageId {id})", text.chars().count()),
+                None => format!("sent {} chars{files} to {name}/{chat_str}", text.chars().count()),
             };
             Ok(Outcome {
-                result: json!({"ok": true, "action": action, "channel": name, "chat": chat_str, "thread": thread, "messageIds": sent.ids, "chars": text.chars().count()}),
+                result: json!({"ok": true, "action": action, "channel": name, "chat": chat_str, "thread": thread, "messageIds": sent.ids, "chars": text.chars().count(), "files": media.len()}),
                 summary,
             })
         }
@@ -297,6 +326,7 @@ impl Tool for MessageTool {
         p.insert("emoji".into(), json!({"type": "string", "description": "Unicode emoji for react"}));
         p.insert("remove".into(), json!({"type": "boolean", "description": "react: remove the reaction instead of adding it"}));
         p.insert("replyTo".into(), json!({"type": "string", "description": "Message id to reply to (send)"}));
+        p.insert("media".into(), json!({"type": "array", "items": {"type": "string"}, "description": "send/reply: files to attach, as paths inside the workspace or artifacts folder (or public https URLs). With no `target`, the file goes to the chat this conversation is in. `text` becomes the caption."}));
         p.insert("silent".into(), json!({"type": "boolean", "description": "Send without a notification where supported"}));
         p.insert("format".into(), json!({"type": "string", "enum": ["plain", "markdown"]}));
         p.insert("question".into(), json!({"type": "string", "description": "Poll question (action=poll)"}));
@@ -330,11 +360,20 @@ impl Tool for MessageTool {
         let channel = aa::s(input, &["channel"])
             .or_else(|| aa::s(input, &["target", "to"]).and_then(|t| t.split(':').next().map(str::to_string)))
             .unwrap_or_else(|| "?".into());
-        vec![Effect::Send { channel, payload: aa::text(input, &["text", "message"]).unwrap_or_default() }]
+        let mut payload = aa::text(input, &["text", "message"]).unwrap_or_default();
+        for k in ["media", "files", "path", "file"] {
+            match input.get(k) {
+                Some(Value::String(f)) => payload.push_str(&format!("\n[file: {f}]")),
+                Some(Value::Array(a)) => a.iter().filter_map(|v| v.as_str()).for_each(|f| payload.push_str(&format!("\n[file: {f}]"))),
+                _ => {}
+            }
+        }
+        vec![Effect::Send { channel, payload }]
     }
 
-    fn call(&self, _ctx: &ToolCtx, input: Value) -> ToolOutput {
-        match dispatch(&self.targets, &input) {
+    fn call(&self, ctx: &ToolCtx, input: Value) -> ToolOutput {
+        let roots = [ctx.workspace.clone(), ctx.artifacts.clone()];
+        match dispatch_in(&self.targets, &input, &ctx.workspace, &roots, Some(&ctx.session_id)) {
             Ok(o) => ToolOutput::ok(o.summary),
             Err(e) => ToolOutput::err(e),
         }
@@ -645,5 +684,39 @@ mod tests {
         assert_eq!(actions_of(&Targets::new()), vec!["send"]);
         let r = MessageTool::new(Targets::new()).call(&tool_ctx(), json!({"text": "x"}));
         assert!(r.is_error && r.content.contains("no channels"), "{}", r.content);
+    }
+
+    #[test]
+    fn sends_files_to_the_origin_chat_and_refuses_paths_outside_the_workspace() {
+        let ch = Arc::new(Fake { caps: Caps { media: true, ..Default::default() }, ..Default::default() });
+        let tool = MessageTool::new(targets(ch.clone()));
+        let mut ctx = tool_ctx();
+        let outside = ark_core::tmp::scratch("ark-ch-outside");
+        std::fs::write(ctx.workspace.join("out.pdf"), b"%PDF").unwrap();
+        std::fs::write(outside.join("key.txt"), b"secret").unwrap();
+        // No target: the file goes to the chat this session came from.
+        ctx.session_id = "origin-test-session".into();
+        crate::outfile::set_origin(Some(Arc::new(|s: &str| (s == "origin-test-session").then(|| ("tg".to_string(), "777".to_string())))));
+        let r = tool.call(&ctx, json!({"media": ["out.pdf"], "text": "report"}));
+        assert!(!r.is_error, "{}", r.content);
+        assert!(r.content.contains("1 file(s) to tg/777"), "{}", r.content);
+        let sent = ch.sent.lock().unwrap().clone();
+        assert_eq!((sent[0].chat.as_str(), sent[0].text.as_str(), sent[0].media.len()), ("777", "report", 1));
+        assert_eq!(sent[0].media[0].mime, "application/pdf");
+        assert!(sent[0].media[0].path.as_deref().unwrap().ends_with("out.pdf"));
+        // A file with no text at all is fine; one outside workspace/artifacts is refused and nothing is sent.
+        assert!(!tool.call(&ctx, json!({"media": "out.pdf"})).is_error);
+        let n = ch.sent.lock().unwrap().len();
+        let r = tool.call(&ctx, json!({"media": [outside.join("key.txt").display().to_string()], "text": "x"}));
+        assert!(r.is_error && r.content.contains("outside"), "{}", r.content);
+        assert_eq!(ch.sent.lock().unwrap().len(), n);
+        // The egress gate sees the file names.
+        let e = tool.effects(&ctx, &json!({"media": ["out.pdf"], "text": "report"}));
+        assert!(matches!(&e[0], Effect::Send { payload, .. } if payload.contains("[file: out.pdf]")));
+        // A channel that cannot carry files says so.
+        let plain = MessageTool::new(targets(Fake::new(&[])));
+        assert!(plain.call(&ctx, json!({"media": ["out.pdf"]})).content.contains("cannot carry files"));
+        crate::outfile::set_origin(None);
+        let _ = std::fs::remove_dir_all(&outside);
     }
 }

@@ -330,7 +330,7 @@ pub fn service_step(p: &mut dyn Prompt, needs_daemon: bool, install: &mut dyn Fn
         return Ok(false);
     }
     p.say(&format!("\n{}", t("⑧ 背景服務", "⑧ Background service")));
-    if !p.yes(t("  安裝成 systemd 使用者服務，登入後自動啟動？", "  Install as a systemd user service that starts at login?"), true)? {
+    if !p.yes(t("  安裝成 systemd 使用者服務（開機即跑、登出不停）？", "  Install as a systemd user service (starts at boot, keeps running after logout)?"), true)? {
         p.say(&format!("  {} ark daemon start", t("之後可手動啟動：", "start it later with:")));
         return Ok(false);
     }
@@ -479,10 +479,18 @@ pub fn add_channel(root: &mut toml::Table, kind: &str) -> Result<String, String>
     Ok(name)
 }
 
+/// After the service is installed: keep it running after logout. Never opens an authorisation
+/// window; when that is needed the command is printed for the person to run.
+pub fn linger_step(p: &mut dyn Prompt, ensure: &dyn Fn() -> crate::ops::service::Linger) {
+    p.say(&format!("  {}", crate::setup_server::linger_lines(&ensure())));
+}
+
 /// Service + completion, after the config is written.
 pub fn post(p: &mut dyn Prompt, needs_daemon: bool, workspace: &Path) -> Result<(), String> {
     let ws = workspace.to_path_buf();
-    service_step(p, needs_daemon, &mut || crate::ops::service::install_user(&ws, true))?;
+    if service_step(p, needs_daemon, &mut || crate::ops::service::install_user(&ws, true))? {
+        linger_step(p, &crate::ops::service::ensure_linger);
+    }
     let home = PathBuf::from(std::env::var_os("HOME").unwrap_or_default());
     completion_step(p, &std::env::var("SHELL").unwrap_or_default(), &home)?;
     Ok(())
@@ -692,5 +700,25 @@ mod tests {
         // already installed: no prompt (no answers left), refreshed in place
         assert!(completion_step(&mut s(&[]), "/usr/bin/zsh", &root).unwrap().is_none());
         assert!(completion_step(&mut s(&["n"]), "/bin/bash", &root).unwrap().is_none());
+    }
+
+    #[test]
+    fn owner_step_and_linger_step() {
+        use crate::ops::service::Linger;
+        let mut root: toml::Table = "".parse().unwrap();
+        let name = add_channel(&mut root, "telegram").unwrap();
+        // Enter skips (and warns), a bad id is re-asked, a good one is stored.
+        let mut sc = s(&[""]);
+        assert_eq!(crate::setup_server::owner_step(&mut sc, &mut root, &name, "telegram").unwrap(), None);
+        assert!(sc.said.borrow().iter().any(|l| l.contains("No owner") || l.contains("沒有人")));
+        let mut sc = s(&["*", "99"]);
+        assert_eq!(crate::setup_server::owner_step(&mut sc, &mut root, &name, "telegram").unwrap().as_deref(), Some("99"));
+        assert_eq!(root["approvals"]["forward"]["approvers"]["telegram"][0].as_str(), Some("99"));
+        // Linger: never asks; says what happened.
+        let mut sc = s(&[]);
+        linger_step(&mut sc, &|| Linger::Manual("sudo loginctl enable-linger me".into()));
+        linger_step(&mut sc, &|| Linger::Enabled);
+        let said = sc.said.borrow().join("\n");
+        assert!(said.contains("sudo loginctl enable-linger me") && said.contains("linger"), "{said}");
     }
 }

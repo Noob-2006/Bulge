@@ -314,6 +314,28 @@ fn table<'a>(root: &'a mut toml::Table, key: &str) -> &'a mut toml::Table {
     e.as_table_mut().unwrap()
 }
 
+/// Write the config (old file backed up first), validate it, and restore the backup when the
+/// result does not load. Returns the backup path when there was a previous file.
+pub fn save_config(cfg_path: &std::path::Path, root: &toml::Table, existing: Option<&str>) -> Result<Option<std::path::PathBuf>, String> {
+    let body = toml::to_string_pretty(root).map_err(|e| e.to_string())?;
+    let header = t("# 由 `ark setup` 產生；所有選項見 docs/config-example.toml\n\n", "# Written by `ark setup`; every option is in docs/config-example.toml\n\n");
+    let backup = cfg_path.with_extension(format!("toml.bak.{}", ark_kernel::util::random_hex(4)));
+    if existing.is_some() {
+        std::fs::copy(cfg_path, &backup).map_err(|e| e.to_string())?;
+    }
+    let text = if existing.is_some_and(|s| s.starts_with("# ")) { body } else { format!("{header}{body}") };
+    std::fs::write(cfg_path, text).map_err(|e| e.to_string())?;
+    if let Err(e) = Config::load(Some(cfg_path), None, &[]) {
+        if existing.is_some() {
+            let _ = std::fs::copy(&backup, cfg_path);
+        } else {
+            let _ = std::fs::remove_file(cfg_path);
+        }
+        return Err(format!("{}: {e}", t("新設定無法通過檢查，已還原", "the new config failed validation and was rolled back")));
+    }
+    Ok(existing.is_some().then_some(backup))
+}
+
 pub fn run(paths: &Paths) -> Result<i32, String> {
     let mut io = Io::new();
     std::fs::create_dir_all(&paths.config_dir).map_err(|e| e.to_string())?;
@@ -657,6 +679,13 @@ pub fn run(paths: &Paths) -> Result<i32, String> {
         }
     }
 
+    // ── 6b. owner = approver = admin (setup_server.rs) ──
+    let mut owner_set = false;
+    if let Some(n) = &channel_added {
+        let kind = root.get("channels").and_then(|c| c.get(n)).and_then(|c| c.get("kind")).and_then(|k| k.as_str()).unwrap_or("telegram").to_string();
+        owner_set = crate::setup_server::owner_step(&mut io, &mut root, n, &kind)?.is_some();
+    }
+
     // Default workspace + official connectors (ops/wizard.rs).
     crate::ops::wizard::mid(&mut io, &mut root, paths)?;
 
@@ -669,23 +698,10 @@ pub fn run(paths: &Paths) -> Result<i32, String> {
             entry.insert(k, v);
         }
     }
-    let body = toml::to_string_pretty(&root).map_err(|e| e.to_string())?;
-    let header = t("# 由 `ark setup` 產生；所有選項見 docs/config-example.toml\n\n", "# Written by `ark setup`; every option is in docs/config-example.toml\n\n");
-    let backup = cfg_path.with_extension(format!("toml.bak.{}", ark_kernel::util::random_hex(4)));
-    if existing.is_some() {
-        std::fs::copy(&cfg_path, &backup).map_err(|e| e.to_string())?;
-    }
-    let text = if existing.as_deref().is_some_and(|s| s.starts_with("# ")) { body } else { format!("{header}{body}") };
-    std::fs::write(&cfg_path, text).map_err(|e| e.to_string())?;
-    if let Err(e) = Config::load(Some(&cfg_path), None, &[]) {
-        if existing.is_some() {
-            let _ = std::fs::copy(&backup, &cfg_path);
-        }
-        return Err(format!("{}: {e}", t("新設定無法通過檢查，已還原", "the new config failed validation and was rolled back")));
-    }
+    let backup = save_config(&cfg_path, &root, existing.as_deref())?;
 
     io.say(&format!("\n✓ {} {}", t("已寫入", "Wrote"), cfg_path.display()));
-    if existing.is_some() {
+    if let Some(backup) = &backup {
         io.say(&format!("  {} {}", t("原檔備份：", "Backup:"), backup.display()));
     }
     let app_ws = root.get("app").and_then(|a| a.get("workspace")).and_then(|v| v.as_str()).map(std::path::PathBuf::from).unwrap_or_else(|| paths.data.join("workspace"));
@@ -701,6 +717,9 @@ pub fn run(paths: &Paths) -> Result<i32, String> {
         io.say(&format!("  ark app open                  {}", t("開啟網頁介面", "open the web UI")));
     }
     if let Some(n) = channel_added {
+        if owner_set {
+            io.say(&format!("  {}", t("擁有者可直接私訊機器人；其他人先收到配對碼：", "the owner can message the bot right away; anyone else gets a pairing code:")));
+        }
         io.say(&format!("  ark pairing approve {n} <code>   {}", t("核准第一次私訊你的人（對方會收到配對碼）", "approve whoever messages first (they receive a pairing code)")));
     }
     io.say(&format!("  ark doctor                    {}", t("檢查環境", "check everything")));

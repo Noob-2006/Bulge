@@ -74,7 +74,7 @@ impl ChannelConfig {
     }
 }
 
-fn yes() -> bool {
+pub(crate) fn yes() -> bool {
     true
 }
 

@@ -36,6 +36,7 @@ mod registry_init;
 mod security_cli;
 mod session_cli;
 mod setup;
+mod setup_server;
 mod slash;
 mod system_cli;
 mod telephony;
@@ -70,7 +71,8 @@ use std::time::{Duration, Instant};
 const HELP: &str = "ark — autonomous agent kernel
 
 USAGE
-  ark setup                            first-run wizard: provider, key, model, web UI, chat platform
+  ark setup                            first-run wizard: provider, key, model, chat platform, owner, systemd service
+  ark setup --provider P --model M [--channel telegram|discord --owner ID] [--no-service] [--no-linger]   unattended (ARK_SETUP_* env; secrets via env only)
   ark run [opts] <prompt…|->           run one task to completion (reads stdin with -)
   ark chat [opts]                      line-based conversation (/help inside)
   ark session list|show|resume|fork|search|compact|model|rm …
@@ -265,7 +267,13 @@ fn dispatch(raw: Vec<String>) -> R {
             println!("ark {} (log v{}, protocol v{})", env!("CARGO_PKG_VERSION"), ark_kernel::event::LOG_VERSION, daemon::PROTOCOL_VERSION);
             Ok(0)
         }
-        "setup" | "onboard" => Ok(setup::run(&Paths::from_env())?),
+        "setup" | "onboard" => {
+            if setup_server::wanted(&a, &setup_server::real_env) {
+                let plan = setup_server::plan(&a, &setup_server::real_env)?;
+                return Ok(setup_server::run(&Paths::from_env(), &plan, &setup_server::real_env, &mut setup_server::RealHost)?);
+            }
+            Ok(setup::run(&Paths::from_env())?)
+        }
         "call" => cmd_call(&a),
         "run" => cmd_run(&a),
         "chat" => cmd_chat(&a),

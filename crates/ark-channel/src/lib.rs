@@ -12,6 +12,7 @@ pub mod deliver;
 pub mod markup;
 pub mod http;
 pub mod message_tool;
+pub mod outfile;
 pub mod router;
 pub mod telegram;
 pub mod tool;

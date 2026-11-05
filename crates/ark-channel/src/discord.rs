@@ -681,10 +681,11 @@ impl Inner {
         let menu = crate::menu();
         let mut cmds = if menu.is_empty() {
             json!([
-                {"name": "new", "description": "開新對話", "type": 1},
-                {"name": "stop", "description": "中斷目前的工作", "type": 1},
                 {"name": "status", "description": "目前狀態", "type": 1},
-                {"name": "help", "description": "說明", "type": 1},
+                {"name": "stop", "description": "中斷目前的工作", "type": 1},
+                {"name": "approve", "description": "核准待處理的動作", "type": 1},
+                {"name": "new", "description": "開新對話", "type": 1},
+                {"name": "help", "description": "所有指令與說明", "type": 1},
             ])
         } else {
             json!(crate::discord_menu(&menu).into_iter().filter(|c| c["name"] != "voice").collect::<Vec<_>>())
@@ -2115,8 +2116,8 @@ struct Settings {
     /// Override the Identify intents bitfield.
     #[serde(default)]
     intents: Option<u64>,
-    /// Register /new /stop /status /help as slash commands.
-    #[serde(default)]
+    /// Register the short native slash-command menu (default on; `/help` shows the rest).
+    #[serde(default = "crate::config::yes")]
     commands: bool,
     #[serde(default)]
     command_guild: Option<String>,
@@ -2656,7 +2657,7 @@ mod tests {
         assert_eq!((reqs[0].method.as_str(), reqs[0].path.as_str()), ("PUT", "/applications/APP/commands"));
         let cmds = reqs[0].json();
         let names: Vec<&str> = cmds.as_array().unwrap().iter().map(|c| c["name"].as_str().unwrap()).collect();
-        assert_eq!(names, ["new", "stop", "status", "help"]);
+        assert_eq!(names, ["status", "stop", "approve", "new", "help"]);
         assert_eq!(reqs[1].path, "/interactions/I2/T2/callback");
         assert_eq!(reqs[1].json()["type"], 4, "answered within the 3 s window");
         d.stop();

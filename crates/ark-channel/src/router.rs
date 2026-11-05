@@ -113,7 +113,7 @@ pub struct Router {
     pub load_warning: Option<String>,
 }
 
-pub const HELP: &str = "Commands: /new (fresh session), /stop (interrupt), /status, /forget (delete what you sent here), /help. Anything else goes to the agent.";
+pub const HELP: &str = "Main commands: /status, /stop (interrupt), /approve, /new (fresh session), /help. Also /sethome (make this chat the home chat), /forget (delete what you sent here). Anything else goes to the agent; the full list follows.";
 
 impl Router {
     pub fn open(path: PathBuf, configs: HashMap<String, RouterConfig>) -> Router {

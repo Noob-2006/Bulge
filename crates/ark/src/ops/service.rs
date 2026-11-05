@@ -273,6 +273,50 @@ pub fn audit(ws: &Path) -> Vec<Issue> {
     v
 }
 
+/// Result of trying to keep the user service alive after logout and start it at boot.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Linger {
+    Already,
+    Enabled,
+    /// Could not be done without authorisation: the command for the person to run themselves.
+    Manual(String),
+}
+
+/// Turn lingering on without ever raising an authorisation prompt (`--no-ask-password`: if
+/// polkit would need to ask, it fails and we print the command instead). Pure over its inputs
+/// so the decision is testable; [`ensure_linger`] wires the real `loginctl`.
+pub fn ensure_linger_with(status: Option<bool>, enable: &dyn Fn() -> Result<(), String>, user: &str) -> Linger {
+    if status == Some(true) {
+        return Linger::Already;
+    }
+    match enable() {
+        Ok(()) => Linger::Enabled,
+        Err(_) => Linger::Manual(format!("sudo loginctl enable-linger {user}")),
+    }
+}
+
+pub fn ensure_linger() -> Linger {
+    let user = std::env::var("USER").or_else(|_| std::env::var("LOGNAME")).unwrap_or_default();
+    ensure_linger_with(
+        linger_enabled(),
+        &|| {
+            let ok = std::process::Command::new("loginctl")
+                .args(["--no-ask-password", "enable-linger", &user])
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .is_ok_and(|s| s.success());
+            if ok && linger_enabled() != Some(false) {
+                Ok(())
+            } else {
+                Err("loginctl enable-linger needs authorisation".into())
+            }
+        },
+        &user,
+    )
+}
+
 pub fn install_user(ws: &Path, start: bool) -> Result<String, String> {
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
     let dir = user_unit_dir();
