@@ -2,7 +2,7 @@
 name: social-research
 title_zh: 社會學與人類學研究
 layer: L2
-isco: 2632
+isco: "2632"
 extends: professional-practice
 description: Applies to studying people and groups by fieldwork, comparison and statistical description with explicit method.
 regulated: false

@@ -2,7 +2,7 @@
 name: legal-drafting-and-theory
 title_zh: 法律理論與法典編纂
 layer: L2
-isco: 2619
+isco: "2619"
 extends: professional-practice
 description: Applies to drafting legislation or codes.
 regulated: true

@@ -2,7 +2,7 @@
 name: mechanical-engineering-workshop
 title_zh: 機械工程與工具機
 layer: L2
-isco: 3115
+isco: "3115"
 extends: technical-support
 description: Applies to machining, fitting and inspecting mechanical parts where dimensions and interchangeability decide.
 regulated: false

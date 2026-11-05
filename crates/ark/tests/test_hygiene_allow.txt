@@ -147,7 +147,6 @@ crates/ark-security/src/plugin_guard.rs  # temp_dir
 crates/ark-security/src/url_safety.rs  # temp_dir
 crates/ark-security/tests/broker.rs  # ark-broker-<pid>-<name> helper predates the guard; migrate to TempDir
 crates/ark-skills/src/compat/cli.rs  # temp_dir
-crates/ark-skills/src/compat/skill.rs  # temp_dir
 crates/ark-skills/src/core/blueprints.rs  # temp_dir
 crates/ark-skills/src/core/bundles.rs  # temp_dir
 crates/ark-skills/src/core/cli.rs  # temp_dir

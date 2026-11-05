@@ -725,3 +725,111 @@ fn attach_keeps_no_strong_reference_to_the_kernel() {
     assert!(att.host.cfg().is_none());
     drop(att);
 }
+
+// ───────────── /role, the role segment and the role hook (crate::roles) ─────────────
+
+fn cleanup(t: &Kit) {
+    if let Some(root) = t.paths.data.parent() {
+        let _ = std::fs::remove_dir_all(root);
+    }
+}
+
+#[test]
+fn identity_always_carries_the_core_and_config_role_adds_a_segment() {
+    let t = kit("role-core", |_| {}, None);
+    let sid = session(&t);
+    let id = seg(&t, &sid, "identity").unwrap();
+    assert!(id.contains("# Professional conduct") && id.contains("professional of record"), "L0 in the identity");
+    assert!(seg(&t, &sid, "role").is_none(), "default agent = L0 only");
+    cleanup(&t);
+
+    let t = kit("role-cfg", |c| c.role.active = "devops".into(), None);
+    let sid = session(&t);
+    let r = seg(&t, &sid, "role").expect("role segment");
+    assert!(r.contains("[role:devops]") && r.contains("ISCO 2522"), "{r}");
+    let ctx = text(&t, "/context", Some(&sid));
+    assert!(ctx.contains("role: DevOps") && ctx.contains("L0 ~") && ctx.contains("L2 ~"), "{ctx}");
+    cleanup(&t);
+}
+
+#[test]
+fn role_slash_switches_the_live_session_and_new_ones() {
+    let t = kit("role-slash", |_| {}, None);
+    let sid = session(&t);
+    assert!(text(&t, "/role", Some(&sid)).contains("role: none"));
+    assert!(text(&t, "/role list", None).contains("itsupport"));
+    let many = text(&t, "/role 2149", Some(&sid));
+    assert!(many.contains("several roles"), "{many}");
+    let out = text(&t, "/role 2512", Some(&sid));
+    assert!(out.contains("software-developer") && out.contains("rewritten"), "{out}");
+    assert!(seg(&t, &sid, "role").unwrap().contains("[role:software-developer]"));
+    // New sessions of this process follow the choice.
+    let sid2 = session(&t);
+    assert!(seg(&t, &sid2, "role").unwrap().contains("[role:software-developer]"));
+    assert!(text(&t, "/role show", Some(&sid)).contains("ISCO 2512"));
+    // Back to none: the segment goes, in the live session and in new ones.
+    text(&t, "/role none", Some(&sid));
+    assert!(seg(&t, &sid, "role").is_none());
+    assert!(seg(&t, &session(&t), "role").is_none());
+    assert!(t.k.hook_names().iter().any(|n| n == "role"), "the role hook is installed by attach");
+    cleanup(&t);
+}
+
+#[test]
+fn regulated_role_hands_reserved_acts_back_to_a_human() {
+    let t = kit("role-boundary", |c| c.context.title_generation = false, None);
+    let sid = session(&t);
+    text(&t, "/role bedside-nursing", Some(&sid));
+    // Final reply that performs a reserved act → the kernel asks for a rewrite; the rewrite passes.
+    t.p.steps.lock().unwrap().extend(["我現在幫你注射胰島素 10 單位。".to_string(), "我整理了觀察紀錄，請由執業護理師依醫囑給藥。".to_string()]);
+    t.k.submit(&sid, "幫我打胰島素", "cli").unwrap();
+    t.k.run(&sid, crate::kernel::RunOpts::default()).unwrap();
+    let revisions = |t: &Kit| t.p.requests().iter().filter(|r| r.messages.last().is_some_and(|m| m.text().contains("Reserved act"))).count();
+    assert_eq!(revisions(&t), 1, "one revision");
+    let revise = t.p.requests().iter().map(|r| r.messages.last().unwrap().text()).find(|x| x.contains("Reserved act")).unwrap();
+    assert!(revise.contains("licensed nurse"), "{revise}");
+    let v = project(&t.k.store.read(&sid).unwrap());
+    assert!(v.messages.last().unwrap().text().contains("執業護理師"));
+
+    // An ordinary answer in the same role is not touched.
+    t.p.steps.lock().unwrap().push_back("血壓 128/82，已記錄並交班。".into());
+    t.k.submit(&sid, "記錄血壓", "cli").unwrap();
+    t.k.run(&sid, crate::kernel::RunOpts::default()).unwrap();
+    assert_eq!(revisions(&t), 1, "no revision for ordinary work");
+    assert!(project(&t.k.store.read(&sid).unwrap()).messages.last().unwrap().text().contains("已記錄並交班"));
+    cleanup(&t);
+}
+
+#[test]
+fn role_hook_refuses_policy_denied_tool_calls_per_session() {
+    use crate::hooks::{Hook, HookDecision, HookEvent};
+    let t = kit("role-hook", |_| {}, None);
+    let plain = session(&t);
+    let data = session(&t);
+    text(&t, "/role data", Some(&data));
+    let hook = crate::roles::hook::RoleHook::new(Arc::downgrade(&t.k));
+    let call = |sid: &str, cmd: &str| hook.run(HookEvent::PreTool, &json!({"session_id": sid, "tool_name": "shell", "tool_input": {"command": cmd}})).unwrap();
+    assert!(matches!(call(&data, "psql -c 'DROP TABLE users'"), HookDecision::Block(r) if r.contains("read-only")));
+    assert!(matches!(call(&data, "psql -c 'select 1'"), HookDecision::Allow));
+    assert!(matches!(call(&plain, "psql -c 'DROP TABLE users'"), HookDecision::Allow), "no role, no role policy");
+    cleanup(&t);
+}
+
+#[test]
+fn named_agent_carries_its_occupation_and_tool_profile() {
+    let t = kit("role-agent", |_| {}, None);
+    crate::agents::add(&t.paths, "ops", crate::agents::AgentDef { name: "Ops".into(), role: "devops".into(), ..Default::default() }).unwrap();
+    crate::agents::add(&t.paths, "lead", crate::agents::AgentDef { role: "coordinator".into(), ..Default::default() }).unwrap();
+    let sid = t.k.create_agent_session(&ws_of(&t), Some("ops"), None, None, None, None).unwrap();
+    assert!(seg(&t, &sid, "role").unwrap().contains("[role:devops]"));
+    let v = project(&t.k.store.read(&sid).unwrap());
+    let allow = v.tool_allow.expect("devops tool profile narrows the tools");
+    assert!(allow.iter().any(|x| x == "shell") && !allow.iter().any(|x| x == "node_invoke"), "{allow:?}");
+    // A team seed is not an occupation.
+    let sid2 = t.k.create_agent_session(&ws_of(&t), Some("lead"), None, None, None, None).unwrap();
+    assert!(seg(&t, &sid2, "role").is_none());
+    // An unknown occupation fails loudly instead of running without its rules.
+    crate::agents::add(&t.paths, "bad", crate::agents::AgentDef { role: "no-such-role".into(), ..Default::default() }).unwrap();
+    assert!(t.k.create_agent_session(&ws_of(&t), Some("bad"), None, None, None, None).is_err());
+    cleanup(&t);
+}

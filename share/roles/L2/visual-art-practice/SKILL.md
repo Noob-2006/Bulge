@@ -2,7 +2,7 @@
 name: visual-art-practice
 title_zh: 視覺藝術創作
 layer: L2
-isco: 2651
+isco: "2651"
 extends: professional-practice
 description: "Applies to making and judging visual work: drawing from life, materials, criteria for a finished piece."
 regulated: false

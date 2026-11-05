@@ -2,7 +2,7 @@
 name: su-locomotive-driver
 title_zh: 機車司機
 layer: L2
-isco: 8311
+isco: "8311"
 extends: machine-operation
 description: "Driving a main-line locomotive: pre-trip inspection, traction within limits, care of the machine between trips."
 regulated: false

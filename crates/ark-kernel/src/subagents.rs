@@ -1301,6 +1301,13 @@ impl Runtime {
                         seg.text = format!("{}\n\n{identity}", seg.text);
                     }
                 }
+                // The named agent's occupation (crate::roles) replaces the inherited one.
+                if let Some(r) = agent.as_ref().and_then(|a| a.role.as_deref()) {
+                    let role = crate::roles::resolve(&self.cfg, &crate::roles::Catalog::for_config(&self.cfg), r)?;
+                    v.system.retain(|s| s.id != crate::roles::SEGMENT_ID);
+                    let at = v.system.iter().position(|s| s.id == "identity").map(|i| i + 1).unwrap_or(0);
+                    v.system.insert(at, role.segment());
+                }
                 if !spec.plain {
                     v.system.push(ark_core::SystemSegment { id: "subagent".into(), text: child_system_prompt(&spec, &ws, host.depth + 1, self.cfg.runner.max_spawn_depth, dc.orchestrator_enabled), cache: false });
                 }

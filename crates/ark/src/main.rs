@@ -33,6 +33,7 @@ mod outbound_host;
 mod plugin_backends;
 mod providers;
 mod registry_init;
+mod role_cli;
 mod security_cli;
 mod session_cli;
 mod setup;
@@ -73,6 +74,7 @@ const HELP: &str = "ark — autonomous agent kernel
 USAGE
   ark setup                            first-run wizard: provider, key, model, chat platform, owner, systemd service
   ark setup --provider P --model M [--channel telegram|discord --owner ID] [--no-service] [--no-linger]   unattended (ARK_SETUP_* env; secrets via env only)
+  ark role list|use|show|verify|diff   professional role: ISCO occupation or preset (devops, swdev, secops, data, itsupport)
   ark run [opts] <prompt…|->           run one task to completion (reads stdin with -)
   ark chat [opts]                      line-based conversation (/help inside)
   ark session list|show|resume|fork|search|compact|model|rm …
@@ -212,7 +214,7 @@ const BUILTINS: &[&str] = &[
     "hooks", "hook", "kanban", "meet", "teams", "teams-pipeline", "web", "browser", "screen", "computer-use",
     "sandbox", "system", "suggestions", "worktree", "agents", "users", "moa",
     "infer", "capability", "voice", "stt", "transcripts",
-    "status", "telemetry", "evals", "tools", "docker", "fleet", "index",
+    "status", "telemetry", "evals", "tools", "docker", "fleet", "index", "role", "roles",
 ];
 
 fn dispatch(raw: Vec<String>) -> R {
@@ -451,7 +453,10 @@ fn load_config(a: &Args, ws: &Path, paths: &Paths) -> Result<Config, Fail> {
         sets.push(format!("runner.max_steps_per_turn={n}"));
     }
     let cfg = Config::load(Some(&paths.user_config()), Some(&project_config(ws)), &sets).map_err(Fail::Msg)?;
-    let cfg = ops::debugdump::effective(&cfg).unwrap_or(cfg); // `/debug set` runtime overrides
+    let mut cfg = ops::debugdump::effective(&cfg).unwrap_or(cfg); // `/debug set` runtime overrides
+    // `[role] active`: the occupation's default permissions tighten (never loosen) the config
+    // the agent runs with — approval preset, workspace-only writes, tool profile (ark_kernel::roles).
+    ark_kernel::roles::apply_policy(&mut cfg);
     models_cli::init(paths, &cfg);
     ark_kernel::i18n::set_config_language(&cfg.display.language); // `display.language` → approval prompts, notices, headings
     Ok(cfg)

@@ -2,7 +2,7 @@
 name: hand-packer
 title_zh: 手工包裝工
 layer: L2
-isco: 9321
+isco: "9321"
 extends: elementary-support
 description: "Packing, sealing and labelling goods to a written specification, where a wrong label or failed seal reaches a customer."
 regulated: false

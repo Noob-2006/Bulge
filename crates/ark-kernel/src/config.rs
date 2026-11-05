@@ -107,6 +107,9 @@ pub struct Config {
     pub personality: String,
     /// Custom personalities `name = "system prompt"`, overlaying the built-ins.
     pub personalities: BTreeMap<String, String>,
+    /// `[role]`: the occupation the default agent works as (`ark role use`), the L0 core
+    /// switch, an extra roles directory and the active-scan allowlist (crate::roles).
+    pub role: crate::roles::RoleConfig,
     /// Scheduled backups (`ark backup`).
     pub backup: BackupConfig,
     /// Self-update source (`ark update`).
@@ -542,7 +545,7 @@ pub struct ToolsConfig {
     pub unpinned: Vec<String>,
     /// `[tools.tool_search]`: BM25 search over the tool index (Hermes tool_search).
     pub tool_search: crate::toolsearch::ToolSearchConfig,
-    /// Tool profile (OpenClaw): minimal | coding | messaging | full. Unset = full.
+    /// Tool profile (OpenClaw): minimal | coding | messaging | devops | secops | data | itsupport | full. Unset = full.
     pub profile: Option<String>,
     /// Replaces the profile's tool list (names, `group:<x>`, globs).
     pub allow: Vec<String>,
@@ -970,6 +973,11 @@ deny = []           # command globs that never run, even under --yolo
 
 [security]
 workspace_only = false
+
+# [role]        # professional role (`ark role use`): ISCO occupation or preset
+# active = "swdev"           # devops | swdev | secops | data | itsupport | a pack slug; "" = L0 core only
+# core = true                # the L0 professional core in every identity
+# scan_targets = ["10.0.0.0/24"]   # where a secops role may run active scanners
 
 # [providers.myvllm]
 # format = "openai_chat"

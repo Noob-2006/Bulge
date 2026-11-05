@@ -2,7 +2,7 @@
 name: su-toolmaker
 title_zh: 工具鉗工
 layer: L2
-isco: 7222
+isco: "7222"
 extends: skilled-trades
 description: "Making, hardening and fitting tooling: one person closing the cycle from drawing to a tool that holds tolerance."
 regulated: false

@@ -2,7 +2,7 @@
 name: shelf-filler
 title_zh: 貨架補充員
 layer: L2
-isco: 9334
+isco: "9334"
 extends: elementary-support
 description: "Replenishing retail shelves and displays: rotation, facing, price accuracy and pull-based ordering in a live shop."
 regulated: false

@@ -2,7 +2,7 @@
 name: religious-and-pastoral-practice
 title_zh: 宗教與靈性陪伴
 layer: L2
-isco: 2636
+isco: "2636"
 extends: professional-practice
 description: Applies to pastoral counsel, teaching and communal religious practice, where meaning and discipline are the work.
 regulated: false

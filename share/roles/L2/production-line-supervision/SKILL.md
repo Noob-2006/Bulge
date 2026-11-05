@@ -2,7 +2,7 @@
 name: production-line-supervision
 title_zh: 生產線監督
 layer: L2
-isco: 3122
+isco: "3122"
 extends: technical-support
 description: "Applies to supervising a production line or shift: pace, standard work, quality at source and stoppages."
 regulated: false

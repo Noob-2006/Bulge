@@ -2,7 +2,7 @@
 name: litigation-lawyer
 title_zh: 訴訟與法律事務律師
 layer: L2
-isco: 2611
+isco: "2611"
 extends: professional-practice
 description: Applies to advising a client and arguing a case.
 regulated: true

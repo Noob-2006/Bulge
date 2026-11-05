@@ -2,7 +2,7 @@
 name: mining-quarrying-labourer
 title_zh: 採礦及採石工人
 layer: L2
-isco: 9311
+isco: "9311"
 extends: elementary-support
 description: "Mining and quarrying labour: ground support, ventilation, gas and blasting routines, and muster accountability underground."
 regulated: false

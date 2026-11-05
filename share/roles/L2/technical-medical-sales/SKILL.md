@@ -2,7 +2,7 @@
 name: technical-medical-sales
 title_zh: 技術與醫療銷售
 layer: L2
-isco: 2433
+isco: "2433"
 extends: professional-practice
 description: Applies to selling technical, industrial or medical products to professional buyers on long cycles.
 regulated: false

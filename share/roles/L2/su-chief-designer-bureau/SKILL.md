@@ -2,7 +2,7 @@
 name: su-chief-designer-bureau
 title_zh: 主任設計師
 layer: L2
-isco: 2144
+isco: "2144"
 extends: professional-practice
 description: "Owning a machine type end to end: layout, weight."
 regulated: true

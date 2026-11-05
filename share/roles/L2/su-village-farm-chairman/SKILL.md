@@ -2,7 +2,7 @@
 name: su-village-farm-chairman
 title_zh: 集體農莊主席
 layer: L2
-isco: 1311
+isco: "1311"
 extends: management
 description: "Running a village-scale farm enterprise that also carries housing, services and social life for its members."
 regulated: false

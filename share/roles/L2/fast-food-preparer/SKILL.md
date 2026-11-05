@@ -2,7 +2,7 @@
 name: fast-food-preparer
 title_zh: 快餐製作員
 layer: L2
-isco: 9411
+isco: "9411"
 extends: elementary-support
 description: "Cooking and serving a short menu to order at speed, where portion, temperature, holding time and accuracy decide quality."
 regulated: false

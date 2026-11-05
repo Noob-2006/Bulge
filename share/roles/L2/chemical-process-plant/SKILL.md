@@ -2,7 +2,7 @@
 name: chemical-process-plant
 title_zh: 化工製程操作技術
 layer: L2
-isco: 3116
+isco: "3116"
 extends: technical-support
 description: "Applies to running and scaling chemical processes: unit operations, balances, windows, manuals."
 regulated: false

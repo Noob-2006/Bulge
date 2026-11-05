@@ -35,6 +35,7 @@ pub fn register() {
     crate::control_cli::register_route();
     crate::media_host::register_route();
     crate::message_cli::register_route();
+    crate::role_cli::register_route();
 }
 
 #[cfg(test)]
@@ -110,7 +111,7 @@ mod tests {
         let mut names = ark_core::registry::registered_command_names();
         names.sort();
         names.dedup();
-        assert_eq!(names, ["agents", "browser", "capability", "computer-use", "infer", "kanban", "meet", "message", "moa", "screen", "stt", "teams", "teams-pipeline", "transcripts", "voice"]);
+        assert_eq!(names, ["agents", "browser", "capability", "computer-use", "infer", "kanban", "meet", "message", "moa", "role", "roles", "screen", "stt", "teams", "teams-pipeline", "transcripts", "voice"]);
         assert!(ark_core::registry::command_route("run", &[]).is_none(), "`ark run` stays in the binary");
         assert!(ark_core::registry::command_route("doctor", &[]).is_none());
         assert!(ark_core::registry::command_route("meet", &[]).is_some(), "an unknown sub-command is the family's own usage error");

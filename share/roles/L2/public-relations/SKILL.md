@@ -2,7 +2,7 @@
 name: public-relations
 title_zh: 公共關係
 layer: L2
-isco: 2432
+isco: "2432"
 extends: professional-practice
 description: Applies to reputation, media relations and crisis communication for an organisation or public figure.
 regulated: false

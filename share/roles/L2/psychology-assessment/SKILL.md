@@ -2,7 +2,7 @@
 name: psychology-assessment
 title_zh: 心理學評估與研究
 layer: L2
-isco: 2634
+isco: "2634"
 extends: professional-practice
 description: Applies to psychological assessment.
 regulated: true

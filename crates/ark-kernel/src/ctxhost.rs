@@ -1,5 +1,5 @@
 //! Context features the host attaches to a kernel: native slash commands (`/context`, `/compact`
-//! and its `/compress` alias, `/title`, `/btw`, `/personality`) and the frozen system segments
+//! and its `/compress` alias, `/title`, `/btw`, `/personality`, `/role`) and the frozen system segments
 //! that carry the persona (`SOUL.md` + personality), the coding posture and the local toolchain
 //! probe, plus the background title generator. Called from `crates/ark/src/wire.rs`.
 //!
@@ -11,6 +11,7 @@
 
 mod persona;
 mod posture;
+pub mod role;
 mod slash;
 mod title;
 
@@ -40,6 +41,8 @@ pub struct Options {
 pub struct Host {
     kernel: Weak<crate::kernel::Runtime>,
     persona: Persona,
+    /// `/role` choice for this process (crate::roles).
+    role: role::RoleChoice,
     titles: Arc<Titles>,
     probe: posture::Probe,
 }
@@ -100,6 +103,7 @@ pub fn attach_with(k: &Kernel, ws: &Path, o: Options) -> Arc<Attached> {
     let host = Arc::new(Host {
         kernel: Arc::downgrade(k),
         persona: Persona::new(),
+        role: role::RoleChoice::default(),
         titles: Arc::new(title::Titles::new(Arc::downgrade(k), o.titler)),
         probe: posture::Probe::new(o.probe_path),
     });
@@ -110,6 +114,10 @@ pub fn attach_with(k: &Kernel, ws: &Path, o: Options) -> Arc<Attached> {
     k.add_lifecycle(Arc::new(posture::PostureSegment(host.clone())));
     k.add_lifecycle(Arc::new(posture::EnvSegment(host.clone())));
     k.add_lifecycle(Arc::new(title::AutoTitle(host.clone())));
+    // Occupation: the `/role` choice for new sessions, and the role's run-time checks
+    // (default permissions, reserved acts of regulated professions).
+    k.add_lifecycle(Arc::new(role::RoleSegment(host.clone())));
+    k.add_hooks(vec![Arc::new(crate::roles::hook::RoleHook::new(Arc::downgrade(k)))]);
     if !o.lazy_probe {
         host.probe.warm(ws);
     }

@@ -2,7 +2,7 @@
 name: fishery-labourer
 title_zh: 漁業及水產養殖工人
 layer: L2
-isco: 9216
+isco: "9216"
 extends: elementary-support
 description: "Deck and pond or raft farm labour: gear, live stock, catch handling and take limits under weather and water."
 regulated: false

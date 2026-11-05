@@ -2,7 +2,7 @@
 name: su-chief-engineer-enterprise
 title_zh: 總工程師
 layer: L2
-isco: 1321
+isco: "1321"
 extends: management
 description: "Technical deputy to a plant or site director: drawings, processes, repairs, safety, and the power to halt the work."
 regulated: false

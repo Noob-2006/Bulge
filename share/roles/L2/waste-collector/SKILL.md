@@ -2,7 +2,7 @@
 name: waste-collector
 title_zh: 垃圾及回收物收集員
 layer: L2
-isco: 9611
+isco: "9611"
 extends: elementary-support
 description: "Collecting household and commercial waste and recyclables on a fixed round, where lifting, sharps and segregation set the risk."
 regulated: false

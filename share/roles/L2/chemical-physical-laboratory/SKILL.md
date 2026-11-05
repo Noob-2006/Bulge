@@ -2,7 +2,7 @@
 name: chemical-physical-laboratory
 title_zh: 化學與物理實驗技術
 layer: L2
-isco: 3111
+isco: "3111"
 extends: technical-support
 description: "Applies to bench work in chemistry and physics: apparatus, measurement, samples and scale-up."
 regulated: false

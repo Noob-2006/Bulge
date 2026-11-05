@@ -2,7 +2,7 @@
 name: civil-engineering-labourer
 title_zh: 土木工程工人
 layer: L2
-isco: 9312
+isco: "9312"
 extends: elementary-support
 description: "Civil works labour on roads, rail, dams, tunnels and trenches: buried services, levels, shielding and plant zones."
 regulated: false

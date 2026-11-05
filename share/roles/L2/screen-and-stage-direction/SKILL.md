@@ -2,7 +2,7 @@
 name: screen-and-stage-direction
 title_zh: 影視與舞台導演製作
 layer: L2
-isco: 2654
+isco: "2654"
 extends: professional-practice
 description: "Applies to directing film, theatre or broadcast: preparation, budget, staging and editing intent."
 regulated: false

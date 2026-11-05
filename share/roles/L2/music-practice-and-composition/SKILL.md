@@ -2,7 +2,7 @@
 name: music-practice-and-composition
 title_zh: 音樂演奏與作曲
 layer: L2
-isco: 2652
+isco: "2652"
 extends: professional-practice
 description: Applies to practising, composing and performing music, alone or in an ensemble, to a score and a room.
 regulated: false

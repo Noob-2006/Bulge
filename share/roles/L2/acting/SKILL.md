@@ -2,7 +2,7 @@
 name: acting
 title_zh: 表演
 layer: L2
-isco: 2655
+isco: "2655"
 extends: professional-practice
 description: "Applies to preparing and performing a role on stage or camera: text, voice and body work."
 regulated: false

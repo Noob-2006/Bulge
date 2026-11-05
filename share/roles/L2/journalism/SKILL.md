@@ -2,7 +2,7 @@
 name: journalism
 title_zh: 新聞採訪與報導
 layer: L2
-isco: 2642
+isco: "2642"
 extends: professional-practice
 description: "Applies to reporting and editing news: verification, sourcing, interviews and publication risk."
 regulated: false

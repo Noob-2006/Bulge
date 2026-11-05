@@ -6,9 +6,17 @@ Checks, per share/roles/<layer>/<slug>/SKILL.md:
   2. layer is L0/L1/L2; `extends` present exactly when layer != L0, and points
      to a pack that exists one layer up with a compatible isco code
   3. isco format: L0 = "all", L1 = one digit 0-9, L2 = four digits
-  4. token budget (characters / 4): L0 <= 300, L1 <= 300, L2 <= 400
-  5. no person name from audit/personas/MASTER.json appears anywhere in the file
-  6. provenance/<slug>.json exists, covers every rule, and repeats its text
+  4. token budget (characters / 4 of the body the runtime injects; frontmatter is
+     never sent to the model): L0 <= 300, L1 <= 300, L2 <= 400
+  5. no person name appears anywhere in the pack (SKILL.md and references/): names come
+     from audit/personas/MASTER.json when that internal file is reachable, else from the
+     unsalted hash list names.sha256 shipped next to this script (no name is stored in
+     the repo, only sha256 prefixes). With neither, the check says SKIPPED and fails
+     unless --allow-skip is given: it never passes silently.
+  6. provenance/<slug>.json exists, covers every rule, and repeats its text. The
+     provenance tree is internal (audit/personas/provenance, never shipped); in a clean
+     checkout it is absent and this check is reported as skipped, not failed, unless
+     --require-provenance is given.
      (rules taken from the persona sections; the governance sections "Scope"
      and "Scope and boundaries" are sourced from boundaries.toml, not from
      personas, so they carry no persona record. A record left behind by a rule
@@ -22,12 +30,19 @@ Checks, per share/roles/<layer>/<slug>/SKILL.md:
      has may_do, hand_to, escalation, Taiwan statutes with URLs and notes, a
      mainland-China note.
 
+  10. isco is written as a quoted string (`isco: "2512"`), so every loader reads a string.
+  11. presets.toml (the pre-assembled professional roles) names existing packs and tool
+      profiles.
+
 Exit status is non-zero when any violation is found.
 
-Usage: python3 check.py [--budget-margin N] [--quiet]
+Usage: python3 check.py [--budget-margin N] [--quiet] [--allow-skip] [--require-provenance]
+       python3 check.py --write-name-hashes   (regenerate names.sha256 from MASTER.json)
+       python3 check.py --self-test           (prove the hashed name check catches a name)
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -40,10 +55,18 @@ except ModuleNotFoundError:  # pragma: no cover - python < 3.11
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 BOUNDARIES = os.path.join(HERE, "boundaries.toml")
+PRESETS = os.path.join(HERE, "presets.toml")
+NAME_HASHES = os.path.join(HERE, "names.sha256")
+TOOL_PROFILES = {"minimal", "coding", "messaging", "full", "devops", "secops", "data", "itsupport"}
+CJK_RE = r"[\u3400-\u9fff\u3040-\u30ff\uac00-\ud7af]"
 
 
 def find_root():
-    """Nearest ancestor holding audit/personas/MASTER.json, else three levels up."""
+    """$ARK_AUDIT_ROOT, else the nearest ancestor holding audit/personas/MASTER.json, else
+    three levels up."""
+    env = os.environ.get("ARK_AUDIT_ROOT")
+    if env:
+        return os.path.abspath(env)
     cur = HERE
     for _ in range(6):
         if os.path.isfile(os.path.join(cur, "audit", "personas", "MASTER.json")):
@@ -93,6 +116,94 @@ def parse_frontmatter(text: str):
         k, v = line.split(":", 1)
         meta[k.strip()] = v.strip().strip('"').strip("'")
     return meta, body, None
+
+
+def norm_latin(s: str) -> str:
+    """Lowercase, punctuation to spaces, single spaces: the form both sides are hashed in."""
+    return " ".join(re.sub(r"[^\w\s]", " ", s.lower()).split())
+
+
+def norm_cjk(s: str) -> str:
+    return re.sub(r"[\s\u00b7\u30fb\u2022.]", "", s)
+
+
+def name_hash(kind: str, s: str) -> str:
+    return hashlib.sha256((kind + ":" + s).encode("utf-8")).hexdigest()[:16]
+
+
+def load_hashes(path=NAME_HASHES):
+    """(latin hashes, cjk hashes, longest latin words, longest cjk chars) from names.sha256."""
+    lat, cjk, lw, cl = set(), set(), 6, 12
+    with open(path, encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if line.startswith("# max_words="):
+                for part in line[2:].split():
+                    k, v = part.split("=")
+                    if k == "max_words":
+                        lw = int(v)
+                    elif k == "max_cjk":
+                        cl = int(v)
+                continue
+            if not line or line.startswith("#"):
+                continue
+            kind, h = line.split(" ", 1)
+            (lat if kind == "L" else cjk).add(h)
+    return lat, cjk, lw, cl
+
+
+def hashed_hits(text: str, hashes) -> set:
+    """Hash every word window / CJK substring of `text`; return the windows that hit."""
+    lat, cjk, max_words, max_cjk = hashes
+    hits = set()
+    words = norm_latin(text).split()
+    for n in range(1, max_words + 1):
+        for i in range(len(words) - n + 1):
+            w = " ".join(words[i:i + n])
+            if len(w) >= 4 and name_hash("L", w) in lat:
+                hits.add(w)
+    for run in re.findall(CJK_RE + r"+", norm_cjk(text)):
+        for n in range(2, min(max_cjk, len(run)) + 1):
+            for i in range(len(run) - n + 1):
+                w = run[i:i + n]
+                if name_hash("C", w) in cjk:
+                    hits.add(w)
+    return hits
+
+
+def write_name_hashes():
+    latin, cjk = load_names()
+    if not latin and not cjk:
+        print(f"{MASTER}: not found; cannot regenerate {NAME_HASHES}")
+        return 1
+    lat = sorted({name_hash("L", norm_latin(n)) for n in latin if len(norm_latin(n)) >= 4})
+    cj = sorted({name_hash("C", norm_cjk(n)) for n in cjk if len(norm_cjk(n)) >= 2})
+    max_words = max(len(norm_latin(n).split()) for n in latin) if latin else 1
+    max_cjk = max(len(norm_cjk(n)) for n in cjk) if cjk else 2
+    with open(NAME_HASHES, "w", encoding="utf-8") as f:
+        f.write("# sha256 prefixes of the exemplar names role packs must never contain (7-4-4).\n")
+        f.write("# Generated by `python3 check.py --write-name-hashes` from the internal MASTER.json;\n")
+        f.write("# the names themselves are not in the repo. L = Latin (lowercase, punctuation as\n")
+        f.write("# spaces), C = CJK (separators removed). Regenerate whenever MASTER.json changes.\n")
+        f.write(f"# max_words={max_words} max_cjk={max_cjk}\n")
+        for h in lat:
+            f.write(f"L {h}\n")
+        for h in cj:
+            f.write(f"C {h}\n")
+    print(f"wrote {NAME_HASHES}: {len(lat)} Latin, {len(cj)} CJK name hashes")
+    return 0
+
+
+def self_test():
+    """The hashed check must catch a planted name in both scripts, and not a neighbour."""
+    lat = {name_hash("L", norm_latin("Zelda Quorbelle"))}
+    cjk = {name_hash("C", norm_cjk("龢·曌甯"))}
+    h = (lat, cjk, 3, 6)
+    assert hashed_hits("Prefer the method of zelda  quorbelle, always.", h) == {"zelda quorbelle"}
+    assert hashed_hits("依龢曌甯的方法", h) == {"龢曌甯"}
+    assert hashed_hits("Zelda alone, and 龢曌 alone", h) == set()
+    print("self-test OK: hashed name check catches planted Latin and CJK names")
+    return 0
 
 
 def load_names():
@@ -244,12 +355,66 @@ def collect():
     return packs
 
 
+def load_presets(packs, problems):
+    """presets.toml: every preset names existing packs and a known tool profile."""
+    if tomllib is None or not os.path.exists(PRESETS):
+        if not os.path.exists(PRESETS):
+            problems.append(f"{PRESETS}: missing")
+        return 0
+    try:
+        with open(PRESETS, "rb") as f:
+            data = tomllib.load(f)
+    except Exception as e:  # noqa: BLE001
+        problems.append(f"{PRESETS}: invalid TOML: {e}")
+        return 0
+    seen = set()
+    for p in data.get("preset", []):
+        pid = p.get("id", "?")
+        if pid in seen:
+            problems.append(f"presets.toml: duplicate preset id {pid!r}")
+        seen.add(pid)
+        for key in ("id", "title_zh", "title_en", "packs", "tools"):
+            if not p.get(key):
+                problems.append(f"presets.toml: preset {pid!r} missing {key!r}")
+        for slug in p.get("packs", []):
+            if slug not in packs:
+                problems.append(f"presets.toml: preset {pid!r} names unknown pack {slug!r}")
+        if p.get("tools") and p["tools"] not in TOOL_PROFILES:
+            problems.append(f"presets.toml: preset {pid!r} uses unknown tool profile {p['tools']!r}")
+    return len(seen)
+
+
 def main(argv):
     quiet = "--quiet" in argv
+    if "--write-name-hashes" in argv:
+        return write_name_hashes()
+    if "--self-test" in argv:
+        return self_test()
     margin = 0
     if "--budget-margin" in argv:
         margin = int(argv[argv.index("--budget-margin") + 1])
     latin, cjk = load_names()
+    hashes = None
+    skipped = []
+    if latin or cjk:
+        name_source = "MASTER.json"
+    elif os.path.exists(NAME_HASHES):
+        hashes = load_hashes()
+        name_source = f"names.sha256 ({len(hashes[0]) + len(hashes[1])} hashes)"
+    else:
+        name_source = "nothing: SKIPPED"
+        msg = ("name check SKIPPED: neither audit/personas/MASTER.json nor "
+               "share/roles/names.sha256 is present")
+        if "--allow-skip" in argv:
+            print("WARNING: " + msg)
+        else:
+            skipped.append(msg + " (pass --allow-skip to accept)")
+    have_prov = os.path.isdir(PROV)
+    if not have_prov:
+        if "--require-provenance" in argv:
+            skipped.append(f"provenance REQUIRED but {PROV} is missing")
+        else:
+            print(f"note: provenance check skipped ({PROV} is internal and not in this checkout)")
     packs = collect()
     problems = []
     notes = []
@@ -344,14 +509,28 @@ def main(argv):
                     problems.append(f"{path}: unregulated pack must not carry a scope section")
 
         text = files[slug][1]
-        tok = token_estimate(text)
+        # The budget is on what reaches the model: the body. Frontmatter is never injected
+        # (the runtime strips it; only `description` appears, in the role index).
+        tok = token_estimate(body.strip())
         limit = BUDGET[layer] - margin
         if tok > limit:
             problems.append(f"{path}: {tok:.0f} tokens (chars/4) over budget {limit}")
 
-        hits = name_hits(text, latin, cjk)
-        for h in sorted(hits):
-            problems.append(f"{path}: person name leaked: {h!r}")
+        texts = [(path, text)]
+        refs = os.path.join(os.path.dirname(path), "references")
+        if os.path.isdir(refs):
+            for ref in sorted(os.listdir(refs)):
+                rp = os.path.join(refs, ref)
+                if os.path.isfile(rp):
+                    texts.append((rp, open(rp, encoding="utf-8").read()))
+        for tpath, ttext in texts:
+            hits = name_hits(ttext, latin, cjk) if hashes is None else hashed_hits(ttext, hashes)
+            for h in sorted(hits):
+                problems.append(f"{tpath}: person name leaked: {h!r}")
+
+        raw_isco = re.search(r"^isco:\s*(.*)$", text, re.M)
+        if raw_isco and not re.fullmatch(r'"[^"]+"', raw_isco.group(1).strip()):
+            problems.append(f"{path}: isco must be a quoted string, got {raw_isco.group(1).strip()}")
 
         persona_rules, gov_rules = split_rules(body)
 
@@ -365,9 +544,11 @@ def main(argv):
                     if phrase not in joined:
                         problems.append(f"{path}: L0 scope rule does not mention {phrase!r}")
 
-        # provenance integrity
+        # provenance integrity (internal data; skipped in a clean checkout, see module docs)
         prov_path = os.path.join(PROV, slug + ".json")
-        if not os.path.exists(prov_path):
+        if not have_prov:
+            pass
+        elif not os.path.exists(prov_path):
             problems.append(f"{prov_path}: missing provenance file")
         else:
             try:
@@ -412,12 +593,15 @@ def main(argv):
         if len(slugs) > 1:
             problems.append(f"L1 coverage: group {isco} has several packs {slugs}")
 
+    n_presets = load_presets(meta_by_slug, problems)
+    problems.extend(skipped)
+
     regulated = sum(1 for _, (meta, _, _) in meta_by_slug.items()
                     if str(meta.get("regulated", "")).lower() == "true")
     if not quiet:
         for slug in sorted(meta_by_slug):
             meta, body, path = meta_by_slug[slug]
-            tok = token_estimate(files[slug][1])
+            tok = token_estimate(body.strip())
             n_rules = len(split_rules(body)[0])
             reg = ""
             if meta.get("layer") == "L2":
@@ -434,7 +618,9 @@ def main(argv):
         print(f"note: {total} provenance record(s) retired across {len(notes)} pack(s), "
               f"from rules trimmed to fit the token budget")
     print(f"\nOK: {len(packs)} packs valid, {regulated} regulated L2 packs, "
-          f"{len(act_ids)} reserved acts in boundaries.toml, no leaked names, budgets respected.")
+          f"{len(act_ids)} reserved acts in boundaries.toml, {n_presets} presets, "
+          f"no leaked names (checked against {name_source}), budgets respected"
+          f"{'' if have_prov else ', provenance skipped'}.")
     return 0
 
 

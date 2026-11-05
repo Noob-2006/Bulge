@@ -2,7 +2,7 @@
 name: database-design-administration
 title_zh: 資料庫設計與管理
 layer: L2
-isco: 2521
+isco: "2521"
 extends: professional-practice
 description: Applies to schemas and database operation.
 regulated: false

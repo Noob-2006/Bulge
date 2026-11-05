@@ -2,7 +2,7 @@
 name: mine-shift-supervision
 title_zh: 礦場班組監督
 layer: L2
-isco: 3121
+isco: "3121"
 extends: technical-support
 description: "Applies to supervising a mine crew or district: ventilation, ground control, permits and shift inspection."
 regulated: false

@@ -2,7 +2,7 @@
 name: su-plant-director
 title_zh: 廠長
 layer: L2
-isco: 1321
+isco: "1321"
 extends: management
 description: "Running a plant as a production system and a community, where every shop serves the pacing line and cadres stay."
 regulated: false

@@ -2,7 +2,7 @@
 name: applications-programmer
 title_zh: 應用程式設計
 layer: L2
-isco: 2514
+isco: "2514"
 extends: professional-practice
 description: Applies to implementing applications in a chosen language and standard libraries, with portability and readability as goals.
 regulated: false

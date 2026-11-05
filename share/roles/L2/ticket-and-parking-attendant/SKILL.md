@@ -2,7 +2,7 @@
 name: ticket-and-parking-attendant
 title_zh: 未分類基層工作者
 layer: L2
-isco: 9629
+isco: "9629"
 extends: elementary-support
 description: "Issuing, checking and collecting numbered tickets and parking time on a beat, where numbering, cash and fair enforcement matter."
 regulated: false

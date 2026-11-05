@@ -2,7 +2,7 @@
 name: ict-sales
 title_zh: 資通訊銷售
 layer: L2
-isco: 2434
+isco: "2434"
 extends: professional-practice
 description: Applies to selling software, cloud and IT services to business buyers, including enterprise proof-of-concept deals.
 regulated: false

@@ -2,7 +2,7 @@
 name: dance-and-choreography
 title_zh: 舞蹈與編舞
 layer: L2
-isco: 2653
+isco: "2653"
 extends: professional-practice
 description: Applies to training dancers, making choreography and staging it safely for a company and a space.
 regulated: false

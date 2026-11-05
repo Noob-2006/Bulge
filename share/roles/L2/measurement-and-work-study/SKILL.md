@@ -2,7 +2,7 @@
 name: measurement-and-work-study
 title_zh: 量測、鑑識與工作研究
 layer: L2
-isco: 3119
+isco: "3119"
 extends: technical-support
 description: "Applies to physical-science support work: trace evidence, process variation, motion or fatigue study."
 regulated: false

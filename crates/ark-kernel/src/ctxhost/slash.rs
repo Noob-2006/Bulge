@@ -10,6 +10,7 @@
 //! - `/btw <question>` (Hermes `agent/side_question.py`): answer against a snapshot of the
 //!   conversation without appending anything to it.
 //! - `/personality [name|list|none]` (Hermes `hermes_cli/personality.py`): the persona overlay.
+//! - `/role [list|<occupation>|none]`: the professional role (`ctxhost/role.rs`).
 
 use super::{persona, title as titles, workspace_of, Host};
 use crate::compaction;
@@ -48,6 +49,7 @@ impl Slash for CtxSlash {
             ("title".into(), "Show, set or generate this session's title: /title [text]".into()),
             ("btw".into(), "Ask a side question about this conversation without adding it to the history: /btw <question>".into()),
             ("personality".into(), "Show or set the persona overlay: /personality [name|list|none]".into()),
+            ("role".into(), "Show or set the professional role (ISCO occupation or preset): /role [list [words]|<code or name>|none]".into()),
         ]
     }
 
@@ -60,6 +62,7 @@ impl Slash for CtxSlash {
             "title" | "name" => Ok(SlashReply::text(set_or_show_title(k, self.0.titles(), sid, args))),
             "btw" | "side" => side_question(k, sid, args).map(SlashReply::text),
             "personality" => Ok(SlashReply::text(personality_command(&self.0, k, sid, args))),
+            "role" | "roles" => Ok(SlashReply::text(super::role::command(&self.0, k, sid, args))),
             _ => return None,
         })
     }
@@ -175,6 +178,7 @@ pub fn context_report(k: &Kernel, session: Option<&str>) -> String {
     if segs.len() > 5 {
         out.push_str(&format!("  (+{} smaller)\n", segs.len() - 5));
     }
+    out.push_str(&super::role::context_line(k, session));
     out.push_str(&format!("tool schemas: {} offered, ~{} tokens\n", tool_count, n(tools_tokens)));
 
     let users = view.messages.iter().filter(|m| m.role == Role::User && !m.content.iter().any(|b| matches!(b, Block::ToolResult { .. }))).count();

@@ -2,7 +2,7 @@
 name: technical-drawing
 title_zh: 工程製圖
 layer: L2
-isco: 3118
+isco: "3118"
 extends: technical-support
 description: Applies to producing and checking technical drawings, models and specifications that others will build from.
 regulated: false

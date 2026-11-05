@@ -2,7 +2,7 @@
 name: odd-job-person
 title_zh: 雜工
 layer: L2
-isco: 9622
+isco: "9622"
 extends: elementary-support
 description: "Small repairs and maintenance across trades, where diagnosis, honest scope and knowing the limit of competence decide safety."
 regulated: false

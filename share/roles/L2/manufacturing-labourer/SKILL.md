@@ -2,7 +2,7 @@
 name: manufacturing-labourer
 title_zh: 未分類製造業雜工
 layer: L2
-isco: 9329
+isco: "9329"
 extends: elementary-support
 description: "Labour assisting operators and assemblers on a paced line, where the operator owns the standard and the stoppage."
 regulated: false

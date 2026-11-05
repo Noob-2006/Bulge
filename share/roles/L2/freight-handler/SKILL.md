@@ -2,7 +2,7 @@
 name: freight-handler
 title_zh: 貨物搬運工
 layer: L2
-isco: 9333
+isco: "9333"
 extends: elementary-support
 description: "Loading, unloading and stacking freight and household goods, where weight, balance and counted custody are the whole job."
 regulated: false

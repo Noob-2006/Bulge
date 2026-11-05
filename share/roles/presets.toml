@@ -1,0 +1,102 @@
+# Pre-assembled professional roles (BATCH-next §3, pro-002/003/004).
+#
+# A preset is a named bundle over the layered packs: the L2 packs it assembles (each pulls
+# its L1 and the L0 core through `extends`), the tool profile it narrows the session to
+# (crates/ark-security/src/toolpolicy.rs), and the role's default permissions. `ark role use
+# <id>` / `/role <id>` / `ark agents add --role <id>` select it like any pack.
+#
+# [preset.policy] keys (all optional; a role only ever tightens what the config allows):
+#   approval        relaxed | standard | strict — the approval preset ([approvals] preset);
+#                   the stricter of this and the config wins.
+#   workspace_only  true: file tools are confined to the workspace ([security] workspace_only).
+#   write_deny      extra path globs file tools may never write ([security] write_deny).
+#   deny            command globs the role never runs (refused before any gate; matched
+#                   case-insensitively against the whole command line).
+#   db_read_only    true: SQL that writes (INSERT/UPDATE/DELETE/DROP/ALTER/…) sent through a
+#                   database client or SQL tool is refused.
+#   scan_allowlist  true: active scanners (nmap, masscan, nuclei, …) only run against
+#                   targets listed in `[role] scan_targets`; the gate still asks for each.
+#   no_password_entry true: commands that would type or pipe a password for someone
+#                   (chpasswd, passwd --stdin, usermod -p, …) are refused.
+#   approve         what this role hands to a human before acting. The hard part of that
+#                   list is enforced by the risk tiers (deploys, restarts, git push, account
+#                   changes ask under every preset); the list is also shown to the model.
+#
+# Keep `id` stable: agents.toml and config.toml store it.
+
+[[preset]]
+id = "devops"
+title_zh = "DevOps／SRE"
+title_en = "DevOps / SRE"
+aliases = ["sre", "ops", "on-call"]
+packs = ["systems-administration"]
+tools = "devops"
+summary = "Incident triage, log analysis, deploy and rollback, on-call support."
+[preset.policy]
+approval = "standard"
+deny = [
+  "kubectl *prod* delete *", "kubectl *prod* apply *", "kubectl *prod* scale *", "kubectl *prod* rollout *",
+  "helm *prod* upgrade *", "helm *prod* rollback *", "helm *prod* uninstall *",
+  "ssh *prod* rm *", "ssh *prod* systemctl *",
+]
+write_deny = ["**/prod/**", "**/production/**"]
+approve = ["deploy", "rollback", "service restart", "any write to a production host"]
+
+[[preset]]
+id = "swdev"
+title_zh = "軟體開發"
+title_en = "Software development"
+aliases = ["dev", "developer", "software", "coding"]
+packs = ["software-developer"]
+tools = "coding"
+summary = "Fix bugs, write tests, review code, handle pull requests."
+[preset.policy]
+approval = "standard"
+workspace_only = true
+approve = ["git push", "merge", "publish a package or release"]
+
+[[preset]]
+id = "secops"
+title_zh = "資安維運"
+title_en = "Security operations"
+aliases = ["security", "soc", "sec"]
+packs = ["security-and-network-specialist"]
+tools = "secops"
+summary = "Triage scan results and alerts, compliance checks; read-only by default."
+[preset.policy]
+approval = "strict"
+workspace_only = true
+scan_allowlist = true
+deny = [
+  "msfconsole*", "msfvenom*", "hydra *", "medusa *", "sqlmap*", "hashcat*", "john *",
+  "aircrack-ng*", "responder*", "crackmapexec*", "netexec*", "*hping3*--flood*",
+]
+approve = ["any active scan (only against allowlisted targets)", "any change outside the workspace"]
+
+[[preset]]
+id = "data"
+title_zh = "資料分析"
+title_en = "Data analysis"
+aliases = ["analyst", "analytics", "sql"]
+packs = ["database-design-administration", "mathematics-statistics"]
+tools = "data"
+summary = "SQL queries, reports, data cleaning; databases are read-only by default."
+[preset.policy]
+approval = "standard"
+workspace_only = true
+db_read_only = true
+approve = ["any database write", "sending data off the machine"]
+
+[[preset]]
+id = "itsupport"
+title_zh = "IT 支援"
+title_en = "IT support"
+aliases = ["helpdesk", "support", "it"]
+packs = ["ict-support-technician"]
+tools = "itsupport"
+summary = "First-line accounts, permissions and device issues from the ticket queue."
+[preset.policy]
+approval = "standard"
+no_password_entry = true
+deny = ["chpasswd*", "*passwd --stdin*", "usermod *-p *", "*net user * /add*"]
+approve = ["account creation, change or reset", "permission changes"]

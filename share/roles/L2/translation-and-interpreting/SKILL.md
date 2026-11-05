@@ -2,7 +2,7 @@
 name: translation-and-interpreting
 title_zh: 翻譯與傳譯
 layer: L2
-isco: 2643
+isco: "2643"
 extends: professional-practice
 description: Applies to translating and interpreting where meaning, terminology and reader effect must hold.
 regulated: false

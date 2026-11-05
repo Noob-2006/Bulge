@@ -2,7 +2,7 @@
 name: su-shop-head
 title_zh: 車間主任
 layer: L2
-isco: 1321
+isco: "1321"
 extends: management
 description: "Running a self-contained shop with its own plan, cost, cadres and technology, usually promoted from the master's post."
 regulated: false

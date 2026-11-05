@@ -2,7 +2,7 @@
 name: water-and-fuel-collector
 title_zh: 食水及柴薪收集者
 layer: L2
-isco: 9624
+isco: "9624"
 extends: elementary-support
 description: "Collecting water and cooking fuel for a household or community, where source protection, carrying load and fuel efficiency matter."
 regulated: false

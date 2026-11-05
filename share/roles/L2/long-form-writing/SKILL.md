@@ -2,7 +2,7 @@
 name: long-form-writing
 title_zh: 寫作與文稿
 layer: L2
-isco: 2641
+isco: "2641"
 extends: professional-practice
 description: "Applies to drafting and revising prose for readers: fiction, essays, reports."
 regulated: false

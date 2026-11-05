@@ -38,6 +38,7 @@ pub mod outbound;
 pub mod projection;
 pub mod queue;
 pub mod reactions;
+pub mod roles;
 pub mod refs;
 pub mod secgate;
 pub mod selfrepo;

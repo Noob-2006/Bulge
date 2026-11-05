@@ -2,7 +2,7 @@
 name: su-general-designer
 title_zh: 總設計師（通用設計師）
 layer: L2
-isco: 2144
+isco: "2144"
 extends: professional-practice
 description: "Technical sovereign over one whole system across bureaus."
 regulated: true

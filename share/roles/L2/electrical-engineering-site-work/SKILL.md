@@ -2,7 +2,7 @@
 name: electrical-engineering-site-work
 title_zh: 電氣工程現場技術
 layer: L2
-isco: 3113
+isco: "3113"
 extends: technical-support
 description: Applies to installing, testing and maintaining electrical plant and installations safely to standard.
 regulated: true
