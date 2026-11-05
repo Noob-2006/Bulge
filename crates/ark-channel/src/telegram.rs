@@ -141,10 +141,11 @@ impl Telegram {
         let menu = crate::menu();
         let cmds = if menu.is_empty() {
             json!({"commands": [
-                {"command": "new", "description": "開新對話"},
-                {"command": "stop", "description": "中斷目前的工作"},
                 {"command": "status", "description": "目前狀態"},
-                {"command": "help", "description": "說明"},
+                {"command": "stop", "description": "中斷目前的工作"},
+                {"command": "approve", "description": "核准待處理的動作"},
+                {"command": "new", "description": "開新對話"},
+                {"command": "help", "description": "所有指令與說明"},
             ]})
         } else {
             json!({"commands": crate::telegram_menu(&menu)})
@@ -587,8 +588,9 @@ struct Settings {
     /// … and the secret every request must carry.
     #[serde(default)]
     webhook_secret: Option<String>,
-    /// Register /new /stop /status /help with setMyCommands.
-    #[serde(default)]
+    /// Register the short native command menu with setMyCommands (default on; the host
+    /// supplies the short list, `/help` shows the rest). `commands = false` opts out.
+    #[serde(default = "crate::config::yes")]
     commands: bool,
 }
 
@@ -865,5 +867,28 @@ mod tests {
         assert_eq!(got.len(), 1);
         assert_eq!(got[0].text, "via hook");
         assert_eq!(srv.requests().len(), 1, "no getUpdates in webhook mode");
+    }
+
+    #[test]
+    fn short_native_menu_is_registered_by_default_and_files_upload_from_the_shared_flow() {
+        let s: Settings = serde_json::from_value(json!({"token": "1:x"})).unwrap();
+        assert!(s.commands, "native menu on by default");
+        let srv = FakeServer::start(|req, n| if req.path.ends_with("/setMyCommands") { ok(json!(true)) } else { ok(json!({"message_id": 100 + n, "id": 7, "username": "bot"})) });
+        let mut t = tg(&srv.url, temp_dir("tgmenu").join("s"));
+        t.register_commands = true;
+        // (No host menu set: the built-in short list applies.)
+        t.register_commands_once();
+        let reqs = srv.requests();
+        let reg = reqs.iter().find(|r| r.path.ends_with("/setMyCommands")).expect("menu registered");
+        let names: Vec<String> = reg.json()["commands"].as_array().unwrap().iter().map(|c| c["command"].as_str().unwrap().to_string()).collect();
+        assert_eq!(names, ["status", "stop", "approve", "new", "help"]);
+        // A workspace file passes the shared gate and goes out as a multipart document.
+        let ws = temp_dir("tgfile");
+        std::fs::write(ws.join("r.pdf"), b"%PDF-1").unwrap();
+        let media = crate::outfile::media_from_input(&json!({"media": ["r.pdf"]}), &ws, std::slice::from_ref(&ws)).unwrap();
+        t.send(&Outbound { media, ..Outbound::text("9", "report") }).unwrap();
+        let reqs = srv.requests();
+        let up = reqs.iter().find(|r| r.path.ends_with("/sendDocument")).expect("sendDocument");
+        assert!(up.body.contains("r.pdf") && up.body.contains("report"));
     }
 }
