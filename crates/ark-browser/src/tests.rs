@@ -1,5 +1,5 @@
-//! Tool-level tests: a simulated page behind the fake CDP server, and an
-//! `#[ignore]` real-Chromium run (`cargo test -p ark-browser -- --ignored real_`).
+//! Tool-level tests: a simulated page behind the fake CDP server. The real-Chromium cases live
+//! in `tests_real.rs` (`ARK_REAL_TESTS=1 cargo test -p ark-browser real_ -- --ignored`).
 
 use crate::config::BrowserConfig;
 use ark_core::tool::SpawnRequest;
@@ -7,7 +7,6 @@ use ark_core::{Cancel, Tool, ToolCtx, ToolHost};
 use serde_json::{json, Value};
 use std::io::{Read, Write};
 use std::net::TcpListener;
-use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 /// The manager is process-global: tool tests take turns.
@@ -27,8 +26,9 @@ impl ToolHost for Host {
 }
 
 pub fn ctx(tag: &str, sid: &str) -> ToolCtx {
-    let ws = std::env::temp_dir().join(format!("ark-bt-{tag}-{}-{}", std::process::id(), ark_net::crypto::random_token(4)));
-    std::fs::create_dir_all(&ws).unwrap();
+    // Removed when the test's thread ends, panic included (the old `temp_dir().join` left
+    // `ark-bt-real-*` profiles behind).
+    let ws = ark_core::tmp::scratch(&format!("ark-bt-{tag}"));
     ToolCtx { artifacts: ws.join(".artifacts"), home: ws.join(".home"), workspace: ws, session_id: sid.into(), cancel: Cancel::new(), host: Arc::new(Host), secrets: Arc::new(|s: &str| s.to_string()) }
 }
 
@@ -376,7 +376,7 @@ fn act_type_records_keystrokes_and_submits() {
 }
 
 /// Tiny HTTP server for the real-browser test.
-fn serve(html: &'static str) -> String {
+pub(crate) fn serve(html: &'static str) -> String {
     let l = TcpListener::bind("127.0.0.1:0").unwrap();
     let base = format!("http://{}", l.local_addr().unwrap());
     std::thread::spawn(move || {
@@ -394,7 +394,7 @@ fn serve(html: &'static str) -> String {
     base
 }
 
-const PAGE: &str = r#"<!doctype html><html><head><title>Real Test</title></head><body>
+pub(crate) const PAGE: &str = r#"<!doctype html><html><head><title>Real Test</title></head><body>
 <h1>Hello ark</h1>
 <button id="b" onclick="document.getElementById('out').textContent='clicked'; console.log('btn clicked')">Press me</button>
 <input id="name" aria-label="Name">
@@ -407,93 +407,3 @@ const PAGE: &str = r#"<!doctype html><html><head><title>Real Test</title></head>
 <script>setTimeout(() => { throw new Error('boom') }, 10)</script>
 </body></html>"#;
 
-#[test]
-#[ignore]
-fn real_chromium_end_to_end() {
-    let exe = crate::launch::find_executable("").expect("needs a Chromium-family browser");
-    eprintln!("using {}", exe.display());
-    let base = serve(PAGE);
-    let cfg = BrowserConfig { backend: "local".into(), enabled: toml::Value::Boolean(true), default_profile: format!("realtest{}", std::process::id()), ..Default::default() };
-    let c = ctx("real", "sess-real");
-    let (ok, v, raw) = call(&cfg, &c, "browser_navigate", json!({"url": format!("{base}/")}));
-    assert!(ok, "{raw}");
-    assert_eq!(v["title"], "Real Test");
-    let snap = v["snapshot"].as_str().unwrap().to_string();
-    eprintln!("{snap}");
-    let refs = |s: &str, name: &str| s.lines().find(|l| l.contains(name)).and_then(|l| l.split("[ref=").nth(1)).map(|r| r.split(']').next().unwrap().to_string()).unwrap_or_else(|| panic!("no ref for {name} in {s}"));
-    let press = refs(&snap, "Press me");
-    let (ok, _, raw) = call(&cfg, &c, "browser_click", json!({"ref": press}));
-    assert!(ok, "{raw}");
-    std::thread::sleep(std::time::Duration::from_millis(300));
-    let (_, v, _) = call(&cfg, &c, "browser_console", json!({"expression": "document.getElementById('out').textContent"}));
-    assert_eq!(v["result"], "clicked");
-    let name = refs(&snap, "\"Name\"");
-    let (ok, _, raw) = call(&cfg, &c, "browser_type", json!({"ref": name, "text": "héllo wörld"}));
-    assert!(ok, "{raw}");
-    let (_, v, _) = call(&cfg, &c, "browser_console", json!({"expression": "document.getElementById('name').value"}));
-    assert_eq!(v["result"], "héllo wörld");
-    let (_, v, _) = call(&cfg, &c, "browser_console", json!({}));
-    assert!(v["console_messages"].to_string().contains("btn clicked") && v["js_errors"].to_string().contains("boom"), "{v}");
-    let (ok, v, _) = call(&cfg, &c, "browser_get_images", json!({}));
-    assert!(ok && v["count"] == 0);
-    let (ok, v, raw) = call(&cfg, &c, "browser_vision", json!({"question": "what?", "annotate": true}));
-    assert!(ok, "{raw}");
-    let png = std::fs::read(v["screenshot_path"].as_str().unwrap()).unwrap();
-    assert!(png.starts_with(b"\x89PNG"), "real PNG");
-    // OpenClaw tool on the same tab.
-    let t = tool(&cfg, "browser");
-    let o = t.call(&c, json!({"action": "act", "kind": "select", "ref": refs(&snap, "Color"), "values": ["Green"]}));
-    assert!(!o.is_error, "{}", o.content);
-    let (_, v, _) = call(&cfg, &c, "browser_console", json!({"expression": "document.getElementById('s').value"}));
-    assert_eq!(v["result"], "g");
-    // Dialog: click Confirm, the page blocks; answer through browser_dialog.
-    let confirm = refs(&snap, "\"Confirm\"");
-    let _ = call(&cfg, &c, "browser_click", json!({"ref": confirm}));
-    std::thread::sleep(std::time::Duration::from_millis(300));
-    let (_, v, raw) = call(&cfg, &c, "browser_snapshot", json!({}));
-    assert!(raw.contains("pending_dialogs") || v["pending_dialogs"].is_array(), "{raw}");
-    let (ok, _, raw) = call(&cfg, &c, "browser_dialog", json!({"action": "accept"}));
-    assert!(ok, "{raw}");
-    std::thread::sleep(std::time::Duration::from_millis(300));
-    let (_, v, _) = call(&cfg, &c, "browser_console", json!({"expression": "document.getElementById('out').textContent"}));
-    assert_eq!(v["result"], "yes");
-    // Upload to the file input.
-    std::fs::write(c.workspace.join("u.txt"), "upload body").unwrap();
-    let o = t.call(&c, json!({"action": "upload", "paths": ["u.txt"], "inputRef": refs(&snap, "Upload")}));
-    assert!(!o.is_error, "{}", o.content);
-    let (_, v, _) = call(&cfg, &c, "browser_console", json!({"expression": "document.getElementById('f').files[0].name"}));
-    assert_eq!(v["result"], "u.txt");
-    // Evaluate, screenshot (labels), pdf, text, emulate, wait.
-    let o = t.call(&c, json!({"action": "act", "kind": "evaluate", "fn": "() => document.querySelectorAll('button').length"}));
-    assert!(o.content.contains("\"result\": 2"), "{}", o.content);
-    let o = t.call(&c, json!({"action": "screenshot", "labels": true, "path": "shot.png"}));
-    assert!(!o.is_error && std::fs::read(c.workspace.join("shot.png")).unwrap().starts_with(b"\x89PNG"), "{}", o.content);
-    let o = t.call(&c, json!({"action": "pdf", "path": "p.pdf"}));
-    assert!(std::fs::read(c.workspace.join("p.pdf")).unwrap().starts_with(b"%PDF"), "{}", o.content);
-    let o = t.call(&c, json!({"action": "text", "selector": "h1"}));
-    assert!(o.content.contains("Hello ark"));
-    let o = t.call(&c, json!({"action": "act", "kind": "wait", "text": "Hello ark", "timeoutMs": 3000}));
-    assert!(!o.is_error, "{}", o.content);
-    let o = t.call(&c, json!({"action": "emulate", "timezoneId": "Asia/Taipei", "locale": "zh-TW"}));
-    assert!(!o.is_error, "{}", o.content);
-    // Download.
-    let o = t.call(&c, json!({"action": "download", "ref": refs(&snap, "Download file"), "path": "dl.txt"}));
-    assert!(!o.is_error, "{}", o.content);
-    assert_eq!(std::fs::read_to_string(c.workspace.join("dl.txt")).unwrap(), "download me");
-    // Vault: save a login for this origin, fill the password field model-blind.
-    let origin = crate::vault::normalize_origin(&base).unwrap();
-    let it = crate::vault::add(&c.home, "login", "local", &origin, std::collections::BTreeMap::from([("identifier".into(), "me@x.example".into()), ("password".into(), "Very-Secret-Pw-42".into())])).unwrap();
-    let (ok, v, raw) = call(&cfg, &c, "browser_vault", json!({"action": "fill", "handle": it.id}));
-    assert!(ok && v["filled_fields"] == 1, "{raw}");
-    assert!(!raw.contains("Very-Secret-Pw-42"));
-    let (_, v, raw) = call(&cfg, &c, "browser_console", json!({"expression": "document.querySelector('input[type=password]').value"}));
-    assert_eq!(v["result"], "[REDACTED]", "the filled secret never comes back: {raw}");
-    // Raw CDP.
-    let (ok, v, _) = call(&cfg, &c, "browser_cdp", json!({"method": "Browser.getVersion"}));
-    assert!(ok && v["result"]["product"].as_str().unwrap().contains('/'));
-    let o = t.call(&c, json!({"action": "status"}));
-    assert!(o.content.contains("\"running\":true"), "{}", o.content);
-    let o = t.call(&c, json!({"action": "stop"}));
-    assert!(o.content.contains("\"stopped\":true"), "{}", o.content);
-    let _: PathBuf = c.home.clone();
-}

@@ -928,7 +928,7 @@ fn drive_zoom_page(exe: &std::path::Path, url: &str) -> Result<(), String> {
     let r = mt.join_url(Platform::Zoom, url, "transcribe", &Cancel::new())?;
     // The join launched this browser (that is the code under test); close exactly it when the
     // test ends, including on a failed assertion.
-    let _owned = OwnedBrowser(Cdp::new(&format!("http://127.0.0.1:{port}")));
+    let _owned = OwnedBrowser(Cdp::new(&format!("http://127.0.0.1:{port}")), cdp::launched_pgid(port));
     let s = &r["session"];
     assert_eq!(s["state"], "active", "{r}");
     let id = s["sessionId"].as_str().unwrap().to_string();
@@ -970,13 +970,20 @@ fn drive_zoom_page(exe: &std::path::Path, url: &str) -> Result<(), String> {
 
 /// Closes the browser this test started when it goes out of scope. Only ever used for a
 /// browser launched by [`cdp::launch`], which refuses to adopt an endpoint it did not start.
-struct OwnedBrowser(Cdp);
+/// `Browser.close` first (clean profile shutdown); then the process group the launcher
+/// recorded is terminated, so a hung or crashed browser is not left behind either (new-001).
+struct OwnedBrowser(Cdp, Option<i32>);
 
 impl Drop for OwnedBrowser {
     fn drop(&mut self) {
         if let Ok(v) = self.0.version() {
             if let Some(ws) = v["webSocketDebuggerUrl"].as_str() {
                 let _ = Cdp::command(ws, "Browser.close", json!({}), Duration::from_secs(5));
+            }
+        }
+        if let Some(pgid) = self.1 {
+            if !ark_core::proc::wait_until(Duration::from_secs(5), || !ark_core::proc::group_alive(pgid)) {
+                ark_core::proc::kill_group(pgid, Duration::from_secs(2));
             }
         }
     }

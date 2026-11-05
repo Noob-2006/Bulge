@@ -360,14 +360,9 @@ pub fn launch(o: &LaunchOpts, timeout: Duration) -> Result<Launched, String> {
     for (k, v) in &o.env {
         cmd.env(k, v);
     }
-    use std::os::unix::process::CommandExt;
-    unsafe {
-        cmd.pre_exec(|| {
-            libc::setsid();
-            Ok(())
-        });
-    }
-    let mut child = cmd.spawn().map_err(|e| format!("failed to start {}: {e}", o.exe.display()))?;
+    // Own session (one `kill(-pgid)` reaches the renderers) and tied to ark: when ark dies —
+    // crash, SIGKILL, an interrupted test run — the kernel sends Chrome SIGTERM (new-001).
+    let mut child = ark_core::proc::spawn_tied(cmd, true).map_err(|e| format!("failed to start {}: {e}", o.exe.display()))?;
     let pid = child.id() as i32;
     let until = Instant::now() + timeout;
     loop {
@@ -620,14 +615,7 @@ pub fn lightpanda_serve(state_dir: &Path, block_private: bool) -> Result<Launche
     let log = std::fs::File::create(state_dir.join("lightpanda.log")).map_err(|e| e.to_string())?;
     let mut cmd = Command::new(&bin);
     cmd.args(&args).stdin(Stdio::null()).stdout(Stdio::null()).stderr(log);
-    use std::os::unix::process::CommandExt;
-    unsafe {
-        cmd.pre_exec(|| {
-            libc::setsid();
-            Ok(())
-        });
-    }
-    let mut child = cmd.spawn().map_err(|e| format!("lightpanda: {e}"))?;
+    let mut child = ark_core::proc::spawn_tied(cmd, true).map_err(|e| format!("lightpanda: {e}"))?;
     let pid = child.id() as i32;
     let http = format!("http://127.0.0.1:{port}");
     let until = Instant::now() + Duration::from_secs(10);

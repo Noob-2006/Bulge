@@ -49,6 +49,11 @@ const SPAWNS_BINARY: &str = "CARGO_BIN_EXE_ark";
 /// network, visible in review).
 const OFFLINE_PIN: &str = "ARK_OFFLINE";
 
+/// Test code that starts a process meant to outlive one call (rule f).
+const LONG_LIVED_SPAWNS: &[&str] = &["\"daemon\", \"run\"", "\"daemon\", \"start\"", "launch::launch(", "cdp::launch(", "join_url("];
+/// Any of these in the same test region counts as a guard for rule (f).
+const SPAWN_GUARDS: &[&str] = &["ChildGuard", "PidGuard", "impl Drop for"];
+
 /// Temp-dir name prefixes the suite uses; `ark system temp-clean` (`crates/ark/src/system_cli.rs`,
 /// `TEST_TEMP_PREFIXES`) scans for exactly these families, so the allowlist header documents them
 /// and a new family must be added in both places.
@@ -196,6 +201,30 @@ fn test_code_uses_self_cleaning_temp_dirs_and_stays_in_its_sandbox() {
                  (crates/ark/src/models_cli.rs::auto_refresh_prices), which makes the suite network-bound \
                  and flaky. A test that really needs the network must say so: `.env(\"ARK_OFFLINE\", \"0\")`."
             ));
+        }
+    }
+
+    // (f) new-001/new-002: a test that starts a long-lived process (a daemon, a browser) must
+    // hold a guard that stops it on drop — a panic or a failed assertion otherwise leaves it
+    // running (two-day-old headless Chromes and an `arkd` were found after interrupted runs).
+    for path in &files {
+        let rel = path.strip_prefix(&root).unwrap_or(path).to_string_lossy().replace('\\', "/");
+        // Test files only (`crates/*/tests/**`, `src/**/tests*.rs`): a source file's
+        // `#[cfg(test)]` region can start early and sweep in production launch code.
+        let fname = rel.rsplit('/').next().unwrap_or("");
+        if rel == "crates/ark/tests/test_hygiene.rs" || !(rel.contains("/tests/") || fname.starts_with("tests")) {
+            continue;
+        }
+        let Ok(text) = std::fs::read_to_string(path) else { continue };
+        let region = test_region(&rel, &text);
+        if let Some(pat) = LONG_LIVED_SPAWNS.iter().find(|p| region.contains(**p)) {
+            if !SPAWN_GUARDS.iter().any(|g| region.contains(g)) {
+                problems.push(format!(
+                    "{rel}: test code starts a long-lived process (`{pat}`) without a drop guard.\n  \
+                     fix: hold it in `ark_core::proc::ChildGuard` (spawn with `ark_core::proc::spawn_tied`), \
+                     `PidGuard`, or a local `impl Drop` that stops it — the guard runs on panic too."
+                ));
+            }
         }
     }
 

@@ -72,3 +72,5 @@ mod tests;
 mod tests_actions;
 #[cfg(test)]
 mod tests_runtime;
+#[cfg(test)]
+mod tests_real;
