@@ -19,7 +19,7 @@ use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 
 pub const COMMANDS: &[&str] = &["accounts", "service-accounts", "retention", "ediscovery", "quota"];
-pub const VALUE_FLAGS: &[&str] = &["role", "ttl-days", "grace-hours", "description", "owner", "team", "since", "until", "keyword", "matter", "by", "actor", "outcome", "kind", "anchor", "custodian"];
+pub const VALUE_FLAGS: &[&str] = &["role", "ttl-days", "grace-hours", "description", "owner", "team", "since", "until", "keyword", "matter", "by", "actor", "outcome", "kind", "anchor", "custodian", "org"];
 pub const BOOL_FLAGS: &[&str] = &["keep-pii", "ready"];
 
 pub fn dispatch(cmd: &str, a: &Args, _raw: &[String]) -> Option<R> {
@@ -140,6 +140,8 @@ pub fn audit_sub(paths: &Paths, a: &Args) -> Option<R> {
                 after_ms: a.val("since").map(|v| parse_when(v, now)).transpose()?,
                 before_ms: a.val("until").map(|v| parse_when(v, now)).transpose()?,
                 limit: a.num::<usize>("limit")?.unwrap_or(100),
+                org: a.val("org").map(String::from),
+                team: a.val("team").map(String::from),
             };
             let v = audit::query(d, &q);
             if a.flag("json") {

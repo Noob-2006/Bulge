@@ -467,6 +467,10 @@ impl Runtime {
             parent: parent.map(String::from),
             title: title.map(|t| t.chars().take(80).collect()),
         })?;
+        // ent-050: a child session lives in its parent's organization / team / project.
+        if let Some(p) = parent {
+            crate::tenancy::inherit(&self.paths.data, &id, p);
+        }
         let mut segs = self.system_segments(&ws);
         let fired = self.fire(Some(&mut log), HookEvent::SessionStart, None, hooks::payload(&id, &ws.to_string_lossy(), None, None, None, None), "")?;
         if !fired.context.is_empty() {
@@ -1638,7 +1642,7 @@ impl Runtime {
                 }
                 KERNEL_TOOL_SEARCH => {
                     crate::normalize::coerce(&crate::agents::session_search_schema(), &mut tinput);
-                    results[i] = Some(ToolOutput::ok(crate::agents::session_search(&self.store, &tinput)));
+                    results[i] = Some(ToolOutput::ok(crate::agents::session_search_as(&self.store, &tinput, &log.id)));
                     continue;
                 }
                 crate::decision::STRUCTURED_OUTPUT if view.output_schema.is_some() => {
