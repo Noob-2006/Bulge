@@ -1,0 +1,18 @@
+[
+  {"id": "al2",       "image": "docker.io/library/amazonlinux:2",           "kind": "rpm", "label": "Amazon Linux 2",        "ent": "ent-009", "pre": "yum install -y shadow-utils util-linux >/dev/null 2>&1 || true"},
+  {"id": "al2023",    "image": "docker.io/library/amazonlinux:2023",        "kind": "rpm", "label": "Amazon Linux 2023",     "ent": "ent-009", "pre": "dnf install -y shadow-utils util-linux-core >/dev/null 2>&1 || true"},
+  {"id": "rocky8",    "image": "docker.io/library/rockylinux:8",            "kind": "rpm", "label": "Rocky Linux 8",         "ent": "ent-010"},
+  {"id": "rocky9",    "image": "docker.io/library/rockylinux:9",            "kind": "rpm", "label": "Rocky Linux 9",         "ent": "ent-010"},
+  {"id": "alma10",    "image": "docker.io/library/almalinux:10",            "kind": "rpm", "label": "AlmaLinux 10",          "ent": "ent-010"},
+  {"id": "centos7", "best_effort": true,   "image": "docker.io/library/centos:7",                "kind": "rpm", "label": "CentOS 7 (best effort)", "ent": "ent-011"},
+  {"id": "fedora",    "image": "docker.io/library/fedora:latest",           "kind": "rpm", "label": "Fedora latest",         "ent": "ent-012"},
+  {"id": "fedora41",  "image": "docker.io/library/fedora:41",               "kind": "rpm", "label": "Fedora 41",             "ent": "ent-012"},
+  {"id": "ubuntu2004","image": "docker.io/library/ubuntu:20.04",            "kind": "deb", "label": "Ubuntu 20.04",          "ent": "ent-013"},
+  {"id": "ubuntu2204","image": "docker.io/library/ubuntu:22.04",            "kind": "deb", "label": "Ubuntu 22.04",          "ent": "ent-013"},
+  {"id": "ubuntu2404","image": "docker.io/library/ubuntu:24.04",            "kind": "deb", "label": "Ubuntu 24.04",          "ent": "ent-013"},
+  {"id": "debian11",  "image": "docker.io/library/debian:11",               "kind": "deb", "label": "Debian 11",             "ent": "ent-014"},
+  {"id": "debian12",  "image": "docker.io/library/debian:12",               "kind": "deb", "label": "Debian 12",             "ent": "ent-014"},
+  {"id": "debian13",  "image": "docker.io/library/debian:trixie-slim",      "kind": "deb", "label": "Debian 13",             "ent": "ent-014"},
+  {"id": "leap15",   "best_effort": true,  "image": "docker.io/opensuse/leap:15.6",              "kind": "rpm", "label": "openSUSE Leap 15 (best effort)", "ent": "ent-015"},
+  {"id": "alpine",    "image": "docker.io/library/alpine:3.22",             "kind": "tar", "label": "Alpine 3.22 (musl, tarball only)", "ent": "ent-004"}
+]
