@@ -1062,7 +1062,8 @@ fn hook_payload(ch: &Arc<dyn Channel>, chat: &str, text: &str) -> Value {
 
 /// Final reply text: the `message_sending` hook may rewrite or stop it; the AI label is appended.
 fn outgoing(hub: &Hub, ch: &Arc<dyn Channel>, to: &ReplyTo, text: &str) -> Option<String> {
-    let mut text = if text.trim().is_empty() { "(no reply)".to_string() } else { text.to_string() };
+    let text = chat_visible(text);
+    let mut text = if text.trim().is_empty() { "(no reply)".to_string() } else { text };
     match hub.k.emit(HookEvent::MessageSending, hook_payload(ch, &to.chat, &text), "prompt") {
         (Some(b), _) => {
             eprintln!("arkd: channel {}: reply withheld by {b}", ch.id());
@@ -1075,6 +1076,13 @@ fn outgoing(hub: &Hub, ch: &Arc<dyn Channel>, to: &ReplyTo, text: &str) -> Optio
         text = format!("{text}\n\n{l}");
     }
     Some(text)
+}
+
+/// srv-019: what of a reply may reach a chat — recalled-memory fences
+/// (`<memory-context>`, `<recalled-context>` and their system notes) are dropped, as the
+/// terminal's `Visible` scrubber does for streamed output.
+fn chat_visible(text: &str) -> String {
+    ark_memory::fence::sanitize_context(text)
 }
 
 fn base_out(to: &ReplyTo) -> Outbound {
@@ -1619,6 +1627,8 @@ fn spawn_run(hub: &Arc<Hub>, ch: &Arc<dyn Channel>, sid: String, to: ReplyTo) {
             std::thread::spawn(move || {
                 let mut st = Stream::new(c, base);
                 let (mut buf, mut fresh) = (String::new(), false);
+                // srv-019: recalled-memory fences never reach the chat, even mid-stream.
+                let mut scrub = ark_memory::fence::StreamScrubber::default();
                 loop {
                     // After the run ends, still apply what is already queued, then stop.
                     let msg = if d.load(std::sync::atomic::Ordering::SeqCst) {
@@ -1636,9 +1646,10 @@ fn spawn_run(hub: &Arc<Hub>, ch: &Arc<dyn Channel>, sid: String, to: ReplyTo) {
                         ark_kernel::kernel::BusMsg::Delta { session, text, thinking: false } if session == s => {
                             if fresh {
                                 buf.clear();
+                                scrub = ark_memory::fence::StreamScrubber::default();
                                 fresh = false;
                             }
-                            buf.push_str(&text);
+                            buf.push_str(&scrub.feed(&text));
                             st.update(&buf);
                         }
                         // The next deltas belong to a new model step: show that message instead.
@@ -1978,6 +1989,19 @@ command = "/bin/cat"
             warnings: vec![],
         });
         Arc::new(Hub { k: kit.k.clone(), router: Arc::new(Router::open(dir.join("routes.json"), cfgs)), deliver: Arc::new(Deliverer::new(None)), ws: kit.ws.clone(), commands: Arc::new(vec![]), plugins: vec![], stream: HashSet::new(), ext })
+    }
+
+    #[test]
+    fn chat_replies_drop_recalled_memory_fences() {
+        let kit = crate::testkit::kit();
+        let hub = test_hub(&kit);
+        let ch = Recorder::new();
+        let to = ReplyTo { chat: "c1".into(), thread: None, message: None };
+        let leaked = "Sure.\n<memory-context>\nowner's bank PIN is 1234\n</memory-context>\nDone <recalled-context source=\"m\">- likes tea</recalled-context>.";
+        reply(&hub, &(ch.clone() as Arc<dyn Channel>), &to, leaked);
+        let got = ch.last();
+        assert!(!got.contains("PIN") && !got.contains("likes tea") && !got.contains("memory-context"), "{got}");
+        assert!(got.contains("Sure.") && got.contains("Done"), "{got}");
     }
 
     fn msg(chat: &str, sender: &str, name: &str, text: &str, id: &str) -> Inbound {
