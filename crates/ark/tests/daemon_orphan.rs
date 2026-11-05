@@ -14,30 +14,30 @@ use std::time::Duration;
 
 fn home(tag: &str) -> TempDir {
     let root = std::env::var_os("TMPDIR").map(PathBuf::from).unwrap_or_else(std::env::temp_dir);
-    // Short on purpose: `<home>/run` must stay under the 80-byte runtime limit, or the socket
-    // would move to /tmp/ark-<uid> (outside the throwaway home).
-    let d = TempDir::new_in(root, &format!("ad{tag}"));
-    assert!(d.path().join("run").as_os_str().len() <= 80, "TMPDIR too long for this test: {}", d.path().display());
-    std::fs::create_dir_all(d.path().join("config")).unwrap();
-    std::fs::write(d.path().join("config/config.toml"), "[exec]\nbackend = \"local\"\n").unwrap();
+    let d = TempDir::new_in(root, &format!("ark-daemon-orphan-{tag}"));
+    std::fs::create_dir_all(d.path().join("h/config")).unwrap();
+    std::fs::write(d.path().join("h/config/config.toml"), "[exec]\nbackend = \"local\"\n").unwrap();
     d
 }
 
-fn ark(h: &Path) -> Command {
+/// The binary runs inside the scratch dir with a *relative* `ARK_HOME=h`: its socket path
+/// (`h/run/arkd.sock`) then stays short however deep $TMPDIR is, so the runtime dir never
+/// moves to /tmp/ark-<uid>.
+fn ark(d: &Path) -> Command {
     let mut c = Command::new(env!("CARGO_BIN_EXE_ark"));
-    c.env("ARK_HOME", h).env("ARK_OFFLINE", "1").env("XDG_RUNTIME_DIR", "").env_remove("OPENAI_API_KEY").env_remove("ANTHROPIC_API_KEY").stdin(Stdio::null());
+    c.current_dir(d).env("ARK_HOME", "h").env("ARK_OFFLINE", "1").env("XDG_RUNTIME_DIR", "").env_remove("OPENAI_API_KEY").env_remove("ANTHROPIC_API_KEY").stdin(Stdio::null());
     c
 }
 
 fn daemon_pid(h: &Path) -> Option<i32> {
-    std::fs::read_to_string(h.join("run/arkd.pid")).ok()?.trim().parse().ok()
+    std::fs::read_to_string(h.join("h/run/arkd.pid")).ok()?.trim().parse().ok()
 }
 
 /// `ark daemon start` detaches the daemon on purpose; with `ARK_DAEMON_WATCH_PID` set to the
 /// harness, the daemon follows the harness down.
 #[test]
 fn detached_daemon_exits_when_the_watched_harness_dies() {
-    let h = home("w");
+    let h = home("watch");
     // Stand-in for the harness process (python run.py): a sleep we own.
     let mut harness = ChildGuard::single(Command::new("sleep").arg("120").spawn().unwrap());
     let out = ark(h.path()).args(["daemon", "start"]).env("ARK_DAEMON_WATCH_PID", harness.id().to_string()).output().unwrap();
@@ -48,7 +48,7 @@ fn detached_daemon_exits_when_the_watched_harness_dies() {
     let _ = harness.child().kill();
     let _ = harness.child().wait();
     let gone = ark_core::proc::wait_until(Duration::from_secs(15), || !group_alive(pid));
-    let log = std::fs::read_to_string(h.path().join("data/arkd.log")).unwrap_or_default();
+    let log = std::fs::read_to_string(h.path().join("h/data/arkd.log")).unwrap_or_default();
     assert!(gone, "arkd {pid} outlived the process it watched: {log}");
     assert!(log.contains("watched process"), "{log}");
 }
@@ -56,16 +56,16 @@ fn detached_daemon_exits_when_the_watched_harness_dies() {
 /// A daemon whose ARK_HOME was deleted under it (the harness's `rmtree`) shuts itself down.
 #[test]
 fn daemon_exits_when_its_home_is_removed() {
-    let h = home("r");
+    let h = home("rm");
     let log = std::fs::File::create(h.path().join("arkd.log")).unwrap();
     let mut d = ChildGuard::group({
         let mut c = ark(h.path());
         c.args(["daemon", "run"]).stdout(log.try_clone().unwrap()).stderr(log);
         ark_core::proc::spawn_tied(c, true).unwrap()
     });
-    assert!(ark_core::proc::wait_until(Duration::from_secs(25), || h.path().join("run/arkd.sock").exists()), "daemon never came up");
+    assert!(ark_core::proc::wait_until(Duration::from_secs(25), || h.path().join("h/run/arkd.sock").exists()), "daemon never came up");
     std::thread::sleep(Duration::from_millis(500));
-    std::fs::remove_dir_all(h.path().join("run")).unwrap();
+    std::fs::remove_dir_all(h.path().join("h/run")).unwrap();
     let exited = ark_core::proc::wait_until(Duration::from_secs(15), || matches!(d.child().try_wait(), Ok(Some(_))));
     let text = std::fs::read_to_string(h.path().join("arkd.log")).unwrap_or_default();
     assert!(exited, "arkd kept running with its control socket gone: {text}");
