@@ -96,7 +96,7 @@ USAGE
   ark fallback list | add <p/m> | remove <p/m|n> | clear
   ark usage [--days N] [--session ID] [--account] [--billing] [--json]   tokens and cost per model; --billing: what the provider billed (admin key)
   ark insights [--days N]              sessions, tools, skills, models, sources
-  ark mcp list | tools [server] | test <server> | refresh <server> | add <name> (--url U | -- cmd args…) | rm <name> | serve [--relay URL [--pair]]
+  ark mcp list | tools [server] | test <server> | refresh <server> | add <name> (--url U | -- cmd args…) | rm <name> | serve [--relay URL [--pair]] | pins [list|diff|accept|forget <server>]
   ark plugin list                      plugins and what they provide (tools, hooks, channels,
                                        commands, CLI, routes, UI, providers, services…)
   ark <plugin-command> [args…]         a CLI command a plugin adds (listed by `ark help`)

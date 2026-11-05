@@ -16,6 +16,7 @@ pub mod exec;
 pub mod events;
 pub mod mcp;
 pub mod oauth;
+pub mod pins;
 pub mod plugin;
 pub mod relay;
 pub mod schema;
