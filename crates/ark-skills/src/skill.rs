@@ -332,6 +332,16 @@ pub fn discover(roots: &[(PathBuf, Source)]) -> Vec<Skill> {
     for (root, src) in roots {
         let mut found = Vec::new();
         walk(root, root, 0, src, &mut found);
+        // gen2-508: a shipped skill that no longer matches this build's pins is not loaded.
+        if matches!(src, Source::Bundled) && crate::integrity::applies(root) {
+            found.retain(|s| match crate::integrity::check_skill(root, &s.dir) {
+                Ok(()) => true,
+                Err(e) => {
+                    warn_once(&e);
+                    false
+                }
+            });
+        }
         for s in found {
             if !out.iter().any(|o| o.name == s.name) {
                 out.push(s);
@@ -339,6 +349,21 @@ pub fn discover(roots: &[(PathBuf, Source)]) -> Vec<Skill> {
         }
     }
     out
+}
+
+/// Every skill under `root`, without the bundled-integrity filter (the integrity check
+/// itself needs to see what is on disk).
+pub(crate) fn discover_unchecked(root: &Path, src: Source) -> Vec<Skill> {
+    let mut found = Vec::new();
+    walk(root, root, 0, &src, &mut found);
+    found
+}
+
+fn warn_once(msg: &str) {
+    static SAID: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<String>>> = std::sync::OnceLock::new();
+    if SAID.get_or_init(Default::default).lock().unwrap_or_else(|p| p.into_inner()).insert(msg.to_string()) {
+        let _ = std::io::Write::write_all(&mut std::io::stderr(), format!("ark: skills: {msg}; not loaded\n").as_bytes());
+    }
 }
 
 fn walk(root: &Path, dir: &Path, depth: u32, src: &Source, out: &mut Vec<Skill>) {

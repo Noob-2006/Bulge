@@ -104,7 +104,7 @@ USAGE
   ark fallback list | add <p/m> | remove <p/m|n> | clear
   ark usage [--days N] [--session ID] [--account] [--billing] [--json]   tokens and cost per model; --billing: what the provider billed (admin key)
   ark insights [--days N]              sessions, tools, skills, models, sources
-  ark mcp list | tools [server] | test <server> | refresh <server> | add <name> (--url U | -- cmd args…) | rm <name> | serve [--relay URL [--pair]]
+  ark mcp list | tools [server] | test <server> | refresh <server> | add <name> (--url U | -- cmd args…) | rm <name> | serve [--relay URL [--pair]] | pins [list|diff|accept|forget <server>]
   ark plugin list                      plugins and what they provide (tools, hooks, channels,
                                        commands, CLI, routes, UI, providers, services…)
   ark <plugin-command> [args…]         a CLI command a plugin adds (listed by `ark help`)
@@ -1302,6 +1302,7 @@ fn mcp_app_call(tools: &[(String, ark_plugin::ToolDef, Arc<ark_plugin::Client>)]
             input: args.clone(),
             gate: ark_kernel::gate::GateKind::Egress,
             reason: format!("the `{server}` app view wants to call `{name}`"),
+            tier: 0,
         };
         if k.approver.approve(&req) == Approval::Deny {
             return Err((-32001, "denied by the user".into()));
@@ -1322,6 +1323,8 @@ fn cmd_daemon(a: &Args) -> R {
         "run" => {
             let (pending, cell) = daemon::pending_approver(Duration::from_secs(600));
             let mut c = build_agent(a, pending.clone(), true)?;
+            // srv-017: `approvals.timeout_secs` is the wait, not a hard-coded 600 s.
+            pending.set_timeout(Duration::from_secs(c.k.cfg.approvals.timeout_secs.max(1)));
             let ext_arc: Option<Arc<ext::Ext>> = c.ext.take().map(Arc::new);
             let _ = cell.set(Arc::downgrade(&c.k));
             eprintln!("arkd {} listening on {}", env!("CARGO_PKG_VERSION"), sock.display());
@@ -2325,6 +2328,12 @@ fn cmd_doctor(a: &Args) -> R {
     // The bundled skills / roles / catalogs: a binary copied without its share/ has none of them.
     check("bundled share/", ark_core::share::share_dir().filter(|d| d.join("skills").is_dir() && d.join("plugin-catalog").is_dir()).map(|d| d.display().to_string()).ok_or_else(|| "not found (bundled skills and catalogs are unavailable): install with install.sh / the release tarball, or set ARK_SHARE_DIR".to_string()));
     check("data dir", std::fs::create_dir_all(&paths.data).map(|_| paths.data.display().to_string()).map_err(|e| e.to_string()));
+    // gen2-508 (H6): the base prompt and the shipped skills still match this build's pins.
+    check("prompt & bundled skills", ark_skills::integrity::doctor_line());
+    // gen2-413: too many questions train people to click Allow — say so before it happens.
+    if let Ok(c) = &cfg {
+        check("approval load", ark_security::approvals::fatigue_check(&paths.data, c.approvals.fatigue_daily_asks));
+    }
     // Browser readiness (OpenClaw `extensions/browser` doctor-browser): optional, so a
     // missing browser is a note rather than a failed check.
     if let Ok(c) = &cfg {

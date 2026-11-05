@@ -11,6 +11,7 @@ pub mod dave;
 pub mod deliver;
 pub mod markup;
 pub mod http;
+pub mod media_guard;
 pub mod message_tool;
 pub mod outfile;
 pub mod router;

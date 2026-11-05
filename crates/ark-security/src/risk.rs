@@ -531,9 +531,41 @@ pub fn payload_exfil(payload: &str, c: &Candidate) -> Option<String> {
 
 /// Credential shapes worth refusing to send (kept deliberately narrow + anchored).
 pub fn secret_kind(s: &str) -> Option<&'static str> {
+    let m = secret_re().find(s)?;
+    Some(kind_of(m.as_str()))
+}
+
+/// H11: `s` with every credential-shaped match replaced by `[REDACTED <kind>]`, plus the
+/// kinds found (never the values). Same patterns as [`secret_kind`].
+pub fn mask_secrets(s: &str) -> (String, Vec<&'static str>) {
+    let re = secret_re();
+    if !re.is_match(s) {
+        return (s.to_string(), vec![]);
+    }
+    let mut kinds = Vec::new();
+    // A PEM block goes as a whole (header, base64 body and footer).
+    static PEM: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let pem = PEM.get_or_init(|| regex::Regex::new(r"-----BEGIN [A-Z ]*PRIVATE KEY-----(?s:.*?)(?:-----END [A-Z ]*PRIVATE KEY-----|\z)").expect("pem pattern"));
+    let s: std::borrow::Cow<str> = if pem.is_match(s) {
+        kinds.push("private key");
+        pem.replace_all(s, "[REDACTED private key]")
+    } else {
+        std::borrow::Cow::Borrowed(s)
+    };
+    let out = re.replace_all(&s, |c: &regex::Captures| {
+        let k = kind_of(c.get(0).map(|m| m.as_str()).unwrap_or(""));
+        if !kinds.contains(&k) {
+            kinds.push(k);
+        }
+        format!("[REDACTED {k}]")
+    });
+    (out.into_owned(), kinds)
+}
+
+fn secret_re() -> &'static regex::Regex {
     use std::sync::OnceLock;
     static RE: OnceLock<regex::Regex> = OnceLock::new();
-    let re = RE.get_or_init(|| {
+    RE.get_or_init(|| {
         regex::Regex::new(concat!(
             r"(?-u:",
             r"ghp_[A-Za-z0-9]{36}",
@@ -551,10 +583,11 @@ pub fn secret_kind(s: &str) -> Option<&'static str> {
             r")",
         ))
         .expect("secret pattern")
-    });
-    let m = re.find(s)?;
-    let hit = m.as_str();
-    Some(if hit.starts_with("gh") {
+    })
+}
+
+fn kind_of(hit: &str) -> &'static str {
+    if hit.starts_with("gh") {
         "GitHub token"
     } else if hit.starts_with("sk-ant") || hit.starts_with("sk-") {
         "API key"
@@ -570,7 +603,7 @@ pub fn secret_kind(s: &str) -> Option<&'static str> {
         "private key"
     } else {
         "JSON web token"
-    })
+    }
 }
 
 fn spend_tier(input: &serde_json::Value) -> Option<Tier> {
@@ -680,6 +713,19 @@ pub fn dev_hosts() -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn output_secrets_are_masked_by_kind_without_echoing_values() {
+        let aws = ["AKIA", "IOSFODNN7EXAMPLE"].concat();
+        let gh = format!("ghp_{}", "a".repeat(36));
+        let pem = "-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXktdjEAAAAA\n-----END OPENSSH PRIVATE KEY-----";
+        let text = format!("env:\nAWS_ACCESS_KEY_ID={aws}\nGH={gh}\n{pem}\nbuild ok");
+        let (m, kinds) = mask_secrets(&text);
+        assert!(!m.contains(&aws) && !m.contains(&gh) && !m.contains("b3BlbnNzaC1rZXkt"), "{m}");
+        assert!(m.contains("[REDACTED AWS access key]") && m.contains("[REDACTED GitHub token]") && m.contains("[REDACTED private key]") && m.ends_with("build ok"), "{m}");
+        assert_eq!(kinds.len(), 3, "{kinds:?}");
+        assert_eq!(mask_secrets("nothing to see"), ("nothing to see".to_string(), vec![]));
+    }
     use serde_json::json;
 
     fn cand(exec: &[&str]) -> Candidate {

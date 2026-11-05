@@ -235,7 +235,7 @@ pub fn build_backend(name: &str, cfg: &ExecConfig, extra: &Value, ctx: &BackendC
         // resolves it before calling us; this arm covers embedders that ask directly.
         "auto" => {
             let plan = ark_vm::policy::resolve(&ark_vm::policy::Query { requested: "auto", cfg: &cfg.vm, data: &ctx.home, sandboxed: ctx.sandboxed });
-            build_backend(&plan.backend, cfg, extra, ctx)?
+            build_planned(&plan, cfg, extra, ctx)?
         }
         "local" => Arc::new(local::LocalBackend::new()),
         // `main` decides the trust tier when the daemon has not installed a
@@ -256,6 +256,28 @@ pub fn build_backend(name: &str, cfg: &ExecConfig, extra: &Value, ctx: &BackendC
             p(extra, ctx)?
         }
     })
+}
+
+/// Build what an `auto` plan chose. srv-015: the owner's (unsandboxed) session on a namespace
+/// fallback keeps host networking — the namespace sandbox is there to hide the host home and
+/// keys, not to cut the agent off — and if the namespace sandbox cannot actually be built here
+/// (no user namespaces, no Landlock in this kernel) it degrades to the host with a loud
+/// `NOT ISOLATED` warning instead of failing every tool call. A *sandboxed* session keeps its
+/// configured network and never silently lands on the host.
+pub fn build_planned(plan: &ark_vm::policy::Plan, cfg: &ExecConfig, extra: &Value, ctx: &BackendCtx) -> Result<Arc<dyn ExecBackend>, String> {
+    if ctx.sandboxed || plan.origin != ark_vm::policy::Origin::AutoFallback {
+        return build_backend(&plan.backend, cfg, extra, ctx);
+    }
+    let mut owner = cfg.clone();
+    owner.sandbox.network = "host".into();
+    match build_backend(&plan.backend, &owner, extra, ctx) {
+        Ok(b) => Ok(b),
+        Err(e) => {
+            let host = ark_vm::policy::host_plan(&format!("{} unusable: {e}", plan.backend), "");
+            warn_once("host-fallback", host.warning.as_deref().unwrap_or("NOT ISOLATED"));
+            build_backend("local", cfg, extra, ctx)
+        }
+    }
 }
 
 /// Decides whether a session is the operator's main session (OpenClaw sandbox
@@ -387,7 +409,7 @@ impl ExecEnv {
         }
         let ctx = BackendCtx { workspace: workspace.to_path_buf(), scope_key: key, secrets: secrets.clone(), home: home.to_path_buf(), sandboxed };
         let extra = self.extra_config(&name);
-        let b = build_backend(&name, &self.cfg, &extra, &ctx)?;
+        let b = build_planned(&plan, &self.cfg, &extra, &ctx)?;
         self.backends.lock().unwrap().insert(cache_key, b.clone());
         Ok(b)
     }
@@ -662,11 +684,20 @@ mod tests {
         let env = ExecEnv::new(ExecConfig::parse(&Value::Null).unwrap());
         let p = env.plan("main", &ws, &home);
         assert!(!matches!(p.origin, ark_vm::policy::Origin::Configured), "nothing was configured: {:?}", p);
-        // No guest image here: the host plan is `local` with a warning that names the fix —
-        // ark does not silently wrap the operator's shell (or claim a VM it cannot boot).
-        assert_eq!((p.backend.as_str(), p.level), ("local", ark_vm::IsolationLevel::Host), "{p:?}");
-        assert!(p.warning.as_deref().unwrap_or("").to_lowercase().contains("build the guest image"), "{p:?}");
+        // No guest image here: srv-015 — the agent is still isolated (namespace sandbox when
+        // this machine has one, else a loud NOT ISOLATED host plan); never silent, never a VM
+        // it cannot boot.
         assert!(!p.uses_microvm());
+        let w = p.warning.as_deref().unwrap_or("");
+        if p.level == ark_vm::IsolationLevel::Host {
+            assert!(w.starts_with("NOT ISOLATED"), "{p:?}");
+        } else {
+            assert_eq!(p.origin, ark_vm::policy::Origin::AutoFallback, "{p:?}");
+            assert!(w.contains("host home and keys not mounted") && w.to_lowercase().contains("build the guest image"), "{p:?}");
+        }
+        // The explicit opt-out (test rigs, operators who want the host): never rewritten.
+        let env = ExecEnv::new(ExecConfig::parse(&json!({"backend": "local"})).unwrap());
+        assert_eq!((env.plan("main", &ws, &home).backend.as_str(), env.plan("main", &ws, &home).origin), ("local", ark_vm::policy::Origin::Configured));
 
         // An explicit backend is honoured whatever the machine can do.
         let env = ExecEnv::new(ExecConfig::parse(&json!({"backend": "bwrap"})).unwrap());
@@ -687,6 +718,31 @@ mod tests {
             let sp = env.plan_for(true, &ws, &home);
             assert_eq!(sp.backend, "vm", "a sandboxed session also gets the microVM: {sp:?}");
         }
+    }
+
+    /// srv-015: the owner's session on a namespace fallback hides the host home but keeps the
+    /// network; an unbuildable namespace sandbox degrades to the host instead of failing.
+    #[test]
+    fn the_owner_session_is_isolated_on_the_namespace_fallback() {
+        let home = ark_core::tmp::TempDir::new("ark-exec-owner");
+        let ws = home.join("ws");
+        std::fs::create_dir_all(&ws).unwrap();
+        let ctx = BackendCtx { workspace: ws.clone(), scope_key: "host-s".into(), secrets: Arc::new(|s: &str| s.to_string()), home: home.to_path_buf(), sandboxed: false };
+        let plan = ark_vm::policy::auto_with(&ark_vm::isolation::Capabilities { kvm: false, bwrap: Some("/usr/bin/bwrap".into()), ..Default::default() }, &Default::default(), false);
+        assert_eq!(plan.backend, "bwrap");
+        let cfg = ExecConfig::default();
+        if local::which(&cfg.bwrap.binary).is_some() {
+            let b = build_planned(&plan, &cfg, &Value::Null, &ctx).unwrap();
+            let d = b.describe();
+            assert!(d.starts_with("bwrap") && d.contains("home hidden") && d.contains("network shared with host"), "{d}");
+        }
+        // bubblewrap missing on this host: the host backend, not an error for every call.
+        let mut broken = ExecConfig::default();
+        broken.bwrap.binary = "/nonexistent/bwrap".into();
+        assert_eq!(build_planned(&plan, &broken, &Value::Null, &ctx).unwrap().id(), "local");
+        // A sandboxed session never lands on the host that way.
+        let sctx = BackendCtx { sandboxed: true, ..ctx };
+        assert!(build_planned(&plan, &broken, &Value::Null, &sctx).is_err());
     }
 
     #[test]

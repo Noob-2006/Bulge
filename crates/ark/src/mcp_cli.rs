@@ -42,6 +42,57 @@ pub fn cmd_mcp(a: &Args) -> R {
             }
             Ok(0)
         }
+        // gen2-505: tool description/schema pins (rug-pull guard).
+        "pins" => {
+            let ws = workspace(a)?;
+            let cfg = load_config(a, &ws, &paths)?;
+            let vault = load_vault(&paths)?;
+            let (cfgs, _) = ext::mcp_configs(&cfg);
+            let sub = a.pos(1).unwrap_or("list");
+            if sub == "list" {
+                let reg = ark_plugin::Registry::load(&cfgs, &paths.data.join("mcp-cache"), ext::secrets_fn(&vault));
+                let pins = ark_plugin::pins::load(&paths.data);
+                for (name, tools) in &pins.servers {
+                    let held = reg.withheld().get(name).map(|w| w.iter().map(|(t, why)| format!("{t} ({why})")).collect::<Vec<_>>().join(", ")).unwrap_or_default();
+                    println!("{name:<16} {:>3} pinned{}", tools.len(), if held.is_empty() { String::new() } else { format!("  WITHHELD: {held}") });
+                }
+                if pins.servers.is_empty() {
+                    println!("no MCP tools pinned yet (a server is pinned the first time it loads)");
+                }
+                return Ok(0);
+            }
+            let name = a.need(2, "server")?;
+            if sub == "forget" {
+                let had = ark_plugin::pins::forget(&paths.data, name)?;
+                println!("{}", if had { format!("{name}: pins forgotten; it is pinned afresh on the next load") } else { format!("{name}: had no pins") });
+                return Ok(0);
+            }
+            let c = cfgs.get(name).ok_or_else(|| format!("no MCP server `{name}` (see `ark mcp list`)"))?;
+            let mut reg = ark_plugin::Registry::load(&BTreeMap::from([(name.to_string(), c.clone())]), &paths.data.join("mcp-cache"), ext::secrets_fn(&vault));
+            match sub {
+                "diff" => {
+                    let defs = reg.catalog_tools(name).ok_or_else(|| format!("{name}: no catalog (try `ark mcp test {name}`)"))?;
+                    let d = ark_plugin::pins::diff(&paths.data, name, &defs);
+                    if d.is_empty() {
+                        println!("{name}: every tool matches what was approved");
+                    }
+                    for (tool, was, now) in d {
+                        println!("── {tool} ({})", if was.is_null() { "new" } else { "changed" });
+                        if !was.is_null() {
+                            println!("  approved: {}", serde_json::to_string_pretty(&was).unwrap_or_default().replace('\n', "\n  "));
+                        }
+                        println!("  now:      {}", serde_json::to_string_pretty(&now).unwrap_or_default().replace('\n', "\n  "));
+                    }
+                    Ok(0)
+                }
+                "accept" => {
+                    let n = reg.accept_pins(name)?;
+                    println!("{name}: {n} tool(s) re-approved and pinned");
+                    Ok(0)
+                }
+                other => Err(Fail::Usage(format!("mcp pins list | diff <server> | accept <server> | forget <server> (got `{other}`)"))),
+            }
+        }
         "test" | "refresh" => {
             let name = a.need(1, "server")?;
             let ws = workspace(a)?;

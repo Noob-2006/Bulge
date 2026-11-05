@@ -101,7 +101,9 @@ impl FakeServer {
 pub fn temp_dir(tag: &str) -> std::path::PathBuf {
     // Removed when the test's thread ends (ark_core::tmp::scratch): a plain `PathBuf` for the
     // callers, no tree left in $TMPDIR after the suite.
-    ark_core::tmp::scratch(&format!("ark-ch-{tag}"))
+    let d = ark_core::tmp::scratch(&format!("ark-ch-{tag}"));
+    crate::media_guard::allow_for_tests(&d);
+    d
 }
 
 /// A `ToolCtx` for channel-tool tests (no host services).

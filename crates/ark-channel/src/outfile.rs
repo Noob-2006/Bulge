@@ -46,14 +46,11 @@ pub fn authorize(path: &Path, extra_roots: &[PathBuf]) -> Result<PathBuf, String
     if let Some(g) = guard {
         return g(path);
     }
-    let canon = std::fs::canonicalize(path).map_err(|e| format!("cannot send {}: {e}", path.display()))?;
-    let roots = ROOTS.read().unwrap_or_else(|p| p.into_inner()).clone();
-    let ok = roots.iter().chain(extra_roots).filter_map(|r| std::fs::canonicalize(r).ok()).any(|r| canon.starts_with(&r));
-    if ok {
-        Ok(canon)
-    } else {
-        Err(format!("refusing to send {}: it is outside the workspace and artifacts folders", path.display()))
-    }
+    let mut roots = ROOTS.read().unwrap_or_else(|p| p.into_inner()).clone();
+    roots.extend(extra_roots.iter().cloned());
+    roots.extend(crate::media_guard::extra_roots());
+    // Same rule as the per-channel guard: inside an allowed root and never key material.
+    crate::media_guard::check(path, Path::new("/"), &roots)
 }
 
 fn kind_of(name: &str) -> (MediaKind, &'static str) {

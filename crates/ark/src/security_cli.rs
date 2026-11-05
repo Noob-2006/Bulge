@@ -22,6 +22,7 @@ use std::path::{Path, PathBuf};
 
 pub const HELP_LINES: &str = "  ark approvals status | test -- <command…> | suggest [--days N] [--min-count N] [--apply 1,3]
                  mode [manual|smart|auto|off] | pending | resolve <id> once|session|permanent|deny [--reason T]
+                 queue [preview] | queue allow|deny <id> | queue allow|deny --group N
                  list | allow <glob> [--exec] | revoke <id|pattern> | yolo|elevated|exec … -s ID
   ark exec-policy show [-s ID] | preset yolo|cautious|deny-all | set [--security S] [--ask A] [--ask-fallback S]
   ark security audit [--deep] [--fix] [--supply-chain] [--fail-on LEVEL] | scan <dir> | plugins [accept <name>]
@@ -52,9 +53,39 @@ pub fn cmd_approvals(a: &Args, k: &Kernel, ws: &Path) -> R {
         "queue" => {
             let items = ap::deferred(&data);
             match a.pos(1) {
+                // gen2-409 (§0-2 #05): same-kind calls grouped with their impacts, answered at once.
+                Some("preview") => {
+                    let groups = ap::deferred_groups(&data);
+                    if a.flag("json") {
+                        println!("{}", json!(groups));
+                    } else if groups.is_empty() {
+                        println!("No deferred approvals.");
+                    } else {
+                        for (i, g) in groups.iter().enumerate() {
+                            println!("[{}] {} × {}  tier {}  {}", i + 1, g.ids.len(), g.tool, g.tier, g.reason);
+                            for (id, imp) in g.ids.iter().zip(&g.impacts).take(20) {
+                                println!("      {id}  {imp}");
+                            }
+                            if g.ids.len() > 20 {
+                                println!("      … {} more", g.ids.len() - 20);
+                            }
+                        }
+                        println!("\n`ark approvals queue allow --group N` answers a whole group once (tier 3 is never batched); `deny --group N` closes it.");
+                    }
+                    return Ok(0);
+                }
+                Some("allow") | Some("deny") if a.val("group").is_some() => {
+                    let allow = a.pos(1) == Some("allow");
+                    let n: usize = a.num("group").map_err(Fail::Usage)?.unwrap_or(0);
+                    let groups = ap::deferred_groups(&data);
+                    let g = groups.get(n.wrapping_sub(1)).ok_or_else(|| Fail::Usage(format!("group {n} out of range (1..{}); see `ark approvals queue preview`", groups.len())))?;
+                    let done = ap::resolve_group(&data, g, allow, cfg.grant_ttl_days, "cli")?;
+                    println!("{} {done} queued {} call(s) ({})", if allow { "allowed" } else { "denied" }, g.tool, g.reason);
+                    return Ok(0);
+                }
                 Some("allow") | Some("deny") => {
                     let allow = a.pos(1) == Some("allow");
-                    let id = a.pos(2).ok_or_else(|| Fail::Usage("approvals queue allow|deny <id>".into()))?;
+                    let id = a.pos(2).ok_or_else(|| Fail::Usage("approvals queue allow|deny <id> | --group N".into()))?;
                     match ap::resolve_deferred(&data, id, allow, cfg.grant_ttl_days)? {
                         Some(it) => println!("{} {} ({})", if allow { "allowed" } else { "denied" }, it.tool, it.reason),
                         None => println!("no pending item `{id}`"),
@@ -88,6 +119,11 @@ pub fn cmd_approvals(a: &Args, k: &Kernel, ws: &Path) -> R {
                 println!("exec: security={} ask={} ask_fallback={} safe_bins={}", v["exec"]["security"].as_str().unwrap_or(""), v["exec"]["ask"].as_str().unwrap_or(""), v["exec"]["ask_fallback"].as_str().unwrap_or(""), cfg.exec.safe_bins.join(","));
                 println!("deny rules: {} · command allowlist: {} · durable grants: {} · strict_inline_eval: {}", cfg.deny.len(), cfg.allowlist.len(), v["durable_grants"], cfg.strict_inline_eval);
                 println!("cron_mode: {} · unattended_mode: {} · elevated: {}", v["cron_mode"].as_str().unwrap_or(""), v["unattended_mode"].as_str().unwrap_or(""), if cfg.elevated.enabled { "enabled" } else { "disabled" });
+                println!("trust presets: owner={} channel={} stranger={} · deferred: {}", v["trust_presets"]["owner"].as_str().unwrap_or(""), v["trust_presets"]["channel"].as_str().unwrap_or(""), v["trust_presets"]["stranger"].as_str().unwrap_or(""), v["deferred"]);
+                match ap::fatigue_check(&data, cfg.fatigue_daily_asks) {
+                    Ok(l) => println!("approval load: {l}"),
+                    Err(w) => println!("approval load: WARNING {w}"),
+                }
                 if let Some((r, at)) = &paused {
                     println!("PAUSED since {}{} — `ark resume` to continue", at.as_deref().unwrap_or("?"), r.as_ref().map(|r| format!(" ({r})")).unwrap_or_default());
                 }

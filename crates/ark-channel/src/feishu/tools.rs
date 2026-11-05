@@ -661,6 +661,7 @@ fn upload_input(api: &Api, ctx: &ToolCtx, a: &Value, allow_image: bool) -> Resul
         if path_like {
             let p = ctx.resolve(&img);
             if p.is_file() || !img.starts_with('/') {
+                let p = crate::media_guard::check(&p, &ctx.workspace, &crate::media_guard::roots_for(ctx))?;
                 return read_local(&p, api.media_max, name_override);
             }
             return Err(format!("File not found: \"{}\". If you intended to pass image binary data, use a data URI instead: data:image/jpeg;base64,...", p.display()));
@@ -670,7 +671,8 @@ fn upload_input(api: &Api, ctx: &ToolCtx, a: &Value, allow_image: bool) -> Resul
         return Ok((bytes, name_override.unwrap_or(format!("image.{}", if mt == "image/jpeg" { "jpg" } else { mt.trim_start_matches("image/") }))));
     }
     if let Some(p) = opt(a, "file_path") {
-        return read_local(&ctx.resolve(&p), api.media_max, name_override);
+        let p = crate::media_guard::check(&ctx.resolve(&p), &ctx.workspace, &crate::media_guard::roots_for(ctx))?;
+        return read_local(&p, api.media_max, name_override);
     }
     if let Some(u) = opt(a, "url") {
         if !(u.starts_with("http://") || u.starts_with("https://")) {

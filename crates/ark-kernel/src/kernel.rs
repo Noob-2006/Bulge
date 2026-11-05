@@ -825,7 +825,7 @@ impl Runtime {
                         ToolOutput::err(format!("[interrupted by a crash while running `{name}`; its side effects are unknown — inspect the state before retrying]"))
                     }
                 };
-                let content = self.guard_tool_output(name, self.vault.redact(&out.content), out.is_error);
+                let content = self.guard_tool_output(name, self.mask_output(self.vault.redact(&out.content)).0, out.is_error);
                 blocks.push(Block::ToolResult { tool_use_id: id.clone(), content, is_error: out.is_error });
             }
             self.append(log, EventKind::Message { message: Message { role: Role::User, content: blocks }, usage: None, model: None, inbox: None })?;
@@ -1789,7 +1789,10 @@ impl Runtime {
                 ark_core::tool::post_process_images(&mut imgs);
                 images.extend(imgs);
             }
-            let mut content = self.vault.redact(&out.content);
+            let (mut content, masked) = self.mask_output(self.vault.redact(&out.content));
+            if !masked.is_empty() {
+                self.append(log, EventKind::Notice { level: "warn".into(), text: format!("masked {} in `{}` output before it entered the context (H11)", masked.join(", "), uses[i].1) })?;
+            }
             if ran.contains(&i) {
                 content = self.guard_tool_output(&uses[i].1, content, out.is_error);
             }

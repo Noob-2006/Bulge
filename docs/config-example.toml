@@ -37,10 +37,12 @@ env_passthrough = ["BUILD_TOKEN"]   # 名稱像憑證但值是中介資料；憑
 [exec]
 scrub_env = true
 env_passthrough = ["BUILD_ID"]
-# backend 不寫 = "auto"：這台機器能開 microVM（/dev/kvm ＋ [exec.vm] 的客體映像）就用 VM，
-# 否則留在主機並在 `ark sandbox explain`／log 印出「no microVM available（原因）＋怎麼修」；
-# 完全沒有 KVM 的機器降級到 bwrap／Landlock，一律附隔離等級警告。寫死名稱（local/vm/bwrap/…）
-# 就照寫的用，不會被改寫。`ark sandbox explain` 的 `execution plan:` 就是同一個答案。
+# backend 不寫 = "auto"：這台機器能開 microVM（/dev/kvm ＋ [exec.vm] 的客體映像）就用 VM；
+# 開不了 VM（沒有 KVM 或沒建映像）時，所有 session（含 owner 主 session）都降級到 bwrap／Landlock，
+# 主機家目錄與金鑰不掛入、owner session 保留網路，並印出「no microVM available（原因）＋怎麼修」。
+# 連 namespace 沙箱都沒有才留在主機，警告開頭是「NOT ISOLATED」（srv-015：能隔離就不要詢問）。
+# 寫死名稱（local/vm/bwrap/…）就照寫的用，不會被改寫；測試環境要固定主機執行就寫 backend = "local"。
+# `ark sandbox explain` 的 `execution plan:` 就是同一個答案。
 # backend = "vm"
 # [exec.sandbox]
 # backend = "auto"    # 沙箱化的 session 也用同一個決策（VM 優先）

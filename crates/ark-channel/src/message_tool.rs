@@ -287,7 +287,11 @@ pub fn dispatch_in(targets: &Targets, input: &Value, base: &std::path::Path, roo
             let args = normalize_poll_args(&args, MAX_POLL_OPTIONS).map_err(|e| e.message)?;
             adapter(&name, channel, "poll", &args)
         }
-        _ => adapter(&name, channel, &action, &args),
+        _ => {
+            // srv-012: attachments a channel reads from the host must come from the workspace.
+            crate::media_guard::guard_args(&mut args)?;
+            adapter(&name, channel, &action, &args)
+        }
     }
 }
 
@@ -372,8 +376,8 @@ impl Tool for MessageTool {
     }
 
     fn call(&self, ctx: &ToolCtx, input: Value) -> ToolOutput {
-        let roots = [ctx.workspace.clone(), ctx.artifacts.clone()];
-        match dispatch_in(&self.targets, &input, &ctx.workspace, &roots, Some(&ctx.session_id)) {
+        let roots = crate::media_guard::roots_for(ctx);
+        match crate::media_guard::scoped(roots.clone(), || dispatch_in(&self.targets, &input, &ctx.workspace, &roots, Some(&ctx.session_id))) {
             Ok(o) => ToolOutput::ok(o.summary),
             Err(e) => ToolOutput::err(e),
         }
@@ -563,6 +567,30 @@ mod tests {
         assert!(tool.effects(&ctx, &json!({"action": "read"})).is_empty());
         let r = tool.call(&ctx, json!({"text": " "}));
         assert!(r.is_error && r.content.contains("`text` is empty"), "{}", r.content);
+    }
+
+    #[test]
+    fn upload_sources_are_confined_to_the_workspace() {
+        // srv-012: the model can name a workspace file, never a host key.
+        let ch = Fake::new(&["upload-file"]);
+        let tool = MessageTool::new(targets(ch.clone()));
+        let ctx = tool_ctx();
+        std::fs::create_dir_all(ctx.workspace.join("out")).unwrap();
+        std::fs::write(ctx.workspace.join("out/report.pdf"), b"%PDF-1.4").unwrap();
+        let r = tool.call(&ctx, json!({"action": "upload-file", "chat": "C", "filePath": "out/report.pdf"}));
+        assert!(!r.is_error, "{}", r.content);
+        let calls = ch.calls.lock().unwrap().clone();
+        let sent = std::path::PathBuf::from(calls[0].1["filePath"].as_str().unwrap());
+        assert!(sent.is_absolute() && sent.ends_with("out/report.pdf"), "relative paths resolve in the workspace: {sent:?}");
+        let outside = ark_core::tmp::TempDir::new("mg-host");
+        std::fs::create_dir_all(outside.join(".ssh")).unwrap();
+        std::fs::write(outside.join(".ssh/id_ed25519"), b"KEY").unwrap();
+        std::fs::write(outside.join("diary.txt"), b"d").unwrap();
+        for p in [outside.join(".ssh/id_ed25519"), outside.join("diary.txt")] {
+            let r = tool.call(&ctx, json!({"action": "upload-file", "chat": "C", "filePath": p.display().to_string()}));
+            assert!(r.is_error && r.content.contains("refusing to send"), "{}", r.content);
+        }
+        assert_eq!(ch.calls.lock().unwrap().len(), 1, "refused uploads never reach the channel");
     }
 
     #[test]

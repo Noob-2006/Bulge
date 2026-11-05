@@ -585,7 +585,8 @@ impl BwrapBackend {
             a.extend([if *ro { "--ro-bind" } else { "--bind" }.into(), src.display().to_string(), dst.clone()]);
         }
         let cwd = req.cwd.as_ref().map(|c| c.display().to_string()).filter(|c| Path::new(c).starts_with(&self.l.workspace)).unwrap_or(ws);
-        a.extend(["--chdir".into(), cwd, "--setenv".into(), "HOME".into(), "/tmp".into()]);
+        // The host's TMPDIR usually lives under the hidden /home: point it at the private /tmp.
+        a.extend(["--chdir".into(), cwd, "--setenv".into(), "HOME".into(), "/tmp".into(), "--setenv".into(), "TMPDIR".into(), "/tmp".into()]);
         a.extend(self.cfg.extra_args.iter().cloned());
         a.extend(["bash".into(), if req.login { "-lc" } else { "-c" }.into(), req.script.clone()]);
         a

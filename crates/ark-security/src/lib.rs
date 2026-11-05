@@ -130,6 +130,10 @@ pub struct SecurityConfig {
     /// in the VM image). Only tier 0 auto-approval depends on it, so pin it on hosts
     /// without a VM rather than trusting a variable a skill could set.
     pub sandboxed: Option<bool>,
+    /// H11 (runtime half): mask credential-shaped strings (API keys, tokens, private keys —
+    /// not only vault values) in tool output before it enters the context, the session log
+    /// or a chat, and check `git commit` for staged secrets. Default on.
+    pub mask_output_secrets: bool,
 }
 
 impl Default for SecurityConfig {
@@ -156,6 +160,7 @@ impl Default for SecurityConfig {
             threat_scan: Default::default(),
             audit_suppress: vec![],
             sandboxed: None,
+            mask_output_secrets: true,
         }
     }
 }

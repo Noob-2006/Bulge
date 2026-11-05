@@ -119,8 +119,20 @@ ARK_VAULT_REQUIRE_ENCRYPTION=1 # 沒有金鑰來源時直接失敗，不降級
 | 測試碰到真實 `$HOME` | 改注入路徑／`TempDir`，`test_hygiene_allow.txt` 只能變短 |
 | kanban paused 不顯示 | `/workboard dispatch` 先印 `paused: …`，JSON 也有 `paused` |
 
+## 6. 第 9 輪：safety 組補的破口
+
+| 項目 | 做法 | 入口 |
+|---|---|---|
+| 發檔來源（srv-012） | channel 動作讀主機檔案前，路徑（解析 symlink、`..`）必須落在 session 工作區或 artifact 目錄（＋`ARK_SEND_ROOTS`），且不是金鑰類檔案（`.ssh`、`.gnupg`、`.aws`、`id_*`、`secrets.*`…）；`message` 工具先檢查一次，Discord／Slack／Feishu／Yuanbao 的讀檔函式再檢查一次。這是獨立於出口核准的第二層 | `message` 工具、`ark message` |
+| 預設隔離（srv-015／016） | 沒有 microVM 時，所有 session（含 owner）都進 bwrap／Landlock，主機家目錄與金鑰不掛入；連 namespace 沙箱都沒有才在主機執行並印 `NOT ISOLATED` | `ark sandbox explain`、`ark doctor` |
+| 聊天回覆過濾（srv-019、H11） | 頻道回覆與串流預覽移除 `<memory-context>`／`<recalled-context>`，並遮罩金鑰樣式字串 | 所有 channel |
+| 遠端第 3 級核准（srv-017／018） | 見 MANUAL §4.5：owner 限定、二次確認、無 Allow Always、記錄核准者、逾時通知 | 聊天按鈕、`/approve` |
+| MCP 工具釘選（gen2-505） | 首次載入時對每個工具的名稱／說明／schema／annotations 取 SHA-256（`<data>/mcp-pins.json`）；之後有變動或新增的工具一律不給模型，直到 `ark mcp pins diff` 檢視、`ark mcp pins accept` 重新核准 | `ark mcp pins` |
+| 提示與內建技能完整性（gen2-508） | `crates/ark-skills/bundled-skills.sha256`（編進二進位）記錄基礎系統提示與每個內建技能的 SHA-256；磁碟上被改過或不在清單內的內建技能不載入、不同步；測試強制清單與原始碼一致 | `ark doctor` |
+| 執行期秘密掃描（H11 執行期那一半） | 工具輸出在進入上下文／session log 前遮罩金鑰樣式字串（並留一筆 Notice）；`git commit` 的暫存變更含 vault 值或金鑰樣式時先問人。`[security] mask_output_secrets = false` 可關。CI 端的掃描由 release 組處理 | 自動 |
+
 ---
 
-## 6. 回報安全問題
+## 7. 回報安全問題
 
 如果是金鑰外洩：先 `ark secrets set NAME` 換掉該金鑰，再 `ark secrets backend` 確認加密狀態。程式缺陷請附上 `ark doctor`、`ark security audit` 的輸出與重現步驟；不要在 issue 裡貼任何 `{{secret:…}}` 的實際值。

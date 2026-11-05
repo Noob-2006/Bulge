@@ -687,3 +687,78 @@ fn h1_task_envelope_runs_tier_two_work_without_prompts() {
     let (_, gates3, _) = run_in(&e, &id, "cli");
     assert_eq!(gates3.last().map(|(_, v)| v.as_str()), Some("deny"), "a revoked envelope is not consulted: {gates3:?}");
 }
+
+/// srv-017/018: a tier-3 approval is never remembered — an "always" answer runs it once,
+/// the next identical call asks again and no grant is saved — and the surfaces see its tier.
+/// A tier-3 call queued for the owner is pushed to the chat surfaces (`q-` id) too.
+#[test]
+fn tier_three_is_allow_once_only_and_queued_calls_reach_the_chat() {
+    let r = rec(Approval::Permanent);
+    let e = env(|_| {}, r.clone());
+    let id = e.k.create_session(&e.ws, None, None, None).unwrap();
+    for _ in 0..2 {
+        call(&e, "sh", json!({"cmd": "aws s3 rb s3://prod-backups --force"}));
+    }
+    let (_, gates, _) = run_in(&e, &id, "cli");
+    let asked = r.asked.lock().unwrap().clone();
+    assert_eq!(asked.len(), 2, "the second identical tier-3 call asks again: {gates:?}");
+    assert!(asked.iter().all(|a| a.tier == 3 && a.irreversible()), "{asked:?}");
+    assert!(gates.iter().filter(|(_, v)| v.starts_with("allow")).all(|(_, v)| v == "allow"), "an always answer is downgraded to once: {gates:?}");
+    assert!(ap::grants(&e.k.paths.data).is_empty(), "no durable grant for the hard floor");
+    let f = ap::fatigue(&e.k.paths.data, 1);
+    assert_eq!((f.asks, f.denied), (2, 0), "gen2-413: every human ask is counted: {f:?}");
+
+    // Unattended: queued for the owner, and the chat surfaces get it with a `q-` id.
+    let r2 = rec(Approval::Once);
+    let e2 = env(|_| {}, r2.clone());
+    let rx = e2.k.bus.subscribe();
+    call(&e2, "sh", json!({"cmd": "aws s3 rb s3://prod-backups --force"}));
+    run(&e2, "schedule");
+    let pushed: Vec<ApprovalRequest> = rx.try_iter().filter_map(|m| if let ark_kernel::kernel::BusMsg::Pending(ark_kernel::approver::PendingItem::Approval(a)) = m { Some(a) } else { None }).collect();
+    let q = ap::deferred(&e2.k.paths.data);
+    assert_eq!(q.len(), 1);
+    assert!(pushed.iter().any(|a| a.id == format!("q-{}", q[0].id) && a.tier == 3), "{pushed:?}");
+    // Only the owner answers it from a chat, and the answer records who did.
+    let err = ark_kernel::secgate::answer_deferred(&e2.k, &format!("q-{}", q[0].id), true, "telegram", "42").unwrap_err();
+    assert!(err.contains("owner"), "{err}");
+}
+
+/// srv-018: tier 3 from a chat is the owner's alone (no wildcard, no forwarded peer).
+#[test]
+fn tier_three_chat_approvals_are_owner_only() {
+    let req = |tier: u8| ApprovalRequest { id: format!("t3-{tier}-{}", n()), tool_use_id: String::new(), session: "s".into(), tool: "sh".into(), summary: "rm".into(), input: Value::Null, gate: ark_kernel::gate::GateKind::Exec, reason: "r".into(), tier };
+    let mut a = ap::ApprovalsConfig::default();
+    a.forward.approvers.insert("telegram".into(), vec!["*".into()]);
+    let t3 = req(3);
+    ap::allow_forwarded(&t3.id, "telegram", "42");
+    assert!(ark_kernel::secgate::approver_allowed(&a, "telegram", "42", &[req(2)]), "tier 2: the wildcard approver list applies");
+    assert!(!ark_kernel::secgate::approver_allowed(&a, "telegram", "42", std::slice::from_ref(&t3)), "tier 3: a wildcard or a forwarded chat is not the owner");
+    a.forward.owners.insert("telegram".into(), vec!["42".into()]);
+    assert!(ark_kernel::secgate::approver_allowed(&a, "telegram", "42", std::slice::from_ref(&t3)));
+    assert!(!ark_kernel::secgate::approver_allowed(&a, "telegram", "43", std::slice::from_ref(&t3)));
+}
+
+/// H11 (runtime half): credential-shaped output is masked before the model sees it, and a
+/// `git commit` whose staged changes carry a key needs a human first.
+#[test]
+fn h11_output_secrets_are_masked_and_a_commit_with_a_key_asks() {
+    let r = rec(Approval::Deny);
+    let e = env(|_| {}, r.clone());
+    let token = format!("ghp_{}", "Z".repeat(36));
+    call(&e, "sh", json!({"cmd": format!("echo {token}")}));
+    let (id, _, res) = run(&e, "cli");
+    assert!(!res[0].contains(&token) && res[0].contains("[REDACTED GitHub token]"), "{}", res[0]);
+    assert!(notices(&e, &id).iter().any(|n| n.contains("masked GitHub token")), "{:?}", notices(&e, &id));
+
+    let git = |args: &[&str]| std::process::Command::new("git").arg("-C").arg(&e.ws).args(args).env("GIT_CONFIG_GLOBAL", "/dev/null").env("GIT_CONFIG_NOSYSTEM", "1").output().map(|o| o.status.success()).unwrap_or(false);
+    if !git(&["init", "-q"]) {
+        return; // no git on this machine
+    }
+    std::fs::write(e.ws.join("config.env"), format!("AWS_ACCESS_KEY_ID={}\n", ["AKIA", "IOSFODNN7EXAMPLE"].concat())).unwrap();
+    assert!(git(&["add", "config.env"]));
+    call(&e, "sh", json!({"cmd": "git commit -m 'add config'"}));
+    let (_, gates, _) = run(&e, "cli");
+    let asked = r.asked.lock().unwrap().clone();
+    assert!(asked.iter().any(|a| a.reason.contains("AWS access key") && a.reason.contains("H11")), "{asked:?} {gates:?}");
+    assert_eq!(e.sh.load(Ordering::SeqCst), 1, "the commit did not run (only the echo did)");
+}
