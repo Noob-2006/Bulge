@@ -89,6 +89,29 @@
 - `allow always` 授權到期（`approvals.grant_ttl_days`，預設 7 天）；`ap::grants()` 會濾掉過期的。沒有永久的全域放行。
 - 卡住只卡那一條：需要人核准的呼叫進 `approvals::defer` 佇列（`ark approvals queue`），agent 先把可回復的部分做完並在摘要標記；owner 之後 `ark approvals queue allow <id>` 就放行那一個呼叫。
 
+- 先預覽、再批次核准（gen2-409）：`ark approvals queue preview` 把同工具＋同等級＋同理由的待核准呼叫合成一組並列出各自影響，`ark approvals queue allow|deny --group N` 一次回答整組；**等級 3 永不批次放行**，必須逐筆。
+- 依信任等級分流（gen2-412）：`[approvals] trust_presets = { owner = "…", channel = "…", stranger = "…" }`。owner＝CLI／TUI／排程或 `approvals.forward.owners` 裡的聊天帳號；stranger＝webhook、email 等不可信入站通道與機器 API；其餘聊天參與者是 channel。未設定時 owner／channel 用 `preset`、stranger 預設 `strict`。
+- 核准疲勞監測（gen2-413）：每次真的問人都記一筆（`<data>/approvals/asks.jsonl`：工具、閘門、等級、結果、等待毫秒，不含輸入）。`ark doctor` 的 `approval load` 與 `ark approvals status` 顯示近 7 天每日詢問數、拒絕率、逾時數、平均等待；超過 `approvals.fatigue_daily_asks`（預設 30）時警告，並點名「幾乎每次都被允許」的理由，建議改成預先授權。
+
+## 3.1 新防線的設計審查準則（GAPS-next 0-3，gen2-422）
+
+新增或預設開啟任何一道防線之前，設計審查必須寫下兩個答案，寫在 PR 說明或該防線的模組註解：
+
+1. **它會讓長時間無人看管的任務多停幾次？** 估計一個典型的夜間任務（排程、goal、channel 機器人）會因為這道防線多出幾次詢問或阻擋；答案不能是「不知道」。
+2. **有沒有「隔離或回復」的替代做法，能達到同樣的安全效果而不需要詢問？** 例如改在 VM／bwrap 內執行、改成快照或 git 分支可回復、改成任務信封預先授權、改成降權（只停用等級 2／3）而不是停擺。
+
+答不出來的防線**不准預設開啟**；只能以設定開關提供，預設關。等級 3 硬底線與公網暴露的雙層防護不受此限（它們本來就是「無法隔離也無法回復」才存在）。
+
+審查時的參考做法：
+
+| 情境 | 優先選擇 | 最後才選 |
+|---|---|---|
+| agent 可能動到主機檔案 | 預設隔離（microVM → bwrap／Landlock，見 srv-015） | 每次寫檔都問 |
+| 可回復的大範圍修改 | checkpoint／VM 快照＋事後稽核 | 事前詢問 |
+| 同類請求大量出現 | 預覽＋批次核准、任務信封 | 逐筆詢問 |
+| 陌生人觸發的任務 | 依信任等級套較嚴 preset、降權 | 全體一律最嚴 |
+| 發檔／外送 | 來源限制在工作區（srv-012）＋外送掃描 | 只靠出口核准 |
+
 ## 4. 邊界
 
 | 邊界 | 誰強制 | 說明 |

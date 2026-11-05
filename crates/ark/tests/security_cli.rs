@@ -370,3 +370,31 @@ fn pause_and_resume_round_trip() {
     assert_eq!(after["paused"], false, "{after}");
     assert!(after["pause_reason"].is_null(), "{after}");
 }
+
+/// gen2-409: same-kind deferred calls are previewed together and answered with one command;
+/// tier 3 is never batched.
+#[test]
+fn approvals_queue_previews_groups_and_answers_them_at_once() {
+    let h = home("approvals-queue-group");
+    let q = h.join("data").join("approvals").join("approvals");
+    std::fs::create_dir_all(&q).unwrap();
+    let item = |id: &str, tier: u8, summary: &str, reason: &str| serde_json::json!({"id": id, "session": "s", "tool": "sh", "summary": summary, "tier": tier, "reason": reason, "created_at": 1, "status": "pending"});
+    let file = serde_json::json!({"version": 1, "items": [
+        item("a1", 2, "git push origin --delete tmp-1", "tier 2: deletes a remote branch"),
+        item("a2", 2, "git push origin --delete tmp-2", "tier 2: deletes a remote branch"),
+        item("b1", 3, "aws s3 rb s3://x", "tier 3: deletes a bucket"),
+        item("b2", 3, "aws s3 rb s3://y", "tier 3: deletes a bucket"),
+    ]});
+    std::fs::write(q.join("queue.json"), file.to_string()).unwrap();
+    let p = ark(&h, &["approvals", "queue", "preview"]);
+    assert_eq!(p.code, 0, "{}", p.all());
+    assert!(p.stdout.contains("[1] 2 × sh") && p.stdout.contains("tmp-2") && p.stdout.contains("[2] 2 × sh  tier 3"), "{}", p.all());
+    let bulk3 = ark(&h, &["approvals", "queue", "allow", "--group", "2"]);
+    assert_ne!(bulk3.code, 0, "tier 3 is never approved in bulk: {}", bulk3.all());
+    let ok = ark(&h, &["approvals", "queue", "allow", "--group", "1"]);
+    assert_eq!(ok.code, 0, "{}", ok.all());
+    assert!(ok.stdout.contains("allowed 2"), "{}", ok.all());
+    let left = json(&ark(&h, &["approvals", "queue", "--json"]).stdout);
+    assert_eq!(left.as_array().map(|a| a.len()), Some(2), "only the tier-3 calls are left: {left}");
+    let _ = std::fs::remove_dir_all(&h);
+}

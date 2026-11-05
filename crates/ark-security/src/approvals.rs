@@ -217,6 +217,13 @@ impl Default for ForwardConfig {
     }
 }
 
+impl ApprovalsConfig {
+    /// The preset that applies to a session driven at `trust` (`owner`/`channel`/`stranger`).
+    pub fn preset_for(&self, trust: &str) -> crate::risk::Preset {
+        self.trust_presets.get(trust).copied().unwrap_or(if trust == "stranger" { crate::risk::Preset::Strict } else { self.preset })
+    }
+}
+
 impl ForwardConfig {
     /// Owner ids for `channel` (explicit `owners`, else explicit non-wildcard `approvers`).
     pub fn owners_of(&self, channel: &str) -> Vec<String> {
@@ -264,6 +271,15 @@ pub struct ApprovalsConfig {
     /// call is refused *for that branch* and the refusal text suggests a reversible
     /// alternative (§0-2 #04).
     pub tier3_fallback: bool,
+    /// gen2-412 (§0-2 #08): the risk preset per trust level of whoever drives the session —
+    /// `owner` (CLI/TUI/schedule, or a chat sender listed in `forward.owners`), `channel`
+    /// (another person on a connected chat), `stranger` (webhooks, e-mail and other
+    /// untrusted inbound channels). Missing entries: `owner`/`channel` use `preset`,
+    /// `stranger` defaults to `strict`. Tier 3 stays the hard floor whatever is set.
+    pub trust_presets: BTreeMap<String, crate::risk::Preset>,
+    /// gen2-413 (§0-2 #09): `ark doctor` warns when the owner was asked more than this many
+    /// times a day on average over the last 7 days (0 = never warn).
+    pub fatigue_daily_asks: u32,
     pub exec: ExecPolicy,
     pub elevated: ElevatedConfig,
     pub forward: ForwardConfig,
@@ -287,6 +303,8 @@ impl Default for ApprovalsConfig {
             grant_ttl_days: 7,
             preset: crate::risk::Preset::Standard,
             tier3_fallback: true,
+            trust_presets: BTreeMap::new(),
+            fatigue_daily_asks: 30,
             exec: ExecPolicy::default(),
             elevated: ElevatedConfig::default(),
             forward: ForwardConfig::default(),
@@ -1106,7 +1124,138 @@ pub fn describe(cfg: &ApprovalsConfig, data: &Path, session: Option<&str>) -> se
         "strict_inline_eval": cfg.strict_inline_eval,
         "cron_mode": format!("{:?}", cfg.cron_mode).to_lowercase(),
         "unattended_mode": format!("{:?}", cfg.unattended_mode).to_lowercase(),
+        "trust_presets": {"owner": cfg.preset_for("owner").as_str(), "channel": cfg.preset_for("channel").as_str(), "stranger": cfg.preset_for("stranger").as_str()},
+        "deferred": deferred(data).len(),
+        "fatigue": fatigue(data, 7),
     })
+}
+
+// ───────────────────────── approval fatigue (gen2-413) ─────────────────────────
+
+/// One question put to a human, as `asks.jsonl` keeps it (no inputs, no secrets).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AskRecord {
+    pub at: u64,
+    pub tool: String,
+    pub gate: String,
+    pub tier: u8,
+    /// `allow` | `deny` | `timeout`.
+    pub outcome: String,
+    pub wait_ms: u64,
+    /// Gate reason (what kept being asked about), truncated.
+    pub reason: String,
+}
+
+pub fn asks_path(data: &Path) -> PathBuf {
+    dir(data).join("asks.jsonl")
+}
+
+/// Append one human ask (best effort: monitoring must never break the gate).
+pub fn record_ask(data: &Path, mut r: AskRecord) {
+    use std::io::Write;
+    r.reason = r.reason.chars().take(200).collect();
+    let p = asks_path(data);
+    if let Some(d) = p.parent() {
+        let _ = std::fs::create_dir_all(d);
+    }
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&p) {
+        let _ = writeln!(f, "{}", serde_json::to_string(&r).unwrap_or_default());
+    }
+}
+
+/// Approval-fatigue numbers over the last `days` days.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct Fatigue {
+    pub days: u64,
+    pub asks: usize,
+    pub per_day: f64,
+    pub denied: usize,
+    pub timed_out: usize,
+    pub deny_rate: f64,
+    pub mean_wait_secs: f64,
+    /// (reason, times asked, times allowed) — almost always allowed ⇒ pre-authorise it.
+    pub mostly_allowed: Vec<(String, usize, usize)>,
+}
+
+pub fn fatigue(data: &Path, days: u64) -> Fatigue {
+    let since = unix_now().saturating_sub(days.max(1) * 86_400);
+    let recs: Vec<AskRecord> = std::fs::read_to_string(asks_path(data)).unwrap_or_default().lines().filter_map(|l| serde_json::from_str::<AskRecord>(l).ok()).filter(|r| r.at >= since).collect();
+    let asks = recs.len();
+    let denied = recs.iter().filter(|r| r.outcome != "allow").count();
+    let timed_out = recs.iter().filter(|r| r.outcome == "timeout").count();
+    let mut by: BTreeMap<String, (usize, usize)> = BTreeMap::new();
+    for r in &recs {
+        let e = by.entry(r.reason.clone()).or_default();
+        e.0 += 1;
+        if r.outcome == "allow" {
+            e.1 += 1;
+        }
+    }
+    let mut mostly_allowed: Vec<(String, usize, usize)> = by.into_iter().filter(|(_, (n, ok))| *n >= 3 && *ok * 10 >= *n * 9).map(|(r, (n, ok))| (r, n, ok)).collect();
+    mostly_allowed.sort_by(|a, b| b.1.cmp(&a.1));
+    mostly_allowed.truncate(5);
+    Fatigue {
+        days: days.max(1),
+        asks,
+        per_day: asks as f64 / days.max(1) as f64,
+        denied,
+        timed_out,
+        deny_rate: if asks == 0 { 0.0 } else { denied as f64 / asks as f64 },
+        mean_wait_secs: if asks == 0 { 0.0 } else { recs.iter().map(|r| r.wait_ms).sum::<u64>() as f64 / asks as f64 / 1000.0 },
+        mostly_allowed,
+    }
+}
+
+/// The doctor line: `Err` (a warning) when the owner is asked more than `threshold` a day.
+pub fn fatigue_check(data: &Path, threshold: u32) -> Result<String, String> {
+    let f = fatigue(data, 7);
+    let line = format!("{:.1} asks/day over 7 days, {:.0}% denied ({} timed out), mean wait {:.0}s", f.per_day, f.deny_rate * 100.0, f.timed_out, f.mean_wait_secs);
+    if threshold > 0 && f.per_day > threshold as f64 {
+        let hint = f.mostly_allowed.first().map(|(r, n, ok)| format!("; \"{r}\" was allowed {ok}/{n} times — pre-authorise it (task envelope, `ark approvals suggest`)")).unwrap_or_default();
+        return Err(format!("{line} — above approvals.fatigue_daily_asks = {threshold}: approval fatigue makes people click Allow blindly{hint}"));
+    }
+    Ok(line)
+}
+
+/// gen2-409 (§0-2 #05): pending deferred calls of the same kind (tool + tier + reason),
+/// so the owner previews them together and answers a whole group at once.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct DeferredGroup {
+    pub tool: String,
+    pub tier: u8,
+    pub reason: String,
+    pub ids: Vec<String>,
+    /// Impact lines of the members (what each would do), for the preview.
+    pub impacts: Vec<String>,
+}
+
+pub fn deferred_groups(data: &Path) -> Vec<DeferredGroup> {
+    let mut out: Vec<DeferredGroup> = Vec::new();
+    for d in deferred(data) {
+        match out.iter_mut().find(|g| g.tool == d.tool && g.tier == d.tier && g.reason == d.reason) {
+            Some(g) => {
+                g.ids.push(d.id);
+                g.impacts.push(d.summary);
+            }
+            None => out.push(DeferredGroup { tool: d.tool, tier: d.tier, reason: d.reason, ids: vec![d.id], impacts: vec![d.summary] }),
+        }
+    }
+    out
+}
+
+/// Answer every member of a group in one go (one confirmation for "delete these 40 temp
+/// branches"). Tier 3 is never batched: each irreversible call is confirmed on its own.
+pub fn resolve_group(data: &Path, group: &DeferredGroup, allow: bool, ttl_days: u64, by: &str) -> Result<usize, String> {
+    if allow && group.tier >= 3 && group.ids.len() > 1 {
+        return Err(format!("tier 3 is never approved in bulk: answer the {} calls one by one", group.ids.len()));
+    }
+    let mut n = 0;
+    for id in &group.ids {
+        if resolve_deferred_by(data, id, allow, ttl_days, by)?.is_some() {
+            n += 1;
+        }
+    }
+    Ok(n)
 }
 
 #[cfg(test)]
@@ -1277,5 +1426,55 @@ mod tests {
         // Sequential ops in one batch see each other's effect (the second op's `old` is gone).
         let e = stage_memory_writes(&d, "s1", "memory", &[MemoryWrite { action: "remove".into(), text: None, old: Some("second old note".into()) }, MemoryWrite { action: "remove".into(), text: None, old: Some("second old note".into()) }]).unwrap_err();
         assert!(e.contains("no unique entry matching `old`"), "{e}");
+    }
+
+    #[test]
+    fn deferred_calls_of_one_kind_are_previewed_and_answered_together() {
+        let t = ark_core::tmp::TempDir::new("ark-appr-group");
+        let d = t.to_path_buf();
+        for b in ["tmp-1", "tmp-2", "tmp-3"] {
+            defer(&d, &format!("s-{b}"), "sh", &format!("git push origin --delete {b}"), 2, "tier 2: deletes a remote branch").unwrap();
+        }
+        defer(&d, "s9", "sh", "aws s3 rb s3://a", 3, "tier 3: deletes a bucket").unwrap();
+        defer(&d, "s10", "sh", "aws s3 rb s3://b", 3, "tier 3: deletes a bucket").unwrap();
+        let g = deferred_groups(&d);
+        assert_eq!(g.len(), 2, "{g:?}");
+        assert_eq!((g[0].ids.len(), g[0].impacts[1].as_str()), (3, "git push origin --delete tmp-2"));
+        assert_eq!(resolve_group(&d, &g[0], true, 7, "cli").unwrap(), 3, "one confirmation for the whole group");
+        assert_eq!(deferred(&d).len(), 2);
+        assert!(resolve_group(&d, &g[1], true, 7, "cli").unwrap_err().contains("never approved in bulk"));
+        assert_eq!(resolve_group(&d, &g[1], false, 7, "cli").unwrap(), 2, "denying in bulk is fine");
+        let q: QueueFile = serde_json::from_str(&std::fs::read_to_string(queue_path(&d)).unwrap()).unwrap();
+        assert!(q.items.iter().all(|i| i.answered_by == "cli"), "the approver is recorded");
+    }
+
+    #[test]
+    fn trust_levels_pick_their_own_preset() {
+        let mut c = ApprovalsConfig::default();
+        assert_eq!((c.preset_for("owner"), c.preset_for("channel"), c.preset_for("stranger")), (crate::risk::Preset::Standard, crate::risk::Preset::Standard, crate::risk::Preset::Strict));
+        c.trust_presets.insert("owner".into(), crate::risk::Preset::Relaxed);
+        assert_eq!(c.preset_for("owner"), crate::risk::Preset::Relaxed);
+        let c: ApprovalsConfig = serde_json::from_value(json!({"trust_presets": {"channel": "strict", "stranger": "standard"}})).unwrap();
+        assert_eq!((c.preset_for("channel"), c.preset_for("stranger")), (crate::risk::Preset::Strict, crate::risk::Preset::Standard));
+    }
+
+    #[test]
+    fn fatigue_counts_asks_denials_and_waits_and_warns_over_the_threshold() {
+        let t = ark_core::tmp::TempDir::new("ark-appr-fatigue");
+        let d = t.to_path_buf();
+        assert!(fatigue_check(&d, 30).is_ok(), "no asks, no warning");
+        let now = unix_now();
+        for i in 0..20u64 {
+            let outcome = if i < 15 { "allow" } else if i < 19 { "deny" } else { "timeout" };
+            let reason = if i < 15 { "exec policy: `cargo` not on the allowlist" } else { "egress" };
+            record_ask(&d, AskRecord { at: now - i, tool: "shell".into(), gate: "exec".into(), tier: 2, outcome: outcome.into(), wait_ms: 2000, reason: reason.into() });
+        }
+        let f = fatigue(&d, 7);
+        assert_eq!((f.asks, f.denied, f.timed_out), (20, 5, 1));
+        assert!((f.deny_rate - 0.25).abs() < 1e-9 && (f.mean_wait_secs - 2.0).abs() < 1e-9, "{f:?}");
+        assert_eq!(f.mostly_allowed[0].0, "exec policy: `cargo` not on the allowlist");
+        assert!(fatigue_check(&d, 30).is_ok(), "20 in 7 days is under 30/day");
+        let e = fatigue_check(&d, 2).unwrap_err();
+        assert!(e.contains("approval fatigue") && e.contains("pre-authorise"), "{e}");
     }
 }

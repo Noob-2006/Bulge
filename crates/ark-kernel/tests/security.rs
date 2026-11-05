@@ -705,6 +705,8 @@ fn tier_three_is_allow_once_only_and_queued_calls_reach_the_chat() {
     assert!(asked.iter().all(|a| a.tier == 3 && a.irreversible()), "{asked:?}");
     assert!(gates.iter().filter(|(_, v)| v.starts_with("allow")).all(|(_, v)| v == "allow"), "an always answer is downgraded to once: {gates:?}");
     assert!(ap::grants(&e.k.paths.data).is_empty(), "no durable grant for the hard floor");
+    let f = ap::fatigue(&e.k.paths.data, 1);
+    assert_eq!((f.asks, f.denied), (2, 0), "gen2-413: every human ask is counted: {f:?}");
 
     // Unattended: queued for the owner, and the chat surfaces get it with a `q-` id.
     let r2 = rec(Approval::Once);

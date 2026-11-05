@@ -70,6 +70,27 @@ pub fn origin_of(source: &str, model: &str) -> Origin {
     o
 }
 
+/// Trust level of whoever drives a session (gen2-412): `owner` (the operator's own surfaces
+/// and schedules, or a chat sender listed as owner), `stranger` (webhooks, e-mail and other
+/// channels whose inbound text is wrapped as untrusted, machine APIs), `channel` (anyone else
+/// on a connected chat).
+pub fn trust_of(cfg: &crate::config::Config, source: &str) -> &'static str {
+    let Some(rest) = source.strip_prefix("channel:") else {
+        return match source {
+            "api" | "openai" | "a2a" | "mcp-event" | "webhook" => "stranger",
+            _ => "owner",
+        };
+    };
+    let (ch, sender) = rest.split_once(':').unwrap_or((rest, ""));
+    if cfg.approvals.forward.is_owner(ch, sender) {
+        "owner"
+    } else if cfg.security.external_content.channels.iter().any(|c| c == ch) || matches!(ch, "webhook" | "msgraph_webhook") {
+        "stranger"
+    } else {
+        "channel"
+    }
+}
+
 enum Context {
     Attended,
     Cron,
@@ -500,7 +521,9 @@ impl Runtime {
         }
         let tier = assessment.tier;
         let tainted = self.context_taint(log);
-        let preset = self.cfg.approvals.preset;
+        // gen2-412: owner wide, strangers strict — the preset follows who drives the session.
+        let trust = trust_of(&self.cfg, &last_source(log));
+        let preset = self.cfg.approvals.preset_for(trust);
         let envelope_open = envelope::active(&self.paths.data, &log.id);
         let in_envelope = envelope_open.as_ref().filter(|e| tier <= preset.envelope_ceiling() && e.covers(&cand, tier)).cloned();
 
@@ -741,10 +764,12 @@ impl Runtime {
         if self.has_hooks(HookEvent::PreApprovalRequest) {
             self.fire(Some(log), HookEvent::PreApprovalRequest, None, ap_payload(), "")?;
         }
+        let asked_at = std::time::Instant::now();
         let answer = {
             let _w = ap::human_wait(&log.id, Duration::from_secs(a.timeout_secs));
             self.approver.approve(&req)
         };
+        let waited = asked_at.elapsed();
         // A smart-DENY override is one operation: nothing persists. Neither does a tier-3
         // approval (srv-017): the hard floor asks every time, so "always" is never remembered.
         let answer = match answer {
@@ -777,6 +802,11 @@ impl Runtime {
             }
             Approval::Deny => ("deny", "deny".to_string()),
         };
+        // gen2-413: every human ask is counted (asks/day, deny rate, wait) for `ark doctor`.
+        ap::record_ask(
+            &data,
+            ap::AskRecord { at: crate::util::unix_now().max(0) as u64, tool: tool.into(), gate: gname.clone(), tier: tier.as_u8(), outcome: if label.starts_with("allow") { "allow" } else if label == "deny (timeout)" { "timeout" } else { "deny" }.into(), wait_ms: waited.as_millis() as u64, reason: d.reason.clone() },
+        );
         // srv-018: the record names who answered (a chat sender, else the operator's surface).
         let label = match ap::take_answered_by(&req.id) {
             Some(who) => format!("{label} by {who}"),
@@ -1350,6 +1380,21 @@ mod tests {
         assert!(cron_prompt_threat("cronjob_manage", &json!({"prompt": "summarise the open issues"})).is_none(), "a clean prompt still passes");
         assert!(cron_prompt_threat("web_fetch", &poisoned).is_none(), "unrelated tools are not scanned");
         assert!(cron_prompt_threat("cronjob_manage", &json!({"action": "list"})).is_none(), "no prompt, nothing to scan");
+    }
+
+    #[test]
+    fn trust_follows_who_drives_the_session() {
+        let mut cfg = crate::config::Config::default();
+        cfg.approvals.forward.owners.insert("telegram".into(), vec!["42".into()]);
+        assert_eq!(trust_of(&cfg, "cli"), "owner");
+        assert_eq!(trust_of(&cfg, "schedule"), "owner");
+        assert_eq!(trust_of(&cfg, "channel:telegram:42"), "owner");
+        assert_eq!(trust_of(&cfg, "channel:telegram:7"), "channel");
+        assert_eq!(trust_of(&cfg, "channel:email:x@y"), "stranger");
+        assert_eq!(trust_of(&cfg, "webhook"), "stranger");
+        // The default: strangers get the strict preset, the owner the configured one.
+        assert_eq!(cfg.approvals.preset_for(trust_of(&cfg, "channel:gmail:z")), ark_security::risk::Preset::Strict);
+        assert_eq!(cfg.approvals.preset_for(trust_of(&cfg, "cli")), cfg.approvals.preset);
     }
 
     #[test]
