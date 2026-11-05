@@ -39,6 +39,9 @@ pub struct MemRow {
     /// `provider/model` of `vec` (empty = not embedded yet).
     pub model: String,
     pub vec: Vec<f32>,
+    /// Tenant of the origin session (srv-037 / ent-050); '' = default organization.
+    pub org: String,
+    pub team: String,
 }
 
 impl MemRow {
@@ -108,8 +111,36 @@ fn apply_op(c: &Connection, v: &Value) -> Result<(), String> {
     }
 }
 
+/// A memory belongs to the tenant of the session that wrote it (ent-050). The ledger stays the
+/// truth: the tag is derived from the session stamps, so a rebuild re-derives it.
+fn tag_tenants(data: &Path) -> Result<(), String> {
+    let stamps = ark_kernel::tenancy::session_tenants(data);
+    if stamps.is_empty() {
+        return Ok(());
+    }
+    sqlindex::with(data, |c| {
+        let origins: Vec<String> = {
+            let mut st = c.prepare("SELECT DISTINCT origin FROM memories WHERE origin != '' AND org = '' AND team = ''").map_err(err)?;
+            let rows = st.query_map([], |r| r.get::<_, String>(0)).map_err(err)?;
+            rows.flatten().collect()
+        };
+        for o in origins {
+            if let Some(t) = stamps.get(&o) {
+                c.execute("UPDATE memories SET org=?2, team=?3 WHERE origin=?1", params![o, t.org, t.team]).map_err(err)?;
+            }
+        }
+        Ok(())
+    })
+}
+
 /// Bring the table up to date: legacy import, ledger tail, MEMORY.md / USER.md mirror.
 pub fn sync(data: &Path) -> Result<(), String> {
+    let r = sync_rows(data);
+    tag_tenants(data)?;
+    r
+}
+
+fn sync_rows(data: &Path) -> Result<(), String> {
     import_legacy(data)?;
     sqlindex::with(data, |c| {
         let p = ledger_path(data);
@@ -208,7 +239,8 @@ fn import_legacy(data: &Path) -> Result<usize, String> {
 /// Record a new memory: ledger first (the source of truth), then the table.
 pub fn add(data: &Path, r: &MemRow) -> Result<(), String> {
     append_ledger(data, &add_op(r))?;
-    sqlindex::with(data, |c| insert(c, r))
+    sqlindex::with(data, |c| insert(c, r))?;
+    tag_tenants(data)
 }
 
 pub fn forget(data: &Path, id: &str) -> Result<bool, String> {
@@ -244,7 +276,7 @@ pub fn touch(data: &Path, ids: &[&str], now: u64) {
 
 pub fn all(data: &Path) -> Result<Vec<MemRow>, String> {
     sqlindex::with(data, |c| {
-        let mut st = c.prepare("SELECT id, text, category, source, trust, importance, created_ms, last_used_ms, use_count, origin, model, vec FROM memories ORDER BY created_ms, id").map_err(err)?;
+        let mut st = c.prepare("SELECT id, text, category, source, trust, importance, created_ms, last_used_ms, use_count, origin, model, vec, org, team FROM memories ORDER BY created_ms, id").map_err(err)?;
         let rows = st
             .query_map([], |r| {
                 Ok(MemRow {
@@ -260,6 +292,8 @@ pub fn all(data: &Path) -> Result<Vec<MemRow>, String> {
                     origin: r.get(9)?,
                     model: r.get(10)?,
                     vec: r.get::<_, Option<Vec<u8>>>(11)?.map(|b| blob_to_vec(&b)).unwrap_or_default(),
+                    org: r.get(12)?,
+                    team: r.get(13)?,
                 })
             })
             .map_err(err)?;

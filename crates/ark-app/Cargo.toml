@@ -34,4 +34,6 @@ regex.workspace = true
 ring.workspace = true
 ureq.workspace = true
 # Decode petdex WebP spritesheets (already in the tree through ark-media).
+# SAML (ent-048): a strict, pull-based XML tokenizer; ark builds its own tree for exclusive C14N.
+quick-xml = { version = "0.42", default-features = false }
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp"] }

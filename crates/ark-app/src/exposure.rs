@@ -131,6 +131,11 @@ pub struct TokenConfig {
     /// Free-text label for logs/audit (never the token).
     #[serde(default)]
     pub name: Option<String>,
+    /// Organization / team the token is limited to (ent-050); unset = installation-wide.
+    #[serde(default)]
+    pub org: String,
+    #[serde(default)]
+    pub team: String,
 }
 
 fn d_scope() -> String {

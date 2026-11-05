@@ -19,7 +19,7 @@ use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 
 pub const COMMANDS: &[&str] = &["accounts", "service-accounts", "retention", "ediscovery", "quota"];
-pub const VALUE_FLAGS: &[&str] = &["role", "ttl-days", "grace-hours", "description", "owner", "team", "since", "until", "keyword", "matter", "by", "actor", "outcome", "kind", "anchor", "custodian"];
+pub const VALUE_FLAGS: &[&str] = &["role", "ttl-days", "grace-hours", "description", "owner", "team", "since", "until", "keyword", "matter", "by", "actor", "outcome", "kind", "anchor", "custodian", "org"];
 pub const BOOL_FLAGS: &[&str] = &["keep-pii", "ready"];
 
 pub fn dispatch(cmd: &str, a: &Args, _raw: &[String]) -> Option<R> {
@@ -100,7 +100,11 @@ pub fn accounts(paths: &Paths, a: &Args, off: usize) -> R {
             let name = a.need(off + 1, "name")?;
             let role = a.val("role").ok_or("--role admin|operator|user|auditor (or scope:read …) is required")?;
             let ttl = a.num::<u64>("ttl-days")?.unwrap_or(90);
-            let (acct, token) = ark_app::identity::issue(d, name, role, ttl, a.val("description").unwrap_or(""), &me)?;
+            let (mut acct, token) = ark_app::identity::issue(d, name, role, ttl, a.val("description").unwrap_or(""), &me)?;
+            // ent-050: limit the account to an organization / team (SCIM for one org, a team bot).
+            if a.val("org").is_some() || a.val("team").is_some() {
+                acct = ark_app::identity::set_tenant(d, name, a.val("org").unwrap_or(""), a.val("team").unwrap_or(""), &me)?;
+            }
             out(format!("{token}\n# service account `{}` ({}), expires {} — the token is shown once; store it now (e.g. `ark secrets set`).", acct.name, acct.role, ts(acct.expires_ms)))
         }
         "rotate" => {
@@ -140,6 +144,8 @@ pub fn audit_sub(paths: &Paths, a: &Args) -> Option<R> {
                 after_ms: a.val("since").map(|v| parse_when(v, now)).transpose()?,
                 before_ms: a.val("until").map(|v| parse_when(v, now)).transpose()?,
                 limit: a.num::<usize>("limit")?.unwrap_or(100),
+                org: a.val("org").map(String::from),
+                team: a.val("team").map(String::from),
             };
             let v = audit::query(d, &q);
             if a.flag("json") {

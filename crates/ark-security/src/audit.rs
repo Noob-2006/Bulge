@@ -95,11 +95,20 @@ pub struct Event {
     pub outcome: String,
     pub session: String,
     pub detail: Value,
+    /// Organization / team the record belongs to (ent-050); empty = the default organization.
+    pub org: String,
+    pub team: String,
 }
 
 impl Event {
     pub fn new(kind: &str, actor: Actor, target: &str, outcome: &str) -> Event {
-        Event { kind: kind.into(), actor, target: target.into(), outcome: outcome.into(), session: String::new(), detail: Value::Null }
+        Event { kind: kind.into(), actor, target: target.into(), outcome: outcome.into(), session: String::new(), detail: Value::Null, org: String::new(), team: String::new() }
+    }
+    /// Tag the record with its tenant (ent-050).
+    pub fn tenant(mut self, org: &str, team: &str) -> Event {
+        self.org = org.into();
+        self.team = team.into();
+        self
     }
     pub fn session(mut self, s: &str) -> Event {
         self.session = s.into();
@@ -298,6 +307,13 @@ pub fn emit(data: &Path, ev: Event) -> Result<u64, String> {
     if !ev.detail.is_null() {
         body["detail"] = clean_value(&ev.detail);
     }
+    // Tenant tags are written only when set, so single-tenant records keep their exact shape.
+    if !ev.org.is_empty() && ev.org != "default" {
+        body["org"] = Value::String(clean(&ev.org));
+    }
+    if !ev.team.is_empty() {
+        body["team"] = Value::String(clean(&ev.team));
+    }
     let hash = chain_hash(&h.hash, &body);
     body["hash"] = Value::String(hash.clone());
     let p = live(data);
@@ -396,6 +412,10 @@ pub struct Query {
     pub after_ms: Option<u64>,
     pub before_ms: Option<u64>,
     pub limit: usize,
+    /// Only this organization's records (`default` also matches untagged ones).
+    pub org: Option<String>,
+    /// Only this team's records plus the organization-wide ones.
+    pub team: Option<String>,
 }
 
 impl Query {
@@ -407,6 +427,8 @@ impl Query {
             && self.outcome.as_deref().is_none_or(|x| s("outcome") == x)
             && self.after_ms.is_none_or(|t| r["ts"].as_u64().unwrap_or(0) >= t)
             && self.before_ms.is_none_or(|t| r["ts"].as_u64().unwrap_or(0) < t)
+            && self.org.as_deref().is_none_or(|o| r["org"].as_str().unwrap_or("default") == o)
+            && self.team.as_deref().is_none_or(|t| r["team"].as_str().is_none_or(|x| x.is_empty() || x == t))
     }
 }
 
@@ -667,5 +689,21 @@ mod tests {
         assert_eq!(query(d, &q).len(), 1);
         assert_eq!(query(d, &Query { actor: Some("channel:slack:U1".into()), ..Default::default() }).len(), 1);
         assert_eq!(Actor::parse_label("sso:bob"), Actor::new("sso", "bob"));
+    }
+
+    #[test]
+    fn records_carry_their_tenant_and_queries_stay_inside_it() {
+        let g = G(tmp());
+        let d = &g.0;
+        emit(d, Event::new("x", Actor::system(), "legacy", "ok")).unwrap();
+        emit(d, Event::new("x", Actor::system(), "eng", "ok").tenant("acme", "eng")).unwrap();
+        emit(d, Event::new("x", Actor::system(), "ops", "ok").tenant("acme", "ops")).unwrap();
+        emit(d, Event::new("x", Actor::system(), "acme-wide", "ok").tenant("acme", "")).unwrap();
+        assert!(all(d)[0].get("org").is_none(), "untagged records keep their shape");
+        let targets = |q: Query| query(d, &q).iter().map(|r| r["target"].as_str().unwrap().to_string()).collect::<Vec<_>>();
+        assert_eq!(targets(Query { org: Some("default".into()), ..Default::default() }), vec!["legacy"]);
+        assert_eq!(targets(Query { org: Some("acme".into()), ..Default::default() }), vec!["eng", "ops", "acme-wide"]);
+        assert_eq!(targets(Query { org: Some("acme".into()), team: Some("eng".into()), ..Default::default() }), vec!["eng", "acme-wide"]);
+        assert!(verify(d, None).ok);
     }
 }

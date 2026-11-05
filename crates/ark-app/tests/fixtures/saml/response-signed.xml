@@ -1,0 +1,24 @@
+<samlp:Response xmlns:samlp="urn:oasis:names:tc:SAML:2.0:protocol" xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion" ID="_resp1" Version="2.0" IssueInstant="2026-11-05T12:00:00Z" Destination="https://ark.test.example/auth/saml/acs" InResponseTo="_req1">
+  <saml:Issuer>https://idp.test.example/saml</saml:Issuer>
+  <samlp:Status><samlp:StatusCode Value="urn:oasis:names:tc:SAML:2.0:status:Success"/></samlp:Status>
+  <saml:Assertion xmlns:xs="http://www.w3.org/2001/XMLSchema" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" ID="_a1" Version="2.0" IssueInstant="2026-11-05T12:00:00Z">
+    <saml:Issuer>https://idp.test.example/saml</saml:Issuer><ds:Signature xmlns:ds="http://www.w3.org/2000/09/xmldsig#"><ds:SignedInfo xmlns:ds="http://www.w3.org/2000/09/xmldsig#"><ds:CanonicalizationMethod Algorithm="http://www.w3.org/2001/10/xml-exc-c14n#"></ds:CanonicalizationMethod><ds:SignatureMethod Algorithm="http://www.w3.org/2001/04/xmldsig-more#rsa-sha256"></ds:SignatureMethod><ds:Reference URI="#_a1"><ds:Transforms><ds:Transform Algorithm="http://www.w3.org/2000/09/xmldsig#enveloped-signature"></ds:Transform><ds:Transform Algorithm="http://www.w3.org/2001/10/xml-exc-c14n#"></ds:Transform></ds:Transforms><ds:DigestMethod Algorithm="http://www.w3.org/2001/04/xmlenc#sha256"></ds:DigestMethod><ds:DigestValue>keP38QE5g8hVbezWEaQr+bFd8nj5ESaM0tp/Nuv3jq4=</ds:DigestValue></ds:Reference></ds:SignedInfo><ds:SignatureValue>D9IePl2t87LId2xMpgv8xinu/8YowcjGHkxCcyveikCNusBhLVfNlOQC+kR2tTFeFRmXWqrMtklJ/fHVd/0av34Xu8DiZxoR1vM60z0FrvNWlNjdeZb+QtPi0CuTJfSnTfCoq1S71gz2CnUainrX3qDkNt01bdVrtOGQZb0Q+T/8qq9JGm5HepJu6vF7r/31PuFEmDw2fCRV2z5TsRevxLbwInVJtMH2BG9g/CwwZP2osSQ2II8PkrEpfvpddnW/CNypcP72IaXGa7ZgaMsOgTOwp6ALofo+Okh7gux3IgLEYlQoJPe8oEiZ6cT9P4EvrRMsnprL/e7+12tIU/hfrQ==</ds:SignatureValue></ds:Signature>
+    <saml:Subject>
+      <saml:NameID Format="urn:oasis:names:tc:SAML:1.1:nameid-format:emailAddress">alice@corp.test.example</saml:NameID>
+      <saml:SubjectConfirmation Method="urn:oasis:names:tc:SAML:2.0:cm:bearer">
+        <saml:SubjectConfirmationData InResponseTo="_req1" NotOnOrAfter="2026-11-05T12:05:00Z" Recipient="https://ark.test.example/auth/saml/acs"/>
+      </saml:SubjectConfirmation>
+    </saml:Subject>
+    <saml:Conditions NotBefore="2026-11-05T11:59:00Z" NotOnOrAfter="2026-11-05T12:05:00Z">
+      <saml:AudienceRestriction><saml:Audience>https://ark.test.example/auth/saml/metadata</saml:Audience></saml:AudienceRestriction>
+    </saml:Conditions>
+    <saml:AuthnStatement AuthnInstant="2026-11-05T12:00:00Z" SessionIndex="_s1" SessionNotOnOrAfter="2026-11-05T20:00:00Z">
+      <saml:AuthnContext><saml:AuthnContextClassRef>urn:oasis:names:tc:SAML:2.0:ac:classes:PasswordProtectedTransport</saml:AuthnContextClassRef></saml:AuthnContext>
+    </saml:AuthnStatement>
+    <saml:AttributeStatement>
+      <saml:Attribute Name="email"><saml:AttributeValue xsi:type="xs:string">alice@corp.test.example</saml:AttributeValue></saml:Attribute>
+      <saml:Attribute Name="displayName"><saml:AttributeValue xsi:type="xs:string">Test User</saml:AttributeValue></saml:Attribute>
+      <saml:Attribute Name="groups"><saml:AttributeValue xsi:type="xs:string">ark-ops</saml:AttributeValue><saml:AttributeValue xsi:type="xs:string">eng</saml:AttributeValue></saml:Attribute>
+    </saml:AttributeStatement>
+  </saml:Assertion>
+</samlp:Response>

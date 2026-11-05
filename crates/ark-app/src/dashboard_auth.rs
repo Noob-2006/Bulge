@@ -100,6 +100,8 @@ pub struct AuthConfig {
     pub secret: String,
     pub basic: BasicConfig,
     pub self_hosted: SelfHostedConfig,
+    /// `[app.auth.saml]` (ent-048), used with `provider = "saml"`.
+    pub saml: crate::saml::SamlConfig,
 }
 
 impl Default for AuthConfig {
@@ -112,6 +114,7 @@ impl Default for AuthConfig {
             secret: String::new(),
             basic: BasicConfig::default(),
             self_hosted: SelfHostedConfig::default(),
+            saml: crate::saml::SamlConfig::default(),
         }
     }
 }
@@ -195,7 +198,16 @@ pub fn mint(secret: &[u8], s: &Session, now: i64, ttl: i64) -> String {
 /// [`mint`] plus the RBAC roles and login kind (`basic`/`sso`/`plugin`) the session was
 /// granted (ent-053): roles are decided once, at login, and travel signed in the token.
 pub fn mint_with(secret: &[u8], s: &Session, roles: &[Role], kind: &str, now: i64, ttl: i64) -> String {
+    mint_team(secret, s, roles, kind, "", now, ttl)
+}
+
+/// [`mint_with`] plus the team an IdP login was mapped to (ent-050, `[app.rbac] teams`).
+#[allow(clippy::too_many_arguments)]
+pub fn mint_team(secret: &[u8], s: &Session, roles: &[Role], kind: &str, team: &str, now: i64, ttl: i64) -> String {
     let mut claims = json!({"sub": s.subject, "exp": now + ttl.max(1), "admin": s.admin});
+    if !team.is_empty() {
+        claims["team"] = json!(team);
+    }
     if !roles.is_empty() {
         claims["roles"] = json!(roles.iter().map(|r| r.as_str()).collect::<Vec<_>>());
     }
@@ -217,6 +229,15 @@ pub fn mint_with(secret: &[u8], s: &Session, roles: &[Role], kind: &str, now: i6
 /// (unknown shape, bad signature, expired) — the caller cannot tell which.
 pub fn open(secret: &[u8], token: &str, now: i64) -> Option<Session> {
     open_with(secret, token, now).map(|(s, _, _)| s)
+}
+
+/// The team claim of a valid session token (empty when none was signed in).
+pub fn open_team(secret: &[u8], token: &str, now: i64) -> String {
+    if open_with(secret, token, now).is_none() {
+        return String::new();
+    }
+    let payload = token.trim().split_once('.').map(|(p, _)| p).unwrap_or("");
+    crypto::b64url_decode(payload).and_then(|raw| serde_json::from_slice::<Value>(&raw).ok()).and_then(|c| c["team"].as_str().map(str::to_string)).unwrap_or_default()
 }
 
 /// [`open`] plus the signed roles and kind (empty when the token predates them).
@@ -532,6 +553,8 @@ fn validate_redirect_uri(uri: &str) -> Result<(), String> {
 enum Selected {
     Basic(Basic),
     Oidc(Arc<Oidc>),
+    /// SAML 2.0 SP with the IdP's verification keys (ent-048).
+    Saml(Vec<crate::xmldsig::Key>),
     Plugin(Arc<dyn Provider>),
     /// A known name that cannot serve here; the string is the operator-facing reason.
     Unsupported(String),
@@ -548,6 +571,11 @@ fn select(cfg: &AuthConfig) -> Selected {
         },
         "self_hosted" | "self-hosted" | "oidc" => match oidc(cfg) {
             Ok(o) => Selected::Oidc(o),
+            Err(e) => Selected::Unsupported(e),
+        },
+        "saml" | "saml2" => match cfg.saml.keys() {
+            Ok(_) if cfg.secret.len() < SECRET_MIN_LEN => Selected::Unsupported(format!("[app.auth] secret is required when `enabled` (at least {SECRET_MIN_LEN} bytes — it signs the session cookie)")),
+            Ok(k) => Selected::Saml(k),
             Err(e) => Selected::Unsupported(e),
         },
         "none" => Selected::Unsupported("dashboard login is off (`[app.auth] provider = \"none\"`); the app token is the only credential".into()),
@@ -591,7 +619,7 @@ pub fn session_from(app: &App, r: &Request) -> Option<Session> {
     match select(cfg) {
         Selected::Oidc(o) => o.verify(bearer).ok(),
         Selected::Plugin(p) => p.verify(bearer).ok(),
-        Selected::Basic(_) | Selected::Unsupported(_) => None,
+        Selected::Basic(_) | Selected::Saml(_) | Selected::Unsupported(_) => None,
     }
 }
 
@@ -603,12 +631,15 @@ pub struct Login {
     /// Email when known, else the subject.
     pub name: String,
     pub roles: Vec<Role>,
+    /// Organization / team reach (ent-050).
+    pub tenant: ark_kernel::tenancy::Viewer,
 }
 
 fn kind_of(cfg: &AuthConfig) -> &'static str {
     match cfg.provider.trim().to_ascii_lowercase().as_str() {
         "" | "basic" => "basic",
         "self_hosted" | "self-hosted" | "oidc" => "sso",
+        "saml" | "saml2" => "saml",
         _ => "plugin",
     }
 }
@@ -627,7 +658,9 @@ pub fn login_from(app: &App, r: &Request) -> Option<Login> {
         return None;
     }
     let now = unix_now();
-    let ours = cookie(r, cfg.cookie_name()).and_then(|t| open_with(cfg.secret.as_bytes(), t, now)).or_else(|| r.bearer().and_then(|t| open_with(cfg.secret.as_bytes(), t, now)));
+    let ours_raw = cookie(r, cfg.cookie_name()).filter(|t| open_with(cfg.secret.as_bytes(), t, now).is_some()).or_else(|| r.bearer().filter(|t| open_with(cfg.secret.as_bytes(), t, now).is_some()));
+    let mut signed_team = ours_raw.map(|t| open_team(cfg.secret.as_bytes(), t, now)).unwrap_or_default();
+    let ours = ours_raw.and_then(|t| open_with(cfg.secret.as_bytes(), t, now));
     let (s, roles, kind) = match ours {
         Some((s, roles, kind)) => {
             let kind = if kind.is_empty() { kind_of(cfg).to_string() } else { kind };
@@ -641,6 +674,7 @@ pub fn login_from(app: &App, r: &Request) -> Option<Login> {
                 Selected::Oidc(o) => {
                     let (s, claims) = o.verify_claims(bearer).ok()?;
                     let groups = identity::groups_from_claims(&claims, app.cfg.rbac.as_ref().map(|r| r.groups_claim.as_str()).unwrap_or("groups"));
+                    signed_team = crate::tenant::login_team(app, &groups);
                     let roles = roles_for(app, "sso", &s, groups).ok()?;
                     (s, roles, "sso".to_string())
                 }
@@ -656,7 +690,8 @@ pub fn login_from(app: &App, r: &Request) -> Option<Login> {
     if ark_kernel::agents::find_login(&app.d.k.paths, &s.subject, s.email.as_deref().unwrap_or("")).is_some_and(|u| u.disabled) {
         return None;
     }
-    Some(Login { kind, name: s.email.clone().unwrap_or_else(|| s.subject.clone()), roles })
+    let tenant = crate::tenant::login_viewer(app, &s.subject, s.email.as_deref().unwrap_or(""), &roles, &signed_team);
+    Some(Login { kind, name: s.email.clone().unwrap_or_else(|| s.subject.clone()), roles, tenant })
 }
 
 fn audit_login(app: &App, r: &Request, kind: &str, who: &str, outcome: &str, detail: Value) {
@@ -680,6 +715,8 @@ pub fn handle(app: &App, r: &Request) -> Response {
         ("POST", "/auth/logout") => logout(cfg, false),
         ("GET", "/auth/whoami") => whoami(app, r),
         ("POST", "/auth/token") => personal_token(app, r),
+        ("GET", "/auth/saml/metadata") => saml_metadata(app),
+        ("POST", "/auth/saml/acs") => saml_acs(app, r),
         _ => not_found(),
     }
 }
@@ -692,6 +729,13 @@ fn login_page(app: &App, r: &Request) -> Response {
             Ok(s) => redirect(&s.url),
             Err(e) => unavailable("self_hosted", &e),
         },
+        Selected::Saml(_) => {
+            let c = &app.cfg.auth.saml;
+            let now = unix_now();
+            let id = crate::saml::new_request(now);
+            let req = crate::saml::authn_request(c, c.sp_entity_id(), c.acs_url(), &id, now);
+            redirect(&crate::saml::redirect_url(c, &req, &crypto::random_token(16)))
+        }
         Selected::Plugin(p) => match p.login_start(&redirect_uri(&app.cfg.auth, r)) {
             Ok(s) => redirect(&s.url),
             Err(e) => {
@@ -740,14 +784,14 @@ fn callback(app: &App, r: &Request) -> Response {
     let (kind, outcome) = match select(cfg) {
         Selected::Oidc(o) => ("sso", o.exchange_claims(code, state, &redirect_uri).map(|(s, c)| (s, identity::groups_from_claims(&c, &groups_claim)))),
         Selected::Plugin(p) => ("plugin", p.exchange(code, state, &redirect_uri).map(|s| (s, vec![]))),
-        Selected::Basic(_) => return failed(400),
+        Selected::Basic(_) | Selected::Saml(_) => return failed(400),
         Selected::Unsupported(reason) => return unavailable(&cfg.provider, &reason),
     };
     match outcome {
         Ok((s, groups)) => match roles_for(app, kind, &s, groups.clone()) {
             Ok(roles) => {
                 audit_login(app, r, kind, s.email.as_deref().unwrap_or(&s.subject), "ok", json!({"subject": s.subject, "groups": groups, "roles": roles.iter().map(|r| r.as_str()).collect::<Vec<_>>()}));
-                with_session_roles(cfg, &s, &roles, kind, redirect("/"))
+                with_session_team(cfg, &s, &roles, kind, &crate::tenant::login_team(app, &groups), redirect("/"))
             }
             Err(e) => {
                 audit_login(app, r, kind, s.email.as_deref().unwrap_or(&s.subject), "deny", json!({"subject": s.subject, "groups": groups, "reason": e}));
@@ -759,6 +803,59 @@ fn callback(app: &App, r: &Request) -> Response {
             // failed (expired / bad signature / wrong audience / unknown key).
             eprintln!("arkd: dashboard auth: login callback failed: {e}");
             failed(status_for(&e))
+        }
+    }
+}
+
+/// `GET /auth/saml/metadata`: the SP metadata to hand to the IdP administrator.
+fn saml_metadata(app: &App) -> Response {
+    let c = &app.cfg.auth.saml;
+    match select(&app.cfg.auth) {
+        Selected::Saml(_) => Response::text(200, &crate::saml::metadata(c, c.sp_entity_id(), c.acs_url())).with_header("content-type", "application/samlmetadata+xml").with_header("cache-control", "no-store"),
+        Selected::Unsupported(reason) => unavailable("saml", &reason),
+        _ => not_found(),
+    }
+}
+
+/// `POST /auth/saml/acs` (HTTP-POST binding): verify the Response, then the same role mapping
+/// and session cookie as an OIDC callback. Exempt from the app-wide Origin check (the IdP's page
+/// posts it); the signed, audience-bound, single-use assertion is the credential.
+fn saml_acs(app: &App, r: &Request) -> Response {
+    let cfg = &app.cfg.auth;
+    let keys = match select(cfg) {
+        Selected::Saml(k) => k,
+        Selected::Unsupported(reason) => return unavailable("saml", &reason),
+        _ => return not_found(),
+    };
+    let form = parse_query(r.body_str());
+    let raw = form.iter().find(|(k, _)| k == "SAMLResponse").map(|(_, v)| v.chars().filter(|c| !c.is_whitespace()).collect::<String>()).unwrap_or_default();
+    let Some(xml) = crypto::b64_decode(&raw).and_then(|b| String::from_utf8(b).ok()) else {
+        audit_login(app, r, "saml", "", "fail", json!({"reason": "no SAMLResponse"}));
+        return failed(400);
+    };
+    let now = unix_now();
+    let c = &cfg.saml;
+    let exp = crate::saml::Expect { sp_entity_id: c.sp_entity_id(), acs_url: c.acs_url(), now };
+    let verified = crate::saml::verify_response(&xml, &keys, c, &exp).and_then(|a| crate::saml::accept(&a, now).map(|_| a));
+    match verified {
+        Ok(a) => {
+            let s = Session { subject: a.subject.clone(), email: a.email.clone(), name: a.name.clone(), expires_at: Some(now + cfg.ttl()), admin: false };
+            let who = s.email.clone().unwrap_or_else(|| s.subject.clone());
+            match roles_for(app, "saml", &s, a.groups.clone()) {
+                Ok(roles) => {
+                    audit_login(app, r, "saml", &who, "ok", json!({"subject": s.subject, "groups": a.groups, "roles": roles.iter().map(|r| r.as_str()).collect::<Vec<_>>(), "assertion": a.id}));
+                    with_session_team(cfg, &s, &roles, "saml", &crate::tenant::login_team(app, &a.groups), redirect("/"))
+                }
+                Err(e) => {
+                    audit_login(app, r, "saml", &who, "deny", json!({"subject": s.subject, "groups": a.groups, "reason": e}));
+                    failed(403)
+                }
+            }
+        }
+        // The browser learns nothing; the reason goes to the audit stream.
+        Err(e) => {
+            audit_login(app, r, "saml", "", "fail", json!({"reason": e}));
+            failed(400)
         }
     }
 }
@@ -796,15 +893,20 @@ fn personal_token(app: &App, r: &Request) -> Response {
     let now = unix_now();
     let left = s.expires_at.map(|e| e - now).unwrap_or(cfg.ttl()).max(60);
     let ttl = want.clamp(60, left.min(cfg.ttl()));
-    let token = mint_with(cfg.secret.as_bytes(), &s, &l.roles, &l.kind, now, ttl);
+    let token = mint_team(cfg.secret.as_bytes(), &s, &l.roles, &l.kind, &l.tenant.team, now, ttl);
     ark_security::audit::record(&app.d.k.paths.data, ark_security::audit::Event::new("token.issue", ark_security::audit::Actor::new(&l.kind, &l.name), "personal", "ok").detail(json!({"ttl_secs": ttl, "roles": l.roles.iter().map(|r| r.as_str()).collect::<Vec<_>>()})));
     Response::json(200, &json!({"token": token, "expires_at": now + ttl, "roles": l.roles.iter().map(|r| r.as_str()).collect::<Vec<_>>()}).to_string()).with_header("cache-control", "no-store")
 }
 
 /// 302 + the session cookie with its roles.
 fn with_session_roles(cfg: &AuthConfig, s: &Session, roles: &[Role], kind: &str, base: Response) -> Response {
+    with_session_team(cfg, s, roles, kind, "", base)
+}
+
+/// 302 + the session cookie with its roles and the team the IdP groups mapped to.
+fn with_session_team(cfg: &AuthConfig, s: &Session, roles: &[Role], kind: &str, team: &str, base: Response) -> Response {
     let ttl = cfg.ttl();
-    let token = mint_with(cfg.secret.as_bytes(), s, roles, kind, unix_now(), ttl);
+    let token = mint_team(cfg.secret.as_bytes(), s, roles, kind, team, unix_now(), ttl);
     base.with_header("set-cookie", &format!("{}={token}; HttpOnly; SameSite=Lax; Path=/; Max-Age={ttl}", cfg.cookie_name())).with_header("cache-control", "no-store")
 }
 

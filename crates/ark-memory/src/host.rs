@@ -45,6 +45,41 @@ fn build_host(cfg: &Config, paths: &Paths) -> Arc<Host> {
     }
 }
 
+/// ARP `kb.search {query, limit?, minScore?}` and `kb.status` (srv-037): the knowledge base
+/// (team bases, notes, documents, long-term memories) for UIs and scripts. The app server puts
+/// the caller's reach in `params._viewer` for organization-bound principals (a client can never
+/// set it); without it (the local socket, the installation owner) nothing is filtered.
+pub fn methods(cfg: &Config, paths: &Paths) -> ark_kernel::daemon::MethodExt {
+    kb_methods_for(host(cfg, paths))
+}
+
+/// [`methods`] over a given host.
+pub fn kb_methods_for(h: Arc<Host>) -> ark_kernel::daemon::MethodExt {
+    Arc::new(move |m: &str, p: &serde_json::Value| {
+        let viewer: Option<ark_kernel::tenancy::Viewer> = p.get("_viewer").and_then(|v| serde_json::from_value(v.clone()).ok());
+        match m {
+            "kb.search" => Some(kb_search(&h, p, viewer.as_ref())),
+            "kb.status" => Some(kb_status(&h, viewer.as_ref())),
+            _ => None,
+        }
+    })
+}
+
+fn kb_search(h: &Host, p: &serde_json::Value, viewer: Option<&ark_kernel::tenancy::Viewer>) -> Result<serde_json::Value, (i32, String)> {
+    let q = p["query"].as_str().map(str::trim).filter(|q| !q.is_empty()).ok_or((-32602, "missing param `query`".to_string()))?;
+    let limit = p["limit"].as_u64().unwrap_or(h.settings.search.max_results as u64).clamp(1, 50) as usize;
+    let min = p["minScore"].as_f64().unwrap_or(h.settings.search.min_score);
+    let o = h.search_as(q, limit, min, &["memory"], viewer).map_err(|e| (-32000, e))?;
+    Ok(serde_json::json!({"mode": o.mode, "results": o.hits.iter().map(|x| serde_json::json!({"path": x.path, "citation": x.citation(), "score": x.score, "snippet": x.snippet, "source": x.source})).collect::<Vec<_>>()}))
+}
+
+fn kb_status(h: &Host, viewer: Option<&ark_kernel::tenancy::Viewer>) -> Result<serde_json::Value, (i32, String)> {
+    h.sync();
+    let all = ark_kernel::tenancy::Viewer::global();
+    let rows = ark_kernel::sqlindex::tenant_files(&h.data, viewer.unwrap_or(&all)).map_err(|e| (-32000, e))?;
+    Ok(serde_json::json!({"documents": rows.iter().map(|(path, org, team, chunks)| serde_json::json!({"path": path, "org": if org.is_empty() { ark_kernel::tenancy::DEFAULT_ORG } else { org }, "team": team, "chunks": chunks})).collect::<Vec<_>>()}))
+}
+
 /// The live [`Host`] for `paths.data` (created on first use, reused afterwards).
 pub fn host(cfg: &Config, paths: &Paths) -> Arc<Host> {
     let mut g = registry().lock().unwrap();

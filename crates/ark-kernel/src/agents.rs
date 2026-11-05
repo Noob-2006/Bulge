@@ -156,10 +156,52 @@ pub fn session_search_schema() -> Value {
     })
 }
 
+/// The sessions session `caller` may see while multi-tenancy is active (ent-050); `None` =
+/// single tenant or no caller (unrestricted).
+pub fn tenant_sessions(store: &Store, caller: &str) -> Option<std::collections::HashSet<String>> {
+    let d = store.root().parent().filter(|d| !caller.is_empty() && crate::tenancy::active(d))?;
+    let reg = crate::tenancy::registry(d);
+    let stamps = crate::tenancy::session_tenants(d);
+    let none = crate::tenancy::Tenant::default();
+    let v = crate::tenancy::Viewer::of_session(stamps.get(caller).unwrap_or(&none));
+    Some(store.list().into_iter().map(|s| s.id).filter(|id| v.sees(stamps.get(id).unwrap_or(&none), &reg)).collect())
+}
+
+/// Session tools acting on another session stay inside the caller's tenant: a foreign session
+/// reads as one that does not exist.
+fn tenant_guard(host: &Host, input: &Value) -> Result<Option<std::collections::HashSet<String>>, String> {
+    let within = tenant_sessions(&host.rt.store, &host.session);
+    if let (Some(w), Some(t)) = (&within, session_arg(input)) {
+        if !w.contains(&t) {
+            return Err(no_session(&t));
+        }
+    }
+    Ok(within)
+}
+
+fn keep_visible(rows: &mut Vec<Value>, within: &Option<std::collections::HashSet<String>>) {
+    if let Some(w) = within {
+        rows.retain(|r| r["id"].as_str().or(r["session_id"].as_str()).is_some_and(|id| w.contains(id)));
+    }
+}
+
 /// `session_search` (kernel tool): search past sessions' messages, read or scroll one
 /// transcript, filter by session/role/time, or summarise the hits per session.
 pub fn session_search(store: &Store, input: &Value) -> String {
-    match session_search_inner(store, input) {
+    session_search_as(store, input, "")
+}
+
+/// [`session_search`] run by session `caller`: while multi-tenancy is active it only reads and
+/// finds sessions of the caller's organization / team (ent-050); another tenant's session looks
+/// like one that does not exist.
+pub fn session_search_as(store: &Store, input: &Value, caller: &str) -> String {
+    let within = tenant_sessions(store, caller);
+    if let (Some(w), Some(sid)) = (&within, session_arg(input)) {
+        if !w.contains(&sid) {
+            return format!("session_search: {}", no_session(&sid));
+        }
+    }
+    match session_search_inner(store, input, within.as_ref()) {
         Ok(s) => s,
         Err(e) => format!("session_search: {e}"),
     }
@@ -298,11 +340,11 @@ fn parse_filters(input: &Value) -> Result<Filters, String> {
 }
 
 /// `session_search` over the SQLite index; `None` = the index is unavailable (scan instead).
-fn session_search_indexed(store: &Store, query: &str, sid: Option<&str>, filters: &Filters, limit: usize, summary: bool) -> Option<String> {
+fn session_search_indexed(store: &Store, query: &str, sid: Option<&str>, filters: &Filters, limit: usize, summary: bool, within: Option<&std::collections::HashSet<String>>) -> Option<String> {
     use crate::sqlindex::{search_messages, session_title, sync_sessions, MsgFilter};
     let data = store.root().parent()?.to_path_buf();
     sync_sessions(&data, store.root()).ok()?;
-    let f = MsgFilter { session: sid.map(str::to_string), roles: filters.roles.as_ref().map(|r| r.iter().map(|x| x.to_string()).collect()), after: filters.after, before: filters.before };
+    let f = MsgFilter { session: sid.map(str::to_string), roles: filters.roles.as_ref().map(|r| r.iter().map(|x| x.to_string()).collect()), after: filters.after, before: filters.before, within: within.map(|w| w.iter().cloned().collect()) };
     let q = query.to_lowercase();
     if !summary {
         let hits = search_messages(&data, query, &f, limit).ok()?;
@@ -337,7 +379,8 @@ fn session_search_indexed(store: &Store, query: &str, sid: Option<&str>, filters
     Some(if blocks.is_empty() { "no matches".into() } else { blocks.join("\n\n") })
 }
 
-fn session_search_inner(store: &Store, input: &Value) -> Result<String, String> {
+fn session_search_inner(store: &Store, input: &Value, within: Option<&std::collections::HashSet<String>>) -> Result<String, String> {
+    let visible = |id: &str| within.is_none_or(|w| w.contains(id));
     let query = arg_str(input, &["query"]).unwrap_or_default();
     let sid = session_arg(input);
     let read = arg_bool(input, &["read"]).unwrap_or(false);
@@ -395,7 +438,7 @@ fn session_search_inner(store: &Store, input: &Value) -> Result<String, String> 
     // JSONL logs) answers queries and summaries; the linear log scan below stays as the
     // fallback when the index cannot be opened.
     if summary || !query.is_empty() {
-        if let Some(out) = session_search_indexed(store, &query, sid.as_deref(), &filters, limit, summary) {
+        if let Some(out) = session_search_indexed(store, &query, sid.as_deref(), &filters, limit, summary, within) {
             return Ok(out);
         }
     }
@@ -404,7 +447,7 @@ fn session_search_inner(store: &Store, input: &Value) -> Result<String, String> 
         let q = query.to_lowercase();
         let mut blocks = Vec::new();
         for info in store.list() {
-            if sid.as_deref().is_some_and(|s| s != info.id) {
+            if sid.as_deref().is_some_and(|s| s != info.id) || !visible(&info.id) {
                 continue;
             }
             let Ok(rows) = messages_of(store, &info.id) else { continue };
@@ -435,7 +478,7 @@ fn session_search_inner(store: &Store, input: &Value) -> Result<String, String> 
         // Browse: the most recently active sessions.
         let mut out = Vec::new();
         for info in store.list() {
-            if sid.as_deref().is_some_and(|s| s != info.id) {
+            if sid.as_deref().is_some_and(|s| s != info.id) || !visible(&info.id) {
                 continue;
             }
             let preview = messages_of(store, &info.id).ok().and_then(|m| m.into_iter().find(|m| m.role == "user")).map(|m| first_sentence(&m.text)).unwrap_or_default();
@@ -453,7 +496,7 @@ fn session_search_inner(store: &Store, input: &Value) -> Result<String, String> 
     let q = query.to_lowercase();
     let mut lines = Vec::new();
     'sessions: for info in store.list() {
-        if sid.as_deref().is_some_and(|s| s != info.id) {
+        if sid.as_deref().is_some_and(|s| s != info.id) || !visible(&info.id) {
             continue;
         }
         let Ok(rows) = messages_of(store, &info.id) else { continue };
@@ -760,6 +803,14 @@ pub struct User {
     pub team: String,
     /// Disabled users keep their history but every login and channel request is refused.
     pub disabled: bool,
+    /// Organization (ent-050); empty = the team's organization, else the default one.
+    /// `*` with the admin role = a global administrator.
+    pub org: String,
+    /// SCIM (ent-049): the IdP's `userName` and `externalId`, and whether the account was
+    /// deleted through SCIM (kept, disabled, hidden from SCIM — history stays attributable).
+    pub user_name: String,
+    pub external_id: String,
+    pub scim_deleted: bool,
 }
 
 pub fn users_path(paths: &Paths) -> PathBuf {
@@ -966,6 +1017,10 @@ impl Runtime {
         };
         let sid = self.create_session(&ws, model.as_deref(), parent, title)?;
         let u = user.and_then(|u| get_user(&self.paths, u));
+        // ent-050: a session started for a registered user belongs to that user's org / team.
+        if let (Some(u), None) = (&u, parent) {
+            crate::tenancy::stamp(&self.paths.data, &sid, &crate::tenancy::user_tenant(&crate::tenancy::registry(&self.paths.data), u));
+        }
         if id == MAIN && u.is_none() && a.identity.is_none() && a.tools_allow.is_none() && a.tools_deny.is_empty() && a.role.is_none() {
             return Ok(sid);
         }
@@ -1048,6 +1103,7 @@ impl Tool for Sessions {
 }
 
 fn sessions_action(host: &Host, input: &Value) -> Result<Value, String> {
+    let within = tenant_guard(host, input)?;
     let rt = &host.rt;
     let action = arg_str(input, &["action"]).map(|a| a.to_ascii_lowercase()).unwrap_or_else(|| "patch".into());
     let target = session_arg(input).unwrap_or_else(|| host.session.clone());
@@ -1153,7 +1209,9 @@ fn sessions_action(host: &Host, input: &Value) -> Result<Value, String> {
             if let Some(g) = arg_str(input, &["group_filter"]) {
                 list_input["group"] = json!(g);
             }
-            Ok(json!({"action": "list", "sessions": list_rows(rt, &list_input)?}))
+            let mut rows = list_rows(rt, &list_input)?;
+            keep_visible(&mut rows, &within);
+            Ok(json!({"action": "list", "sessions": rows}))
         }
         "stop" => {
             ensure_session(rt, &target)?;
@@ -1320,6 +1378,8 @@ fn sessions_create(host: &Host, input: &Value) -> Result<Value, String> {
     let title = arg_str(input, &["title", "label"]);
     let ws = arg_str(input, &["workspace", "cwd"]).map(|w| ark_core::tool::expand_home(&w)).unwrap_or_else(|| host.workspace.clone());
     let sid = rt.create_agent_session(&ws, agent.as_deref(), user.as_deref(), model.as_deref(), None, title.as_deref()).map_err(|e| e.to_string())?;
+    // ent-050: a session created by a tenant's session belongs to that tenant.
+    crate::tenancy::inherit(&rt.paths.data, &sid, &host.session);
     let view = view_of(rt, &sid)?;
     Ok(json!({
         "session_id": sid,
@@ -1368,7 +1428,10 @@ impl Tool for SessionsList {
     fn call(&self, ctx: &ToolCtx, input: Value) -> ToolOutput {
         let Ok(host) = kernel_host(ctx, "sessions_list") else { return ToolOutput::err("sessions_list needs the ark kernel") };
         match list_rows(&host.rt, &input) {
-            Ok(rows) => json_out(&Value::Array(rows)),
+            Ok(mut rows) => {
+                keep_visible(&mut rows, &tenant_sessions(&host.rt.store, &host.session));
+                json_out(&Value::Array(rows))
+            }
             Err(e) => ToolOutput::err(e),
         }
     }
@@ -1415,6 +1478,7 @@ impl Tool for SessionsHistory {
 }
 
 fn sessions_history(host: &Host, input: &Value) -> Result<Value, String> {
+    tenant_guard(host, input)?;
     let sid = session_arg(input).unwrap_or_else(|| host.session.clone());
     let limit = arg_usize(input, &["limit"]).unwrap_or(50).clamp(1, 500);
     let role = arg_str(input, &["role"]).map(|r| {
@@ -1515,6 +1579,7 @@ impl Tool for SessionsSend {
 }
 
 fn sessions_send(host: &Host, input: &Value) -> Result<Value, String> {
+    tenant_guard(host, input)?;
     let rt = &host.rt;
     let sid = session_arg(input).ok_or("sessions_send needs `session`: the target session id (see sessions_list)")?;
     let msg = input.get("message").and_then(Value::as_str).map(str::trim).filter(|m| !m.is_empty()).ok_or("sessions_send needs a non-empty `message`")?.to_string();

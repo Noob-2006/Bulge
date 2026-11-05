@@ -15,6 +15,7 @@ pub mod batch;
 pub mod cluster;
 pub mod completion;
 pub mod enterprise;
+pub mod tenancy;
 pub mod context;
 pub mod confcli;
 pub mod doctor;
@@ -95,6 +96,7 @@ const MODULES: &[Module] = &[
     (users::COMMANDS, users::VALUE_FLAGS, users::BOOL_FLAGS, users::dispatch),
     (audit::COMMANDS, audit::VALUE_FLAGS, audit::BOOL_FLAGS, audit::dispatch),
     (enterprise::COMMANDS, enterprise::VALUE_FLAGS, enterprise::BOOL_FLAGS, enterprise::dispatch),
+    (tenancy::COMMANDS, tenancy::VALUE_FLAGS, tenancy::BOOL_FLAGS, tenancy::dispatch),
     (storage::COMMANDS, storage::VALUE_FLAGS, storage::BOOL_FLAGS, storage::dispatch),
     (triage::COMMANDS, triage::VALUE_FLAGS, triage::BOOL_FLAGS, triage::dispatch),
     (worker::COMMANDS, worker::VALUE_FLAGS, worker::BOOL_FLAGS, worker::dispatch),

@@ -12,6 +12,7 @@ use crate::Host;
 use ark_core::tool::{arg_opt_str, arg_opt_u64};
 use ark_core::{Effect, Tool, ToolCtx, ToolOutput, ToolSpec};
 use ark_kernel::lifecycle::Lifecycle;
+use ark_kernel::tenancy::Viewer;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::{HashMap, VecDeque};
@@ -185,10 +186,10 @@ impl VectorMemory {
 
     /// Raw similarity (1 / (1 + L2)) of every non-quarantined row, best first; `files` adds
     /// the MEMORY.md / USER.md mirror.
-    fn scored(&self, vector: &[f32], files: bool) -> Vec<(Row, f64)> {
+    fn scored(&self, vector: &[f32], files: bool, viewer: Option<&Viewer>) -> Vec<(Row, f64)> {
         let model = self.model();
         let mut rows = self.mem_rows();
-        rows.retain(|r| r.trust != trust::QUARANTINED && (files || !r.is_file_entry()));
+        rows.retain(|r| r.trust != trust::QUARANTINED && (files || !r.is_file_entry()) && visible(viewer, r));
         self.ensure_vectors(&mut rows);
         let mut v: Vec<(Row, f64)> = rows
             .into_iter()
@@ -205,7 +206,12 @@ impl VectorMemory {
     /// Rows of the current model with score ≥ `min`, best first (unweighted: duplicate
     /// detection and forget-by-query compare text, not trust).
     pub fn search(&self, vector: &[f32], limit: usize, min: f64) -> Vec<(Row, f64)> {
-        let mut v: Vec<(Row, f64)> = self.scored(vector, false).into_iter().filter(|(_, s)| *s >= min).collect();
+        self.search_as(vector, limit, min, None)
+    }
+
+    /// [`VectorMemory::search`] over the rows `viewer` may see (ent-050).
+    pub fn search_as(&self, vector: &[f32], limit: usize, min: f64, viewer: Option<&Viewer>) -> Vec<(Row, f64)> {
+        let mut v: Vec<(Row, f64)> = self.scored(vector, false, viewer).into_iter().filter(|(_, s)| *s >= min).collect();
         v.truncate(limit);
         v
     }
@@ -213,8 +219,14 @@ impl VectorMemory {
     /// Recall ranking: similarity × trust weight, then the read-time threat re-scan — a
     /// row that now matches a threat pattern is quarantined and never returned.
     pub fn recall(&self, vector: &[f32], limit: usize, min: f64, auto: bool) -> Vec<(Row, f64)> {
+        self.recall_as(vector, limit, min, auto, None)
+    }
+
+    /// [`VectorMemory::recall`] over the rows `viewer` may see: a session never recalls
+    /// another team's or organization's memories (ent-050 / srv-037).
+    pub fn recall_as(&self, vector: &[f32], limit: usize, min: f64, auto: bool, viewer: Option<&Viewer>) -> Vec<(Row, f64)> {
         let mut v: Vec<(Row, f64)> = self
-            .scored(vector, !auto)
+            .scored(vector, !auto, viewer)
             .into_iter()
             .map(|(r, s)| {
                 let w = trust::weight(&r.trust);
@@ -263,7 +275,15 @@ impl VectorMemory {
     }
 
     pub fn delete(&self, id: &str) -> Result<bool, String> {
+        self.delete_as(id, None)
+    }
+
+    /// Forget a row only when `viewer` may see it (another tenant's row reads as not found).
+    pub fn delete_as(&self, id: &str, viewer: Option<&Viewer>) -> Result<bool, String> {
         let _g = self.lock.lock().unwrap();
+        if viewer.is_some() && !memstore::get(&self.host.data, id).is_some_and(|r| visible(viewer, &r)) {
+            return Ok(false);
+        }
         memstore::forget(&self.host.data, id)
     }
 
@@ -273,12 +293,17 @@ impl VectorMemory {
 
     /// `<relevant-memories>` block for auto-recall (empty when nothing clears 0.3).
     pub fn auto_recall(&self, prompt: &str) -> Option<String> {
+        self.auto_recall_as(prompt, None)
+    }
+
+    /// [`VectorMemory::auto_recall`] for a session's tenant.
+    pub fn auto_recall_as(&self, prompt: &str, viewer: Option<&Viewer>) -> Option<String> {
         if prompt.trim().is_empty() || crate::manager::is_trivial_prompt(prompt) || self.rows().is_empty() {
             return None;
         }
         let v = self.embed(&self.recall_query(prompt), Kind::Query).ok()?;
         // Low-trust rows are never injected unasked; MEMORY.md / USER.md are already in the prompt.
-        let hits: Vec<(Row, f64)> = self.recall(&v, AUTO_RECALL_CAP, 0.3, true);
+        let hits: Vec<(Row, f64)> = self.recall_as(&v, AUTO_RECALL_CAP, 0.3, true, viewer);
         if hits.is_empty() {
             return None;
         }
@@ -341,14 +366,15 @@ impl Tool for Recall {
     fn effects(&self, _: &ToolCtx, _: &Value) -> Vec<Effect> {
         vec![Effect::Read { path: self.0.path() }]
     }
-    fn call(&self, _: &ToolCtx, input: Value) -> ToolOutput {
+    fn call(&self, ctx: &ToolCtx, input: Value) -> ToolOutput {
         let Some(q) = arg_opt_str(&input, "query").filter(|q| !q.trim().is_empty()) else { return ToolOutput::err("memory_recall needs `query`") };
+        let viewer = self.0.host.session_viewer(&ctx.session_id);
         let limit = arg_opt_u64(&input, "limit").unwrap_or(5).max(1) as usize;
         let v = match self.0.embed(&self.0.recall_query(q), Kind::Query) {
             Ok(v) => v,
             Err(e) => return ToolOutput::ok(format!("Memory recall is unavailable right now ({e}). Do not assume that no relevant memory exists.")),
         };
-        let hits: Vec<(Row, f64)> = self.0.recall(&v, limit, 0.1, false);
+        let hits: Vec<(Row, f64)> = self.0.recall_as(&v, limit, 0.1, false, viewer.as_ref());
         if hits.is_empty() {
             return ok("No relevant memories found.".into(), json!({"count": 0}));
         }
@@ -401,10 +427,11 @@ impl Tool for Forget {
     fn effects(&self, _: &ToolCtx, _: &Value) -> Vec<Effect> {
         vec![Effect::Write { path: self.0.path() }]
     }
-    fn call(&self, _: &ToolCtx, input: Value) -> ToolOutput {
+    fn call(&self, ctx: &ToolCtx, input: Value) -> ToolOutput {
+        let viewer = self.0.host.session_viewer(&ctx.session_id);
         let not_found = |id: &str| ToolOutput::err(format!("Memory {id} was not deleted because it was not found."));
         if let Some(id) = arg_opt_str(&input, "memoryId").or(arg_opt_str(&input, "memory_id")) {
-            return match self.0.delete(id) {
+            return match self.0.delete_as(id, viewer.as_ref()) {
                 Ok(true) => ok(format!("Memory {id} forgotten."), json!({"action": "deleted", "id": id})),
                 Ok(false) => not_found(id),
                 Err(e) => ToolOutput::err(e),
@@ -415,13 +442,13 @@ impl Tool for Forget {
             Ok(v) => v,
             Err(e) => return ToolOutput::err(e),
         };
-        let hits = self.0.search(&v, 5, 0.7);
+        let hits = self.0.search_as(&v, 5, 0.7, viewer.as_ref());
         if hits.is_empty() {
             return ok("No matching memories found.".into(), json!({"found": 0}));
         }
         if hits.len() == 1 && hits[0].1 > 0.9 {
             let r = &hits[0].0;
-            return match self.0.delete(&r.id) {
+            return match self.0.delete_as(&r.id, viewer.as_ref()) {
                 Ok(true) => ok(format!("Forgotten: \"{}\"", clip(&r.text, self.0.host.settings.vector.recall_max_chars)), json!({"action": "deleted", "id": r.id})),
                 _ => not_found(&r.id),
             };
@@ -431,6 +458,11 @@ impl Tool for Forget {
     }
 }
 
+/// May `viewer` see this row? (`None` = unrestricted.)
+fn visible(viewer: Option<&Viewer>, r: &MemRow) -> bool {
+    viewer.is_none_or(|v| v.sees_team(if r.org.is_empty() { ark_kernel::tenancy::DEFAULT_ORG } else { &r.org }, &r.team))
+}
+
 /// Auto-recall (prefetch) and auto-capture (turn end).
 pub struct AutoMemory(pub Arc<VectorMemory>);
 
@@ -438,11 +470,11 @@ impl Lifecycle for AutoMemory {
     fn name(&self) -> String {
         "vector-memory".into()
     }
-    fn prefetch(&self, _session: &str, _ws: &str, prompt: &str) -> Option<String> {
+    fn prefetch(&self, session: &str, _ws: &str, prompt: &str) -> Option<String> {
         if !self.0.host.settings.vector.auto_recall {
             return None;
         }
-        self.0.auto_recall(prompt)
+        self.0.auto_recall_as(prompt, self.0.host.session_viewer(session).as_ref())
     }
     fn turn_end(&self, session: &str, _ws: &str, user: &str, _assistant: &str, ok: bool) {
         if ok && self.0.host.settings.vector.auto_capture && !session.starts_with("incognito") {

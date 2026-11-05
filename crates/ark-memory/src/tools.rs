@@ -49,7 +49,7 @@ impl Tool for MemorySearch {
     fn effects(&self, _: &ToolCtx, _: &Value) -> Vec<Effect> {
         vec![Effect::Read { path: self.0.memory_dir() }]
     }
-    fn call(&self, _ctx: &ToolCtx, input: Value) -> ToolOutput {
+    fn call(&self, ctx: &ToolCtx, input: Value) -> ToolOutput {
         let h = &self.0;
         let Some(query) = arg_opt_str(&input, "query").or(arg_opt_str(&input, "q")).map(str::trim).filter(|q| !q.is_empty()) else {
             return ToolOutput::err("memory_search needs `query`");
@@ -72,7 +72,9 @@ impl Tool for MemorySearch {
                 "sessions" => vec!["sessions"],
                 _ => vec![],
             };
-            match h.search(query, max, min, &sources) {
+            // srv-037: a session only retrieves its own tenant's knowledge.
+            let viewer = h.session_viewer(&ctx.session_id);
+            match h.search_as(query, max, min, &sources, viewer.as_ref()) {
                 Ok(o) => {
                     let mut st = recall::Store::load(&h.data);
                     let (rec, skip) = st.record_hits(query, &o.hits, util::now_ms(), h.utc_offset_minutes);

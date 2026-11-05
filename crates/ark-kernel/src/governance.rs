@@ -187,7 +187,7 @@ fn registry_owner(paths: &crate::config::Paths, label: &str) -> Owner {
     let (kind, name) = label.split_once(':').unwrap_or(("local", label));
     let u = match kind {
         "channel" => name.split_once(':').and_then(|(c, s)| crate::agents::find_user(paths, c, s)),
-        "sso" | "basic" => crate::agents::find_login(paths, name, name),
+        "sso" | "saml" | "basic" | "plugin" => crate::agents::find_login(paths, name, name),
         _ => crate::agents::users(paths).into_iter().find(|u| u.name == name || u.id == name || u.identities.iter().any(|i| i.channel == kind && i.sender == name)),
     };
     match u {
@@ -199,25 +199,36 @@ fn registry_owner(paths: &crate::config::Paths, label: &str) -> Owner {
 /// Who a session is charged to: the recorded owner, else its channel sender, else the parent
 /// session's owner (sub-agents), else the local OS user.
 pub fn owner_of(rt: &Runtime, session: &str) -> Owner {
-    let o = owners(&rt.paths.data);
+    owner_in(&rt.paths, &rt.store, session)
+}
+
+/// [`owner_of`] without a runtime (the CLI opens the store itself).
+pub fn owner_in(paths: &crate::config::Paths, store: &crate::store::Store, session: &str) -> Owner {
+    let o = owners(&paths.data);
     let mut cur = session.to_string();
     for _ in 0..8 {
         if let Some(l) = o.get(&cur) {
-            return registry_owner(&rt.paths, l);
+            return registry_owner(paths, l);
         }
-        let evs = rt.store.read(&cur).unwrap_or_default();
+        let evs = store.read(&cur).unwrap_or_default();
         if let Some(src) = evs.iter().find_map(|e| match &e.kind {
             EventKind::Inbox { source, .. } if source.starts_with("channel:") => Some(source.clone()),
             _ => None,
         }) {
-            return registry_owner(&rt.paths, &src);
+            return registry_owner(paths, &src);
         }
-        match rt.store.list().into_iter().find(|s| s.id == cur).and_then(|s| s.parent) {
+        match store.list().into_iter().find(|s| s.id == cur).and_then(|s| s.parent) {
             Some(p) => cur = p,
             None => break,
         }
     }
-    registry_owner(&rt.paths, &ark_security::audit::Actor::local().label())
+    registry_owner(paths, &ark_security::audit::Actor::local().label())
+}
+
+/// The sessions among `sessions` that belong to the registered user `user` (ent-049: whose
+/// running turns stop when the user is deactivated).
+pub fn sessions_of_user(paths: &crate::config::Paths, store: &crate::store::Store, sessions: &[String], user: &crate::agents::User) -> Vec<String> {
+    sessions.iter().filter(|s| owner_in(paths, store, s).user == user.name).cloned().collect()
 }
 
 /// Start of the current quota period (UTC), Unix ms.

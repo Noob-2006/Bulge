@@ -153,6 +153,21 @@ impl Host {
 
     /// Sync then search (OpenClaw `sync.onSearch`).
     pub fn search(&self, query: &str, max_results: usize, min_score: f64, sources: &[&str]) -> Result<SearchOutcome, String> {
+        self.search_as(query, max_results, min_score, sources, None)
+    }
+
+    /// The viewer a session searches as (srv-037): its tenant while multi-tenancy is active,
+    /// otherwise unrestricted.
+    pub fn session_viewer(&self, session: &str) -> Option<ark_kernel::tenancy::Viewer> {
+        if session.is_empty() || !ark_kernel::tenancy::active(&self.data) {
+            return None;
+        }
+        Some(ark_kernel::tenancy::Viewer::of_session(&ark_kernel::tenancy::session_tenant(&self.data, session)))
+    }
+
+    /// [`Host::search`] restricted to what `viewer` may retrieve (team knowledge bases,
+    /// transcripts and memories of other tenants are never candidates).
+    pub fn search_as(&self, query: &str, max_results: usize, min_score: f64, sources: &[&str], viewer: Option<&ark_kernel::tenancy::Viewer>) -> Result<SearchOutcome, String> {
         if !self.settings.search.enabled {
             return Err("memory search is disabled ([memory.search] enabled = false)".into());
         }
@@ -178,7 +193,7 @@ impl Host {
         }
         let g = self.index.lock().unwrap();
         let ix = g.as_ref().ok_or("index not loaded")?;
-        let hits = ix.search(&self.data, &self.settings.search, query, qv.as_deref().map(|v| (provider.as_str(), v)), max_results, min_score, sources, util::now_ms());
+        let hits = ix.search_as(&self.data, &self.settings.search, query, qv.as_deref().map(|v| (provider.as_str(), v)), max_results, min_score, sources, util::now_ms(), viewer);
         Ok(SearchOutcome { hits, mode: if qv.is_some() { "hybrid".into() } else { "fts-only".into() }, provider, warnings })
     }
 

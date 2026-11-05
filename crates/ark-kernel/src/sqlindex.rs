@@ -51,7 +51,9 @@ CREATE TRIGGER IF NOT EXISTS tool_results_au AFTER UPDATE ON tool_results BEGIN 
 
 -- Memory notes and knowledge files (source: memory/**/*.md, [memory.search] extra_paths,
 -- session transcripts when the `sessions` corpus is on), chunked for hybrid search.
-CREATE TABLE IF NOT EXISTS files(path TEXT PRIMARY KEY, source TEXT NOT NULL, mtime_ms INTEGER NOT NULL, size INTEGER NOT NULL, hash TEXT NOT NULL);
+-- `org` / `team` (srv-037, ent-050): which tenant may retrieve the file ('' = default org /
+-- organization-wide); added to older indexes by `add_tenant_columns`.
+CREATE TABLE IF NOT EXISTS files(path TEXT PRIMARY KEY, source TEXT NOT NULL, mtime_ms INTEGER NOT NULL, size INTEGER NOT NULL, hash TEXT NOT NULL, org TEXT NOT NULL DEFAULT '', team TEXT NOT NULL DEFAULT '');
 CREATE TABLE IF NOT EXISTS chunks(id INTEGER PRIMARY KEY, path TEXT NOT NULL, ord INTEGER NOT NULL, start_line INTEGER NOT NULL, end_line INTEGER NOT NULL, text TEXT NOT NULL, hash TEXT NOT NULL);
 CREATE INDEX IF NOT EXISTS chunks_path ON chunks(path);
 -- Embedding cache: `provider/model|content hash` → little-endian f32 BLOB (brute-force cosine).
@@ -59,7 +61,7 @@ CREATE TABLE IF NOT EXISTS vectors(key TEXT PRIMARY KEY, vec BLOB NOT NULL);
 
 -- Long-term memory items (source: memory/memories.jsonl, MEMORY.md / USER.md entries).
 -- trust: user | agent | external | tainted | quarantined (see ark-memory trust.rs).
-CREATE TABLE IF NOT EXISTS memories(id TEXT PRIMARY KEY, text TEXT NOT NULL, category TEXT NOT NULL DEFAULT 'other', source TEXT NOT NULL, trust TEXT NOT NULL, importance REAL NOT NULL DEFAULT 0.7, created_ms INTEGER NOT NULL, last_used_ms INTEGER NOT NULL DEFAULT 0, use_count INTEGER NOT NULL DEFAULT 0, origin TEXT NOT NULL DEFAULT '', model TEXT NOT NULL DEFAULT '', vec BLOB, flagged TEXT NOT NULL DEFAULT '');
+CREATE TABLE IF NOT EXISTS memories(id TEXT PRIMARY KEY, text TEXT NOT NULL, category TEXT NOT NULL DEFAULT 'other', source TEXT NOT NULL, trust TEXT NOT NULL, importance REAL NOT NULL DEFAULT 0.7, created_ms INTEGER NOT NULL, last_used_ms INTEGER NOT NULL DEFAULT 0, use_count INTEGER NOT NULL DEFAULT 0, origin TEXT NOT NULL DEFAULT '', model TEXT NOT NULL DEFAULT '', vec BLOB, flagged TEXT NOT NULL DEFAULT '', org TEXT NOT NULL DEFAULT '', team TEXT NOT NULL DEFAULT '');
 CREATE INDEX IF NOT EXISTS memories_source ON memories(source);
 "#;
 
@@ -114,6 +116,45 @@ fn version(c: &Connection) -> Result<Option<i64>, rusqlite::Error> {
     c.query_row("SELECT value FROM meta WHERE key='schema_version'", [], |r| r.get::<_, String>(0)).optional().map(|v| v.and_then(|s| s.parse().ok()))
 }
 
+/// Tenant columns (srv-037) on an index created before them: added in place, never a rebuild
+/// (a rebuild would throw away paid-for embeddings). Existing rows read as `''` = the default
+/// organization, which is where pre-tenancy data belongs.
+fn add_tenant_columns(c: &Connection) -> Result<(), rusqlite::Error> {
+    for table in ["files", "memories"] {
+        let cols: Vec<String> = c.prepare(&format!("PRAGMA table_info({table})"))?.query_map([], |r| r.get::<_, String>(1))?.flatten().collect();
+        for col in ["org", "team"] {
+            if !cols.iter().any(|x| x == col) {
+                c.execute_batch(&format!("ALTER TABLE {table} ADD COLUMN {col} TEXT NOT NULL DEFAULT ''"))?;
+            }
+        }
+    }
+    c.execute_batch("CREATE INDEX IF NOT EXISTS files_tenant ON files(org, team); CREATE INDEX IF NOT EXISTS memories_tenant ON memories(org, team);")
+}
+
+/// SQL condition (and its parameters) for rows a viewer may retrieve: `org`/`team` columns of
+/// `alias` (srv-037). The default organization is stored as `''`.
+pub fn tenant_clause(alias: &str, v: &crate::tenancy::Viewer) -> (String, Vec<String>) {
+    if v.global {
+        return ("1".into(), vec![]);
+    }
+    let org = if v.org == crate::tenancy::DEFAULT_ORG { String::new() } else { v.org.clone() };
+    if v.org_admin {
+        return (format!("{alias}.org = ?"), vec![org]);
+    }
+    (format!("({alias}.org = ? AND ({alias}.team = '' OR {alias}.team = ?))"), vec![org, v.team.clone()])
+}
+
+/// Knowledge-base files a viewer may retrieve: `(path, org, team, chunks)` (`kb.status`).
+pub fn tenant_files(data: &Path, v: &crate::tenancy::Viewer) -> Result<Vec<(String, String, String, i64)>, String> {
+    let (cond, args) = tenant_clause("f", v);
+    with(data, |c| {
+        let sql = format!("SELECT f.path, f.org, f.team, (SELECT count(*) FROM chunks c WHERE c.path = f.path) FROM files f WHERE f.source = 'memory' AND {cond} ORDER BY f.path");
+        let mut st = c.prepare(&sql).map_err(err)?;
+        let rows = st.query_map(rusqlite::params_from_iter(args.iter()), |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))).map_err(err)?;
+        Ok(rows.flatten().collect())
+    })
+}
+
 /// Open (creating or rebuilding as needed) the index of `data`.
 fn open_fresh(data: &Path) -> Result<Connection, String> {
     fs::create_dir_all(data).map_err(|e| format!("{}: {e}", data.display()))?;
@@ -126,12 +167,14 @@ fn open_fresh(data: &Path) -> Result<Connection, String> {
         match version(&c)? {
             Some(v) if v == SCHEMA_VERSION => {
                 c.execute_batch(SCHEMA)?;
+                add_tenant_columns(&c)?;
                 Ok(c)
             }
             Some(_) => Err(rusqlite::Error::InvalidQuery), // other version: rebuilt below
             None => {
                 c.execute_batch(SCHEMA)?;
                 c.execute("INSERT OR REPLACE INTO meta(key, value) VALUES ('schema_version', ?1)", params![SCHEMA_VERSION.to_string()])?;
+                add_tenant_columns(&c)?;
                 Ok(c)
             }
         }
@@ -375,6 +418,8 @@ pub struct MsgFilter {
     pub roles: Option<Vec<String>>,
     pub after: Option<u64>,
     pub before: Option<u64>,
+    /// Only these sessions (ent-050: the ones the searching session's tenant may see).
+    pub within: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -407,6 +452,13 @@ pub fn search_messages(data: &Path, query: &str, f: &MsgFilter, limit: usize) ->
         if let Some(s) = &f.session {
             sql.push_str(" AND m.session = ?");
             args.push(s.clone().into());
+        }
+        if let Some(w) = &f.within {
+            if w.is_empty() {
+                return Ok(vec![]);
+            }
+            sql.push_str(&format!(" AND m.session IN ({})", w.iter().map(|_| "?").collect::<Vec<_>>().join(",")));
+            args.extend(w.iter().map(|s| s.clone().into()));
         }
         if let Some(roles) = &f.roles {
             sql.push_str(&format!(" AND m.role IN ({})", roles.iter().map(|_| "?").collect::<Vec<_>>().join(",")));
@@ -594,6 +646,61 @@ mod tests {
         let v = with(&t.0, |c| Ok(meta_get(c, "schema_version"))).unwrap();
         assert_eq!(v.as_deref(), Some(SCHEMA_VERSION.to_string().as_str()));
         assert_eq!(with(&t.0, |c| Ok(meta_get(c, "k"))).unwrap(), None, "old rows are gone");
+    }
+
+    /// srv-037: an index from before the tenant columns gains them in place (paid embeddings
+    /// survive), and SQL filtering returns only what a viewer may retrieve.
+    #[test]
+    fn tenant_columns_migrate_in_place_and_filter() {
+        let t = tmp();
+        {
+            let c = Connection::open(path(&t.0)).unwrap();
+            c.execute_batch("CREATE TABLE meta(key TEXT PRIMARY KEY, value TEXT NOT NULL); INSERT INTO meta VALUES ('schema_version', '1');
+                CREATE TABLE files(path TEXT PRIMARY KEY, source TEXT NOT NULL, mtime_ms INTEGER NOT NULL, size INTEGER NOT NULL, hash TEXT NOT NULL);
+                CREATE TABLE vectors(key TEXT PRIMARY KEY, vec BLOB NOT NULL);
+                INSERT INTO files VALUES ('old.md', 'memory', 1, 1, 'h'); INSERT INTO vectors VALUES ('m|h', x'00000000');").unwrap();
+        }
+        with(&t.0, |c| {
+            c.execute("INSERT INTO files(path, source, mtime_ms, size, hash, org, team) VALUES ('eng.md', 'memory', 1, 1, 'h2', 'acme', 'eng'), ('ops.md', 'memory', 1, 1, 'h3', 'acme', 'ops'), ('acme.md', 'memory', 1, 1, 'h4', 'acme', '')", []).map_err(err)?;
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(counts(&t.0).unwrap().iter().find(|(k, _)| k == "vectors").map(|(_, n)| *n), Some(1), "no rebuild");
+        let names = |v: &crate::tenancy::Viewer| tenant_files(&t.0, v).unwrap().into_iter().map(|r| r.0).collect::<Vec<_>>();
+        assert_eq!(names(&crate::tenancy::Viewer::member("acme", "eng", "u", false)), vec!["acme.md", "eng.md"]);
+        assert_eq!(names(&crate::tenancy::Viewer::member("acme", "", "boss", true)), vec!["acme.md", "eng.md", "ops.md"]);
+        assert_eq!(names(&crate::tenancy::Viewer::member("", "", "x", false)), vec!["old.md"], "pre-tenancy files stay in the default org");
+        assert_eq!(names(&crate::tenancy::Viewer::global()).len(), 4);
+    }
+
+    /// ent-050: the model's `session_search` from a tenant's session never reads or finds
+    /// another tenant's transcript (indexed search, summary mode and direct reads).
+    #[test]
+    fn session_search_stays_inside_the_callers_tenant() {
+        let t = tmp();
+        let mut store = Store::new(t.0.join("sessions"));
+        store.sync = false;
+        for (id, text) in [("s-eng", "the falcon rollout plan"), ("s-ops", "the falcon pager rota"), ("s-eng2", "falcon notes")] {
+            let mut log = store.create(header(id)).unwrap();
+            log.append(msg(Message::user(text))).unwrap();
+        }
+        let tenant = |team: &str| crate::tenancy::Tenant { org: "acme".into(), team: team.into(), project: String::new() };
+        crate::tenancy::org_add(&t.0, "acme", "").unwrap();
+        crate::tenancy::team_add(&t.0, "eng", "acme", "").unwrap();
+        crate::tenancy::team_add(&t.0, "ops", "acme", "").unwrap();
+        crate::tenancy::stamp(&t.0, "s-eng", &tenant("eng"));
+        crate::tenancy::stamp(&t.0, "s-eng2", &tenant("eng"));
+        crate::tenancy::stamp(&t.0, "s-ops", &tenant("ops"));
+        let q = |caller: &str, input: serde_json::Value| crate::agents::session_search_as(&store, &input, caller);
+        let hits = q("s-eng", serde_json::json!({"query": "falcon"}));
+        assert!(hits.contains("s-eng ") && hits.contains("s-eng2") && !hits.contains("s-ops"), "{hits}");
+        let sum = q("s-eng", serde_json::json!({"query": "falcon", "summary": true}));
+        assert!(!sum.contains("s-ops") && !sum.contains("pager"), "{sum}");
+        let read = q("s-eng", serde_json::json!({"session": "s-ops", "read": true}));
+        assert!(read.contains("no session `s-ops`") && !read.contains("pager"), "{read}");
+        assert!(q("s-ops", serde_json::json!({"query": "falcon"})).contains("pager rota"));
+        // The owner's own tools (no caller) are unrestricted, as before.
+        assert!(crate::agents::session_search(&store, &serde_json::json!({"query": "falcon"})).contains("s-ops"));
     }
 
     #[test]

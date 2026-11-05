@@ -154,6 +154,8 @@ pub struct Principal {
     pub access: Access,
     /// Client address after trusted-proxy resolution.
     pub ip: String,
+    /// Organization / team reach (ent-050); global for the installation owner.
+    pub tenant: ark_kernel::tenancy::Viewer,
 }
 
 impl Principal {
@@ -179,11 +181,13 @@ pub struct RbacConfig {
     pub groups: BTreeMap<String, String>,
     /// Email / subject / login name → role.
     pub users: BTreeMap<String, String>,
+    /// IdP group → team (ent-050) for logins that are not registered with a team.
+    pub teams: BTreeMap<String, String>,
 }
 
 impl Default for RbacConfig {
     fn default() -> Self {
-        RbacConfig { default_role: "user".into(), groups_claim: "groups".into(), groups: BTreeMap::new(), users: BTreeMap::new() }
+        RbacConfig { default_role: "user".into(), groups_claim: "groups".into(), groups: BTreeMap::new(), users: BTreeMap::new(), teams: BTreeMap::new() }
     }
 }
 
@@ -223,7 +227,13 @@ pub fn groups_from_claims(claims: &serde_json::Value, claim: &str) -> Vec<String
 
 /// The roles a login gets, or why it is refused.
 pub fn login_roles(rbac: Option<&RbacConfig>, paths: &ark_kernel::config::Paths, f: &LoginFacts) -> Result<Vec<Role>, String> {
-    if let Some(u) = ark_kernel::agents::find_login(paths, f.subject, f.email).or_else(|| ark_kernel::agents::users(paths).into_iter().find(|u| f.provider == "basic" && (u.name == f.subject || u.id == f.subject))) {
+    let registered = ark_kernel::agents::find_login(paths, f.subject, f.email).or_else(|| ark_kernel::agents::users(paths).into_iter().find(|u| f.provider == "basic" && (u.name == f.subject || u.id == f.subject)));
+    // SCIM-provisioned group memberships count like the IdP's groups claim (ent-049).
+    let mut groups = f.groups.clone();
+    if let Some(u) = &registered {
+        groups.extend(crate::scim::groups_of(&paths.data, &u.id));
+    }
+    if let Some(u) = registered {
         if u.disabled {
             return Err(format!("user `{}` is disabled", u.name));
         }
@@ -240,7 +250,7 @@ pub fn login_roles(rbac: Option<&RbacConfig>, paths: &ark_kernel::config::Paths,
             return Ok(vec![Role::parse(r)?]);
         }
     }
-    let mut roles: Vec<Role> = f.groups.iter().filter_map(|g| rb.groups.get(g)).filter_map(|r| Role::parse(r).ok()).collect();
+    let mut roles: Vec<Role> = groups.iter().filter_map(|g| rb.groups.get(g)).filter_map(|r| Role::parse(r).ok()).collect();
     roles.sort();
     roles.dedup();
     if !roles.is_empty() {
@@ -289,6 +299,9 @@ pub struct ServiceAccount {
     pub expires_ms: u64,
     pub revoked: bool,
     pub last_used_ms: u64,
+    /// Organization / team this account is limited to (ent-050); both empty = installation-wide.
+    pub org: String,
+    pub team: String,
 }
 
 impl ServiceAccount {
@@ -375,6 +388,18 @@ pub fn rotate(data: &Path, name: &str, grace_hours: u64, ttl_days: Option<u64>, 
     save_accounts(data, &all)?;
     ark_security::audit::record(data, ark_security::audit::Event::new("token.rotate", by.clone(), name, "ok").detail(json!({"grace_hours": grace_hours, "expires_ms": out.expires_ms})));
     Ok((out, token))
+}
+
+/// Limit an account to an organization / team (ent-050). Empty values = installation-wide.
+pub fn set_tenant(data: &Path, name: &str, org: &str, team: &str, by: &Actor) -> Result<ServiceAccount, String> {
+    let mut all = accounts(data);
+    let a = all.iter_mut().find(|a| a.name == name && !a.revoked).ok_or_else(|| format!("no active service account `{name}`"))?;
+    a.org = org.trim().into();
+    a.team = team.trim().into();
+    let out = a.clone();
+    save_accounts(data, &all)?;
+    ark_security::audit::record(data, ark_security::audit::Event::new("token.tenant", by.clone(), name, "ok").detail(json!({"org": out.org, "team": out.team})));
+    Ok(out)
 }
 
 pub fn revoke(data: &Path, name: &str, by: &Actor) -> Result<(), String> {
