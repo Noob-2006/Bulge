@@ -82,14 +82,15 @@ pub fn program() -> Option<Vec<u8>> {
     {
         let deny = denied();
         let n = deny.len();
-        let mut p: Vec<[u8; 8]> = vec![];
-        // A = seccomp_data.arch; anything but the native ABI → EPERM.
-        p.push(insn(LD_W_ABS, 0, 0, 4));
-        p.push(insn(JEQ_K, 1, 0, AUDIT_ARCH));
-        p.push(insn(RET_K, 0, 0, RET_ERRNO_EPERM));
-        // A = seccomp_data.nr; the x32 range (bit 30) → EPERM.
-        p.push(insn(LD_W_ABS, 0, 0, 0));
-        p.push(insn(JGE_K, (n + 1) as u8, 0, 0x4000_0000));
+        let mut p: Vec<[u8; 8]> = vec![
+            // A = seccomp_data.arch; anything but the native ABI → EPERM.
+            insn(LD_W_ABS, 0, 0, 4),
+            insn(JEQ_K, 1, 0, AUDIT_ARCH),
+            insn(RET_K, 0, 0, RET_ERRNO_EPERM),
+            // A = seccomp_data.nr; the x32 range (bit 30) → EPERM.
+            insn(LD_W_ABS, 0, 0, 0),
+            insn(JGE_K, (n + 1) as u8, 0, 0x4000_0000),
+        ];
         for (i, (_, nr)) in deny.iter().enumerate() {
             // Match → jump over the remaining tests and the ALLOW to the EPERM return.
             p.push(insn(JEQ_K, (n - i) as u8, 0, *nr as u32));

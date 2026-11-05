@@ -338,7 +338,9 @@ pub(crate) mod tests {
 
     /// A fake Vault: KV v2 under `secret/`, a token `t-root`, AppRole `role-1`/`sid-1`, and
     /// writes that bump the version. Returns the server and the request log.
-    pub fn fake_vault() -> (Server, Arc<Mutex<Vec<String>>>, Arc<Mutex<serde_json::Map<String, Value>>>) {
+    pub type FakeVault = (Server, Arc<Mutex<Vec<String>>>, Arc<Mutex<serde_json::Map<String, Value>>>);
+
+    pub fn fake_vault() -> FakeVault {
         let log = Arc::new(Mutex::new(vec![]));
         let store = Arc::new(Mutex::new(serde_json::Map::new()));
         store.lock().unwrap().insert("ark/providers".into(), json!({"openai": "sk-from-vault", "anthropic": "ant-from-vault"}));

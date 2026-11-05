@@ -23,7 +23,7 @@ use ark_kernel::config::Paths;
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::io::Read;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 pub const COMMANDS: &[&str] = &[];
 pub const VALUE_FLAGS: &[&str] = &["every-days", "max-age-days", "rotate-command", "new-backend", "token-name"];
@@ -291,6 +291,7 @@ pub fn dispatch(cmd: &str, a: &Args, _raw: &[String]) -> Option<R> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::Path;
 
     fn paths(root: &Path) -> Paths {
         Paths { data: root.join("data"), config_dir: root.join("cfg"), runtime: root.join("run") }
