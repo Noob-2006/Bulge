@@ -6,6 +6,7 @@ pub mod crypto;
 pub mod http;
 pub mod httpd;
 pub mod stream;
+pub mod tlsd;
 pub mod ws;
 
 pub use stream::{form_encode, parse_query, urldecode, urlencode, Stream, Url};

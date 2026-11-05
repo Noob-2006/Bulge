@@ -89,6 +89,19 @@ impl App {
                 return Some(Principal { kind: l.kind, name: l.name, access: Access::Roles(l.roles), ip });
             }
         }
+        // ent-121/059: a verified client certificate (mTLS; only the TLS terminator can set this
+        // header — it strips every client-sent copy) maps through `client_identities`.
+        if self.cfg.exposure.tls {
+            if let Some(id) = r.header(ark_net::tlsd::H_CLIENT) {
+                if let Some((c, access)) = self.cfg.exposure.client_access(id) {
+                    let access = match access {
+                        Ok(s) => Access::Scope(s),
+                        Err(role) => Access::Roles(vec![role]),
+                    };
+                    return Some(Principal { kind: "mtls".into(), name: c.name.clone().unwrap_or_else(|| id.to_string()), access, ip });
+                }
+            }
+        }
         let given = self.presented(r)?;
         if let Some(a) = identity::lookup(&self.d.k.paths.data, &given) {
             let access = a.access().ok()?;
@@ -513,7 +526,12 @@ pub fn start(app: Arc<App>) -> Result<httpd::Server, String> {
     let a = app.clone();
     let h: httpd::Handler = Arc::new(move |r| a.handle(r));
     let opts = httpd::Opts { max_body: 16 * 1024 * 1024, max_conns: app.cfg.max_conns, read_timeout: Duration::from_secs(30) };
-    httpd::Server::bind(&app.cfg.listen, opts, h).map_err(|e| format!("app server: cannot listen on {}: {e}", app.cfg.listen))
+    match app.cfg.exposure.server_tls() {
+        // ent-121: native TLS / mTLS; the handler sees the real peer and the verified identity.
+        Some(t) => httpd::Server::bind_tls(&app.cfg.listen, opts, h, &t),
+        None => httpd::Server::bind(&app.cfg.listen, opts, h),
+    }
+    .map_err(|e| format!("app server: cannot listen on {}: {e}", app.cfg.listen))
 }
 
 #[cfg(test)]
@@ -580,6 +598,37 @@ mod tests {
 
     fn rpc(method: &str) -> String {
         json!({"jsonrpc": "2.0", "id": 1, "method": method, "params": {}}).to_string()
+    }
+
+    /// ent-121: native TLS with required client certificates; the verified SPIFFE ID maps to
+    /// an access level through `client_identities` (RBAC), no bearer token involved.
+    #[test]
+    fn native_mtls_maps_client_certificates_to_access_ent121() {
+        let td = |f: &str| format!("{}/../ark-net/src/testdata/{f}", env!("CARGO_MANIFEST_DIR"));
+        let mut cfg = AppConfig { enabled: true, listen: "127.0.0.1:0".into(), ..AppConfig::default() };
+        cfg.exposure.tls = true;
+        cfg.exposure.cert = Some(td("server.pem"));
+        cfg.exposure.key = Some(td("server.key"));
+        cfg.exposure.client_auth = "require".into();
+        cfg.exposure.client_ca = Some(td("ca.pem"));
+        cfg.exposure.client_identities = vec![crate::exposure::ClientIdentity { id: "spiffe://example.org/ark/node/*".into(), scope: "read".into(), name: Some("node fleet".into()) }];
+        let srv = start(app(cfg)).unwrap();
+        assert!(srv.is_tls());
+        let url = format!("https://localhost:{}/arp", srv.local_addr().port());
+        let net = ark_net::http::NetConfig { ca_file: Some(td("ca.pem")), client_cert: Some(td("client.pem")), client_key: Some(td("client.key")), ..Default::default() };
+        let call = |net: ark_net::http::NetConfig, method: &str| {
+            ark_net::http::with_config(net, || {
+                let a: ureq::Agent = ark_net::http::builder().http_status_as_error(false).build().into();
+                a.post(&url).header("content-type", "application/json").send(rpc(method)).map(|mut r| (r.status().as_u16(), r.body_mut().read_to_string().unwrap_or_default())).map_err(|e| e.to_string())
+            })
+        };
+        let (st, body) = call(net.clone(), "session.list").unwrap();
+        assert_eq!(st, 200, "{body}");
+        assert!(body.contains("\"result\""), "{body}");
+        let (_, body) = call(net.clone(), "config.get").unwrap();
+        assert!(body.contains("forbidden"), "a read-scoped certificate may not call admin methods: {body}");
+        // No client certificate: the handshake itself fails.
+        assert!(call(ark_net::http::NetConfig { client_cert: None, client_key: None, ..net }, "session.list").is_err());
     }
 
     /// A11 / H7: the OpenClaw CVE-2026-25253 shape — an evil page with a stolen token in the

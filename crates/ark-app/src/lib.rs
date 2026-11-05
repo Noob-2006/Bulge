@@ -125,6 +125,14 @@ impl AppConfig {
             }
             tok.scope = norm;
         }
+        for (i, ci) in c.exposure.client_identities.iter().enumerate() {
+            if ci.id.trim().is_empty() || ci.id.trim() == "*" {
+                return Err(format!("[app.exposure] client_identities[{i}]: `id` must name a certificate identity (a bare `*` would admit every certificate)"));
+            }
+            if exposure::Scope::parse(&ci.scope).is_err() && identity::Role::parse(&ci.scope).is_err() {
+                return Err(format!("[app.exposure] client_identities[{i}]: unknown scope/role `{}`", ci.scope));
+            }
+        }
         if let Some(rb) = &c.rbac {
             rb.validate()?;
         }
