@@ -407,7 +407,10 @@ mod tests {
     #[test]
     fn every_catalog_blueprint_fills_with_its_defaults() {
         let bps = catalog();
-        assert_eq!(bps.len(), 16, "share/blueprints.json carries the whole catalog");
+        assert!(bps.len() >= 18, "share/blueprints.json carries the whole catalog");
+        for key in ["incident-triage", "vuln-triage"] {
+            assert!(bps.iter().any(|b| b["key"] == key), "{key}: the DevOps / SecOps example flows (pro-013, pro-029)");
+        }
         for b in &bps {
             let f = fill(b, &BTreeMap::new()).unwrap_or_else(|e| panic!("{}: {e}", b["key"]));
             assert!(ark_kernel::cron::Cron::parse(&f.schedule).is_ok(), "{}: {} is not a cron", b["key"], f.schedule);

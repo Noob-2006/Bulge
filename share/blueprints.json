@@ -1029,6 +1029,142 @@
      "strict": false
     }
    ]
+  },
+  {
+   "key": "incident-triage",
+   "title": "Alert → incident triage",
+   "description": "Watch Alertmanager; when an alert fires, investigate metrics and logs, build a timeline, summarise, and propose (never run) a rollback when a recent deploy is the likely cause.",
+   "category": "devops",
+   "schedule_template": "*/{interval_min} * * * *",
+   "prompt_template": "Follow the incident-response skill (references/oncall-runbook.md). 1) alertmanager_alerts kind=alerts active=true with filter severity=~\"{severity}\"; if nothing fired or changed since the last run, respond with [SILENT]. 2) For each new alert group: query the alert's expression and neighbours with prometheus_query (range over the last hour), pull matching error lines with loki_query or elastic_search, and check deploy action=history plus grafana_query annotations for changes in the last 2 hours. 3) Write the timeline (UTC, oldest first), the impact, the most likely cause with evidence, and open questions. 4) If a deploy correlates, propose `deploy action=rollback plan_id=<id>` with the reason — do not run it; the on-call human approves. 5) Offer to open or update a ticket (jira / servicenow / pagerduty) with this summary.",
+   "deliver_default": "origin",
+   "skills": [
+    "incident-response",
+    "deploy-rollback"
+   ],
+   "tags": [
+    "devops",
+    "incident",
+    "on-call",
+    "monitor"
+   ],
+   "slots": [
+    {
+     "name": "interval_min",
+     "type": "enum",
+     "label": "How often?",
+     "default": "5",
+     "options": [
+      "5",
+      "10",
+      "15",
+      "30"
+     ],
+     "optional": false,
+     "help": "minutes between checks",
+     "strict": true
+    },
+    {
+     "name": "severity",
+     "type": "enum",
+     "label": "Which alerts?",
+     "default": "critical|page",
+     "options": [
+      "critical|page",
+      "critical|page|warning"
+     ],
+     "optional": false,
+     "help": "Alertmanager severity label values (regex)",
+     "strict": true
+    },
+    {
+     "name": "deliver",
+     "type": "enum",
+     "label": "Where to deliver?",
+     "default": "origin",
+     "options": [
+      "origin",
+      "local",
+      "telegram",
+      "discord",
+      "email"
+     ],
+     "optional": false,
+     "help": "origin = the chat you set this up from (or your configured home channel when created from the dashboard); local = save only, no message; or any connected platform name",
+     "strict": false
+    }
+   ]
+  },
+  {
+   "key": "vuln-triage",
+   "title": "Weekly vulnerability triage",
+   "description": "Parse the latest scanner reports, de-duplicate, rank by exploitability and draft remediation tickets for the top findings.",
+   "category": "security",
+   "schedule_template": "{minute} {hour} * * {dow}",
+   "prompt_template": "Follow the vuln-triage skill (references/vuln-triage-runbook.md). Run scan_report over the reports in {reports} (with the KEV list when [integrations.secops] kev_file is set), output the ranked list to reports/ranked-<date>.csv, and look up the P1/P2 package findings with osv_query for fixed versions. Group findings that one change fixes (same package / base image). Draft one ticket per group with priority, evidence, fix and owner hint, and list them; create them with jira or servicenow only after the user approves the list. Never run scanners against hosts here.",
+   "deliver_default": "origin",
+   "skills": [
+    "vuln-triage"
+   ],
+   "tags": [
+    "security",
+    "vulnerability",
+    "weekly"
+   ],
+   "slots": [
+    {
+     "name": "time",
+     "type": "time",
+     "label": "What time?",
+     "default": "09:00",
+     "options": [],
+     "optional": false,
+     "help": "24h local time, e.g. 08:00",
+     "strict": true
+    },
+    {
+     "name": "day",
+     "type": "enum",
+     "label": "Which day?",
+     "default": "monday",
+     "options": [
+      "monday",
+      "tuesday",
+      "wednesday",
+      "thursday",
+      "friday"
+     ],
+     "optional": false,
+     "help": "",
+     "strict": true
+    },
+    {
+     "name": "reports",
+     "type": "text",
+     "label": "Where are the scan reports?",
+     "default": "reports/scans/",
+     "optional": false,
+     "options": [],
+     "help": "a directory or files (SARIF, Trivy, Grype, Nessus)",
+     "strict": true
+    },
+    {
+     "name": "deliver",
+     "type": "enum",
+     "label": "Where to deliver?",
+     "default": "origin",
+     "options": [
+      "origin",
+      "local",
+      "telegram",
+      "discord",
+      "email"
+     ],
+     "optional": false,
+     "help": "origin = the chat you set this up from (or your configured home channel when created from the dashboard); local = save only, no message; or any connected platform name",
+     "strict": false
+    }
+   ]
   }
  ]
 }
