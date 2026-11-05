@@ -86,16 +86,29 @@ impl App {
         let ip = self.client_ip(r).map(|i| i.to_string()).unwrap_or_default();
         if self.cfg.auth.enabled {
             if let Some(l) = crate::dashboard_auth::login_from(self, r) {
-                return Some(Principal { kind: l.kind, name: l.name, access: Access::Roles(l.roles), ip });
+                return Some(Principal { kind: l.kind, name: l.name, access: Access::Roles(l.roles), ip, tenant: l.tenant });
             }
         }
         let given = self.presented(r)?;
         if let Some(a) = identity::lookup(&self.d.k.paths.data, &given) {
             let access = a.access().ok()?;
-            return Some(Principal { kind: "service".into(), name: a.name, access, ip });
+            let tenant = crate::tenant::credential_viewer(self, &a.org, &a.team, access.has(identity::Role::Admin) || access == Access::Scope(Scope::Admin), &a.name);
+            return Some(Principal { kind: "service".into(), name: a.name, access, ip, tenant });
         }
-        let (access, name) = self.scope_of(&given)?;
-        Some(Principal { kind: "token".into(), name, access, ip })
+        let (access, name, org, team) = self.scope_of(&given)?;
+        let tenant = crate::tenant::credential_viewer(self, &org, &team, access.has(identity::Role::Admin) || access == Access::Scope(Scope::Admin), &name);
+        Some(Principal { kind: "token".into(), name, access, ip, tenant })
+    }
+
+    /// Is a principal captured earlier (an open WebSocket) still valid? A login whose profile
+    /// was disabled (`ark users disable`, SCIM `active: false`) or a revoked / expired service
+    /// account stops at once, even mid-connection (ent-049).
+    pub fn still_valid(&self, p: &Principal) -> bool {
+        match p.kind.as_str() {
+            "service" => identity::accounts(&self.d.k.paths.data).iter().any(|a| a.name == p.name && a.active(ark_security::audit::now_ms())),
+            "sso" | "saml" | "basic" | "plugin" => !ark_kernel::agents::find_login(&self.d.k.paths, &p.name, &p.name).is_some_and(|u| u.disabled),
+            _ => true,
+        }
     }
 
     /// Which scope the request's credential carries, if it presents one (roles are mapped onto
@@ -112,10 +125,10 @@ impl App {
     /// Constant-time token → access lookup; the single `[app] token` is admin. `{{secret:NAME}}`
     /// references are resolved exactly like the daemon resolves `token`; an unresolvable one
     /// never matches anything. The name is the token's `name` (or `app-token` / `tokens[i]`).
-    fn scope_of(&self, given: &str) -> Option<(Access, String)> {
+    fn scope_of(&self, given: &str) -> Option<(Access, String, String, String)> {
         let mut found = None;
         if !self.token.trim().is_empty() && ark_net::crypto::ct_eq(given.as_bytes(), self.token.as_bytes()) {
-            found = Some((Access::Scope(Scope::Admin), "app-token".to_string()));
+            found = Some((Access::Scope(Scope::Admin), "app-token".to_string(), String::new(), String::new()));
         }
         if !self.cfg.tokens.is_empty() {
             let subst = self.d.k.vault_substitute();
@@ -129,7 +142,7 @@ impl App {
                         Ok(s) => Access::Scope(s),
                         Err(_) => identity::Role::parse(&t.scope).map(|r| Access::Roles(vec![r])).unwrap_or(Access::Scope(Scope::Admin)),
                     };
-                    found = Some((access, t.name.clone().unwrap_or_else(|| format!("tokens[{i}]"))));
+                    found = Some((access, t.name.clone().unwrap_or_else(|| format!("tokens[{i}]")), t.org.clone(), t.team.clone()));
                 }
             }
         }
@@ -149,7 +162,7 @@ impl App {
         if outcome == "allow" && (quiet || (read_only && !self.d.k.cfg.audit.log_reads)) {
             return;
         }
-        let ev = ark_security::audit::Event::new(if outcome == "allow" { "app.request" } else { "auth.denied" }, p.actor(), target, outcome).detail(detail);
+        let ev = crate::tenant::tag(ark_security::audit::Event::new(if outcome == "allow" { "app.request" } else { "auth.denied" }, p.actor(), target, outcome).detail(detail), p);
         if ark_security::audit::emit(&self.d.k.paths.data, ev).is_err() {
             crate::metrics::audit_error();
         }
@@ -167,7 +180,7 @@ impl App {
         let mut methods: Vec<String> = Daemon::METHODS.iter().map(|s| s.to_string()).collect();
         methods.extend(self.host_methods.iter().cloned());
         methods.extend(crate::browser_view::METHODS.iter().map(|s| s.to_string()));
-        methods.extend(["initialize", "subscribe", "unsubscribe", "whoami", "audit.query", "audit.verify"].map(String::from));
+        methods.extend(["initialize", "subscribe", "unsubscribe", "whoami", "audit.query", "audit.verify", "usage.query", "tenancy.show"].map(String::from));
         json!({
             "protocol": ARP_VERSION,
             "server": {"name": "ark", "version": env!("CARGO_PKG_VERSION")},
@@ -184,7 +197,9 @@ impl App {
         }
         // A page on another site must not be able to make this server *do* anything (A11):
         // every state-changing request has to come from our own page or a listed origin.
-        if r.method != "GET" && r.method != "HEAD" && !self.origin_ok(&r) {
+        // The one exception is the SAML ACS: the IdP's page posts the signed response there
+        // (HTTP-POST binding); the audience-bound, single-use, signed assertion is the credential.
+        if r.method != "GET" && r.method != "HEAD" && !self.origin_ok(&r) && !(r.method == "POST" && r.path == "/auth/saml/acs") {
             return Response::json(403, &json!({"error": "forbidden: cross-origin request (Origin not allowed)"}).to_string());
         }
         if !crate::exposure::rate_ok_ip(&self.cfg.exposure, self.client_ip(&r)) {
@@ -222,6 +237,11 @@ impl App {
             // A2A authenticates its own peers (per-peer tokens) before anything else.
             (_, p) if p.starts_with("/a2a") && self.cfg.a2a.enabled => a2a::handle(self, r),
             (_, p) if p.starts_with("/auth/") && self.cfg.auth.enabled => crate::dashboard_auth::handle(self, &r),
+            // SCIM provisioning (ent-049): bearer credential, admin only, audited.
+            (_, p) if (p == "/scim/v2" || p.starts_with("/scim/v2/")) && self.cfg.scim => match self.principal(&r) {
+                Some(p) => crate::scim::handle(self, &r, &p),
+                None => Response::json(401, &json!({"schemas": ["urn:ietf:params:scim:api:messages:2.0:Error"], "status": "401", "detail": "unauthorized"}).to_string()).with_header("www-authenticate", "Bearer"),
+            },
             // Everything below needs a credential; how much depends on what is asked for.
             _ => match self.principal(&r) {
                 Some(p) => self.routed(r, p),
@@ -344,6 +364,16 @@ impl App {
                 o.insert("_via".into(), "app".into());
             }
         }
+        // ent-050: an organization-bound principal only reaches its own tenant.
+        if let Some(o) = params.as_object_mut() {
+            o.remove("_tenant");
+            o.remove("_viewer");
+        }
+        if let Some(p) = who {
+            if let Err((code, message)) = crate::tenant::guard(self, p, method, &mut params) {
+                return json!({"jsonrpc": "2.0", "id": id, "error": {"code": code, "message": message}});
+            }
+        }
         if let Some(r) = self.identity_rpc(method, &params, who) {
             return match r {
                 Ok(v) => json!({"jsonrpc": "2.0", "id": id, "result": v}),
@@ -360,6 +390,10 @@ impl App {
             m if m.starts_with("view.") => crate::browser_view::rpc(self, m, &params).map_err(|(c, e)| (c as i32, e)),
             m => self.d.call(m, &params),
         };
+        let mut r = r;
+        if let (Some(p), Ok(v)) = (who, r.as_mut()) {
+            crate::tenant::after(self, p, method, &params, v);
+        }
         if let (Some(p), Ok(v)) = (who, &r) {
             let sid = match method {
                 "session.create" => v["id"].as_str().map(str::to_string),
@@ -387,9 +421,25 @@ impl App {
             }),
             "audit.query" => {
                 let s = |k: &str| params[k].as_str().map(str::to_string);
-                let q = ark_security::audit::Query { kind: s("kind"), actor: s("actor"), session: s("session"), outcome: s("outcome"), after_ms: params["after_ms"].as_u64(), before_ms: params["before_ms"].as_u64(), limit: params["limit"].as_u64().unwrap_or(100).min(1000) as usize };
+                // A bound principal's query is pinned to its own organization (and team).
+                let (org, team) = match who {
+                    Some(p) if crate::tenant::bound(self, p) => crate::tenant::audit_scope(self, p),
+                    _ => (s("org"), s("team")),
+                };
+                let q = ark_security::audit::Query { kind: s("kind"), actor: s("actor"), session: s("session"), outcome: s("outcome"), after_ms: params["after_ms"].as_u64(), before_ms: params["before_ms"].as_u64(), limit: params["limit"].as_u64().unwrap_or(100).min(1000) as usize, org, team };
                 Ok(json!(ark_security::audit::query(data, &q)))
             }
+            "usage.query" => crate::tenant::usage(self, who, params),
+            "tenancy.show" => {
+                let v = who.map(|p| p.tenant.clone()).unwrap_or_default();
+                let reg = ark_kernel::tenancy::registry(data);
+                let active = ark_kernel::tenancy::active(data);
+                // The caller's own organization and the teams / projects it may see.
+                let teams: Vec<&ark_kernel::tenancy::Team> = reg.teams.iter().filter(|t| v.global || (v.sees_team(&ark_kernel::tenancy::team_org(&reg, &t.id), &t.id) && (v.org_admin || t.id == v.team))).collect();
+                let projects: Vec<&ark_kernel::tenancy::Project> = reg.projects.iter().filter(|p| teams.iter().any(|t| t.id == p.team)).collect();
+                Ok(json!({"active": active, "viewer": v, "teams": teams, "projects": projects}))
+            }
+            "audit.verify" if who.is_some_and(|p| crate::tenant::bound(self, p)) => Err((-32003, "forbidden: the whole-chain verification is installation-wide".to_string())),
             "audit.verify" => Ok(serde_json::to_value(ark_security::audit::verify(data, params["anchor"].as_str())).unwrap_or(Value::Null)),
             _ => return None,
         })
@@ -410,7 +460,18 @@ impl App {
         let closed = Arc::new(AtomicBool::new(false));
         let mut subs: Vec<(Value, Arc<AtomicBool>)> = Vec::new();
         let _ = out_tx.send(json!({"jsonrpc": "2.0", "method": "ready", "params": self.capabilities()}));
+        let mut checked = std::time::Instant::now();
         loop {
+            // ent-049: a principal disabled or revoked while connected loses the socket (and its
+            // subscriptions) within a second.
+            if checked.elapsed() >= Duration::from_secs(1) {
+                checked = std::time::Instant::now();
+                if !self.still_valid(&principal) {
+                    ark_security::audit::record(&self.d.k.paths.data, crate::tenant::tag(ark_security::audit::Event::new("auth.revoked", principal.actor(), "ws", "deny"), &principal));
+                    let _ = ws.send_text(&json!({"jsonrpc": "2.0", "method": "revoked", "params": {"reason": "credential disabled or revoked"}}).to_string());
+                    break;
+                }
+            }
             for m in out_rx.try_iter() {
                 if ws.send_text(&m.to_string()).is_err() {
                     closed.store(true, Ordering::SeqCst);
@@ -446,14 +507,23 @@ impl App {
             self.audit_request(&principal, method_name, "allow", json!({"transport": "ws"}));
             match method_name {
                 "subscribe" | "events.subscribe" | "session.attach" => {
+                    let mut gp = req.get("params").cloned().unwrap_or(json!({}));
+                    if let Err((code, message)) = crate::tenant::guard(&self, &principal, method_name, &mut gp) {
+                        let _ = out_tx.send(json!({"jsonrpc": "2.0", "id": id, "error": {"code": code, "message": message}}));
+                        continue;
+                    }
                     let stop = Arc::new(AtomicBool::new(false));
                     subs.push((id.clone(), stop.clone()));
-                    let (me, tx, cl) = (self.clone(), out_tx.clone(), closed.clone());
+                    let (me, tx, cl, who) = (self.clone(), out_tx.clone(), closed.clone(), principal.clone());
                     // `subscribe` with a session id replays that session's log first, like `session.attach`.
                     let method = if req["method"] == "session.attach" || (req["method"] == "subscribe" && req["params"].get("id").is_some()) { "session.attach" } else { "events.subscribe" };
                     let params = req.get("params").cloned().unwrap_or(json!({}));
                     std::thread::spawn(move || {
                         let mut sink = |v: &Value| -> std::io::Result<()> {
+                            // ent-050: other tenants' events never reach this socket.
+                            if !crate::tenant::stream_visible(&me, &who, v) {
+                                return Ok(());
+                            }
                             // Tag stream messages with the subscription id so clients can demultiplex.
                             let mut v = v.clone();
                             if v.get("method").is_some() {
@@ -652,9 +722,9 @@ mod tests {
             listen: "127.0.0.1:0".into(),
             openai_api: true,
             tokens: vec![
-                crate::exposure::TokenConfig { token: "read-token".into(), scope: "read".into(), name: Some("status".into()) },
-                crate::exposure::TokenConfig { token: "write-token".into(), scope: "write".into(), name: None },
-                crate::exposure::TokenConfig { token: "approve-token".into(), scope: "approve".into(), name: None },
+                crate::exposure::TokenConfig { token: "read-token".into(), scope: "read".into(), name: Some("status".into()), org: String::new(), team: String::new() },
+                crate::exposure::TokenConfig { token: "write-token".into(), scope: "write".into(), name: None, org: String::new(), team: String::new() },
+                crate::exposure::TokenConfig { token: "approve-token".into(), scope: "approve".into(), name: None, org: String::new(), team: String::new() },
             ],
             // Never the real cwd: a `session.create` here must not touch the repo.
             workspace: Some(std::env::temp_dir().join(format!("ark-app-ws-{}", ark_kernel::util::random_hex(8))).display().to_string()),
@@ -754,8 +824,8 @@ mod tests {
             enabled: true,
             listen: "127.0.0.1:0".into(),
             tokens: vec![
-                crate::exposure::TokenConfig { token: "{{secret:WEB_READ}}".into(), scope: "read".into(), name: None },
-                crate::exposure::TokenConfig { token: "{{secret:MISSING}}".into(), scope: "admin".into(), name: None },
+                crate::exposure::TokenConfig { token: "{{secret:WEB_READ}}".into(), scope: "read".into(), name: None, org: String::new(), team: String::new() },
+                crate::exposure::TokenConfig { token: "{{secret:MISSING}}".into(), scope: "admin".into(), name: None, org: String::new(), team: String::new() },
             ],
             ..AppConfig::default()
         };
@@ -795,9 +865,9 @@ mod tests {
             enabled: true,
             listen: "127.0.0.1:0".into(),
             tokens: vec![
-                crate::exposure::TokenConfig { token: "op-token".into(), scope: "operator".into(), name: Some("ops-bot".into()) },
-                crate::exposure::TokenConfig { token: "au-token".into(), scope: "auditor".into(), name: Some("auditor".into()) },
-                crate::exposure::TokenConfig { token: "ap-token".into(), scope: "approve".into(), name: Some("approver".into()) },
+                crate::exposure::TokenConfig { token: "op-token".into(), scope: "operator".into(), name: Some("ops-bot".into()), org: String::new(), team: String::new() },
+                crate::exposure::TokenConfig { token: "au-token".into(), scope: "auditor".into(), name: Some("auditor".into()), org: String::new(), team: String::new() },
+                crate::exposure::TokenConfig { token: "ap-token".into(), scope: "approve".into(), name: Some("approver".into()), org: String::new(), team: String::new() },
             ],
             exposure: crate::exposure::ExposureConfig { behind_proxy: true, ..Default::default() },
             workspace: Some(home.join("ws").display().to_string()),

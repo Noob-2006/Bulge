@@ -35,9 +35,13 @@ pub mod openai;
 pub mod qr;
 pub mod server;
 pub mod session_share;
+pub mod saml;
+pub mod scim;
 pub mod surfaces;
+pub mod tenant;
 pub mod tui;
 pub mod ui;
+pub mod xmldsig;
 
 pub use server::{start, App, ARP_VERSION};
 
@@ -89,11 +93,13 @@ pub struct AppConfig {
     pub rbac: Option<identity::RbacConfig>,
     /// Serve `/metrics` without a credential (for a scraper on a private network). Off by default.
     pub metrics_public: bool,
+    /// SCIM 2.0 provisioning at `/scim/v2` (ent-049). Off by default: no route while off.
+    pub scim: bool,
 }
 
 impl Default for AppConfig {
     fn default() -> Self {
-        AppConfig { enabled: false, listen: d_listen(), token: None, allow_origins: vec![], ui: true, openai_api: false, nodes: false, a2a: a2a::A2aConfig::default(), max_conns: d_conns(), workspace: None, terminal: false, auth: dashboard_auth::AuthConfig::default(), tokens: vec![], exposure: exposure::ExposureConfig::default(), rbac: None, metrics_public: false }
+        AppConfig { enabled: false, listen: d_listen(), token: None, allow_origins: vec![], ui: true, openai_api: false, nodes: false, a2a: a2a::A2aConfig::default(), max_conns: d_conns(), workspace: None, terminal: false, auth: dashboard_auth::AuthConfig::default(), tokens: vec![], exposure: exposure::ExposureConfig::default(), rbac: None, metrics_public: false, scim: false }
     }
 }
 
