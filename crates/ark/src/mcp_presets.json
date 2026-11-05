@@ -694,6 +694,35 @@
   "post_install": "On first connection Hermes opens a browser to authorize with Grafana Cloud\n(or run `hermes mcp login grafana`). During authorization you'll enter your\nGrafana Cloud stack URL (https://<your-stack>.grafana.net) and choose read\nor read+write access, then approve. Restart the session so tools load.\n\nRequires a hosted Grafana Cloud stack and the \"Assistant Cloud MCP User\"\nrole (Editor or higher has it by default). Self-hosted Grafana isn't\nsupported by this endpoint — use the OSS mcp-grafana server instead.\n\nBilling note: Grafana counts each user connecting via MCP as an active\nGrafana Assistant user — see grafana.com Assistant pricing."
  },
  {
+  "name": "grafana-selfhosted",
+  "description": "Self-hosted Grafana through the official mcp-grafana server (dashboards, Prometheus/Loki queries, alerts, incidents) running next to your Grafana.",
+  "source": "https://github.com/grafana/mcp-grafana",
+  "url": "${GRAFANA_MCP_URL}",
+  "auth": "none",
+  "env": [
+   {
+    "name": "GRAFANA_MCP_URL",
+    "prompt": "URL of your mcp-grafana server in streamable-http mode (e.g. http://grafana-mcp.internal:8000/mcp; start it with GRAFANA_URL and a read-only GRAFANA_SERVICE_ACCOUNT_TOKEN)",
+    "secret": false,
+    "required": true
+   }
+  ],
+  "oauth": {},
+  "include": [],
+  "exclude": [],
+  "keywords": [
+   "grafana",
+   "promql",
+   "logql",
+   "observability",
+   "dashboard",
+   "self-hosted",
+   "on-prem"
+  ],
+  "hosts": [],
+  "post_install": "mcp-grafana talks to Grafana with its own service-account token (give it the Viewer role for read-only use).\nWithout MCP, ark's native tools reach the same data: set [integrations.grafana] url/token\n(grafana_query) and [integrations.prometheus] / [integrations.loki] url or via_grafana."
+ },
+ {
   "name": "hugging_face",
   "description": "Models, datasets, Spaces, and papers from the Hugging Face Hub.",
   "source": "https://huggingface.co/docs/hub/agents-mcp",

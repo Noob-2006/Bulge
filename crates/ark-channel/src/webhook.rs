@@ -19,7 +19,10 @@
 //! `id.ts.body`, `whsec_` keys, 300 s replay window), Linear (`linear-signature`),
 //! GitHub (`X-Hub-Signature-256`), GitLab (`X-Gitlab-Token`), generic V2
 //! (`X-Webhook-Signature-V2` over `<ts>.<body>` + `X-Webhook-Timestamp`) and the
-//! legacy body-only `X-Webhook-Signature`; `scheme` pins one (or `bearer`).
+//! legacy body-only `X-Webhook-Signature`; `scheme` pins one (or `bearer`). Incident and
+//! ticket sources: PagerDuty v3 (`X-PagerDuty-Signature: v1=<hex HMAC>`, several during a
+//! secret rotation) and Jira / JSM (`X-Hub-Signature: sha256=<hex HMAC>`); their event types
+//! come from `event.event_type` (PagerDuty) and `webhookEvent` (Jira).
 //! Then a per-route rate limit (30/min), a 1 MB cap, a 1 h idempotency cache
 //! (X-GitHub-Delivery / svix-id / webhook-id / X-Request-ID), declarative
 //! filters, the prompt template, and optional coalescing (latest event wins).
@@ -128,7 +131,7 @@ pub struct RouteConfig {
     /// Falls back to the channel-wide `secret`. `INSECURE_NO_AUTH` (loopback only) skips checks.
     #[serde(default)]
     pub secret: Option<String>,
-    /// auto (default) | standard-webhooks | svix | github | gitlab | linear | generic | bearer.
+    /// auto (default) | standard-webhooks | svix | github | gitlab | linear | pagerduty | jira | generic | bearer.
     #[serde(default)]
     pub scheme: Option<String>,
     #[serde(default)]
@@ -344,7 +347,7 @@ fn make_route(id: &str, listen: &str, default_secret: &Option<String>, name: &st
         return Err(format!("channel {id}: route `{name}` uses {INSECURE_NO_AUTH} but listens on non-loopback {listen}"));
     }
     let scheme = cfg.scheme.clone().unwrap_or_else(|| "auto".into());
-    if !["auto", "standard-webhooks", "svix", "github", "gitlab", "linear", "generic", "bearer"].contains(&scheme.as_str()) {
+    if !["auto", "standard-webhooks", "svix", "github", "gitlab", "linear", "pagerduty", "jira", "generic", "bearer"].contains(&scheme.as_str()) {
         return Err(format!("channel {id}: route `{name}` has unknown scheme `{scheme}`"));
     }
     if let Some(c) = &cfg.coalesce {
@@ -826,6 +829,8 @@ fn handle_route(s: &mut TcpStream, ing: &Ingress, route: &Route, method: &str, h
         .filter(|e| !e.is_empty())
         .or_else(|| h("x-gitlab-event").filter(|e| !e.is_empty()))
         .or_else(|| payload["event_type"].as_str().filter(|e| !e.is_empty()).map(str::to_string))
+        .or_else(|| payload["event"]["event_type"].as_str().filter(|e| !e.is_empty()).map(str::to_string))
+        .or_else(|| payload["webhookEvent"].as_str().filter(|e| !e.is_empty()).map(str::to_string))
         .or_else(|| payload["type"].as_str().filter(|e| !e.is_empty()).map(str::to_string))
         .unwrap_or_else(|| "unknown".into());
     if !route.cfg.events.is_empty() && !route.cfg.events.contains(&event_type) {
@@ -1204,6 +1209,12 @@ pub(crate) fn verify_signature(scheme: &str, headers: &[(String, String)], body:
         !v1.is_empty() && str_eq(v1, &hex_hmac(secret, body))
     };
     let provided = |k: &str| Some(h(k)).filter(|v| !v.is_empty());
+    // PagerDuty: comma-separated `v1=<hex>` (more than one while a secret rotates).
+    let pagerduty = |p: &str| {
+        let want = format!("v1={}", hex_hmac(secret, body));
+        p.split(',').any(|s| str_eq(s.trim(), &want))
+    };
+    let jira = |p: &str| str_eq(p, &format!("sha256={}", hex_hmac(secret, body)));
     match scheme {
         "svix" | "standard-webhooks" => {
             if !h("svix-signature").is_empty() || !h("svix-id").is_empty() {
@@ -1215,6 +1226,8 @@ pub(crate) fn verify_signature(scheme: &str, headers: &[(String, String)], body:
         "github" => provided("x-hub-signature-256").is_some_and(|p| str_eq(p, &format!("sha256={}", hex_hmac(secret, body)))),
         "gitlab" => provided("x-gitlab-token").is_some_and(|p| str_eq(p, secret)),
         "linear" => provided("linear-signature").is_some_and(|p| str_eq(p, &hex_hmac(secret, body))),
+        "pagerduty" => provided("x-pagerduty-signature").is_some_and(pagerduty),
+        "jira" => provided("x-hub-signature").or_else(|| provided("x-hub-signature-256")).is_some_and(jira),
         "generic" => generic(),
         "bearer" => h("authorization").strip_prefix("Bearer ").is_some_and(|t| str_eq(t.trim(), secret)),
         _ => {
@@ -1232,6 +1245,12 @@ pub(crate) fn verify_signature(scheme: &str, headers: &[(String, String)], body:
             }
             if let Some(p) = provided("x-gitlab-token") {
                 return str_eq(p, secret);
+            }
+            if let Some(p) = provided("x-pagerduty-signature") {
+                return pagerduty(p);
+            }
+            if let Some(p) = provided("x-hub-signature") {
+                return jira(p);
             }
             generic()
         }
@@ -2104,6 +2123,26 @@ mod tests {
         let hs: String = headers.iter().map(|(k, v)| format!("{k}: {v}\r\n")).collect();
         let (st, b) = raw(addr, format!("POST {path} HTTP/1.1\r\nHost: x\r\n{hs}Content-Length: {}\r\n\r\n{body}", body.len()).as_bytes());
         (st, serde_json::from_str(&b).unwrap_or(Value::Null))
+    }
+
+    /// PagerDuty v3 and Jira webhook signatures (ent-105 / ent-107), pinned and auto-detected.
+    #[test]
+    fn pagerduty_and_jira_signatures() {
+        let body = br#"{"event":{"event_type":"incident.triggered","data":{"id":"P1"}}}"#;
+        let sig = hexmac("pdsecret", std::str::from_utf8(body).unwrap());
+        let hs = |k: &str, v: String| vec![(k.to_string(), v)];
+        assert!(verify_signature("pagerduty", &hs("x-pagerduty-signature", format!("v1=deadbeef, v1={sig}")), body, "pdsecret", 0), "any v1 of a rotation");
+        assert!(verify_signature("auto", &hs("x-pagerduty-signature", format!("v1={sig}")), body, "pdsecret", 0));
+        assert!(!verify_signature("pagerduty", &hs("x-pagerduty-signature", format!("v1={sig}")), body, "other", 0));
+        assert!(!verify_signature("pagerduty", &hs("x-pagerduty-signature", sig.clone()), body, "pdsecret", 0), "the v1= prefix is required");
+        assert!(!verify_signature("pagerduty", &[], body, "pdsecret", 0));
+        let jb = br#"{"webhookEvent":"jira:issue_created","issue":{"key":"OPS-1"}}"#;
+        let js = format!("sha256={}", hexmac("jsecret", std::str::from_utf8(jb).unwrap()));
+        assert!(verify_signature("jira", &hs("x-hub-signature", js.clone()), jb, "jsecret", 0));
+        assert!(verify_signature("auto", &hs("x-hub-signature", js.clone()), jb, "jsecret", 0));
+        assert!(!verify_signature("jira", &hs("x-hub-signature", js), jb, "wrong", 0));
+        let cfg = RouteConfig { scheme: Some("pagerduty".into()), ..serde_json::from_value(json!({})).unwrap() };
+        assert!(make_route("c", "127.0.0.1:0", &Some("s".into()), "pd", &cfg, &[]).is_ok());
     }
 
     fn hexmac(key: &str, data: &str) -> String {

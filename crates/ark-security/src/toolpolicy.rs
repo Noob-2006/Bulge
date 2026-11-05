@@ -44,6 +44,11 @@ pub fn groups() -> BTreeMap<&'static str, &'static [&'static str]> {
         ("group:nodes", &["node_invoke"][..]),
         ("group:plan", &["todo", "skill", "ask_user", "tool_describe", "tool_call"][..]),
         ("group:media", &["image", "tts", "pdf", "image_generate", "vision"][..]),
+        // Professional DevOps / SecOps tools (ark_tools::ops, ark_tools::secops).
+        ("group:observability", &["prometheus_query", "loki_query", "alertmanager_alerts", "elastic_search", "grafana_query"][..]),
+        ("group:deploy", &["deploy"][..]),
+        ("group:tickets", &["jira", "servicenow", "pagerduty"][..]),
+        ("group:secops", &["scan_report", "osv_query", "siem_alerts", "compliance_check"][..]),
     ])
 }
 
@@ -57,10 +62,12 @@ pub fn profile(name: &str) -> Option<Option<Vec<String>>> {
         "messaging" => Some(expand(&["group:messaging", "group:memory", "group:web", "ask_user", "todo", "tool_describe", "tool_call", "session_status"])),
         // Professional roles (BATCH-next §3). DevOps/SRE: terminal, logs, process control,
         // scheduled checks, monitoring/integration connectors (MCP), sub-agents for parallel triage.
-        "devops" => Some(expand(&["group:fs", "group:runtime", "group:web", "group:memory", "group:sessions", "group:agents", "group:plan", "group:automation", "mcp__*"])),
+        "devops" => Some(expand(&["group:fs", "group:runtime", "group:web", "group:memory", "group:sessions", "group:agents", "group:plan", "group:automation", "group:observability", "group:deploy", "group:tickets", "osv_query", "scan_report", "mcp__*"])),
         // Security operations: read and analyse; no messaging, no automation, no remote nodes,
         // no delegation to external agents (offensive tooling is refused by the role policy).
-        "secops" => Some(expand(&["group:fs", "group:runtime", "group:web", "group:memory", "group:plan", "group:sessions", "mcp__*"])),
+        // Monitoring queries and tickets are in: triage reads alerts and logs and opens tickets;
+        // `deploy` is not (changing production is the DevOps role's job).
+        "secops" => Some(expand(&["group:fs", "group:runtime", "group:web", "group:memory", "group:plan", "group:sessions", "group:secops", "group:observability", "group:tickets", "mcp__*"])),
         // Data analysis: files, a runtime for queries/notebooks, charts (media), DB connectors.
         "data" => Some(expand(&["group:fs", "group:runtime", "group:web", "group:memory", "group:plan", "group:media", "group:sessions", "mcp__*"])),
         // IT support: ticket replies (messaging), diagnostics (runtime), knowledge base (web/memory).
@@ -177,6 +184,14 @@ mod tests {
         }
         assert!(layer_allows(&l("devops"), "schedule") && !layer_allows(&l("secops"), "schedule"));
         assert!(!layer_allows(&l("secops"), "channel_send") && !layer_allows(&l("secops"), "a2a_send"));
+        // DevOps / SecOps tools land in their roles' profiles (not in the coding profile).
+        for t in ["prometheus_query", "loki_query", "alertmanager_alerts", "elastic_search", "grafana_query", "deploy", "jira", "servicenow", "pagerduty"] {
+            assert!(layer_allows(&l("devops"), t), "devops: {t}");
+        }
+        for t in ["scan_report", "osv_query", "siem_alerts", "compliance_check", "jira", "elastic_search"] {
+            assert!(layer_allows(&l("secops"), t), "secops: {t}");
+        }
+        assert!(!layer_allows(&l("secops"), "deploy") && !layer_allows(&l("coding"), "deploy") && !layer_allows(&l("coding"), "siem_alerts"));
         assert!(layer_allows(&l("itsupport"), "channel_send"), "IT support answers tickets");
         assert!(layer_allows(&l("data"), "image"), "charts");
     }

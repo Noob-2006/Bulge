@@ -145,7 +145,7 @@ mod tests {
     #[test]
     fn catalog_is_complete_and_well_formed() {
         let c = catalog();
-        assert_eq!(c.len(), 65);
+        assert_eq!(c.len(), 66);
         for p in c {
             assert!(!p.description.is_empty() && !p.url.is_empty(), "{}", p.name);
             assert!(matches!(p.auth.as_str(), "oauth" | "none"), "{}", p.name);
@@ -191,5 +191,12 @@ mod tests {
         let n8n = get("n8n-official").unwrap();
         let b = config_block("n", n8n, &BTreeMap::from([("N8N_MCP_SERVER_URL".to_string(), "https://n8n.example/mcp-server/http".to_string())])).unwrap();
         assert_eq!(parse(&b, "n").url.as_deref(), Some("https://n8n.example/mcp-server/http"));
+        // pro-015: self-hosted Grafana through the OSS mcp-grafana server.
+        let g = get("grafana-selfhosted").unwrap();
+        assert!(config_block("g", g, &BTreeMap::new()).unwrap_err().contains("GRAFANA_MCP_URL"));
+        let b = config_block("g", g, &BTreeMap::from([("GRAFANA_MCP_URL".to_string(), "http://grafana-mcp.internal:8000/mcp".to_string())])).unwrap();
+        let c = parse(&b, "g");
+        assert!(!c.uses_oauth() && c.url.as_deref() == Some("http://grafana-mcp.internal:8000/mcp"));
+        assert!(search("on-prem").iter().any(|p| p.name == "grafana-selfhosted"));
     }
 }
