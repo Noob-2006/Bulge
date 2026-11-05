@@ -17,6 +17,8 @@ ark-kernel = { path = "../ark-kernel", default-features = false }
 # The builtin MEMORY.md / USER.md store (limits, scanner hook, staged-write replay) lives in
 # ark-tools' `memory` tool; reusing it keeps one implementation of the § store.
 ark-tools.workspace = true
+# Read-time threat re-scan of recalled memories (H8).
+ark-security.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 regex.workspace = true

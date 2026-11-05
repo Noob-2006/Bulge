@@ -98,13 +98,13 @@ pub fn attach(k: &Kernel, ws: &Path) {
     k.add_slash(Arc::new(crate::slash::MemorySlash::new(h, ws.to_path_buf())));
 }
 
-/// `ark memory <sub>` / `ark journey <sub>`: the verbs in [`crate::cli`]. `argv` excludes the
+/// `ark memory <sub>` / `ark journey <sub>` / `ark index <sub>`: the verbs in [`crate::cli`]. `argv` excludes the
 /// command word (the library CLI expects it as `argv[0]`).
 pub fn cli(cmd: &str, argv: &[String], cfg: &Config, paths: &Paths, ws: &Path) -> Result<i32, String> {
     let h = host(cfg, paths);
     let argv: Vec<String> = std::iter::once(cmd.to_string()).chain(argv.iter().cloned()).collect();
     let plugins: Vec<String> = cfg.plugins.keys().cloned().collect();
-    let out = crate::cli::run_with(&h, &argv, &plugins, &skill_roots(paths, ws))?;
+    let out = if cmd == "index" { crate::cli::index_cmd(&h, &argv[1..], Some(cfg))? } else { crate::cli::run_with(&h, &argv, &plugins, &skill_roots(paths, ws))? };
     if !out.is_empty() {
         println!("{out}");
     }

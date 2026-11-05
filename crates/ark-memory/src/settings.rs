@@ -95,7 +95,8 @@ impl Default for SearchSettings {
     fn default() -> Self {
         SearchSettings {
             enabled: true,
-            sources: vec!["memory".into()],
+            // srv-059: past sessions are searchable by default (chat Q&A over old sessions).
+            sources: vec!["memory".into(), "sessions".into()],
             extra_paths: vec![],
             max_results: 6,
             min_score: 0.35,

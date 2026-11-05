@@ -93,7 +93,66 @@ pub fn run_with(h: &Arc<Host>, argv: &[String], plugins: &[String], skill_roots:
     match verb {
         "journey" | "learning" | "memory-graph" => crate::journey::run(h, &args, skill_roots),
         "wiki" => crate::wiki::cli(h, &args),
+        "index" => index_cmd(h, &args, None),
         _ => memory(h, &args, plugins),
+    }
+}
+
+pub const INDEX_USAGE: &str = "usage: ark index <status [--json]|sync|rebuild|bench <session> [--json]>";
+
+/// `ark index …`: the SQLite index (`<data>/index.db`). It is derived from the JSONL session
+/// logs, the memory ledger and the memory files, so `rebuild` is always safe.
+/// `cfg` (the kernel config) is needed by `bench` only.
+pub fn index_cmd(h: &Arc<Host>, args: &[String], cfg: Option<&ark_kernel::config::Config>) -> Result<String, String> {
+    use ark_kernel::sqlindex;
+    let pos = positional(args);
+    let json_out = args.iter().any(|a| a == "--json");
+    let sessions = h.data.join("sessions");
+    let sync_all = |h: &Arc<Host>| -> Result<String, String> {
+        let s = sqlindex::sync_sessions(&h.data, &sessions)?;
+        crate::memstore::sync(&h.data)?;
+        let r = h.sync();
+        let mut out = format!("sessions: {} ({} new message(s), {} tool result(s), {} removed); memory files: {} ({} changed, {} chunk(s), {} embedded)", s.sessions, s.messages, s.tool_results, s.removed, r.files, r.changed, r.chunks, r.embedded);
+        for w in r.warnings {
+            out.push_str(&format!("\nwarning: {w}"));
+        }
+        Ok(out)
+    };
+    match pos.first().map(String::as_str).unwrap_or("status") {
+        "status" => {
+            let counts = sqlindex::counts(&h.data)?;
+            let trust = crate::memstore::trust_counts(&h.data);
+            let size = std::fs::metadata(sqlindex::path(&h.data)).map(|m| m.len()).unwrap_or(0);
+            if json_out {
+                let c: serde_json::Map<String, Value> = counts.iter().map(|(k, v)| (k.clone(), json!(v))).collect();
+                let t: serde_json::Map<String, Value> = trust.iter().map(|(k, v)| (k.clone(), json!(v))).collect();
+                return Ok(serde_json::to_string_pretty(&json!({"path": sqlindex::path(&h.data), "schema_version": sqlindex::SCHEMA_VERSION, "bytes": size, "rows": c, "memories_by_trust": t})).unwrap_or_default());
+            }
+            let mut out = vec![format!("index: {} ({} bytes, schema v{}) — derived from sessions/*/events.jsonl, memory/memories.jsonl and memory/*.md; `ark index rebuild` regenerates it", sqlindex::path(&h.data).display(), size, sqlindex::SCHEMA_VERSION)];
+            out.extend(counts.iter().map(|(k, v)| format!("  {k}: {v}")));
+            if !trust.is_empty() {
+                out.push(format!("  memories by trust: {}", trust.iter().map(|(k, v)| format!("{k} {v}")).collect::<Vec<_>>().join(", ")));
+            }
+            Ok(out.join("\n"))
+        }
+        "sync" => sync_all(h),
+        "rebuild" => {
+            sqlindex::clear(&h.data)?;
+            h.reset_index()?;
+            Ok(format!("index cleared and rebuilt from the source files\n{}", sync_all(h)?))
+        }
+        "bench" => {
+            let id = pos.get(1).ok_or("usage: ark index bench <session>")?;
+            let cfg = cfg.cloned().unwrap_or_default();
+            let store = ark_kernel::store::Store::new(&sessions);
+            let events = store.read(id).map_err(|e| e.to_string())?;
+            let b = ark_kernel::ctxbench::replay(&events, &cfg);
+            if json_out {
+                return Ok(serde_json::to_string_pretty(&json!({"session": id, "requests": b.requests, "avg_raw": b.avg_raw, "avg_trimmed": b.avg_trimmed, "max_raw": b.max_raw, "max_trimmed": b.max_trimmed, "total_raw": b.total_raw, "total_trimmed": b.total_trimmed, "saved_pct": b.saved_pct(), "max_tool_result_chars": cfg.compaction.max_tool_result_chars, "keep_tool_results": cfg.compaction.keep_tool_results})).unwrap_or_default());
+            }
+            Ok(format!("session {id} (estimated input tokens per request, system + conversation; [compaction] max_tool_result_chars = {}, keep_tool_results = {})\n{}", cfg.compaction.max_tool_result_chars, cfg.compaction.keep_tool_results, b.render()))
+        }
+        other => Err(format!("unknown `index {other}`\n{INDEX_USAGE}")),
     }
 }
 
@@ -214,6 +273,9 @@ fn memory(h: &Arc<Host>, args: &[String], plugins: &[String]) -> Result<String, 
             st["writeApproval"] = json!(store::write_approval_enabled(&h.data));
             st["dreaming"] = dreaming::status_json(h);
             st["shortTerm"] = json!(recall::Store::load(&h.data).entries.len());
+            let _ = crate::memstore::sync(&h.data);
+            let trust: serde_json::Map<String, Value> = crate::memstore::trust_counts(&h.data).into_iter().map(|(k, v)| (k, json!(v))).collect();
+            st["memoriesByTrust"] = Value::Object(trust);
             if flag("--json") {
                 return Ok(serde_json::to_string_pretty(&st).unwrap_or_default());
             }
@@ -224,6 +286,7 @@ fn memory(h: &Arc<Host>, args: &[String], plugins: &[String]) -> Result<String, 
                 format!("MEMORY.md {}/{} chars, USER.md {}/{} chars", std::fs::read_to_string(h.memory_dir().join("MEMORY.md")).map(|s| s.chars().count()).unwrap_or(0), store::cap_of("memory"), std::fs::read_to_string(h.memory_dir().join("USER.md")).map(|s| s.chars().count()).unwrap_or(0), store::cap_of("user")),
                 format!("write approval: {} ({} pending)", if store::write_approval_enabled(&h.data) { "on" } else { "off" }, st["pending"]),
                 format!("dreaming: {}", if st["dreaming"]["enabled"] == true { "on" } else { "off" }),
+                format!("long-term memories by trust: {}", st["memoriesByTrust"].as_object().map(|m| if m.is_empty() { "none".to_string() } else { m.iter().map(|(k, v)| format!("{k} {v}")).collect::<Vec<_>>().join(", ") }).unwrap_or_default()),
             ];
             if let Some(e) = st["embeddingError"].as_str() {
                 out.push(format!("embedding error: {e}"));

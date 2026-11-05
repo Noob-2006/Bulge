@@ -21,6 +21,7 @@ pub mod host;
 pub mod index;
 pub mod journey;
 pub mod manager;
+pub mod memstore;
 pub mod migrate;
 pub mod oauth;
 pub mod recall;
@@ -30,9 +31,12 @@ pub mod settings;
 pub mod slash;
 pub mod sigv4;
 pub mod tools;
+pub mod trust;
 pub mod util;
 pub mod vector;
 pub mod wiki;
+#[cfg(test)]
+mod ragtests;
 
 use ark_core::{Cancel, Message, Tool};
 use ark_kernel::config::MemoryConfig;
