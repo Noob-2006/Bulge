@@ -1,0 +1,53 @@
+#cloud-config
+# ark agent server on first boot (Ubuntu/Debian/RHEL family/Amazon Linux 2023). Needs outbound
+# HTTPS to your package mirror only. Replace the three placeholders; pass the API key through your
+# cloud's secret mechanism (the example reads it from a file the platform writes, 0600) - never
+# paste it in user-data, which is readable from the instance metadata service.
+#
+# Tested flow (deploy/README.md): the same `ark setup` flags are run in the distro matrix.
+write_files:
+  - path: /etc/ark/managed.toml
+    owner: root:root
+    permissions: "0644"
+    defer: true                       # after the package created /etc/ark
+    content: |
+      [managed]
+      locked = ["approvals.preset", "gate.egress_allow"]
+      [approvals]
+      preset = "standard"
+      [gate]
+      egress_allow = ["api.anthropic.com"]
+  - path: /usr/local/sbin/ark-firstboot
+    owner: root:root
+    permissions: "0755"
+    content: |
+      #!/bin/sh
+      set -eu
+      REPO=https://packages.example.com/ark            # <-- your mirror of packaging/repo output
+      KEYFILE=/run/ark-api-key                          # <-- written by the platform, 0600, deleted below
+      if command -v apt-get >/dev/null 2>&1; then
+          install -d -m 0755 /etc/apt/keyrings
+          curl -fsSL "$REPO/ark-archive-keyring.gpg" -o /etc/apt/keyrings/ark-archive-keyring.gpg
+          echo "deb [signed-by=/etc/apt/keyrings/ark-archive-keyring.gpg] $REPO/apt stable main" > /etc/apt/sources.list.d/ark.list
+          apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y ark-agent
+      else
+          cat > /etc/yum.repos.d/ark.repo <<REPOEOF
+      [ark]
+      name=ark agent runtime
+      baseurl=$REPO/rpm/\$basearch
+      enabled=1
+      gpgcheck=1
+      repo_gpgcheck=1
+      gpgkey=$REPO/rpm/RPM-GPG-KEY-ark
+      REPOEOF
+          (command -v dnf >/dev/null 2>&1 && dnf install -y ark-agent) || yum install -y ark-agent
+      fi
+      # unattended setup as the service account; the key goes through the environment into the vault
+      ARK_SETUP_API_KEY=$(cat "$KEYFILE") ARK_HOME=/var/lib/ark \
+          setpriv --reuid=ark --regid=ark --clear-groups \
+          /usr/bin/ark setup --non-interactive --no-service --provider anthropic --model claude-sonnet-4-5
+      rm -f "$KEYFILE"
+      systemctl enable --now arkd
+runcmd:
+  - [/usr/local/sbin/ark-firstboot]
+  - [/usr/bin/ark, doctor]

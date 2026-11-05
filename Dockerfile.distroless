@@ -1,0 +1,44 @@
+# syntax=docker/dockerfile:1
+# ark on a distroless base (ent-018): a static musl binary + share/, no shell, no package manager.
+#   docker build -f Dockerfile.distroless -t ark:distroless .
+#   docker run -d --name ark -v ark-data:/data ark:distroless
+#
+# What this image is for, and what it is not: the agent's own `shell`/`git`/bridge tools need a
+# userland, and there is none here. Use it for the API/channel/MCP-client deployments where the
+# execution backend is remote or a microVM (exec.backend = "vm"/"ssh"), and for the smallest
+# possible attack surface. For an agent that runs shell commands locally use `Dockerfile` (debian)
+# or `Dockerfile.ubi`. There is no tini either: PID 1 is `ark`, which reaps its own children, and
+# `docker run --init` / Kubernetes `shareProcessNamespace` cover anything it spawns.
+FROM lukemathwalker/cargo-chef:latest-rust-alpine AS chef
+RUN apk add --no-cache build-base
+WORKDIR /app
+
+FROM chef AS planner
+COPY . .
+RUN cargo chef prepare --recipe-path recipe.json
+
+FROM chef AS builder
+COPY --from=planner /app/recipe.json recipe.json
+RUN cargo chef cook --release --locked --recipe-path recipe.json
+COPY . .
+RUN cargo build --release --locked --bin ark \
+ && mkdir -p /rootfs/data /rootfs/work \
+ && cp -r /app/share /rootfs/share-ark
+
+FROM gcr.io/distroless/static-debian12:nonroot
+COPY --from=builder /app/target/release/ark /usr/bin/ark
+COPY --from=builder /rootfs/share-ark/ /usr/share/ark/
+COPY --from=builder /app/packaging/vm/build-image.sh /app/packaging/vm/README.md /usr/share/ark/vm/
+# 65532 = the `nonroot` user of distroless
+COPY --from=builder --chown=65532:65532 /rootfs/data /data
+COPY --from=builder --chown=65532:65532 /rootfs/work /work
+ENV ARK_HOME=/data XDG_RUNTIME_DIR="" ARK_SHARE_DIR=/usr/share/ark
+VOLUME ["/data", "/work"]
+USER 65532:65532
+WORKDIR /work
+EXPOSE 8640
+HEALTHCHECK --interval=30s --timeout=3s --start-period=10s CMD ["/usr/bin/ark", "health"]
+ENTRYPOINT ["/usr/bin/ark"]
+# Headless by default, same as `Dockerfile`: nothing listens on the network until you opt in
+# (see packaging/docker/README.md and deploy/helm for the TLS-terminated variants).
+CMD ["daemon", "run", "-w", "/work"]

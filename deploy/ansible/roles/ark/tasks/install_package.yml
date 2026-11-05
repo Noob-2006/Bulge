@@ -1,0 +1,39 @@
+---
+- name: ark | binary path
+  ansible.builtin.set_fact:
+    ark_bin: /usr/bin/ark
+
+- name: ark | fetch the package when it is a URL
+  ansible.builtin.get_url:
+    url: "{{ ark_package_src }}"
+    dest: "/var/tmp/{{ ark_package_src | basename }}"
+    checksum: "{{ ark_package_checksum }}"
+    mode: "0600"
+  register: ark_pkg_fetched
+  when: ark_package_src is match('^https://')
+
+- name: ark | copy the package from the controller
+  ansible.builtin.copy:
+    src: "{{ ark_package_src }}"
+    dest: "/var/tmp/{{ ark_package_src | basename }}"
+    mode: "0600"
+  when: ark_package_src is not match('^https://')
+
+- name: ark | the package file must hash to the pinned sha256 (take it from the verified SHA256SUMS)
+  ansible.builtin.stat:
+    path: "/var/tmp/{{ ark_package_src | basename }}"
+    checksum_algorithm: sha256
+  register: ark_pkg_stat
+
+- name: ark | refuse a package that is not the pinned one
+  ansible.builtin.assert:
+    that: ark_pkg_stat.stat.checksum == (ark_package_checksum | regex_replace('^sha256:', ''))
+    fail_msg: "sha256 of {{ ark_package_src | basename }} does not match ark_package_checksum"
+
+- name: ark | install a .deb
+  ansible.builtin.apt: { deb: "/var/tmp/{{ ark_package_src | basename }}", state: present }
+  when: ansible_os_family == 'Debian'
+
+- name: ark | install an .rpm
+  ansible.builtin.package: { name: "/var/tmp/{{ ark_package_src | basename }}", state: present, disable_gpg_check: true }  # integrity = the pinned sha256 above; use method "repo" for signature checking
+  when: ansible_os_family in ['RedHat', 'Suse']

@@ -1,0 +1,86 @@
+# ark on Kubernetes. One replica on purpose: the daemon owns a session store, a vault and an audit
+# log on local disk (the PVC); two writers would corrupt it. Scale by running more releases.
+image:
+  repository: ghcr.io/ark-agent/ark
+  # empty = the chart's appVersion. Variants: "<ver>" (debian), "<ver>-ubi", "<ver>-distroless".
+  # Pin by digest in production: tag: "0.1.0@sha256:..."
+  tag: ""
+  pullPolicy: IfNotPresent
+imagePullSecrets: []
+
+# How ark gets its configuration:
+#  setup - an init container runs the unattended `ark setup --non-interactive ...` once per volume
+#          (needs a shell: debian / ubi variants, not distroless)
+#  file  - `config.toml` below is mounted as /data/config/config.toml (any variant, incl. distroless);
+#          the model key arrives as the provider's own environment variable from the Secret
+config:
+  mode: setup
+  provider: anthropic
+  model: claude-sonnet-4-5
+  baseUrl: ""          # custom / local OpenAI-compatible endpoint (e.g. an in-cluster vLLM)
+  channel: ""          # telegram | discord
+  owner: ""            # owner id on that channel
+  # Existing Secret (create it yourself / External Secrets / Sealed Secrets - never in values):
+  #   kubectl create secret generic ark-secrets --from-literal=api-key=... [--from-literal=channel-token=...]
+  existingSecret: ""
+  apiKeyKey: api-key
+  channelTokenKey: channel-token
+  # mode=file only: the provider's env variable name that receives the key, and the file contents.
+  apiKeyEnv: ANTHROPIC_API_KEY
+  toml: ""
+
+# Organisation policy: mounted read-only as /etc/ark/managed.d/10-chart.toml (root-owned, 0644,
+# which is what ark's managed-config loader insists on). Same format as /etc/ark/managed.toml.
+managedPolicy: ""
+
+# The web/app API. Off = nothing listens on the network. On = ark binds loopback inside the pod and
+# a proxy sidecar (same network namespace) is the only thing the Service reaches; terminate TLS in
+# your Ingress / mesh. The token must come from the Secret.
+app:
+  enabled: false
+  tokenKey: app-token
+  port: 8443
+  proxyImage: docker.io/library/caddy:2
+
+persistence:
+  size: 5Gi
+  storageClassName: ""
+  accessModes: [ReadWriteOnce]
+
+workspace:
+  size: 10Gi         # /work: what the agent may read and write
+
+resources:
+  requests: { cpu: 250m, memory: 512Mi }
+  limits: { memory: 2Gi }
+
+# Pod / container hardening. Defaults satisfy the Kubernetes "restricted" Pod Security Standard.
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 10001
+  runAsGroup: 0           # group 0 + group-writable volumes is what OpenShift's arbitrary uid needs
+  fsGroup: 10001
+  seccompProfile: { type: RuntimeDefault }
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities: { drop: [ALL] }
+
+networkPolicy:
+  enabled: true
+  # ark connects out to the model API / chat platforms over 443 and resolves DNS. Narrow `egress`
+  # to your proxy or endpoints; set to [] to allow only DNS.
+  egress:
+    - ports: [{ port: 443, protocol: TCP }]
+  ingressFrom: []         # only used when app.enabled: a list of NetworkPolicyPeer
+
+serviceAccount:
+  create: true
+  annotations: {}
+automountServiceAccountToken: false
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
+podAnnotations: {}
+extraEnv: []

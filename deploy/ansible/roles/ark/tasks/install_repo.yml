@@ -1,0 +1,44 @@
+---
+- name: ark | binary path
+  ansible.builtin.set_fact:
+    ark_bin: /usr/bin/ark
+
+- name: ark | apt repository (signed-by a dedicated keyring, never apt-key)
+  when: ansible_os_family == 'Debian'
+  block:
+    - name: ark | keyring directory
+      ansible.builtin.file: { path: /etc/apt/keyrings, state: directory, mode: "0755" }
+    - name: ark | repository key
+      ansible.builtin.get_url:
+        url: "{{ ark_repo_key_url }}"
+        dest: /etc/apt/keyrings/ark-archive-keyring.gpg
+        mode: "0644"
+    - name: ark | sources entry
+      ansible.builtin.apt_repository:
+        repo: "deb [signed-by=/etc/apt/keyrings/ark-archive-keyring.gpg] {{ ark_repo_url }}/apt stable main"
+        filename: ark
+        state: present
+    - name: ark | package
+      ansible.builtin.apt: { name: "ark-agent={{ ark_version }}-1", state: present, update_cache: true }
+
+- name: ark | yum/dnf/zypper repository (gpgcheck and repo_gpgcheck on)
+  when: ansible_os_family in ['RedHat', 'Suse']
+  block:
+    - name: ark | yum repo file
+      ansible.builtin.yum_repository:
+        name: ark
+        description: ark agent runtime
+        baseurl: "{{ ark_repo_url }}/rpm/$basearch"
+        gpgcheck: true
+        repo_gpgcheck: true
+        gpgkey: "{{ ark_repo_key_url }}"
+      when: ansible_os_family == 'RedHat'
+    - name: ark | zypper repo
+      community.general.zypper_repository:
+        name: ark
+        repo: "{{ ark_repo_url }}/rpm/{{ ansible_architecture }}"
+        auto_import_keys: false
+        state: present
+      when: ansible_os_family == 'Suse'
+    - name: ark | package
+      ansible.builtin.package: { name: "ark-agent-{{ ark_version }}", state: present }
