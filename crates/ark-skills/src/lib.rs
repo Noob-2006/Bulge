@@ -9,5 +9,6 @@ pub mod compat;
 pub mod core;
 pub mod host;
 pub mod hub;
+pub mod integrity;
 pub mod skill;
 pub mod yaml;

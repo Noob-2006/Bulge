@@ -34,6 +34,8 @@ pub struct SyncResult {
     pub relocated: Vec<String>,
     /// The profile opted out (`.no-bundled-skills`): only `ESSENTIAL_SKILLS` were considered.
     pub essential_only: bool,
+    /// gen2-508: shipped skills whose bytes no longer match this build's pins — not seeded.
+    pub tampered: Vec<String>,
 }
 
 /// Skills a `.no-bundled-skills` profile still seeds (Hermes `agent.skill_utils.ESSENTIAL_SKILLS`):
@@ -84,8 +86,16 @@ pub fn sync(s: &Settings, st: &Store, bdir: &Path) -> Result<SyncResult, String>
     let external: Vec<String> = skill::discover(&s.external_dirs.iter().map(|d| (d.clone(), skill::Source::Extra)).collect::<Vec<_>>()).into_iter().map(|x| x.name).collect();
     let hub = usage::hub_names(st);
     let all = bundled(bdir);
+    let pinned = crate::integrity::applies(bdir);
     for b in &all {
         let name = b.name.clone();
+        if pinned {
+            if let Err(e) = crate::integrity::check_skill(bdir, &b.dir) {
+                eprintln!("ark: skills: {e}; not seeded");
+                r.tampered.push(name);
+                continue;
+            }
+        }
         let origin = dir_hash(&b.dir);
         // An opted-out profile (.no-bundled-skills) still seeds the essentials (upstream
         // `sync_skills`); the curator's pruned list never hides an essential either.

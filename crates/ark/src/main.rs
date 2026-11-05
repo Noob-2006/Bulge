@@ -2312,6 +2312,8 @@ fn cmd_doctor(a: &Args) -> R {
     check("git (checkpoints)", tool("git"));
     check("python3 (code mode)", tool("python3"));
     check("data dir", std::fs::create_dir_all(&paths.data).map(|_| paths.data.display().to_string()).map_err(|e| e.to_string()));
+    // gen2-508 (H6): the base prompt and the shipped skills still match this build's pins.
+    check("prompt & bundled skills", ark_skills::integrity::doctor_line());
     // gen2-413: too many questions train people to click Allow — say so before it happens.
     if let Ok(c) = &cfg {
         check("approval load", ark_security::approvals::fatigue_check(&paths.data, c.approvals.fatigue_daily_asks));
