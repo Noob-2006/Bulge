@@ -107,7 +107,7 @@ fn usage_cost(usd_per_mtok_in: f64, usd_per_mtok_out: f64, cache_read: f64, cach
 
 /// USD of one event, priced with `[prices]` / the built-in table. `None` when the event
 /// carries no usage at all (nothing to count).
-fn event_cost(cfg: &crate::config::Config, session_model: &str, kind: &EventKind) -> Option<f64> {
+pub(crate) fn event_cost(cfg: &crate::config::Config, session_model: &str, kind: &EventKind) -> Option<f64> {
     let (usage, model) = match kind {
         EventKind::Message { usage: Some(u), model, .. } => (u, model.as_deref().unwrap_or(session_model)),
         EventKind::AuxUsage { usage, model, .. } => (usage, model.as_str()),
@@ -122,7 +122,7 @@ fn events(rt: &Runtime, session: &str) -> Vec<crate::event::Event> {
 }
 
 /// The session's header model (the price fallback for events that do not name one).
-fn session_model(evs: &[crate::event::Event]) -> String {
+pub(crate) fn session_model(evs: &[crate::event::Event]) -> String {
     evs.iter()
         .find_map(|e| match &e.kind {
             EventKind::Header { model, .. } => Some(model.clone()),

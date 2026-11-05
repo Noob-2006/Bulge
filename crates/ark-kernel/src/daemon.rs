@@ -198,20 +198,30 @@ impl Daemon {
         n
     }
 
+    /// One retention pass over sessions, audit, broker log, logs and exports (ent-077),
+    /// skipping anything under a legal hold. Returns the number of sessions deleted.
     pub fn enforce_retention(&self) -> usize {
-        let Some(days) = self.k.cfg.compliance.retention_days.filter(|d| *d > 0) else { return 0 };
-        let cutoff = crate::event::now_ms().saturating_sub(days as u64 * 86_400_000);
-        let mut n = 0;
-        for s in self.k.store.list().into_iter().filter(|s| s.updated_ms < cutoff && !self.k.is_running(&s.id)) {
-            self.k.end_session(&s.id, "retention");
-            if self.k.store.remove(&s.id).is_ok() {
-                n += 1;
+        let out = crate::governance::enforce_retention(&self.k);
+        for (class, n) in &out {
+            if *n > 0 {
+                eprintln!("arkd: retention: removed {n} {class} item(s)");
             }
         }
-        if n > 0 {
-            eprintln!("arkd: retention: deleted {n} session(s) older than {days} days");
+        out.iter().find(|(c, _)| *c == "sessions").map(|(_, n)| *n).unwrap_or(0)
+    }
+
+    /// Forward new audit records to the configured SIEM sinks (ent-074…076).
+    fn pump_audit(&self) {
+        let cfg = &self.k.cfg.audit.export;
+        if cfg.sinks().is_empty() {
+            return;
         }
-        n
+        let subst = self.k.vault_substitute();
+        for (sink, r) in ark_security::audit_export::pump(&self.k.paths.data, cfg, &|s: &str| subst(s)) {
+            if let Err(e) = r {
+                eprintln!("arkd: audit export to {sink}: {e}");
+            }
+        }
     }
 
     fn scheduler_loop(&self) {
@@ -221,7 +231,13 @@ impl Daemon {
         // C1/C2: paused sessions are retried on their own schedule (a transient network
         // failure or a topped-up account resumes without the user doing anything).
         let mut last_resume = Instant::now() - Duration::from_secs(30);
+        let mut last_export = Instant::now() - Duration::from_secs(3600);
+        ark_security::audit::set_rotate_bytes(self.k.cfg.audit.rotate_mb.max(1) * 1024 * 1024);
         while !STOP.load(Ordering::SeqCst) {
+            if last_export.elapsed() >= Duration::from_secs(self.k.cfg.audit.export_secs.max(1)) {
+                last_export = Instant::now();
+                self.pump_audit();
+            }
             if last_resume.elapsed() >= Duration::from_secs(30) {
                 last_resume = Instant::now();
                 self.retry_paused();
@@ -329,7 +345,11 @@ impl Daemon {
             "session.interrupt" => Ok(json!({"interrupted": k.interrupt(&need("id")?)})),
             "gate.pending" => Ok(json!(self.pending.list().into_iter().map(pending_json).collect::<Vec<_>>())),
             "gate.answer" => {
-                let ok = self.pending.answer(&need("id")?, &need("answer")?);
+                // `_by` is set by the app server from the authenticated principal; on the
+                // owner-only unix socket the caller is the local user.
+                let who = s("_by").map(|b| ark_security::audit::Actor::parse_label(&b)).unwrap_or_else(ark_security::audit::Actor::local);
+                let via = s("_via").unwrap_or_else(|| "arp".into());
+                let ok = crate::approver::answer_by(&*self.pending, &k.paths.data, &need("id")?, &need("answer")?, &who, &via);
                 if ok {
                     Ok(json!({"ok": true}))
                 } else {

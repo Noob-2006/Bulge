@@ -55,12 +55,70 @@ pub struct ExposureConfig {
     pub tls: bool,
     /// Requests per minute per client IP; 0 = off (refused when public).
     pub rate_limit_per_min: u32,
+    /// With `behind_proxy`: the proxies whose `X-Forwarded-For` is believed (IPs or CIDRs).
+    /// Empty = loopback only. A header from any other peer is ignored (ent-120).
+    pub trusted_proxies: Vec<String>,
 }
 
 impl Default for ExposureConfig {
     fn default() -> Self {
-        ExposureConfig { allow_public: false, behind_proxy: false, tls: false, rate_limit_per_min: 1200 }
+        ExposureConfig { allow_public: false, behind_proxy: false, tls: false, rate_limit_per_min: 1200, trusted_proxies: vec![] }
     }
+}
+
+fn ip_in(ip: IpAddr, rule: &str) -> bool {
+    let rule = rule.trim();
+    let (net, bits) = match rule.split_once('/') {
+        Some((n, b)) => (n, b.parse::<u32>().ok()),
+        None => (rule, None),
+    };
+    let Ok(net) = net.parse::<IpAddr>() else { return false };
+    match (ip, net) {
+        (IpAddr::V4(a), IpAddr::V4(n)) => {
+            let b = bits.unwrap_or(32).min(32);
+            let mask = if b == 0 { 0 } else { u32::MAX << (32 - b) };
+            u32::from(a) & mask == u32::from(n) & mask
+        }
+        (IpAddr::V6(a), IpAddr::V6(n)) => {
+            let b = bits.unwrap_or(128).min(128);
+            let mask = if b == 0 { 0 } else { u128::MAX << (128 - b) };
+            u128::from(a) & mask == u128::from(n) & mask
+        }
+        // An IPv4-mapped IPv6 peer against an IPv4 rule.
+        (IpAddr::V6(a), IpAddr::V4(_)) => a.to_ipv4_mapped().is_some_and(|v4| ip_in(IpAddr::V4(v4), rule)),
+        _ => false,
+    }
+}
+
+fn trusted(cfg: &ExposureConfig, ip: IpAddr) -> bool {
+    if cfg.trusted_proxies.is_empty() {
+        return ip.is_loopback() || matches!(ip, IpAddr::V6(v6) if v6.to_ipv4_mapped().is_some_and(|v| v.is_loopback()));
+    }
+    cfg.trusted_proxies.iter().any(|r| ip_in(ip, r))
+}
+
+/// The real client address (ent-120). Without `behind_proxy`, or when the TCP peer is not a
+/// trusted proxy, it is the peer. Otherwise `X-Forwarded-For` is walked from the right, skipping
+/// trusted proxies, and the first untrusted hop is the client — so a client cannot pick its own
+/// address by prepending entries.
+pub fn client_ip(cfg: &ExposureConfig, peer: Option<SocketAddr>, xff: Option<&str>) -> Option<IpAddr> {
+    let peer = peer?.ip();
+    if !cfg.behind_proxy || !trusted(cfg, peer) {
+        return Some(peer);
+    }
+    let Some(xff) = xff else { return Some(peer) };
+    let hops: Vec<IpAddr> = xff.split(',').filter_map(|h| {
+        let h = h.trim().trim_matches(['[', ']']);
+        h.parse::<IpAddr>().ok().or_else(|| h.parse::<SocketAddr>().ok().map(|s| s.ip()))
+    }).collect();
+    let mut client = peer;
+    for ip in hops.iter().rev() {
+        client = *ip;
+        if !trusted(cfg, *ip) {
+            break;
+        }
+    }
+    Some(client)
 }
 
 /// `[app] tokens = [{ token = "…", scope = "read" }]`.
@@ -118,7 +176,7 @@ const ADMIN_PREFIXES: &[&str] = &[
 ];
 const APPROVE_METHODS: &[&str] = &["gate.answer", "approval.answer", "approvals.answer", "question.answer"];
 const READ_METHODS: &[&str] = &[
-    "ping", "initialize", "session.list", "session.history", "session.view", "gate.pending", "goal.list", "schedule.list", "models.list", "tools.list", "events.subscribe", "session.attach", "subscribe", "unsubscribe", "view.browser.list", "view.browser.frame", "view.desktop.state", "logbook.list",
+    "ping", "initialize", "session.list", "session.history", "session.view", "gate.pending", "goal.list", "schedule.list", "models.list", "tools.list", "events.subscribe", "session.attach", "subscribe", "unsubscribe", "view.browser.list", "view.browser.frame", "view.desktop.state", "logbook.list", "whoami",
 ];
 const WRITE_METHODS: &[&str] = &[
     "session.create", "session.submit", "session.command", "session.interrupt", "goal.start", "goal.stop", "goal.cancel", "schedule.run", "view.browser.input", "view.desktop.takeover", "view.desktop.handback", "view.novnc", "chat.send", "message.send",
@@ -258,18 +316,23 @@ const MAX_PEERS: usize = 4096;
 /// Per-IP sliding-window limiter (A9 layer 4). In-process callers (`peer == None`:
 /// plugins, tests, host routes) are never limited; nothing here waits for a human.
 pub fn rate_ok(cfg: &ExposureConfig, peer: Option<SocketAddr>) -> bool {
+    rate_ok_ip(cfg, peer.map(|p| p.ip()))
+}
+
+/// [`rate_ok`] keyed by the resolved client address ([`client_ip`]).
+pub fn rate_ok_ip(cfg: &ExposureConfig, client: Option<IpAddr>) -> bool {
     let per_min = cfg.rate_limit_per_min;
     if per_min == 0 {
         return true;
     }
-    let Some(peer) = peer else { return true };
+    let Some(ip) = client else { return true };
     let now = Instant::now();
     let mut guard = HITS.lock().unwrap_or_else(|e| e.into_inner());
     let map = guard.get_or_insert_with(HashMap::new);
     if map.len() > MAX_PEERS {
         map.retain(|_, v| v.last().is_some_and(|t| now.duration_since(*t) < WINDOW));
     }
-    let q = map.entry(peer.ip()).or_default();
+    let q = map.entry(ip).or_default();
     while q.first().is_some_and(|t| now.duration_since(*t) >= WINDOW) {
         q.remove(0);
     }
@@ -400,5 +463,29 @@ mod tests {
         assert_eq!(c.tokens[1].name.as_deref(), Some("bot"));
         assert!(AppConfig::parse(&toml::from_str("tokens = [{ token = \"x\", scope = \"root\" }]").unwrap()).is_err());
         assert!(AppConfig::parse(&toml::from_str("tokens = [{ token = \"x\", extra = 1 }]").unwrap()).is_err());
+    }
+
+    #[test]
+    fn forwarded_for_is_only_believed_from_trusted_proxies_ent120() {
+        let peer = |s: &str| Some(s.parse::<SocketAddr>().unwrap());
+        let off = ExposureConfig::default();
+        assert_eq!(client_ip(&off, peer("127.0.0.1:5"), Some("1.2.3.4")).unwrap().to_string(), "127.0.0.1", "not behind a proxy: header ignored");
+        let lo = ExposureConfig { behind_proxy: true, ..Default::default() };
+        assert_eq!(client_ip(&lo, peer("127.0.0.1:5"), Some("1.2.3.4")).unwrap().to_string(), "1.2.3.4");
+        assert_eq!(client_ip(&lo, peer("10.0.0.9:5"), Some("1.2.3.4")).unwrap().to_string(), "10.0.0.9", "untrusted peer: header ignored");
+        let net = ExposureConfig { behind_proxy: true, trusted_proxies: vec!["10.0.0.0/8".into(), "192.168.1.1".into()], ..Default::default() };
+        // Client spoofs a leading entry; the proxy chain appends the real one.
+        assert_eq!(client_ip(&net, peer("10.1.1.1:5"), Some("6.6.6.6, 5.5.5.5, 192.168.1.1")).unwrap().to_string(), "5.5.5.5");
+        assert_eq!(client_ip(&net, peer("10.1.1.1:5"), Some("garbage")).unwrap().to_string(), "10.1.1.1");
+        assert_eq!(client_ip(&net, peer("10.1.1.1:5"), None).unwrap().to_string(), "10.1.1.1");
+        assert!(ip_in("::ffff:10.2.3.4".parse().unwrap(), "10.0.0.0/8"));
+        assert!(!ip_in("11.0.0.1".parse().unwrap(), "10.0.0.0/8"));
+        assert!(ip_in("fd00::1".parse().unwrap(), "fd00::/8"));
+        // Rate limiting follows the resolved client, so two clients behind one proxy are separate.
+        let cfg = ExposureConfig { behind_proxy: true, rate_limit_per_min: 1, ..Default::default() };
+        let a = client_ip(&cfg, peer("127.0.0.1:1"), Some("203.0.113.10"));
+        let b = client_ip(&cfg, peer("127.0.0.1:1"), Some("203.0.113.11"));
+        assert!(rate_ok_ip(&cfg, a) && rate_ok_ip(&cfg, b));
+        assert!(!rate_ok_ip(&cfg, a));
     }
 }

@@ -55,6 +55,7 @@
 //! `GET|POST /auth/logout`, `GET /auth/whoami`.
 
 use crate::cron_fire::Keys;
+use crate::identity::{self, Role};
 use crate::server::App;
 use ark_net::httpd::{Request, Response};
 use ark_net::{crypto, form_encode, parse_query};
@@ -188,7 +189,19 @@ impl SelfHostedConfig {
 
 /// Mint a session token for `s`: `base64url(claims)` and the hex HMAC-SHA256 of that text.
 pub fn mint(secret: &[u8], s: &Session, now: i64, ttl: i64) -> String {
+    mint_with(secret, s, &[], "", now, ttl)
+}
+
+/// [`mint`] plus the RBAC roles and login kind (`basic`/`sso`/`plugin`) the session was
+/// granted (ent-053): roles are decided once, at login, and travel signed in the token.
+pub fn mint_with(secret: &[u8], s: &Session, roles: &[Role], kind: &str, now: i64, ttl: i64) -> String {
     let mut claims = json!({"sub": s.subject, "exp": now + ttl.max(1), "admin": s.admin});
+    if !roles.is_empty() {
+        claims["roles"] = json!(roles.iter().map(|r| r.as_str()).collect::<Vec<_>>());
+    }
+    if !kind.is_empty() {
+        claims["kind"] = json!(kind);
+    }
     if let Some(e) = &s.email {
         claims["email"] = json!(e);
     }
@@ -203,6 +216,11 @@ pub fn mint(secret: &[u8], s: &Session, now: i64, ttl: i64) -> String {
 /// Verify a session token: constant-time HMAC compare, then `exp`. `None` on any failure
 /// (unknown shape, bad signature, expired) — the caller cannot tell which.
 pub fn open(secret: &[u8], token: &str, now: i64) -> Option<Session> {
+    open_with(secret, token, now).map(|(s, _, _)| s)
+}
+
+/// [`open`] plus the signed roles and kind (empty when the token predates them).
+pub fn open_with(secret: &[u8], token: &str, now: i64) -> Option<(Session, Vec<Role>, String)> {
     let (payload, sig) = token.trim().split_once('.')?;
     if payload.is_empty() || sig.is_empty() {
         return None;
@@ -218,13 +236,19 @@ pub fn open(secret: &[u8], token: &str, now: i64) -> Option<Session> {
         return None;
     }
     let text = |k: &str| claims[k].as_str().map(str::trim).filter(|s| !s.is_empty()).map(str::to_string);
-    Some(Session {
-        subject,
-        email: text("email"),
-        name: text("name"),
-        expires_at: claims["exp"].as_i64(),
-        admin: claims["admin"].as_bool().unwrap_or(false),
-    })
+    let roles: Vec<Role> = claims["roles"].as_array().map(|a| a.iter().filter_map(|r| r.as_str().and_then(|r| Role::parse(r).ok())).collect()).unwrap_or_default();
+    let kind = text("kind").unwrap_or_default();
+    Some((
+        Session {
+            subject,
+            email: text("email"),
+            name: text("name"),
+            expires_at: claims["exp"].as_i64(),
+            admin: claims["admin"].as_bool().unwrap_or(false),
+        },
+        roles,
+        kind,
+    ))
 }
 
 // ─── built-in `basic` ───────────────────────────────────────────────────────
@@ -362,6 +386,18 @@ impl Oidc {
     }
 
     pub fn exchange(&self, code: &str, state: &str, redirect_uri: &str) -> Result<Session, String> {
+        self.exchange_claims(code, state, redirect_uri).map(|(s, _)| s)
+    }
+
+    /// Exchange the code and also return the verified claims (for the groups claim, ent-047).
+    pub fn exchange_claims(&self, code: &str, state: &str, redirect_uri: &str) -> Result<(Session, Value), String> {
+        let token = self.exchange_token(code, state, redirect_uri)?;
+        self.verify_claims(&token)
+    }
+
+    /// Code + PKCE verifier → the ID token. Never follows redirects (the body carries the
+    /// code), asks for JSON, 10 s budget.
+    fn exchange_token(&self, code: &str, state: &str, redirect_uri: &str) -> Result<String, String> {
         let verifier = take_state(state)?;
         let mut form: Vec<(&str, &str)> = vec![
             ("grant_type", "authorization_code"),
@@ -373,7 +409,6 @@ impl Oidc {
         if !self.cfg.client_secret.trim().is_empty() {
             form.push(("client_secret", self.cfg.client_secret.trim()));
         }
-        // Never follow redirects: the body carries the code. Ask for JSON, 10 s budget.
         let agent: ureq::Agent = ureq::Agent::config_builder().http_status_as_error(false).max_redirects(0).timeout_global(Some(TOKEN_TIMEOUT)).build().into();
         let resp = agent.post(self.cfg.token_endpoint.trim()).header("accept", "application/json").send_form(form).map_err(|e| format!("IDP unreachable: {e}"))?;
         let status = resp.status().as_u16();
@@ -391,11 +426,19 @@ impl Oidc {
         if !token_type.is_empty() && token_type != "bearer" {
             return Err(format!("unexpected token_type `{token_type}`"));
         }
-        let token = ["id_token", "access_token"]
+        ["id_token", "access_token"]
             .iter()
-            .find_map(|k| payload[*k].as_str().map(str::trim).filter(|t| !t.is_empty()))
-            .ok_or_else(|| "token response has no id_token (is the `openid` scope configured?)".to_string())?;
-        self.verify(token)
+            .find_map(|k| payload[*k].as_str().map(str::trim).filter(|t| !t.is_empty()).map(str::to_string))
+            .ok_or_else(|| "token response has no id_token (is the `openid` scope configured?)".to_string())
+    }
+
+    /// Verify an ID token and keep its claims.
+    pub fn verify_claims(&self, token: &str) -> Result<(Session, Value), String> {
+        let now = unix_now();
+        let audience = if self.cfg.audience.trim().is_empty() { self.cfg.client_id.trim() } else { self.cfg.audience.trim() };
+        let issuer = Some(self.cfg.issuer.trim()).filter(|i| !i.is_empty());
+        let claims = crate::cron_fire::verify_with(token, &self.keys, audience, issuer, now, LEEWAY_SECS)?;
+        Ok((claims_to_session(&claims, now)?, claims))
     }
 }
 
@@ -539,13 +582,86 @@ pub fn session_from(app: &App, r: &Request) -> Option<Session> {
             return Some(s);
         }
     }
-    // A credential presented directly (an OIDC ID token / a plugin provider's token).
+    // A credential presented directly: a personal token from `/auth/token`, an OIDC ID token
+    // or a plugin provider's token.
     let bearer = r.bearer()?;
+    if let Some(s) = open(cfg.secret.as_bytes(), bearer, now) {
+        return Some(s);
+    }
     match select(cfg) {
         Selected::Oidc(o) => o.verify(bearer).ok(),
         Selected::Plugin(p) => p.verify(bearer).ok(),
         Selected::Basic(_) | Selected::Unsupported(_) => None,
     }
+}
+
+/// A resolved dashboard login: who, how, and which roles (ent-047 / ent-053).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Login {
+    /// `basic`, `sso` or `plugin`.
+    pub kind: String,
+    /// Email when known, else the subject.
+    pub name: String,
+    pub roles: Vec<Role>,
+}
+
+fn kind_of(cfg: &AuthConfig) -> &'static str {
+    match cfg.provider.trim().to_ascii_lowercase().as_str() {
+        "" | "basic" => "basic",
+        "self_hosted" | "self-hosted" | "oidc" => "sso",
+        _ => "plugin",
+    }
+}
+
+/// Map a login to roles (or refuse it), using `[app.rbac]` and the user registry.
+pub fn roles_for(app: &App, kind: &str, s: &Session, groups: Vec<String>) -> Result<Vec<Role>, String> {
+    let facts = identity::LoginFacts { provider: kind, subject: &s.subject, email: s.email.as_deref().unwrap_or(""), groups, provider_admin: s.admin && kind == "plugin" };
+    identity::login_roles(app.cfg.rbac.as_ref(), &app.d.k.paths, &facts)
+}
+
+/// The login a request carries (cookie, personal token, or a provider token), with roles.
+/// A profile disabled in `ark users` after login stops working at once.
+pub fn login_from(app: &App, r: &Request) -> Option<Login> {
+    let cfg = &app.cfg.auth;
+    if !cfg.enabled || cfg.secret.len() < SECRET_MIN_LEN {
+        return None;
+    }
+    let now = unix_now();
+    let ours = cookie(r, cfg.cookie_name()).and_then(|t| open_with(cfg.secret.as_bytes(), t, now)).or_else(|| r.bearer().and_then(|t| open_with(cfg.secret.as_bytes(), t, now)));
+    let (s, roles, kind) = match ours {
+        Some((s, roles, kind)) => {
+            let kind = if kind.is_empty() { kind_of(cfg).to_string() } else { kind };
+            // A token minted before roles existed: decide now (no groups available).
+            let roles = if roles.is_empty() { roles_for(app, &kind, &s, vec![]).ok()? } else { roles };
+            (s, roles, kind)
+        }
+        None => {
+            let bearer = r.bearer()?;
+            match select(cfg) {
+                Selected::Oidc(o) => {
+                    let (s, claims) = o.verify_claims(bearer).ok()?;
+                    let groups = identity::groups_from_claims(&claims, app.cfg.rbac.as_ref().map(|r| r.groups_claim.as_str()).unwrap_or("groups"));
+                    let roles = roles_for(app, "sso", &s, groups).ok()?;
+                    (s, roles, "sso".to_string())
+                }
+                Selected::Plugin(p) => {
+                    let s = p.verify(bearer).ok()?;
+                    let roles = roles_for(app, "plugin", &s, vec![]).ok()?;
+                    (s, roles, "plugin".to_string())
+                }
+                _ => return None,
+            }
+        }
+    };
+    if ark_kernel::agents::find_login(&app.d.k.paths, &s.subject, s.email.as_deref().unwrap_or("")).is_some_and(|u| u.disabled) {
+        return None;
+    }
+    Some(Login { kind, name: s.email.clone().unwrap_or_else(|| s.subject.clone()), roles })
+}
+
+fn audit_login(app: &App, r: &Request, kind: &str, who: &str, outcome: &str, detail: Value) {
+    let ip = app.client_ip(r).map(|i| i.to_string()).unwrap_or_default();
+    ark_security::audit::record(&app.d.k.paths.data, ark_security::audit::Event::new("auth.login", ark_security::audit::Actor::new(kind, who).with_ip(&ip), "/auth/login", outcome).detail(detail));
 }
 
 /// Serve one `/auth/…` request (mounted before the app-token check: this *is* the login).
@@ -563,6 +679,7 @@ pub fn handle(app: &App, r: &Request) -> Response {
         ("GET", "/auth/logout") => logout(cfg, true),
         ("POST", "/auth/logout") => logout(cfg, false),
         ("GET", "/auth/whoami") => whoami(app, r),
+        ("POST", "/auth/token") => personal_token(app, r),
         _ => not_found(),
     }
 }
@@ -595,9 +712,19 @@ fn login_submit(app: &App, r: &Request) -> Response {
     let form = parse_query(r.body_str());
     let field = |k: &str| form.iter().find(|(a, _)| a == k).map(|(_, v)| v.as_str()).unwrap_or("");
     match b.login(field("user"), field("password")) {
-        Ok(s) => with_session(cfg, &s, redirect("/")),
+        Ok(s) => match roles_for(app, "basic", &s, vec![]) {
+            Ok(roles) => {
+                audit_login(app, r, "basic", &s.subject, "ok", json!({"roles": roles.iter().map(|r| r.as_str()).collect::<Vec<_>>()}));
+                with_session_roles(cfg, &s, &roles, "basic", redirect("/"))
+            }
+            Err(e) => {
+                audit_login(app, r, "basic", &s.subject, "deny", json!({"reason": e}));
+                Response::json(403, &json!({"error": LOGIN_FAILED}).to_string()).with_header("cache-control", "no-store")
+            }
+        },
         Err(e) => {
             eprintln!("arkd: dashboard auth: password login failed: {e}");
+            audit_login(app, r, "basic", field("user"), "fail", Value::Null);
             Response::json(401, &json!({"error": INVALID_CREDENTIALS}).to_string()).with_header("cache-control", "no-store")
         }
     }
@@ -609,14 +736,25 @@ fn callback(app: &App, r: &Request) -> Response {
         return failed(400);
     };
     let redirect_uri = redirect_uri(cfg, r);
-    let outcome = match select(cfg) {
-        Selected::Oidc(o) => o.exchange(code, state, &redirect_uri),
-        Selected::Plugin(p) => p.exchange(code, state, &redirect_uri),
+    let groups_claim = app.cfg.rbac.as_ref().map(|r| r.groups_claim.clone()).unwrap_or_else(|| "groups".into());
+    let (kind, outcome) = match select(cfg) {
+        Selected::Oidc(o) => ("sso", o.exchange_claims(code, state, &redirect_uri).map(|(s, c)| (s, identity::groups_from_claims(&c, &groups_claim)))),
+        Selected::Plugin(p) => ("plugin", p.exchange(code, state, &redirect_uri).map(|s| (s, vec![]))),
         Selected::Basic(_) => return failed(400),
         Selected::Unsupported(reason) => return unavailable(&cfg.provider, &reason),
     };
     match outcome {
-        Ok(s) => with_session(cfg, &s, redirect("/")),
+        Ok((s, groups)) => match roles_for(app, kind, &s, groups.clone()) {
+            Ok(roles) => {
+                audit_login(app, r, kind, s.email.as_deref().unwrap_or(&s.subject), "ok", json!({"subject": s.subject, "groups": groups, "roles": roles.iter().map(|r| r.as_str()).collect::<Vec<_>>()}));
+                with_session_roles(cfg, &s, &roles, kind, redirect("/"))
+            }
+            Err(e) => {
+                eprintln!("arkd: dashboard auth: login refused: {e}");
+                audit_login(app, r, kind, s.email.as_deref().unwrap_or(&s.subject), "deny", json!({"subject": s.subject, "groups": groups, "reason": e}));
+                failed(403)
+            }
+        },
         Err(e) => {
             // Logged in full, shown as one generic line: a caller must not learn which check
             // failed (expired / bad signature / wrong audience / unknown key).
@@ -628,7 +766,14 @@ fn callback(app: &App, r: &Request) -> Response {
 
 fn whoami(app: &App, r: &Request) -> Response {
     match session_from(app, r) {
-        Some(s) => Response::json(200, &serde_json::to_string(&s).unwrap_or_else(|_| "{}".into())).with_header("cache-control", "no-store"),
+        Some(s) => {
+            let mut v = serde_json::to_value(&s).unwrap_or(json!({}));
+            if let Some(l) = login_from(app, r) {
+                v["roles"] = json!(l.roles.iter().map(|r| r.as_str()).collect::<Vec<_>>());
+                v["kind"] = json!(l.kind);
+            }
+            Response::json(200, &v.to_string()).with_header("cache-control", "no-store")
+        }
         None => Response::json(401, &json!({"error": "unauthorized"}).to_string()).with_header("www-authenticate", "Bearer").with_header("cache-control", "no-store"),
     }
 }
@@ -639,7 +784,33 @@ fn logout(cfg: &AuthConfig, home: bool) -> Response {
     base.with_header("set-cookie", &clear).with_header("cache-control", "no-store")
 }
 
+/// `POST /auth/token` (with a login): a personal bearer token carrying the same identity and
+/// roles, for ARP scripts and CLI clients (ent-047: SSO beyond the browser). Optional JSON
+/// `{"ttl_secs": N}`, capped by the session lifetime. Same-origin only (the route is behind the
+/// app-wide Origin check for non-GET requests).
+fn personal_token(app: &App, r: &Request) -> Response {
+    let cfg = &app.cfg.auth;
+    let (Some(l), Some(s)) = (login_from(app, r), session_from(app, r)) else {
+        return Response::json(401, &json!({"error": "unauthorized"}).to_string()).with_header("cache-control", "no-store");
+    };
+    let want = serde_json::from_slice::<Value>(&r.body).ok().and_then(|v| v["ttl_secs"].as_i64()).unwrap_or(cfg.ttl());
+    let now = unix_now();
+    let left = s.expires_at.map(|e| e - now).unwrap_or(cfg.ttl()).max(60);
+    let ttl = want.clamp(60, left.min(cfg.ttl()));
+    let token = mint_with(cfg.secret.as_bytes(), &s, &l.roles, &l.kind, now, ttl);
+    ark_security::audit::record(&app.d.k.paths.data, ark_security::audit::Event::new("token.issue", ark_security::audit::Actor::new(&l.kind, &l.name), "personal", "ok").detail(json!({"ttl_secs": ttl, "roles": l.roles.iter().map(|r| r.as_str()).collect::<Vec<_>>()})));
+    Response::json(200, &json!({"token": token, "expires_at": now + ttl, "roles": l.roles.iter().map(|r| r.as_str()).collect::<Vec<_>>()}).to_string()).with_header("cache-control", "no-store")
+}
+
+/// 302 + the session cookie with its roles.
+fn with_session_roles(cfg: &AuthConfig, s: &Session, roles: &[Role], kind: &str, base: Response) -> Response {
+    let ttl = cfg.ttl();
+    let token = mint_with(cfg.secret.as_bytes(), s, roles, kind, unix_now(), ttl);
+    base.with_header("set-cookie", &format!("{}={token}; HttpOnly; SameSite=Lax; Path=/; Max-Age={ttl}", cfg.cookie_name())).with_header("cache-control", "no-store")
+}
+
 /// 302 + the session cookie (the only place a cookie is ever set).
+#[allow(dead_code)]
 fn with_session(cfg: &AuthConfig, s: &Session, base: Response) -> Response {
     let ttl = cfg.ttl();
     let token = mint(cfg.secret.as_bytes(), s, unix_now(), ttl);
@@ -740,7 +911,7 @@ mod tests {
     }
 
     fn app(label: &str, auth: AuthConfig) -> Arc<App> {
-        let home = std::env::temp_dir().join(format!("ark-auth-{label}-{}", ark_kernel::util::random_hex(8)));
+        let home = ark_core::tmp::scratch(&format!("ark-auth-{label}"));
         let paths = Paths { data: home.join("data"), config_dir: home.join("cfg"), runtime: home.join("run") };
         let (pending, _cell) = ark_kernel::daemon::pending_approver(Duration::from_secs(1));
         let k = ark_kernel::kernel::new_kernel(Config::default(), paths, Arc::new(NoRes), vec![], Arc::new(ark_kernel::vault::Vault::empty()), pending.clone());
@@ -920,6 +1091,44 @@ mod tests {
         // A verified ID token is a credential on its own (upstream `verify_session`).
         let good = served.lock().unwrap()["token"].as_str().unwrap().to_string();
         assert!(app.authorized(&get("/arp", &[("authorization", &format!("Bearer {good}"))])));
+        // ent-047: an IdP login is never admin by default; it is a `user`.
+        assert_eq!(v["roles"], json!(["user"]));
+        let arp = |app: &Arc<App>, auth: (&str, &str), method: &str| {
+            let mut r = get("/arp", &[auth, ("content-type", "application/json")]);
+            r.method = "POST".into();
+            r.body = json!({"jsonrpc": "2.0", "id": 1, "method": method, "params": {}}).to_string().into_bytes();
+            app.clone().handle(r).status
+        };
+        let cookie_hdr = format!("ark_session={token}");
+        assert_eq!(arp(&app, ("cookie", &cookie_hdr), "config.set"), 403, "a user login cannot reconfigure");
+        assert_eq!(arp(&app, ("cookie", &cookie_hdr), "session.list"), 200);
+        // Groups claim → roles with [app.rbac]; a personal token carries the same identity.
+        let mut rb = crate::identity::RbacConfig::default();
+        rb.groups.insert("ark-ops".into(), "operator".into());
+        let ops_app = Arc::new(App { d: app.d.clone(), cfg: AppConfig { rbac: Some(rb), ..app.cfg.clone() }, token: "app-token".into(), host_methods: vec![], routes: vec![] });
+        let now = unix_now();
+        served.lock().unwrap()["token"] = json!(sign(json!({"sub": "u-2", "email": "ops@idp.test", "groups": ["ark-ops", "staff"], "aud": "ark", "iss": issuer, "iat": now, "nbf": now - 1, "exp": now + 300})));
+        let state = start(&ops_app);
+        let r = handle(&ops_app, &get(&format!("/auth/callback?code=good&state={state}"), &[("host", "ark.test")]));
+        assert_eq!(r.status, 302);
+        let ops_cookie = format!("ark_session={}", header(&r, "set-cookie").unwrap().split(';').next().unwrap().trim().split_once('=').unwrap().1);
+        assert_eq!(json_body(&handle(&ops_app, &get("/auth/whoami", &[("cookie", &ops_cookie)])))["roles"], json!(["operator"]));
+        let mut tr = get("/auth/token", &[("cookie", &ops_cookie)]);
+        tr.method = "POST".into();
+        let pt = json_body(&handle(&ops_app, &tr));
+        let bearer = format!("Bearer {}", pt["token"].as_str().unwrap());
+        assert_eq!(arp(&ops_app, ("authorization", &bearer), "session.list"), 200);
+        assert_eq!(arp(&ops_app, ("authorization", &bearer), "session.history"), 403, "operators never see conversation content");
+        let logins = ark_security::audit::query(&app.d.k.paths.data, &ark_security::audit::Query { kind: Some("auth.login".into()), ..Default::default() });
+        assert!(logins.iter().any(|r| r["actor"]["name"] == "ops@idp.test" && r["detail"]["roles"] == json!(["operator"])), "{logins:?}");
+        // default_role = "none" refuses an unmapped login outright.
+        let strict = crate::identity::RbacConfig { default_role: "none".into(), ..Default::default() };
+        let strict_app = Arc::new(App { d: app.d.clone(), cfg: AppConfig { rbac: Some(strict), ..app.cfg.clone() }, token: "app-token".into(), host_methods: vec![], routes: vec![] });
+        let state = start(&strict_app);
+        let r = handle(&strict_app, &get(&format!("/auth/callback?code=good&state={state}"), &[("host", "ark.test")]));
+        assert_eq!(r.status, 403);
+        assert!(header(&r, "set-cookie").is_none());
+        served.lock().unwrap()["token"] = json!(id_token(unix_now() + 300, "ark"));
 
         // 2. A state can only be spent once.
         let r = handle(&app, &get(&format!("/auth/callback?code=good&state={state}"), &[("host", "ark.test")]));

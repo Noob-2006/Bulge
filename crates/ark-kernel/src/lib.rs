@@ -59,5 +59,7 @@ pub mod verify_loop;
 pub mod wake;
 pub mod worktree;
 pub mod limits;
+pub mod governance;
+pub mod managed;
 pub mod reaper;
 pub mod coord;

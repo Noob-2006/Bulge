@@ -699,6 +699,13 @@ pub struct User {
     /// Personal instructions added to sessions this user starts.
     pub instructions: String,
     pub created_ms: u64,
+    /// RBAC role (ent-053/060): `admin`, `operator`, `user`, `auditor`; empty = decided by
+    /// `[app.rbac]` (group mapping / default role).
+    pub role: String,
+    /// Team for usage reports and quotas (ent-070/071).
+    pub team: String,
+    /// Disabled users keep their history but every login and channel request is refused.
+    pub disabled: bool,
 }
 
 pub fn users_path(paths: &Paths) -> PathBuf {
@@ -808,6 +815,21 @@ pub fn user_remove(paths: &Paths, id: &str) -> Result<(), String> {
 
 pub fn find_user(paths: &Paths, channel: &str, sender: &str) -> Option<User> {
     users(paths).into_iter().find(|u| u.identities.iter().any(|i| (i.channel == channel || i.channel == "*") && i.sender == sender) || (channel == "email" && u.emails.iter().any(|e| e.eq_ignore_ascii_case(sender))))
+}
+
+/// Set a user's RBAC role and/or team (`ark users role|team`).
+pub fn user_update(paths: &Paths, id: &str, f: impl FnOnce(&mut User) -> Result<(), String>) -> Result<User, String> {
+    let mut all = users(paths);
+    let u = all.iter_mut().find(|u| u.id == id || u.name == id).ok_or_else(|| format!("no user `{id}`"))?;
+    f(u)?;
+    let out = u.clone();
+    save_users(paths, &all)?;
+    Ok(out)
+}
+
+/// The profile behind an SSO login: an `oidc` identity with the subject, else a linked email.
+pub fn find_login(paths: &Paths, subject: &str, email: &str) -> Option<User> {
+    users(paths).into_iter().find(|u| u.identities.iter().any(|i| i.channel == "oidc" && !subject.is_empty() && i.sender == subject) || (!email.is_empty() && u.emails.iter().any(|e| e.eq_ignore_ascii_case(email))))
 }
 
 pub fn get_user(paths: &Paths, id: &str) -> Option<User> {

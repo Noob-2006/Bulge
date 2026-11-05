@@ -932,7 +932,11 @@ pub fn chat_command(k: &Runtime, line: &str, session: Option<&str>, who: Option<
             if targets.is_empty() {
                 return Some("No pending approval here.".into());
             }
-            let n = targets.iter().filter(|r| k.approver.answer(&r.id, &answer)).count();
+            let actor = match who {
+                Some((ch, sender, _)) => ark_security::audit::Actor::channel(ch, sender),
+                None => ark_security::audit::Actor::local(),
+            };
+            let n = targets.iter().filter(|r| crate::approver::answer_by(&*k.approver, &k.paths.data, &r.id, &answer, &actor, "slash")).count();
             format!("{} {n} approval(s): {}", if answer.starts_with("deny") { "Denied" } else { "Approved" }, answer.split_whitespace().next().unwrap_or(""))
         }
         "yolo" => {

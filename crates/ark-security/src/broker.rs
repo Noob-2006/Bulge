@@ -509,6 +509,9 @@ fn audit(ctx: &Ctx, component: &str, op: &str, tier: Tier, verdict: &str, subjec
     if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(dir.join("broker.jsonl")) {
         let _ = writeln!(f, "{line}");
     }
+    // ent-073: the same fact in the unified, hash-chained stream.
+    let ev = crate::audit::Event::new(&format!("broker.{component}"), crate::audit::Actor::new("agent", &ctx.session), &subject.chars().take(300).collect::<String>(), verdict).session(&ctx.session).detail(json!({"op": op, "tier": tier.as_u8()}));
+    crate::audit::record(&ctx.data, ev);
 }
 
 // ───────────────────────── base64 (the wire uses it for bodies) ─────────────────────────

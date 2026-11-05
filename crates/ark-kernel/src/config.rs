@@ -135,6 +135,15 @@ pub struct Config {
     /// Built-in plugins ported from upstream (`[builtin_plugins.<name>] enabled, dry_run, block …`):
     /// parsed by ark-plugin (`crates/ark-plugin/src/builtin/mod.rs`).
     pub builtin_plugins: toml::Table,
+    /// `[audit]`: unified audit stream rotation and SIEM export (see `governance`).
+    pub audit: crate::governance::AuditConfig,
+    /// `[quotas]`: spend per user / team per period.
+    pub quotas: crate::governance::QuotaConfig,
+    /// `[alerts]`: where spend / quota alerts are pushed.
+    pub alerts: crate::governance::AlertsConfig,
+    /// What `/etc/ark` contributed (never read from or written to a file).
+    #[serde(skip)]
+    pub managed: crate::managed::Managed,
 }
 
 /// `[display]`: user-facing presentation (Hermes `display.language`).
@@ -287,6 +296,14 @@ pub struct ComplianceConfig {
     pub profile: String,
     /// Delete sessions (logs, transcripts) not updated for this many days. 0/None = keep.
     pub retention_days: Option<u32>,
+    /// Per-class retention (sessions, audit, broker, logs, exports) — see `governance`.
+    pub retention: crate::governance::RetentionConfig,
+    /// PII masking at rest and in exports.
+    pub pii: ark_security::pii::PiiConfig,
+    /// Data classification of this install / project (`public`, `internal`, `confidential`, …).
+    pub data_class: String,
+    /// Which models each data class may use: `confidential = ["anthropic/*", "local/*"]`.
+    pub classes: BTreeMap<String, Vec<String>>,
 }
 
 /// Model providers whose data is processed in the PRC, and their API hosts.
@@ -298,7 +315,7 @@ pub const PRC_HOSTS: &[&str] = &[
 
 /// Keys that run programs or open listeners. A cloned repo must not get them
 /// for free: they are dropped from a project config unless the user trusts it.
-pub const PROJECT_GATED: &[&str] = &["hooks", "hooks_extra", "mcp", "plugins", "channels", "providers", "app", "acp", "browser", "media", "bot_desktop", "web", "exec", "files", "computer_use", "trusted_projects", "context_engine", "memory", "network", "webhooks", "kanban", "meetings", "workflows", "integrations", "automation", "heartbeat", "surfaces"];
+pub const PROJECT_GATED: &[&str] = &["hooks", "hooks_extra", "mcp", "plugins", "channels", "providers", "app", "acp", "browser", "media", "bot_desktop", "web", "exec", "files", "computer_use", "trusted_projects", "context_engine", "memory", "network", "webhooks", "kanban", "meetings", "workflows", "integrations", "automation", "heartbeat", "surfaces", "audit", "quotas", "alerts"];
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -700,12 +717,24 @@ impl Config {
     /// Whether `model.allow` permits switching to `m`.
     pub fn model_allowed(&self, m: &str) -> bool {
         let a = &self.model.allow;
-        a.is_empty() || a.iter().any(|p| p == m || p.strip_suffix("/*").is_some_and(|pre| m.split('/').next() == Some(pre))) || m == self.model.default
+        let listed = a.is_empty() || a.iter().any(|p| p == m || p.strip_suffix("/*").is_some_and(|pre| m.split('/').next() == Some(pre))) || m == self.model.default;
+        listed && crate::governance::class_allows(&self.compliance, m).is_ok()
+    }
+
+    /// The whole system → user → project → `--set` stack, with `/etc/ark` policy applied.
+    pub fn load_with_system(system: &[PathBuf], user: Option<&Path>, project: Option<&Path>, sets: &[String]) -> Result<Config, String> {
+        Self::load_layers(system, user, project, sets)
     }
 
     /// Load and merge layers. Missing files are fine; malformed ones are errors.
     pub fn load(user: Option<&Path>, project: Option<&Path>, sets: &[String]) -> Result<Config, String> {
-        let mut merged = toml::Table::new();
+        Self::load_layers(&crate::managed::system_files(), user, project, sets)
+    }
+
+    fn load_layers(system: &[PathBuf], user: Option<&Path>, project: Option<&Path>, sets: &[String]) -> Result<Config, String> {
+        // ent-063: the system layer is the base, and its locked keys are re-applied last.
+        let (sys, locked, sys_files) = crate::managed::load_system(system)?;
+        let mut merged = sys.clone();
         let mut dropped = Vec::new();
         for (layer, p) in [(0, user), (1, project)] {
             let Some(p) = p.filter(|p| p.exists()) else { continue };
@@ -731,7 +760,12 @@ impl Config {
             let (k, v) = s.split_once('=').ok_or_else(|| format!("--set expects key=value, got `{s}`"))?;
             set_path(&mut merged, k.trim(), parse_value(v.trim()))?;
         }
+        let overridden = crate::managed::enforce(&mut merged, &sys, &locked);
+        if !overridden.is_empty() {
+            eprintln!("ark: {} locked by system policy ({}); your value is ignored", overridden.join(", "), sys_files.join(", "));
+        }
         let mut cfg: Config = toml::Value::Table(merged).try_into().map_err(|e: toml::de::Error| format!("config: {}", e.message()))?;
+        cfg.managed = crate::managed::Managed { files: sys_files, locked, overridden };
         if cfg.compliance.profile == "government" {
             for h in PRC_HOSTS {
                 if !cfg.gate.egress_deny.iter().any(|x| x == h) {
@@ -755,6 +789,15 @@ impl Config {
                 }
             }
             other => return Err(format!("compliance.profile `{other}`: use \"government\" or leave it empty")),
+        }
+        // ent-093: every configured model has to be approved for this install's data class.
+        if !self.compliance.data_class.trim().is_empty() {
+            for m in std::iter::once(&self.model.default).chain(self.model.fallback.iter()).chain([&self.model.aux, &self.model.subagent].into_iter().filter(|s| !s.is_empty())) {
+                crate::governance::class_allows(&self.compliance, self.resolve_model(m))?;
+            }
+        }
+        if !matches!(self.quotas.period.as_str(), "month" | "day") {
+            return Err(format!("quotas.period `{}`: use month or day", self.quotas.period));
         }
         if !matches!(self.model.thinking.as_str(), "" | "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max") {
             return Err(format!("model.thinking `{}`: use off, minimal, low, medium, high, xhigh or max", self.model.thinking));
@@ -811,6 +854,10 @@ impl Config {
     pub fn dump(&self) -> String {
         toml::to_string_pretty(self).unwrap_or_default()
     }
+}
+
+pub(crate) fn merge_tables(base: &mut toml::Table, over: toml::Table) {
+    merge(base, over)
 }
 
 fn merge(base: &mut toml::Table, over: toml::Table) {

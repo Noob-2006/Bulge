@@ -941,7 +941,7 @@ fn answer_approval(k: &Kernel, m: &Inbound, data: &str) -> Option<String> {
     if !ark_kernel::secgate::approver_allowed(&k.cfg.approvals, &m.channel, &m.sender, std::slice::from_ref(&req)) {
         return Some("❌ You are not allowed to answer approvals here.".to_string());
     }
-    if !k.approver.answer(id, choice) {
+    if !ark_kernel::approver::answer_by(&*k.approver, &k.paths.data, id, choice, &ark_security::audit::Actor::channel(&m.channel, &m.sender), "button") {
         return Some(no_longer_available(id));
     }
     let label = match choice {
