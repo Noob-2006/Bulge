@@ -118,7 +118,6 @@ crates/ark-model/src/local.rs  # temp_dir
 crates/ark-model/src/login.rs  # temp_dir+test-code HOME/kill
 crates/ark-model/src/modelsdb.rs  # temp_dir
 crates/ark-model/src/muse.rs  # temp_dir
-crates/ark-model/src/net.rs  # temp_dir
 crates/ark-model/src/store.rs  # temp_dir
 crates/ark-plugin/src/builtin/achievements.rs  # temp_dir
 crates/ark-plugin/src/builtin/disk_cleanup.rs  # temp_dir

@@ -32,7 +32,7 @@ fn header_list(h: &ureq::http::HeaderMap) -> Vec<(String, String)> {
 }
 
 pub fn agent(timeout: Duration) -> ureq::Agent {
-    ureq::Agent::config_builder()
+    ark_net::http::builder()
         .http_status_as_error(false)
         .timeout_connect(Some(Duration::from_secs(15)))
         .timeout_global(Some(timeout))

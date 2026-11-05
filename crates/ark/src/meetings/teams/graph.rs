@@ -384,7 +384,7 @@ impl Client {
         let part = dest.with_file_name(format!("{}.part", dest.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()));
         for attempt in 0..=self.max_retries {
             let token = self.tokens.access_token(last.as_ref().and_then(|e| e.status) == Some(401))?;
-            let agent: ureq::Agent = ureq::Agent::config_builder().http_status_as_error(false).timeout_global(Some(Duration::from_secs(self.timeout))).build().into();
+            let agent: ureq::Agent = ark_net::http::builder().http_status_as_error(false).timeout_global(Some(Duration::from_secs(self.timeout))).build().into();
             let r = agent.get(&url).header("Authorization", format!("Bearer {token}")).header("Accept", "*/*").header("User-Agent", USER_AGENT).call();
             match r {
                 Ok(mut resp) if resp.status().as_u16() < 400 => {
@@ -451,7 +451,7 @@ pub(crate) fn http_json(method: &str, url: &str, headers: &[(&str, String)], bod
 }
 
 fn ureq_agent(timeout: u64) -> ureq::Agent {
-    ureq::Agent::config_builder().http_status_as_error(false).timeout_global(Some(Duration::from_secs(timeout.max(1)))).build().into()
+    ark_net::http::builder().http_status_as_error(false).timeout_global(Some(Duration::from_secs(timeout.max(1)))).build().into()
 }
 
 fn finish(r: Result<ureq::http::Response<ureq::Body>, ureq::Error>) -> Result<Resp, String> {

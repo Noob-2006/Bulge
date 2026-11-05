@@ -571,7 +571,7 @@ pub struct Nip05 {
 
 impl Nip05 {
     pub fn new(timeout: Duration) -> Nip05 {
-        let agent = ureq::Agent::config_builder().http_status_as_error(false).max_redirects(0).timeout_connect(Some(timeout)).timeout_global(Some(timeout)).build().into();
+        let agent = ark_net::http::builder().http_status_as_error(false).max_redirects(0).timeout_connect(Some(timeout)).timeout_global(Some(timeout)).build().into();
         Nip05 { http: crate::http::Http { agent, headers: Vec::new() }, base: None, cache: Mutex::new(HashMap::new()) }
     }
 

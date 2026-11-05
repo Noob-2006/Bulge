@@ -5,7 +5,7 @@ use std::io::Read;
 use std::time::Duration;
 
 pub fn agent(timeout: Duration) -> ureq::Agent {
-    ureq::Agent::config_builder().http_status_as_error(false).timeout_global(Some(timeout)).build().into()
+    ark_net::http::builder().http_status_as_error(false).timeout_global(Some(timeout)).build().into()
 }
 
 /// (status, body) with the body capped at `limit` bytes.

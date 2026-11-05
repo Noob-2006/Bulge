@@ -32,7 +32,7 @@ pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// HTTP agent for DevTools JSON endpoints.
 pub fn http(timeout: Duration) -> ureq::Agent {
-    ureq::Agent::config_builder().timeout_global(Some(timeout)).http_status_as_error(false).build().into()
+    ark_net::http::builder().timeout_global(Some(timeout)).http_status_as_error(false).build().into()
 }
 
 /// GET a DevTools JSON endpoint (`/json/version`, `/json/list`).

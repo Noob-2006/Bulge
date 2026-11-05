@@ -547,7 +547,7 @@ fn openai_decisions(key: &str, base: &str, model: &str, state: &State, qs: &[Que
         State::List(_) => return Err("unsupported-input".into()),
     };
     let url = format!("{}/decisions", base.trim_end_matches('/'));
-    let agent: ureq::Agent = ureq::Agent::config_builder().timeout_global(Some(timeout)).http_status_as_error(false).max_redirects(0).build().into();
+    let agent: ureq::Agent = ark_net::http::builder().timeout_global(Some(timeout)).http_status_as_error(false).max_redirects(0).build().into();
     let body = json!({"model": model, "input": input, "questions": questions}).to_string();
     let mut resp = agent.post(&url).header("Authorization", &format!("Bearer {key}")).header("Content-Type", "application/json").send(body.as_bytes()).map_err(|_| "transport".to_string())?;
     let status = resp.status().as_u16();

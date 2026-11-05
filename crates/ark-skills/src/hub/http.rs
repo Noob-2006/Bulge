@@ -173,7 +173,7 @@ impl Http {
 
     /// Guarded GET: None on a blocked hop, transport error or too many redirects.
     pub fn get(&self, url: &str) -> Option<Resp> {
-        let agent: ureq::Agent = ureq::Agent::config_builder().timeout_global(Some(Duration::from_secs(20))).http_status_as_error(false).max_redirects(0).build().into();
+        let agent: ureq::Agent = ark_net::http::builder().timeout_global(Some(Duration::from_secs(20))).http_status_as_error(false).max_redirects(0).build().into();
         let mut cur = url.to_string();
         for _ in 0..=MAX_REDIRECTS {
             if self.check(&cur).is_err() {
@@ -204,7 +204,7 @@ impl Http {
     /// One guarded request with a JSON body (`POST` / `PUT` / `PATCH`); no redirects.
     pub fn send_json(&self, method: &str, url: &str, body: &Value) -> Result<Resp, String> {
         self.check(url)?;
-        let agent: ureq::Agent = ureq::Agent::config_builder().timeout_global(Some(Duration::from_secs(30))).http_status_as_error(false).max_redirects(0).build().into();
+        let agent: ureq::Agent = ark_net::http::builder().timeout_global(Some(Duration::from_secs(30))).http_status_as_error(false).max_redirects(0).build().into();
         let data = serde_json::to_vec(body).unwrap_or_default();
         let mut req = match method {
             "PUT" => agent.put(url),

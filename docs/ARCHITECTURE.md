@@ -18,18 +18,18 @@
 | 層 | crate | 可以依賴 | 職責 |
 |---|---|---|---|
 | 0 | `ark-core` | （無） | 介面層：`Tool`、`Provider`、`ExecBackend`、訊息型別、`registry`、`tmp`、`imageevict` |
-| 0 | `ark-net` | （無） | 傳輸原語：HTTP/TLS/WebSocket、事件迴圈 |
-| 1 | `ark-security` | （無） | 政策：核准、硬底線、URL/SSRF、環境變數清洗、技能掃描 |
+| 0 | `ark-net` | （無） | 傳輸原語：HTTP/TLS/WebSocket、事件迴圈；`http::builder` 是全部對外 HTTP client 的唯一建構點（proxy／NO_PROXY／CA／離線，`http_client_lint` 檢查） |
+| 1 | `ark-security` | `ark-net` | 政策：核准、硬底線、URL/SSRF、環境變數清洗、技能掃描 |
 | 1 | `ark-vm` | `ark-net` | microVM：供應商偵測、guest 映像、vsock、快照。刻意不連 `ark-tools`／kernel，guest agent 才能很小 |
 | 2 | `ark-model` | core, net, security | 供應商實作（Anthropic、OpenAI 相容、Bedrock…）、模型清單、登入 |
 | 2 | `ark-tools` | core, net, security, vm | 內建工具（檔案、shell、web、exec 後端） |
 | 2 | `ark-browser` | core, net, security | 瀏覽器：CDP 客戶端、設定檔、雲端後端 |
 | 2 | `ark-media` | core, net, security | 媒體：影像／影片／音樂生成、TTS/STT、附件理解 |
 | 3 | `ark-channel` | core, net, media, security | 聊天平台。對 `ark-media` 的依賴是單向的（附件理解）；`ark-media` 不會提到任何通道。`security` 只有一個用途：通道抓圖／上傳前的位址分類走 `url_safety`（A14），不再自己維護一份私有位址表 |
-| 3 | `ark-kernel` | core, model, security | 核心：session、回合執行、閘門、壓縮、子代理 |
+| 3 | `ark-kernel` | core, model, net, security | 核心：session、回合執行、閘門、壓縮、子代理 |
 | 4 | `ark-plugin` | core, kernel, net, security | MCP／外掛宿主、生命週期 |
-| 5 | `ark-skills` | core, kernel, tools, security, plugin | 技能、hub、curator |
-| 5 | `ark-memory` | core, kernel, security, tools | 記憶、wiki、向量回想（召回時以 `ark_security::threat` 重新掃描，H8） |
+| 5 | `ark-skills` | core, kernel, net, tools, security, plugin | 技能、hub、curator |
+| 5 | `ark-memory` | core, kernel, net, security, tools | 記憶、wiki、向量回想（召回時以 `ark_security::threat` 重新掃描，H8） |
 | 6 | `ark-app` | 上面全部（除了 binary 專屬） | 應用層：TUI、surfaces、computer use、cron、節點 |
 | 7 | `ark` | 全部 | 執行檔：參數分派、`build`/`build_agent` 組裝、各命令家族模組 |
 

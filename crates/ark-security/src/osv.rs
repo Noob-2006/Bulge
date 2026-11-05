@@ -26,7 +26,7 @@ pub fn endpoint() -> String {
 }
 
 fn agent(t: Duration) -> ureq::Agent {
-    ureq::Agent::config_builder().http_status_as_error(false).timeout_global(Some(t)).build().into()
+    ark_net::http::builder().http_status_as_error(false).timeout_global(Some(t)).build().into()
 }
 
 fn post_json(url: &str, body: &Value, t: Duration) -> Result<Value, String> {

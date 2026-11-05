@@ -114,6 +114,7 @@ version = "0.1.0"
 dependencies = [
  "ark-core",
  "ark-model",
+ "ark-net",
  "ark-security",
  "base64",
  "libc",
@@ -148,6 +149,7 @@ version = "0.1.0"
 dependencies = [
  "ark-core",
  "ark-kernel",
+ "ark-net",
  "ark-security",
  "ark-tools",
  "base64",
@@ -181,6 +183,8 @@ dependencies = [
  "base64",
  "ring",
  "rustls",
+ "serde",
+ "ureq",
  "webpki-roots",
 ]
 
@@ -205,6 +209,7 @@ name = "ark-security"
 version = "0.1.0"
 dependencies = [
  "ark-core",
+ "ark-net",
  "base64",
  "fancy-regex",
  "libc",
@@ -222,6 +227,7 @@ version = "0.1.0"
 dependencies = [
  "ark-core",
  "ark-kernel",
+ "ark-net",
  "ark-plugin",
  "ark-security",
  "ark-tools",

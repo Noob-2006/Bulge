@@ -260,7 +260,7 @@ pub fn apply_search_keeping_disabled(root: &mut toml::Table, w: &SearchWrite, wa
 }
 
 fn agent() -> ureq::Agent {
-    ureq::Agent::config_builder().http_status_as_error(false).timeout_global(Some(Duration::from_secs(20))).build().into()
+    ark_net::http::builder().http_status_as_error(false).timeout_global(Some(Duration::from_secs(20))).build().into()
 }
 
 fn read_json(r: ureq::http::Response<ureq::Body>) -> (u16, Value) {

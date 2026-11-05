@@ -40,7 +40,7 @@ impl Client {
     }
 
     fn req(&self, method: &str, path: &str, body: Option<Value>, timeout: Option<Duration>) -> Result<(u16, Vec<u8>), String> {
-        let a: ureq::Agent = ureq::Agent::config_builder().timeout_global(Some(timeout.unwrap_or(self.timeout))).http_status_as_error(false).build().into();
+        let a: ureq::Agent = ark_net::http::builder().timeout_global(Some(timeout.unwrap_or(self.timeout))).http_status_as_error(false).build().into();
         let url = format!("{}{path}", self.base);
         let auth = self.key.as_ref().filter(|_| path != "/health").map(|k| format!("Bearer {k}"));
         let r = match method {

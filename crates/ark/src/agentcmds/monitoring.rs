@@ -281,7 +281,7 @@ impl Otlp {
     }
 
     pub fn export(&self, batch: &[Value]) -> Result<u16, String> {
-        let agent: ureq::Agent = ureq::Agent::config_builder().http_status_as_error(false).max_redirects(0).timeout_global(Some(Duration::from_secs(10))).build().into();
+        let agent: ureq::Agent = ark_net::http::builder().http_status_as_error(false).max_redirects(0).timeout_global(Some(Duration::from_secs(10))).build().into();
         let mut req = agent.post(&self.url).header("content-type", "application/json");
         for (k, v) in &self.headers {
             req = req.header(k, v);

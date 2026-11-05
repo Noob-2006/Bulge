@@ -169,14 +169,14 @@ pub type Headers = [(String, String)];
 
 impl Http {
     pub fn new(timeout: Duration) -> Self {
-        let agent = ureq::Agent::config_builder().http_status_as_error(false).max_redirects(10).timeout_connect(Some(Duration::from_secs(20))).timeout_global(Some(timeout)).build().into();
+        let agent = ark_net::http::builder().http_status_as_error(false).max_redirects(10).timeout_connect(Some(Duration::from_secs(20))).timeout_global(Some(timeout)).build().into();
         Http { agent, timeout }
     }
 
     /// A client for **provider-supplied** URLs: no redirects (every hop is vetted by the caller)
     /// and [`PinnedResolver`] checks the address that is actually dialled.
     fn guarded(&self, cfg: &crate::MediaConfig) -> ureq::Agent {
-        let conf = ureq::Agent::config_builder()
+        let conf = ark_net::http::builder()
             .http_status_as_error(false)
             .max_redirects(0)
             .timeout_connect(Some(Duration::from_secs(20)))

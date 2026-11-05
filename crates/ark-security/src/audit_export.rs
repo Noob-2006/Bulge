@@ -189,7 +189,7 @@ fn send_syslog(c: &SyslogConfig, recs: &[Value]) -> Result<(), String> {
 }
 
 fn agent() -> ureq::Agent {
-    ureq::Agent::config_builder().http_status_as_error(false).timeout_global(Some(Duration::from_secs(20))).build().into()
+    ark_net::http::builder().http_status_as_error(false).timeout_global(Some(Duration::from_secs(20))).build().into()
 }
 
 /// Splunk HEC batch body: one event object per record, concatenated.

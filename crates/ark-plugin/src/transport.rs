@@ -351,7 +351,7 @@ pub(crate) struct HttpOpts {
 }
 
 pub(crate) fn http_agent(o: &HttpOpts, global: Option<Duration>) -> ureq::Agent {
-    let mut b = ureq::Agent::config_builder().http_status_as_error(false).timeout_connect(Some(Duration::from_secs(10))).timeout_global(global);
+    let mut b = ark_net::http::builder().http_status_as_error(false).timeout_connect(Some(Duration::from_secs(10))).timeout_global(global);
     if let Some(t) = &o.tls {
         b = b.tls_config(t.clone());
     }
@@ -376,6 +376,8 @@ pub(crate) fn tls_from(ca: Option<&PathBuf>, cert: Option<&PathBuf>, key: Option
             return Err(format!("{}: no PEM certificates", ca.display()));
         }
         b = b.root_certs(RootCerts::new_with_certs(&certs));
+    } else if let Some(r) = ark_net::http::custom_roots() {
+        b = b.root_certs(RootCerts::Specific(r)); // no per-server CA: the `[network]` bundle (ent-037)
     }
     match (cert, key) {
         (Some(c), Some(k)) => {

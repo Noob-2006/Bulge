@@ -421,7 +421,7 @@ fn egress(id: &Value, req: &Value, ctx: &Ctx, component: &str) -> Value {
             headers.push((k.clone(), value));
         }
     }
-    let agent: ureq::Agent = ureq::Agent::config_builder().http_status_as_error(false).timeout_global(Some(Duration::from_secs(60))).build().into();
+    let agent: ureq::Agent = ark_net::http::builder().http_status_as_error(false).timeout_global(Some(Duration::from_secs(60))).build().into();
     let keep = |r: ureq::RequestBuilder<ureq::typestate::WithoutBody>| {
         let mut r = r;
         for (k, v) in &headers {

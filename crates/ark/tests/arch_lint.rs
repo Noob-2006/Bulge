@@ -28,7 +28,8 @@ use std::path::{Path, PathBuf};
 const LAYERS: &[(u8, &str, &[&str])] = &[
     (0, "ark-core", &[]),
     (0, "ark-net", &[]),
-    (1, "ark-security", &[]),
+    // ent-036: outbound HTTP clients (OSV, audit export, broker) start from `ark_net::http::builder`.
+    (1, "ark-security", &["ark-net"]),
     // microVM execution: provider detection, guest channel, snapshots. Deliberately does not
     // link ark-tools (the `ExecBackend` glue is there) or the kernel, so the guest agent stays
     // tiny and the crate cannot grow into the rest of the runtime.
@@ -43,12 +44,12 @@ const LAYERS: &[(u8, &str, &[&str])] = &[
     // SSRF table), so a channel depends on the policy helpers — never the other way round.
     (3, "ark-channel", &["ark-core", "ark-media", "ark-net", "ark-security"]),
     (2, "ark-media", &["ark-core", "ark-net", "ark-security"]),
-    (3, "ark-kernel", &["ark-core", "ark-model", "ark-security"]),
+    (3, "ark-kernel", &["ark-core", "ark-model", "ark-net", "ark-security"]),
     (4, "ark-plugin", &["ark-core", "ark-kernel", "ark-net", "ark-security"]),
-    (5, "ark-skills", &["ark-core", "ark-kernel", "ark-plugin", "ark-security", "ark-tools"]),
+    (5, "ark-skills", &["ark-core", "ark-kernel", "ark-net", "ark-plugin", "ark-security", "ark-tools"]),
     // H8: recalled memories are re-scanned with `ark_security::threat` at read time, so memory
     // depends on the policy helpers (a downward edge; security never names memory).
-    (5, "ark-memory", &["ark-core", "ark-kernel", "ark-security", "ark-tools"]),
+    (5, "ark-memory", &["ark-core", "ark-kernel", "ark-net", "ark-security", "ark-tools"]),
     (6, "ark-app", &["ark-browser", "ark-channel", "ark-core", "ark-kernel", "ark-net", "ark-plugin", "ark-security", "ark-tools"]),
     (7, "ark", &["ark-app", "ark-vm", "ark-browser", "ark-channel", "ark-core", "ark-kernel", "ark-media", "ark-memory", "ark-model", "ark-net", "ark-plugin", "ark-security", "ark-skills", "ark-tools"]),
 ];

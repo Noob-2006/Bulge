@@ -368,7 +368,7 @@ pub fn validate(proxy_url: &str, allowed: &[String], denied: &[String], timeout:
         Ok(p) => p,
         Err(e) => return json!({"ok": false, "proxyUrl": proxy_url, "error": format!("invalid proxy URL: {e}")}),
     };
-    let agent: ureq::Agent = ureq::Agent::config_builder().proxy(Some(proxy)).http_status_as_error(false).timeout_global(Some(timeout)).build().into();
+    let agent: ureq::Agent = ark_net::http::builder().proxy(Some(proxy)).http_status_as_error(false).timeout_global(Some(timeout)).build().into();
     let probe = |u: &str| -> Result<u16, String> { agent.get(u).call().map(|r| r.status().as_u16()).map_err(|e| e.to_string()) };
     let mut checks = vec![];
     let mut ok = true;

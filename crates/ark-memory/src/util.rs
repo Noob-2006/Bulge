@@ -203,7 +203,7 @@ impl Resp {
 
 /// One HTTP request; transport failures are `Err`, any status is `Ok`.
 pub fn http(method: &str, url: &str, headers: &[(String, String)], body: Option<&[u8]>, timeout: Duration) -> Result<Resp, String> {
-    let agent: ureq::Agent = ureq::Agent::config_builder().http_status_as_error(false).timeout_global(Some(timeout)).max_redirects(3).build().into();
+    let agent: ureq::Agent = ark_net::http::builder().http_status_as_error(false).timeout_global(Some(timeout)).max_redirects(3).build().into();
     let res = match method {
         "GET" | "DELETE" => {
             let mut r = if method == "GET" { agent.get(url) } else { agent.delete(url) };

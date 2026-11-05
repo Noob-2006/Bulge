@@ -1294,7 +1294,7 @@ pub(crate) mod tests {
                 let get = |k: &str| q.iter().find(|(a, _)| a == k).unwrap().1.clone();
                 let target = format!("{}?code=abc&state={}", get("redirect_uri"), get("state"));
                 std::thread::spawn(move || {
-                    let _ = ureq::get(&target).call();
+                    let _ = ark_net::http::agent().get(&target).call();
                 });
             }
             fn read(&self, _: &str) -> String {

@@ -87,7 +87,7 @@ enum GhErr {
 
 impl Gh {
     pub fn new(api: &str, token: Option<String>) -> Gh {
-        let agent = ureq::Agent::config_builder().http_status_as_error(false).timeout_global(Some(Duration::from_secs(30))).build().into();
+        let agent = ark_net::http::builder().http_status_as_error(false).timeout_global(Some(Duration::from_secs(30))).build().into();
         Gh { api: api.trim_end_matches('/').to_string(), token: token.filter(|t| !t.is_empty()), agent }
     }
 

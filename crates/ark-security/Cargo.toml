@@ -11,6 +11,7 @@ serde.workspace = true
 serde_json.workspace = true
 regex.workspace = true
 ureq.workspace = true
+ark-net.workspace = true # ark_net::http::builder — the one outbound client builder (proxy/CA/offline)
 libc.workspace = true
 # Skills Guard: Hermes' scan table uses look-around (27 of 134 patterns).
 fancy-regex = { version = "0.14", default-features = false, features = ["std", "unicode"] }

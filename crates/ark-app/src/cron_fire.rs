@@ -49,7 +49,7 @@ impl Keys {
         if !(self.src.starts_with("https://") || self.src.starts_with("http://")) {
             return Err("no JWKS configured".into());
         }
-        let agent: ureq::Agent = ureq::Agent::config_builder().timeout_global(Some(Duration::from_secs(15))).build().into();
+        let agent: ureq::Agent = ark_net::http::builder().timeout_global(Some(Duration::from_secs(15))).build().into();
         let text = agent.get(&self.src).header("Accept", "application/json").header("User-Agent", concat!("ark/", env!("CARGO_PKG_VERSION"))).call().map_err(|e| e.to_string())?.body_mut().read_to_string().map_err(|e| e.to_string())?;
         Ok(parse_jwks(&serde_json::from_str(&text).map_err(|e| e.to_string())?))
     }

@@ -57,7 +57,7 @@ pub fn label(provider: &str) -> &'static str {
 }
 
 fn send(method: &str, url: &str, headers: &[(&str, &str)], body: Option<&Value>, label: &str, timeout: Duration) -> Result<(u16, Value, Option<String>), String> {
-    let a: ureq::Agent = ureq::Agent::config_builder().timeout_global(Some(timeout)).http_status_as_error(false).build().into();
+    let a: ureq::Agent = ark_net::http::builder().timeout_global(Some(timeout)).http_status_as_error(false).build().into();
     let mut r = match (method, body) {
         ("GET", _) | ("DELETE", None) => {
             let mut q = if method == "GET" { a.get(url) } else { a.delete(url) };

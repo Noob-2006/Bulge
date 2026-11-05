@@ -47,7 +47,7 @@ pub fn endpoint(cdp_url: &str) -> Result<String, String> {
 }
 
 fn targets(base: &str) -> Result<Vec<Value>, String> {
-    let agent: ureq::Agent = ureq::Agent::config_builder().timeout_global(Some(T)).build().into();
+    let agent: ureq::Agent = ark_net::http::builder().timeout_global(Some(T)).build().into();
     let mut r = agent.get(&format!("{base}/json/list")).call().map_err(|e| format!("CDP {base}: {e}"))?;
     let v: Value = serde_json::from_str(&r.body_mut().read_to_string().map_err(|e| e.to_string())?).map_err(|e| format!("CDP /json/list: {e}"))?;
     Ok(v.as_array().cloned().unwrap_or_default().into_iter().filter(|t| t["type"] == "page").collect())

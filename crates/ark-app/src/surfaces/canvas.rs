@@ -664,7 +664,7 @@ fn endpoint(cdp_url: &str) -> Result<String, String> {
 }
 
 fn http_req(method: &str, url: &str, t: Duration) -> Result<String, String> {
-    let agent: ureq::Agent = ureq::Agent::config_builder().timeout_global(Some(t)).build().into();
+    let agent: ureq::Agent = ark_net::http::builder().timeout_global(Some(t)).build().into();
     let r = if method == "PUT" { agent.put(url).send_empty() } else { agent.get(url).call() };
     let mut r = r.map_err(|e| format!("CDP {url}: {e}"))?;
     r.body_mut().read_to_string().map_err(|e| e.to_string())

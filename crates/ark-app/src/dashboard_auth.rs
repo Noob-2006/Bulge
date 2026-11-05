@@ -409,7 +409,7 @@ impl Oidc {
         if !self.cfg.client_secret.trim().is_empty() {
             form.push(("client_secret", self.cfg.client_secret.trim()));
         }
-        let agent: ureq::Agent = ureq::Agent::config_builder().http_status_as_error(false).max_redirects(0).timeout_global(Some(TOKEN_TIMEOUT)).build().into();
+        let agent: ureq::Agent = ark_net::http::builder().http_status_as_error(false).max_redirects(0).timeout_global(Some(TOKEN_TIMEOUT)).build().into();
         let resp = agent.post(self.cfg.token_endpoint.trim()).header("accept", "application/json").send_form(form).map_err(|e| format!("IDP unreachable: {e}"))?;
         let status = resp.status().as_u16();
         let mut raw = String::new();

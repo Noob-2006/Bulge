@@ -222,7 +222,7 @@ mod tests {
     }
 
     fn get(base: &str, path: &str, token: Option<&str>, body: Option<Value>) -> (u16, String, String) {
-        let a: ureq::Agent = ureq::Agent::config_builder().http_status_as_error(false).timeout_global(Some(Duration::from_secs(10))).build().into();
+        let a: ureq::Agent = ark_net::http::builder().http_status_as_error(false).timeout_global(Some(Duration::from_secs(10))).build().into();
         let url = format!("{base}{path}");
         let auth = token.map(|t| format!("Bearer {t}"));
         let r = match body {
@@ -295,7 +295,7 @@ mod tests {
 
     /// A GET that also returns the response headers (lower-case names), for the panel's CSP.
     fn get_headers(base: &str, path: &str, token: Option<&str>) -> (u16, Vec<(String, String)>, String) {
-        let a: ureq::Agent = ureq::Agent::config_builder().http_status_as_error(false).timeout_global(Some(Duration::from_secs(10))).build().into();
+        let a: ureq::Agent = ark_net::http::builder().http_status_as_error(false).timeout_global(Some(Duration::from_secs(10))).build().into();
         let mut rq = a.get(&format!("{base}{path}"));
         if let Some(t) = token {
             rq = rq.header("authorization", &format!("Bearer {t}"));
