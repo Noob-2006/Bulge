@@ -155,3 +155,100 @@ fn index_cli_status_sync_rebuild_and_bench() {
 fn past_sessions_are_searchable_by_default() {
     assert!(crate::settings::Settings::default().search.sources.iter().any(|s| s == "sessions"));
 }
+
+/// srv-037 / ent-050: team knowledge bases share the one SQLite index, tagged with their
+/// tenant, and every retrieval path (memory_search, memory_recall, auto-recall, forget, session
+/// transcripts) only returns what the asking session's team / organization may see.
+#[test]
+fn team_knowledge_bases_and_memories_are_filtered_by_tenant() {
+    let kb = crate::tmp("rag-team-kb");
+    for (dir, text) in [("eng", "Failover runbook for eng: promote replica B."), ("ops", "Failover runbook for ops: page the night shift."), ("acme", "Failover policy for all of acme: CTO signs off."), ("shared", "Failover notes from before tenancy.")] {
+        fs::create_dir_all(kb.join(dir)).unwrap();
+        fs::write(kb.join(dir).join(format!("{dir}.txt")), text).unwrap();
+    }
+    let p = |d: &str| kb.join(d).display().to_string();
+    let (eng, ops, acme, shared) = (p("eng"), p("ops"), p("acme"), p("shared"));
+    let g = host("rag-tenant", |s| {
+        s.search.team_paths.insert("eng".into(), vec![eng.clone()]);
+        s.search.team_paths.insert("ops".into(), vec![ops.clone()]);
+        s.search.team_paths.insert("org:acme".into(), vec![acme.clone()]);
+        s.search.extra_paths = vec![shared.clone()];
+    });
+    let h = &g.0;
+    use ark_kernel::tenancy::{self, Tenant, Viewer};
+    // Single-tenant: every session sees everything, as before.
+    let names = |o: &crate::SearchOutcome| o.hits.iter().map(|x| x.path.rsplit('/').next().unwrap().to_string()).collect::<Vec<_>>();
+    assert_eq!(h.session_viewer("s-eng"), None);
+    assert_eq!(names(&h.search("failover", 10, 0.0, &["memory"]).unwrap()).len(), 4);
+    tenancy::org_add(&h.data, "acme", "").unwrap();
+    tenancy::team_add(&h.data, "eng", "acme", "").unwrap();
+    tenancy::team_add(&h.data, "ops", "acme", "").unwrap();
+    tenancy::stamp(&h.data, "s-eng", &Tenant { org: "acme".into(), team: "eng".into(), project: String::new() });
+    tenancy::stamp(&h.data, "s-ops", &Tenant { org: "acme".into(), team: "ops".into(), project: String::new() });
+    // The model's memory_search, from an eng session and an ops session.
+    let search = |sid: &str, q: &str| {
+        let out = crate::tools::MemorySearch(h.clone()).call(&crate::tools::tests::ctx(&h.data, sid), json!({"query": q, "minScore": 0, "maxResults": 20})).content;
+        let v: serde_json::Value = serde_json::from_str(out.split("\n\n").next().unwrap_or(&out)).unwrap_or(json!({"raw": out}));
+        v["results"].as_array().cloned().unwrap_or_default().iter().map(|r| r["path"].as_str().unwrap_or("").rsplit('/').next().unwrap().to_string()).collect::<Vec<_>>()
+    };
+    let mut e = search("s-eng", "failover");
+    e.sort();
+    assert_eq!(e, vec!["acme.txt", "eng.txt"], "eng sees its team base and the org-wide base");
+    let mut o = search("s-ops", "failover");
+    o.sort();
+    assert_eq!(o, vec!["acme.txt", "ops.txt"]);
+    let mut legacy = search("s-legacy", "failover");
+    legacy.sort();
+    assert_eq!(legacy, vec!["shared.txt"], "a default-org session never sees acme's bases");
+    // The index carries the tenant columns (SQL-level filter agrees).
+    let rows = ark_kernel::sqlindex::tenant_files(&h.data, &Viewer::member("acme", "eng", "", false)).unwrap();
+    assert!(rows.iter().all(|r| r.1 == "acme" && (r.2 == "eng" || r.2.is_empty())) && rows.len() == 2, "{rows:?}");
+    // Session transcripts follow the session's tenant.
+    let dir = h.data.join("sessions").join("s-ops");
+    fs::create_dir_all(&dir).unwrap();
+    let lines = [
+        json!({"seq":0,"ts":1,"type":"header","version":1,"session_id":"s-ops","workspace":"/w","model":"m"}),
+        json!({"seq":1,"ts":2,"type":"message","message":{"role":"user","content":[{"type":"text","text":"the zebra migration plan is confidential"}]}}),
+    ];
+    fs::write(dir.join("events.jsonl"), lines.iter().map(|l| format!("{l}\n")).collect::<String>()).unwrap();
+    assert!(search("s-ops", "zebra migration").iter().any(|p| p == "s-ops"));
+    assert!(search("s-eng", "zebra migration").is_empty(), "another team's transcript is never a candidate");
+    // Long-term memories: written by an eng session, invisible to ops (recall, auto-recall, forget).
+    let vm = Arc::new(VectorMemory::with_embedder(h.clone(), Arc::new(LocalHash)));
+    assert!(Store(vm.clone()).call(&crate::tools::tests::ctx(&h.data, "s-eng"), json!({"text": "Eng prefers blue-green deploys for the billing service"})).content.contains("Stored:"));
+    let row = memstore::all(&h.data).unwrap().into_iter().find(|r| r.text.contains("blue-green")).unwrap();
+    assert_eq!((row.org.as_str(), row.team.as_str()), ("acme", "eng"));
+    let recall = |sid: &str| Recall(vm.clone()).call(&crate::tools::tests::ctx(&h.data, sid), json!({"query": "blue-green deploys billing"})).content;
+    assert!(recall("s-eng").contains("blue-green"));
+    assert!(!recall("s-ops").contains("blue-green"));
+    assert!(AutoMemory(vm.clone()).prefetch("s-ops", "/w", "how do we do blue-green deploys for billing").unwrap_or_default().is_empty());
+    let forget = crate::vector::Forget(vm.clone()).call(&crate::tools::tests::ctx(&h.data, "s-ops"), json!({"memoryId": row.id})).content;
+    assert!(forget.contains("not found") || forget.contains("not deleted"), "{forget}");
+    assert!(memstore::get(&h.data, &row.id).is_some(), "ops cannot delete eng's memory");
+    let _ = fs::remove_dir_all(&kb);
+}
+
+/// srv-037 over ARP: `kb.search` / `kb.status` honour the viewer the app server injects.
+#[test]
+fn kb_methods_filter_by_the_injected_viewer() {
+    let kb = crate::tmp("rag-kb-arp");
+    fs::write(kb.join("eng.txt"), "Rollback procedure for eng services.").unwrap();
+    let engp = kb.display().to_string();
+    let g = host("rag-kb-arp-h", |s| {
+        s.search.team_paths.insert("eng".into(), vec![engp.clone()]);
+    });
+    let h = &g.0;
+    ark_kernel::tenancy::org_add(&h.data, "acme", "").unwrap();
+    ark_kernel::tenancy::team_add(&h.data, "eng", "acme", "").unwrap();
+    let m = crate::host::kb_methods_for(h.clone());
+    let call = |name: &str, p: serde_json::Value| m(name, &p).unwrap().unwrap();
+    let eng = serde_json::to_value(ark_kernel::tenancy::Viewer::member("acme", "eng", "", false)).unwrap();
+    let ops = serde_json::to_value(ark_kernel::tenancy::Viewer::member("acme", "ops", "", false)).unwrap();
+    assert_eq!(call("kb.search", json!({"query": "rollback procedure", "minScore": 0, "_viewer": eng}))["results"].as_array().unwrap().len(), 1);
+    assert!(call("kb.search", json!({"query": "rollback procedure", "minScore": 0, "_viewer": ops}))["results"].as_array().unwrap().is_empty());
+    assert_eq!(call("kb.status", json!({"_viewer": eng}))["documents"][0]["team"], "eng");
+    assert!(call("kb.status", json!({"_viewer": ops}))["documents"].as_array().unwrap().is_empty());
+    assert_eq!(call("kb.status", json!({}))["documents"].as_array().unwrap().len(), 1, "the owner sees all");
+    assert!(m("memory.other", &json!({})).is_none());
+    let _ = fs::remove_dir_all(&kb);
+}

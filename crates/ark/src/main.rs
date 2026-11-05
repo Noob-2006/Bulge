@@ -1277,6 +1277,7 @@ fn cmd_daemon(a: &Args) -> R {
             ops::logs::install(&c.k);
             d.add_methods(ops::logs::methods(paths.clone()));
             d.add_methods(host_methods(&paths, ext_arc.as_deref()));
+            d.add_methods(ark_memory::host::methods(&c.k.cfg, &paths)); // srv-037: kb.search / kb.status
             // Work surfaces: dashboards / cards / workflow ARP, hosted documents, report schedule.
             let surfaces = ext_arc.as_deref().and_then(|e| ark_app::surfaces::Env::new(&c.k.cfg, &paths, e.kernel.clone(), ext::channel_map(e)).map_err(|w| eprintln!("arkd: warning: {w}")).ok()).map(Arc::new);
             if let Some(s) = &surfaces {

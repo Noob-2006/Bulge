@@ -72,6 +72,10 @@ pub struct SearchSettings {
     pub sources: Vec<String>,
     /// Extra Markdown files or directories to index.
     pub extra_paths: Vec<String>,
+    /// Team knowledge bases (srv-037): `team id` (or `org:<id>` for an organization-wide base)
+    /// → files / directories. Indexed into the same SQLite index, tagged with the tenant, and
+    /// only retrievable by sessions and principals of that team / organization.
+    pub team_paths: std::collections::BTreeMap<String, Vec<String>>,
     pub max_results: usize,
     pub min_score: f64,
     pub vector_weight: f64,
@@ -98,6 +102,7 @@ impl Default for SearchSettings {
             // srv-059: past sessions are searchable by default (chat Q&A over old sessions).
             sources: vec!["memory".into(), "sessions".into()],
             extra_paths: vec![],
+            team_paths: Default::default(),
             max_results: 6,
             min_score: 0.35,
             vector_weight: 0.7,

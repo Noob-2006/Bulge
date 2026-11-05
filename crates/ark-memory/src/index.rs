@@ -89,6 +89,9 @@ struct FileRec {
     size: u64,
     hash: String,
     chunks: Vec<Chunk>,
+    /// Tenant (srv-037): '' = default organization / organization-wide.
+    org: String,
+    team: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -129,6 +132,28 @@ pub struct SourceFile {
     pub display: String,
     pub abs: PathBuf,
     pub source: String,
+    /// Who may retrieve it (srv-037): '' = default organization / organization-wide.
+    pub org: String,
+    pub team: String,
+}
+
+impl SourceFile {
+    fn new(display: String, abs: PathBuf, source: &str) -> SourceFile {
+        SourceFile { display, abs, source: source.into(), org: String::new(), team: String::new() }
+    }
+}
+
+/// Knowledge files under one configured path (a file or a directory tree).
+fn knowledge_under(p: &Path) -> Vec<PathBuf> {
+    if p.is_dir() {
+        let mut files = Vec::new();
+        walk(p, "", &mut files, 1);
+        files.into_iter().map(|(_, a)| a).filter(|a| knowledge_file(a)).collect()
+    } else if p.is_file() && knowledge_file(p) {
+        vec![p.to_path_buf()]
+    } else {
+        vec![]
+    }
 }
 
 pub struct Index {
@@ -244,21 +269,36 @@ pub fn source_files(data: &Path, s: &SearchSettings) -> Vec<SourceFile> {
         walk(&root, "", &mut files, 0);
         for (rel, abs) in files {
             if rel.ends_with(".md") {
-                out.push(SourceFile { display: rel, abs, source: "memory".into() });
+                out.push(SourceFile::new(rel, abs, "memory"));
             } else if s.multimodal.enabled && modality(&abs).is_some_and(|m| s.multimodal.modalities.iter().any(|x| x == "all" || x == m)) {
-                out.push(SourceFile { display: rel, abs, source: "media".into() });
+                out.push(SourceFile::new(rel, abs, "media"));
+            }
+        }
+        // Team knowledge bases first: a path listed for a team is that team's, even if an
+        // organization-wide `extra_paths` entry also covers it.
+        let reg = ark_kernel::tenancy::registry(data);
+        let mut seen = std::collections::HashSet::new();
+        for (key, paths) in &s.team_paths {
+            let (org, team) = match key.strip_prefix("org:") {
+                Some(o) => (o.to_string(), String::new()),
+                None => (ark_kernel::tenancy::team_org(&reg, key), key.clone()),
+            };
+            let org = if org == ark_kernel::tenancy::DEFAULT_ORG { String::new() } else { org };
+            for p in paths {
+                for abs in knowledge_under(&ark_core::tool::expand_home(p)) {
+                    let display = abs.display().to_string();
+                    if seen.insert(display.clone()) {
+                        out.push(SourceFile { display, abs, source: "memory".into(), org: org.clone(), team: team.clone() });
+                    }
+                }
             }
         }
         for extra in &s.extra_paths {
-            let p = ark_core::tool::expand_home(extra);
-            if p.is_dir() {
-                let mut files = Vec::new();
-                walk(&p, "", &mut files, 1);
-                for (_, abs) in files.into_iter().filter(|(_, a)| knowledge_file(a)) {
-                    out.push(SourceFile { display: abs.display().to_string(), abs, source: "memory".into() });
+            for abs in knowledge_under(&ark_core::tool::expand_home(extra)) {
+                let display = abs.display().to_string();
+                if seen.insert(display.clone()) {
+                    out.push(SourceFile::new(display, abs, "memory"));
                 }
-            } else if p.is_file() && knowledge_file(&p) {
-                out.push(SourceFile { display: p.display().to_string(), abs: p, source: "memory".into() });
             }
         }
     }
@@ -266,8 +306,11 @@ pub fn source_files(data: &Path, s: &SearchSettings) -> Vec<SourceFile> {
         if let Ok(rd) = fs::read_dir(data.join("sessions")) {
             let mut ids: Vec<_> = rd.flatten().filter(|e| e.path().join("events.jsonl").is_file()).map(|e| e.file_name().to_string_lossy().into_owned()).collect();
             ids.sort();
+            // A transcript belongs where its session does (ent-050).
+            let stamps = ark_kernel::tenancy::session_tenants(data);
             for id in ids {
-                out.push(SourceFile { display: format!("sessions/{id}"), abs: data.join("sessions").join(&id).join("events.jsonl"), source: "sessions".into() });
+                let t = stamps.get(&id).cloned().unwrap_or_default();
+                out.push(SourceFile { display: format!("sessions/{id}"), abs: data.join("sessions").join(&id).join("events.jsonl"), source: "sessions".into(), org: t.org, team: t.team });
             }
         }
     }
@@ -343,8 +386,8 @@ impl Index {
             }
         }
         let loaded = sqlindex::with(data, |c| {
-            let mut st = c.prepare("SELECT path, source, mtime_ms, size, hash FROM files").map_err(err)?;
-            let rows = st.query_map([], |r| Ok((r.get::<_, String>(0)?, FileRec { source: r.get(1)?, mtime_ms: r.get::<_, i64>(2)? as u64, size: r.get::<_, i64>(3)? as u64, hash: r.get(4)?, chunks: vec![] }))).map_err(err)?;
+            let mut st = c.prepare("SELECT path, source, mtime_ms, size, hash, org, team FROM files").map_err(err)?;
+            let rows = st.query_map([], |r| Ok((r.get::<_, String>(0)?, FileRec { source: r.get(1)?, mtime_ms: r.get::<_, i64>(2)? as u64, size: r.get::<_, i64>(3)? as u64, hash: r.get(4)?, chunks: vec![], org: r.get(5)?, team: r.get(6)? }))).map_err(err)?;
             let mut files: BTreeMap<String, FileRec> = rows.flatten().collect();
             let mut st = c.prepare("SELECT path, start_line, end_line, text, hash FROM chunks ORDER BY path, ord").map_err(err)?;
             let rows = st.query_map([], |r| Ok((r.get::<_, String>(0)?, Chunk { start_line: r.get::<_, i64>(1)? as usize, end_line: r.get::<_, i64>(2)? as usize, text: r.get(3)?, hash: r.get(4)? }))).map_err(err)?;
@@ -421,7 +464,7 @@ impl Index {
             }
             for p in dirty {
                 let Some(r) = files.get(p) else { continue };
-                tx.execute("INSERT INTO files(path, source, mtime_ms, size, hash) VALUES (?1, ?2, ?3, ?4, ?5)", params![p, r.source, r.mtime_ms as i64, r.size as i64, r.hash]).map_err(err)?;
+                tx.execute("INSERT INTO files(path, source, mtime_ms, size, hash, org, team) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)", params![p, r.source, r.mtime_ms as i64, r.size as i64, r.hash, r.org, r.team]).map_err(err)?;
                 for (i, ch) in r.chunks.iter().enumerate() {
                     tx.execute("INSERT INTO chunks(path, ord, start_line, end_line, text, hash) VALUES (?1, ?2, ?3, ?4, ?5, ?6)", params![p, i as i64, ch.start_line as i64, ch.end_line as i64, ch.text, ch.hash]).map_err(err)?;
                 }
@@ -480,8 +523,14 @@ impl Index {
                 continue;
             }
             let (mt, size) = (mtime_ms(&meta), meta.len());
-            if let Some(r) = self.files.get(&f.display) {
+            if let Some(r) = self.files.get_mut(&f.display) {
                 if r.mtime_ms == mt && r.size == size && f.source != "media" {
+                    // Same content, possibly a new owner (a path moved between teams).
+                    if r.org != f.org || r.team != f.team {
+                        r.org = f.org.clone();
+                        r.team = f.team.clone();
+                        self.dirty.insert(f.display.clone());
+                    }
                     continue;
                 }
             }
@@ -498,6 +547,8 @@ impl Index {
             rec.mtime_ms = mt;
             rec.size = size;
             rec.source = f.source.clone();
+            rec.org = f.org.clone();
+            rec.team = f.team.clone();
             if rec.hash != hash {
                 rec.hash = hash;
                 rec.chunks = if f.source == "media" {
@@ -577,6 +628,16 @@ impl Index {
     /// all; `memory` includes media and the long-term `memories` rows).
     #[allow(clippy::too_many_arguments)]
     pub fn search(&self, data: &Path, s: &SearchSettings, query: &str, query_vec: Option<(&str, &[f32])>, max_results: usize, min_score: f64, sources: &[&str], now: u64) -> Vec<Hit> {
+        self.search_as(data, s, query, query_vec, max_results, min_score, sources, now, None)
+    }
+
+    /// [`Index::search`] limited to what `viewer` may retrieve (srv-037 / ent-050): team
+    /// knowledge bases, session transcripts and long-term memories of other teams or
+    /// organizations never become candidates. `None` = unrestricted (single tenant, the owner).
+    #[allow(clippy::too_many_arguments)]
+    pub fn search_as(&self, data: &Path, s: &SearchSettings, query: &str, query_vec: Option<(&str, &[f32])>, max_results: usize, min_score: f64, sources: &[&str], now: u64, viewer: Option<&ark_kernel::tenancy::Viewer>) -> Vec<Hit> {
+        let org_of = |o: &str| if o.is_empty() { ark_kernel::tenancy::DEFAULT_ORG.to_string() } else { o.to_string() };
+        let visible = |org: &str, team: &str| viewer.is_none_or(|v| v.sees_team(&org_of(org), team));
         struct Doc<'a> {
             path: &'a str,
             source: &'a str,
@@ -600,7 +661,7 @@ impl Index {
             memstore::all(data)
                 .unwrap_or_default()
                 .into_iter()
-                .filter(|r| !r.is_file_entry() && r.trust != trust::QUARANTINED && !r.text.trim().is_empty())
+                .filter(|r| !r.is_file_entry() && r.trust != trust::QUARANTINED && !r.text.trim().is_empty() && visible(&r.org, &r.team))
                 .map(|r| (format!("memories/{}", r.id), Chunk { start_line: 1, end_line: 1, text: r.text.clone(), hash: r.id.clone() }, r))
                 .collect()
         } else {
@@ -609,7 +670,7 @@ impl Index {
         let mut all: Vec<Doc> = self
             .files
             .iter()
-            .filter(|(_, r)| allow(&r.source))
+            .filter(|(_, r)| allow(&r.source) && visible(&r.org, &r.team))
             .flat_map(|(p, r)| {
                 r.chunks.iter().map(move |c| Doc { path: p.as_str(), source: r.source.as_str(), chunk: c, trust: file_trust(p, &r.source), vec: mk.and_then(|m| self.vectors.get(&format!("{m}|{}", c.hash))).map(|v| v.as_slice()), ts: timestamp(data, p, &r.source, &self.files) })
             })
