@@ -196,6 +196,10 @@ pub fn new_kernel(cfg: Config, paths: Paths, resolver: Arc<dyn Resolver>, tools:
     tools.extend(crate::coord::tools());
     tools.extend(crate::decision::tools());
     let store = Store::new(paths.sessions());
+    // ent-096: a node-local SQLite index next to a shared data directory.
+    if !cfg.ha.index_dir.trim().is_empty() {
+        crate::sqlindex::relocate(&paths.data, Path::new(cfg.ha.index_dir.trim()));
+    }
     cfg.security.activate_at(Some(&paths.config_dir));
     Arc::new(Runtime { cfg, paths, store, resolver, tools, vault, approver, remembered: Remembered::default(), bus: Bus::default(), running: Mutex::new(HashMap::new()), benched: Mutex::new(HashMap::new()), no_reasoning: Mutex::new(std::collections::HashSet::new()), hooks: Default::default(), session_tools: Default::default(), taps: Default::default(), engine: Default::default(), lifecycles: Default::default(), slash: Default::default(), retry_sleep: None, subagents: Default::default(), end_turn: Default::default(), auto_resume: Default::default(), queue_settings: Default::default(), runtime_cfg: Default::default(), ctx: Default::default() })
 }

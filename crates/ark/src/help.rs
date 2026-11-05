@@ -70,6 +70,10 @@ USAGE
   ark evals list|run [ID…] [--filter S] [--json] [--verbose]   in-process runtime evals (hermetic, no network/keys)
   ark tools list|enable|disable [NAME…] [--platform P] | --summary | post-setup KEY [--dry-run]   per-platform tools, backend install hooks
   ark fleet [status|board|files|limits|resume SESSION] [--json]   multi-agent progress: agents, files held, spend, shared board, pauses
+  ark ha status|stepdown [--json]      daemon high availability: lease holder, epoch, hand the lease over
+  ark workers status|dispatch SESSION   the leader's worker-process pool ([workers] count)
+  ark cluster status|nodes|sessions|agents | node add NAME URL --token-secret S | node remove NAME
+  ark cluster keygen [--out F] | policy sign FILE --version N [--seed F] [--out F] | policy verify|publish BUNDLE | policy push [--node N]|pull|status
   ark docker check [--file Dockerfile] [--json]   lint the container files (multi-stage, USER, HEALTHCHECK, secrets)
   ark doctor | version | help
   ark browser close-profile [--browser NAME] | status | install [--url ZIP] | extension

@@ -46,17 +46,70 @@ pub fn pending_approver(timeout: Duration) -> (Arc<Pending>, Arc<OnceLock<Weak<R
 /// Returns `None` when the method is not theirs.
 pub type MethodExt = Arc<dyn Fn(&str, &Value) -> Option<Result<Value, (i32, String)>> + Send + Sync>;
 
+/// Called with `true` when this daemon starts acting as leader (at once without `[ha]`) and
+/// with `false` when it loses the lease: hosts start / stop leader-only services with it
+/// (channel polling, backups, report schedules) so two nodes never both answer a chat.
+pub type LeaderHook = Box<dyn Fn(bool) + Send + Sync>;
+
+/// JSON-RPC error code a standby returns for methods only the leader may serve.
+pub const STANDBY_ERROR: i32 = -32010;
+
 pub struct Daemon {
     pub k: Kernel,
     pub pending: Arc<Pending>,
     busy_jobs: Arc<Mutex<HashSet<String>>>,
     busy_goals: Arc<Mutex<HashSet<String>>>,
     ext: Mutex<Vec<MethodExt>>,
+    /// ent-095: the lease elector (only with `[ha] enabled`).
+    ha: OnceLock<Arc<crate::ha::Ha>>,
+    /// ent-097: the worker pool while this node leads and `[workers] count > 0`.
+    pool: Mutex<Option<Arc<crate::workers::Pool>>>,
+    leader_hooks: Mutex<Vec<LeaderHook>>,
+    /// Sessions a new leader could not resume yet (the old leader still held the log lock),
+    /// with the notice to write when it can.
+    resume_retry: Arc<Mutex<std::collections::HashMap<String, Option<String>>>>,
+    retrying: Arc<AtomicBool>,
+    started_ms: u64,
 }
 
 impl Daemon {
     pub fn new(k: Kernel, pending: Arc<Pending>) -> Self {
-        Daemon { k, pending, busy_jobs: Default::default(), busy_goals: Default::default(), ext: Mutex::new(vec![]) }
+        Daemon {
+            k,
+            pending,
+            busy_jobs: Default::default(),
+            busy_goals: Default::default(),
+            ext: Mutex::new(vec![]),
+            ha: OnceLock::new(),
+            pool: Mutex::new(None),
+            leader_hooks: Mutex::new(vec![]),
+            resume_retry: Default::default(),
+            retrying: Default::default(),
+            started_ms: crate::event::now_ms(),
+        }
+    }
+
+    pub fn ha(&self) -> Option<&Arc<crate::ha::Ha>> {
+        self.ha.get()
+    }
+    pub fn pool(&self) -> Option<Arc<crate::workers::Pool>> {
+        self.pool.lock().unwrap().clone()
+    }
+    pub fn started_ms(&self) -> u64 {
+        self.started_ms
+    }
+    /// Without `[ha]` a daemon always leads.
+    pub fn is_leader(&self) -> bool {
+        self.ha.get().is_none_or(|h| h.is_leader())
+    }
+    /// Register a leader-only service switch (see [`LeaderHook`]). Call before `run`.
+    pub fn on_leadership(&self, f: LeaderHook) {
+        self.leader_hooks.lock().unwrap().push(f);
+    }
+    fn fire_leadership(&self, leader: bool) {
+        for f in self.leader_hooks.lock().unwrap().iter() {
+            f(leader);
+        }
     }
 
     pub fn add_methods(&self, m: MethodExt) {
@@ -93,15 +146,21 @@ impl Daemon {
         }
         STOP.store(false, Ordering::SeqCst);
 
-        self.resume();
-        // C7: the process-group supervisor. `ark-tools` registers every group it starts;
-        // this thread reaps the ones whose owner died (crash, SIGKILL, daemon restart). It
-        // only ever signals groups it recorded itself, and only when the recorded start time
-        // still matches — a recycled pid (the user's browser) is never touched.
-        let reap = self.k.cfg.limits.reap_interval_secs;
-        if reap > 0 {
-            crate::reaper::spawn_sweeper(self.k.paths.data.clone(), Duration::from_secs(reap));
+        // ent-095: with `[ha]` the leader-only work starts when the lease is won (cluster
+        // thread below); without it this daemon leads from the start.
+        let cfg = &self.k.cfg;
+        if cfg.ha.enabled {
+            let h = Arc::new(crate::ha::Ha::for_data(&cfg.ha, &self.k.paths.data));
+            self.k.store.set_fence(h.store_fence());
+            let _ = self.ha.set(h);
+            eprintln!("arkd: HA node {} (standby until it holds the lease in {})", cfg.ha.node(), cfg.ha.lease_dir(&self.k.paths.data).display());
+        } else {
+            self.become_leader(None);
         }
+        let cluster = (cfg.ha.enabled || cfg.cluster.enabled || !cfg.cluster.console_url.is_empty()).then(|| {
+            let me = self.clone();
+            std::thread::spawn(move || me.cluster_loop())
+        });
         let me = self.clone();
         let sched = std::thread::spawn(move || me.scheduler_loop());
         sd_notify("READY=1\nSTATUS=arkd listening");
@@ -122,11 +181,23 @@ impl Daemon {
         for id in self.k.running_ids() {
             self.k.interrupt(&id);
         }
+        if let Some(p) = self.pool.lock().unwrap().take() {
+            p.shutdown();
+        }
         let until = Instant::now() + Duration::from_secs(10);
         while !self.k.running_ids().is_empty() && Instant::now() < until {
             std::thread::sleep(Duration::from_millis(50));
         }
         let _ = sched.join();
+        if let Some(c) = cluster {
+            let _ = c.join();
+        }
+        // A planned stop hands the lease over at once instead of making a standby wait it out.
+        if let Some(h) = self.ha.get() {
+            if h.step_down().unwrap_or(false) {
+                eprintln!("arkd: released the HA lease");
+            }
+        }
         let _ = std::fs::remove_file(&sock);
         let _ = std::fs::remove_file(&pid_path);
         Ok(())
@@ -136,8 +207,153 @@ impl Daemon {
         STOP.store(true, Ordering::SeqCst);
     }
 
-    /// Restart work that was in flight when the daemon died.
-    fn resume(&self) {
+    /// Start acting as leader: worker pool, leader-only services, the reaper, then resume
+    /// interrupted sessions. `term` is `(epoch, previous leader)` after an HA takeover.
+    fn become_leader(self: &Arc<Self>, term: Option<(u64, Option<String>)>) {
+        let k = &self.k;
+        if let Some((epoch, from)) = &term {
+            let node = self.ha.get().map(|h| h.node.clone()).unwrap_or_default();
+            eprintln!("arkd: HA node {node} is now the leader (epoch {epoch}{})", from.as_deref().map(|f| format!(", took over from {f}")).unwrap_or_default());
+            ark_security::audit::record(&k.paths.data, ark_security::audit::Event::new("ha.takeover", ark_security::audit::Actor::new("node", &node), &node, "ok").detail(json!({"epoch": epoch, "from": from})));
+        }
+        if k.cfg.workers.count > 0 {
+            let env = self.ha.get().map(|h| h.worker_env(&k.paths.data)).unwrap_or_default();
+            *self.pool.lock().unwrap() = Some(crate::workers::Pool::start(k.clone(), k.cfg.workers.clone(), env));
+        }
+        // C7: the process-group supervisor. `ark-tools` registers every group it starts;
+        // this thread reaps the ones whose owner died (crash, SIGKILL, daemon restart). It
+        // only ever signals groups it recorded itself, and only when the recorded start time
+        // still matches — a recycled pid (the user's browser) is never touched. Leader only:
+        // a standby runs nothing, and one sweeper per shared registry is enough.
+        static SWEEPER: std::sync::Once = std::sync::Once::new();
+        let reap = k.cfg.limits.reap_interval_secs;
+        if reap > 0 {
+            let data = k.paths.data.clone();
+            SWEEPER.call_once(move || {
+                crate::reaper::spawn_sweeper(data, Duration::from_secs(reap));
+            });
+        }
+        self.fire_leadership(true);
+        match term {
+            None => self.resume(None),
+            Some((epoch, _)) => {
+                // Off the lease thread: a session the old leader still holds blocks for ~1.5 s.
+                let me = self.clone();
+                std::thread::spawn(move || me.resume(Some(epoch)));
+            }
+        }
+    }
+
+    /// Lost the lease (or stepped down): stop everything only a leader may do.
+    pub fn on_lost(&self, reason: &str) {
+        let node = self.ha.get().map(|h| h.node.clone()).unwrap_or_default();
+        eprintln!("arkd: HA node {node} is no longer the leader: {reason}");
+        ark_security::audit::record(&self.k.paths.data, ark_security::audit::Event::new("ha.lost", ark_security::audit::Actor::new("node", &node), &node, "ok").detail(json!({"reason": reason})));
+        for id in self.k.running_ids() {
+            self.k.interrupt(&id);
+        }
+        if let Some(p) = self.pool.lock().unwrap().take() {
+            p.shutdown();
+        }
+        self.resume_retry.lock().unwrap().clear();
+        self.fire_leadership(false);
+    }
+
+    /// Run a session: on a worker when the pool takes everything, else in this process. With
+    /// HA, a session still locked by a deposed leader is retried (with its notice) every second.
+    fn launch(&self, id: &str, notice: Option<String>) {
+        if let Some(text) = notice.clone() {
+            if let Err(e) = self.k.record(id, EventKind::Notice { level: "info".into(), text }) {
+                if matches!(e, crate::kernel::KernelError::Store(crate::store::StoreError::Locked(_))) && self.ha.get().is_some() {
+                    self.resume_retry.lock().unwrap().insert(id.to_string(), notice);
+                }
+                return;
+            }
+        }
+        if let Some(pool) = self.pool().filter(|_| self.k.cfg.workers.dispatch_all()) {
+            pool.dispatch(id);
+            return;
+        }
+        let h = self.k.start(id, Default::default());
+        if self.ha.get().is_some() {
+            let retry = self.resume_retry.clone();
+            let id = id.to_string();
+            std::thread::spawn(move || {
+                if let Ok(Err(crate::kernel::KernelError::Store(crate::store::StoreError::Locked(_)))) = h.join() {
+                    retry.lock().unwrap().insert(id, None);
+                }
+            });
+        }
+    }
+
+    fn retry_resumes(self: &Arc<Self>) {
+        if self.resume_retry.lock().unwrap().is_empty() || self.retrying.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        let me = self.clone();
+        std::thread::spawn(move || {
+            let todo: Vec<(String, Option<String>)> = me.resume_retry.lock().unwrap().drain().collect();
+            for (id, notice) in todo {
+                if me.is_leader() && !me.k.is_running(&id) {
+                    me.launch(&id, notice);
+                }
+            }
+            me.retrying.store(false, Ordering::SeqCst);
+        });
+    }
+
+    /// Lease ticks, heartbeats into the node registry and policy pulls (ent-095 / ent-062).
+    fn cluster_loop(self: &Arc<Self>) {
+        let cfg = self.k.cfg.clone();
+        let tick = self.ha.get().map(|h| (h.cfg.renew() / 3).clamp(Duration::from_millis(50), Duration::from_millis(500))).unwrap_or(Duration::from_millis(500));
+        let hb = Duration::from_secs(cfg.cluster.heartbeat_secs.max(1));
+        let pull = Duration::from_secs(cfg.cluster.pull_secs.max(10));
+        let mut last_hb = Instant::now() - hb;
+        let mut last_pull = Instant::now() - pull;
+        let mut last_retry = Instant::now();
+        while !STOP.load(Ordering::SeqCst) {
+            if let Some(h) = self.ha.get() {
+                match h.tick() {
+                    crate::ha::Transition::BecameLeader { epoch, from } => {
+                        self.become_leader(Some((epoch, from)));
+                        last_hb = Instant::now() - hb;
+                    }
+                    crate::ha::Transition::Lost { reason } => {
+                        self.on_lost(&reason);
+                        last_hb = Instant::now() - hb;
+                    }
+                    crate::ha::Transition::None => {}
+                }
+                if h.is_leader() && last_retry.elapsed() >= Duration::from_secs(1) {
+                    last_retry = Instant::now();
+                    self.retry_resumes();
+                }
+            }
+            if last_hb.elapsed() >= hb {
+                last_hb = Instant::now();
+                if let Err(e) = crate::cluster::write_heartbeat(&self.k.paths.data, &crate::cluster::snapshot(self)) {
+                    eprintln!("arkd: cluster heartbeat: {e}");
+                }
+            }
+            if self.is_leader() && cfg.managed.cluster_key.is_some() && last_pull.elapsed() >= pull {
+                last_pull = Instant::now();
+                let tok = (self.k.vault_substitute())(&cfg.cluster.console_token);
+                match crate::cluster::pull(&self.k.paths.data, &cfg.cluster, cfg.managed.cluster_key.as_deref(), if tok.contains("{{secret:") { "" } else { &tok }) {
+                    Ok(Some(v)) => {
+                        eprintln!("arkd: installed cluster policy v{v} (takes effect on restart)");
+                        ark_security::audit::record(&self.k.paths.data, ark_security::audit::Event::new("cluster.policy.apply", ark_security::audit::Actor::new("node", &crate::cluster::node_name(self)), &format!("v{v}"), "ok").detail(json!({"version": v, "via": "pull"})));
+                    }
+                    Ok(None) => {}
+                    Err(e) => eprintln!("arkd: cluster policy pull: {e}"),
+                }
+            }
+            std::thread::sleep(tick);
+        }
+    }
+
+    /// Restart work that was in flight when the daemon died. `epoch`: after an HA takeover
+    /// (each resumed session gets a notice saying which node picked it up).
+    fn resume(&self, epoch: Option<u64>) {
         let week_ms = 7 * 86_400 * 1000;
         let now = crate::event::now_ms();
         for s in self.k.store.list().into_iter().filter(|s| now.saturating_sub(s.updated_ms) < week_ms && s.parent.is_none()) {
@@ -149,7 +365,8 @@ impl Daemon {
                 _ => None,
             }) == Some(true);
             if !v.pending_inbox.is_empty() || open_turn || !v.dangling.is_empty() {
-                let _ = self.k.start(&s.id, Default::default());
+                let notice = epoch.map(|e| format!("ha: node {} (epoch {e}) resumed this session after failover", self.ha.get().map(|h| h.node.as_str()).unwrap_or("?")));
+                self.launch(&s.id, notice);
             }
         }
         if let Ok(goals) = automation::read_list::<Goal>(&automation::goals_path(&self.k.paths.data)) {
@@ -235,6 +452,11 @@ impl Daemon {
         let mut last_export = Instant::now() - Duration::from_secs(3600);
         ark_security::audit::set_rotate_bytes(self.k.cfg.audit.rotate_mb.max(1) * 1024 * 1024);
         while !STOP.load(Ordering::SeqCst) {
+            // ent-095: a standby claims no jobs, resumes nothing and dispatches nothing.
+            if !self.is_leader() {
+                std::thread::sleep(Duration::from_millis(200));
+                continue;
+            }
             if last_export.elapsed() >= Duration::from_secs(self.k.cfg.audit.export_secs.max(1)) {
                 last_export = Instant::now();
                 self.pump_audit();
@@ -322,11 +544,20 @@ impl Daemon {
         let need = |k: &str| s(k).ok_or((-32602, format!("missing param `{k}`")));
         let kerr = |e: crate::kernel::KernelError| (-32000, e.to_string());
         let k = &self.k;
+        if let Some(h) = self.ha.get().filter(|h| !h.is_leader()) {
+            if !standby_may_serve(method) {
+                let l = h.leader();
+                let at = l.as_ref().map(|l| format!("node {} (epoch {}{})", l.node, l.epoch, if l.advertise.is_empty() { String::new() } else { format!(", {}", l.advertise) })).unwrap_or_else(|| "not elected yet".into());
+                return Err((STANDBY_ERROR, format!("standby: node {} is not the HA leader; `{method}` must go to the leader: {at}", h.node)));
+            }
+        }
+        let pool = self.pool();
+        let on_worker = |id: &str| pool.as_ref().is_some_and(|p| p.owns(id));
         match method {
-            "ping" => Ok(json!({"protocol": PROTOCOL_VERSION, "version": env!("CARGO_PKG_VERSION"), "running": k.running_ids(), "pid": std::process::id()})),
+            "ping" => Ok(json!({"protocol": PROTOCOL_VERSION, "version": env!("CARGO_PKG_VERSION"), "running": k.running_ids(), "pid": std::process::id(), "role": match self.ha.get() { Some(h) if h.is_leader() => "leader", Some(_) => "standby", None => "single" }, "node": self.ha.get().map(|h| h.node.clone())})),
             "session.list" => {
                 let lim = p.get("limit").and_then(|v| v.as_u64()).unwrap_or(50) as usize;
-                Ok(json!(k.store.list().into_iter().take(lim).map(|s| json!({"id":s.id,"title":s.title,"model":s.model,"workspace":s.workspace,"updated_ms":s.updated_ms,"messages":s.messages,"parent":s.parent,"running":k.is_running(&s.id)})).collect::<Vec<_>>()))
+                Ok(json!(k.store.list().into_iter().take(lim).map(|s| json!({"id":s.id,"title":s.title,"model":s.model,"workspace":s.workspace,"updated_ms":s.updated_ms,"messages":s.messages,"parent":s.parent,"running":k.is_running(&s.id) || on_worker(&s.id)})).collect::<Vec<_>>()))
             }
             "session.create" => {
                 let ws = need("workspace")?;
@@ -336,14 +567,31 @@ impl Daemon {
             "session.submit" => {
                 let id = need("id")?;
                 let text = need("text")?;
-                k.submit(&id, &text, s("source").as_deref().unwrap_or("cli")).map_err(kerr)?;
+                let source = s("source").unwrap_or_else(|| "cli".into());
+                // ent-097: a worker holds this session's log lock; deliver after its run.
+                if let Some(pool) = pool.as_ref().filter(|p| p.running().contains(&id)) {
+                    if !k.store.exists(&id) {
+                        return Err((-32602, format!("no such session `{id}`")));
+                    }
+                    pool.hold(&id, &text, &source);
+                    return Ok(json!({"queued": true, "started": false, "worker": true}));
+                }
+                k.submit(&id, &text, &source).map_err(kerr)?;
+                let to_worker = pool.as_ref().filter(|_| k.cfg.workers.dispatch_all() || p["worker"].as_bool() == Some(true));
+                if let Some(pool) = to_worker.filter(|_| !k.is_running(&id)) {
+                    let started = pool.dispatch(&id);
+                    return Ok(json!({"queued": true, "started": started, "worker": true}));
+                }
                 let started = !k.is_running(&id);
                 if started {
                     let _ = k.start(&id, Default::default());
                 }
                 Ok(json!({"queued": true, "started": started}))
             }
-            "session.interrupt" => Ok(json!({"interrupted": k.interrupt(&need("id")?)})),
+            "session.interrupt" => {
+                let id = need("id")?;
+                Ok(json!({"interrupted": k.interrupt(&id) || pool.as_ref().is_some_and(|p| p.cancel(&id))}))
+            }
             "gate.pending" => Ok(json!(self.pending.list().into_iter().map(pending_json).collect::<Vec<_>>())),
             "gate.answer" => {
                 // `_by` is set by the app server from the authenticated principal; on the
@@ -395,6 +643,7 @@ impl Daemon {
             }
             "" => Err((-32600, "missing method".into())),
             m if m.starts_with("kanban.") || m.starts_with("board.") => crate::kanban::methods::call(k, m, p).unwrap_or_else(|| Err((-32601, format!("unknown method `{m}`")))),
+            m if m.starts_with("ha.") || m.starts_with("workers.") || m.starts_with("cluster.") => crate::cluster::call(self, m, p).unwrap_or_else(|| Err((-32601, format!("unknown method `{m}`")))),
             m => {
                 for f in self.ext.lock().unwrap().iter() {
                     if let Some(r) = f(m, p) {
@@ -474,6 +723,14 @@ impl Daemon {
             }
         }
     }
+}
+
+/// What a standby still answers: reads of the shared store, status, and the HA / console
+/// surface. Everything that starts work or changes state belongs to the leader.
+fn standby_may_serve(m: &str) -> bool {
+    const EXACT: &[&str] = &["ping", "initialize", "whoami", "session.list", "session.history", "session.view", "gate.pending", "goal.list", "schedule.list", "models.list", "tools.list", "shutdown", "health.ready"];
+    const SUFFIX: &[&str] = &[".list", ".get", ".status", ".show", ".info", ".query", ".describe", ".tail", ".state"];
+    EXACT.contains(&m) || m.starts_with("ha.") || m.starts_with("cluster.") || SUFFIX.iter().any(|x| m.ends_with(x))
 }
 
 fn pending_session(i: &PendingItem) -> &str {

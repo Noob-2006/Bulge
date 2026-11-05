@@ -15,6 +15,8 @@ pub enum StoreError {
     /// A line in the middle of the log does not parse. Never silently skipped.
     Corrupt { line: usize, reason: String },
     Version(u32),
+    /// HA fencing (ent-095): this process no longer holds the cluster lease; nothing was written.
+    Fenced(String),
 }
 
 impl std::fmt::Display for StoreError {
@@ -25,6 +27,7 @@ impl std::fmt::Display for StoreError {
             StoreError::NotFound(id) => write!(f, "session {id} not found"),
             StoreError::Corrupt { line, reason } => write!(f, "event log corrupt at line {line}: {reason}"),
             StoreError::Version(v) => write!(f, "event log version {v} is newer than this ark ({LOG_VERSION})"),
+            StoreError::Fenced(why) => write!(f, "write refused by HA fencing: {why}"),
         }
     }
 }
@@ -35,10 +38,15 @@ impl From<std::io::Error> for StoreError {
     }
 }
 
+/// A write guard consulted before every append (HA fencing, `crate::ha`). `Err` = refuse.
+pub type Fence = std::sync::Arc<dyn Fn() -> Result<(), String> + Send + Sync>;
+
 pub struct Store {
     root: PathBuf,
     /// fsync every append (durability) — on by default; tests may turn it off.
     pub sync: bool,
+    /// Set once by an HA daemon / worker: every log opened afterwards checks it per append.
+    fence: std::sync::OnceLock<Fence>,
 }
 
 #[derive(Debug, Clone)]
@@ -62,7 +70,17 @@ pub struct SearchHit {
 
 impl Store {
     pub fn new(root: impl Into<PathBuf>) -> Self {
-        Store { root: root.into(), sync: true }
+        Store { root: root.into(), sync: true, fence: std::sync::OnceLock::new() }
+    }
+    /// Install the HA fence (first call wins; a store is fenced for the life of the process).
+    pub fn set_fence(&self, f: Fence) -> bool {
+        self.fence.set(f).is_ok()
+    }
+    fn check_fence(&self) -> Result<(), StoreError> {
+        match self.fence.get() {
+            Some(f) => f().map_err(StoreError::Fenced),
+            None => Ok(()),
+        }
     }
     pub fn root(&self) -> &Path {
         &self.root
@@ -82,12 +100,13 @@ impl Store {
         if !valid_id(&id) {
             return Err(StoreError::NotFound(id));
         }
+        self.check_fence()?;
         let dir = self.dir(&id);
         fs::create_dir_all(dir.join("artifacts"))?;
         let path = dir.join("events.jsonl");
         let file = OpenOptions::new().create_new(true).append(true).read(true).open(&path)?;
         lock(&file, &id)?;
-        let mut log = SessionLog { id, dir, file, events: Vec::new(), sync: self.sync };
+        let mut log = SessionLog { id, dir, file, events: Vec::new(), sync: self.sync, fence: self.fence.get().cloned() };
         log.append(header)?;
         Ok(log)
     }
@@ -96,12 +115,13 @@ impl Store {
         if !self.exists(id) {
             return Err(StoreError::NotFound(id.to_string()));
         }
+        self.check_fence()?;
         let dir = self.dir(id);
         let path = dir.join("events.jsonl");
         let mut file = OpenOptions::new().read(true).append(true).open(&path)?;
         lock(&file, id)?;
         let events = read_events(&mut file, true)?;
-        Ok(SessionLog { id: id.to_string(), dir, file, events, sync: self.sync })
+        Ok(SessionLog { id: id.to_string(), dir, file, events, sync: self.sync, fence: self.fence.get().cloned() })
     }
 
     /// Read without taking the write lock (for listing / display while a session runs).
@@ -290,6 +310,7 @@ pub struct SessionLog {
     file: File,
     events: Vec<Event>,
     sync: bool,
+    fence: Option<Fence>,
 }
 
 impl SessionLog {
@@ -303,6 +324,11 @@ impl SessionLog {
         self.events.last().map(|e| e.seq + 1).unwrap_or(0)
     }
     pub fn append(&mut self, kind: EventKind) -> Result<Event, StoreError> {
+        // ent-095: re-checked on every write, so a deposed HA leader that wakes up with a
+        // model reply in hand cannot add it to a log the new leader now owns.
+        if let Some(f) = &self.fence {
+            f().map_err(StoreError::Fenced)?;
+        }
         let ev = Event { seq: self.next_seq(), ts: now_ms(), kind };
         let mut line = serde_json::to_vec(&ev).map_err(|e| StoreError::Io(std::io::Error::other(e)))?;
         line.push(b'\n');
@@ -325,7 +351,9 @@ mod tests {
     /// behind in the temp directory — 800+ of them on the author's machine.)
     fn tmp() -> (ark_core::tmp::TempDir, Store) {
         let dir = ark_core::tmp::TempDir::new("ark-store");
-        let mut s = Store::new(dir.path().to_path_buf());
+        // `<data>/sessions`, like a real install: `search` keeps its SQLite index in the parent,
+        // which used to be $TMPDIR itself (an `index.db` left behind by every run).
+        let mut s = Store::new(dir.path().join("sessions"));
         s.sync = false;
         (dir, s)
     }
@@ -346,6 +374,30 @@ mod tests {
         assert_eq!(log.events().len(), 2);
         assert_eq!(log.next_seq(), 2);
         assert_eq!(s.list()[0].messages, 1);
+    }
+
+    #[test]
+    fn fenced_store_refuses_writes_and_writes_nothing() {
+        let (_dir, s) = tmp();
+        let mut log = s.create(header("f1")).unwrap();
+        let ok = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let o2 = ok.clone();
+        // Logs opened before the fence was installed are not retrofitted; new ones are.
+        assert!(s.set_fence(std::sync::Arc::new(move || if o2.load(std::sync::atomic::Ordering::SeqCst) { Ok(()) } else { Err("node b holds epoch 2".into()) })));
+        log.append(msg("before")).unwrap();
+        drop(log);
+        let mut log = s.open("f1").unwrap();
+        log.append(msg("leader")).unwrap();
+        ok.store(false, std::sync::atomic::Ordering::SeqCst);
+        match log.append(msg("stale")) {
+            Err(StoreError::Fenced(w)) => assert!(w.contains("epoch 2")),
+            other => panic!("expected Fenced, got {other:?}"),
+        }
+        drop(log);
+        assert!(matches!(s.open("f1"), Err(StoreError::Fenced(_))), "a fenced node cannot even open for writing");
+        let texts: Vec<String> = s.read("f1").unwrap().iter().filter_map(|e| if let EventKind::Message { message, .. } = &e.kind { Some(message.text()) } else { None }).collect();
+        assert_eq!(texts, vec!["before", "leader"], "the stale write never reached the log");
+        assert!(s.read("f1").is_ok(), "reads are never fenced");
     }
 
     #[test]

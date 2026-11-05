@@ -46,7 +46,7 @@ const NOTE = '<p class="cp-note dim"></p>';
 
 // Pages this file adds on top of `ui.pages` (crates/ark/src/ops/ui_methods.rs). `showControl`
 // appends them to the nav group each one declares, so the Rust page order stays authoritative.
-const EXTRA_PAGES = ['fleet', 'models', 'devices', 'plugins', 'logs'];
+const EXTRA_PAGES = ['fleet', 'cluster', 'models', 'devices', 'plugins', 'logs'];
 
 // The logs page state (file / level / grep / limit) lives in CP.log; the tail renderer escapes
 // every record and marks the timestamp and level up with CSS classes.
@@ -577,6 +577,46 @@ const PAGES = {
     const paused = ((d.limits || {}).paused) || [];
     if (paused.length) h += `<h3>暫停中</h3><p class="dim">${paused.map((p) => `${v(p.session)}：${v(p.reason)}（<code>ark fleet resume ${v(p.session)}</code>）`).join('<br>')}</p>`;
     return h;
+  } },
+
+  // ent-062: the central console — every node (shared registry + registered remote nodes), HA
+  // lease, worker pool, sessions across nodes and the signed managed policy. Reads are metadata
+  // (operator / auditor may open the page); every button is an admin-only `cluster.*` method.
+  cluster: { title: '叢集', group: '控制', async render() {
+    const d = await call('cluster.status');
+    const ha = d.ha || {};
+    const p = d.policy || {};
+    const w = d.workers;
+    let h = `<p>${ha.enabled ? `本節點 <strong>${v(ha.node)}</strong> · ${ha.role === 'leader' ? '<span class="ok">leader</span>' : 'standby'} · epoch ${v(ha.epoch)} · 租約 ${v(ha.lease_secs)} 秒${ha.leader ? ` · 目前 leader：<code>${v(ha.leader.node)}</code>（epoch ${v(ha.leader.epoch)}）` : ''}` : `本節點 <strong>${v(d.self)}</strong> · 未啟用高可用（<code>[ha] enabled</code>）`}
+      ${ha.enabled && ha.role === 'leader' ? ' <button class="btn ghost small" id="clStep">交出租約</button>' : ''}</p>`;
+    if (ha.error) h += `<p class="bad">${v(ha.error)}</p>`;
+    h += '<h3>節點</h3><table class="kv"><tr><th></th><th>節點</th><th>角色</th><th>epoch</th><th>執行中</th><th>版本</th><th>來源</th><th>位址</th><th>政策</th><th></th></tr>' + (d.nodes || []).map((n) => row([
+      n.alive ? '<span class="ok">●</span>' : '<span class="dim">○</span>',
+      `<strong>${v(n.node)}</strong>${n.self ? ' <span class="dim">（本機）</span>' : ''}`,
+      v(n.role || '—'), v(n.epoch ?? '—'), v((n.running || []).length), v(n.version || '—'), v(n.source || ''),
+      `<code>${v(n.advertise || n.url || '')}</code>${n.error ? ` <span class="bad">${v(n.error)}</span>` : ''}`,
+      v(n.policy_version ?? '—'),
+      n.source === 'remote' ? `<button class="btn ghost small" data-rmnode="${v(n.name || n.node)}">移除</button>` : '',
+    ])).join('') + '</table>';
+    h += `<details><summary>登記遠端節點</summary><p class="dim">不共用資料目錄的節點：填它的 app 位址與存放唯讀 token 的金庫秘密名稱（<code>ark secrets set NAME …</code>）。推送政策需要另一個存 admin token 的秘密。</p>
+      <input id="clName" placeholder="名稱"> <input id="clUrl" placeholder="https://node:8640"> <input id="clTok" placeholder="唯讀 token 秘密名稱"> <input id="clAdm" placeholder="admin token 秘密名稱（選填）"> <button class="btn small" id="clAdd">登記</button></details>`;
+    if (w) h += `<h3>Worker 池</h3><p class="dim">${v(w.count)} 個 · 派送 ${v(w.dispatch)} · 完成 ${v(w.completed)} · 重派 ${v(w.redispatched)} · 佇列 ${v((w.queue || []).length)}</p>` + '<table class="kv"><tr><th>#</th><th>pid</th><th>狀態</th><th>重啟</th><th>上次結束</th></tr>' + (w.workers || []).map((x) => row([v(x.index), v(x.pid ?? '—'), x.session ? `執行 <code>${v(x.session)}</code>` : x.alive ? '閒置' : '<span class="bad">停止</span>', v(x.restarts), v(x.last_exit || '')])).join('') + '</table>';
+    const agents = d.agents || [];
+    h += '<h3>代理</h3><table class="kv"><tr><th>節點</th><th>具名代理</th><th>執行中</th><th>子代理</th></tr>' + agents.map((a) => row([v(a.node), v((a.agents || []).join(', ') || '（預設）'), v(a.running), v(a.fleet ? `${a.fleet.running || 0} 執行 / ${a.fleet.done || 0} 完成` : '—')])).join('') + '</table>';
+    const sess = (d.sessions || []).filter((x) => x.running).concat((d.sessions || []).filter((x) => !x.running).slice(0, 20));
+    h += '<h3>Session</h3><table class="kv"><tr><th></th><th>id</th><th>節點</th><th>標題</th><th>訊息</th><th>更新</th></tr>' + sess.map((x) => row([x.running ? '<span class="ok">▶</span>' : '', `<code>${v(x.id)}</code>`, v(x.node || '—'), v(x.title || ''), v(x.messages ?? ''), `<span class="dim">${when(x.updated_ms)}</span>`])).join('') + '</table>';
+    h += `<h3>受管政策</h3><p>釘選公鑰：${p.pinned_key_id ? `<code>${v(p.pinned_key_id)}</code>` : '<span class="dim">未設定（/etc/ark/managed.toml 的 <code>[managed] cluster_key</code>）</span>'} · 生效 v${v(p.active_version ?? '—')} · 已安裝 v${v(p.installed ? p.installed.version : '—')} · 已發佈 v${v(p.published ? p.published.version : '—')}${p.restart_required ? ' · <span class="bad">重新啟動 arkd 才會生效</span>' : ''}</p>
+      ${p.error ? `<p class="bad">${v(p.error)}</p>` : ''}
+      <details><summary>發佈已簽章的政策</summary><p class="dim">在管理員電腦上 <code>ark cluster policy sign policy.toml --version N</code> 產生 bundle，貼上 JSON。節點只接受用釘選公鑰簽、版本更新的 bundle。</p>
+      <textarea id="clBundle" rows="6" style="width:100%"></textarea><br><button class="btn small" id="clPub">發佈</button> <button class="btn ghost small" id="clPush">推送到遠端節點</button> <button class="btn ghost small" id="clPull">立即拉取</button></details>${NOTE}`;
+    return h;
+  }, after() {
+    if ($('clStep')) $('clStep').onclick = async () => { if (confirm('把 leader 租約交給 standby？本節點進行中的 session 會中斷並由新 leader 續跑。') && await act(() => call('ha.stepdown'), '已交出租約')) openPage('cluster'); };
+    if ($('clAdd')) $('clAdd').onclick = async () => { if (await act(() => call('cluster.node.add', { name: $('clName').value.trim(), url: $('clUrl').value.trim(), token_secret: $('clTok').value.trim(), admin_secret: $('clAdm').value.trim() }), '已登記')) openPage('cluster'); };
+    for (const b of qa('[data-rmnode]')) b.onclick = async () => { if (confirm(`移除節點 ${b.dataset.rmnode}？`) && await act(() => call('cluster.node.remove', { name: b.dataset.rmnode }))) openPage('cluster'); };
+    if ($('clPub')) $('clPub').onclick = async () => { if (await act(() => call('cluster.policy.publish', { bundle: $('clBundle').value.trim() }), (r) => `已發佈 v${r.published}`)) openPage('cluster'); };
+    if ($('clPush')) $('clPush').onclick = () => act(() => call('cluster.policy.push'), (r) => (r.nodes || []).map((n) => `${n.node}：${n.ok ? '已套用' : n.error}`).join('；') || '沒有登記的遠端節點');
+    if ($('clPull')) $('clPull').onclick = () => act(() => call('cluster.policy.pull'), (r) => r.installed ? `已安裝 v${r.installed}，重新啟動後生效` : '已是最新');
   } },
 
   devices: { title: '裝置', group: '控制', async render() {

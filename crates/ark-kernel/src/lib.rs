@@ -67,3 +67,6 @@ pub mod governance;
 pub mod managed;
 pub mod reaper;
 pub mod coord;
+pub mod ha;
+pub mod workers;
+pub mod cluster;

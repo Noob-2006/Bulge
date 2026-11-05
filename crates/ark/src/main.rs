@@ -1253,17 +1253,8 @@ fn cmd_daemon(a: &Args) -> R {
                 eprintln!("arkd: warning: {w}");
             }
             let stop = ark_core::Cancel::new();
-            let loops = match &ext_arc {
-                Some(e) => ext::spawn_channel_loops(c.k.clone(), e, c.workspace.clone(), stop.clone()),
-                None => vec![],
-            };
-            if !loops.is_empty() {
-                eprintln!("arkd: {} channel(s) active", loops.len());
-            }
             let services = ext_arc.as_deref().and_then(|e| ark_plugin::plugin::supervise(e.plugins.clone(), stop.clone()));
-            let _hook_services = hooks_ext::start_daemon_services(&c.k, &c.workspace, stop.clone());
             agentcmds::start_daemon_services(&c.k);
-            let _backups = ops::backup::spawn_scheduler(paths.clone(), c.k.cfg.backup.clone(), stop.clone());
             for p in ext_arc.iter().flat_map(|e| e.plugins.iter()).filter(|p| !p.routes.is_empty() || !p.ui.is_empty()) {
                 ark_app::server::mount(&p.name, Arc::new(PluginMount(p.clone())));
             }
@@ -1283,7 +1274,34 @@ fn cmd_daemon(a: &Args) -> R {
                 d.add_methods(ark_app::surfaces::methods(s.clone()));
                 ark_app::surfaces::gateway::deliver_restart_notice(s);
             }
-            let _reports = surfaces.clone().and_then(|s| ark_app::surfaces::spawn_daemon(s, stop.clone()));
+            // ent-095: leader-only services — channel polling, hook services (watchers, Gmail),
+            // scheduled backups and report schedules. Without `[ha]` the daemon leads at once;
+            // with it they start on every lease win and stop when the lease is lost, so two
+            // nodes never both answer a chat message or send the same report.
+            {
+                let (k, ext, ws, paths2, surf, stop) = (c.k.clone(), ext_arc.clone(), c.workspace.clone(), paths.clone(), surfaces.clone(), stop.clone());
+                let term: std::sync::Mutex<Option<ark_core::Cancel>> = std::sync::Mutex::new(None);
+                d.on_leadership(Box::new(move |leader| {
+                    if let Some(t) = term.lock().unwrap().take() {
+                        t.cancel();
+                    }
+                    if !leader {
+                        return;
+                    }
+                    let t = stop.child();
+                    let loops = match &ext {
+                        Some(e) => ext::spawn_channel_loops(k.clone(), e, ws.clone(), t.clone()),
+                        None => vec![],
+                    };
+                    if !loops.is_empty() {
+                        eprintln!("arkd: {} channel(s) active", loops.len());
+                    }
+                    hooks_ext::start_daemon_services(&k, &ws, t.clone());
+                    ops::backup::spawn_scheduler(paths2.clone(), k.cfg.backup.clone(), t.clone());
+                    surf.clone().and_then(|s| ark_app::surfaces::spawn_daemon(s, t.clone()));
+                    *term.lock().unwrap() = Some(t);
+                }));
+            }
             d.add_methods(ops::ui_methods::methods(&paths, c.k.clone(), ext_arc.as_deref()));
             d.add_methods(ops::webui::methods(&paths, c.k.clone(), ext_arc.as_deref()));
             d.add_methods(ops::dock::methods(c.k.clone()));
@@ -1304,6 +1322,7 @@ fn cmd_daemon(a: &Args) -> R {
                 let mut host: Vec<String> = ark_app::node::METHODS.iter().map(|s| s.to_string()).collect();
                 host.extend(HOST_METHODS.iter().chain(ops::ui_methods::METHODS).chain(ops::webui::METHODS).chain(ops::dock::METHODS).map(|s| s.to_string()));
                 host.extend(ark_app::surfaces::METHODS.iter().map(|s| s.to_string()));
+                host.extend(ark_kernel::cluster::METHODS.iter().map(|s| s.to_string()));
                 // MCP event deliveries arrive as signed webhooks and are queued into the subscribing session.
                 let mut routes: Vec<(String, ark_net::httpd::Handler)> = surfaces.clone().map(|s| ark_app::surfaces::routes(s, token.clone())).unwrap_or_default();
                 if let Some(hub) = ext_arc.as_deref().and_then(|e| e.registry.events()) {
@@ -1390,7 +1409,11 @@ fn cmd_daemon(a: &Args) -> R {
         }
         "status" => match daemon::call(&sock, "ping", json!({})) {
             Ok(r) => {
-                println!("arkd running · pid {} · version {} · running sessions: {}", r["pid"], r["version"].as_str().unwrap_or("?"), r["running"].as_array().map(|v| v.len()).unwrap_or(0));
+                let role = match (r["role"].as_str(), r["node"].as_str()) {
+                    (Some(role), Some(node)) => format!(" · HA {role} ({node})"),
+                    _ => String::new(),
+                };
+                println!("arkd running · pid {} · version {} · running sessions: {}{role}", r["pid"], r["version"].as_str().unwrap_or("?"), r["running"].as_array().map(|v| v.len()).unwrap_or(0));
                 Ok(0)
             }
             Err(e) => {

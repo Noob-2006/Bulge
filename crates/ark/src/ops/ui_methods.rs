@@ -112,6 +112,9 @@ pub const PAGES: &[(&str, &str, &str)] = &[
     ("profile", "Profile", "settings"),
     // Pages served by `ops::webui` (model providers, paired devices, plugins + MCP, daemon logs).
     ("fleet", "Agent fleet", "control"),
+    // ent-062: the central console (nodes, HA, workers, all sessions, managed policy) — served
+    // by the daemon's own `cluster.*` methods (ark_kernel::cluster).
+    ("cluster", "Cluster", "control"),
     ("models", "Model providers", "settings"),
     ("devices", "Devices", "control"),
     ("plugins", "Plugins", "agent"),
@@ -1593,7 +1596,8 @@ mod tests {
             let served = if m.starts_with("kanban.") {
                 ark_kernel::kanban::methods::NAMES.contains(&m.as_str())
             } else {
-                ark_kernel::daemon::Daemon::METHODS.contains(&m.as_str()) || crate::HOST_METHODS.contains(&m.as_str())
+                // `cluster.*` / `ha.*` / `workers.*` are the daemon's own (ark_kernel::cluster, ent-062).
+                ark_kernel::daemon::Daemon::METHODS.contains(&m.as_str()) || crate::HOST_METHODS.contains(&m.as_str()) || ark_kernel::cluster::METHODS.contains(&m.as_str())
             };
             assert!(served, "pages.js calls `{m}`, which the app server does not serve/advertise");
         }

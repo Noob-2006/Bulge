@@ -5,6 +5,9 @@
 //! Requests (one JSON object per line, ≤ 1 MiB):
 //! - `{"type":"turn","turnId":"t1","workspace":"/abs","prompt":"…","model":"p/m",
 //!   "containmentRoot":"/abs","tools":["read","grep"],"deny":["shell"],"maxSteps":20}`
+//! - `{"type":"run","turnId":"r1","sessionId":"…"}` (ark extension, ent-097): continue an
+//!   existing session of the shared store — how the daemon's worker pool
+//!   (`ark_kernel::workers`) hands a session to this process.
 //! - `{"type":"cancel","turnId":"t1"}`
 //!
 //! Replies: `{"type":"started","turnId","sessionId"}`, then `{"type":"result","turnId",
@@ -14,7 +17,8 @@
 //! resolved); the session's tool policy is the descriptor's `tools` allow-list (none =
 //! the default toolset) minus `deny`; privilege and egress are never granted (the
 //! approver denies). One turn at a time. Supervisor loss (stdin EOF) cancels the
-//! running turn and exits.
+//! running turn and exits. A worker started by an HA leader inherits its fencing token
+//! (`ARK_HA_NODE` / `ARK_HA_EPOCH` / `ARK_HA_DIR`) and cannot write once that leader is deposed.
 
 use crate::args::Args;
 use crate::R;
@@ -159,6 +163,21 @@ pub fn serve(k: &Kernel, input: Box<dyn BufRead + Send>, out: &mut dyn Write) ->
                 let h = k.start(&sid, RunOpts::default());
                 running = Some((turn, sid, h));
             }
+            "run" => {
+                let turn = req["turnId"].as_str().unwrap_or("").to_string();
+                let sid = req["sessionId"].as_str().unwrap_or("").to_string();
+                if running.is_some() {
+                    reply(out, json!({"type": "result", "turnId": turn, "sessionId": sid, "status": "rejected", "reason": "busy"}));
+                    continue;
+                }
+                if turn.is_empty() || !k.store.exists(&sid) {
+                    reply(out, json!({"type": "result", "turnId": turn, "sessionId": sid, "status": "rejected", "reason": "unknown session"}));
+                    continue;
+                }
+                reply(out, json!({"type": "started", "turnId": turn, "sessionId": sid}));
+                let h = k.start(&sid, RunOpts::default());
+                running = Some((turn, sid, h));
+            }
             "cancel" => {
                 if let Some((turn, sid, _)) = &running {
                     if req["turnId"].as_str() == Some(turn.as_str()) {
@@ -180,6 +199,10 @@ pub fn dispatch(cmd: &str, a: &Args, _raw: &[String]) -> Option<R> {
         // Never auto-approve: a worker has exactly the authority its descriptor names.
         let approver: std::sync::Arc<dyn ark_kernel::approver::Approver> = std::sync::Arc::new(ark_kernel::approver::Policy { allow_privilege: false, allow_egress: false });
         let c = crate::build_agent(a, approver, false)?;
+        // ent-095: started by an HA leader → write only while that leader's epoch holds.
+        if let Some(f) = ark_kernel::ha::fence_from_env() {
+            c.k.store.set_fence(f);
+        }
         let input: Box<dyn BufRead + Send> = Box::new(std::io::BufReader::new(std::io::stdin()));
         Ok(serve(&c.k, input, &mut std::io::stdout()))
     })())
@@ -216,6 +239,19 @@ mod tests {
         assert!(admit(&json!({"turnId": "t", "workspace": inside, "containmentRoot": root})).unwrap_err().contains("prompt"));
         assert!(admit(&json!({"turnId": "t", "prompt": "x", "workspace": "rel", "containmentRoot": root})).is_err());
         assert!(admit(&json!({"turnId": "t", "prompt": "x", "workspace": inside, "containmentRoot": root, "tools": "read"})).is_err());
+    }
+
+    #[test]
+    fn run_continues_an_existing_session() {
+        let kit = crate::testkit::kit();
+        let sid = kit.k.create_session(&kit.ws, None, None, Some("pooled")).unwrap();
+        kit.k.submit(&sid, "from the pool", "test").unwrap();
+        let input = format!("{}\n{}\n", json!({"type": "run", "turnId": "r1", "sessionId": sid}), json!({"type": "run", "turnId": "r2", "sessionId": "nope"}));
+        let mut out = vec![];
+        assert_eq!(serve(&kit.k, Box::new(std::io::Cursor::new(input.into_bytes())), &mut out), 0);
+        let lines: Vec<Value> = String::from_utf8(out).unwrap().lines().map(|l| serde_json::from_str(l).unwrap()).collect();
+        assert!(lines.iter().any(|l| l["type"] == "started" && l["sessionId"] == sid.as_str()), "{lines:?}");
+        assert!(lines.iter().any(|l| l["turnId"] == "r2" && l["status"] == "rejected"), "{lines:?}");
     }
 
     #[test]

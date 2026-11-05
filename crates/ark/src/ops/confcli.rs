@@ -318,8 +318,9 @@ pub fn refuse_locked(key: &str) -> Result<(), String> {
     if files.is_empty() {
         return Ok(());
     }
-    let (_, locked, names) = ark_kernel::managed::load_system(&files)?;
-    let m = ark_kernel::managed::Managed { files: names, locked, overridden: vec![] };
+    // ent-062: keys a verified cluster policy locks are refused too.
+    let l = ark_kernel::managed::load_system_layer(&files)?;
+    let m = ark_kernel::managed::Managed { files: l.files, locked: l.locked, ..Default::default() };
     if m.is_locked(key) {
         return Err(format!("`{key}` is locked by system policy ({}); ask your administrator", m.files.join(", ")));
     }

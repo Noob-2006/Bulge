@@ -73,8 +73,23 @@ fn pool() -> &'static Mutex<HashMap<PathBuf, Shared>> {
     P.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+fn relocated() -> &'static std::sync::RwLock<HashMap<PathBuf, PathBuf>> {
+    static R: OnceLock<std::sync::RwLock<HashMap<PathBuf, PathBuf>>> = OnceLock::new();
+    R.get_or_init(Default::default)
+}
+
+/// ent-096: keep the index of (shared) `data` in a node-local directory instead. SQLite's WAL
+/// needs shared memory, which network file systems do not provide; the index is derived from
+/// the JSONL logs, so every node simply keeps — and rebuilds — its own copy.
+pub fn relocate(data: &Path, dir: &Path) {
+    relocated().write().unwrap().insert(data.to_path_buf(), dir.to_path_buf());
+}
+
 pub fn path(data: &Path) -> PathBuf {
-    data.join(FILE)
+    match relocated().read().unwrap().get(data) {
+        Some(d) => d.join(FILE),
+        None => data.join(FILE),
+    }
 }
 
 fn remove_db_files(p: &Path) {
@@ -103,6 +118,9 @@ fn version(c: &Connection) -> Result<Option<i64>, rusqlite::Error> {
 fn open_fresh(data: &Path) -> Result<Connection, String> {
     fs::create_dir_all(data).map_err(|e| format!("{}: {e}", data.display()))?;
     let p = path(data);
+    if let Some(dir) = p.parent() {
+        fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    }
     let attempt = |p: &Path| -> Result<Connection, rusqlite::Error> {
         let c = connect(p)?;
         match version(&c)? {

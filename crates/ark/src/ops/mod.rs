@@ -12,6 +12,7 @@ use crate::R;
 pub mod archive;
 pub mod backup;
 pub mod batch;
+pub mod cluster;
 pub mod completion;
 pub mod enterprise;
 pub mod context;
@@ -93,6 +94,7 @@ const MODULES: &[Module] = &[
     (storage::COMMANDS, storage::VALUE_FLAGS, storage::BOOL_FLAGS, storage::dispatch),
     (triage::COMMANDS, triage::VALUE_FLAGS, triage::BOOL_FLAGS, triage::dispatch),
     (worker::COMMANDS, worker::VALUE_FLAGS, worker::BOOL_FLAGS, worker::dispatch),
+    (cluster::COMMANDS, cluster::VALUE_FLAGS, cluster::BOOL_FLAGS, cluster::dispatch),
     (dns::COMMANDS, dns::VALUE_FLAGS, dns::BOOL_FLAGS, dns::dispatch),
     (proxy::COMMANDS, proxy::VALUE_FLAGS, proxy::BOOL_FLAGS, proxy::dispatch),
     (directory::COMMANDS, directory::VALUE_FLAGS, directory::BOOL_FLAGS, directory::dispatch),

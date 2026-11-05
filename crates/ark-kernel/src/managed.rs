@@ -28,6 +28,14 @@
 //! by group/other; anything else is refused (a policy file the user can edit is no policy).
 //! `/etc/ark` always wins; `ARK_SYSTEM_CONFIG` is consulted only when `/etc/ark` holds no
 //! policy at all (tests, packaging checks), so setting it can never weaken a real install.
+//!
+//! **Cluster policy (ent-062).** `[managed] cluster_key = "ed25519:…"` pins the key of a central
+//! console. A bundle that console signed (`crate::cluster::Bundle`, pushed or pulled into
+//! `<data>/managed/cluster.json`) is then verified on every load and merged as one more system
+//! layer after the files (its `locked` keys join the list). A bundle that does not verify is
+//! ignored with a warning — unless `cluster_required = true`, which refuses to load at all —
+//! and `cluster_min_version` rejects rolled-back bundles. The key can only come from the
+//! root-owned system files, so a user cannot pin a key of their own.
 
 use std::path::{Path, PathBuf};
 
@@ -42,6 +50,12 @@ pub struct Managed {
     pub locked: Vec<String>,
     /// Locked keys a lower layer tried to change (and lost).
     pub overridden: Vec<String>,
+    /// `[managed] cluster_key`: the console key cluster bundles must be signed with.
+    pub cluster_key: Option<String>,
+    /// Version of the verified cluster bundle that was applied.
+    pub cluster_version: Option<u64>,
+    /// Why a present cluster bundle was not applied.
+    pub cluster_error: Option<String>,
 }
 
 impl Managed {
@@ -94,8 +108,78 @@ fn check_owner(p: &Path) -> Result<(), String> {
     Ok(())
 }
 
+/// `[managed]` keys only the system files may set (never a cluster bundle).
+const SYSTEM_ONLY: &[&str] = &["cluster_key", "cluster_required", "cluster_min_version"];
+
+#[derive(Default)]
+struct Pins {
+    key: Option<String>,
+    required: bool,
+    min_version: u64,
+}
+
+/// Everything the system layer contributes.
+pub struct SystemLayer {
+    pub table: toml::Table,
+    pub locked: Vec<String>,
+    pub files: Vec<String>,
+    pub cluster_key: Option<String>,
+    pub cluster_version: Option<u64>,
+    pub cluster_error: Option<String>,
+}
+
+/// Where a verified cluster bundle is installed for this `ARK_HOME`.
+pub fn cluster_bundle_path() -> PathBuf {
+    crate::cluster::installed_path(&crate::config::Paths::from_env().data)
+}
+
+/// The system files plus the cluster bundle at its installed location.
+pub fn load_system_layer(files: &[PathBuf]) -> Result<SystemLayer, String> {
+    load_system_layer_at(files, &cluster_bundle_path())
+}
+
+/// [`load_system_layer`] with an explicit bundle path (tests).
+pub fn load_system_layer_at(files: &[PathBuf], bundle: &Path) -> Result<SystemLayer, String> {
+    let mut pins = Pins::default();
+    let (mut table, mut locked, mut names) = load_files(files, &mut pins)?;
+    let mut layer = SystemLayer { table: toml::Table::new(), locked: vec![], files: vec![], cluster_key: pins.key.clone(), cluster_version: None, cluster_error: None };
+    if let Some(key) = &pins.key {
+        match crate::cluster::load_installed(bundle, key, pins.min_version) {
+            Ok(Some((b, mut t))) => {
+                if let Some(m) = t.remove("managed") {
+                    for v in m.get("locked").and_then(|v| v.as_array()).cloned().unwrap_or_default() {
+                        if let Some(k) = v.as_str().map(str::trim).filter(|k| !k.is_empty() && !k.split('.').any(str::is_empty)) {
+                            if !locked.iter().any(|l| l == k) {
+                                locked.push(k.to_string());
+                            }
+                        }
+                    }
+                }
+                crate::config::merge_tables(&mut table, t);
+                names.push(format!("cluster policy v{} ({})", b.version, bundle.display()));
+                layer.cluster_version = Some(b.version);
+            }
+            Ok(None) if pins.required => return Err(format!("managed.cluster_required is set but no cluster policy is installed ({}); run `ark cluster policy pull`", bundle.display())),
+            Ok(None) => {}
+            Err(e) if pins.required => return Err(format!("cluster policy {}: {e}", bundle.display())),
+            Err(e) => {
+                eprintln!("ark: warning: ignoring cluster policy {}: {e}", bundle.display());
+                layer.cluster_error = Some(e);
+            }
+        }
+    }
+    layer.table = table;
+    layer.locked = locked;
+    layer.files = names;
+    Ok(layer)
+}
+
 /// Read and merge the system files: `(defaults table, locked keys, files)`.
 pub fn load_system(files: &[PathBuf]) -> Result<(toml::Table, Vec<String>, Vec<String>), String> {
+    load_files(files, &mut Pins::default())
+}
+
+fn load_files(files: &[PathBuf], pins: &mut Pins) -> Result<(toml::Table, Vec<String>, Vec<String>), String> {
     let mut merged = toml::Table::new();
     let mut locked: Vec<String> = vec![];
     let mut names = vec![];
@@ -106,9 +190,19 @@ pub fn load_system(files: &[PathBuf]) -> Result<(toml::Table, Vec<String>, Vec<S
         if let Some(m) = t.remove("managed") {
             let m = m.as_table().cloned().unwrap_or_default();
             for k in m.keys() {
-                if k != "locked" {
-                    return Err(format!("{}: unknown key `managed.{k}` (expected `locked`)", p.display()));
+                if !SYSTEM_ONLY.contains(&k.as_str()) && k != "locked" {
+                    return Err(format!("{}: unknown key `managed.{k}` (expected `locked`, `cluster_key`, `cluster_required` or `cluster_min_version`)", p.display()));
                 }
+            }
+            if let Some(k) = m.get("cluster_key").and_then(|v| v.as_str()) {
+                ark_security::signing::PublicKey::parse(k).map_err(|e| format!("{}: managed.cluster_key: {e}", p.display()))?;
+                pins.key = Some(k.trim().to_string());
+            }
+            if let Some(b) = m.get("cluster_required").and_then(|v| v.as_bool()) {
+                pins.required = b;
+            }
+            if let Some(n) = m.get("cluster_min_version").and_then(|v| v.as_integer()) {
+                pins.min_version = n.max(0) as u64;
             }
             for v in m.get("locked").and_then(|v| v.as_array()).cloned().unwrap_or_default() {
                 let k = v.as_str().ok_or_else(|| format!("{}: managed.locked holds strings", p.display()))?.trim().to_string();
@@ -193,7 +287,7 @@ mod tests {
         assert_eq!(get(&merged, "model.allow"), get(&sys, "model.allow"));
         assert_eq!(get(&merged, "model.default").unwrap().as_str(), Some("x/y"), "unlocked keys stay the user's");
         assert!(get(&merged, "tools.deny").is_none(), "locked but unset in system → built-in default");
-        let m = Managed { files: vec!["x".into()], locked: vec!["gate".into(), "model.allow".into()], overridden: vec![] };
+        let m = Managed { files: vec!["x".into()], locked: vec!["gate".into(), "model.allow".into()], overridden: vec![], ..Default::default() };
         assert!(m.is_locked("gate.egress_allow") && m.is_locked("model.allow") && m.is_locked("model") && !m.is_locked("model.default"));
     }
 

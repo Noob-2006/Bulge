@@ -69,7 +69,7 @@ mod tests {
         let js = serve("/ui/pages.js");
         assert_eq!(js.status, 200);
         let js = body(js);
-        for page in ["channels", "skill-workshop", "cron", "usage", "config", "secrets", "terminal", "workboard", "memory-import", "meetings", "worktrees", "cloud-workers", "custodian", "labs", "profile"] {
+        for page in ["channels", "skill-workshop", "cron", "usage", "config", "secrets", "terminal", "workboard", "memory-import", "meetings", "worktrees", "cloud-workers", "custodian", "labs", "profile", "cluster.status", "cluster.policy.publish"] {
             assert!(js.contains(page), "page {page} missing");
         }
         assert_eq!(serve("/ui/pages.css").status, 200);

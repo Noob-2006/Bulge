@@ -147,6 +147,12 @@ pub struct Config {
     /// What `/etc/ark` contributed (never read from or written to a file).
     #[serde(skip)]
     pub managed: crate::managed::Managed,
+    /// `[ha]`: leader lease over shared storage (ent-095, docs/ARCHITECTURE.md §7).
+    pub ha: crate::ha::HaConfig,
+    /// `[workers]`: the leader's worker-process pool (ent-097).
+    pub workers: crate::workers::WorkersConfig,
+    /// `[cluster]`: node registry and central-console policy pull (ent-062).
+    pub cluster: crate::cluster::ClusterConfig,
 }
 
 /// `[display]`: user-facing presentation (Hermes `display.language`).
@@ -745,7 +751,8 @@ impl Config {
 
     fn load_layers(system: &[PathBuf], user: Option<&Path>, project: Option<&Path>, sets: &[String]) -> Result<Config, String> {
         // ent-063: the system layer is the base, and its locked keys are re-applied last.
-        let (sys, locked, sys_files) = crate::managed::load_system(system)?;
+        let layer = crate::managed::load_system_layer(system)?;
+        let (sys, locked, sys_files) = (layer.table, layer.locked, layer.files);
         let mut merged = sys.clone();
         let mut dropped = Vec::new();
         for (layer, p) in [(0, user), (1, project)] {
@@ -781,7 +788,7 @@ impl Config {
             eprintln!("ark: {n}");
         }
         let mut cfg: Config = toml::Value::Table(merged).try_into().map_err(|e: toml::de::Error| format!("config: {}", e.message()))?;
-        cfg.managed = crate::managed::Managed { files: sys_files, locked, overridden };
+        cfg.managed = crate::managed::Managed { files: sys_files, locked, overridden, cluster_key: layer.cluster_key, cluster_version: layer.cluster_version, cluster_error: layer.cluster_error };
         if cfg.compliance.profile == "government" {
             for h in PRC_HOSTS {
                 if !cfg.gate.egress_deny.iter().any(|x| x == h) {
@@ -794,6 +801,8 @@ impl Config {
     }
 
     pub fn validate(&self) -> Result<(), String> {
+        self.ha.validate()?;
+        self.workers.validate()?;
         match self.compliance.profile.as_str() {
             "" | "default" => {}
             "government" => {

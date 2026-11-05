@@ -65,6 +65,12 @@ pub struct App {
 }
 
 impl App {
+    /// 503 from an HA standby, naming the leader (`ha.status` has the details).
+    fn standby_reply(&self) -> Response {
+        let leader = self.d.ha().and_then(|h| h.leader()).map(|l| json!({"node": l.node, "epoch": l.epoch, "advertise": l.advertise}));
+        Response::json(503, &json!({"error": "this ark node is an HA standby; send work to the leader", "leader": leader}).to_string()).with_header("retry-after", "2")
+    }
+
     /// The token a request presents, if any: `Authorization: Bearer`, the `ark.token.<t>`
     /// subprotocol, or — **only on a WebSocket upgrade whose Origin is ours** — `?token=`: a
     /// URL leaks into history, `Referer` headers, proxy logs and screenshots, so a plain HTTP
@@ -220,6 +226,8 @@ impl App {
             }
             (_, p) if p.starts_with("/plugins/") => self.plugin_route(&r),
             // A2A authenticates its own peers (per-peer tokens) before anything else.
+            // ent-095: an HA standby starts no turns (its store is fenced anyway); say where to go.
+            (m, p) if p.starts_with("/a2a") && self.cfg.a2a.enabled && m == "POST" && !self.d.is_leader() => self.standby_reply(),
             (_, p) if p.starts_with("/a2a") && self.cfg.a2a.enabled => a2a::handle(self, r),
             (_, p) if p.starts_with("/auth/") && self.cfg.auth.enabled => crate::dashboard_auth::handle(self, &r),
             // Everything below needs a credential; how much depends on what is asked for.
@@ -286,6 +294,9 @@ impl App {
                 }
                 if r.method != "GET" {
                     self.audit_request(&p, "openai.request", "allow", json!({"path": path}));
+                }
+                if r.method != "GET" && !self.d.is_leader() {
+                    return self.standby_reply();
                 }
                 openai::handle(self, r)
             }
