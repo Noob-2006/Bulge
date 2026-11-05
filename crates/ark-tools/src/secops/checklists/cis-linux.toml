@@ -1,0 +1,395 @@
+# CIS-style Linux host baseline (read-only checks; subset of the CIS Distribution Independent
+# Linux / Ubuntu / RHEL benchmarks' Level 1 server items). Every check runs a fixed, read-only
+# command (no shell); none needs root, and a check whose input is unreadable is "skip", never
+# "pass". Numbering follows the benchmark sections loosely: map them to the exact benchmark
+# version your organisation adopted before using the result as evidence.
+#
+# Check fields: cmd (argv) or cmds (alternatives: the first that exits with an ok_exit code is
+# evaluated); ok_exit (default [0]); on_error = skip | fail | pass when no command exits ok;
+# match / match_all / not_match (regexes over the output, multi-line); pattern + min / max (first capture
+# group as a number); max_matches (count of `pattern` matches); mode_mask (octal permission
+# bits allowed); first_line = true (evaluate only the first output line); manual = true (an
+# evidence item for a human; no command).
+
+[meta]
+id = "cis-linux"
+title = "CIS-style Linux host baseline (Level 1 server subset)"
+
+[[check]]
+id = "1.1.2"
+section = "1.1 Filesystem"
+title = "/tmp is a separate mount with nodev,nosuid"
+severity = "medium"
+cmd = ["findmnt", "-n", "-o", "OPTIONS", "/tmp"]
+match_all = ['(^|,)nodev(,|$)', '(^|,)nosuid(,|$)']
+on_error = "fail"
+fix = "Mount /tmp as tmpfs or a separate partition with nodev,nosuid,noexec (systemd tmp.mount or /etc/fstab)."
+
+[[check]]
+id = "1.1.4"
+section = "1.1 Filesystem"
+title = "/tmp is mounted noexec"
+severity = "low"
+cmd = ["findmnt", "-n", "-o", "OPTIONS", "/tmp"]
+match = '(^|,)noexec(,|$)'
+on_error = "fail"
+fix = "Add noexec to the /tmp mount options."
+
+[[check]]
+id = "1.1.8"
+section = "1.1 Filesystem"
+title = "/dev/shm is mounted nodev,nosuid,noexec"
+severity = "medium"
+cmd = ["findmnt", "-n", "-o", "OPTIONS", "/dev/shm"]
+match_all = ['(^|,)nodev(,|$)', '(^|,)nosuid(,|$)', '(^|,)noexec(,|$)']
+on_error = "skip"
+fix = "tmpfs /dev/shm tmpfs defaults,nodev,nosuid,noexec 0 0 in /etc/fstab, then remount."
+
+[[check]]
+id = "1.5.2"
+section = "1.5 Process hardening"
+title = "Address space layout randomisation is fully enabled"
+severity = "high"
+cmd = ["sysctl", "-n", "kernel.randomize_va_space"]
+match = '^2\s*$'
+fix = "kernel.randomize_va_space = 2 in /etc/sysctl.d/60-hardening.conf; sysctl --system."
+
+[[check]]
+id = "1.5.3"
+section = "1.5 Process hardening"
+title = "Core dumps of setuid programs are disabled"
+severity = "medium"
+cmd = ["sysctl", "-n", "fs.suid_dumpable"]
+match = '^0\s*$'
+fix = "fs.suid_dumpable = 0 and '* hard core 0' in /etc/security/limits.conf."
+
+[[check]]
+id = "1.5.4"
+section = "1.5 Process hardening"
+title = "ptrace is restricted (Yama ptrace_scope >= 1)"
+severity = "medium"
+cmd = ["sysctl", "-n", "kernel.yama.ptrace_scope"]
+pattern = '^(\d+)'
+min = 1
+on_error = "skip"
+fix = "kernel.yama.ptrace_scope = 1 (or 2) in /etc/sysctl.d/."
+
+[[check]]
+id = "3.1.1"
+section = "3 Network"
+title = "IPv4 forwarding is disabled (unless this host is a router)"
+severity = "medium"
+cmd = ["sysctl", "-n", "net.ipv4.ip_forward"]
+match = '^0\s*$'
+fix = "net.ipv4.ip_forward = 0 unless the host routes traffic (container hosts usually need 1: record the exception)."
+
+[[check]]
+id = "3.2.1"
+section = "3 Network"
+title = "Source-routed packets are not accepted"
+severity = "medium"
+cmd = ["sysctl", "-n", "net.ipv4.conf.all.accept_source_route"]
+match = '^0\s*$'
+fix = "net.ipv4.conf.all.accept_source_route = 0 and net.ipv4.conf.default.accept_source_route = 0."
+
+[[check]]
+id = "3.2.2"
+section = "3 Network"
+title = "ICMP redirects are not accepted"
+severity = "medium"
+cmd = ["sysctl", "-n", "net.ipv4.conf.all.accept_redirects"]
+match = '^0\s*$'
+fix = "net.ipv4.conf.all.accept_redirects = 0 (and .default)."
+
+[[check]]
+id = "3.1.2"
+section = "3 Network"
+title = "ICMP redirects are not sent"
+severity = "low"
+cmd = ["sysctl", "-n", "net.ipv4.conf.all.send_redirects"]
+match = '^0\s*$'
+fix = "net.ipv4.conf.all.send_redirects = 0 (and .default)."
+
+[[check]]
+id = "3.2.4"
+section = "3 Network"
+title = "Suspicious packets are logged (log_martians)"
+severity = "low"
+cmd = ["sysctl", "-n", "net.ipv4.conf.all.log_martians"]
+match = '^1\s*$'
+fix = "net.ipv4.conf.all.log_martians = 1 (and .default)."
+
+[[check]]
+id = "3.2.7"
+section = "3 Network"
+title = "Reverse path filtering is enabled"
+severity = "medium"
+cmd = ["sysctl", "-n", "net.ipv4.conf.all.rp_filter"]
+match = '^[12]\s*$'
+fix = "net.ipv4.conf.all.rp_filter = 1 (strict) or 2 (loose for multi-homed hosts)."
+
+[[check]]
+id = "3.2.8"
+section = "3 Network"
+title = "TCP SYN cookies are enabled"
+severity = "medium"
+cmd = ["sysctl", "-n", "net.ipv4.tcp_syncookies"]
+match = '^1\s*$'
+fix = "net.ipv4.tcp_syncookies = 1."
+
+[[check]]
+id = "3.5"
+section = "3 Network"
+title = "A host firewall is active (firewalld or ufw)"
+severity = "high"
+cmds = [["pgrep", "-x", "firewalld"], ["grep", "-E", "^ENABLED=yes", "/etc/ufw/ufw.conf"]]
+on_error = "fail"
+fix = "Enable firewalld or ufw (or document the nftables ruleset / network firewall that replaces it)."
+
+[[check]]
+id = "4.1.1"
+section = "4 Logging and auditing"
+title = "auditd is running"
+severity = "medium"
+cmd = ["pgrep", "-x", "auditd"]
+on_error = "fail"
+fix = "Install and enable auditd (auditd package; systemctl enable --now auditd) with rules for identity, sudo and time changes."
+
+[[check]]
+id = "4.2.1"
+section = "4 Logging and auditing"
+title = "A syslog daemon (rsyslog / syslog-ng) runs for durable or remote logs"
+severity = "low"
+cmd = ["pgrep", "-x", "rsyslogd|syslog-ng"]
+on_error = "fail"
+fix = "Run rsyslog or syslog-ng forwarding to the central log store, or set journald Storage=persistent and ship the journal."
+
+[[check]]
+id = "2.1.1"
+section = "2 Services"
+title = "Time is synchronised (NTP)"
+severity = "medium"
+cmd = ["timedatectl", "show", "-p", "NTPSynchronized", "--value"]
+match = '^yes'
+on_error = "skip"
+fix = "Enable systemd-timesyncd or chrony against the organisation's time source."
+
+[[check]]
+id = "2.2.x"
+section = "2 Services"
+title = "Unneeded network services are not running (avahi, cups, rpcbind, telnet, vsftpd, xinetd)"
+severity = "medium"
+cmd = ["pgrep", "-l", "-x", "avahi-daemon|cupsd|rpcbind|in.telnetd|telnetd|vsftpd|xinetd"]
+ok_exit = [1]
+on_error = "fail"
+fix = "Stop and disable the listed services unless documented as needed."
+
+[[check]]
+id = "1.9"
+section = "1 Initial setup"
+title = "Security updates are applied automatically (unattended-upgrades or dnf-automatic)"
+severity = "medium"
+cmds = [["grep", "-rhE", '^\s*APT::Periodic::Unattended-Upgrade\s+"1"', "/etc/apt/apt.conf.d"], ["grep", "-E", '^\s*apply_updates\s*=\s*yes', "/etc/dnf/automatic.conf"]]
+on_error = "fail"
+fix = "Enable unattended-upgrades (Debian/Ubuntu) or dnf-automatic with apply_updates = yes (RHEL family), or document the patch process that replaces it."
+
+[[check]]
+id = "5.2.10"
+section = "5.2 SSH server"
+title = "SSH root login is disabled"
+severity = "high"
+cmd = ["grep", "-rhiE", '^\s*PermitRootLogin\s', "/etc/ssh/sshd_config.d", "/etc/ssh/sshd_config"]
+ok_exit = [0, 1, 2]
+first_line = true
+match = '(?i)PermitRootLogin\s+no\b'
+fix = "PermitRootLogin no (first value wins: drop-ins in sshd_config.d come before sshd_config); reload sshd."
+
+[[check]]
+id = "5.2.11"
+section = "5.2 SSH server"
+title = "SSH does not permit empty passwords"
+severity = "high"
+cmd = ["grep", "-rhiE", '^\s*PermitEmptyPasswords\s', "/etc/ssh/sshd_config.d", "/etc/ssh/sshd_config"]
+ok_exit = [0, 1, 2]
+first_line = true
+not_match = '(?i)PermitEmptyPasswords\s+yes'
+fix = "PermitEmptyPasswords no."
+
+[[check]]
+id = "5.2.7"
+section = "5.2 SSH server"
+title = "SSH MaxAuthTries is 4 or less"
+severity = "medium"
+cmd = ["grep", "-rhiE", '^\s*MaxAuthTries\s', "/etc/ssh/sshd_config.d", "/etc/ssh/sshd_config"]
+ok_exit = [0, 2]
+first_line = true
+pattern = '(?i)MaxAuthTries\s+(\d+)'
+max = 4
+on_error = "fail"
+fix = "MaxAuthTries 4."
+
+[[check]]
+id = "5.2.6"
+section = "5.2 SSH server"
+title = "SSH X11 forwarding is disabled"
+severity = "low"
+cmd = ["grep", "-rhiE", '^\s*X11Forwarding\s', "/etc/ssh/sshd_config.d", "/etc/ssh/sshd_config"]
+ok_exit = [0, 1, 2]
+first_line = true
+not_match = '(?i)X11Forwarding\s+yes'
+fix = "X11Forwarding no."
+
+[[check]]
+id = "5.2.16"
+section = "5.2 SSH server"
+title = "SSH idle sessions time out (ClientAliveInterval 1-900 s)"
+severity = "medium"
+cmd = ["grep", "-rhiE", '^\s*ClientAliveInterval\s', "/etc/ssh/sshd_config.d", "/etc/ssh/sshd_config"]
+ok_exit = [0, 2]
+first_line = true
+pattern = '(?i)ClientAliveInterval\s+(\d+)'
+min = 1
+max = 900
+on_error = "fail"
+fix = "ClientAliveInterval 300 and ClientAliveCountMax 3 (or lower)."
+
+[[check]]
+id = "5.2.1"
+section = "5.2 SSH server"
+title = "sshd_config is not writable or readable by group / others"
+severity = "medium"
+cmd = ["stat", "-c", "%a", "/etc/ssh/sshd_config"]
+mode_mask = "644"
+on_error = "skip"
+fix = "chown root:root /etc/ssh/sshd_config; chmod 600 (or 644 at most)."
+
+[[check]]
+id = "5.4.1.1"
+section = "5.4 Accounts"
+title = "Passwords expire within 365 days (PASS_MAX_DAYS)"
+severity = "medium"
+cmd = ["grep", "-E", '^\s*PASS_MAX_DAYS', "/etc/login.defs"]
+pattern = 'PASS_MAX_DAYS\s+(\d+)'
+max = 365
+on_error = "fail"
+fix = "PASS_MAX_DAYS 365 (or the policy value) in /etc/login.defs; chage --maxdays for existing users."
+
+[[check]]
+id = "5.4.1.2"
+section = "5.4 Accounts"
+title = "Minimum days between password changes is 1 or more"
+severity = "low"
+cmd = ["grep", "-E", '^\s*PASS_MIN_DAYS', "/etc/login.defs"]
+pattern = 'PASS_MIN_DAYS\s+(\d+)'
+min = 1
+on_error = "fail"
+fix = "PASS_MIN_DAYS 1 in /etc/login.defs."
+
+[[check]]
+id = "5.4.1.3"
+section = "5.4 Accounts"
+title = "Users are warned 7 days before password expiry"
+severity = "low"
+cmd = ["grep", "-E", '^\s*PASS_WARN_AGE', "/etc/login.defs"]
+pattern = 'PASS_WARN_AGE\s+(\d+)'
+min = 7
+on_error = "fail"
+fix = "PASS_WARN_AGE 7 in /etc/login.defs."
+
+[[check]]
+id = "5.3.1"
+section = "5.3 PAM"
+title = "Password minimum length is 14 or more (pwquality minlen)"
+severity = "medium"
+cmd = ["grep", "-rhE", '^\s*minlen\s*=', "/etc/security/pwquality.conf", "/etc/security/pwquality.conf.d"]
+ok_exit = [0, 2]
+first_line = true
+pattern = 'minlen\s*=\s*(\d+)'
+min = 14
+on_error = "fail"
+fix = "minlen = 14 in /etc/security/pwquality.conf (libpam-pwquality installed and in the PAM stack)."
+
+[[check]]
+id = "5.3.2"
+section = "5.3 PAM"
+title = "Accounts lock after 5 or fewer failed logins (faillock deny)"
+severity = "medium"
+cmd = ["grep", "-E", '^\s*deny\s*=', "/etc/security/faillock.conf"]
+pattern = 'deny\s*=\s*(\d+)'
+min = 1
+max = 5
+on_error = "fail"
+fix = "deny = 5 and unlock_time = 900 in /etc/security/faillock.conf, pam_faillock in the auth stack."
+
+[[check]]
+id = "5.5.4"
+section = "5.5 User environment"
+title = "Default umask is 027 or more restrictive"
+severity = "low"
+cmd = ["grep", "-E", '^\s*UMASK', "/etc/login.defs"]
+match = 'UMASK\s+0?(27|77)\b'
+on_error = "fail"
+fix = "UMASK 027 in /etc/login.defs."
+
+[[check]]
+id = "5.5.5"
+section = "5.5 User environment"
+title = "Idle shells time out (TMOUT 1-900 s)"
+severity = "low"
+cmd = ["grep", "-rhE", '^\s*(readonly\s+|export\s+|typeset\s+-r\s+)*TMOUT=', "/etc/profile", "/etc/profile.d", "/etc/bash.bashrc"]
+ok_exit = [0, 2]
+first_line = true
+pattern = 'TMOUT=(\d+)'
+min = 1
+max = 900
+on_error = "fail"
+fix = "readonly TMOUT=900 ; export TMOUT in /etc/profile.d/tmout.sh."
+
+[[check]]
+id = "6.1.2"
+section = "6.1 File permissions"
+title = "/etc/passwd is 644 or stricter"
+severity = "medium"
+cmd = ["stat", "-c", "%a", "/etc/passwd"]
+mode_mask = "644"
+fix = "chmod 644 /etc/passwd."
+
+[[check]]
+id = "6.1.3"
+section = "6.1 File permissions"
+title = "/etc/shadow is 640 or stricter"
+severity = "high"
+cmd = ["stat", "-c", "%a", "/etc/shadow"]
+mode_mask = "640"
+on_error = "skip"
+fix = "chown root:shadow /etc/shadow; chmod 640 (or 000 on RHEL)."
+
+[[check]]
+id = "6.1.4"
+section = "6.1 File permissions"
+title = "/etc/group is 644 or stricter"
+severity = "low"
+cmd = ["stat", "-c", "%a", "/etc/group"]
+mode_mask = "644"
+fix = "chmod 644 /etc/group."
+
+[[check]]
+id = "6.2.2"
+section = "6.2 Users and groups"
+title = "root is the only UID 0 account"
+severity = "high"
+cmd = ["getent", "passwd"]
+pattern = '(?m)^[^:]+:[^:]*:0:'
+max_matches = 1
+fix = "Give every other UID 0 account its own UID (or remove it)."
+
+[[check]]
+id = "6.2.1"
+section = "6.2 Users and groups"
+title = "No account has an empty password"
+severity = "high"
+cmd = ["cat", "/etc/shadow"]
+pattern = '(?m)^[^:]+::'
+max_matches = 0
+on_error = "skip"
+fix = "passwd -l <account> for each account with an empty password field (needs root to verify: unreadable here means 'skip')."

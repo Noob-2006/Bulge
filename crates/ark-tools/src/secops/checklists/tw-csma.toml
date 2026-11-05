@@ -1,0 +1,209 @@
+# 資通安全管理法 對照檢查（主機技術面＋組織面證據清單）
+#
+# 依據：資通安全管理法（2025-09-24 修正公布、2025-12-01 施行，主管機關數位發展部）及其子法
+# 「資通安全責任等級分級辦法」（應辦事項附表、附表十「資通系統防護基準」七構面）與「資通安全
+# 事件通報及應變辦法」。本清單是**對照用的檢查起點，不是法規全文，也不是稽核結論**：
+# 適用與否取決於機關（或特定非公務機關）的責任等級與系統防護需求等級（普／中／高），條文與
+# 期限以主管機關最新公告為準。研究背景見 docs/compliance-tw.md 第 3 節。
+#
+# 技術項以 `same_as = "cis-linux:<id>"` 沿用 CIS 檢查的唯讀指令；組織項（manual = true）列出
+# 稽核時要備妥的證據，由人填寫。
+
+[meta]
+id = "tw-csma"
+title = "資通安全管理法 對照檢查（資通系統防護基準七構面＋應辦事項證據）"
+
+# ── 存取控制 ──
+[[check]]
+id = "AC-帳號管理-逾時登出"
+section = "存取控制"
+title = "閒置工作階段逾時登出（SSH ClientAliveInterval）"
+same_as = "cis-linux:5.2.16"
+
+[[check]]
+id = "AC-帳號管理-逾時登出-shell"
+section = "存取控制"
+title = "閒置 shell 逾時登出（TMOUT）"
+same_as = "cis-linux:5.5.5"
+
+[[check]]
+id = "AC-最小權限-root"
+section = "存取控制"
+title = "禁止以 root 直接遠端登入（最小權限、可歸責）"
+same_as = "cis-linux:5.2.10"
+
+[[check]]
+id = "AC-最小權限-uid0"
+section = "存取控制"
+title = "僅 root 具 UID 0"
+same_as = "cis-linux:6.2.2"
+
+[[check]]
+id = "AC-帳號管理-閒置帳號"
+section = "存取控制"
+title = "已建立帳號定期清查程序（停用逾期未使用與離職人員帳號）"
+manual = true
+evidence = "帳號清查紀錄（頻率依防護需求等級）、離職／調職停權紀錄"
+
+# ── 事件日誌與可歸責性 ──
+[[check]]
+id = "AU-記錄事件"
+section = "事件日誌與可歸責性"
+title = "系統稽核紀錄服務運作中（auditd）"
+same_as = "cis-linux:4.1.1"
+
+[[check]]
+id = "AU-日誌儲存"
+section = "事件日誌與可歸責性"
+title = "日誌持久保存或集中收容（rsyslog / syslog-ng）"
+same_as = "cis-linux:4.2.1"
+
+[[check]]
+id = "AU-時戳及校時"
+section = "事件日誌與可歸責性"
+title = "系統時間與標準時間來源同步"
+same_as = "cis-linux:2.1.1"
+
+[[check]]
+id = "AU-日誌保護"
+section = "事件日誌與可歸責性"
+title = "日誌保存期限、容量告警與存取限制已訂定"
+manual = true
+evidence = "日誌保存期限（依機關規定與防護需求等級）、儲存容量不足之告警設定、日誌存取權限清單"
+
+# ── 識別與鑑別 ──
+[[check]]
+id = "IA-密碼長度"
+section = "識別與鑑別"
+title = "密碼最小長度（pwquality minlen）"
+same_as = "cis-linux:5.3.1"
+
+[[check]]
+id = "IA-密碼效期"
+section = "識別與鑑別"
+title = "密碼效期設定（PASS_MAX_DAYS）"
+same_as = "cis-linux:5.4.1.1"
+
+[[check]]
+id = "IA-錯誤鎖定"
+section = "識別與鑑別"
+title = "連續登入失敗鎖定（faillock deny）"
+same_as = "cis-linux:5.3.2"
+
+[[check]]
+id = "IA-空密碼"
+section = "識別與鑑別"
+title = "無空白密碼帳號"
+same_as = "cis-linux:6.2.1"
+
+[[check]]
+id = "IA-SSH空密碼"
+section = "識別與鑑別"
+title = "SSH 不允許空白密碼登入"
+same_as = "cis-linux:5.2.11"
+
+# ── 系統與通訊保護 ──
+[[check]]
+id = "SC-邊界防護"
+section = "系統與通訊保護"
+title = "主機防火牆啟用"
+same_as = "cis-linux:3.5"
+
+[[check]]
+id = "SC-網路參數"
+section = "系統與通訊保護"
+title = "不接受 ICMP 重導向"
+same_as = "cis-linux:3.2.2"
+
+[[check]]
+id = "SC-傳輸加密"
+section = "系統與通訊保護"
+title = "對外傳輸採加密通道（TLS 1.2 以上）、資料儲存加密依防護需求等級"
+manual = true
+evidence = "對外服務 TLS 設定與憑證清單、靜態資料加密範圍說明"
+
+# ── 系統與資訊完整性 ──
+[[check]]
+id = "SI-漏洞修復"
+section = "系統與資訊完整性"
+title = "安全更新自動或定期套用"
+same_as = "cis-linux:1.9"
+
+[[check]]
+id = "SI-不必要服務"
+section = "系統與資訊完整性"
+title = "未執行不必要的網路服務"
+same_as = "cis-linux:2.2.x"
+
+[[check]]
+id = "SI-系統監控"
+section = "系統與資訊完整性"
+title = "資通系統監控與弱點掃描結果追蹤（含修補期限）"
+manual = true
+evidence = "弱點掃描報告與修補追蹤（可用 scan_report 產出排序清單）、監控告警規則與值班紀錄"
+
+# ── 營運持續計畫 ──
+[[check]]
+id = "CP-系統備份"
+section = "營運持續計畫"
+title = "系統與資料備份，並定期測試還原"
+manual = true
+evidence = "備份排程、異地或離線備份說明、最近一次還原測試紀錄"
+
+# ── 系統與服務獲得 ──
+[[check]]
+id = "SA-生命週期"
+section = "系統與服務獲得"
+title = "系統發展生命週期各階段納入資安要求（含委外）"
+manual = true
+evidence = "需求／設計／測試階段資安檢核紀錄、委外契約資安條款、源碼或弱點檢測報告"
+
+# ── 應辦事項（組織面，依責任等級）──
+[[check]]
+id = "ORG-維護計畫"
+section = "應辦事項"
+title = "訂定、修正並實施資通安全維護計畫，並依規定提出實施情形"
+manual = true
+evidence = "資通安全維護計畫（核定版）與年度實施情形"
+
+[[check]]
+id = "ORG-資安人力"
+section = "應辦事項"
+title = "資通安全長與資通安全專責人員之指派"
+manual = true
+evidence = "指派文件、專責人員名單與證照"
+
+[[check]]
+id = "ORG-ISMS"
+section = "應辦事項"
+title = "資訊安全管理系統導入及驗證（責任等級較高者須通過公正第三方驗證）"
+manual = true
+evidence = "ISMS 適用範圍、驗證證書或導入進度"
+
+[[check]]
+id = "ORG-資安健診"
+section = "應辦事項"
+title = "資安健診、弱點掃描、滲透測試（頻率依責任等級）"
+manual = true
+evidence = "最近一次健診／掃描／滲透測試報告與改善追蹤"
+
+[[check]]
+id = "ORG-教育訓練"
+section = "應辦事項"
+title = "資通安全教育訓練（一般使用者、資訊人員、專責人員時數）"
+manual = true
+evidence = "年度訓練時數統計"
+
+[[check]]
+id = "IR-通報時限"
+section = "資通安全事件通報及應變"
+title = "知悉資通安全事件後，於規定時限內（公務機關：一小時內）通報，並於期限內完成損害控制或復原"
+manual = true
+evidence = "通報窗口與流程（含非上班時間）、最近演練紀錄；期限以「資通安全事件通報及應變辦法」最新版本為準"
+
+[[check]]
+id = "IR-演練"
+section = "資通安全事件通報及應變"
+title = "資通安全事件通報應變演練與業務持續運作演練"
+manual = true
+evidence = "演練計畫與結果報告"
