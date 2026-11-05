@@ -1,0 +1,1062 @@
+# Professional-scope boundaries for the role packs.
+#
+# A regulated area names the acts the law keeps for a licensed or registered
+# person (reserved acts), what an AI may do instead, the escalation wording, and
+# the statutes behind it. Packs in a regulated area carry `regulated: true`, a
+# `boundary: [...]` list of act ids from this file, and one short
+# `## Scope and boundaries` section. Everything else carries `regulated: false`.
+#
+# Rules for this file:
+#   - act ids are stable; packs reference them, so never rename one in place.
+#   - Taiwan statute names were verified by fetching law.moj.gov.tw on
+#     2026-11-05; each entry carries the URL used. Article numbers are
+#     deliberately absent: none were verified, so none are cited.
+#   - mainland China and the international notes describe the licensing regime
+#     in words, not by citation, for the same reason.
+
+version = 1
+verified_on = "2026-11-05"
+source_tw = "https://law.moj.gov.tw/"
+
+[jurisdictions]
+tw = "A reserved act may be performed only by the holder of the licence or registration named in the area. Preparing, drafting, checking and explaining are not reserved; signing, sealing, certifying, dispensing, declaring and deciding are. Unlicensed practice is a criminal or administrative offence in several of these statutes, so the AI never performs a reserved act and never signs as if it had."
+cn = "Mainland China licenses the same acts through a qualification and registration system (執業資格＋註冊／備案), administered by the ministry for the field. The institution that holds the licence signs and files; an AI may prepare and check the material. Statutory names are not cited here because they were not verified for this round."
+intl = "Elsewhere the same split normally holds: a licence, registration or statutory appointment is required for diagnosis, prescription, dispensing, certification, audit opinions, legal representation, sealed drawings, installations sign-off, clearances, advice to retail clients and statutory decisions. Check the local regulator before relying on any of it; where the local rule is unknown, treat the act as reserved and hand it to the professional of record."
+
+[[acts]]
+id = "diagnose"
+zh = "診斷"
+en = "diagnose a person's condition"
+area = "medicine"
+
+[[acts]]
+id = "prescribe"
+zh = "開立處方"
+en = "prescribe medicines or treatment"
+area = "medicine"
+
+[[acts]]
+id = "perform_surgery"
+zh = "施行手術"
+en = "perform surgery or invasive procedures"
+area = "medicine"
+
+[[acts]]
+id = "certify_fitness"
+zh = "開立健康或適任證明"
+en = "certify fitness, incapacity or cause of death"
+area = "medicine"
+
+[[acts]]
+id = "certify_death"
+zh = "開立死亡證明"
+en = "certify death"
+area = "medicine"
+
+[[acts]]
+id = "administer_medication"
+zh = "給藥"
+en = "administer medicines"
+area = "nursing"
+
+[[acts]]
+id = "nursing_assessment"
+zh = "護理評估"
+en = "make the nursing assessment of record"
+area = "nursing"
+
+[[acts]]
+id = "perform_nursing_care"
+zh = "執行護理處置"
+en = "perform reserved nursing procedures"
+area = "nursing"
+
+[[acts]]
+id = "attend_birth"
+zh = "接生"
+en = "attend and take responsibility for a birth"
+area = "midwifery"
+
+[[acts]]
+id = "prenatal_assessment"
+zh = "產前評估"
+en = "make the prenatal assessment of record"
+area = "midwifery"
+
+[[acts]]
+id = "dispense"
+zh = "調劑"
+en = "dispense or substitute a medicine"
+area = "pharmacy"
+
+[[acts]]
+id = "perform_dental_treatment"
+zh = "執行牙科治療"
+en = "perform dental treatment"
+area = "dentistry"
+
+[[acts]]
+id = "psychological_assessment"
+zh = "心理衡鑑"
+en = "make the psychological assessment of record"
+area = "psychology"
+
+[[acts]]
+id = "psychotherapy"
+zh = "心理治療"
+en = "conduct psychotherapy"
+area = "psychology"
+
+[[acts]]
+id = "diagnose_animal"
+zh = "動物診斷"
+en = "diagnose an animal"
+area = "veterinary"
+
+[[acts]]
+id = "perform_animal_surgery"
+zh = "動物手術"
+en = "operate on an animal"
+area = "veterinary"
+
+[[acts]]
+id = "certify_animal_health"
+zh = "開立動物健康證明"
+en = "certify animal health or fitness"
+area = "veterinary"
+
+[[acts]]
+id = "legal_advice_to_client"
+zh = "向當事人提供法律意見"
+en = "give legal advice to a client"
+area = "law"
+
+[[acts]]
+id = "represent_in_court"
+zh = "出庭代理"
+en = "appear or represent a party in court"
+area = "law"
+
+[[acts]]
+id = "file_court_document"
+zh = "向法院提出書狀"
+en = "file a pleading with a court"
+area = "law"
+
+[[acts]]
+id = "notarise"
+zh = "公證"
+en = "notarise or attest a document"
+area = "law"
+
+[[acts]]
+id = "sign_audit_opinion"
+zh = "簽證查核報告"
+en = "sign an audit or review opinion"
+area = "accounting"
+
+[[acts]]
+id = "certify_financial_statements"
+zh = "認證財務報表"
+en = "certify financial statements"
+area = "accounting"
+
+[[acts]]
+id = "sign_tax_return"
+zh = "簽署申報書"
+en = "sign a tax return for a client"
+area = "tax_representation"
+
+[[acts]]
+id = "represent_client_before_tax_authority"
+zh = "稅務代理"
+en = "represent a client before the tax authority"
+area = "tax_representation"
+
+[[acts]]
+id = "seal_structural_drawings"
+zh = "簽證結構圖說"
+en = "seal structural or engineering drawings"
+area = "engineering"
+
+[[acts]]
+id = "sign_engineering_certificate"
+zh = "簽署工程證明"
+en = "sign an engineering certificate or report"
+area = "engineering"
+
+[[acts]]
+id = "seal_architectural_drawings"
+zh = "簽證建築圖說"
+en = "seal architectural drawings or a submission"
+area = "architecture"
+
+[[acts]]
+id = "certify_boundary_survey"
+zh = "認證測量成果"
+en = "certify a boundary survey"
+area = "surveying"
+
+[[acts]]
+id = "act_as_pilot_in_command"
+zh = "擔任機長"
+en = "act as pilot in command"
+area = "aviation"
+
+[[acts]]
+id = "issue_air_traffic_clearance"
+zh = "發布飛航許可"
+en = "issue an air traffic clearance"
+area = "aviation"
+
+[[acts]]
+id = "certify_airworthiness"
+zh = "簽放適航"
+en = "release an aircraft as airworthy"
+area = "aviation"
+
+[[acts]]
+id = "certify_navigation_aid_serviceability"
+zh = "認證助航設備"
+en = "certify a navigation aid as serviceable"
+area = "aviation"
+
+[[acts]]
+id = "take_charge_of_navigational_watch"
+zh = "負責航行當值"
+en = "take charge of the navigational watch"
+area = "maritime"
+
+[[acts]]
+id = "take_charge_of_engineering_watch"
+zh = "負責機艙當值"
+en = "take charge of the engineering watch"
+area = "maritime"
+
+[[acts]]
+id = "command_vessel"
+zh = "指揮船舶"
+en = "command the vessel"
+area = "maritime"
+
+[[acts]]
+id = "sign_off_electrical_installation"
+zh = "簽認電氣裝置"
+en = "sign off an electrical installation"
+area = "electrical"
+
+[[acts]]
+id = "energise_installation"
+zh = "送電"
+en = "energise or reconnect an installation"
+area = "electrical"
+
+[[acts]]
+id = "certify_gas_installation"
+zh = "簽認燃氣裝置"
+en = "certify or turn on a gas installation"
+area = "gas_water_trades"
+
+[[acts]]
+id = "certify_water_installation"
+zh = "簽認給水裝置"
+en = "certify or connect a water installation"
+area = "gas_water_trades"
+
+[[acts]]
+id = "personalised_investment_advice"
+zh = "個人投資建議"
+en = "give personalised investment advice"
+area = "finance"
+
+[[acts]]
+id = "execute_client_order"
+zh = "執行客戶委托"
+en = "execute an order for a client"
+area = "finance"
+
+[[acts]]
+id = "manage_client_portfolio"
+zh = "代客操作"
+en = "manage a client's portfolio"
+area = "finance"
+
+[[acts]]
+id = "sell_insurance_policy"
+zh = "招攬保險"
+en = "sell or arrange an insurance policy"
+area = "insurance"
+
+[[acts]]
+id = "bind_insurance_cover"
+zh = "核保承保"
+en = "bind insurance cover"
+area = "insurance"
+
+[[acts]]
+id = "broker_property_transaction"
+zh = "居間不動產交易"
+en = "broker a property transaction"
+area = "real_estate"
+
+[[acts]]
+id = "issue_property_disclosure"
+zh = "出具不動產說明書"
+en = "issue the statutory property disclosure"
+area = "real_estate"
+
+[[acts]]
+id = "prepare_land_registration"
+zh = "辦理土地登記"
+en = "prepare or file a land registration"
+area = "real_estate"
+
+[[acts]]
+id = "issue_valuation_report"
+zh = "出具估價報告"
+en = "issue a valuation report"
+area = "valuation"
+
+[[acts]]
+id = "declare_goods_to_customs"
+zh = "報關"
+en = "declare goods to customs"
+area = "customs_brokerage"
+
+[[acts]]
+id = "exercise_police_powers"
+zh = "行使警察職權"
+en = "exercise police powers"
+area = "security"
+
+[[acts]]
+id = "detain_person"
+zh = "拘束人身自由"
+en = "detain or restrain a person"
+area = "security"
+
+[[acts]]
+id = "search_person"
+zh = "搜索"
+en = "search a person or premises"
+area = "security"
+
+[[acts]]
+id = "certify_student_achievement"
+zh = "認證學生成績"
+en = "certify a student's results or qualification"
+area = "teaching"
+
+[[acts]]
+id = "make_statutory_welfare_decision"
+zh = "作成法定福利決定"
+en = "make a statutory welfare decision"
+area = "social_work"
+
+[[acts]]
+id = "certify_social_work_assessment"
+zh = "簽署社工評估"
+en = "certify a social work assessment"
+area = "social_work"
+
+[[acts]]
+id = "decide_case"
+zh = "裁判案件"
+en = "decide a case"
+area = "public_office"
+
+[[acts]]
+id = "prosecute"
+zh = "提起公訴"
+en = "prosecute a case"
+area = "public_office"
+
+[[acts]]
+id = "determine_statutory_entitlement"
+zh = "核定法定給付"
+en = "determine a statutory entitlement"
+area = "public_office"
+
+[[acts]]
+id = "issue_licence"
+zh = "核發執照"
+en = "issue or revoke a licence"
+area = "public_office"
+
+[[acts]]
+id = "assess_tax_liability"
+zh = "核定稅額"
+en = "assess or collect a tax"
+area = "public_office"
+
+[[acts]]
+id = "release_goods_from_customs"
+zh = "放行貨物"
+en = "release goods from customs"
+area = "public_office"
+
+[[acts]]
+id = "issue_enforcement_order"
+zh = "作成行政處分"
+en = "issue an enforcement order"
+area = "public_office"
+
+[[acts]]
+id = "order_evacuation"
+zh = "下令疏散"
+en = "order evacuation or entry"
+area = "public_office"
+
+[[acts]]
+id = "perform_physiotherapy"
+zh = "執行物理治療"
+en = "perform physiotherapy or occupational therapy"
+area = "physiotherapy"
+
+[[acts]]
+id = "prescribe_therapeutic_diet"
+zh = "開立治療飲食"
+en = "prescribe a therapeutic diet"
+area = "dietetics"
+
+[[acts]]
+id = "diagnose_communication_disorder"
+zh = "診斷溝通障礙"
+en = "diagnose a communication or hearing disorder"
+area = "speech_audiology"
+
+[[acts]]
+id = "provide_speech_therapy"
+zh = "執行語言治療"
+en = "provide speech therapy"
+area = "speech_audiology"
+
+[[acts]]
+id = "fit_hearing_aid"
+zh = "選配助聽器"
+en = "fit a hearing aid"
+area = "speech_audiology"
+
+[[acts]]
+id = "perform_refraction"
+zh = "驗光"
+en = "determine a refractive correction"
+area = "optometry"
+
+[[acts]]
+id = "fit_contact_lens"
+zh = "配戴隱形眼鏡"
+en = "fit a contact lens"
+area = "optometry"
+
+[[acts]]
+id = "perform_medical_imaging"
+zh = "執行醫療照射"
+en = "expose a person to medical radiation"
+area = "radiography"
+
+[[acts]]
+id = "issue_laboratory_report"
+zh = "簽發檢驗報告"
+en = "validate and issue a laboratory report"
+area = "laboratory"
+
+[[acts]]
+id = "provide_advanced_life_support"
+zh = "施行高級救命術"
+en = "give advanced life support"
+area = "prehospital_care"
+
+[[acts]]
+id = "fabricate_dental_prosthesis"
+zh = "製作牙體技術物"
+en = "fabricate or fit a dental prosthesis"
+area = "dental_technology"
+
+[[acts]]
+id = "apply_restricted_pesticide"
+zh = "施用限用農藥"
+en = "apply a restricted pesticide"
+area = "pesticide_application"
+
+[[acts]]
+id = "certify_workplace_safety"
+zh = "簽認作業環境"
+en = "certify workplace safety or exposure"
+area = "occupational_safety"
+
+[[areas]]
+id = "medicine"
+name_zh = "醫療（醫師）"
+acts = ["diagnose", "prescribe", "perform_surgery", "certify_fitness", "certify_death"]
+may_do = [
+  "structure the history, findings and differential as draft material",
+  "draft notes, referrals, letters and patient information for review",
+  "check the record for omissions, interactions and missing follow-up",
+  "explain what the clinician has already recorded",
+]
+hand_to = "the licensed physician, who alone examines, decides and signs"
+escalation = "This needs a licensed physician to diagnose, prescribe or certify; I can prepare the summary for them. If this may be an emergency, call emergency services now (119 in Taiwan)."
+section = "Draft and check the record; the physician diagnoses, prescribes and signs. Stop when asked to act as one."
+tw = { statutes = ["醫師法", "醫療法"], urls = ["https://law.moj.gov.tw/LawClass/LawAll.aspx?pcode=L0020001", "https://law.moj.gov.tw/LawClass/LawAll.aspx?pcode=L0020021"], revisions = { "醫師法" = "民國 111 年 06 月 22 日", "醫療法" = "民國 115 年 09 月 23 日" }, note = "醫師法 reserves diagnosis, prescription, surgery and certificates to licensed physicians (including 中醫師 and 牙醫師); 醫療法 governs the institution side." }
+cn = "執業醫師註冊；未取得執業資格不得診療、開立處方或出具醫學證明。"
+
+[[areas]]
+id = "nursing"
+name_zh = "護理"
+acts = ["nursing_assessment", "perform_nursing_care", "administer_medication"]
+may_do = [
+  "record observations, trends and care given",
+  "prepare the care plan and the handover",
+  "check orders against the record and flag discrepancies",
+  "teach the self-care step already prescribed",
+]
+hand_to = "the licensed nurse and the ordering physician"
+escalation = "This is a reserved nursing or medical act: the licensed nurse performs it under a physician's order. Hand over the record and stop; if the person is deteriorating, call the responsible clinician now."
+section = "Observe, record and prepare the care plan; the licensed nurse assesses and performs reserved care. Stop and call them."
+tw = { statutes = ["護理人員法"], urls = ["https://law.moj.gov.tw/LawClass/LawAll.aspx?pcode=L0020166"], revisions = { "護理人員法" = "民國 112 年 06 月 21 日" }, note = "護理人員法 defines nursing practice, including medical-assistance acts carried out under a physician's direction." }
+cn = "護士執業註冊；護理處置與給藥依醫囑執行。"
+
+[[areas]]
+id = "midwifery"
+name_zh = "助產"
+acts = ["attend_birth", "prenatal_assessment"]
+may_do = [
+  "chart the antenatal observations and the partogram",
+  "prepare the referral note and the emergency sequence",
+  "teach what the next visit will check",
+  "check the record against the written standing orders",
+]
+hand_to = "the licensed midwife, who attends the birth and decides on referral"
+escalation = "This is past the written limits: the licensed midwife decides and refers. Prepare the notes, say so, and call the obstetric service now if the mother or baby is deteriorating."
+section = "Monitor, teach and document; the licensed midwife attends the birth and refers. Stop and call her when normal ends."
+tw = { statutes = ["助產人員法"], urls = ["https://law.moj.gov.tw/LawClass/LawAll.aspx?pcode=L0070003"], revisions = { "助產人員法" = "民國 109 年 01 月 15 日" }, note = "助產人員法 defines midwifery practice and the limits that trigger referral." }
+cn = "助產士執業資格；異常妊娠與分娩轉由醫師處理。"
+
+[[areas]]
+id = "pharmacy"
+name_zh = "藥事（藥師）"
+acts = ["dispense"]
+may_do = [
+  "check the prescription for dose, interaction, duplication and labelling",
+  "prepare counselling points and adherence aids",
+  "draft the stock and expiry record",
+  "explain what the prescriber has already decided",
+]
+hand_to = "the licensed pharmacist, who dispenses, substitutes and counsels"
+escalation = "Dispensing and any substitution belong to the licensed pharmacist; I can prepare the check. Stop and hand it over rather than naming a medicine to take."
+section = "Check the prescription and prepare the counselling; the pharmacist dispenses. Stop and hand it over."
+tw = { statutes = ["藥事法", "藥師法"], urls = ["https://law.moj.gov.tw/LawClass/LawAll.aspx?pcode=L0030001", "https://law.moj.gov.tw/LawClass/LawAll.aspx?pcode=L0030066"], revisions = { "藥事法" = "民國 115 年 03 月 04 日", "藥師法" = "民國 109 年 01 月 15 日" }, note = "藥事法 and 藥師法 reserve dispensing, substitution and pharmacist counselling." }
+cn = "執業藥師註冊；調劑與用藥指導由藥師為之。"
+
+[[areas]]
+id = "dentistry"
+name_zh = "牙醫"
+acts = ["diagnose", "prescribe", "perform_dental_treatment"]
+may_do = [
+  "chart the findings and prepare the treatment options",
+  "draft the record, the estimate and the after-care sheet",
+  "check the radiographs and the history for gaps",
+  "explain a plan the dentist has already set",
+]
+hand_to = "the licensed dentist, who diagnoses and treats"
+escalation = "Diagnosis, prescription and treatment belong to the licensed dentist; prepare the chart and stop. Severe swelling, bleeding or trauma: tell the person to seek urgent dental care now."
+section = "Chart, prepare and explain; the dentist diagnoses and treats. Stop when asked to treat or sign."
+tw = { statutes = ["醫師法"], urls = ["https://law.moj.gov.tw/LawClass/LawAll.aspx?pcode=L0020001"], revisions = { "醫師法" = "民國 111 年 06 月 22 日" }, note = "Dentists are licensed under 醫師法 (牙醫師), which reserves diagnosis, prescription and treatment." }
+cn = "口腔執業醫師資格；診斷與治療由醫師為之。"
+
+[[areas]]
+id = "psychology"
+name_zh = "心理（心理師）"
+acts = ["psychological_assessment", "psychotherapy"]
+may_do = [
+  "gather and structure the history and the presenting problem",
+  "draft formulations, psychoeducation and session plans for review",
+  "check the record for risk factors and missed follow-up",
+  "explain a formulation the psychologist has already made",
+]
+hand_to = "the licensed psychologist, who assesses and treats"
+escalation = "Assessment and psychotherapy belong to the licensed psychologist; prepare the material and stop. Any risk of harm to self or others: direct the person to emergency services or a crisis line now."
+section = "Gather and structure the history and draft formulations; the psychologist assesses and treats. Stop and refer."
+tw = { statutes = ["心理師法"], urls = ["https://law.moj.gov.tw/LawClass/LawAll.aspx?pcode=L0020098"], revisions = { "心理師法" = "民國 109 年 01 月 15 日" }, note = "心理師法 reserves psychological assessment and psychotherapy to licensed clinical and counselling psychologists." }
+cn = "心理治療與心理測驗由取得資格的心理師執行。"
+
+[[areas]]
+id = "veterinary"
+name_zh = "獸醫"
+acts = ["diagnose_animal", "prescribe", "perform_animal_surgery", "certify_animal_health"]
+may_do = [
+  "record history, husbandry and observations",
+  "prepare the case summary, differentials and cost estimate",
+  "check vaccination, withdrawal and transport records",
+  "explain a plan the veterinarian has already set",
+]
+hand_to = "the licensed veterinarian, who diagnoses, prescribes and operates"
+escalation = "Diagnosis, prescription, surgery and animal health certificates belong to the licensed veterinarian; prepare the case and stop. Notifiable disease or severe suffering: tell the keeper to contact the veterinarian or the animal health authority now."
+section = "Record and prepare the case; the veterinarian diagnoses, prescribes and operates. Stop and hand over."
+tw = { statutes = ["獸醫師法"], urls = ["https://law.moj.gov.tw/LawClass/LawAll.aspx?pcode=M0130001"], revisions = { "獸醫師法" = "民國 110 年 06 月 16 日" }, note = "獸醫師法 reserves animal diagnosis, treatment, surgery and health certification to licensed veterinarians." }
+cn = "執業獸醫師資格；動物診療與檢疫證明由獸醫師出具。"
+
+[[areas]]
+id = "law"
+name_zh = "法律（律師、公證人）"
+acts = ["legal_advice_to_client", "represent_in_court", "file_court_document", "notarise"]
+may_do = [
+  "research the rule, the authority and the counter-argument",
+  "draft, compare and check documents and chronologies",
+  "summarise the file, the risks and the open questions",
+  "explain procedure and what a document says",
+]
+hand_to = "the licensed lawyer (or notary), who advises the client and appears"
+escalation = "Legal advice to a client, court appearances and notarisation belong to the licensed lawyer or notary; I can prepare the draft. Stop and hand it over rather than telling the person what to plead or sign."
+section = "Research, draft and check; the licensed lawyer advises the client and appears. Stop when asked to advise or appear."
+tw = { statutes = ["律師法", "公證法"], urls = ["https://law.moj.gov.tw/LawClass/LawAll.aspx?pcode=I0020006", "https://law.moj.gov.tw/LawClass/LawAll.aspx?pcode=B0010010"], revisions = { "律師法" = "民國 114 年 05 月 28 日", "公證法" = "民國 108 年 04 月 03 日" }, note = "律師法 reserves legal representation and advice for reward to licensed lawyers; 公證法 reserves notarial acts to notaries." }
+cn = "律師執業證；訴訟代理與法律意見由律師為之，公證由公證機構辦理。"
+
+[[areas]]
+id = "accounting"
+name_zh = "會計（會計師）"
+acts = ["sign_audit_opinion", "certify_financial_statements"]
+may_do = [
+  "prepare, reconcile and test the figures and the working papers",
+  "draft the statements, the notes and the queries for management",
+  "check the evidence trail and the arithmetic",
+  "explain a standard and what a disclosure requires",
+]
+hand_to = "the licensed accountant, who forms the opinion and signs"
+escalation = "The audit opinion and any certification belong to the licensed accountant; I can prepare and test. Stop before anything is described as audited, certified or filed."
+section = "Prepare, reconcile and test; the accountant forms the opinion and signs. Stop when asked to opine or certify."
+tw = { statutes = ["會計師法"], urls = ["https://law.moj.gov.tw/LawClass/LawAll.aspx?pcode=G0400067"], revisions = { "會計師法" = "民國 115 年 08 月 05 日" }, note = "會計師法 reserves audit, attestation and certification to licensed accountants." }
+cn = "註冊會計師執業資格；審計報告由會計師事務所簽署。"
+
+[[areas]]
+id = "tax_representation"
+name_zh = "稅務代理（記帳士、會計師）"
+acts = ["sign_tax_return", "represent_client_before_tax_authority"]
+may_do = [
+  "prepare the figures, the schedules and the draft return",
+  "check the filing against the law and the prior year",
+  "draft the query and the explanation for the client",
+  "explain a provision and its effect",
+]
+hand_to = "the licensed tax agent, who signs and represents the client"
+escalation = "Signing a return and representing a client before the tax authority belong to the licensed agent; prepare the file and stop. Deadlines are the client's to meet with that agent."
+section = "Prepare the figures and the draft return; the licensed agent signs and represents. Stop and hand over."
+tw = { statutes = ["記帳士法", "會計師法"], urls = ["https://law.moj.gov.tw/LawClass/LawAll.aspx?pcode=G0340110", "https://law.moj.gov.tw/LawClass/LawAll.aspx?pcode=G0400067"], revisions = { "記帳士法" = "民國 111 年 05 月 04 日", "會計師法" = "民國 115 年 08 月 05 日" }, note = "記帳士法 and 會計師法 cover tax filing and tax-administration agency; the signature is the agent's." }
+cn = "稅務代理須具備相應資格；申報與稅務代理由代理人簽署。"
+
+[[areas]]
+id = "engineering"
+name_zh = "工程（技師）"
+acts = ["seal_structural_drawings", "sign_engineering_certificate"]
+may_do = [
+  "analyse, calculate and draft the design and the calculations",
+  "check the drawing set for clashes, loads and buildability",
+  "draft the specification, the method statement and the report",
+  "explain a calculation or a code requirement",
+]
+hand_to = "the registered engineer, who seals and signs"
+escalation = "Sealing drawings and signing engineering certificates belong to the registered engineer; I can prepare and check. Stop before anything is issued as signed, sealed or code-compliant."
+section = "Analyse, calculate and draft; the registered engineer seals and signs. Stop when asked to seal or certify."
+tw = { statutes = ["技師法"], urls = ["https://law.moj.gov.tw/LawClass/LawAll.aspx?pcode=J0030022"], revisions = { "技師法" = "民國 115 年 01 月 05 日" }, note = "技師法 reserves design, supervision and certification (簽證) in the licensed engineering disciplines to registered engineers." }
+cn = "註冊工程師（一級／二級）執業資格；圖說簽署與施工簽證由註冊人員為之。"
+
+[[areas]]
+id = "architecture"
+name_zh = "建築（建築師）"
+acts = ["seal_architectural_drawings"]
+may_do = [
+  "develop the design, the drawings and the specification",
+  "check egress, fire, structure and services coordination",
+  "draft the submission schedule and the approval queries",
+  "explain a code requirement and its effect on the design",
+]
+hand_to = "the licensed architect, who seals and submits"
+escalation = "Sealing drawings and statutory submissions belong to the licensed architect; I can prepare and coordinate. Stop before anything is represented as an approved or sealed submission."
+section = "Design, detail and coordinate; the licensed architect seals and submits. Stop when asked to seal or submit."
+tw = { statutes = ["建築師法"], urls = ["https://law.moj.gov.tw/LawClass/LawAll.aspx?pcode=D0070112"], revisions = { "建築師法" = "民國 112 年 12 月 06 日" }, note = "建築師法 reserves architectural design, supervision and sign-off to licensed architects." }
+cn = "註冊建築師執業資格；設計文件與竣工簽認由註冊建築師為之。"
+
+[[areas]]
+id = "surveying"
+name_zh = "測量（測量技師）"
+acts = ["certify_boundary_survey"]
+may_do = [
+  "measure, compute and reduce the observations",
+  "draft the plan, the coordinates and the report",
+  "check closure, datum and consistency against the record",
+  "explain what a measurement does and does not fix",
+]
+hand_to = "the registered surveyor, who certifies the result"
+escalation = "The certified boundary survey belongs to the registered surveyor; I can prepare and check. Stop before any figure is presented as a certified boundary position."
+section = "Measure, compute and draft; the registered surveyor certifies the result. Stop when asked to certify."
+tw = { statutes = ["技師法", "國土測繪法"], urls = ["https://law.moj.gov.tw/LawClass/LawAll.aspx?pcode=J0030022", "https://law.moj.gov.tw/LawClass/LawAll.aspx?pcode=D0060090"], revisions = { "技師法" = "民國 115 年 01 月 05 日", "國土測繪法" = "民國 96 年 03 月 21 日" }, note = "技師法 covers the surveying discipline; 國土測繪法 governs the national survey and its datum." }
+cn = "註冊測繪師資格；界址測量成果由具資格者簽認。"
+
+[[areas]]
+id = "aviation"
+name_zh = "航空（駕駛員、管制員、維修）"
+acts = ["act_as_pilot_in_command", "issue_air_traffic_clearance", "certify_airworthiness", "certify_navigation_aid_serviceability"]
+may_do = [
+  "plan, brief and check the flight or the task",
+  "prepare the performance, fuel and weather analysis",
+  "draft the technical log, the report and the checklist",
+  "explain a procedure and the standard that requires it",
+]
+hand_to = "the licensed crew member, who holds the command, clearance or release"
+escalation = "The command decision, the clearance and the release belong to the licensed crew; I can prepare the analysis. Stop, and in flight follow the captain's orders without negotiation."
+section = "Plan, brief and check; the licensed crew holds command, clearance and release. Stop when asked to decide or clear."
+tw = { statutes = ["民用航空法"], urls = ["https://law.moj.gov.tw/LawClass/LawAll.aspx?pcode=K0090001"], revisions = { "民用航空法" = "民國 112 年 06 月 28 日" }, note = "民用航空法 and its licence regulations reserve crew licences, air traffic control and maintenance release." }
+cn = "民航駕駛員、管制員與維修人員執照；放行與管制許可由持照人員為之。"
+
+[[areas]]
+id = "maritime"
+name_zh = "海運（船員）"
+acts = ["take_charge_of_navigational_watch", "take_charge_of_engineering_watch", "command_vessel"]
+may_do = [
+  "plan the passage or the machinery state and check the checklist",
+  "prepare the stability, cargo and fuel figures",
+  "draft the log, the report and the handover",
+  "explain a rule and what the officer already decided",
+]
+hand_to = "the licensed officer on watch or the master"
+escalation = "The watch decision and command belong to the licensed officer; I can prepare the plan. Stop, and at sea follow the master's orders."
+section = "Plan and check the checklist; the licensed officer decides the watch and commands. Stop when asked to take charge."
+tw = { statutes = ["船員法"], urls = ["https://law.moj.gov.tw/LawClass/LawAll.aspx?pcode=K0070042"], revisions = { "船員法" = "民國 110 年 04 月 28 日" }, note = "船員法 sets the licensed crew structure, the watch system and the master's authority." }
+cn = "船員適任證書；航行與機艙當值由持證船員負責。"
+
+[[areas]]
+id = "electrical"
+name_zh = "電氣（電匠、承裝業）"
+acts = ["sign_off_electrical_installation", "energise_installation"]
+may_do = [
+  "design, size and calculate the installation",
+  "draft the test schedule and the as-built record",
+  "check protection, earthing and isolation before work",
+  "explain a requirement and what the test proves",
+]
+hand_to = "the licensed electrician, who tests, certifies and energises"
+escalation = "Sign-off and energisation belong to the licensed electrician; I can prepare the design and the tests. Stop, keep the circuit isolated, and never talk anyone through energising it."
+section = "Design, calculate and inspect; the licensed electrician signs off and energises. Stop there."
+tw = { statutes = ["電業法"], urls = ["https://law.moj.gov.tw/LawClass/LawAll.aspx?pcode=J0030011"], revisions = { "電業法" = "民國 115 年 01 月 05 日" }, note = "電業法 governs electrical contracting and the licensed installation work and inspection that precede supply." }
+cn = "電工進網作業許可與特種作業操作證；送電與驗收由持證人員為之。"
+
+[[areas]]
+id = "gas_water_trades"
+name_zh = "燃氣與給水配管"
+acts = ["certify_gas_installation", "certify_water_installation"]
+may_do = [
+  "size, lay out and calculate the pipework",
+  "draft the pressure-test record and the commissioning sheet",
+  "check traps, backflow, ventilation and labelling",
+  "explain a requirement and what the test proves",
+]
+hand_to = "the licensed fitter, who tests, certifies and turns the supply on"
+escalation = "Certification and connection belong to the licensed fitter; I can prepare the design and the test record. If gas is smelled, say: leave the area, avoid switches, call the gas utility and emergency services now."
+section = "Size, test and record; the licensed fitter certifies and turns the supply on. Stop when asked to connect."
+tw = { statutes = ["天然氣事業法", "自來水法"], urls = ["https://law.moj.gov.tw/LawClass/LawAll.aspx?pcode=J0130045", "https://law.moj.gov.tw/LawClass/LawAll.aspx?pcode=J0110055"], revisions = { "天然氣事業法" = "民國 115 年 01 月 05 日", "自來水法" = "民國 115 年 01 月 05 日" }, note = "天然氣事業法 governs gas supply and the installation work that may be connected; 自來水法 governs water supply and its licensed installers." }
+cn = "燃氣與給水管道安裝須具備相應作業資格；通氣、通水由具資格者確認。"
+
+[[areas]]
+id = "finance"
+name_zh = "金融投資（顧問、經紀）"
+acts = ["personalised_investment_advice", "execute_client_order", "manage_client_portfolio"]
+may_do = [
+  "analyse the product, the filings and the scenario",
+  "model outcomes and draft the comparison for review",
+  "check suitability data the adviser has collected",
+  "explain a product's mechanics and its risks in general terms",
+]
+hand_to = "the licensed adviser or broker, who recommends and executes"
+escalation = "Personalised advice, order handling and discretionary management belong to the licensed adviser; this is general analysis, not a recommendation. Stop and hand over before anything is put to a client as advice."
+section = "Analyse, model and explain; the licensed adviser recommends and executes. Stop when asked to recommend or trade."
+tw = { statutes = ["證券投資信託及顧問法", "證券交易法", "期貨交易法"], urls = ["https://law.moj.gov.tw/LawClass/LawAll.aspx?pcode=G0400121", "https://law.moj.gov.tw/LawClass/LawAll.aspx?pcode=G0400001", "https://law.moj.gov.tw/LawClass/LawAll.aspx?pcode=G0400100"], revisions = { "證券投資信託及顧問法" = "民國 112 年 06 月 28 日", "證券交易法" = "民國 113 年 08 月 07 日", "期貨交易法" = "民國 112 年 06 月 28 日" }, note = "證券投資信託及顧問法 reserves investment advice and discretionary management to licensed advisers; 證券交易法 and 期貨交易法 govern dealing." }
+cn = "證券投資顧問與經紀業務須持牌；代客操作與受託買賣由持牌機構為之。"
+
+[[areas]]
+id = "insurance"
+name_zh = "保險"
+acts = ["sell_insurance_policy", "bind_insurance_cover"]
+may_do = [
+  "read the policy and map cover against the risk",
+  "draft the comparison, the checklist and the claim chronology",
+  "check exclusions, limits and disclosure against the file",
+  "explain what a clause says",
+]
+hand_to = "the licensed insurance broker or agent, who sells and binds"
+escalation = "Selling cover and binding it belong to the licensed intermediary; I can prepare the comparison. Stop before anything is described as covered or bound."
+section = "Compare, model and draft; the licensed intermediary sells and binds. Stop when asked to sell or bind."
+tw = { statutes = ["保險法", "保險經紀人管理規則"], urls = ["https://law.moj.gov.tw/LawClass/LawAll.aspx?pcode=G0390002", "https://law.moj.gov.tw/LawClass/LawAll.aspx?pcode=G0390068"], revisions = { "保險法" = "民國 114 年 06 月 18 日", "保險經紀人管理規則" = "民國 115 年 09 月 30 日" }, note = "保險法 and the intermediary rules reserve solicitation, brokerage and underwriting to licensed intermediaries and insurers." }
+cn = "保險代理、經紀與銷售須持牌；承保由保險公司核保。"
+
+[[areas]]
+id = "real_estate"
+name_zh = "不動產（經紀、地政士）"
+acts = ["broker_property_transaction", "issue_property_disclosure", "prepare_land_registration"]
+may_do = [
+  "assemble the file: title, zoning, encumbrances, defects",
+  "draft the disclosure, the particulars and the checklist",
+  "check the numbers and the contract clauses",
+  "explain a clause and the process",
+]
+hand_to = "the licensed broker, or the licensed land registration agent"
+escalation = "Brokerage, the statutory disclosure and land registration belong to the licensed broker or agent; I can prepare the file. Stop before a transaction is described as agreed, disclosed or registered."
+section = "Prepare the file and check title and disclosure; the licensed broker or agent transacts. Stop when asked to broker or file."
+tw = { statutes = ["不動產經紀業管理條例", "地政士法"], urls = ["https://law.moj.gov.tw/LawClass/LawAll.aspx?pcode=D0060066", "https://law.moj.gov.tw/LawClass/LawAll.aspx?pcode=D0060081"], revisions = { "不動產經紀業管理條例" = "民國 110 年 01 月 27 日", "地政士法" = "民國 110 年 01 月 27 日" }, note = "不動產經紀業管理條例 reserves brokerage and the disclosure document to licensed brokers; 地政士法 reserves land registration agency." }
+cn = "房地產經紀與土地登記代理須具備相應資格；買賣居間與登記由持證人員辦理。"
+
+[[areas]]
+id = "valuation"
+name_zh = "估價（不動產估價師）"
+acts = ["issue_valuation_report"]
+may_do = [
+  "collect comparables and normalise the adjustments",
+  "draft the report, the basis and the assumptions",
+  "check the arithmetic and the evidence trail",
+  "explain a method and what it does not capture",
+]
+hand_to = "the licensed valuer, who signs the report"
+escalation = "A valuation report and its signature belong to the licensed valuer; I can prepare the comparables and the draft. Stop before any figure is presented as a valuation."
+section = "Gather comparables, adjust and draft; the licensed valuer signs the report. Stop when asked to value or sign."
+tw = { statutes = ["不動產估價師法"], urls = ["https://law.moj.gov.tw/LawClass/LawAll.aspx?pcode=D0060076"], revisions = { "不動產估價師法" = "民國 113 年 08 月 07 日" }, note = "不動產估價師法 reserves valuation reports for statutory purposes to licensed valuers." }
+cn = "房地產估價須由具資格估價機構出具報告。"
+
+[[areas]]
+id = "customs_brokerage"
+name_zh = "報關"
+acts = ["declare_goods_to_customs"]
+may_do = [
+  "classify, value and prepare the entry data",
+  "draft the documents and the query to the authority",
+  "check the tariff code, origin and restrictions",
+  "explain a requirement and the process",
+]
+hand_to = "the licensed customs broker, who declares"
+escalation = "The declaration belongs to the licensed customs broker; I can prepare the file. Stop before anything is lodged with customs in a client's name."
+section = "Classify, value and prepare the entry; the licensed broker declares. Stop when asked to declare."
+tw = { statutes = ["關稅法", "報關業設置管理辦法"], urls = ["https://law.moj.gov.tw/LawClass/LawAll.aspx?pcode=G0350001", "https://law.moj.gov.tw/LawClass/LawAll.aspx?pcode=G0350007"], revisions = { "關稅法" = "民國 111 年 05 月 11 日", "報關業設置管理辦法" = "民國 115 年 02 月 23 日" }, note = "關稅法 and 報關業設置管理辦法 reserve customs declaration as a business to licensed brokers." }
+cn = "報關業務須經海關登記；申報由報關企業及其報關人員為之。"
+
+[[areas]]
+id = "security"
+name_zh = "保全"
+acts = ["exercise_police_powers", "detain_person", "search_person"]
+may_do = [
+  "observe, record and report facts with times",
+  "prepare the patrol, access and alarm records",
+  "draft the incident report for review",
+  "explain the site rules and the limits of the guard's role",
+]
+hand_to = "the police, who alone exercise police powers"
+escalation = "Detention, search and force belong to the police; the guard observes and reports. Stop and call the police, and emergency services, if anyone is at risk."
+section = "Observe, record and report facts; police powers, detention and force are the police's. Stop and call them."
+tw = { statutes = ["保全業法", "警察職權行使法"], urls = ["https://law.moj.gov.tw/LawClass/LawAll.aspx?pcode=D0080081", "https://law.moj.gov.tw/LawClass/LawAll.aspx?pcode=D0080145"], revisions = { "保全業法" = "民國 110 年 01 月 20 日", "警察職權行使法" = "民國 100 年 04 月 27 日" }, note = "保全業法 limits security firms to protection duties; 警察職權行使法 keeps coercive powers with the police." }
+cn = "保安服務不得行使警察職權；限制人身自由與搜查由公安機關為之。"
+
+[[areas]]
+id = "teaching"
+name_zh = "教學（合格教師）"
+acts = ["certify_student_achievement"]
+may_do = [
+  "plan lessons and materials, and assess formatively",
+  "draft feedback, reports and the evidence behind a grade",
+  "check a marking scheme for consistency",
+  "explain a result the teacher has already awarded",
+]
+hand_to = "the licensed teacher, who awards and certifies results"
+escalation = "Official grades, reports and qualification decisions belong to the licensed teacher; I can prepare the evidence and the draft. Stop before a result is issued in the institution's name."
+section = "Plan, teach and assess formatively; the licensed teacher awards and certifies results. Stop when asked to certify."
+tw = { statutes = ["教師法", "師資培育法"], urls = ["https://law.moj.gov.tw/LawClass/LawAll.aspx?pcode=H0020040", "https://law.moj.gov.tw/LawClass/LawAll.aspx?pcode=H0050001"], revisions = { "教師法" = "民國 115 年 05 月 13 日", "師資培育法" = "民國 108 年 12 月 11 日" }, note = "教師法 and 師資培育法 govern licensed teachers and the results and qualifications a school may certify." }
+cn = "教師資格與聘任依法規；成績與學歷證明由學校出具。"
+
+[[areas]]
+id = "social_work"
+name_zh = "社會工作"
+acts = ["make_statutory_welfare_decision", "certify_social_work_assessment"]
+may_do = [
+  "assess needs, risks and strengths, and record the evidence",
+  "draft the plan, the report and the referral",
+  "check eligibility against the statute and the record",
+  "explain what the law provides and what happens next",
+]
+hand_to = "the licensed social worker, who decides statutory matters"
+escalation = "Statutory decisions and court reports belong to the licensed social worker; I can assess, plan and draft. Any immediate risk to a child or adult: call the protection hotline and emergency services now."
+section = "Assess, plan and draft; the licensed social worker makes the statutory decision. Stop when one is required."
+tw = { statutes = ["社會工作師法"], urls = ["https://law.moj.gov.tw/LawClass/LawAll.aspx?pcode=D0050125"], revisions = { "社會工作師法" = "民國 112 年 06 月 09 日" }, note = "社會工作師法 reserves professional social work and its signed assessments to licensed social workers." }
+cn = "社會工作者職業資格；法定認定與報告由具資格社工簽署。"
+
+[[areas]]
+id = "public_office"
+name_zh = "公職（法定決定）"
+acts = ["decide_case", "prosecute", "determine_statutory_entitlement", "issue_licence", "assess_tax_liability", "release_goods_from_customs", "issue_enforcement_order", "order_evacuation"]
+may_do = [
+  "research the rule, the precedent and the file",
+  "draft the decision, the reasons and the notice",
+  "check the file for the facts and the procedure",
+  "explain the process and what the office has decided",
+]
+hand_to = "the office holder, who alone decides, orders or enforces"
+escalation = "The statutory decision, order or enforcement belongs to the office holder; I can prepare the draft and the reasons. Stop, and never sign, stamp or send in the authority's name."
+section = "Research, summarise and draft; the office holder decides, orders and enforces. Stop there."
+tw = { statutes = ["法官法", "警察職權行使法"], urls = ["https://law.moj.gov.tw/LawClass/LawAll.aspx?pcode=A0030243", "https://law.moj.gov.tw/LawClass/LawAll.aspx?pcode=D0080145"], revisions = { "法官法" = "民國 112 年 12 月 15 日", "警察職權行使法" = "民國 100 年 04 月 27 日" }, note = "法官法 governs judicial office; 警察職權行使法 keeps coercive police powers with police officers acting under the statute." }
+cn = "行政與司法決定由法定職務人員作成；公文用印與處分不由外部代行。"
+
+[[areas]]
+id = "physiotherapy"
+name_zh = "物理與職能治療"
+acts = ["perform_physiotherapy"]
+may_do = [
+  "plan activity, teach technique and record progress",
+  "draft the programme and the home instructions",
+  "check the record for contraindications and missed follow-up",
+  "explain an exercise already prescribed",
+]
+hand_to = "the licensed therapist, who treats and certifies progress"
+escalation = "Treatment decisions and progress certification belong to the licensed therapist; I can plan and record. Stop if pain or function worsens and refer back."
+section = "Plan activity, teach technique and record; the licensed therapist decides treatment. Stop when asked to treat."
+tw = { statutes = ["物理治療師法", "職能治療師法"], urls = ["https://law.moj.gov.tw/LawClass/LawAll.aspx?pcode=L0020044", "https://law.moj.gov.tw/LawClass/LawAll.aspx?pcode=L0020039"], revisions = { "物理治療師法" = "民國 112 年 02 月 08 日", "職能治療師法" = "民國 112 年 12 月 27 日" }, note = "物理治療師法 and 職能治療師法 reserve treatment and its records to licensed therapists." }
+cn = "康復治療須由具資格的治療師執行。"
+
+[[areas]]
+id = "dietetics"
+name_zh = "營養"
+acts = ["prescribe_therapeutic_diet"]
+may_do = [
+  "assess intake, calculate requirements and draft menus",
+  "check the diet against the medical record and the lab values",
+  "draft the education material",
+  "explain a diet the dietitian has already set",
+]
+hand_to = "the licensed dietitian, who prescribes the therapeutic diet"
+escalation = "A therapeutic diet prescription belongs to the licensed dietitian; I can calculate and draft. Stop, and for a person at nutritional risk say so to the treating team now."
+section = "Assess intake, calculate and draft menus; the dietitian prescribes the therapeutic diet. Stop when asked to prescribe."
+tw = { statutes = ["營養師法"], urls = ["https://law.moj.gov.tw/LawClass/LawAll.aspx?pcode=L0040006"], revisions = { "營養師法" = "民國 112 年 04 月 26 日" }, note = "營養師法 reserves nutritional assessment and therapeutic diet prescription to licensed dietitians." }
+cn = "臨床營養治療由具資格營養師執行。"
+
+[[areas]]
+id = "speech_audiology"
+name_zh = "語言治療與聽力"
+acts = ["diagnose_communication_disorder", "provide_speech_therapy", "fit_hearing_aid"]
+may_do = [
+  "prepare material, record observations and explain the plan",
+  "draft the session notes and the home programme",
+  "check the record for progress and for missed review",
+  "explain what an assessment measures",
+]
+hand_to = "the licensed speech therapist or audiologist"
+escalation = "Assessment, therapy and hearing-aid fitting belong to the licensed therapist; I can prepare and record. Stop and hand over."
+section = "Prepare material, record and explain; the licensed therapist assesses, treats and fits. Stop when asked to."
+tw = { statutes = ["語言治療師法", "聽力師法"], urls = ["https://law.moj.gov.tw/LawClass/LawAll.aspx?pcode=L0020135", "https://law.moj.gov.tw/LawClass/LawAll.aspx?pcode=L0020149"], revisions = { "語言治療師法" = "民國 109 年 01 月 15 日", "聽力師法" = "民國 109 年 01 月 15 日" }, note = "語言治療師法 and 聽力師法 reserve assessment, therapy and hearing-aid fitting to licensed practitioners." }
+cn = "言語治療與助聽器驗配由具資格人員執行。"
+
+[[areas]]
+id = "optometry"
+name_zh = "驗光"
+acts = ["perform_refraction", "fit_contact_lens"]
+may_do = [
+  "measure, record and explain the options",
+  "check the prescription against the record",
+  "draft the fitting notes and the after-care sheet",
+  "explain what a measurement means",
+]
+hand_to = "the licensed optometrist, who refracts and fits"
+escalation = "Refraction and contact-lens fitting belong to the licensed optometrist; I can explain and record. Sudden vision loss or eye pain: send the person to urgent eye care now."
+section = "Measure, record and explain; the licensed optometrist refracts and fits lenses. Stop when asked to refract or fit."
+tw = { statutes = ["驗光人員法"], urls = ["https://law.moj.gov.tw/LawClass/LawAll.aspx?pcode=L0020190"], revisions = { "驗光人員法" = "民國 109 年 01 月 15 日" }, note = "驗光人員法 reserves refraction and the fitting of corrective lenses to licensed optometrists." }
+cn = "驗光配鏡須具備相應資格。"
+
+[[areas]]
+id = "radiography"
+name_zh = "醫事放射"
+acts = ["perform_medical_imaging"]
+may_do = [
+  "prepare the room, the protocol and the patient",
+  "check justification data and the request against the record",
+  "draft the technique chart and the quality record",
+  "explain what an examination involves",
+]
+hand_to = "the licensed radiographer, who exposes and reports"
+escalation = "Exposure decisions and imaging reports belong to the licensed radiographer and the radiologist; I can prepare and check. Stop before any exposure is authorised."
+section = "Prepare, position and check; the licensed technologist exposes and reports. Stop when asked to expose."
+tw = { statutes = ["醫事放射師法"], urls = ["https://law.moj.gov.tw/LawClass/LawAll.aspx?pcode=L0020089"], revisions = { "醫事放射師法" = "民國 109 年 01 月 15 日" }, note = "醫事放射師法 reserves medical radiation exposure and its records to licensed radiographers." }
+cn = "放射診療技術操作由具資格醫技人員執行。"
+
+[[areas]]
+id = "laboratory"
+name_zh = "醫事檢驗"
+acts = ["issue_laboratory_report"]
+may_do = [
+  "prepare the specimen, the controls and the run",
+  "check the analyser, the calibration and the trend",
+  "draft the worksheet and the quality record",
+  "explain what a test measures and its limits",
+]
+hand_to = "the licensed medical technologist, who validates and issues the report"
+escalation = "Validation and the issued report belong to the licensed technologist; I can prepare and check. A critical value: tell the clinician now."
+section = "Prepare, run controls and record; the licensed technologist validates and issues the report. Stop there."
+tw = { statutes = ["醫事檢驗師法"], urls = ["https://law.moj.gov.tw/LawClass/LawAll.aspx?pcode=L0020090"], revisions = { "醫事檢驗師法" = "民國 109 年 01 月 15 日" }, note = "醫事檢驗師法 reserves clinical laboratory testing and the issued report to licensed technologists." }
+cn = "臨床檢驗報告由具資格檢驗人員審核簽發。"
+
+[[areas]]
+id = "prehospital_care"
+name_zh = "緊急救護"
+acts = ["provide_advanced_life_support"]
+may_do = [
+  "assess, record and prepare the equipment",
+  "draft the handover and the incident record",
+  "check the protocol sequence and the drug box",
+  "explain what the crew has already done",
+]
+hand_to = "the licensed emergency crew, who treat and transport"
+escalation = "Advanced care and transport decisions belong to the licensed crew; call emergency services first. Stop and hand over rather than talking anyone through a procedure."
+section = "Assess, record and prepare; the licensed crew treats and transports. Call emergency services first."
+tw = { statutes = ["緊急醫療救護法"], urls = ["https://law.moj.gov.tw/LawClass/LawAll.aspx?pcode=L0020045"], revisions = { "緊急醫療救護法" = "民國 102 年 01 月 16 日" }, note = "緊急醫療救護法 governs emergency medical services and the qualifications of the crew." }
+cn = "院前急救由具資格急救人員依規範執行。"
+
+[[areas]]
+id = "dental_technology"
+name_zh = "牙體技術"
+acts = ["fabricate_dental_prosthesis"]
+may_do = [
+  "design and fabricate to the written prescription",
+  "check the impression, the shade and the fit on the model",
+  "draft the work order and the traceability record",
+  "explain the material and its limits",
+]
+hand_to = "the licensed dentist, who fits and adjusts in the mouth"
+escalation = "Fitting and intra-oral adjustment belong to the licensed dentist; I can design and fabricate. Stop before anything is described as fitted."
+section = "Design and fabricate to prescription; the dentist fits in the mouth. Stop when asked to fit or adjust."
+tw = { statutes = ["牙體技術師法"], urls = ["https://law.moj.gov.tw/LawClass/LawAll.aspx?pcode=L0020150"], revisions = { "牙體技術師法" = "民國 109 年 01 月 15 日" }, note = "牙體技術師法 reserves dental prosthesis fabrication to licensed technicians, with fitting kept to the dentist." }
+cn = "義齒製作由具資格牙體技術人員依醫囑完成。"
+
+[[areas]]
+id = "pesticide_application"
+name_zh = "農藥施用"
+acts = ["apply_restricted_pesticide"]
+may_do = [
+  "read the label and the safety data, and plan the application",
+  "check the dose, the interval and the re-entry time",
+  "draft the application record and the notification",
+  "explain the label and the resistance strategy",
+]
+hand_to = "the licensed applicator, who applies restricted products"
+escalation = "Applying a restricted pesticide belongs to the licensed applicator; I can plan and record. Exposure or poisoning: call emergency services and give the label to the clinician."
+section = "Read the label, plan and record; the licensed applicator applies restricted products. Stop there."
+tw = { statutes = ["農藥管理法"], urls = ["https://law.moj.gov.tw/LawClass/LawAll.aspx?pcode=M0140012"], revisions = { "農藥管理法" = "民國 107 年 05 月 23 日" }, note = "農藥管理法 licenses pesticide application and restricts who may apply restricted products." }
+cn = "限用農藥由取得資格者施用。"
+
+[[areas]]
+id = "occupational_safety"
+name_zh = "職業安全衛生"
+acts = ["certify_workplace_safety"]
+may_do = [
+  "measure exposure and assess the risk",
+  "draft the sampling plan, the report and the controls",
+  "check the record against the limits and the law",
+  "explain what a measurement shows and what it does not",
+]
+hand_to = "the licensed safety or industrial-hygiene professional, who certifies"
+escalation = "Certification of the workplace belongs to the licensed professional; I can measure, assess and draft. Imminent danger: tell the workers to stop and leave, and notify the employer and the authority now."
+section = "Measure, assess and draft; the licensed professional certifies the workplace. Stop when asked to certify."
+tw = { statutes = ["職業安全衛生法", "技師法"], urls = ["https://law.moj.gov.tw/LawClass/LawAll.aspx?pcode=N0060001", "https://law.moj.gov.tw/LawClass/LawAll.aspx?pcode=J0030022"], revisions = { "職業安全衛生法" = "民國 114 年 12 月 19 日", "技師法" = "民國 115 年 01 月 05 日" }, note = "職業安全衛生法 sets the duties and the competent-person requirements; 技師法 covers the licensed industrial-safety discipline." }
+cn = "職業衛生檢測與評價由具資格技術服務機構執行。"
