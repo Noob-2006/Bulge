@@ -317,6 +317,18 @@ fn dispatch(raw: Vec<String>) -> R {
         "data" => cmd_data(&a),
         "health" => {
             // For container health checks and monitors: is the daemon answering?
+            // `--ready` (ent-098): can it do work — model reachable, channels connected, audit writable.
+            if a.flag("ready") {
+                let v = daemon::call(&Paths::from_env().socket(), "health.ready", json!({}))?;
+                if a.flag("json") {
+                    println!("{v}");
+                } else {
+                    for c in v["checks"].as_array().into_iter().flatten() {
+                        println!("{} {:<20} {}", if c["ok"] == true { "ok  " } else { "FAIL" }, c["name"].as_str().unwrap_or(""), c["detail"].as_str().or(c["error"].as_str()).unwrap_or(""));
+                    }
+                }
+                return Ok(if v["ready"] == true { 0 } else { 1 });
+            }
             match daemon::call(&Paths::from_env().socket(), "ping", json!({})) {
                 Ok(_) => Ok(0),
                 Err(e) => Err(e.into()),
@@ -1349,6 +1361,13 @@ fn cmd_daemon(a: &Args) -> R {
             d.add_methods(ops::ui_methods::methods(&paths, c.k.clone(), ext_arc.as_deref()));
             d.add_methods(ops::webui::methods(&paths, c.k.clone(), ext_arc.as_deref()));
             d.add_methods(ops::dock::methods(c.k.clone()));
+            // ent-098: readiness for `ark health --ready` (the same checks as GET /ready).
+            {
+                let weak = Arc::downgrade(&d);
+                d.add_methods(Arc::new(move |m: &str, _p: &Value| {
+                    (m == "health.ready").then(|| weak.upgrade().map(|d| ark_app::metrics::readiness_json(&d).1).ok_or((-32000, "daemon is stopping".to_string())))
+                }));
+            }
             // App server: web/desktop UI, WebSocket ARP, OpenAI-compatible API, A2A, nodes.
             let app_cfg = ark_app::AppConfig::parse(&c.k.cfg.app)?;
             let _server = if app_cfg.enabled {
@@ -2732,7 +2751,8 @@ fn cmd_app(a: &Args) -> R {
             println!("[app] {} on {url} · ui {} · openai api {} · nodes {} · a2a {}", if app.enabled { "enabled" } else { "disabled" }, app.ui, app.openai_api, app.nodes, app.a2a.enabled);
             Ok(0)
         }
-        other => Err(format!("unknown app subcommand `{other}` (token, open, status)").into()),
+        "accounts" | "service-accounts" => ops::enterprise::accounts(&paths, a, 1),
+        other => Err(format!("unknown app subcommand `{other}` (token, open, status, accounts)").into()),
     }
 }
 

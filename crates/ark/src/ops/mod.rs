@@ -13,6 +13,7 @@ pub mod archive;
 pub mod backup;
 pub mod batch;
 pub mod completion;
+pub mod enterprise;
 pub mod context;
 pub mod confcli;
 pub mod doctor;
@@ -88,6 +89,7 @@ const MODULES: &[Module] = &[
     (console::COMMANDS, console::VALUE_FLAGS, console::BOOL_FLAGS, console::dispatch),
     (users::COMMANDS, users::VALUE_FLAGS, users::BOOL_FLAGS, users::dispatch),
     (audit::COMMANDS, audit::VALUE_FLAGS, audit::BOOL_FLAGS, audit::dispatch),
+    (enterprise::COMMANDS, enterprise::VALUE_FLAGS, enterprise::BOOL_FLAGS, enterprise::dispatch),
     (storage::COMMANDS, storage::VALUE_FLAGS, storage::BOOL_FLAGS, storage::dispatch),
     (triage::COMMANDS, triage::VALUE_FLAGS, triage::BOOL_FLAGS, triage::dispatch),
     (worker::COMMANDS, worker::VALUE_FLAGS, worker::BOOL_FLAGS, worker::dispatch),

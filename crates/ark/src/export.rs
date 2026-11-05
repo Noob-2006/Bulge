@@ -47,6 +47,13 @@ impl SessionData {
         tj::redact_flats(&mut self.flats, &f);
         self.system = f(&self.system);
     }
+    /// PII out of every body (`[compliance.pii]` classes).
+    pub fn mask_pii(&mut self, c: &ark_security::pii::PiiConfig) {
+        let f = |s: &str| ark_security::pii::mask_with(s, c);
+        tj::redact_flats(&mut self.flats, &f);
+        self.system = f(&self.system);
+        self.title = self.title.as_deref().map(f);
+    }
     fn tool_call_count(&self) -> usize {
         self.flats.iter().map(|f| f.tool_calls.len()).sum()
     }
@@ -510,6 +517,12 @@ pub fn cmd_export(a: &Args) -> R {
         if !a.flag("no-redact") {
             s.redact(&c.k.vault);
         }
+        // ent-078: exports leave the box, so personal data is masked unless asked otherwise.
+        let mask = c.k.cfg.compliance.pii.exports && !a.flag("keep-pii");
+        if mask {
+            s.mask_pii(&c.k.cfg.compliance.pii);
+        }
+        ark_security::audit::record(&c.k.paths.data, ark_security::audit::Event::new("session.export", ark_security::audit::Actor::local(), id, "ok").session(id).detail(json!({"format": fmt, "pii_masked": mask, "secrets_redacted": !a.flag("no-redact")})));
         sessions.push(s);
     }
     let offset = c.k.cfg.schedule.utc_offset_minutes;

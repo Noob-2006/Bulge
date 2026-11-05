@@ -242,6 +242,10 @@ impl Drop for Lock {
 fn lock(data: &Path) -> Result<Lock, String> {
     use std::os::unix::fs::OpenOptionsExt;
     use std::os::unix::io::AsRawFd;
+    // Never resurrect a removed home: the data dir may be created, but its parent must exist.
+    if !data.exists() && !data.parent().is_some_and(Path::exists) {
+        return Err(format!("audit: {} does not exist", data.display()));
+    }
     fs::create_dir_all(dir(data)).map_err(|e| format!("audit: {e}"))?;
     let f = OpenOptions::new().create(true).truncate(false).write(true).mode(0o600).open(dir(data).join(".lock")).map_err(|e| format!("audit: {e}"))?;
     if unsafe { libc::flock(f.as_raw_fd(), libc::LOCK_EX) } != 0 {

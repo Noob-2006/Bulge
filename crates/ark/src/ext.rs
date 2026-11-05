@@ -938,7 +938,7 @@ fn answer_approval(k: &Kernel, m: &Inbound, data: &str) -> Option<String> {
     }) else {
         return Some(no_longer_available(id));
     };
-    if !ark_kernel::secgate::approver_allowed(&k.cfg.approvals, &m.channel, &m.sender, std::slice::from_ref(&req)) {
+    if ark_app::identity::channel_permits(&k.paths, &m.channel, &m.sender, true).is_err() || !ark_kernel::secgate::approver_allowed(&k.cfg.approvals, &m.channel, &m.sender, std::slice::from_ref(&req)) {
         return Some("❌ You are not allowed to answer approvals here.".to_string());
     }
     if !ark_kernel::approver::answer_by(&*k.approver, &k.paths.data, id, choice, &ark_security::audit::Actor::channel(&m.channel, &m.sender), "button") {
@@ -1011,17 +1011,41 @@ impl ark_kernel::kernel::HostRoutes for ChannelRoutes {
     }
 }
 
+/// Connection state per channel for `/ready` (ent-098): `(ok, detail)`.
+fn channel_states() -> &'static std::sync::Mutex<HashMap<String, (bool, String)>> {
+    static S: std::sync::OnceLock<std::sync::Mutex<HashMap<String, (bool, String)>>> = std::sync::OnceLock::new();
+    S.get_or_init(Default::default)
+}
+
+fn channel_seen(name: &str, ok: bool, detail: &str) {
+    channel_states().lock().unwrap_or_else(|e| e.into_inner()).insert(name.to_string(), (ok, detail.to_string()));
+}
+
+/// Register `channel:<name>` as a readiness check reading the poll loop's last state.
+fn register_channel_check(name: &str) {
+    let n = name.to_string();
+    ark_app::metrics::register_check(&format!("channel:{name}"), Arc::new(move || match channel_states().lock().unwrap_or_else(|e| e.into_inner()).get(&n) {
+        Some((true, d)) => Ok(d.clone()),
+        Some((false, d)) => Err(d.clone()),
+        None => Err("not polled yet".into()),
+    }));
+}
+
 fn channel_loop(hub: &Arc<Hub>, name: &str, ch: Arc<dyn Channel>, cancel: &Cancel) {
     let mut backoff = 1u64;
+    register_channel_check(name);
     while !cancel.is_cancelled() {
         let msgs = match ch.poll(cancel) {
             Ok(m) => {
                 backoff = 1;
+                channel_seen(name, true, "connected");
                 m
             }
             Err(e) => {
+                channel_seen(name, false, &e.message);
                 if matches!(e.kind, ChannelErrorKind::Auth | ChannelErrorKind::Fatal) {
                     eprintln!("arkd: channel {name} stopped: {}", e.message);
+                    channel_seen(name, false, &format!("stopped: {}", e.message));
                     return;
                 }
                 let wait = match e.kind {
@@ -1272,6 +1296,16 @@ fn handle_inbound(hub: &Arc<Hub>, ch: &Arc<dyn Channel>, m: Inbound) {
                 m.thread = None;
             }
             ark_kernel::threads::Route::Unbound => {}
+        }
+    }
+    // ent-047 / ent-060: a sender registered in `ark users` brings its role and status to chat
+    // too. Disabled profiles are refused; operator / auditor profiles may only ask for status.
+    if let Err(why) = ark_app::identity::channel_permits(&k.paths, &m.channel, &m.sender, false) {
+        let cmd = m.text.split_whitespace().next().unwrap_or("");
+        let status_only = matches!(cmd, "/status" | "/help" | "/whoami") && !why.contains("disabled");
+        if !status_only {
+            ark_security::audit::record(&k.paths.data, ark_security::audit::Event::new("auth.denied", ark_security::audit::Actor::channel(&m.channel, &m.sender), "channel.message", "deny").detail(json!({"reason": why})));
+            return reply(hub, ch, &to, &format!("⛔ {why}."));
         }
     }
     match hub.router.route(&m) {
