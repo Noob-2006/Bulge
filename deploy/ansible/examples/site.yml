@@ -1,0 +1,22 @@
+---
+# ansible-playbook -i inventory examples/site.yml --ask-vault-pass
+# Secrets live in ansible-vault (group_vars/ark/vault.yml), never in this file.
+- name: ark agent hosts
+  hosts: ark
+  become: true
+  roles:
+    - role: ark
+      vars:
+        ark_install_method: repo
+        ark_repo_url: https://packages.example.com/ark
+        ark_repo_key_url: https://packages.example.com/ark/ark-archive-keyring.gpg   # RPM hosts: .../RPM-GPG-KEY-ark
+        ark_provider: anthropic
+        ark_model: claude-sonnet-4-5
+        ark_api_key: "{{ vault_ark_api_key }}"
+        ark_managed_policy:
+          managed:
+            locked: ["approvals.preset", "gate.egress_allow"]
+          approvals:
+            preset: standard
+          gate:
+            egress_allow: ["api.anthropic.com"]

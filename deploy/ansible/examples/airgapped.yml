@@ -1,0 +1,14 @@
+---
+# Air-gapped site: the tarball comes from the offline bundle on the controller, nothing is downloaded.
+- name: ark agent hosts (offline)
+  hosts: ark
+  become: true
+  roles:
+    - role: ark
+      vars:
+        ark_install_method: tarball
+        ark_tarball_src: "{{ playbook_dir }}/../bundle/release/ark-{{ ansible_architecture }}-unknown-linux-musl.tar.gz"
+        ark_tarball_checksum: "sha256:{{ vault_ark_tarball_sha256 }}"   # from the verified release/SHA256SUMS
+        ark_provider: openai
+        ark_base_url: http://llm.internal:8000/v1
+        ark_model: local-model

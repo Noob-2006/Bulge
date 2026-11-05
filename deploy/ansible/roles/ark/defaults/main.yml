@@ -1,0 +1,37 @@
+---
+# How ark gets onto the host:
+#   repo     - the signed apt/yum repository from packaging/repo (set ark_repo_url + ark_repo_key_url)
+#   package  - a .deb/.rpm you host yourself or ship from the controller (ark_package_src)
+#   tarball  - the static release tarball (any distro, also air-gapped: ark_tarball_src on the controller)
+ark_install_method: repo
+ark_version: "0.1.0"
+
+ark_repo_url: ""            # e.g. https://packages.example.com/ark   (apt: <url>/apt, yum: <url>/rpm/$basearch)
+ark_repo_key_url: ""        # public key: apt keyring (.gpg/.asc) or RPM-GPG-KEY-ark
+ark_package_src: ""         # path on the controller or https URL of the .deb/.rpm
+ark_package_checksum: ""    # "sha256:<hex>" from the verified SHA256SUMS - REQUIRED for method package
+ark_tarball_src: ""         # path on the controller of ark-<arch>-unknown-linux-musl.tar.gz
+ark_tarball_checksum: ""   # "sha256:<hex>" from the verified SHA256SUMS - REQUIRED for method tarball
+ark_tarball_prefix: /usr/local
+
+# Unattended `ark setup` (flags/env of crates/ark/src/setup_server.rs). Secrets only travel in the
+# environment of that one command, never in argv or a file this role writes.
+ark_provider: ""            # anthropic, openai, ... ; empty = skip setup (you manage config.toml yourself)
+ark_model: ""
+ark_base_url: ""            # local / custom OpenAI-compatible endpoint
+ark_api_key: ""             # put it in ansible-vault; no_log is set on every task that sees it
+ark_channel: ""             # telegram | discord
+ark_channel_token: ""
+ark_owner: ""
+ark_become_method: sudo      # how to become the `ark` account (su needs ark_become_flags: "-s /bin/sh": the account has no login shell)
+ark_become_flags: ""
+ark_setup_no_log: true       # set false only to debug with a throw-away key
+ark_setup_force: false      # re-run setup on a host that already has a config.toml
+
+# Organisation policy -> /etc/ark/managed.toml (root:root 0644). Any TOML-able structure.
+ark_managed_policy: {}
+
+ark_system_user: ark
+ark_home: /var/lib/ark
+ark_service_enabled: true
+ark_service_state: started

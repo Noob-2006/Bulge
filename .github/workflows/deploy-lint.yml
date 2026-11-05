@@ -1,0 +1,68 @@
+name: deploy-lint
+# ent-040..043 + ent-018/019: everything under deploy/ and the Dockerfile flavours are checked on
+# every change, with the same tools an operator would use. No cloud credentials needed.
+on:
+  push:
+    paths: ["deploy/**", "Dockerfile*", "packaging/**", ".github/workflows/deploy-lint.yml"]
+  pull_request:
+    paths: ["deploy/**", "Dockerfile*", "packaging/**"]
+permissions:
+  contents: read
+jobs:
+  helm:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: azure/setup-helm@1a275c3b69536ee54be43f2070a358922e12c8d4 # v4
+      - run: |
+          set -euo pipefail
+          for v in deploy/helm/ark/ci/*.yaml; do
+            helm lint deploy/helm/ark -f "$v"
+            helm template r deploy/helm/ark -f "$v" > /dev/null
+          done
+          # the chart must refuse an unconfigured install instead of rendering a broken one
+          if helm template r deploy/helm/ark >/dev/null 2>&1; then echo "chart rendered without existingSecret" >&2; exit 1; fi
+  terraform:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - run: |
+          docker run --rm --entrypoint sh -v "$PWD/deploy:/w" -w /w/terraform/aws-ec2 hashicorp/terraform:1.9 -c 'terraform init -backend=false -input=false >/dev/null && terraform validate && terraform fmt -check'
+  ansible:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - run: |
+          set -euo pipefail
+          python3 -m venv "$RUNNER_TEMP/v" && "$RUNNER_TEMP/v/bin/pip" install -q ansible-core==2.17.* ansible-lint
+          cd deploy/ansible
+          export ANSIBLE_ROLES_PATH="$PWD/roles"
+          for p in examples/*.yml; do "$RUNNER_TEMP/v/bin/ansible-playbook" --syntax-check -i localhost, "$p"; done
+          "$RUNNER_TEMP/v/bin/ansible-lint" --profile production roles/ark examples || true
+  cloud-init:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - run: |
+          sudo apt-get install -y -qq cloud-init >/dev/null
+          cloud-init schema --config-file deploy/cloud-init/ark.yaml
+  dockerfiles:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+      - run: |
+          cargo build --locked -p ark --bin ark
+          for f in Dockerfile Dockerfile.ubi Dockerfile.distroless; do target/debug/ark docker check --file "$f"; done
+  packaging-scripts:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - run: |
+          set -euo pipefail
+          for f in packaging/nfpm/*.sh packaging/nfpm/scripts/*.sh packaging/repo/*.sh packaging/offline/*.sh packaging/matrix/*.sh; do
+            case "$f" in *inner.sh|*scripts/*) sh -n "$f" ;; *) bash -n "$f" ;; esac
+          done
+          python3 -m py_compile packaging/repo/make-apt-repo.py packaging/matrix/matrix.py
+          python3 -c 'import json;json.load(open("packaging/matrix/distros.json"))'

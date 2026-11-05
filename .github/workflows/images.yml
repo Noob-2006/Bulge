@@ -1,0 +1,137 @@
+name: images
+# ent-018/019/021: OCI images in three flavours (debian = Dockerfile, ubi = Dockerfile.ubi,
+# distroless = Dockerfile.distroless), each built natively for amd64 and arm64 (no QEMU: the Rust
+# build would take hours emulated), pushed by digest, merged into one multi-arch manifest per tag,
+# then signed keyless with cosign (GitHub OIDC -> Sigstore) and shipped with BuildKit SBOM and
+# max-mode provenance attestations. Verify:
+#   cosign verify ghcr.io/<owner>/ark:<tag> --certificate-identity-regexp 'https://github.com/<owner>/ark/.*' \
+#     --certificate-oidc-issuer https://token.actions.githubusercontent.com
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+permissions:
+  contents: read
+env:
+  IMAGE: ghcr.io/${{ github.repository_owner }}/ark
+jobs:
+  smoke:
+    # Every flavour must start before anything is pushed.
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { variant: debian, file: Dockerfile }
+          - { variant: ubi, file: Dockerfile.ubi }
+          - { variant: distroless, file: Dockerfile.distroless }
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+      - uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          file: ${{ matrix.file }}
+          load: true
+          tags: ark:smoke-${{ matrix.variant }}
+          cache-from: type=gha,scope=${{ matrix.variant }}
+      - name: starts, non-root, share/ present
+        run: |
+          set -euo pipefail
+          img='ark:smoke-${{ matrix.variant }}'
+          docker run --rm "$img" --version
+          uid="$(docker image inspect "$img" --format '{{.Config.User}}')"
+          test -n "$uid" && test "$uid" != root && test "$uid" != 0
+          docker run --rm "$img" skills list >/dev/null   # bundled share/ is found
+  build:
+    needs: smoke
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+    strategy:
+      fail-fast: false
+      matrix:
+        variant: [debian, ubi, distroless]
+        platform: [linux/amd64, linux/arm64]
+        include:
+          - { platform: linux/amd64, runner: ubuntu-24.04, pair: amd64 }
+          - { platform: linux/arm64, runner: ubuntu-24.04-arm, pair: arm64 }
+          - { variant: debian, file: Dockerfile }
+          - { variant: ubi, file: Dockerfile.ubi }
+          - { variant: distroless, file: Dockerfile.distroless }
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - id: build
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          file: ${{ matrix.file }}
+          platforms: ${{ matrix.platform }}
+          outputs: type=image,name=${{ env.IMAGE }},push-by-digest=true,name-canonical=true,push=true
+          provenance: mode=max
+          sbom: true
+          cache-from: type=gha,scope=${{ matrix.variant }}-${{ matrix.pair }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.variant }}-${{ matrix.pair }}
+      - run: |
+          mkdir -p digests
+          d='${{ steps.build.outputs.digest }}'
+          touch "digests/${d#sha256:}"
+      - uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
+        with:
+          name: digests-${{ matrix.variant }}-${{ matrix.pair }}
+          path: digests/*
+          if-no-files-found: error
+  merge:
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+    strategy:
+      fail-fast: false
+      matrix:
+        variant: [debian, ubi, distroless]
+    steps:
+      - uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6
+        with:
+          pattern: digests-${{ matrix.variant }}-*
+          path: digests
+          merge-multiple: true
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac # v3
+      - name: multi-arch manifest, then sign it
+        working-directory: digests
+        run: |
+          set -euo pipefail
+          ver="${GITHUB_REF_NAME#v}"
+          case '${{ matrix.variant }}' in
+            debian) tags="$ver latest" ;;
+            *) tags="$ver-${{ matrix.variant }} ${{ matrix.variant }}" ;;
+          esac
+          args=()
+          for t in $tags; do args+=(-t "$IMAGE:$t"); done
+          refs=(); for d in *; do refs+=("$IMAGE@sha256:$d"); done
+          docker buildx imagetools create "${args[@]}" "${refs[@]}"
+          first="${tags%% *}"
+          digest="$(docker buildx imagetools inspect "$IMAGE:$first" --format '{{json .Manifest}}' | python3 -c 'import json,sys;print(json.load(sys.stdin)["digest"])')"
+          # sign the manifest list by digest (a tag can move; the digest cannot)
+          cosign sign --yes "$IMAGE@$digest"
+          cosign verify "$IMAGE@$digest" \
+            --certificate-identity-regexp "https://github.com/${GITHUB_REPOSITORY}/.*" \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com >/dev/null
+          echo "signed $IMAGE@$digest ($tags)" >> "$GITHUB_STEP_SUMMARY"

@@ -1,0 +1,16 @@
+Content-Type: multipart/mixed; boundary="==ARK=="
+MIME-Version: 1.0
+
+--==ARK==
+Content-Type: text/x-shellscript; charset="us-ascii"
+
+#!/bin/sh
+# Runs before cloud-config: put the model key where ark-firstboot expects it (0600, root only).
+umask 077
+aws secretsmanager get-secret-value --region ${region} --secret-id ${secret_id} --query SecretString --output text > /run/ark-api-key
+
+--==ARK==
+Content-Type: text/cloud-config; charset="us-ascii"
+
+${ark_cloud_config}
+--==ARK==--

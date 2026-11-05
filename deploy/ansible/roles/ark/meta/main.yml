@@ -1,0 +1,14 @@
+galaxy_info:
+  role_name: ark
+  author: ark maintainers
+  description: Install and configure the ark agent daemon as a hardened system service
+  license: MIT
+  min_ansible_version: "2.14"
+  platforms:
+    - { name: Debian, versions: [bullseye, bookworm, trixie] }
+    - { name: Ubuntu, versions: [focal, jammy, noble] }
+    - { name: EL, versions: ["7", "8", "9", "10"] }
+    - { name: Fedora, versions: [all] }
+    - { name: Amazon, versions: ["2", "2023"] }
+    - { name: opensuse, versions: ["15"] }
+dependencies: []

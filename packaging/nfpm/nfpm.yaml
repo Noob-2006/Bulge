@@ -1,0 +1,85 @@
+# One nfpm definition for both .deb and .rpm (ent-006/007). Why nfpm and not cargo-deb +
+# cargo-generate-rpm: ark ships a prebuilt *static musl* binary plus a large share/ tree, two
+# distro families need the same file layout, and nfpm needs no cargo plugin or rpmbuild/dpkg
+# on the build host (it is a single Go binary; CI and build-packages.sh run it from its
+# container). The cargo plugins would build the binary themselves (glibc, wrong baseline).
+#
+# Everything is substituted from the environment by packaging/nfpm/build-packages.sh:
+#   VERSION, ARCH (amd64|arm64), ARK_BIN, STAGE
+name: ark-agent
+arch: ${ARCH}
+platform: linux
+version: ${VERSION}
+release: "1"
+section: utils
+priority: optional
+maintainer: ark maintainers <ark@users.noreply.github.com>
+description: |
+  ark agent runtime (daemon, CLI, tools, sandboxing, audit).
+  Static binary with bundled skills, roles and plugin catalog under /usr/share/ark.
+homepage: https://github.com/ark-agent/ark
+license: MIT
+# The distribution name is `ark-agent`: Debian, Ubuntu, Fedora and openSUSE already ship a KDE
+# archiver called `ark` (also /usr/bin/ark), and with the plain name apt would silently prefer the
+# distro package (its epoch wins). The binary stays `ark`; the conflict is declared, not overwritten.
+conflicts:
+  - ark
+# Static musl build: nothing to depend on. git and certificates are what the agent uses at run time.
+recommends:
+  - git
+  - ca-certificates
+contents:
+  - src: ${ARK_BIN}
+    expand: true
+    dst: /usr/bin/ark
+    file_info: { mode: 0755 }
+  # skills, roles, catalogs, vm builder, sandbox-browser sources, units, managed-by-package marker
+  # (ark_core::share finds /usr/share/ark from /usr/bin/ark; `ark update` refuses to replace it)
+  - src: ${STAGE}/usr/share/ark
+    expand: true
+    dst: /usr/share/ark
+    type: tree
+  - src: ${STAGE}/usr/share/doc/ark
+    expand: true
+    dst: /usr/share/doc/ark
+    type: tree
+  # systemd: the system instance, generated from ops/service.rs (render_unit). postinstall.sh
+  # rewrites it for systemd < 245 with `ark service print --system` (ent-025).
+  - src: ${STAGE}/usr/lib/systemd/system/arkd.service
+    expand: true
+    dst: /usr/lib/systemd/system/arkd.service
+    file_info: { mode: 0644 }
+  - src: ${STAGE}/usr/lib/sysusers.d/ark.conf
+    expand: true
+    dst: /usr/lib/sysusers.d/ark.conf
+    file_info: { mode: 0644 }
+  - src: ${STAGE}/usr/lib/tmpfiles.d/ark.conf
+    expand: true
+    dst: /usr/lib/tmpfiles.d/ark.conf
+    file_info: { mode: 0644 }
+  # /etc/ark: administrator policy (ark_kernel::managed). The directories belong to the package,
+  # the policy files never do, so an upgrade or removal cannot touch an organisation's policy.
+  - dst: /etc/ark
+    type: dir
+    file_info: { mode: 0755 }
+  - dst: /etc/ark/managed.d
+    type: dir
+    file_info: { mode: 0755 }
+  - src: ${STAGE}/usr/share/ark/examples/managed.toml
+    expand: true
+    dst: /etc/ark/managed.toml.example
+    type: config|noreplace
+    file_info: { mode: 0644 }
+scripts:
+  preinstall: scripts/preinstall.sh
+  postinstall: scripts/postinstall.sh
+  preremove: scripts/preremove.sh
+  postremove: scripts/postremove.sh
+rpm:
+  # EL7 (rpm 4.11) cannot read zstd/xz-by-default payloads.
+  compression: gzip
+  group: Applications/System
+deb:
+  compression: gzip
+  fields:
+    Bugs: https://github.com/ark-agent/ark/issues

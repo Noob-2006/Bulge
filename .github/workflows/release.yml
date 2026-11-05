@@ -4,6 +4,9 @@ name: release
 # SBOM (+ Ed25519 signature when the signing secret is set) + build attestation.
 # Asset names are the contract `ark update` and install.sh rely on:
 #   ark-<triple>.tar.gz   (bin/ark, share/ark/…), SHA256SUMS, SHA256SUMS.sig, sbom.spdx.json
+# Packages (ent-006/007/027/028/029): ark_<ver>-1_<arch>.deb, ark-<ver>-1.<arch>.rpm (nfpm, from the
+# musl binary), ark-apt-repo.tar.gz / ark-yum-repo.tar.gz (signed with ARK_REPO_GPG_KEY), and
+# ark-offline-<ver>-<arch>.tar.gz (air-gapped bundle). All except the offline bundle are inside SHA256SUMS.
 on:
   push:
     tags: ["v*"]
@@ -93,6 +96,88 @@ jobs:
             sh /src/packaging/install.sh
             ~/.local/bin/ark version
             test -d ~/.local/lib/ark/share/skills'
+  # ent-006/007: .deb and .rpm from the static musl binary (one nfpm definition, packaging/nfpm).
+  packages:
+    needs: build
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { arch: amd64, triple: x86_64-unknown-linux-musl }
+          - { arch: arm64, triple: aarch64-unknown-linux-musl }
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6
+        with:
+          name: ark-${{ matrix.triple }}
+          path: dist-in
+      - name: build .deb and .rpm
+        run: |
+          set -euo pipefail
+          SOURCE_DATE_EPOCH="$(git log -1 --format=%ct)"; export SOURCE_DATE_EPOCH
+          mkdir -p x out && tar -xzf "dist-in/ark-${{ matrix.triple }}.tar.gz" -C x
+          packaging/nfpm/build-packages.sh --bin x/bin/ark --arch '${{ matrix.arch }}' --out out
+      - uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
+        with:
+          name: pkg-${{ matrix.arch }}
+          path: out/*
+  # ent-009..017: install the packages on real distributions, run `ark --version`, `ark doctor`,
+  # `ark setup --non-interactive` and one offline conversation against tests/e2e/fake_provider.py.
+  # Best-effort rows (CentOS 7, openSUSE Leap) are reported but cannot block a release.
+  distro-matrix:
+    needs: [build, packages]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6
+        with: { name: pkg-amd64, path: dist }
+      - uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6
+        with: { name: ark-x86_64-unknown-linux-musl, path: dist }
+      - name: matrix
+        run: python3 -I packaging/matrix/matrix.py --dist dist --out matrix.md --json matrix.json
+      - name: signed apt + yum repositories install and verify (ent-027/028)
+        run: |
+          set -euo pipefail
+          sudo apt-get install -y --no-install-recommends gnupg dpkg >/dev/null
+          packaging/repo/test-repos.sh dist
+      - if: always()
+        run: cat matrix.md >> "$GITHUB_STEP_SUMMARY"
+      - if: always()
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
+        with: { name: distro-matrix, path: "matrix.*" }
+  # ent-027/028: signed repositories. Without ARK_REPO_GPG_KEY (an ASCII-armoured secret key without
+  # passphrase, in a repository secret) the repositories are not built and the release says so.
+  repos:
+    needs: packages
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6
+        with: { pattern: "pkg-*", path: pkgs, merge-multiple: true }
+      - name: build repositories
+        env:
+          REPO_KEY: ${{ secrets.ARK_REPO_GPG_KEY }}
+        run: |
+          set -euo pipefail
+          if [ -z "${REPO_KEY:-}" ]; then
+            echo "::warning::ARK_REPO_GPG_KEY is not set: the apt/yum repositories are NOT built for this release"
+            mkdir -p out; exit 0
+          fi
+          export GNUPGHOME="$RUNNER_TEMP/gnupg"; mkdir -m 700 "$GNUPGHOME"
+          printf '%s\n' "$REPO_KEY" | gpg --batch --import
+          KID="$(gpg --batch --list-secret-keys --with-colons | awk -F: '/^fpr/{print $10; exit}')"
+          SOURCE_DATE_EPOCH="$(git log -1 --format=%ct)"; export SOURCE_DATE_EPOCH
+          mkdir -p debs rpms out repo
+          cp pkgs/*.deb debs/; cp pkgs/*.rpm rpms/
+          packaging/repo/make-apt-repo.py --debs debs --out repo/apt --key-id "$KID"
+          packaging/repo/make-yum-repo.sh --rpms rpms --out repo/rpm --key-id "$KID" --base-url "${{ vars.ARK_REPO_BASE_URL || 'https://packages.example.com/ark' }}/rpm" --container
+          tar --sort=name --owner=0 --group=0 --numeric-owner --mtime="@$SOURCE_DATE_EPOCH" -czf out/ark-apt-repo.tar.gz -C repo apt
+          tar --sort=name --owner=0 --group=0 --numeric-owner --mtime="@$SOURCE_DATE_EPOCH" -czf out/ark-yum-repo.tar.gz -C repo rpm
+          gpg --batch --armor --export "$KID" > out/ark-repo-signing-key.asc
+          rm -rf "$GNUPGHOME"
+      - uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
+        with: { name: repos, path: out/*, if-no-files-found: ignore }
   repro:
     # The same tree built from two different paths must give identical bytes (A18).
     runs-on: ubuntu-24.04
@@ -102,7 +187,7 @@ jobs:
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
       - run: packaging/release/repro-check.sh
   publish:
-    needs: [build, smoke, repro]
+    needs: [build, smoke, repro, packages, distro-matrix, repos]
     runs-on: ubuntu-24.04
     permissions:
       contents: write
@@ -113,6 +198,7 @@ jobs:
       - uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6
         with:
           path: dist
+          pattern: "{ark-*,pkg-*,repos}"
           merge-multiple: true
       - name: SBOM, checksums, signature
         env:
@@ -137,10 +223,30 @@ jobs:
             ../packaging/release/verify-release.sh . --key release-key.pub.pem
           fi
           ls -l
+      # ent-029: the air-gapped bundle wraps the verified release directory (it carries its own
+      # SHA256SUMS + signature); built after signing, shipped next to it.
+      - name: offline bundles
+        env:
+          SIGNING_KEY: ${{ secrets.ARK_RELEASE_SIGNING_KEY }}
+        run: |
+          set -euo pipefail
+          SOURCE_DATE_EPOCH="$(git log -1 --format=%ct)"; export SOURCE_DATE_EPOCH
+          ver="${GITHUB_REF_NAME#v}"; mkdir -p offline
+          keyarg=()
+          if [ -n "${SIGNING_KEY:-}" ]; then umask 077; printf '%s\n' "$SIGNING_KEY" > "$RUNNER_TEMP/k.pem"; keyarg=(--key "$RUNNER_TEMP/k.pem"); fi
+          for arch in x86_64 aarch64; do
+            packaging/offline/make-offline-bundle.sh --dist dist --arch "$arch" --out "offline/ark-offline-$ver-$arch.tar.gz" "${keyarg[@]}"
+          done
+          rm -f "$RUNNER_TEMP/k.pem"
+          (cd offline && sha256sum ark-offline-* > ark-offline.SHA256SUMS)
       # SLSA build provenance; verify with: gh attestation verify ark-*.tar.gz -R <owner>/ark
       - uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4
         with:
-          subject-path: dist/ark-*.tar.gz
-      - run: gh release create "$GITHUB_REF_NAME" dist/* --verify-tag --repo "$GITHUB_REPOSITORY"
+          subject-path: |
+            dist/ark-*.tar.gz
+            dist/*.deb
+            dist/*.rpm
+            offline/ark-offline-*.tar.gz
+      - run: gh release create "$GITHUB_REF_NAME" dist/* offline/* --verify-tag --repo "$GITHUB_REPOSITORY"
         env:
           GH_TOKEN: ${{ github.token }}

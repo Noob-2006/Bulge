@@ -1,0 +1,42 @@
+---
+- name: ark | binary path
+  ansible.builtin.set_fact:
+    ark_bin: "{{ ark_tarball_prefix }}/bin/ark"
+
+- name: ark | hash the tarball on the controller
+  ansible.builtin.stat:
+    path: "{{ ark_tarball_src }}"
+    checksum_algorithm: sha256
+  delegate_to: localhost
+  become: false
+  register: ark_tar_stat
+
+- name: ark | refuse a tarball that is not the pinned one (hash from the verified SHA256SUMS)
+  ansible.builtin.assert:
+    that: ark_tar_stat.stat.checksum == (ark_tarball_checksum | regex_replace('^sha256:', ''))
+    fail_msg: "sha256 of {{ ark_tarball_src | basename }} does not match ark_tarball_checksum"
+
+- name: ark | unpack bin/ and share/ark (the layout ark_core::share finds next to the binary)
+  ansible.builtin.unarchive:
+    src: "{{ ark_tarball_src }}"
+    dest: "{{ ark_tarball_prefix }}"
+    owner: root
+    group: root
+  notify: restart arkd
+
+- name: ark | the dedicated account and its directories (what the package's scriptlets do)
+  ansible.builtin.user: { name: "{{ ark_system_user }}", system: true, home: "{{ ark_home }}", shell: /usr/sbin/nologin, create_home: false }
+
+- name: ark | state directories
+  ansible.builtin.file: { path: "{{ item }}", state: directory, owner: "{{ ark_system_user }}", group: "{{ ark_system_user }}", mode: "0750" }
+  loop: ["{{ ark_home }}", "{{ ark_home }}/workspace"]
+
+- name: ark | unit, rendered by ark itself for this host's systemd
+  ansible.builtin.shell: |
+    set -e
+    env -u ARK_HOME {{ ark_bin }} service print --system > /etc/systemd/system/arkd.service.new
+    mv /etc/systemd/system/arkd.service.new /etc/systemd/system/arkd.service
+  args: { executable: /bin/sh }
+  changed_when: true
+  when: ansible_service_mgr == 'systemd'
+  notify: reload and restart arkd
