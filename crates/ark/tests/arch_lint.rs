@@ -46,7 +46,9 @@ const LAYERS: &[(u8, &str, &[&str])] = &[
     (3, "ark-kernel", &["ark-core", "ark-model", "ark-security"]),
     (4, "ark-plugin", &["ark-core", "ark-kernel", "ark-net", "ark-security"]),
     (5, "ark-skills", &["ark-core", "ark-kernel", "ark-plugin", "ark-security", "ark-tools"]),
-    (5, "ark-memory", &["ark-core", "ark-kernel", "ark-tools"]),
+    // H8: recalled memories are re-scanned with `ark_security::threat` at read time, so memory
+    // depends on the policy helpers (a downward edge; security never names memory).
+    (5, "ark-memory", &["ark-core", "ark-kernel", "ark-security", "ark-tools"]),
     (6, "ark-app", &["ark-browser", "ark-channel", "ark-core", "ark-kernel", "ark-net", "ark-plugin", "ark-security", "ark-tools"]),
     (7, "ark", &["ark-app", "ark-vm", "ark-browser", "ark-channel", "ark-core", "ark-kernel", "ark-media", "ark-memory", "ark-model", "ark-net", "ark-plugin", "ark-security", "ark-skills", "ark-tools"]),
 ];
@@ -284,7 +286,8 @@ fn style_is_consistent_across_crates() {
             }
             // (c) library stdout: warnings go to stderr with an `ark:` prefix.
             if m != "crates/ark" {
-                let n = text.matches("println!(").count();
+                // `eprintln!(` is the recommended form, so it must not count as stdout.
+                let n = text.match_indices("println!(").filter(|(i, _)| !text[..*i].ends_with('e')).count();
                 let allowed = b.println.get(&r).copied().unwrap_or(0);
                 if n > allowed {
                     problems.push(format!("{r}: {n} `println!` in a library crate (allowed {allowed}); use `eprintln!(\"ark: …\")` for warnings and return data to the caller"));

@@ -371,7 +371,7 @@ fn ark_voice_runs_one_talk_mode_turn() {
     config(
         &h,
         &format!(
-            "[model]\ndefault = \"openai/gpt-4o-mini\"\n\n[providers.openai]\napi_key = \"k\"\nbase_url = \"{m}/v1\"\nformat = \"openai_responses\"\n\n[media.voice]\nmode = \"ptt\"\nbeep = false\nrecord_command = \"cat {pcm}\"\nsilence_duration = 0.5\nmax_wait = 3.0\n\n[media.stt]\nprovider = \"fake\"\n\n[media.stt.providers.fake]\ncommand = \"echo 'what time is it'\"\n\n[media.tts]\nprovider = \"fake\"\nplayer = \"{player} {{path}}\"\nprefs_path = \"{prefs}\"\n\n[media.tts.providers.fake]\ncommand = \"printf ID3FAKE > {{output_path}}\"\nformat = \"mp3\"\n",
+            "[model]\ndefault = \"openai/gpt-4o-mini\"\n\n[providers.openai]\napi_key = \"k\"\nbase_url = \"{m}/v1\"\nformat = \"openai_responses\"\n\n[media.voice]\nmode = \"ptt\"\nbeep = false\nrecord_command = \"cat {pcm}\"\nsilence_duration = 0.5\nmax_wait = 10.0\n\n[media.stt]\nprovider = \"fake\"\n\n[media.stt.providers.fake]\ncommand = \"echo 'what time is it'\"\n\n[media.tts]\nprovider = \"fake\"\nplayer = \"{player} {{path}}\"\nprefs_path = \"{prefs}\"\n\n[media.tts.providers.fake]\ncommand = \"printf ID3FAKE > {{output_path}}\"\nformat = \"mp3\"\n",
             m = model.url,
             pcm = h.join("ws/take.pcm").display(),
             player = player.display(),

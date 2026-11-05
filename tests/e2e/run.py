@@ -205,9 +205,10 @@ def setup_wizard_from_scratch_then_run():
     # bad key, good key, first listed model, web UI on, no chat platform, default workspace,
     # no connectors, no service, no shell completion.
     n = len([l for l in ark("providers", "list", env=env)[1].splitlines() if l.strip()])
-    # …then the web-search provider (18 = skip for now), web UI, chat platform, workspace,
+    # …then the web-search provider (18 = skip for now), web UI, chat platform, professional
+    # role (Enter = general), workspace,
     # connectors, service, shell completion.
-    answers = ["y", "11", str(n + 1), "fake", BASE + "/v1", "y", "bad-key", "good-key-not-secret", "1", "18", "y", "1", "", "", "n", "n"]
+    answers = ["y", "11", str(n + 1), "fake", BASE + "/v1", "y", "bad-key", "good-key-not-secret", "1", "18", "y", "1", "", "", "", "n", "n"]
     c, out, err = ark("setup", stdin="\n".join(answers) + "\n", env=env)
     check(c == 0 and "key rejected: " in err and "key works (" in err and "fake-embedding" not in err, err[-1500:])
     cfg = open(os.path.join(home, "config", "config.toml")).read()
@@ -219,7 +220,7 @@ def setup_wizard_from_scratch_then_run():
     check(c == 0 and "configured" in out and seen()[0]["auth"] == "Bearer good-key-not-secret", out + err)
     # Running it again keeps the old file as a backup.
     script([{"text": "pong"}])
-    answers = ["y", "11", str(n + 1), "fake", BASE + "/v1", "y", "y", "1", "18", "n", "1", "", "", "n"]
+    answers = ["y", "11", str(n + 1), "fake", BASE + "/v1", "y", "y", "1", "18", "n", "1", "", "", "", "n"]
     c, out, err = ark("setup", stdin="\n".join(answers) + "\n", env=env)
     check(c == 0 and "Backup:" in err and any(f.startswith("config.toml.bak.") for f in os.listdir(os.path.join(home, "config"))), err[-800:])
 

@@ -161,7 +161,7 @@ mod tests {
     const CALLS: u64 = 30;
 
     fn run(max_tool_result_chars: usize) -> (Vec<u64>, ModelRequest, Vec<Event>, Config, Dir) {
-        let root = std::env::temp_dir().join(format!("ark-ctxbench-{}", crate::util::random_hex(8)));
+        let root = ark_core::tmp::scratch("ark-ctxbench");
         let dir = Dir(root.clone());
         let ws = root.join("ws");
         std::fs::create_dir_all(&ws).unwrap();

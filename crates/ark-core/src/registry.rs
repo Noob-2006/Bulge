@@ -224,10 +224,14 @@ mod tests {
         Ok(vec![Arc::new(Fixed("omega"))])
     }
 
+    /// The provider registry is process-global: tests that clear and refill it take turns.
+    static REGISTRY_TESTS: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     /// Registrations are ordered by `order`, and re-registering a name replaces it: init may
     /// run twice (tests, daemon restart in-process) without duplicating tools.
     #[test]
     fn providers_are_ordered_and_idempotent() {
+        let _g = REGISTRY_TESTS.lock().unwrap_or_else(|p| p.into_inner());
         clear_tool_providers();
         register_tool_provider("late", 300, late);
         register_tool_provider("early", 100, provider);
@@ -243,6 +247,7 @@ mod tests {
     /// One broken subsystem is a warning; the others still contribute their tools.
     #[test]
     fn a_failing_provider_is_a_warning_not_a_lost_tool_set() {
+        let _g = REGISTRY_TESTS.lock().unwrap_or_else(|p| p.into_inner());
         clear_tool_providers();
         register_tool_provider("broken", 10, failing);
         register_tool_provider("fine", 20, provider);

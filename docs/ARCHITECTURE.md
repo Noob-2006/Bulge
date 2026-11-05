@@ -29,7 +29,7 @@
 | 3 | `ark-kernel` | core, model, security | 核心：session、回合執行、閘門、壓縮、子代理 |
 | 4 | `ark-plugin` | core, kernel, net, security | MCP／外掛宿主、生命週期 |
 | 5 | `ark-skills` | core, kernel, tools, security, plugin | 技能、hub、curator |
-| 5 | `ark-memory` | core, kernel, tools | 記憶、wiki、向量回想 |
+| 5 | `ark-memory` | core, kernel, security, tools | 記憶、wiki、向量回想（召回時以 `ark_security::threat` 重新掃描，H8） |
 | 6 | `ark-app` | 上面全部（除了 binary 專屬） | 應用層：TUI、surfaces、computer use、cron、節點 |
 | 7 | `ark` | 全部 | 執行檔：參數分派、`build`/`build_agent` 組裝、各命令家族模組 |
 

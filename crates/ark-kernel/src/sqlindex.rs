@@ -479,7 +479,7 @@ mod tests {
         }
     }
     fn tmp() -> Tmp {
-        let d = std::env::temp_dir().join(format!("ark-sqlindex-{}", crate::util::random_hex(8)));
+        let d = ark_core::tmp::scratch("ark-sqlindex");
         fs::create_dir_all(d.join("sessions")).unwrap();
         Tmp(d)
     }

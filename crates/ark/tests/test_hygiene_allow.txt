@@ -134,7 +134,6 @@ crates/ark-plugin/tests/mcp_ext.rs  # temp_dir
 crates/ark-plugin/tests/mcp_features.rs  # temp_dir
 crates/ark-plugin/tests/plugin_kinds.rs  # temp_dir
 crates/ark-plugin/tests/stream_hooks.rs  # temp_dir
-crates/ark-security/src/approvals.rs  # temp_dir
 crates/ark-security/src/credfiles.rs  # temp_dir
 crates/ark-security/src/egress_proxy.rs  # dev-hosts cache dir under TMPDIR (production code, pid-scoped, removed by its owner)
 crates/ark-security/src/envelope.rs  # temp_dir
@@ -198,7 +197,7 @@ crates/ark/src/control_cli.rs  # temp_dir
 crates/ark/src/devtools.rs  # temp_dir
 crates/ark/src/exec_cli.rs  # temp_dir
 crates/ark/src/export.rs  # temp_dir
-crates/ark/src/ext.rs  # temp_dir
+crates/ark/src/ext/tests.rs  # temp_dir
 crates/ark/src/gmail_hook.rs  # temp_dir
 crates/ark/src/hooks_bundled.rs  # temp_dir
 crates/ark/src/hooks_cli.rs  # temp_dir
