@@ -53,8 +53,10 @@ const MIN_BODY_CHARS: &[(&str, usize)] = &[
     ("codex", 3316),
     ("coding-agent", 5821),
     ("competitor-news-monitor", 2551),
+    ("compliance-audit", 1866),
     ("computer-use", 10566),
     ("configure-channel", 2185),
+    ("deploy-rollback", 2372),
     ("design-md", 4831),
     ("diagnose-gateway", 1527),
     ("diagram-maker", 1307),
@@ -77,6 +79,7 @@ const MIN_BODY_CHARS: &[(&str, usize)] = &[
     ("himalaya", 4839),
     ("humanizer", 20377),
     ("imessage", 1294),
+    ("incident-response", 3252),
     ("llm-wiki", 11734),
     ("manim-video", 7107),
     ("maps", 3750),
@@ -103,6 +106,7 @@ const MIN_BODY_CHARS: &[(&str, usize)] = &[
     ("requesting-code-review", 4992),
     ("sag", 1099),
     ("sdlc-review", 5227),
+    ("security-alert-triage", 1869),
     ("sherpa-onnx-tts", 925),
     ("simplify-code", 8530),
     ("skill-creator", 1289),
@@ -119,6 +123,7 @@ const MIN_BODY_CHARS: &[(&str, usize)] = &[
     ("tmux", 1212),
     ("trello", 1435),
     ("visualize", 5554),
+    ("vuln-triage", 2122),
     ("weather", 1435),
     ("weekly-review-planning", 2148),
     ("xlsx", 5594),
@@ -488,7 +493,8 @@ fn transcribed_skills_carry_mit_attribution() {
     for s in &all {
         let (front, body) = parsed(s);
         let upstream = front["upstream"].as_str().unwrap_or_default();
-        let corpus_ok = upstream.starts_with("hermes-agent/skills/") || upstream.starts_with("openclaw/skills/") || upstream.starts_with("openclaw/custodian-skills/");
+        // ark's own professional skills (DevOps / SecOps, BATCH-next §三) say so instead of naming a corpus.
+        let corpus_ok = upstream.starts_with("hermes-agent/skills/") || upstream.starts_with("openclaw/skills/") || upstream.starts_with("openclaw/custodian-skills/") || upstream.starts_with("ark/skills ");
         if !corpus_ok || !upstream.contains("(MIT)") {
             wrong.push(format!("{}: upstream = {upstream:?}", s.file.display()));
         }

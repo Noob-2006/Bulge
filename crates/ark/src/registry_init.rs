@@ -29,6 +29,7 @@ pub fn register() {
     crate::meetings::meet::register();
     crate::meetings::meet::register_hooks();
     crate::plugin_backends::register();
+    register_ops();
     // CLI command families whose flags the binary's parser must not see.
     crate::meetings::register_route();
     crate::agentcmds::register_routes();
@@ -37,6 +38,17 @@ pub fn register() {
     crate::message_cli::register_route();
     crate::role_cli::register_route();
     crate::pro_tools::register();
+}
+
+/// DevOps / SecOps tools (`ark_tools::ops`, `ark_tools::secops`) over the opaque
+/// `[integrations]` table: monitoring queries, `deploy`, tickets / incidents, scan reports,
+/// OSV, SIEM alerts and compliance checklists. Query and ticket tools appear only for the
+/// sections that name an endpoint.
+fn register_ops() {
+    ark_core::registry::register_tool_provider("ops", 320, |env| {
+        let cfg = env.config::<ark_kernel::config::Config>()?;
+        Ok(ark_tools::ops::tools_from_value(serde_json::to_value(&cfg.integrations).unwrap_or(serde_json::Value::Null)))
+    });
 }
 
 #[cfg(test)]
@@ -75,7 +87,7 @@ mod tests {
         sorted.sort();
         sorted.dedup();
         assert_eq!(names.len(), sorted.len(), "no provider registered twice: {names:?}");
-        for name in ["skills", "memory", "cronjob", "kanban", "web", "web-cli", "google-meet", "media-plugin-backends", "xai-code-execution"] {
+        for name in ["skills", "memory", "cronjob", "kanban", "web", "web-cli", "google-meet", "media-plugin-backends", "xai-code-execution", "ops"] {
             assert!(names.contains(&name), "{name} is registered: {names:?}");
         }
         let order: Vec<i32> = ark_core::registry::tool_providers().iter().map(|p| p.order).collect();
@@ -116,5 +128,24 @@ mod tests {
         assert!(ark_core::registry::command_route("run", &[]).is_none(), "`ark run` stays in the binary");
         assert!(ark_core::registry::command_route("doctor", &[]).is_none());
         assert!(ark_core::registry::command_route("meet", &[]).is_some(), "an unknown sub-command is the family's own usage error");
+    }
+
+    /// The ops / secops tools reach the model through the registry, driven by `[integrations]`.
+    #[test]
+    fn ops_tools_follow_the_integrations_table() {
+        register();
+        let s = Scratch::new();
+        let names = |cfg: &Config| ark_core::registry::collect_tools(&s.env(cfg)).0.iter().map(|t| t.spec().name).collect::<Vec<_>>();
+        let base = names(&Config::default());
+        for n in ["deploy", "scan_report", "osv_query", "compliance_check"] {
+            assert!(base.iter().any(|x| x == n), "{n} missing from {base:?}");
+        }
+        assert!(!base.iter().any(|x| x == "prometheus_query" || x == "jira"));
+        let cfg: Config = toml::from_str("[integrations.prometheus]\nurl = \"http://prom:9090\"\n[integrations.jira]\nurl = \"https://jira.example.com\"\ntoken = \"{{secret:JIRA_TOKEN}}\"\n[integrations.wazuh]\nurl = \"https://wazuh:9200\"\n").unwrap();
+        let all = names(&cfg);
+        for n in ["prometheus_query", "jira", "siem_alerts"] {
+            assert!(all.iter().any(|x| x == n), "{n} missing from {all:?}");
+        }
+        drop(s.dir);
     }
 }

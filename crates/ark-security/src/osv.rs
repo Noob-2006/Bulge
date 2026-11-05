@@ -7,6 +7,10 @@
 //! - [`audit`] (Hermes `hermes_cli/security_audit.py`): `querybatch` + `vulns/{id}` for
 //!   every pinned component (ark's own crates from the embedded lockfile, pinned MCP
 //!   and plugin packages) with severity tiers and fixed versions.
+//! - [`audit_at`] / [`vuln_at`] (pro-026): the same general CVE query against any OSV-compatible
+//!   endpoint (a mirror, a test server) for the `osv_query` tool — every advisory, not only
+//!   MAL-*, with aliases (CVE ⇄ GHSA) and fixed versions; [`pins_from_package_lock`] adds
+//!   npm lockfiles to the pin discovery.
 
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
@@ -196,6 +200,8 @@ pub struct Vuln {
     pub severity: String,
     pub summary: String,
     pub fixed: Vec<String>,
+    /// Other ids of the same advisory (`CVE-…` for a `GHSA-…`, and back).
+    pub aliases: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -260,6 +266,33 @@ pub fn pins_from_package_json(text: &str, source: &str) -> Vec<Component> {
     }).collect()).unwrap_or_default()
 }
 
+/// Exact versions from an npm `package-lock.json` (lockfileVersion 2/3 `packages`, or v1
+/// `dependencies`).
+pub fn pins_from_package_lock(text: &str, source: &str) -> Vec<Component> {
+    let v: Value = serde_json::from_str(text).unwrap_or_default();
+    let mut out: Vec<Component> = Vec::new();
+    let mut push = |name: &str, ver: &str| {
+        if !name.is_empty() && ver.chars().next().is_some_and(|c| c.is_ascii_digit()) && !out.iter().any(|c| c.name == name && c.version == ver) {
+            out.push(Component { name: name.into(), version: ver.into(), ecosystem: "npm".into(), source: source.into() });
+        }
+    };
+    if let Some(m) = v["packages"].as_object() {
+        for (path, p) in m {
+            let Some(name) = path.rsplit_once("node_modules/").map(|(_, n)| n) else { continue };
+            if let Some(ver) = p["version"].as_str() {
+                push(name, ver);
+            }
+        }
+    } else if let Some(m) = v["dependencies"].as_object() {
+        for (name, p) in m {
+            if let Some(ver) = p["version"].as_str() {
+                push(name, ver);
+            }
+        }
+    }
+    out
+}
+
 fn severity_of(rec: &Value) -> String {
     let mut cands = vec![rec["database_specific"]["severity"].as_str()];
     if let Some(a) = rec["affected"].as_array() {
@@ -286,7 +319,26 @@ fn fixed_of(rec: &Value) -> Vec<String> {
 
 /// Query OSV for every component; findings sorted by severity, then source and name.
 pub fn audit(components: &[Component]) -> Result<Vec<Finding>, String> {
-    let base = endpoint();
+    audit_at(&endpoint(), components)
+}
+
+fn vuln_of(id: &str, rec: &Value) -> Vuln {
+    let aliases = rec["aliases"].as_array().map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect()).unwrap_or_default();
+    Vuln { id: id.to_string(), severity: severity_of(rec), summary: rec["summary"].as_str().or(rec["details"].as_str()).unwrap_or("").trim().chars().take(400).collect(), fixed: fixed_of(rec), aliases }
+}
+
+/// One advisory by id (`CVE-…`, `GHSA-…`, `RUSTSEC-…`, `PYSEC-…`) from `base`.
+pub fn vuln_at(base: &str, id: &str) -> Result<Vuln, String> {
+    if id.is_empty() || id.len() > 64 || !id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.') {
+        return Err(format!("`{id}` is not an advisory id"));
+    }
+    let rec = get_json(&format!("{}/v1/vulns/{id}", base.trim_end_matches('/')), Duration::from_secs(20)).map_err(|e| format!("OSV lookup of {id} failed: {e}"))?;
+    Ok(vuln_of(id, &rec))
+}
+
+/// [`audit`] against an explicit OSV endpoint.
+pub fn audit_at(base: &str, components: &[Component]) -> Result<Vec<Finding>, String> {
+    let base = base.trim_end_matches('/').to_string();
     let mut raw: Vec<(Component, Vec<String>)> = Vec::new();
     for chunk in components.chunks(BATCH_MAX) {
         let queries: Vec<Value> = chunk.iter().map(|c| json!({"package": {"name": c.name, "ecosystem": c.ecosystem}, "version": c.version})).collect();
@@ -307,7 +359,7 @@ pub fn audit(components: &[Component]) -> Result<Vec<Finding>, String> {
             let base = base.clone();
             s.spawn(move || ids.into_iter().map(|id| {
                 let v = match get_json(&format!("{base}/v1/vulns/{id}"), Duration::from_secs(20)) {
-                    Ok(rec) => Vuln { id: id.clone(), severity: severity_of(&rec), summary: rec["summary"].as_str().unwrap_or("").trim().to_string(), fixed: fixed_of(&rec) },
+                    Ok(rec) => vuln_of(&id, &rec),
                     Err(_) => Vuln { id: id.clone(), severity: "UNKNOWN".into(), ..Default::default() },
                 };
                 (id, v)
@@ -400,5 +452,28 @@ mod tests {
         assert_eq!(pins_from_requirements("requests==2.31.0\nflask>=2\n# c\nx[y]==1 ; python_version>'3'\n", "plugin:p").len(), 2);
         assert_eq!(pins_from_package_json(r#"{"dependencies":{"a":"1.2.3","b":"^2.0.0"}}"#, "plugin:p").len(), 1);
         assert_eq!(severity_rank("critical"), 4);
+        let pl = r#"{"lockfileVersion":3,"packages":{"":{"version":"0.0.0"},"node_modules/lodash":{"version":"4.17.20"},"node_modules/a/node_modules/@s/b":{"version":"1.0.0"}}}"#;
+        let c = pins_from_package_lock(pl, "app");
+        let mut got: Vec<String> = c.iter().map(|c| format!("{}@{}", c.name, c.version)).collect();
+        got.sort();
+        assert_eq!(got, ["@s/b@1.0.0", "lodash@4.17.20"]);
+    }
+
+    #[test]
+    fn general_cves_with_aliases_from_an_explicit_endpoint() {
+        const GHSA: &str = r#"{"id":"GHSA-xxxx","aliases":["CVE-2021-23337"],"summary":"Command injection","database_specific":{"severity":"HIGH"},"affected":[{"ranges":[{"events":[{"introduced":"0"},{"fixed":"4.17.21"}]}]}]}"#;
+        let (base, _) = serve(vec![
+            ("/v1/querybatch", r#"{"results":[{"vulns":[{"id":"GHSA-xxxx"}]},{}]}"#.to_string()),
+            ("/v1/vulns/GHSA-xxxx", GHSA.to_string()),
+            ("/v1/vulns/GHSA-xxxx", GHSA.to_string()),
+        ]);
+        let comps = vec![Component { name: "lodash".into(), version: "4.17.20".into(), ecosystem: "npm".into(), source: "app".into() }, Component { name: "left-pad".into(), version: "1.3.0".into(), ecosystem: "npm".into(), source: "app".into() }];
+        let f = audit_at(&base, &comps).unwrap();
+        assert_eq!(f.len(), 1);
+        assert_eq!(f[0].vuln.aliases, ["CVE-2021-23337"]);
+        assert_eq!(f[0].vuln.fixed, ["4.17.21"]);
+        assert_eq!(f[0].vuln.severity, "HIGH");
+        assert_eq!(vuln_at(&base, "GHSA-xxxx").unwrap().summary, "Command injection");
+        assert!(vuln_at(&base, "../x").is_err());
     }
 }

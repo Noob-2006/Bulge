@@ -22,9 +22,13 @@ mod lint;
 mod job;
 pub mod lsp;
 mod memory;
+/// DevOps / SRE tools: monitoring queries, controlled deploys, tickets and incidents.
+pub mod ops;
 mod plan;
 pub mod proc;
 mod search;
+/// Security-operations tools: scan reports, OSV, SIEM alerts, compliance checklists.
+pub mod secops;
 mod shell;
 mod terminal;
 pub mod tokenjuice;

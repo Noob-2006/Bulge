@@ -31,7 +31,7 @@ title_en = "DevOps / SRE"
 aliases = ["sre", "ops", "on-call"]
 packs = ["systems-administration"]
 tools = "devops"
-summary = "Incident triage, log analysis, deploy and rollback, on-call support."
+summary = "Incident triage and log analysis (prometheus_query, loki_query, alertmanager_alerts, elastic_search, grafana_query), deploys and rollbacks through the deploy tool (plan, then apply only after approval, prepared rollback), on-call tickets (jira, servicenow, pagerduty). Skills: incident-response, deploy-rollback."
 [preset.policy]
 approval = "standard"
 deny = [
@@ -40,7 +40,7 @@ deny = [
   "ssh *prod* rm *", "ssh *prod* systemctl *",
 ]
 write_deny = ["**/prod/**", "**/production/**"]
-approve = ["deploy", "rollback", "service restart", "any write to a production host"]
+approve = ["deploy (deploy action=apply)", "rollback (deploy action=rollback)", "service restart", "any write to a production host", "creating or changing tickets and incidents"]
 
 [[preset]]
 id = "swdev"
@@ -62,7 +62,7 @@ title_en = "Security operations"
 aliases = ["security", "soc", "sec"]
 packs = ["security-and-network-specialist"]
 tools = "secops"
-summary = "Triage scan results and alerts, compliance checks; read-only by default."
+summary = "Triage scan results (scan_report, osv_query) and SIEM alerts (siem_alerts), run compliance checklists (compliance_check: cis-linux, tw-csma), open remediation tickets; read-only by default. Skills: vuln-triage, security-alert-triage, compliance-audit."
 [preset.policy]
 approval = "strict"
 workspace_only = true
@@ -71,7 +71,7 @@ deny = [
   "msfconsole*", "msfvenom*", "hydra *", "medusa *", "sqlmap*", "hashcat*", "john *",
   "aircrack-ng*", "responder*", "crackmapexec*", "netexec*", "*hping3*--flood*",
 ]
-approve = ["any active scan (only against allowlisted targets)", "any change outside the workspace"]
+approve = ["any active scan (only against allowlisted targets)", "any change outside the workspace", "opening tickets in bulk (show the ranked list first)"]
 
 [[preset]]
 id = "data"
