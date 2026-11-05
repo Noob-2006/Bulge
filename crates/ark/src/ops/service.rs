@@ -19,7 +19,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 pub const COMMANDS: &[&str] = &["service"];
-pub const VALUE_FLAGS: &[&str] = &["drain", "lines", "user-name"];
+pub const VALUE_FLAGS: &[&str] = &["drain", "lines", "user-name", "systemd-version"];
 pub const BOOL_FLAGS: &[&str] = &["system", "launchd", "sysusers", "tmpfiles"];
 
 pub const STORM_WINDOW_SECS: i64 = 600;
@@ -58,7 +58,83 @@ pub const SYSTEM_WORKSPACE: &str = "/var/lib/ark/workspace";
 /// against the same hardening list by a test.
 pub fn unit(exe: &Path, workspace: &Path, user: Option<&str>) -> String {
     let home_env = std::env::var("ARK_HOME").ok().filter(|_| crate::ops::profile::current() == "custom ARK_HOME").map(|h| format!("Environment=ARK_HOME={h}\n")).unwrap_or_default();
-    render_unit(exe, workspace, user, &profile_arg(), &home_env)
+    degrade_unit(&render_unit(exe, workspace, user, &profile_arg(), &home_env), systemd_version())
+}
+
+/// First systemd release that understands each directive `render_unit` can emit. Older managers
+/// only log "Unknown lvalue" for the rest, but a unit that warns on every line is noise operators
+/// report as a bug, and the two that change *place* (the start-rate limit) would silently be lost.
+const DIRECTIVE_SINCE: &[(&str, u32)] = &[
+    ("ProtectSystem", 214),
+    ("RestrictRealtime", 231),
+    ("ProtectKernelTunables", 232),
+    ("ProtectKernelModules", 232),
+    ("ProtectControlGroups", 232),
+    ("LockPersonality", 235),
+    ("StateDirectory", 235),
+    ("StateDirectoryMode", 235),
+    ("RestrictSUIDSGID", 242),
+    ("ProtectKernelLogs", 244),
+    ("ProtectClock", 245),
+];
+
+/// `StartLimitIntervalSec=`/`StartLimitBurst=` live in `[Unit]` from systemd 229; before that
+/// (RHEL/CentOS 7 ships 219) they are `StartLimitInterval=`/`StartLimitBurst=` in `[Service]`.
+const START_LIMIT_UNIT_SECTION_SINCE: u32 = 229;
+
+/// Rewrite a unit rendered for a current systemd so that systemd `ver` accepts all of it (ent-025).
+/// `None` (version unknown) keeps the modern text; so does anything >= 245. Idempotent.
+pub fn degrade_unit(text: &str, ver: Option<u32>) -> String {
+    let Some(ver) = ver else { return text.to_string() };
+    let mut out = Vec::new();
+    let mut moved: Vec<String> = Vec::new();
+    let mut changed = false;
+    let mut section = "";
+    for line in text.lines() {
+        if line.starts_with('[') {
+            section = line;
+        }
+        let key = line.split_once('=').map(|(k, _)| k.trim()).filter(|k| !k.starts_with('#') && !k.contains(' '));
+        if let Some(k) = key {
+            if DIRECTIVE_SINCE.iter().any(|(d, since)| *d == k && ver < *since) {
+                changed = true;
+                continue;
+            }
+            if ver < START_LIMIT_UNIT_SECTION_SINCE && section == "[Unit]" && (k == "StartLimitIntervalSec" || k == "StartLimitBurst") {
+                changed = true;
+                moved.push(line.replace("StartLimitIntervalSec", "StartLimitInterval"));
+                continue;
+            }
+        }
+        out.push(line.to_string());
+        if line == "[Service]" && !moved.is_empty() {
+            // placed right under the header; `moved` is complete because [Unit] comes first
+            out.push("# systemd < 229: the start-rate limit is a [Service] setting".into());
+            out.append(&mut moved);
+        }
+    }
+    let mut s = out.join("\n");
+    s.push('\n');
+    if changed {
+        s = s.replacen("[Unit]\n", &format!("[Unit]\n# rendered for systemd {ver}: directives it does not know are left out (ark service print --systemd-version N)\n"), 1);
+    }
+    s
+}
+
+/// `systemd 219` / `systemd 252 (252.22-1~deb12u1)` → 219 / 252.
+pub fn parse_systemd_version(out: &str) -> Option<u32> {
+    let first = out.lines().next()?;
+    let tok = first.strip_prefix("systemd ")?.split_whitespace().next()?;
+    tok.chars().take_while(char::is_ascii_digit).collect::<String>().parse().ok()
+}
+
+/// The running manager's version: `ARK_SYSTEMD_VERSION` (tests, cross-rendering) or `systemctl --version`.
+pub fn systemd_version() -> Option<u32> {
+    if let Some(v) = std::env::var("ARK_SYSTEMD_VERSION").ok().and_then(|v| v.trim().parse().ok()) {
+        return Some(v);
+    }
+    let o = std::process::Command::new("systemctl").arg("--version").stdin(std::process::Stdio::null()).stderr(std::process::Stdio::null()).output().ok()?;
+    o.status.success().then(|| parse_systemd_version(&String::from_utf8_lossy(&o.stdout))).flatten()
 }
 
 /// Pure renderer behind [`unit`] (`prof` = ` -p name` or empty, `home_env` = an `Environment=` line).
@@ -455,11 +531,18 @@ pub fn dispatch(cmd: &str, a: &Args, _raw: &[String]) -> Option<R> {
                     print!("{}", sysusers(a.val("user-name").unwrap_or(SYSTEM_USER)));
                 } else if a.flag("tmpfiles") {
                     print!("{}", tmpfiles(a.val("user-name").unwrap_or(SYSTEM_USER)));
-                } else if system {
-                    let ws = if a.val("workspace").is_some() { crate::workspace(a)? } else { PathBuf::from(SYSTEM_WORKSPACE) };
-                    print!("{}", unit(&exe, &ws, Some(a.val("user-name").unwrap_or(SYSTEM_USER))));
                 } else {
-                    print!("{}", unit(&exe, &crate::workspace(a)?, None));
+                    // --systemd-version N renders for another manager (a package building for EL7, a test).
+                    let ver = a.num::<u32>("systemd-version").map_err(crate::Fail::Usage)?;
+                    if let Some(v) = ver {
+                        std::env::set_var("ARK_SYSTEMD_VERSION", v.to_string());
+                    }
+                    if system {
+                        let ws = if a.val("workspace").is_some() { crate::workspace(a)? } else { PathBuf::from(SYSTEM_WORKSPACE) };
+                        print!("{}", unit(&exe, &ws, Some(a.val("user-name").unwrap_or(SYSTEM_USER))));
+                    } else {
+                        print!("{}", unit(&exe, &crate::workspace(a)?, None));
+                    }
                 }
                 Ok(0)
             }
@@ -498,7 +581,7 @@ pub fn dispatch(cmd: &str, a: &Args, _raw: &[String]) -> Option<R> {
                 }
                 Ok(if issues.is_empty() { 0 } else { 1 })
             }
-            other => usage(format!("unknown `service {other}` (install [--system|--launchd] [--no-start], uninstall, status, print [--system|--sysusers|--tmpfiles], restart [--drain S], logs, audit)")),
+            other => usage(format!("unknown `service {other}` (install [--system|--launchd] [--no-start], uninstall, status, print [--system|--sysusers|--tmpfiles] [--systemd-version N], restart [--drain S], logs, audit)")),
         }
     })())
 }
@@ -577,6 +660,83 @@ mod tests {
             assert!(nix.contains(&format!("{k} =")), "nix/nixos.nix lacks {k} (kept in step with ops/service.rs)");
         }
         assert!(nix.contains("ARK_HOME = \"/var/lib/ark\"") && nix.contains("users.users.ark"));
+    }
+
+    #[test]
+    fn old_systemd_gets_a_unit_it_understands() {
+        let (exe, ws) = (Path::new("/usr/bin/ark"), Path::new(SYSTEM_WORKSPACE));
+        let modern = render_unit(exe, ws, Some("ark"), "", "");
+        assert_eq!(degrade_unit(&modern, None), modern, "unknown version keeps the modern unit");
+        assert_eq!(degrade_unit(&modern, Some(252)), modern, "a current systemd needs no change");
+        assert!(degrade_unit(&modern, Some(219)).contains("# rendered for systemd 219"));
+        // RHEL/CentOS 7: systemd 219.
+        let old = degrade_unit(&modern, Some(219));
+        let section = |name: &str| -> String { old.split(&format!("[{name}]\n")).nth(1).unwrap().split("\n[").next().unwrap().to_string() };
+        assert!(!section("Unit").contains("StartLimit"), "StartLimit* must leave [Unit]:\n{old}");
+        assert!(section("Service").contains("StartLimitInterval=300\nStartLimitBurst=5"), "{old}");
+        for gone in ["StateDirectory", "ProtectKernelLogs", "ProtectClock", "RestrictSUIDSGID", "LockPersonality", "ProtectKernelModules", "RestrictRealtime"] {
+            assert!(!old.contains(&format!("\n{gone}")), "{gone} is unknown to systemd 219:\n{old}");
+        }
+        // what 219 does know stays: the sandbox that matters and the lifecycle.
+        for kept in ["Type=notify", "NotifyAccess=main", "KillMode=mixed", "NoNewPrivileges=yes", "PrivateTmp=yes", "ProtectSystem=full", "User=ark", "Environment=ARK_HOME=/var/lib/ark", "WantedBy=multi-user.target"] {
+            assert!(old.contains(kept), "{kept} lost:\n{old}");
+        }
+        // 233 knows StateDirectory? no (235); 236 does and still lacks RestrictSUIDSGID (242).
+        let v236 = degrade_unit(&modern, Some(236));
+        assert!(v236.contains("StateDirectory=ark ark/workspace") && !v236.contains("RestrictSUIDSGID") && v236.contains("StartLimitIntervalSec=300"));
+        assert_eq!(degrade_unit(&old, Some(219)), old, "idempotent");
+        // the audit accepts a degraded unit as long as the same degrade produced the expectation.
+        let exe = std::env::current_exe().unwrap();
+        let u = degrade_unit(&render_unit(&exe, ws, Some("ark"), "", ""), Some(219));
+        assert!(audit_text(&u, &u, &exe).is_empty());
+        // user units degrade too.
+        let user = degrade_unit(&render_unit(Path::new("/x/ark"), Path::new("/w"), None, "", ""), Some(219));
+        assert!(user.contains("StartLimitInterval=300") && !user.contains("RestrictSUIDSGID"));
+    }
+
+    #[test]
+    fn systemd_version_parsing() {
+        assert_eq!(parse_systemd_version("systemd 219\n+PAM +AUDIT"), Some(219));
+        assert_eq!(parse_systemd_version("systemd 252 (252.22-1~deb12u1)\n+PAM"), Some(252));
+        assert_eq!(parse_systemd_version("systemd 256.7-1-arch\n"), Some(256));
+        assert_eq!(parse_systemd_version("not systemd"), None);
+    }
+
+    fn read_repo(rel: &str) -> String {
+        std::fs::read_to_string(repo(rel)).unwrap_or_else(|e| panic!("{rel}: {e}"))
+    }
+
+    /// ent-006/007/025: the deb/rpm definition ships exactly the generated units and wires the
+    /// systemd-version downgrade (`ark service print --system`) into its postinstall.
+    #[test]
+    fn packages_ship_the_generated_units_and_downgrade_them_on_old_systemd() {
+        let nfpm = read_repo("packaging/nfpm/nfpm.yaml");
+        for want in ["name: ark-agent", "conflicts:", "dst: /usr/bin/ark", "dst: /usr/share/ark", "dst: /etc/ark\n", "dst: /etc/ark/managed.d", "dst: /usr/lib/systemd/system/arkd.service", "dst: /usr/lib/sysusers.d/ark.conf", "dst: /usr/lib/tmpfiles.d/ark.conf", "compression: gzip"] {
+            assert!(nfpm.contains(want), "nfpm.yaml lacks {want}");
+        }
+        assert!(!nfpm.contains("/var/lib/ark"), "the package must not own the state directory");
+        let build = read_repo("packaging/nfpm/build-packages.sh");
+        for f in ["packaging/systemd/arkd-system.service", "packaging/systemd/ark-sysusers.conf", "packaging/systemd/ark-tmpfiles.conf"] {
+            assert!(build.contains(f), "build-packages.sh does not stage {f}");
+        }
+        let post = read_repo("packaging/nfpm/scripts/postinstall.sh");
+        assert!(post.contains("ark service print --system") && post.contains("systemd-sysusers") && post.contains("systemd-tmpfiles"));
+        // `enable --now` appears once, in the hint printed for the operator; the script itself only ever try-restarts a running daemon
+        assert!(post.matches("enable --now").count() == 1 && post.contains("2. systemctl enable --now arkd") && !post.contains("systemctl start"), "installing must not start the daemon");
+        // the file the postinstall regenerates is the one the package ships
+        assert_eq!(read_repo("packaging/systemd/arkd-system.service"), render_unit(Path::new("/usr/bin/ark"), Path::new(SYSTEM_WORKSPACE), Some(SYSTEM_USER), "", ""));
+    }
+
+    /// ent-018/019: every Dockerfile flavour passes the same lint the CLI runs (`ark docker check`).
+    #[test]
+    fn all_dockerfile_flavours_pass_the_container_lint() {
+        for f in ["Dockerfile", "Dockerfile.ubi", "Dockerfile.distroless"] {
+            let bad: Vec<String> = crate::ops::docker::lint(f, &read_repo(f)).into_iter().filter(|x| !x.ok).map(|x| format!("{}: {}", x.rule, x.detail)).collect();
+            assert!(bad.is_empty(), "{f}: {bad:?}");
+        }
+        let ubi = read_repo("Dockerfile.ubi");
+        assert!(ubi.contains("ubi9/ubi-minimal") && ubi.contains("USER 10001"));
+        assert!(read_repo("Dockerfile.distroless").contains("distroless/static"));
     }
 
     #[test]
