@@ -51,6 +51,15 @@ pub struct Skill {
     pub front: Value,
 }
 
+/// The role-pack part of a skill's frontmatter ([`Skill::role`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RoleMeta {
+    pub layer: String,
+    pub isco: String,
+    pub extends: Option<String>,
+    pub regulated: bool,
+}
+
 /// Maximum description length kept for the index (Hermes `MAX_DESCRIPTION_LENGTH`).
 pub const MAX_DESCRIPTION: usize = 1024;
 /// Skill names: lowercase letters, digits, `-`, `_`, `.`; ≤ 64 chars (Hermes `MAX_NAME_LENGTH`).
@@ -82,6 +91,24 @@ impl Skill {
     /// A frontmatter value by dotted path (`metadata.hermes.tags`).
     pub fn meta(&self, path: &str) -> Option<&Value> {
         path.split('.').try_fold(&self.front, |v, k| v.get(k))
+    }
+
+    /// Role-pack fields (`share/roles`, BATCH-next §7-6-1): `layer`, `isco` (always a string —
+    /// a bare YAML integer is read back as its digits, a unit group padded to four), `extends`.
+    /// `None` for an ordinary skill.
+    pub fn role(&self) -> Option<RoleMeta> {
+        let layer = self.front.get("layer").and_then(Value::as_str).map(str::trim).filter(|l| !l.is_empty())?.to_string();
+        let isco = match self.front.get("isco") {
+            Some(Value::String(s)) => s.clone(),
+            Some(Value::Number(n)) => n.to_string(),
+            _ => String::new(),
+        };
+        Some(RoleMeta {
+            isco: ark_kernel::roles::normalize_isco(&isco, ark_kernel::roles::Layer::parse(&layer)),
+            extends: self.front.get("extends").and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty()).map(String::from),
+            regulated: self.front.get("regulated").and_then(|v| v.as_bool().or_else(|| v.as_str().map(|s| s.eq_ignore_ascii_case("true")))).unwrap_or(false),
+            layer,
+        })
     }
 
     /// Runtime requirements the frontmatter declares.
@@ -318,23 +345,11 @@ pub fn user_dir(paths: &Paths) -> PathBuf {
     paths.data.join("skills")
 }
 
-/// ark's shared data dir (bundled skills, optional-skills, optional-mcps, plugin-catalog):
-/// `$ARK_SHARE_DIR`, `<exe>/../share/ark`, or the source tree's `share/` (dev builds).
+/// ark's shared data dir (bundled skills, optional-skills, optional-mcps, plugin-catalog, the
+/// role packs): `$ARK_SHARE_DIR`, `<exe>/../share/ark`, or the source tree's `share/` (dev
+/// builds). One implementation, shared with the kernel's role loader (`ark_kernel::roles`).
 pub fn share_dir() -> Option<PathBuf> {
-    if let Some(p) = std::env::var_os("ARK_SHARE_DIR").map(PathBuf::from).filter(|p| p.is_dir()) {
-        return Some(p);
-    }
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(bin) = exe.parent() {
-            for c in [bin.join("../share/ark"), bin.join("share")] {
-                if c.is_dir() {
-                    return c.canonicalize().ok();
-                }
-            }
-        }
-    }
-    let dev = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../share");
-    dev.is_dir().then(|| dev.canonicalize().ok()).flatten()
+    ark_kernel::roles::share_dir()
 }
 
 /// Every skill under `roots` (first definition of a name wins). Nested category folders are

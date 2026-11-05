@@ -611,6 +611,13 @@ pub fn find(cfg: &Config, cat: &Catalog, query: &str) -> Found {
             }
         })
         .collect();
+    if scored.is_empty() && many.is_empty() {
+        // `護理師` / `會計師` / `technicians`: retry without a common job-title suffix.
+        let stem = ["工程師", "人員", "師", "員", "者", "家", "s"].iter().find_map(|suf| q.strip_suffix(suf).filter(|s| s.chars().count() >= 2));
+        if let Some(stem) = stem {
+            return find(cfg, cat, stem);
+        }
+    }
     scored.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.layer.cmp(&b.1.layer)).then(a.1.slug.cmp(&b.1.slug)));
     many.extend(scored.into_iter().map(|(_, p)| (p.slug.clone(), label(p))));
     match many.len() {

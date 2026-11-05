@@ -268,15 +268,13 @@ mod tests {
 
     #[test]
     fn compat_skill_write_is_readable_by_ark() {
-        let d = std::env::temp_dir().join(format!("ark-compat-skill-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&d);
+        let d = ark_core::tmp::TempDir::new("ark-compat-skill");
         let imp = normalize("---\nname: notes\ndescription: Keep notes\nmetadata: {\"openclaw\": {\"requires\": {\"bins\": [\"rg\"]}}}\n---\nbody\n").unwrap();
         let p = write(&imp, &d.join("notes")).unwrap();
         let back = normalize(&std::fs::read_to_string(&p).unwrap()).unwrap();
         assert_eq!(back.name, "notes");
         assert_eq!(back.front["requires"]["bins"][0], "rg");
         assert_eq!(back.body, "body\n");
-        let _ = std::fs::remove_dir_all(&d);
     }
 
     #[test]
@@ -316,6 +314,60 @@ mod tests {
         }
         println!("skills: {seen} SKILL.md normalized, {failures:?} failed, variants {by_variant:?}");
         assert!(failures.is_empty(), "{failures:#?}");
+    }
+
+    /// 7-6-1: the role packs are ordinary SKILL.md files to every upstream reader. Each one
+    /// normalizes as a plain skill with nothing hoisted or dropped (OpenClaw and Hermes read
+    /// `name` + `description` and ignore the rest), the layer fields survive a write/read
+    /// round trip, and ark's own loader reads them back with `isco` as a string.
+    #[test]
+    fn compat_skill_role_packs_are_plain_skills_everywhere() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../share/roles");
+        let mut files = Vec::new();
+        walk(&root, 4, &mut files);
+        files.retain(|f| f.file_name().is_some_and(|n| n == "SKILL.md"));
+        assert!(files.len() >= 548, "{} packs", files.len());
+        for f in &files {
+            let text = std::fs::read_to_string(f).unwrap();
+            let imp = normalize(&text).unwrap_or_else(|e| panic!("{}: {e}", f.display()));
+            assert_eq!(variant(&imp.front), "plain", "{}", f.display());
+            assert!(imp.dropped.is_empty() && imp.mapped.is_empty() && imp.warnings.is_empty(), "{}: {:?} {:?} {:?}", f.display(), imp.mapped, imp.dropped, imp.warnings);
+            assert!(imp.front["isco"].is_string(), "{}: isco is a YAML string", f.display());
+            let dir = f.parent().unwrap();
+            let s = crate::skill::Skill::load(dir, &root, crate::skill::Source::Extra).unwrap();
+            let r = s.role().unwrap_or_else(|| panic!("{}: role fields", f.display()));
+            assert_eq!(s.name, dir.file_name().unwrap().to_string_lossy());
+            assert!(!s.description.is_empty());
+            assert_eq!(r.extends.is_none(), r.layer == "L0");
+        }
+        // Round trip through ark's writer keeps the layer fields.
+        let d = ark_core::tmp::TempDir::new("ark-compat-role");
+        let imp = from_dir(&root.join("L2/software-developer")).unwrap();
+        let p = write(&imp, &d.join("software-developer")).unwrap();
+        let back = crate::skill::Skill::load(p.parent().unwrap(), &d, crate::skill::Source::Extra).unwrap();
+        assert_eq!(back.role().unwrap(), crate::skill::RoleMeta { layer: "L2".into(), isco: "2512".into(), extends: Some("professional-practice".into()), regulated: false });
+    }
+
+    /// Bare-integer `isco` (as older packs and other tools write it) still reads as a string,
+    /// and a Distilly / colleague-skill style persona file (name + description + body, no
+    /// layer) stays an ordinary skill.
+    #[test]
+    fn compat_skill_role_fields_from_other_writers() {
+        let d = ark_core::tmp::TempDir::new("ark-compat-role2");
+        for (name, text) in [
+            ("bare", "---\nname: bare\ndescription: d\nlayer: L2\nisco: 110\nextends: armed-forces\nregulated: false\n---\nbody\n"),
+            ("hermes", "---\nname: hermes\ndescription: d\nlayer: L1\nisco: 2\nextends: professional-core\nplatforms: [linux]\n---\nbody\n"),
+            ("colleague", "---\nname: colleague\ndescription: How a teammate reviews code\nmetadata: {\"distilly\": {\"source\": \"team\"}}\n---\n# Review habits\n- read the tests first\n"),
+        ] {
+            let imp = normalize(text).unwrap();
+            write(&imp, &d.join(name)).unwrap();
+        }
+        let load = |n: &str| crate::skill::Skill::load(&d.join(n), &d, crate::skill::Source::Extra).unwrap();
+        assert_eq!(load("bare").role().unwrap().isco, "0110");
+        let h = load("hermes");
+        assert_eq!((h.role().unwrap().isco.as_str(), h.requirements().os), ("2", vec!["linux".to_string()]));
+        let c = load("colleague");
+        assert!(c.role().is_none() && c.description.contains("teammate"));
     }
 
     fn walk(dir: &std::path::Path, depth: usize, out: &mut Vec<std::path::PathBuf>) {

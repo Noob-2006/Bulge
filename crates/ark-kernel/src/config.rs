@@ -965,6 +965,11 @@ deny = []           # command globs that never run, even under --yolo
 [security]
 workspace_only = false
 
+# [role]        # professional role (`ark role use`): ISCO occupation or preset
+# active = "swdev"           # devops | swdev | secops | data | itsupport | a pack slug; "" = L0 core only
+# core = true                # the L0 professional core in every identity
+# scan_targets = ["10.0.0.0/24"]   # where a secops role may run active scanners
+
 # [providers.myvllm]
 # format = "openai_chat"
 # base_url = "http://localhost:8000/v1"

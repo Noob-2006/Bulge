@@ -125,6 +125,7 @@ fn find_matches_codes_names_and_disambiguates() {
         Found::One(id) => assert!(id.contains("nurs")),
         Found::None => panic!("護理 matches something"),
     }
+    assert_ne!(find(&cfg, &c, "護理師"), Found::None, "a job-title suffix is stripped");
     assert_eq!(find(&cfg, &c, "zzzz-not-a-job"), Found::None);
     assert_eq!(find(&cfg, &c, "9999"), Found::None);
 }
