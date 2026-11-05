@@ -380,7 +380,7 @@ pub fn postgres(dsn: &Dsn, client: &[String], sql: &str, lim: &Limits) -> Result
 }
 
 /// MySQL / MariaDB through `mysql`.
-pub fn mysql(dsn: &Dsn, client: &[String], sql: &str, lim: &Limits) -> Result<Rows, String> {
+pub fn mysql(dsn: &Dsn, client: &[String], sql: &str, lim: &Limits, mariadb: bool) -> Result<Rows, String> {
     let mut argv = client_argv(client, "mysql");
     let port = dsn.port.unwrap_or(3306);
     argv.extend(["--batch", "--quick", "--connect-timeout=10", "--init-command=SET SESSION TRANSACTION READ ONLY"].map(String::from));
@@ -399,7 +399,9 @@ pub fn mysql(dsn: &Dsn, client: &[String], sql: &str, lim: &Limits) -> Result<Ro
     if !dsn.password.is_empty() {
         env.push(("MYSQL_PWD".into(), dsn.password.clone()));
     }
-    let script = format!("SET SESSION max_execution_time={};\nSTART TRANSACTION READ ONLY;\n{sql};\nROLLBACK;\n", lim.timeout.as_millis());
+    // Server-side time limit: MySQL counts milliseconds (`max_execution_time`), MariaDB seconds (`max_statement_time`).
+    let limit = if mariadb { format!("SET SESSION max_statement_time={};", lim.timeout.as_secs().max(1)) } else { format!("SET SESSION max_execution_time={};", lim.timeout.as_millis()) };
+    let script = format!("{limit}\nSTART TRANSACTION READ ONLY;\n{sql};\nROLLBACK;\n");
     run_client(&argv, &env, &script, lim, &dsn.password, parse_mysql_batch)
 }
 

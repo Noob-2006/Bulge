@@ -166,7 +166,7 @@ fn execute(ctx: &ToolCtx, cfg: &DataConfig, s: &SourceCfg, sql: &str, max_rows: 
     match backends::dialect_of(&s.kind).ok_or("unknown kind")? {
         Dialect::Sqlite => backends::sqlite(&sqlite_path(ctx, s), sql, &lim),
         Dialect::Postgres => backends::postgres(&dsn_of(ctx, s)?, &s.client, sql, &lim),
-        Dialect::Mysql => backends::mysql(&dsn_of(ctx, s)?, &s.client, sql, &lim),
+        Dialect::Mysql => backends::mysql(&dsn_of(ctx, s)?, &s.client, sql, &lim, s.kind == "mariadb"),
         Dialect::ClickHouse => backends::clickhouse(&dsn_of(ctx, s)?, sql, &lim),
         Dialect::BigQuery => {
             let token = match (&s.token, &s.token_env) {

@@ -205,7 +205,13 @@ fn mysql_sets_a_read_only_session_and_transaction() {
     let argv = std::fs::read_to_string(out.join("argv.txt")).unwrap();
     assert!(argv.contains("--init-command=SET SESSION TRANSACTION READ ONLY") && argv.contains("--host=10.0.0.5") && argv.contains("--database=shop") && !argv.contains("pw123456"), "{argv}");
     assert!(std::fs::read_to_string(out.join("env.txt")).unwrap().contains("MYSQL_PWD=pw123456"));
-    assert!(std::fs::read_to_string(out.join("stdin.txt")).unwrap().contains("START TRANSACTION READ ONLY;"));
+    let stdin = std::fs::read_to_string(out.join("stdin.txt")).unwrap();
+    assert!(stdin.contains("START TRANSACTION READ ONLY;") && stdin.contains("SET SESSION max_execution_time=30000;"), "{stdin}");
+    // MariaDB spells the server-side time limit differently (seconds, max_statement_time).
+    let (client, out) = fake_client(&c.workspace, "mariadb", "printf 'n\\n1\\n'");
+    let (q, _) = tool_set(json!({"sources": {"m": {"kind": "mariadb", "dsn": "mysql://root@10.0.0.5/shop", "client": [client]}}}));
+    assert!(!q.call(&c, json!({"sql": "SELECT 1 AS n"})).is_error);
+    assert!(std::fs::read_to_string(out.join("stdin.txt")).unwrap().contains("SET SESSION max_statement_time=30;"));
 }
 
 #[test]
@@ -387,7 +393,7 @@ fn real_mariadb_enforces_read_only_in_both_layers() {
     wait_for("mariadb", || mysql("SELECT 1;"));
     assert!(mysql("CREATE TABLE t(id int primary key, v varchar(20)); INSERT INTO t VALUES (1,'a'),(2,'b'),(3,NULL);"));
     let c = ctx("sql-realmy");
-    let cfg = json!({"max_rows": 2, "sources": {"my": {"kind": "mysql", "dsn": "mysql://root:ark_test_pw@127.0.0.1:3306/shop", "client": ["podman", "exec", "-i", "-e", "MYSQL_PWD", name, "mariadb"]}}});
+    let cfg = json!({"max_rows": 2, "sources": {"my": {"kind": "mariadb", "dsn": "mysql://root:ark_test_pw@127.0.0.1:3306/shop", "client": ["podman", "exec", "-i", "-e", "MYSQL_PWD", name, "mariadb"]}}});
     let (q, _) = tool_set(cfg);
     let v = rows_of(&q.call(&c, json!({"sql": "SELECT id, v FROM t ORDER BY id"})));
     assert_eq!((v["row_count"].as_u64(), v["truncated"].as_bool()), (Some(2), Some(true)));
@@ -398,7 +404,7 @@ fn real_mariadb_enforces_read_only_in_both_layers() {
     let client: Vec<String> = ["podman", "exec", "-i", "-e", "MYSQL_PWD", name, "mariadb"].map(String::from).to_vec();
     let lim = Limits { max_rows: 10, timeout: Duration::from_secs(20), cancel: c.cancel.clone() };
     for w in ["DELETE FROM t", "INSERT INTO t VALUES (9,'z')", "DROP TABLE t"] {
-        let e = backends::mysql(&dsn, &client, w, &lim).unwrap_err();
+        let e = backends::mysql(&dsn, &client, w, &lim, true).unwrap_err();
         assert!(e.to_lowercase().contains("read") , "{w}: {e}");
     }
     let v = rows_of(&q.call(&c, json!({"sql": "SELECT count(*) FROM t"})));

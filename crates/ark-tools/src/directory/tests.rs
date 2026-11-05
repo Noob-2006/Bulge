@@ -206,3 +206,54 @@ fn config_validation() {
     assert!(t.call(&c, json!({"kind": "user", "query": "x"})).content.contains("name a `provider`"));
     assert!(t.call(&c, json!({"provider": "a", "kind": "user", "query": "x"})).content.contains("NOPE"));
 }
+
+// ───────────── a real OpenLDAP server in podman (ark-test-prodev-ldap), run with `--ignored` ─────────────
+
+struct Container(String);
+impl Drop for Container {
+    fn drop(&mut self) {
+        let _ = std::process::Command::new("podman").args(["rm", "-f", &self.0]).output();
+    }
+}
+
+/// `cargo test -p ark-tools directory::tests::real_openldap -- --ignored`
+/// (needs podman, docker.io/osixia/openldap:1.5.0 and the host's `ldapsearch`).
+#[test]
+#[ignore = "needs podman, docker.io/osixia/openldap:1.5.0 and ldapsearch"]
+fn real_openldap_lookup_through_ldapsearch() {
+    use std::io::Write;
+    let name = "ark-test-prodev-ldap";
+    let _ = std::process::Command::new("podman").args(["rm", "-f", name]).output();
+    let _g = Container(name.into());
+    let o = std::process::Command::new("podman").args(["run", "-d", "--name", name, "-p", "127.0.0.1:13389:389", "-e", "LDAP_ORGANISATION=Ark Test", "-e", "LDAP_DOMAIN=example.org", "-e", "LDAP_ADMIN_PASSWORD=ark_test_pw", "docker.io/osixia/openldap:1.5.0"]).output().unwrap();
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    let ready = || std::process::Command::new("ldapsearch").args(["-x", "-LLL", "-H", "ldap://127.0.0.1:13389", "-D", "cn=admin,dc=example,dc=org", "-w", "ark_test_pw", "-b", "dc=example,dc=org", "-s", "base", "dn"]).output().map(|o| o.status.success()).unwrap_or(false);
+    for _ in 0..60 {
+        if ready() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_secs(1));
+    }
+    assert!(ready(), "openldap did not become ready");
+    let ldif = "dn: ou=people,dc=example,dc=org\nobjectClass: organizationalUnit\nou: people\n\ndn: ou=groups,dc=example,dc=org\nobjectClass: organizationalUnit\nou: groups\n\ndn: uid=alee,ou=people,dc=example,dc=org\nobjectClass: inetOrgPerson\nuid: alee\ncn: Ann Lee\nsn: Lee\nmail: ann@example.org\nuserPassword: not-for-output\n\ndn: uid=bob,ou=people,dc=example,dc=org\nobjectClass: inetOrgPerson\nuid: bob\ncn: Bob Ray\nsn: Ray\nmail: bob@example.org\n\ndn: cn=vpn,ou=groups,dc=example,dc=org\nobjectClass: groupOfNames\ncn: vpn\ndescription: remote access\nmember: uid=alee,ou=people,dc=example,dc=org\nmember: uid=bob,ou=people,dc=example,dc=org\n";
+    let mut add = std::process::Command::new("ldapadd").args(["-x", "-H", "ldap://127.0.0.1:13389", "-D", "cn=admin,dc=example,dc=org", "-w", "ark_test_pw"]).stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::null()).spawn().unwrap();
+    add.stdin.take().unwrap().write_all(ldif.as_bytes()).unwrap();
+    assert!(add.wait().unwrap().success());
+
+    let mut c = ctx("dir-realldap");
+    c.secrets = Arc::new(|s: &str| s.replace("{{secret:LDAP_PW}}", "ark_test_pw"));
+    let t = one(json!({"providers": {"corp": {"kind": "ldap", "uri": "ldap://127.0.0.1:13389", "base_dn": "dc=example,dc=org", "bind_dn": "cn=admin,dc=example,dc=org", "bind_password": "{{secret:LDAP_PW}}"}}}));
+    let v = body(&t.call(&c, json!({"kind": "user", "query": "alee"})));
+    assert_eq!((v["results"][0]["login"].as_str(), v["results"][0]["mail"].as_str()), (Some("alee"), Some("ann@example.org")));
+    assert!(!v.to_string().contains("not-for-output"), "userPassword never leaves");
+    let v = body(&t.call(&c, json!({"kind": "members", "query": "vpn"})));
+    assert_eq!(v["results"][0]["members"], json!(["alee", "bob"]));
+    let v = body(&t.call(&c, json!({"kind": "groups_of", "query": "bob"})));
+    assert_eq!(v["results"][0]["groups"], json!(["vpn"]));
+    let v = body(&t.call(&c, json!({"kind": "user", "query": "*", "limit": 1})));
+    assert_eq!((v["results"].as_array().unwrap().len(), v["truncated"].as_bool()), (1, Some(true)));
+    // A wrong bind password is an error without the password in it.
+    c.secrets = Arc::new(|s: &str| s.replace("{{secret:LDAP_PW}}", "wrong-password-zz"));
+    let o = t.call(&c, json!({"kind": "user", "query": "alee"}));
+    assert!(o.is_error && !o.content.contains("wrong-password-zz"), "{}", o.content);
+}

@@ -245,7 +245,7 @@ mod tests {
     }
 
     fn home(config_toml: &str) -> Home {
-        let dir = ark_core::tmp::TempDir::new("ark-pro");
+        let dir = ark_core::tmp::TempDir::new("ark-cfg-pro");
         let paths = Paths { data: dir.join("data"), config_dir: dir.join("config"), runtime: dir.join("run") };
         std::fs::create_dir_all(&paths.data).unwrap();
         std::fs::create_dir_all(&paths.config_dir).unwrap();

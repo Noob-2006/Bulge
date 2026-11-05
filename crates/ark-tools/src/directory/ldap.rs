@@ -37,9 +37,12 @@ pub fn pattern(q: &str) -> String {
 const USER_ATTRS: &[&str] = &["dn", "cn", "uid", "sAMAccountName", "userPrincipalName", "mail", "displayName", "title", "department", "userAccountControl", "accountExpires", "lastLogonTimestamp", "whenCreated", "memberOf", "manager", "employeeID", "shadowExpire", "nsAccountLock", "pwdAccountLockedTime"];
 const GROUP_ATTRS: &[&str] = &["dn", "cn", "description", "member", "uniqueMember", "memberUid", "gidNumber", "sAMAccountName", "mail", "groupType"];
 
-pub fn user_filter(q: &str) -> String {
+/// `ad`: Active Directory also stores machines as `user` objects, so they are excluded there;
+/// OpenLDAP does not know the class `computer` and would treat `(!(objectClass=computer))` as undefined.
+pub fn user_filter(q: &str, ad: bool) -> String {
     let p = pattern(q);
-    format!("(&(|(objectClass=person)(objectClass=inetOrgPerson)(objectClass=user))(!(objectClass=computer))(|(sAMAccountName={p})(uid={p})(userPrincipalName={p})(mail={p})(cn={p})(displayName={p})))")
+    let not_computer = if ad { "(!(objectClass=computer))" } else { "" };
+    format!("(&(|(objectClass=person)(objectClass=inetOrgPerson)(objectClass=user)){not_computer}(|(sAMAccountName={p})(uid={p})(userPrincipalName={p})(mail={p})(cn={p})(displayName={p})))")
 }
 
 pub fn group_filter(q: &str) -> String {
@@ -203,7 +206,7 @@ pub fn lookup(p: &Provider, ctx: &ark_core::ToolCtx, q: &Query) -> Result<Value,
     let limit = q.limit;
     match q.kind.as_str() {
         "user" => {
-            let r = run(p, ctx, &user_filter(&q.query), USER_ATTRS, limit + 1)?;
+            let r = run(p, ctx, &user_filter(&q.query, p.kind == "ad"), USER_ATTRS, limit + 1)?;
             Ok(json!({"results": r.iter().take(limit).map(user_record).collect::<Vec<_>>(), "truncated": r.len() > limit}))
         }
         "group" => {
@@ -219,7 +222,7 @@ pub fn lookup(p: &Provider, ctx: &ark_core::ToolCtx, q: &Query) -> Result<Value,
             }
         }
         "groups_of" => {
-            let u = run(p, ctx, &user_filter(&q.query), USER_ATTRS, 2)?;
+            let u = run(p, ctx, &user_filter(&q.query, p.kind == "ad"), USER_ATTRS, 2)?;
             let user = match u.as_slice() {
                 [] => return Err(format!("no user matches `{}`", q.query)),
                 [u] => u,
@@ -254,7 +257,8 @@ mod tests {
         assert_eq!(pattern("ann*"), "ann*");
         assert_eq!(pattern("*"), "*");
         assert_eq!(pattern("a*b"), "a\\2ab");
-        let f = user_filter("x)(objectClass=*");
+        let f = user_filter("x)(objectClass=*", true);
+        assert!(f.contains("(!(objectClass=computer))") && !user_filter("a", false).contains("computer"));
         assert!(!f.contains("x)(objectClass=") && f.contains("x\\29\\28objectClass=*"), "{f}");
     }
 
