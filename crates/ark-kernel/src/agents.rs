@@ -297,6 +297,46 @@ fn parse_filters(input: &Value) -> Result<Filters, String> {
     Ok(Filters { roles, after, before })
 }
 
+/// `session_search` over the SQLite index; `None` = the index is unavailable (scan instead).
+fn session_search_indexed(store: &Store, query: &str, sid: Option<&str>, filters: &Filters, limit: usize, summary: bool) -> Option<String> {
+    use crate::sqlindex::{search_messages, session_title, sync_sessions, MsgFilter};
+    let data = store.root().parent()?.to_path_buf();
+    sync_sessions(&data, store.root()).ok()?;
+    let f = MsgFilter { session: sid.map(str::to_string), roles: filters.roles.as_ref().map(|r| r.iter().map(|x| x.to_string()).collect()), after: filters.after, before: filters.before };
+    let q = query.to_lowercase();
+    if !summary {
+        let hits = search_messages(&data, query, &f, limit).ok()?;
+        let lines: Vec<String> = hits
+            .iter()
+            .map(|h| {
+                let lower = h.text.to_lowercase();
+                let pos = lower.find(&q).unwrap_or(0);
+                format!("{} #{} [{}] {}", h.session, h.seq, h.role, snippet(&h.text, &lower, pos, q.len()))
+            })
+            .collect();
+        return Some(if lines.is_empty() { "no matches".into() } else { lines.join("\n") });
+    }
+    let hits = search_messages(&data, query, &f, 20_000).ok()?;
+    // Group per session, most recently matched session first; hits within one oldest first.
+    let mut order: Vec<String> = Vec::new();
+    let mut groups: BTreeMap<String, Vec<&crate::sqlindex::MsgHit>> = BTreeMap::new();
+    for h in &hits {
+        if !groups.contains_key(&h.session) {
+            order.push(h.session.clone());
+        }
+        groups.entry(h.session.clone()).or_default().push(h);
+    }
+    let mut blocks = Vec::new();
+    for id in order.into_iter().take(limit) {
+        let mut g = groups.remove(&id).unwrap_or_default();
+        g.sort_by_key(|h| (h.ts, h.seq));
+        let (first, last) = (g[0], g[g.len() - 1]);
+        let title = session_title(&data, &id).filter(|t| !t.is_empty()).unwrap_or_else(|| "(untitled)".into());
+        blocks.push(format!("{} · {} hit(s) · {} → {}\n  {}\n  [{}] {}", id, g.len(), show_time(first.ts), show_time(last.ts), title, first.role, first_sentence(&first.text)));
+    }
+    Some(if blocks.is_empty() { "no matches".into() } else { blocks.join("\n\n") })
+}
+
 fn session_search_inner(store: &Store, input: &Value) -> Result<String, String> {
     let query = arg_str(input, &["query"]).unwrap_or_default();
     let sid = session_arg(input);
@@ -350,6 +390,15 @@ fn session_search_inner(store: &Store, input: &Value) -> Result<String, String> 
     }
 
     let limit = arg_usize(input, &["limit"]).unwrap_or(10).clamp(1, 50);
+
+    // The SQLite index (FTS5 over every session's messages, synced incrementally from the
+    // JSONL logs) answers queries and summaries; the linear log scan below stays as the
+    // fallback when the index cannot be opened.
+    if summary || !query.is_empty() {
+        if let Some(out) = session_search_indexed(store, &query, sid.as_deref(), &filters, limit, summary) {
+            return Ok(out);
+        }
+    }
 
     if summary {
         let q = query.to_lowercase();

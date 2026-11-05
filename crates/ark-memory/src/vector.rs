@@ -1,9 +1,12 @@
-//! Vector long-term memory (OpenClaw memory-lancedb, MIT) on ark's own on-disk store
-//! (`<data>/memory/vector/memories.json`, no LanceDB): memory_recall / memory_store /
-//! memory_forget, auto-recall before a reply and opt-in auto-capture of user statements.
-//! Score = 1 / (1 + L2 distance) as LanceDB reports it.
+//! Vector long-term memory (OpenClaw memory-lancedb, MIT) on ark's unified memory table
+//! (`memories` in `<data>/index.db`, ledger `memory/memories.jsonl`; see memstore.rs):
+//! memory_recall / memory_store / memory_forget, auto-recall before a reply and opt-in
+//! auto-capture of user statements. Score = 1 / (1 + L2 distance) as LanceDB reports it,
+//! weighted by the row's trust level (H8); recalled rows are threat-scanned again on read.
 
 use crate::embed::{self, Embedder, Kind, LocalHash};
+use crate::memstore::{self, MemRow};
+use crate::trust;
 use crate::util::{self, clip};
 use crate::Host;
 use ark_core::tool::{arg_opt_str, arg_opt_u64};
@@ -15,7 +18,6 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 
 pub const CATEGORIES: &[&str] = &["preference", "fact", "decision", "entity", "other"];
-const OVERFETCH: usize = 10;
 const AUTO_RECALL_CAP: usize = 3;
 const MAX_CAPTURE_PER_TURN: usize = 3;
 const DUPLICATE_LIMIT: usize = 5;
@@ -30,6 +32,20 @@ pub struct Row {
     pub category: String,
     pub created_ms: u64,
     pub model: String,
+    /// Where it came from (`memory_store`, `auto_capture`, `file:MEMORY.md`, `legacy:vector`…).
+    #[serde(default)]
+    pub source: String,
+    /// `user` | `agent` | `external` | `tainted` | `quarantined` (trust.rs).
+    #[serde(default)]
+    pub trust: String,
+    #[serde(default)]
+    pub last_used_ms: u64,
+}
+
+impl From<MemRow> for Row {
+    fn from(m: MemRow) -> Row {
+        Row { id: m.id, text: m.text, vector: m.vec, importance: m.importance, category: m.category, created_ms: m.created_ms, model: m.model, source: m.source, trust: m.trust, last_used_ms: m.last_used_ms }
+    }
 }
 
 pub struct VectorMemory {
@@ -126,16 +142,40 @@ impl VectorMemory {
     }
 
     fn path(&self) -> std::path::PathBuf {
-        self.host.memory_dir().join("vector/memories.json")
+        memstore::ledger_path(&self.host.data)
     }
     fn model(&self) -> String {
         format!("{}/{}", self.embedder.id(), self.embedder.model())
     }
+    /// Every long-term memory row except the MEMORY.md / USER.md mirror (those are managed
+    /// with the `memory` tool and already sit in the system prompt).
     pub fn rows(&self) -> Vec<Row> {
-        util::read_json(&self.path()).and_then(|v| serde_json::from_value(v).ok()).unwrap_or_default()
+        self.mem_rows().into_iter().filter(|r| !r.is_file_entry()).map(Row::from).collect()
     }
-    fn save(&self, rows: &[Row]) -> Result<(), String> {
-        util::write_atomic(&self.path(), serde_json::to_string(rows).unwrap_or_default().as_bytes())
+    fn mem_rows(&self) -> Vec<MemRow> {
+        if let Err(e) = memstore::sync(&self.host.data) {
+            eprintln!("ark: memory index sync: {e}");
+        }
+        memstore::all(&self.host.data).unwrap_or_default()
+    }
+
+    /// Embed rows that have no vector for the current model (rebuilt index, model switch).
+    fn ensure_vectors(&self, rows: &mut [MemRow]) {
+        let model = self.model();
+        let todo: Vec<usize> = rows.iter().enumerate().filter(|(_, r)| (r.model != model || r.vec.is_empty()) && r.trust != trust::QUARANTINED && !r.text.trim().is_empty()).map(|(i, _)| i).collect();
+        if todo.is_empty() {
+            return;
+        }
+        let texts: Vec<String> = todo.iter().map(|i| rows[*i].text.clone()).collect();
+        let Ok(vs) = self.embedder.embed(&texts, Kind::Document, util::RETRY_QUERY) else { return };
+        for (i, v) in todo.into_iter().zip(vs) {
+            if v.is_empty() {
+                continue;
+            }
+            let _ = memstore::set_vec(&self.host.data, &rows[i].id, &model, &v);
+            rows[i].model = model.clone();
+            rows[i].vec = v;
+        }
     }
 
     pub fn embed(&self, text: &str, kind: Kind) -> Result<Vec<f32>, String> {
@@ -143,23 +183,61 @@ impl VectorMemory {
         v.pop().filter(|v| !v.is_empty()).ok_or_else(|| "embedding provider returned no vector".to_string())
     }
 
-    /// Rows of the current model with score ≥ `min`, best first.
-    pub fn search(&self, vector: &[f32], limit: usize, min: f64) -> Vec<(Row, f64)> {
+    /// Raw similarity (1 / (1 + L2)) of every non-quarantined row, best first; `files` adds
+    /// the MEMORY.md / USER.md mirror.
+    fn scored(&self, vector: &[f32], files: bool) -> Vec<(Row, f64)> {
         let model = self.model();
-        let mut v: Vec<(Row, f64)> = self
-            .rows()
+        let mut rows = self.mem_rows();
+        rows.retain(|r| r.trust != trust::QUARANTINED && (files || !r.is_file_entry()));
+        self.ensure_vectors(&mut rows);
+        let mut v: Vec<(Row, f64)> = rows
             .into_iter()
-            .filter(|r| r.model == model && r.vector.len() == vector.len() && !r.text.trim().is_empty())
+            .filter(|r| r.model == model && r.vec.len() == vector.len() && !r.text.trim().is_empty())
             .map(|r| {
-                let d: f64 = r.vector.iter().zip(vector).map(|(a, b)| ((a - b) as f64).powi(2)).sum::<f64>().sqrt();
-                let s = 1.0 / (1.0 + d);
-                (r, s)
+                let d: f64 = r.vec.iter().zip(vector).map(|(a, b)| ((a - b) as f64).powi(2)).sum::<f64>().sqrt();
+                (Row::from(r), 1.0 / (1.0 + d))
             })
-            .filter(|(_, s)| *s >= min)
             .collect();
         v.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+        v
+    }
+
+    /// Rows of the current model with score ≥ `min`, best first (unweighted: duplicate
+    /// detection and forget-by-query compare text, not trust).
+    pub fn search(&self, vector: &[f32], limit: usize, min: f64) -> Vec<(Row, f64)> {
+        let mut v: Vec<(Row, f64)> = self.scored(vector, false).into_iter().filter(|(_, s)| *s >= min).collect();
         v.truncate(limit);
         v
+    }
+
+    /// Recall ranking: similarity × trust weight, then the read-time threat re-scan — a
+    /// row that now matches a threat pattern is quarantined and never returned.
+    pub fn recall(&self, vector: &[f32], limit: usize, min: f64, auto: bool) -> Vec<(Row, f64)> {
+        let mut v: Vec<(Row, f64)> = self
+            .scored(vector, !auto)
+            .into_iter()
+            .map(|(r, s)| {
+                let w = trust::weight(&r.trust);
+                (r, s * w)
+            })
+            .filter(|(r, s)| *s >= min && (!auto || trust::weight(&r.trust) >= trust::AUTO_RECALL_MIN))
+            .collect();
+        v.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+        let mut out = Vec::new();
+        for (r, s) in v {
+            let found = trust::recheck(&r.text);
+            if !found.is_empty() {
+                let _ = memstore::quarantine(&self.host.data, &r.id, &found);
+                continue;
+            }
+            out.push((r, s));
+            if out.len() >= limit {
+                break;
+            }
+        }
+        let ids: Vec<&str> = out.iter().map(|(r, _)| r.id.as_str()).collect();
+        memstore::touch(&self.host.data, &ids, util::now_ms());
+        out
     }
 
     fn duplicate(&self, vector: &[f32], exact: Option<&str>) -> Option<Row> {
@@ -167,28 +245,26 @@ impl VectorMemory {
     }
 
     pub fn store(&self, text: &str, importance: f64, category: &str) -> Result<(String, bool), String> {
+        self.store_as(text, importance, category, "api", trust::AGENT, "")
+    }
+
+    /// Store with provenance: `source` (who wrote it), `trust` level, `origin` session.
+    pub fn store_as(&self, text: &str, importance: f64, category: &str, source: &str, trust_level: &str, origin: &str) -> Result<(String, bool), String> {
         let v = self.embed(text, Kind::Document)?;
         let _g = self.lock.lock().unwrap();
         if let Some(r) = self.duplicate(&v, Some(&normalize_text(text))) {
             return Ok((r.id, false));
         }
-        let mut rows = self.rows();
-        let id = util::sha256_hex(format!("{text}{}{}", util::now_ms(), rows.len()).as_bytes())[..16].to_string();
-        rows.push(Row { id: id.clone(), text: normalize_text(text), vector: v, importance: importance.clamp(0.0, 1.0), category: category.into(), created_ms: util::now_ms(), model: self.model() });
-        self.save(&rows)?;
+        let now = util::now_ms();
+        let id = util::sha256_hex(format!("{text}{now}{origin}").as_bytes())[..16].to_string();
+        let row = MemRow { id: id.clone(), text: normalize_text(text), category: category.into(), source: source.into(), trust: trust_level.into(), importance: importance.clamp(0.0, 1.0), created_ms: now, origin: origin.into(), model: self.model(), vec: v, ..Default::default() };
+        memstore::add(&self.host.data, &row)?;
         Ok((id, true))
     }
 
     pub fn delete(&self, id: &str) -> Result<bool, String> {
         let _g = self.lock.lock().unwrap();
-        let mut rows = self.rows();
-        let n = rows.len();
-        rows.retain(|r| r.id != id);
-        if rows.len() == n {
-            return Ok(false);
-        }
-        self.save(&rows)?;
-        Ok(true)
+        memstore::forget(&self.host.data, id)
     }
 
     fn recall_query(&self, q: &str) -> String {
@@ -201,7 +277,8 @@ impl VectorMemory {
             return None;
         }
         let v = self.embed(&self.recall_query(prompt), Kind::Query).ok()?;
-        let hits: Vec<(Row, f64)> = self.search(&v, OVERFETCH, 0.3).into_iter().take(AUTO_RECALL_CAP).collect();
+        // Low-trust rows are never injected unasked; MEMORY.md / USER.md are already in the prompt.
+        let hits: Vec<(Row, f64)> = self.recall(&v, AUTO_RECALL_CAP, 0.3, true);
         if hits.is_empty() {
             return None;
         }
@@ -228,7 +305,8 @@ impl VectorMemory {
                 q.pop_front();
             }
         }
-        match self.store(&text, 0.7, detect_category(&text)) {
+        // The user's own words: the highest trust level.
+        match self.store_as(&text, 0.7, detect_category(&text), "auto_capture", trust::USER, session) {
             Ok((_, true)) => 1,
             _ => 0,
         }
@@ -270,13 +348,14 @@ impl Tool for Recall {
             Ok(v) => v,
             Err(e) => return ToolOutput::ok(format!("Memory recall is unavailable right now ({e}). Do not assume that no relevant memory exists.")),
         };
-        let hits: Vec<(Row, f64)> = self.0.search(&v, limit + OVERFETCH, 0.1).into_iter().take(limit).collect();
+        let hits: Vec<(Row, f64)> = self.0.recall(&v, limit, 0.1, false);
         if hits.is_empty() {
             return ok("No relevant memories found.".into(), json!({"count": 0}));
         }
         let max = self.0.host.settings.vector.recall_max_chars;
-        let text = hits.iter().enumerate().map(|(i, (r, s))| format!("{}. [{}] {} ({:.0}%)", i + 1, r.category, clip(&r.text, max), s * 100.0)).collect::<Vec<_>>().join("\n");
-        ok(format!("Found {} memories:\n\n{UNTRUSTED}\n{text}", hits.len()), json!({"count": hits.len(), "memories": hits.iter().map(|(r, s)| json!({"id": r.id, "text": r.text, "category": r.category, "importance": r.importance, "score": s})).collect::<Vec<_>>()}))
+        let low = |r: &Row| if trust::weight(&r.trust) < trust::AUTO_RECALL_MIN { " [low trust: written while untrusted content was in context]" } else { "" };
+        let text = hits.iter().enumerate().map(|(i, (r, s))| format!("{}. [{}] {} ({:.0}%){}", i + 1, r.category, clip(&r.text, max), s * 100.0, low(r))).collect::<Vec<_>>().join("\n");
+        ok(format!("Found {} memories:\n\n{UNTRUSTED}\n{text}", hits.len()), json!({"count": hits.len(), "memories": hits.iter().map(|(r, s)| json!({"id": r.id, "text": r.text, "category": r.category, "importance": r.importance, "score": s, "source": r.source, "trust": r.trust})).collect::<Vec<_>>()}))
     }
 }
 
@@ -302,7 +381,11 @@ impl Tool for Store {
         }
         let cat = arg_opt_str(&input, "category").filter(|c| CATEGORIES.contains(c)).unwrap_or("other");
         let imp = input.get("importance").and_then(Value::as_f64).unwrap_or(0.7);
-        match self.0.store(text, imp, cat) {
+        // H8: a write made while untrusted external content is in the context is kept, but
+        // as `tainted` — weighted down and never auto-injected.
+        let level = trust::for_model_write(&self.0.host.data, &ctx.session_id);
+        match self.0.store_as(text, imp, cat, "memory_store", level, &ctx.session_id) {
+            Ok((id, true)) if level == trust::TAINTED => ok(format!("Stored as low-trust (the context contains untrusted external content): \"{}...\"", clip(text, 100)), json!({"action": "created", "id": id, "trust": level})),
             Ok((id, true)) => ok(format!("Stored: \"{}...\"", clip(text, 100)), json!({"action": "created", "id": id})),
             Ok((id, false)) => ok(format!("Already stored: \"{text}\""), json!({"action": "already_present", "existingId": id})),
             Err(e) => ToolOutput::err(format!("memory_store failed: {e}")),

@@ -283,6 +283,7 @@ impl Runtime {
         if self.cfg.tools.tool_search.enabled {
             v.push(crate::ctxrun::tool_search_schema());
         }
+        v.push(crate::ctxfetch::schema());
         if goal_mode {
             v.push(ToolSchema {
                 name: KERNEL_TOOL_GOAL_DONE.into(),
@@ -930,6 +931,8 @@ impl Runtime {
                 req.options.service_tier = Some("priority".into());
             }
             self.assemble(log, &view, &mut req)?;
+            // C11 / srv-058: old long tool results go out clipped, with a context_fetch pointer.
+            context::trim_old_tool_results(&mut req.messages, cfg.compaction.max_tool_result_chars, cfg.compaction.keep_tool_results);
             th.apply(&mut req);
             if boost > 0 {
                 req.max_tokens = req.max_tokens.saturating_mul(1 << boost).min(MAX_BOOSTED_TOKENS);
@@ -1449,6 +1452,7 @@ impl Runtime {
         for l in self.lifecycles() {
             l.pre_compress(&log.id, &view.workspace, &view.messages[..cut]);
         }
+        let engine_owned = owned.is_some();
         let (summary, fallback) = match (owned, self.resolver.provider(pid)) {
             (Some(c), _) => (c.summary, false),
             (None, Ok(p)) => {
@@ -1463,6 +1467,9 @@ impl Runtime {
         if fallback {
             self.append(log, EventKind::Notice { level: "warn".into(), text: "summary model unavailable or low quality; used deterministic digest".into() })?;
         }
+        // Retrieval pointer: what the summary dropped is still in the log and the index (an
+        // engine that owns compaction keeps its summary verbatim).
+        let summary = if engine_owned { summary } else { format!("{summary}\n\n(Earlier messages stay searchable with session_search {{\"session\":\"{}\",\"query\":\"…\"}}; earlier tool output with {} {{\"query\":\"…\"}}.)", log.id, crate::ctxfetch::NAME) };
         self.append(log, EventKind::Compaction { upto_seq: view.message_seqs[cut], summary, pruned: vec![], tokens_before: before })?;
         // The history was rewritten: micro-compaction starts over from the new summary.
         crate::ctxrun::micro_reset(&self.ctx, &log.id);
@@ -1596,6 +1603,14 @@ impl Runtime {
                     crate::normalize::coerce(&json!({"properties":{"query":{"type":"string"},"limit":{"type":"integer"}}}), &mut tinput);
                     let specs = self.session_specs(&log.id, &self.session_model(log));
                     results[i] = Some(ToolOutput::ok(crate::ctxrun::tool_search(&specs, &self.cfg, &tinput)));
+                    continue;
+                }
+                crate::ctxfetch::NAME => {
+                    crate::normalize::coerce(&crate::ctxfetch::schema().input_schema, &mut tinput);
+                    results[i] = Some(match crate::ctxfetch::run(log.events(), &self.paths.data, self.store.root(), &log.id, &tinput) {
+                        Ok(t) => ToolOutput::ok(t),
+                        Err(e) => ToolOutput::err(format!("{}: {e}", crate::ctxfetch::NAME)),
+                    });
                     continue;
                 }
                 KERNEL_TOOL_SEARCH => {

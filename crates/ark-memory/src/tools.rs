@@ -185,6 +185,18 @@ pub fn excerpt(content: &str, path: &str, from: Option<usize>, lines: Option<usi
 }
 
 pub fn read_memory_file(h: &Host, path: &str, from: Option<usize>, lines: Option<usize>) -> Value {
+    // `memories/<id>`: a long-term memory row (memory_search cites them like files).
+    if let Some(id) = path.strip_prefix("memories/") {
+        return match crate::memstore::get(&h.data, id).filter(|r| r.trust != crate::trust::QUARANTINED) {
+            Some(r) => {
+                let mut v = excerpt(&r.text, path, from, lines);
+                v["source"] = json!(r.source);
+                v["trust"] = json!(r.trust);
+                v
+            }
+            None => json!({"status": "not_found", "path": path, "text": ""}),
+        };
+    }
     match resolve_memory_path(h, path) {
         Err(e) => json!({"status": "error", "path": path, "text": "", "code": "MEMORY_PATH_NOT_ALLOWED", "error": e}),
         Ok((rel, abs)) => match fs::read(&abs) {
@@ -351,7 +363,7 @@ pub fn tests_ctx(home: &Path) -> ToolCtx {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use ark_core::Cancel;
 
@@ -370,7 +382,8 @@ mod tests {
 
     #[test]
     fn search_records_recall_and_get_reads_bounded() {
-        let h = crate::test_host("tools", |_| {});
+        // Sessions are a default corpus now (srv-059); this test covers the opt-out.
+        let h = crate::test_host("tools", |s| s.search.sources = vec!["memory".into()]);
         fs::create_dir_all(h.memory_dir().join("daily")).unwrap();
         let note: String = (1..=200).map(|i| format!("line {i}: the deploy key rotates monthly")).collect::<Vec<_>>().join("\n");
         fs::write(h.memory_dir().join("daily/2026-11-01.md"), &note).unwrap();

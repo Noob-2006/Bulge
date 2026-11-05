@@ -203,8 +203,8 @@ pub fn build_request(view: &View, cfg: &Config, specs: &[ToolSpec], kernel_tools
 ///
 /// Tool output is the bulk of a long agent transcript and is almost never re-read in full:
 /// a `cargo build` log from twenty steps ago costs its full token count on every request.
-/// The full text stays in the session log (`ark session show`), so this is lossy only to the
-/// model's view — and only for results that are already outside the kept window.
+/// The full text stays in the session log (and the SQLite index); the marker names
+/// `context_fetch`, which brings it back on demand — retrieval instead of re-sending.
 pub fn trim_old_tool_results(messages: &mut [Message], max_chars: usize, keep: usize) {
     if max_chars == 0 {
         return;
@@ -218,7 +218,10 @@ pub fn trim_old_tool_results(messages: &mut [Message], max_chars: usize, keep: u
             }
         }
     }
-    let cut = idx.len().saturating_sub(keep);
+    // The clip boundary moves in steps of `keep` results, not one result per step: every
+    // move rewrites an old message and breaks the provider's prompt cache from there on.
+    let step = keep.max(1);
+    let cut = idx.len().saturating_sub(keep) / step * step;
     for (mi, bi) in idx.into_iter().take(cut) {
         let Block::ToolResult { tool_use_id, content, is_error } = &messages[mi].content[bi] else { continue };
         if content.chars().count() <= max_chars {
@@ -229,7 +232,11 @@ pub fn trim_old_tool_results(messages: &mut [Message], max_chars: usize, keep: u
             let total = content.chars().count();
             content.chars().skip(total.saturating_sub(max_chars / 3)).collect()
         };
-        let clipped = format!("{head}\n[… {} characters clipped by ark; the full output is in the session log (`ark session show`) …]\n{tail}", content.chars().count() - head.chars().count() - tail.chars().count());
+        let clipped = format!(
+            "{head}\n[… {} characters clipped by ark; fetch the full output with {} {{\"id\":\"{tool_use_id}\"}} (add \"query\" for matching lines only) …]\n{tail}",
+            content.chars().count() - head.chars().count() - tail.chars().count(),
+            crate::ctxfetch::NAME
+        );
         messages[mi].content[bi] = Block::ToolResult { tool_use_id: tool_use_id.clone(), content: clipped, is_error: *is_error };
     }
 }

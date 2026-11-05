@@ -7,6 +7,11 @@ mod fs;
 pub mod fuzzy;
 pub mod patchfmt;
 mod extract;
+/// Document → text converters (PDF, DOCX, PPTX, XLSX, ODT, HTML, RTF, notebooks…), shared with
+/// the memory knowledge index.
+pub mod documents {
+    pub use crate::extract::{extract, html_text, is_extractable};
+}
 mod zip;
 pub mod filestate;
 mod lint;
@@ -35,7 +40,7 @@ pub use job::Job;
 pub use memory::Memory;
 pub mod memory_store {
     //! The builtin memory store (MEMORY.md / USER.md) for hosts: limits, scanner hook, approval gate, staged replay.
-    pub use crate::memory::{apply_batch, apply_staged, cap_of, find_one, load, path_of, set_limits, set_write_approval, staging_dir, write_approval_enabled, CHAR_CAP, SEP, WRITE_SCANNER};
+    pub use crate::memory::{apply_batch, apply_staged, cap_of, find_one, load, path_of, session_tainted, set_limits, set_write_approval, staging_dir, write_approval_enabled, CHAR_CAP, SEP, WRITE_SCANNER};
 }
 pub use plan::{Skill, Todo};
 pub use proc::Proc;

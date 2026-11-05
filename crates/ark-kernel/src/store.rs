@@ -145,6 +145,21 @@ impl Store {
         if q.trim().is_empty() || limit == 0 {
             return hits;
         }
+        // The SQLite index (FTS5, synced from these logs) first; the scan is the fallback.
+        if let Some(data) = self.root.parent() {
+            if crate::sqlindex::sync_sessions(data, &self.root).is_ok() {
+                if let Ok(found) = crate::sqlindex::search_messages(data, query, &crate::sqlindex::MsgFilter::default(), limit) {
+                    return found
+                        .into_iter()
+                        .map(|h| {
+                            let lower = h.text.to_lowercase();
+                            let pos = lower.find(&q).unwrap_or(0);
+                            SearchHit { session: h.session, seq: h.seq, snippet: snippet(&lower, &h.text, pos, q.len()) }
+                        })
+                        .collect();
+                }
+            }
+        }
         for info in self.list() {
             let Ok(events) = self.read(&info.id) else { continue };
             for ev in events.iter().rev() {
