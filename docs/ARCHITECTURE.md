@@ -113,3 +113,120 @@ Hermes 光 `hermes_state_*` 就拆成約 70 個檔案：讀一個流程要跳十
 | 新增一個 crate | `Cargo.toml` members ＋ `arch_lint.rs` 的 `LAYERS` ＋ 本文件第 1 節的表格（附理由） |
 | 精簡執行檔 | [BUILD.md](BUILD.md)：`--no-default-features` 與 per-platform feature |
 | 發佈（SBOM／簽章／重現建置／依賴審查） | [../packaging/release/README.md](../packaging/release/README.md)（檢查清單）與同目錄的腳本 |
+
+## 7. 高可用、共用儲存、worker 擴充與集中管理台（ent-095／096／097／062）
+
+### 7.1 不變的兩件事
+
+1. **每個 session 的 `sessions/<id>/events.jsonl` 仍是唯一真實來源。** HA 不引入第二份 session 狀態：主機、備機、
+   worker 都直接讀寫同一個（共用的）資料目錄裡的同一份 JSONL；接手時靠既有的 `Kernel::run → recover()`
+   （懸空的工具呼叫、未結束的回合）與 `Daemon::resume()` 續跑，和單機當機重啟走同一條路。
+2. **SQLite（`index.db`）只是可重建索引。** 它從 JSONL 衍生，所以每個節點可以有自己的一份：`[ha] index_dir`
+   把索引搬到節點本機磁碟（SQLite 的 WAL 需要共享記憶體，放在 NFS 上不安全）。節點換手後索引照游標增量追上，
+   壞了就 `ark index rebuild`。
+
+### 7.2 主備＋共用儲存（ent-095、ent-096）
+
+部署形狀：N 個 `arkd` 指向同一個資料目錄（NFS／共用磁碟，或把 `data/` 符號連結到掛載點），各自有本機的
+`config/` 與 `run/`（unix socket）。同一時間只有一台是 **leader**：只有它跑排程、目標、通道輪詢、續跑與 worker 池；
+其他是 **standby**，只回答唯讀 ARP（`ping`、`session.list/history/view`、`ha.status`、`cluster.*` 的查詢），
+會改狀態的方法回 `-32010 standby`，錯誤裡帶 leader 的 `advertise` 位址讓客戶端／負載平衡器改送。
+
+**租約（`crates/ark-kernel/src/ha.rs`）**
+
+- 介面 `LeaseStore { read, swap(expect, new) }`：比較後交換（CAS）。內建 `FsLease`：每個任期一個檔
+  `<ha_dir>/term-<epoch>.json`，目前租約＝編號最大的那個。**刻意不用鎖檔**：持鎖的程序若被暫停（SIGSTOP、GC、
+  網路分割），所有 standby 都會被它卡死（整合測試一開始就踩到）。搶新任期用 `link(tmp, term-<N>)`——已存在就
+  `EEXIST`，是 NFS 上安全的排他建立，等於對 N 做 CAS；續約／釋放只有任期 N 的持有者會改寫 `term-<N>.json`
+  （tmp＋fsync＋rename），被罷黜的舊主就算改寫自己的舊任期也無害，因為讀者只看最大編號。物件儲存（S3
+  `If-None-Match`／`If-Match`、GCS generation）可以用同一個 trait 實作。
+- 租約內容：`node`、`epoch`（**fencing token**，每次換主 +1）、`renewed`（續約計數）、`lease_ms`、`advertise`、
+  `host`、`pid`。
+- **不依賴跨機時鐘**：standby 不看對方寫的到期時間，而是用自己的單調時鐘觀察 `(node, epoch, renewed)` 有沒有變；
+  連續 `lease_secs` 沒變才以 `epoch+1` 搶租約。leader 每 `renew_secs`（預設 lease/3）續約；本機單調時鐘超過
+  `lease_secs` 沒續約成功（共用儲存斷線、程序被暫停）就**自行下台**，先於任何 standby 可能接手的時間點。
+- 同一台主機上前一個化身（同 node、同 host、pid 已不存在）留下的租約可立即接手，重啟不必等一個租期。
+- `ark ha stepdown`（ARP `ha.stepdown`）把租約標成釋放，standby 下一個 tick 就接手（計畫性維護）。
+
+**Fencing**
+
+- `Store::set_fence(f)`：設定後，`SessionLog::append`（以及開啟寫入）每次都先呼叫 `f`；`f` 重新讀共用儲存上的
+  租約，`node`／`epoch` 不是自己就回 `StoreError::Fenced`，那一筆**不會寫入**，回合以錯誤結束、釋放 session 鎖。
+  因此一台被暫停（SIGSTOP、GC、網路分割）後醒來的舊主機，即使手上還有進行中的模型回應，也寫不進 JSONL。
+- 第二道防線是既有的每 session `flock`：本機檔案系統與 NFSv4 都會讓同一 session 同時只有一個寫者；租約
+  fencing 處理的是鎖被伺服器回收後（NFS lease 過期）的情形。兩道都在，任何一道失守都不會雙寫。
+- worker 程序繼承 leader 的 `ARK_HA_NODE`／`ARK_HA_EPOCH`／`ARK_HA_DIR`，裝上同一個 fence：舊 leader 派出去的
+  worker 在換主後同樣寫不進去。
+
+**接手流程**：standby 取得租約 → 安裝 leader 服務（排程、通道、備份、報表、worker 池）→ `resume()` 掃描未完成
+的 session，先寫一筆 `Notice`（「ha: node B (epoch N) resumed this session after failover」）再啟動；session 若
+仍被舊主機鎖住（`StoreError::Locked`），放入重試集合，每秒再試，直到舊主機被 fence 掉而釋放鎖。
+失去租約 → 中斷所有本機執行、停掉 leader 服務與 worker、回到 standby。
+
+**已知限制**：reaper 的程序群組登記檔在共用資料目錄裡，只有 leader 執行清掃（standby 沒有在跑的程序）；跨主機
+的 pid 由 `/proc` 啟動時間比對保護，無法證明的項目一律不殺。整份 session 存到物件儲存（不經 POSIX 檔案）尚未實作；
+租約層已抽象，事件紀錄的物件儲存後端是下一步。
+
+### 7.3 水平擴充 worker（ent-097，`crates/ark-kernel/src/workers.rs`）
+
+`[workers] count = N` 時，leader 啟動 N 個 worker 程序（預設 `ark worker --internal-worker-ipc`；`command` 可改成
+`["ssh", "host2", "ark", "worker", "--internal-worker-ipc"]` 在別台機器跑，前提是同一個共用資料目錄）。沿用既有
+的 worker JSONL 協定，加一種請求 `{"type":"run","turnId","sessionId"}`：在 worker 裡續跑一個既有 session（它直接
+讀寫共用的 JSONL）。daemon 端：
+
+- `dispatch = "all"`（預設）時 `session.submit`、續跑、`workers.dispatch` 都把 session 排進佇列，交給閒置的 worker；
+  `"explicit"` 只派 `workers.dispatch` 指定的。
+- worker 執行中的 session 再收到訊息時，daemon 先暫存，回合結束後寫入並再派一次（worker 持有 session 鎖）。
+- worker 掛掉（stdout EOF／程序結束）→ 它手上的 session 寫一筆 `Notice` 後重新排隊、派給下一個 worker；worker
+  依退避重生。session 本身的恢復仍是 kernel 的 `recover()`。
+- 回收：worker 用 `PR_SET_PDEATHSIG` 綁在 worker 池的長壽執行緒上，stdin EOF 也會讓它取消回合並退出；`Pool`
+  的 `Drop` 對每個子程序 SIGTERM→SIGKILL→`wait`。daemon 被 SIGKILL 也不會留下 worker。
+- 限制：worker 用 `ark worker` 的權限模型（不給特權、不給額外出網，核准一律拒），需要互動核准的工作應留在 leader
+  本機跑（`dispatch = "explicit"`）。
+
+### 7.4 集中管理台（ent-062，`crates/ark-kernel/src/cluster.rs`）
+
+- **節點註冊**：每個 daemon（HA 或 `[cluster] enabled`）每 5 秒把自己的快照寫到 `<data>/cluster/nodes/<node>.json`
+  （角色、epoch、版本、advertise、執行中的 session、具名代理、worker 數、已套用的政策版本）。共用資料目錄的節點
+  因此自動出現在彼此的管理台；不共用儲存的遠端節點由管理員 `ark cluster node add NAME URL --token-secret S` 登記，
+  管理台用 `POST <url>/arp` 帶唯讀 token 呼叫對方的 `cluster.self.status`／`session.list`。
+- **受管設定下發**：沿用 `/etc/ark` 的 `managed` 機制，加一層「叢集政策」：
+  - `/etc/ark/managed.toml` 的 `[managed] cluster_key = "ed25519:…"` 釘住簽章公鑰（root 擁有，使用者改不了），
+    可加 `cluster_required = true`（沒有有效政策就拒絕載入設定）與 `cluster_min_version`（防回滾）。
+  - 管理員離線簽章：`ark cluster keygen`（種子只存在管理員的 0600 檔）、`ark cluster policy sign policy.toml --version N`
+    產生 bundle（政策 TOML、版本、時間、公鑰、Ed25519 簽章，簽的是 `ark-cluster-policy\n1\n<ver>\n<ms>\n<sha256>\n`）。
+  - 發佈：`cluster.policy.publish` 存到管理台；**推送** `cluster.policy.push` 用登記的節點 admin token 呼叫對方的
+    `cluster.policy.apply`；**拉取**：節點設 `[cluster] console_url`／`console_token`（唯讀 token 即可）定期呼叫
+    `cluster.policy.get`；共用資料目錄的節點直接讀發佈檔。不論哪條路，節點都用自己釘住的公鑰驗簽、要求版本嚴格遞增
+    後才寫入 `<data>/managed/cluster.json`；載入設定時再驗一次（被竄改就當作不存在並警告，`cluster_required` 時拒絕）。
+    政策內容當作 `/etc/ark` 檔案之後的一層 system 預設，`[managed] locked` 取聯集。daemon 的設定在啟動時載入，
+    新政策回報 `restart_required`。
+- **總覽**：`cluster.status`（節點、HA、所有節點的 session 與代理、政策版本）、`cluster.nodes.list`、
+  `cluster.sessions.list`、`cluster.agents.list`；Web UI「叢集」頁；CLI `ark cluster status|nodes|sessions|agents`。
+- **RBAC 與稽核**：方法名沿用既有的範圍規則（`*.status`／`*.list`／`*.get` 是唯讀，operator／auditor 可看中繼資料；
+  其餘 `cluster.*`、`ha.stepdown`、`workers.dispatch` 未列名＝admin），不另開權限表。登記／移除節點、發佈／推送／
+  套用政策、接手／下台都寫進統一稽核流（`cluster.*`、`ha.*` 事件）。
+
+### 7.5 設定
+
+```toml
+[ha]
+enabled = true
+node_id = "arkd-a"          # 預設主機名稱
+lease_secs = 10
+renew_secs = 0              # 0 = lease_secs / 3
+dir = ""                    # 預設 <data>/ha
+advertise = "https://arkd-a.corp:8640"
+index_dir = "/var/lib/ark-local/index"   # 節點本機的 SQLite 索引
+
+[workers]
+count = 4
+dispatch = "all"            # 或 "explicit"
+command = []                # 預設本執行檔 `worker --internal-worker-ipc`
+
+[cluster]
+enabled = true
+console_url = "https://console.corp:8640"
+console_token = "{{secret:ARK_CONSOLE_TOKEN}}"
+pull_secs = 300
+```

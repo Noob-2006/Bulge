@@ -181,3 +181,29 @@ command = "~/.config/ark/hooks/check-shell.sh"
 # url = "https://hooks.example.com/ark"
 # events = ["pre_tool", "session_end"]
 # secret = "{{secret:HOOK_SECRET}}"
+
+# ───────────── 高可用、worker 擴充、集中管理台（docs/ARCHITECTURE.md §7）─────────────
+# 多個 arkd 指向同一個資料目錄（NFS／共用磁碟），以租約選主；只有 leader 跑排程、通道與 session。
+# [ha]
+# enabled = true
+# node_id = "arkd-a"            # 預設主機名稱
+# lease_secs = 10               # leader 沉默這麼久，standby 才接手
+# renew_secs = 0                # 0 = lease_secs / 3
+# dir = ""                      # 租約目錄，預設 <data>/ha
+# advertise = "https://arkd-a.corp:8640"   # standby 把客戶端導向 leader 時顯示的位址
+# index_dir = "/var/lib/ark-local/index"   # SQLite 索引放節點本機（不要放 NFS）
+#
+# [workers]
+# count = 4                     # leader 維持的 `ark worker` 程序數；0 = session 在 daemon 內跑
+# dispatch = "all"              # all：所有 session 交給 worker；explicit：只有 `ark workers dispatch`
+# command = []                  # 預設本執行檔；可改 ["ssh", "host2", "ark", "worker", "--internal-worker-ipc"]
+# restart_backoff_ms = 500
+#
+# [cluster]
+# enabled = true                # 沒開 [ha] 也寫入節點註冊（管理台看得到）
+# name = ""                     # 沒開 [ha] 時的節點名稱
+# console_url = "https://console.corp:8640"         # 從管理台拉取已簽章的受管政策
+# console_token = "{{secret:ARK_CONSOLE_TOKEN}}"    # 唯讀 token 即可
+# pull_secs = 300
+# heartbeat_secs = 5
+# 公鑰釘在 /etc/ark/managed.toml：[managed] cluster_key = "ed25519:…"（ark cluster keygen 產生）
