@@ -38,12 +38,15 @@ fn root_store() -> rustls::RootCertStore {
 }
 
 fn tls_config() -> Arc<rustls::ClientConfig> {
-    if let Some(c) = tls_slot().read().unwrap().as_ref() {
+    let cached = !crate::http::overridden();
+    if let Some(c) = tls_slot().read().unwrap().as_ref().filter(|_| cached) {
         return c.clone();
     }
     let provider = Arc::new(rustls::crypto::ring::default_provider());
     let cfg = Arc::new(rustls::ClientConfig::builder_with_provider(provider).with_safe_default_protocol_versions().expect("rustls protocol versions").with_root_certificates(root_store()).with_no_client_auth());
-    *tls_slot().write().unwrap() = Some(cfg.clone());
+    if cached {
+        *tls_slot().write().unwrap() = Some(cfg.clone());
+    }
     cfg
 }
 

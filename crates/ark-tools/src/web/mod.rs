@@ -49,6 +49,11 @@ fn has_credential(cfg: &WebConfig, env: &http::EnvFn, id: &str, vars: &[&str]) -
 /// `firecrawl_scrape` when Firecrawl is selected or has a key / self-hosted URL.
 pub fn tools(cfg: Arc<WebConfig>, env: http::EnvFn) -> Vec<Arc<dyn Tool>> {
     let mut out: Vec<Arc<dyn Tool>> = vec![];
+    // ent-039: offline mode removes the web tools from the model's tool list (the client builder
+    // refuses public hosts as the second line).
+    if ark_net::http::offline() {
+        return out;
+    }
     if cfg.fetch.enabled {
         out.push(Arc::new(WebFetch { cfg: cfg.clone(), env: env.clone() }));
     }
@@ -82,6 +87,13 @@ mod tests {
 
     fn names(cfg: serde_json::Value, env: &[(&str, &str)]) -> Vec<String> {
         tools(Arc::new(WebConfig::from_value(cfg).unwrap()), env_of(env)).iter().map(|t| t.spec().name).collect()
+    }
+
+    #[test]
+    fn offline_mode_registers_no_web_tools_ent039() {
+        let offline = ark_net::http::NetConfig { offline: true, ..Default::default() };
+        assert!(ark_net::http::with_config(offline, || names(json!({}), &[("FIRECRAWL_API_KEY", "fc-k"), ("XAI_API_KEY", "x")])).is_empty());
+        assert!(!names(json!({}), &[]).is_empty());
     }
 
     #[test]

@@ -61,11 +61,11 @@ pub fn init(paths: &Paths, cfg: &Config) {
 
 /// Keep the models.dev price/metadata cache fresh without a manual `ark models refresh`:
 /// fetched in the foreground (bounded) when missing, in the background when older than a
-/// day. Off with `[pricing] auto_refresh = false`, `ARK_OFFLINE=1`, or the government
+/// day. Off with `[pricing] auto_refresh = false`, `ARK_OFFLINE=1`, `[network] offline`, or the government
 /// profile (models.dev is a third-party host).
 fn auto_refresh_prices(cache: &std::path::Path, cfg: &Config) {
     const STALE: std::time::Duration = std::time::Duration::from_secs(24 * 3600);
-    let enabled = cfg.pricing.auto_refresh && std::env::var_os("ARK_OFFLINE").is_none_or(|v| v.is_empty() || v == "0") && cfg.compliance.profile != "government";
+    let enabled = cfg.pricing.auto_refresh && !ark_net::http::no_background_fetch() && cfg.compliance.profile != "government";
     if !enabled {
         return;
     }

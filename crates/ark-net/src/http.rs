@@ -11,7 +11,7 @@
 //! - **custom CA**: `[network] ca_file`, else `$ARK_CA_BUNDLE` / `$SSL_CERT_FILE` /
 //!   `$REQUESTS_CA_BUNDLE` / `$CURL_CA_BUNDLE` — replaces the bundled roots, for ureq *and* the
 //!   raw TLS streams in [`crate::stream`] (WebSocket gateways, IRC, SMTP/IMAP);
-//! - **offline**: `[network] offline = true` or `ARK_OFFLINE=1` — every request to a public
+//! - **offline**: `[network] offline = true` or `ARK_NETWORK_OFFLINE=1` — every request to a public
 //!   host is refused here (second line behind the per-feature switches: update check, price
 //!   table, skills hub, telemetry, web tools). Loopback, private ranges, `*.localhost`, the
 //!   NO_PROXY hosts and `[network] offline_allow` stay reachable (an air-gapped LAN model).
@@ -47,7 +47,7 @@ pub struct NetConfig {
     /// Provider hosts that are refused (suffix match), e.g. filled by compliance profiles.
     pub deny_hosts: Vec<String>,
     /// Fully offline: no update check, price table, skills hub, telemetry or web tools, and
-    /// no request to a public host from any client. Also `ARK_OFFLINE=1`.
+    /// no request to a public host from any client. Also `ARK_NETWORK_OFFLINE=1`.
     pub offline: bool,
     /// Extra hosts (same forms as `no_proxy`) still reachable when offline: an internal model
     /// gateway, an on-prem Vault.
@@ -83,28 +83,51 @@ pub fn configure(c: NetConfig) {
     crate::stream::reset_tls();
 }
 
+thread_local! {
+    /// [`with_config`]'s per-thread override: tests exercise the policy without racing the
+    /// process-wide config other tests read.
+    static LOCAL: std::cell::RefCell<Option<NetConfig>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Whether this thread runs under [`with_config`] (caches are bypassed then).
+pub(crate) fn overridden() -> bool {
+    LOCAL.with(|l| l.borrow().is_some())
+}
+
 pub fn current() -> NetConfig {
-    state().read().unwrap().clone()
+    LOCAL.with(|l| l.borrow().clone()).unwrap_or_else(|| state().read().unwrap().clone())
 }
 
 fn truthy(v: &str) -> bool {
     !matches!(v.trim().to_ascii_lowercase().as_str(), "" | "0" | "false" | "no" | "off")
 }
 
-/// The single offline switch: `[network] offline = true` or `ARK_OFFLINE=1`.
+/// Environment form of the offline switch (containers, systemd `Environment=`).
+pub const OFFLINE_ENV: &str = "ARK_NETWORK_OFFLINE";
+
+/// The single offline switch: `[network] offline = true` (or `ARK_NETWORK_OFFLINE=1`).
+///
+/// Not to be confused with `ARK_OFFLINE=1`, the older and narrower test/CI knob that only stops
+/// *automatic background* downloads (the price-table auto-refresh): the whole test suite runs
+/// under it and still talks to its local fake servers.
 pub fn offline() -> bool {
-    state().read().unwrap().offline || std::env::var("ARK_OFFLINE").is_ok_and(|v| truthy(&v))
+    offline_source().is_some()
 }
 
 /// Where the offline switch came from, for `ark doctor`.
 pub fn offline_source() -> Option<&'static str> {
-    if state().read().unwrap().offline {
+    if current().offline {
         Some("[network] offline = true")
-    } else if std::env::var("ARK_OFFLINE").is_ok_and(|v| truthy(&v)) {
-        Some("ARK_OFFLINE")
+    } else if std::env::var(OFFLINE_ENV).is_ok_and(|v| truthy(&v)) {
+        Some("ARK_NETWORK_OFFLINE")
     } else {
         None
     }
+}
+
+/// `ARK_OFFLINE=1` (or the full offline switch): skip automatic background downloads.
+pub fn no_background_fetch() -> bool {
+    offline() || std::env::var("ARK_OFFLINE").is_ok_and(|v| truthy(&v))
 }
 
 /// `Err` with a uniform message when `feature` must not run because ark is offline.
@@ -296,6 +319,9 @@ pub fn load_ca(path: &str) -> Result<Vec<ureq::tls::Certificate<'static>>, Strin
 /// The custom roots in effect (cached per path), or `None` for the bundled Mozilla roots.
 pub fn custom_roots() -> Option<Arc<Vec<ureq::tls::Certificate<'static>>>> {
     let path = ca_path(&current())?;
+    if overridden() {
+        return load_ca(&path).ok().map(Arc::new);
+    }
     let mut cache = roots_cache().lock().unwrap();
     if let Some((p, r)) = cache.as_ref() {
         if *p == path {
@@ -392,7 +418,7 @@ fn offline_guard(req: ureq::http::Request<ureq::SendBody>, next: ureq::middlewar
     if offline() {
         let host = req.uri().host().unwrap_or("").to_string();
         if !offline_allows(&current(), &host) {
-            let src = offline_source().unwrap_or("ARK_OFFLINE");
+            let src = offline_source().unwrap_or(OFFLINE_ENV);
             return Err(ureq::Error::Io(std::io::Error::new(std::io::ErrorKind::PermissionDenied, format!("offline mode ({src}): request to {host} refused"))));
         }
     }
@@ -442,15 +468,17 @@ fn always_direct() -> Vec<String> {
 /// (CIDR, `host:port`), with `global`/`connect` timeouts and 4xx/5xx returned as responses.
 pub fn agent_for(global: Duration, connect: Duration, url: &str) -> ureq::Agent {
     let direct = is_direct(url);
+    let build = || {
+        let c = current();
+        let proxy = if direct { None } else { proxy_url(&c).and_then(|p| ureq::Proxy::new(&p).ok()) };
+        base(&c, proxy).http_status_as_error(false).timeout_connect(Some(connect)).timeout_global(Some(global)).build().into()
+    };
+    if overridden() {
+        return build();
+    }
     let key = (direct, global.as_millis() as u64 ^ ((connect.as_millis() as u64) << 40));
     let mut m = agents().lock().unwrap();
-    m.entry(key)
-        .or_insert_with(|| {
-            let c = current();
-            let proxy = if direct { None } else { proxy_url(&c).and_then(|p| ureq::Proxy::new(&p).ok()) };
-            base(&c, proxy).http_status_as_error(false).timeout_connect(Some(connect)).timeout_global(Some(global)).build().into()
-        })
-        .clone()
+    m.entry(key).or_insert_with(build).clone()
 }
 
 /// One-line summary of the policy in effect, for `ark doctor`.
@@ -470,7 +498,13 @@ pub fn describe() -> Vec<(String, String)> {
             None => "built-in Mozilla roots".into(),
         },
     ));
-    v.push(("offline".into(), offline_source().map(|s| format!("on ({s})")).unwrap_or_else(|| "off".into())));
+    v.push((
+        "offline".into(),
+        match offline_source() {
+            Some(s) => format!("on ({s}) — update check, price table, skills hub, telemetry and web tools are off; public hosts are refused"),
+            None => "off ([network] offline = true to cut all outbound traffic)".into(),
+        },
+    ));
     v
 }
 
@@ -481,19 +515,17 @@ fn redact_userinfo(u: &str) -> String {
     }
 }
 
-/// Test helper: run `f` with `c` installed, restoring the previous config afterwards. Tests
-/// that touch the process-wide policy serialise on this lock.
+/// Run `f` with `c` as this thread's network config (tests: the process-wide config, which
+/// other threads read, is untouched). Restored on return and on panic.
 pub fn with_config<T>(c: NetConfig, f: impl FnOnce() -> T) -> T {
-    static L: Mutex<()> = Mutex::new(());
-    let _g = L.lock().unwrap_or_else(|e| e.into_inner());
-    let prev = current();
-    configure(c);
-    struct Restore(NetConfig);
+    struct Restore(Option<NetConfig>);
     impl Drop for Restore {
         fn drop(&mut self) {
-            configure(std::mem::take(&mut self.0));
+            let prev = self.0.take();
+            LOCAL.with(|l| *l.borrow_mut() = prev);
         }
     }
+    let prev = LOCAL.with(|l| l.borrow_mut().replace(c));
     let _r = Restore(prev);
     f()
 }
@@ -603,7 +635,6 @@ mod tests {
         let c = NetConfig { proxy: Some(format!("http://127.0.0.1:{pport}")), ..Default::default() };
         with_config(c, || {
             let a: ureq::Agent = builder().timeout_global(Some(Duration::from_secs(5))).build().into();
-            // A private address: still reachable when the test runs under ARK_OFFLINE=1.
             let r = a.get("http://10.255.255.1/x").call().unwrap();
             assert_eq!(r.status(), 200);
             let line = seen.recv_timeout(Duration::from_secs(5)).unwrap();

@@ -105,6 +105,7 @@ impl Http {
 
     /// The policy check applied to every hop.
     pub fn check(&self, url: &str) -> Result<(), String> {
+        ark_net::http::ensure_online("the skills hub")?;
         if let Some(m) = ark_security::url_safety::check_website_global(url) {
             return Err(m);
         }
@@ -319,6 +320,16 @@ pub mod testserver {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn offline_mode_stops_the_hub_ent039() {
+        let s = Settings::from_table(&toml::Table::new());
+        let st = Store::at(std::path::Path::new("/nonexistent/ark-hub-offline"));
+        let h = Http::new(&s, &st);
+        let offline = ark_net::http::NetConfig { offline: true, ..Default::default() };
+        let e = ark_net::http::with_config(offline, || h.check("https://github.com/x/y")).unwrap_err();
+        assert!(e.contains("skills hub") && e.contains("offline"), "{e}");
+    }
 
     #[test]
     fn redirects_policy_and_cache() {

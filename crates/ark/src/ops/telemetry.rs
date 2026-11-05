@@ -65,6 +65,9 @@ pub fn status_text(t: &TelemetryConfig, data: &std::path::Path, attached: Option
         Some(_) => s.push_str("  Exporter:       attached in this process\n"),
         None => s.push_str("  Exporter:       not attached here (only the daemon exports; `ark telemetry test` checks reachability)\n"),
     }
+    if let Some(src) = ark_net::http::offline_source() {
+        s.push_str(&format!("  Offline:        on ({src}) — nothing is exported\n"));
+    }
     s.push_str("\n  Scope: gateway service health + redacted diagnostics only.\n");
     if !t.enabled {
         s.push_str("  Enable with: `ark config set telemetry.enabled true` (then restart the daemon).\n");

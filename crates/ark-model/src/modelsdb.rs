@@ -976,6 +976,7 @@ pub fn refresh(url: Option<&str>) -> Result<(usize, bool), String> {
 }
 
 fn refresh_inner(url: Option<&str>) -> Result<(usize, bool), String> {
+    ark_net::http::ensure_online("the models.dev price table refresh")?;
     if let Some(d) = backoff_remaining() {
         return Err(format!(
             "models.dev refresh failed recently; retrying in {}s without a request",

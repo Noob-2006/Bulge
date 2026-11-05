@@ -2278,6 +2278,14 @@ fn cmd_doctor(a: &Args) -> R {
             Err(e) => println!("· computer_use: {e}"),
         }
     }
+    // ent-036/037/039: the outbound network policy every HTTP/TLS client is built with.
+    for (k, v) in ark_net::http::describe() {
+        if k == "ca" && v.contains("falling back") {
+            check("network ca", Err(v));
+        } else {
+            println!("· network {k}: {v}");
+        }
+    }
     let sock = paths.socket();
     check("socket path length", if sock.as_os_str().len() < 100 { Ok(format!("{} bytes", sock.as_os_str().len())) } else { Err("too long for a unix socket; set XDG_RUNTIME_DIR".into()) });
     match daemon::call(&sock, "ping", json!({})) {

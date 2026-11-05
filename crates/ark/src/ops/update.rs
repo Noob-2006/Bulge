@@ -73,6 +73,7 @@ pub struct Release {
 }
 
 pub fn releases(base: &str) -> Result<Vec<Release>, String> {
+    ark_net::http::ensure_online("the update check")?;
     let v = net::get_json(&format!("{}/releases?per_page=30", base.trim_end_matches('/')), &[("accept", "application/vnd.github+json".into()), ("user-agent", format!("ark/{}", env!("CARGO_PKG_VERSION")))])?;
     let wanted = asset_names(std::env::consts::ARCH);
     Ok(v.as_array().ok_or("release index is not a list")?.iter().filter(|r| r["draft"] != true).map(|r| {
@@ -129,6 +130,9 @@ pub fn check(cfg: &Config, channel: Option<&str>) -> Result<Option<Release>, Str
 
 /// One-line answer for `/update` and the daemon's start-up check.
 pub fn check_text(cfg: &Config) -> String {
+    if let Some(src) = ark_net::http::offline_source() {
+        return format!("update check skipped: offline mode ({src})");
+    }
     match check(cfg, None) {
         Ok(Some(r)) => format!("ark {} is available (you have {}); run `ark update` on the host", r.tag, env!("CARGO_PKG_VERSION")),
         Ok(None) => format!("ark {} is up to date ({} channel)", env!("CARGO_PKG_VERSION"), cfg.update.channel),
@@ -572,6 +576,15 @@ mod tests {
     use super::*;
     use crate::ops::net::fake;
     use std::sync::Arc;
+
+    #[test]
+    fn offline_mode_skips_the_update_check_ent039() {
+        let offline = ark_net::http::NetConfig { offline: true, ..Default::default() };
+        ark_net::http::with_config(offline, || {
+            assert!(releases("http://127.0.0.1:9/never").unwrap_err().contains("offline mode"));
+            assert!(check_text(&Config::default()).contains("skipped: offline mode"));
+        });
+    }
 
     #[test]
     fn versions_and_channels() {
