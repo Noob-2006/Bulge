@@ -27,7 +27,7 @@ impl Reply {
 }
 
 fn agent(timeout: u64) -> ureq::Agent {
-    ureq::Agent::config_builder().timeout_global(Some(Duration::from_secs(timeout.max(1)))).http_status_as_error(false).max_redirects(0).build().into()
+    ark_net::http::builder().timeout_global(Some(Duration::from_secs(timeout.max(1)))).http_status_as_error(false).max_redirects(0).build().into()
 }
 
 fn finish(r: Result<ureq::http::Response<ureq::Body>, ureq::Error>, secrets: &[&str]) -> Result<Reply, String> {

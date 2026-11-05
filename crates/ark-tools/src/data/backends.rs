@@ -408,7 +408,7 @@ pub fn mysql(dsn: &Dsn, client: &[String], sql: &str, lim: &Limits, mariadb: boo
 // ───────────────────────────── HTTP: ClickHouse, BigQuery ─────────────────────────────
 
 fn http_agent(timeout: Duration) -> ureq::Agent {
-    ureq::Agent::config_builder().timeout_global(Some(timeout)).http_status_as_error(false).max_redirects(0).build().into()
+    ark_net::http::builder().timeout_global(Some(timeout)).http_status_as_error(false).max_redirects(0).build().into()
 }
 
 fn read_capped(resp: &mut ureq::http::Response<ureq::Body>, cap: u64) -> Result<String, String> {

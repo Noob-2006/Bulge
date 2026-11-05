@@ -317,7 +317,7 @@ pub fn remote_remove(data: &Path, name: &str) -> Result<bool, String> {
 
 /// One JSON-RPC call to another node's app server (`POST <url>/arp`).
 pub fn arp_call(url: &str, token: &str, method: &str, params: Value, timeout: Duration) -> Result<Value, String> {
-    let agent: ureq::Agent = ureq::Agent::config_builder().timeout_global(Some(timeout)).http_status_as_error(false).max_redirects(0).build().into();
+    let agent: ureq::Agent = ark_net::http::builder().timeout_global(Some(timeout)).http_status_as_error(false).max_redirects(0).build().into();
     let endpoint = format!("{}/arp", url.trim_end_matches('/'));
     let body = json!({"jsonrpc": "2.0", "id": 1, "method": method, "params": params}).to_string();
     let mut req = agent.post(&endpoint).header("Content-Type", "application/json");

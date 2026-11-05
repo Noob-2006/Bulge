@@ -150,7 +150,7 @@ impl Endpoint {
             url.push('=');
             url.push_str(&crate::web::http::enc(v));
         }
-        let agent: ureq::Agent = ureq::Agent::config_builder().timeout_global(Some(Duration::from_secs(self.timeout))).http_status_as_error(false).max_redirects(0).build().into();
+        let agent: ureq::Agent = ark_net::http::builder().timeout_global(Some(Duration::from_secs(self.timeout))).http_status_as_error(false).max_redirects(0).build().into();
         let mut headers: Vec<(String, String)> = vec![("Accept".into(), "application/json".into()), ("User-Agent".into(), "ark-ops/1".into())];
         match &self.auth {
             Auth::None => {}

@@ -118,7 +118,9 @@ impl App {
                         Ok(s) => Access::Scope(s),
                         Err(role) => Access::Roles(vec![role]),
                     };
-                    return Some(Principal { kind: "mtls".into(), name: c.name.clone().unwrap_or_else(|| id.to_string()), access, ip });
+                    let name = c.name.clone().unwrap_or_else(|| id.to_string());
+                    let tenant = crate::tenant::credential_viewer(self, &c.org, &c.team, access.has(identity::Role::Admin) || access == Access::Scope(Scope::Admin), &name);
+                    return Some(Principal { kind: "mtls".into(), name, access, ip, tenant });
                 }
             }
         }
@@ -716,7 +718,7 @@ mod tests {
         cfg.exposure.key = Some(td("server.key"));
         cfg.exposure.client_auth = "require".into();
         cfg.exposure.client_ca = Some(td("ca.pem"));
-        cfg.exposure.client_identities = vec![crate::exposure::ClientIdentity { id: "spiffe://example.org/ark/node/*".into(), scope: "read".into(), name: Some("node fleet".into()) }];
+        cfg.exposure.client_identities = vec![crate::exposure::ClientIdentity { id: "spiffe://example.org/ark/node/*".into(), scope: "read".into(), name: Some("node fleet".into()), org: String::new(), team: String::new() }];
         let srv = start(app(cfg)).unwrap();
         assert!(srv.is_tls());
         let url = format!("https://localhost:{}/arp", srv.local_addr().port());

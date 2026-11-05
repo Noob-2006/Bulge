@@ -90,6 +90,11 @@ pub struct ClientIdentity {
     pub scope: String,
     #[serde(default)]
     pub name: Option<String>,
+    /// Tenant of the certificate holder (ent-050), like a token's `org` / `team`.
+    #[serde(default)]
+    pub org: String,
+    #[serde(default)]
+    pub team: String,
 }
 
 impl ClientIdentity {
