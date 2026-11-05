@@ -1192,7 +1192,7 @@ pub fn fatigue(data: &Path, days: u64) -> Fatigue {
         }
     }
     let mut mostly_allowed: Vec<(String, usize, usize)> = by.into_iter().filter(|(_, (n, ok))| *n >= 3 && *ok * 10 >= *n * 9).map(|(r, (n, ok))| (r, n, ok)).collect();
-    mostly_allowed.sort_by(|a, b| b.1.cmp(&a.1));
+    mostly_allowed.sort_by_key(|x| std::cmp::Reverse(x.1));
     mostly_allowed.truncate(5);
     Fatigue {
         days: days.max(1),

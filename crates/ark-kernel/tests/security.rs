@@ -737,3 +737,28 @@ fn tier_three_chat_approvals_are_owner_only() {
     assert!(ark_kernel::secgate::approver_allowed(&a, "telegram", "42", std::slice::from_ref(&t3)));
     assert!(!ark_kernel::secgate::approver_allowed(&a, "telegram", "43", std::slice::from_ref(&t3)));
 }
+
+/// H11 (runtime half): credential-shaped output is masked before the model sees it, and a
+/// `git commit` whose staged changes carry a key needs a human first.
+#[test]
+fn h11_output_secrets_are_masked_and_a_commit_with_a_key_asks() {
+    let r = rec(Approval::Deny);
+    let e = env(|_| {}, r.clone());
+    let token = format!("ghp_{}", "Z".repeat(36));
+    call(&e, "sh", json!({"cmd": format!("echo {token}")}));
+    let (id, _, res) = run(&e, "cli");
+    assert!(!res[0].contains(&token) && res[0].contains("[REDACTED GitHub token]"), "{}", res[0]);
+    assert!(notices(&e, &id).iter().any(|n| n.contains("masked GitHub token")), "{:?}", notices(&e, &id));
+
+    let git = |args: &[&str]| std::process::Command::new("git").arg("-C").arg(&e.ws).args(args).env("GIT_CONFIG_GLOBAL", "/dev/null").env("GIT_CONFIG_NOSYSTEM", "1").output().map(|o| o.status.success()).unwrap_or(false);
+    if !git(&["init", "-q"]) {
+        return; // no git on this machine
+    }
+    std::fs::write(e.ws.join("config.env"), format!("AWS_ACCESS_KEY_ID={}\n", ["AKIA", "IOSFODNN7EXAMPLE"].concat())).unwrap();
+    assert!(git(&["add", "config.env"]));
+    call(&e, "sh", json!({"cmd": "git commit -m 'add config'"}));
+    let (_, gates, _) = run(&e, "cli");
+    let asked = r.asked.lock().unwrap().clone();
+    assert!(asked.iter().any(|a| a.reason.contains("AWS access key") && a.reason.contains("H11")), "{asked:?} {gates:?}");
+    assert_eq!(e.sh.load(Ordering::SeqCst), 1, "the commit did not run (only the echo did)");
+}

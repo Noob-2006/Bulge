@@ -564,6 +564,15 @@ impl Runtime {
                 }
             }
         }
+        // H11: a `git commit` whose changes carry a credential needs a human first.
+        if self.cfg.security.mask_output_secrets {
+            for e in effects {
+                let Effect::Exec { command } = e else { continue };
+                if let Some(kind) = commit_secret(command, &ws, &self.vault) {
+                    d = stricter(d, Decision { gate: GateKind::Egress, reason: format!("the changes being committed contain {kind} (H11: secrets must not reach a commit)"), ask: true, misses: vec![], inline: false });
+                }
+            }
+        }
         for e in effects {
             if let Effect::Write { path } = e {
                 let p = if path.is_absolute() { path.clone() } else { ws.join(path) };
@@ -891,6 +900,15 @@ impl Runtime {
 
     /// Post-process an untrusted tool's result: boundary markers (OpenClaw) and a threat
     /// note (Hermes advisory scan). Returns the new content.
+    /// H11 (runtime half): credential-shaped strings in tool output are masked before the
+    /// model, the session log or a chat sees them (`[security] mask_output_secrets`).
+    pub(crate) fn mask_output(&self, content: String) -> (String, Vec<&'static str>) {
+        if !self.cfg.security.mask_output_secrets {
+            return (content, vec![]);
+        }
+        risk::mask_secrets(&content)
+    }
+
     pub(crate) fn guard_tool_output(&self, tool: &str, content: String, is_error: bool) -> String {
         let sec = &self.cfg.security;
         let untrusted = sec.external_content.tools.iter().any(|g| ark_security::glob::fnmatch(g, tool));
@@ -1280,6 +1298,25 @@ pub fn approver_allowed(a: &ap::ApprovalsConfig, channel: &str, sender: &str, pe
     let own = format!("channel:{channel}:{sender}");
     let o = origins().lock().unwrap_or_else(|p| p.into_inner());
     pending.iter().all(|r| o.get(&r.session) == Some(&own) || ap::forwarded_allowed(&r.id, channel, sender))
+}
+
+/// H11: if `command` runs `git commit`, the credential its changes would record (the staged
+/// diff, plus tracked modifications for `-a`/`--all`), scanned for vault values and secret
+/// shapes. Only added lines count. `None` when not a commit or nothing found.
+pub fn commit_secret(command: &str, ws: &Path, vault: &crate::vault::Vault) -> Option<String> {
+    let commit = shell::parse(command).into_iter().find(|c| c.argv.first().is_some_and(|b| Path::new(b).file_name().is_some_and(|n| n == "git")) && c.argv.iter().skip(1).any(|x| x == "commit"))?;
+    let all = commit.argv.iter().any(|x| x == "--all" || (x.starts_with('-') && !x.starts_with("--") && x[1..].chars().all(|c| c.is_ascii_alphabetic()) && x.contains('a')));
+    let mut args = vec!["-C".to_string(), ws.display().to_string(), "diff".into(), "--no-color".into(), "--no-ext-diff".into()];
+    args.push(if all { "HEAD".into() } else { "--cached".into() });
+    let out = std::process::Command::new("git").args(&args).stdin(std::process::Stdio::null()).stderr(std::process::Stdio::null()).output().ok()?;
+    let added: String = String::from_utf8_lossy(&out.stdout).lines().filter(|l| l.starts_with('+') && !l.starts_with("+++")).map(|l| &l[1..]).collect::<Vec<_>>().join("\n");
+    if added.is_empty() {
+        return None;
+    }
+    if let Some(name) = vault.leaks(&added) {
+        return Some(format!("the value of vault secret {name}"));
+    }
+    risk::secret_kind(&added).map(|k| format!("what looks like a {k}"))
 }
 
 /// Prefix of a deferred (queued-for-the-owner) approval id on chat surfaces.

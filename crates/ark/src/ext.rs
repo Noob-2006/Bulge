@@ -861,8 +861,10 @@ fn approval_text(req: &ark_kernel::approver::ApprovalRequest) -> String {
 }
 
 /// Where each forwarded approval went, so an expiry can be announced there (srv-017).
-fn forwarded_to() -> &'static Mutex<HashMap<String, Vec<(String, String, Option<String>)>>> {
-    static S: std::sync::OnceLock<Mutex<HashMap<String, Vec<(String, String, Option<String>)>>>> = std::sync::OnceLock::new();
+type Target = (String, String, Option<String>);
+
+fn forwarded_to() -> &'static Mutex<HashMap<String, Vec<Target>>> {
+    static S: std::sync::OnceLock<Mutex<HashMap<String, Vec<Target>>>> = std::sync::OnceLock::new();
     S.get_or_init(Default::default)
 }
 
@@ -1187,7 +1189,8 @@ fn outgoing(hub: &Hub, ch: &Arc<dyn Channel>, to: &ReplyTo, text: &str) -> Optio
 /// (`<memory-context>`, `<recalled-context>` and their system notes) are dropped, as the
 /// terminal's `Visible` scrubber does for streamed output.
 fn chat_visible(text: &str) -> String {
-    ark_memory::fence::sanitize_context(text)
+    // H11: a credential-shaped string never leaves in a chat reply either.
+    ark_security::risk::mask_secrets(&ark_memory::fence::sanitize_context(text)).0
 }
 
 fn base_out(to: &ReplyTo) -> Outbound {
@@ -2114,6 +2117,9 @@ command = "/bin/cat"
         let got = ch.last();
         assert!(!got.contains("PIN") && !got.contains("likes tea") && !got.contains("memory-context"), "{got}");
         assert!(got.contains("Sure.") && got.contains("Done"), "{got}");
+        let key = ["AKIA", "IOSFODNN7EXAMPLE"].concat();
+        reply(&hub, &(ch.clone() as Arc<dyn Channel>), &to, &format!("your key is {key}"));
+        assert!(!ch.last().contains(&key) && ch.last().contains("[REDACTED AWS access key]"), "{}", ch.last());
     }
 
     fn msg(chat: &str, sender: &str, name: &str, text: &str, id: &str) -> Inbound {
