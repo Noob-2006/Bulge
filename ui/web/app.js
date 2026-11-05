@@ -479,7 +479,7 @@ function onPending(p) {
   box.innerHTML = '<span class="star corner tl"></span><span class="star corner br"></span>';
   if (p.kind === 'approval') {
     box.innerHTML += `<div class="q"><span class="star pulse" style="--size:18px"></span><div><strong>${esc(t('approval', { gate: p.gate }))}</strong><div class="dim">${esc(p.tool)} — ${esc(p.reason)}</div><pre>${esc(p.summary || '')}</pre></div></div>
-      <div class="acts"><button class="btn danger small" data-a="deny">${esc(t('deny'))}</button><button class="btn ghost small" data-a="always">${esc(t('always'))}</button><button class="btn small" data-a="once">${esc(t('once'))}</button></div>`;
+      <div class="acts" data-approve-ui><button class="btn danger small" data-a="deny">${esc(t('deny'))}</button><button class="btn ghost small" data-a="always">${esc(t('always'))}</button><button class="btn small" data-a="once">${esc(t('once'))}</button></div>`;
   } else {
     // `clarify` questions carry pickable choices (`choices`, `multi_select`); a plain
     // question (ask_user) has none and stays a free-text box.
@@ -490,7 +490,7 @@ function onPending(p) {
     box._picked = new Set();
     const acts = choices.length
       ? `<div class="acts">${choices.map((c, i) => `<button class="btn ghost small" data-c="${esc(c)}" data-i="${i}">${esc(c)}</button>`).join('')}${multi ? '<button class="btn small" data-a="answer">送出</button>' : ''}</div>`
-      : `<input type="text" placeholder="${esc(t('answer'))}"><div class="acts"><button class="btn small" data-a="answer">${esc(t('answer'))}</button></div>`;
+      : `<input type="text" placeholder="${esc(t('answer'))}"><div class="acts" data-approve-ui><button class="btn small" data-a="answer">${esc(t('answer'))}</button></div>`;
     box.innerHTML += `<div class="q"><span class="star pulse" style="--size:18px"></span><div><strong>${esc(t('ask'))}</strong><div>${md(p.question)}</div>${multi ? '<div class="dim">可多選</div>' : ''}</div></div>${acts}`;
   }
   box.addEventListener('click', async (e) => {
@@ -580,6 +580,24 @@ async function showPanel(title, fn, after) {
   $('panelBody').innerHTML = '<span class="star spin"></span>';
   $('panelDialog').showModal();
   try { $('panelBody').innerHTML = await fn(); if (after) after(); } catch (e) { $('panelBody').textContent = e.message; }
+  guardPanel($('panelBody'));
+}
+
+// ── RBAC in the UI (gen2-518): the server enforces every method; the UI mirrors what the
+// caller may do (`whoami.can`) so a read-only role never sees a control that would only fail.
+function applyAccess(me) {
+  const can = (me && me.can) || { write: true, approve: true };
+  document.body.classList.toggle('ro', !can.write);
+  document.body.classList.toggle('no-approve', !can.approve);
+  if (!can.write) document.body.dataset.access = (me && me.access) || 'read';
+}
+// Read-only callers: every control in a Control UI page is hidden / disabled unless it is a
+// pure read (navigation, refresh, export, filters), which pages.js marks with `data-read`.
+function guardPanel(root) {
+  if (!document.body.classList.contains('ro') || !root) return;
+  for (const b of root.querySelectorAll('button:not([data-read]):not([data-page])')) b.hidden = true;
+  for (const el of root.querySelectorAll('input:not([data-read]), select:not([data-read]), textarea:not([data-read])')) el.disabled = true;
+  if (!root.querySelector('.ro-note')) root.insertAdjacentHTML('afterbegin', '<p class="ro-note dim">唯讀角色：寫入操作已隱藏。</p>');
 }
 
 function row(cells) { return '<tr>' + cells.map((c) => `<td>${c}</td>`).join('') + '</tr>'; }
@@ -598,6 +616,9 @@ async function start(token) {
   S.arp.on('delta', (p) => { if (p.subscription !== S.globalSub) onDelta(p); });
   S.arp.on('pending', (p) => { if (p.subscription === S.globalSub) onPending(p); });
   S.arp.on('close', () => { setConn(t('conn.down')); setTimeout(() => start(token), 3000); });
+  // After the handlers: the server's `ready` notification must not arrive unobserved.
+  try { S.me = await S.arp.call('whoami'); } catch { S.me = null; }
+  applyAccess(S.me);
   // A second subscription follows every session for approvals and the sidebar.
   S.globalSub = S.arp.next;
   S.arp.call('subscribe', {}).catch(() => {});

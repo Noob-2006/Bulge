@@ -156,3 +156,7 @@ iframe.plugin-panel { width: 100%; min-height: 360px; }
 .msg.toolcard .bad { color: var(--danger); margin-right: 6px; }
 details > summary { list-style: none; }
 details > summary::-webkit-details-marker { display: none; }
+
+/* RBAC (gen2-518): controls a read-only / no-approve caller may not use. */
+body.ro [data-write], body.no-approve [data-approve-ui] { display: none !important; }
+.ro-note { margin: 0 0 .6em; }

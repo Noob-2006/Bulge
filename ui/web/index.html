@@ -24,7 +24,7 @@
         <div class="brand-sub" id="conn" data-i18n="conn.idle">尚未連線</div>
       </div>
     </header>
-    <button class="btn new" id="newSession" data-i18n="new">＋ 新對話</button>
+    <button class="btn new" id="newSession" data-write data-i18n="new">＋ 新對話</button>
     <nav class="sessions" id="sessions" aria-label="對話清單"></nav>
     <nav class="plugin-panels" id="pluginPanels" aria-label="外掛面板"></nav>
     <footer class="side-foot">
@@ -55,7 +55,7 @@
 
     <div class="attachments" id="attachments" hidden></div>
     <div class="slash-menu panel cornered" id="slashMenu" hidden role="listbox" aria-label="Commands"></div>
-    <form class="composer panel cornered" id="composer">
+    <form class="composer panel cornered" id="composer" data-write>
       <span class="star corner tl"></span><span class="star corner tr"></span><span class="star corner bl"></span><span class="star corner br"></span>
       <button type="button" class="btn ghost small" id="attach" data-i18n="attach" title="Attach a file (or paste / drop one)">附加</button>
       <input type="file" id="file" multiple hidden>
