@@ -133,7 +133,7 @@ const PAGES = {
     const days = +(CP.usageDays || 30);
     const u = await call('ui.usage', { days });
     const max = Math.max(1, ...u.daily.map((d) => d.input + d.output));
-    return `<p><select id="usageDays">${[1, 7, 30, 90].map((d) => `<option value="${d}"${d === days ? ' selected' : ''}>最近 ${d} 天</option>`).join('')}</select> <select id="usageFmt"><option value="models-csv">模型 CSV</option><option value="daily-csv">每日 CSV</option><option value="sessions-csv">對話 CSV</option><option value="json">JSON</option></select> <button class="btn ghost small" id="usageCsv">匯出</button></p>
+    return `<p><select id="usageDays" data-read>${[1, 7, 30, 90].map((d) => `<option value="${d}"${d === days ? ' selected' : ''}>最近 ${d} 天</option>`).join('')}</select> <select id="usageFmt" data-read><option value="models-csv">模型 CSV</option><option value="daily-csv">每日 CSV</option><option value="sessions-csv">對話 CSV</option><option value="json">JSON</option></select> <button class="btn ghost small" id="usageCsv" data-read>匯出</button></p>
       <p>${u.sessions_count} 個對話 · ${u.total.tokens.toLocaleString()} tokens · $${u.total.cost_usd.toFixed(4)}</p>
       <div class="cp-bars">${u.daily.map((d) => `<div title="${v(d.day)}: ${d.input + d.output} tokens" style="height:${Math.round(((d.input + d.output) / max) * 100)}%"></div>`).join('')}</div>
       <h3>模型</h3><table class="kv"><tr><th>模型</th><th>呼叫</th><th>輸入</th><th>輸出</th><th>快取讀</th><th>快取寫</th><th>費用</th></tr>${u.models.map((m) => row([v(m.model), m.calls, m.input, m.output, m.cache_read, m.cache_write, m.cost_usd === null ? '—' : '$' + m.cost_usd.toFixed(4)])).join('')}</table>
@@ -237,7 +237,7 @@ const PAGES = {
     const f = (CP.dashQ || '').toLowerCase();
     const list = a.canvas.filter((d) => !f || `${d.title} ${d.kind || ''}`.toLowerCase().includes(f));
     if (CP.dashSort === 'title') list.sort((x, y) => String(x.title).localeCompare(String(y.title)));
-    return `<p><button class="btn small" id="dashAll">對話儀表板總覽</button> <input type="text" id="dashQ" placeholder="篩選 canvas 文件…" value="${v(CP.dashQ || '')}"> <select id="dashSort"><option value="new">最新</option><option value="title"${CP.dashSort === 'title' ? ' selected' : ''}>標題</option></select> <span class="dim">${list.length} / ${a.canvas.length}</span></p><h3>Canvas 文件</h3>` +
+    return `<p><button class="btn small" id="dashAll" data-read>對話儀表板總覽</button> <input type="text" id="dashQ" data-read placeholder="篩選 canvas 文件…" value="${v(CP.dashQ || '')}"> <select id="dashSort" data-read><option value="new">最新</option><option value="title"${CP.dashSort === 'title' ? ' selected' : ''}>標題</option></select> <span class="dim">${list.length} / ${a.canvas.length}</span></p><h3>Canvas 文件</h3>` +
       (list.length ? '<table class="kv">' + list.map((d) => row([`<a href="${v(d.url)}" target="_blank" rel="noopener">${v(d.title)}</a>`, `<span class="dim">${v(d.kind || '')}</span>`, `<span class="dim">${v(d.created || '')}</span>`])).join('') + '</table>' : '<p class="dim">沒有符合的 canvas 文件。</p>');
   }, after() {
     $('dashAll').onclick = () => (typeof showBoards === 'function' ? showBoards() : null);
@@ -257,8 +257,8 @@ const PAGES = {
     const a = await call('ui.apps');
     if (!a.portals.length && !a.canvas.length) return '<p class="dim">沒有外掛掛載的頁面或 canvas 文件。</p>';
     return '<p class="dim">外掛掛載的 HTTP 頁面與 canvas 文件（在新分頁開啟）；「檢查」會在瀏覽器裡試探一次。' + '</p><table class="kv"><tr><th>頁面</th><th>來源</th><th>狀態</th></tr>' +
-      a.portals.map((p) => row([`<a href="${v(p.url)}" target="_blank" rel="noopener">${v(p.name)}</a>`, '<span class="dim">外掛</span>', `<button class="btn ghost small" data-probe="${v(p.url)}">檢查</button> <span class="dim" data-state="${v(p.url)}"></span>`])).join('') +
-      a.canvas.map((d) => row([`<a href="${v(d.url)}" target="_blank" rel="noopener">${v(d.title)}</a>`, '<span class="dim">canvas</span>', `<button class="btn ghost small" data-probe="${v(d.url)}">檢查</button> <span class="dim" data-state="${v(d.url)}"></span>`])).join('') + '</table>';
+      a.portals.map((p) => row([`<a href="${v(p.url)}" target="_blank" rel="noopener">${v(p.name)}</a>`, '<span class="dim">外掛</span>', `<button class="btn ghost small" data-read data-probe="${v(p.url)}">檢查</button> <span class="dim" data-state="${v(p.url)}"></span>`])).join('') +
+      a.canvas.map((d) => row([`<a href="${v(d.url)}" target="_blank" rel="noopener">${v(d.title)}</a>`, '<span class="dim">canvas</span>', `<button class="btn ghost small" data-read data-probe="${v(d.url)}">檢查</button> <span class="dim" data-state="${v(d.url)}"></span>`])).join('') + '</table>';
   }, after() {
     for (const b of qa('[data-probe]')) b.onclick = async () => {
       const out = q(`[data-state="${b.dataset.probe}"]`);
@@ -275,7 +275,7 @@ const PAGES = {
     const cur = CP.board || (boards.find((b) => b.current) || boards[0] || { meta: { slug: '' } }).meta.slug;
     const b = await call('kanban.board', cur ? { board: cur } : {});
     const cols = b.workflow.columns;
-    let h = `<p><select id="wbBoard">${boards.map((x) => `<option value="${v(x.meta.slug)}"${x.meta.slug === b.board ? ' selected' : ''}>${v(x.meta.name || x.meta.slug)}</option>`).join('')}</select> <input type="text" id="wbNew" placeholder="新看板 slug" size="12"> <button class="btn ghost small" id="wbNewBtn">新增看板</button></p><div class="cp-cols">`;
+    let h = `<p><select id="wbBoard" data-read>${boards.map((x) => `<option value="${v(x.meta.slug)}"${x.meta.slug === b.board ? ' selected' : ''}>${v(x.meta.name || x.meta.slug)}</option>`).join('')}</select> <input type="text" id="wbNew" placeholder="新看板 slug" size="12"> <button class="btn ghost small" id="wbNewBtn">新增看板</button></p><div class="cp-cols">`;
     for (const c of cols) {
       h += `<section><h4>${v(c.icon || '')} ${v(c.label)}</h4>` + b.tasks.filter((t) => t.status === c.key).map((t) =>
         `<div class="cp-card"><div><a href="#" data-card="${v(t.id)}"><code>${v(t.id)}</code></a> ${v(t.title)}</div><div class="dim">${v(t.assignee || '')}</div><select data-move="${v(t.id)}"><option value="">移到…</option>${cols.filter((x) => x.key !== c.key).map((x) => `<option value="${v(x.key)}">${v(x.label)}</option>`).join('')}</select></div>`).join('') + '</section>';
@@ -380,7 +380,7 @@ const PAGES = {
       q('.cp-detail').innerHTML = `<h3>${v(t.title)}</h3>${t.summary ? `<p>${v(t.summary)}</p>` : ''}
         <p><input type="text" id="tQ" placeholder="在逐字稿中搜尋…（Enter）" value="${v(query || '')}"> <span class="dim">${query ? `${t.matches} / ${t.segments_total} 段符合` : `${t.segments_total || segs.length} 段`}</span></p>
         <div class="cp-pre">${segs.map((s) => `<p><strong>${v(s.speaker)}</strong>：${v(s.text)}</p>`).join('') || '<p class="dim">沒有符合的段落。</p>'}</div>
-        <p><button class="btn ghost small" id="meetExport">匯出 Markdown</button> <button class="btn ghost small" id="meetJsonl">匯出 JSONL</button></p>`;
+        <p><button class="btn ghost small" id="meetExport" data-read>匯出 Markdown</button> <button class="btn ghost small" id="meetJsonl" data-read>匯出 JSONL</button></p>`;
       $('meetExport').onclick = async () => { const r = await call('ui.transcripts.export', { id: CP.meet }); download(r.filename, r.content, 'text/markdown'); };
       $('meetJsonl').onclick = async () => { const r = await call('ui.transcripts.export', { id: CP.meet, format: 'jsonl' }); download(r.filename, r.content, 'application/jsonl'); };
       $('tQ').onkeydown = (e) => { if (e.key === 'Enter') show(CP.meet, e.target.value); };
@@ -395,7 +395,7 @@ const PAGES = {
     try { list = await call('ui.worktrees.list', ws ? { workspace: ws } : {}); } catch (e) { return `<p class="dim">${v(e.message)}</p>`; }
     return '<table class="kv"><tr><th>路徑</th><th>分支</th><th>HEAD</th><th></th></tr>' + list.map((w) => row([v(w.path), v(w.branch), `<code>${v(w.head)}</code>`, w.ark ? `<button class="btn ghost small" data-rm="${v(w.path)}">移除</button>` : ''])).join('') + '</table>' +
       '<h3>新增 worktree</h3><p><input type="text" id="wtName" placeholder="名稱（英數、- _ .）"> <button class="btn small" id="wtCreate">在 ark/&lt;名稱&gt; 分支建立</button></p>' +
-      '<p><button class="btn ghost small" id="wtDry">預覽清理</button> <button class="btn ghost small" id="wtPrune">清理空的 ark worktree</button></p>' + NOTE;
+      '<p><button class="btn ghost small" id="wtDry" data-read>預覽清理</button> <button class="btn ghost small" id="wtPrune">清理空的 ark worktree</button></p>' + NOTE;
   }, after() {
     const ws = store.get('ark.workspace') || undefined;
     for (const b of qa('[data-rm]')) b.onclick = async () => { if (confirm(`移除 ${b.dataset.rm}？未提交的變更會遺失。`) && await act(() => call('ui.worktrees.remove', { name: b.dataset.rm, workspace: ws }))) openPage('worktrees'); };
@@ -509,7 +509,7 @@ const PAGES = {
       <p>預設 <input type="text" id="mdDefault" list="mdRefs" size="28" value="${v(m.default)}"> ${pick('mdDefault')}</p>
       <p>備援 <input type="text" id="mdFallback" list="mdRefs" size="48" value="${v((m.fallback || []).join(', '))}" placeholder="以逗號分隔，依序嘗試"> ${pick('mdFallback')}</p>
       <p>輔助 <input type="text" id="mdAux" list="mdRefs" size="28" value="${v(m.aux)}"> ${pick('mdAux')}</p>
-      <p><button class="btn" id="mdSave">儲存路由</button> <button class="btn ghost small" id="mdCheck">檢查</button> <span class="dim">留空表示移除設定；變更對新對話生效。</span></p>
+      <p><button class="btn" id="mdSave">儲存路由</button> <button class="btn ghost small" id="mdCheck" data-read>檢查</button> <span class="dim">留空表示移除設定；變更對新對話生效。</span></p>
       <datalist id="mdRefs">${refs.map((r) => `<option value="${v(r)}"></option>`).join('')}</datalist>
       <div class="cp-detail" id="mdOut"></div>`;
     return h + NOTE + '<p class="dim">金鑰只寫入 vault 或設定檔，頁面永遠不會顯示已儲存的值。</p>';
@@ -710,11 +710,11 @@ const PAGES = {
     CP.logTail = r.tail || [];
     CP.logFile = r.file || '';
     const levels = [['', '所有等級'], ['error', '錯誤'], ['warn', '警告以上'], ['info', '資訊以上'], ['debug', '含 debug']];
-    return `<p><select id="logFile"><option value=""${file ? '' : ' selected'}>即時日誌</option>${files.map((f) => `<option value="${v(f.name)}"${f.name === file ? ' selected' : ''}>${v(f.name)} · ${bytes(f.bytes)}</option>`).join('')}</select>
-      <select id="logLevel">${levels.map(([k, t]) => `<option value="${k}"${k === level ? ' selected' : ''}>${v(t)}</option>`).join('')}</select>
-      <select id="logLimit">${[200, 500, 2000].map((n) => `<option value="${n}"${n === limit ? ' selected' : ''}>${n} 行</option>`).join('')}</select>
-      <input type="text" id="logGrep" placeholder="grep…（Enter）" size="14" value="${v(grep)}">
-      <button class="btn ghost small" id="logRefresh">重新整理</button> <button class="btn ghost small" id="logDownload">下載</button> <span class="dim" id="logMeta"></span></p>
+    return `<p><select id="logFile" data-read><option value=""${file ? '' : ' selected'}>即時日誌</option>${files.map((f) => `<option value="${v(f.name)}"${f.name === file ? ' selected' : ''}>${v(f.name)} · ${bytes(f.bytes)}</option>`).join('')}</select>
+      <select id="logLevel" data-read>${levels.map(([k, t]) => `<option value="${k}"${k === level ? ' selected' : ''}>${v(t)}</option>`).join('')}</select>
+      <select id="logLimit" data-read>${[200, 500, 2000].map((n) => `<option value="${n}"${n === limit ? ' selected' : ''}>${n} 行</option>`).join('')}</select>
+      <input type="text" id="logGrep" data-read placeholder="grep…（Enter）" size="14" value="${v(grep)}">
+      <button class="btn ghost small" id="logRefresh" data-read>重新整理</button> <button class="btn ghost small" id="logDownload" data-read>下載</button> <span class="dim" id="logMeta"></span></p>
       <pre class="cp-log" id="logTail">${cpLogHtml(CP.logTail)}</pre>${NOTE}
       <p class="dim">${v(CP.logFile)} · 每 3 秒自動更新，離開這一頁就停止。</p>`;
   }, after() {

@@ -433,8 +433,10 @@ impl App {
         let data = &self.d.k.paths.data;
         Some(match method {
             "whoami" => Ok(match who {
-                Some(p) => json!({"kind": p.kind, "name": p.name, "access": p.access.label(), "ip": p.ip}),
-                None => json!({"kind": "in-process"}),
+                // `can`: what the UI may offer this caller (gen2-518: a read-only role sees no
+                // write controls). The server still checks every method on its own.
+                Some(p) => json!({"kind": p.kind, "name": p.name, "access": p.access.label(), "ip": p.ip, "can": {"write": p.access.permits("session.submit").is_ok(), "approve": p.access.permits("gate.answer").is_ok()}}),
+                None => json!({"kind": "in-process", "can": {"write": true, "approve": true}}),
             }),
             "audit.query" => {
                 let s = |k: &str| params[k].as_str().map(str::to_string);
@@ -905,6 +907,12 @@ mod tests {
         assert!(body_text(&r).contains("role operator"));
         assert_eq!(call("op-token", "channels.restart", json!({})).status, 200);
         assert_eq!(call("op-token", "session.submit", json!({})).status, 403);
+        // gen2-518: whoami tells the UI which controls to offer (it mirrors the checks above).
+        let can = |tok: &str| serde_json::from_str::<Value>(&body_text(&call(tok, "whoami", json!({})))).unwrap()["result"]["can"].clone();
+        assert_eq!(can("op-token"), json!({"write": false, "approve": false}));
+        assert_eq!(can("au-token"), json!({"write": false, "approve": false}));
+        assert_eq!(can("ap-token"), json!({"write": true, "approve": true}));
+        assert_eq!(can("admin-token"), json!({"write": true, "approve": true}));
         // Auditor: the audit stream, never content.
         let r = call("au-token", "audit.query", json!({"kind": "auth.denied"}));
         assert_eq!(r.status, 200);

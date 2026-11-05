@@ -13,6 +13,10 @@ path = "src/main.rs"
 # measured sizes and what is lost).
 [features]
 default = ["channel", "providers"]
+# Personal-desktop modules (gen1-306), NOT in the default binary: voice mode, wake word,
+# GPT-Live / realtime speech-to-speech, the Chrome-extension relay and real-profile import.
+# `cargo build -p ark --features personal` brings them (and their tests) back.
+personal = ["ark-media/personal", "ark-browser/personal"]
 # Chat channels: every platform (`ark-channel/all`).
 channel = ["ark-channel/all", "ark-app/channel"]
 # Optional model adapters; off only with `--no-default-features` (docs/BUILD.md).

@@ -19,6 +19,8 @@ pub mod openclaw;
 
 #[cfg(test)]
 pub(crate) mod fake_driver;
+#[cfg(test)]
+mod tests_real;
 
 pub use config::ComputerUseConfig;
 

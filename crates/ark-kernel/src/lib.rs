@@ -71,3 +71,5 @@ pub mod coord;
 pub mod ha;
 pub mod workers;
 pub mod cluster;
+#[cfg(test)]
+mod longtask_tests;

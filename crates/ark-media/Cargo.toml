@@ -6,6 +6,12 @@ license.workspace = true
 # Media capabilities: vision, document extraction, image/video/music generation,
 # speech (TTS/STT), realtime voice, voice mode, meeting bots and phone calls.
 
+[features]
+# Personal-desktop voice front-ends (gen1-306): voice mode, wake word, realtime
+# speech-to-speech sessions and GPT-Live. Off by default; `ark` enables it with
+# `--features personal`.
+personal = []
+
 [dependencies]
 ark-core.workspace = true
 ark-net.workspace = true

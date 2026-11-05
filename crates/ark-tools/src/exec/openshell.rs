@@ -311,7 +311,8 @@ impl ExecBackend for OpenShellBackend {
         let mut cmd = Command::new("ssh");
         cmd.args(self.ssh_args(req.pty.is_some()));
         cmd.arg(&self.alias);
-        cmd.arg("bash").arg(if req.login { "-lc" } else { "-c" }).arg(script);
+        // One quoted word: ssh re-parses the joined command line on the remote side.
+        cmd.arg(ssh::remote_command(if req.login { "-lc" } else { "-c" }, &script));
         spawn_command(cmd, req, None)
     }
     fn map_path(&self, host: &Path) -> String {

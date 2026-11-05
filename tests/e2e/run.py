@@ -1,11 +1,113 @@
 """End-to-end tests: the real `ark` binary against the scripted fake provider.
 Usage: python3 -I tests/e2e/run.py path/to/ark
 """
-import json, os, shutil, signal, subprocess, sys, tempfile, time, urllib.request
+import atexit, json, os, shutil, signal, subprocess, sys, tempfile, time, urllib.request
 
 ARK = os.path.abspath(sys.argv[1])
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = tempfile.mkdtemp(prefix="ark-e2e-")
+
+# ───────────── process hygiene (new-002) ─────────────
+# An interrupted run once left an `ark daemon` (and its children) running for two days. Three
+# layers make that impossible:
+#  1. every subprocess this script starts is tracked (subprocess.run goes through Popen too);
+#  2. every daemon gets ARK_DAEMON_WATCH_PID=<this pid> and stops itself when we are gone,
+#     even after SIGKILL;
+#  3. atexit + SIGTERM/SIGHUP/SIGINT handlers stop what is left: tracked children, then any
+#     process whose ARK_HOME lies under ROOT (only this run creates paths there).
+_CHILDREN = []
+
+
+def _die_with_us():
+    # PR_SET_PDEATHSIG(SIGTERM): the kernel stops the child even if this script is SIGKILLed.
+    import ctypes
+    ctypes.CDLL(None, use_errno=True).prctl(1, signal.SIGTERM)
+
+
+class _TrackedPopen(subprocess.Popen):
+    def __init__(self, *a, **kw):
+        # PDEATHSIG fires when the forking *thread* exits: only tie children forked by the
+        # main thread (which lives as long as the run), and never override a caller's hook.
+        import threading
+        if "preexec_fn" not in kw and threading.current_thread() is threading.main_thread():
+            kw["preexec_fn"] = _die_with_us
+        super().__init__(*a, **kw)
+        _CHILDREN.append(self)
+
+
+subprocess.Popen = _TrackedPopen
+
+
+def _ours():
+    """Pids of processes started for this run: their ARK_HOME is under ROOT."""
+    mine = []
+    root = os.path.realpath(ROOT).encode()
+    for d in os.listdir("/proc"):
+        if not d.isdigit() or int(d) == os.getpid():
+            continue
+        try:
+            env = open(f"/proc/{d}/environ", "rb").read().split(b"\0")
+        except OSError:
+            continue
+        for kv in env:
+            if kv.startswith(b"ARK_HOME=") and os.path.realpath(kv[9:]).startswith(root):
+                mine.append(int(d))
+                break
+    return mine
+
+
+_CLEANED = False
+
+
+def cleanup():
+    global _CLEANED
+    if _CLEANED:
+        return
+    _CLEANED = True
+    for p in _CHILDREN:
+        if p.poll() is None:
+            p.terminate()
+    deadline = time.time() + 3
+    for p in _CHILDREN:
+        try:
+            p.wait(timeout=max(0.1, deadline - time.time()))
+        except Exception:
+            p.kill()
+    # Detached daemons (`ark daemon start` uses setsid) and their children.
+    left = _ours()
+    for pid in left:
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except OSError:
+            pass
+    deadline = time.time() + 5
+    while left and time.time() < deadline:
+        left = [p for p in left if os.path.exists(f"/proc/{p}") and open(f"/proc/{p}/stat").read().rsplit(")", 1)[-1].split()[0] != "Z"]
+        time.sleep(0.1)
+    for pid in left:
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except OSError:
+            pass
+    if left:
+        print(f"cleanup: force-killed leftover processes {left}", file=sys.stderr)
+
+
+atexit.register(cleanup)
+
+
+def _on_signal(signum, _frame):
+    print(f"\ninterrupted by signal {signum}; cleaning up", file=sys.stderr)
+    cleanup()
+    if not os.environ.get("ARK_E2E_KEEP"):
+        shutil.rmtree(ROOT, ignore_errors=True)
+    else:
+        print("artifacts kept in", ROOT, file=sys.stderr)
+    os._exit(128 + signum)
+
+
+for _s in (signal.SIGTERM, signal.SIGHUP, signal.SIGINT):
+    signal.signal(_s, _on_signal)
 HOME = os.path.join(ROOT, "home")
 WS = os.path.join(ROOT, "ws")
 os.makedirs(WS)
@@ -60,6 +162,8 @@ ENV.update({"ARK_HOME": HOME, "FAKE_KEY": "test-key-not-secret", "NO_COLOR": "1"
 # the network opts in through `online()`, which drops ARK_OFFLINE for its own subprocesses.
 ENV["ARK_OFFLINE"] = "1"
 ENV.pop("ARK_CALL_SOCK", None)
+# Every daemon follows this script down (crates/ark-kernel/src/daemon.rs watchdog).
+ENV["ARK_DAEMON_WATCH_PID"] = str(os.getpid())
 
 failures = []
 passed = 0
@@ -1509,6 +1613,7 @@ try:
     pass
 finally:
     srv.terminate()
+    cleanup()
     print(f"\n{passed} passed, {len(failures)} failed" + (f": {', '.join(failures)}" if failures else ""))
     if not failures and not os.environ.get("ARK_E2E_KEEP"):
         shutil.rmtree(ROOT, ignore_errors=True)

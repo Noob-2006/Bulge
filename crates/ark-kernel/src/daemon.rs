@@ -145,6 +145,7 @@ impl Daemon {
             libc::signal(libc::SIGINT, on_signal as *const () as libc::sighandler_t);
         }
         STOP.store(false, Ordering::SeqCst);
+        spawn_watchdog(sock.clone(), self.k.paths.data.clone(), watch_pid_from_env());
 
         // ent-095: with `[ha]` the leader-only work starts when the lease is won (cluster
         // thread below); without it this daemon leads from the start.
@@ -351,6 +352,10 @@ impl Daemon {
         }
     }
 
+    pub fn stopping() -> bool {
+        STOP.load(Ordering::SeqCst)
+    }
+
     /// Restart work that was in flight when the daemon died. `epoch`: after an HA takeover
     /// (each resumed session gets a notice saying which node picked it up).
     fn resume(&self, epoch: Option<u64>) {
@@ -399,11 +404,17 @@ impl Daemon {
     /// keeps failing backs off (1 min → 1 h for transient, 15 min → 6 h for billing); the
     /// session never dies and its log is untouched between attempts.
     fn retry_paused(&self) -> usize {
+        self.retry_paused_at(crate::event::now_ms())
+    }
+
+    /// [`Self::retry_paused`] against an explicit clock: the long-task harness (gen1-305)
+    /// fast-forwards hours of backoff without waiting for them.
+    pub fn retry_paused_at(&self, now_ms: u64) -> usize {
         if ark_security::estop::is_engaged(&self.k.paths.data) {
             return 0;
         }
         let mut n = 0;
-        for p in crate::limits::due_pauses(&self.k.paths.data, crate::event::now_ms()) {
+        for p in crate::limits::due_pauses(&self.k.paths.data, now_ms) {
             if p.session.is_empty() || self.k.is_running(&p.session) {
                 continue;
             }
@@ -822,7 +833,8 @@ mod session_command_tests {
 
     #[test]
     fn session_command_runs_security_slash_commands() {
-        let root = std::env::temp_dir().join(format!("ark-daemon-cmd-{}", std::process::id()));
+        let tmp = ark_core::tmp::TempDir::new("ark-daemon-cmd");
+        let root = tmp.path().to_path_buf();
         let paths = crate::config::Paths { data: root.join("data"), config_dir: root.join("cfg"), runtime: root.join("run") };
         std::fs::create_dir_all(&root).unwrap();
         let (pending, cell) = pending_approver(Duration::from_secs(5));
@@ -839,6 +851,75 @@ mod session_command_tests {
         assert!(d.call("session.command", &json!({"id": "nope-123", "line": "/yolo"})).is_err());
         assert!(d.call("session.command", &json!({"id": id})).is_err());
         assert!(Daemon::METHODS.contains(&"session.command"));
-        let _ = std::fs::remove_dir_all(&root);
+    }
+}
+
+/// `ARK_DAEMON_WATCH_PID`: the daemon shuts down when this process is gone (new-002). Test
+/// harnesses (tests/e2e/run.py) and supervisors that start `ark daemon start` set it to their own
+/// pid, so a harness that is interrupted or crashes cannot leave an `arkd` running for days.
+pub fn watch_pid_from_env() -> Option<i32> {
+    std::env::var("ARK_DAEMON_WATCH_PID").ok().and_then(|v| v.trim().parse::<i32>().ok()).filter(|p| *p > 1)
+}
+
+/// Why the watchdog should stop the daemon now, if it should.
+pub fn watchdog_reason(sock: &Path, data: Option<&Path>, watch: Option<i32>) -> Option<String> {
+    if let Some(pid) = watch {
+        // ESRCH only: EPERM means it exists (another user), which never happens for our parent.
+        if unsafe { libc::kill(pid, 0) } != 0 && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH) {
+            return Some(format!("watched process {pid} exited (ARK_DAEMON_WATCH_PID)"));
+        }
+    }
+    // The control socket was removed (its ARK_HOME/runtime dir deleted): nobody can reach or
+    // stop this daemon any more, so it stops itself instead of lingering unreachable.
+    if !sock.exists() {
+        return Some(format!("control socket {} was removed", sock.display()));
+    }
+    // Same for the data directory (ARK_HOME deleted while the socket lives elsewhere, e.g. a
+    // long ARK_HOME whose socket moved to $XDG_RUNTIME_DIR).
+    if let Some(d) = data.filter(|d| !d.exists()) {
+        return Some(format!("data directory {} was removed", d.display()));
+    }
+    None
+}
+
+fn spawn_watchdog(sock: std::path::PathBuf, data: std::path::PathBuf, watch: Option<i32>) {
+    // Only watch the data directory if it exists now (it always does once arkd.log is open).
+    let data = data.exists().then_some(data);
+    let _ = std::thread::Builder::new().name("arkd-watchdog".into()).spawn(move || {
+        while !STOP.load(Ordering::SeqCst) {
+            std::thread::sleep(Duration::from_secs(1));
+            if STOP.load(Ordering::SeqCst) {
+                break;
+            }
+            if let Some(why) = watchdog_reason(&sock, data.as_deref(), watch) {
+                eprintln!("arkd: shutting down: {why}");
+                STOP.store(true, Ordering::SeqCst);
+                break;
+            }
+        }
+    });
+}
+
+#[cfg(test)]
+mod watchdog_tests {
+    use super::*;
+
+    #[test]
+    fn watchdog_stops_for_a_dead_watched_pid_or_a_removed_home() {
+        let d = ark_core::tmp::TempDir::new("ark-daemon-watchdog");
+        let sock = d.path().join("arkd.sock");
+        let data = d.path().join("data");
+        std::fs::write(&sock, "").unwrap();
+        std::fs::create_dir_all(&data).unwrap();
+        let me = std::process::id() as i32;
+        assert_eq!(watchdog_reason(&sock, Some(&data), Some(me)), None, "we are alive");
+        let mut c = std::process::Command::new("true").spawn().unwrap();
+        let dead = c.id() as i32;
+        c.wait().unwrap();
+        assert!(watchdog_reason(&sock, Some(&data), Some(dead)).unwrap().contains("ARK_DAEMON_WATCH_PID"));
+        std::fs::remove_dir_all(&data).unwrap();
+        assert!(watchdog_reason(&sock, Some(&data), None).unwrap().contains("data directory"));
+        std::fs::remove_file(&sock).unwrap();
+        assert!(watchdog_reason(&sock, None, None).unwrap().contains("control socket"));
     }
 }

@@ -557,10 +557,20 @@ done
 case "$*" in
     *unreachable*) echo "ssh: connect to host unreachable port 22: Connection refused" >&2; exit 255 ;;
 esac
-last=""
-for a in "$@"; do last="$a"; done
+# Like real ssh: skip options, the first positional is the target, and every argument
+# after it is joined with spaces into ONE command line for the remote shell (so a
+# script passed as separate unquoted words breaks here exactly as it does over ssh).
+args=("$@"); i=0; n=${{#args[@]}}
+while [ $i -lt $n ]; do
+    case "${{args[$i]}}" in
+        -o|-p|-i|-O|-l|-S|-F|-J|-c|-E|-L|-R|-D|-W|-b|-e|-m|-Q|-w) i=$((i+2)) ;;
+        -*) i=$((i+1)) ;;
+        *) break ;;
+    esac
+done
+cmd="${{args[*]:$((i+1))}}"
 export HOME={home}
-exec bash -c "$last"
+exec bash -c "$cmd"
 "#,
             log = log.display(),
             home = remote_home.display()

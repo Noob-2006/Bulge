@@ -55,7 +55,6 @@ crates/ark-browser/src/lease.rs  # temp_dir
 crates/ark-browser/src/manager.rs  # temp_dir
 crates/ark-browser/src/sandbox.rs  # temp_dir
 crates/ark-browser/src/snapshot.rs  # temp_dir
-crates/ark-browser/src/tests.rs  # temp_dir
 crates/ark-browser/src/tests_runtime.rs  # temp_dir
 crates/ark-browser/src/vault.rs  # temp_dir
 crates/ark-browser/src/view.rs  # temp_dir
@@ -76,7 +75,6 @@ crates/ark-kernel/src/cronjob/incidents.rs  # temp_dir
 crates/ark-kernel/src/cronjob/script.rs  # temp_dir
 crates/ark-kernel/src/cronjob/tests.rs  # temp_dir
 crates/ark-kernel/src/ctxhost/tests.rs  # temp_dir
-crates/ark-kernel/src/daemon.rs  # temp_dir
 crates/ark-kernel/src/decision.rs  # temp_dir
 crates/ark-kernel/src/devprompts.rs  # temp_dir
 crates/ark-kernel/src/engine.rs  # temp_dir

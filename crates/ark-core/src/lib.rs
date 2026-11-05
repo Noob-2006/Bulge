@@ -6,6 +6,7 @@
 pub mod cancel;
 pub mod exec;
 pub mod imageevict;
+pub mod proc;
 pub mod provider;
 pub mod registry;
 pub mod share;

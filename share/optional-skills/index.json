@@ -3283,6 +3283,138 @@
    "files": [
     "SKILL.md"
    ]
+  },
+  {
+   "name": "apple-notes",
+   "path": "personal/apple-notes",
+   "description": "Manage Apple Notes via memo CLI: create, search, edit.",
+   "tags": [
+    "Personal",
+    "Consumer"
+   ],
+   "files": [
+    "SKILL.md"
+   ]
+  },
+  {
+   "name": "apple-reminders",
+   "path": "personal/apple-reminders",
+   "description": "Apple Reminders via remindctl: add, list, complete.",
+   "tags": [
+    "Personal",
+    "Consumer"
+   ],
+   "files": [
+    "SKILL.md"
+   ]
+  },
+  {
+   "name": "bear-notes",
+   "path": "personal/bear-notes",
+   "description": "Create, search, and manage Bear notes via grizzly CLI.",
+   "tags": [
+    "Personal",
+    "Consumer"
+   ],
+   "files": [
+    "SKILL.md"
+   ]
+  },
+  {
+   "name": "blucli",
+   "path": "personal/blucli",
+   "description": "BluOS CLI (blu) for discovery, playback, grouping, and volume.",
+   "tags": [
+    "Personal",
+    "Consumer"
+   ],
+   "files": [
+    "SKILL.md"
+   ]
+  },
+  {
+   "name": "eightctl",
+   "path": "personal/eightctl",
+   "description": "Control Eight Sleep pods (status, temperature, alarms, schedules).",
+   "tags": [
+    "Personal",
+    "Consumer"
+   ],
+   "files": [
+    "SKILL.md"
+   ]
+  },
+  {
+   "name": "findmy",
+   "path": "personal/findmy",
+   "description": "Track Apple devices/AirTags via FindMy.app on macOS.",
+   "tags": [
+    "Personal",
+    "Consumer"
+   ],
+   "files": [
+    "SKILL.md"
+   ]
+  },
+  {
+   "name": "imessage",
+   "path": "personal/imessage",
+   "description": "Send and receive iMessages/SMS via the imsg CLI on macOS.",
+   "tags": [
+    "Personal",
+    "Consumer"
+   ],
+   "files": [
+    "SKILL.md"
+   ]
+  },
+  {
+   "name": "peekaboo",
+   "path": "personal/peekaboo",
+   "description": "Capture and automate macOS UI with the Peekaboo CLI.",
+   "tags": [
+    "Personal",
+    "Consumer"
+   ],
+   "files": [
+    "SKILL.md"
+   ]
+  },
+  {
+   "name": "sonoscli",
+   "path": "personal/sonoscli",
+   "description": "Control Sonos speakers (discover/status/play/volume/group).",
+   "tags": [
+    "Personal",
+    "Consumer"
+   ],
+   "files": [
+    "SKILL.md"
+   ]
+  },
+  {
+   "name": "spotify-player",
+   "path": "personal/spotify-player",
+   "description": "Terminal Spotify playback/search via spogo (preferred) or spotify_player.",
+   "tags": [
+    "Personal",
+    "Consumer"
+   ],
+   "files": [
+    "SKILL.md"
+   ]
+  },
+  {
+   "name": "things-mac",
+   "path": "personal/things-mac",
+   "description": "Add, update, list, search, or inspect Things 3 todos, inbox, today, projects, areas, and tags on macOS.",
+   "tags": [
+    "Personal",
+    "Consumer"
+   ],
+   "files": [
+    "SKILL.md"
+   ]
   }
  ]
 }

@@ -281,6 +281,14 @@ pub fn find_chrome(explicit: &str) -> Option<std::path::PathBuf> {
     ])
 }
 
+/// Browsers [`launch`] started, by DevTools port → process-group id (tests stop exactly theirs).
+static LAUNCHED: std::sync::Mutex<std::collections::BTreeMap<u16, i32>> = std::sync::Mutex::new(std::collections::BTreeMap::new());
+
+/// The process group of the meeting browser this process launched on `port`, if any.
+pub fn launched_pgid(port: u16) -> Option<i32> {
+    LAUNCHED.lock().unwrap_or_else(|e| e.into_inner()).get(&port).copied()
+}
+
 /// Start a meeting Chromium on `port` with a persistent profile in `profile_dir`.
 pub fn launch(exe: &Path, port: u16, profile_dir: &Path, headless: bool) -> Result<String, String> {
     std::fs::create_dir_all(profile_dir).map_err(|e| e.to_string())?;
@@ -314,15 +322,15 @@ pub fn launch(exe: &Path, port: u16, profile_dir: &Path, headless: bool) -> Resu
     // the reason is in here instead of /dev/null.
     let log_path = profile_dir.join("browser.log");
     let log = std::fs::File::create(&log_path).map_err(|e| e.to_string())?;
-    use std::os::unix::process::CommandExt;
-    let mut child = std::process::Command::new(exe)
-        .args(&args)
+    let mut cmd = std::process::Command::new(exe);
+    cmd.args(&args)
         .arg("about:blank")
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::from(log))
-        .process_group(0)
-        .spawn()
+        .stderr(std::process::Stdio::from(log));
+    // Own process group, and tied to ark: the meeting browser outlives a call, never ark
+    // itself (new-001: interrupted test runs left headless meeting browsers for days).
+    let mut child = ark_core::proc::spawn_tied(cmd, false)
         .map_err(|e| format!("could not start {}: {e}", exe.display()))?;
     let c = Cdp::new(&base);
     let deadline = Instant::now() + Duration::from_secs(30);
@@ -350,6 +358,7 @@ pub fn launch(exe: &Path, port: u16, profile_dir: &Path, headless: bool) -> Resu
         }
         if c.version().is_ok() {
             // Ours: keep it running (a meeting browser outlives the call), reap it when it exits.
+            LAUNCHED.lock().unwrap_or_else(|e| e.into_inner()).insert(port, child.id() as i32);
             std::thread::spawn(move || {
                 let _ = child.wait();
             });

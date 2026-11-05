@@ -79,17 +79,19 @@ fn gateway_start_and_stop_hooks_fire_around_the_daemon() {
     let ws = h.join("ws");
     std::fs::create_dir_all(&ws).unwrap();
     let log = std::fs::File::create(h.join("daemon.log")).unwrap();
-    let mut child = Command::new(env!("CARGO_BIN_EXE_ark"))
-        .args(["daemon", "run", "-w", ws.to_str().unwrap()])
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_ark"));
+    cmd.args(["daemon", "run", "-w", ws.to_str().unwrap()])
         .env("ARK_HOME", &h)
         .env("ARK_OFFLINE", "1")
         .env_remove("OPENAI_API_KEY")
         .env_remove("ANTHROPIC_API_KEY")
         .stdin(Stdio::null())
         .stdout(log.try_clone().unwrap())
-        .stderr(log)
-        .spawn()
-        .expect("spawn arkd");
+        .stderr(log);
+    // Tied to this test process and guarded: a failed assertion or an interrupted run stops the
+    // daemon and its whole process group (new-002).
+    let mut guard = ark_core::proc::ChildGuard::group(ark_core::proc::spawn_tied(cmd, true).expect("spawn arkd"));
+    let child = guard.child();
 
     // The daemon answered: the start hook must have run (it is emitted before the socket serves).
     let up = wait_until(Duration::from_secs(25), || ark(&h, &["daemon", "status"]).0 == 0);
