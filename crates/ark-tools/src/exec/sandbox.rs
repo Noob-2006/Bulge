@@ -101,7 +101,7 @@ impl SandboxConfig {
 }
 
 /// OpenClaw DEFAULT_TOOL_ALLOW / DEFAULT_TOOL_DENY mapped to ark tool names.
-pub const DEFAULT_ALLOW: &[&str] = &["shell", "process", "terminal", "read", "write", "edit", "patch", "apply_patch", "glob", "grep", "run", "todo", "ask_user", "spawn", "session_search", "skill", "memory", "job", "goal_done", "tool_describe", "tool_call"];
+pub const DEFAULT_ALLOW: &[&str] = &["shell", "process", "terminal", "read", "write", "edit", "patch", "apply_patch", "glob", "grep", "run", "todo", "ask_user", "spawn", "session_search", "context_fetch", "skill", "memory", "job", "goal_done", "tool_describe", "tool_call"];
 pub const DEFAULT_DENY: &[&str] = &["node_invoke", "channel_send", "browser", "computer", "canvas", "acp_delegate", "cron", "schedule", "gateway"];
 
 impl ToolPolicy {

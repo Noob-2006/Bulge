@@ -22,3 +22,6 @@ regex.workspace = true
 libc.workspace = true
 ureq.workspace = true # decision provider HTTP (OpenAI /decisions)
 base64.workspace = true
+# SQLite index (sessions FTS5, unified memory table, chunk vectors, spilled tool output).
+# `bundled` compiles SQLite in statically: no system libsqlite3, works for the musl build.
+rusqlite = { version = "0.40", features = ["bundled"] }

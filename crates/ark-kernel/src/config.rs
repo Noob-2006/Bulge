@@ -450,7 +450,8 @@ pub struct CompactionConfig {
     /// Most recent tool results never pruned.
     pub keep_tool_results: usize,
     /// C11: long tool results older than `keep_tool_results` are clipped to this many
-    /// characters (head + tail, with a marker) before every request. 0 = off.
+    /// characters (head + tail, with a `context_fetch` pointer that brings the full output
+    /// back on demand) before every request. 0 = off. Default 2000 (srv-041 benchmark).
     pub max_tool_result_chars: usize,
     /// Most recent messages kept verbatim by summarisation.
     pub keep_messages: usize,
@@ -612,7 +613,7 @@ impl Default for RunnerConfig {
 }
 impl Default for CompactionConfig {
     fn default() -> Self {
-        CompactionConfig { threshold: 0.75, prune_threshold: 0.5, keep_tool_results: 6, max_tool_result_chars: 8000, keep_messages: 8, micro_compact: false, micro_compact_every_n_turns: 1, micro_compact_defrag_threshold_tokens: 2000, native: NativeCompactionConfig::default() }
+        CompactionConfig { threshold: 0.75, prune_threshold: 0.5, keep_tool_results: 6, max_tool_result_chars: 2000, keep_messages: 8, micro_compact: false, micro_compact_every_n_turns: 1, micro_compact_defrag_threshold_tokens: 2000, native: NativeCompactionConfig::default() }
     }
 }
 impl Default for ScheduleConfig {

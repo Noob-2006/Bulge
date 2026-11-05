@@ -104,7 +104,8 @@ fn name_matches(pattern: &str, name: &str) -> bool {
 
 /// The session's tool policy (`Tools` event) allows `name`? Meta tools always pass.
 pub fn tool_allowed(view: &View, name: &str) -> bool {
-    if matches!(name, "tool_describe" | "tool_call" | "goal_done" | "structured_output") {
+    // context_fetch only re-reads output this session already received (clip markers point at it).
+    if matches!(name, "tool_describe" | "tool_call" | "goal_done" | "structured_output" | "context_fetch") {
         return true;
     }
     if view.tool_deny.iter().any(|p| name_matches(p, name)) {
