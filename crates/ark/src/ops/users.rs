@@ -65,6 +65,16 @@ pub fn run(p: &Paths, a: &Args) -> Result<String, String> {
             audit(p, "user.role", &u.name, &serde_json::json!({"role": u.role}));
             show(&[u], js)
         }
+        // ent-050: organization (`*` with the admin role = global administrator).
+        "org" => {
+            let org = a.need(2, "org")?.trim().to_string();
+            let u = agents::user_update(p, a.need(1, "id")?, |u| {
+                u.org = if org == "-" { String::new() } else { org.clone() };
+                Ok(())
+            })?;
+            audit(p, "user.org", &u.name, &serde_json::json!({"org": u.org}));
+            show(&[u], js)
+        }
         "team" => {
             let team = a.rest(2);
             let u = agents::user_update(p, a.need(1, "id")?, |u| {
@@ -81,6 +91,9 @@ pub fn run(p: &Paths, a: &Args) -> Result<String, String> {
                 Ok(())
             })?;
             audit(p, if off { "user.disable" } else { "user.enable" }, &u.name, &serde_json::Value::Null);
+            if off {
+                revoke_running(p, &u);
+            }
             show(&[u], js)
         }
         // Bind an SSO subject (`sub` claim) to a profile; logins then resolve to it.
@@ -107,8 +120,21 @@ pub fn run(p: &Paths, a: &Args) -> Result<String, String> {
             Some(u) => show(&[u], js),
             None => return Err("no user profile has that identity".into()),
         },
-        other => return Err(format!("unknown `users {other}` (list | add <name> | link-email <email> --to <id> | link <channel> <sender> --to <id> | link-oidc <subject> --to <id> | role <id> <admin|operator|user|auditor|-> | team <id> <team|-> | disable <id> | enable <id> | merge <source> --into <target> | instructions <id> <text> | rm <id> | whois <channel> <sender>)")),
+        other => return Err(format!("unknown `users {other}` (list | add <name> | link-email <email> --to <id> | link <channel> <sender> --to <id> | link-oidc <subject> --to <id> | role <id> <admin|operator|user|auditor|-> | org <id> <org|*|-> | team <id> <team|-> | disable <id> | enable <id> | merge <source> --into <target> | instructions <id> <text> | rm <id> | whois <channel> <sender>)")),
     })
+}
+
+/// ent-049: a disabled user's running turns stop now. Logins, personal tokens, open sockets and
+/// chat identities already re-check the registry on use; running turns are interrupted through
+/// the daemon (when one is up — otherwise nothing is running).
+fn revoke_running(p: &Paths, u: &User) {
+    let sock = p.socket();
+    let Ok(ping) = ark_kernel::daemon::call(&sock, "ping", serde_json::json!({})) else { return };
+    let running: Vec<String> = ping["running"].as_array().map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect()).unwrap_or_default();
+    let store = ark_kernel::store::Store::new(p.sessions());
+    for sid in ark_kernel::governance::sessions_of_user(p, &store, &running, u) {
+        let _ = ark_kernel::daemon::call(&sock, "session.interrupt", serde_json::json!({"id": sid}));
+    }
 }
 
 pub fn dispatch(cmd: &str, a: &Args, _raw: &[String]) -> Option<R> {

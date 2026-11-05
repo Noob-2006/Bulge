@@ -616,7 +616,7 @@ pub(crate) mod tests {
         let xsw_dup = format!("{head}{evil_unsigned}{signed_assertion}{tail}");
         assert!(check(&xsw_dup).unwrap_err().contains("duplicate ID"));
         // XSW: the signed original hidden inside Extensions / Object, forged one in its place.
-        let hidden = format!("{}<samlp:Extensions>{signed_assertion}</samlp:Extensions>{}{tail}", &head, evil_unsigned.replace("ID=\"_good\"", "ID=\"_evil\""));
+        let hidden = format!("{}<samlp:Extensions>{signed_assertion}</samlp:Extensions>{}{tail}", head, evil_unsigned.replace("ID=\"_good\"", "ID=\"_evil\""));
         assert!(check(&hidden).is_err());
         let in_object = evil_assertion.replace("</ds:Signature>", &format!("<ds:Object>{signed_assertion}</ds:Object></ds:Signature>"));
         assert!(check(&format!("{head}{in_object}{tail}")).is_err());
@@ -627,7 +627,7 @@ pub(crate) mod tests {
         let resp_signed = sign(&legit, "_resp1", &idp_key());
         let wrapped = format!(
             "<samlp:Response xmlns:samlp=\"{NS_SAMLP}\" xmlns:saml=\"{NS_SAML}\" ID=\"_outer\" Version=\"2.0\" Destination=\"{ACS}\"><samlp:Status><samlp:StatusCode Value=\"{STATUS_SUCCESS}\"/></samlp:Status>{}<samlp:Extensions>{resp_signed}</samlp:Extensions></samlp:Response>",
-            &evil_unsigned.replace("ID=\"_good\"", "ID=\"_evil\"")
+            evil_unsigned.replace("ID=\"_good\"", "ID=\"_evil\"")
         );
         assert!(check(&wrapped).is_err());
         // A signature anywhere but directly in the Response / Assertion is refused, even a valid one.
