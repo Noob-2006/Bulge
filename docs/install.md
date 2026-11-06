@@ -41,6 +41,7 @@ curl --proto '=https' --tlsv1.2 -fsSL https://github.com/se-agent/System-Enginee
 
 - 不需要 sudo。程式放在 `~/.local/bin/seagent`，設定在 `~/.config/seagent`，資料在 `~/.local/share/seagent`。
 - 會：下載對應 CPU 的版本 → 對照 `SHA256SUMS` 驗證 → 安裝 → 用 systemd 使用者服務啟動（沒有就改背景程序）→ 印出（桌面環境下自動開啟）一次性設定精靈連結。
+- 安裝時固定 `umask go-w`：裝出來的執行檔與 `share/` 檔案不會有群組／其他人的寫入權限（你的 umask 更嚴格時照你的）；離線包的 `install.sh` 相同。
 - 精靈連結 30 分鐘內有效、只能用一次。過期了：`seagent setup link`。
 
 ### 當成系統服務安裝（伺服器、多人共用）
@@ -304,6 +305,7 @@ cargo build --release -p seagent                # Rust 1.80 以上
 
 | 看到 | 原因 | 處理 |
 |---|---|---|
+| `API key missing … set $<變數>` | 沒有該供應商的金鑰 | 照訊息裡的變數名稱 `seagent secrets set <變數>`，或重跑 `seagent setup` |
 | `Auth: … the key contains a control character` | 貼金鑰時終端機夾帶了控制碼 | `seagent secrets set <供應商>_API_KEY`，貼上後 Enter、Ctrl+D |
 | `401`／`403` | 金鑰錯、過期、沒額度 | `seagent providers check`；到供應商後台確認 |
 | `model not found` | 模型名稱打錯或供應商沒有 | `seagent models list <供應商>`；`seagent model` 互動選擇 |

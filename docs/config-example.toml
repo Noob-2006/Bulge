@@ -9,11 +9,24 @@ default = "anthropic/claude-sonnet-5-5"
 fallback = ["openai/gpt-5-mini", "mistral/mistral-small-latest"]
 aux = "deepseek/deepseek-chat"     # 便宜模型：標題、MCP sampling（壓縮預設沿用對話模型以命中快取；要改設 [model.tasks] compaction）
 max_tokens = 8192
-# system_updates = "in_history"    # 端點支援歷史中的 system 更新時才開；預設 rewrite（相容舊行為）
-# log_requests = true             # 每次送出的請求原樣寫進工作階段記錄（除錯快取未命中用；記錄會變大）
+# system_updates = "rewrite"       # 預設 rewrite；in_history = 中途的 system 變更接在快取歷史之後（端點支援才開）
+# log_requests = false             # true = 每次送出的請求原樣寫進 session 紀錄（除錯快取未命中用；紀錄會變大）
+# daybreak = false                 # true = 只在 openai-codex 路由送 access_programs.cyber = "daybreak_blue"
+# context_length = 128000          # 釘選上下文視窗（/context 標 (pinned)）；未設且模型未知時標 (fallback)
+# DeepSeek 的 Anthropic 相容路由（未對真實端點驗證）：default = "deepseek-messages/deepseek-v4-pro"
+
+# [model.tasks]
+# compaction = "deepseek/deepseek-chat"   # 明確指定才會用便宜模型壓縮（會放棄對話前綴快取）
+# group_router = "deepseek/deepseek-chat" # hosted room 的 routing = "auto" 用來挑成員
 
 [compaction]
-trim_tool_results = "pressure"     # pressure（預設，超過 prune_threshold 才裁剪舊工具輸出）| always
+trim_tool_results = "pressure"     # pressure（預設，超過 prune_threshold 才裁剪舊工具輸出）| always（舊行為）
+# prune_threshold = 0.5
+
+# [decision]                        # decision_evaluate 的 provider
+# backend = "rerank"                # llm（預設）| openai | rerank（POST {base_url}/rerank：vLLM、TEI、Infinity、Cohere、Jina、Voyage）
+# model = "local/bge-reranker-v2-m3"
+# base_url = "http://127.0.0.1:8080"
 
 [budget]                            # 每個 session 的上限（不設就無上限）
 max_cost_usd = 5.0
@@ -29,6 +42,32 @@ egress_deny = []
 [schedule]
 utc_offset_minutes = 480            # 排程時區 UTC+8
 
+# ───────────── 排程投遞與自動維運（全部可省略，以下為預設值或範例）─────────────
+# [automation]
+# default_deliver = "slack:ops"           # 投遞：job → [automation.creators.<SEAGENT_PROFILE>] → [automation.agents.<agent>] → 這裡 → origin
+# default_failure_deliver = "slack:oncall"
+# agent = "ops"                           # 新工作記錄的擁有者 agent
+# restart_hold_seconds = 3600             # 重啟時比這新的已認領工作恢復成待執行，更舊的記為 missed
+# scratch_ttl_hours = 24                  # <data>/tmp、scratch、art、session artifacts 過期（0 關閉）
+# worktree_idle_hours = 168               # 回收乾淨且閒置的 .worktrees/*（0 關閉）
+# cleanup_interval_secs = 3600
+# idle_session_secs = 1800                # seagentd 讓閒置 session 的記憶體狀態退場（0 關閉）
+# plugin_auto_update_hours = 0            # 外掛無人值守更新（0 = 關；仍走掃描與同意）
+# [automation.agents.ops]
+# deliver = "slack:C123"
+# failure_deliver = "slack:C999"
+# [automation.creators.alice]
+# deliver = "room:room-ab12"              # cron 輸出貼進 hosted room（不自動讓成員回話）
+
+# ───────────── 子代理與代理對代理 ─────────────
+# [delegation]
+# prefix_stagger_seconds = 0              # 批次兄弟等第一個子代理的第一個串流片段再開始（最多 60）
+# max_hops = 4                            # agent_message 鏈結上限
+# ralph_max_rounds = 16
+# ralph_max_handoff_chars = 16384
+# [gateway.bot_loop_guard]
+# max_hops = 3                            # 有設就蓋過 [delegation] max_hops
+
 # ───────────── 子行程環境清洗 ─────────────
 # 子行程（shell、背景工作、code mode、hooks、MCP、外掛、sandbox）看不到 seagent 管的憑證。
 # env_passthrough 只放寬「名稱長得像憑證」這條啟發式規則（例如 *_TOKEN，但值其實是中介資料：
@@ -39,9 +78,15 @@ scrub_env = true                    # 關閉 = 子行程拿到完整環境（不
 env_strip = ["CORP_*"]              # 額外要移除的名稱或 PREFIX_* 樣式
 env_passthrough = ["BUILD_TOKEN"]   # 名稱像憑證但值是中介資料；憑證寫在這裡也沒用
 
+# 逐供應商／模型的 exec 上限：只能收緊，/yolo、/elevated 也蓋不過；查原因用 `seagent tools explain <tool> --model M`
+# [tools.by_provider."ollama".exec]
+# mode = "ask"                       # deny | allowlist | ask | auto | full（或直接給 security / ask）
+
 [exec]
 scrub_env = true
 env_passthrough = ["BUILD_ID"]
+# [exec.code]
+# run_code_only = false              # true = 模型只看得到 `run`，其他工具在腳本內用 seagent-call 呼叫
 # backend 不寫 = "auto"：這台機器能開 microVM（/dev/kvm ＋ [exec.vm] 的客體映像）就用 VM；
 # 開不了 VM（沒有 KVM 或沒建映像）時，所有 session（含 owner 主 session）都降級到 bwrap／Landlock，
 # 主機家目錄與金鑰不掛入、owner session 保留網路，並印出「no microVM available（原因）＋怎麼修」。
@@ -75,6 +120,42 @@ network = "broker"                  # 客體沒有網卡，只能經 seagent-bro
 snapshots = true                    # 破壞性指令先快照再放行（undo 取代詢問）
 snapshot_keep = 20
 trust_tiers = true                  # owner / stranger / untrusted 各自獨立的 VM 與工作區
+
+# ───────────── 記憶、知識庫、技能工坊 ─────────────
+# [memory.recall_gate]
+# mode = "off"                       # off | shadow（只記 <data>/logs/recall-gate.jsonl）| live（注入）
+# high_threshold = 0.75
+# timeout_ms = 1500
+# max_candidates = 10
+# page_chars = 2800
+# max_inject_chars = 6000
+# store = ""                         # 空 = 預設知識庫
+# model = ""                         # 空 = aux
+# [memory.wiki]
+# agent_id = ""                      # 空 = $SEAGENT_AGENT
+# agents = []                        # 可用預設庫的代理（空 = 全部）
+# history = true                     # 每次改寫前存舊頁到 .seagent-wiki/history/
+# history_max = 50
+# [memory.wiki.stores.ops]
+# path = "~/kb/ops"
+# agents = ["ops"]
+# [memory.standing]
+# enabled = false                    # 常駐提醒；用 `seagent memory intents add …` 新增
+# max_intents = 50
+# cooldown_secs = 3600
+# max_fires = 3
+# [memory.search.embedding]
+# provider = "ollama"
+# allow_private = true               # false = Ollama 只准 loopback；雲端 metadata 永遠拒絕
+# [skills.workshop]
+# mode = "off"                       # off | propose（草稿進 /skills drafts）| auto（經守衛直接寫入）
+# llm_review = true
+# model = ""                         # 空 = aux
+# diet_max_bytes = 12000             # seagent curator diet 的 SKILL.md 本文預算（2000–100000）
+
+# ───────────── 瀏覽器 ─────────────
+# [browser]
+# allow_private_urls = false         # 嚴格 SSRF：open/navigate 逐跳檢查轉址（Camofox 改為拒絕 http(s) 導航）
 
 # ───────────── 法遵（docs/compliance-tw.md）─────────────
 [compliance]

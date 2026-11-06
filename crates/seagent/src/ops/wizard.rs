@@ -82,6 +82,14 @@ pub fn migration_step(p: &mut dyn Prompt, paths: &Paths, found: &[(&'static str,
             p.say(&format!("    … {}", acts.len() - 8));
         }
         if p.yes(&format!("  {} {src}?", t("現在匯入", "Import from")), true)? {
+            // Credentials are a separate, default-no question (same policy as `migrate
+            // --migrate-secrets`): agreeing to import settings never copies keys by itself.
+            let secrets = acts.iter().filter(|a| matches!(a, crate::ops::migrate::Act::Secret(..))).count();
+            let acts = if secrets > 0 && p.yes(&format!("  {} {secrets} {}", t("也把", "Also import"), t("個金鑰匯入保管庫？", "credential(s) into the vault?")), false)? {
+                acts
+            } else {
+                crate::ops::migrate::without_secrets(acts)
+            };
             let s = crate::ops::migrate::apply(paths, &acts, false)?;
             p.say(&format!("  ✓ {s}"));
             done.push(src.to_string());
@@ -548,10 +556,17 @@ mod tests {
         std::fs::create_dir_all(&h).unwrap();
         std::fs::write(h.join("config.yaml"), "model:\n  default: anthropic/claude-sonnet-4\n").unwrap();
         std::fs::write(h.join(".env"), "OPENROUTER_API_KEY=sk-or-test\n").unwrap();
-        let mut sc = s(&["y"]);
+        // Settings yes, credentials left at the default (no): the key is skipped.
+        let mut sc = s(&["y", ""]);
         let done = migration_step(&mut sc, &p, &[("hermes", h.clone())]).unwrap();
         assert_eq!(done, vec!["hermes"]);
         assert!(sc.said.borrow().iter().any(|l| l.contains("hermes (")));
+        let vault = |p: &Paths| seagent_kernel::vault::Vault::load(&p.secrets()).unwrap().names();
+        assert!(!vault(&p).iter().any(|n| n == "OPENROUTER_API_KEY"), "credentials need their own yes");
+        // Settings yes, credentials yes: the key lands in the vault.
+        let (_, p3) = paths();
+        assert_eq!(migration_step(&mut s(&["y", "y"]), &p3, &[("hermes", h.clone())]).unwrap(), vec!["hermes"]);
+        assert!(vault(&p3).iter().any(|n| n == "OPENROUTER_API_KEY"));
         // declined → nothing applied
         let (_, p2) = paths();
         assert!(migration_step(&mut s(&["n"]), &p2, &[("hermes", h)]).unwrap().is_empty());

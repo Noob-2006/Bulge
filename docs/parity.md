@@ -1,9 +1,10 @@
-# SE Agent 與 OpenClaw / Hermes 功能對照（2026-11-02 盤點，2026-11-05 更新狀態與落差索引）
+# SE Agent 與 OpenClaw / Hermes 功能對照（2026-11-02 盤點，2026-11-06 上游同步）
 
-來源：OpenClaw `4e4342b9`（MIT，© 2026 OpenClaw Foundation）、Hermes Agent `c627ec84`（MIT，© 2025 Nous Research）。
+來源：OpenClaw `4e4342b9`（MIT，© 2026 OpenClaw Foundation）、Hermes Agent `c627ec84`（MIT，© 2025 Nous Research）；
+2026-11-06 同步再對照 OpenClaw `8a186ad`、Hermes `90d6b98` 與 DeepSeek Harness `fcc0ad4`（MIT，© 2026 DeepSeek），見第六節。
 轉寫時保留上游 MIT 版權聲明（見 `THIRD_PARTY_NOTICES.md`）。
 
-> **本檔狀態：2026-11-05（第六輪更新）。** 這張表回答「某個平台／上游功能支援到什麼程度」，
+> **本檔狀態：2026-11-06（第六輪更新＋上游同步，見第六節）。** 這張表回答「某個平台／上游功能支援到什麼程度」，
 > 不是使用說明。安裝與操作見 [MANUAL.md](MANUAL.md)；crate 分層與登記規則見
 > [ARCHITECTURE.md](ARCHITECTURE.md)；建置、feature flags 與精簡執行檔見 [BUILD.md](BUILD.md)。
 >
@@ -115,7 +116,7 @@
 | prompt 內容：text、image、resource、resource_link | ✓ | ✓ | ✅ image（及 image/* blob resource）成為 `Block::Image` 真圖片輸入：Anthropic image/base64、OpenAI Chat image_url data URL、Responses input_image、Gemini inlineData；load 時重播 |
 | request_permission：allow_once/allow_always/reject_once/reject_always；edit 核准帶 diff | ✓ | ✓ | ✅ allow_once/allow_always/reject_once；toolCallId 用實際 tool_use id，edit/write/patch 附整檔 diff（seagent-tools `preview` 對檔案試算，不寫入） |
 | 編輯器帶入的 MCP servers 由 session 擁有 | — | ✓ | ✅ stdio/http/sse 經 seagent-plugin 啟動，工具只給該 session（完整 schema）；預設 untrusted（無 readOnlyHint 的呼叫先過 egress 閘門→向編輯器要權限，`[acp] trust_editor_mcp` 可改）；與 `[mcp]` 同名者以設定為準、SE Agent 自己跳過；close／編輯器斷線時停止 |
-| client 端（acpx）：驅動 Claude/Codex/Copilot/OpenCode/Qwen 等 ACP agent，permissionMode approve-all/approve-reads/deny-all | ✓ | — | ✅ `acp_client.rs`：acpx 內建 registry（claude、codex、gemini、opencode、qwen、copilot、cursor、droid、grok-build、iflow、kilocode、kimi、kiro、openclaw、SE Agent）＋`[acp.agents.<name>] command/args/env/permission_mode`；client 方法 fs/read_text_file、fs/write_text_file（限 cwd、解 symlink）、terminal/create/output/wait_for_exit/kill/release（先過 SE Agent 閘門，閘門要問一律問人）、session/request_permission（approve-reads 自動允許 read/search/think，其餘問人、無人可問即拒絕）；`acp_delegate` 工具（agent、prompt、cwd、session 重用、close、進度串流到 UI）與 `seagent acp-client <agent> "prompt"`（--json、--session 載入、--list、Ctrl-C→session/cancel）。🚧 只對假 agent 測過，未對真 Claude/Codex/Gemini 驗證 |
+| client 端（acpx）：驅動 Claude/Codex/Copilot/OpenCode/Qwen 等 ACP agent，permissionMode approve-all/approve-reads/deny-all | ✓ | — | ✅ `acp_client.rs`：acpx 內建 registry（claude、codex、gemini、opencode、qwen、copilot、cursor、droid、grok-build、iflow、kilocode、kimi、kiro、openclaw、qoder、SE Agent）＋`[acp.agents.<name>] command/args/env/permission_mode`；client 方法 fs/read_text_file、fs/write_text_file（限 cwd、解 symlink）、terminal/create/output/wait_for_exit/kill/release（先過 SE Agent 閘門，閘門要問一律問人）、session/request_permission（approve-reads 自動允許 read/search/think，其餘問人、無人可問即拒絕）；`acp_delegate` 工具（agent、prompt、cwd、session 重用、close、進度串流到 UI）與 `seagent acp-client <agent> "prompt"`（--json、--session 載入、--list、Ctrl-C→session/cancel）。🚧 只對假 agent 測過，未對真 Claude/Codex/Gemini 驗證 |
 
 ### A2A 1.0（JSON-RPC）
 - agent card `/.well-known/agent-card.json`（+ 舊 agent.json）、supportedInterfaces、securitySchemes。
@@ -209,7 +210,7 @@
 
 ---
 
-## 五、目前狀態與已知落差索引（2026-11-05）
+## 五、目前狀態與已知落差索引（2026-11-06）
 
 表上的 ✅ 常有條件；這一節把「看起來完成、實際上有前提」的項目集中列出，並指向權威位置。
 使用面的完整說明（安裝、通道設定、安全模型、VM、艦隊、技能）在 [MANUAL.md](MANUAL.md)。
@@ -225,17 +226,125 @@
 | microVM | `seagent sandbox vm status／image build／verify／snapshot／snapshots／undo／gc` 可用；`[exec.vm.readonly]` 逐工作區覆寫未實作；daemon 尚未自動回收閒置 VM | `crates/seagent-vm/src/`、`crates/seagent/src/exec_cli.rs` |
 | 艦隊 | `seagent fleet status／board／files／limits／resume`；檔案租約預設 1 小時、最長 7 天、過期自動釋放 | `crates/seagent-kernel/src/coord.rs`、`limits.rs` |
 | 技能相容 | 直接讀 `.claude/skills`、`metadata.openclaw`、`metadata.hermes`；只結構化使用 `name`／`description`，其餘欄位按需解讀 | `crates/seagent-skills/src/skill.rs` |
-| Notion／Airtable 技能 | 已移除隨附的 `productivity/notion`、`productivity/airtable`（上游 `8112254f8a` 同樣移除）。改用廠商 MCP server（`[mcp.notion]`、`[mcp.airtable]`）或 vendor-owned skill taps；不再隨附 `AIRTABLE_API_KEY` 範例 | [MCP 段落](#二mcp)、`share/skills/` |
-| 知識召回閘門 | `[memory.recall_gate]` off/shadow/live、逐頁決策模型分數、1.5s 預算、`shadow` 只記 log；實作於 `active::RecallGate` | `crates/seagent-memory/src/active.rs` |
-| 知識庫 ACL／歷史／取代鏈 | `[memory.wiki] agent_id/agents/stores/history`；`wiki_apply op=supersede` 與搜尋沿 supersede 鏈；`wiki_history`／`seagent wiki history` | `crates/seagent-memory/src/wiki.rs` |
-| 技能鎖 | `seagent skills lock/unlock`（使用者）；skill 工具、write/patch、shell 寫入與 curator archive 都拒絕；agent 不能 unlock | `crates/seagent-skills/src/core/usage.rs`、`crates/seagent-kernel/src/secgate.rs` |
-| 技能工坊 propose/auto 與 diet | `[skills.workshop] mode`；LLM 經驗回顧；propose 進 `/skills drafts` 審批；`seagent curator diet` 把尾段移入 references | `crates/seagent-skills/src/core/{review,workshop,cli}.rs` |
-| 深度研究工具 | `deep_research`：有界迴圈、逐字引文、支持稽核、numeric ledger、明確 gaps；不需 function calling | `crates/seagent-tools/src/research.rs` |
-| 常駐提醒 | `[memory.standing]` ＋ `seagent memory intents`：關鍵詞觸發、scope、cooldown、max fires、expiry | `crates/seagent-memory/src/standing.rs` |
-| 記憶供應商 profile/config hooks | `Provider::profile_created/profile_renamed/read_config/write_config` 與 plugin JSON-RPC；核心尚無 profile-create 指令（host 可呼叫） | `crates/seagent-memory/src/manager.rs` |
-| Ollama embeddings 私網政策 | loopback 與 LAN 預設可用，`[memory.search.embedding] allow_private = false` 只准 loopback；metadata 永遠拒絕 | `crates/seagent-memory/src/embed.rs` |
 | 核准疲勞統計 | **未實作**（沒有每日詢問次數／被拒比例／建議改預授權的統計） | `crates/seagent-security/src/approvals.rs`（`status` 只報規則數） |
 | 瀏覽器／電腦操作 | CDP client 與 AT-SPI／xdotool 有實作；端到端只對本機 Chromium 驗證過一部分 | `crates/seagent-browser`、`tests/real/chromium_real.sh` |
 
 維護方式：改動功能時同步更新對應段落與這裡的落差；`cargo test --workspace` 綠燈不代表表格正確，
 表格的正確性靠 `file:line` 與測試名稱人工核對。
+
+---
+
+## 六、2026-11-06 上游同步（OpenClaw `8a186ad`、Hermes `90d6b98`、DeepSeek Harness `fcc0ad4`）
+
+落差報告與十個工作包的回報在 `docs/parity-agent/upstream-2026-11-06/`（`openclaw-core.md`、`openclaw-extensions.md`、`hermes.md`、`deepseek-harness.md`、`workers/w1.md`～`w10.md`）。
+上游欄：OC = OpenClaw、HE = Hermes、DSH = DeepSeek Harness。測試名稱可以直接 `cargo test <名稱>` 找到；🚧 列寫明缺什麼。使用說明在 [MANUAL.md](MANUAL.md)。
+
+### 安全與核准
+
+| 功能 | 上游 | 狀態 | 證據（測試） |
+|---|---|---|---|
+| `test`／`[` 只有靜態運算元才算安全內建（`-v`／`-R`、`$'…'`、動態字元回到一般核准） | OC | ✅ | `approvals::tests::dynamic_test_and_bracket_predicates_are_not_safe_builtins`、`dynamic_shell_predicates_are_not_safe_builtins_in_allowlist_mode` |
+| 每個風險發現各自需要同意；`.env`／`secrets.toml` 上傳是等級 3 | HE | ✅ | `credential_upload_is_not_covered_by_a_pipe_to_shell_grant`、`risk::tests::dotenv_upload_is_credential_exfiltration` |
+| 工具結果附自動核准來源（`[approval] auto-approved: …`） | HE | ✅ | `silent_auto_approvals_are_explained_in_the_tool_result` |
+| 逐供應商／模型的 exec 上限 `[tools.by_provider.*.exec]` | OC | ✅ | `toolpolicy::tests::exec_ceilings_restrict_per_provider_and_model`、`model_exec_ceiling_binds_over_yolo_and_elevated` |
+| `seagent tools explain`（指出擋住的政策層與修法） | OC | ✅ | `toolpolicy::tests::explain_names_the_blocking_layer_and_its_fix`、`ops::toolcfg::tests::explain_replays_layers_and_names_the_fix` |
+| PowerShell／cmd／wmic 刪除與強制 Stop-Process 歸等級 3 | HE | ✅（引號內散文可能誤判） | `risk::tests::windows_deletes_and_force_stops_are_tier_three` |
+| `seagent mcp add` 的 consent 行（argv／env／cwd、遮蔽秘密、轉義 bidi） | HE | ✅ | `mcp_cli::tests::stdio_consent_shows_argv_env_and_cwd_without_leaking_secrets`、`consent_line_escapes_bidi_and_zero_width_characters` |
+| 安裝程式 `umask go-w` | OC | ✅ | `install_sh_never_installs_group_or_world_writable_files` |
+| 秘密遮蔽擴充（連線字串、URL 帳密、環境變數、PGP／PuTTY／age、Azure、YAML／JSON、旗標） | HE | ✅ | `risk::tests::{connection_strings_are_masked_in_all_forms,env_assignments_and_flags_are_masked_without_touching_help_text,non_pem_private_keys_and_azure_keys_are_masked,quoted_json_and_yaml_secret_values_are_masked}` |
+| 設定寫入拒絕遮蔽佔位符 | OC | ✅ | `confcli::tests::redaction_placeholders_are_never_written_back`、`ui_methods::tests::config_page_redacts_and_refuses_placeholders` |
+| 瀏覽器快照遮蔽 password／OTP／信用卡欄位 | OC | ✅ | `snapshot::tests::sensitive_ax_values_are_masked_before_render`、`tests_actions::openclaw_snapshots_mask_password_otp_and_card_values` |
+| 瀏覽器嚴格模式逐跳檢查轉址 | OC | 🚧 `open`／`navigate` 已逐跳；點擊／JS 觸發的導航與 OOPIF 子 session 仍只看最終網址 | `tests_actions::strict_navigation_refuses_a_private_redirect_hop`、`tab_close_is_exempt_from_strict_url_policy` |
+| Channel HTTP 逐跳 SSRF／轉址檢查（只信任設定的來源） | OC | ✅ | `http::tests::call_allows_the_configured_private_origin_but_blocks_redirects_to_other_private_hosts`、`get_bytes_is_strict_and_the_trusted_form_allows_only_its_own_origin` |
+| 唯讀 ARP 呼叫者看不到主機路徑 | OC | 🚧 列表類方法已移除 `workspace`；`session.history`／`session.attach` 事件串流內容仍可能含路徑 | `daemon::session_command_tests::read_only_callers_do_not_get_host_paths` |
+| 技能鎖（`seagent skills lock/unlock`；agent 各寫入路徑與 curator 都拒絕） | HE | ✅（shell 檢查是指令文字的政策檢查，不是沙箱） | `secgate::tests::skill_locks_refuse_every_agent_write_path`、`hub::cli::tests::lock_unlock_cli_records_the_user_lock` |
+| `seagent migrate` 憑證改為 `--migrate-secrets` 才匯入 | HE | ✅（終端機 `seagent setup` 的匯入步驟仍沿用完整計畫） | `ops::migrate::tests::credentials_are_opt_in_and_skips_are_named` |
+| 主控台常設授權與全域 exec 政策 | OC | 🚧 列出／撤銷授權、編輯全域政策、顯示各代理有效政策已做；**逐代理 exec 政策**沒有對應設定鍵，無法編輯 | `ops::ui_methods::tests::approvals_grants_exec_policy_and_security_posture` |
+| 主控台「安全」頁（監聽面、風險發現、權杖中繼資料、channel、代理能力） | OC | ✅ | `approvals_grants_exec_policy_and_security_posture`、`ui::tests::operations_views_are_served` |
+| Checkpoint 加固（拒絕 `/`、`$HOME` 與其上層、瀏覽器 profile、存放區本身） | HE | ✅ | `checkpoint::tests::{refuses_home_parents_browser_profiles_and_the_store_itself,store_inside_workspace_is_never_staged_or_rewound,size_and_file_caps_ignore_excluded_paths_already_in_the_index}` |
+
+### 前綴快取與上下文（DeepSeek Harness）
+
+| 功能 | 上游 | 狀態 | 證據（測試） |
+|---|---|---|---|
+| 請求前綴逐步、逐輪穩定的回歸測試 | DSH | ✅ | `runner::request_prefix_is_stable_across_steps_and_turns` |
+| 壓縮摘要重播對話前綴、預設用對話模型 | DSH | ✅ | `summarise_replays_the_conversation_prefix_and_appends_only_the_instruction`、`compaction_summary_replays_the_previous_request_prefix` |
+| 只在上下文壓力下裁剪工具輸出（`[compaction] trim_tool_results`） | DSH | ✅ | `tool_results_are_trimmed_only_under_pressure_unless_configured`、`trimming_kicks_in_once_context_is_under_pressure` |
+| system 變更接在歷史之後（`[model] system_updates = "in_history"`） | DSH | 🚧 機制完成、預設關；尚未確認任何公開端點支援 | `system_prompt_changes_append_after_history_when_configured`、`system_delta_appends_after_cached_messages` |
+| 記錄確切請求位元組（`[model] log_requests`） | DSH | ✅ | `session_log_replays_the_exact_request_bytes`、`the_session_log_records_the_post_image_prep_request` |
+| Fork 子代理沿用父前綴、工具限制改在執行時 | DSH | ✅ | `agents_tools::forked_child_reuses_the_parent_prefix_and_guards_tools_at_execution`、`projection::tests::message_boundary_keeps_consecutive_user_messages_separate` |
+| 批次快取暖機 `[delegation] prefix_stagger_seconds` | HE | ✅ | `agents_tools::prefix_stagger_holds_siblings_until_the_leaders_first_chunk`、`subagents::tests::prefix_gate_wakes_on_the_leaders_first_chunk` |
+| 被拒答的回合不再送給模型 | HE | ✅ | `a_refused_turn_is_dropped_from_later_model_requests`、`turn_drop_hides_only_the_model_context` |
+| 壓縮保留 `Unverified / Working Hypotheses` | HE | ✅ | `summary_prompt_requires_unverified_hypotheses` |
+| `/context` 標示 `(fallback)`／`(pinned)` | HE | ✅ | `defaulted_windows_are_labelled_and_known_ones_are_not`、`context_report_marks_a_defaulted_window`、`a_pinned_context_window_is_labelled_and_wins` |
+| 每一步 TTFT／速度／cache 統計（`seagent session stats --session`） | DSH | ✅ | `runner::per_step_stats_recorded_with_timing_and_cache_usage`、`agentcmds::sessions::tests::stats_show_per_step_ttft_speed_time_and_cache` |
+
+### 模型供應商
+
+| 功能 | 上游 | 狀態 | 證據（測試） |
+|---|---|---|---|
+| `deepseek-messages` 路由（Anthropic 相容 Messages、`thinking`／`output_config.effort`） | DSH | 🚧 只對假伺服器測過，**未對真實 DeepSeek 端點驗證**；Files API 圖片上傳、對話中工具增減、48 h 串流逾時未做 | `catalog::tests::deepseek_messages_is_an_opt_in_route`、`anthropic::tests::deepseek_messages_effort_and_thinking` |
+| Rerank 決策 backend（`[decision] backend = "rerank"`） | OC | ✅（假端點） | `decision::tests::{rerank_plan_and_scores_map_boolean_choice_and_sort,rerank_decisions_retries_texts_and_maps_the_response,decision_evaluate_rerank_backend_posts_and_maps_the_answer}` |
+| Bedrock 探索（ON_DEMAND 過濾、inference profiles） | OC | ✅（假控制平面） | `bedrock::tests::discovery_hides_non_on_demand_foundations_and_lists_profiles` |
+| Bedrock 環境憑證鏈（env → web identity → profile／credential_process → ECS → IMDSv2） | OC | 🚧 功能完整、只對假端點測；還沒有依到期時間的快取，每步重新解析 | `sigv4::tests::{chain_order_and_partial_environment,shared_profile_selects_the_named_profile,web_identity_exchanges_the_token_file_at_fake_sts,ecs_container_credentials_from_fake_endpoint,imds_v2_token_role_and_credentials_from_fake_endpoint}` |
+| Gemini service tier（priority／flex／standard） | OC | ✅ | `gemini::tests::service_tier_maps_flex_priority_and_standard` |
+| Codex Daybreak（`[model] daybreak`） | HE | 🚧 預設關；未對真實帳號驗證權限 | `responses::tests::daybreak_is_explicit_and_codex_only` |
+| Qoder ACP preset | OC | ✅（設定層） | `acp_client::tests::config_presets_and_modes` |
+| 缺金鑰訊息寫出變數與修法 | HE | ✅ | `auth::tests::source_precedence` |
+| xAI OAuth 需要可用的 token 期限 | HE | ✅ | `login::tests::xai_oauth_requires_a_usable_response_expiry` |
+| setup-token 不會覆蓋 API-key profile | OC | ✅（原本就正確，補回歸測試） | `store::tests::setup_token_does_not_collide_with_an_api_key_profile` |
+
+### 自動化與 daemon
+
+| 功能 | 上游 | 狀態 | 證據（測試） |
+|---|---|---|---|
+| Cron 預設投遞與失敗通知（job → creator → agent → 全域 → origin） | OC | ✅ | `cronjob::tests::delivery_defaults_fall_back_job_creator_agent_gateway` |
+| Cron `deliver = "room:<id>"` | HE | ✅ | `outbound::tests::parses_and_renders_targets`、`ops::rooms::tests::cron_post_appends_a_labelled_message_and_mentions` |
+| 重啟時恢復被打斷的已認領工作（`restart_hold_seconds`） | HE | ✅ | `automation::tests::a_claim_interrupted_by_a_restart_is_restored_not_missed` |
+| 停止歸屬：`run.stopped` 稽核與 `run_stopped` hook | OC | ✅ | `daemon::session_command_tests::explicit_stop_records_the_actor_and_fires_run_stopped` |
+| Scratch 過期與閒置 worktree 回收 | OC | ✅ | `scratch::tests::{expires_old_scratch_and_live_or_fresh_artifacts,settings_default_and_zero_disables}`、`worktree::tests::prune_idle_respects_age_and_symlinks` |
+| 閒置 session 從記憶體退場（`idle_session_secs`） | HE | ✅ | `daemon::session_command_tests::idle_sessions_are_retired_from_memory_and_rebuilt_on_demand` |
+| ARP `tools.call`（經同一條政策、核准、稽核） | OC | ✅ | `daemon::session_command_tests::tools_call_goes_through_the_same_log_and_audit` |
+| 忙碌時到達的訊息指標 | HE | ✅ | `metrics::busy_tests::{busy_chats_are_day_scoped_and_peak_is_kept,busy_arrivals_only_use_the_fixed_outcome_vocabulary}` |
+| 外掛無人值守更新（`plugin_auto_update_hours`，預設關） | HE | ✅ | `hub::plugins::tests::unattended_update_is_opt_in_and_still_scans` |
+| 裝置上的 MCP server（node.toml `[mcp.*]`） | OC | 🚧 以裝置指令（`node_invoke`）公告；gateway 端還沒有註冊成一級代理工具，elicitation／sampling 不轉給操作者 | `node::tests::node_hosted_mcp_servers_expose_tools_as_commands` |
+
+### 代理、房間與 channel
+
+| 功能 | 上游 | 狀態 | 證據（測試） |
+|---|---|---|---|
+| 代理對代理鏈結上限、重複詢問拒絕、notify-only 回覆 | HE | ✅（狀態只在程序內） | `coord::tests::agent_message_chains_count_hops_dedupe_asks_and_make_replies_notify_only` |
+| Hosted room 的 purpose／notes、lead／auto 分派、continue | HE | ✅ | `ops::rooms::tests::room_settings_lead_auto_routing_and_continue` |
+| Ralph 全新 context 輪次（`ralph` 工具） | DSH | ✅ | `agents_tools::ralph_runs_fresh_rounds_with_a_bounded_handoff_and_progress_file` |
+| `ask_user` 選擇題（按鈕／編號清單） | HE | ✅（多選一律用編號清單） | `ask_user_options_render_a_numbered_fallback_and_map_the_answer`、`ask_user_choice_buttons_and_typed_replies_answer_the_question`、`host_ask_user_choice_uses_clarify_and_returns_the_mapped_option` |
+| Channel `/fork` 開新 thread／topic | HE | 🚧 Discord、Telegram、Slack（錨點訊息）可用；沒有 thread／topic 動作的 channel 退回 `/branch` | `channel_fork_creates_a_sibling_thread_and_keeps_the_parent_chat` |
+| Teams 未曾入站也能主動私訊（以設定的 tenant 為準） | OC | ✅（假 Bot Framework） | `proactive_dm_uses_the_configured_tenant_without_any_inbound` |
+| Feishu 未知聊天的卡片動作拒收；Slack `list-pins` 的 `limit` | OC | ✅ | `parses_every_message_kind_mentions_threads_and_callbacks`、`reactions_read_and_pins` |
+| `/handoff <channel>[:<chat>]` | HE | ✅ | `agentcmds::handoff::tests::{resolves_channel_chat_and_default,perform_binds_the_chat_and_posts_the_handoff}` |
+
+### 記憶、研究與技能
+
+| 功能 | 上游 | 狀態 | 證據（測試） |
+|---|---|---|---|
+| `deep_research`（有界迴圈、逐字引文、支持稽核、數值帳、明確 gaps；不需 function calling） | OC | ✅（Google 託管研究不移植） | `research::tests::{quote_and_calculation_ledger_are_mechanical,tool_runs_without_function_calling_and_reports_gaps}` |
+| 知識召回閘門 `[memory.recall_gate]`（off／shadow／live） | OC | ✅（`candidates = "model"` 未做，會被拒） | `active::tests::recall_gate_live_shadow_and_no_model` |
+| 知識庫：逐庫 ACL、頁面歷史、取代鏈 | OC | 🚧 ACL／歷史／supersede 與 6 個 `wiki_*` 工具已做；上游其餘 `knowledge_*` 工具、Git 式歷史、merge／withdraw／verify、時間軸、逐關係 ACL 未做 | `wiki::tests::store_acl_history_and_supersede_chain` |
+| 技能工坊 off／propose／auto、LLM 回顧、`seagent curator diet` | OC | ✅ | `core::review::tests::workshop_llm_review_auto_and_propose_modes`、`core::workshop::tests::diet_moves_the_tail_into_references_without_losing_it`、`core::cli::tests::curator_diet_shrinks_a_sprawling_skill_into_references` |
+| 常駐提醒 `[memory.standing]`＋`seagent memory intents` | OC | ✅（範圍以 session key 子字串比對） | `standing::tests::reminder_fires_scoped_cooldown_cap_and_expiry` |
+| Ollama embeddings 私網政策（`allow_private`，預設 true；metadata 永遠拒絕） | OC | ✅ | `embed::tests::ollama_private_network_policy` |
+| 記憶供應商 profile／config hooks | HE | 🚧 介面與外掛 JSON-RPC 已做；核心還沒有建立／改名 profile 的指令會呼叫它們 | `manager::tests::provider_profile_and_config_hooks` |
+| 移除隨附 `productivity/notion`、`productivity/airtable` | HE | ✅（改用廠商 MCP：`[mcp.notion]`、`[mcp.airtable]`） | `seagent-skills --test content`、bundled integrity 測試 |
+
+### 工具、終端機與測試基礎
+
+| 功能 | 上游 | 狀態 | 證據（測試） |
+|---|---|---|---|
+| `edit` 還原貼上時帶 `read` 行號前綴的 `old_string` | HE | ✅ | `fuzzy::tests::{read_line_number_gutter_is_stripped_before_matching,single_gutter_line_matches_only_a_whole_line_and_never_by_similarity}` |
+| SSH 長駐遠端 shell | DSH | 🚧 只用在內部同步／上傳腳本；模型的 `shell` 工具仍每次一個 ssh 程序，沒有遠端 PTY | `exec::ssh::tests::persistent_shell_reuses_one_ssh_process_and_frames_exit_status` |
+| 模型錄製／重播（`SEAGENT_MODEL_RECORD`／`SEAGENT_MODEL_REPLAY`） | DSH | ✅ | `replay::tests::{a_recorded_run_replays_without_the_inner_provider,replay_refuses_a_changed_request_and_replays_errors}`、`providers::tests::replay_fixture_serves_a_provider_without_a_key` |
+| `benchmark` 工具 profile 與 `seagent evals bench --tool-profile` | DSH | ✅ | `toolpolicy::tests::profiles_groups_allow_deny`、`ops::evalkit::run::tests::tool_profile_reaches_the_eval_kernel` |
+| `[exec.code] run_code_only` | DSH | ✅ | `code_mode_only::run_code_only_exposes_run_and_nested_calls_still_work` |
+| `/undo` 列出變更檔案與 checkpoint id | HE | ✅ | `checkpoint::tests::changed_files_lists_tracked_edits_deletions_and_new_files`、`agentcmds::tests::undo_names_changed_files_and_the_checkpoint_that_restores_them` |
+| TUI 回溯清單（Esc Esc） | HE | ✅ | `tui::tests::rewind_picker_undoes_to_the_picked_prompt_and_prefills_it`、`tui::actions::tests::branch_session_action_switches_to_the_fork` |
+| TUI 內嵌圖片與大型貼上折疊 | HE | ✅ | `tui::tests::transcript_draws_image_fallback_and_collapsed_paste`、`submitting_a_collapsed_paste_sends_the_full_text` |
+| TUI 回合中 `/new` 讓舊回合在背景跑完 | HE | ✅ | `tui::actions::tests::new_mid_turn_keeps_the_old_turn_in_the_background`、`tui::tests::background_turn_completion_is_announced_once` |

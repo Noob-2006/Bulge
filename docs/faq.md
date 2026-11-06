@@ -66,7 +66,8 @@ OpenAI、Anthropic、Google Gemini／Vertex、AWS Bedrock、DeepSeek、OpenRoute
 **Q：要怎麼控制花費？**
 - 看用量：`seagent usage --days 7`
 - 設上限：`[budget]`（每日／每月）、`seagent fleet limits`（子代理）
-- 便宜的小模型做摘要與審查：`[model] aux`
+- 便宜的小模型做標題、審查等輔助工作：`[model] aux`（對話壓縮預設沿用對話本身的模型以命中前綴快取；真的要用便宜模型壓縮請設 `[model.tasks] compaction`）
+- 看每一步的快取命中率與速度：`seagent session stats --session <id>`
 - 緊急停止一切：`seagent pause`
 
 **Q：貼了金鑰卻說格式錯誤／一直 401？**
@@ -199,7 +200,10 @@ QEMU 與 `/dev/kvm`（沒有 KVM 也能跑但很慢）。第一次 `seagent vm d
 MIT。第三方元件的授權見 [THIRD_PARTY_NOTICES.md](../THIRD_PARTY_NOTICES.md)。
 
 **Q：和 OpenClaw、Hermes 等專案有什麼關係？**
-SE Agent 是獨立實作，相容這些專案的技能、外掛與設定格式，並提供匯入工具（`seagent migrate`）。各專案的來源與授權標示在 [THIRD_PARTY_NOTICES.md](../THIRD_PARTY_NOTICES.md)。
+SE Agent 是獨立實作，相容這些專案的技能、外掛與設定格式，並提供匯入工具（`seagent migrate`）。
+
+**Q：從 OpenClaw／Hermes 搬過來，金鑰也會一起搬嗎？**
+`seagent migrate` 預設**不**匯入憑證，只列出略過了哪些（`skipped credential NAME …`）。先 `seagent migrate from openclaw --dry-run` 看計畫，確定要搬金鑰再加 `--migrate-secrets`（寫進加密保管庫，不寫進 `config.toml`）；或之後逐一 `seagent secrets set NAME`。終端機精靈 `seagent setup` 的匯入步驟會先問要不要匯入設定，再另外問要不要匯入金鑰（預設不要）。各專案的來源與授權標示在 [THIRD_PARTY_NOTICES.md](../THIRD_PARTY_NOTICES.md)。
 
 ---
 

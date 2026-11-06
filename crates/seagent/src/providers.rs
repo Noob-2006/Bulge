@@ -32,6 +32,13 @@ pub struct Providers {
 
 impl Providers {
     pub fn new(overrides: &BTreeMap<String, toml::Table>, vault: Arc<Vault>) -> Result<Self, String> {
+        let env = |k: &str| std::env::var_os(k).filter(|p| !p.is_empty()).map(PathBuf::from);
+        Self::with_fixtures(overrides, vault, env(seagent_model::replay::REPLAY_ENV), env(seagent_model::replay::RECORD_ENV))
+    }
+
+    /// [`Providers::new`] with the `SEAGENT_MODEL_REPLAY` / `SEAGENT_MODEL_RECORD` paths given
+    /// explicitly (tests pass them here instead of mutating the process environment).
+    pub fn with_fixtures(overrides: &BTreeMap<String, toml::Table>, vault: Arc<Vault>, replay_path: Option<PathBuf>, record_path: Option<PathBuf>) -> Result<Self, String> {
         let mut configs: BTreeMap<String, ProviderConfig> = presets().into_iter().map(|p| (p.id.clone(), p)).collect();
         for (id, table) in overrides {
             let mut base = match configs.get(id) {
@@ -51,7 +58,7 @@ impl Providers {
             configs.insert(id.clone(), cfg);
         }
         let mut replay: BTreeMap<String, Arc<dyn Provider>> = BTreeMap::new();
-        if let Some(path) = std::env::var_os(seagent_model::replay::REPLAY_ENV).filter(|p| !p.is_empty()).map(PathBuf::from) {
+        if let Some(path) = replay_path {
             let mut groups: BTreeMap<String, Vec<seagent_model::replay::Exchange>> = BTreeMap::new();
             for ex in seagent_model::replay::load(&path)? {
                 groups.entry(ex.provider.clone()).or_default().push(ex);
@@ -60,7 +67,6 @@ impl Providers {
                 replay.insert(id.clone(), Arc::new(seagent_model::replay::ReplayProvider::from_exchanges(&id, entries)?));
             }
         }
-        let record_path = std::env::var_os(seagent_model::replay::RECORD_ENV).filter(|p| !p.is_empty()).map(PathBuf::from);
         Ok(Providers { configs, vault, store: seagent_model::store::default_store(), cache: Mutex::new(HashMap::new()), plugins: Mutex::default(), replay, record_path })
     }
 
@@ -432,8 +438,6 @@ mod tests {
             .collect();
         let _env = EnvGuard(old);
         std::env::set_var("SEAGENT_HOME", root.path());
-        std::env::set_var("SEAGENT_MODEL_REPLAY", &fixture);
-        std::env::remove_var("SEAGENT_MODEL_RECORD");
 
         let req = ModelRequest { model: "deepseek-chat".into(), system: vec![], messages: vec![Message::user("hello")], tools: vec![], max_tokens: 50, ..Default::default() };
         let fake = Arc::new(P(AtomicUsize::new(0)));
@@ -442,7 +446,7 @@ mod tests {
         drop(rec);
         assert_eq!(fake.0.load(Ordering::SeqCst), 1);
 
-        let p = Providers::new(&BTreeMap::new(), Arc::new(Vault::empty())).unwrap();
+        let p = Providers::with_fixtures(&BTreeMap::new(), Arc::new(Vault::empty()), Some(fixture.clone()), None).unwrap();
         assert!(p.key_source("deepseek").is_err(), "a replay run needs no credentials");
         let provider = p.provider("deepseek").unwrap();
         let mut events = vec![];
@@ -479,11 +483,9 @@ mod tests {
             .collect();
         let _env = EnvGuard(old);
         std::env::set_var("SEAGENT_HOME", root.path());
-        std::env::remove_var("SEAGENT_MODEL_REPLAY");
-        std::env::set_var("SEAGENT_MODEL_RECORD", &fixture);
         let mut o = BTreeMap::new();
         o.insert("mybox".to_string(), "format = \"openai_chat\"\nbase_url = \"http://127.0.0.1:9/v1\"".parse::<toml::Table>().unwrap());
-        let p = Providers::new(&o, Arc::new(Vault::empty())).unwrap();
+        let p = Providers::with_fixtures(&o, Arc::new(Vault::empty()), None, Some(fixture.clone())).unwrap();
         assert!(!fixture.exists(), "nothing is recorded until a provider is built");
         assert!(p.provider("mybox").is_ok());
         assert!(fixture.exists(), "building with SEAGENT_MODEL_RECORD creates the JSONL fixture");

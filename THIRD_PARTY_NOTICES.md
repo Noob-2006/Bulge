@@ -158,20 +158,12 @@ Ported: the DeepSeek Messages route shape (Anthropic-compatible `/v1/messages`, 
 per-step statistics (time to first token, output speed, model vs tool time, per-step cache hit
 rate; `crates/seagent-kernel/src/{event,kernel}.rs`, `crates/seagent/src/agentcmds/sessions.rs`).
 
-## DeepSeek Harness — MIT License
-
-Copyright (c) 2026 DeepSeek
-
 Ported ideas (rewritten in Rust): compaction that replays the routed request's system prompt,
 tools and shadowed-region messages byte for byte and appends only a trailing summary instruction
 (`crates/seagent-kernel/src/compaction.rs`, from `packages/compaction/compaction-basic`), and
 pressure-gated tool-result pruning (`crates/seagent-kernel/src/context.rs`,
 `packages/compaction/compaction-tool-result-pruner`). The exact-request session-log events follow
 `packages/core/agent-loop` and `docs/architecture.md` ("model-visible means logged").
-
-## DeepSeek Harness — MIT License
-
-Copyright (c) 2026 DeepSeek
 
 Ported: the provider record/replay layer (`crates/seagent-model/src/replay.rs`, from
 `packages/test-support/llm-replay` and `session-snapshot`), including exact-request fixture
