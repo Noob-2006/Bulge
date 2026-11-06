@@ -51,7 +51,7 @@ cp "$ROOT"/packaging/systemd/* "$S/systemd/"
 install -m 0644 "$HERE/managed.toml.example" "$S/examples/managed.toml"
 : > "$S/managed-by-package"          # `seagent update` leaves package-managed installs to the package manager
 echo "linux-$ARCH" > "$S/TARGET"
-for f in README.md THIRD_PARTY_NOTICES.md; do [ -f "$ROOT/$f" ] && install -m 0644 "$ROOT/$f" "$STAGE/usr/share/doc/seagent/$f"; done
+for f in README.md LICENSE THIRD_PARTY_NOTICES.md; do [ -f "$ROOT/$f" ] && install -m 0644 "$ROOT/$f" "$STAGE/usr/share/doc/seagent/$f"; done
 install -m 0644 "$ROOT/packaging/systemd/seagentd-system.service" "$STAGE/usr/lib/systemd/system/seagentd.service"
 install -m 0644 "$ROOT/packaging/systemd/seagent-sysusers.conf" "$STAGE/usr/lib/sysusers.d/seagent.conf"
 install -m 0644 "$ROOT/packaging/systemd/seagent-tmpfiles.conf" "$STAGE/usr/lib/tmpfiles.d/seagent.conf"

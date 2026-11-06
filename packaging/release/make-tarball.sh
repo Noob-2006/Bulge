@@ -52,7 +52,7 @@ if [ -n "$AGENT" ]; then
 fi
 cp -R "$ROOT/packaging/sandbox-browser/." "$S/sandbox-browser/"
 cp "$ROOT"/packaging/systemd/* "$S/systemd/"
-for f in README.md THIRD_PARTY_NOTICES.md; do
+for f in README.md LICENSE THIRD_PARTY_NOTICES.md; do
     [ -f "$ROOT/$f" ] && install -m 0644 "$ROOT/$f" "$STAGE/share/doc/seagent/$f"
 done
 echo "$TRIPLE" > "$S/TARGET"

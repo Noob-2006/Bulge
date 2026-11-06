@@ -26,6 +26,8 @@
 
 - 各平台安裝、套件（deb／rpm／pacman／apk／npm／Nix）與疑難排解：[docs/install.md](docs/install.md)
 - 常見問題：[docs/faq.md](docs/faq.md)
+- 參與開發：[CONTRIBUTING.md](CONTRIBUTING.md)（每個 commit 需 `Signed-off-by`）；回報漏洞：[SECURITY.md](SECURITY.md)（私下回報）；行為準則：[CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md)
+- 授權：MIT（[LICENSE](LICENSE)），第三方來源見 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)；變更紀錄：[CHANGELOG.md](CHANGELOG.md)
 
 ## 安裝
 

@@ -32,10 +32,8 @@ package() {
     install -Dm0644 "$srcdir/share/seagent/systemd/seagent-tmpfiles.conf" "$pkgdir/usr/lib/tmpfiles.d/seagent.conf"
     install -dm1770 "$pkgdir/etc/seagent"
     install -dm0755 "$pkgdir/etc/seagent/managed.d"
-    for f in README.md THIRD_PARTY_NOTICES.md; do
+    for f in README.md LICENSE THIRD_PARTY_NOTICES.md; do
         [ -f "$srcdir/share/doc/seagent/$f" ] && install -Dm0644 "$srcdir/share/doc/seagent/$f" "$pkgdir/usr/share/doc/seagent/$f"
     done
-    install -Dm0644 /dev/stdin "$pkgdir/usr/share/licenses/$pkgname/LICENSE" <<'LICENSE'
-See /usr/share/doc/seagent/THIRD_PARTY_NOTICES.md and https://github.com/se-agent/System-Engineering-Agent/blob/main/LICENSE
-LICENSE
+    install -Dm0644 "$srcdir/share/doc/seagent/LICENSE" "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
 }

@@ -1,0 +1,42 @@
+# Licensing of every file, in the REUSE format (https://reuse.software); `reuse lint` checks it.
+# Ported code is spread across the tree, so the default annotation names every upstream holder
+# whose work is in it; THIRD_PARTY_NOTICES.md says which parts come from where. Later
+# annotations override earlier ones for the files they match.
+version = 1
+SPDX-PackageName = "SE Agent"
+SPDX-PackageSupplier = "The SE Agent Authors"
+SPDX-PackageDownloadLocation = "https://github.com/se-agent/System-Engineering-Agent"
+
+[[annotations]]
+path = "**"
+precedence = "aggregate"
+SPDX-FileCopyrightText = ["2026 The SE Agent Authors", "2026 OpenClaw Foundation", "2025 Nous Research"]
+SPDX-License-Identifier = "MIT"
+
+# DAVE fingerprints and test vectors ported from libdave.
+[[annotations]]
+path = "crates/seagent-channel/src/dave.rs"
+precedence = "aggregate"
+SPDX-FileCopyrightText = ["2026 The SE Agent Authors", "2024 Discord"]
+SPDX-License-Identifier = "MIT"
+
+# Generated from the WHATWG Encoding Standard index files (tools/gen_charset_tables.py).
+[[annotations]]
+path = "crates/seagent-channel/data/**"
+precedence = "override"
+SPDX-FileCopyrightText = "WHATWG (Apple, Google, Mozilla, Microsoft)"
+SPDX-License-Identifier = "BSD-3-Clause"
+
+# Rule table transcribed from anthropics/claude-plugins-official (via Hermes, MIT).
+[[annotations]]
+path = "crates/seagent-security/src/guidance.rs"
+precedence = "aggregate"
+SPDX-FileCopyrightText = ["Anthropic, PBC", "2025 Nous Research", "2026 The SE Agent Authors"]
+SPDX-License-Identifier = "Apache-2.0 AND MIT"
+
+# Skill transcribed with its own license file.
+[[annotations]]
+path = "share/skills/creative/humanizer/**"
+precedence = "aggregate"
+SPDX-FileCopyrightText = ["2025 Siqi Chen", "2025 Nous Research", "2026 The SE Agent Authors"]
+SPDX-License-Identifier = "MIT"

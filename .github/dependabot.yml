@@ -6,3 +6,11 @@ updates:
   - package-ecosystem: cargo
     directory: /
     schedule: { interval: weekly }
+  # Node sidecars (bridges/*) and the npm wrapper of the release binary
+  - package-ecosystem: npm
+    directories: [/bridges/whatsapp, /bridges/photon, /bridges/zalouser, /packaging/npm]
+    schedule: { interval: weekly }
+  # Base images of the release and sandbox-browser containers
+  - package-ecosystem: docker
+    directories: [/, /packaging/sandbox-browser]
+    schedule: { interval: weekly }
