@@ -151,6 +151,16 @@ impl Tool for SkillTool {
 
     fn call(&self, ctx: &ToolCtx, input: Value) -> ToolOutput {
         let s = Settings::load(&self.cfg);
+        // A user lock refuses every mutating route, including the builtin writer's create/update
+        // and an atomic batch that names the skill somewhere other than the top level.
+        if !matches!(route(&input), Route::View | Route::List | Route::Search | Route::Workshop) {
+            let st = Store::new(&self.paths);
+            let mut names: Vec<String> = vec![input.get("name").and_then(Value::as_str).unwrap_or("").to_string()];
+            names.extend(input.get("operations").and_then(Value::as_array).into_iter().flatten().filter_map(|o| o.get("name").and_then(Value::as_str)).map(String::from));
+            if let Some(n) = names.into_iter().find(|n| !n.is_empty() && usage::is_locked(&st, n)) {
+                return ToolOutput::err(usage::lock_refusal(&n));
+            }
+        }
         match route(&input) {
             Route::List => ToolOutput::ok(self.list(&ctx.workspace, &s, &input)),
             Route::Search => match self.search(&ctx.workspace, &s, &input) {

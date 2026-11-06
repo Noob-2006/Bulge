@@ -204,6 +204,9 @@ pub struct Runner {
     pub container_env_file: Option<String>,
     /// Local copies of files OSWorld setup steps would download.
     pub cache_dir: Option<PathBuf>,
+    /// `--tool-profile`: the tool policy applied to in-process kernel attempts (`benchmark`
+    /// = few tools, for a cheap baseline). None keeps the configured profile.
+    pub tool_profile: Option<String>,
     kernels: Mutex<HashMap<String, Kernel>>,
 }
 
@@ -225,6 +228,7 @@ impl Runner {
             quiet: true,
             container_env_file: None,
             cache_dir: None,
+            tool_profile: None,
             kernels: Mutex::new(HashMap::new()),
         }
     }
@@ -316,6 +320,9 @@ impl Runner {
         cfg.model.default = model.into();
         cfg.checkpoint.enabled = false;
         cfg.role.active = role.unwrap_or("").to_string();
+        if let Some(p) = &self.tool_profile {
+            cfg.tools.profile = Some(p.clone());
+        }
         let k = seagent_kernel::kernel::new_kernel(
             cfg,
             paths,
@@ -627,6 +634,15 @@ mod tests {
         let a = r.attempt(&Subject::seagent("nosuch/model"), &tasks[0], 1);
         assert_eq!(a.status, "error");
         assert!(a.error.unwrap().contains("not configured"));
+    }
+
+    #[test]
+    fn tool_profile_reaches_the_eval_kernel() {
+        let out = seagent_core::tmp::scratch("seagent-evprofile");
+        let mut r = runner(&out);
+        r.tool_profile = Some("benchmark".into());
+        let k = r.kernel(&Subject::seagent("fake/oracle"), "fake/oracle", None).unwrap();
+        assert_eq!(k.cfg.tools.profile.as_deref(), Some("benchmark"));
     }
 
     #[test]

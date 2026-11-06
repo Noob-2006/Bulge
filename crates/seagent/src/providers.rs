@@ -11,6 +11,7 @@ use seagent_model::auth::{self, CredSource, Member, Pool, Stored};
 use seagent_model::store::Store;
 use seagent_model::{presets, ProviderConfig, WireFormat};
 use std::collections::{BTreeMap, HashMap};
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -23,6 +24,10 @@ pub struct Providers {
     cache: Mutex<HashMap<String, Arc<dyn Provider>>>,
     /// Providers registered by plugins (`seagent/provider.complete`); they shadow presets.
     plugins: Mutex<BTreeMap<String, Arc<dyn Provider>>>,
+    /// `SEAGENT_MODEL_REPLAY`: recorded exchanges per provider (a keyless test run).
+    replay: BTreeMap<String, Arc<dyn Provider>>,
+    /// `SEAGENT_MODEL_RECORD`: append every built provider's exchanges here.
+    record_path: Option<PathBuf>,
 }
 
 impl Providers {
@@ -45,7 +50,31 @@ impl Providers {
             let cfg: ProviderConfig = base.try_into().map_err(|e: toml::de::Error| format!("[providers.{id}]: {}", e.message()))?;
             configs.insert(id.clone(), cfg);
         }
-        Ok(Providers { configs, vault, store: seagent_model::store::default_store(), cache: Mutex::new(HashMap::new()), plugins: Mutex::default() })
+        let mut replay: BTreeMap<String, Arc<dyn Provider>> = BTreeMap::new();
+        if let Some(path) = std::env::var_os(seagent_model::replay::REPLAY_ENV).filter(|p| !p.is_empty()).map(PathBuf::from) {
+            let mut groups: BTreeMap<String, Vec<seagent_model::replay::Exchange>> = BTreeMap::new();
+            for ex in seagent_model::replay::load(&path)? {
+                groups.entry(ex.provider.clone()).or_default().push(ex);
+            }
+            for (id, entries) in groups {
+                replay.insert(id.clone(), Arc::new(seagent_model::replay::ReplayProvider::from_exchanges(&id, entries)?));
+            }
+        }
+        let record_path = std::env::var_os(seagent_model::replay::RECORD_ENV).filter(|p| !p.is_empty()).map(PathBuf::from);
+        Ok(Providers { configs, vault, store: seagent_model::store::default_store(), cache: Mutex::new(HashMap::new()), plugins: Mutex::default(), replay, record_path })
+    }
+
+    /// Wrap a built provider when `SEAGENT_MODEL_RECORD` is set. A recording failure must not
+    /// break the live call: it is reported once per build and the provider keeps working.
+    fn maybe_record(&self, id: &str, p: Arc<dyn Provider>) -> Arc<dyn Provider> {
+        let Some(path) = &self.record_path else { return p };
+        match seagent_model::replay::Recorder::new(p.clone(), path, id) {
+            Ok(r) => r as Arc<dyn Provider>,
+            Err(e) => {
+                eprintln!("seagent: model recording is off: {e}");
+                p
+            }
+        }
     }
 
     /// Use this credential store (tests; the binary sets the process default).
@@ -178,7 +207,7 @@ impl Providers {
         if let Some(f) = &c.oauth {
             return Err(format!("no credentials: `seagent login {f}`, set {}, or `seagent auth add {}`", names[0], c.id));
         }
-        Err(format!("no API key: run `seagent setup`, set {}, or `seagent secrets set {}`", names[0], names[0]))
+        Err(seagent_model::auth::missing_key_message(c))
     }
 
     /// Build with the auxiliary-health recorder wrapped around the adapter: a capacity failure
@@ -224,6 +253,15 @@ impl Resolver for Providers {
         if let Some(p) = self.plugins.lock().unwrap().get(id) {
             return Ok(p.clone());
         }
+        // Recorded fixtures win over credentials: a replay test needs no key, no network.
+        if let Some(p) = self.replay.get(id) {
+            return Ok(p.clone());
+        }
+        if let Some(c) = seagent_model::resolve_alias(id) {
+            if let Some(p) = self.replay.get(&c) {
+                return Ok(p.clone());
+            }
+        }
         // ent-086: a team with its own key for this provider gets a provider built from it.
         if let Some(team) = seagent_core::team::current() {
             if let Some(cfg) = self.config(id).cloned() {
@@ -234,6 +272,7 @@ impl Resolver for Providers {
                     }
                     let idle = Duration::from_secs(cfg.idle_timeout_secs.unwrap_or(seagent_model::DEFAULT_IDLE_SECS).max(1));
                     let p = self.watched(&cfg.id, seagent_model::build_with(&cfg, Arc::new(auth::Static::new(Some(key))), idle)?);
+                    let p = self.maybe_record(&cfg.id, p);
                     self.cache.lock().unwrap().insert(ck, p.clone());
                     return Ok(p);
                 }
@@ -244,6 +283,7 @@ impl Resolver for Providers {
         }
         let cfg = self.config(id).cloned().ok_or_else(|| format!("unknown provider `{id}` (see `seagent providers list`)"))?;
         let p = self.build(&cfg)?;
+        let p = self.maybe_record(&cfg.id, p);
         self.cache.lock().unwrap().insert(id.to_string(), p.clone());
         Ok(p)
     }
@@ -348,6 +388,105 @@ mod tests {
         assert!(p.provider("moa").is_ok());
         let p = Providers::new(&BTreeMap::new(), Arc::new(Vault::empty())).unwrap();
         assert!(p.provider("moa").err().unwrap().contains("references"));
+    }
+
+    #[test]
+    fn replay_fixture_serves_a_provider_without_a_key() {
+        use seagent_core::{Block, Cancel, Message, ModelCaps, ModelRequest, ModelResponse, StopReason, StreamEvent, Usage};
+        use std::ffi::OsString;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        static ENV: Mutex<()> = Mutex::new(());
+        struct EnvGuard(Vec<(String, Option<OsString>)>);
+        impl Drop for EnvGuard {
+            fn drop(&mut self) {
+                for (k, v) in &self.0 {
+                    match v {
+                        Some(v) => std::env::set_var(k, v),
+                        None => std::env::remove_var(k),
+                    }
+                }
+            }
+        }
+        struct P(AtomicUsize);
+        impl Provider for P {
+            fn id(&self) -> &str {
+                "deepseek"
+            }
+            fn caps(&self, _: &str) -> ModelCaps {
+                ModelCaps { context_window: 64_000, max_output: 4096, tools: true, vision: false, explicit_cache: false }
+            }
+            fn complete(&self, req: &ModelRequest, on: &mut dyn FnMut(StreamEvent), _: &Cancel) -> Result<ModelResponse, seagent_core::ProviderError> {
+                self.0.fetch_add(1, Ordering::SeqCst);
+                on(StreamEvent::TextDelta("from fixture".into()));
+                Ok(ModelResponse { message: Message { role: seagent_core::Role::Assistant, content: vec![Block::text("from fixture")] }, stop: StopReason::EndTurn, usage: Usage { input_tokens: 7, output_tokens: 2, ..Default::default() }, model: req.model.clone() })
+            }
+        }
+
+        let _lock = ENV.lock().unwrap_or_else(|e| e.into_inner());
+        let root = seagent_core::tmp::TempDir::new("seagent-prov-replay");
+        let fixture = root.join("run.jsonl");
+        let old: Vec<(String, Option<OsString>)> = ["SEAGENT_HOME", "SEAGENT_MODEL_REPLAY", "SEAGENT_MODEL_RECORD"]
+            .iter()
+            .map(|k| ((*k).to_string(), std::env::var_os(k)))
+            .collect();
+        let _env = EnvGuard(old);
+        std::env::set_var("SEAGENT_HOME", root.path());
+        std::env::set_var("SEAGENT_MODEL_REPLAY", &fixture);
+        std::env::remove_var("SEAGENT_MODEL_RECORD");
+
+        let req = ModelRequest { model: "deepseek-chat".into(), system: vec![], messages: vec![Message::user("hello")], tools: vec![], max_tokens: 50, ..Default::default() };
+        let fake = Arc::new(P(AtomicUsize::new(0)));
+        let rec = seagent_model::replay::Recorder::new(fake.clone(), &fixture, "deepseek").unwrap();
+        rec.complete(&req, &mut |_| {}, &Cancel::new()).unwrap();
+        drop(rec);
+        assert_eq!(fake.0.load(Ordering::SeqCst), 1);
+
+        let p = Providers::new(&BTreeMap::new(), Arc::new(Vault::empty())).unwrap();
+        assert!(p.key_source("deepseek").is_err(), "a replay run needs no credentials");
+        let provider = p.provider("deepseek").unwrap();
+        let mut events = vec![];
+        let r = provider.complete(&req, &mut |e| events.push(e), &Cancel::new()).unwrap();
+        assert_eq!(r.message.text(), "from fixture");
+        assert_eq!(r.usage.input_tokens, 7);
+        assert_eq!(events, vec![seagent_core::StreamEvent::TextDelta("from fixture".into())]);
+        assert_eq!(fake.0.load(Ordering::SeqCst), 1, "the inner provider is not called again");
+    }
+
+    #[test]
+    fn record_env_wraps_a_built_provider_and_creates_the_fixture() {
+        use std::ffi::OsString;
+
+        static ENV: Mutex<()> = Mutex::new(());
+        struct EnvGuard(Vec<(String, Option<OsString>)>);
+        impl Drop for EnvGuard {
+            fn drop(&mut self) {
+                for (k, v) in &self.0 {
+                    match v {
+                        Some(v) => std::env::set_var(k, v),
+                        None => std::env::remove_var(k),
+                    }
+                }
+            }
+        }
+
+        let _lock = ENV.lock().unwrap_or_else(|e| e.into_inner());
+        let root = seagent_core::tmp::TempDir::new("seagent-prov-record");
+        let fixture = root.join("run.jsonl");
+        let old: Vec<(String, Option<OsString>)> = ["SEAGENT_HOME", "SEAGENT_MODEL_REPLAY", "SEAGENT_MODEL_RECORD"]
+            .iter()
+            .map(|k| ((*k).to_string(), std::env::var_os(k)))
+            .collect();
+        let _env = EnvGuard(old);
+        std::env::set_var("SEAGENT_HOME", root.path());
+        std::env::remove_var("SEAGENT_MODEL_REPLAY");
+        std::env::set_var("SEAGENT_MODEL_RECORD", &fixture);
+        let mut o = BTreeMap::new();
+        o.insert("mybox".to_string(), "format = \"openai_chat\"\nbase_url = \"http://127.0.0.1:9/v1\"".parse::<toml::Table>().unwrap());
+        let p = Providers::new(&o, Arc::new(Vault::empty())).unwrap();
+        assert!(!fixture.exists(), "nothing is recorded until a provider is built");
+        assert!(p.provider("mybox").is_ok());
+        assert!(fixture.exists(), "building with SEAGENT_MODEL_RECORD creates the JSONL fixture");
     }
 
     /// ent-086: a session of team `eng` uses `OPENAI_API_KEY__ENG`, other sessions the shared key.

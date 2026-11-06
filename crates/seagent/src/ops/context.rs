@@ -167,7 +167,14 @@ fn pct(tokens: u64, denom: u64) -> f64 {
 }
 
 /// The full `/context` report. `details` also renders the `/context all` tables.
+#[cfg(test)]
 pub fn report(v: &View, specs: &[ToolSpec], window: u64, comp: &CompactionConfig, details: bool) -> String {
+    report_marked(v, specs, window, comp, details, "")
+}
+
+/// `report` with the window provenance marker ("pinned"/"fallback"/""), so a defaulted window is
+/// never mistaken for a detected limit.
+pub fn report_marked(v: &View, specs: &[ToolSpec], window: u64, comp: &CompactionConfig, details: bool, marker: &str) -> String {
     let cats = categories(v, specs);
     let estimated_total: u64 = cats.iter().map(|c| c.tokens).sum();
     let mut o = String::new();
@@ -192,7 +199,8 @@ pub fn report(v: &View, specs: &[ToolSpec], window: u64, comp: &CompactionConfig
     // A single prompt can never exceed the window; any excess is estimate drift.
     if window > 0 {
         used = used.min(window);
-        o.push_str(&format!("\nContext window: {mark}{} / {} tokens ({mark}{}%)\n", commas(used), commas(window), (pct(used, window)).round() as u64));
+        let note = if marker.is_empty() { String::new() } else { format!(" ({marker})") };
+        o.push_str(&format!("\nContext window: {mark}{} / {}{note} tokens ({mark}{}%)\n", commas(used), commas(window), (pct(used, window)).round() as u64));
     }
     o.push_str(&format!("Source: {}; category counts are local estimates.\n", if measured { "provider usage" } else { "local estimate" }));
     o.push_str(&format!(
@@ -316,7 +324,13 @@ pub fn details(v: &View, specs: &[ToolSpec]) -> Vec<String> {
 
 /// The machine-readable payload (OpenClaw `/context json`, upstream `compute_session_context_breakdown`
 /// return value): categories with their glyph/token counts plus the occupancy and its provenance.
+#[cfg(test)]
 pub fn payload(v: &View, specs: &[ToolSpec], window: u64) -> serde_json::Value {
+    payload_marked(v, specs, window, "")
+}
+
+/// `payload` with the window provenance marker.
+pub fn payload_marked(v: &View, specs: &[ToolSpec], window: u64, marker: &str) -> serde_json::Value {
     let cats = categories(v, specs);
     let estimated_total: u64 = cats.iter().map(|c| c.tokens).sum();
     let measured = v.last_input_tokens > 0;
@@ -328,6 +342,7 @@ pub fn payload(v: &View, specs: &[ToolSpec], window: u64) -> serde_json::Value {
         "context_used": used,
         "context_percent": if window > 0 { (pct(used, window)).round() as u64 } else { 0 },
         "context_source": if measured { "provider_usage" } else { "local_estimate" },
+        "context_marker": marker,
         "context_estimated": !measured,
         "estimated_total": estimated_total,
         "compactions": v.compactions,
@@ -422,6 +437,16 @@ mod tests {
         // A tiny category is still visible.
         let tiny = vec![Category { id: "memory", glyph: "▧", tokens: 1 }];
         assert!(grid(&tiny, 1_000_000).join(" ").contains('▧'));
+    }
+
+    #[test]
+    fn context_report_marks_a_defaulted_window() {
+        let v = View { model: "p/zz-unknown".into(), ..Default::default() };
+        let comp = CompactionConfig::default();
+        let marked = report_marked(&v, &[], 32_768, &comp, false, "fallback");
+        assert!(marked.contains("32,768 (fallback) tokens"), "{marked}");
+        assert_eq!(payload_marked(&v, &[], 32_768, "fallback")["context_marker"].as_str(), Some("fallback"));
+        assert!(!report(&v, &[], 32_768, &comp, false).contains("(fallback)"));
     }
 
     #[test]

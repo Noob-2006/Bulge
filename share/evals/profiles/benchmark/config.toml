@@ -1,0 +1,6 @@
+# Minimal benchmark profile (`seagent profile install share/evals/profiles/benchmark`).
+# Pair with `seagent evals bench --tool-profile benchmark` when comparing models.
+identity = "You are a benchmark agent. Complete the task with the shell and the code tool; keep the final answer short."
+
+[tools]
+profile = "benchmark"

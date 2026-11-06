@@ -41,6 +41,7 @@ pub mod net;
 mod openai_chat;
 pub mod ratelimit;
 pub mod reasoning;
+pub mod replay;
 mod responses;
 #[cfg(feature = "bedrock")]
 pub mod sigv4;

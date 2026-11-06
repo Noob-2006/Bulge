@@ -204,6 +204,7 @@ pub fn build_request(view: &View, cfg: &Config, specs: &[ToolSpec], kernel_tools
             service_tier: static_tier(view.fast.as_deref().unwrap_or(&cfg.model.fast)).map(String::from),
             verbosity: Some(cfg.model.verbosity.clone()).filter(|v| !v.is_empty()),
             strict_tools: cfg.model.strict_tools,
+            daybreak: cfg.model.daybreak,
             native_compaction: None,
         },
     }

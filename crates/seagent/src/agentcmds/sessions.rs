@@ -136,7 +136,7 @@ impl Opts {
 
 /// Flags this module reads. `--older-than`/`--dry-run`/`--yes`/`--json`/`--limit`/`--model` happen
 /// to be known to the global parser already; the rest are ours (see `cli_raw`).
-const VALUE_FLAGS: &[&str] = &["older-than", "title", "model", "after", "before", "min-messages", "max-messages", "limit", "from"];
+const VALUE_FLAGS: &[&str] = &["older-than", "title", "model", "after", "before", "min-messages", "max-messages", "limit", "from", "session"];
 const BOOL_FLAGS: &[&str] = &["dry-run", "yes", "include-pinned", "include-archived", "check-only", "json", "all", "quiet", "help", "force"];
 
 pub const USAGE: &str = "\
@@ -148,7 +148,8 @@ seagent session <subcommand>
   unarchive <id…>                 restore archived sessions
   label <id> <group>              set the sidebar group (empty clears it)
   group <id> <status>             set the short status line (empty clears it)
-  stats [--json]                  sessions, messages, tokens, disk usage, pin/archive counts
+  stats [--json] [--session <id>] sessions, messages, tokens, disk usage, pin/archive counts
+                                  (with --session: per-step TTFT, output speed, model/tool time, cache hit)
   prune [filters] [--yes]         delete matching sessions (no filters: older than 90 days)
   import [path] [--from claude|codex]  import a Claude Code / Codex CLI session
   repair [id…] [--check-only]     fix corrupted event logs (bad lines, seq, header)
@@ -743,7 +744,119 @@ fn dir_size(p: &Path) -> u64 {
     total
 }
 
+#[derive(Debug, Default, Clone, Copy)]
+struct StepAgg {
+    count: u64,
+    ttft_ms: u64,
+    model_ms: u64,
+    tool_ms: u64,
+    input_tokens: u64,
+    output_tokens: u64,
+    cache_read: u64,
+    cache_write: u64,
+}
+
+impl StepAgg {
+    fn add(&mut self, ttft_ms: u64, model_ms: u64, tool_ms: u64, usage: &Usage) {
+        self.count += 1;
+        self.ttft_ms += ttft_ms;
+        self.model_ms += model_ms;
+        self.tool_ms += tool_ms;
+        self.input_tokens += usage.input_tokens;
+        self.output_tokens += usage.output_tokens;
+        self.cache_read += usage.cache_read_tokens;
+        self.cache_write += usage.cache_write_tokens;
+    }
+    fn generation_ms(&self) -> u64 {
+        self.model_ms.saturating_sub(self.ttft_ms).max(1)
+    }
+    fn ttft_avg_ms(&self) -> u64 {
+        self.ttft_ms.checked_div(self.count).unwrap_or(0)
+    }
+    fn output_per_sec(&self) -> f64 {
+        self.output_tokens as f64 * 1000.0 / self.generation_ms() as f64
+    }
+    fn cache_rate(&self) -> f64 {
+        let total = self.input_tokens + self.cache_read + self.cache_write;
+        if total == 0 {
+            0.0
+        } else {
+            self.cache_read as f64 / total as f64
+        }
+    }
+}
+
+fn step_agg(events: &[Event]) -> StepAgg {
+    let mut a = StepAgg::default();
+    for e in events {
+        if let EventKind::Step { ttft_ms, model_ms, tool_ms, usage, .. } = &e.kind {
+            a.add(*ttft_ms, *model_ms, *tool_ms, usage);
+        }
+    }
+    a
+}
+
+fn ms(v: u64) -> String {
+    if v >= 1000 {
+        format!("{:.1}s", v as f64 / 1000.0)
+    } else {
+        format!("{v}ms")
+    }
+}
+
+fn step_summary(a: &StepAgg) -> String {
+    format!(
+        "{} (avg ttft {} · {:.1} tok/s · model {} · tool {} · cache {:.1}%)",
+        a.count,
+        ms(a.ttft_avg_ms()),
+        a.output_per_sec(),
+        ms(a.model_ms),
+        ms(a.tool_ms),
+        a.cache_rate() * 100.0
+    )
+}
+
+fn step_json(a: &StepAgg) -> Value {
+    json!({
+        "count": a.count,
+        "avg_ttft_ms": a.ttft_avg_ms(),
+        "output_tokens_per_sec": a.output_per_sec(),
+        "model_ms": a.model_ms,
+        "tool_ms": a.tool_ms,
+        "cache_hit_rate": a.cache_rate(),
+        "input_tokens": a.input_tokens,
+        "output_tokens": a.output_tokens,
+        "cache_read_tokens": a.cache_read,
+        "cache_write_tokens": a.cache_write,
+    })
+}
+
+fn step_line(s: &EventKind) -> Option<String> {
+    let EventKind::Step { turn, step, model, ttft_ms, model_ms, tool_ms, tool_calls, usage } = s else {
+        return None;
+    };
+    let gen = model_ms.saturating_sub(*ttft_ms).max(1);
+    let tps = usage.output_tokens as f64 * 1000.0 / gen as f64;
+    let total = usage.input_tokens + usage.cache_read_tokens + usage.cache_write_tokens;
+    let cache = if total == 0 { 0.0 } else { usage.cache_read_tokens as f64 / total as f64 * 100.0 };
+    let calls = if *tool_calls == 0 { String::new() } else { format!(" · {} tool{}", tool_calls, if *tool_calls == 1 { "" } else { "s" }) };
+    Some(format!(
+        "  t{turn} s{step}  {:<34}  ttft {:>6}  out {:>6.1} tok/s  model {:>6}  tool {:>6}  cache {:>5.1}%  (in {} · out {}{calls})",
+        clip(&one_line(model), 34),
+        ms(*ttft_ms),
+        tps,
+        ms(*model_ms),
+        ms(*tool_ms),
+        cache,
+        usage.input_tokens,
+        usage.output_tokens
+    ))
+}
+
 fn cmd_stats(store: &Store, o: &Opts) -> Result<String, String> {
+    if let Some(id) = o.val("session") {
+        return session_stats(store, &resolve(store, id)?, o.flag("json"));
+    }
     let rows = rows(store);
     let sessions = rows.len();
     let children = rows.iter().filter(|r| r.info.parent.is_some()).count();
@@ -755,6 +868,20 @@ fn cmd_stats(store: &Store, o: &Opts) -> Result<String, String> {
     }
     let pinned = rows.iter().filter(|r| r.pinned).count();
     let archived = rows.iter().filter(|r| r.archived).count();
+    let mut steps = StepAgg::default();
+    for r in &rows {
+        if let Ok(evs) = store.read(&r.info.id) {
+            let a = step_agg(&evs);
+            steps.count += a.count;
+            steps.ttft_ms += a.ttft_ms;
+            steps.model_ms += a.model_ms;
+            steps.tool_ms += a.tool_ms;
+            steps.input_tokens += a.input_tokens;
+            steps.output_tokens += a.output_tokens;
+            steps.cache_read += a.cache_read;
+            steps.cache_write += a.cache_write;
+        }
+    }
     let disk = dir_size(store.root());
     let oldest = rows.iter().min_by_key(|r| r.info.created_ms).map(|r| r.info.created_ms);
     let newest = rows.iter().max_by_key(|r| r.info.updated_ms).map(|r| r.info.updated_ms);
@@ -765,6 +892,7 @@ fn cmd_stats(store: &Store, o: &Opts) -> Result<String, String> {
             "messages": messages,
             "turns": turns,
             "tokens": {"input": usage.input_tokens, "output": usage.output_tokens, "cache_read": usage.cache_read_tokens, "cache_write": usage.cache_write_tokens, "total": usage.total()},
+            "steps": step_json(&steps),
             "bytes": disk,
             "pinned": pinned,
             "archived": archived,
@@ -780,11 +908,62 @@ fn cmd_stats(store: &Store, o: &Opts) -> Result<String, String> {
         format!("sessions: {sessions}{}", if children > 0 { format!(" ({children} sub-agent)") } else { String::new() }),
         format!("messages: {messages} ({turns} turns)"),
         format!("tokens: {} (in {} · out {} · cache read {})", usage.total(), usage.input_tokens, usage.output_tokens, usage.cache_read_tokens),
+        format!("steps: {}", step_summary(&steps)),
         format!("disk: {} in {}", bytes(disk), store.root().display()),
         format!("pinned: {pinned} · archived: {archived}"),
     ];
     let ts = |ms: Option<u64>| ms.map(super::iso).unwrap_or_else(|| "-".into());
     out.push(format!("oldest: {} · newest: {}", ts(oldest), ts(newest)));
+    Ok(out.join("\n"))
+}
+
+/// One session's per-step rows (and the same aggregate the fleet view prints).
+fn session_stats(store: &Store, id: &str, as_json: bool) -> Result<String, String> {
+    let info = store.list().into_iter().find(|s| s.id == id).ok_or_else(|| format!("no session `{id}`"))?;
+    let events = store.read(id).map_err(|e| e.to_string())?;
+    let agg = step_agg(&events);
+    let row = row_of(store, info.clone());
+    if as_json {
+        let steps: Vec<Value> = events
+            .iter()
+            .filter_map(|e| match &e.kind {
+                EventKind::Step { turn, step, model, ttft_ms, model_ms, tool_ms, tool_calls, usage } => {
+                    let gen = model_ms.saturating_sub(*ttft_ms).max(1);
+                    let total = usage.input_tokens + usage.cache_read_tokens + usage.cache_write_tokens;
+                    Some(json!({
+                        "turn": turn,
+                        "step": step,
+                        "model": model,
+                        "ttft_ms": ttft_ms,
+                        "model_ms": model_ms,
+                        "tool_ms": tool_ms,
+                        "tool_calls": tool_calls,
+                        "output_tokens_per_sec": usage.output_tokens as f64 * 1000.0 / gen as f64,
+                        "cache_hit_rate": if total == 0 { 0.0 } else { usage.cache_read_tokens as f64 / total as f64 },
+                        "usage": usage,
+                    }))
+                }
+                _ => None,
+            })
+            .collect();
+        return Ok(serde_json::to_string_pretty(&json!({
+            "session": id,
+            "title": row.title(),
+            "messages": row.info.messages,
+            "turns": row.turns,
+            "tokens": {"input": row.usage.input_tokens, "output": row.usage.output_tokens, "cache_read": row.usage.cache_read_tokens, "cache_write": row.usage.cache_write_tokens, "total": row.usage.total()},
+            "step_stats": step_json(&agg),
+            "steps": steps,
+        }))
+        .unwrap_or_else(|_| "{}".into()));
+    }
+    let mut out = vec![
+        format!("session {id}  {}", clip(&row.title(), 60)),
+        format!("messages: {} ({} turns)", row.info.messages, row.turns),
+        format!("tokens: {} (in {} · out {} · cache read {})", row.usage.total(), row.usage.input_tokens, row.usage.output_tokens, row.usage.cache_read_tokens),
+        format!("steps: {}", step_summary(&agg)),
+    ];
+    out.extend(events.iter().filter_map(|e| step_line(&e.kind)));
     Ok(out.join("\n"))
 }
 
@@ -1445,6 +1624,36 @@ mod tests {
         assert_eq!(j["archived"], 1);
         assert!(j["bytes"].as_u64().unwrap() > 0);
         assert!(j["oldest"].as_str().unwrap().ends_with('Z'));
+    }
+
+    #[test]
+    fn stats_show_per_step_ttft_speed_time_and_cache() {
+        let store = tmp_store();
+        let now = util_now_ms();
+        write_session(&store, "s", None, 2, now, &[EventKind::Step {
+            turn: 0,
+            step: 1,
+            model: "anthropic/claude-sonnet-5-5".into(),
+            ttft_ms: 100,
+            model_ms: 1_100,
+            tool_ms: 200,
+            tool_calls: 1,
+            usage: Usage { input_tokens: 100, output_tokens: 20, cache_read_tokens: 300, ..Default::default() },
+        }]);
+        let out = run_ok(&store, &["stats", "--session", "s"]);
+        assert!(out.contains("steps: 1 (avg ttft 100ms · 20.0 tok/s · model 1.1s · tool 200ms · cache 75.0%)"), "{out}");
+        assert!(out.contains("t0 s1") && out.contains("ttft  100ms") && out.contains("cache  75.0%"), "{out}");
+        let j: Value = serde_json::from_str(&run_ok(&store, &["stats", "--session", "s", "--json"])).unwrap();
+        assert_eq!(j["step_stats"]["count"], 1);
+        assert_eq!(j["step_stats"]["avg_ttft_ms"], 100);
+        assert_eq!(j["step_stats"]["output_tokens_per_sec"], 20.0);
+        assert_eq!(j["step_stats"]["cache_hit_rate"], 0.75);
+        assert_eq!(j["steps"][0]["tool_calls"], 1);
+        assert_eq!(j["steps"][0]["usage"]["cache_read_tokens"], 300);
+        // The fleet view sums the same steps.
+        let all: Value = serde_json::from_str(&run_ok(&store, &["stats", "--json"])).unwrap();
+        assert_eq!(all["steps"]["count"], 1);
+        assert_eq!(all["steps"]["cache_read_tokens"], 300);
     }
 
     #[test]

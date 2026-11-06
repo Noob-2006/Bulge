@@ -102,6 +102,10 @@ pub struct RequestOptions {
     /// Ask for strict (schema-enforced) tool arguments where supported.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub strict_tools: bool,
+    /// OpenAI Daybreak (Trusted Access for Cyber) on the Codex subscription route:
+    /// sends `access_programs.cyber = "daybreak_blue"`. Off by default.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub daybreak: bool,
     /// Server-side ("native") compaction threshold in tokens: `Some(n)` asks a provider that
     /// owns the context (OpenAI Responses `context_management`) to compact itself once the
     /// input crosses `n`. None = local compaction only.

@@ -18,7 +18,7 @@ use crate::{ChannelError, Media};
 use serde_json::{json, Value};
 
 /// Every action `Slack::action` implements (advertised by `message_actions`).
-pub(super) const ACTIONS: &[&str] = &["reactions", "read", "conversation-open", "download-file", "upload-file", "pin", "unpin", "list-pins", "member-info", "emoji-list"];
+pub(super) const ACTIONS: &[&str] = &["reactions", "read", "conversation-open", "download-file", "upload-file", "pin", "unpin", "list-pins", "member-info", "emoji-list", "thread-create"];
 
 /// `SLACK_REACTION_RESULT_LIMIT`: reaction users and emoji-list entries.
 const RESULT_LIMIT: u64 = 100;
@@ -224,12 +224,14 @@ impl Slack {
             }
             "list-pins" => {
                 let ch = need_channel(args, action)?;
+                let limit = a::pos(args, &["limit"]).map_err(|_| bad("limit must be a positive integer."))?.unwrap_or(RESULT_LIMIT).min(RESULT_LIMIT) as usize;
                 let v = self.form("pins.list", &[("channel", &ch)])?;
                 let pins: Vec<Value> = v["items"]
                     .as_array()
                     .cloned()
                     .unwrap_or_default()
                     .into_iter()
+                    .take(limit)
                     .map(|mut p| {
                         if p["message"].is_object() {
                             p["message"] = with_ts(p["message"].take());
@@ -238,6 +240,15 @@ impl Slack {
                     })
                     .collect();
                 Ok(json!({"ok": true, "pins": pins}))
+            }
+            "thread-create" => {
+                // A Slack thread hangs off a message: post the anchor, then return its ts as
+                // the thread id (the generic `/fork` path posts the recap into it).
+                let ch = need_channel(args, action)?;
+                let name = a::s(args, &["threadName", "name"]).map(|n| n.trim().to_string()).filter(|n| !n.is_empty()).ok_or_else(|| bad("thread-create requires a threadName."))?;
+                let v = self.inner.api("chat.postMessage", &json!({"channel": ch, "text": name}))?;
+                let ts = v["ts"].as_str().filter(|t| !t.is_empty()).ok_or_else(|| bad("chat.postMessage returned no ts for the thread anchor."))?;
+                Ok(json!({"ok": true, "thread": {"id": ts}, "threadId": ts}))
             }
             "member-info" => {
                 let user = a::s(args, &["userId"]).ok_or_else(|| bad("member-info requires a userId outside a current Slack conversation."))?;
@@ -507,6 +518,8 @@ mod tests {
         s.message_action("unpin", &json!({"target": "C1", "messageId": "1.2"})).unwrap();
         let v = s.message_action("list-pins", &json!({"target": "C1"})).unwrap();
         assert_eq!((v["pins"][0]["message"]["timestampMs"].as_i64(), v["pins"][1]["file"]["id"].as_str()), (Some(1_700_000_000_500), Some("F1")));
+        let v = s.message_action("list-pins", &json!({"target": "C1", "limit": 1})).unwrap();
+        assert_eq!(v["pins"].as_array().unwrap().len(), 1, "list-pins honours limit");
         let r = srv.requests();
         assert_eq!((r[0].path.as_str(), form(&r[0])), ("/reactions.get", pairs(&[("channel", "C1"), ("timestamp", "1.2"), ("full", "true")])));
         assert_eq!((r[1].path.as_str(), form(&r[1])), ("/conversations.history", pairs(&[("channel", "C1"), ("limit", "10"), ("latest", "1700000000"), ("oldest", "1690000000")])));
@@ -515,11 +528,25 @@ mod tests {
         assert_eq!((r[4].path.as_str(), r[4].json()), ("/pins.add", json!({"channel": "C1", "timestamp": "1.2"})));
         assert_eq!((r[5].path.as_str(), r[5].json()), ("/pins.remove", json!({"channel": "C1", "timestamp": "1.2"})));
         assert_eq!((r[6].path.as_str(), form(&r[6])), ("/pins.list", pairs(&[("channel", "C1")])));
+        assert_eq!((r[7].path.as_str(), form(&r[7])), ("/pins.list", pairs(&[("channel", "C1")])), "limit is applied locally to the full pin list");
         assert_eq!(r[0].header("authorization"), Some("Bearer xoxb-SECRET"));
         assert!(s.message_action("pin", &json!({"target": "C1"})).unwrap_err().message.contains("messageId required"));
         assert!(s.message_action("read", &json!({"target": "C1", "limit": 0})).unwrap_err().message.contains("positive integer"));
         assert!(s.message_action("reactions", &json!({"messageId": "1"})).unwrap_err().message.contains("requires target"));
-        assert_eq!(srv.requests().len(), 7);
+        assert_eq!(srv.requests().len(), 8);
+    }
+
+    #[test]
+    fn thread_create_posts_an_anchor_and_returns_its_ts() {
+        let srv = FakeServer::start(|r, _| match r.path.as_str() {
+            "/chat.postMessage" => ok(json!({"ok": true, "ts": "1700000000.99"})),
+            _ => ok(json!({})),
+        });
+        let s = sl(&srv);
+        let v = s.message_action("thread-create", &json!({"target": "C1", "threadName": "Incident 42"})).unwrap();
+        assert_eq!((v["thread"]["id"].as_str(), v["threadId"].as_str()), (Some("1700000000.99"), Some("1700000000.99")));
+        assert_eq!(srv.requests()[0].json(), json!({"channel": "C1", "text": "Incident 42"}));
+        assert!(s.message_action("thread-create", &json!({"target": "C1"})).is_err());
     }
 
     #[test]

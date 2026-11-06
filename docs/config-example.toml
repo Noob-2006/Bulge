@@ -7,8 +7,13 @@
 [model]
 default = "anthropic/claude-sonnet-5-5"
 fallback = ["openai/gpt-5-mini", "mistral/mistral-small-latest"]
-aux = "deepseek/deepseek-chat"     # 便宜模型：壓縮、標題、MCP sampling
+aux = "deepseek/deepseek-chat"     # 便宜模型：標題、MCP sampling（壓縮預設沿用對話模型以命中快取；要改設 [model.tasks] compaction）
 max_tokens = 8192
+# system_updates = "in_history"    # 端點支援歷史中的 system 更新時才開；預設 rewrite（相容舊行為）
+# log_requests = true             # 每次送出的請求原樣寫進工作階段記錄（除錯快取未命中用；記錄會變大）
+
+[compaction]
+trim_tool_results = "pressure"     # pressure（預設，超過 prune_threshold 才裁剪舊工具輸出）| always
 
 [budget]                            # 每個 session 的上限（不設就無上限）
 max_cost_usd = 5.0

@@ -639,3 +639,50 @@ fn heartbeat_slash_reports_toggles_and_fires_a_beat() {
     assert!(plain.contains("not configured"), "{plain}");
     assert!(k2.run_slash("/heartbeat run", None, "cli").unwrap().unwrap_err().contains("not configured"));
 }
+
+#[test]
+fn delivery_defaults_fall_back_job_creator_agent_gateway() {
+    let (k, _, ws) = kernel(|_| {});
+    let data = k.paths.data.clone();
+    let _ = sent();
+    let mut cfg = Config::default();
+    let table: toml::Table = r#"
+default_deliver = "cap1"
+default_failure_deliver = "cap4"
+[agents.ops]
+deliver = "cap2"
+failure_deliver = "cap5"
+[creators.alice]
+deliver = "cap3"
+failure_deliver = "cap6"
+"#
+    .parse()
+    .unwrap();
+    cfg.automation = table;
+    let st = Settings::from_config(&cfg);
+    let mut job = create(&data, &st, Spec { schedule: Some("1h".into()), prompt: Some("report".into()), ..Default::default() }, &ws).unwrap();
+    job.ext.agent = Some("ops".into());
+    job.ext.created_by = Some("alice".into());
+    let defaults = DeliveryDefaults::from_config(&cfg);
+    let ch = |n: &str| vec![Target::Channel { name: n.into(), chat: None, thread: None }];
+    assert_eq!(targets_with(&data, &job, false, &defaults), ch("cap3"), "creator wins over agent and gateway");
+    job.ext.created_by = Some("nobody".into());
+    assert_eq!(targets_with(&data, &job, false, &defaults), ch("cap2"), "agent wins over gateway");
+    job.ext.agent = None;
+    assert_eq!(targets_with(&data, &job, false, &defaults), ch("cap1"), "gateway default is last");
+    job.ext.deliver = Some("cap7".into());
+    assert_eq!(targets_with(&data, &job, false, &defaults), ch("cap7"), "the job's own target wins");
+    // Failure: explicit job failure, then job delivery, then creator/agent/gateway failure.
+    job.ext.failure_deliver = Some("cap8".into());
+    assert_eq!(targets_with(&data, &job, true, &defaults), ch("cap8"));
+    job.ext.failure_deliver = None;
+    assert_eq!(targets_with(&data, &job, true, &defaults), ch("cap7"), "a job target also carries failures");
+    job.ext.deliver = None;
+    job.ext.agent = Some("ops".into());
+    job.ext.created_by = Some("alice".into());
+    assert_eq!(targets_with(&data, &job, true, &defaults), ch("cap6"));
+    job.ext.created_by = None;
+    assert_eq!(targets_with(&data, &job, true, &defaults), ch("cap5"));
+    job.ext.agent = None;
+    assert_eq!(targets_with(&data, &job, true, &defaults), ch("cap4"));
+}

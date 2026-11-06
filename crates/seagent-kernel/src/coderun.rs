@@ -40,11 +40,14 @@ pub struct CodeConfig {
     pub kernel_idle_timeout_secs: u64,
     /// Run scripts in the session's execution backend when it is not the local host.
     pub use_backend: bool,
+    /// Expose only `run` to the model (PTC-style): every other tool is reachable from inside
+    /// the script through `seagent-call`, but never as a direct tool call.
+    pub run_code_only: bool,
 }
 
 impl Default for CodeConfig {
     fn default() -> Self {
-        CodeConfig { max_tool_calls: 50, persistent: true, max_kernels: 4, kernel_idle_timeout_secs: 1800, use_backend: true }
+        CodeConfig { max_tool_calls: 50, persistent: true, max_kernels: 4, kernel_idle_timeout_secs: 1800, use_backend: true, run_code_only: false }
     }
 }
 
@@ -56,6 +59,11 @@ pub fn configure(c: CodeConfig) {
 
 pub fn config() -> CodeConfig {
     CONFIG.read().unwrap().clone().unwrap_or_default()
+}
+
+/// Is `name` offered as a direct tool call? In `run_code_only` mode only `run` is.
+pub fn tool_visible(name: &str) -> bool {
+    !config().run_code_only || name == "run"
 }
 
 /// Per-call nested tool budget; refusals are free, only dispatched calls count.

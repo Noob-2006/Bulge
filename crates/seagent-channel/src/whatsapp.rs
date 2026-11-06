@@ -601,7 +601,7 @@ impl Channel for WhatsApp {
     fn fetch_media(&self, m: &Media) -> Result<Vec<u8>, ChannelError> {
         match (&m.path, &m.url) {
             (Some(p), _) => std::fs::read(p).map_err(|e| ChannelError::new(K::NotFound, format!("bridge media {p}: {e}"))),
-            (None, Some(u)) => crate::http::get_bytes(u, &[], 64 * 1024 * 1024),
+            (None, Some(u)) => crate::http::get_bytes_trusted(u, &[], 64 * 1024 * 1024, &self.base),
             _ => Err(ChannelError::new(K::Fatal, "attachment has neither path nor url")),
         }
     }

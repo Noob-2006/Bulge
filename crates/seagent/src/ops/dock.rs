@@ -16,6 +16,7 @@ pub fn snapshot(k: &Kernel, session: &str) -> Result<Value, String> {
     let v = project(&k.store.read(session).map_err(|e| e.to_string())?);
     let (pid, m) = seagent_kernel::context::split_model(&v.model);
     let window = k.resolver.provider(pid).map(|p| p.caps(m).context_window).unwrap_or(0);
+    let marker = k.window_marker(&v.model);
     let pct = (window > 0).then(|| ((v.last_input_tokens as f64 * 100.0 / window as f64).round() as u64).min(100));
     let prompt = v.usage.input_tokens + v.usage.cache_read_tokens + v.usage.cache_write_tokens;
     let cache = (v.usage.cache_read_tokens > 0 && prompt > 0).then(|| (v.usage.cache_read_tokens as f64 * 1000.0 / prompt as f64).round() / 10.0);
@@ -24,7 +25,7 @@ pub fn snapshot(k: &Kernel, session: &str) -> Result<Value, String> {
         format!("{}{} ({}/{} rounds)", if paused { "⏸ " } else { "" }, g["objective"].as_str().unwrap_or(""), g["rounds"], g["max_rounds"])
     });
     Ok(json!({
-        "status": {"model": v.model, "context_pct": pct, "context_window": window, "tokens": v.usage.total(), "cache_pct": cache, "compactions": v.compactions, "running": k.is_running(session)},
+        "status": {"model": v.model, "context_pct": pct, "context_window": window, "context_marker": marker, "tokens": v.usage.total(), "cache_pct": cache, "compactions": v.compactions, "running": k.is_running(session)},
         "goal": goal.unwrap_or_default(),
         "subagents": k.subagent_list(session, false),
         "processes": processes(session),

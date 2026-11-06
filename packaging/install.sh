@@ -29,6 +29,11 @@
 set -eu
 (set -o pipefail) 2>/dev/null && set -o pipefail
 
+# Distros with user private groups default to umask 002; an installed runtime that is
+# group-writable fails its own ownership checks. Remove group/world write while keeping
+# a stricter caller mask (umask 077 stays 077).
+umask go-w
+
 STEPS=7
 step=0
 if [ -t 1 ] && [ -z "${NO_COLOR:-}" ]; then B=$(printf '\033[1m'); D=$(printf '\033[2m'); G=$(printf '\033[32m'); Y=$(printf '\033[33m'); R=$(printf '\033[31m'); C=$(printf '\033[36m'); N=$(printf '\033[0m'); else B= D= G= Y= R= C= N=; fi

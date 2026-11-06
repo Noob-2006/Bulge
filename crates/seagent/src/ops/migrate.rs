@@ -20,7 +20,7 @@ use std::path::{Path, PathBuf};
 
 pub const COMMANDS: &[&str] = &["migrate", "import-agent", "claw"];
 pub const VALUE_FLAGS: &[&str] = &["path"];
-pub const BOOL_FLAGS: &[&str] = &["overwrite"];
+pub const BOOL_FLAGS: &[&str] = &["overwrite", "migrate-secrets"];
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Act {
@@ -560,6 +560,30 @@ pub fn plan_codex(root: &Path, data: &Path) -> Result<Vec<Act>, String> {
     Ok(acts)
 }
 
+/// Remove credential imports (`--migrate-secrets` is off by default) and report exactly what
+/// was skipped. Config references such as `{{secret:TELEGRAM_BOT_TOKEN}}` are kept: the value
+/// never enters the config, and the operator can set it later with `seagent secret set`.
+pub fn without_secrets(acts: Vec<Act>) -> Vec<Act> {
+    let mut out = Vec::new();
+    let mut skipped = Vec::new();
+    for a in acts {
+        match a {
+            Act::Secret(n, _) => skipped.push(n),
+            other => out.push(other),
+        }
+    }
+    for n in skipped {
+        out.push(Act::Note(format!("skipped credential {n} (use --migrate-secrets to import credentials; any {{{{secret:{n}}}}} reference stays unset until you set it)")));
+    }
+    out
+}
+
+/// [`plan`] with the credential policy applied: `include_secrets=false` is the safe default.
+pub fn plan_opt(source: &str, path: Option<&Path>, data: &Path, include_secrets: bool) -> Result<Vec<Act>, String> {
+    let acts = plan(source, path, data)?;
+    Ok(if include_secrets { acts } else { without_secrets(acts) })
+}
+
 pub fn plan(source: &str, path: Option<&Path>, data: &Path) -> Result<Vec<Act>, String> {
     let h = home();
     match source {
@@ -705,7 +729,7 @@ pub fn dispatch(cmd: &str, a: &Args, _raw: &[String]) -> Option<R> {
             }
             "retired-models" | "xai" => retired(&paths, a.flag("apply")),
             s => {
-                let acts = plan(s, a.val("path").map(Path::new), &paths.data)?;
+                let acts = plan_opt(s, a.val("path").map(Path::new), &paths.data, a.flag("migrate-secrets"))?;
                 if acts.iter().all(|x| matches!(x, Act::Note(_))) {
                     for x in &acts {
                         println!("{}", describe(x));
@@ -817,5 +841,26 @@ mod tests {
         assert!(acts.contains(&Act::Config("model.default".into(), toml::Value::String("openai/gpt-5-codex".into()))));
         assert!(acts.iter().any(|a| matches!(a, Act::Config(k, _) if k == "mcp.docs")));
         assert!(acts.iter().any(|a| matches!(a, Act::Config(k, toml::Value::Table(t)) if k == "providers.az" && t["format"].as_str() == Some("openai_responses"))));
+    }
+
+    #[test]
+    fn credentials_are_opt_in_and_skips_are_named() {
+        let root = tmp();
+        std::fs::create_dir_all(root.join("workspace")).unwrap();
+        std::fs::write(root.join(".env"), "TELEGRAM_BOT_TOKEN=123:abc\n").unwrap();
+        std::fs::write(root.join("openclaw.json"), r#"{"channels":{"telegram":{"botToken":"${TELEGRAM_BOT_TOKEN}"}}}"#).unwrap();
+        let p = Paths { data: root.join("seagent/data"), config_dir: root.join("seagent/config"), runtime: root.join("seagent/run"), ..Default::default() };
+        let safe = plan_opt("openclaw", Some(&root), &p.data, false).unwrap();
+        assert!(!safe.iter().any(|a| matches!(a, Act::Secret(..))), "credentials are not imported by default");
+        assert!(safe.iter().any(|a| matches!(a, Act::Note(n) if n.contains("TELEGRAM_BOT_TOKEN") && n.contains("--migrate-secrets"))), "{safe:?}");
+        apply(&p, &safe, false).unwrap();
+        let vault = seagent_kernel::vault::Vault::load(&p.secrets()).unwrap();
+        assert!(!vault.names().iter().any(|n| n == "TELEGRAM_BOT_TOKEN"), "no value written to the vault");
+
+        let full = plan_opt("openclaw", Some(&root), &p.data, true).unwrap();
+        assert!(full.contains(&Act::Secret("TELEGRAM_BOT_TOKEN".into(), "123:abc".into())));
+        apply(&p, &full, true).unwrap();
+        let vault = seagent_kernel::vault::Vault::load(&p.secrets()).unwrap();
+        assert_eq!(vault.substitute("{{secret:TELEGRAM_BOT_TOKEN}}"), "123:abc", "--migrate-secrets imports it");
     }
 }

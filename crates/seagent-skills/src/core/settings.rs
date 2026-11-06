@@ -67,6 +67,26 @@ pub struct Review {
     pub auto_apply: bool,
 }
 
+/// `[skills.workshop]`: autonomous experience review (OpenClaw `extensions/skill-workshop`).
+#[derive(Debug, Clone)]
+pub struct Workshop {
+    /// `off` (keep today's candidate-only review), `propose` (queue a draft for approval) or
+    /// `auto` (write through the guarded writer at turn end).
+    pub mode: String,
+    /// Use the aux model to turn a session's experience into a draft; deterministic fallback.
+    pub llm_review: bool,
+    /// Model for the review (`provider/model`); empty = aux model.
+    pub model: String,
+    /// `seagent curator diet`: SKILL.md body budget before detail moves into references/.
+    pub diet_max_bytes: usize,
+}
+
+impl Default for Workshop {
+    fn default() -> Self {
+        Workshop { mode: "off".into(), llm_review: true, model: String::new(), diet_max_bytes: 12_000 }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Settings {
     pub template_vars: bool,
@@ -82,6 +102,7 @@ pub struct Settings {
     /// Hermes `skills.guard_agent_created`: block caution findings on agent-written skills.
     pub guard_agent_created: bool,
     pub review: Review,
+    pub workshop: Workshop,
     pub curator: Curator,
     pub hub: Hub,
 }
@@ -118,6 +139,7 @@ impl Settings {
         let c = t.get("curator").and_then(|v| v.as_table()).unwrap_or(&empty);
         let r = t.get("review").and_then(|v| v.as_table()).unwrap_or(&empty);
         let h = t.get("hub").and_then(|v| v.as_table()).unwrap_or(&empty);
+        let w = t.get("workshop").and_then(|v| v.as_table()).unwrap_or(&empty);
         let default_taps = match h.get("taps").and_then(|v| v.as_array()) {
             Some(a) => a.iter().filter_map(|x| x.as_str()).map(|r| (r.to_string(), "skills/".to_string())).collect(),
             None => vec![("openai/skills".into(), "skills/".into()), ("anthropics/skills".into(), "skills/".into())],
@@ -134,6 +156,16 @@ impl Settings {
             write_approval: b(t, "write_approval", false),
             guard_agent_created: b(t, "guard_agent_created", false),
             review: Review { enabled: b(r, "enabled", true), min_steps: n(r, "min_steps", 4).max(2) as usize, auto_apply: b(r, "auto_apply", false) },
+            workshop: Workshop {
+                mode: match s(w, "mode", "off").as_str() {
+                    m @ ("off" | "propose" | "auto") => m.to_string(),
+                    // An unknown mode never falls through to "auto" (a write): stay off.
+                    _ => "off".to_string(),
+                },
+                llm_review: b(w, "llm_review", true),
+                model: s(w, "model", ""),
+                diet_max_bytes: n(w, "diet_max_bytes", 12_000).clamp(2_000, 100_000) as usize,
+            },
             curator: Curator {
                 enabled: b(c, "enabled", true),
                 interval_hours: n(c, "interval_hours", 24 * 7).max(1),
@@ -165,6 +197,14 @@ impl Settings {
 
     pub fn load(cfg: &Config) -> Settings {
         Settings::from_table(&cfg.skills)
+    }
+
+    /// Normalize/validate the workshop mode (unknown values fall back to `off`, never write).
+    pub fn validate(&self) -> Result<(), String> {
+        if !["off", "propose", "auto"].contains(&self.workshop.mode.as_str()) {
+            return Err(format!("[skills] workshop.mode = `{}`: use off, propose or auto", self.workshop.mode));
+        }
+        Ok(())
     }
 
     pub fn is_disabled(&self, name: &str) -> bool {
@@ -247,14 +287,17 @@ mod tests {
         assert_eq!(s.hub.clawhub, "https://clawhub.ai/api/v1");
         assert!(!s.write_approval && !s.guard_agent_created, "both Hermes gates default off");
         assert!(s.review.enabled && s.review.min_steps == 4 && !s.review.auto_apply);
+        assert_eq!((s.workshop.mode.as_str(), s.workshop.llm_review, s.workshop.diet_max_bytes), ("off", true, 12_000));
         let t: toml::Table = toml::from_str("inline_shell = true\ndisabled = [\"x\"]\n[curator]\nstale_after_days = 0\nmin_idle_hours = 0.5\n[hub]\nclawhub = \"http://127.0.0.1:9/api/\"\n").unwrap();
         let s = Settings::from_table(&t);
         assert!(s.inline_shell && s.is_disabled("x") && !s.is_disabled("y"));
-        let t2: toml::Table = toml::from_str("write_approval = true\nguard_agent_created = true\n[review]\nmin_steps = 1\nauto_apply = true\n").unwrap();
+        let t2: toml::Table = toml::from_str("write_approval = true\nguard_agent_created = true\n[review]\nmin_steps = 1\nauto_apply = true\n[workshop]\nmode = \"propose\"\ndiet_max_bytes = 1\n").unwrap();
         let g = Settings::from_table(&t2);
         assert!(g.write_approval && g.guard_agent_created);
         assert_eq!(g.review.min_steps, 2, "floored at 2: one tool call is not a procedure");
         assert!(g.review.auto_apply);
+        assert_eq!(g.workshop.mode, "propose");
+        assert_eq!(g.workshop.diet_max_bytes, 2_000, "floored so a diet never truncates a usable procedure");
         assert_eq!(s.curator.stale_after_days, 1, "floored at 1 like upstream _bounded_count");
         assert_eq!(s.curator.min_idle_hours, 0.5, "upstream reads a float");
         assert_eq!(s.hub.clawhub, "http://127.0.0.1:9/api");

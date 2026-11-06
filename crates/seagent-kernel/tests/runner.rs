@@ -275,6 +275,37 @@ fn simple_turn_and_tool_loop() {
 }
 
 #[test]
+fn per_step_stats_recorded_with_timing_and_cache_usage() {
+    let e = env();
+    e.p.call("echo", json!({"text":"hi"}));
+    e.p.text("done");
+    let id = start(&e, "say hi");
+    assert_eq!(e.k.run(&id, RunOpts::default()).unwrap().reason, EndReason::Done);
+    let steps: Vec<_> = events(&e, &id)
+        .into_iter()
+        .filter_map(|k| match k {
+            EventKind::Step { turn, step, model, ttft_ms, model_ms, tool_ms, tool_calls, usage } => Some((turn, step, model, ttft_ms, model_ms, tool_ms, tool_calls, usage)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(steps.len(), 2, "one Step per model call: {steps:?}");
+    let (turn, step, model, ttft, model_ms, tool_ms, tools, usage) = steps[0].clone();
+    assert_eq!((turn, step), (0, 1));
+    assert!(model.ends_with("/m1"), "the answered model is recorded: {model}");
+    assert!(ttft <= model_ms, "TTFT is inside the model call: {ttft} <= {model_ms}");
+    assert_eq!(tools, 1);
+    assert!(tool_ms < 10_000);
+    assert_eq!((usage.input_tokens, usage.output_tokens), (100, 20));
+    let (_, step2, _, _, _, tool_ms2, tools2, usage2) = steps[1].clone();
+    assert_eq!((step2, tools2), (2, 0));
+    assert_eq!(tool_ms2, 0, "a text-only step spent no time in tools");
+    assert_eq!((usage2.input_tokens, usage2.output_tokens), (100, 20));
+    // Step events do not enter the model-visible projection.
+    assert_eq!(e.k.store.read(&id).unwrap().iter().filter(|e| matches!(e.kind, EventKind::Step { .. })).count(), 2);
+    assert!(!seagent_kernel::projection::project(&e.k.store.read(&id).unwrap()).messages.iter().any(|m| m.text().contains("ttft")));
+}
+
+#[test]
 fn retries_then_succeeds() {
     let e = env();
     e.p.fail(ProviderErrorKind::RateLimited { retry_after: Some(Duration::from_millis(1)) });
@@ -383,8 +414,9 @@ fn context_overflow_compacts_and_retries() {
 
 #[test]
 fn second_overflow_in_a_row_is_an_error() {
-    // Summaries go to the backup provider so they don't consume main's script.
-    let e = env_with(|c| c.model.aux = "backup/m2".into(), Arc::new(Policy { allow_privilege: false, allow_egress: false }));
+    // An explicit compaction task routes summaries to the backup provider so they don't consume
+    // main's script (`[model] aux` alone must not, or the warm conversation prefix is lost).
+    let e = env_with(|c| { c.model.tasks.insert("compaction".into(), "backup/m2".into()); }, Arc::new(Policy { allow_privilege: false, allow_egress: false }));
     e.p.text("a");
     let id = start(&e, "q1");
     e.k.run(&id, RunOpts::default()).unwrap();
@@ -1079,7 +1111,8 @@ fn turn_prepare_and_prompt_build_shape_every_request_of_the_turn() {
     }
     assert!(tool_results(&e, &id)[0].0.contains("not available in this turn"));
     assert_eq!(e.calls["hidden"].load(Ordering::SeqCst), 0);
-    assert!(!format!("{:?}", events(&e, &id)).contains("PRE-CTX"), "context is not persisted");
+    let persisted: Vec<_> = events(&e, &id).into_iter().filter(|k| !matches!(k, EventKind::Request { .. })).collect();
+    assert!(!format!("{persisted:?}").contains("PRE-CTX"), "context is not persisted as conversation state");
     assert_eq!(preps.lock().unwrap()[0]["prompt"], "go");
     // system_prompt replaces the system segments.
     let e2 = env();
@@ -1613,4 +1646,292 @@ fn runtime_window_follows_a_window_learned_from_the_endpoint() {
     let _ = e.k.run(&id, RunOpts::default());
     assert_eq!(e.p.requests().last().unwrap().options.native_compaction, endpoint, "after learning: the endpoint's number");
     seagent_model::contextpin::clear_learned();
+}
+
+// ───────────── W4: KV-cache prefix stability and DeepSeek/Hermes ports ─────────────
+
+/// Whether any tool result in the request carries the send-time clip marker.
+fn request_has_clip(r: &ModelRequest) -> bool {
+    r.messages.iter().flat_map(|m| m.content.iter()).any(|b| matches!(b, Block::ToolResult { content, .. } if content.contains("clipped by seagent")))
+}
+
+/// The cache invariant: `next` must start with every byte of `prev`'s system prompt, tools and
+/// messages. Retries may change knobs; only the conversation prefix matters.
+fn assert_prefix_extension(prev: &ModelRequest, next: &ModelRequest) {
+    assert_eq!(next.system, prev.system, "system prompt was rewritten mid-series");
+    assert_eq!(next.tools, prev.tools, "tool schemas changed mid-series");
+    assert!(next.messages.len() >= prev.messages.len(), "history shrank: {} -> {}", prev.messages.len(), next.messages.len());
+    assert_eq!(&next.messages[..prev.messages.len()], &prev.messages[..], "message prefix changed");
+    // The provider sees JSON, so compare the serialized prefix too.
+    let before = serde_json::to_vec(&prev.messages).unwrap();
+    let after = serde_json::to_vec(&next.messages[..prev.messages.len()]).unwrap();
+    assert_eq!(before, after, "serialized message prefix changed");
+}
+
+#[test]
+fn request_prefix_is_stable_across_steps_and_turns() {
+    let e = env_with(
+        |c| {
+            c.model.log_requests = true;
+            c.compaction.keep_tool_results = 1;
+            c.compaction.max_tool_result_chars = 80;
+            // No context pressure: old results must not be rewritten just because another step ran.
+            c.compaction.prune_threshold = 0.95;
+            c.compaction.threshold = 0.98;
+        },
+        Arc::new(Yes),
+    );
+    for _ in 0..4 {
+        e.p.call("big", json!({}));
+    }
+    e.p.text("first turn done");
+    let id = start(&e, "say hi");
+    assert_eq!(e.k.run(&id, RunOpts::default()).unwrap().reason, EndReason::Done);
+    e.p.text("second turn done");
+    e.k.submit(&id, "again", "cli").unwrap();
+    assert_eq!(e.k.run(&id, RunOpts::default()).unwrap().reason, EndReason::Done);
+
+    let reqs = e.p.requests();
+    assert!(reqs.len() >= 6, "multi-step run: {}", reqs.len());
+    for pair in reqs.windows(2) {
+        assert_prefix_extension(&pair[0], &pair[1]);
+    }
+    assert!(
+        reqs.iter().all(|r| !request_has_clip(r)),
+        "below the pressure threshold, old tool output must stay byte-identical"
+    );
+    let logged = events(&e, &id).into_iter().filter(|k| matches!(k, EventKind::Request { purpose, .. } if purpose == "conversation")).count();
+    assert_eq!(logged, reqs.len(), "every provider send is logged exactly once");
+}
+
+#[test]
+fn compaction_summary_replays_the_previous_request_prefix() {
+    let e = env_with(
+        |c| {
+            c.model.log_requests = true;
+            c.compaction.max_tool_result_chars = 1_000_000;
+        },
+        Arc::new(Yes),
+    );
+    e.p.call("echo", json!({"text":"hi"}));
+    e.p.text("first answer");
+    let id = start(&e, "question one");
+    e.k.run(&id, RunOpts::default()).unwrap();
+
+    e.p.fail(ProviderErrorKind::ContextOverflow);
+    let summary = "## Goal\nanswer the first question\n## Progress\nanswered\n## Key facts\nnone\n## Files\nnone\n## Next steps\nnone\n## Unverified / Working Hypotheses\nNone.".to_string();
+    e.p.text(&summary);
+    e.p.text("after compaction");
+    e.k.submit(&id, "question two", "cli").unwrap();
+    let o = e.k.run(&id, RunOpts::default()).unwrap();
+    assert_eq!(o.text, "after compaction");
+
+    let reqs = e.p.requests();
+    // The failed overflow request is the previous routed envelope; the next send is the summary.
+    let prev = &reqs[2];
+    let sreq = &reqs[3];
+    let replayed = sreq.messages.len() - 1;
+    assert!(replayed <= prev.messages.len());
+    assert_eq!(sreq.system, prev.system, "summary uses the conversation's own system prompt");
+    assert_eq!(sreq.tools, prev.tools, "summary uses the conversation's tools");
+    assert_eq!(&sreq.messages[..replayed], &prev.messages[..replayed], "summary replays the routed prefix");
+    assert!(sreq.messages.last().unwrap().text().contains("Summarise the conversation so far"));
+    assert!(!sreq.system.iter().any(|s| s.id == "summariser"));
+    assert!(!sreq.messages.iter().any(|m| m.text().contains("<conversation>")), "no rendered transcript");
+    assert_eq!(sreq.model, prev.model, "same route/model, not the aux model");
+    assert_eq!(e.fb.requests().len(), 0, "the aux route was not used for compaction");
+    assert!(events(&e, &id).iter().any(|k| matches!(k, EventKind::Compaction { .. })));
+    assert!(events(&e, &id).iter().any(|k| matches!(k, EventKind::Request { purpose, .. } if purpose == "compaction")));
+}
+
+#[test]
+fn tool_results_are_trimmed_only_under_pressure_unless_configured() {
+    // Default: below pressure nothing is rewritten.
+    let e = env_with(
+        |c| {
+            c.compaction.keep_tool_results = 1;
+            c.compaction.max_tool_result_chars = 50;
+            c.compaction.prune_threshold = 0.95;
+            c.compaction.threshold = 0.98;
+        },
+        Arc::new(Yes),
+    );
+    for _ in 0..3 {
+        e.p.call("big", json!({}));
+    }
+    e.p.text("done");
+    let id = start(&e, "go");
+    e.k.run(&id, RunOpts::default()).unwrap();
+    assert!(
+        e.p.requests().iter().all(|r| !request_has_clip(r)),
+        "no trim below the pressure threshold"
+    );
+
+    // Opt-in old behaviour: trim on every request.
+    let e = env_with(
+        |c| {
+            c.compaction.keep_tool_results = 1;
+            c.compaction.max_tool_result_chars = 50;
+            c.compaction.trim_tool_results = "always".into();
+            c.compaction.prune_threshold = 0.95;
+            c.compaction.threshold = 0.98;
+        },
+        Arc::new(Yes),
+    );
+    e.p.call("big", json!({}));
+    e.p.call("big", json!({}));
+    e.p.text("done");
+    let id = start(&e, "go");
+    e.k.run(&id, RunOpts::default()).unwrap();
+    let last = e.p.requests().last().unwrap().clone();
+    assert!(request_has_clip(&last), "always mode rewrites old results");
+    let longest_logged = events(&e, &id)
+        .into_iter()
+        .filter_map(|k| match k {
+            EventKind::Message { message, .. } => Some(message),
+            _ => None,
+        })
+        .flat_map(|m| m.content)
+        .filter_map(|b| match b {
+            Block::ToolResult { content, .. } => Some(content.len()),
+            _ => None,
+        })
+        .max()
+        .unwrap_or(0);
+    assert!(longest_logged > 1_000, "the original output (or its spill preview) stays in the log, not the 50-char clip: {longest_logged}");
+}
+
+#[test]
+fn session_log_replays_the_exact_request_bytes() {
+    let e = env_with(
+        |c| {
+            c.model.log_requests = true;
+            c.model.thinking = "high".into();
+            c.compaction.keep_tool_results = 1;
+            c.compaction.max_tool_result_chars = 50;
+            c.compaction.trim_tool_results = "always".into();
+            c.compaction.prune_threshold = 0.95;
+            c.compaction.threshold = 0.98;
+        },
+        Arc::new(Yes),
+    );
+    e.p.call("big", json!({}));
+    e.p.call("big", json!({}));
+    e.p.text("done");
+    let id = start(&e, "go");
+    e.k.run(&id, RunOpts::default()).unwrap();
+    let seen = e.p.requests().last().unwrap().clone();
+    let logged = events(&e, &id)
+        .into_iter()
+        .filter_map(|k| match k {
+            EventKind::Request { purpose, request } if purpose == "conversation" => Some(request),
+            _ => None,
+        })
+        .next_back()
+        .expect("the send-time request envelope is logged");
+    assert_eq!(logged, seen, "the logged envelope is exactly what the provider received");
+    assert_eq!(logged.reasoning.as_deref(), Some("high"), "thinking settings are captured");
+    assert!(request_has_clip(&logged), "send-time trimming is captured");
+}
+
+#[test]
+fn a_refused_turn_is_dropped_from_later_model_requests() {
+    let e = env();
+    e.p.push(|_| Ok(resp(vec![Block::text("I cannot help with that request.")], StopReason::Refusal)));
+    let id = start(&e, "do the dangerous thing");
+    let o = e.k.run(&id, RunOpts::default()).unwrap();
+    assert_eq!(o.reason, EndReason::Refusal);
+    let ev = events(&e, &id);
+    assert!(ev.iter().any(|k| matches!(k, EventKind::TurnDropped { reason, .. } if reason == "refusal")));
+    assert!(ev.iter().any(|k| matches!(k, EventKind::Notice { text, .. } if text.contains("removed from the model context"))));
+    assert!(ev.iter().any(|k| matches!(k, EventKind::Message { message, .. } if message.text().contains("I cannot help"))), "the refused reply is still in the log");
+
+    e.p.text("sure, here is a safe answer");
+    e.k.submit(&id, "a safe follow-up", "cli").unwrap();
+    let o = e.k.run(&id, RunOpts::default()).unwrap();
+    assert_eq!(o.text, "sure, here is a safe answer");
+    let reqs = e.p.requests();
+    let next = reqs.last().unwrap();
+    let text = next.messages.iter().map(|m| m.text()).collect::<Vec<_>>().join("\n");
+    assert!(text.contains("a safe follow-up"));
+    assert!(!text.contains("dangerous thing") && !text.contains("I cannot help"), "refused turn is no longer sent: {text}");
+}
+
+#[test]
+fn system_prompt_changes_append_after_history_when_configured() {
+    use seagent_kernel::projection::project;
+
+    let e = env_with(|c| c.model.system_updates = "in_history".into(), Arc::new(Yes));
+    e.p.text("one");
+    let id = start(&e, "hello");
+    e.k.run(&id, RunOpts::default()).unwrap();
+    let before = e.p.requests()[0].clone();
+    let mut segs = project(&e.k.store.read(&id).unwrap()).system;
+    segs.iter_mut().find(|s| s.id == "identity").unwrap().text.push_str("\n\nNew standing rule: be terse.");
+    e.k.update_system(&id, segs.clone()).unwrap();
+    e.p.text("two");
+    e.k.submit(&id, "again", "cli").unwrap();
+    e.k.run(&id, RunOpts::default()).unwrap();
+    let after = e.p.requests().last().unwrap().clone();
+    assert_eq!(after.system, before.system, "the head is not rewritten");
+    assert_eq!(&after.messages[..before.messages.len()], &before.messages[..], "cached history stays a prefix");
+    let tail = after.messages.last().unwrap().text();
+    assert!(tail.contains("[System prompt update]") && tail.contains("New standing rule: be terse."), "{tail}");
+    let ev = events(&e, &id);
+    assert!(ev.iter().any(|k| matches!(k, EventKind::SystemDelta { .. })));
+    assert_eq!(ev.iter().filter(|k| matches!(k, EventKind::System { .. })).count(), 1, "no second System rewrite");
+
+    // Default route: the head is replaced and the change is visible in system, not history.
+    let e = env_with(|_| {}, Arc::new(Yes));
+    e.p.text("one");
+    let id = start(&e, "hello");
+    e.k.run(&id, RunOpts::default()).unwrap();
+    let before = e.p.requests()[0].clone();
+    let mut segs = project(&e.k.store.read(&id).unwrap()).system;
+    segs.iter_mut().find(|s| s.id == "identity").unwrap().text.push_str("\n\nRewrite me.");
+    e.k.update_system(&id, segs).unwrap();
+    e.p.text("two");
+    e.k.submit(&id, "again", "cli").unwrap();
+    e.k.run(&id, RunOpts::default()).unwrap();
+    let after = e.p.requests().last().unwrap().clone();
+    assert_ne!(after.system, before.system);
+    assert!(after.system.iter().any(|s| s.text.contains("Rewrite me.")));
+    assert_eq!(events(&e, &id).iter().filter(|k| matches!(k, EventKind::System { .. })).count(), 2);
+}
+
+#[test]
+fn trimming_kicks_in_once_context_is_under_pressure() {
+    let e = env_with(
+        |c| {
+            c.model.log_requests = true;
+            c.model.context_length = Some(20_000);
+            c.compaction.keep_tool_results = 1;
+            c.compaction.max_tool_result_chars = 50;
+            c.compaction.prune_threshold = 0.1;
+            c.compaction.threshold = 0.95;
+        },
+        Arc::new(Yes),
+    );
+    e.p.call("echo", json!({"text": "x".repeat(200)}));
+    // The provider reports a 6k-token input: the next request is under pressure.
+    e.p.push(|_| {
+        Ok(ModelResponse {
+            message: Message { role: Role::Assistant, content: vec![Block::ToolUse { id: "tu_p2".into(), name: "echo".into(), input: json!({"text": "y".repeat(200)}) }] },
+            stop: StopReason::ToolUse,
+            usage: Usage { input_tokens: 6_000, output_tokens: 20, ..Default::default() },
+            model: String::new(),
+        })
+    });
+    e.p.text("done");
+    let id = start(&e, "go");
+    e.k.run(&id, RunOpts::default()).unwrap();
+    let last = e.p.requests().last().unwrap().clone();
+    assert!(request_has_clip(&last), "under pressure the old result is clipped: {:?}", last.messages);
+    assert!(events(&e, &id).iter().any(|k| matches!(k, EventKind::Request { request, .. } if request_has_clip(request))));
+}
+
+#[test]
+fn a_pinned_context_window_is_labelled_and_wins() {
+    let e = env_with(|c| c.model.context_length = Some(12_345), Arc::new(Yes));
+    assert_eq!(e.k.window_marker("main/m1"), "pinned");
 }

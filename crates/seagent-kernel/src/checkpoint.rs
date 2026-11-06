@@ -32,13 +32,54 @@ pub struct Checkpoint {
     pub label: String,
 }
 
-const EXCLUDES: &str = ".git/\ntarget/\nnode_modules/\n.venv/\n__pycache__/\n*.o\n.seagent/cache/\n";
+const EXCLUDES: &str = ".git/\ntarget/\nnode_modules/\n.venv/\n__pycache__/\n*.o\n.seagent/cache/\n**/browser/profiles/\n**/browser/real-profile/\n**/browser/chrome-debug/\n**/browser/browsers/\nchrome_cdp_profile/\nagent-browser-chrome-*/\n";
+
+/// Canonicalize the nearest existing ancestor and append the rest, so a not-yet-created
+/// `<workspace>/.seagent/checkpoints` still compares correctly against the canonical workspace.
+fn canonical_best(p: &Path) -> PathBuf {
+    let mut cur = p;
+    let mut rest: Vec<std::ffi::OsString> = Vec::new();
+    while !cur.exists() {
+        let (Some(parent), Some(name)) = (cur.parent(), cur.file_name()) else { return p.to_path_buf() };
+        rest.push(name.to_os_string());
+        cur = parent;
+    }
+    let mut out = cur.canonicalize().unwrap_or_else(|_| cur.to_path_buf());
+    for name in rest.iter().rev() {
+        out.push(name);
+    }
+    out
+}
+
+/// `/`, the home directory and every ancestor of it, and the agent's own browser profiles /
+/// checkpoint store: never a project, always huge or recursively self-referential.
+fn too_broad(work: &Path, data: &Path, home: Option<&Path>) -> Option<&'static str> {
+    if work == Path::new("/") {
+        return Some("/");
+    }
+    if let Some(home) = home {
+        let home = canonical_best(home);
+        if home == work || home.starts_with(work) {
+            return Some("the home directory or one of its parents");
+        }
+    }
+    let browser = canonical_best(&data.join("browser"));
+    if work == browser || work.starts_with(&browser) {
+        return Some("a browser profile directory");
+    }
+    let store = canonical_best(&data.join("checkpoints"));
+    if work == store || work.starts_with(&store) {
+        return Some("the checkpoint store");
+    }
+    None
+}
 
 impl Checkpoints {
     pub fn new(data: &Path, workspace: &Path) -> Result<Self, String> {
         let work = workspace.canonicalize().map_err(|e| format!("{}: {e}", workspace.display()))?;
-        if work == Path::new("/") || std::env::var_os("HOME").is_some_and(|h| Path::new(&h) == work) {
-            return Err("refusing to checkpoint / or the home directory; run seagent inside a project folder".into());
+        let home = std::env::var_os("HOME").map(PathBuf::from);
+        if let Some(why) = too_broad(&work, data, home.as_deref()) {
+            return Err(format!("refusing to checkpoint {why}; run seagent inside a project folder"));
         }
         let key: u64 = work.to_string_lossy().bytes().fold(0xcbf29ce484222325, |h, b| (h ^ b as u64).wrapping_mul(0x100000001b3));
         Ok(Checkpoints { git_dir: data.join("checkpoints").join(format!("{key:016x}")), work, limits: Limits::default() })
@@ -54,6 +95,11 @@ impl Checkpoints {
     }
 
     fn git(&self, args: &[&str]) -> Result<String, String> {
+        let owned: Vec<String> = args.iter().map(|s| (*s).to_string()).collect();
+        self.git_args(&owned)
+    }
+
+    fn git_args(&self, args: &[String]) -> Result<String, String> {
         let out = Command::new("git")
             .arg("--git-dir")
             .arg(&self.git_dir)
@@ -88,6 +134,43 @@ impl Checkpoints {
             let _ = std::fs::write(self.git_dir.join(PARENT_ID_FILE), format!("{} {}", id.0, id.1));
         }
         let _ = std::fs::write(self.git_dir.join(TOUCH_FILE), crate::util::unix_now().to_string());
+    }
+
+    /// The store can sit inside the workspace (a portable `SEAGENT_HOME`). Snapshotting it
+    /// would stage every previous packfile into the next snapshot, so it is excluded at any
+    /// depth and never restored over.
+    fn store_rel(&self) -> Option<String> {
+        let base = canonical_best(self.git_dir.parent().unwrap_or(&self.git_dir));
+        base.strip_prefix(&self.work).ok().filter(|p| !p.as_os_str().is_empty()).map(|p| p.to_string_lossy().replace('\\', "/"))
+    }
+
+    fn store_pathspec(&self) -> Option<String> {
+        self.store_rel().map(|r| format!(":(exclude,literal){r}"))
+    }
+
+    /// Drop ignored paths that an older index still tracks (git only applies `info/exclude`
+    /// to paths it is not already tracking). This is what makes the file count and size cap
+    /// ignore excluded paths instead of treating them as workspace content.
+    fn unstage_excluded(&self) -> Result<(), String> {
+        let exclude = self.git_dir.join("info/exclude");
+        if !exclude.exists() {
+            return Ok(());
+        }
+        let names = self.git_args(&["ls-files".into(), "--cached".into(), "--ignored".into(), "-z".into(), format!("--exclude-from={}", exclude.display())])?;
+        let paths: Vec<String> = names.split('\0').filter(|n| !n.is_empty()).map(String::from).collect();
+        for chunk in paths.chunks(200) {
+            let mut args = vec!["rm".into(), "-r".into(), "-q".into(), "--cached".into(), "--ignore-unmatch".into(), "--".into()];
+            args.extend(chunk.iter().cloned());
+            self.git_args(&args)?;
+        }
+        Ok(())
+    }
+
+    /// Drop a store captured by a snapshot taken before it was excluded.
+    fn unstage_store(&self) -> Result<(), String> {
+        let Some(rel) = self.store_rel() else { return Ok(()) };
+        self.git_args(&["rm".into(), "-r".into(), "-q".into(), "--cached".into(), "--ignore-unmatch".into(), "--".into(), format!(":(literal){rel}")])?;
+        Ok(())
     }
 
     /// Unstage newly added/modified files over the size limit (datasets, model weights).
@@ -188,7 +271,14 @@ impl Checkpoints {
         let _lock = StoreLock::shared(self.git_dir.parent().unwrap_or(&self.git_dir))?;
         self.init()?;
         self.touch();
-        self.git(&["add", "-A", "."])?;
+        self.unstage_excluded()?;
+        self.unstage_store()?;
+        let mut add = vec!["add".into(), "-A".into(), "--".into(), ".".into()];
+        if let Some(p) = self.store_pathspec() {
+            add.push(p);
+        }
+        self.git_args(&add)?;
+        self.unstage_excluded()?;
         self.drop_large()?;
         let n = self.git(&["ls-files", "--cached"])?.lines().count();
         if n > max_files {
@@ -228,6 +318,22 @@ impl Checkpoints {
             .collect())
     }
 
+    /// Paths whose working-tree state differs from checkpoint `id`: modified and
+    /// deleted tracked files plus new untracked ones (`/undo`'s changed-files line).
+    /// Read-only: it writes no object, ref or index.
+    pub fn changed_files(&self, id: &str) -> Result<Vec<String>, String> {
+        if id.is_empty() || !id.chars().all(|c| c.is_ascii_hexdigit()) {
+            return Err(format!("bad checkpoint id `{id}`"));
+        }
+        self.git(&["rev-parse", "--verify", "-q", &format!("{id}^{{commit}}")]).map_err(|_| format!("no checkpoint {id}"))?;
+        let tracked = self.git(&["diff", "--name-only", "-z", id, "--"])?;
+        let untracked = self.git(&["ls-files", "--others", "--exclude-standard", "-z"])?;
+        let mut out: Vec<String> = tracked.split('\0').chain(untracked.split('\0')).filter(|p| !p.is_empty()).map(str::to_string).collect();
+        out.sort();
+        out.dedup();
+        Ok(out)
+    }
+
     /// Restore the workspace to a checkpoint. The current state is snapshotted
     /// first, so a restore is itself undoable.
     pub fn restore(&self, id: &str) -> Result<Option<String>, String> {
@@ -236,7 +342,13 @@ impl Checkpoints {
         }
         self.git(&["rev-parse", "--verify", "-q", &format!("{id}^{{commit}}")]).map_err(|_| format!("no checkpoint {id}"))?;
         let before = self.snapshot(&format!("before restore to {id}"), usize::MAX)?;
-        self.git(&["read-tree", "-u", "--reset", id])?;
+        // `restore` (unlike `read-tree`) takes a pathspec, so the checkpoint store is never
+        // rewound by rolling the workspace back over it.
+        let mut args = vec!["restore".into(), format!("--source={id}"), "--worktree".into(), "--staged".into(), "--".into(), ".".into()];
+        if let Some(p) = self.store_pathspec() {
+            args.push(p);
+        }
+        self.git_args(&args)?;
         Ok(before)
     }
 }
@@ -564,6 +676,27 @@ mod tests {
     }
 
     #[test]
+    fn changed_files_lists_tracked_edits_deletions_and_new_files() {
+        let (_dir, data, ws) = setup();
+        let c = Checkpoints::new(&data, &ws).unwrap();
+        fs::write(ws.join("src/a.txt"), "v1").unwrap();
+        fs::write(ws.join("keep.txt"), "k").unwrap();
+        fs::write(ws.join("gone.txt"), "g").unwrap();
+        let first = c.snapshot("turn 1", 1000).unwrap().unwrap();
+        assert!(c.changed_files(&first).unwrap().is_empty(), "nothing changed yet");
+        fs::write(ws.join("src/a.txt"), "v2").unwrap();
+        fs::write(ws.join("new.txt"), "n").unwrap();
+        fs::remove_file(ws.join("gone.txt")).unwrap();
+        assert_eq!(c.changed_files(&first).unwrap(), ["gone.txt", "new.txt", "src/a.txt"]);
+        // Untracked files are listed too; ignored files are not.
+        fs::create_dir_all(ws.join("target")).unwrap();
+        fs::write(ws.join("target/ignored"), "x").unwrap();
+        assert!(!c.changed_files(&first).unwrap().iter().any(|p| p.contains("ignored")));
+        assert!(c.changed_files("deadbeef").unwrap_err().contains("no checkpoint"));
+        assert!(c.changed_files("zzz").unwrap_err().contains("bad checkpoint"));
+    }
+
+    #[test]
     fn failure_paths() {
         let (_dir, data, ws) = setup();
         let c = Checkpoints::new(&data, &ws).unwrap();
@@ -638,6 +771,68 @@ mod tests {
         assert!(keep.count() < before && keep.count() >= 1, "oldest dropped, one always kept");
         assert!(store.clear().unwrap() > 0);
         assert!(store.status().projects.is_empty());
+    }
+
+    #[test]
+    fn refuses_home_parents_browser_profiles_and_the_store_itself() {
+        let root = seagent_core::tmp::TempDir::new("seagent-broad");
+        let home = root.join("home");
+        let data = root.join("data");
+        fs::create_dir_all(home.join("project")).unwrap();
+        fs::create_dir_all(data.join("browser/profiles/work")).unwrap();
+        let home = home.canonicalize().unwrap();
+        let ws = home.join("project");
+        assert_eq!(too_broad(&home, &data, Some(&home)), Some("the home directory or one of its parents"), "the home directory itself");
+        assert!(too_broad(home.parent().unwrap(), &data, Some(&home)).is_some(), "a parent of home");
+        assert_eq!(too_broad(&ws, &data, Some(&home)), None, "a normal project under home is fine");
+        let profile = data.join("browser/profiles/work");
+        assert_eq!(too_broad(&profile, &data, None), Some("a browser profile directory"));
+        assert_eq!(too_broad(&data.join("browser"), &data, None), Some("a browser profile directory"));
+        assert_eq!(too_broad(&data.join("checkpoints"), &data, None), Some("the checkpoint store"));
+        assert_eq!(too_broad(&data.join("checkpoints/abc"), &data, None), Some("the checkpoint store"));
+        assert_eq!(too_broad(&data.join("workspace"), &data, None), None);
+        assert!(Checkpoints::new(&data, &profile).err().unwrap().contains("browser profile"));
+    }
+
+    #[test]
+    fn store_inside_workspace_is_never_staged_or_rewound() {
+        let root = seagent_core::tmp::TempDir::new("seagent-selfstore");
+        let ws = root.join("ws");
+        let data = ws.join(".seagent");
+        fs::create_dir_all(&data).unwrap();
+        fs::write(ws.join("a.txt"), "v1").unwrap();
+        let c = Checkpoints::new(&data, &ws).unwrap();
+        c.snapshot("first", 1000).unwrap();
+        assert!(!c.git(&["ls-files"]).unwrap().contains(".seagent"), "the store is not workspace content");
+        // A snapshot from before the exclusion still carries the store in its tree.
+        fs::write(c.git_dir().join("legacy-marker"), "old").unwrap();
+        c.git(&["add", "-A", "."]).unwrap();
+        c.git(&["commit", "-q", "--allow-empty", "-m", "legacy store snapshot"]).unwrap();
+        let legacy = c.git(&["rev-parse", "HEAD"]).unwrap().trim().to_string();
+        fs::write(c.git_dir().join("legacy-marker"), "new").unwrap();
+        fs::write(ws.join("a.txt"), "v2").unwrap();
+        c.restore(&legacy).unwrap();
+        assert_eq!(fs::read_to_string(c.git_dir().join("legacy-marker")).unwrap(), "new", "rollback must not rewind the store");
+        assert_eq!(fs::read_to_string(ws.join("a.txt")).unwrap(), "v1", "the workspace itself rolled back");
+        assert!(c.git_dir().join("HEAD").exists());
+        assert!(c.snapshot("after", 1000).is_ok(), "the store still works");
+    }
+
+    #[test]
+    fn size_and_file_caps_ignore_excluded_paths_already_in_the_index() {
+        let (_dir, data, ws) = setup();
+        fs::write(ws.join("a.txt"), "1").unwrap();
+        let c = Checkpoints::new(&data, &ws).unwrap().with_limits(Limits { max_snapshots: 0, max_file_bytes: 10 });
+        c.snapshot("first", 1000).unwrap();
+        // An older index may track an excluded path; it must be dropped before counting,
+        // not treated as a 2nd workspace file or stat'ed against the size cap.
+        fs::create_dir_all(ws.join("target")).unwrap();
+        fs::write(ws.join("target/big.bin"), "x".repeat(100)).unwrap();
+        c.git(&["add", "-A", "."]).unwrap();
+        c.snapshot("cap", 1).unwrap();
+        let files = c.git(&["ls-files"]).unwrap();
+        assert_eq!(files.trim(), "a.txt");
+        assert!(ws.join("target/big.bin").exists(), "the file itself is untouched");
     }
 
     #[test]

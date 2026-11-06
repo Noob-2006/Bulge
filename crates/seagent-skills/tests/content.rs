@@ -30,7 +30,6 @@ use std::path::{Path, PathBuf};
 const MIN_BODY_CHARS: &[(&str, usize)] = &[
     ("1password", 3744),
     ("add-model-provider", 2429),
-    ("airtable", 6533),
     ("apple-notes", 1251),
     ("apple-reminders", 1995),
     ("architecture-diagram", 3246),
@@ -88,7 +87,6 @@ const MIN_BODY_CHARS: &[(&str, usize)] = &[
     ("model-usage", 1181),
     ("nano-pdf", 259),
     ("node-inspect-debugger", 8437),
-    ("notion", 10465),
     ("obsidian", 3279),
     ("openai-whisper", 229),
     ("openai-whisper-api", 861),
@@ -138,12 +136,12 @@ const HERMES_BUNDLED: &[&str] = &[
     "seagent-agent",
     "seagent-skill-authoring",
     // verbatim ports
-    "airtable", "apple-notes", "apple-reminders", "architecture-diagram", "arxiv", "ascii-video",
+    "apple-notes", "apple-reminders", "architecture-diagram", "arxiv", "ascii-video",
     "baoyu-infographic", "blocked-page-recovery", "box", "claude-code", "claude-design",
     "codebase-inspection", "codex", "competitor-news-monitor", "computer-use", "design-md",
     "document-to-action-items", "docx", "dogfood", "email-inbox-triage", "findmy", "gif-search",
     "github", "google-workspace", "grounded-citations", "himalaya", "humanizer", "imessage",
-    "llm-wiki", "manim-video", "maps", "meeting-action-items", "node-inspect-debugger", "notion",
+    "llm-wiki", "manim-video", "maps", "meeting-action-items", "node-inspect-debugger",
     "obsidian", "opencode", "p5js", "pdf", "popular-web-designs", "powerpoint",
     "product-price-monitor", "python-debugpy", "requesting-code-review", "sdlc-review",
     "simplify-code", "songsee", "songwriting-and-ai-music", "spike", "systematic-debugging",
@@ -157,7 +155,7 @@ const HERMES_BUNDLED: &[&str] = &[
 const OPENCLAW_NAMED: &[&str] = &[
     "1password", "blogwatcher", "blucli", "camsnap", "clawhub", "coding-agent", "diagram-maker", "eightctl",
     "gemini", "gh-issues", "gifgrep", "github", "gog", "goplaces", "healthcheck", "himalaya",
-    "meme-maker", "nano-pdf", "node-inspect-debugger", "notion", "obsidian", "openai-whisper",
+    "meme-maker", "nano-pdf", "node-inspect-debugger", "obsidian", "openai-whisper",
     "openai-whisper-api", "openhue", "oracle", "ordercli", "python-debugpy", "sag",
     "sherpa-onnx-tts", "skill-creator", "songsee", "sonoscli", "spike", "spotify-player", "summarize", "tmux",
     "trello", "visualize", "weather", "xurl",
@@ -166,7 +164,7 @@ const OPENCLAW_NAMED: &[&str] = &[
 /// OpenClaw skills whose name collides with a Hermes bundled skill; both upstream procedures must
 /// be present in the one file (Hermes body + `## OpenClaw procedure` section).
 const OPENCLAW_MERGED: &[&str] = &[
-    "github", "himalaya", "node-inspect-debugger", "notion", "obsidian", "python-debugpy",
+    "github", "himalaya", "node-inspect-debugger", "obsidian", "python-debugpy",
     "songsee", "spike", "xurl",
 ];
 
@@ -286,8 +284,8 @@ fn bundled_corpus_covers_every_required_skill_name() {
         assert!(lines >= MIN_NONEMPTY_LINES, "{}: body has only {lines} non-empty lines", s.file.display());
     }
     assert!(missing.is_empty(), "required skills not discovered: {missing:?}");
-    assert_eq!(required.len(), 96, "required-name list changed without updating the audit rows");
-    assert!(all.len() >= 96, "corpus shrank: {} skills", all.len());
+    assert_eq!(required.len(), 94, "required-name list changed without updating the audit rows");
+    assert!(all.len() >= 94, "corpus shrank: {} skills", all.len());
 
     // Category folders of the shipped tree (Hermes layout) must survive discovery.
     let cats: BTreeSet<&str> = all.iter().filter_map(|s| s.category.as_deref()).collect();

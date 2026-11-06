@@ -16,12 +16,15 @@ pub mod actions;
 pub mod battery;
 pub mod display;
 pub mod dock;
+pub mod image;
 pub mod indicator;
 pub mod notify;
+pub mod paste;
 pub mod palette;
 pub mod pets;
 pub mod png;
 pub mod prefs;
+pub mod rewind;
 pub mod skin;
 pub mod stash;
 pub mod statusbar;
@@ -29,6 +32,7 @@ pub mod tips;
 pub mod ux;
 
 use serde_json::{json, Value};
+use std::collections::BTreeMap;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
@@ -228,17 +232,27 @@ fn term_size() -> (usize, usize) {
     (100, 30)
 }
 
+/// One drawn transcript row: text, colour, and an optional image escape.
+type Row = (String, (u8, u8, u8), Option<String>);
+
 #[derive(Clone)]
 struct Line {
     kind: &'static str,
     text: String,
     /// `HH:MM` when the line appeared (drawn when `/timestamps` is on).
     ts: String,
+    /// A pre-rendered kitty/iTerm escape sequence for an inline image row.
+    image: Option<String>,
 }
 
 impl Line {
     fn new(kind: &'static str, text: impl Into<String>) -> Line {
-        Line { kind, text: text.into(), ts: hhmm() }
+        Line { kind, text: text.into(), ts: hhmm(), image: None }
+    }
+    fn image(media_type: impl Into<String>, data: impl Into<String>) -> Line {
+        let (media_type, data) = (media_type.into(), data.into());
+        let seq = image::render(image::detect_env(), &data, &media_type, 40);
+        Line { kind: "image", text: image::fallback(&media_type, &data), ts: hhmm(), image: seq }
     }
 }
 
@@ -283,6 +297,15 @@ pub(crate) struct State {
     compose: Option<String>,
     /// Ctrl+P / `/palette`.
     palette: palette::Palette,
+    /// Esc Esc: pick an earlier prompt to edit/resend or fork.
+    rewind: rewind::Picker,
+    /// Large pastes stored under composer markers (expanded on submit).
+    pastes: Vec<paste::Paste>,
+    /// Ctrl+E: show the full text of large transcript lines.
+    paste_expanded: bool,
+    /// Sessions whose running turn kept going after `/new` (id → title):
+    /// their completion is announced when the event arrives, even from another chat.
+    background: BTreeMap<String, String>,
 }
 
 impl State {
@@ -335,6 +358,10 @@ pub(crate) fn test_state(tag: &str) -> State {
         disp_at: Instant::now(),
         compose: None,
         palette: palette::Palette::default(),
+        rewind: rewind::Picker::default(),
+        pastes: vec![],
+        paste_expanded: false,
+        background: BTreeMap::new(),
     };
     st.ux.paths = prefs::test_paths(tag);
     st.ux.reload();
@@ -390,6 +417,7 @@ fn push_message(st: &mut State, m: &Value) {
             (Some("text"), _) => st.lines.push(Line::new("assistant", b["text"].as_str().unwrap_or(""))),
             (Some("tool_use"), _) => st.lines.push(Line::new("tool", format!("⚙ {} {}", b["name"].as_str().unwrap_or(""), b["input"].to_string().chars().take(160).collect::<String>()))),
             (Some("tool_result"), _) => st.lines.push(Line::new("tool", format!("↳ {}", b["content"].as_str().unwrap_or("").lines().next().unwrap_or("").chars().take(160).collect::<String>()))),
+            (Some("image"), _) => st.lines.push(Line::image(b["media_type"].as_str().unwrap_or("image/png"), b["data"].as_str().unwrap_or(""))),
             _ => {}
         }
     }
@@ -459,6 +487,26 @@ fn palette_rows(st: &State, w: usize) -> Vec<String> {
     out
 }
 
+/// Rewind overlay rows: title, newest-first prompts around the cursor, the selected
+/// prompt's preview and the key hint.
+fn rewind_rows(st: &State, w: usize) -> Vec<String> {
+    let p = &st.rewind;
+    let mut out = vec![format!("{}{}{}\x1b[0m", bg(CRIMSON[2]), fg(GOLD), fit(" ✦ 回到先前的提問 · ↑↓ 選擇 · Enter 編輯重送 · f 從此分支 · Esc 關閉", w))];
+    for i in p.window(8) {
+        let item = &p.prompts[i];
+        let sel = i == p.cursor;
+        let mark = if sel { "▸" } else { " " };
+        let row = format!(" {mark} {}. {}", item.turn, item.first_line());
+        out.push(format!("{} {}{}\x1b[0m", bg(if sel { CRIMSON[2] } else { CRIMSON[1] }), fg(if sel { GOLD } else { TEXT }), fit(&row, w.saturating_sub(1))));
+    }
+    if let Some(item) = p.selected() {
+        for line in item.text.lines().take(3).skip(1) {
+            out.push(format!("{}   {}{}", bg(CRIMSON[1]), fg(DIM), fit(&format!("│ {line}"), w.saturating_sub(2))));
+        }
+    }
+    out
+}
+
 fn draw(st: &mut State) -> String {
     let (w, h) = term_size();
     let side = if w >= 90 { 28 } else { 0 };
@@ -490,6 +538,12 @@ fn draw(st: &mut State) -> String {
         pal.extend(footer);
         footer = pal;
     }
+    // Esc Esc: earlier prompts, above the composer (like the palette).
+    if st.rewind.open {
+        let mut rw = rewind_rows(st, w);
+        rw.extend(footer);
+        footer = rw;
+    }
     if mode == statusbar::Mode::Top {
         if let Some(b) = &bar {
             o.push_str(b);
@@ -499,26 +553,31 @@ fn draw(st: &mut State) -> String {
     let body_h = h.saturating_sub(5 + footer.len() + bar.is_some() as usize);
     let (pet_w, pet) = st.ux.overlay(st.running);
     // Conversation, wrapped and scrolled.
-    let mut rendered: Vec<(String, (u8, u8, u8))> = Vec::new();
+    let mut rendered: Vec<Row> = Vec::new();
     let all: Vec<Line> = visible_lines(st);
     for l in &all {
         let (prefix, colour) = match l.kind {
             "user" => ("你 ▸ ", GOLD),
             "assistant" => ("✦ ", TEXT),
             "tool" => ("  ", DIM),
+            "image" => ("▣ ", GOLD_DIM),
             _ => ("  ", DIM),
         };
         let prefix = if st.disp.timestamps && !l.ts.is_empty() && l.kind != "tool" { format!("[{}] {prefix}", l.ts) } else { prefix.to_string() };
-        let text = if l.kind == "assistant" { plain_md(&l.text) } else { l.text.clone() };
+        let text = match l.kind {
+            "assistant" => plain_md(&l.text),
+            "user" => paste::display(&l.text, st.paste_expanded),
+            _ => l.text.clone(),
+        };
         for (i, piece) in wrap(&text, main_w.saturating_sub(4)).into_iter().enumerate() {
-            rendered.push((format!("{}{piece}", if i == 0 { prefix.as_str() } else { "  " }), colour));
+            rendered.push((format!("{}{piece}", if i == 0 { prefix.as_str() } else { "  " }), colour, if i == 0 { l.image.clone() } else { None }));
         }
-        rendered.push((String::new(), TEXT));
+        rendered.push((String::new(), TEXT, None));
     }
     for p in &st.pending {
         let line = if p["kind"] == "approval" { format!("✦ 需要核准 [{}] {} — {}   (y 允許一次 · s 本次對話都允許 · p 永久允許 · n 拒絕 · /deny 理由)", p["gate"].as_str().unwrap_or(""), p["tool"].as_str().unwrap_or(""), p["reason"].as_str().unwrap_or("")) } else { format!("✦ seagent 想問：{}   (在下方輸入回答)", p["question"].as_str().unwrap_or("")) };
         for piece in wrap(&line, main_w.saturating_sub(4)) {
-            rendered.push((piece, GOLD));
+            rendered.push((piece, GOLD, None));
         }
     }
     let end = rendered.len().saturating_sub(st.scroll);
@@ -543,7 +602,12 @@ fn draw(st: &mut State) -> String {
         let pet_row = pet.get(row).filter(|_| pet_w + 4 < main_w);
         let text_w = if pet_row.is_some() { main_w - 1 - pet_w - 1 } else { main_w - 1 };
         match visible.get(row) {
-            Some((t, c)) => o.push_str(&format!("{} {}", fg(*c), fit(t, text_w))),
+            Some((t, c, seq)) => {
+                if let Some(seq) = seq {
+                    o.push_str(seq);
+                }
+                o.push_str(&format!("{} {}", fg(*c), fit(t, text_w)));
+            }
             None => o.push_str(&" ".repeat(text_w + 1)),
         }
         if let Some(p) = pet_row {
@@ -595,6 +659,59 @@ fn draw(st: &mut State) -> String {
     o
 }
 
+/// Esc Esc: load the current session's replayable prompts into the picker.
+fn open_rewind(st: &mut State, rpc: &mut dyn FnMut(&str, Value) -> Result<Value, String>) {
+    if st.rewind.open {
+        st.rewind.close();
+        return;
+    }
+    let Some(id) = st.current.clone() else {
+        st.status = "還沒有提問可以回到".into();
+        return;
+    };
+    if st.running {
+        st.status = "這一輪還在跑 — 先 /stop 再回來".into();
+        return;
+    }
+    match rpc("session.view", json!({"id": id})) {
+        Ok(v) => {
+            let messages = v["messages"].as_array().cloned().unwrap_or_default();
+            if st.rewind.open(&messages) {
+                st.status = format!("回到先前的提問 · {} 則", st.rewind.prompts.len());
+            } else {
+                st.status = "沒有可以重送的純文字提問".into();
+            }
+        }
+        Err(e) => st.status = format!("⚠ {e}"),
+    }
+}
+
+/// Enter (`fork = false`) rewinds to just before the picked prompt and prefills it;
+/// `f` (`fork = true`) branches a new session from that point and prefills it there.
+fn rewind_apply(st: &mut State, fork: bool, rpc: &mut dyn FnMut(&str, Value) -> Result<Value, String>) -> Flow {
+    let Some(p) = st.rewind.selected().cloned() else {
+        st.rewind.close();
+        return Flow::Continue;
+    };
+    let n = st.rewind.rewind_turns();
+    st.rewind.close();
+    let before = st.current.clone();
+    let flow = submit(st, if fork { format!("/branch --at {n}") } else { format!("/undo {n}") }, rpc);
+    if flow == Flow::Quit {
+        return flow;
+    }
+    if !fork {
+        actions::reload_current(st, rpc);
+        st.input = p.text;
+        st.status = format!("已回到提問 {}（編輯後按 Enter 重送）", p.turn);
+    } else if st.current != before {
+        st.input = p.text;
+        st.status = format!("已從提問 {} 分支（編輯後按 Enter 送出）", p.turn);
+    }
+    st.scroll = 0;
+    Flow::Continue
+}
+
 /// Run the TUI against the daemon at `sock`. `workspace` = cwd for new sessions.
 pub fn run(sock: &Path, workspace: &Path, yolo: bool) -> Result<(), String> {
     call(sock, "ping", json!({}))?;
@@ -619,6 +736,10 @@ pub fn run(sock: &Path, workspace: &Path, yolo: bool) -> Result<(), String> {
         disp_at: Instant::now(),
         compose: None,
         palette: palette::Palette::default(),
+        rewind: rewind::Picker::default(),
+        pastes: vec![],
+        paste_expanded: false,
+        background: BTreeMap::new(),
     };
     st.sessions = call(sock, "session.list", json!({"limit": 200}))?.as_array().cloned().unwrap_or_default();
     st.current = st.sessions.first().and_then(|s| s["id"].as_str()).map(str::to_string);
@@ -639,6 +760,7 @@ pub fn run(sock: &Path, workspace: &Path, yolo: bool) -> Result<(), String> {
     let mut rpc = |m: &str, p: Value| call(sock, m, p);
     let mut out = std::io::stdout();
     let mut last_ctrl_c: Option<Instant> = None;
+    let mut last_esc: Option<Instant> = None;
     let mut buf = [0u8; 256];
     let mut esc: Vec<u8> = Vec::new();
     loop {
@@ -697,6 +819,21 @@ pub fn run(sock: &Path, workspace: &Path, yolo: bool) -> Result<(), String> {
                 }
                 continue;
             }
+            // The rewind picker takes plain keys; arrows/Esc go through the escape parser.
+            if st.rewind.open && c != '\x1b' {
+                match c {
+                    '\x11' | '\x03' | '\x10' => st.rewind.close(),
+                    '\r' | '\n' => {
+                        if rewind_apply(&mut st, false, &mut rpc) == Flow::Quit {
+                            return Ok(());
+                        }
+                    }
+                    'f' | 'F' if rewind_apply(&mut st, true, &mut rpc) == Flow::Quit => return Ok(()),
+                    'f' | 'F' => {}
+                    _ => {}
+                }
+                continue;
+            }
             match c {
                 '\x11' => return Ok(()),
                 '\x03' => {
@@ -739,6 +876,13 @@ pub fn run(sock: &Path, workspace: &Path, yolo: bool) -> Result<(), String> {
                     st.input.pop();
                 }
                 '\x1b' => {
+                    // Two Esc bytes arriving together (the usual double-tap): open the picker.
+                    if chars.peek() == Some(&'\x1b') {
+                        chars.next();
+                        open_rewind(&mut st, &mut rpc);
+                        last_esc = None;
+                        continue;
+                    }
                     let seq: String = std::iter::from_fn(|| chars.next_if(|c| !c.is_ascii_alphabetic() && *c != '~')).collect();
                     let fin = chars.next().unwrap_or(' ');
                     if st.palette.open {
@@ -749,6 +893,14 @@ pub fn run(sock: &Path, workspace: &Path, yolo: bool) -> Result<(), String> {
                         }
                         continue;
                     }
+                    if st.rewind.open {
+                        match (seq.as_str(), fin) {
+                            ("[", 'A') => st.rewind.move_cursor(-1),
+                            ("[", 'B') => st.rewind.move_cursor(1),
+                            _ => st.rewind.close(),
+                        }
+                        continue;
+                    }
                     let nav = match (seq.as_str(), fin) {
                         ("[", 'A') => "up",
                         ("[", 'B') => "down",
@@ -756,8 +908,16 @@ pub fn run(sock: &Path, workspace: &Path, yolo: bool) -> Result<(), String> {
                         ("", ' ') => "esc",
                         _ => "",
                     };
+                    if nav == "esc" && last_esc.is_some_and(|t| t.elapsed() < Duration::from_millis(500)) {
+                        open_rewind(&mut st, &mut rpc);
+                        last_esc = None;
+                        continue;
+                    }
                     if !nav.is_empty() && st.ux.stash_key(nav, &mut st.input) {
                         continue;
+                    }
+                    if nav == "esc" {
+                        last_esc = Some(Instant::now());
                     }
                     match (seq.as_str(), fin) {
                         ("", '\r') => st.input.push('\n'), // Alt+Enter
@@ -772,7 +932,8 @@ pub fn run(sock: &Path, workspace: &Path, yolo: bool) -> Result<(), String> {
                             load_history(sock, &mut st);
                         }
                         ("[200", '~') => {
-                            // Bracketed paste: take everything up to the end marker.
+                            // Bracketed paste: take everything up to the end marker. A large
+                            // paste stays collapsed in the composer and expands on submit.
                             let mut pasted = String::new();
                             for c in chars.by_ref() {
                                 pasted.push(c);
@@ -781,10 +942,23 @@ pub fn run(sock: &Path, workspace: &Path, yolo: bool) -> Result<(), String> {
                                     break;
                                 }
                             }
-                            st.input.push_str(&pasted.replace('\r', "\n"));
+                            let text = pasted.replace('\r', "\n");
+                            let (shown, stored) = paste::collapse(&text, st.pastes.len() + 1);
+                            if let Some(p) = stored {
+                                st.pastes.push(p);
+                            }
+                            st.input.push_str(&shown);
                         }
                         _ => {}
                     }
+                }
+                // Ctrl+E: expand large pastes (composer markers and transcript rows).
+                '\x05' => {
+                    if st.input.contains("[pasted #") {
+                        st.input = paste::expand(&st.input, &st.pastes);
+                    }
+                    st.paste_expanded = !st.paste_expanded;
+                    st.status = if st.paste_expanded { "已展開大型貼上（Ctrl+E 收回）".into() } else { "已收回大型貼上（Ctrl+E 展開）".into() };
                 }
                 c if st.input.is_empty() && !st.pending.is_empty() && st.pending[0]["kind"] == "approval" && key_answer(c).is_some() => {
                     let p = st.pending.remove(0);
@@ -834,6 +1008,8 @@ fn submit(st: &mut State, text: String, rpc: &mut dyn FnMut(&str, Value) -> Resu
 /// Send `text` to the current session (creating one when needed), with the pending
 /// `/paste` / `/image` blocks attached.
 fn submit_text(st: &mut State, text: String, rpc: &mut dyn FnMut(&str, Value) -> Result<Value, String>) -> Flow {
+    // The model always gets the full paste, even though the composer shows a marker.
+    let text = paste::expand(&text, &st.pastes);
     if st.current.is_none() {
         if let Ok(r) = rpc("session.create", json!({"workspace": st.workspace.display().to_string(), "title": "終端機對話"})) {
             st.current = r["id"].as_str().map(str::to_string);
@@ -860,6 +1036,7 @@ fn submit_text(st: &mut State, text: String, rpc: &mut dyn FnMut(&str, Value) ->
         match rpc(method, params) {
             Ok(_) => {
                 st.running = true;
+                st.pastes.clear();
                 // Hermes reactions: affection aimed at the agent gets a heart (never sent to the model).
                 if seagent_kernel::reactions::detect(&text).is_some() {
                     st.notice("♥");
@@ -892,6 +1069,28 @@ fn palette_run(st: &mut State, rpc: &mut dyn FnMut(&str, Value) -> Result<Value,
     }
 }
 
+/// `/new` while a turn runs: keep the old session's completion for later. The daemon
+/// already runs the turn; this only remembers where to announce it.
+pub(crate) fn background_current(st: &mut State) -> Option<String> {
+    if !st.running {
+        return None;
+    }
+    let id = st.current.clone()?;
+    let title = st.sessions.iter().find(|s| s["id"].as_str() == Some(id.as_str())).and_then(|s| s["title"].as_str().or(s["id"].as_str())).unwrap_or(&id).to_string();
+    st.background.insert(id.clone(), title);
+    Some(id)
+}
+
+/// A `turn_end` for a session that kept running after `/new`: announce it once.
+fn background_finished(st: &mut State, session: &str, reason: &str) -> Option<String> {
+    let title = st.background.remove(session)?;
+    let ok = matches!(reason, "done" | "idle" | "end_turn");
+    let msg = format!("・背景對話「{title}」{}（{reason}）", if ok { "已完成" } else { "已結束" });
+    st.notice(msg.clone());
+    st.ux.background_finished(&title, session, ok);
+    Some(msg)
+}
+
 fn on_event(sock: &Path, st: &mut State, v: &Value) {
     let p = &v["params"];
     match v["method"].as_str() {
@@ -918,10 +1117,14 @@ fn on_event(sock: &Path, st: &mut State, v: &Value) {
                 Some("tool_called") if mine => st.ux.tool(true),
                 Some("tool_settled") if mine => st.ux.tool(false),
                 Some("turn_end") => {
+                    let reason = ev["reason"].as_str().unwrap_or("");
+                    let sess = p["session"].as_str().unwrap_or("");
+                    // A turn we left running behind `/new` still reports back here.
+                    background_finished(st, sess, reason);
                     if mine {
                         st.running = false;
                         st.streaming.clear();
-                        st.ux.turn_ended(ev["reason"].as_str().unwrap_or(""), p["session"].as_str().unwrap_or(""));
+                        st.ux.turn_ended(reason, sess);
                     }
                     st.sessions = call(sock, "session.list", json!({"limit": 200})).ok().and_then(|v| v.as_array().cloned()).unwrap_or(std::mem::take(&mut st.sessions));
                 }
@@ -1044,6 +1247,91 @@ mod tests {
         st.palette.open_with(palette::items(&json!([{"name": "redraw", "args": "", "description": "Force a full repaint", "category": "Session"}])), "");
         let frame = draw(&mut st);
         assert!(frame.contains("指令面板") && frame.contains("/redraw"), "palette rows are rendered");
+    }
+
+    #[test]
+    fn transcript_draws_image_fallback_and_collapsed_paste() {
+        let mut st = test_state("frame-media");
+        let big = "line\n".repeat(paste::MAX_LINES + 2);
+        st.lines.push(Line::new("user", big.clone()));
+        st.lines.push(Line::image("image/png", "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFBQIAX8jx0gAAAABJRU5ErkJggg=="));
+        let frame = draw(&mut st);
+        assert!(frame.contains("[image image/png ·"), "the image has a readable row");
+        assert!(frame.contains("[pasted "), "a large paste is collapsed in the transcript");
+        st.paste_expanded = true;
+        let expanded = draw(&mut st);
+        assert!(!expanded.contains("[pasted "), "Ctrl+E expands it");
+    }
+
+    #[test]
+    fn submitting_a_collapsed_paste_sends_the_full_text() {
+        use std::cell::RefCell;
+        use std::rc::Rc;
+        let got = Rc::new(RefCell::new(String::new()));
+        let g = got.clone();
+        let mut rpc = move |m: &str, p: Value| -> Result<Value, String> {
+            if m == "session.submit" {
+                *g.borrow_mut() = p["text"].as_str().unwrap_or("").to_string();
+            }
+            Ok(json!({}))
+        };
+        let mut st = test_state("paste-submit");
+        st.current = Some("s1".into());
+        let big = "x".repeat(paste::MAX_CHARS + 10);
+        let (marker, stored) = paste::collapse(&big, 1);
+        st.pastes.push(stored.unwrap());
+        assert_eq!(submit_text(&mut st, format!("look: {marker}"), &mut rpc), Flow::Continue);
+        assert_eq!(*got.borrow(), format!("look: {big}"), "the marker is expanded, not sent literally");
+        assert!(st.pastes.is_empty(), "the stored copy is released after a successful submit");
+    }
+
+    #[test]
+    fn rewind_picker_undoes_to_the_picked_prompt_and_prefills_it() {
+        use std::cell::RefCell;
+        use std::rc::Rc;
+        let lines = Rc::new(RefCell::new(Vec::<String>::new()));
+        let l = lines.clone();
+        let mut rpc = move |m: &str, p: Value| -> Result<Value, String> {
+            if m == "command.run" {
+                l.borrow_mut().push(p["line"].as_str().unwrap_or("").to_string());
+                return Ok(json!({"handled": true, "text": "rewound 2 turn(s)"}));
+            }
+            if m == "session.view" {
+                return Ok(json!({"running": false, "messages": [{"role": "user", "content": [{"type": "text", "text": "kept"}]}]}));
+            }
+            Ok(json!({}))
+        };
+        let mut st = test_state("rewind-apply");
+        st.current = Some("s1".into());
+        st.rewind.prompts = vec![rewind::Prompt { turn: 2, text: "second".into() }, rewind::Prompt { turn: 1, text: "first".into() }];
+        st.rewind.cursor = 1;
+        st.rewind.open = true;
+        assert_eq!(rewind_apply(&mut st, false, &mut rpc), Flow::Continue);
+        assert_eq!(lines.borrow().as_slice(), ["/undo 2"], "the picked prompt and everything after it are cut");
+        assert_eq!(st.input, "first", "the prompt is ready to edit and resend");
+        assert!(!st.rewind.open);
+        assert!(st.lines.iter().any(|x| x.text == "kept"), "history is reloaded after the rewind");
+        assert!(st.status.contains("提問 1"));
+    }
+
+    #[test]
+    fn background_turn_completion_is_announced_once() {
+        let mut st = test_state("bg-done");
+        st.background.insert("s1".into(), "deploy".into());
+        let msg = background_finished(&mut st, "s1", "done").expect("announced");
+        assert!(msg.contains("deploy") && msg.contains("已完成"), "{msg}");
+        assert!(st.lines.iter().any(|l| l.text == msg), "the notice is in the transcript");
+        assert!(background_finished(&mut st, "s1", "done").is_none(), "only once");
+        st.background.insert("s2".into(), "failing job".into());
+        assert!(background_finished(&mut st, "s2", "error").unwrap().contains("已結束"));
+        // A running session becomes background on /new, then completes.
+        let mut st = test_state("bg-new");
+        st.current = Some("s3".into());
+        st.running = true;
+        assert_eq!(background_current(&mut st).as_deref(), Some("s3"));
+        assert!(st.background.contains_key("s3"));
+        assert!(background_finished(&mut st, "s3", "done").is_some());
+        assert!(st.running, "tracking does not stop the old daemon turn");
     }
 
     #[test]

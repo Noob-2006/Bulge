@@ -739,6 +739,49 @@ pub fn command_granted(cfg: &ApprovalsConfig, data: &Path, command: &str) -> Opt
 /// Builtins that cannot run external code (OpenClaw `DEFAULT_SAFE_BUILTINS`).
 pub const SAFE_BUILTINS: &[&str] = &[":", "cd", "false", "pwd", "test", "true", "["];
 
+/// Predicate builtins whose operands the shell may re-evaluate as grammar. Bash >= 4.2
+/// evaluates the array subscript of a `test -v` operand even inside single quotes, so
+/// `test -v 'a[$(cmd)]'` runs `cmd`; ANSI-C (`$'…'`) operands can rebuild the same text
+/// after quoting. These never get the closed safe-builtin exemption.
+fn safe_predicate_ok(argv: &[String], raw: Option<&str>) -> bool {
+    let head = argv.first().map(|a| a.as_str()).unwrap_or("");
+    if head == "[" && argv.last().map(|a| a.as_str()) != Some("]") {
+        return false;
+    }
+    // `-v` (bash array test) and `-R` (zsh conditional) take an operand the shell parses.
+    if argv.iter().skip(1).any(|a| {
+        let a = a.trim();
+        a == "-v" || a == "-R"
+    }) {
+        return false;
+    }
+    // ANSI-C quoting can reassemble glob/subscript text after our lexer has run.
+    if raw.is_some_and(|r| r.contains("$'")) {
+        return false;
+    }
+    let end = if head == "[" { argv.len().saturating_sub(1) } else { argv.len() };
+    for a in &argv[1.min(end)..end] {
+        if a.chars().any(|c| "\\$`*?{}[]".contains(c)) {
+            return false;
+        }
+    }
+    true
+}
+
+/// Is this argv the closed safe-builtin form? `raw` is the original command source when
+/// available, so quoting the parsed argv cannot hide dynamic text.
+pub fn safe_builtin_ok(argv: &[String], raw: Option<&str>) -> bool {
+    let Some(first) = argv.first() else { return false };
+    let name = first.rsplit('/').next().unwrap_or(first);
+    if !SAFE_BUILTINS.contains(&name) {
+        return false;
+    }
+    if name == "test" || name == "[" {
+        return safe_predicate_ok(argv, raw);
+    }
+    true
+}
+
 struct SafeBinProfile {
     min_positional: usize,
     max_positional: usize,
@@ -823,10 +866,12 @@ pub fn resolve_executable(name: &str, cwd: &Path) -> Option<PathBuf> {
 }
 
 /// Does one simple command satisfy the exec allowlist? Returns the matching rule.
-pub fn exec_allowlisted(argv: &[String], cfg: &ApprovalsConfig, data: &Path, cwd: &Path) -> Option<String> {
+/// `raw` is the original command source (when the parser has it), used to refuse a
+/// safe-builtin exemption for dynamic predicate operands.
+pub fn exec_allowlisted(argv: &[String], raw: Option<&str>, cfg: &ApprovalsConfig, data: &Path, cwd: &Path) -> Option<String> {
     let first = argv.first()?;
     let name = first.rsplit('/').next().unwrap_or(first);
-    if SAFE_BUILTINS.contains(&name) {
+    if safe_builtin_ok(argv, raw) {
         return Some(format!("safe builtin `{name}`"));
     }
     if safe_bin_ok(argv, &cfg.exec.safe_bins) {
@@ -1331,19 +1376,39 @@ mod tests {
         let a = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
         let cfg = ApprovalsConfig { exec: ExecPolicy { allowlist: vec!["git".into()], ..Default::default() }, ..Default::default() };
         let usr = ApprovalsConfig { exec: ExecPolicy { allowlist: vec!["/usr/bin/*".into()], ..Default::default() }, ..Default::default() };
-        assert!(exec_allowlisted(&a(&["wc", "-l"]), &cfg, &d, &d).is_some());
-        assert!(exec_allowlisted(&a(&["head", "-n", "5"]), &cfg, &d, &d).is_some());
-        assert!(exec_allowlisted(&a(&["head", "-n5"]), &cfg, &d, &d).is_some());
-        assert!(exec_allowlisted(&a(&["head", "/etc/passwd"]), &cfg, &d, &d).is_none(), "file operand breaks stdin-only");
-        assert!(exec_allowlisted(&a(&["tail", "-f"]), &cfg, &d, &d).is_none(), "denied flag");
-        assert!(exec_allowlisted(&a(&["sort", "-o", "x"]), &cfg, &d, &d).is_none(), "sort not a default safe bin and -o denied");
-        assert!(exec_allowlisted(&a(&["cd", "x"]), &cfg, &d, &d).is_some());
-        assert!(exec_allowlisted(&a(&["git", "status"]), &cfg, &d, &d).is_some());
-        assert!(exec_allowlisted(&a(&["/usr/bin/env"]), &usr, &d, &d).is_some());
-        assert!(exec_allowlisted(&a(&["/opt/x/tool"]), &cfg, &d, &d).is_none());
+        assert!(exec_allowlisted(&a(&["wc", "-l"]), None, &cfg, &d, &d).is_some());
+        assert!(exec_allowlisted(&a(&["head", "-n", "5"]), None, &cfg, &d, &d).is_some());
+        assert!(exec_allowlisted(&a(&["head", "-n5"]), None, &cfg, &d, &d).is_some());
+        assert!(exec_allowlisted(&a(&["head", "/etc/passwd"]), None, &cfg, &d, &d).is_none(), "file operand breaks stdin-only");
+        assert!(exec_allowlisted(&a(&["tail", "-f"]), None, &cfg, &d, &d).is_none(), "denied flag");
+        assert!(exec_allowlisted(&a(&["sort", "-o", "x"]), None, &cfg, &d, &d).is_none(), "sort not a default safe bin and -o denied");
+        assert!(exec_allowlisted(&a(&["cd", "x"]), None, &cfg, &d, &d).is_some());
+        assert!(exec_allowlisted(&a(&["git", "status"]), None, &cfg, &d, &d).is_some());
+        assert!(exec_allowlisted(&a(&["/usr/bin/env"]), None, &usr, &d, &d).is_some());
+        assert!(exec_allowlisted(&a(&["/opt/x/tool"]), None, &cfg, &d, &d).is_none());
         add_grant(&d, GrantKind::Exec, "/opt/x/*", None, "allow-always").unwrap();
-        assert!(exec_allowlisted(&a(&["/opt/x/tool", "arg"]), &cfg, &d, &d).is_some());
+        assert!(exec_allowlisted(&a(&["/opt/x/tool", "arg"]), None, &cfg, &d, &d).is_some());
         assert!(grants(&d)[0].last_used_command.as_deref() == Some("/opt/x/tool arg"), "usage recorded");
+    }
+
+    #[test]
+    fn dynamic_test_and_bracket_predicates_are_not_safe_builtins() {
+        let d = tmp();
+        let a = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let cfg = ApprovalsConfig::default();
+        // The exact regression: bash >= 4.2 evaluates the array subscript even inside
+        // single quotes, so the parsed argv looks harmless but still runs a command.
+        assert!(exec_allowlisted(&a(&["test", "-v", "a[$(cmd)]"]), Some("test -v 'a[$(cmd)]'"), &cfg, &d, &d).is_none(), "array-subscript operand");
+        assert!(exec_allowlisted(&a(&["[", "-v", "a[$(cmd)]", "]"]), Some("[ -v 'a[$(cmd)]' ]"), &cfg, &d, &d).is_none());
+        assert!(exec_allowlisted(&a(&["test", "-R", "a[$(cmd)]"]), Some("test -R 'a[$(cmd)]'"), &cfg, &d, &d).is_none(), "-R operand");
+        assert!(exec_allowlisted(&a(&["test", "$'x'"]), Some("test $'x'"), &cfg, &d, &d).is_none(), "ANSI-C quoting");
+        assert!(exec_allowlisted(&a(&["test", "-e", "*.txt"]), Some("test -e *.txt"), &cfg, &d, &d).is_none(), "glob operand");
+        assert!(exec_allowlisted(&a(&["test", "a[b]"]), Some("test 'a[b]'"), &cfg, &d, &d).is_none(), "bracket operand");
+        assert!(exec_allowlisted(&a(&["[", "-d", "dir"]), Some("[ -d dir ]"), &cfg, &d, &d).is_none(), "no closing bracket in argv is not the safe form");
+        // Static predicates stay on the safe list.
+        for (argv, raw) in [(a(&["test", "-f", "x"]), "test -f x"), (a(&["test", "-d", "dir"]), "test -d dir"), (a(&["[", "-d", "dir", "]"]), "[ -d dir ]"), (a(&["pwd"]), "pwd"), (a(&["cd", "build"]), "cd build")] {
+            assert!(exec_allowlisted(&argv, Some(raw), &cfg, &d, &d).is_some(), "{raw}");
+        }
     }
 
     #[test]

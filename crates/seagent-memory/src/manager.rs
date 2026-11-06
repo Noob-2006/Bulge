@@ -10,6 +10,8 @@
 //! - `seagent/memory.pre_compress {session, messages: [{role, content}]}` → `{text?}`
 //! - `seagent/memory.session_end {session, messages}` → any
 //! - `seagent/memory.write {action, target, content}` → any (mirror of builtin memory writes)
+//! - `seagent/memory.profile_created {profile, home}` / `profile_renamed {old, new, home}` → any
+//! - `seagent/memory.config.read {home}` → `{values?, placeholders?}`; `config.write {home, values}` → any
 
 use crate::fence;
 use crate::Host;
@@ -40,6 +42,18 @@ pub trait Provider: Send + Sync {
     }
     fn session_end(&self, _session: &str, _messages: &[Message]) {}
     fn on_memory_write(&self, _action: &str, _target: &str, _content: &str) {}
+    /// Profile lifecycle seams (Hermes `on_profile_created` / `on_profile_renamed`): a provider
+    /// that stores per-profile state (a remote peer, a host mapping) opts in here. The core has
+    /// no profile-creation command yet, so hosts call these when they add one.
+    fn profile_created(&self, _profile: &str, _home: &str) {}
+    fn profile_renamed(&self, _old: &str, _new: &str, _home: &str) {}
+    /// Dashboard-style configuration storage (Hermes `read_config_fields`): `{values, placeholders}`.
+    fn read_config(&self, _home: &str) -> Option<Value> {
+        None
+    }
+    fn write_config(&self, _values: &Value, _home: &str) -> Result<(), String> {
+        Err("memory provider does not store configuration itself".to_string())
+    }
 }
 
 /// Prompts with no semantic signal (Hermes TRIVIAL_PROMPT_RE).
@@ -111,19 +125,22 @@ impl PluginProvider {
     pub fn new(name: &str, rpc: Rpc) -> PluginProvider {
         PluginProvider { name: name.into(), rpc, unsupported: Mutex::new(HashSet::new()) }
     }
-    fn call(&self, method: &str, params: Value) -> Option<Value> {
+    fn try_call(&self, method: &str, params: Value) -> Result<Value, String> {
         if self.unsupported.lock().unwrap().contains(method) {
-            return None;
+            return Err(format!("{method} is not supported by this provider"));
         }
         match (self.rpc)(method, params) {
-            Ok(v) => Some(v),
+            Ok(v) => Ok(v),
             Err(e) => {
                 if e.contains("-32601") || e.contains("not found") || e.contains("not supported") {
                     self.unsupported.lock().unwrap().insert(method.into());
                 }
-                None
+                Err(e)
             }
         }
+    }
+    fn call(&self, method: &str, params: Value) -> Option<Value> {
+        self.try_call(method, params).ok()
     }
 }
 
@@ -154,6 +171,18 @@ impl Provider for PluginProvider {
     }
     fn on_memory_write(&self, action: &str, target: &str, content: &str) {
         self.call("seagent/memory.write", json!({"action": action, "target": target, "content": content}));
+    }
+    fn profile_created(&self, profile: &str, home: &str) {
+        self.call("seagent/memory.profile_created", json!({"profile": profile, "home": home}));
+    }
+    fn profile_renamed(&self, old: &str, new: &str, home: &str) {
+        self.call("seagent/memory.profile_renamed", json!({"old": old, "new": new, "home": home}));
+    }
+    fn read_config(&self, home: &str) -> Option<Value> {
+        self.call("seagent/memory.config.read", json!({"home": home}))
+    }
+    fn write_config(&self, values: &Value, home: &str) -> Result<(), String> {
+        self.try_call("seagent/memory.config.write", json!({"home": home, "values": values})).map(|_| ())
     }
 }
 
@@ -266,6 +295,31 @@ impl MemoryManager {
             return None;
         }
         self.providers.iter().find(|p| p.serves_memory_tool() && p.name() == want).map(|p| p.name())
+    }
+}
+
+impl MemoryManager {
+    /// Profile lifecycle seams: notify every active provider (builtin is a no-op).
+    pub fn profile_created(&self, profile: &str, home: &str) {
+        for p in &self.providers {
+            p.profile_created(profile, home);
+        }
+    }
+
+    pub fn profile_renamed(&self, old: &str, new: &str, home: &str) {
+        for p in &self.providers {
+            p.profile_renamed(old, new, home);
+        }
+    }
+
+    /// Provider-owned config storage (`[memory.<provider>]` fields shown by a UI).
+    pub fn read_provider_config(&self, provider: &str, home: &str) -> Option<Value> {
+        self.providers.iter().find(|p| p.name() == provider).and_then(|p| p.read_config(home))
+    }
+
+    pub fn write_provider_config(&self, provider: &str, values: &Value, home: &str) -> Result<(), String> {
+        let p = self.providers.iter().find(|p| p.name() == provider).ok_or_else(|| format!("no active memory provider `{provider}`"))?;
+        p.write_config(values, home)
     }
 }
 
@@ -387,6 +441,34 @@ mod tests {
         assert_eq!(methods.iter().filter(|m| **m == "seagent/memory.pre_compress").count(), 1, "-32601 remembered");
         let w = c.iter().find(|(m, _)| m == "seagent/memory.write").unwrap();
         assert_eq!(w.1, json!({"action":"add","target":"user","content":"is vegan"}));
+    }
+
+    /// Hermes #35: provider profile lifecycle and config-storage seams reach the plugin provider
+    /// as JSON-RPC, and an unsupported method is remembered instead of retried every call.
+    #[test]
+    fn provider_profile_and_config_hooks() {
+        let h = crate::test_host("mgr-profile", |s| s.provider = "kinds".into());
+        let calls: Arc<Mutex<Vec<(String, Value)>>> = Arc::default();
+        let c2 = calls.clone();
+        let rpc: Rpc = Arc::new(move |m, p| {
+            c2.lock().unwrap().push((m.to_string(), p.clone()));
+            match m {
+                "seagent/memory.config.read" => Ok(json!({"values": {"peer": "acme"}, "placeholders": {"peer": "default"}})),
+                "seagent/memory.config.write" => Ok(json!({})),
+                _ => Ok(json!({})),
+            }
+        });
+        let m = MemoryManager::new(h.clone(), vec![Arc::new(Builtin(h.clone())), Arc::new(PluginProvider::new("kinds", rpc))]);
+        m.profile_created("work", "/profiles/work");
+        m.profile_renamed("work", "job", "/profiles/job");
+        assert_eq!(m.read_provider_config("kinds", "/profiles/job").unwrap()["values"]["peer"], "acme");
+        m.write_provider_config("kinds", &json!({"peer": "acme2"}), "/profiles/job").unwrap();
+        assert!(m.read_provider_config("builtin", "/x").is_none(), "builtin stores no provider config");
+        assert!(m.write_provider_config("nope", &json!({}), "/x").unwrap_err().contains("no active memory provider"));
+        let c = calls.lock().unwrap();
+        assert!(c.iter().any(|(m, p)| m == "seagent/memory.profile_created" && p["profile"] == "work" && p["home"] == "/profiles/work"));
+        assert!(c.iter().any(|(m, p)| m == "seagent/memory.profile_renamed" && p["old"] == "work" && p["new"] == "job"));
+        assert!(c.iter().any(|(m, p)| m == "seagent/memory.config.write" && p["values"]["peer"] == "acme2"));
     }
 
     #[test]

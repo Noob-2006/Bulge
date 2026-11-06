@@ -64,6 +64,7 @@ pub mod verify;
 pub mod verify_loop;
 pub mod wake;
 pub mod worktree;
+pub mod scratch;
 pub mod limits;
 pub mod governance;
 pub mod tenancy;

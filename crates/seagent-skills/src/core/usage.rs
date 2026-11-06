@@ -26,7 +26,7 @@ fn now() -> i64 {
 }
 
 pub fn empty_record() -> Value {
-    json!({"created_by": null, "use_count": 0, "view_count": 0, "patch_count": 0, "last_used_at": null, "last_viewed_at": null, "last_patched_at": null, "created_at": now(), "state": ACTIVE, "pinned": false, "archived_at": null, "first_seen_at": null})
+    json!({"created_by": null, "use_count": 0, "view_count": 0, "patch_count": 0, "last_used_at": null, "last_viewed_at": null, "last_patched_at": null, "created_at": now(), "state": ACTIVE, "pinned": false, "locked": false, "archived_at": null, "first_seen_at": null})
 }
 
 fn backfill(rec: Option<&Value>) -> Value {
@@ -225,6 +225,40 @@ pub fn set_pinned(s: &Settings, st: &Store, name: &str, pinned: bool) -> Result<
     .ok_or_else(|| "could not write usage record".into())
 }
 
+/// User lock (Hermes `skills/.usage.json` `locked`): every agent write path refuses the skill
+/// while it is set. The user's own CLI/editor is not gated; `seagent skills unlock` lifts it.
+pub fn set_locked(st: &Store, name: &str, locked: bool) -> Result<(), String> {
+    mutate(st, name, |r| {
+        r.insert("locked".into(), json!(locked));
+    })
+    .map(|_| ())
+    .ok_or_else(|| "could not write usage record".into())
+}
+
+/// Names the user locked (one sidecar walk, no frontmatter read).
+pub fn locked_names(st: &Store) -> Vec<String> {
+    let mut v: Vec<String> = load(st).into_iter().filter(|(_, r)| r.get("locked").and_then(Value::as_bool) == Some(true)).map(|(n, _)| n).collect();
+    v.sort();
+    v
+}
+
+pub fn is_locked(st: &Store, name: &str) -> bool {
+    get(st, name)["locked"].as_bool() == Some(true)
+}
+
+/// The user-facing refusal shared by the tool, file and shell guards.
+pub fn lock_refusal(name: &str) -> String {
+    format!("Skill '{name}' is locked by the user, so the agent cannot change it: skill writes, file writes/patches and shell writes into its directory all refuse. Don't retry or copy it under another name; tell the user what you would change. They can unlock it with `seagent skills unlock {name}`.")
+}
+
+pub fn lock_record_refusal() -> String {
+    "skills/.usage.json holds the user's skill locks, so the agent cannot change it while any skill is locked.".to_string()
+}
+
+pub fn unlock_refusal() -> String {
+    "Only the user can lock or unlock a skill. Ask them to run `seagent skills lock|unlock <skill>` themselves.".to_string()
+}
+
 pub fn set_state(st: &Store, name: &str, state: &str) {
     mutate(st, name, |r| {
         r.insert("state".into(), json!(state));
@@ -257,6 +291,9 @@ pub fn copy_tree(src: &Path, dest: &Path) -> Result<(), String> {
 /// Move a curation-eligible skill to `.archive/<name>` (timestamp suffix on collision), with a
 /// ledger entry. Never hub; bundled only with `prune_builtins` (and then suppressed from re-seeding).
 pub fn archive(s: &Settings, st: &Store, name: &str, actor: &str) -> Result<String, String> {
+    if is_locked(st, name) {
+        return Err(lock_refusal(name));
+    }
     let sk = find_local(st, name);
     if !curation_eligible(s, st, name) {
         return Err(match provenance(s, st, name) {

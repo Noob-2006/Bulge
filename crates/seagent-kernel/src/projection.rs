@@ -41,6 +41,9 @@ pub struct View {
     pub user: Option<String>,
     pub tool_allow: Option<Vec<String>>,
     pub tool_deny: Vec<String>,
+    /// Execution-time-only restrictions (fork children); they leave the request tool list alone.
+    pub tool_guard_allow: Option<Vec<String>>,
+    pub tool_guard_deny: Vec<String>,
     pub pinned: bool,
     pub archived: bool,
     pub group: Option<String>,
@@ -79,6 +82,8 @@ pub fn project(events: &[Event]) -> View {
     let mut artifacts: HashMap<String, String> = HashMap::new();
     let mut rewinds: Vec<(u64, u64)> = Vec::new();
     let mut compactions: Vec<(u64, u64, String)> = Vec::new();
+    let mut dropped: Vec<(u64, u64)> = Vec::new();
+    let mut break_merge = false;
 
     for ev in events {
         match &ev.kind {
@@ -104,6 +109,7 @@ pub fn project(events: &[Event]) -> View {
                     consumed.insert(i.clone());
                 }
             }
+            EventKind::MessageBoundary => break_merge = true,
             EventKind::Compaction { upto_seq, summary, pruned: p, .. } => {
                 compactions.push((ev.seq, *upto_seq, summary.clone()));
                 compaction = Some((*upto_seq, summary.clone()));
@@ -134,6 +140,11 @@ pub fn project(events: &[Event]) -> View {
             EventKind::Tools { allow, deny } => {
                 v.tool_allow = allow.clone();
                 v.tool_deny = deny.clone();
+            }
+            EventKind::TurnDropped { from_seq, upto_seq, .. } => dropped.push((*from_seq, *upto_seq)),
+            EventKind::ToolGuard { allow, deny } => {
+                v.tool_guard_allow = allow.clone();
+                v.tool_guard_deny = deny.clone();
             }
             EventKind::Rewind { from_seq, .. } => {
                 rewinds.push((*from_seq, ev.seq));
@@ -175,28 +186,40 @@ pub fn project(events: &[Event]) -> View {
 
     let cutoff = compaction.as_ref().map(|(s, _)| *s).unwrap_or(0);
     if let Some((seq, summary)) = &compaction {
-        push_merged(&mut v, Message::user(format!("[Summary of earlier conversation]\n{summary}")), *seq);
+        push_merged(&mut v, Message::user(format!("[Summary of earlier conversation]\n{summary}")), *seq, false);
     }
     for ev in events {
-        if ev.seq < cutoff || rewound(ev.seq) {
+        if ev.seq < cutoff || rewound(ev.seq) || dropped.iter().any(|(from, upto)| *from <= ev.seq && ev.seq <= *upto) {
             continue;
         }
-        if let EventKind::Message { message, .. } = &ev.kind {
-            if is_user_turn(message) && message.text().trim() != "" && !message.text().starts_with("[Your reply was cut off") {
-                v.user_turns.push(ev.seq);
-            }
-            let mut m = message.clone();
-            if !pruned.is_empty() {
-                for b in &mut m.content {
-                    if let Block::ToolResult { tool_use_id, content, .. } = b {
-                        if pruned.contains(tool_use_id) && !content.starts_with(PRUNED_STUB) {
-                            let hint = artifacts.get(tool_use_id).map(|a| format!("; full output at {a}")).unwrap_or_default();
-                            *content = format!("{PRUNED_STUB} ({} bytes){hint}]", content.len());
+        match &ev.kind {
+            // A fork child's first message must stay separate from the copied parent prefix.
+            EventKind::MessageBoundary => break_merge = true,
+            EventKind::Message { message, .. } => {
+                if is_user_turn(message) && message.text().trim() != "" && !message.text().starts_with("[Your reply was cut off") {
+                    v.user_turns.push(ev.seq);
+                }
+                let mut m = message.clone();
+                if !pruned.is_empty() {
+                    for b in &mut m.content {
+                        if let Block::ToolResult { tool_use_id, content, .. } = b {
+                            if pruned.contains(tool_use_id) && !content.starts_with(PRUNED_STUB) {
+                                let hint = artifacts.get(tool_use_id).map(|a| format!("; full output at {a}")).unwrap_or_default();
+                                *content = format!("{PRUNED_STUB} ({} bytes){hint}]", content.len());
+                            }
                         }
                     }
                 }
+                push_merged(&mut v, m, ev.seq, break_merge);
+                break_merge = false;
             }
-            push_merged(&mut v, m, ev.seq);
+            // A mid-session prompt update arrives after the cached history. Its own message keeps
+            // the previous request a byte prefix; do not mutate the message before it.
+            EventKind::SystemDelta { text } => {
+                push_new(&mut v, Message::user(format!("[System prompt update]\n{text}")), ev.seq);
+                break_merge = false;
+            }
+            _ => {}
         }
     }
 
@@ -209,13 +232,20 @@ pub fn project(events: &[Event]) -> View {
     v
 }
 
-fn push_merged(v: &mut View, m: Message, seq: u64) {
+fn push_merged(v: &mut View, m: Message, seq: u64, force_new: bool) {
     if let Some(last) = v.messages.last_mut() {
-        if last.role == m.role {
+        if last.role == m.role && !force_new {
             last.content.extend(m.content);
             return;
         }
     }
+    v.messages.push(m);
+    v.message_seqs.push(seq);
+}
+
+/// Append a message without merging it into the previous same-role message. Used for
+/// mid-session system updates: merging would rewrite bytes the provider already cached.
+fn push_new(v: &mut View, m: Message, seq: u64) {
     v.messages.push(m);
     v.message_seqs.push(seq);
 }
@@ -258,6 +288,19 @@ mod tests {
     }
 
     #[test]
+    fn message_boundary_keeps_consecutive_user_messages_separate() {
+        let v = project(&evs(vec![
+            header(),
+            m(Message::user("parent question")),
+            EventKind::MessageBoundary,
+            m(Message::user("child task")),
+        ]));
+        assert_eq!(v.messages.len(), 2, "the child task must not merge into the parent's last user message");
+        assert_eq!(v.messages[0].text(), "parent question");
+        assert_eq!(v.messages[1].text(), "child task");
+    }
+
+    #[test]
     fn compaction_drops_old_and_prepends_summary() {
         let v = project(&evs(vec![
             header(),
@@ -297,6 +340,41 @@ mod tests {
         ]));
         assert_eq!(v.unsettled.len(), 1);
         assert_eq!(v.dangling.len(), 1);
+    }
+
+    #[test]
+    fn turn_drop_hides_only_the_model_context() {
+        let evs = evs(vec![
+            header(),
+            m(Message::user("first")),
+            m(Message::assistant("answer")),
+            m(Message::user("dangerous request")),
+            m(Message::assistant("I cannot help with that")),
+            EventKind::TurnDropped { from_seq: 3, upto_seq: 4, reason: "refusal".into() },
+            m(Message::user("next question")),
+        ]);
+        // The raw log still holds the refused exchange.
+        assert_eq!(evs.len(), 7);
+        let v = project(&evs);
+        assert_eq!(v.messages.len(), 3);
+        assert!(v.messages[0].text().contains("first") && v.messages[1].text().contains("answer") && v.messages[2].text().contains("next question"));
+        assert!(!v.messages.iter().any(|m| m.text().contains("dangerous") || m.text().contains("cannot help")));
+        assert_eq!(v.user_turns, vec![1, 6], "the dropped ask is not a rewind target");
+    }
+
+    #[test]
+    fn system_delta_appends_after_cached_messages() {
+        let v = project(&evs(vec![
+            header(),
+            m(Message::user("hi")),
+            m(Message::assistant("hello")),
+            EventKind::SystemDelta { text: "Be terse.".into() },
+        ]));
+        assert_eq!(v.messages.len(), 3, "the update is a new message, not a head rewrite");
+        assert_eq!(v.messages[0].text(), "hi");
+        assert_eq!(v.messages[1].text(), "hello");
+        assert!(v.messages[2].text().contains("[System prompt update]") && v.messages[2].text().contains("Be terse."));
+        assert_eq!(v.message_seqs[2], 3);
     }
 
     #[test]

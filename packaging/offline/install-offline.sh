@@ -9,6 +9,9 @@
 #   --prefix    default /usr/local when root, ~/.local otherwise
 #   --package   install the matching .deb/.rpm with dpkg/rpm instead of unpacking the tarball
 set -euo pipefail
+# Never inherit group/world-writable bits from a umask 002 caller (group-writable
+# installed files fail the runtime's ownership checks); a stricter mask is preserved.
+umask go-w
 export LC_ALL=C
 PROG=$(basename "$0")
 HERE=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)

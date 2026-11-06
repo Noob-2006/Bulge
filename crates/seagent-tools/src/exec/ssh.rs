@@ -20,8 +20,9 @@ use serde::Deserialize;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 /// `[exec.ssh]`
 #[derive(Debug, Clone, Deserialize)]
@@ -188,6 +189,107 @@ pub struct SshBackend {
     passthrough: Vec<String>,
     control: String,
     gone: AtomicBool,
+    /// One long-lived remote `bash` over the multiplexed connection. A request that needs
+    /// stdin, a login shell or a PTY still gets its own process (the shell's stdin is the
+    /// command channel), so this is the transport for sync/probe work first.
+    shell: Mutex<Option<RemoteShell>>,
+}
+
+/// A persistent remote bash. Commands are framed with a per-shell nonce: the wrapper runs
+/// the script in a subshell (so `exit`/`cd` cannot kill the session) and prints a sentinel
+/// carrying the exit status. Output before the sentinel belongs to the command.
+struct RemoteShell {
+    child: Box<dyn ExecChild>,
+    tag: String,
+    seq: u64,
+    buf: Vec<u8>,
+}
+
+static SHELL_SEQ: AtomicU64 = AtomicU64::new(1);
+
+fn find_bytes(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    if needle.is_empty() || haystack.len() < needle.len() {
+        return None;
+    }
+    haystack.windows(needle.len()).position(|w| w == needle)
+}
+
+impl RemoteShell {
+    fn start(cfg: &SshConfig, control: &str) -> Result<RemoteShell, String> {
+        let mut cmd = Command::new("ssh");
+        cmd.args(ssh_opts(cfg, control));
+        cmd.arg(target(cfg));
+        // One remote command line; the shell then reads framed scripts from stdin.
+        cmd.arg("bash --noprofile --norc");
+        let req = ExecRequest { stdin: true, ..Default::default() };
+        let child = spawn_command(cmd, &req, None).map_err(|e| format!("cannot start persistent ssh shell: {e}"))?;
+        let tag = format!("{}-{}", std::process::id(), SHELL_SEQ.fetch_add(1, Ordering::Relaxed));
+        let mut sh = RemoteShell { child, tag, seq: 0, buf: Vec::new() };
+        let ready = format!("SEAGENT_READY_{}", sh.tag);
+        sh.write(&format!("printf '\\n{ready}\\n'\n"))?;
+        sh.read_line(&ready, Duration::from_secs(20))?;
+        Ok(sh)
+    }
+
+    fn write(&mut self, data: &str) -> Result<(), String> {
+        self.child.write_stdin(data.as_bytes()).map_err(|e| format!("persistent ssh shell: write failed: {e}"))
+    }
+
+    /// Read until `marker`, then the rest of that line. Returns (output before the marker,
+    /// the marker line's suffix). A timeout or closed shell kills the session so the next
+    /// caller starts a fresh one instead of reading a half-consumed stream.
+    fn read_line(&mut self, marker: &str, timeout: Duration) -> Result<(Vec<u8>, String), String> {
+        let deadline = Instant::now() + timeout;
+        loop {
+            if let Some(pos) = find_bytes(&self.buf, marker.as_bytes()) {
+                let rest = &self.buf[pos + marker.len()..];
+                if let Some(nl) = rest.iter().position(|b| *b == b'\n') {
+                    let tail = String::from_utf8_lossy(&rest[..nl]).trim().to_string();
+                    let mut out = self.buf[..pos].to_vec();
+                    if out.last() == Some(&b'\n') {
+                        out.pop();
+                    }
+                    self.buf.drain(..pos + marker.len() + nl + 1);
+                    return Ok((out, tail));
+                }
+            }
+            if Instant::now() >= deadline {
+                self.child.kill(true);
+                return Err(format!("persistent ssh shell: timed out after {}s", timeout.as_secs()));
+            }
+            if let Ok(Some(st)) = self.child.try_wait() {
+                return Err(format!("persistent ssh shell exited ({})", st.describe()));
+            }
+            let mut chunk = [0u8; 16384];
+            match self.child.read(&mut chunk, Duration::from_millis(100)) {
+                Ok(0) => return Err("persistent ssh shell: connection closed".into()),
+                Ok(n) => self.buf.extend_from_slice(&chunk[..n]),
+                Err(_) => {}
+            }
+        }
+    }
+
+    fn run(&mut self, script: &str, timeout: Duration) -> Result<(ExitInfo, Vec<u8>), String> {
+        self.seq += 1;
+        let marker = format!("SEAGENT_DONE_{}_{}_", self.tag, self.seq);
+        let wrapped = format!("(\n{script}\n) </dev/null 2>&1\n__seagent_rc=$?\nprintf '\\n{marker}%s\\n' \"$__seagent_rc\"\n");
+        self.write(&wrapped)?;
+        let (out, code) = self.read_line(&marker, timeout)?;
+        Ok((ExitInfo::code(code.parse().unwrap_or(-1)), out))
+    }
+
+    fn shutdown(&mut self) {
+        let _ = self.write("exit 0\n");
+        self.child.close_stdin();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while Instant::now() < deadline {
+            if self.child.try_wait().ok().flatten().is_some() {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        self.child.kill(true);
+    }
 }
 
 impl SshBackend {
@@ -239,6 +341,7 @@ impl SshBackend {
             remote_root: root,
             control,
             gone: AtomicBool::new(false),
+            shell: Mutex::new(None),
             cfg: cfg.clone(),
         })
     }
@@ -247,8 +350,40 @@ impl SshBackend {
         ssh_opts(&self.cfg, &self.control)
     }
 
+    /// One command over the persistent shell. Stdin-bearing calls fall back to a one-shot
+    /// ssh process: the shell's stdin carries commands, not payload. If the shell cannot be
+    /// started (a remote without bash, an old ssh), the same fallback keeps the backend
+    /// working; a failure *after* a command was written is returned, never replayed, because
+    /// retrying could duplicate a side effect.
+    fn shell_run(&self, script: &str, stdin: Option<&[u8]>, timeout: Duration) -> Result<(ExitInfo, Vec<u8>), String> {
+        if stdin.is_some() {
+            return self.capture_oneshot(script, stdin, timeout);
+        }
+        let mut guard = self.shell.lock().unwrap();
+        if guard.is_none() {
+            match RemoteShell::start(&self.cfg, &self.control) {
+                Ok(s) => *guard = Some(s),
+                Err(_) => {
+                    drop(guard);
+                    return self.capture_oneshot(script, None, timeout);
+                }
+            }
+        }
+        let r = guard.as_mut().unwrap().run(script, timeout);
+        if r.is_err() {
+            *guard = None;
+        }
+        r
+    }
+
+    fn capture_oneshot(&self, script: &str, stdin: Option<&[u8]>, timeout: Duration) -> Result<(ExitInfo, Vec<u8>), String> {
+        let req = ExecRequest { script: script.into(), stdin: stdin.is_some(), stdin_data: stdin.map(|s| s.to_vec()), ..Default::default() };
+        let child = self.spawn(&req).map_err(|e| format!("exec backend ssh: {e}"))?;
+        super::drain(child, timeout)
+    }
+
     fn runner(&self) -> impl Fn(&str, Option<&[u8]>) -> Result<super::Capture, String> + '_ {
-        move |script: &str, stdin: Option<&[u8]>| super::run_capture(self, script, stdin, Duration::from_secs(600))
+        move |script: &str, stdin: Option<&[u8]>| self.shell_run(script, stdin, Duration::from_secs(600))
     }
 }
 
@@ -332,6 +467,9 @@ impl ExecBackend for SshBackend {
         if self.cfg.pull {
             let _ = self.after_exec();
         }
+        if let Some(mut sh) = self.shell.lock().unwrap().take() {
+            sh.shutdown();
+        }
         if !self.control.is_empty() {
             let _ = Command::new("ssh")
                 .args(["-o", &format!("ControlPath={}", self.control), "-O", "exit", &target(&self.cfg)])
@@ -352,9 +490,8 @@ mod tests {
     use crate::testutil::tmpdir;
     use std::os::unix::fs::PermissionsExt;
 
-    fn cred_file(tag: &str) -> (PathBuf, String) {
-        let home = std::env::var("HOME").unwrap();
-        let p = Path::new(&home).join(format!(".seagent-ssh-{tag}-{}", std::process::id()));
+    fn cred_file(tag: &str, home: &Path) -> (PathBuf, String) {
+        let p = home.join(format!(".seagent-ssh-{tag}-{}", std::process::id()));
         std::fs::write(&p, "token=1\n").unwrap();
         let rel = format!("~/{}", p.file_name().unwrap().to_string_lossy());
         (p, rel)
@@ -375,7 +512,7 @@ mod tests {
         fakecli::fake_ssh(&bin, &log, &remote_home);
         let old = fakecli::prepend_path(&bin);
         std::fs::write(ws.join("in.txt"), "from host").unwrap();
-        let (cred, cred_rel) = cred_file("cred");
+        let (cred, cred_rel) = cred_file("cred", &home);
 
         let cfg = ExecConfig {
             backend: "ssh".into(),
@@ -399,7 +536,10 @@ mod tests {
         assert!(b.describe().contains("seagent@remote.test") && b.describe().contains(&mapped[..mapped.len() - "/a/b.txt".len()]));
 
         // push: the host workspace lands in the remote mirror, credentials in $HOME.
-        b.before_exec().unwrap();
+        {
+            let _home_guard = crate::testutil::test_home(&home);
+            b.before_exec().unwrap();
+        }
         let root = b.map_path(&ws);
         assert_eq!(std::fs::read_to_string(format!("{root}/in.txt")).unwrap(), "from host");
         assert!(read().contains("tar -xf -"), "tar push over ssh: {}", read());
@@ -430,6 +570,38 @@ mod tests {
         b.cleanup();
         assert!(read().contains("-O exit"), "the control master is closed: {}", read());
         let _ = std::fs::remove_file(&cred);
+        fakecli::restore_path(old);
+    }
+
+    #[test]
+    fn persistent_shell_reuses_one_ssh_process_and_frames_exit_status() {
+        let _lock = fakecli::lock_path();
+        let base = tmpdir("sshshell");
+        let (remote_home, ws, home) = (base.join("remotehome"), base.join("ws"), base.join("seagenthome"));
+        let bin = base.join("bin");
+        for d in [&remote_home, &ws, &home] {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        let log = base.join("ssh.log");
+        fakecli::fake_ssh(&bin, &log, &remote_home);
+        let old = fakecli::prepend_path(&bin);
+        let secrets: std::sync::Arc<dyn Fn(&str) -> String + Send + Sync> = std::sync::Arc::new(|s: &str| s.to_string());
+        let cfg = ExecConfig { backend: "ssh".into(), ssh: SshConfig { host: "remote.test".into(), pull: false, ..Default::default() }, ..Default::default() };
+        let ctx = BackendCtx { workspace: ws.clone(), scope_key: "s1".into(), secrets, home: home.clone(), sandboxed: false };
+        let b = SshBackend::new(&cfg.ssh, &cfg, &ctx).unwrap();
+        let shell_lines = || read_log(&log).lines().filter(|l| l.contains("bash --noprofile --norc")).count();
+        assert_eq!(shell_lines(), 0);
+
+        let (st, out) = b.shell_run("echo one", None, Duration::from_secs(20)).unwrap();
+        assert!(st.success() && String::from_utf8_lossy(&out).contains("one"), "{}", String::from_utf8_lossy(&out));
+        assert_eq!(shell_lines(), 1, "one persistent remote shell");
+        let (st, out) = b.shell_run("echo two; exit 7", None, Duration::from_secs(20)).unwrap();
+        assert_eq!(st.code, Some(7), "{}", String::from_utf8_lossy(&out));
+        assert!(String::from_utf8_lossy(&out).contains("two"));
+        assert_eq!(shell_lines(), 1, "the second call reuses the same ssh process, not a new one");
+
+        b.cleanup();
+        assert!(read_log(&log).contains("-O exit"), "the control master is closed");
         fakecli::restore_path(old);
     }
 

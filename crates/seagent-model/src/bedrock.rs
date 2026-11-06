@@ -385,17 +385,90 @@ fn bedrock_error(ty: &str, msg: &str) -> ProviderError {
 
 /// Foundation models with text output (`GET bedrock.<region>/foundation-models`).
 pub(crate) fn list_models(cfg: &ProviderConfig) -> Result<Vec<String>, String> {
-    use std::io::Read;
     let base = cfg.resolved_base()?;
     let region = region_of(cfg, &base);
     let url = std::env::var("SEAGENT_BEDROCK_CONTROL_URL")
         .ok()
         .filter(|v| !v.is_empty())
         .unwrap_or_else(|| format!("https://bedrock.{region}.amazonaws.com"));
-    let full = format!(
-        "{}/foundation-models?byOutputModality=TEXT",
-        url.trim_end_matches('/')
-    );
+    let foundation = control_get(
+        cfg,
+        &region,
+        &url,
+        "/foundation-models",
+        &[("byOutputModality".into(), "TEXT".into())],
+    )?;
+    let mut out: Vec<String> = Vec::new();
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut push = |id: &str| {
+        let id = id.trim();
+        if !id.is_empty() && seen.insert(id.to_string()) {
+            out.push(id.to_string());
+        }
+    };
+    for m in foundation["modelSummaries"].as_array().into_iter().flatten() {
+        let Some(id) = m["modelId"].as_str() else { continue };
+        // A bare foundation-model id only works on demand; profile-only and
+        // provisioned-only ids fail at request time (OpenClaw 44ef0d6cc21).
+        // Unknown metadata stays selectable: unknown is not "not invocable".
+        if !on_demand(m) {
+            continue;
+        }
+        push(id);
+    }
+    // Inference profiles are the usable route for models Bedrock does not serve
+    // by bare id. A failure here must not hide the on-demand foundation list.
+    let mut token: Option<String> = None;
+    for _ in 0..20 {
+        let mut query: Vec<(String, String)> = Vec::new();
+        if let Some(t) = &token {
+            query.push(("nextToken".into(), t.clone()));
+        }
+        let Ok(v) = control_get(cfg, &region, &url, "/inference-profiles", &query) else {
+            break;
+        };
+        for p in v["inferenceProfileSummaries"].as_array().into_iter().flatten() {
+            if !p["status"].as_str().is_some_and(|s| s.eq_ignore_ascii_case("ACTIVE")) {
+                continue;
+            }
+            if let Some(id) = p["inferenceProfileId"].as_str() {
+                push(id);
+            }
+        }
+        match v["nextToken"].as_str().filter(|t| !t.is_empty()) {
+            Some(t) if token.as_deref() != Some(t) => token = Some(t.to_string()),
+            _ => break,
+        }
+    }
+    // Explicitly configured ids are never filtered: an operator may know a model
+    // works through provisioned throughput or a profile this account can invoke.
+    for id in &cfg.models {
+        push(id);
+    }
+    Ok(out)
+}
+
+fn on_demand(m: &Value) -> bool {
+    match m["inferenceTypesSupported"].as_array() {
+        None => true,
+        Some(a) => a.is_empty() || a.iter().any(|t| t.as_str().is_some_and(|t| t.eq_ignore_ascii_case("ON_DEMAND"))),
+    }
+}
+
+fn control_get(
+    cfg: &ProviderConfig,
+    region: &str,
+    base: &str,
+    path: &str,
+    query: &[(String, String)],
+) -> Result<Value, String> {
+    use std::io::Read;
+    let mut full = format!("{}{path}", base.trim_end_matches('/'));
+    if !query.is_empty() {
+        let q: Vec<String> = query.iter().map(|(k, v)| format!("{}={}", crate::sigv4::uri_encode(k, false), crate::sigv4::uri_encode(v, false))).collect();
+        full.push('?');
+        full.push_str(&q.join("&"));
+    }
     let mut req = crate::net::agent(std::time::Duration::from_secs(20), &full)
         .get(&full)
         .header("accept", "application/json");
@@ -412,11 +485,11 @@ pub(crate) fn list_models(cfg: &ProviderConfig) -> Result<Vec<String>, String> {
             &creds,
             "GET",
             &host,
-            "/foundation-models",
-            &[("byOutputModality".into(), "TEXT".into())],
+            path,
+            query,
             &[],
             b"",
-            &region,
+            region,
             "bedrock",
             crate::ratelimit::now_ms() / 1000,
         ) {
@@ -438,13 +511,7 @@ pub(crate) fn list_models(cfg: &ProviderConfig) -> Result<Vec<String>, String> {
             classify::from_status(status, None, &raw)
         ));
     }
-    let v: Value = serde_json::from_str(&raw).map_err(|e| e.to_string())?;
-    Ok(v["modelSummaries"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter_map(|m| m["modelId"].as_str().map(String::from))
-        .collect())
+    serde_json::from_str(&raw).map_err(|e| e.to_string())
 }
 
 #[cfg(test)]
@@ -675,6 +742,64 @@ mod tests {
         assert_eq!(
             bedrock_error("accessDeniedException", "no").kind,
             ProviderErrorKind::Auth
+        );
+    }
+
+    #[test]
+    fn discovery_hides_non_on_demand_foundations_and_lists_profiles() {
+        use std::io::{BufRead, BufReader, Write};
+        let l = TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", l.local_addr().unwrap());
+        let h = std::thread::spawn(move || {
+            for _ in 0..3 {
+                let (mut s, _) = l.accept().unwrap();
+                let mut r = BufReader::new(s.try_clone().unwrap());
+                let mut line = String::new();
+                r.read_line(&mut line).unwrap();
+                loop {
+                    let mut h = String::new();
+                    r.read_line(&mut h).unwrap();
+                    if h.trim().is_empty() {
+                        break;
+                    }
+                }
+                let body = if line.contains("/foundation-models") {
+                    json!({"modelSummaries": [
+                        {"modelId": "on-demand", "inferenceTypesSupported": ["ON_DEMAND"]},
+                        {"modelId": "provisioned", "inferenceTypesSupported": ["PROVISIONED"]},
+                        {"modelId": "unknown"},
+                        {"modelId": "empty", "inferenceTypesSupported": []},
+                        {"modelId": "  "}
+                    ]})
+                } else if line.contains("nextToken=n1") {
+                    json!({"inferenceProfileSummaries": [
+                        {"inferenceProfileId": "us.provisioned", "status": "ACTIVE"}
+                    ]})
+                } else {
+                    json!({"inferenceProfileSummaries": [
+                        {"inferenceProfileId": "global.on-demand", "status": "ACTIVE"},
+                        {"inferenceProfileId": "eu.creating", "status": "CREATING"},
+                        {"inferenceProfileId": ""}
+                    ], "nextToken": "n1"})
+                };
+                let body = body.to_string();
+                write!(s, "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}", body.len()).unwrap();
+            }
+        });
+        let _g = ENV.lock().unwrap_or_else(|p| p.into_inner());
+        std::env::set_var("AWS_ACCESS_KEY_ID", "AKIDTEST");
+        std::env::set_var("AWS_SECRET_ACCESS_KEY", "secret");
+        std::env::remove_var("AWS_BEARER_TOKEN_BEDROCK");
+        std::env::set_var("SEAGENT_BEDROCK_CONTROL_URL", &base);
+        let mut c = cfg(&base);
+        c.models = vec!["manual.provisioned".into()];
+        let ids = list_models(&c).unwrap();
+        std::env::remove_var("SEAGENT_BEDROCK_CONTROL_URL");
+        h.join().unwrap();
+        assert_eq!(
+            ids,
+            ["on-demand", "unknown", "empty", "global.on-demand", "us.provisioned", "manual.provisioned"],
+            "profile-only, provisioned-only and empty id rows are hidden; profiles and explicit ids stay"
         );
     }
 

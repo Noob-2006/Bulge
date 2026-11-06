@@ -126,6 +126,7 @@ fn env(vision: bool) -> Env {
     cfg.model.default = "main/m1".into();
     cfg.model.fallback = vec![];
     cfg.checkpoint.enabled = false;
+    cfg.model.log_requests = true;
     let model = Model::new("main", vision);
     let mut map = HashMap::new();
     map.insert("main".to_string(), model.clone());
@@ -198,4 +199,26 @@ fn tool_result_images_are_retired_once_the_request_crosses_the_strict_ceiling() 
         run_turn(&small, &sid, &format!("look {i}"));
     }
     assert_eq!(images(&small.model.last()), 21, "within the many-image cap the hard limit is 100");
+}
+
+#[test]
+fn the_session_log_records_the_post_image_prep_request() {
+    let e = env(false);
+    let id = e.k.create_session(&e.ws, None, None, None).unwrap();
+    e.k.submit_with(&id, "what is this?", vec![Block::Image { media_type: "image/png".into(), data: seagent_core::tool::base64_encode(&png(64, 64)) }], "cli").unwrap();
+    assert!(e.k.run(&id, RunOpts::default()).unwrap().reason.ok());
+    let logged = e
+        .k
+        .store
+        .read(&id)
+        .unwrap()
+        .into_iter()
+        .filter_map(|ev| match ev.kind {
+            seagent_kernel::event::EventKind::Request { purpose, request } if purpose == "conversation" => Some(request),
+            _ => None,
+        })
+        .next_back()
+        .expect("a request event");
+    assert_eq!(logged, e.model.last(), "image eviction/stand-in decisions are part of the logged bytes");
+    assert_eq!(images(&logged), 0);
 }

@@ -16,13 +16,14 @@
 use crate::args::Args;
 use crate::slash::{Ctx, Def, Reply};
 use crate::R;
+use seagent_core::{Cancel, Message};
 use seagent_kernel::config::Paths;
 use seagent_kernel::kernel::{Kernel, RunOpts};
 use serde_json::{json, Value};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 pub const COMMANDS: &[&str] = &["rooms", "room"];
-pub const VALUE_FLAGS: &[&str] = &["member"];
+pub const VALUE_FLAGS: &[&str] = &["member", "purpose", "notes", "routing", "lead"];
 pub const BOOL_FLAGS: &[&str] = &[];
 
 pub const MAX_MEMBERS: usize = 6;
@@ -32,6 +33,11 @@ pub const MAX_MESSAGES: usize = 10;
 pub const MAX_DELTA_LINES: usize = 24;
 pub const MAX_TEXT_BYTES: usize = 64 * 1024;
 pub const MAX_PROMPT_BYTES: usize = 96 * 1024;
+pub const MAX_PURPOSE_CHARS: usize = 200;
+pub const MAX_NOTES_BYTES: usize = 8 * 1024;
+/// Each Continue grants one more full round/message budget (Hermes MAX_DISCUSSION_CONTINUES).
+pub const MAX_DISCUSSION_CONTINUES: usize = 5;
+pub const ROUTING_MODES: &[&str] = &["everyone", "lead", "auto"];
 const TRUNCATED: &str = "\n\n[Reply truncated. Ask the bot to share the full result as a file.]";
 /// Openers of seagent's own harness frames a member must not be able to imitate.
 const CONTROL_OPENERS: &[&str] = &["Discussion:", "system", "System", "SYSTEM", "steer", "Steer", "compaction", "Compaction", "runtime", "Runtime", "background", "Background", "prior context", "Prior context", "/plan", "/init", "/review"];
@@ -49,6 +55,14 @@ pub struct Member {
 pub struct Room {
     pub room_id: String,
     pub name: String,
+    /// What the room is for (shown to members and the router; never the system prompt).
+    pub purpose: String,
+    /// Shared notes every member sees (user-maintained room state).
+    pub notes: String,
+    /// `everyone` (default), `lead` or `auto`.
+    pub routing: String,
+    /// Seated lead member id when `routing = "lead"`.
+    pub lead_member_id: String,
     pub members: Vec<Member>,
     pub events: Vec<Value>,
     pub disbanded: bool,
@@ -74,6 +88,7 @@ impl Room {
     pub fn to_json(&self) -> Value {
         json!({
             "room_id": self.room_id, "name": self.name, "disbanded": self.disbanded,
+            "purpose": self.purpose, "notes": self.notes, "routing": self.routing, "lead_member_id": self.lead_member_id,
             "members": self.members.iter().map(|m| json!({"member_id": m.member_id, "handle": m.handle, "profile": m.profile, "model": m.model, "session": m.session})).collect::<Vec<_>>(),
             "events": self.events,
         })
@@ -86,7 +101,18 @@ impl Room {
             model: m["model"].as_str().map(str::to_string),
             session: m["session"].as_str().map(str::to_string),
         }).collect();
-        Ok(Room { room_id: v["room_id"].as_str().ok_or("room_id")?.into(), name: v["name"].as_str().unwrap_or("").into(), members, events: v["events"].as_array().cloned().unwrap_or_default(), disbanded: v["disbanded"] == true })
+        let routing = v["routing"].as_str().unwrap_or("everyone").trim().to_ascii_lowercase();
+        Ok(Room {
+            room_id: v["room_id"].as_str().ok_or("room_id")?.into(),
+            name: v["name"].as_str().unwrap_or("").into(),
+            purpose: v["purpose"].as_str().unwrap_or("").into(),
+            notes: v["notes"].as_str().unwrap_or("").into(),
+            routing: if ROUTING_MODES.contains(&routing.as_str()) { routing } else { "everyone".into() },
+            lead_member_id: v["lead_member_id"].as_str().unwrap_or("").into(),
+            members,
+            events: v["events"].as_array().cloned().unwrap_or_default(),
+            disbanded: v["disbanded"] == true,
+        })
     }
     pub fn save(&self, paths: &Paths) -> Result<(), String> {
         std::fs::create_dir_all(rooms_dir(paths)).map_err(|e| e.to_string())?;
@@ -134,14 +160,77 @@ pub fn parse_members(specs: &[String]) -> Result<Vec<Member>, String> {
     Ok(out)
 }
 
+/// Cron delivery (`deliver: room:<id>`): append one labelled gateway message to the room's log.
+/// It names the @mentions the job included so a room worker can start a round for those members;
+/// it never starts a round itself (a feed of scheduled results must not make every bot answer).
+pub fn post_message(data: &Path, id_or_name: &str, text: &str) -> Result<String, String> {
+    let paths = Paths { data: data.to_path_buf(), ..Default::default() };
+    let mut r = load(&paths, id_or_name)?;
+    if r.disbanded {
+        return Err(format!("room `{id_or_name}` is disbanded"));
+    }
+    let mentioned: Vec<String> = resolve_mentions(&[text], &r.members, false).iter().map(|m| m.handle.clone()).collect();
+    r.append("message.gateway", json!({"kind": "gateway", "source": "cron"}), json!({"text": text, "thread_id": "main", "mentions": mentioned, "scheduled": true}));
+    r.save(&paths)?;
+    Ok(format!("posted to room {} ({})", r.room_id, r.name))
+}
+
 pub fn create(paths: &Paths, name: &str, members: Vec<Member>) -> Result<Room, String> {
+    create_with(paths, name, members, "", "", "everyone", "")
+}
+
+/// `create` plus room settings (purpose, shared notes and lead/auto routing).
+pub fn create_with(paths: &Paths, name: &str, members: Vec<Member>, purpose: &str, notes: &str, routing: &str, lead: &str) -> Result<Room, String> {
     let name = name.trim();
     if name.is_empty() || name.chars().count() > 80 {
         return Err("room name must be 1–80 characters".into());
     }
-    let r = Room { room_id: format!("room-{}", seagent_kernel::util::random_hex(4)), name: name.into(), members, events: vec![], disbanded: false };
+    let (purpose, notes, routing, lead_member_id) = resolve_settings(&members, purpose, notes, routing, lead)?;
+    let r = Room { room_id: format!("room-{}", seagent_kernel::util::random_hex(4)), name: name.into(), purpose, notes, routing, lead_member_id, members, events: vec![], disbanded: false };
     r.save(paths)?;
     Ok(r)
+}
+
+/// Normalize and validate room settings. `lead` is a handle or member id; `lead` routing
+/// needs one, `everyone`/`auto` clear it.
+pub fn resolve_settings(members: &[Member], purpose: &str, notes: &str, routing: &str, lead: &str) -> Result<(String, String, String, String), String> {
+    let purpose = purpose.split_whitespace().collect::<Vec<_>>().join(" ");
+    if purpose.chars().count() > MAX_PURPOSE_CHARS {
+        return Err(format!("purpose must be at most {MAX_PURPOSE_CHARS} characters"));
+    }
+    let notes = notes.trim().to_string();
+    if notes.len() > MAX_NOTES_BYTES {
+        return Err(format!("notes must be at most {MAX_NOTES_BYTES} bytes"));
+    }
+    let routing = if routing.trim().is_empty() { "everyone".into() } else { routing.trim().to_ascii_lowercase() };
+    if !ROUTING_MODES.contains(&routing.as_str()) {
+        return Err(format!("routing must be one of {}", ROUTING_MODES.join(", ")));
+    }
+    let lead = lead.trim().trim_start_matches('@');
+    let lead_member_id = if routing == "lead" {
+        let m = members.iter().find(|m| m.member_id == lead || m.handle.eq_ignore_ascii_case(lead)).ok_or("lead routing needs a seated --lead <handle>")?;
+        m.member_id.clone()
+    } else {
+        String::new()
+    };
+    Ok((purpose, notes, routing, lead_member_id))
+}
+
+/// Change room settings; a field passed as `None` keeps its current value.
+pub fn set_context(paths: &Paths, room: &mut Room, purpose: Option<&str>, notes: Option<&str>, routing: Option<&str>, lead: Option<&str>) -> Result<(), String> {
+    let lead_handle = lead.unwrap_or_else(|| room.members.iter().find(|m| m.member_id == room.lead_member_id).map(|m| m.handle.as_str()).unwrap_or(""));
+    let (p, n, r, lid) = resolve_settings(
+        &room.members,
+        purpose.unwrap_or(&room.purpose),
+        notes.unwrap_or(&room.notes),
+        routing.unwrap_or(&room.routing),
+        lead_handle,
+    )?;
+    room.purpose = p;
+    room.notes = n;
+    room.routing = r;
+    room.lead_member_id = lid;
+    room.save(paths)
 }
 
 pub fn load(paths: &Paths, id_or_name: &str) -> Result<Room, String> {
@@ -256,7 +345,17 @@ pub fn build_prompt(r: &Room, m: &Member, thread: &[&Value], watermark: u64, see
     let delta: Vec<&&Value> = thread.iter().filter(|e| e["seq"].as_u64().is_some_and(|s| s > watermark && s <= seen)).collect();
     let delta = &delta[delta.len().saturating_sub(MAX_DELTA_LINES)..];
     let peers: Vec<String> = r.members.iter().filter(|x| x.member_id != m.member_id).map(|x| format!("@{}", x.handle)).collect();
-    let opening = format!("[Discussion: \"{}\"] You are @{}, one participant with {} and the user.\n\nNew messages in this thread since your last turn (oldest first):", r.name, m.handle, if peers.is_empty() { "no other members".into() } else { peers.join(", ") });
+    let mut opening = format!("[Discussion: \"{}\"] You are @{}, one participant with {} and the user.", r.name, m.handle, if peers.is_empty() { "no other members".into() } else { peers.join(", ") });
+    if !r.purpose.is_empty() {
+        opening.push_str(&format!("\nRoom purpose (set by the user): {}", r.purpose));
+    }
+    if !r.notes.is_empty() {
+        opening.push_str("\nRoom notes (shared with every member; the user keeps them in room settings):");
+        for line in r.notes.lines() {
+            opening.push_str(&format!("\n  {line}"));
+        }
+    }
+    opening.push_str("\n\nNew messages in this thread since your last turn (oldest first):");
     let rules = "\nRules for this Discussion:\n- Reply with one conversational message only when you have something new worth adding.\n- If you have nothing new to add, reply with exactly \"(pass)\".\n- Mention a teammate by handle to pull them into the next round; do not repeat points already made.\n- Never reveal content from private conversations. Your reply is published verbatim.";
     let mut avail = MAX_PROMPT_BYTES.saturating_sub(opening.len() + rules.len() + 2);
     let mut lines: Vec<String> = vec![];
@@ -276,26 +375,67 @@ pub fn build_prompt(r: &Room, m: &Member, thread: &[&Value], watermark: u64, see
     format!("{opening}\n{}\n{rules}", lines.join("\n"))
 }
 
-/// Replay the room log and decide the next member turn (at most one).
-pub fn plan_next(r: &Room) -> Decision {
+/// Activities before the latest Continue still finish the discussion; a Continue reopens it.
+fn done_discussions(ev: &[Value]) -> std::collections::HashSet<u64> {
+    let mut done = std::collections::HashSet::new();
+    for e in ev {
+        match e["kind"].as_str() {
+            Some("room.activity") if matches!(e["payload"]["status"].as_str(), Some("settled" | "bounded")) => {
+                if let Some(d) = e["payload"]["discussion_seq"].as_u64() {
+                    done.insert(d);
+                }
+            }
+            Some("room.continued") => {
+                if let Some(d) = e["payload"]["discussion_seq"].as_u64() {
+                    done.remove(&d);
+                }
+            }
+            _ => {}
+        }
+    }
+    done
+}
+
+fn continue_count(r: &Room, dseq: u64) -> usize {
+    r.events.iter().filter(|e| e["kind"] == "room.continued" && e["payload"]["discussion_seq"].as_u64() == Some(dseq)).count()
+}
+
+/// The newest user message whose discussion is still pending.
+fn pending_discussion(r: &Room) -> Option<&Value> {
     let ev = &r.events;
     let stopped = ev.iter().filter(|e| e["kind"] == "room.stop_requested").filter_map(|e| e["seq"].as_u64()).max().unwrap_or(0);
-    let done: Vec<u64> = ev.iter().filter(|e| e["kind"] == "room.activity" && matches!(e["payload"]["status"].as_str(), Some("settled" | "bounded"))).filter_map(|e| e["payload"]["discussion_seq"].as_u64()).collect();
-    // Latest user message per thread, oldest first.
+    let done = done_discussions(ev);
     let mut latest: Vec<&Value> = vec![];
     for e in ev.iter().filter(|e| e["kind"] == "message.user") {
         let t = e["payload"]["thread_id"].as_str().unwrap_or("main");
         latest.retain(|x| x["payload"]["thread_id"].as_str().unwrap_or("main") != t);
         latest.push(e);
     }
-    let Some(disc) = latest.into_iter().find(|e| e["seq"].as_u64().unwrap_or(0) > stopped && !done.contains(&e["seq"].as_u64().unwrap_or(0))) else { return Decision::Idle };
+    latest.into_iter().find(|e| e["seq"].as_u64().unwrap_or(0) > stopped && !done.contains(&e["seq"].as_u64().unwrap_or(0)))
+}
+
+/// The assignment the lead/router recorded for a discussion: (member ids, everyone).
+fn assignment_for(r: &Room, dseq: u64) -> Option<(Vec<String>, bool)> {
+    r.events.iter().rev().find(|e| e["kind"] == "room.assignment" && e["payload"]["discussion_seq"].as_u64() == Some(dseq)).map(|e| {
+        let ids = e["payload"]["member_ids"].as_array().map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect()).unwrap_or_default();
+        (ids, e["payload"]["everyone"].as_bool().unwrap_or(false))
+    })
+}
+
+/// Replay the room log and decide the next member turn (at most one).
+pub fn plan_next(r: &Room) -> Decision {
+    let ev = &r.events;
+    let Some(disc) = pending_discussion(r) else { return Decision::Idle };
     let dseq = disc["seq"].as_u64().unwrap_or(0);
     let thread_id = disc["payload"]["thread_id"].as_str().unwrap_or("main").to_string();
+    let continues = continue_count(r, dseq);
+    let max_messages = MAX_MESSAGES.saturating_mul(1 + continues);
+    let max_rounds = MAX_ROUNDS.saturating_mul(1 + continues);
     let committed: Vec<u64> = ev.iter().filter(|e| e["kind"] == "turn.settled").filter_map(|e| e["payload"]["message_seq"].as_u64()).collect();
     let thread: Vec<&Value> = ev.iter().filter(|e| e["payload"]["thread_id"].as_str().unwrap_or("main") == thread_id && (e["kind"] == "message.user" || (e["kind"] == "message.member" && committed.contains(&e["seq"].as_u64().unwrap_or(0))))).collect();
     let since: Vec<&Value> = thread.iter().copied().filter(|e| e["seq"].as_u64().unwrap_or(0) >= dseq).collect();
     let member_msgs: Vec<&Value> = since.iter().copied().filter(|e| e["kind"] == "message.member" && e["payload"]["discussion_seq"].as_u64() == Some(dseq)).collect();
-    if member_msgs.len() >= MAX_MESSAGES {
+    if member_msgs.len() >= max_messages {
         return Decision::Bounded("max_messages");
     }
     let terminals: Vec<(usize, String)> = ev.iter().filter(|e| e["kind"].as_str().is_some_and(|k| k.starts_with("turn.")) && e["payload"]["discussion_seq"].as_u64() == Some(dseq)).map(|e| (e["payload"]["round"].as_u64().unwrap_or(0) as usize, e["payload"]["member_id"].as_str().unwrap_or("").to_string())).collect();
@@ -303,9 +443,20 @@ pub fn plan_next(r: &Room) -> Decision {
     // (Hermes `_derive_member_watermarks`: every terminal counts; a published reply also
     // covers the member's own message.)
     let watermark = |mid: &str| ev.iter().filter(|e| e["kind"].as_str().is_some_and(|k| k.starts_with("turn.")) && e["payload"]["member_id"] == mid && e["payload"]["thread_id"].as_str().unwrap_or("main") == thread_id).map(|e| e["payload"]["seen_through"].as_u64().unwrap_or(0).max(e["payload"]["message_seq"].as_u64().unwrap_or(0))).max().unwrap_or(0);
-    for round in 0..MAX_ROUNDS {
+    for round in 0..max_rounds {
         let responders: Vec<&Member> = if round == 0 {
-            resolve_mentions(&[disc["payload"]["text"].as_str().unwrap_or("")], &r.members, true)
+            let named = resolve_mentions(&[disc["payload"]["text"].as_str().unwrap_or("")], &r.members, false);
+            if !named.is_empty() {
+                named
+            } else if let Some((ids, everyone)) = assignment_for(r, dseq) {
+                if everyone {
+                    r.members.iter().collect()
+                } else {
+                    r.members.iter().filter(|m| ids.contains(&m.member_id)).collect()
+                }
+            } else {
+                resolve_mentions(&[disc["payload"]["text"].as_str().unwrap_or("")], &r.members, true)
+            }
         } else {
             // Peers a bot cited and who have not posted since.
             let mut cited: Vec<(&Member, u64)> = vec![];
@@ -337,16 +488,231 @@ pub fn plan_next(r: &Room) -> Decision {
         if !member_msgs.iter().any(|e| e["payload"]["round"].as_u64() == Some(round as u64)) {
             return Decision::Settled("silent_round");
         }
-        if round == MAX_ROUNDS - 1 {
+        if round == max_rounds - 1 {
             return Decision::Bounded("max_rounds");
         }
     }
     Decision::Bounded("max_rounds")
 }
 
+/// The latest bounded discussion that may take another Continue, if any.
+fn paused_discussion(r: &Room) -> Option<(u64, String)> {
+    let bounded = r.events.iter().rev().find(|e| e["kind"] == "room.activity" && e["payload"]["status"] == "bounded")?;
+    let dseq = bounded["payload"]["discussion_seq"].as_u64()?;
+    let seq = bounded["seq"].as_u64().unwrap_or(0);
+    let thread_id = bounded["payload"]["thread_id"].as_str().unwrap_or("main").to_string();
+    if r.events.iter().any(|e| e["seq"].as_u64().unwrap_or(0) > seq && (e["kind"] == "room.stop_requested" || (e["kind"] == "message.user" && e["payload"]["thread_id"].as_str().unwrap_or("main") == thread_id))) {
+        return None;
+    }
+    if continue_count(r, dseq) >= MAX_DISCUSSION_CONTINUES {
+        return None;
+    }
+    // The latest Continue must not already have reopened this cap.
+    let last_continue = r.events.iter().filter(|e| e["kind"] == "room.continued" && e["payload"]["discussion_seq"].as_u64() == Some(dseq)).filter_map(|e| e["seq"].as_u64()).max().unwrap_or(0);
+    if last_continue > seq {
+        return None;
+    }
+    Some((dseq, thread_id))
+}
+
+/// `Continue` on a discussion that hit its cap: grants one more full round/message budget.
+pub fn continue_room(paths: &Paths, room: &mut Room) -> Result<usize, String> {
+    if room.disbanded {
+        return Err("room is disbanded".into());
+    }
+    let (dseq, thread_id) = paused_discussion(room).ok_or("no bounded discussion to continue (or the Continue limit was reached)")?;
+    let grant = continue_count(room, dseq) + 1;
+    room.append("room.continued", json!({"kind": "user"}), json!({"discussion_seq": dseq, "thread_id": thread_id, "grant": grant}));
+    room.save(paths)?;
+    Ok(grant)
+}
+
 /// Runs one member turn and returns its reply text.
 pub trait Runner {
     fn run(&self, room: &Room, member: &mut Member, prompt: &str) -> Result<String, String>;
+
+    /// `routing = "auto"`: a cheap router picks round-0 responders. `Ok(Some(ids))`
+    /// with an empty vec means everyone; `Ok(None)`/`Err` falls back to everyone.
+    fn route(&self, _room: &Room, _message: &str, _recent: &[(String, String)]) -> Result<Option<Vec<String>>, String> {
+        Ok(None)
+    }
+}
+
+const ROUTER_SYSTEM_PROMPT: &str = "You route messages in a group chat between a user and several AI assistants. Decide which members the user's new message is for: pick each member whose role or area the request touches, and only those. Pick everyone only when the message is clearly for the whole group. Never pick a member only to acknowledge or repeat another. Reply with only a JSON object and nothing else: {\"members\": [\"handle\", ...]} or {\"members\": \"everyone\"}.";
+
+fn router_prompt(room: &Room, message: &str, recent: &[(String, String)]) -> String {
+    let mut lines = vec![format!("Room: {}", room.name)];
+    if !room.purpose.is_empty() {
+        lines.push(format!("Purpose: {}", room.purpose));
+    }
+    if !room.notes.is_empty() {
+        lines.push(format!("Notes: {}", room.notes.chars().take(2000).collect::<String>()));
+    }
+    lines.push(String::new());
+    lines.push("Members:".into());
+    for m in &room.members {
+        let role = if m.profile.is_empty() { "".to_string() } else { format!(": {}", m.profile) };
+        lines.push(format!("- @{}{role}", m.handle));
+    }
+    if !recent.is_empty() {
+        lines.push(String::new());
+        lines.push("Recent messages (oldest first):".into());
+        for (who, text) in recent {
+            let flat = text.split_whitespace().collect::<Vec<_>>().join(" ");
+            lines.push(format!("  {who}: {}", flat.chars().take(600).collect::<String>()));
+        }
+    }
+    lines.push(String::new());
+    lines.push("The user's new message:".into());
+    lines.push(format!("  {}", message.chars().take(20_000).collect::<String>()));
+    lines.join("\n")
+}
+
+fn parse_router_answer(text: &str, members: &[Member]) -> Option<Vec<String>> {
+    let raw = text.trim().trim_start_matches("```json").trim_start_matches("```").trim_end_matches("```").trim();
+    let v: Value = serde_json::from_str(raw).ok()?;
+    if v.as_object().is_none_or(|o| o.len() != 1 || !o.contains_key("members")) {
+        return None;
+    }
+    let picked = &v["members"];
+    if picked.as_str() == Some("everyone") {
+        return Some(vec![]);
+    }
+    let arr = picked.as_array()?;
+    if arr.is_empty() {
+        return None;
+    }
+    let mut ids = vec![];
+    for item in arr {
+        let h = item.as_str()?.trim().trim_start_matches('@');
+        let m = members.iter().find(|m| m.handle.eq_ignore_ascii_case(h))?;
+        if !ids.contains(&m.member_id) {
+            ids.push(m.member_id.clone());
+        }
+    }
+    Some(ids)
+}
+
+/// The lead's routing turn: a lead that names nobody (or fails) gets the message itself.
+fn lead_routing_prompt(room: &Room, lead: &Member, message: &str, recent: &[(String, String)]) -> String {
+    let mut lines = vec![format!("[Discussion: \"{}\"] You are @{}, the lead of this room.", room.name, lead.handle)];
+    if !room.purpose.is_empty() {
+        lines.push(format!("Room purpose (set by the user): {}", room.purpose));
+    }
+    if !room.notes.is_empty() {
+        lines.push(format!("Room notes:\n{}", room.notes));
+    }
+    lines.push(String::new());
+    lines.push("Members:".into());
+    for m in &room.members {
+        lines.push(format!("- @{}{}", m.handle, if m.member_id == lead.member_id { " (you)" } else { "" }));
+    }
+    if !recent.is_empty() {
+        lines.push(String::new());
+        lines.push("Recent messages (oldest first):".into());
+        for (who, text) in recent {
+            lines.push(format!("  {who}: {}", text.split_whitespace().collect::<Vec<_>>().join(" ")));
+        }
+    }
+    lines.push(String::new());
+    lines.push("The message (from the user):".into());
+    lines.push(format!("  {message}"));
+    lines.push(String::new());
+    lines.push("You are the lead: decide who takes it, not answer it yourself here. Pick the member(s) whose role the request touches (yourself included when it is yours). Reply with only a JSON object and nothing else, for example {\"assign\": [\"handle\"]}.".into());
+    lines.join("\n")
+}
+
+fn parse_lead_assignment(text: &str, members: &[Member], lead: &Member) -> (Vec<String>, bool) {
+    let candidate = seagent_kernel::jsonschema::extract_json_candidate(text);
+    if let Ok(v) = serde_json::from_str::<Value>(&candidate) {
+        if let Some(arr) = v.get("assign").and_then(Value::as_array) {
+            let mut ids = vec![];
+            for item in arr {
+                if let Some(h) = item.as_str() {
+                    let h = h.trim().trim_start_matches('@');
+                    if let Some(m) = members.iter().find(|m| m.handle.eq_ignore_ascii_case(h)) {
+                        if !ids.contains(&m.member_id) {
+                            ids.push(m.member_id.clone());
+                        }
+                    }
+                }
+            }
+            if !ids.is_empty() {
+                return (ids, false);
+            }
+        }
+    }
+    (vec![lead.member_id.clone()], true)
+}
+
+fn recent_messages(room: &Room, before_seq: u64) -> Vec<(String, String)> {
+    let mut rows: Vec<(String, String)> = room
+        .events
+        .iter()
+        .filter(|e| e["seq"].as_u64().is_some_and(|s| s < before_seq) && (e["kind"] == "message.user" || e["kind"] == "message.member"))
+        .map(|e| {
+            let who = if e["kind"] == "message.user" {
+                "user".to_string()
+            } else {
+                room.member(e["payload"]["member_id"].as_str().unwrap_or("")).map(|m| m.handle.clone()).unwrap_or_else(|| "member".into())
+            };
+            (who, e["payload"]["text"].as_str().unwrap_or("").to_string())
+        })
+        .collect();
+    if rows.len() > 5 {
+        rows = rows.split_off(rows.len() - 5);
+    }
+    rows
+}
+
+/// Record the lead/auto assignment for a new, unaddressed discussion. Best-effort: a
+/// failed router falls back to everyone, a failed lead to the lead alone.
+fn ensure_routing(paths: &Paths, room: &mut Room, runner: &dyn Runner) -> Result<(), String> {
+    if room.routing == "everyone" {
+        return Ok(());
+    }
+    let Some(disc) = pending_discussion(room) else { return Ok(()) };
+    let dseq = disc["seq"].as_u64().unwrap_or(0);
+    let thread_id = disc["payload"]["thread_id"].as_str().unwrap_or("main").to_string();
+    let text = disc["payload"]["text"].as_str().unwrap_or("").to_string();
+    if assignment_for(room, dseq).is_some() {
+        return Ok(());
+    }
+    // Explicit mentions (and @all) always win; only a new thread is routable.
+    if !resolve_mentions(&[text.as_str()], &room.members, false).is_empty() {
+        return Ok(());
+    }
+    if room.events.iter().any(|e| e["seq"].as_u64().is_some_and(|s| s < dseq) && e["payload"]["thread_id"].as_str().unwrap_or("main") == thread_id && (e["kind"] == "message.user" || e["kind"] == "message.member")) {
+        return Ok(());
+    }
+    let recent = recent_messages(room, dseq);
+    let (ids, everyone, fallback, source) = if room.routing == "lead" {
+        let Some(lead) = room.member(&room.lead_member_id).cloned() else {
+            return Ok(());
+        };
+        let prompt = lead_routing_prompt(room, &lead, &text, &recent);
+        let mut m = lead.clone();
+        let answer = runner.run(room, &mut m, &prompt);
+        if let Some(slot) = room.members.iter_mut().find(|x| x.member_id == lead.member_id) {
+            *slot = m;
+        }
+        let (ids, fallback) = match answer {
+            Ok(a) => parse_lead_assignment(&a, &room.members, &lead),
+            Err(_) => (vec![lead.member_id.clone()], true),
+        };
+        (ids, false, fallback, "lead")
+    } else {
+        match runner.route(room, &text, &recent) {
+            Ok(Some(ids)) if ids.is_empty() => (vec![], true, false, "router"),
+            Ok(Some(ids)) => (ids, false, false, "router"),
+            _ => (vec![], true, true, "router"),
+        }
+    };
+    room.append("room.assignment", json!({"kind": "gateway"}), json!({
+        "discussion_seq": dseq, "thread_id": thread_id, "member_ids": ids,
+        "everyone": everyone, "fallback": fallback, "routing": room.routing, "source": source,
+    }));
+    room.save(paths)
 }
 
 /// Members run as sessions of this kernel (their own session per room, optional model);
@@ -386,6 +752,13 @@ impl Runner for KernelRunner {
         let out = self.k.run(&sid, RunOpts::default()).map_err(|e| e.to_string())?;
         Ok(out.text)
     }
+
+    fn route(&self, room: &Room, message: &str, recent: &[(String, String)]) -> Result<Option<Vec<String>>, String> {
+        let model = self.k.cfg.task_model("group_router");
+        let prompt = router_prompt(room, message, recent);
+        let (reply, _used, _stop) = self.k.sample(Some(&model), ROUTER_SYSTEM_PROMPT, vec![Message::user(prompt)], vec![], 200, &Cancel::new())?;
+        Ok(parse_router_answer(&reply.text(), &room.members))
+    }
 }
 
 /// Post a user message and drive the Discussion to completion; `on_msg` sees each
@@ -404,11 +777,14 @@ pub fn say(paths: &Paths, room: &mut Room, text: &str, runner: &dyn Runner, on_m
 }
 
 pub fn drive(paths: &Paths, room: &mut Room, runner: &dyn Runner, on_msg: &mut dyn FnMut(&str)) -> Result<&'static str, String> {
-    for _ in 0..(MAX_ROUNDS * MAX_MEMBERS + 2) {
+    for _ in 0..(MAX_ROUNDS * (MAX_DISCUSSION_CONTINUES + 1) * MAX_MEMBERS + 2) {
         // Re-read: a `stop` from another terminal lands in the file.
         if let Ok(fresh) = load(paths, &room.room_id) {
             room.events = fresh.events;
             room.disbanded = fresh.disbanded;
+        }
+        if ensure_routing(paths, room, runner).is_err() {
+            // A router/lead call is advisory: fall through to the normal round.
         }
         match plan_next(room) {
             Decision::Idle => return Ok("idle"),
@@ -467,7 +843,13 @@ pub fn transcript(r: &Room, last: usize) -> String {
 }
 
 fn summary(r: &Room) -> String {
-    format!("{}  {}  ({})", r.room_id, r.name, r.members.iter().map(|m| format!("@{}{}", m.handle, m.model.as_ref().map(|x| format!("[{x}]")).unwrap_or_default())).collect::<Vec<_>>().join(" "))
+    let routing = match r.routing.as_str() {
+        "lead" => format!(" · lead @{}", r.members.iter().find(|m| m.member_id == r.lead_member_id).map(|m| m.handle.as_str()).unwrap_or("?")),
+        "auto" => " · auto-routed".to_string(),
+        _ => String::new(),
+    };
+    let purpose = if r.purpose.is_empty() { String::new() } else { format!(" — {}", r.purpose) };
+    format!("{}  {}{purpose}  [{}]{routing}", r.room_id, r.name, r.members.iter().map(|m| format!("@{}{}", m.handle, m.model.as_ref().map(|x| format!("[{x}]")).unwrap_or_default())).collect::<Vec<_>>().join(" "))
 }
 
 // ───────────── CLI / slash ─────────────
@@ -481,10 +863,29 @@ pub fn dispatch(cmd: &str, a: &Args, _raw: &[String]) -> Option<R> {
 
 fn cli(a: &Args) -> R {
     let paths = Paths::from_env();
+    let one = |key: &str| a.vals(key).into_iter().next().unwrap_or_default();
     match a.pos(0).unwrap_or("list") {
         "create" => {
-            let r = create(&paths, &a.rest(1), parse_members(&a.vals("member"))?)?;
+            let members = parse_members(&a.vals("member"))?;
+            let (purpose, notes, routing, lead) = (one("purpose"), one("notes"), one("routing"), one("lead"));
+            let r = if purpose.is_empty() && notes.is_empty() && routing.is_empty() && lead.is_empty() {
+                create(&paths, &a.rest(1), members)?
+            } else {
+                create_with(&paths, &a.rest(1), members, &purpose, &notes, &routing, &lead)?
+            };
             println!("✓ created {}", summary(&r));
+        }
+        "update" | "set" => {
+            let mut r = load(&paths, a.need(1, "room")?)?;
+            let purpose = a.vals("purpose").into_iter().next();
+            let notes = a.vals("notes").into_iter().next();
+            let routing = a.vals("routing").into_iter().next();
+            let lead = a.vals("lead").into_iter().next();
+            if purpose.is_none() && notes.is_none() && routing.is_none() && lead.is_none() {
+                return Err("rooms update needs at least one of --purpose, --notes, --routing, --lead".into());
+            }
+            set_context(&paths, &mut r, purpose.as_deref(), notes.as_deref(), routing.as_deref(), lead.as_deref())?;
+            println!("✓ updated {}", summary(&r));
         }
         "list" => {
             let l = list(&paths);
@@ -507,6 +908,14 @@ fn cli(a: &Args) -> R {
             let status = say(&paths, &mut r, &text, &runner, &mut |m| println!("{m}\n"))?;
             eprintln!("· discussion {status}");
         }
+        "continue" => {
+            let mut r = load(&paths, a.need(1, "room")?)?;
+            let grant = continue_room(&paths, &mut r)?;
+            let c = crate::build_agent(a, crate::approver_for(a, true), false)?;
+            let runner = KernelRunner { k: c.k.clone(), workspace: c.workspace.clone() };
+            let status = drive(&paths, &mut r, &runner, &mut |m| println!("{m}\n"))?;
+            eprintln!("· discussion continued (grant {grant}): {status}");
+        }
         "stop" => {
             let mut r = load(&paths, a.need(1, "room")?)?;
             stop(&paths, &mut r)?;
@@ -518,12 +927,12 @@ fn cli(a: &Args) -> R {
             r.save(&paths)?;
             println!("✓ disbanded {}", r.room_id);
         }
-        other => return Err(format!("unknown `seagent rooms {other}` (create <name> --member profile[:handle][@model]… | list | show | say <room> <text> | stop | disband)").into()),
+        other => return Err(format!("unknown `seagent rooms {other}` (create <name> --member profile[:handle][@model]… [--purpose … --notes … --routing everyone|lead|auto --lead <handle>] | update <room> … | list | show | say <room> <text> | continue <room> | stop | disband)").into()),
     }
     Ok(0)
 }
 
-pub const SLASH: &[Def] = &[Def { name: "room", aliases: &["group"], args: "[list|<room> <message>|stop <room>]", help: "Group chat: several agents discuss your message in turns", category: "Session", admin: true, local: true, run: slash_room }];
+pub const SLASH: &[Def] = &[Def { name: "room", aliases: &["group"], args: "[list|<room> <message>|continue <room>|stop <room>]", help: "Group chat: several agents discuss your message in turns", category: "Session", admin: true, local: true, run: slash_room }];
 
 fn slash_room(c: &Ctx, a: &str) -> Result<Reply, String> {
     let paths = c.k.paths.clone();
@@ -540,6 +949,31 @@ fn slash_room(c: &Ctx, a: &str) -> Result<Reply, String> {
             let mut r = load(&paths, id)?;
             stop(&paths, &mut r)?;
             text("stop requested".into())
+        }
+        ("continue", id) => {
+            let mut r = load(&paths, id)?;
+            let grant = continue_room(&paths, &mut r)?;
+            let runner = KernelRunner { k: c.k.clone(), workspace: c.workspace.clone() };
+            match c.notify.clone() {
+                Some(n) => {
+                    let paths = paths.clone();
+                    std::thread::spawn(move || {
+                        let n2 = n.clone();
+                        let res = drive(&paths, &mut r, &runner, &mut |m| n2(m.to_string()));
+                        n(match res {
+                            Ok(s) => format!("· discussion continued (grant {grant}): {s}"),
+                            Err(e) => format!("✗ room: {e}"),
+                        });
+                    });
+                    text(format!("continued {} — members reply below", r_name(id)))
+                }
+                None => {
+                    let mut out = vec![];
+                    let s = drive(&paths, &mut r, &runner, &mut |m| out.push(m.to_string()))?;
+                    out.push(format!("· discussion continued (grant {grant}): {s}"));
+                    text(out.join("\n\n"))
+                }
+            }
         }
         (id, "") => {
             let r = load(&paths, id)?;
@@ -739,5 +1173,99 @@ mod tests {
         assert!(crate::slash::run(&c, &format!("/group {}", r.room_id)).unwrap().text.unwrap().contains("User (user): hello team"));
         assert_eq!(crate::slash::run(&c, &format!("/room stop {}", r.room_id)).unwrap().text.unwrap(), "stop requested");
         assert!(load(&p, &r.room_id).unwrap().events.iter().any(|e| e["kind"] == "room.stop_requested"));
+    }
+    #[test]
+    fn cron_post_appends_a_labelled_message_and_mentions() {
+        let d = seagent_core::tmp::scratch_path(format!("seagent-room-post-{}", seagent_kernel::util::random_hex(6)));
+        let p = Paths { data: d.clone(), ..Default::default() };
+        let r = room(&p);
+        let receipt = post_message(&d, &r.room_id, "nightly digest @bob").unwrap();
+        assert!(receipt.contains(&r.room_id), "{receipt}");
+        let got = load(&p, &r.room_id).unwrap();
+        let ev = got.events.last().unwrap();
+        assert_eq!((ev["kind"].as_str(), ev["actor"]["source"].as_str()), (Some("message.gateway"), Some("cron")));
+        assert_eq!(ev["payload"]["text"], "nightly digest @bob");
+        assert_eq!(ev["payload"]["mentions"], json!(["bob"]), "only mentioned members are named");
+        assert!(post_message(&d, "no-such-room", "x").unwrap_err().contains("no room"));
+    }
+
+    #[test]
+    fn room_settings_lead_auto_routing_and_continue() {
+        let kit = crate::testkit::kit();
+        let p = kit.paths.clone();
+        let members = parse_members(&["alice".into(), "bob".into()]).unwrap();
+        assert!(resolve_settings(&members, "", "", "bogus", "").unwrap_err().contains("routing"));
+        assert!(resolve_settings(&members, "", "", "lead", "").unwrap_err().contains("--lead"));
+        assert!(resolve_settings(&members, &"x".repeat(MAX_PURPOSE_CHARS + 1), "", "", "").unwrap_err().contains("purpose"));
+        assert!(resolve_settings(&members, "", &"x".repeat(MAX_NOTES_BYTES + 1), "", "").unwrap_err().contains("notes"));
+
+        // Lead routing: an unaddressed new message goes to the lead as a routing turn, which names bob.
+        let mut r = create_with(&p, "lead room", members, "Review APIs", "Shared: run fmt", "lead", "alice").unwrap();
+        assert_eq!(r.lead_member_id, r.members[0].member_id);
+        assert!(summary(&r).contains("lead @alice") && summary(&r).contains("Review APIs"));
+        let s = Script(RefCell::new(vec![]), |h, prompt, _n| {
+            if prompt.contains("the lead of this room") {
+                "{\"assign\":[\"bob\"]}".into()
+            } else if h == "bob" {
+                "I reviewed the API.".into()
+            } else {
+                "(pass)".into()
+            }
+        });
+        let mut seen = vec![];
+        assert_eq!(say(&p, &mut r, "please look at the API", &s, &mut |m| seen.push(m.to_string())).unwrap(), "settled");
+        assert_eq!(s.0.borrow().iter().map(|(h, _)| h.as_str()).collect::<Vec<_>>(), ["alice", "bob"], "lead routes, bob answers");
+        assert!(seen.iter().any(|m| m.starts_with("@bob: I reviewed")));
+        let assignment = r.events.iter().find(|e| e["kind"] == "room.assignment").unwrap();
+        assert_eq!(assignment["payload"]["source"], "lead");
+        assert_eq!(assignment["payload"]["member_ids"], json!([r.members[1].member_id.clone()]));
+        let bob_prompt = s.0.borrow().iter().find(|(h, _)| h == "bob").unwrap().1.clone();
+        assert!(bob_prompt.contains("Room purpose (set by the user): Review APIs"), "{bob_prompt}");
+        assert!(bob_prompt.contains("Shared: run fmt"), "{bob_prompt}");
+
+        // Auto routing: the cheap router picks carol, and nobody else takes round 0.
+        let mut a = create_with(&p, "auto room", parse_members(&["alice".into(), "bob".into(), "carol".into()]).unwrap(), "Triage", "", "auto", "").unwrap();
+        struct Routed {
+            calls: RefCell<Vec<String>>,
+            pick: usize,
+        }
+        impl Runner for Routed {
+            fn run(&self, _: &Room, m: &mut Member, _: &str) -> Result<String, String> {
+                self.calls.borrow_mut().push(m.handle.clone());
+                Ok("(pass)".into())
+            }
+            fn route(&self, room: &Room, _: &str, _: &[(String, String)]) -> Result<Option<Vec<String>>, String> {
+                Ok(Some(vec![room.members[self.pick].member_id.clone()]))
+            }
+        }
+        let routed = Routed { calls: RefCell::new(vec![]), pick: 2 };
+        say(&p, &mut a, "please triage this", &routed, &mut |_| {}).unwrap();
+        assert_eq!(routed.calls.borrow().as_slice(), ["carol"]);
+        let assignment = a.events.iter().find(|e| e["kind"] == "room.assignment").unwrap();
+        assert_eq!(assignment["payload"]["source"], "router");
+        assert_eq!(assignment["payload"]["member_ids"], json!([a.members[2].member_id.clone()]));
+
+        // Continue past the message cap: one grant reopens the same discussion; a second
+        // Continue without another cap is refused.
+        let mut c = create(&p, "bounded", parse_members(&["a".into(), "b".into()]).unwrap()).unwrap();
+        c.append("message.user", json!({"kind": "user"}), json!({"text": "go", "thread_id": "main"}));
+        for i in 0..MAX_MESSAGES {
+            let mid = c.members[i % 2].member_id.clone();
+            let seq = c.append("message.member", json!({"kind": "member", "id": mid}), json!({"text": format!("reply {i}"), "member_id": mid, "discussion_seq": 1, "round": 0, "thread_id": "main"}));
+            c.append("turn.settled", json!({"kind": "gateway"}), json!({"discussion_seq": 1, "member_id": mid, "round": 0, "thread_id": "main", "seen_through": seq, "passed": false, "message_seq": seq}));
+        }
+        assert_eq!(plan_next(&c), Decision::Bounded("max_messages"));
+        c.append("room.activity", json!({"kind": "gateway"}), json!({"status": "bounded", "reason_code": "max_messages", "discussion_seq": 1, "thread_id": "main"}));
+        assert_eq!(continue_room(&p, &mut c).unwrap(), 1);
+        assert!(!matches!(plan_next(&c), Decision::Bounded(_)), "a Continue grants another budget");
+        assert!(continue_room(&p, &mut c).is_err(), "no second Continue until the reopened discussion caps again");
+
+        // Old room files (before purpose/routing existed) load with safe defaults.
+        let legacy = json!({"room_id": "room-legacy", "name": "Legacy", "members": [{"member_id": "m1", "handle": "a", "profile": "a"}], "events": []});
+        std::fs::create_dir_all(rooms_dir(&p)).unwrap();
+        std::fs::write(rooms_dir(&p).join("room-legacy.json"), serde_json::to_string(&legacy).unwrap()).unwrap();
+        let old = load(&p, "room-legacy").unwrap();
+        assert_eq!((old.routing.as_str(), old.purpose.as_str(), old.notes.as_str()), ("everyone", "", ""));
+        assert!(old.lead_member_id.is_empty());
     }
 }

@@ -155,7 +155,9 @@ pub fn context_report(k: &Kernel, session: Option<&str>) -> String {
         (true, Some(sid)) => out.push_str(&format!("Context — session {sid}\n")),
         _ => out.push_str(&format!("Context — no session yet, showing the defaults a new session in {} starts with\n", view.workspace)),
     }
-    out.push_str(&format!("model {} · window {} tokens\n", if view.model.is_empty() { "(none)" } else { &view.model }, n(window)));
+    let marker = k.window_marker(&view.model);
+    let note = if marker.is_empty() { String::new() } else { format!(" ({marker})") };
+    out.push_str(&format!("model {} · window {}{note} tokens\n", if view.model.is_empty() { "(none)" } else { &view.model }, n(window)));
 
     let system_tokens: u64 = view.system.iter().map(|s| estimate_tokens(&s.text) + 4).sum();
     let (tool_count, tools_tokens) = tool_tokens(k, &cfg);

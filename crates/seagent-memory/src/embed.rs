@@ -609,6 +609,24 @@ fn bearer(key: &str) -> Vec<(String, String)> {
     }
 }
 
+/// Ollama embedding endpoints are operator-configured, but a LAN/private target is still an
+/// SSRF surface. Loopback/localhost stay allowed (the default install); any other private or
+/// metadata host is refused when `[memory.search.embedding] allow_private = false`.
+fn check_ollama_endpoint(url: &str, allow_private: bool) -> Result<(), String> {
+    let p = seagent_security::url_safety::parse_http(url).map_err(|e| format!("ollama embeddings base_url: {e}"))?;
+    let host = p.host.trim_matches(['[', ']']).to_ascii_lowercase();
+    let loopback = host == "localhost" || host.ends_with(".localhost") || host.parse::<std::net::IpAddr>().is_ok_and(|ip| ip.is_loopback());
+    // Cloud metadata is a floor even with allow_private.
+    let policy = seagent_security::url_safety::UrlPolicy { allow_private_urls: allow_private || loopback, ..Default::default() };
+    let hp = seagent_security::url_safety::HostPolicy { url: &policy, allowed_hostnames: &[], hostname_allowlist: &[], blocked_hostnames: &[] };
+    let checked = seagent_security::url_safety::check_host(&host, &p.scheme, &hp);
+    if allow_private || loopback {
+        checked
+    } else {
+        checked.map_err(|e| format!("{e}; for a trusted LAN Ollama set [memory.search.embedding] allow_private = true"))
+    }
+}
+
 /// Resolve the configured provider. `Ok(None)` = FTS-only (provider `none`, or `auto` with no key).
 pub fn build(s: &EmbeddingSettings, subst: &Subst) -> Result<Option<Arc<dyn Embedder>>, String> {
     let provider = s.provider.trim().to_lowercase();
@@ -693,7 +711,9 @@ pub fn build(s: &EmbeddingSettings, subst: &Subst) -> Result<Option<Arc<dyn Embe
             let k = key(&["OLLAMA_API_KEY"]);
             let mut h = bearer(&k);
             h.append(&mut extra);
-            Arc::new(Ollama { base: base("http://127.0.0.1:11434"), model: model("nomic-embed-text"), headers: h, dimensions: s.dimensions, timeout })
+            let base = base("http://127.0.0.1:11434");
+            check_ollama_endpoint(&base, s.allow_private)?;
+            Arc::new(Ollama { base, model: model("nomic-embed-text"), headers: h, dimensions: s.dimensions, timeout })
         }
         "bedrock" | "amazon-bedrock" => {
             let region = if !s.region.is_empty() {
@@ -854,6 +874,25 @@ mod tests {
         assert_eq!(reqs[1].json()["requests"][0]["content"]["parts"][1]["inlineData"]["mimeType"], "image/png");
         assert_eq!(reqs[1].json()["requests"][0]["outputDimensionality"], 3072);
     }
+
+    /// OpenClaw-ext #7 (967dd72c07f): loopback Ollama always works; a LAN/private endpoint works
+    /// unless `allow_private = false`; cloud metadata is refused even with it.
+    #[test]
+    fn ollama_private_network_policy() {
+        let mut s = settings("ollama", "http://127.0.0.1:11434");
+        assert!(build(&s, &subst()).is_ok(), "the default loopback endpoint stays usable");
+        s.base_url = "http://localhost:11434".into();
+        assert!(build(&s, &subst()).is_ok(), "localhost is the provider's own host");
+        s.base_url = "http://192.168.1.5:11434".into();
+        assert!(build(&s, &subst()).is_ok(), "a configured on-prem LAN endpoint works by default");
+        s.allow_private = false;
+        let e = build(&s, &subst()).err().unwrap();
+        assert!(e.contains("private or internal") && e.contains("allow_private = true"), "{e}");
+        s.allow_private = true;
+        s.base_url = "http://169.254.169.254/latest".into();
+        assert!(build(&s, &subst()).is_err(), "metadata is a floor even with allow_private");
+    }
+
 
     #[test]
     fn ollama_templates_and_truncation() {

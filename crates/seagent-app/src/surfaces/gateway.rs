@@ -301,7 +301,14 @@ impl GatewayTool {
                 };
                 let payload = json!({"ok": true, "result": result});
                 if serde_json::to_string_pretty(&payload).unwrap_or_default().len() > MAX_GET_CHARS {
-                    return Err("config.get response is too large; use path to request a narrower config subtree".into());
+                    if p["path"].as_str().is_some_and(|s| !s.trim().is_empty()) {
+                        return Err("config.get response is too large; use path to request a narrower config subtree".into());
+                    }
+                    // The whole config outgrew one tool result: still hand back the hash (needed
+                    // for config.patch / config.apply) and the top-level keys to narrow with `path`.
+                    let keys: Vec<&String> = full.as_object().map(|o| o.keys().collect()).unwrap_or_default();
+                    return Ok(json!({"ok": true, "result": {"hash": hash, "path": env.user_config, "truncated": true, "keys": keys,
+                        "message": "config.get response is too large; use path to request a narrower config subtree"}}));
                 }
                 Ok(payload)
             }

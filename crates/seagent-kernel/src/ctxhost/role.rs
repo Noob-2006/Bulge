@@ -136,7 +136,7 @@ pub fn refresh(k: &Kernel, session: &str, role: Option<&Role>) -> Result<(), Str
     if segs == current {
         return Ok(());
     }
-    k.record(session, crate::event::EventKind::System { segments: segs }).map_err(|e| e.to_string())
+    k.update_system(session, segs).map_err(|e| e.to_string())
 }
 
 pub fn command(host: &Host, k: &Kernel, session: Option<&str>, args: &str) -> String {

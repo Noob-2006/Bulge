@@ -251,6 +251,38 @@ fn child_events(e: &Env, id: &str) -> Vec<EventKind> {
     e.k.store.read(id).unwrap().into_iter().map(|ev| ev.kind).collect()
 }
 
+/// A child provider that delays its first chunk deliberately: the prompt-cache gate must
+/// hold the sibling until the leader's chunk has started, not just until both are spawned.
+struct Warmup {
+    calls: AtomicUsize,
+    first_seen: AtomicBool,
+    saw_first: AtomicBool,
+}
+
+impl Provider for Warmup {
+    fn id(&self) -> &str {
+        "warm"
+    }
+    fn caps(&self, _: &str) -> ModelCaps {
+        ModelCaps { context_window: 200_000, max_output: 8192, tools: true, vision: false, explicit_cache: true }
+    }
+    fn complete(&self, _: &ModelRequest, on: &mut dyn FnMut(StreamEvent), _: &Cancel) -> Result<ModelResponse, ProviderError> {
+        match self.calls.fetch_add(1, Ordering::SeqCst) {
+            0 => {
+                std::thread::sleep(Duration::from_millis(200));
+                self.first_seen.store(true, Ordering::SeqCst);
+                on(StreamEvent::TextDelta("leader first chunk".into()));
+                Ok(resp(vec![Block::text("leader done")], StopReason::EndTurn))
+            }
+            1 => {
+                self.saw_first.store(self.first_seen.load(Ordering::SeqCst), Ordering::SeqCst);
+                Ok(resp(vec![Block::text("sibling done")], StopReason::EndTurn))
+            }
+            _ => Ok(resp(vec![Block::text("unexpected")], StopReason::EndTurn)),
+        }
+    }
+}
+
 mod agents_tools {
     use super::*;
 
@@ -848,7 +880,16 @@ mod agents_tools {
     fn steered_text_reaches_the_childs_next_request() {
         let e = env();
         // First child step: a tool call, so the child needs another step (where steering lands).
-        e.c.push(|_| Ok(resp(vec![Block::ToolUse { id: "tu_child".into(), name: "noop".into(), input: json!({}) }], StopReason::ToolUse)));
+        // It holds until the parent's third request (sent after the steer call ran), so the
+        // child is still live when steered instead of racing the parent.
+        let parent = e.p.clone();
+        e.c.push(move |_| {
+            let until = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            while parent.requests().len() < 3 && std::time::Instant::now() < until {
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            Ok(resp(vec![Block::ToolUse { id: "tu_child".into(), name: "noop".into(), input: json!({}) }], StopReason::ToolUse))
+        });
         e.c.text("followed the steer");
         // Parent: dispatch in the background, then steer the live child, then end the turn.
         e.p.call("delegate_task", json!({"tasks": [{"goal": "long job"}]}));
@@ -894,5 +935,117 @@ mod agents_tools {
         }
         // The children are real sessions under this parent, not promises.
         assert_eq!(child_sessions(&e, &id).len(), 6);
+    }
+
+    #[test]
+    fn forked_child_reuses_the_parent_prefix_and_guards_tools_at_execution() {
+        let e = env();
+        // Child fork defaults to the parent's model, so both requests go to the same script.
+        e.p.call("delegate_task", json!({"background": false, "tasks": [{"goal": "find the parser bug", "fork": true}]}));
+        e.p.call("clarify", json!({"question": "which file?"}));
+        e.p.text("child report");
+        e.p.text("parent done");
+
+        let parent = parent_session(&e, "Investigate the parser");
+        let o = e.k.run(&parent, RunOpts::default()).unwrap();
+        assert!(o.reason.ok(), "{:?}", o.reason);
+        let reqs = e.p.requests();
+        assert!(reqs.len() >= 3, "parent, child, child after tool: {}", reqs.len());
+        let (parent_req, child_req) = (&reqs[0], &reqs[1]);
+        let child = child_sessions(&e, &parent)[0].clone();
+        assert_eq!(child_req.system, parent_req.system, "fork must reuse the parent's system prompt byte for byte");
+        assert_eq!(child_req.tools, parent_req.tools, "fork must reuse the parent's tool list byte for byte");
+        assert_eq!(child_req.messages.len(), parent_req.messages.len() + 1, "the child task is appended");
+        assert_eq!(&child_req.messages[..parent_req.messages.len()], &parent_req.messages[..], "the parent's messages are an exact prefix");
+        assert!(child_req.messages.last().unwrap().text().contains("find the parser bug"));
+        assert!(child_req.messages.last().unwrap().text().contains("TASK:"));
+
+        let pv = project(&e.k.store.read(&parent).unwrap());
+        let cv = project(&e.k.store.read(&child).unwrap());
+        assert_eq!(cv.system, pv.system, "the persisted child system is the parent's");
+        assert!(!cv.system.iter().any(|s| s.id == "subagent"), "no child-only system segment");
+        assert!(child_events(&e, &child).iter().any(|k| matches!(k, EventKind::ToolGuard { .. })), "restrictions live in a guard event");
+        // The parent's `clarify` stays in the advertised list, but calling it is refused.
+        assert!(child_req.tools.iter().any(|t| t.name == "clarify"));
+        let results = tool_results(&e, &child);
+        assert!(results[0].1, "clarify must be refused at execution: {}", results[0].0);
+        assert!(results[0].0.contains("not available"), "{}", results[0].0);
+        assert_eq!(e.c.requests().len(), 0, "a fork stays on the parent's route");
+    }
+
+    #[test]
+    fn prefix_stagger_holds_siblings_until_the_leaders_first_chunk() {
+        struct Mixed(HashMap<String, Arc<dyn Provider>>);
+        impl Resolver for Mixed {
+            fn provider(&self, id: &str) -> Result<Arc<dyn Provider>, String> {
+                self.0.get(id).cloned().ok_or_else(|| format!("no provider {id}"))
+            }
+        }
+
+        let root = seagent_core::tmp::scratch_path(format!("seagent-warmup-{}", rand_hex()));
+        let ws = root.join("ws");
+        std::fs::create_dir_all(&ws).unwrap();
+        let paths = Paths { data: root.join("data"), config_dir: root.join("cfg"), runtime: root.join("run"), ..Default::default() };
+        let mut cfg = Config::default();
+        cfg.model.default = "main/m1".into();
+        cfg.model.subagent = "warm/w1".into();
+        cfg.model.aux = "main/m1".into();
+        cfg.checkpoint.enabled = false;
+        cfg.delegation.prefix_stagger_seconds = 2;
+        let p = Scripted::new("main");
+        let warm = Arc::new(Warmup { calls: AtomicUsize::new(0), first_seen: AtomicBool::new(false), saw_first: AtomicBool::new(false) });
+        let mut map: HashMap<String, Arc<dyn Provider>> = HashMap::new();
+        map.insert("main".into(), p.clone());
+        map.insert("warm".into(), warm.clone());
+        let k = new_kernel(cfg, paths, Arc::new(Mixed(map)), vec![], Arc::new(Vault::empty()), Arc::new(Yes));
+
+        p.call("delegate_task", json!({"model": "warm/w1", "background": false, "tasks": [{"goal": "first"}, {"goal": "second"}]}));
+        p.text("parent done");
+        let id = k.create_session(&ws, None, None, Some("warm batch")).unwrap();
+        k.submit(&id, "run both", "cli").unwrap();
+        let o = k.run(&id, RunOpts::default()).unwrap();
+        assert!(o.reason.ok(), "{:?}", o.reason);
+        assert_eq!(warm.calls.load(Ordering::SeqCst), 2, "both children ran");
+        assert!(warm.saw_first.load(Ordering::SeqCst), "the sibling started only after the leader's first chunk");
+        let out = p.requests();
+        let result = out.iter().rev().flat_map(|r| r.messages.iter()).flat_map(|m| m.content.iter()).find_map(|b| match b {
+            Block::ToolResult { content, is_error: false, .. } => serde_json::from_str::<Value>(content).ok(),
+            _ => None,
+        }).expect("delegate result");
+        assert_eq!(result["results"].as_array().map(|a| a.len()), Some(2), "{result}");
+    }
+
+    #[test]
+    fn ralph_runs_fresh_rounds_with_a_bounded_handoff_and_progress_file() {
+        let e = env();
+        e.p.call("ralph", json!({"objective": "Long objective: fix the flaky parser", "max_rounds": 3, "progress_file": "state/ralph.md"}));
+        e.p.text("parent done");
+        e.c.text(r#"{"status":"continue","summary":"found the failing test","evidence":["cargo test parser fails"],"next_steps":["fix the tokenizer"],"blocker":""}"#);
+        e.c.text(r#"{"status":"complete","summary":"tokenizer fixed","evidence":["cargo test parser passes"],"next_steps":[],"blocker":""}"#);
+
+        let parent = parent_session(&e, "Start the long objective");
+        let o = e.k.run(&parent, RunOpts::default()).unwrap();
+        assert!(o.reason.ok(), "{:?}", o.reason);
+        let out = tool_json(&e, &parent, 0);
+        assert_eq!(out["status"], "complete", "{out}");
+        assert_eq!(out["rounds_started"], 2, "{out}");
+        assert_eq!(out["report"]["summary"], "tokenizer fixed", "{out}");
+        let progress = out["progress_file"].as_str().expect("progress path");
+        let text = std::fs::read_to_string(progress).unwrap();
+        assert!(text.contains("Round 1: continue") && text.contains("Round 2: complete"), "{text}");
+        assert!(text.contains("fix the flaky parser") && text.contains("fix the tokenizer"), "{text}");
+        // One fresh child per round, and neither inherited the parent's conversation.
+        let children = child_sessions(&e, &parent);
+        assert_eq!(children.len(), 2, "{children:?}");
+        for req in e.c.requests() {
+            let all = serde_json::to_string(&req.messages).unwrap();
+            assert!(!all.contains("Start the long objective"), "a Ralph round must not inherit the parent conversation: {all}");
+            assert!(all.contains("Long objective: fix the flaky parser"), "the immutable objective is passed: {all}");
+        }
+        // The progress file is inside the workspace, not an absolute escape.
+        assert!(std::path::Path::new(progress).starts_with(&e.ws));
+        let tool = seagent_kernel::subagents::Ralph;
+        assert!(tool.spec().input_schema["properties"]["objective"].is_object());
+        assert!(tool.call(&dummy_ctx(), json!({})).is_error);
     }
 }

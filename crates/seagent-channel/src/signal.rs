@@ -879,7 +879,7 @@ impl Channel for Signal {
                 let b64 = r["data"].as_str().or_else(|| r.as_str()).ok_or_else(|| ChannelError::new(K::NotFound, "signal getAttachment returned no data"))?;
                 seagent_net::crypto::b64_decode(b64).ok_or_else(|| ChannelError::new(K::Protocol, "signal getAttachment: bad base64"))
             }
-            Mode::Container => crate::http::get_bytes(&format!("{}/v1/attachments/{}", self.base, seagent_net::urlencode(id)), &[], 100 * 1024 * 1024),
+            Mode::Container => crate::http::get_bytes_trusted(&format!("{}/v1/attachments/{}", self.base, seagent_net::urlencode(id)), &[], 100 * 1024 * 1024, &self.base),
         }
     }
 

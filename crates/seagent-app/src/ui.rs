@@ -100,11 +100,15 @@ mod tests {
             _ => panic!("bytes"),
         };
         let index = body(serve("/"));
-        for id in ["view-ops", "view-agents", "view-devices", "view-approvals", "view-audit", "src=\"/ui/ops.js\"", "id=\"palette\""] {
+        for id in ["view-ops", "view-agents", "view-devices", "view-approvals", "view-audit", "view-security", "data-view=\"security\"", "src=\"/ui/ops.js\"", "id=\"palette\""] {
             assert!(index.contains(id), "{id} missing from index.html");
         }
         let ops = body(serve("/ui/ops.js"));
         assert!(ops.contains("ui.ops.status") && ops.contains("audit.verify") && ops.contains("ui.fleet"));
+        // The approvals page lists/revokes standing grants and edits exec policy; the
+        // security page renders the same posture the CLI audit reports.
+        assert!(ops.contains("ui.approvals.grants.list") && ops.contains("ui.approvals.grant.revoke") && ops.contains("ui.exec.policy.set"));
+        assert!(ops.contains("VIEWS.security") && ops.contains("ui.security.status"));
         assert!(body(serve("/ui/app.js")).contains("gate.answer"));
         // The service worker's offline shell lists every UI file.
         let sw = body(serve("/sw.js"));

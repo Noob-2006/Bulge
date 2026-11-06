@@ -111,6 +111,16 @@ impl Ux {
             notify::write_tty(&notify::sequence(&notify::env_map(), &ctx, false, session, "", &self.workspace.display().to_string()));
         }
     }
+    /// A turn that kept running after `/new` finished in the background: flash the pet
+    /// and notify when `bell_on_complete` is on, without touching the live turn's timer.
+    pub fn background_finished(&mut self, title: &str, session: &str, ok: bool) {
+        self.flash = Some((if ok { "wave" } else { "failed" }, Instant::now()));
+        if prefs::get_bool(&self.prefs, "bell_on_complete", false) {
+            let what = format!("background turn complete: {title}");
+            notify::write_tty(&notify::sequence(&notify::env_map(), &what, false, session, "", &self.workspace.display().to_string()));
+        }
+    }
+
     pub fn prompted(&mut self, what: &str, session: &str) {
         self.awaiting = true;
         if prefs::get_bool(&self.prefs, "bell_on_prompt", false) {

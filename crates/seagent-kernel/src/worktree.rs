@@ -209,6 +209,83 @@ pub fn prune(workspace: &Path, dry_run: bool) -> Result<Vec<String>, String> {
     Ok(removed)
 }
 
+/// Newest modification time anywhere in `p` (never follows symlinks; bounded). A tree whose
+/// newest file is old is idle even if its top directory was touched by a checkout.
+pub fn newest_mtime(p: &Path) -> Option<std::time::SystemTime> {
+    let mut newest: Option<std::time::SystemTime> = None;
+    let mut stack = vec![p.to_path_buf()];
+    let mut seen = 0usize;
+    while let Some(d) = stack.pop() {
+        seen += 1;
+        if seen > 100_000 {
+            break;
+        }
+        let Ok(md) = std::fs::symlink_metadata(&d) else { continue };
+        if md.file_type().is_symlink() {
+            continue;
+        }
+        if md.is_file() {
+            if let Ok(t) = md.modified() {
+                if newest.is_none_or(|n| t > n) {
+                    newest = Some(t);
+                }
+            }
+        }
+        if md.is_dir() {
+            if let Ok(rd) = std::fs::read_dir(&d) {
+                // Git's own metadata changes on every command; it says nothing about idle work.
+                stack.extend(rd.flatten().filter(|e| e.file_name() != ".git").map(|e| e.path()));
+            }
+        }
+    }
+    newest
+}
+
+/// Is a process working in this tree? (`/proc/<pid>/cwd`; skips our own pid.)
+fn tree_in_use(p: &Path) -> bool {
+    let Ok(canon) = p.canonicalize() else { return false };
+    let me = std::process::id();
+    std::fs::read_dir("/proc").is_ok_and(|rd| {
+        rd.flatten().filter_map(|e| e.file_name().to_str()?.parse::<u32>().ok()).filter(|pid| *pid != me).any(|pid| std::fs::read_link(format!("/proc/{pid}/cwd")).is_ok_and(|c| c.starts_with(&canon)))
+    })
+}
+
+/// Reclaim clean, empty seagent worktrees whose newest file is older than `idle_hours`.
+/// Unlike [`prune`] this is the daemon's hygiene pass: age-gated, symlink-safe and it never
+/// removes a tree a process is working in. `dry_run` only reports.
+pub fn prune_idle(workspace: &Path, idle_hours: u64, dry_run: bool) -> Result<Vec<String>, String> {
+    let root = repo_root(workspace).ok_or_else(|| format!("{} is not inside a git repository", workspace.display()))?;
+    let main_head = git(&["rev-parse", "HEAD"], &root)?;
+    let cutoff = std::time::SystemTime::now().checked_sub(std::time::Duration::from_secs(idle_hours.saturating_mul(3600)));
+    let Some(cutoff) = cutoff else { return Ok(vec![]) };
+    let mut removed = Vec::new();
+    for e in list(&root)?.into_iter().filter(|e| e.seagent) {
+        let p = Path::new(&e.path);
+        if !p.is_dir() || tree_in_use(p) {
+            continue;
+        }
+        if newest_mtime(p).is_none_or(|t| t > cutoff) {
+            continue;
+        }
+        let ahead = git(&["rev-list", "--count", &format!("{main_head}..HEAD")], p).ok().and_then(|s| s.parse::<u64>().ok());
+        let clean = git(&["status", "--porcelain"], p).map(|s| s.is_empty()).unwrap_or(false);
+        if ahead != Some(0) || !clean {
+            continue;
+        }
+        if !dry_run {
+            git(&["worktree", "remove", "--force", &e.path], &root)?;
+            if !e.branch.is_empty() {
+                let _ = git(&["branch", "-D", &e.branch], &root);
+            }
+        }
+        removed.push(e.path);
+    }
+    if !dry_run {
+        git(&["worktree", "prune"], &root)?;
+    }
+    Ok(removed)
+}
+
 /// Remove one worktree by name or path (`--force` semantics: uncommitted work is lost).
 pub fn remove(workspace: &Path, name: &str) -> Result<String, String> {
     let root = repo_root(workspace).ok_or_else(|| format!("{} is not inside a git repository", workspace.display()))?;
@@ -331,5 +408,24 @@ mod tests {
         assert!(repo_root(&outside).is_none());
         let a = Info { path: "/nonexistent/x".into(), branch: "b".into(), repo_root: repo.to_string_lossy().into(), base_commit: "0".into() };
         assert!(finalize(&a, true).pruned);
+    }
+
+    #[test]
+    fn prune_idle_respects_age_and_symlinks() {
+        let repo = test_repo("idle");
+        let old = create(&repo, "old").unwrap();
+        let young = create(&repo, "young").unwrap();
+        assert!(prune_idle(&repo, 24, true).unwrap().is_empty(), "fresh trees are idle-protected");
+        // Make the old tree's newest file two days old (top dir mtime alone is not enough).
+        let f = Path::new(&old.path).join("a.txt");
+        let t = std::time::SystemTime::now() - std::time::Duration::from_secs(2 * 86_400);
+        let times = std::fs::FileTimes::new().set_accessed(t).set_modified(t);
+        std::fs::OpenOptions::new().write(true).open(&f).unwrap().set_times(times).unwrap();
+        let dry = prune_idle(&repo, 24, true).unwrap();
+        assert_eq!(dry, vec![old.path.clone()]);
+        assert!(Path::new(&old.path).exists(), "dry run removes nothing");
+        assert_eq!(prune_idle(&repo, 24, false).unwrap(), vec![old.path.clone()]);
+        assert!(!Path::new(&old.path).exists());
+        assert!(Path::new(&young.path).exists());
     }
 }

@@ -251,17 +251,52 @@ VIEWS.devices = {
   },
 };
 
-// ── 05 approvals ──
+// ── 05 approvals: waiting, standing grants, exec policy, recent decisions ──
+const EXEC_LEVELS = ['deny', 'allowlist', 'full'];
+const ASK_LEVELS = ['off', 'on-miss', 'always'];
+function grantRow(g, revocable) {
+  return `<tr><td class="mono">${ov(g.kind)}</td><td class="mono">${ov(g.pattern)}</td><td>${ov(g.source || '—')}</td><td class="mono">${g.last_used_at ? new Date(g.last_used_at * 1000).toLocaleString() : '—'}</td><td class="mono">${g.expires_at ? new Date(g.expires_at * 1000).toLocaleDateString() : L('永不過期', 'never')}</td><td>${revocable ? `<button class="btn ghost small" data-revoke="${ov(g.id)}" data-write>${L('撤銷', 'Revoke')}</button>` : `<span class="faint">${L('設定檔', 'config')}</span>`}</td></tr>`;
+}
+function execPolicyBox(p) {
+  const opt = (xs, cur) => xs.map((x) => `<option${x === cur ? ' selected' : ''}>${x}</option>`).join('');
+  return `<div class="toolbar"><label class="dim">${L('執行安全', 'Exec security')} <select id="exSecurity" data-write>${opt(EXEC_LEVELS, p.security)}</select></label><label class="dim">${L('詢問時機', 'Ask')} <select id="exAsk" data-write>${opt(ASK_LEVELS, p.ask)}</select></label><label class="dim">${L('無人可問', 'Ask fallback')} <select id="exFallback" data-write>${opt(EXEC_LEVELS, p.askFallback)}</select></label><button class="btn small" id="exSave" data-write>${L('儲存', 'Save')}</button></div>`;
+}
+function agentPolicyTable(agents, exec) {
+  if (!agents || !agents.length) return `<div class="none">${L('沒有具名代理；主代理沿用全域政策。', 'No named agents; the main agent inherits the global policy.')}</div>`;
+  return '<table class="kv"><tr><th>' + L('代理', 'Agent') + '</th><th>' + L('模型', 'Model') + '</th><th>' + L('角色', 'Role') + '</th><th>' + L('核准預設', 'Approval') + '</th><th>' + L('執行', 'Exec') + '</th><th>' + L('沙箱', 'Sandbox') + '</th><th>' + L('工具限制', 'Tools') + '</th></tr>' +
+    agents.map((a) => {
+      const r = a.role || {};
+      const known = r.status !== 'unknown';
+      const policy = r.policy || r;
+      const deny = [...(r.deny || []), ...(r.write_deny || [])];
+      return `<tr><td><strong>${ov(a.id)}</strong>${a.default ? ` <span class="faint">${L('預設', 'default')}</span>` : ''}</td><td class="mono">${ov(a.model || '—')}</td><td>${r.id ? `<span class="mono">${ov(r.id)}</span>` : `<span class="faint">${L('無', 'none')}</span>`}${known ? '' : ` <span class="crit">unknown</span>`}</td><td>${known ? ov(policy.approval || '—') : '<span class="crit">unknown</span>'}</td><td class="mono">${ov(exec.security || '—')} / ${ov(exec.ask || '—')}</td><td>${ov(exec.sandbox || '—')}</td><td class="mono">${ov([...(a.tools_deny || []), ...deny].join(', ') || '—')}</td></tr>`;
+    }).join('') + '</table>';
+}
 VIEWS.approvals = {
   title: () => L('核准與提問', 'Approvals & questions'),
   async render(el) {
     const items = [...S.pending.values()].map((e) => e.p);
     let recent = [];
+    let grants = null;
     try { recent = await S.arp.call('audit.query', { kind: 'approval', limit: 30 }); } catch {}
+    try { grants = await S.arp.call('ui.approvals.grants.list'); } catch (e) { grants = { error: e.message }; }
     if (S.view !== 'approvals') return;
     let h = `<div class="ops"><section>${secH('01', L('等待中', 'Waiting'), `${items.length}`)}`;
     h += items.length ? '<div id="apList" style="display:grid;gap:10px"></div>' : `<div class="none"><span class="star ok" style="--size:9px"></span> ${L('沒有等待中的核准或提問。代理需要你時會出現在這裡，也會跳出通知。', 'Nothing is waiting. When an agent needs you it shows up here and as a notification.')}</div>`;
-    h += `</section><section>${secH('02', L('最近的決定', 'Recent decisions'), L('來自稽核紀錄', 'from the audit trail'))}`;
+    h += `</section><section>${secH('02', L('常設授權', 'Standing grants'), `<button data-go="security">${L('安全態勢 →', 'Posture →')}</button>`)}`;
+    if (!grants || grants.error) {
+      h += `<p class="bad">${ov(grants && grants.error || 'unavailable')}</p>`;
+    } else {
+      const gs = grants.grants || [], cfg = grants.config || [];
+      h += gs.length || cfg.length ? '<table class="kv"><tr><th>' + L('類型', 'Kind') + '</th><th>' + L('樣式', 'Pattern') + '</th><th>' + L('來源', 'Source') + '</th><th>' + L('上次使用', 'Last used') + '</th><th>' + L('到期', 'Expires') + '</th><th></th></tr>' + gs.map((g) => grantRow(g, true)).join('') + cfg.map((g) => grantRow(g, false)).join('') + '</table>' : `<div class="none">${L('沒有常設授權。', 'No standing grants.')}</div>`;
+      h += `<p class="dim">${L(`常設授權預設 ${grants.grant_ttl_days} 天後到期；撤銷立刻生效。`, `Standing grants expire after ${grants.grant_ttl_days} days by default; revocation is immediate.`)}</p>`;
+    }
+    h += `</section><section>${secH('03', L('執行政策', 'Exec policy'), L('主機預設與各代理的實際權限', 'host defaults and what each agent may do'))}`;
+    if (grants && !grants.error) {
+      h += execPolicyBox(grants.exec || {});
+      h += agentPolicyTable((grants.agents || {}).agents, { security: (grants.exec || {}).security, ask: (grants.exec || {}).ask, sandbox: ((grants.agents || {}).sandbox || {}).mode });
+    }
+    h += `</section><section>${secH('04', L('最近的決定', 'Recent decisions'), L('來自稽核紀錄', 'from the audit trail'))}`;
     h += recent.length ? '<table class="kv"><tr><th>' + L('時間', 'Time') + '</th><th>' + L('類型', 'Kind') + '</th><th>' + L('誰', 'Who') + '</th><th>' + L('對象', 'Target') + '</th><th>' + L('結果', 'Outcome') + '</th><th>' + L('對話', 'Session') + '</th></tr>' + recent.slice().reverse().map((r) => `<tr><td class="mono">${new Date(r.ts).toLocaleString()}</td><td class="mono">${ov(r.kind)}</td><td>${ov((r.actor || {}).name)}${(r.actor || {}).role ? ` <span class="faint">${ov(r.actor.role)}</span>` : ''}</td><td class="mono">${ov(r.target)}</td><td class="${/deny|reject/.test(r.outcome) ? 'crit' : 'ok'}">${ov(r.outcome)}</td><td class="mono">${r.session ? `<a href="#" data-open="${ov(r.session)}">${ov(r.session).slice(0, 10)}</a>` : ''}</td></tr>`).join('') + '</table>' : `<div class="none">${L('還沒有核准紀錄。', 'No approval records yet.')}</div>`;
     h += '</section></div>';
     el.innerHTML = h;
@@ -272,6 +307,71 @@ VIEWS.approvals = {
       wrap.appendChild(pendingBox(p));
       list && list.appendChild(wrap);
     }
+    for (const b of el.querySelectorAll('[data-revoke]')) b.onclick = async () => {
+      b.disabled = true;
+      try { const r = await S.arp.call('ui.approvals.grant.revoke', { id: b.dataset.revoke }); toast(L(`已撤銷 ${r.removed} 筆授權`, `Revoked ${r.removed} grant(s)`)); VIEWS.approvals.render(el); }
+      catch (e) { toast(e.message, true); b.disabled = false; }
+    };
+    const save = el.querySelector('#exSave');
+    if (save) save.onclick = async () => {
+      save.disabled = true;
+      try {
+        await S.arp.call('ui.exec.policy.set', { security: el.querySelector('#exSecurity').value, ask: el.querySelector('#exAsk').value, ask_fallback: el.querySelector('#exFallback').value });
+        toast(L('執行政策已儲存', 'Exec policy saved'));
+        VIEWS.approvals.render(el);
+      } catch (e) { toast(e.message, true); save.disabled = false; }
+    };
+    bindCommon(el);
+  },
+};
+
+// ── 06 security posture: what is exposed, and what every agent may do ──
+function sevClass(s) { return s === 'critical' ? 'crit' : s === 'warn' ? 'warn' : ''; }
+VIEWS.security = {
+  title: () => L('安全態勢', 'Security posture'),
+  async render(el) {
+    el.innerHTML = '<div class="ops"><span class="star spin"></span></div>';
+    let d;
+    try { d = await S.arp.call('ui.security.status'); } catch (e) { el.innerHTML = `<div class="ops"><p class="bad">${ov(e.message)}</p></div>`; return; }
+    if (S.view !== 'security') return;
+    const app = d.app || {}, surfaces = d.surfaces || [], findings = d.findings || [], warnings = d.warnings || [], channels = d.channels || [], agents = d.agents || [], tokens = d.scoped_tokens || [];
+    const exposed = surfaces.filter((s) => s.enabled && !s.loopback);
+    const bad = findings.filter((f) => f.severity === 'critical' || f.severity === 'warn');
+    const sv = (x) => (x ? `<span class="star ok" style="--size:9px"></span>` : `<span class="light warn"></span>`);
+    let h = '<div class="ops"><div class="kpis">'
+      + `<div class="kpi ${exposed.length ? 'crit' : ''}"><span class="k">${L('對外監聽', 'Exposed listeners')}</span><span class="v">${exposed.length}</span><span class="s">${exposed.length ? L('需確認每一層', 'check every layer') : L('只在 loopback', 'loopback only')}</span></div>`
+      + `<div class="kpi ${bad.length ? 'warn' : ''}"><span class="k">${L('風險發現', 'Findings')}</span><span class="v">${bad.length}</span><span class="s">${findings.length} ${L('項（含提示）', 'total (with info)')}</span></div>`
+      + `<div class="kpi"><span class="k">${L('權杖', 'Tokens')}</span><span class="v">${(app.token && app.token.set ? 1 : 0) + tokens.length}</span><span class="s">${tokens.length} ${L('具範圍', 'scoped')}</span></div>`
+      + `<div class="kpi ${channels.some((c) => c.open) ? 'warn' : ''}"><span class="k">${L('頻道', 'Channels')}</span><span class="v">${channels.length}</span><span class="s">${channels.filter((c) => c.open).length} ${L('開放', 'open')}</span></div>`
+      + `<div class="kpi"><span class="k">${L('代理', 'Agents')}</span><span class="v">${agents.length}</span><span class="s">${L('可用的執行/工具政策', 'effective exec/tool policy')}</span></div>`
+      + '</div><div class="cols">';
+    // Surfaces
+    h += `<section class="c7">${secH('01', L('監聽面', 'Listening surfaces'), `${surfaces.length}`)}<div class="slist">`;
+    h += surfaces.length ? surfaces.map((s) => `<div class="srow"><span class="light ${s.enabled ? (s.loopback ? 'ok' : 'warn') : ''}"></span><span><strong>${ov(s.name)}</strong> <span class="mono faint">${ov(s.listen)}</span><span class="sub">${s.enabled ? (s.loopback ? L('僅本機', 'loopback') : L('可由網路連線', 'network reachable')) : L('未啟用', 'disabled')} · auth ${ov(s.auth)}${s.tls ? ' · TLS' : ''}${s.behind_proxy ? ' · proxy' : ''}${s.rate_limit ? ' · rate-limit' : ''}</span>${s.warning ? `<span class="sub crit">${ov(s.warning)}</span>` : ''}${(s.origins || []).length ? `<span class="sub faint">origins: ${ov(s.origins.join(', '))}</span>` : ''}</span><span class="r">${s.allow_public ? L('已允許公開', 'public opt-in') : L('未允許公開', 'no public opt-in')}</span></div>`).join('') : `<div class="none">${L('沒有監聽面。', 'No listening surfaces.')}</div>`;
+    h += `</div>${warnings.length ? `<div class="verify badv" style="margin-top:10px">${warnings.map((w) => `<div>⚠ ${ov(w)}</div>`).join('')}</div>` : ''}</section>`;
+    // App endpoints / tokens
+    h += `<section class="c5">${secH('02', L('App server 與權杖', 'App server & tokens'), app.enabled ? L('已啟用', 'enabled') : L('未啟用', 'disabled'))}`;
+    if (app.status === 'unknown') h += `<p class="bad">${ov(app.error || 'unknown')}</p>`;
+    else h += `<dl class="facts">
+      <dt>${L('監聽', 'Listen')}</dt><dd class="mono">${ov(app.listen)}</dd>
+      <dt>${L('管理權杖', 'Admin token')}</dt><dd>${app.token && app.token.set ? `<span class="ok">${L('已設定', 'set')}</span>` : `<span class="crit">${L('未設定', 'not set')}</span>`}</dd>
+      <dt>${L('登入', 'Dashboard auth')}</dt><dd>${app.dashboard_auth && app.dashboard_auth.enabled ? ov(app.dashboard_auth.provider) : L('關閉（只用權杖）', 'off (token only)')}</dd>
+      <dt>${L('端點', 'Endpoints')}</dt><dd>${[app.openai_api && 'OpenAI /v1', app.nodes && 'nodes /node', app.terminal && L('終端機', 'terminal'), app.a2a && app.a2a.enabled && 'A2A', app.metrics_public && '/metrics (public)', app.scim && 'SCIM'].filter(Boolean).map(ov).join(' · ') || L('控制台', 'console only')}</dd>
+      <dt>${L('TLS / proxy', 'TLS / proxy')}</dt><dd>${app.tls ? 'TLS' : L('無原生 TLS', 'no native TLS')}${app.behind_proxy ? ' · behind proxy' : ''}</dd>
+      <dt>Origins</dt><dd class="mono">${ov((app.allow_origins || []).join(', ') || L('僅同源', 'same-origin only'))}</dd>
+    </dl>`;
+    if (tokens.length) h += '<table class="kv" style="margin-top:10px"><tr><th>' + L('名稱', 'Name') + '</th><th>scope</th><th>org / team</th></tr>' + tokens.map((t) => `<tr><td>${ov(t.name || '—')}</td><td class="mono">${ov(t.scope)}</td><td class="mono">${ov([t.org, t.team].filter(Boolean).join(' / ') || '—')}</td></tr>`).join('') + '</table>';
+    h += '</section>';
+    // Findings
+    h += `<section class="c12">${secH('03', L('風險與建議', 'Findings & fixes'), L('來自 seagent security audit 的同一組檢查', 'the same checks as seagent security audit'))}`;
+    h += findings.length ? '<table class="kv"><tr><th>' + L('等級', 'Severity') + '</th><th>id</th><th>' + L('問題', 'Finding') + '</th><th>' + L('建議', 'Fix') + '</th></tr>' + findings.map((f) => `<tr><td class="${sevClass(f.severity)}">${ov(f.severity)}</td><td class="mono faint">${ov(f.id)}</td><td><strong>${ov(f.title)}</strong>${f.detail ? `<span class="sub">${ov(f.detail)}</span>` : ''}</td><td class="mono">${ov(f.fix || '—')}</td></tr>`).join('') + '</table>' : `<div class="none"><span class="star ok" style="--size:9px"></span> ${L('沒有風險發現。', 'No findings.')}</div>`;
+    h += '</section>';
+    // Channels
+    h += `<section class="c6">${secH('04', L('頻道', 'Channels'), `${channels.length}`)}<div class="slist">${channels.length ? channels.map((c) => `<div class="srow"><span class="light ${c.open ? 'warn' : 'ok'}"></span><span><strong>${ov(c.name)}</strong> <span class="faint">${ov(c.kind)}</span><span class="sub">${c.listening ? `${L('監聽', 'listen')} ${ov(c.listen)}` : L('外送／輪詢', 'outbound / polling')}${c.default_chat ? ` · default ${ov(c.default_chat)}` : ''}${c.public_url ? ' · public URL' : ''}</span></span><span class="r">${c.open ? L('任何人可進', 'open to anyone') : L('允許清單', 'allowlisted')} · ${c.secret_configured ? L('已簽章', 'signed') : L('無密鑰', 'no secret')}</span></div>`).join('') : `<div class="none">${L('沒有設定頻道。', 'No channels configured.')}</div>`}</div></section>`;
+    // Agents
+    h += `<section class="c6">${secH('05', L('代理能力', 'Agent capabilities'), `${agents.length}`)}${agentPolicyTable(agents, { security: (d.exec || {}).security, ask: (d.exec || {}).ask, sandbox: (d.sandbox || {}).mode || (d.sandbox || {}).status })}<p class="dim">${L('未知的角色一律顯示 unknown，不當成安全。', 'Unknown roles always show as unknown, never as safe.')}</p></section>`;
+    h += '</div></div>';
+    el.innerHTML = h;
     bindCommon(el);
   },
 };

@@ -171,6 +171,9 @@ mod tests {
         cfg.model.default = "fake/m".into();
         cfg.checkpoint.enabled = false;
         cfg.compaction.max_tool_result_chars = max_tool_result_chars;
+        // The benchmark measures the trimming benefit, so it asks for the per-request policy
+        // rather than waiting for real context pressure.
+        cfg.compaction.trim_tool_results = "always".into();
         let mut steps: VecDeque<Block> = (0..CALLS).map(|n| Block::ToolUse { id: format!("t{n}"), name: "bigout".into(), input: json!({"n": n, "size": SIZES[n as usize % SIZES.len()]}) }).collect();
         steps.push_back(Block::ToolUse { id: "fetch".into(), name: "context_fetch".into(), input: json!({"id": "t2", "query": "needle-2"}) });
         steps.push_back(Block::ToolUse { id: "find".into(), name: "context_fetch".into(), input: json!({"query": "needle-5"}) });

@@ -505,4 +505,28 @@ mod tests {
         };
         assert!(e.blocked(None, 0).is_some());
     }
+
+    #[test]
+    fn setup_token_does_not_collide_with_an_api_key_profile() {
+        // OpenClaw e72b356459b: a setup-token profile must not replace an API-key
+        // profile that happens to share its label. Our upsert keys on kind + flow +
+        // label, so the API key stays usable and a re-login only replaces the token.
+        let s = temp_store("anthropic-profiles");
+        let key = Entry::new("api_key", "default", Some("sk-ant-api".into()));
+        let key_id = s.add("anthropic", key.clone(), None).unwrap();
+        let mut token = Entry::new("token", "setup-token", Some("sk-ant-oat01-a".into()));
+        token.flow = Some("anthropic-setup-token".into());
+        let token_id = s.upsert_login("anthropic", token).unwrap();
+        assert_ne!(key_id, token_id);
+        let e = s.entries("anthropic");
+        assert_eq!(e.len(), 2);
+        assert_eq!(e.iter().find(|x| x.id == key_id).unwrap().key.as_deref(), Some("sk-ant-api"));
+        let mut again = Entry::new("token", "setup-token", Some("sk-ant-oat01-b".into()));
+        again.flow = Some("anthropic-setup-token".into());
+        assert_eq!(s.upsert_login("anthropic", again).unwrap(), token_id, "a token re-login replaces the token");
+        let e = s.entries("anthropic");
+        assert_eq!(e.len(), 2, "the API key is still there");
+        assert_eq!(e.iter().find(|x| x.id == key_id).unwrap().key.as_deref(), Some("sk-ant-api"));
+        assert_eq!(e.iter().find(|x| x.id == token_id).unwrap().key.as_deref(), Some("sk-ant-oat01-b"));
+    }
 }

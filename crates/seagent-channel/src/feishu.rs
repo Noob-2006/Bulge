@@ -922,9 +922,13 @@ fn card_inbound(channel: &str, v: &Value, chat_types: &HashMap<String, ChatType>
     let value = &e["action"]["value"];
     let data = value["data"].as_str().map(str::to_string).or_else(|| value.as_str().map(str::to_string)).unwrap_or_else(|| if value.is_null() { String::new() } else { value.to_string() });
     let id = if token.is_empty() { format!("{msg}:{}", crypto::hex(&crypto::sha256(data.as_bytes()))[..12].to_owned()) } else { token };
+    // A card action in a chat that never produced an inbound message has no known type.
+    // Guessing Group would apply group mention/policy rules to a private chat (and the
+    // other way round), so the action is refused (upstream ee8f4da1d7e).
+    let chat_type = chat_types.get(&chat).copied()?;
     Some(Inbound {
         channel: channel.to_string(),
-        chat_type: chat_types.get(&chat).copied().unwrap_or(ChatType::Group),
+        chat_type,
         chat,
         sender,
         message_id: format!("cb:{id}"),
@@ -1450,7 +1454,7 @@ impl Channel for Feishu {
     fn fetch_media(&self, m: &Media) -> Result<Vec<u8>, ChannelError> {
         let url = m.url.as_deref().ok_or_else(|| crate::unsupported("downloading this attachment"))?;
         let auth = format!("Bearer {}", self.tenant_token()?);
-        crate::http::get_bytes(url, &[("authorization", &auth)], MAX_MEDIA)
+        crate::http::get_bytes_trusted(url, &[("authorization", &auth)], MAX_MEDIA, &self.base)
     }
 
     fn wire(&self, w: &crate::Wiring) {
@@ -1621,7 +1625,11 @@ mod tests {
     }
 
     fn parse(v: &Value) -> Option<Inbound> {
-        inbound_of("fs", "http://h", v, &Bot { open_id: "ou_bot".into(), name: "Seagent".into() }, &HashMap::new())
+        parse_with(v, &HashMap::new())
+    }
+
+    fn parse_with(v: &Value, types: &HashMap<String, ChatType>) -> Option<Inbound> {
+        inbound_of("fs", "http://h", v, &Bot { open_id: "ou_bot".into(), name: "Seagent".into() }, types)
     }
 
     #[test]
@@ -1668,14 +1676,19 @@ mod tests {
         assert!(parse(&msg_event("om_16", "group", "text", json!({"text": "@_user_1"}), json!({"mentions": [{"key": "@_user_1", "id": {"open_id": "ou_bot"}, "name": "Seagent"}]}))).is_none(), "bare @bot is empty");
         // Card actions, v2 and v1 shapes.
         let v2 = json!({"schema": "2.0", "header": {"event_type": "card.action.trigger", "token": "vt"}, "event": {"operator": {"open_id": "ou_amy"}, "token": "c-tok", "action": {"tag": "button", "value": {"data": "appr:1:once"}}, "context": {"open_message_id": "om_card", "open_chat_id": "oc_chat"}}});
-        let c = parse(&v2).unwrap();
+        let mut types = HashMap::new();
+        types.insert("oc_chat".to_string(), ChatType::Group);
+        let c = parse_with(&v2, &types).unwrap();
         assert_eq!((c.callback.as_ref().unwrap().data.as_str(), c.callback.as_ref().unwrap().id.as_str(), c.message_id.as_str(), c.sender.as_str()), ("appr:1:once", "c-tok", "cb:c-tok", "ou_amy"));
         assert!(c.reply.as_ref().unwrap().is_own && c.chat_type == ChatType::Group);
+        // An action in a chat whose type was never seen is refused instead of guessed Group.
+        assert!(parse(&v2).is_none(), "unknown chat type must not default to Group");
         let v1 = json!({"open_id": "ou_amy", "open_message_id": "om_card", "open_chat_id": "oc_dm", "token": "c-2", "action": {"value": {"k": 1}, "tag": "button"}});
         let mut types = HashMap::new();
         types.insert("oc_dm".to_string(), ChatType::Direct);
         let c1 = inbound_of("fs", "http://h", &v1, &Bot::default(), &types).unwrap();
         assert_eq!((c1.callback.unwrap().data.as_str(), c1.chat_type), (r#"{"k":1}"#, ChatType::Direct));
+        assert!(inbound_of("fs", "http://h", &v1, &Bot::default(), &HashMap::new()).is_none());
     }
 
     #[test]
@@ -1804,6 +1817,8 @@ mod tests {
         let srv = FakeServer::start(|r, n| if is_token(r) { token_reply() } else { ok(json!({"message_id": format!("om_{n}")})) });
         let (mut f, a) = hooked(&srv);
         f.approval_timeout = Duration::from_millis(300);
+        // Card actions are only accepted for a chat whose type was seen before.
+        f.chat_types.lock().unwrap().insert("oc_chat".into(), ChatType::Group);
         let sent = f.send(&Outbound { buttons: appr_buttons("A1"), ..Outbound::text("oc_chat", "Run `sudo reboot`?") }).unwrap();
         let req = api_calls(&srv).pop().unwrap();
         let card: Value = serde_json::from_str(req.json()["content"].as_str().unwrap()).unwrap();
@@ -1992,6 +2007,7 @@ mod tests {
     fn webhook_encrypted_and_signed() {
         let srv = FakeServer::start(|r, _| if is_token(r) { token_reply() } else { ok(json!({})) });
         let f = fs(&srv.url).with_webhook("127.0.0.1:0", "/hook", Some("ekey"), Some("vt")).unwrap();
+        f.chat_types.lock().unwrap().insert("oc_chat".into(), ChatType::Group);
         let a = f.webhook_addr().unwrap();
         let now = now_secs();
         let wrap = |v: &Value| json!({"encrypt": encrypt("ekey", &v.to_string(), [7; 16])}).to_string();

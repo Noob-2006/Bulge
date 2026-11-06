@@ -51,6 +51,10 @@ pub type MethodExt = Arc<dyn Fn(&str, &Value) -> Option<Result<Value, (i32, Stri
 /// (channel polling, backups, report schedules) so two nodes never both answer a chat.
 pub type LeaderHook = Box<dyn Fn(bool) + Send + Sync>;
 
+/// A leader-only maintenance job the host registers (plugin auto-update, host backups…). The
+/// daemon calls it about once a minute; the hook itself decides whether it is due.
+pub type MaintenanceHook = Arc<dyn Fn() + Send + Sync>;
+
 /// JSON-RPC error code a standby returns for methods only the leader may serve.
 pub const STANDBY_ERROR: i32 = -32010;
 
@@ -65,6 +69,7 @@ pub struct Daemon {
     /// ent-097: the worker pool while this node leads and `[workers] count > 0`.
     pool: Mutex<Option<Arc<crate::workers::Pool>>>,
     leader_hooks: Mutex<Vec<LeaderHook>>,
+    maintenance: Mutex<Vec<MaintenanceHook>>,
     /// Sessions a new leader could not resume yet (the old leader still held the log lock),
     /// with the notice to write when it can.
     resume_retry: Arc<Mutex<std::collections::HashMap<String, Option<String>>>>,
@@ -83,6 +88,7 @@ impl Daemon {
             ha: OnceLock::new(),
             pool: Mutex::new(None),
             leader_hooks: Mutex::new(vec![]),
+            maintenance: Mutex::new(vec![]),
             resume_retry: Default::default(),
             retrying: Default::default(),
             started_ms: crate::event::now_ms(),
@@ -116,11 +122,16 @@ impl Daemon {
         self.ext.lock().unwrap().push(m);
     }
 
+    /// Register a leader-only, roughly minute-paced maintenance hook (opt-in host services).
+    pub fn add_maintenance(&self, f: MaintenanceHook) {
+        self.maintenance.lock().unwrap().push(f);
+    }
+
     /// Method names served by this daemon (kernel + host extensions are not enumerable;
     /// hosts list theirs via `capabilities`).
     pub const METHODS: &'static [&'static str] = &[
         "ping", "session.list", "session.create", "session.submit", "session.interrupt", "session.history", "session.view",
-        "gate.pending", "gate.answer", "gate.policy.show", "session.review.set", "session.review.list", "session.review.get", "session.command", "goal.start", "goal.list", "schedule.list", "models.list", "tools.list", "shutdown", "session.attach", "events.subscribe",
+        "gate.pending", "gate.answer", "gate.policy.show", "session.review.set", "session.review.list", "session.review.get", "session.command", "goal.start", "goal.list", "schedule.list", "models.list", "tools.list", "tools.call", "shutdown", "session.attach", "events.subscribe",
     ];
 
     pub fn run(self: Arc<Self>) -> Result<(), String> {
@@ -233,6 +244,13 @@ impl Daemon {
             SWEEPER.call_once(move || {
                 crate::reaper::spawn_sweeper(data, Duration::from_secs(reap));
             });
+        }
+        // A one-shot claimed just before a drain/crash is restored (young claims only) instead of
+        // being retired as missed.
+        let hold = k.cfg.automation.get("restart_hold_seconds").and_then(|v| v.as_integer()).unwrap_or(3600);
+        let restored = crate::automation::recover_claims(&k.paths.data, unix_now(), hold);
+        if !restored.is_empty() {
+            eprintln!("seagentd: restored {} cron claim(s) interrupted by a restart", restored.len());
         }
         self.fire_leadership(true);
         match term {
@@ -468,6 +486,14 @@ impl Daemon {
         // failure or a topped-up account resumes without the user doing anything).
         let mut last_resume = Instant::now() - Duration::from_secs(30);
         let mut last_export = Instant::now() - Duration::from_secs(3600);
+        let cleanup_every = Duration::from_secs(crate::scratch::Settings::from_config(&self.k.cfg).cleanup_interval_secs);
+        let mut last_cleanup = Instant::now() - cleanup_every;
+        // Hermes `gateway/session_retirement.py`: idle live sessions leave memory; the transcript
+        // stays on disk and a later request rebuilds the per-session state on demand.
+        let idle_secs = self.k.cfg.automation.get("idle_session_secs").and_then(|v| v.as_integer()).unwrap_or(1800).max(0) as u64;
+        let idle_every = Duration::from_secs(60);
+        let mut last_retire = Instant::now() - idle_every;
+        let mut last_maint = Instant::now() - idle_every;
         seagent_security::audit::set_rotate_bytes(self.k.cfg.audit.rotate_mb.max(1) * 1024 * 1024);
         while !STOP.load(Ordering::SeqCst) {
             // ent-095: a standby claims no jobs, resumes nothing and dispatches nothing.
@@ -491,6 +517,24 @@ impl Daemon {
                     let _ = crate::checkpoint::Store::new(&self.k.paths.data).maybe_auto_prune(c.retention_days, c.min_interval_hours, c.max_total_size_mb * 1024 * 1024);
                 }
             }
+            if crate::scratch::due(&mut last_maint, idle_every) {
+                for f in self.maintenance.lock().unwrap().iter() {
+                    f();
+                }
+            }
+            if idle_secs > 0 && crate::scratch::due(&mut last_retire, idle_every) {
+                let gone = self.k.retire_idle_sessions(Duration::from_secs(idle_secs));
+                if !gone.is_empty() {
+                    eprintln!("seagentd: retired {} idle session(s) from memory", gone.len());
+                }
+            }
+            // Disposable agent scratch (24 h) and idle worktrees (7 days), both configurable.
+            if crate::scratch::due(&mut last_cleanup, cleanup_every) {
+                let r = crate::scratch::maintenance(&self.k);
+                if !r.removed.is_empty() || !r.errors.is_empty() {
+                    eprintln!("seagentd: scratch cleanup removed {} item(s), {} byte(s), {} error(s)", r.removed.len(), r.bytes, r.errors.len());
+                }
+            }
             // Global emergency stop: claim nothing (jobs stay due and run after `seagent resume`).
             if last.elapsed() >= tick && seagent_security::estop::is_engaged(&self.k.paths.data) {
                 last = Instant::now();
@@ -501,6 +545,12 @@ impl Daemon {
             }
             if last.elapsed() >= tick {
                 last = Instant::now();
+                // A drain must not claim new work: an in-flight one-shot stays due for the next
+                // leader instead of being marked missed.
+                if STOP.load(Ordering::SeqCst) {
+                    std::thread::sleep(Duration::from_millis(200));
+                    continue;
+                }
                 let busy: Vec<String> = self.busy_jobs.lock().unwrap().iter().cloned().collect();
                 match automation::claim_due(&self.k.paths.data, unix_now(), self.k.cfg.schedule.utc_offset_minutes, &busy) {
                     Ok(due) => {
@@ -558,6 +608,7 @@ impl Daemon {
     }
 
     pub fn call(&self, method: &str, p: &Value) -> Result<Value, (i32, String)> {
+        let read_only = read_only_caller(p);
         let s = |k: &str| p.get(k).and_then(|v| v.as_str()).map(String::from);
         let need = |k: &str| s(k).ok_or((-32602, format!("missing param `{k}`")));
         let kerr = |e: crate::kernel::KernelError| (-32000, e.to_string());
@@ -575,7 +626,16 @@ impl Daemon {
             "ping" => Ok(json!({"protocol": PROTOCOL_VERSION, "version": env!("CARGO_PKG_VERSION"), "running": k.running_ids(), "pid": std::process::id(), "role": match self.ha.get() { Some(h) if h.is_leader() => "leader", Some(_) => "standby", None => "single" }, "node": self.ha.get().map(|h| h.node.clone())})),
             "session.list" => {
                 let lim = p.get("limit").and_then(|v| v.as_u64()).unwrap_or(50) as usize;
-                Ok(json!(k.store.list().into_iter().take(lim).map(|s| json!({"id":s.id,"title":s.title,"model":s.model,"workspace":s.workspace,"updated_ms":s.updated_ms,"messages":s.messages,"parent":s.parent,"running":k.is_running(&s.id) || on_worker(&s.id)})).collect::<Vec<_>>()))
+                let mut rows: Vec<Value> = k.store.list().into_iter().take(lim).map(|s| json!({"id":s.id,"title":s.title,"model":s.model,"workspace":s.workspace,"updated_ms":s.updated_ms,"messages":s.messages,"parent":s.parent,"running":k.is_running(&s.id) || on_worker(&s.id)})).collect();
+                if read_only {
+                    // A read-scoped token gets status, not the host's disk layout.
+                    for r in &mut rows {
+                        if let Some(o) = r.as_object_mut() {
+                            o.remove("workspace");
+                        }
+                    }
+                }
+                Ok(json!(rows))
             }
             "session.create" => {
                 let ws = need("workspace")?;
@@ -608,7 +668,20 @@ impl Daemon {
             }
             "session.interrupt" => {
                 let id = need("id")?;
-                Ok(json!({"interrupted": k.interrupt(&id) || pool.as_ref().is_some_and(|p| p.cancel(&id))}))
+                // `_by` is the authenticated principal when the app server forwards one; on the
+                // owner-only unix socket the caller is the local user. `_source` distinguishes a
+                // chat stop from a client/runbook stop in `run_stopped`.
+                let who = s("_by").map(|b| seagent_security::audit::Actor::parse_label(&b).with_role(&s("_by_role").unwrap_or_default())).unwrap_or_else(seagent_security::audit::Actor::local);
+                let source = s("_source").unwrap_or_else(|| "client".into());
+                let interrupted = k.interrupt_as(&id, &who, &source) || pool.as_ref().is_some_and(|p| p.cancel(&id));
+                if interrupted && !k.interrupt(&id) {
+                    // A worker owns this run: the daemon-side kernel cannot attribute it, so record
+                    // the same audit + hook from the control plane.
+                    let cwd = crate::projection::project(&k.store.read(&id).unwrap_or_default()).workspace;
+                    seagent_security::audit::record(&k.paths.data, seagent_security::audit::Event::new("run.stopped", who.clone(), &id, "ok").session(&id).detail(json!({"source": source, "run_id": id, "actor": who.label(), "worker": true})));
+                    crate::hooks::fire_run_stopped(k, &id, &cwd, &source, &who.label(), &id);
+                }
+                Ok(json!({"interrupted": interrupted}))
             }
             "gate.pending" => Ok(json!(self.pending.list().into_iter().map(pending_json).collect::<Vec<_>>())),
             "gate.answer" => {
@@ -639,8 +712,28 @@ impl Daemon {
                 })
             }
             "goal.start" => Ok(json!({"started": self.start_goal(&need("id")?)})),
-            "goal.list" => automation::read_list::<Goal>(&automation::goals_path(&k.paths.data)).map(|g| json!(g)).map_err(|e| (-32000, e)),
-            "schedule.list" => automation::read_list::<Job>(&automation::jobs_path(&k.paths.data)).map(|j| json!(j)).map_err(|e| (-32000, e)),
+            "goal.list" => automation::read_list::<Goal>(&automation::goals_path(&k.paths.data)).map(|g| {
+                let mut v = json!(g);
+                if read_only {
+                    for goal in v.as_array_mut().into_iter().flatten() {
+                        if let Some(o) = goal.as_object_mut() {
+                            o.remove("workspace");
+                        }
+                    }
+                }
+                v
+            }).map_err(|e| (-32000, e)),
+            "schedule.list" => automation::read_list::<Job>(&automation::jobs_path(&k.paths.data)).map(|j| {
+                let mut v = json!(j);
+                if read_only {
+                    for job in v.as_array_mut().into_iter().flatten() {
+                        if let Some(o) = job.as_object_mut() {
+                            o.remove("workspace");
+                        }
+                    }
+                }
+                v
+            }).map_err(|e| (-32000, e)),
             "session.history" => {
                 let from = p.get("from_seq").and_then(|v| v.as_u64()).unwrap_or(0);
                 let evs = k.store.read(&need("id")?).map_err(|e| (-32000, e.to_string()))?;
@@ -648,15 +741,47 @@ impl Daemon {
             }
             "session.view" => {
                 // The conversation as the model sees it, for UIs that render a transcript.
-                let evs = k.store.read(&need("id")?).map_err(|e| (-32000, e.to_string()))?;
+                let id = need("id")?;
+                let evs = k.store.read(&id).map_err(|e| (-32000, e.to_string()))?;
                 let v = crate::projection::project(&evs);
-                Ok(json!({"messages": v.messages, "running": k.is_running(&need("id")?), "workspace": v.workspace}))
+                let mut out = json!({"messages": v.messages, "running": k.is_running(&id)});
+                if !read_only {
+                    out["workspace"] = json!(v.workspace);
+                }
+                Ok(out)
             }
             "models.list" => {
                 let c = &k.cfg.model;
                 Ok(json!({"default": c.default, "fallback": c.fallback, "aux": k.cfg.aux_model()}))
             }
             "tools.list" => Ok(json!(k.specs().into_iter().map(|s| json!({"name": s.name, "description": s.description})).collect::<Vec<_>>())),
+            "tools.call" => {
+                let tool = s("tool").or_else(|| s("name")).ok_or((-32602, "missing param `tool`".to_string()))?;
+                let input = p.get("input").or_else(|| p.get("arguments")).cloned().unwrap_or_else(|| json!({}));
+                if !input.is_object() {
+                    return Err((-32602, "`input` must be a JSON object".into()));
+                }
+                // Scripts may name an existing session to keep audit/history in one place; without
+                // one a fresh session is created so the gate has a real log to write to.
+                let session = match s("session").or_else(|| s("id")).filter(|x| !x.trim().is_empty()) {
+                    Some(id) => {
+                        if !k.store.exists(&id) {
+                            return Err((-32602, format!("no such session `{id}`")));
+                        }
+                        id
+                    }
+                    None => {
+                        let ws = s("workspace").map(std::path::PathBuf::from).unwrap_or_else(|| k.paths.default_workspace());
+                        k.create_session(&ws, None, None, Some(&format!("tools.call {tool}"))).map_err(kerr)?
+                    }
+                };
+                let who = s("_by").map(|b| seagent_security::audit::Actor::parse_label(&b).with_role(&s("_by_role").unwrap_or_default())).unwrap_or_else(seagent_security::audit::Actor::local);
+                let source = s("_source").unwrap_or_else(|| "arp".into());
+                match k.call_tool_as(&session, &tool, input, &who, &source) {
+                    Ok((content, is_error)) => Ok(json!({"ok": !is_error, "session": session, "tool": tool, "is_error": is_error, "content": content})),
+                    Err(e) => Err(kerr(e)),
+                }
+            }
             "shutdown" => {
                 Daemon::stop();
                 Ok(json!({"stopping": true}))
@@ -744,6 +869,12 @@ impl Daemon {
             }
         }
     }
+}
+
+/// Read-only principals (a `read` token, an auditor role) never get the host's disk layout.
+fn read_only_caller(p: &Value) -> bool {
+    let scope = p.get("_scope").and_then(|v| v.as_str()).unwrap_or("");
+    scope == "scope:read" || scope == "auditor"
 }
 
 /// What a standby still answers: reads of the shared store, status, and the HA / console
@@ -848,6 +979,19 @@ mod session_command_tests {
         }
     }
 
+    struct Echo;
+    impl seagent_core::Tool for Echo {
+        fn spec(&self) -> seagent_core::ToolSpec {
+            seagent_core::ToolSpec { name: "echo_test".into(), description: "echo".into(), input_schema: json!({"type":"object"}), parallel_safe: false, idempotent: true, pinned: false }
+        }
+        fn effects(&self, _: &seagent_core::ToolCtx, _: &Value) -> Vec<seagent_core::Effect> {
+            vec![]
+        }
+        fn call(&self, _: &seagent_core::ToolCtx, input: Value) -> seagent_core::ToolOutput {
+            seagent_core::ToolOutput::ok(input.get("text").and_then(|v| v.as_str()).unwrap_or("").to_string())
+        }
+    }
+
     #[test]
     fn session_command_runs_security_slash_commands() {
         let tmp = seagent_core::tmp::TempDir::new("seagent-daemon-cmd");
@@ -868,6 +1012,138 @@ mod session_command_tests {
         assert!(d.call("session.command", &json!({"id": "nope-123", "line": "/yolo"})).is_err());
         assert!(d.call("session.command", &json!({"id": id})).is_err());
         assert!(Daemon::METHODS.contains(&"session.command"));
+    }
+
+    #[test]
+    fn tools_call_goes_through_the_same_log_and_audit() {
+        let tmp = seagent_core::tmp::TempDir::new("seagent-daemon-toolcall");
+        let root = tmp.path().to_path_buf();
+        let paths = crate::config::Paths { data: root.join("data"), config_dir: root.join("cfg"), runtime: root.join("run"), ..Default::default() };
+        std::fs::create_dir_all(&root).unwrap();
+        let (pending, cell) = pending_approver(Duration::from_secs(5));
+        let k = crate::kernel::new_kernel(crate::config::Config::default(), paths, Arc::new(NoModels), vec![Arc::new(Echo)], Arc::new(crate::vault::Vault::empty()), pending.clone());
+        let _ = cell.set(Arc::downgrade(&k));
+        let d = Daemon::new(k.clone(), pending);
+        assert!(Daemon::METHODS.contains(&"tools.call"));
+        // A fresh session is created when the caller has none.
+        let r = d.call("tools.call", &json!({"tool": "echo_test", "input": {"text": "hi"}, "workspace": root})).unwrap();
+        assert_eq!((r["ok"].as_bool(), r["is_error"].as_bool(), r["content"].as_str()), (Some(true), Some(false), Some("hi")));
+        let sid = r["session"].as_str().unwrap().to_string();
+        let ev = k.store.read(&sid).unwrap();
+        assert!(ev.iter().any(|e| matches!(&e.kind, crate::event::EventKind::ToolCalled { name, .. } if name == "echo_test")), "the call is in the session log");
+        assert!(ev.iter().any(|e| matches!(&e.kind, crate::event::EventKind::ToolSettled { .. })), "and settled");
+        let audit = seagent_security::audit::query(&k.paths.data, &seagent_security::audit::Query { kind: Some("tool.call".into()), session: Some(sid.clone()), ..Default::default() });
+        assert_eq!(audit.len(), 1, "{audit:?}");
+        assert_eq!(audit[0]["detail"]["tool"], "echo_test");
+        // An unknown tool is an error result, not a silent success.
+        let r = d.call("tools.call", &json!({"tool": "nope", "session": sid, "input": {}})).unwrap();
+        assert_eq!((r["ok"].as_bool(), r["is_error"].as_bool()), (Some(false), Some(true)));
+        assert!(r["content"].as_str().unwrap().contains("unknown tool"));
+        assert!(d.call("tools.call", &json!({"session": "missing"})).is_err());
+    }
+
+    #[test]
+    fn read_only_callers_do_not_get_host_paths() {
+        let tmp = seagent_core::tmp::TempDir::new("seagent-daemon-paths");
+        let root = tmp.path().to_path_buf();
+        let paths = crate::config::Paths { data: root.join("data"), config_dir: root.join("cfg"), runtime: root.join("run"), ..Default::default() };
+        std::fs::create_dir_all(&root).unwrap();
+        let (pending, cell) = pending_approver(Duration::from_secs(5));
+        let k = crate::kernel::new_kernel(crate::config::Config::default(), paths, Arc::new(NoModels), vec![], Arc::new(crate::vault::Vault::empty()), pending.clone());
+        let _ = cell.set(Arc::downgrade(&k));
+        let d = Daemon::new(k.clone(), pending);
+        let id = k.create_session(&root, None, None, Some("paths")).unwrap();
+        let full = d.call("session.list", &json!({})).unwrap();
+        assert!(full.as_array().unwrap().iter().any(|s| s["workspace"].as_str() == Some(root.to_string_lossy().as_ref())));
+        let ro = d.call("session.list", &json!({"_scope": "scope:read"})).unwrap();
+        assert!(ro.as_array().unwrap().iter().all(|s| s.get("workspace").is_none()), "{ro}");
+        let v = d.call("session.view", &json!({"id": id, "_scope": "scope:read"})).unwrap();
+        assert!(v.get("workspace").is_none(), "{v}");
+        let audit = d.call("session.view", &json!({"id": id, "_scope": "auditor"})).unwrap();
+        assert!(audit.get("workspace").is_none(), "{audit}");
+        let admin = d.call("session.view", &json!({"id": id})).unwrap();
+        assert_eq!(admin["workspace"], root.to_string_lossy().as_ref());
+    }
+
+    #[test]
+    fn idle_sessions_are_retired_from_memory_and_rebuilt_on_demand() {
+        let tmp = seagent_core::tmp::TempDir::new("seagent-daemon-retire");
+        let root = tmp.path().to_path_buf();
+        let paths = crate::config::Paths { data: root.join("data"), config_dir: root.join("cfg"), runtime: root.join("run"), ..Default::default() };
+        std::fs::create_dir_all(&root).unwrap();
+        let (pending, cell) = pending_approver(Duration::from_secs(5));
+        let k = crate::kernel::new_kernel(crate::config::Config::default(), paths, Arc::new(NoModels), vec![], Arc::new(crate::vault::Vault::empty()), pending.clone());
+        let _ = cell.set(Arc::downgrade(&k));
+        let id = k.create_session(&root, None, None, Some("idle")).unwrap();
+        k.set_queue(&id, crate::queue::Settings { mode: crate::queue::Mode::Collect, cap: 3, ..Default::default() });
+        assert_eq!(k.queue_for(&id).mode, crate::queue::Mode::Collect);
+        assert!(k.retire_idle_sessions(Duration::ZERO).is_empty(), "0 disables retirement");
+        std::thread::sleep(Duration::from_millis(3));
+        assert_eq!(k.retire_idle_sessions(Duration::from_millis(1)), vec![id.clone()]);
+        assert_eq!(k.queue_for(&id).mode, crate::queue::Mode::Steer, "restored on demand: the config default returns");
+    }
+
+    #[test]
+    fn explicit_stop_records_the_actor_and_fires_run_stopped() {
+        struct Slow;
+        impl seagent_core::Provider for Slow {
+            fn id(&self) -> &str {
+                "slow"
+            }
+            fn caps(&self, _: &str) -> seagent_core::ModelCaps {
+                seagent_core::ModelCaps { context_window: 100_000, max_output: 1000, tools: true, vision: false, explicit_cache: false }
+            }
+            fn complete(&self, _: &seagent_core::ModelRequest, _: &mut dyn FnMut(seagent_core::StreamEvent), _: &seagent_core::Cancel) -> Result<seagent_core::ModelResponse, seagent_core::ProviderError> {
+                std::thread::sleep(Duration::from_millis(300));
+                Ok(seagent_core::ModelResponse { message: seagent_core::Message { role: seagent_core::Role::Assistant, content: vec![seagent_core::Block::text("done")] }, stop: seagent_core::StopReason::EndTurn, usage: Default::default(), model: "m".into() })
+            }
+        }
+        struct Res(Arc<Slow>);
+        impl crate::kernel::Resolver for Res {
+            fn provider(&self, _: &str) -> Result<Arc<dyn seagent_core::Provider>, String> {
+                Ok(self.0.clone())
+            }
+        }
+        struct Capture(Arc<Mutex<Vec<Value>>>);
+        impl crate::hooks::Hook for Capture {
+            fn name(&self) -> String {
+                "capture-run-stopped".into()
+            }
+            fn wants(&self, e: crate::hooks::HookEvent, _: Option<&str>) -> bool {
+                e == crate::hooks::HookEvent::RunStopped
+            }
+            fn run(&self, _: crate::hooks::HookEvent, payload: &Value) -> Result<crate::hooks::HookDecision, String> {
+                self.0.lock().unwrap().push(payload.clone());
+                Ok(crate::hooks::HookDecision::Allow)
+            }
+        }
+        let tmp = seagent_core::tmp::TempDir::new("seagent-daemon-stop");
+        let root = tmp.path().to_path_buf();
+        let mut cfg = crate::config::Config::default();
+        cfg.model.default = "slow/m".into();
+        let paths = crate::config::Paths { data: root.join("data"), config_dir: root.join("cfg"), runtime: root.join("run"), ..Default::default() };
+        std::fs::create_dir_all(&root).unwrap();
+        let (pending, cell) = pending_approver(Duration::from_secs(5));
+        let k = crate::kernel::new_kernel(cfg, paths, Arc::new(Res(Arc::new(Slow))), vec![], Arc::new(crate::vault::Vault::empty()), pending.clone());
+        let _ = cell.set(Arc::downgrade(&k));
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        k.add_hooks(vec![Arc::new(Capture(seen.clone()))]);
+        let d = Daemon::new(k.clone(), pending);
+        let id = k.create_session(&root, None, None, Some("stop")).unwrap();
+        k.submit(&id, "hello", "cli").unwrap();
+        let h = k.start(&id, Default::default());
+        std::thread::sleep(Duration::from_millis(50));
+        let r = d.call("session.interrupt", &json!({"id": id, "_by": "token:ops-bot", "_by_role": "scope:write", "_source": "client"})).unwrap();
+        assert_eq!(r["interrupted"], true);
+        let _ = h.join();
+        let audit = seagent_security::audit::query(&k.paths.data, &seagent_security::audit::Query { kind: Some("run.stopped".into()), session: Some(id.clone()), ..Default::default() });
+        assert_eq!(audit.len(), 1, "{audit:?}");
+        assert_eq!((audit[0]["actor"]["kind"].as_str(), audit[0]["actor"]["name"].as_str()), (Some("token"), Some("ops-bot")));
+        assert_eq!(audit[0]["detail"]["source"], "client");
+        let p = seen.lock().unwrap();
+        assert_eq!(p.len(), 1, "{p:?}");
+        assert_eq!((p[0]["source"].as_str(), p[0]["actor"].as_str()), (Some("client"), Some("token:ops-bot")));
+        assert_eq!(p[0]["sessions"][0]["sessionKey"], id);
     }
 }
 

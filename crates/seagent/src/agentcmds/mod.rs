@@ -15,6 +15,7 @@ pub mod agents;
 pub mod bindings;
 pub mod conversations;
 pub mod debounce;
+pub mod handoff;
 pub mod kanban;
 pub mod moa;
 pub mod monitoring;
@@ -69,6 +70,7 @@ pub const SLASH: &[Def] = &[
     Def { name: "moa", aliases: &[], args: "[preset:] <prompt>", help: "Mixture of Agents: ask the preset's reference models, then act with its aggregator", category: "Session", admin: false, local: false, run: moa::cmd_moa },
     Def { name: "branch", aliases: &["fork"], args: "[--at N] [name]", help: "Fork this conversation into a new session and continue there", category: "Session", admin: false, local: false, run: cmd_branch },
     Def { name: "bg", aliases: &[], args: "<prompt>", help: "Run a prompt in a separate background session; the answer arrives here", category: "Session", admin: false, local: false, run: cmd_bg },
+    Def { name: "handoff", aliases: &[], args: "<channel>[:<chat>]", help: "Hand this CLI/TUI session to a chat channel and continue there", category: "Session", admin: false, local: false, run: handoff::cmd_handoff },
 ];
 
 const DEFAULT_DASHBOARD_REQUEST: &str = "Create a dashboard for this session.";
@@ -302,7 +304,7 @@ mod tests {
 
     #[test]
     fn agent_rows_are_registered_and_reachable() {
-        for n in ["agents", "tasks", "moa", "branch", "fork", "bg"] {
+        for n in ["agents", "tasks", "moa", "branch", "fork", "bg", "handoff"] {
             assert!(slash::find(n).is_some(), "/{n} registered");
         }
         assert_eq!(slash::find("tasks").unwrap().name, "agents", "`/tasks` is the Hermes alias of `/agents`");
@@ -357,6 +359,40 @@ mod tests {
         // `/fork` is the alias and answers with the same switch action.
         let r = slash::run(&ctx(&t.k, &t.ws, Some(id.clone())), "/fork").unwrap();
         assert!(matches!(r.action, Some(slash::Action::Local(ref n, _)) if n == "session"));
+    }
+
+    #[test]
+    fn undo_names_changed_files_and_the_checkpoint_that_restores_them() {
+        if std::process::Command::new("git").arg("--version").output().is_err() {
+            return; // checkpoints shell out to git; the rest of the suite skips it the same way
+        }
+        let t = kit();
+        let id = t.k.create_session(&t.ws, None, None, Some("undo hint")).unwrap();
+        let mut log = t.k.store.open(&id).unwrap();
+        let msg = |m: seagent_core::Message| seagent_kernel::event::EventKind::Message { message: m, usage: None, model: None, inbox: None };
+        log.append(msg(seagent_core::Message::user("q0"))).unwrap();
+        log.append(msg(seagent_core::Message::assistant("a0"))).unwrap();
+        // The checkpoint the second turn started from: its files are what /undo 1 can restore.
+        std::fs::write(t.ws.join("a.txt"), "v1").unwrap();
+        let cp = seagent_kernel::checkpoint::Checkpoints::new(&t.paths.data, &t.ws).unwrap();
+        let cp_id = cp.snapshot("turn 1", 1000).unwrap().expect("a checkpoint id");
+        log.append(seagent_kernel::event::EventKind::Checkpoint { id: cp_id.clone(), turn: 1 }).unwrap();
+        log.append(msg(seagent_core::Message::user("q1"))).unwrap();
+        log.append(msg(seagent_core::Message::assistant("a1"))).unwrap();
+        // Files the undone turn changed.
+        std::fs::write(t.ws.join("a.txt"), "v2").unwrap();
+        std::fs::write(t.ws.join("new.txt"), "n").unwrap();
+        drop(log); // the append handle takes the session lock
+        let out = slash::run(&ctx(&t.k, &t.ws, Some(id.clone())), "/undo 1").unwrap().text.unwrap();
+        assert!(out.contains("rewound 1 turn(s)"), "{out}");
+        assert!(out.contains(&format!("checkpoint {cp_id} restores them")), "{out}");
+        assert!(out.contains("a.txt") && out.contains("new.txt"), "{out}");
+        assert!(out.contains(&format!("/undo {cp_id}")), "names the restoring command: {out}");
+        assert_eq!(seagent_kernel::projection::project(&t.k.store.read(&id).unwrap()).user_turns.len(), 1);
+        // No checkpoint for the undone turn: the rewind still works, with no false promise.
+        let plain = seed(&t.k, &t.ws, 1);
+        let out = slash::run(&ctx(&t.k, &t.ws, Some(plain)), "/undo 1").unwrap().text.unwrap();
+        assert!(out.contains("rewound 1 turn(s)") && !out.contains("checkpoint "), "{out}");
     }
 
     #[test]

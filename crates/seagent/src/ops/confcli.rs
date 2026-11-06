@@ -350,8 +350,27 @@ fn audit_change(paths: &Paths, key: &str, op: &str) {
     seagent_security::audit::record(&paths.data, seagent_security::audit::Event::new("config.change", seagent_security::audit::Actor::local(), key, "ok").detail(serde_json::json!({"op": op, "file": paths.user_config().display().to_string()})));
 }
 
+/// A value that is a redaction marker rather than a real value: `***` (the config page's
+/// mask), `[REDACTED …]` (tool output), `«redacted…»` (Hermes' sentinel) or OpenClaw's
+/// `__OPENCLAW_REDACTED__`. Writing one back silently replaces a credential with a dead
+/// placeholder, so every config editor refuses it.
+pub fn redaction_placeholder(value: &str) -> bool {
+    let t = value.trim().trim_matches(['"', '\'']);
+    t == "***" || t.starts_with("[REDACTED") || t.starts_with("«redacted") || t.contains("__OPENCLAW_REDACTED__")
+}
+
+fn text_has_redaction_placeholder(text: &str) -> bool {
+    text.lines().any(|l| {
+        let code = l.split('#').next().unwrap_or("");
+        [code.split_once('='), code.split_once(':')].into_iter().flatten().any(|(_, v)| redaction_placeholder(v))
+    })
+}
+
 pub fn set(paths: &Paths, key: &str, value: &str) -> Result<String, String> {
     refuse_locked(key)?;
+    if redaction_placeholder(value) {
+        return Err(format!("refusing to write a redaction placeholder for `{key}`; set the real value or use {{{{secret:NAME}}}}"));
+    }
     let v = parse_value(value.trim());
     let text = edited_text(&read_user(paths)?, key, Some(v.clone()))?;
     write_validated(paths, &text, true)?;
@@ -397,6 +416,9 @@ pub fn get(paths: &Paths, ws: &Path, key: &str) -> Result<String, String> {
 
 /// JSON merge patch (RFC 7396; `null` deletes) or a TOML snippet (deep-merged).
 pub fn patch(paths: &Paths, src: &str) -> Result<String, String> {
+    if text_has_redaction_placeholder(src) {
+        return Err("refusing to write a redaction placeholder; set the real value or use {{secret:NAME}}".into());
+    }
     let mut table: toml::Table = read_user(paths)?.parse().map_err(|e| format!("current config does not parse: {e}"))?;
     let src = src.trim();
     if src.starts_with('{') {
@@ -737,6 +759,23 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
         assert_eq!(std::fs::metadata(p.user_config()).unwrap().permissions().mode() & 0o777, 0o600);
         assert_eq!(get(&p, Path::new("/nonexistent"), "model.default").unwrap(), "a/b");
+    }
+
+    #[test]
+    fn redaction_placeholders_are_never_written_back() {
+        let p = paths();
+        std::fs::create_dir_all(&p.config_dir).unwrap();
+        let before = "[providers.x]\napi_key = \"real-key\"\n";
+        std::fs::write(p.user_config(), before).unwrap();
+        for v in ["\"***\"", "\"[REDACTED API key]\"", "\"«redacted:ghp_x»\"", "\"__OPENCLAW_REDACTED__\""] {
+            let e = set(&p, "providers.x.api_key", v).unwrap_err();
+            assert!(e.contains("redaction placeholder"), "{v}: {e}");
+            assert_eq!(std::fs::read_to_string(p.user_config()).unwrap(), before, "{v} changed the file");
+        }
+        assert!(patch(&p, "providers.x.api_key = \"[REDACTED]\"\n").unwrap_err().contains("redaction placeholder"));
+        assert_eq!(std::fs::read_to_string(p.user_config()).unwrap(), before);
+        set(&p, "providers.x.api_key", "\"new-key\"").unwrap();
+        assert!(std::fs::read_to_string(p.user_config()).unwrap().contains("new-key"));
     }
 
     #[test]

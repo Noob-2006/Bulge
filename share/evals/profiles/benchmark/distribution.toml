@@ -1,0 +1,4 @@
+[profile]
+name = "benchmark"
+description = "Minimal eval baseline: one persistent shell, read (including images) and the code tool; short identity."
+version = "1"

@@ -94,7 +94,7 @@ pub fn apply_transitions(s: &Settings, st: &Store, at: i64, dry_run: bool) -> (C
         }
         c.checked += 1;
         let rec = usage::get(st, &name);
-        if rec["pinned"].as_bool() == Some(true) || protected.contains(&name) {
+        if rec["pinned"].as_bool() == Some(true) || rec["locked"].as_bool() == Some(true) || protected.contains(&name) {
             continue;
         }
         if !usage_map.contains_key(&name) {

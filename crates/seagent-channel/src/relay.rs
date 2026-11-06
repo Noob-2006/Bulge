@@ -1363,7 +1363,8 @@ impl Channel for Relay {
         if url.contains("/relay/media/") {
             let t = self.sh.bearer().map(|t| format!("Bearer {t}"));
             let hs: Vec<(&str, &str)> = t.as_deref().map(|t| vec![("authorization", t)]).unwrap_or_default();
-            crate::http::get_bytes(url, &hs, MEDIA_MAX_BYTES)
+            // The connector may be self-hosted on a private network: trust its own origin only.
+            crate::http::get_bytes_trusted(url, &hs, MEDIA_MAX_BYTES, &self.base)
         } else {
             crate::http::get_bytes(url, &[], MEDIA_MAX_BYTES)
         }

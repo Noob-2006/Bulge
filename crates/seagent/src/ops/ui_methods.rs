@@ -41,6 +41,9 @@ pub const METHODS: &[&str] = &[
     "ui.search", "ui.websearch.status", "ui.websearch.set", "ui.websearch.test",
     "ui.systems", "ui.systems.backup", "ui.custodian", "ui.labs", "ui.labs.set", "ui.about", "ui.profile", "ui.profile.set",
     "ui.ops.status",
+    "ui.approvals.grants.list", "ui.approvals.grant.revoke",
+    "ui.exec.policy.get", "ui.exec.policy.set",
+    "ui.security.status",
 ];
 
 type Res = Result<Value, (i32, String)>;
@@ -213,6 +216,23 @@ pub fn call(c: &UiCtx, m: &str, p: &Value) -> Option<Res> {
         "ui.labs.set" => labs_set(c, &s("id"), p["enabled"].as_bool().unwrap_or(false)),
         "ui.about" => Ok(about(c)),
         "ui.ops.status" => Ok(crate::ops::opsview::status(c)),
+        // ── approvals: standing grants + exec policy ──
+        "ui.approvals.grants.list" => approvals_page(c, &ws),
+        "ui.approvals.grant.revoke" => {
+            let key = s("id");
+            if key.trim().is_empty() {
+                Err(bad("id is required"))
+            } else {
+                seagent_security::approvals::remove_grant(&c.paths.data, key.trim()).map(|n| json!({"removed": n})).map_err(fail)
+            }
+        }
+        "ui.exec.policy.get" => fresh(c, &ws).map(|cfg| crate::security_cli::exec_policy_json(&cfg, &c.paths)).map_err(fail),
+        "ui.exec.policy.set" => {
+            let fb = if p["ask_fallback"].is_string() { s("ask_fallback") } else { s("askFallback") };
+            crate::security_cli::set_exec_policy(&c.paths, &ws, &s("security"), &s("ask"), &fb).map_err(fail)
+        }
+        // ── security posture ──
+        "ui.security.status" => security_status(c, &ws),
         "ui.profile" => Ok(profile(c)),
         "ui.profile.set" => profile_set(c, p),
         _ => return None,
@@ -271,6 +291,167 @@ fn vault(c: &UiCtx) -> Result<seagent_kernel::vault::Vault, (i32, String)> {
     seagent_kernel::vault::Vault::load(&c.paths.secrets()).map_err(fail)
 }
 
+// ───────────────────────── approvals / security posture ─────────────────────────
+
+/// Standing grants the console may revoke, plus the config-file allowlists (read-only
+/// here: they live in `config.toml`, so the UI points at the Config page instead).
+fn approvals_page(c: &UiCtx, ws: &Path) -> Res {
+    let cfg = fresh(c, ws).map_err(fail)?;
+    let grants: Vec<Value> = seagent_security::approvals::grants(&c.paths.data)
+        .into_iter()
+        .filter_map(|g| {
+            let mut v = serde_json::to_value(&g).ok()?;
+            v["revocable"] = json!(true);
+            Some(v)
+        })
+        .collect();
+    let mut config = Vec::new();
+    for p in &cfg.approvals.allowlist {
+        config.push(json!({"kind": "command", "pattern": p, "source": "config"}));
+    }
+    for p in &cfg.approvals.exec.allowlist {
+        config.push(json!({"kind": "exec", "pattern": p, "source": "config"}));
+    }
+    Ok(json!({
+        "grants": grants,
+        "config": config,
+        "grant_ttl_days": cfg.approvals.grant_ttl_days,
+        "exec": crate::security_cli::exec_policy_json(&cfg, &c.paths),
+        "agents": agent_policies(&cfg),
+    }))
+}
+
+fn role_policy(cfg: &Config, role: &str) -> Value {
+    let role = role.trim();
+    if role.is_empty() {
+        return json!({"id": "", "status": "none", "policy": null});
+    }
+    let cat = seagent_kernel::roles::Catalog::for_config(cfg);
+    match seagent_kernel::roles::resolve(cfg, &cat, role) {
+        Ok(r) => {
+            let p = r.policy();
+            json!({
+                "id": role, "status": "known", "title": r.title,
+                "approval": p.approval, "workspace_only": p.workspace_only,
+                "write_deny": p.write_deny, "deny": p.deny, "approve": p.approve,
+                "tool_profile": r.tool_profile(),
+            })
+        }
+        // An unknown role is reported as unknown, never as unrestricted/safe.
+        Err(e) => json!({"id": role, "status": "unknown", "error": e, "policy": null}),
+    }
+}
+
+/// What each agent may do: its role preset (tightening approval/workspace policy), the
+/// tools it may use, and the global exec/sandbox/elevated posture it inherits.
+fn agent_policies(cfg: &Config) -> Value {
+    let mut agents = Vec::new();
+    for (id, a) in &cfg.agents {
+        let role = if a.role.trim().is_empty() { cfg.role.active.clone() } else { a.role.clone() };
+        agents.push(json!({
+            "id": id, "name": a.name, "model": if a.model.trim().is_empty() { cfg.model.default.clone() } else { a.model.clone() },
+            "role": role_policy(cfg, &role),
+            "tools_allow": a.tools_allow, "tools_deny": a.tools_deny,
+            "default": a.default,
+        }));
+    }
+    if !cfg.agents.contains_key("main") {
+        agents.insert(0, json!({
+            "id": "main", "name": "main", "model": cfg.model.default,
+            "role": role_policy(cfg, &cfg.role.active), "tools_allow": [], "tools_deny": [], "default": cfg.agents.values().all(|a| !a.default),
+        }));
+    }
+    let exec = &cfg.approvals.exec;
+    let sandbox = seagent_tools::exec::ExecConfig::parse(&serde_json::to_value(&cfg.exec).unwrap_or(Value::Null)).map(|e| json!({
+        "mode": e.sandbox.mode, "backend": e.sandbox.backend, "workspace_access": e.sandbox.workspace_access,
+        "network": e.sandbox.network, "elevated": e.sandbox.elevated,
+    })).unwrap_or_else(|e| json!({"status": "unknown", "error": e}));
+    json!({
+        "agents": agents,
+        "exec": {
+            "security": exec.security.as_str(), "ask": exec.ask.as_str(), "ask_fallback": exec.ask_fallback.as_str(),
+            "safe_bins": exec.safe_bins, "allowlist": exec.allowlist, "strict_inline_eval": cfg.approvals.strict_inline_eval,
+        },
+        "sandbox": sandbox,
+        "elevated": {"enabled": cfg.approvals.elevated.enabled, "default": format!("{:?}", cfg.approvals.elevated.default).to_lowercase()},
+        "preset": cfg.approvals.preset.as_str(),
+    })
+}
+
+fn secretish(t: &toml::Table) -> bool {
+    const KEYS: &[&str] = &["secret", "token", "verification_token", "encoding_aes_key", "signing_secret", "app_secret", "channel_secret", "auth_token", "push_token", "password", "bot_token"];
+    KEYS.iter().any(|k| t.get(*k).is_some_and(|v| !v.is_str() || v.as_str().is_some_and(|s| !s.trim().is_empty())))
+}
+
+fn host_name() -> String {
+    std::env::var("HOSTNAME").ok().filter(|h| !h.trim().is_empty()).or_else(|| std::fs::read_to_string("/etc/hostname").ok().map(|s| s.trim().to_string())).filter(|h| !h.is_empty()).unwrap_or_else(|| "this host".into())
+}
+
+/// Security posture: every listening surface with its auth/layers, the app's tokens and
+/// endpoints (never a token value), configured channels, and what each agent may do.
+fn security_status(c: &UiCtx, ws: &Path) -> Res {
+    let cfg = fresh(c, ws).map_err(fail)?;
+    let mut surfaces = Vec::new();
+    for s in crate::security_cli::exposure_surfaces(&cfg) {
+        let surf = s.as_surface();
+        surfaces.push(json!({
+            "name": s.name, "listen": s.listen, "enabled": s.enabled, "tls": s.tls,
+            "behind_proxy": s.behind_proxy, "allow_public": s.allow_public,
+            "auth": s.auth.as_str(), "origins": s.origins, "rate_limit": s.rate_limit,
+            "loopback": seagent_security::exposure::is_loopback(&s.listen),
+            "warning": seagent_security::exposure::warning(&surf),
+        }));
+    }
+    let findings: Vec<Value> = crate::security_cli::exposure_findings(&cfg).into_iter().map(|f| json!({
+        "id": f.id, "severity": f.severity, "title": f.title, "detail": f.detail, "fix": f.fix,
+    })).collect();
+    let warnings = crate::security_cli::exposure_warnings(&cfg);
+    let app = seagent_app::AppConfig::parse(&cfg.app).ok();
+    let (app_json, tokens) = match &app {
+        Some(a) => (
+            json!({
+                "enabled": a.enabled, "listen": a.listen, "ui": a.ui, "openai_api": a.openai_api,
+                "nodes": a.nodes, "terminal": a.terminal, "metrics_public": a.metrics_public, "scim": a.scim,
+                "a2a": {"enabled": a.a2a.enabled, "public_url": a.a2a.public_url, "peers": a.a2a.peers.keys().cloned().collect::<Vec<_>>(), "push": a.a2a.push_secret.is_some()},
+                "allow_origins": a.allow_origins, "tls": a.exposure.tls, "behind_proxy": a.exposure.behind_proxy,
+                "allow_public": a.exposure.allow_public,
+                "token": {"set": a.token.as_deref().is_some_and(|t| !t.trim().is_empty()), "scope": "admin"},
+                "dashboard_auth": {"enabled": a.auth.enabled, "provider": a.auth.provider},
+            }),
+            a.tokens.iter().map(|t| json!({"name": t.name, "scope": t.scope, "org": t.org, "team": t.team})).collect::<Vec<_>>(),
+        ),
+        None => (json!({"status": "unknown", "error": "the [app] table does not parse"}), vec![]),
+    };
+    let channels: Vec<Value> = cfg.channels.iter().map(|(name, t)| {
+        let kind = t.get("kind").and_then(|k| k.as_str()).unwrap_or(name);
+        let listen = t.get("listen").and_then(|v| v.as_str()).unwrap_or("");
+        let open = t.get("allow").and_then(|v| v.as_array()).is_some_and(|a| a.iter().any(|x| x.as_str() == Some("*"))) || t.get("dm_policy").and_then(|v| v.as_str()) == Some("open");
+        let urls = ["webhook_url", "public_url", "public_base", "inbound_url", "outbound_url"];
+        let public_url = urls.iter().any(|k| t.get(*k).and_then(|v| v.as_str()).is_some_and(|v| !v.trim().is_empty()));
+        json!({
+            "name": name, "kind": kind, "listening": !listen.is_empty(), "listen": listen,
+            "default_chat": t.get("default_chat").and_then(|v| v.as_str()),
+            "open": open,
+            "secret_configured": secretish(t),
+            "public_url": public_url,
+        })
+    }).collect();
+    Ok(json!({
+        "host": {"name": host_name(), "policy": "known"},
+        "app": app_json,
+        "scoped_tokens": tokens,
+        "surfaces": surfaces,
+        "findings": findings,
+        "warnings": warnings,
+        "channels": channels,
+        "plugins": {"configured": cfg.plugins.len(), "mcp": cfg.mcp.len(), "hooks": cfg.hooks.len()},
+        "agents": agent_policies(&cfg)["agents"],
+        "exec": agent_policies(&cfg)["exec"],
+        "sandbox": agent_policies(&cfg)["sandbox"],
+        "elevated": agent_policies(&cfg)["elevated"],
+    }))
+}
+
 // ───────────────────────── config ─────────────────────────
 
 /// Redacted user config text, its path and the JSON schema (Config page).
@@ -291,8 +472,8 @@ fn config_get(c: &UiCtx, ws: &Path) -> Res {
 /// Replace the user config with `text` (validated, previous version backed up). Text that
 /// still carries a redaction placeholder is refused so a save can never wipe a key.
 fn config_save(c: &UiCtx, text: &str) -> Res {
-    if text.lines().any(|l| l.split_once('=').is_some_and(|(_, v)| v.trim() == "\"***\"")) {
-        return Err(bad("the text still contains redacted values (\"***\"); set those keys one by one or move them to secrets"));
+    if text.lines().any(|l| l.split_once('=').is_some_and(|(_, v)| crate::ops::confcli::redaction_placeholder(v.split('#').next().unwrap_or(v)))) {
+        return Err(bad("the text still contains redacted values; set those keys one by one or move them to secrets"));
     }
     crate::ops::confcli::write_validated(&c.paths, text, true).map_err(fail)?;
     Ok(json!({"ok": true, "path": c.paths.user_config().display().to_string()}))
@@ -1203,6 +1384,8 @@ mod tests {
         assert!(!text.contains("sk-live-123456") && text.contains("\"***\"") && g["redacted"] == true, "{text}");
         assert!(g["schema"]["properties"]["model"].is_object());
         assert!(err(&c, "ui.config.save", json!({"text": text})).contains("redacted"));
+        assert!(err(&c, "ui.config.save", json!({"text": "[providers.x]\napi_key = \"[REDACTED API key]\"\n"})).contains("redacted"));
+        assert!(err(&c, "ui.config.save", json!({"text": "[providers.x]\napi_key = \"«redacted:ghp_x»\"\n"})).contains("redacted"));
         ok(&c, "ui.config.set", json!({"key": "model.default", "value": "\"echo/other\""}));
         assert!(std::fs::read_to_string(t.paths.user_config()).unwrap().contains("echo/other"));
         assert!(err(&c, "ui.config.save", json!({"text": "[model\n"})).contains("invalid"));
@@ -1584,6 +1767,39 @@ mod tests {
     /// `ui.*` by this module (`METHODS` + `call()`), `kanban.*` by the kernel's kanban
     /// handler, everything else by the daemon or the app server's host methods — and every
     /// page in `PAGES` exists in `pages.js` (same count, same ids).
+    #[test]
+    fn approvals_grants_exec_policy_and_security_posture() {
+        let t = kit();
+        let c = ctx(&t);
+        // A durable grant can be listed and revoked from the console.
+        let id = seagent_security::approvals::add_grant(&t.paths.data, seagent_security::approvals::GrantKind::Command, "git status", None, "test").unwrap();
+        let v = ok(&c, "ui.approvals.grants.list", json!({}));
+        assert!(v["grants"].as_array().unwrap().iter().any(|g| g["id"] == id && g["pattern"] == "git status" && g["revocable"] == true), "{v}");
+        assert!(v["exec"]["security"].is_string() && v["agents"]["agents"].as_array().unwrap().iter().any(|a| a["id"] == "main"), "{v}");
+        assert_eq!(ok(&c, "ui.approvals.grant.revoke", json!({"id": id}))["removed"], 1);
+        assert!(!ok(&c, "ui.approvals.grants.list", json!({}))["grants"].as_array().unwrap().iter().any(|g| g["id"] == id));
+        assert!(err(&c, "ui.approvals.grant.revoke", json!({})).contains("id is required"));
+        // The exec policy editor persists the same keys as `seagent exec-policy set`.
+        let e = ok(&c, "ui.exec.policy.set", json!({"security": "deny", "ask": "always", "ask_fallback": "deny"}));
+        assert_eq!((e["security"].as_str(), e["ask"].as_str(), e["askFallback"].as_str()), (Some("deny"), Some("always"), Some("deny")));
+        assert_eq!(ok(&c, "ui.exec.policy.get", json!({}))["security"], "deny");
+        assert!(err(&c, "ui.exec.policy.set", json!({"security": "nope", "ask": "off", "ask_fallback": "deny"})).contains("security"));
+        // Posture: loopback app surface, exposure findings, channels, and per-agent policy.
+        let s = ok(&c, "ui.security.status", json!({}));
+        assert_eq!(s["host"]["policy"], "known");
+        assert!(s["surfaces"].as_array().unwrap().iter().any(|x| x["name"] == "app server" && x["loopback"] == true), "{s}");
+        assert!(s["findings"].is_array() && s["warnings"].is_array());
+        assert_eq!(s["exec"]["security"], "deny");
+        assert!(s["agents"].as_array().unwrap().iter().any(|a| a["id"] == "main" && a["role"]["status"] != "unknown"), "{s}");
+        // An unknown role is surfaced as unknown, never as unrestricted.
+        let mut cfg = std::fs::read_to_string(t.paths.user_config()).unwrap_or_default();
+        cfg.push_str("\n[agents.ops]\nrole = \"not-a-real-role\"\n");
+        std::fs::write(t.paths.user_config(), cfg).unwrap();
+        let s = ok(&c, "ui.security.status", json!({}));
+        let ops = s["agents"].as_array().unwrap().iter().find(|a| a["id"] == "ops").expect("agent listed");
+        assert_eq!(ops["role"]["status"], "unknown", "{s}");
+    }
+
     #[test]
     fn pages_js_calls_only_served_methods() {
         const JS: &str = include_str!("../../../../ui/web/pages.js");

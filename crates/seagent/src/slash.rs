@@ -134,7 +134,7 @@ pub const DEFS: &[Def] = &[
     def!("clear", [], "", "Clear the screen and start a new session", "Session", false, false, |_, _| Ok(Reply::act(Action::NewSession { clear: true }))),
     def!("redraw", [], "", "Force a full repaint of the screen", "Session", false, true, |_, a| Ok(Reply::act(Action::Local("redraw".into(), a.into())))),
     def!("status", [], "", "Session, model, tokens, context and queue", "Session", false, false, cmd_status),
-    def!("stop", [], "", "Stop the running turn", "Session", false, false, |c, _| Ok(Reply::text(if c.session.as_deref().is_some_and(|s| c.k.interrupt(s)) { "stopping" } else { "nothing is running" }))),
+    def!("stop", [], "", "Stop the running turn", "Session", false, false, |c, _| Ok(Reply::text(if c.session.as_deref().is_some_and(|s| c.k.interrupt_as(s, &seagent_security::audit::Actor::local(), "client")) { "stopping" } else { "nothing is running" }))),
     def!("model", [], "[provider/model]", "Show or switch this session's model", "Session", false, false, cmd_model),
     def!("compact", ["compress"], "[here [N]|up to here [N]|--keep N] [--preview] [focus]", "Compact the context now; 'here N' keeps the last N exchanges verbatim", "Session", false, false, crate::ops::partial::slash),
     def!("recap", [], "", "Recap what happened in this session", "Session", false, false, crate::ops::recap::slash),
@@ -148,7 +148,7 @@ pub const DEFS: &[Def] = &[
     def!("plan", [], "[task]", "Write an implementation plan to .seagent/plans/ without executing anything", "Session", false, false, cmd_plan),
     def!("review", [], "[instructions]", "Independent sub-agent reviews the work just discussed", "Session", false, false, cmd_review),
     def!("init", [], "[notes]", "Generate or update AGENTS.md from a repo scan", "Session", false, false, cmd_init),
-    def!("learn", [], "[what to learn]", "Turn a directory, URL, notes or this chat into a reusable skill", "Session", false, false, cmd_learn),
+    def!("learn", [], "[what to learn|drafts]", "Turn a directory, URL, notes or this chat into a reusable skill; `drafts` lists the workshop's proposed skills", "Session", false, false, cmd_learn),
     def!("queue", ["q"], "[mode <m>|cap <n>|drop <p>|debounce <d>|list|rm <n>|edit <n> <text>|move <a> <b>|clear|<prompt>]", "Queue a prompt for the next turn, or manage queued input", "Session", false, false, cmd_queue),
     def!("busy", [], "[steer|queue|collect|interrupt]", "How messages behave while a turn runs (saved as runner.busy_mode)", "Session", false, false, cmd_busy),
     def!("followup", [], "<text>", "Run this as a new turn after the current one, whatever the queue mode", "Session", false, false, cmd_followup),
@@ -308,7 +308,9 @@ fn cmd_status(c: &Ctx, _: &str) -> Result<Reply, String> {
     let v = view(c)?;
     let q = c.k.queue_for(id);
     let window = context_window(c.k, &v.model);
-    let pct = if window > 0 { format!(" ({:.0}% of {window})", v.last_input_tokens as f64 * 100.0 / window as f64) } else { String::new() };
+    let marker = c.k.window_marker(&v.model);
+    let note = if marker.is_empty() { String::new() } else { format!(" {marker}") };
+    let pct = if window > 0 { format!(" ({:.0}% of {window}{note})", v.last_input_tokens as f64 * 100.0 / window as f64) } else { String::new() };
     // The line's wording lives in the `status.*` catalogs (`display.language`).
     let title = v.title.as_deref().map(|t| format!(" — {t}")).unwrap_or_default();
     let state = seagent_kernel::i18n::t(if c.k.is_running(id) { "status.running" } else { "status.idle" });
@@ -370,8 +372,29 @@ fn cmd_undo(c: &Ctx, a: &str) -> Result<Reply, String> {
 
 fn rewind_turns(c: &Ctx, n: u64) -> Result<Reply, String> {
     let id = sid(c)?;
+    // The checkpoint taken when the oldest undone turn started is the restore point for
+    // its files. Read it before the rewind (the view still sees the undone turns) and
+    // never guess: a turn with no checkpoint of its own gets no rollback pointer.
+    let v = view(c)?;
+    let kept = v.user_turns.len().saturating_sub(n as usize);
+    let cp_id = v.checkpoints.into_iter().rev().find(|(turn, _)| *turn as usize == kept).map(|(_, id)| id);
     let from = c.k.rewind(id, n)?;
-    Ok(Reply::text(format!("rewound {n} turn(s) — the conversation continues from event #{from} (the log itself is append-only)")))
+    let mut text = format!("rewound {n} turn(s) — the conversation continues from event #{from} (the log itself is append-only)");
+    if let Some(cp) = cp_id {
+        let files = seagent_kernel::checkpoint::Checkpoints::new(&paths(c).data, &ws(c)).and_then(|c| c.changed_files(&cp)).unwrap_or_default();
+        if files.is_empty() {
+            text.push_str(&format!("\nno workspace files changed in the undone turn(s); checkpoint {cp} restores that state (`/undo {cp}`)"));
+        } else {
+            let named: Vec<&str> = files.iter().take(8).map(String::as_str).collect();
+            let more = files.len().saturating_sub(named.len());
+            text.push_str(&format!(
+                "\nchanged files (checkpoint {cp} restores them; `/undo {cp}`):\n  {}{}",
+                named.join("\n  "),
+                if more > 0 { format!("\n  … {more} more") } else { String::new() }
+            ));
+        }
+    }
+    Ok(Reply::text(text))
 }
 
 fn cmd_history(c: &Ctx, a: &str) -> Result<Reply, String> {
@@ -737,7 +760,13 @@ pub fn learn_prompt(what: &str) -> String {
     format!("[/learn] Turn the request below into ONE reusable skill and save it.\n\nTHE REQUEST / SOURCES:\n{req}\n\nThe request may mix two kinds of content, in any order: SOURCES to gather (directories, file paths, URLs, \"what we just did\", pasted notes) and REQUIREMENTS that shape the skill (what to focus on, what to leave out, scope, naming). Treat every part as load-bearing: prose after a path or link is not incidental — `<url> focus on the auth flow, skip the deprecated endpoints` means gather the URL AND honor the focus. Never fetch the first source and ignore the rest.\n\nSteps:\n1. Inventory every source named, with the tools you already have: `read`/`glob`/`grep` for local files and directories, `web_fetch` for URLs, this conversation when the source is what we just did, and pasted text as-is. Gather a small source now. For a large source, map its chapters first and process it incrementally (see the knowledge-base layout below) instead of loading it all. If the scope is ambiguous, make a reasonable choice and note it — do not stall.\n2. Check the skill index for a skill that already covers this topic. If one exists, load it (`skill` action=\"view\") and extend it with action=\"update\"; only create a new one when nothing matches.\n3. Reply with the skill name and the exact SKILL.md path the `skill` tool reported, and a one-line summary of what it captured.\n\n{LEARN_STANDARDS}")
 }
 
-fn cmd_learn(_: &Ctx, a: &str) -> Result<Reply, String> {
+fn cmd_learn(c: &Ctx, a: &str) -> Result<Reply, String> {
+    // `/learn drafts` is the workshop's propose queue (same records as `/skills drafts`).
+    if matches!(a.trim(), "drafts" | "pending") {
+        let s = seagent_skills::core::settings::Settings::load(&c.k.cfg);
+        let mc = seagent_skills::core::manage::Ctx { cfg: &c.k.cfg, paths: &c.k.paths, ws: &c.workspace, settings: &s, session: c.session.as_deref() };
+        return seagent_skills::core::manage::cli(&mc, &["drafts".to_string()]).map(Reply::text);
+    }
     Ok(Reply::prompt(if a.trim().is_empty() { "learning from this conversation…" } else { "learning a skill…" }, learn_prompt(a)))
 }
 
@@ -935,7 +964,7 @@ fn cmd_discard(c: &Ctx, _: &str) -> Result<Reply, String> {
 /// Context breakdown shared by `/context` and `seagent prompt-size` (upstream
 /// `agent/context_breakdown.py`, in [`crate::ops::context`]).
 pub fn context_report(k: &Kernel, v: &View, specs: &[seagent_core::ToolSpec]) -> String {
-    crate::ops::context::report(v, specs, context_window(k, &v.model), &k.cfg.compaction, false)
+    crate::ops::context::report_marked(v, specs, context_window(k, &v.model), &k.cfg.compaction, false, k.window_marker(&v.model))
 }
 
 /// `/context [all|detail|list|json]` — usage gauge, breakdown by category, compaction stats.
@@ -944,12 +973,13 @@ pub fn context_report(k: &Kernel, v: &View, specs: &[seagent_core::ToolSpec]) ->
 fn cmd_context(c: &Ctx, a: &str) -> Result<Reply, String> {
     let v = view(c)?;
     let window = context_window(c.k, &v.model);
+    let marker = c.k.window_marker(&v.model);
     let specs = c.k.specs();
     match a.trim().to_ascii_lowercase().as_str() {
-        "json" => Ok(Reply::text(serde_json::to_string_pretty(&crate::ops::context::payload(&v, &specs, window)).unwrap_or_default())),
+        "json" => Ok(Reply::text(serde_json::to_string_pretty(&crate::ops::context::payload_marked(&v, &specs, window, marker)).unwrap_or_default())),
         mode => {
             let details = matches!(mode, "all" | "full" | "detail" | "details");
-            Ok(Reply::text(crate::ops::context::report(&v, &specs, window, &c.k.cfg.compaction, details)))
+            Ok(Reply::text(crate::ops::context::report_marked(&v, &specs, window, &c.k.cfg.compaction, details, marker)))
         }
     }
 }
@@ -1308,13 +1338,13 @@ fn cmd_personality(c: &Ctx, a: &str) -> Result<Reply, String> {
         })?
     };
     if let Some(id) = c.session.as_deref() {
-        let mut log = c.k.store.open(id).map_err(|e| e.to_string())?;
-        let mut segs = project(log.events()).system;
+        let events = c.k.store.read(id).map_err(|e| e.to_string())?;
+        let mut segs = project(&events).system;
         segs.retain(|s| s.id != "personality");
         if !text.is_empty() {
             segs.insert(1.min(segs.len()), seagent_core::SystemSegment { id: "personality".into(), text: format!("# Personality\n{text}"), cache: false });
         }
-        log.append(EventKind::System { segments: segs }).map_err(|e| e.to_string())?;
+        c.k.update_system(id, segs).map_err(|e| e.to_string())?;
     }
     let lit = toml::Value::String(name.clone()).to_string();
     let saved = crate::ops::confcli::set(paths(c), "personality", &lit).is_ok();
@@ -1845,6 +1875,7 @@ mod tests {
         assert!(p.contains("MERGE DISCIPLINE") && p.contains("keep this") && p.contains("focus on tests"));
         let p = run(&c, "/learn ~/docs/tool").unwrap().prompt.unwrap();
         assert!(p.contains("~/docs/tool") && p.contains("<=60 characters"));
+        assert!(run(&c, "/learn drafts").unwrap().text.unwrap_or_default().contains("no pending skill writes"), "/learn drafts is the workshop queue");
         let task = review_task(&[Message::user("ship the PR"), Message::assistant("done: PR #4")], "check tests").unwrap();
         assert!(task.contains("USER: ship the PR") && task.contains("ASSISTANT: done: PR #4") && task.contains("check tests") && task.contains("independent senior reviewer"));
         assert!(review_task(&[], "").is_err());

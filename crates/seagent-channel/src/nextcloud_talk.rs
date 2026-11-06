@@ -626,11 +626,11 @@ impl Channel for NextcloudTalk {
                 let uid = self.user_id()?;
                 let enc: Vec<String> = p.trim_start_matches('/').split('/').map(seagent_net::urlencode).collect();
                 let r = self.basic()?;
-                return crate::http::get_bytes(&format!("{}{}/{}", self.base, self.dav_root(&uid), enc.join("/")), &[("authorization", &r)], MAX);
+                return crate::http::get_bytes_trusted(&format!("{}{}/{}", self.base, self.dav_root(&uid), enc.join("/")), &[("authorization", &r)], MAX, &self.base);
             }
         }
         match &m.url {
-            Some(u) => crate::http::get_bytes(&format!("{}/download", u.trim_end_matches('/')), &[], MAX),
+            Some(u) => crate::http::get_bytes_trusted(&format!("{}/download", u.trim_end_matches('/')), &[], MAX, &self.base),
             None => Err(crate::unsupported("media download")),
         }
     }

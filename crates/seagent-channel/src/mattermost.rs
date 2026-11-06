@@ -899,7 +899,7 @@ impl Channel for Mattermost {
             _ => return Err(ChannelError::new(K::Fatal, "mattermost file without id")),
         };
         let auth = format!("Bearer {}", self.inner.cfg.token);
-        crate::http::get_bytes(&url, &[("authorization", &auth)], 100 * 1024 * 1024)
+        crate::http::get_bytes_trusted(&url, &[("authorization", &auth)], 100 * 1024 * 1024, &self.inner.cfg.base_url)
     }
 
     fn stop(&self) {

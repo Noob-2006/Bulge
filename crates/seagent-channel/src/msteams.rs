@@ -704,8 +704,10 @@ impl Shared {
         if let Some(c) = self.users.lock().unwrap().get(user) {
             return Ok(c.clone());
         }
+        // The configured tenant is authoritative: proactive DMs must work before any
+        // inbound activity has told us the tenant. Only fall back to what an inbound saw.
         let seen = self.tenant_seen.lock().unwrap().clone();
-        let tenant = if !seen.is_empty() { seen } else if self.tenant != "botframework.com" { self.tenant.clone() } else { String::new() };
+        let tenant = if self.tenant != "botframework.com" { self.tenant.clone() } else { seen };
         let member = if user.contains(':') { json!({"id": user}) } else { json!({"id": format!("8:orgid:{user}"), "aadObjectId": user}) };
         let mut body = json!({"bot": {"id": format!("28:{}", self.app_id)}, "members": [member], "isGroup": false});
         if !tenant.is_empty() {
@@ -1704,7 +1706,9 @@ rBfXU4bsOl7nzb+HXQM2ROw=\n\
         let reqs = srv.requests();
         let creates: Vec<_> = reqs.iter().filter(|r| r.path == "/svc/v3/conversations").collect();
         assert_eq!(creates.len(), 1);
-        assert_eq!(creates[0].json(), json!({"bot": {"id": "28:APPID"}, "members": [{"id": "8:orgid:aad-bob", "aadObjectId": "aad-bob"}], "isGroup": false, "tenantId": "TEN", "channelData": {"tenant": {"id": "TEN"}}}));
+        // The configured tenant (contoso) is authoritative; an inbound tenant only fills in
+        // when the config leaves it unset.
+        assert_eq!(creates[0].json(), json!({"bot": {"id": "28:APPID"}, "members": [{"id": "8:orgid:aad-bob", "aadObjectId": "aad-bob"}], "isGroup": false, "tenantId": "contoso", "channelData": {"tenant": {"id": "contoso"}}}));
         assert_eq!(reqs.iter().filter(|r| r.path == "/svc/v3/conversations/a%3Anew-conv/activities").count(), 2);
         // Native streaming in the (personal) conversation; group chats fall back.
         let base = Outbound::text("a:new-conv", "Hel");
@@ -1726,6 +1730,24 @@ rBfXU4bsOl7nzb+HXQM2ROw=\n\
         t2.sh.save();
         let t3 = teams(&srv.url, None, state);
         assert_eq!(t3.sh.resolve_chat("user:x").unwrap(), "a:x");
+    }
+
+    #[test]
+    fn proactive_dm_uses_the_configured_tenant_without_any_inbound() {
+        // Approval notifications can target a Teams approver who never messaged the bot:
+        // the tenant comes from `[channels.teams] tenant`, not from an earlier activity.
+        let (srv, _) = fake(|req, n| match req.path.as_str() {
+            "/svc/v3/conversations" => json_reply(json!({"id": "a:proactive"})),
+            _ => json_reply(json!({"id": format!("S{n}")})),
+        });
+        let t = teams(&srv.url, None, temp_dir("teams").join("proactive.json"));
+        t.send(&Outbound::text("user:aad-never-spoke", "approval needed")).unwrap();
+        let reqs = srv.requests();
+        let create = reqs.iter().find(|r| r.path == "/svc/v3/conversations").expect("a personal conversation is created");
+        assert_eq!(create.json()["tenantId"], json!("contoso"), "configured tenant, no inbound needed");
+        assert_eq!(create.json()["channelData"], json!({"tenant": {"id": "contoso"}}));
+        assert_eq!(create.json()["members"][0]["aadObjectId"], json!("aad-never-spoke"));
+        assert!(reqs.iter().any(|r| r.path == "/svc/v3/conversations/a%3Aproactive/activities"), "the notification is delivered");
     }
 
     #[test]

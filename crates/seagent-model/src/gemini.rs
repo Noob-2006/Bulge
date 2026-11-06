@@ -86,6 +86,11 @@ impl Gemini {
             (Some("off"), None) => gen["thinkingConfig"] = json!({"thinkingBudget": 0}),
             _ => {}
         }
+        if let Some(t) = req.options.service_tier.as_deref().and_then(service_tier) {
+            // Gemini's service tiers: priority (fast), flex (cheaper, slower) and
+            // standard (explicit). `fast` maps to priority like the other providers.
+            gen["serviceTier"] = t.into();
+        }
         let mut b = json!({"contents": contents, "generationConfig": gen});
         let sys = req.system_text();
         if !sys.is_empty() {
@@ -100,6 +105,15 @@ impl Gemini {
             b["tools"] = json!([{"functionDeclarations": decls}]);
         }
         b
+    }
+}
+
+fn service_tier(tier: &str) -> Option<&'static str> {
+    match tier.trim().to_ascii_lowercase().as_str() {
+        "priority" | "fast" | "ultrafast" => Some("priority"),
+        "flex" => Some("flex"),
+        "standard" | "normal" => Some("standard"),
+        _ => None,
     }
 }
 
@@ -249,5 +263,43 @@ impl Provider for Gemini {
             usage,
             model,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::auth::Static;
+    use std::sync::Arc;
+
+    fn provider() -> Gemini {
+        Gemini::new(Conn {
+            id: "gemini".into(),
+            base: "https://generativelanguage.googleapis.com/v1beta".into(),
+            cred: Arc::new(Static::new(Some("k".into()))),
+            headers: vec![],
+            query: vec![],
+            auth: "".into(),
+            quirks: vec![],
+            efforts: None,
+            http: crate::http::Http::new(std::time::Duration::from_secs(5), "gemini"),
+        })
+    }
+
+    #[test]
+    fn service_tier_maps_flex_priority_and_standard() {
+        let p = provider();
+        let req = |tier: Option<&str>| ModelRequest {
+            model: "gemini-3-flash-preview".into(),
+            messages: vec![Message::user("hi")],
+            max_tokens: 20,
+            options: RequestOptions { service_tier: tier.map(String::from), ..Default::default() },
+            ..Default::default()
+        };
+        assert_eq!(p.body(&req(Some("priority")))["generationConfig"]["serviceTier"], "priority");
+        assert_eq!(p.body(&req(Some("fast")))["generationConfig"]["serviceTier"], "priority");
+        assert_eq!(p.body(&req(Some("flex")))["generationConfig"]["serviceTier"], "flex");
+        assert_eq!(p.body(&req(Some("standard")))["generationConfig"]["serviceTier"], "standard");
+        assert!(p.body(&req(None))["generationConfig"].get("serviceTier").is_none());
     }
 }

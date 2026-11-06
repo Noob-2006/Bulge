@@ -9,6 +9,23 @@ pub fn tmpdir(tag: &str) -> PathBuf {
     seagent_core::tmp::scratch(&format!("seagent-tools-{tag}"))
 }
 
+/// Point `HOME` at a test tree for the duration, restoring it on drop. Tests that exercise
+/// `~` expansion / credential upload must not read or write the real home directory.
+pub struct HomeGuard(Option<std::ffi::OsString>);
+impl Drop for HomeGuard {
+    fn drop(&mut self) {
+        match &self.0 {
+            Some(v) => std::env::set_var("HOME", v),
+            None => std::env::remove_var("HOME"),
+        }
+    }
+}
+pub fn test_home(home: &std::path::Path) -> HomeGuard {
+    let old = std::env::vars_os().find(|(k, _)| k == "HOME").map(|(_, v)| v);
+    std::env::set_var("HOME", home);
+    HomeGuard(old)
+}
+
 #[derive(Default)]
 pub struct FakeHost {
     pub spawned: Mutex<Vec<SpawnRequest>>,

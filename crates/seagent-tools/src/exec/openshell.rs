@@ -425,9 +425,10 @@ echo "unexpected: $*" >&2; exit 2
         fakecli::fake_ssh(&bin, &sshlog, &remote);
         let old = fakecli::prepend_path(&bin);
         std::fs::write(ws.join("in.txt"), "host file").unwrap();
+        let hosthome = base.join("hosthome");
+        std::fs::create_dir_all(&hosthome).unwrap();
         let (cred, cred_rel) = {
-            let h = std::env::var("HOME").unwrap();
-            let p = Path::new(&h).join(format!(".seagent-oshell-{}", std::process::id()));
+            let p = hosthome.join(format!(".seagent-oshell-{}", std::process::id()));
             std::fs::write(&p, "token=2\n").unwrap();
             let rel = format!("~/{}", p.file_name().unwrap().to_string_lossy());
             (p, rel)
@@ -460,7 +461,10 @@ echo "unexpected: $*" >&2; exit 2
         assert_eq!(mapped, format!("{}/d/x", remote.display()));
 
         // mirror push: workspace files and credential files land remotely.
-        b.before_exec().unwrap();
+        {
+            let _home = crate::testutil::test_home(&hosthome);
+            b.before_exec().unwrap();
+        }
         assert_eq!(std::fs::read_to_string(remote.join("in.txt")).unwrap(), "host file");
         let landed = remote.join(cred.file_name().unwrap());
         assert_eq!(std::fs::read_to_string(&landed).unwrap(), "token=2\n");

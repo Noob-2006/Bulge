@@ -9,7 +9,7 @@ use serde_json::{json, Value};
 use std::path::PathBuf;
 use std::sync::Arc;
 
-pub const USAGE: &str = "usage: seagent memory <show|add [--user] <text>|review|pending|accept <n|all>|reject <n|all>|approval [on|off|status]|setup [provider]|status [--json]|off|reset [--target all|memory|user] --yes|index [--force]|search <query> [--max N] [--corpus memory|sessions]|promote [--apply]|promote-explain <query>|rem-harness|rem|dreaming [status|on|off|run [phase]]|backfill sessions [--from D] [--to D] [--apply]|events [--limit N]|migrate-hermes <hermes_home>|honcho-host <old> <new>|oauth <provider> [--authorize-url U] [--token-url U] [--client-id ID] [--scope S] [--port N]|oauth-status <provider> [--json]|query <method> [json]|wiki [init|status|compile|ingest|lint|search|get|apply]>";
+pub const USAGE: &str = "usage: seagent memory <show|add [--user] <text>|review|pending|accept <n|all>|reject <n|all>|approval [on|off|status]|setup [provider]|status [--json]|off|reset [--target all|memory|user] --yes|index [--force]|search <query> [--max N] [--corpus memory|sessions]|promote [--apply]|promote-explain <query>|rem-harness|rem|dreaming [status|on|off|run [phase]]|backfill sessions [--from D] [--to D] [--apply]|events [--limit N]|migrate-hermes <hermes_home>|honcho-host <old> <new>|oauth <provider> [--authorize-url U] [--token-url U] [--client-id ID] [--scope S] [--port N]|oauth-status <provider> [--json]|query <method> [json]|wiki [init|status|compile|ingest|lint|search|get|history|apply]|intents [list|add|remove|clear]>";
 
 /// Provider override written by `memory setup <p>` / `memory off` (wins over `[memory] provider`).
 pub fn provider_override(data: &std::path::Path) -> Option<String> {
@@ -386,6 +386,7 @@ fn memory(h: &Arc<Host>, args: &[String], plugins: &[String]) -> Result<String, 
         }
         // `seagent memory wiki` - the compiled wiki vault (same verbs as `seagent wiki`).
         "wiki" => crate::wiki::cli(h, args.get(1..).unwrap_or(&[])),
+        "intents" => crate::standing::cli(h, args.get(1..).unwrap_or(&[])),
         "migrate-hermes" => migrate::import_hermes(&seagent_core::tool::expand_home(pos.get(1).ok_or("usage: seagent memory migrate-hermes <hermes_home>")?), &h.data),
         "honcho-host" => {
             let old = pos.get(1).ok_or("usage: seagent memory honcho-host <old> <new>")?;

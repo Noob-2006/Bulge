@@ -347,6 +347,20 @@ pub fn run(c: &Ctx, argv: &[String]) -> Result<String, String> {
                 o => Err(format!("unknown config action `{o}` (list, enable, disable)")),
             }
         }
+        "lock" | "unlock" => {
+            let n = arg(1, "lock|unlock <name>")?;
+            // Resolve first so a typo never forges a lock record (Hermes `_set_lock`).
+            let cat = invoke::catalog(c.cfg, c.paths, c.ws, &s);
+            let k = invoke::resolve(&cat, &n).ok_or_else(|| format!("no skill `{n}` in the active catalog; `seagent skills list` shows the names"))?;
+            let on = sub == "lock";
+            usage::set_locked(&st, &k.name, on)?;
+            // The curator never manages a locked skill, so archive/rollback would be a silent bypass.
+            Ok(if on {
+                format!("locked '{}'. The agent cannot change it: skill writes, write/patch tools and shell writes into its directory refuse. It stays readable and auto-loadable; your own edits are unaffected. Unlock with `seagent skills unlock {}`.", k.name, k.name)
+            } else {
+                format!("unlocked '{}'. The agent may edit it again.", k.name)
+            })
+        }
         "trust" | "untrust" => {
             let root = p.get(1).map(PathBuf::from).unwrap_or_else(|| c.ws.to_path_buf());
             let root = root.canonicalize().map_err(|e| format!("{}: {e}", root.display()))?.display().to_string();
@@ -373,11 +387,11 @@ pub fn run(c: &Ctx, argv: &[String]) -> Result<String, String> {
         "rollback" => super::super::core::ledger::rollback(&s, &st, &arg(1, "rollback <ledger-entry-id>")?),
         // Skill writes the approval gate staged (`skill action=create|update|patch` with
         // `[skills] write_approval` on): review them from the CLI too, not only `/skills`.
-        "pending" | "approve" | "reject" => {
+        "pending" | "drafts" | "approve" | "reject" => {
             let mc = super::super::core::manage::Ctx { cfg: c.cfg, paths: c.paths, ws: c.ws, settings: &s, session: None };
             super::super::core::manage::cli(&mc, argv)
         }
-        other => Err(format!("unknown `seagent skills` subcommand `{other}`; try: list view search browse install inspect uninstall check update audit lint setup sync reset list-modified diff opt-out opt-in repair-official publish snapshot tap config enable disable trust untrust usage blueprint ledger rollback pending approve reject compat")),
+        other => Err(format!("unknown `seagent skills` subcommand `{other}`; try: list view search browse install inspect uninstall check update audit lint setup sync reset list-modified diff opt-out opt-in repair-official publish snapshot tap config enable disable lock unlock trust untrust usage blueprint ledger rollback pending drafts approve reject compat")),
     }
 }
 
@@ -556,7 +570,7 @@ mod tests {
         }
 
         const SUBS: &[&str] = &[
-            "list", "view", "search", "browse", "install", "inspect", "uninstall", "check", "update", "audit", "lint", "setup", "sync", "reset", "list-modified", "diff", "opt-out", "opt-in", "repair-official", "publish", "snapshot", "tap", "config", "enable", "disable", "trust", "untrust", "usage", "blueprint", "ledger", "rollback",
+            "list", "view", "search", "browse", "install", "inspect", "uninstall", "check", "update", "audit", "lint", "setup", "sync", "reset", "list-modified", "diff", "opt-out", "opt-in", "repair-official", "publish", "snapshot", "tap", "config", "enable", "disable", "lock", "unlock", "trust", "untrust", "usage", "blueprint", "ledger", "rollback",
         ];
         let d = seagent_core::tmp::scratch_path(format!("seagent-sksubs-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
@@ -587,6 +601,28 @@ mod tests {
             assert!(!text.contains("unknown `seagent skills` subcommand"), "`/skills {s}` dispatches: {text}");
         }
         assert_eq!(k.run_slash("/skills help", None, "test").unwrap().unwrap().text.unwrap_or_default().chars().take(7).collect::<String>(), "/skills");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// `seagent skills lock|unlock` records the user lock beside `pinned`; a typo forges nothing.
+    #[test]
+    fn lock_unlock_cli_records_the_user_lock() {
+        let d = seagent_core::tmp::scratch_path(format!("seagent-sklock-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        let sk = d.join("ws/.seagent/skills/notes");
+        std::fs::create_dir_all(&sk).unwrap();
+        std::fs::write(sk.join("SKILL.md"), "---\nname: notes\ndescription: Keep notes\n---\nbody\n").unwrap();
+        let paths = Paths { data: d.join("data"), config_dir: d.join("cfg"), runtime: d.join("run"), ..Default::default() };
+        let cfg = Config::default();
+        let c = Ctx { cfg: &cfg, paths: &paths, ws: &d.join("ws"), ask: None };
+        let st = Store::new(&paths);
+        let out = run(&c, &a(&["lock", "notes"])).unwrap();
+        assert!(out.contains("locked 'notes'") && out.contains("seagent skills unlock notes"), "{out}");
+        assert!(usage::is_locked(&st, "notes"));
+        assert!(run(&c, &a(&["lock", "ghost"])).unwrap_err().contains("no skill `ghost`"));
+        assert!(run(&c, &a(&["unlock", "notes"])).unwrap().contains("unlocked 'notes'"));
+        assert!(!usage::is_locked(&st, "notes"));
+        assert!(run(&c, &a(&["lock"])).unwrap_err().contains("usage: seagent skills lock|unlock <name>"));
         let _ = std::fs::remove_dir_all(&d);
     }
 

@@ -123,7 +123,10 @@ pub fn redact_patterns(s: &str) -> String {
     for (i, re) in pats.iter().enumerate() {
         out = if i == pats.len() - 1 { re.replace_all(&out, "$1 [REDACTED]").into_owned() } else { re.replace_all(&out, "[REDACTED]").into_owned() };
     }
-    out
+    // Force-mode exports also carry the structural secrets (database URLs and connection
+    // strings, client env vars, URL userinfo, non-PEM keys, Azure keys, quoted config values,
+    // command-line flags) that the token-shape list above never sees.
+    seagent_security::risk::mask_secrets(&out).0
 }
 
 /// Apply `redact` to every text-bearing field.
@@ -455,6 +458,8 @@ mod tests {
     fn redaction_and_ids() {
         let r = redact_patterns("key sk-ant-ABCDEFGHIJKLMNOPQRSTUVWX and hf_abcdefghijklmnopqrstuvwxyz0123456 Authorization: Bearer abcdefghijklmnop");
         assert!(!r.contains("sk-ant-ABC") && !r.contains("hf_abc") && r.contains("Authorization: Bearer [REDACTED]"), "{r}");
+        let r = redact_patterns("postgresql://app:s3cret-pg@db/x PGPASSWORD=pgpass1 AccountKey=abc123DEF456ghi789==");
+        assert!(!r.contains("s3cret-pg") && !r.contains("pgpass1") && !r.contains("abc123DEF456"), "{r}");
         let mut f = flatten(&sample());
         redact_flats(&mut f, &|s| s.replace("look", "XX"));
         assert_eq!(f[1].content, "let me XX");

@@ -11,13 +11,14 @@ use std::time::Duration;
 
 pub type Secrets = Arc<dyn Fn(&str) -> String + Send + Sync>;
 
-/// Install the sender for `channels` (name → channel, default chat).
-pub fn install(channels: BTreeMap<String, (Arc<dyn Channel>, Option<String>)>, secrets: Secrets) {
+/// Install the sender for `channels` (name → channel, default chat). `data` is the seagent
+/// data directory, used by `room:<id>` targets.
+pub fn install(channels: BTreeMap<String, (Arc<dyn Channel>, Option<String>)>, secrets: Secrets, data: std::path::PathBuf) {
     let names = channels.keys().cloned().collect();
-    outbound::install(Arc::new(move |t: &Target, p: &Payload| send(&channels, &secrets, t, p)), names);
+    outbound::install(Arc::new(move |t: &Target, p: &Payload| send(&channels, &secrets, &data, t, p)), names);
 }
 
-fn send(channels: &BTreeMap<String, (Arc<dyn Channel>, Option<String>)>, secrets: &Secrets, t: &Target, p: &Payload) -> Result<String, String> {
+fn send(channels: &BTreeMap<String, (Arc<dyn Channel>, Option<String>)>, secrets: &Secrets, data: &std::path::Path, t: &Target, p: &Payload) -> Result<String, String> {
     match t {
         Target::Channel { name, chat, thread } => {
             let (ch, default_chat) = channels.get(name).ok_or_else(|| format!("unknown channel `{name}`; configured: {}", channels.keys().cloned().collect::<Vec<_>>().join(", ")))?;
@@ -27,6 +28,7 @@ fn send(channels: &BTreeMap<String, (Arc<dyn Channel>, Option<String>)>, secrets
             ch.send(&o).map_err(|e| format!("send to {name}/{chat} failed: {e}"))?;
             Ok(format!("sent to {name}/{chat}"))
         }
+        Target::Room { id } => crate::ops::rooms::post_message(data, id, &p.text),
         Target::Webhook { url, secret } => post_webhook(url, secret.as_deref().map(|s| secrets(s)).as_deref(), p),
         Target::Local => Ok("kept local".into()),
         Target::Origin => Err("unresolved `origin` target".into()),

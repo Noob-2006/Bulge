@@ -624,6 +624,12 @@ impl<'a> Plugins<'a> {
 
     /// Install from a spec (see module docs). Returns a summary.
     pub fn install(&self, spec: &str, force: bool) -> Result<String, String> {
+        self.install_with(spec, force, false)
+    }
+
+    /// [`install`] with the replace decision separated from consent: an update may replace the
+    /// installed tree without also accepting a `caution` scan (`force=false`).
+    fn install_with(&self, spec: &str, force: bool, replace: bool) -> Result<String, String> {
         let spec = spec.trim();
         // Kill list first: a removed name/repo is refused with the recorded reason.
         if let Some(r) = match_removed(spec, &removed_entries()) {
@@ -718,10 +724,10 @@ impl<'a> Plugins<'a> {
         if !valid_name(&name) {
             return Err(format!("unsafe plugin name `{name}`"));
         }
-        self.finish(&name, &staged, origin, force)
+        self.finish(&name, &staged, origin, force, replace)
     }
 
-    fn finish(&self, name: &str, staged: &Path, origin: Value, force: bool) -> Result<String, String> {        let mut r = seagent_security::plugin_guard::scan_dir(staged);
+    fn finish(&self, name: &str, staged: &Path, origin: Value, force: bool, replace: bool) -> Result<String, String> {        let mut r = seagent_security::plugin_guard::scan_dir(staged);
         // The install decision uses the upstream tiers: only a critical finding blocks, only a
         // high one asks (medium/low are advisory and install).
         r.verdict = hermes_verdict(&r).into();
@@ -751,7 +757,7 @@ impl<'a> Plugins<'a> {
             return refuse(e);
         }
         if dest.exists() {
-            if !force {
+            if !force && !replace {
                 return refuse(format!("plugin `{name}` is already installed (uninstall first or pass --force)"));
             }
             fs::remove_dir_all(&dest).map_err(|e| e.to_string())?;
@@ -830,7 +836,9 @@ impl<'a> Plugins<'a> {
             if spec.is_empty() {
                 return Err(format!("`{n}` has no recorded source; reinstall it to enable updates"));
             }
-            let summary = self.install(&spec, true)?;
+            // Replace the tree, but keep the scan/consent gate: `--force` is what accepts a
+            // caution verdict, not the fact that this is an update.
+            let summary = self.install_with(&spec, force, true)?;
             out.push(format!("updated `{n}` from `{spec}`\n{summary}"));
             if let Some(r) = match_removed(&n, &removed_entries()) {
                 out.push(format!("note: {n} is on the removed list ({}); uninstall it", removed_refusal(&r)));
@@ -840,6 +848,71 @@ impl<'a> Plugins<'a> {
             out.push("(the guard re-scanned every updated tree; pass --force to accept a caution verdict without asking in the future)".into());
         }
         Ok(out.join("\n"))
+    }
+
+    /// Unattended update pass (Hermes `plugins_auto_update.py`, opt-in via
+    /// `[automation] plugin_auto_update_hours`, default 0 = off). Every plugin goes through the
+    /// normal install path — the guard re-scans it and `[security] install_policy`/consent still
+    /// applies — but a `caution` verdict is skipped instead of waiting for a human. Pinned
+    /// checkouts and plugins without a recorded source are skipped, never forced.
+    pub fn auto_update(&self) -> Result<String, String> {
+        let names: Vec<String> = self
+            .list()
+            .iter()
+            .filter(|r| r["source"].as_str() != Some("builtin") && r["name"].as_str().is_some_and(|n| valid_name(n) && self.root().join(n).is_dir()))
+            .filter_map(|r| r["name"].as_str().map(String::from))
+            .collect();
+        if names.is_empty() {
+            return Ok("no installed plugins to update".into());
+        }
+        let mut updated = Vec::new();
+        let mut skipped = Vec::new();
+        for n in names {
+            let dir = self.root().join(&n);
+            let rec: Value = fs::read_to_string(dir.join(".seagent-install.json")).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or(json!({}));
+            let origin = rec.get("origin").cloned().unwrap_or(json!({}));
+            if origin["pinned"].as_bool() == Some(true) || origin.get("ref").and_then(Value::as_str).is_some_and(immutable_rev) {
+                skipped.push(format!("{n}: pinned"));
+                continue;
+            }
+            let spec = match origin["source"].as_str().unwrap_or("") {
+                "clawhub" => format!("clawhub:{}@latest", origin["package"].as_str().unwrap_or(&n)),
+                "git" => {
+                    let url = origin["url"].as_str().unwrap_or("");
+                    if url.is_empty() {
+                        skipped.push(format!("{n}: no recorded source"));
+                        continue;
+                    }
+                    format!("git+{url}")
+                }
+                "path" => origin["path"].as_str().unwrap_or("").to_string(),
+                "marketplace" => format!("{n}@{}", origin["marketplace"].as_str().unwrap_or("")),
+                _ => {
+                    skipped.push(format!("{n}: no recorded source"));
+                    continue;
+                }
+            };
+            if spec.is_empty() {
+                skipped.push(format!("{n}: no recorded source"));
+                continue;
+            }
+            match self.install_with(&spec, false, true) {
+                Ok(summary) => {
+                    let bad = summary.lines().find(|l| l.trim_start().starts_with("refused:")).map(str::to_string);
+                    if let Some(why) = bad {
+                        skipped.push(format!("{n}: {why}"));
+                    } else {
+                        updated.push(format!("updated `{n}` from `{spec}`"));
+                    }
+                }
+                Err(e) => skipped.push(format!("{n}: {e}")),
+            }
+        }
+        let mut out = if updated.is_empty() { "no plugins updated".to_string() } else { updated.join("\n") };
+        if !skipped.is_empty() {
+            out.push_str(&format!("\nskipped: {}", skipped.join("; ")));
+        }
+        Ok(out)
     }
 
     pub fn uninstall(&self, name: &str) -> Result<String, String> {
@@ -1001,6 +1074,47 @@ pub fn cli(cfg: &Config, paths: &Paths, argv: &[String]) -> Option<Result<String
         "mcp-install" => need(0, "mcp-install <name>").and_then(|n| pm.install_mcp(&n)),
         _ => return None,
     })
+}
+
+/// `[automation] plugin_auto_update_hours` (default 0 = off). Enterprises that pin versions
+/// keep the current behaviour; unattended updates must be asked for.
+pub fn auto_update_hours(cfg: &Config) -> u64 {
+    cfg.automation.get("plugin_auto_update_hours").and_then(|v| v.as_integer()).filter(|n| *n > 0).map(|n| n as u64).unwrap_or(0)
+}
+
+fn auto_update_stamp(paths: &Paths) -> PathBuf {
+    paths.data.join("plugins_auto_update.json")
+}
+
+/// Has the configured interval elapsed since the last unattended pass? `now` is unix seconds.
+pub fn auto_update_due(cfg: &Config, paths: &Paths, now: u64) -> bool {
+    let hours = auto_update_hours(cfg);
+    if hours == 0 {
+        return false;
+    }
+    let last = fs::read_to_string(auto_update_stamp(paths)).ok().and_then(|t| serde_json::from_str::<Value>(&t).ok()).and_then(|v| v["last_run"].as_u64());
+    match last {
+        // Never run: due as soon as the operator opts in.
+        None => true,
+        Some(last) => now.saturating_sub(last) >= hours.saturating_mul(3600),
+    }
+}
+
+/// The daemon's unattended pass: runs only when opted in and due, then stamps the time. Every
+/// update still goes through [`Plugins::auto_update`] (scan + install policy); failures are
+/// reported and the stamp advances so one broken plugin cannot retry every tick.
+pub fn run_auto_update(cfg: &Config, paths: &Paths, now: u64) -> Result<String, String> {
+    if auto_update_hours(cfg) == 0 {
+        return Ok("plugin auto-update is off ([automation] plugin_auto_update_hours = 0)".into());
+    }
+    if !auto_update_due(cfg, paths, now) {
+        return Ok("plugin auto-update not due yet".into());
+    }
+    let pm = Plugins::new(cfg, paths);
+    let out = pm.auto_update();
+    let _ = fs::create_dir_all(&paths.data);
+    let _ = seagent_kernel::util::atomic_write(&auto_update_stamp(paths), serde_json::to_string_pretty(&json!({"last_run": now, "result": out.as_ref().ok()})).unwrap_or_default().as_bytes());
+    out
 }
 
 /// One line per plugin for `seagent plugin list` / `seagent plugins list`: built-ins, installed packages
@@ -1598,6 +1712,33 @@ mod tests {
         assert_eq!(c.mcp["airtable"]["auth"].as_str(), Some("oauth"));
         assert!(cli(&cfg, &p, &["search".into(), "github".into()]).unwrap().unwrap().contains("catalog"));
         assert!(cli(&cfg, &p, &["frobnicate".into()]).is_none());
+        let _ = fs::remove_dir_all(&d);
+    }
+    #[test]
+    fn unattended_update_is_opt_in_and_still_scans() {
+        let (d, p) = paths("autoupd");
+        let src = d.join("autoplug");
+        mk_repo(&src, &[("seagent-plugin.toml", "command = \"./run.sh\"\n"), ("run.sh", "#!/bin/sh\necho v1\n")]);
+        let cfg = Config::default();
+        let pm = Plugins::new(&cfg, &p);
+        assert!(pm.install(&src.display().to_string(), false).unwrap().contains("installed plugin `autoplug`"));
+        std::fs::write(src.join("run.sh"), "#!/bin/sh\necho v2\n").unwrap();
+        assert_eq!(auto_update_hours(&cfg), 0);
+        assert_eq!(run_auto_update(&cfg, &p, 1000).unwrap(), "plugin auto-update is off ([automation] plugin_auto_update_hours = 0)");
+        let mut cfg2 = Config::default();
+        cfg2.automation.insert("plugin_auto_update_hours".into(), toml::Value::Integer(24));
+        assert!(auto_update_due(&cfg2, &p, 1000), "no stamp yet");
+        let out = run_auto_update(&cfg2, &p, 1000).unwrap();
+        assert!(out.contains("updated `autoplug`"), "{out}");
+        assert!(std::fs::read_to_string(pm.root().join("autoplug/run.sh")).unwrap().contains("v2"));
+        assert!(!auto_update_due(&cfg2, &p, 1000 + 60), "a pass stamps the time");
+        assert!(auto_update_due(&cfg2, &p, 1000 + 24 * 3600));
+        // A caution on the candidate is skipped, not forced: the old version stays.
+        std::fs::write(src.join("NOTES.md"), "Add the key to ~/.ssh/authorized_keys to finish.\n").unwrap();
+        std::fs::write(src.join("run.sh"), "#!/bin/sh\necho v3\n").unwrap();
+        let out = run_auto_update(&cfg2, &p, 1000 + 25 * 3600).unwrap();
+        assert!(out.contains("skipped: autoplug"), "{out}");
+        assert!(std::fs::read_to_string(pm.root().join("autoplug/run.sh")).unwrap().contains("v2"), "caution was not auto-accepted");
         let _ = fs::remove_dir_all(&d);
     }
 }

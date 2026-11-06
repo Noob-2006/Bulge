@@ -222,6 +222,47 @@ impl Recorder {
     }
 }
 
+/// A channel with native thread creation, for `/fork`.
+struct ThreadRecorder {
+    sent: Mutex<Vec<Outbound>>,
+    created: Mutex<Vec<Value>>,
+}
+
+impl Channel for ThreadRecorder {
+    fn id(&self) -> &str {
+        "test"
+    }
+    fn poll(&self, _: &Cancel) -> Result<Vec<Inbound>, ChannelError> {
+        Ok(vec![])
+    }
+    fn send(&self, out: &Outbound) -> Result<seagent_channel::Sent, ChannelError> {
+        self.sent.lock().unwrap().push(out.clone());
+        Ok(seagent_channel::Sent::one("srv1"))
+    }
+    fn caps(&self) -> seagent_channel::Caps {
+        seagent_channel::Caps { buttons: true, threads: true, ..Default::default() }
+    }
+    fn message_actions(&self) -> Vec<&'static str> {
+        vec!["thread-create"]
+    }
+    fn message_action(&self, action: &str, args: &Value) -> Result<Value, ChannelError> {
+        if action != "thread-create" {
+            return Err(seagent_channel::unsupported(action));
+        }
+        self.created.lock().unwrap().push(args.clone());
+        Ok(json!({"thread": {"id": "T-fork"}}))
+    }
+}
+
+impl ThreadRecorder {
+    fn new() -> Arc<ThreadRecorder> {
+        Arc::new(ThreadRecorder { sent: Mutex::new(vec![]), created: Mutex::new(vec![]) })
+    }
+    fn outs(&self) -> Vec<Outbound> {
+        self.sent.lock().unwrap().clone()
+    }
+}
+
 /// A `Hub` over a kit: one `test` channel allowed to everyone, an empty plugin
 /// registry and an in-memory outbox — everything `handle_inbound` touches and nothing
 /// that needs a daemon.
@@ -232,6 +273,11 @@ fn test_hub(kit: &crate::testkit::Kit) -> Arc<Hub> {
 /// A hub whose `Ext` also knows these channels (approval forwarding sends through them).
 /// The router accepts the channel names the external-content tests feed.
 fn test_hub_with(kit: &crate::testkit::Kit, channels: &[(&str, Arc<Recorder>)]) -> Arc<Hub> {
+    let any: Vec<(&str, Arc<dyn Channel>)> = channels.iter().map(|(n, c)| (*n, c.clone() as Arc<dyn Channel>)).collect();
+    test_hub_any(kit, &any)
+}
+
+fn test_hub_any(kit: &crate::testkit::Kit, channels: &[(&str, Arc<dyn Channel>)]) -> Arc<Hub> {
     let dir = kit.paths.data.join("channels");
     std::fs::create_dir_all(&dir).unwrap();
     let mut cfgs = HashMap::new();
@@ -1094,4 +1140,85 @@ fn sethome_is_for_the_owner_only_and_changes_where_unaddressed_messages_go() {
     assert!(std::fs::read_to_string(d.join("home.json")).unwrap().contains("-100200"), "persisted");
     assert_eq!(leading_command("/sethome@mybot now").as_deref(), Some("sethome"));
     let _ = std::fs::remove_dir_all(&d);
+}
+
+/// `ask_user` choices: a button callback answers only in the chat the question went to and
+/// carries the choice number back to `Pending::clarify` (which maps it to the label).
+struct QuestionApprover {
+    answered: Mutex<Vec<(String, String)>>,
+}
+
+impl seagent_kernel::approver::Approver for QuestionApprover {
+    fn approve(&self, _: &seagent_kernel::approver::ApprovalRequest) -> seagent_kernel::approver::Approval {
+        seagent_kernel::approver::Approval::Deny
+    }
+    fn ask(&self, _: &str, _: &str) -> Result<String, String> {
+        Err("headless".into())
+    }
+    fn pending(&self) -> Vec<seagent_kernel::approver::PendingItem> {
+        vec![seagent_kernel::approver::PendingItem::Question {
+            id: "q-ask".into(),
+            session: "s1".into(),
+            question: "Deploy where?".into(),
+            choices: vec!["staging".into(), "prod".into()],
+            multi: false,
+        }]
+    }
+    fn answer(&self, id: &str, answer: &str) -> bool {
+        self.answered.lock().unwrap().push((id.to_string(), answer.to_string()));
+        true
+    }
+}
+
+#[test]
+fn ask_user_choice_buttons_and_typed_replies_answer_the_question() {
+    let ap = Arc::new(QuestionApprover { answered: Mutex::new(vec![]) });
+    let kit = kit_with_approver(Config::default(), ap.clone());
+    forwarded_questions().lock().unwrap().insert("q-ask".into(), vec![("test".into(), "c1".into(), None)]);
+    // A button in another chat cannot answer it.
+    let other = answer_question(&kit.k, &msg("c2", "u2", "Mallory", "", "m1"), "ask:q-ask:1").unwrap();
+    assert!(other.contains("not sent to this conversation"), "{other}");
+    assert!(ap.answered.lock().unwrap().is_empty());
+    // The target chat's button carries the index; the pending clarify maps it to the label.
+    let ok = answer_question(&kit.k, &msg("c1", "u1", "Dana", "", "m2"), "ask:q-ask:2").unwrap();
+    assert!(ok.contains("prod"), "{ok}");
+    assert_eq!(*ap.answered.lock().unwrap(), vec![("q-ask".to_string(), "2".to_string())]);
+}
+
+#[test]
+fn ask_user_choice_typed_reply_is_the_fallback_without_buttons() {
+    let ap = Arc::new(QuestionApprover { answered: Mutex::new(vec![]) });
+    let kit = kit_with_approver(Config::default(), ap.clone());
+    forwarded_questions().lock().unwrap().insert("q-ask".into(), vec![("test".into(), "c1".into(), None)]);
+    let ok = answer_typed_question(&kit.k, &msg("c1", "u1", "Dana", "2", "m1"), "2").unwrap();
+    assert!(ok.contains("Answer recorded"), "{ok}");
+    assert_eq!(*ap.answered.lock().unwrap(), vec![("q-ask".to_string(), "2".to_string())]);
+    assert!(answer_typed_question(&kit.k, &msg("c1", "u1", "Dana", "1", "m2"), "1").is_none(), "already answered");
+    // Slash commands never become answers.
+    forwarded_questions().lock().unwrap().insert("q-ask".into(), vec![("test".into(), "c1".into(), None)]);
+    assert!(answer_typed_question(&kit.k, &msg("c1", "u1", "Dana", "/status", "m3"), "/status").is_none());
+    forwarded_questions().lock().unwrap().clear();
+}
+
+#[test]
+fn channel_fork_creates_a_sibling_thread_and_keeps_the_parent_chat() {
+    let kit = crate::testkit::kit();
+    let ch = ThreadRecorder::new();
+    let hub = test_hub_any(&kit, &[("test", ch.clone() as Arc<dyn Channel>)]);
+    let parent = kit.k.create_session(&kit.ws, None, None, Some("parent")).unwrap();
+    hub.router.bind(&seagent_channel::router::RouteKey::chat("test", "c1"), &parent);
+    kit.k.record(&parent, seagent_kernel::event::EventKind::Message { message: Message::user("earlier decision"), usage: None, model: None, inbox: None }).unwrap();
+    handle_inbound(&hub, &(ch.clone() as Arc<dyn Channel>), msg("c1", "u1", "Dana", "/fork Incident 42", "m1"));
+    let reply = ch.outs().into_iter().find(|o| o.thread.is_none()).map(|o| o.text).unwrap_or_default();
+    assert!(reply.contains("Forked into the thread"), "{reply}");
+    let created = ch.created.lock().unwrap().clone();
+    assert_eq!((created[0]["target"].as_str(), created[0]["threadName"].as_str()), (Some("c1"), Some("Incident 42")));
+    let b = seagent_kernel::threads::by_thread(&kit.paths, "test", "c1", "T-fork").expect("binding");
+    assert_ne!(b.session, parent);
+    assert_eq!(b.parent, parent);
+    // The parent chat keeps its own route; the fork starts from the copied history.
+    assert_eq!(hub.router.routes().into_iter().find(|r| r.key.chat == "c1").map(|r| r.session), Some(parent.clone()));
+    let child = seagent_kernel::projection::project(&kit.k.store.read(&b.session).unwrap());
+    assert_eq!(child.messages[0].text(), "earlier decision");
+    assert!(ch.outs().iter().any(|o| o.thread.as_deref() == Some("T-fork") && o.text.contains("Session recap")), "{:?}", ch.outs());
 }

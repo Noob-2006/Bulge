@@ -20,7 +20,7 @@ const I18N = {
   'zh-Hant': {
     'conn.idle': '尚未連線', 'conn.connecting': '連線中…', 'conn.failed': '連線失敗', 'conn.ready': '已連線 · v{v}', 'conn.down': '連線中斷，3 秒後重試',
     'new': '新對話', 'boards': '儀表板', 'boards_all': '所有儀表板', 'devices': '裝置', 'control': '控制台', 'settings': '設定',
-    'nav.ops': '總覽', 'nav.chat': '對話', 'nav.agents': '代理', 'nav.approvals': '核准', 'nav.audit': '稽核', 'nav.sessions': '對話紀錄',
+    'nav.ops': '總覽', 'nav.chat': '對話', 'nav.agents': '代理', 'nav.approvals': '核准', 'nav.audit': '稽核', 'nav.security': '安全', 'nav.sessions': '對話紀錄',
     'filter': '搜尋對話', 'back': '← 返回', 'palette': '指令', 'palette_ph': '跳到頁面、對話或指令…', 'jump': '↓ 最新', 'send_hint': 'Enter 送出 · Shift+Enter 換行',
     'pick': '選擇或建立一個對話', 'input': '交代 SE Agent 要做的事…  輸入 / 顯示指令', 'stop': '停止', 'send': '送出', 'working': '工作中',
     'you': '你', 'tool_result': '工具結果', 'tool_call': '呼叫 {n}', 'tool_error': '失敗', 'tool_ok': '完成', 'tool_run': '執行中', 'gate.egress': '連網', 'gate.exec': '執行', 'gate.fs': '檔案', 'gate.privilege': '權限',
@@ -40,7 +40,7 @@ const I18N = {
   en: {
     'conn.idle': 'Not connected', 'conn.connecting': 'Connecting…', 'conn.failed': 'Connection failed', 'conn.ready': 'Connected · v{v}', 'conn.down': 'Disconnected, retrying in 3s',
     'new': 'New chat', 'boards': 'Dashboards', 'boards_all': 'All dashboards', 'devices': 'Devices', 'control': 'Control', 'settings': 'Settings',
-    'nav.ops': 'Overview', 'nav.chat': 'Chat', 'nav.agents': 'Agents', 'nav.approvals': 'Approvals', 'nav.audit': 'Audit', 'nav.sessions': 'Conversations',
+    'nav.ops': 'Overview', 'nav.chat': 'Chat', 'nav.agents': 'Agents', 'nav.approvals': 'Approvals', 'nav.audit': 'Audit', 'nav.security': 'Security', 'nav.sessions': 'Conversations',
     'filter': 'Search conversations', 'back': '← Back', 'palette': 'Commands', 'palette_ph': 'Jump to a page, conversation or command…', 'jump': '↓ Latest', 'send_hint': 'Enter to send · Shift+Enter for newline',
     'pick': 'Pick or start a conversation', 'input': 'Tell seagent what to do…  / for commands', 'stop': 'Stop', 'send': 'Send', 'working': 'Working',
     'you': 'You', 'tool_result': 'Tool result', 'tool_call': 'Calling {n}', 'tool_error': 'failed', 'tool_ok': 'done', 'tool_run': 'running', 'gate.egress': 'network', 'gate.exec': 'exec', 'gate.fs': 'files', 'gate.privilege': 'privilege',
@@ -108,7 +108,7 @@ function toast(text, bad) {
 // `ops`, `agents`, `devices`, `approvals`, `audit` are drawn by ops.js (VIEWS registry);
 // `chat` is the transcript; `page` is a Control UI page / dashboard (#panelDialog).
 const VIEWS = {}; // name → {title, render(el), leave()} (ops.js)
-const VIEW_SEC = { ops: 'nav.ops', chat: 'nav.chat', agents: 'nav.agents', devices: 'devices', approvals: 'nav.approvals', audit: 'nav.audit', page: 'control' };
+const VIEW_SEC = { ops: 'nav.ops', chat: 'nav.chat', agents: 'nav.agents', devices: 'devices', approvals: 'nav.approvals', audit: 'nav.audit', security: 'nav.security', page: 'control' };
 function showView(name, opts) {
   const prev = S.view;
   if (prev && prev !== name && VIEWS[prev] && VIEWS[prev].leave) VIEWS[prev].leave();

@@ -885,6 +885,216 @@ fn forwarded_to() -> &'static Mutex<HashMap<String, Vec<Target>>> {
     S.get_or_init(Default::default)
 }
 
+/// Where each forwarded `ask_user` / clarify question went, so a button press or a typed
+/// reply in *that* chat can answer it.
+fn forwarded_questions() -> &'static Mutex<HashMap<String, Vec<Target>>> {
+    static S: std::sync::OnceLock<Mutex<HashMap<String, Vec<Target>>>> = std::sync::OnceLock::new();
+    S.get_or_init(Default::default)
+}
+
+fn question_targets(hub: &Arc<Hub>, session: &str) -> Vec<Target> {
+    if let Some(b) = seagent_kernel::threads::by_session(&hub.k.paths, session) {
+        return vec![(b.channel, b.chat, Some(b.thread))];
+    }
+    hub.router.routes().into_iter().filter(|r| r.session == session).map(|r| {
+        let (chat, thread) = chat_and_thread(&r.key.chat);
+        (r.key.channel, chat, thread)
+    }).collect()
+}
+
+fn question_text(question: &str, choices: &[String], multi: bool, id: &str) -> String {
+    let mut s = format!("❓ {question}\nID: {id}");
+    if !choices.is_empty() {
+        s.push('\n');
+        for (i, c) in choices.iter().enumerate() {
+            s.push_str(&format!("\n  {}. {c}", i + 1));
+        }
+        s.push_str(&format!("\n  {}. Other (type your answer)", choices.len() + 1));
+        s.push_str(if multi { "\nReply with one or more numbers (e.g. 1,3), or type your own answer." } else { "\nReply with a number, or type your own answer." });
+    }
+    s
+}
+
+fn question_buttons(id: &str, choices: &[String], multi: bool) -> Vec<Vec<seagent_channel::Button>> {
+    if multi || choices.is_empty() {
+        return Vec::new();
+    }
+    let mut rows = Vec::new();
+    for (i, c) in choices.iter().enumerate() {
+        let label: String = c.chars().take(60).collect();
+        rows.push(vec![seagent_channel::Button { label, data: format!("ask:{id}:{}", i + 1), url: None }]);
+    }
+    rows
+}
+
+fn forward_question(hub: &Arc<Hub>, id: &str, session: &str, question: &str, choices: &[String], multi: bool) {
+    let targets = question_targets(hub, session);
+    if targets.is_empty() {
+        return;
+    }
+    let text = question_text(question, choices, multi, id);
+    for (channel, chat, thread) in targets {
+        let Some(ch) = hub.ext.channels.get(&channel).map(|(c, _)| c.clone()) else { continue };
+        let key = format!("{channel}\u{1f}{chat}\u{1f}{}\u{1f}q:{id}", thread.clone().unwrap_or_default());
+        {
+            let mut seen = forwarded_seen().lock().unwrap_or_else(|p| p.into_inner());
+            if !seen.insert(key) {
+                continue;
+            }
+            if seen.len() > 1024 {
+                seen.clear();
+            }
+        }
+        let mut out = Outbound { chat: chat.clone(), thread: thread.clone(), text: text.clone(), format: seagent_channel::TextFormat::Markdown, ..Default::default() };
+        if ch.caps().buttons {
+            out.buttons = question_buttons(id, choices, multi);
+        }
+        match hub.deliver.send(ch.as_ref(), &out) {
+            Ok(_) => {
+                let mut m = forwarded_questions().lock().unwrap_or_else(|p| p.into_inner());
+                if m.len() > 1024 {
+                    m.clear();
+                }
+                m.entry(id.to_string()).or_default().push((channel.clone(), chat.clone(), thread.clone()));
+            }
+            Err(e) => eprintln!("seagentd: questions: forwarding {id} to {channel} failed: {}", e.message),
+        }
+    }
+}
+
+fn target_matches(targets: &[Target], m: &Inbound) -> bool {
+    targets.iter().any(|(c, chat, thread)| c == &m.channel && chat == &m.chat && thread.as_deref() == m.thread.as_deref())
+}
+
+fn pending_question(k: &Kernel, id: &str) -> Option<seagent_kernel::approver::PendingItem> {
+    k.approver.pending().into_iter().find(|p| matches!(p, seagent_kernel::approver::PendingItem::Question { id: q, .. } if q == id))
+}
+
+/// A pressed `ask:<id>:<n>` button answers that pending question with the choice number;
+/// `Pending::clarify` maps it back to the label. Only a chat the question was sent to may
+/// answer it.
+fn answer_question(k: &Kernel, m: &Inbound, data: &str) -> Option<String> {
+    let rest = data.strip_prefix("ask:")?;
+    let (id, choice) = rest.rsplit_once(':').unwrap_or((rest, ""));
+    let targets = forwarded_questions().lock().unwrap_or_else(|p| p.into_inner()).get(id).cloned().unwrap_or_default();
+    if !target_matches(&targets, m) {
+        return Some("This question was not sent to this conversation.".into());
+    }
+    let Some(seagent_kernel::approver::PendingItem::Question { choices, .. }) = pending_question(k, id) else {
+        forwarded_questions().lock().unwrap_or_else(|p| p.into_inner()).remove(id);
+        return Some("That question is no longer waiting for an answer (already answered or timed out).".into());
+    };
+    let n = match choice.trim().parse::<usize>() {
+        Ok(n) if (1..=choices.len()).contains(&n) => n,
+        _ => return Some("Unknown answer for this question.".into()),
+    };
+    if !seagent_kernel::approver::answer_by(&*k.approver, &k.paths.data, id, &n.to_string(), &seagent_security::audit::Actor::channel(&m.channel, &m.sender), "button") {
+        forwarded_questions().lock().unwrap_or_else(|p| p.into_inner()).remove(id);
+        return Some("That question is no longer waiting for an answer (already answered or timed out).".into());
+    }
+    forwarded_questions().lock().unwrap_or_else(|p| p.into_inner()).remove(id);
+    Some(format!("✅ Answer recorded: {}", choices[n - 1]))
+}
+
+/// A typed reply in the chat a question was sent to answers it (the numbered-list fallback
+/// for channels without buttons). Slash commands stay commands.
+fn answer_typed_question(k: &Kernel, m: &Inbound, text: &str) -> Option<String> {
+    if text.trim_start().starts_with('/') || text.trim().is_empty() {
+        return None;
+    }
+    let ids: Vec<String> = forwarded_questions()
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .iter()
+        .filter(|(id, targets)| target_matches(targets, m) && pending_question(k, id).is_some())
+        .map(|(id, _)| id.clone())
+        .collect();
+    let id = match ids.as_slice() {
+        [id] => id.clone(),
+        _ => return None,
+    };
+    if !seagent_kernel::approver::answer_by(&*k.approver, &k.paths.data, &id, text.trim(), &seagent_security::audit::Actor::channel(&m.channel, &m.sender), "chat") {
+        return None;
+    }
+    forwarded_questions().lock().unwrap_or_else(|p| p.into_inner()).remove(&id);
+    Some("✅ Answer recorded.".into())
+}
+
+/// `/fork [title]` in a channel with threads: copy the conversation into a sibling thread
+/// instead of switching (and ending) the chat's own session. `None` = not handled here.
+fn fork_to_thread(hub: &Arc<Hub>, ch: &Arc<dyn Channel>, m: &Inbound, session: Option<&str>, text: &str) -> Option<String> {
+    let rest = text.trim_start().strip_prefix('/')?;
+    let cmd = rest.split_whitespace().next()?;
+    if cmd != "fork" {
+        return None;
+    }
+    let title = rest[cmd.len()..].trim();
+    if title.starts_with("--") {
+        return None; // `/fork --at N` keeps the branch command's rewind semantics.
+    }
+    if !ch.caps().threads || m.thread.is_some() {
+        return None;
+    }
+    let action = if ch.message_actions().contains(&"thread-create") {
+        "thread-create"
+    } else if ch.message_actions().contains(&"topic-create") {
+        "topic-create"
+    } else {
+        return None;
+    };
+    let sid = match session {
+        Some(s) => s,
+        None => return Some("There is nothing to fork yet — send a message first.".into()),
+    };
+    if hub.k.is_running(sid) {
+        return Some("A turn is still running — stop it before forking.".into());
+    }
+    let route = hub.router.routes().into_iter().find(|r| r.session == sid)?;
+    let (chat, _) = chat_and_thread(&route.key.chat);
+    let name = if title.is_empty() { format!("fork of {}", sid.chars().take(8).collect::<String>()) } else { title.to_string() };
+    let v = match ch.message_action(action, &json!({"target": chat, "threadName": name, "name": name})) {
+        Ok(v) => v,
+        Err(e) => return Some(format!("Could not create a fork thread: {}", e.message)),
+    };
+    let thread = v["thread"]["id"].as_str().map(str::to_string).or_else(|| {
+        ["threadId", "thread_id", "topicId", "id"].iter().find_map(|k| v[*k].as_str().map(str::to_string).or_else(|| v[*k].as_i64().map(|n| n.to_string())))
+    });
+    let thread = match thread {
+        Some(t) => t,
+        None => return Some("Could not create a fork thread: the channel returned no thread id.".into()),
+    };
+    let child = match hub.k.branch(sid, None) {
+        Ok(c) => c,
+        Err(e) => return Some(format!("Could not fork the conversation: {e}")),
+    };
+    if !title.is_empty() {
+        let _ = hub.k.record(&child, seagent_kernel::event::EventKind::Title { title: title.to_string() });
+    }
+    let policy = seagent_kernel::threads::policy(&hub.k.cfg_now(), &m.channel);
+    let _ = seagent_kernel::threads::bind(&hub.k.paths, seagent_kernel::threads::Binding {
+        session: child.clone(),
+        parent: sid.to_string(),
+        channel: m.channel.clone(),
+        chat: chat.clone(),
+        thread: thread.clone(),
+        agent: "main".into(),
+        label: name.clone(),
+        name: name.clone(),
+        idle_ms: policy.idle_ms,
+        max_age_ms: policy.max_age_ms,
+        ..Default::default()
+    });
+    let recap = hub.k.store.read(&child).ok().map(|events| {
+        let v = seagent_kernel::projection::project(&events);
+        crate::ops::recap::build_recap(&v.messages, v.title.as_deref(), Some(&child), Path::new(&v.workspace))
+    }).unwrap_or_default();
+    let out = Outbound { chat, thread: Some(thread), text: format!("Forked from the conversation.\n\n{recap}"), format: seagent_channel::TextFormat::Markdown, ..Default::default() };
+    if let Err(e) = hub.deliver.send(ch.as_ref(), &out) {
+        eprintln!("seagentd: /fork: could not post the recap: {}", e.message);
+    }
+    Some(format!("Forked into the thread `{name}`. Messages there continue the fork; this chat keeps its own conversation."))
+}
+
 /// Buttons for a forwarded approval. Tier 3 offers no "Allow Always" (the hard floor is never
 /// remembered) and its allow button only opens the second confirmation.
 fn approval_buttons(req: &seagent_kernel::approver::ApprovalRequest) -> Vec<Vec<seagent_channel::Button>> {
@@ -993,6 +1203,7 @@ fn forward_loop_with(hub: Arc<Hub>, rx: Receiver<seagent_kernel::kernel::BusMsg>
     while !cancel.is_cancelled() {
         match rx.recv_timeout(Duration::from_millis(250)) {
             Ok(seagent_kernel::kernel::BusMsg::Pending(seagent_kernel::approver::PendingItem::Approval(req))) => forward_approval(&hub, &req),
+            Ok(seagent_kernel::kernel::BusMsg::Pending(seagent_kernel::approver::PendingItem::Question { id, session, question, choices, multi })) => forward_question(&hub, &id, &session, &question, &choices, multi),
             Ok(seagent_kernel::kernel::BusMsg::Event { event, .. }) => {
                 if let seagent_kernel::event::EventKind::Notice { text, .. } = &event.kind {
                     announce_expiry(&hub, text);
@@ -1463,6 +1674,10 @@ fn handle_inbound(hub: &Arc<Hub>, ch: &Arc<dyn Channel>, m: Inbound) {
         }
         Action::Callback { session, callback, .. } => {
             let _ = ch.ack_callback(&callback, None);
+            // `ask:<id>:<n>` buttons answer a pending ask_user/clarify question.
+            if let Some(out) = answer_question(k, &m, &callback.data) {
+                return reply(hub, ch, &to, &out);
+            }
             // `appr:<id>:<choice>` buttons answer a pending approval right here; every other
             // button press resumes the conversation as a user message (below).
             if let Some(out) = answer_approval(k, &m, &callback.data) {
@@ -1543,9 +1758,17 @@ fn handle_inbound(hub: &Arc<Hub>, ch: &Arc<dyn Channel>, m: Inbound) {
             if leading_command(&text).as_deref() == Some("sethome") {
                 return reply(hub, ch, &to, &sethome(k, &m));
             }
+            // `/fork` opens a sibling thread instead of moving (and ending) this chat's session.
+            if let Some(out) = fork_to_thread(hub, ch, &m, session.as_deref(), &text) {
+                return reply(hub, ch, &to, &out);
+            }
             // Security commands (`/approve /deny /yolo /approvals /elevated /exec /pause
             // /resume`) authorize by `channel` + sender, so the chat path must pass `who`.
             if let Some(out) = seagent_kernel::secgate::chat_command(k, &text, session.as_deref(), Some((m.channel.as_str(), m.sender.as_str(), m.sender_name.as_str()))) {
+                return reply(hub, ch, &to, &out);
+            }
+            // A typed answer to a question this chat was asked (the numbered-list fallback).
+            if let Some(out) = answer_typed_question(k, &m, &text) {
                 return reply(hub, ch, &to, &out);
             }
             if crate::agentcmds::on_submit(k, &m) {

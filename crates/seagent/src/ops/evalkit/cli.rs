@@ -11,13 +11,13 @@ use crate::{usage, R};
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 
-pub const VALUE_FLAGS: &[&str] = &["suite", "models", "agents", "agents-file", "judge", "repeat", "harness", "price", "repos", "desktop-image", "container-bin", "container-env", "cache-dir", "mode", "threshold", "questions", "provenance", "to", "report"];
+pub const VALUE_FLAGS: &[&str] = &["suite", "models", "agents", "agents-file", "judge", "repeat", "harness", "tool-profile", "price", "repos", "desktop-image", "container-bin", "container-env", "cache-dir", "mode", "threshold", "questions", "provenance", "to", "report"];
 pub const BOOL_FLAGS: &[&str] = &["exec-external", "swe-images", "ablate"];
 
 pub const USAGE: &str = "usage:
   seagent evals list|run …                         the hermetic runtime probes (unchanged)
   seagent evals bench --suite SPEC… [--model M]… [--agents ID[=MODEL],…] [--judge M] [--repeat N]
-                  [--out DIR] [--resume] [--harness auto|seagent|mini] [--role ID] [--limit N] [--filter S]
+                  [--out DIR] [--resume] [--harness auto|seagent|mini] [--tool-profile NAME] [--role ID] [--limit N] [--filter S]
                   [--price MODEL=IN,OUT]… [--exec-external] [--agents-file F] [--swe-images] [--repos DIR]
                   [--desktop-image IMG] [--container-bin podman] [--container-env FILE] [--cache-dir DIR]
   seagent evals roles [--preset ID,…|all] [--model M]… --judge M [--mode both|with|without] [--ablate]
@@ -61,6 +61,7 @@ pub fn runner_for(a: &Args, out: &Path, models: &[String]) -> Result<Runner, Str
         r.container_bin = b.into();
     }
     r.container_env_file = a.val("container-env").map(String::from);
+    r.tool_profile = a.val("tool-profile").map(String::from);
     r.cache_dir = a.val("cache-dir").map(PathBuf::from);
     if let Some(n) = a.num::<u32>("max-iterations")? {
         r.max_iterations = n;
@@ -178,7 +179,7 @@ fn bench_cmd(a: &Args) -> R {
     let manifest = json!({
         "kind": "bench", "suites": a.vals("suite"), "subjects": subs.iter().map(|s| s.label.clone()).collect::<Vec<_>>(),
         "models": models, "agents": split_list(a, "agents", "__none__"), "agents_file": a.val("agents-file"),
-        "judge": a.val("judge"), "repeat": r.repeat, "harness": a.val("harness").unwrap_or("auto"), "role": a.val("role"),
+        "judge": a.val("judge"), "repeat": r.repeat, "harness": a.val("harness").unwrap_or("auto"), "role": a.val("role"), "tool_profile": r.tool_profile,
         "tasks": tasks.len(), "started": now(), "prices": r.prices,
     });
     finish(&out, &manifest, None, a.flag("json"))

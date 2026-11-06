@@ -584,8 +584,8 @@ impl Channel for Ntfy {
         // Only our own server gets the credentials.
         let ours = u.starts_with(&format!("{}/", self.server));
         match (&self.auth, ours) {
-            (Some(a), true) => crate::http::get_bytes(u, &[("authorization", a)], 50 * 1024 * 1024),
-            _ => crate::http::get_bytes(u, &[], 50 * 1024 * 1024),
+            (Some(a), true) => crate::http::get_bytes_trusted(u, &[("authorization", a)], 50 * 1024 * 1024, &self.server),
+            _ => crate::http::get_bytes_trusted(u, &[], 50 * 1024 * 1024, &self.server),
         }
     }
 

@@ -8,6 +8,7 @@
 //! global one for a provider/model, a channel, or a channel sender — every applicable
 //! layer must allow the tool.
 
+use crate::approvals::{max_ask, min_security, ExecAsk, ExecSecurity};
 use crate::glob::fnmatch;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -19,6 +20,120 @@ pub struct Layer {
     pub allow: Vec<String>,
     pub also_allow: Vec<String>,
     pub deny: Vec<String>,
+    /// Restrict-only host exec policy for turns on this model/sender
+    /// (OpenClaw `tools.byProvider[...].exec.mode`). Only `by_provider` is consulted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exec: Option<ExecCeiling>,
+}
+
+/// A per-model exec ceiling. `mode` is the OpenClaw spelling
+/// (`deny` < `allowlist` < `ask`/`auto` < `full`); `security`/`ask` can narrow a
+/// mode or stand alone.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ExecCeiling {
+    pub mode: Option<String>,
+    pub security: Option<ExecSecurity>,
+    pub ask: Option<ExecAsk>,
+}
+
+impl ExecCeiling {
+    /// The `(security, ask)` this ceiling imposes, if any field was set.
+    pub fn policy(&self) -> Option<(ExecSecurity, ExecAsk)> {
+        let base = match self.mode.as_deref().map(str::trim).map(str::to_ascii_lowercase).as_deref() {
+            None => None,
+            Some("deny") => Some((ExecSecurity::Deny, ExecAsk::Off)),
+            Some("allowlist") => Some((ExecSecurity::Allowlist, ExecAsk::Off)),
+            // `auto` selects the reviewer in OpenClaw; our reviewer is a session mode,
+            // so the restrict-only part here is the allowlist + on-miss policy.
+            Some("ask" | "auto") => Some((ExecSecurity::Allowlist, ExecAsk::OnMiss)),
+            Some("full") => Some((ExecSecurity::Full, ExecAsk::Off)),
+            Some(_) => return None,
+        };
+        match (base, self.security, self.ask) {
+            (None, None, None) => None,
+            (base, sec, ask) => {
+                let (mut s, mut a) = base.unwrap_or((ExecSecurity::Full, ExecAsk::Off));
+                if let Some(x) = sec {
+                    s = x;
+                }
+                if let Some(x) = ask {
+                    a = x;
+                }
+                Some((s, a))
+            }
+        }
+    }
+}
+
+/// Compose a model ceiling onto the current exec policy: security takes the minimum,
+/// ask the maximum, and a side that denies allowlist misses keeps them denied unless
+/// the other side mandates `ask = always`.
+pub fn compose_exec_policy(current: (ExecSecurity, ExecAsk), ceiling: (ExecSecurity, ExecAsk)) -> (ExecSecurity, ExecAsk) {
+    let (cs, ca) = current;
+    let (ss, sa) = ceiling;
+    let denies = |s: ExecSecurity, a: ExecAsk| s != ExecSecurity::Full && a == ExecAsk::Off;
+    let ask = if ca != ExecAsk::Always && (denies(cs, ca) || denies(ss, sa)) { ExecAsk::Off } else { max_ask(ca, sa) };
+    (min_security(cs, ss), ask)
+}
+
+/// The strictest `exec` ceiling of every `[tools.by_provider]` layer matching `origin`
+/// (`provider` or `provider/model`). `None` = no ceiling.
+pub fn exec_ceiling(by_provider: &BTreeMap<String, Layer>, origin: &Origin) -> Option<(ExecSecurity, ExecAsk)> {
+    let provider = origin.model.split('/').next().unwrap_or("");
+    let mut out: Option<(ExecSecurity, ExecAsk)> = None;
+    for (k, l) in by_provider {
+        if k != &origin.model && k != provider {
+            continue;
+        }
+        let Some(p) = l.exec.as_ref().and_then(ExecCeiling::policy) else { continue };
+        out = Some(match out {
+            None => p,
+            Some(cur) => compose_exec_policy(cur, p),
+        });
+    }
+    out
+}
+
+/// Layers that block `tool` for `origin`, in pipeline order, with the config that fixes each.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Block {
+    pub layer: String,
+    pub config: String,
+    pub fix: String,
+}
+
+pub fn explain(global: &Layer, by_provider: &BTreeMap<String, Layer>, by_channel: &BTreeMap<String, Layer>, by_sender: &BTreeMap<String, Layer>, origin: &Origin, tool: &str) -> Vec<Block> {
+    let mut out = Vec::new();
+    let hint = |what: &str| format!("add `{tool}` to {what}.also_allow, remove it from {what}.deny, or widen {what}.profile");
+    if !layer_allows(global, tool) {
+        out.push(Block { layer: "tools".into(), config: "tools.profile / tools.allow / tools.deny".into(), fix: hint("tools") });
+    }
+    let provider = origin.model.split('/').next().unwrap_or("");
+    for (k, l) in by_provider {
+        if (k == &origin.model || k == provider) && !layer_allows(l, tool) {
+            let at = format!("tools.by_provider.{k}");
+            out.push(Block { layer: at.clone(), config: format!("[{at}]"), fix: hint(&at) });
+        }
+    }
+    if let Some(ch) = &origin.channel {
+        if let Some(l) = by_channel.get(ch) {
+            if !layer_allows(l, tool) {
+                let at = format!("tools.by_channel.{ch}");
+                out.push(Block { layer: at.clone(), config: format!("[{at}]"), fix: hint(&at) });
+            }
+        }
+        if let Some(s) = &origin.sender {
+            let key = format!("{ch}:{s}");
+            if let Some(l) = by_sender.get(&key) {
+                if !layer_allows(l, tool) {
+                    let at = format!("tools.by_sender.{key}");
+                    out.push(Block { layer: at.clone(), config: format!("[{at}]"), fix: hint(&at) });
+                }
+            }
+        }
+    }
+    out
 }
 
 /// Where a session's turn comes from, for scoped policies.
@@ -62,6 +177,9 @@ pub fn profile(name: &str) -> Option<Option<Vec<String>>> {
     let expand = |names: &[&str]| -> Vec<String> { names.iter().flat_map(|n| g.get(n).map(|v| v.iter().map(|s| s.to_string()).collect()).unwrap_or_else(|| vec![n.to_string()])).collect() };
     Some(match name {
         "minimal" => Some(expand(&["ask_user", "todo", "tool_describe", "tool_call", "session_status"])),
+        // Benchmark floor: a persistent shell, image-capable `read`, and the code tool. No
+        // write/edit/glob/skills/subagents, so a run measures the model loop, not the toolbox.
+        "benchmark" => Some(expand(&["shell", "read", "run"])),
         "coding" => Some(expand(&["group:fs", "group:runtime", "group:web", "group:memory", "group:sessions", "group:agents", "group:plan", "group:media", "group:forge"])),
         "messaging" => Some(expand(&["group:messaging", "group:memory", "group:web", "ask_user", "todo", "tool_describe", "tool_call", "session_status"])),
         // Professional roles (BATCH-next §3). DevOps/SRE: terminal, logs, process control,
@@ -107,7 +225,12 @@ fn matches(entry: &str, tool: &str) -> bool {
 pub fn validate(layer: &Layer, at: &str) -> Result<(), String> {
     if let Some(p) = &layer.profile {
         if profile(p).is_none() {
-            return Err(format!("{at}.profile `{p}`: use minimal, coding, messaging, devops, secops, data, itsupport or full"));
+            return Err(format!("{at}.profile `{p}`: use minimal, benchmark, coding, messaging, devops, secops, data, itsupport or full"));
+        }
+    }
+    if let Some(e) = &layer.exec {
+        if e.mode.is_some() && e.policy().is_none() {
+            return Err(format!("{at}.exec.mode: use deny, allowlist, ask, auto or full"));
         }
     }
     Ok(())
@@ -171,6 +294,10 @@ mod tests {
         let full = Layer { profile: Some("full".into()), deny: vec!["group:runtime".into(), "mcp__danger__*".into()], ..Default::default() };
         assert!(!layer_allows(&full, "shell") && !layer_allows(&full, "bash"), "alias bash → shell");
         assert!(!layer_allows(&full, "mcp__danger__drop") && layer_allows(&full, "mcp__safe__x"));
+        let benchmark = Layer { profile: Some("benchmark".into()), ..Default::default() };
+        assert!(layer_allows(&benchmark, "shell") && layer_allows(&benchmark, "read") && layer_allows(&benchmark, "run"), "benchmark keeps the minimal loop");
+        assert!(!layer_allows(&benchmark, "write") && !layer_allows(&benchmark, "edit") && !layer_allows(&benchmark, "spawn") && !layer_allows(&benchmark, "skill"), "benchmark hides the rest");
+        assert!(validate(&benchmark, "tools").is_ok());
         let explicit = Layer { allow: vec!["read".into(), "grep".into()], profile: Some("coding".into()), ..Default::default() };
         assert!(layer_allows(&explicit, "grep") && !layer_allows(&explicit, "write"), "allow replaces the profile");
         assert!(layer_allows(&Layer::default(), "anything"));
@@ -214,6 +341,46 @@ mod tests {
             assert!(can("coding", t) && can("devops", t) && !can("data", t) && !can("itsupport", t) && !can("secops", t) && !can("messaging", t), "{t}");
         }
         assert!(layer_allows(&l("full"), "sql_query"));
+    }
+
+    #[test]
+    fn exec_ceilings_restrict_per_provider_and_model() {
+        let l = |mode: &str| Layer { exec: Some(ExecCeiling { mode: Some(mode.into()), ..Default::default() }), ..Default::default() };
+        let bp = BTreeMap::from([
+            ("ollama".to_string(), l("deny")),
+            ("openai/gpt-4o".to_string(), l("ask")),
+            ("openai/gpt-4o-mini".to_string(), l("allowlist")),
+        ]);
+        let o = |m: &str| Origin { model: m.into(), ..Default::default() };
+        assert_eq!(exec_ceiling(&bp, &o("ollama/llama3")), Some((ExecSecurity::Deny, ExecAsk::Off)));
+        assert_eq!(exec_ceiling(&bp, &o("openai/gpt-4o")), Some((ExecSecurity::Allowlist, ExecAsk::OnMiss)));
+        assert_eq!(exec_ceiling(&bp, &o("openai/gpt-4o-mini")), Some((ExecSecurity::Allowlist, ExecAsk::Off)));
+        assert_eq!(exec_ceiling(&bp, &o("anthropic/claude")), None);
+        // Security minimum, ask maximum; a side that denies misses keeps them denied.
+        assert_eq!(compose_exec_policy((ExecSecurity::Full, ExecAsk::Off), (ExecSecurity::Allowlist, ExecAsk::OnMiss)), (ExecSecurity::Allowlist, ExecAsk::OnMiss));
+        assert_eq!(compose_exec_policy((ExecSecurity::Allowlist, ExecAsk::OnMiss), (ExecSecurity::Allowlist, ExecAsk::Off)), (ExecSecurity::Allowlist, ExecAsk::Off));
+        assert_eq!(compose_exec_policy((ExecSecurity::Allowlist, ExecAsk::Always), (ExecSecurity::Allowlist, ExecAsk::Off)), (ExecSecurity::Allowlist, ExecAsk::Always), "a mandatory always is never dropped");
+        let parsed: Layer = serde_json::from_value(serde_json::json!({"exec": {"security": "allowlist", "ask": "always"}})).unwrap();
+        assert_eq!(parsed.exec.unwrap().policy(), Some((ExecSecurity::Allowlist, ExecAsk::Always)));
+        assert!(validate(&Layer { exec: Some(ExecCeiling { mode: Some("bogus".into()), ..Default::default() }), ..Default::default() }, "tools.by_provider.x").is_err());
+    }
+
+    #[test]
+    fn explain_names_the_blocking_layer_and_its_fix() {
+        let g = Layer::default();
+        let bp = BTreeMap::from([("ollama".to_string(), Layer { deny: vec!["shell".into()], ..Default::default() })]);
+        let bc = BTreeMap::from([("telegram".to_string(), Layer { deny: vec!["group:runtime".into()], ..Default::default() })]);
+        let bs = BTreeMap::from([("telegram:7".to_string(), Layer { deny: vec!["write".into()], ..Default::default() })]);
+        let o = Origin { model: "ollama/llama3".into(), channel: Some("telegram".into()), sender: Some("7".into()) };
+        let b = explain(&g, &bp, &bc, &bs, &o, "shell");
+        assert_eq!(b.len(), 2, "{b:?}");
+        assert_eq!(b[0].layer, "tools.by_provider.ollama");
+        assert!(b[0].config.contains("[tools.by_provider.ollama]") && b[0].fix.contains("also_allow"));
+        assert_eq!(b[1].layer, "tools.by_channel.telegram");
+        let b = explain(&g, &bp, &bc, &bs, &o, "write");
+        assert_eq!(b.len(), 1, "provider does not deny write and channel runtime does not cover it: {b:?}");
+        assert_eq!(b[0].layer, "tools.by_sender.telegram:7");
+        assert!(explain(&g, &bp, &bc, &bs, &o, "read").is_empty());
     }
 
     #[test]

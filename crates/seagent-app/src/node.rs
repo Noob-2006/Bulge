@@ -1030,6 +1030,10 @@ pub struct HostPolicy {
     pub cdp_url: String,
     /// Plugins whose `node_commands` this node offers (`[plugins.<name>]` as in config.toml).
     pub plugins: BTreeMap<String, seagent_plugin::McpServerConfig>,
+    /// MCP servers hosted on this node (`[mcp.<name>]` in node.toml). Their tools are offered
+    /// as `mcp__<server>__<tool>` node commands, so the server and its credentials stay on the
+    /// managed host while the gateway drives the call through `node_invoke`.
+    pub mcp: BTreeMap<String, seagent_plugin::McpServerConfig>,
 }
 
 pub(crate) fn which(bin: &str) -> Option<PathBuf> {
@@ -1610,6 +1614,53 @@ fn node_plugins(policy: &HostPolicy) -> (Vec<Arc<seagent_plugin::PluginHost>>, B
     (hosts, meta)
 }
 
+/// MCP servers started on a node: command → `(server, tool)` plus the live clients.
+#[derive(Default)]
+pub struct NodeMcp {
+    clients: BTreeMap<String, Arc<seagent_plugin::Client>>,
+    tools: BTreeMap<String, (String, String)>,
+}
+
+/// Start node.toml's `[mcp.*]` servers and turn each tool into a node command.
+fn node_mcp(policy: &HostPolicy, data: &Path) -> (NodeMcp, BTreeMap<String, Value>) {
+    let mut out = NodeMcp::default();
+    let mut meta = BTreeMap::new();
+    if policy.mcp.is_empty() {
+        return (out, meta);
+    }
+    let reg = seagent_plugin::Registry::load(&policy.mcp, &data.join("mcp-cache"), seagent_plugin::no_secrets());
+    for w in reg.warnings() {
+        eprintln!("seagent node: mcp: {w}");
+    }
+    let mut taken = std::collections::HashSet::new();
+    for (server, cfg) in &policy.mcp {
+        if !cfg.enabled {
+            continue;
+        }
+        let Some(client) = reg.client(server) else { continue };
+        let Some(tools) = reg.catalog_tools(server) else { continue };
+        out.clients.insert(server.clone(), client);
+        for t in tools {
+            let command = seagent_plugin::tool_name(server, &t.name, &mut taken);
+            meta.insert(command.clone(), json!({
+                "description": t.description,
+                "params": t.input_schema,
+                "dangerous": t.destructive || !t.read_only,
+                "plugin": format!("mcp:{server}"),
+            }));
+            out.tools.insert(command, (server.clone(), t.name));
+        }
+    }
+    (out, meta)
+}
+
+fn node_mcp_invoke(mcp: &NodeMcp, command: &str, params: &Value) -> Result<Value, String> {
+    let (server, tool) = mcp.tools.get(command).ok_or_else(|| format!("unknown MCP command `{command}`"))?;
+    let client = mcp.clients.get(server).ok_or_else(|| format!("MCP server `{server}` is not running"))?;
+    let r = client.call_tool(tool, params.clone(), &seagent_core::Cancel::new())?;
+    Ok(json!({"content": r.text, "is_error": r.is_error}))
+}
+
 /// How `seagent node` reaches the server.
 pub struct HostConn {
     pub url: String,
@@ -1654,13 +1705,19 @@ pub fn run_host(c: &HostConn, policy: &HostPolicy) -> Result<(), String> {
     ws.set_read_timeout(Some(Duration::from_millis(100))).ok();
     let mut token = std::fs::read_to_string(&c.token_path).unwrap_or_default().trim().to_string();
     let mut cmds: Vec<String> = host_commands(policy).into_iter().map(str::to_string).collect();
-    let (plugins, meta) = node_plugins(policy);
+    let (plugins, mut meta) = node_plugins(policy);
+    let data_dir = c.key_path.parent().unwrap_or(Path::new(".")).to_path_buf();
+    let (mcp, mcp_meta) = node_mcp(policy, &data_dir);
+    for (k, v) in mcp_meta {
+        meta.entry(k).or_insert(v);
+    }
     for c in meta.keys() {
         if !cmds.contains(c) {
             cmds.push(c.clone());
         }
     }
     let plugins = Arc::new(plugins);
+    let mcp = Arc::new(mcp);
     let (out_tx, out_rx) = mpsc::channel::<Value>();
     let running: Arc<Mutex<HashMap<String, Running>>> = Arc::default();
     let policy = Arc::new(policy.clone());
@@ -1669,12 +1726,16 @@ pub fn run_host(c: &HostConn, policy: &HostPolicy) -> Result<(), String> {
         let (itx, irx) = mpsc::channel();
         let ctl = Ctl { cancel: Arc::default(), input: Some(irx) };
         running.lock().unwrap().insert(id.clone(), Running { cancel: ctl.cancel.clone(), input: itx });
-        let (out, pol, run, plugs) = (out_tx.clone(), policy.clone(), running.clone(), plugins.clone());
+        let (out, pol, run, plugs, mcp) = (out_tx.clone(), policy.clone(), running.clone(), plugins.clone(), mcp.clone());
         std::thread::spawn(move || {
-            let r = match plugs.iter().find(|p| p.node_commands.iter().any(|c| c.command == command)) {
-                // Plugin commands never shadow the built-in ones (node_plugins skips those names).
-                Some(p) => p.node_invoke(&command, params.clone(), Duration::from_millis(params["timeoutMs"].as_u64().unwrap_or(60_000).clamp(1_000, 600_000))),
-                None => host_run_ctl(&pol, &command, &params, &ctl),
+            let r = if mcp.tools.contains_key(&command) {
+                node_mcp_invoke(&mcp, &command, &params)
+            } else {
+                match plugs.iter().find(|p| p.node_commands.iter().any(|c| c.command == command)) {
+                    // Plugin commands never shadow the built-in ones (node_plugins skips those names).
+                    Some(p) => p.node_invoke(&command, params.clone(), Duration::from_millis(params["timeoutMs"].as_u64().unwrap_or(60_000).clamp(1_000, 600_000))),
+                    None => host_run_ctl(&pol, &command, &params, &ctl),
+                }
             };
             let msg = match r {
                 Ok(payload) => json!({"jsonrpc": "2.0", "method": "node.invoke.result", "params": {"id": rid, "ok": true, "payload": payload}}),
@@ -1985,5 +2046,25 @@ mod tests {
             assert_eq!(meta["kinds.wipe"]["dangerous"], true);
             assert_eq!(hosts[0].node_invoke("kinds.hello", json!({"name": "node"}), Duration::from_secs(5)).unwrap()["greeting"], "hello node");
         }
+    }
+
+    #[test]
+    fn node_hosted_mcp_servers_expose_tools_as_commands() {
+        if !std::process::Command::new("python3").arg("-c").arg("1").output().is_ok() {
+            return;
+        }
+        let f = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/mcp/server.py");
+        let toml = format!("[mcp.echo]\ncommand = \"python3\"\nargs = [\"-I\", {:?}]\n", f.display().to_string());
+        let policy: HostPolicy = toml::from_str(&toml).unwrap();
+        assert_eq!(policy.mcp.len(), 1);
+        let data = seagent_core::tmp::scratch_path(format!("seagent-node-mcp-{}", seagent_kernel::util::random_hex(6)));
+        std::fs::create_dir_all(&data).unwrap();
+        let (mcp, meta) = node_mcp(&policy, &data);
+        assert!(meta.contains_key("mcp__echo__echo"), "tools are advertised: {:?}", meta.keys().collect::<Vec<_>>());
+        assert_eq!(meta["mcp__echo__echo"]["plugin"], "mcp:echo");
+        let out = node_mcp_invoke(&mcp, "mcp__echo__echo", &json!({"text": "hi"})).unwrap();
+        assert_eq!(out["content"], "hi");
+        assert_eq!(out["is_error"], false);
+        assert!(node_mcp_invoke(&mcp, "mcp__echo__missing", &json!({})).is_err());
     }
 }

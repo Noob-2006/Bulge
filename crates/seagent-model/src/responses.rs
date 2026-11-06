@@ -91,6 +91,13 @@ impl Responses {
         if let Some(t) = req.options.service_tier.as_deref().filter(|_| first_party) {
             b["service_tier"] = t.into();
         }
+        if req.options.daybreak && codex {
+            // OpenAI Daybreak (Trusted Access for Cyber) on the Codex subscription
+            // route. The account's Codex catalog is the authority on which models
+            // accept it; keeping this behind an explicit flag means an account
+            // without the program is never sent it implicitly.
+            b["access_programs"] = json!({"cyber": "daybreak_blue"});
+        }
         if let Some(v) = req.options.verbosity.as_deref() {
             b["text"] = json!({"verbosity": v});
         }
@@ -275,5 +282,43 @@ fn flush_text(content: &mut Vec<Block>, text: &mut String) {
         content.push(Block::Text {
             text: std::mem::take(text),
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::auth::Static;
+    use std::sync::Arc;
+
+    fn conn(codex: bool) -> Conn {
+        Conn {
+            id: if codex { "openai-codex" } else { "openai" }.into(),
+            base: if codex { "https://chatgpt.com/backend-api/codex" } else { "https://api.openai.com/v1" }.into(),
+            cred: Arc::new(Static::new(Some("tok".into()))),
+            headers: vec![],
+            query: vec![],
+            auth: "oauth".into(),
+            quirks: if codex { vec!["codex".into()] } else { vec![] },
+            efforts: None,
+            http: crate::http::Http::new(std::time::Duration::from_secs(5), "responses"),
+        }
+    }
+
+    #[test]
+    fn daybreak_is_explicit_and_codex_only() {
+        let p = Responses::new(conn(true));
+        let req = |daybreak| ModelRequest {
+            model: "gpt-5.5-codex".into(),
+            messages: vec![Message::user("assess this incident")],
+            max_tokens: 100,
+            options: RequestOptions { daybreak, ..Default::default() },
+            ..Default::default()
+        };
+        let b = p.body(&req(true));
+        assert_eq!(b["access_programs"]["cyber"], "daybreak_blue");
+        assert!(p.body(&req(false)).get("access_programs").is_none(), "off by default");
+        let plain = Responses::new(conn(false));
+        assert!(plain.body(&req(true)).get("access_programs").is_none(), "never on the public API route");
     }
 }

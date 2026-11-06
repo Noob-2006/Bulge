@@ -255,6 +255,102 @@ fn stricter(a: Option<Decision>, b: Decision) -> Option<Decision> {
     }
 }
 
+/// User skill locks (Hermes `tools/skill_lock.py`): the names in `<data>/skills/.usage.json`
+/// whose `locked` field is true. A malformed sidecar locks nothing (the CLI validates before
+/// writing it); a missing one means no locks.
+fn locked_skill_names(data: &Path) -> Vec<String> {
+    let text = std::fs::read_to_string(data.join("skills/.usage.json")).unwrap_or_default();
+    let v: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
+    let mut names: Vec<String> = v.as_object().into_iter().flatten().filter(|(_, r)| r.get("locked").and_then(Value::as_bool) == Some(true)).map(|(n, _)| n.clone()).collect();
+    names.sort();
+    names
+}
+
+fn norm_path(p: &Path) -> PathBuf {
+    let mut out = PathBuf::new();
+    for c in p.components() {
+        use std::path::Component;
+        match c {
+            Component::ParentDir => {
+                out.pop();
+            }
+            Component::CurDir => {}
+            other => out.push(other.as_os_str()),
+        }
+    }
+    out
+}
+
+fn locked_path_refusal(p: &Path, data: &Path, locked: &[String]) -> Option<String> {
+    if locked.is_empty() {
+        return None;
+    }
+    let p = norm_path(p);
+    let record = norm_path(&data.join("skills/.usage.json"));
+    if p == record {
+        return Some("skills/.usage.json holds the user's skill locks, so the agent cannot change it while any skill is locked.".into());
+    }
+    let parts: Vec<String> = p.components().map(|c| c.as_os_str().to_string_lossy().to_string()).collect();
+    for name in locked {
+        let dir = norm_path(&data.join("skills").join(name));
+        // Every skill root has a `skills/<name>` suffix (profile, project, `.claude`, external).
+        let in_skill_root = parts.windows(2).any(|w| w[0] == "skills" && w[1] == *name);
+        if p == dir || p.starts_with(&dir) || in_skill_root {
+            return Some(format!("Skill '{name}' is locked by the user, so the agent cannot change it: skill writes, file writes/patches and shell writes into its directory all refuse. Don't retry or copy it under another name; tell the user what you would change. They can unlock it with `seagent skills unlock {name}`."));
+        }
+    }
+    None
+}
+
+fn locked_skill_name_in_call(tool: &str, input: &Value, locked: &[String]) -> Option<String> {
+    if tool != "skill" || locked.is_empty() {
+        return None;
+    }
+    let action = input.get("action").and_then(Value::as_str).unwrap_or("").to_ascii_lowercase();
+    if matches!(action.as_str(), "view" | "read" | "show" | "get" | "list" | "search" | "find" | "workshop") {
+        return None;
+    }
+    let mut names: Vec<String> = vec![input.get("name").and_then(Value::as_str).unwrap_or("").to_string()];
+    names.extend(input.get("operations").and_then(Value::as_array).into_iter().flatten().filter_map(|o| o.get("name").and_then(Value::as_str)).map(String::from));
+    names.into_iter().find(|n| locked.iter().any(|l| l == n))
+}
+
+fn shell_writeish(command: &str) -> bool {
+    let c = command.to_lowercase();
+    let redirect = c.contains('>') || c.contains("tee ") || c.contains("tee -a");
+    let words = ["rm ", "rm\t", "rmdir ", "unlink ", "truncate ", "shred ", "touch ", "chmod ", "chown ", "chgrp ", "chattr ", "setfacl ", "mkdir ", "mv ", "cp ", "install ", "ln ", "patch ", "sed -i", "sed --in-place", "perl -i", "perl -pi", "ruby -i", "find ", "git add", "git commit", "git checkout", "git reset", "git clean", "git rm", "git mv", "git restore", "git stash", "git apply", "tar ", "unzip ", "rsync ", "scp ", "open(", ".write(", "writefile", "writeFile", "appendfile"];
+    redirect || words.iter().any(|w| c.contains(w))
+}
+
+fn shell_lock_refusal(command: &str, data: &Path, locked: &[String]) -> Option<String> {
+    if locked.is_empty() {
+        return None;
+    }
+    let flat = command.replace(['\\', '\'', '"'], "");
+    // The user's own CLI owns lock/unlock; an agent shell may not run it while a lock exists.
+    let lower = flat.to_lowercase();
+    if (lower.contains("seagent") || lower.contains("hermes"))
+        && (lower.contains("curator") || lower.contains("skills") || lower.contains("skill"))
+        && (lower.contains("unlock") || lower.contains(" lock"))
+    {
+        return Some("Only the user can lock or unlock a skill. Ask them to run `seagent skills lock|unlock <skill>` themselves.".into());
+    }
+    if lower.contains(".usage.json") && shell_writeish(&flat) {
+        return Some("skills/.usage.json holds the user's skill locks, so the agent cannot change it while any skill is locked.".into());
+    }
+    if !shell_writeish(&flat) {
+        return None;
+    }
+    for name in locked {
+        let abs = format!("{}/skills/{name}", data.display());
+        let rel = format!("skills/{name}");
+        if flat.contains(&abs) || flat.contains(&rel) {
+            return Some(format!("Skill '{name}' is locked by the user, so the agent cannot change it: skill writes, file writes/patches and shell writes into its directory all refuse. Don't retry or copy it under another name; tell the user what you would change. They can unlock it with `seagent skills unlock {name}`."));
+        }
+    }
+    None
+}
+
 impl Runtime {
     fn floor(&self, log: &mut SessionLog, id: &str, kind: &str, reason: String) -> Result<Option<ToolOutput>, StoreError> {
         self.append(log, EventKind::Gate { tool_use_id: id.into(), gate: kind.into(), verdict: "deny (floor)".into(), reason: reason.clone() })?;
@@ -265,14 +361,39 @@ impl Runtime {
         paths::SeagentDirs { config_dir: self.paths.config_dir.clone(), data_dir: self.paths.data.clone() }
     }
 
+    /// Effective exec policy for a turn: config + `/exec` override, then the
+    /// `[tools.by_provider]` ceiling for the model driving it (restrict-only).
+    fn effective_exec(&self, log: &SessionLog) -> (ExecSecurity, ExecAsk) {
+        let a = &self.cfg.approvals;
+        let (es, ea) = ap::effective_exec(a, &self.paths.data, &log.id, completed_turns(log));
+        match self.exec_ceiling(log) {
+            Some(c) => seagent_security::toolpolicy::compose_exec_policy((es, ea), c),
+            None => (es, ea),
+        }
+    }
+
+    /// The model/provider exec ceiling that applies to this turn, if any.
+    fn exec_ceiling(&self, log: &SessionLog) -> Option<(ExecSecurity, ExecAsk)> {
+        let model = model_of(log, &self.cfg.model.default);
+        seagent_security::toolpolicy::exec_ceiling(&self.cfg.tools.by_provider, &origin_of(&last_source(log), &model))
+    }
+
     /// Floors (step 1). Some(error) when the call must not run.
     fn floors(&self, log: &mut SessionLog, id: &str, tool: &str, effects: &[Effect], input: &Value, ws: &Path) -> Result<Option<ToolOutput>, StoreError> {
         let a = &self.cfg.approvals;
         let sec = &self.cfg.security;
         let sudo_pw = std::env::var("SUDO_PASSWORD").is_ok() || self.vault.names().iter().any(|n| n == "SUDO_PASSWORD");
+        // Per-skill user locks: the skill tool and every write path (file tools, shell) refuse.
+        let locked = locked_skill_names(&self.paths.data);
+        if let Some(name) = locked_skill_name_in_call(tool, input, &locked) {
+            return self.floor(log, id, "skill-lock", format!("Skill '{name}' is locked by the user, so the agent cannot change it: skill writes, file writes/patches and shell writes into its directory all refuse. Don't retry or copy it under another name; tell the user what you would change. They can unlock it with `seagent skills unlock {name}`."));
+        }
         for e in effects {
             match e {
                 Effect::Exec { command } => {
+                    if let Some(e) = shell_lock_refusal(command, &self.paths.data, &locked) {
+                        return self.floor(log, id, "skill-lock", e);
+                    }
                     let extra = extra_variants(command);
                     if let Some(d) = hardline::detect(command, &extra) {
                         return self.floor(log, id, "hardline", hardline::hardline_message(d));
@@ -290,9 +411,9 @@ impl Runtime {
                             }
                         }
                     }
-                    let (es, _) = ap::effective_exec(a, &self.paths.data, &log.id, completed_turns(log));
+                    let (es, _) = self.effective_exec(log);
                     if es == ExecSecurity::Deny {
-                        return self.floor(log, id, "exec", "Blocked: command execution is disabled (approvals.exec.security = \"deny\"). Do not retry; use other tools or ask the user.".into());
+                        return self.floor(log, id, "exec", "Blocked: command execution is disabled (approvals.exec.security = \"deny\" or a [tools.by_provider] exec ceiling). Do not retry; use other tools or ask the user.".into());
                     }
                 }
                 Effect::Read { path } => {
@@ -309,6 +430,9 @@ impl Runtime {
                 }
                 Effect::Write { path } => {
                     let p = if path.is_absolute() { path.clone() } else { ws.join(path) };
+                    if let Some(e) = locked_path_refusal(&p, &self.paths.data, &locked) {
+                        return self.floor(log, id, "skill-lock", e);
+                    }
                     if let Some(e) = paths::write_block(&p, &self.dirs(), &sec.path_policy()) {
                         return self.floor(log, id, "path", e);
                     }
@@ -534,7 +658,8 @@ impl Runtime {
             Verdict::Deny { gate, reason } => Some(Decision { gate, reason, ask: false, misses: vec![], inline: false }),
         };
         // Exec approval policy.
-        let (es, ea) = ap::effective_exec(a, &data, &log.id, completed_turns(log));
+        let (es, ea) = self.effective_exec(log);
+        let exec_capped = self.exec_ceiling(log).is_some_and(|(s, k)| s != ExecSecurity::Full || k != ExecAsk::Off);
         let elevated = ap::elevated_level(a, &data, &log.id);
         // `/elevated` semantics (off | on | ask | full), always *after* the floors:
         // `ask` → every host execution goes through a human, even one the gates allowed;
@@ -557,7 +682,7 @@ impl Runtime {
                 continue;
             }
             if es == ExecSecurity::Allowlist {
-                let misses: Vec<String> = shell::parse(command).iter().filter(|c| !c.argv.is_empty() && ap::exec_allowlisted(&c.argv, a, &data, &ws).is_none()).map(|c| c.argv[0].clone()).collect();
+                let misses: Vec<String> = shell::parse(command).iter().filter(|c| !c.argv.is_empty() && ap::exec_allowlisted(&c.argv, Some(command), a, &data, &ws).is_none()).map(|c| c.argv[0].clone()).collect();
                 if !misses.is_empty() && ap::command_granted(a, &data, command).is_none() {
                     let reason = format!("{} not on the exec allowlist", misses.iter().map(|m| format!("`{m}`")).collect::<Vec<_>>().join(", "));
                     d = stricter(d, Decision { gate: GateKind::Exec, reason: if ea == ExecAsk::Off { format!("{reason} (approvals.exec.ask = \"off\")") } else { reason }, ask: ea != ExecAsk::Off, misses, inline: !inline.is_empty() });
@@ -599,6 +724,7 @@ impl Runtime {
                 if tier >= Tier::Impactful {
                     self.append(log, EventKind::Gate { tool_use_id: id.into(), gate: "envelope".into(), verdict: "allow (envelope)".into(), reason: format!("inside task envelope `{}` (tier {})", e.label, tier.as_u8()) })?;
                 }
+                self.note_provenance(id, format!("[approval] auto-approved: allow (envelope) — inside task envelope `{}` (tier {})", e.label, tier.as_u8()));
             }
             return Ok(None);
         }
@@ -655,12 +781,13 @@ impl Runtime {
             ap::touch_grant(&data, &g.id, &commands.join(" ; "));
             "allow (always)".into()
         } else if !commands.is_empty() && commands.iter().all(|c| ap::command_granted(a, &data, c).is_some()) && d.gate != GateKind::Exec {
+            // Tier-3 findings (credential upload, etc.) never reach here: the hard floor above.
             "allow (allowlist)".into()
-        } else if ap::yolo_active(&data, &log.id) || ap::process_yolo() || a.mode == Mode::Off {
+        } else if !(exec_capped && d.gate == GateKind::Exec) && (ap::yolo_active(&data, &log.id) || ap::process_yolo() || a.mode == Mode::Off) {
             "allow (yolo)".into()
-        } else if elevated == ap::Elevated::Full && d.gate == GateKind::Exec {
+        } else if !exec_capped && elevated == ap::Elevated::Full && d.gate == GateKind::Exec {
             "allow (elevated full)".into()
-        } else if elevated == ap::Elevated::On && d.gate == GateKind::Exec {
+        } else if !exec_capped && elevated == ap::Elevated::On && d.gate == GateKind::Exec {
             "allow (elevated on)".into()
         } else if self.remembered.contains(&log.id, d.gate, &d.reason) {
             "allow (remembered)".into()
@@ -703,6 +830,12 @@ impl Runtime {
             self.append(log, EventKind::Notice { level: "warn".into(), text: format!("ran {tool} on the host without a prompt (/elevated on): {}", d.reason) })?;
         }
         if decision.starts_with("allow") {
+            // Hermes approval provenance: a silent auto-approval is explained in the tool
+            // result, so the model and the user see why no prompt appeared.
+            if decision.starts_with("allow (") {
+                let why: String = d.reason.replace(['\n', '\r'], " ").chars().take(220).collect();
+                self.note_provenance(id, format!("[approval] auto-approved: {decision} — {why}"));
+            }
             Ok(None)
         } else {
             let mut extra = deny_extra.clone();
@@ -1240,7 +1373,15 @@ pub fn explain(k: &Runtime, session: Option<&str>, ws: &Path, command: &str) -> 
         }
     }
     let turns = session.map(|s| current_turns(k, s)).unwrap_or(0);
-    let (es, ea) = ap::effective_exec(a, data, sid, turns);
+    let (model, source) = match session.and_then(|s| k.store.open(s).ok()) {
+        Some(ev) => (model_of(&ev, &k.cfg.model.default), last_source(&ev)),
+        None => (k.cfg.model.default.clone(), String::new()),
+    };
+    let (mut es, mut ea) = ap::effective_exec(a, data, sid, turns);
+    if let Some(c) = seagent_security::toolpolicy::exec_ceiling(&k.cfg.tools.by_provider, &origin_of(&source, &model)) {
+        (es, ea) = seagent_security::toolpolicy::compose_exec_policy((es, ea), c);
+        trace.push(format!("model exec ceiling: security={} ask={}", es.as_str(), ea.as_str()));
+    }
     if es == ExecSecurity::Deny {
         return deny("approvals.exec.security = deny".into(), trace);
     }
@@ -1259,7 +1400,7 @@ pub fn explain(k: &Runtime, session: Option<&str>, ws: &Path, command: &str) -> 
         (verdict, rule) = ("ask", "approvals.exec.ask = always".into());
     }
     if verdict == "allow" && es == ExecSecurity::Allowlist {
-        let misses: Vec<String> = shell::parse(command).iter().filter(|c| !c.argv.is_empty() && ap::exec_allowlisted(&c.argv, a, data, ws).is_none()).map(|c| c.argv[0].clone()).collect();
+        let misses: Vec<String> = shell::parse(command).iter().filter(|c| !c.argv.is_empty() && ap::exec_allowlisted(&c.argv, Some(command), a, data, ws).is_none()).map(|c| c.argv[0].clone()).collect();
         if !misses.is_empty() && ap::command_granted(a, data, command).is_none() {
             let r = format!("exec allowlist miss: {}", misses.join(", "));
             (verdict, rule) = if ea == ExecAsk::Off { ("deny", r) } else { ("ask", r) };
@@ -1469,6 +1610,37 @@ mod tests {
     }
 
     use super::*;
+
+    /// A lock in `skills/.usage.json` refuses the skill tool, file writes inside the skill and
+    /// shell writes into it — but keeps reads and unrelated files working.
+    #[test]
+    fn skill_locks_refuse_every_agent_write_path() {
+        let d = seagent_core::tmp::scratch_path(format!("seagent-skilllock-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(d.join("skills/deploy")).unwrap();
+        std::fs::write(d.join("skills/deploy/SKILL.md"), "x").unwrap();
+        std::fs::write(d.join("skills/.usage.json"), json!({"deploy": {"locked": true}}).to_string()).unwrap();
+        let locked = locked_skill_names(&d);
+        assert_eq!(locked, ["deploy"]);
+        assert!(locked_skill_name_in_call("skill", &json!({"action": "patch", "name": "deploy"}), &locked).is_some());
+        assert!(locked_skill_name_in_call("skill", &json!({"operations": [{"action": "create", "name": "deploy"}]}), &locked).is_some());
+        assert!(locked_skill_name_in_call("skill", &json!({"action": "view", "name": "deploy"}), &locked).is_none(), "reading is allowed");
+        let dir = d.join("skills/deploy");
+        assert!(locked_path_refusal(&dir.join("SKILL.md"), &d, &locked).is_some());
+        assert!(locked_path_refusal(&d.join("skills/.usage.json"), &d, &locked).is_some());
+        assert!(locked_path_refusal(&d.join("skills/other/SKILL.md"), &d, &locked).is_none());
+        assert!(locked_path_refusal(Path::new("/ws/.seagent/skills/deploy/SKILL.md"), &d, &locked).is_some(), "project roots are covered too");
+        assert!(shell_lock_refusal("echo new > skills/deploy/SKILL.md", &d, &locked).is_some());
+        assert!(shell_lock_refusal("rm -rf skills/deploy", &d, &locked).is_some());
+        assert!(shell_lock_refusal("seagent skills unlock deploy", &d, &locked).is_some(), "the agent cannot lift a lock");
+        assert!(shell_lock_refusal("cat skills/deploy/SKILL.md", &d, &locked).is_none(), "plain reads are allowed");
+        assert!(shell_lock_refusal("echo x > /tmp/unrelated", &d, &locked).is_none());
+        // No locks = no refusal, and a malformed sidecar does not invent one.
+        assert!(shell_lock_refusal("echo new > skills/deploy/SKILL.md", &d, &[]).is_none());
+        std::fs::write(d.join("skills/.usage.json"), "not json").unwrap();
+        assert!(locked_skill_names(&d).is_empty());
+        let _ = std::fs::remove_dir_all(&d);
+    }
 
     /// The scheduled-prompt threat floor (Hermes `_scan_cron_prompt`) must fire for the tool
     /// names the kernel really registers, not only for the legacy spellings — `cronjob_manage`

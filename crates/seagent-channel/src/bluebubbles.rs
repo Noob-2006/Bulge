@@ -361,7 +361,7 @@ impl Channel for BlueBubbles {
 
     fn fetch_media(&self, m: &Media) -> Result<Vec<u8>, ChannelError> {
         let g = m.id.as_deref().ok_or_else(|| ChannelError::new(K::Fatal, "bluebubbles attachment without guid"))?;
-        crate::http::get_bytes(&self.url(&format!("/api/v1/attachment/{}/download", Self::enc(g))), &[], 100 * 1024 * 1024).map_err(|e| ChannelError::new(e.kind, self.redact(&e.message)))
+        crate::http::get_bytes_trusted(&self.url(&format!("/api/v1/attachment/{}/download", Self::enc(g))), &[], 100 * 1024 * 1024, &self.server).map_err(|e| ChannelError::new(e.kind, self.redact(&e.message)))
     }
 }
 

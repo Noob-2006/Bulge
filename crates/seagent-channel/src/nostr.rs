@@ -603,7 +603,7 @@ impl Nip05 {
     fn fetch(&self, local: &str, domain: &str) -> Result<Nip05Found, ChannelError> {
         let base = self.base.clone().unwrap_or_else(|| format!("https://{domain}"));
         let url = format!("{base}/.well-known/nostr.json?{}", seagent_net::form_encode(&[("name", local)]));
-        let r = self.http.call("GET", &url, &[("accept", "application/json")], crate::http::Payload::None)?;
+        let r = self.http.call_once("GET", &url, &[("accept", "application/json")], crate::http::Payload::None)?;
         let miss = |why: String| ChannelError::new(K::NotFound, format!("NIP-05 {local}@{domain}: {why}"));
         match r.status {
             200 => {}

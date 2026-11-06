@@ -5,15 +5,17 @@
 //! questions over supplied state, answered by a decision provider).
 //!
 //! Decision backends: `llm` (any configured chat model, JSON reply validated per
-//! question) and `openai` (the OpenAI `/decisions` endpoint used by OpenClaw's
-//! bundled OpenAI decision provider).
+//! question), `openai` (the OpenAI `/decisions` endpoint used by OpenClaw's
+//! bundled OpenAI decision provider) and `rerank` (any `/rerank` endpoint:
+//! vLLM, TEI, Infinity, Cohere, Jina, Voyage; OpenClaw `extensions/rerank`).
 
 use crate::jsonschema;
 use crate::kernel::Host;
 use seagent_core::{Block, Cancel, Effect, Message, ModelRequest, Role, SystemSegment, Tool, ToolCtx, ToolOutput, ToolSchema, ToolSpec};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 // ───────────────────────── structured_output ─────────────────────────
@@ -63,7 +65,8 @@ pub fn check_structured(schema: &Value, input: &Value) -> Result<Value, String> 
 pub struct DecisionConfig {
     /// `provider/model`. Empty = `decision_evaluate` reports `unavailable`.
     pub model: String,
-    /// `llm` (any chat model) or `openai` (POST {base_url}/decisions).
+    /// `llm` (any chat model), `openai` (POST {base_url}/decisions) or `rerank`
+    /// (POST {base_url}/rerank on vLLM/TEI/Cohere/Jina/Voyage and friends).
     pub backend: String,
     /// For `openai`.
     pub base_url: String,
@@ -491,6 +494,10 @@ pub(crate) fn evaluate(host: &Host, p: &Value, cancel: &Cancel) -> Value {
             Ok(v) => v,
             Err(reason) => return json!({"status": "unavailable", "reason": reason}),
         },
+        "rerank" => match rerank_decisions(&host.rt.vault.substitute(&cfg.api_key), &cfg.base_url, crate::context::split_model(&cfg.model).1, &state, &qs, timeout) {
+            Ok(v) => v,
+            Err(reason) => return json!({"status": "unavailable", "reason": reason}),
+        },
         _ => {
             let (system, blocks) = decision_prompt(&state, &qs);
             match complete(host, &cfg.model, &system, blocks, 2048, Some(0.0), None, timeout, cancel) {
@@ -514,6 +521,228 @@ pub(crate) fn evaluate(host: &Host, p: &Value, cancel: &Cancel) -> Value {
         answers.insert(q.name.clone(), a);
     }
     json!({"status": "ok", "result": {"model": cfg.model, "answers": answers}})
+}
+
+#[derive(Debug, Clone)]
+enum RerankSlot {
+    Boolean { question: String },
+    Choice { question: String, label: String },
+    Sort { question: String, id: String },
+}
+
+#[derive(Debug, Clone)]
+struct RerankCall {
+    query: String,
+    documents: Vec<String>,
+    slots: Vec<RerankSlot>,
+}
+
+/// Map a decision batch onto `/rerank` calls: a reranker answers "how relevant is
+/// this document to this query", so boolean documents are the true criterion,
+/// choice documents are the alternatives, and sort documents are the list items
+/// ranked against the question's instructions. Score/tags/box/image are unsupported.
+fn rerank_plan(state: &State, qs: &[Question]) -> Result<Vec<RerankCall>, String> {
+    let state_query = match state {
+        State::Text(t) => Some(t.clone()),
+        State::Json(v) => Some(v.to_string()),
+        _ => None,
+    };
+    let mut calls: Vec<RerankCall> = Vec::new();
+    let call_for = |calls: &mut Vec<RerankCall>, query: &str| -> usize {
+        match calls.iter().position(|c| c.query == query) {
+            Some(i) => i,
+            None => {
+                calls.push(RerankCall { query: query.to_string(), documents: vec![], slots: vec![] });
+                calls.len() - 1
+            }
+        }
+    };
+    for q in qs {
+        match q.kind.as_str() {
+            "boolean" => {
+                let query = state_query.clone().filter(|q| !q.trim().is_empty()).ok_or("unsupported-input")?;
+                let doc = if !q.instructions.is_null() {
+                    entry_text(&q.instructions)
+                } else {
+                    q.criteria.get("true").map(entry_text).unwrap_or_default()
+                };
+                if doc.trim().is_empty() {
+                    return Err("unsupported-input".into());
+                }
+                let i = call_for(&mut calls, &query);
+                calls[i].documents.push(doc);
+                calls[i].slots.push(RerankSlot::Boolean { question: q.name.clone() });
+            }
+            "choice" => {
+                let query = state_query.clone().filter(|q| !q.trim().is_empty()).ok_or("unsupported-input")?;
+                let Some(criteria) = q.criteria.as_object().filter(|o| o.len() >= 2) else {
+                    return Err("unsupported-input".into());
+                };
+                let i = call_for(&mut calls, &query);
+                for (label, desc) in criteria {
+                    calls[i].documents.push(if desc.is_null() { label.clone() } else { entry_text(desc) });
+                    calls[i].slots.push(RerankSlot::Choice { question: q.name.clone(), label: label.clone() });
+                }
+            }
+            "sort" => {
+                let State::List(items) = state else { return Err("unsupported-input".into()) };
+                if q.instructions.is_null() || items.is_empty() {
+                    return Err("unsupported-input".into());
+                }
+                let query = entry_text(&q.instructions);
+                if query.trim().is_empty() {
+                    return Err("unsupported-input".into());
+                }
+                let i = call_for(&mut calls, &query);
+                for (id, content) in items {
+                    calls[i].documents.push(entry_text(content));
+                    calls[i].slots.push(RerankSlot::Sort { question: q.name.clone(), id: id.clone() });
+                }
+            }
+            _ => return Err("unsupported-input".into()),
+        }
+    }
+    if calls.is_empty() || calls.iter().any(|c| c.documents.is_empty()) {
+        return Err("unsupported-input".into());
+    }
+    Ok(calls)
+}
+
+fn rerank_field() -> &'static Mutex<HashMap<String, String>> {
+    static F: OnceLock<Mutex<HashMap<String, String>>> = OnceLock::new();
+    F.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Read one `/rerank` response into scores aligned with the request documents.
+/// Accepts Cohere/Jina/vLLM/Infinity `{results:[{index,relevance_score}]}`,
+/// Voyage `{data:[…]}`, and TEI's bare `[{index,score}]`. Every document must be
+/// scored exactly once, and scores are probabilities in [0,1].
+fn read_rerank_scores(payload: &Value, count: usize) -> Option<Vec<f64>> {
+    let rows = if let Some(a) = payload.as_array() {
+        a
+    } else if let Some(a) = payload["results"].as_array() {
+        a
+    } else {
+        payload["data"].as_array()?
+    };
+    if rows.len() != count {
+        return None;
+    }
+    let mut scores: Vec<Option<f64>> = vec![None; count];
+    for row in rows {
+        let index = row["index"].as_u64()? as usize;
+        let score = row["relevance_score"].as_f64().or_else(|| row["score"].as_f64())?;
+        if index >= count || scores[index].is_some() || !(0.0..=1.0).contains(&score) {
+            return None;
+        }
+        scores[index] = Some(score);
+    }
+    scores.into_iter().collect()
+}
+
+fn decode_rerank(calls: &[RerankCall], scores: &[Vec<f64>]) -> Value {
+    let mut answers = Map::new();
+    let mut choices: HashMap<String, Vec<(String, f64)>> = HashMap::new();
+    let mut sorts: HashMap<String, Vec<(usize, String, f64)>> = HashMap::new();
+    for (call, scores) in calls.iter().zip(scores) {
+        for (position, (slot, score)) in call.slots.iter().zip(scores).enumerate() {
+            match slot {
+                RerankSlot::Boolean { question } => {
+                    answers.insert(question.clone(), json!({"probabilityTrue": score}));
+                }
+                RerankSlot::Choice { question, label } => {
+                    choices.entry(question.clone()).or_default().push((label.clone(), *score));
+                }
+                RerankSlot::Sort { question, id } => {
+                    sorts.entry(question.clone()).or_default().push((position, id.clone(), *score));
+                }
+            }
+        }
+    }
+    for (question, probabilities) in choices {
+        let mut best: Option<(&str, f64)> = None;
+        let mut map = Map::new();
+        for (label, score) in &probabilities {
+            map.insert(label.clone(), (*score).into());
+            if best.is_none_or(|(_, b)| *score > b) {
+                best = Some((label, *score));
+            }
+        }
+        answers.insert(question, json!({"choice": best.map(|(l, _)| l), "probabilities": map}));
+    }
+    for (question, ranked) in sorts {
+        let mut ranked = ranked;
+        ranked.sort_by(|a, b| b.2.total_cmp(&a.2).then(a.0.cmp(&b.0)));
+        answers.insert(question, json!({"order": ranked.into_iter().map(|(_, id, _)| id).collect::<Vec<_>>()}));
+    }
+    Value::Object(answers)
+}
+
+fn rerank_status(status: u16) -> &'static str {
+    match status {
+        401 | 403 => "authentication",
+        429 => "rate-limited",
+        400 | 413 | 422 => "unsupported-input",
+        _ => "transport",
+    }
+}
+
+/// Any `/rerank` endpoint (vLLM, TEI, Infinity, Cohere, Jina, Voyage).
+fn rerank_decisions(key: &str, base: &str, model: &str, state: &State, qs: &[Question], timeout: Duration) -> Result<Value, String> {
+    let calls = rerank_plan(state, qs)?;
+    if base.trim().is_empty() {
+        return Err("unsupported-input".into());
+    }
+    let url = format!("{}/rerank", base.trim_end_matches('/'));
+    let agent: ureq::Agent = seagent_net::http::builder().timeout_global(Some(timeout)).http_status_as_error(false).max_redirects(0).build().into();
+    let known = rerank_field().lock().unwrap().get(&url).cloned();
+    let fields: Vec<&str> = match known.as_deref() {
+        Some(f) => vec![f],
+        None => vec!["documents", "texts"],
+    };
+    let auth = (!key.is_empty() && !key.starts_with("{{secret:")).then(|| format!("Bearer {key}"));
+    let mut all_scores: Vec<Vec<f64>> = Vec::new();
+    for call in &calls {
+        let mut last = "transport";
+        let mut scores = None;
+        for field in &fields {
+            let body = json!({"model": model, "query": call.query, (*field): call.documents}).to_string();
+            let mut req = agent.post(&url).header("Content-Type", "application/json").header("Accept", "application/json");
+            if let Some(a) = &auth {
+                req = req.header("Authorization", a);
+            }
+            let mut resp = match req.send(body.as_bytes()) {
+                Ok(r) => r,
+                Err(_) => continue,
+            };
+            let status = resp.status().as_u16();
+            if !(200..300).contains(&status) {
+                if status == 400 || status == 422 {
+                    last = "unsupported-input";
+                    continue;
+                }
+                return Err(rerank_status(status).into());
+            }
+            let text = resp.body_mut().with_config().limit(1_048_576).read_to_string().map_err(|_| "invalid-response".to_string())?;
+            if auth.as_deref().is_some_and(|a| text.contains(a)) {
+                return Err("invalid-response".into());
+            }
+            let v: Value = serde_json::from_str(&text).map_err(|_| "invalid-response".to_string())?;
+            match read_rerank_scores(&v, call.documents.len()) {
+                Some(s) => {
+                    rerank_field().lock().unwrap().insert(url.clone(), (*field).to_string());
+                    scores = Some(s);
+                    break;
+                }
+                None => return Err("invalid-response".into()),
+            }
+        }
+        match scores {
+            Some(s) => all_scores.push(s),
+            None => return Err(last.into()),
+        }
+    }
+    Ok(decode_rerank(&calls, &all_scores))
 }
 
 /// OpenAI `/decisions` (boolean→predicate, choice, score). Err = unavailable reason.
@@ -716,6 +945,95 @@ mod tests {
         assert_eq!(openai_decisions("{{secret:X}}", "http://127.0.0.1:1", "m", &st, &qs, Duration::from_secs(1)).unwrap_err(), "authentication");
     }
 
+    #[test]
+    fn rerank_plan_and_scores_map_boolean_choice_and_sort() {
+        let (st, qs) = parse_batch(&json!({"state": "the disk is full", "questions": {
+            "alert": {"type":"boolean","criteria":{"true":"needs immediate action","false":"can wait"}},
+            "sev": {"type":"choice","criteria":{"low":"minor","high":"service down"}}
+        }})).unwrap();
+        let calls = rerank_plan(&st, &qs).unwrap();
+        assert_eq!(calls.len(), 1, "one query, one request");
+        assert_eq!(calls[0].query, "the disk is full");
+        assert_eq!(calls[0].documents.len(), 3);
+        assert!(calls[0].documents.contains(&"needs immediate action".to_string()));
+        assert!(calls[0].documents.contains(&"service down".to_string()));
+        // Keep the score slots aligned with the documents the plan emitted.
+        let scores = vec![calls[0]
+            .documents
+            .iter()
+            .map(|d| if d == "needs immediate action" { 0.9 } else if d == "service down" { 0.8 } else { 0.2 })
+            .collect::<Vec<_>>()];
+        let answers = decode_rerank(&calls, &scores);
+        assert_eq!(answers["alert"]["probabilityTrue"], 0.9);
+        assert_eq!(answers["sev"]["choice"], "high");
+        assert_eq!(answers["sev"]["probabilities"]["low"], 0.2);
+
+        let (st, qs) = parse_batch(&json!({"contractVersion":2,"state":{"type":"list","items":[
+            {"id":"a","content":"disk full"},
+            {"id":"b","content":"cert expired"},
+            {"id":"c","content":"disk slow"}
+        ]},"questions":{"rank":{"type":"sort","instructions":"most urgent first"}}})).unwrap();
+        let calls = rerank_plan(&st, &qs).unwrap();
+        assert_eq!(calls[0].query, "most urgent first");
+        assert_eq!(calls[0].documents, ["disk full", "cert expired", "disk slow"]);
+        let answers = decode_rerank(&calls, &[vec![0.4, 0.9, 0.4]]);
+        assert_eq!(answers["rank"]["order"], json!(["b", "a", "c"]), "ties keep list position");
+
+        assert!(read_rerank_scores(&json!([{"index":0,"score":0.5}]), 1).is_some());
+        assert!(read_rerank_scores(&json!({"results":[{"index":0,"relevance_score":0.5}]}), 1).is_some());
+        assert!(read_rerank_scores(&json!({"data":[{"index":0,"relevance_score":0.5}]}), 1).is_some());
+        assert!(read_rerank_scores(&json!([{"index":0,"score":1.5}]), 1).is_none(), "scores must be probabilities");
+        assert!(read_rerank_scores(&json!([{"index":0,"score":0.5}]), 2).is_none(), "every document needs a score");
+    }
+
+    #[test]
+    fn rerank_decisions_retries_texts_and_maps_the_response() {
+        use std::io::{Read, Write};
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = l.local_addr().unwrap();
+        let h = std::thread::spawn(move || {
+            let mut seen = Vec::new();
+            for i in 0..2 {
+                let (mut s, _) = l.accept().unwrap();
+                let mut buf = vec![0u8; 65536];
+                let mut got = Vec::new();
+                loop {
+                    let n = s.read(&mut buf).unwrap();
+                    got.extend_from_slice(&buf[..n]);
+                    let t = String::from_utf8_lossy(&got);
+                    if let Some(p) = t.find("\r\n\r\n") {
+                        let len: usize = t.lines().find_map(|l| l.to_lowercase().strip_prefix("content-length:").map(|v| v.trim().parse().unwrap())).unwrap_or(0);
+                        if got.len() >= p + 4 + len {
+                            break;
+                        }
+                    }
+                }
+                seen.push(String::from_utf8_lossy(&got).to_string());
+                if i == 0 {
+                    write!(s, "HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").unwrap();
+                } else {
+                    let body = r#"{"results":[{"index":0,"relevance_score":0.2},{"index":1,"relevance_score":0.9},{"index":2,"relevance_score":0.5}]}"#;
+                    write!(s, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+                }
+            }
+            seen
+        });
+        let (st, qs) = parse_batch(&json!({"contractVersion":2,"state":{"type":"list","items":[
+            {"id":"a","content":"disk full"},{"id":"b","content":"cert expired"},{"id":"c","content":"disk slow"}
+        ]},"questions":{"rank":{"type":"sort","instructions":"most urgent first"}}})).unwrap();
+        let out = rerank_decisions("", &format!("http://{addr}/v1"), "rerank-model", &st, &qs, Duration::from_secs(5)).unwrap();
+        let seen = h.join().unwrap();
+        assert!(seen[0].contains("\"documents\":["), "first attempt uses documents: {}", seen[0]);
+        assert!(seen[1].contains("\"texts\":["), "TEI retry uses texts: {}", seen[1]);
+        assert!(seen[0].contains("\"query\":\"most urgent first\"") && seen[0].contains("\"model\":\"rerank-model\""));
+        assert_eq!(out["rank"]["order"], json!(["b", "c", "a"]));
+        assert_eq!(out["rank"]["type"], Value::Null, "rerank returns the raw answer shape; check_answer adds the type later");
+
+        // A 401 is authentication and a score outside [0,1] is invalid, never a fabricated ranking.
+        let (st, qs) = parse_batch(&json!({"state": "x", "questions": {"q": {"type": "choice","criteria":{"a":"one","b":"two"}}}})).unwrap();
+        assert_eq!(rerank_decisions("", "http://127.0.0.1:1/v1", "m", &st, &qs, Duration::from_secs(1)).unwrap_err(), "transport");
+    }
+
     struct JsonProv;
 
     impl seagent_core::Provider for JsonProv {
@@ -770,6 +1088,44 @@ mod tests {
         }
         let ctx = ToolCtx { workspace: root.clone(), session_id: String::new(), artifacts: root, home: std::path::PathBuf::new(), cancel: Cancel::new(), host: Arc::new(NoHost), secrets: Arc::new(|s: &str| s.to_string()) };
         assert!(DecisionEvaluate.call(&ctx, json!({})).is_error, "no kernel host behind a foreign ToolCtx");
+    }
+
+    struct ChoiceApprover {
+        seen: std::sync::Mutex<Vec<crate::approver::ClarifyQuestion>>,
+    }
+
+    impl crate::approver::Approver for ChoiceApprover {
+        fn approve(&self, _: &crate::approver::ApprovalRequest) -> crate::approver::Approval {
+            crate::approver::Approval::Deny
+        }
+        fn ask(&self, _: &str, _: &str) -> Result<String, String> {
+            Err("use clarify".into())
+        }
+        fn clarify(&self, _: &str, questions: &[crate::approver::ClarifyQuestion]) -> crate::approver::ClarifyReply {
+            self.seen.lock().unwrap().extend_from_slice(questions);
+            let mut answers = std::collections::BTreeMap::new();
+            for q in questions {
+                answers.insert(q.qid.clone(), Some(serde_json::json!("prod")));
+            }
+            crate::approver::ClarifyReply { answers, outcome: "submitted".into(), notice: None }
+        }
+    }
+
+    #[test]
+    fn host_ask_user_choice_uses_clarify_and_returns_the_mapped_option() {
+        let ap = Arc::new(ChoiceApprover { seen: std::sync::Mutex::new(vec![]) });
+        let root = seagent_core::tmp::scratch_path(format!("seagent-choice-{}", crate::util::random_hex(8)));
+        let paths = crate::config::Paths { data: root.join("d"), config_dir: root.join("c"), runtime: root.join("r"), ..Default::default() };
+        std::fs::create_dir_all(&paths.config_dir).unwrap();
+        let mut cfg = crate::config::Config::default();
+        cfg.model.default = "fake/m".into();
+        let k = crate::kernel::new_kernel(cfg, paths, Arc::new(Res), vec![], Arc::new(crate::vault::Vault::empty()), ap.clone());
+        let sid = k.create_session(&root, None, None, Some("ask")).unwrap();
+        let host = Host { rt: k.clone(), session: sid, workspace: root.clone(), depth: 0, ledger: crate::ledger::Ledger::new(k.cfg.budget.clone()), conversation: vec![] };
+        let got = seagent_core::ToolHost::ask_user_choice(&host, "Deploy where?", &["staging".into(), "prod".into()], false).unwrap();
+        assert_eq!(got, "prod");
+        let seen = ap.seen.lock().unwrap();
+        assert_eq!((seen[0].question.as_str(), seen[0].choices.clone(), seen[0].multi_select), ("Deploy where?", vec!["staging".to_string(), "prod".to_string()], false));
     }
 
     #[test]
@@ -872,6 +1228,66 @@ mod tests {
         assert!(v["detail"].as_str().unwrap_or_default().contains("decision.model"));
         let _ = std::fs::remove_dir_all(root);
         let _ = std::fs::remove_dir_all(root2);
+    }
+
+    /// The `rerank` backend is wired through `evaluate` and its scores are checked per
+    /// question just like an LLM answer (no unchecked probabilities escape).
+    #[test]
+    fn decision_evaluate_rerank_backend_posts_and_maps_the_answer() {
+        use std::io::{Read, Write};
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = l.local_addr().unwrap();
+        let h = std::thread::spawn(move || {
+            let (mut s, _) = l.accept().unwrap();
+            let mut buf = vec![0u8; 65536];
+            let mut got = Vec::new();
+            loop {
+                let n = s.read(&mut buf).unwrap();
+                got.extend_from_slice(&buf[..n]);
+                let t = String::from_utf8_lossy(&got);
+                if let Some(i) = t.find("\r\n\r\n") {
+                    let len: usize = t.lines().find_map(|l| l.to_lowercase().strip_prefix("content-length:").map(|v| v.trim().parse().unwrap())).unwrap_or(0);
+                    if got.len() >= i + 4 + len {
+                        break;
+                    }
+                }
+            }
+            let req = String::from_utf8_lossy(&got).to_string();
+            let body = r#"{"results":[{"index":0,"relevance_score":0.9},{"index":1,"relevance_score":0.7},{"index":2,"relevance_score":0.2}]}"#;
+            write!(s, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}", body.len()).unwrap();
+            req
+        });
+        let (k, host, root) = decision_host(
+            |c| {
+                c.decision.model = "rerank/bge".into();
+                c.decision.backend = "rerank".into();
+                c.decision.base_url = format!("http://{addr}/v1");
+                c.decision.api_key = String::new();
+                c.decision.timeout_secs = 5;
+            },
+            "{}",
+        );
+        let _ = k;
+        let v = evaluate(
+            &host,
+            &json!({
+                "state": "red build",
+                "questions": {
+                    "broken": {"type": "boolean", "criteria": {"true": "tests fail", "false": "tests pass"}},
+                    "sev": {"type": "choice", "criteria": {"low": "minor", "high": "blocking"}}
+                }
+            }),
+            &Cancel::new(),
+        );
+        let req = h.join().unwrap();
+        assert_eq!(v["status"], "ok", "{v}");
+        assert!(req.starts_with("POST /v1/rerank"), "{req}");
+        assert!(req.contains("\"model\":\"bge\""));
+        assert_eq!(v["result"]["answers"]["broken"]["type"], "boolean");
+        assert_eq!(v["result"]["answers"]["broken"]["probabilityTrue"], 0.9);
+        assert_eq!(v["result"]["answers"]["sev"]["choice"], "high");
+        assert_eq!(v["result"]["answers"]["sev"]["probabilities"]["low"], 0.2);
+        let _ = std::fs::remove_dir_all(root);
     }
 
     /// G18: the `openai` decision backend really runs at runtime — `evaluate` posts to

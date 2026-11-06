@@ -653,7 +653,7 @@ impl Channel for ClickClack {
         // Only send the bot token to our own server.
         if u.starts_with(&self.core.base) {
             let auth = self.core.http.headers.iter().find(|(k, _)| k == "authorization").map(|(_, v)| v.clone()).unwrap_or_default();
-            crate::http::get_bytes(u, &[("authorization", &auth)], MAX_UPLOAD)
+            crate::http::get_bytes_trusted(u, &[("authorization", &auth)], MAX_UPLOAD, &self.core.base)
         } else {
             crate::http::get_bytes(u, &[], MAX_UPLOAD)
         }

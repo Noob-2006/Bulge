@@ -434,8 +434,128 @@ pub const STRATEGIES: [(&str, Strategy); 9] = [
     ("context_aware", s_context_aware),
 ];
 
+/// Strategies that only normalize whitespace/escaping. A gutter-pasted old_string may use
+/// these, never the similarity tier: a line-number prefix barely changes per-line similarity,
+/// so accepting the raw paste would write the `N|` prefixes into the file.
+const PRECISE_STRATEGIES: [(&str, Strategy); 7] = [
+    ("exact", s_exact),
+    ("line_trimmed", s_line_trimmed),
+    ("whitespace_normalized", s_whitespace_normalized),
+    ("indentation_flexible", s_indentation_flexible),
+    ("escape_normalized", s_escape_normalized),
+    ("trimmed_boundary", s_trimmed_boundary),
+    ("unicode_normalized", s_unicode_normalized),
+];
+const SIMILARITY_STRATEGIES: [(&str, Strategy); 2] = [("block_anchor", s_block_anchor), ("context_aware", s_context_aware)];
+/// A single numbered line is only safe as a whole line: a bare `2|4` stripped to `4` must
+/// not land inside `a = 4`.
+const WHOLE_LINE_STRATEGIES: [(&str, Strategy); 1] = [("line_trimmed", s_line_trimmed)];
+
 pub fn is_similarity_strategy(s: &str) -> bool {
     matches!(s, "block_anchor" | "context_aware")
+}
+
+const GUTTER_STRIPPED_NOTE: &str =
+    "old_string carried read's line-number prefixes (`N|`); they were stripped before matching. Send file text without the `N|` gutter next time.";
+const GUTTER_NEW_STRING_ERROR: &str =
+    "old_string looks like read output with its `N|` line-number prefixes, but new_string's `N|` prefixes are not a clean gutter (missing on some non-blank lines, or not numbered consecutively), so the intended replacement text is ambiguous. Resend both strings without any `N|` prefixes.";
+const GUTTER_MISS_SUFFIX: &str =
+    " (its read `N|` line-number prefixes were stripped first; only an exact or whitespace-tolerant match of the remaining text is accepted)";
+
+/// `N|` at the start of a line: (number, byte offset after the pipe).
+fn gutter_prefix(line: &str) -> Option<(u64, usize)> {
+    let b = line.as_bytes();
+    let mut i = 0;
+    while i < b.len() && b[i].is_ascii_digit() {
+        i += 1;
+    }
+    if i == 0 || b.get(i) != Some(&b'|') {
+        return None;
+    }
+    Some((line[..i].parse().ok()?, i + 1))
+}
+
+fn has_gutter_line(text: &str) -> bool {
+    text.split('\n').any(|l| gutter_prefix(l).is_some())
+}
+
+/// `text` minus a read-tool `N|` gutter, or None when it is not a verbatim paste. Every
+/// non-blank line must carry the gutter, there must be at least `min_numbered` of them, and
+/// the numbers must run consecutively (a blank line may lose its prefix but still consumes
+/// a number).
+fn strip_line_number_gutter(text: &str, min_numbered: usize) -> Option<String> {
+    let mut stripped = Vec::new();
+    let mut expected: Option<u64> = None;
+    let mut numbered = 0usize;
+    for raw in text.split('\n') {
+        let mut line = raw;
+        match gutter_prefix(line) {
+            None if !line.trim().is_empty() => return None,
+            None => {}
+            Some((n, start)) => {
+                if expected.is_some_and(|e| n != e) {
+                    return None;
+                }
+                expected = Some(n);
+                numbered += 1;
+                line = &line[start..];
+            }
+        }
+        if let Some(e) = expected.as_mut() {
+            *e += 1;
+        }
+        stripped.push(line);
+    }
+    (numbered >= min_numbered).then(|| stripped.join("\n"))
+}
+
+/// `(old_string minus a gutter, whether only whole-line matching is safe)`; None when it has
+/// no gutter, strips to whitespace, or the file itself has gutter-shaped lines (the pipes may
+/// be real content there).
+fn gutter_stripped_old(content: &str, old: &str) -> Option<(String, bool)> {
+    let stripped = strip_line_number_gutter(old, 1)?;
+    if stripped.trim().is_empty() || has_gutter_line(content) {
+        return None;
+    }
+    Some((stripped, strip_line_number_gutter(old, 2).is_none()))
+}
+
+fn join_notes(a: Option<String>, b: Option<String>) -> Option<String> {
+    match (a, b) {
+        (Some(a), Some(b)) => Some(format!("{a}\n{b}")),
+        (a, b) => a.or(b),
+    }
+}
+
+fn run_strategies(
+    content: &str,
+    old: &str,
+    new: &str,
+    replace_all: bool,
+    strategies: &[(&'static str, Strategy)],
+    note: Option<String>,
+) -> Result<Option<Replaced>, String> {
+    for (name, f) in strategies {
+        let m = f(content, old);
+        if m.is_empty() {
+            continue;
+        }
+        if m.len() > 1 && !replace_all {
+            return Err(format!("Found {} matches for old_string. Provide more context to make it unique, or use replace_all=true. Matches:\n{}", m.len(), match_locations(content, &m, 5)));
+        }
+        if replace_all && m.len() > 1 && is_similarity_strategy(name) {
+            return Err(format!("Found {} approximate matches via the '{name}' strategy; replace_all only applies to exact matches. Provide the precise text (whitespace included) so an exact/line-trimmed match can be made.", m.len()));
+        }
+        if *name != "exact" {
+            if let Some(e) = detect_escape_drift(content, &m, old, new) {
+                return Err(e);
+            }
+        }
+        let eff = maybe_unescape_new(new, content, &m);
+        let out = apply_replacements(content, &m, &eff, (*name != "exact").then_some(old), *name == "unicode_normalized");
+        return Ok(Some(Replaced { content: out, count: m.len(), strategy: name, note }));
+    }
+    Ok(None)
 }
 
 /// Note for edits located by a similarity strategy (the span may be a line off).
@@ -746,25 +866,34 @@ pub fn fuzzy_replace(content: &str, old: &str, new: &str, replace_all: bool) -> 
     if old == new {
         return Err(IDENTICAL_STRINGS_ERROR.into());
     }
-    for (name, f) in STRATEGIES {
-        let m = f(content, &old);
-        if m.is_empty() {
-            continue;
+    // A raw precise match wins: the file may really hold `N|` text. Gutter recovery runs
+    // before any similarity strategy so a pasted `N|` prefix can never be written into the
+    // file by an approximate match.
+    if let Some(r) = run_strategies(content, &old, &new, replace_all, &PRECISE_STRATEGIES, note.clone())? {
+        return Ok(r);
+    }
+    let gutter = gutter_stripped_old(content, &old);
+    if let Some((stripped_old, whole_line)) = &gutter {
+        let stripped_new = match strip_line_number_gutter(&new, 1) {
+            Some(s) => s,
+            None if has_gutter_line(&new) => return Err(GUTTER_NEW_STRING_ERROR.into()),
+            None => new.clone(),
+        };
+        if *stripped_old == stripped_new {
+            return Err(IDENTICAL_STRINGS_ERROR.into());
         }
-        if m.len() > 1 && !replace_all {
-            return Err(format!("Found {} matches for old_string. Provide more context to make it unique, or use replace_all=true. Matches:\n{}", m.len(), match_locations(content, &m, 5)));
+        let strategies: &[(&'static str, Strategy)] = if *whole_line { &WHOLE_LINE_STRATEGIES } else { &PRECISE_STRATEGIES };
+        if let Some(mut r) = run_strategies(content, stripped_old, &stripped_new, replace_all, strategies, None)? {
+            r.note = join_notes(note, Some(GUTTER_STRIPPED_NOTE.into()));
+            return Ok(r);
         }
-        if replace_all && m.len() > 1 && is_similarity_strategy(name) {
-            return Err(format!("Found {} approximate matches via the '{name}' strategy; replace_all only applies to exact matches. Provide the precise text (whitespace included) so an exact/line-trimmed match can be made.", m.len()));
-        }
-        if name != "exact" {
-            if let Some(e) = detect_escape_drift(content, &m, &old, &new) {
-                return Err(e);
-            }
-        }
-        let eff = maybe_unescape_new(&new, content, &m);
-        let out = apply_replacements(content, &m, &eff, (name != "exact").then_some(old.as_str()), name == "unicode_normalized");
-        return Ok(Replaced { content: out, count: m.len(), strategy: name, note });
+        // A recognized gutter paste never falls through to the similarity tier: a `41|`
+        // prefix barely moves per-line similarity, so an approximate match could write the
+        // prefixes into the file.
+        return Err(format!("{NO_MATCH_ERROR}{GUTTER_MISS_SUFFIX}"));
+    }
+    if let Some(r) = run_strategies(content, &old, &new, replace_all, &SIMILARITY_STRATEGIES, note)? {
+        return Ok(r);
     }
     Err(NO_MATCH_ERROR.into())
 }
@@ -915,6 +1044,46 @@ mod tests {
         assert!(rep("path = \"a\\\\b\"\n", "\"a\\\\\\\\b\"", "\"c\\\\d\"").unwrap_err().contains("intentional backslashes"));
         // Literal \n in old matched via escape normalization, but new also carries \n: refuse.
         assert!(rep("a\nb\n", "a\\nb", "a\\nc").unwrap_err().contains("Escape-drift"));
+    }
+
+    #[test]
+    fn read_line_number_gutter_is_stripped_before_matching() {
+        let file = "fn a() {\n    let x = 1;\n}\n";
+        let r = rep(file, "1|fn a() {\n2|    let x = 1;\n3|}", "fn a() {\n    let x = 2;\n}").unwrap();
+        assert_eq!(r.strategy, "exact");
+        assert_eq!(r.content, "fn a() {\n    let x = 2;\n}\n", "the N| prefixes are not written");
+        assert!(r.note.unwrap().contains("line-number prefixes"), "the model learns the paste was stripped");
+        // Blank pasted lines may lose the gutter but still consume a number.
+        let r = rep("a\n\nb\n", "1|a\n\n3|b", "c").unwrap();
+        assert_eq!(r.content, "c\n");
+        // A stripped new_string is accepted.
+        let r = rep("a\nb\n", "1|a\n2|b", "1|c\n2|d").unwrap();
+        assert_eq!(r.content, "c\nd\n");
+        // Not every line numbered: not a verbatim paste, and no similarity guess writes it.
+        let e = rep(file, "1|fn a() {\n    let x = 1;\n3|}", "z").unwrap_err();
+        assert_eq!(e, NO_MATCH_ERROR);
+        // Numbers must run consecutively.
+        assert_eq!(rep(file, "1|fn a() {\n3|    let x = 1;\n4|}", "z").unwrap_err(), NO_MATCH_ERROR);
+        // The file may really contain gutter-shaped text: a raw exact match wins.
+        let r = rep("1|one\n2|two\n", "1|one\n2|two", "3|three").unwrap();
+        assert_eq!((r.strategy, r.content.as_str()), ("exact", "3|three\n"));
+        // new_string that is partly gutter-shaped is ambiguous, not silently guessed.
+        let e = rep("a\nb\n", "1|a\n2|b", "1|c\nd").unwrap_err();
+        assert!(e.contains("new_string's `N|` prefixes"), "{e}");
+    }
+
+    #[test]
+    fn single_gutter_line_matches_only_a_whole_line_and_never_by_similarity() {
+        let e = rep("a = 4\n", "2|4", "5").unwrap_err();
+        assert!(e.starts_with(NO_MATCH_ERROR) && e.contains("line-number prefixes were stripped"), "{e}");
+        assert_eq!(rep("x\n4\ny\n", "2|4", "5").unwrap().content, "x\n5\ny\n");
+        // The stripped text resembles a region only; gutter recovery refuses the similarity tier.
+        let file = "fn a() {\n    let alpha = compute(1, 3);\n    let beta = other();\n}\n";
+        let e = rep(file, "1|fn a() {\n2|    let alpha = compute(1, 2);\n3|    let beta = other();\n4|}", "fn a() {}").unwrap_err();
+        assert!(e.starts_with(NO_MATCH_ERROR) && e.contains("line-number prefixes were stripped"), "{e}");
+        let file = "start_here(1)\nmiddle_thing(2)\nend_here(3)\n";
+        let e = rep(file, "1|start_here(9)\n2|middle_thing(2)\n3|end_here(8)", "X").unwrap_err();
+        assert!(e.starts_with(NO_MATCH_ERROR), "a gutter paste is not rescued by context similarity: {e}");
     }
 
     #[test]

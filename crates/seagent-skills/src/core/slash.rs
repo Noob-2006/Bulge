@@ -180,9 +180,9 @@ impl Slash for SkillsSlash {
         match name {
             "skills" => {
                 if argv.first().map(String::as_str) == Some("help") {
-                    return Some(Ok(SlashReply::text("/skills list | search <q> | browse | inspect <id> | install <id> | uninstall <name> | check | update | audit | view <name> | setup <name> | usage | pending | approve <id> | reject <id> | tap … | config disable <name>")));
+                    return Some(Ok(SlashReply::text("/skills list | search <q> | browse | inspect <id> | install <id> | uninstall <name> | check | update | audit | view <name> | setup <name> | usage | pending | drafts | approve <id> | reject <id> | lock <name> | unlock <name> | tap … | config disable <name>")));
                 }
-                if matches!(argv.first().map(String::as_str), Some("pending" | "approve" | "reject")) {
+                if matches!(argv.first().map(String::as_str), Some("pending" | "drafts" | "approve" | "reject")) {
                     return Some(pending_cmd(ctx, &argv).map(SlashReply::text));
                 }
                 let c = crate::hub::cli::Ctx { cfg, paths, ws: &ws, ask: None };

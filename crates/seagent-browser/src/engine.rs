@@ -71,6 +71,13 @@ pub struct Frame {
     pub oopif: bool,
 }
 
+/// Per-navigation strict-SSRF fence. While it is set, every document request is checked
+/// before Chrome sends it, so a redirect hop cannot reach a private host first.
+#[derive(Debug, Clone, Copy)]
+pub struct NavigationGuard {
+    pub allow_private: bool,
+}
+
 #[derive(Default)]
 pub struct Page {
     pub session: Option<String>,
@@ -99,6 +106,8 @@ pub struct Page {
     pub prev_keys: Option<HashSet<String>>,
     pub context: Option<String>,
     pub closed: bool,
+    pub nav_guard: Option<NavigationGuard>,
+    pub nav_blocked: Option<String>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -308,6 +317,17 @@ pub fn handle_event(st: &Mutex<State>, conn: &Conn, method: &str, p: &Value, sid
             let url = p["request"]["url"].as_str().unwrap_or("");
             let rid = p["requestId"].as_str().unwrap_or("").to_string();
             if !url.contains(BRIDGE_HOST) {
+                // Strict navigation: check each document hop before Chrome sends it. A
+                // blocked request fails closed and the navigation reports it afterwards.
+                if p["resourceType"].as_str() == Some("Document") {
+                    if let Some(g) = pg.nav_guard {
+                        if let Some(why) = crate::policy::nav_request_blocked(url, g.allow_private) {
+                            pg.nav_blocked = Some(why);
+                            conn.send_nowait("Fetch.failRequest", json!({"requestId": rid, "errorReason": "BlockedByClient"}), sid);
+                            return;
+                        }
+                    }
+                }
                 conn.send_nowait("Fetch.continueRequest", json!({"requestId": rid}), sid);
                 return;
             }
@@ -516,6 +536,44 @@ impl Browser {
         r
     }
 
+    /// Enable the per-hop strict-SSRF fence for the next navigation in `target`. Failure to
+    /// install it means the backend cannot inspect redirects, so the caller must refuse.
+    pub fn begin_navigation_guard(&self, target: &str, allow_private: bool) -> Result<(), String> {
+        let sid = self.attach(target)?;
+        let mut patterns = vec![json!({"urlPattern": "*", "resourceType": "Document", "requestStage": "Request"})];
+        if self.bridge {
+            patterns.push(json!({"urlPattern": format!("http://{BRIDGE_HOST}/*"), "requestStage": "Request"}));
+        }
+        self.session_call(target, &sid, "Fetch.enable", json!({"patterns": patterns}), self.timeout)?;
+        self.page(target, |p| {
+            p.nav_guard = Some(NavigationGuard { allow_private });
+            p.nav_blocked = None;
+        });
+        Ok(())
+    }
+
+    /// Disable the fence (and restore the bridge pattern when this browser uses it).
+    pub fn end_navigation_guard(&self, target: &str) {
+        let sid = self.page(target, |p| p.session.clone());
+        if let Some(sid) = sid {
+            if self.bridge {
+                let pattern = json!({"urlPattern": format!("http://{BRIDGE_HOST}/*"), "requestStage": "Request"});
+                let _ = self.session_call(target, &sid, "Fetch.enable", json!({"patterns": [pattern]}), Duration::from_secs(5));
+            } else {
+                let _ = self.session_call(target, &sid, "Fetch.disable", json!({}), Duration::from_secs(5));
+            }
+        }
+        self.page(target, |p| {
+            p.nav_guard = None;
+            p.nav_blocked = None;
+        });
+    }
+
+    /// Why the strict fence refused a hop in `target`, if it did.
+    pub fn take_navigation_blocked(&self, target: &str) -> Option<String> {
+        self.page(target, |p| p.nav_blocked.take())
+    }
+
     /// Attach (once) to a page target and enable the domains the supervisor needs.
     pub fn attach(&self, target: &str) -> Result<String, String> {
         if let Some(sid) = self.state.lock().unwrap().pages.get(target).and_then(|p| p.session.clone()) {
@@ -672,7 +730,8 @@ impl Browser {
         let until = Instant::now() + timeout;
         while Instant::now() < until {
             let (load, nav, blocked) = self.page(target, |p| (p.load_seq, p.nav_seq, !p.dialogs.is_empty()));
-            if blocked || (load > load_before && nav >= nav_before) {
+            let blocked_hop = self.page(target, |p| p.nav_blocked.is_some());
+            if blocked || blocked_hop || (load > load_before && nav >= nav_before) {
                 return;
             }
             std::thread::sleep(Duration::from_millis(50));

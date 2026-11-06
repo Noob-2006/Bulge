@@ -109,6 +109,7 @@ pub fn catalog() -> Vec<Preset> {
         p("xai-oauth", "xAI account (OAuth)", OpenAiChat, "https://api.x.ai/v1", &[]).oauth("xai").efforts(&["low", "medium", "high"]),
         p("mistral", "Mistral", OpenAiChat, "https://api.mistral.ai/v1", &["MISTRAL_API_KEY"]).signup("https://console.mistral.ai"),
         p("deepseek", "DeepSeek", OpenAiChat, "https://api.deepseek.com", &["DEEPSEEK_API_KEY"]).alias(&["deep-seek"]).efforts(&["low", "medium", "high", "max"]).notes("PRC provider"),
+        p("deepseek-messages", "DeepSeek (Messages API)", Anthropic, "https://api.deepseek.com/anthropic/v1", &["DEEPSEEK_API_KEY"]).alias(&["deepseek-anthropic", "deepseek-native"]).quirk("deepseek_messages").efforts(&["off", "low", "high", "max"]).models(&["deepseek-flash", "deepseek-v4-pro"]).notes("Anthropic-compatible Messages route; `deepseek` stays the default OpenAI-chat preset"),
         p("cohere", "Cohere (compatibility API)", OpenAiChat, "https://api.cohere.ai/compatibility/v1", &["COHERE_API_KEY"]),
         p("perplexity", "Perplexity", OpenAiChat, "https://api.perplexity.ai", &["PERPLEXITY_API_KEY", "PPLX_API_KEY"]).alias(&["pplx"]).models(&["sonar", "sonar-pro", "sonar-reasoning-pro"]),
         p("meta-ai", "Meta Model API", OpenAiResponses, "https://api.meta.ai/v1", &["MODEL_API_KEY", "META_API_KEY", "META_MODEL_API_KEY"]).alias(&["meta", "muse", "llama-api"]).efforts(&["minimal", "low", "medium", "high", "xhigh"]).notes("`-contributor` models train on your prompts"),
@@ -378,6 +379,19 @@ mod tests {
         let s = reasoning::detect_with(m, Some(&h));
         assert!(!s.sends_reasoning());
         assert!(s.unverified());
+    }
+
+    #[test]
+    fn deepseek_messages_is_an_opt_in_route() {
+        let p = catalog().into_iter().find(|p| p.cfg.id == "deepseek-messages").expect("DeepSeek Messages preset");
+        assert_eq!(p.cfg.format, WireFormat::Anthropic);
+        assert_eq!(p.cfg.base_url, "https://api.deepseek.com/anthropic/v1");
+        assert_eq!(p.cfg.auth, "");
+        assert_eq!(p.cfg.api_key_env.as_deref(), Some("DEEPSEEK_API_KEY"));
+        assert!(p.cfg.has_quirk("deepseek_messages"));
+        assert_eq!(p.cfg.reasoning_efforts.as_deref(), Some(&["off".to_string(), "low".into(), "high".into(), "max".into()][..]));
+        assert_eq!(resolve_alias("deepseek").as_deref(), Some("deepseek"), "the OpenAI-chat preset stays the default");
+        assert_eq!(resolve_alias("deepseek-native").as_deref(), Some("deepseek-messages"));
     }
 
     #[test]

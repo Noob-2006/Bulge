@@ -122,7 +122,16 @@ impl Anthropic {
         if !system.is_empty() {
             b["system"] = system.into();
         }
-        if reasoning::claude_adaptive(&req.model) {
+        if self.conn.quirk("deepseek_messages") {
+            // DeepSeek Messages: `thinking` is always explicit and effort is
+            // `output_config.effort` (off/low/high/max), never a token budget.
+            if let Some(e) = self.conn.effort(&["off", "low", "high", "max"], req) {
+                b["thinking"] = json!({"type": if e == "off" { "disabled" } else { "enabled" }});
+                if e != "off" {
+                    b["output_config"] = json!({"effort": e});
+                }
+            }
+        } else if reasoning::claude_adaptive(&req.model) {
             // Budgets are rejected here; effort is the only knob.
             if let Some(e) = self.conn.effort(reasoning::ADAPTIVE_WIRE, req) {
                 b["thinking"] = json!({"type": "adaptive"});
@@ -384,5 +393,49 @@ impl Provider for Anthropic {
             usage,
             model,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::auth::Static;
+    use std::sync::Arc;
+
+    fn conn(quirks: &[&str], efforts: &[&str]) -> Conn {
+        Conn {
+            id: "deepseek-messages".into(),
+            base: "https://api.deepseek.com/anthropic/v1".into(),
+            cred: Arc::new(Static::new(Some("sk-test".into()))),
+            headers: vec![],
+            query: vec![],
+            auth: "x-api-key".into(),
+            quirks: quirks.iter().map(|s| s.to_string()).collect(),
+            efforts: Some(efforts.iter().map(|s| s.to_string()).collect()),
+            http: crate::http::Http::new(std::time::Duration::from_secs(5), "deepseek-messages"),
+        }
+    }
+
+    #[test]
+    fn deepseek_messages_effort_and_thinking() {
+        let a = Anthropic::new(conn(&["deepseek_messages"], &["off", "low", "high", "max"]));
+        let req = |reasoning: Option<&str>| ModelRequest {
+            model: "deepseek-v4-pro".into(),
+            messages: vec![Message::user("hi")],
+            max_tokens: 100,
+            reasoning: reasoning.map(String::from),
+            ..Default::default()
+        };
+        let off = a.body(&req(Some("off")), Mode::default());
+        assert_eq!(off["thinking"]["type"], "disabled");
+        assert!(off.get("output_config").is_none(), "off sends no effort");
+        let high = a.body(&req(Some("high")), Mode::default());
+        assert_eq!(high["thinking"]["type"], "enabled");
+        assert_eq!(high["output_config"]["effort"], "high");
+        let default = a.body(&req(None), Mode::default());
+        assert!(default.get("thinking").is_none(), "no explicit effort means provider default");
+        // A Claude model on the same adapter keeps the budget/adaptive shapes.
+        let claude = a.body(&ModelRequest { model: "claude-opus-5".into(), messages: vec![Message::user("hi")], max_tokens: 100, reasoning: Some("high".into()), ..Default::default() }, Mode::default());
+        assert!(claude.get("output_config").is_none() || claude["output_config"]["effort"] == "high");
     }
 }

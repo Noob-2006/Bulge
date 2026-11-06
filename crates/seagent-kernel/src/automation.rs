@@ -85,9 +85,26 @@ pub struct Job {
     /// Name, repeat, skills, script / no_agent, delivery, chaining… (`cronjob::JobExt`).
     #[serde(default, flatten)]
     pub ext: crate::cronjob::JobExt,
+    /// Set while a claimed run is in flight; restored by [`recover_claims`] after a crash or
+    /// restart so a one-shot due during a drain is not retired as missed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub claim: Option<Claim>,
 }
 fn yes() -> bool {
     true
+}
+
+/// The pre-claim state of a due job, kept in `schedules.json` (atomic with the claim) so a
+/// restart can put the job back instead of losing one-shot schedules.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Claim {
+    pub at: i64,
+    pub next_run: i64,
+    pub enabled: bool,
+    pub runs: u32,
+    pub last_run: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_result: Option<String>,
 }
 
 pub fn jobs_path(data: &Path) -> PathBuf {
@@ -115,6 +132,7 @@ pub fn add_job(data: &Path, cron: &str, prompt: &str, workspace: &Path, model: O
         last_result: None,
         budget: Budget::default(),
         ext: Default::default(),
+        claim: None,
     };
     with_list(&jobs_path(data), |v: &mut Vec<Job>| v.push(job.clone()))?;
     crate::cronjob::fire_changed(None, "added", &job, serde_json::json!({"next_run_at_ms": job.next_run * 1000, "enabled": job.enabled}));
@@ -171,6 +189,8 @@ pub fn claim_due(data: &Path, now: i64, offset: i32, busy: &[String]) -> Result<
                 j.last_result = Some("skipped: previous run still in progress".into());
                 continue;
             }
+            // Remember what this claim changed, so a crash before `record` can be undone.
+            j.claim = Some(Claim { at: now, next_run: j.next_run, enabled: j.enabled, runs: j.ext.runs, last_run: j.last_run, last_result: j.last_result.clone() });
             // Repeat count (one-shots are 1): the last allowed run disables the job.
             j.ext.runs += 1;
             if j.ext.repeat.is_some_and(|r| j.ext.runs >= r) {
@@ -222,8 +242,51 @@ pub fn run_job(k: &Kernel, job: &Job) -> Result<String, String> {
 pub fn run_job_with(k: &Kernel, job: &Job, extra: Option<&str>) -> Result<String, String> {
     let started = std::time::Instant::now();
     let r = run_job_inner(k, job, extra);
+    // A normal completion (success or error) clears the claim; only a crash leaves it for
+    // `recover_claims`.
+    let _ = clear_claim(&k.paths.data, &job.id);
     notify_exec(&job.id, r.is_ok(), started.elapsed().as_millis() as u64);
     r
+}
+
+fn clear_claim(data: &Path, id: &str) -> Result<(), String> {
+    with_list(&jobs_path(data), |v: &mut Vec<Job>| {
+        if let Some(j) = v.iter_mut().find(|j| j.id == id) {
+            j.claim = None;
+        }
+    })
+}
+
+/// Put back jobs whose claimed run never finished because the daemon crashed or was drained
+/// mid-flight. A claim younger than `hold_secs` is restored to due (and fires on the next
+/// tick); an older one is recorded as missed rather than silently disappearing. Returns the ids
+/// that were restored.
+pub fn recover_claims(data: &Path, now: i64, hold_secs: i64) -> Vec<String> {
+    let hold = hold_secs.max(0);
+    with_list(&jobs_path(data), |v: &mut Vec<Job>| {
+        let mut restored = Vec::new();
+        for j in v.iter_mut() {
+            let Some(c) = j.claim.clone() else { continue };
+            // A run that recorded its outcome before the crash already finished: just clear.
+            let finished = j.last_result != c.last_result;
+            j.claim = None;
+            if finished {
+                continue;
+            }
+            if now.saturating_sub(c.at) <= hold {
+                j.next_run = now;
+                j.enabled = c.enabled;
+                j.ext.runs = c.runs;
+                j.last_run = c.last_run;
+                j.last_result = c.last_result;
+                restored.push(j.id.clone());
+            } else {
+                j.last_result = Some(format!("missed: daemon restarted {}s after the run was claimed (hold {}s)", now.saturating_sub(c.at), hold));
+            }
+        }
+        restored
+    })
+    .unwrap_or_default()
 }
 
 fn run_job_inner(k: &Kernel, job: &Job, extra: Option<&str>) -> Result<String, String> {
@@ -504,6 +567,45 @@ mod tests {
         assert!(!set_job_enabled(&d, "nope", true).unwrap());
         assert!(remove_job(&d, &j.id).unwrap());
         assert!(!remove_job(&d, &j.id).unwrap());
+    }
+
+    #[test]
+    fn a_claim_interrupted_by_a_restart_is_restored_not_missed() {
+        let d = dir();
+        let j = add_job(&d, "@hourly", "tick", &d, None, false, 0).unwrap();
+        let now = unix_now() + 60;
+        with_list(&jobs_path(&d), |v: &mut Vec<Job>| {
+            let x = v.iter_mut().find(|x| x.id == j.id).unwrap();
+            x.next_run = now - 10;
+            x.ext.repeat = Some(1);
+        })
+        .unwrap();
+        let due = claim_due(&d, now, 0, &[]).unwrap();
+        assert_eq!(due.len(), 1);
+        let claimed: Vec<Job> = read_list(&jobs_path(&d)).unwrap();
+        assert!(!claimed[0].enabled, "the one-shot was claimed");
+        assert!(claimed[0].claim.is_some());
+        // The daemon died before recording the run; a young claim is restored and fires again.
+        let restored = recover_claims(&d, now + 30, 3600);
+        assert_eq!(restored, vec![j.id.clone()]);
+        let back: Vec<Job> = read_list(&jobs_path(&d)).unwrap();
+        assert!(back[0].enabled && back[0].claim.is_none() && back[0].next_run <= now + 30);
+        assert_eq!(claim_due(&d, now + 30, 0, &[]).unwrap().len(), 1, "the restored one-shot runs");
+        // A completed run clears its claim, so recovery does nothing.
+        crate::cronjob::record(&d, &j.id, "ok", Some("done"), None);
+        assert!(recover_claims(&d, now + 60, 3600).is_empty());
+        // A claim older than the hold window is recorded as missed, not run hours later.
+        with_list(&jobs_path(&d), |v: &mut Vec<Job>| {
+            let x = v.iter_mut().find(|x| x.id == j.id).unwrap();
+            x.enabled = true;
+            x.next_run = now + 100;
+            x.claim = Some(Claim { at: now + 10, next_run: now + 100, enabled: true, runs: 0, last_run: None, last_result: None });
+        })
+        .unwrap();
+        assert!(recover_claims(&d, now + 10 + 7200, 3600).is_empty());
+        let late: Vec<Job> = read_list(&jobs_path(&d)).unwrap();
+        assert!(late[0].claim.is_none());
+        assert!(late[0].last_result.as_deref().unwrap_or("").contains("missed"));
     }
 
     #[test]

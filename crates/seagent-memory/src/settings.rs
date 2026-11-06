@@ -38,11 +38,15 @@ pub struct EmbeddingSettings {
     pub max_batch: usize,
     /// Per-request timeout seconds (default 60).
     pub timeout_secs: u64,
+    /// Allow an embedding endpoint that resolves to a private/LAN address (`ollama`; default
+    /// true: an operator-configured on-prem GPU host is the usual setup). Loopback and
+    /// `localhost` are always allowed; cloud-metadata hosts never are.
+    pub allow_private: bool,
 }
 
 impl Default for EmbeddingSettings {
     fn default() -> Self {
-        EmbeddingSettings { provider: "auto".into(), model: String::new(), base_url: String::new(), api_key: String::new(), headers: HashMap::new(), dimensions: None, input_type: None, query_input_type: None, document_input_type: None, region: String::new(), max_batch: 0, timeout_secs: 60 }
+        EmbeddingSettings { provider: "auto".into(), model: String::new(), base_url: String::new(), api_key: String::new(), headers: HashMap::new(), dimensions: None, input_type: None, query_input_type: None, document_input_type: None, region: String::new(), max_batch: 0, timeout_secs: 60, allow_private: true }
     }
 }
 
@@ -278,7 +282,17 @@ impl Default for FlushSettings {
     }
 }
 
-/// `[memory.wiki]` (OpenClaw memory-wiki).
+/// One named knowledge store: its own vault directory and agent ACL.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(default, deny_unknown_fields)]
+pub struct WikiStore {
+    /// Store directory; empty is refused (a named store must say where it lives).
+    pub path: String,
+    /// Agent ids allowed to read/write this store (empty = every agent).
+    pub agents: Vec<String>,
+}
+
+/// `[memory.wiki]` (OpenClaw memory-wiki + extensions/knowledge ACL/history).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default, deny_unknown_fields)]
 pub struct WikiSettings {
@@ -293,10 +307,74 @@ pub struct WikiSettings {
     pub create_dashboards: bool,
     /// Index DREAMS.md / daily notes / MEMORY.md as bridge sources.
     pub bridge: bool,
+    /// This agent's id; empty = `$SEAGENT_AGENT`. Used by the default store's `agents` ACL.
+    pub agent_id: String,
+    /// Agent ids allowed on the default store (empty = every agent).
+    pub agents: Vec<String>,
+    /// Extra named stores (`[memory.wiki.stores.<name>]`), scoped to their own agents.
+    pub stores: std::collections::BTreeMap<String, WikiStore>,
+    /// Keep a page snapshot under `.seagent-wiki/history/` before every mutation.
+    pub history: bool,
+    /// Snapshots kept per page.
+    pub history_max: usize,
 }
 impl Default for WikiSettings {
     fn default() -> Self {
-        WikiSettings { enabled: true, vault_path: String::new(), render_mode: "obsidian".into(), search_corpus: "wiki".into(), create_backlinks: true, create_dashboards: true, bridge: false }
+        WikiSettings { enabled: true, vault_path: String::new(), render_mode: "obsidian".into(), search_corpus: "wiki".into(), create_backlinks: true, create_dashboards: true, bridge: false, agent_id: String::new(), agents: vec![], stores: Default::default(), history: true, history_max: 50 }
+    }
+}
+
+/// `[memory.standing]`: keyword-triggered reminders (OpenClaw `memory-core/standing-intents`),
+/// scoped to a conversation/sender/channel, with cooldown, max fires and expiry. Off by default:
+/// enabling it makes the prefetch turn inspect the user message for triggers.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(default, deny_unknown_fields)]
+pub struct StandingSettings {
+    pub enabled: bool,
+    pub max_intents: usize,
+    /// Default cooldown between two fires of one intent.
+    pub cooldown_secs: u64,
+    pub max_fires: u32,
+}
+impl Default for StandingSettings {
+    fn default() -> Self {
+        StandingSettings { enabled: false, max_intents: 50, cooldown_secs: 3_600, max_fires: 3 }
+    }
+}
+
+/// `[memory.recall_gate]` (OpenClaw `extensions/knowledge` recall gate): before the reply,
+/// shortlist knowledge pages by keyword, score each independently with the aux/decision model,
+/// and inject only what clears the threshold. `shadow` runs the same pass and logs it without
+/// injecting; `live` injects. Off by default.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(default, deny_unknown_fields)]
+pub struct RecallGateSettings {
+    /// `off` | `shadow` | `live`.
+    pub mode: String,
+    /// `keyword` (the measured shortlist); `model` is not implemented yet and is refused.
+    pub candidates: String,
+    /// Page text is injected at or above this probability.
+    pub high_threshold: f64,
+    /// Pointer-only tier; `None` = off.
+    pub medium_threshold: Option<f64>,
+    /// When set, all scores below this add a one-line "memory unnecessary" hint.
+    pub skip_hint_below: Option<f64>,
+    /// Whole-gate budget (the scoring call).
+    pub timeout_ms: u64,
+    /// Most pages scored per turn.
+    pub max_candidates: usize,
+    /// Characters of page body injected per high page.
+    pub page_chars: usize,
+    /// Whole injection budget, header included.
+    pub max_inject_chars: usize,
+    /// Wiki store to read; empty = default vault.
+    pub store: String,
+    /// `provider/model`; empty = aux model.
+    pub model: String,
+}
+impl Default for RecallGateSettings {
+    fn default() -> Self {
+        RecallGateSettings { mode: "off".into(), candidates: "keyword".into(), high_threshold: 0.75, medium_threshold: None, skip_hint_below: None, timeout_ms: 1_500, max_candidates: 10, page_chars: 2_800, max_inject_chars: 6_000, store: String::new(), model: String::new() }
     }
 }
 
@@ -354,6 +432,8 @@ pub struct Settings {
     pub vector: VectorSettings,
     pub flush: FlushSettings,
     pub wiki: WikiSettings,
+    pub recall_gate: RecallGateSettings,
+    pub standing: StandingSettings,
     pub rewrite: RewriteSettings,
     pub byterover: ByteroverSettings,
     pub retaindb: RetaindbSettings,
@@ -369,6 +449,8 @@ impl Settings {
             vector: parse(&c.vector, "vector")?,
             flush: parse(&c.flush, "flush")?,
             wiki: parse(&c.wiki, "wiki")?,
+            recall_gate: parse(&c.recall_gate, "recall_gate")?,
+            standing: parse(&c.standing, "standing")?,
             rewrite: parse(&c.rewrite, "rewrite")?,
             byterover: parse(&c.byterover, "byterover")?,
             retaindb: parse(&c.retaindb, "retaindb")?,
@@ -386,6 +468,16 @@ impl Settings {
         one_of(&self.search.citations, &["auto", "on", "off"], "search.citations")?;
         one_of(&self.wiki.render_mode, &["obsidian", "native"], "wiki.render_mode")?;
         one_of(&self.wiki.search_corpus, &["wiki", "memory", "all"], "wiki.search_corpus")?;
+        one_of(&self.recall_gate.mode, &["off", "shadow", "live"], "recall_gate.mode")?;
+        one_of(&self.recall_gate.candidates, &["keyword"], "recall_gate.candidates")?;
+        if !(0.0..=1.0).contains(&self.recall_gate.high_threshold) {
+            return Err("[memory] recall_gate.high_threshold must be between 0 and 1".into());
+        }
+        for (k, v) in [("medium_threshold", self.recall_gate.medium_threshold), ("skip_hint_below", self.recall_gate.skip_hint_below)] {
+            if v.is_some_and(|x| !(0.0..=1.0).contains(&x)) {
+                return Err(format!("[memory] recall_gate.{k} must be between 0 and 1"));
+            }
+        }
         for s in &self.search.sources {
             one_of(s, &["memory", "sessions"], "search.sources")?;
         }
@@ -417,6 +509,8 @@ mod tests {
         assert_eq!((s.search.chunk_tokens, s.search.chunk_overlap), (400, 80));
         assert_eq!(s.dreaming.deep.min_score, 0.75);
         assert_eq!(s.active.timeout_ms, 15_000);
+        assert_eq!((s.recall_gate.mode.as_str(), s.recall_gate.high_threshold, s.recall_gate.timeout_ms), ("off", 0.75, 1_500));
+        assert!(!s.standing.enabled && s.standing.max_intents == 50 && s.standing.cooldown_secs == 3_600);
         assert_eq!(s.vector.capture_max_chars, 500);
         let mut c = MemoryConfig { search: toml::from_str("max_results = 3\n[embedding]\nprovider = \"ollama\"").unwrap(), ..Default::default() };
         let s = Settings::from_config(&c).unwrap();

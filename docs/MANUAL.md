@@ -85,6 +85,7 @@ seagent chat                                      # 互動對話（/help 看清�
 | 匯出 | `seagent session export [id] --format md\|qmd\|html\|json`（預設去識別化，`--no-redact` 關閉） |
 | 背景常駐 | `seagent daemon start\|stop\|status`、`seagent service install`（systemd user unit） |
 | 對背景 session 下指令／跟台／打斷 | `seagent send <session> <text>`、`seagent attach <session>`、`seagent interrupt <session>` |
+| 把終端對話交給聊天頻道 | `/handoff <channel>[:<chat>]`（需要 `seagentd` 與已設定的 `[channels.*]`；之後在該聊天回覆就延續同一對話） |
 | 排程 | `seagent schedule add "0 9 * * 1-5" "每天早上整理 issue"`、`schedule list\|rm\|enable\|disable\|run` |
 | 長期目標 | `seagent goal add "把測試覆蓋率拉到 80%" --rounds 5`、`goal list\|show\|run\|pause\|resume\|cancel` |
 | 核准佇列 | `seagent gate list`、`seagent gate answer <id> once\|session\|permanent\|deny` |
@@ -95,6 +96,28 @@ seagent chat                                      # 互動對話（/help 看清�
 結束碼：`0` 完成、`1` 錯誤、`2` 用法錯誤、`3` 預算／上限／卡住、`130` 中斷。
 
 > `seagent pause` 只停「排程、goal、heartbeat、channel 進來的工作、kanban 派工、上限重試」，**不會殺掉正在跑的工作**；互動的 `seagent run`／`seagent chat` 不受影響。sentinel 檔是 `<data>/ESTOP`，讀不到時視為「已暫停」（fail safe）。
+
+排程輸出與維運相關設定（都有安全預設，不寫就維持原行為）：
+
+```toml
+[automation]
+default_deliver = "slack:ops"          # 沒指定 deliver 的工作最後才用它（工作 → 建立者 → agent → 全域）
+default_failure_deliver = "slack:oncall" # 失敗通知的同一套退回鏈
+agent = "ops"                          # 新工作記錄的 owner，對應 [automation.agents.ops]
+scratch_ttl_hours = 24                  # `<data>/tmp`、`scratch`、`art`、session artifacts 的過期時數（0 關閉）
+worktree_idle_hours = 168               # 閒置且乾淨的 `.worktrees/*` 回收（0 關閉）
+idle_session_secs = 1800                # seagentd 把閒置 session 的記憶體狀態退場，下次使用時重建（0 關閉）
+plugin_auto_update_hours = 0            # 外掛無人值守更新；預設關，更新仍走掃描與同意流程
+
+[automation.agents.ops]
+deliver = "slack:C123"
+failure_deliver = "slack:C999"
+
+[automation.creators.alice]
+deliver = "telegram:42"
+```
+
+`deliver` 另接受 `room:<room-id>`：把輸出附加到 hosted room 的日誌（只點名訊息中的 @成員，不會自動讓所有 bot 回話）。`seagent migrate ... --migrate-secrets` 才會把來源憑證寫進 vault；預設會列出略過的憑證名稱。`tools.call` ARP 方法讓 script 在既有 session 上直接呼叫工具（含 MCP），仍經過 policy、核准與 audit；需要 admin scope。
 > 實作：`crates/seagent/src/main.rs`、`crates/seagent-security/src/estop.rs`。
 
 ---
@@ -120,6 +143,9 @@ ai_label = "— 由 AI 生成"
 - **陌生人的預設待遇是拒絕**。`dm_policy = "pairing"` 時，未列在白名單的人會收到一組配對碼，你用 `seagent pairing approve <channel> <code>` 放行（`seagent pairing list|revoke`；8 碼、1 小時過期、只存加鹽雜湊、失敗 5 次鎖 1 小時）。
 - 群組預設要 `@` 提及才回應；`require_mention = false` 可關。
 - `privacy_notice`／`ai_label` 與 `[compliance] retention_days` 是法遵欄位：`dm_policy = open|pairing` 或 `group_policy = open` 卻沒設 `privacy_notice`，載入時會警告。
+- 外送 HTTP 會逐跳檢查轉址：自架的 channel 位址（Mattermost、Matrix、Nextcloud、ClickClack…）可為內網，但**轉址到另一個內網或雲端 metadata 位址會被拒絕**；附件下載（Discord CDN 等）只允許公開位址，並在跨來源轉址時丟掉授權標頭。
+- `ask_user` 可帶 `options`（2–12 個選項；`multi_select = true` 可多選）。有按鈕的 channel（Telegram、Slack、Discord、Feishu…）直接顯示按鈕，其餘顯示編號清單；回覆編號或選項文字都會對應回選項。
+- 在支援 threads／topics 的 channel 用 `/fork [標題]` 會把目前對話複製到同一個聊天的新 thread（Discord thread、Telegram topic；Slack 會先建立錨點訊息），原本的聊天與 session 不受影響。
 
 ```bash
 seagent channel list                       # 已設定的通道（名稱、kind、dm 政策、白名單）
@@ -196,12 +222,13 @@ seagent webhook subscribe|list|rm|test …
 |---|---|---|
 | Gate 授權 | 閘門名稱＋理由字串 | 例如「只放行這個 egress 理由」 |
 | 指令授權 | 完整指令或 glob | 複合指令（含 `;`、`&&`、管線）不准建立授權 |
-| 執行檔授權 | 執行檔名或路徑 glob | 加上安全的 shell 內建（`cd`、`pwd`、`test`…）與 stdin 安全的 `jq`、`grep`、`cut`、`sort`、`uniq`、`head`、`tail`、`tr`、`wc` |
+| 執行檔授權 | 執行檔名或路徑 glob | 加上安全的 shell 內建（`cd`、`pwd`、`true`…）與 stdin 安全的 `jq`、`grep`、`cut`、`sort`、`uniq`、`head`、`tail`、`tr`、`wc`。`test`／`[` 只在運算元是靜態文字時才算安全：`-v`／`-R`、`$'…'`、以及含反斜線、`$`、反引號、`* ? { } [ ]` 的運算元一律回到一般核准（bash 會重新解析這些字元） |
 
 - 期限：預設 **7 天**（`[approvals] grant_ttl_days`），讀取時才過濾（沒有背景清掃）；`seagent approvals queue allow` 這條路徑接受 0 = 永不過期。
 - 存放：`<data>/approvals/allowlist.json`（目錄 0700）。
 - 指令授權**永遠蓋不過等級 3**：tier-3 分支在授權檢查之前。
 - 用法：`seagent approvals list`、`seagent approvals allow "<glob>" [--exec]`、`seagent approvals revoke <id|pattern>`。
+- 網頁主控台的「核准」頁同樣列出常設授權（可直接撤銷）、可編輯全域執行政策，並顯示各代理的角色／工具／沙箱有效權限；「安全」頁集中顯示監聽面、權杖、頻道、風險發現與代理能力，未知角色一律標成 `unknown`。
 - 建議來源：`seagent approvals suggest --days 7` 會從「過去被允許的閘門事件」挖出候選樣式（hardline／destructive 指令與 `rm`、`dd`、`sudo`、`chmod`、`kill`、`systemctl` 等不安全執行檔永遠不會被建議），你再用 `--apply 1,3` 套用。
 
 ### 4.5 核准的模式與開關
@@ -210,11 +237,14 @@ seagent webhook subscribe|list|rm|test …
 |---|---|---|---|
 | `seagent approvals mode` | `manual`（預設）／`smart`／`auto`／`off` | `smart` 由便宜模型當監護人答 APPROVE／DENY／ESCALATE；`auto` 由審查模型答 allow／deny／ask 並附風險標籤；`off` 不問 | hardline、等級 3 |
 | `seagent exec-policy preset` | `yolo`／`cautious`／`deny-all` | 一次設定 exec 的 security／ask／ask_fallback | 同上 |
+| `[tools.by_provider."<provider 或 provider/model>".exec]` | `mode = "deny"｜"allowlist"｜"ask"｜"auto"｜"full"`（或 `security`＋`ask`） | 只對該模型／供應商的回合夾住 exec 政策；只能收緊，`/yolo`、`/elevated` 也蓋不過 | 等級 3、hardline |
 | `--yolo`（`SEAGENT_YOLO=1`、`/yolo`） | 旗標 | 這個 process／session 跳過核准提示 | 等級 3、hardline、`deny` 規則 |
 | `--allow-privilege`／`--allow-egress`／`--yes` | 旗標 | 無 TTY 時的 headless 核准者：對提權／外送直接答「一次」 | hardline；`exec` 仍走 `ask_fallback`（預設 deny） |
 | `seagent pause` | 全域 | 停止新的自動工作（見第 2 節） | 已在跑的工作 |
 
 `smart` 在逾時或回覆無法解析時退回 ESCALATE（問人）；`auto` 退回 ASK。「沉默不是同意」：`[approvals] timeout_secs`（預設 600，daemon 啟動時套用）到期視為**拒絕**，閘門記錄寫 `deny (timeout)`，並在當初轉送核准的聊天室貼出「⏱ Approval … expired」。
+
+沒有跳出提示、由政策自動放行的呼叫，工具結果末尾會附一行 `[approval] auto-approved: allow (allowlist|always|remembered|yolo|envelope|elevated|cron_mode) — <理由>`，讓模型與使用者看得到為什麼沒有問。要查某個工具為何可用或不可用，用 `seagent tools explain <tool> [--model M] [--channel C] [--sender S]`；它會逐層重放 `tools.disabled`、`tools.profile/allow/deny`、`tools.by_provider`、`tools.by_channel`、`tools.by_sender`，指出卡在哪一層與要改哪個設定。
 
 **遠端第 3 級核准（聊天軟體）：**
 - 第 3 級（VM 外且不可回復）的轉送訊息標明等級、影響與「不可回復」，按鈕只有 `Review & Allow Once`／`Deny`，**沒有 Allow Always**；任何「always」回答都降為一次，不寫入記憶或授權。
@@ -309,6 +339,11 @@ trust_tiers = true             # owner / stranger / untrusted 各自獨立的 VM
 deny_paths = [".ssh", ".aws", ".gnupg", ".config/gh", ".netrc", ".kube", …]
 ```
 
+`[exec.code] run_code_only = true` 讓模型只看得到 `run` 這一個直接工具：其他工具仍可在腳本內用 `seagent-call` 呼叫，但不會出現在工具清單。
+SSH 後端會在同一個 ControlMaster 連線上維持一個遠端 `bash`（同步、探測與不含 stdin 的指令共用）；需要 stdin 或 PTY 的指令仍各自開一個 ssh 程序，不假裝有 PTY。
+評測基準可用 `seagent evals bench --tool-profile benchmark`（工具面只有 `shell`、`read`、`run`）；完整最小設定檔在 `share/evals/profiles/benchmark/`。
+模型請求可錄成 fixture 再用來離線重播：`SEAGENT_MODEL_RECORD=run.jsonl seagent …` 錄一次，之後 `SEAGENT_MODEL_REPLAY=run.jsonl seagent …` 不解析憑證、也不連網；請求必須逐位元組相同，否則重播會指名哪裡變了。
+
 ### 5.3 客體映像與快照
 
 ```bash
@@ -352,6 +387,7 @@ seagent vm desktop reset [name]   # 刪除磁碟疊加層，下次開機用新�
 - 代理端：`computer_use` 的 `target = "vm:<name>"`（或 `[computer_use] target` 預設值）；核准範圍為 `desktop:vm:<name>:<action>`。
 - 主控台：`view.desktop.list`、`view.desktop.{state,frame,takeover,handback,input}`（帶 `target`）、`view.vm.start|stop`（admin）。
 - 內建瀏覽器：`install.sh --with-browser`／離線包 `--with-browser` 會帶固定版本的 Chrome for Testing（sha256 驗證）到 `<share>/browsers/`，`[browser] prefer_bundled = true` 時優先使用。
+- 瀏覽器快照會把 password、`one-time-code` 與信用卡欄位（`cc-number`／`cc-csc`）的值換成 `[redacted]`；`[browser] allow_private_urls = false` 是嚴格 SSRF 模式，CDP 後端會在送出前逐跳檢查重新導向，無法檢查的後端（Camofox）會拒絕 http(s) 導航。
 
 ---
 
@@ -369,8 +405,13 @@ seagent fleet --json            # 給程式用
 ```
 
 - **派遣**：模型用 `delegate_task`（`tasks[]`、`mode = sync|background|collect`、`worktree`、`model`、`toolsets`）、`sessions_spawn`（預設隔離、背景）、`agents_wait`、`subagents action=list|info|cancel|stop|wait` 這些工具。子代理**不會**拿到互動類工具（`clarify`、`ask_user`、channel 發送、排程…）。
+- **Fork 前綴重用**：`fork` 子代理沿用父會話的 system prompt 與工具清單（逐位元組相同，provider 快取可命中），角色與任務指示放在第一則 user 訊息；工具限制改在執行時以 `ToolGuard` 拒絕，不再改寫工具清單。
+- **批次快取暖機**：`[delegation] prefix_stagger_seconds = N`（預設 0 = 關閉，上限 60）讓同路由的批次兄弟等第一個子代理的第一個串流片段（或 N 秒）再開始，代價約一個 TTFT。
+- **鏈結上限**：`[gateway.bot_loop_guard] max_hops` 或 `[delegation] max_hops`（預設 4）限制代理對代理的訊息跳數；同一鏈重複相同訊息會被拒絕，回覆為 notify-only（`agent_message` 回傳 `hops` / `notify_only`）。
+- **Ralph 迴圈**：`ralph` 工具以每輪全新 context 重複同一個不可變目標，只傳遞有界的結構化報告，並在工作區寫進度檔；`[delegation] ralph_max_rounds`（預設 16）是單次上限，`ralph_max_handoff_chars`（預設 16384）限制每輪交接報告大小。
 - **檔案擁有權**：`files_claim`／`files_release`／`files_owned`；租約綁定工作區相對路徑、預設 1 小時（`DEFAULT_TTL_MS`）、最長 7 天，過期自動釋放，重複索取會回報衝突。擁有權只能往下分割、不能重疊。
 - **組間溝通**：`board_post`／`board_read`（共用公告板）、`agent_message`（只准父／子／兄弟）、`agent_escalate`（往上回報衝突）。
+- **群聊房間**：`seagent rooms create <name> --member … --purpose … --notes … --routing everyone|lead|auto [--lead <handle>]`、`rooms update`、`rooms show`、`rooms say`、`rooms continue <room>`（越過討論上限，每次 +1 完整輪次/訊息預算，最多 5 次）、`rooms stop|disband`；`/room` 提供同一組操作。
 - **上限**：`[limits]` 的 `per_agent_spend_usd`、`hourly_spend_usd`、`global_spend_usd`、`max_processes_per_agent`、`disk_mb_per_agent`、`disk_mb_total`；接近上限（`warn_at`，預設 0.8）先警告再暫停。
 - **孤兒程序**：每個代理的子程序在各自的 process group，代理結束（含當機）整組回收。
 
@@ -428,6 +469,8 @@ command = "~/.config/seagent/hooks/check-shell.sh"
 
 ```bash
 seagent mcp add files -- npx -y @modelcontextprotocol/server-filesystem ~/docs
+# 寫入前會印出 mcp consent 一行：完整 argv、env 名稱、cwd；secret 名稱的值遮蔽、
+# bidi/zero-width 字元以 \u{…} 轉義，避免惡意指令改寫終端畫面
 seagent mcp add github --url https://api.githubcopilot.com/mcp/      # 之後 seagent mcp login github（--device 給沒有瀏覽器的主機）
 seagent mcp list | tools [server] | test <server> | refresh <server>
 seagent mcp serve [--relay URL [--pair]]                              # 反過來讓別的 agent 用 seagent 的工具
@@ -460,7 +503,20 @@ seagent fallback add <p/m>
 seagent usage --days 7 [--json]
 ```
 
-- `[model] default`／`fallback[]`／`aux`（便宜模型：壓縮、標題、MCP sampling）。
+- `[model] default`／`fallback[]`／`aux`（便宜模型：標題、MCP sampling）。壓縮預設沿用對話本身的 provider/model，才能命中快取前綴；要改用便宜模型請明確設 `[model.tasks] compaction = "provider/model"`（或 `[auxiliary.compaction]`）。
+- `[model] daybreak = true`：只在 `openai-codex`（ChatGPT Codex 訂閱）路由送
+  `access_programs.cyber = "daybreak_blue"`；預設關閉，帳號方案仍須支援。
+- `deepseek-messages`（別名 `deepseek-native`）走 DeepSeek 的 Anthropic-compatible Messages
+  路由，`thinking`／`output_config.effort` 對應 `off|low|high|max`；`deepseek` 仍是預設
+  OpenAI-chat 路由。
+- `[decision] backend = "rerank"` 加 `base_url`：任何 `/rerank` 端點（vLLM、TEI、Infinity、
+  Cohere、Jina、Voyage）都可當 `decision_evaluate` 的 provider。
+- Gemini 的 `service_tier` 會從 `/fast` 對應到 `priority`，也接受 `flex`／`standard`。
+- `seagent session stats --session <id>` 顯示每一步的 TTFT、輸出 tok/s、model/tool 時間與
+  cache 命中率（`--json` 有 `step_stats` 與 `steps[]`）。
+- `[model] log_requests = true`：每次送給模型的請求原樣存成 `Request` 事件，可逐位元組重放、查快取為何沒命中。預設關閉，因為每一步都會再存一份完整上下文。
+- `[model] system_updates = "in_history"`：只有端點支援「歷史中的 system 更新」時才開；開啟後 `/role`、`/personality` 等中途的系統提示變更會接在快取歷史之後，不再改寫開頭，DeepSeek 快取前綴因此保留。預設 `"rewrite"`（相容舊行為）。
+- `[compaction] trim_tool_results = "pressure"`（預設）：只有上下文真的超過 `prune_threshold` 才裁剪舊工具輸出；`"always"` 恢復舊的每次請求都裁剪。`/context` 的視窗若只是未知模型的預設值會標 `(fallback)`，`model.context_length` 釘選則標 `(pinned)`。
 - `[budget] max_cost_usd`、`max_steps`；`seagent run --budget-usd`、`--budget-tokens`。
 - 金鑰只在 daemon，子行程看不到（環境清洗 `[security] scrub_env`、`env_strip`、`env_passthrough`）。
 - 編譯進執行檔的模型格式：OpenAI Chat／Responses、Anthropic、Gemini、Bedrock、OpenAI Agents API、外部 agent CLI（claude／gemini／codex、ACP、muse）、託管的 llama.cpp。精簡建置可以只留前三種（第 11 節）。
@@ -493,6 +549,26 @@ cargo build -p seagent --profile slim                   # 同一組功能，改�
 | 磁碟變大 | `seagent checkpoint prune`、`seagent system temp-clean --older-than 24`、`seagent sandbox recreate --all` |
 | channel 沒反應 | `seagent channel list`、精簡建置的警告、`seagent webhook test` |
 | 子代理互相踩檔案 | `seagent fleet files`、`seagent fleet board` |
+
+---
+
+## 12. 記憶、研究與技能治理
+
+**知識召回閘門** `[memory.recall_gate]`：`mode = "off" | "shadow" | "live"`（預設 off）。每輪先用關鍵字挑知識頁，再讓 aux 模型逐頁打相關分數；`shadow` 只把決策寫進 `<data>/logs/recall-gate.jsonl`、不注入，`live` 才把過 `high_threshold` 的頁面注入（`page_chars`、`max_inject_chars` 有上限，`timeout_ms` 預設 1500）。`store` 可指定知識庫。
+
+**知識庫 ACL／歷史／取代鏈** `[memory.wiki]`：`agent_id`（空 = `$SEAGENT_AGENT`）、預設庫的 `agents`、`[memory.wiki.stores.<name>] path/agents`；`history = true` 會在每次改寫前把舊頁存到 `.seagent-wiki/history/`（`history_max`）。`seagent wiki … --store <name>` 與 `wiki_history` 工具可讀歷史；`wiki_apply {"op":"supersede","lookup":…,"by":…}` 會把舊頁標成 superseded，搜尋沿 `supersededBy` 回傳現行頁。
+
+**常駐提醒** `[memory.standing] enabled = true`，再用 `seagent memory intents add "觸發詞,另一個" "提醒內容" --scope conversation|sender|channel --scope-value … --cooldown 秒 --max-fires n --ttl 秒`；`list`／`remove`／`clear` 管理。觸發後注入該輪，受冷卻、次數與到期限制。
+
+**技能鎖** `seagent skills lock <name>`（使用者指令；agent 的 skill 寫入、write/patch、shell 寫入都會被拒），`seagent skills unlock <name>` 解鎖。鎖存在 `skills/.usage.json` 的 `locked`，curator 不會 archive 鎖住的技能。
+
+**技能工坊模式** `[skills.workshop] mode = "off" | "propose" | "auto"`（預設 off，保留原本 deterministic review）。`propose` 把 LLM 經驗回顧產生的草稿放進審批佇列（`/skills drafts`、`/skills approve <id>`），`auto` 直接走守衛寫入。`llm_review = false` 可只用 deterministic 版本。`seagent curator diet [--apply]` 會把過長 SKILL.md 的尾段移到 `references/`，不刪內容（`diet_max_bytes`）。
+
+**深度研究工具** `deep_research`：有界搜尋／抓取（60 KB 語料、單頁 12k 字）、逐字引文驗證、第二輪支持／矛盾稽核、明確 gaps；只用 `complete_text`，不需要 function calling（DeepSeek 可用）。可用 `sources.documents` 完全離線，`budget` 限制模型／搜尋／抓取次數與時限。
+
+**Ollama embeddings** `[memory.search.embedding] allow_private = true`（預設）：loopback／`localhost` 與管理者設定的 LAN 端點可用；設 false 則只准 loopback。雲端 metadata 永遠拒絕。
+
+**已移除技能** `productivity/notion`、`productivity/airtable` 不再隨附（上游同樣移除）。改用廠商 MCP server（`[mcp.notion]`／`[mcp.airtable]`）或 vendor-owned skill taps。
 
 ---
 
@@ -529,6 +605,6 @@ seagent channel list|send | message … | webhook … | pairing
 seagent approvals mode|status|list|allow|revoke|suggest|queue | exec-policy | gate | pause
 seagent security audit|scan|plugins|check-url|creds | secrets | auth | login | models | usage
 seagent mcp … | plugin list | hooks … | commands | skills
-seagent tools list|enable|disable | browser … | screen … | computer-use … | voice | stt
+seagent tools list|enable|disable|explain | browser … | screen … | computer-use … | voice | stt
 seagent node … | nodes … | acp | acp-client | verify | plan | init | doctor | version
 ```

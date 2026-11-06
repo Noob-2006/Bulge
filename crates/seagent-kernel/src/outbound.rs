@@ -26,6 +26,8 @@ pub enum Target {
         #[serde(default)]
         thread: Option<String>,
     },
+    /// A hosted room (`room:<id>`): the daemon appends one message to the room's log.
+    Room { id: String },
     Webhook {
         url: String,
         /// Secret for the `X-Seagent-Signature: sha256=<hex>` header (may be a `{{secret:NAME}}` reference).
@@ -53,6 +55,13 @@ impl Target {
         if s.starts_with("webhook:") {
             return Err(format!("webhook target needs an http(s) URL, got `{url}`"));
         }
+        if let Some(id) = s.strip_prefix("room:") {
+            let id = id.trim();
+            if id.is_empty() || !id.chars().all(|c| c.is_ascii_alphanumeric() || "._-@".contains(c)) {
+                return Err(format!("bad room target `{s}` (expected room:<room-id>)"));
+            }
+            return Ok(Target::Room { id: id.to_string() });
+        }
         let mut it = s.splitn(3, ':');
         let name = it.next().unwrap_or("").trim().to_string();
         if name.is_empty() || !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '.') {
@@ -72,6 +81,7 @@ impl Target {
                 (Some(c), None) => format!("{name}:{c}"),
                 _ => name.clone(),
             },
+            Target::Room { id } => format!("room:{id}"),
             Target::Webhook { url, .. } => url.clone(),
         }
     }
@@ -128,6 +138,7 @@ pub fn deliver(target: &Target, payload: &Payload) -> Result<String, String> {
     match target {
         Target::Local => return Ok("kept local".into()),
         Target::Origin => return Err("`origin` must be resolved to a concrete target before delivery".into()),
+        Target::Room { .. } => {}
         _ => {}
     }
     let sender = HOST.read().unwrap().as_ref().map(|h| h.sender.clone());
@@ -164,6 +175,9 @@ mod tests {
         assert_eq!(Target::parse("tg:-100:7").unwrap(), Target::Channel { name: "tg".into(), chat: Some("-100".into()), thread: Some("7".into()) });
         assert_eq!(Target::parse("https://x.test/h").unwrap(), Target::Webhook { url: "https://x.test/h".into(), secret: None });
         assert_eq!(Target::parse("webhook:http://127.0.0.1:9/h").unwrap().render(), "http://127.0.0.1:9/h");
+        assert_eq!(Target::parse("room:room-ab12").unwrap(), Target::Room { id: "room-ab12".into() });
+        assert_eq!(Target::parse("room:room-ab12@ops").unwrap().render(), "room:room-ab12@ops");
+        assert!(Target::parse("room:").is_err() && Target::parse("room:bad id").is_err());
         assert!(Target::parse("webhook:ftp://x").is_err());
         assert!(Target::parse("").is_err());
         assert!(Target::parse("bad name").is_err());

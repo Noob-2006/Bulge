@@ -36,6 +36,25 @@ selectors for Google Meet, Teams, Zoom and Slack huddles (`crates/seagent-media/
 Also: the model-provider agent harnesses — the OpenAI Agents API hosted-session flow
 (`extensions/agentsapi`) and the Muse Code MSP stdio runtime (`extensions/muse`), both
 `crates/seagent-model/src/agentsapi.rs` / `muse.rs`.
+Also: exec safe-builtin predicate guards (`test`/`[` dynamic operands, ANSI-C quoting) and
+per-provider/model exec ceilings (`crates/seagent-security/src/{approvals,toolpolicy}.rs`,
+`crates/seagent-kernel/src/secgate.rs`; upstream `exec-safe-builtins.ts` and
+`session-permission-exec-mode.ts`).
+
+Also: Bedrock discovery that hides non-on-demand foundation models and lists inference
+profiles (`crates/seagent-model/src/bedrock.rs`, `extensions/amazon-bedrock/discovery.ts`),
+the rerank Decision provider (`crates/seagent-kernel/src/decision.rs`,
+`extensions/rerank/`), the Gemini service tier mapping and the Qoder ACP preset
+(`crates/seagent-model/src/gemini.rs`, `crates/seagent-app/src/acp_client.rs`).
+
+Also: cron delivery/failure-alert defaults and room delivery (`crates/seagent-kernel/src/cronjob/`,
+`crates/seagent/src/ops/rooms.rs`), the `run_stopped` hook contract (`crates/seagent-kernel/src/hooks.rs`),
+scratch/idle-worktree expiry (`crates/seagent-kernel/src/scratch.rs`, `worktree.rs`), and
+node-hosted MCP tool advertisement (`crates/seagent-app/src/node.rs`).
+
+Also: the approvals console's standing-grant rows/history and the security posture page
+(`ui/web/ops.js`, `crates/seagent/src/ops/ui_methods.rs`), following
+`ui/src/pages/approvals/*` and `ui/src/pages/config/security*`.
 
 ## Hermes Agent — MIT License
 
@@ -46,7 +65,11 @@ Signal, Matrix, Mattermost, Email, SMS, DingTalk, Feishu, WeCom, WeCom callback,
 QQ Bot, Yuanbao, BlueBubbles, Photon, Google Chat, Teams, LINE, IRC, ntfy, SimpleX, Buzz,
 Raft, A2A, webhook ingress, MS Graph webhook, relay), the OpenAI-compatible API server,
 delivery ledger, pairing store, MCP OAuth/sampling/elicitation behaviour, ACP adapter,
-file tools: fuzzy find-and-replace strategies and escape-drift correction (crates/seagent-tools/src/fuzzy.rs),
+file tools: fuzzy find-and-replace strategies (including the read-tool `N|` gutter recovery) and
+escape-drift correction (crates/seagent-tools/src/fuzzy.rs),
+checkpoint-store hardening (home/browser-profile refusals, store self-exclusion, excluded-path
+size caps, rollback that never rewinds the store; `crates/seagent-kernel/src/checkpoint.rs`, from
+`tools/checkpoint_manager.py`),
 V4A patch parser (patchfmt.rs), document extraction (extract.rs), read tracking / file-state
 registry / write guards / binary-extension lists (filestate.rs), post-write lint (lint.rs).
 `bridges/whatsapp/` and `bridges/photon/` contain Hermes sidecar sources (see
@@ -59,6 +82,10 @@ ported from superagent-ai/grok-cli, MIT; `crates/seagent-kernel/src/verify.rs`),
 Also transcribed: the FAL video family table and payload rules, xAI edit/extend and
 `video_analyze` prompts/limits/error texts (`crates/seagent-media/src/video_gen/hosted.rs`,
 `understand/mod.rs`), inbound voice-note markers (`inbound/mod.rs`).
+Also: the expanded secret redaction patterns for database connection strings, client env
+variables, URL userinfo, non-PEM private keys, Azure keys/SAS, quoted YAML/JSON values and
+command-line flags (`crates/seagent-security/src/risk.rs`, from `agent/redact.py` and
+`agent/redact_connstr.py`).
 Transcribed data: the optional-mcps catalog (`crates/seagent/src/mcp_presets.json`, 65 vendor MCP
 manifests), the session-export HTML template and Lucide-style icons
 (`crates/seagent/src/export_template.html`, `export_icons.rs`), and the trajectory system prompt
@@ -67,14 +94,27 @@ Ops ports (`crates/seagent/src/ops/`): external secret sources (`secretsrc.rs`, 
 `agent/secret_sources`), the toolset distribution table and batch runner (`batch.rs`), the
 mini-SWE runner prompts (`miniswe.rs`) and the trajectory compressor summary prompt
 (`trajcomp.rs`).
+Also: approval provenance lines in tool results, per-finding command consent (an approved
+pipe-to-shell rule never hides a credential upload), PowerShell/wmic/Stop-Process approval
+rules and the stdio MCP consent line (`crates/seagent-kernel/src/secgate.rs`,
+`crates/seagent-security/src/risk.rs`, `crates/seagent/src/mcp_cli.rs`).
 Also: the `dump` / `debug share` report layout, paste upload/auto-delete flow (`debugdump.rs`),
 the safe console command engine (`console.rs`), worktree audit/prune/restore rules
 (`worktree.rs`), the projects store (`project.rs`) and the multiplex preflight (`multiplex.rs`).
+Also: idle-session retirement (`crates/seagent-kernel/src/kernel.rs`), busy-arrival metrics
+(`crates/seagent-app/src/metrics.rs`), importer credential opt-in (`crates/seagent/src/ops/migrate.rs`)
+and opt-in plugin auto-update (`crates/seagent-skills/src/hub/plugins.rs`).
 Terminal UX ports (`crates/seagent-app/src/tui/`, `crates/seagent/src/ops/rooms.rs`): the built-in skin
 palettes, branding and spinner tables (`skins.json`, from `hermes_cli/skin_engine.py`), the
 petdex pet geometry/state taxonomy and sprite-generation prompts (`pets.rs`, from `agent/pet`),
-the kaomoji busy-indicator faces (`indicator.rs`, from ui-tui), and the hosted-room Discussion
-policy and member prompt (`rooms.rs`, from `gateway/hosted_room_discussion.py`).
+the kaomoji busy-indicator faces (`indicator.rs`, from ui-tui), the rewind picker (`rewind.rs`,
+from `ui-tui/src/components/rewindPicker.tsx` and `canonicalRewindPicker.ts`), inline transcript
+images (`image.rs`, from `agent/terminal_image.py` / `hermes_cli/cli_inline_images.py`), large-paste
+collapse (`paste.rs`, from `ui-tui/src/components/pasteSections.tsx` / `domain/pasteExpand.ts`),
+and the hosted-room Discussion policy and member prompt (`rooms.rs`, from
+`gateway/hosted_room_discussion.py`).
+`/handoff` and `/undo`'s changed-files/checkpoint pointer (`crates/seagent/src/agentcmds/handoff.rs`,
+`crates/seagent/src/slash.rs`) follow `hermes_cli/commands.py` and `tools/checkpoint_undo_hint.py`.
 Media speech ports (`crates/seagent-media/src/stt/`, `voice/`): the STT provider dispatch,
 chunking and whisper.cpp model pins (URLs + SHA-256), the faster-whisper anti-hallucination
 settings, the Whisper hallucination phrase list, stop-phrase and TTS-echo guards, voice-mode
@@ -89,6 +129,8 @@ the sentence-chunked streaming reader (Hermes `tools/tts_tool*.py`, `hermes_cli/
 `extensions/talk-voice`, `src/auto-reply/commands-registry*`).
 The `/image <path> [prompt]` path/prompt split in `crates/seagent-app/src/clip.rs`
 (`split_path_input`) is Hermes `hermes_cli/cli_terminal_input.py::_split_path_input`.
+Also: the OpenAI Daybreak opt-in on the Codex subscription route (`crates/seagent-model/src/responses.rs`,
+`crates/seagent-kernel/src/config.rs`, from `agent/codex_service_tiers.py`).
 Browser/desktop control ports (`crates/seagent-browser/src/control*`): the `/browser` command texts and
 system notes, the Bot Desktop launcher script (`control/launcher.sh`, from
 `tools/bot_desktop/launcher.sh`), package tables and the cua-driver runtime contract / release pins.
@@ -96,6 +138,53 @@ Also: the sandbox-browser container image (`packaging/sandbox-browser`: Dockerfi
 the Basic-auth CDP relay, from OpenClaw `scripts/docker/sandbox/Dockerfile.browser` and
 `scripts/sandbox-browser-entrypoint.sh`) and the bundled browser extension
 (`ui/browser-extension`, from `extensions/browser/chrome-extension`).
+Also: browser snapshot masking of password, one-time-code and card field values
+(`crates/seagent-browser/src/snapshot.rs`, from `extensions/browser/src/browser/sensitive-field-values.ts`)
+and the strict-SSRF navigation redirect-hop fence (`crates/seagent-browser/src/{policy,engine,tools}.rs`,
+from `navigation-guard.ts` / the Playwright navigation fence).
+
+Also: the delegation prompt-cache warm-up gate (`crates/seagent-kernel/src/subagents.rs`,
+from `tools/delegate_tool_prefix_gate.py`), the bot-to-bot chain hop/dedupe/notify-only
+rules (`crates/seagent-kernel/src/coord.rs`, from `agent/bot_chain.py`) and hosted-room
+lead/auto routing plus Continue (`crates/seagent/src/ops/rooms.rs`, from
+`gateway/hosted_room_lead.py`, `hosted_room_router.py` and `hosted_room_context.py`).
+
+## DeepSeek Harness — MIT License
+
+Copyright (c) 2026 DeepSeek
+
+Ported: the DeepSeek Messages route shape (Anthropic-compatible `/v1/messages`, `x-api-key`,
+`thinking` plus `output_config.effort`; `crates/seagent-model/src/{catalog,anthropic}.rs`) and
+per-step statistics (time to first token, output speed, model vs tool time, per-step cache hit
+rate; `crates/seagent-kernel/src/{event,kernel}.rs`, `crates/seagent/src/agentcmds/sessions.rs`).
+
+## DeepSeek Harness — MIT License
+
+Copyright (c) 2026 DeepSeek
+
+Ported ideas (rewritten in Rust): compaction that replays the routed request's system prompt,
+tools and shadowed-region messages byte for byte and appends only a trailing summary instruction
+(`crates/seagent-kernel/src/compaction.rs`, from `packages/compaction/compaction-basic`), and
+pressure-gated tool-result pruning (`crates/seagent-kernel/src/context.rs`,
+`packages/compaction/compaction-tool-result-pruner`). The exact-request session-log events follow
+`packages/core/agent-loop` and `docs/architecture.md` ("model-visible means logged").
+
+## DeepSeek Harness — MIT License
+
+Copyright (c) 2026 DeepSeek
+
+Ported: the provider record/replay layer (`crates/seagent-model/src/replay.rs`, from
+`packages/test-support/llm-replay` and `session-snapshot`), including exact-request fixture
+matching, recorded stream deltas and recorded provider errors. The persistent SSH session
+(`crates/seagent-tools/src/exec/ssh.rs`) follows the remote execution environment idea in
+`packages/ssh/*` (one long-lived remote shell over a multiplexed connection).
+
+Ported: the fork child's byte-identical parent prefix (no child system section or tool
+list edit; guidance in the first user message, restrictions enforced at execution time —
+`crates/seagent-kernel/src/subagents.rs`, from `packages/subagent/subagent-fork-in-process`)
+and the fresh-context Ralph round loop with a bounded structured handoff and progress
+file (`crates/seagent-kernel/src/subagents.rs`, from
+`packages/experimental/tool-ralph`).
 
 ## libdave — MIT License
 

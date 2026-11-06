@@ -198,7 +198,7 @@ pub fn refresh(host: &Host, session: &str) -> Result<(), String> {
     if segs == current {
         return Ok(());
     }
-    k.record(session, crate::event::EventKind::System { segments: segs }).map_err(|e| e.to_string())
+    k.update_system(session, segs).map_err(|e| e.to_string())
 }
 
 /// `SOUL.md` as a system segment.

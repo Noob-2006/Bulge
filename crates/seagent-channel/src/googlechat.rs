@@ -809,7 +809,7 @@ impl Channel for GoogleChat {
     fn fetch_media(&self, m: &Media) -> Result<Vec<u8>, ChannelError> {
         let auth = format!("Bearer {}", self.access_token()?);
         if let Some(res) = &m.id {
-            return crate::http::get_bytes(&format!("{}/media/{res}?alt=media", self.api), &[("authorization", &auth)], 50 * 1024 * 1024);
+            return crate::http::get_bytes_trusted(&format!("{}/media/{res}?alt=media", self.api), &[("authorization", &auth)], 50 * 1024 * 1024, &self.api);
         }
         let url = m.url.as_deref().ok_or_else(|| ChannelError::new(K::Fatal, "attachment without resource name or url"))?;
         let host = seagent_net::Url::parse(url).map(|u| u.host).unwrap_or_default();

@@ -1088,13 +1088,17 @@ exit 0
         // path under the sandbox home; `/etc/passwd` and `~/.ssh/...` never reach the container.
         let f = Fake::new("ctr11");
         let ctx = BackendCtx { workspace: tmpdir("ctr11w"), scope_key: "s1".into(), secrets: Arc::new(|s: &str| s.to_string()), home: tmpdir("ctr11h"), sandboxed: true };
-        let Some(home) = std::env::var_os("HOME").map(PathBuf::from).filter(|h| h.is_absolute()) else { return };
+        let home = tmpdir("ctr11home");
+        std::fs::create_dir_all(&home).unwrap();
         let name = format!(".seagent-cred-test-{}", std::process::id());
         let src = home.join(&name);
         std::fs::write(&src, "token=1").unwrap();
         let ecfg = ExecConfig { credential_files: vec![name.clone(), "/etc/passwd".into(), ".ssh/id_rsa".into()], ..ExecConfig::default() };
         let sb = SandboxConfig { workspace_access: "rw".into(), ..Default::default() };
-        let be = ContainerBackend::new(&f.cfg(), &sb, &ecfg, &ctx).unwrap_or_else(|e| panic!("{e}"));
+        let be = {
+            let _home = crate::testutil::test_home(&home);
+            ContainerBackend::new(&f.cfg(), &sb, &ecfg, &ctx).unwrap_or_else(|e| panic!("{e}"))
+        };
         let args = be.run_args();
         let real = std::fs::canonicalize(&src).unwrap();
         assert!(has(&args, &["-v", &format!("{}:{CONTAINER_HOME}/{name}:ro", real.display())]), "credential bind missing: {args:?}");

@@ -848,6 +848,7 @@ mod tests {
             last_result: None,
             budget: Default::default(),
             ext: crate::cronjob::JobExt { script: script.map(String::from), no_agent: script.is_some(), deliver: Some("local".into()), ..Default::default() },
+            claim: None,
         };
         let now = 1_000_000;
         let jobs = vec![mk("a", "0 9 * * *", now + 60, None), mk("b", "not a cron", now - 3600, Some("missing.sh")), mk("c", "@hourly", now - 3600, None)];

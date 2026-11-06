@@ -422,9 +422,13 @@ impl App {
             o.remove("_by");
             o.remove("_by_role");
             o.remove("_via");
+            o.remove("_scope");
         }
         if let (Some(p), Some(o)) = (who, params.as_object_mut()) {
-            if matches!(method, "gate.answer" | "approval.answer" | "approvals.answer" | "question.answer" | "session.review.set") {
+            // The daemon uses this to keep host paths out of read-only answers; a client cannot
+            // set it itself (removed above).
+            o.insert("_scope".into(), p.access.label().into());
+            if matches!(method, "gate.answer" | "approval.answer" | "approvals.answer" | "question.answer" | "session.review.set" | "session.interrupt" | "tools.call") {
                 o.insert("_by".into(), p.label().into());
                 o.insert("_by_role".into(), p.access.label().into());
                 o.insert("_via".into(), "app".into());

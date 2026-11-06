@@ -278,6 +278,50 @@ pub fn refine(existing: &str, name: &str, focus: &str, steps: &[String]) -> Resu
     Ok(Refinement { name: name.to_string(), content, section, advisories })
 }
 
+/// A deterministic skill-diet plan: keep the frontmatter and the first sections inside the
+/// budget, move the tail into `references/diet-<name>.md` and point at it from a short
+/// `## Details` section. No model call: what moved is exactly what was too long.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Diet {
+    pub name: String,
+    pub before_bytes: usize,
+    pub after_bytes: usize,
+    pub reference_path: String,
+    pub reference: String,
+    pub content: String,
+    pub moved_sections: usize,
+}
+
+pub fn diet_plan(content: &str, name: &str, max_bytes: usize) -> Option<Diet> {
+    let before_bytes = content.len();
+    if before_bytes <= max_bytes {
+        return None;
+    }
+    let chunks: Vec<&str> = content.split("\n## ").collect();
+    if chunks.len() < 2 {
+        return None;
+    }
+    let mut keep = chunks[0].to_string();
+    let mut moved: Vec<&str> = Vec::new();
+    for (i, chunk) in chunks.iter().enumerate().skip(1) {
+        let section = format!("\n## {chunk}");
+        // The first section always stays: a diet must never produce a skill with no procedure.
+        if i == 1 || keep.len() + section.len() <= max_bytes {
+            keep.push_str(&section);
+        } else {
+            moved.push(chunk);
+        }
+    }
+    if moved.is_empty() {
+        return None;
+    }
+    let reference_path = format!("references/diet-{name}.md");
+    let reference = moved.iter().map(|s| format!("## {s}")).collect::<Vec<_>>().join("\n\n");
+    let pointer = format!("## Details\nSee {reference_path} for procedure sections moved out of SKILL.md by `seagent curator diet`.\n");
+    let content = format!("{}\n\n{}", keep.trim_end(), pointer);
+    Some(Diet { name: name.to_string(), before_bytes, after_bytes: content.len(), reference_path, reference, content, moved_sections: moved.len() })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -318,5 +362,19 @@ mod tests {
         let noisy = format!("{skill_md}\nBe thorough and comprehensive.\n");
         assert!(advisories(skill_md, &noisy).iter().any(|a| a.starts_with("Advisory (not blocking): cut no-op emphasis")));
         assert!(AUTHORING_STANDARD.contains("A skill is a procedure, not memory"));
+    }
+
+    #[test]
+    fn diet_moves_the_tail_into_references_without_losing_it() {
+        let body = (0..40).map(|i| format!("## Section {i}\n{}", "step ".repeat(80))).collect::<Vec<_>>().join("\n");
+        let md = format!("---\nname: big\ndescription: Big\n---\n\n# Big\n\n{body}");
+        let d = diet_plan(&md, "big", 4_000).unwrap();
+        assert_eq!(d.reference_path, "references/diet-big.md");
+        assert!(d.after_bytes < d.before_bytes && d.after_bytes <= 4_000 + 200, "{} -> {}", d.before_bytes, d.after_bytes);
+        assert!(d.content.starts_with("---\nname: big") && d.content.contains("## Details") && d.content.contains("references/diet-big.md"));
+        assert!(d.reference.starts_with("## Section ") && d.reference.contains("## Section 39"));
+        assert_eq!(d.content.matches("## Section").count() + d.reference.matches("## Section").count(), 40, "every section survives the move");
+        assert!(diet_plan(&md, "big", 100_000).is_none(), "a small skill is left alone");
+        assert!(diet_plan("---\nname: x\ndescription: x\n---\nno headings", "x", 10).is_none(), "nothing to move");
     }
 }

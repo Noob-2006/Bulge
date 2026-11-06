@@ -555,7 +555,7 @@ impl Channel for Telegram {
         let id = m.id.as_deref().ok_or_else(|| ChannelError::new(K::Fatal, "telegram attachment without file_id"))?;
         let f = self.call("getFile", &json!({"file_id": id}), &Cancel::new())?.unwrap_or_default();
         let path = f["file_path"].as_str().ok_or_else(|| ChannelError::new(K::Protocol, "getFile returned no file_path (file over 20 MB?)"))?;
-        crate::http::get_bytes(&format!("{}/file/bot{}/{path}", self.base, self.token), &[], 20 * 1024 * 1024)
+        crate::http::get_bytes_trusted(&format!("{}/file/bot{}/{path}", self.base, self.token), &[], 20 * 1024 * 1024, &self.base)
     }
 
     fn message_action(&self, action: &str, args: &Value) -> Result<Value, ChannelError> {

@@ -43,13 +43,10 @@ crates/seagent-model/src/modelsdb.rs  # temp_dir
 crates/seagent-plugin/src/builtin/disk_cleanup.rs  # temp_dir
 crates/seagent-security/src/glob.rs  # +test-code HOME/kill
 crates/seagent-security/src/paths.rs  # temp_dir+test-code HOME/kill
-crates/seagent-tools/src/exec/container.rs  # +test-code HOME/kill
 crates/seagent-tools/src/exec/local.rs  # temp_dir+test-code HOME/kill
 crates/seagent-tools/src/exec/modal.rs  # +test-code HOME/kill
-crates/seagent-tools/src/exec/openshell.rs  # +test-code HOME/kill
 crates/seagent-tools/src/exec/sandbox.rs  # +test-code HOME/kill
 crates/seagent-tools/src/exec/ssh.rs  # temp_dir+test-code HOME/kill
-crates/seagent-tools/src/exec/sync.rs  # +test-code HOME/kill
 crates/seagent-tools/src/web/http.rs  # temp_dir
 crates/seagent-tools/src/web/providers/codex.rs  # temp_dir
 crates/seagent-vm/src/pool.rs  # seagent-vm owns its temp roots (snapshot dirs must outlive a guard); revisit with its owner

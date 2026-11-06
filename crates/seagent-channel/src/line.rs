@@ -488,7 +488,7 @@ impl Channel for Line {
             }
         }
         let auth = format!("Bearer {}", self.token);
-        crate::http::get_bytes(&format!("{}/v2/bot/message/{id}/content", self.data_api), &[("authorization", &auth)], 200 * 1024 * 1024)
+        crate::http::get_bytes_trusted(&format!("{}/v2/bot/message/{id}/content", self.data_api), &[("authorization", &auth)], 200 * 1024 * 1024, &self.data_api)
     }
 }
 

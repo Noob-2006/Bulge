@@ -176,6 +176,12 @@ impl Ctx<'_> {
     }
 }
 
+/// User locks refuse every mutating op before planning (Hermes `skill_lock.skill_refusal`).
+/// A `create` is refused too: otherwise deleting and recreating the directory would bypass it.
+fn locked_error(ctx: &Ctx, name: &str) -> Option<String> {
+    usage::is_locked(&ctx.store(), name).then(|| usage::lock_refusal(name))
+}
+
 /// The skill's writable directory: the agent's own library (`<data>/skills/<name>`).
 fn own_dir(paths: &Paths, name: &str) -> PathBuf {
     paths.data.join("skills").join(name)
@@ -296,6 +302,9 @@ fn plan(ctx: &Ctx, ops: &[Op]) -> Result<Vec<Staged>, String> {
     for (i, op) in ops.iter().enumerate() {
         let at = |e: String| if ops.len() > 1 { format!("operations[{i}] ({} `{}`): {e}", op.action, op.name) } else { e };
         if let Some(e) = op.shape_error() {
+            return Err(at(e));
+        }
+        if let Some(e) = locked_error(ctx, &op.name) {
             return Err(at(e));
         }
         match op.action.as_str() {
@@ -511,6 +520,8 @@ pub struct Pending {
     pub id: String,
     pub summary: String,
     pub created_at: i64,
+    /// `write` (approval gate) or `draft` (workshop propose mode).
+    pub kind: String,
     pub ops: Vec<Value>,
     pub session: Option<String>,
 }
@@ -533,6 +544,7 @@ fn stage_write(ctx: &Ctx, ops: &[Op]) -> Result<String, String> {
     let id = seagent_kernel::util::random_hex(4);
     let rec = json!({
         "id": id, "subsystem": "skills", "created_at": seagent_kernel::util::unix_now(),
+        "kind": if ctx.settings.workshop.mode == "propose" { "draft" } else { "write" },
         "summary": gist(ops), "session": ctx.session,
         "ops": ops.iter().map(Op::to_value).collect::<Vec<_>>(),
     });
@@ -553,6 +565,7 @@ pub fn pending(st: &Store) -> Vec<Pending> {
                 id: r.get("id")?.as_str()?.to_string(),
                 summary: r.get("summary").and_then(Value::as_str).unwrap_or("").to_string(),
                 created_at: r.get("created_at").and_then(Value::as_i64).unwrap_or(0),
+                kind: r.get("kind").and_then(Value::as_str).unwrap_or("write").to_string(),
                 ops: r.get("ops")?.as_array()?.clone(),
                 session: r.get("session").and_then(Value::as_str).map(String::from),
             })
@@ -595,8 +608,9 @@ pub fn reject(st: &Store, id: &str) -> Result<String, String> {
 pub fn cli(ctx: &Ctx, argv: &[String]) -> Result<String, String> {
     let st = ctx.store();
     match argv.first().map(String::as_str) {
-        Some("pending") => {
-            let rows = pending(&st);
+        Some("pending" | "drafts") => {
+            let drafts = argv.first().map(String::as_str) == Some("drafts");
+            let rows: Vec<Pending> = pending(&st).into_iter().filter(|p| !drafts || p.kind == "draft").collect();
             if rows.is_empty() {
                 return Ok(if ctx.settings.write_approval {
                     "no pending skill writes".into()
@@ -604,7 +618,7 @@ pub fn cli(ctx: &Ctx, argv: &[String]) -> Result<String, String> {
                     "no pending skill writes ([skills] write_approval is off, so writes are applied directly)".into()
                 });
             }
-            Ok(rows.iter().map(|p| format!("{}  {}  {}", p.id, seagent_kernel::util::fmt_time(p.created_at, 0), p.summary)).collect::<Vec<_>>().join("\n"))
+            Ok(rows.iter().map(|p| format!("{}  {}  {}{}", p.id, seagent_kernel::util::fmt_time(p.created_at, 0), p.summary, if drafts { " (draft)" } else { "" })).collect::<Vec<_>>().join("\n"))
         }
         Some("approve") => {
             let id = argv.get(1).ok_or("usage: skills approve <id>")?;
@@ -614,7 +628,7 @@ pub fn cli(ctx: &Ctx, argv: &[String]) -> Result<String, String> {
             let id = argv.get(1).ok_or("usage: skills reject <id>")?;
             reject(&st, id)
         }
-        _ => Err("usage: skills pending | skills approve <id> | skills reject <id>".into()),
+        _ => Err("usage: skills pending | skills drafts | skills approve <id> | skills reject <id>".into()),
     }
 }
 
@@ -652,6 +666,12 @@ mod tests {
         assert!(run(&c, &parse(&json!({"action":"create","name":"deploy","description":"d","body":"b"})).unwrap()).unwrap_err().contains("exists; use action=update"));
         // patch: unique old_string only
         let op = |j: Value| parse(&j).unwrap();
+        // A user lock refuses every mutating op (and a re-create of the same name).
+        usage::set_locked(&Store::new(&paths), "deploy", true).unwrap();
+        let e = run(&c, &op(json!({"action":"patch","name":"deploy","old_string":"1. run tests","new_string":"x"}))).unwrap_err();
+        assert!(e.contains("is locked by the user") && e.contains("seagent skills unlock deploy"), "{e}");
+        assert!(run(&c, &op(json!({"action":"create","name":"deploy","description":"d","body":"b"}))).unwrap_err().contains("locked"));
+        usage::set_locked(&Store::new(&paths), "deploy", false).unwrap();
         assert!(run(&c, &op(json!({"action":"patch","name":"deploy","old_string":"nope","new_string":"x"}))).unwrap_err().contains("not found"));
         assert!(run(&c, &op(json!({"action":"patch","name":"deploy","old_string":"1. run tests","new_string":"1. run tests twice"}))).is_ok());
         assert!(fs::read_to_string(paths.data.join("skills/deploy/SKILL.md")).unwrap().contains("run tests twice"));

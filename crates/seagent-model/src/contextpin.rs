@@ -25,6 +25,35 @@ pub fn suffix(shown: u64, pin: Option<u64>) -> &'static str {
     }
 }
 
+/// True when `shown` is only a default because no local source knows this model's window
+/// (Hermes `is_fallback_context_length`). A pin, an endpoint-learned window, the models.dev
+/// registry or the built-in table all count as knowledge; the generic heuristic does not.
+pub fn is_fallback(shown: u64, model: &str, base_url: &str, pin: Option<u64>) -> bool {
+    if shown == 0 || is_pinned(shown, pin) || pin.is_some_and(|p| p > 0) {
+        return false;
+    }
+    if learned(model, base_url).is_some() {
+        return false;
+    }
+    if advertised(model, base_url).is_some() {
+        return false;
+    }
+    // A provider that reports its own (different) window is authoritative even when the local
+    // catalogue does not list the model.
+    shown == crate::caps_for(model).context_window
+}
+
+/// `" (pinned)"`, `" (fallback)"` or `""` for a rendered context window.
+pub fn marker(shown: u64, model: &str, base_url: &str, pin: Option<u64>) -> &'static str {
+    if is_pinned(shown, pin) {
+        "pinned"
+    } else if is_fallback(shown, model, base_url, pin) {
+        "fallback"
+    } else {
+        ""
+    }
+}
+
 fn learned_map() -> &'static Mutex<HashMap<(String, String), u64>> {
     static M: OnceLock<Mutex<HashMap<(String, String), u64>>> = OnceLock::new();
     M.get_or_init(|| Mutex::new(HashMap::new()))
@@ -262,6 +291,26 @@ mod tests {
         set_learned("glm-5.3-flash", "https://api.example.test/v1", 65_536);
         assert_eq!(advertised("glm-5.3-flash", "https://api.example.test/v1"), Some(65_536));
         assert_eq!(advertised("glm-5.3-flash", ""), Some(1_310_720));
+        clear_learned();
+    }
+
+    #[test]
+    fn defaulted_windows_are_labelled_and_known_ones_are_not() {
+        let _g = crate::modelsdb::test_lock();
+        clear_learned();
+        // Unknown model: the generic heuristic is a default, not a detected limit.
+        let generic = crate::caps_for("zz-totally-unknown").context_window;
+        assert!(is_fallback(generic, "zz-totally-unknown", "", None));
+        assert_eq!(marker(generic, "zz-totally-unknown", "", None), "fallback");
+        // A catalogue entry is knowledge.
+        assert!(!is_fallback(1_310_720, "glm-5.3-flash", "", None));
+        assert_eq!(marker(1_310_720, "glm-5.3-flash", "", None), "");
+        // An endpoint-learned window is knowledge.
+        set_learned("zz-pin-learned", "https://api.example.test/v1", 65_536);
+        assert!(!is_fallback(65_536, "zz-pin-learned", "https://api.example.test/v1", None));
+        // A pin is labelled pinned, never fallback.
+        assert!(!is_fallback(4_096, "zz-totally-unknown", "", Some(4_096)));
+        assert_eq!(marker(4_096, "zz-totally-unknown", "", Some(4_096)), "pinned");
         clear_learned();
     }
 

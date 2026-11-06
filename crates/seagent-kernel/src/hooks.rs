@@ -113,6 +113,9 @@ pub enum HookEvent {
     /// `requester_origin`, `expects_completion_message`). Result `{origin: {channel, to, thread_id}}`:
     /// the completion is also sent there (host channels).
     SubagentDeliveryTarget,
+    /// A user or operator explicitly stopped a run (`source`, `actor`, `sessions`, `run_ids`);
+    /// observe only. Built by [`run_stopped_payload`].
+    RunStopped,
     /// A cron job changed (`action`: added|updated|removed|started|finished|scheduled, `job_id`,
     /// `job`, …); observe only. Built by [`cron_changed_payload`].
     CronChanged,
@@ -142,7 +145,7 @@ pub enum HookEvent {
 }
 
 impl HookEvent {
-    pub const ALL: [HookEvent; 52] = [
+    pub const ALL: [HookEvent; 53] = [
         HookEvent::SessionStart,
         HookEvent::SessionEnd,
         HookEvent::UserPrompt,
@@ -185,6 +188,7 @@ impl HookEvent {
         HookEvent::ReplyDispatch,
         HookEvent::SubagentProgress,
         HookEvent::SubagentDeliveryTarget,
+        HookEvent::RunStopped,
         HookEvent::CronChanged,
         HookEvent::CronReconciled,
         HookEvent::SkillChanged,
@@ -269,6 +273,7 @@ impl HookEvent {
             HookEvent::ReplyDispatch => "ReplyDispatch",
             HookEvent::SubagentProgress => "SubagentProgress",
             HookEvent::SubagentDeliveryTarget => "SubagentDeliveryTarget",
+            HookEvent::RunStopped => "RunStopped",
             HookEvent::CronChanged => "CronChanged",
             HookEvent::CronReconciled => "CronReconciled",
             HookEvent::SkillChanged => "SkillChanged",
@@ -540,6 +545,23 @@ pub fn exec_env(v: &Value) -> Vec<(String, String)> {
             _ => None,
         })
         .collect()
+}
+
+/// Payload for `run_stopped` (OpenClaw `PluginHookRunStoppedEvent`): who stopped which runs.
+pub fn run_stopped_payload(session: &str, cwd: &str, source: &str, actor: &str, run_id: &str) -> Value {
+    json!({
+        "session_id": session,
+        "cwd": cwd,
+        "source": source,
+        "actor": actor,
+        "sessions": [{"sessionKey": session}],
+        "run_ids": if run_id.is_empty() { json!([]) } else { json!([run_id]) },
+    })
+}
+
+/// Fire `run_stopped` (observe only; a hook can never block an explicit Stop).
+pub fn fire_run_stopped(rt: &crate::kernel::Runtime, session: &str, cwd: &str, source: &str, actor: &str, run_id: &str) {
+    rt.emit(HookEvent::RunStopped, run_stopped_payload(session, cwd, source, actor, run_id), "");
 }
 
 /// Payload for `cron_changed` (OpenClaw `PluginHookCronChangedEvent`). `action` is one of

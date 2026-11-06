@@ -76,6 +76,18 @@ fn backend_of_selector(b: &Browser, target: &str, sid: &str, sel: &str) -> Resul
     d["node"]["backendNodeId"].as_i64().ok_or_else(|| "DOM.describeNode returned no backendNodeId".into())
 }
 
+/// A form field's tag/type/autocomplete attributes, for snapshot value masking.
+pub(crate) fn describe_field(b: &Browser, target: &str, sid: &str, backend: i64) -> Option<(String, Option<String>, Option<String>)> {
+    let d = b.session_call(target, sid, "DOM.describeNode", json!({"backendNodeId": backend}), Duration::from_secs(5)).ok()?;
+    let node = &d["node"];
+    let tag = node["nodeName"].as_str()?.to_string();
+    let attrs = node["attributes"].as_array()?;
+    let get = |name: &str| {
+        attrs.chunks(2).find(|kv| kv.first().and_then(Value::as_str).is_some_and(|k| k.eq_ignore_ascii_case(name))).and_then(|kv| kv.get(1)).and_then(Value::as_str).map(str::to_string)
+    };
+    Some((tag, get("type"), get("autocomplete")))
+}
+
 fn cursor_scan(b: &Browser, target: &str, sid: &str) -> HashMap<i64, Cursor> {
     let mut out = HashMap::new();
     let Ok(found) = b.eval(target, CURSOR_JS) else { return out };
@@ -147,6 +159,8 @@ pub fn snapshot(b: &Browser, target: &str, req: &SnapshotReq) -> Result<Snapshot
         let bk = backend_of_selector(b, target, &session, sel)?;
         nodes = subtree(&nodes, bk).ok_or("Snapshot root is no longer present in the accessibility tree; retry.")?;
     }
+    // Password / OTP / card values never reach the model, however the page filled them.
+    snapshot::redact_sensitive_ax_values(&mut nodes, |bk| describe_field(b, target, &session, bk));
     let mut refs: Vec<(String, Ref)> = vec![];
     let mut counter = 0;
     let child_sess = (session != sid).then_some(session.as_str());
@@ -166,7 +180,8 @@ pub fn snapshot(b: &Browser, target: &str, req: &SnapshotReq) -> Result<Snapshot
             None => (sid.clone(), json!({"frameId": fid})),
         };
         if let Ok(t) = b.session_call(target, &s2, "Accessibility.getFullAXTree", p2, Duration::from_secs(10)) {
-            let sub = t["nodes"].as_array().cloned().unwrap_or_default();
+            let mut sub = t["nodes"].as_array().cloned().unwrap_or_default();
+            snapshot::redact_sensitive_ax_values(&mut sub, |bk| describe_field(b, target, &s2, bk));
             let (more, deep) = snapshot::render(&sub, &HashMap::new(), &req.opts, child.as_deref(), &mut counter, &mut refs, depth + 1);
             too_deep |= deep;
             all.extend(more);

@@ -78,7 +78,7 @@ use serde_json::json;
 use std::time::{Duration, Instant};
 
 pub const COMMANDS: &[&str] = &["tools"];
-pub const VALUE_FLAGS: &[&str] = &["platform"];
+pub const VALUE_FLAGS: &[&str] = &["platform", "model", "channel", "sender"];
 pub const BOOL_FLAGS: &[&str] = &["summary", "dry-run"];
 
 /// Platform kinds that are valid even when no channel of that name is configured
@@ -229,6 +229,32 @@ fn one_line(s: &str, n: usize) -> String {
     } else {
         format!("{}…", first.chars().take(n).collect::<String>())
     }
+}
+
+/// `seagent tools explain <tool>`: replay the same layers a call goes through and
+/// name the first policy that blocks it, plus the config key that would change it.
+pub fn explain_tool(cfg: &Config, tool: &str, origin: &seagent_security::toolpolicy::Origin) -> String {
+    let tool = tool.trim();
+    let mut out = vec![format!("tool `{tool}` · model={} · channel={} · sender={}", if origin.model.is_empty() { "-" } else { origin.model.as_str() }, origin.channel.as_deref().unwrap_or("-"), origin.sender.as_deref().unwrap_or("-"))];
+    if cfg.tools.disabled.iter().any(|d| d == tool) {
+        out.push("✗ blocked by tools.disabled".into());
+        out.push(format!("  fix: seagent tools enable {tool} --platform cli"));
+        return out.join("\n");
+    }
+    let blocks = seagent_security::toolpolicy::explain(&cfg.tools.layer(), &cfg.tools.by_provider, &cfg.tools.by_channel, &cfg.tools.by_sender, origin, tool);
+    if blocks.is_empty() {
+        out.push("✓ available: no tool policy layer blocks it".into());
+        if !names(cfg).iter().any(|n| n == tool) {
+            out.push(format!("  note: `{tool}` is not a built-in tool this build knows; an MCP `server__tool` is only visible with a live kernel"));
+        }
+    } else {
+        out.push(format!("✗ blocked by {}", blocks.iter().map(|b| b.layer.as_str()).collect::<Vec<_>>().join(", ")));
+        for b in blocks {
+            out.push(format!("  {} (`{}`)", b.config, b.layer));
+            out.push(format!("  fix: {}", b.fix));
+        }
+    }
+    out.join("\n")
 }
 
 /// `seagent tools list --platform P`: ✓/✗ per tool, with the description the model sees.
@@ -593,6 +619,9 @@ struct Cmd {
     sub: Option<String>,
     names: Vec<String>,
     platform: Option<String>,
+    model: Option<String>,
+    channel: Option<String>,
+    sender: Option<String>,
     json: bool,
     summary: bool,
     dry_run: bool,
@@ -622,6 +651,18 @@ fn parse(raw: &[String]) -> Result<Cmd, String> {
             f if f.starts_with("--platform=") => {
                 c.platform = Some(f["--platform=".len()..].to_string())
             }
+            "--model" | "--channel" | "--sender" => {
+                let v = raw.get(i).cloned().ok_or_else(|| format!("{r} needs a value"))?;
+                i += 1;
+                match r {
+                    "--model" => c.model = Some(v),
+                    "--channel" => c.channel = Some(v),
+                    _ => c.sender = Some(v),
+                }
+            }
+            f if f.starts_with("--model=") => c.model = Some(f["--model=".len()..].to_string()),
+            f if f.starts_with("--channel=") => c.channel = Some(f["--channel=".len()..].to_string()),
+            f if f.starts_with("--sender=") => c.sender = Some(f["--sender=".len()..].to_string()),
             f if f.starts_with('-') => return Err(format!("unknown option {f} for `seagent tools`")),
             w => match &c.sub {
                 None => c.sub = Some(w.to_string()),
@@ -649,12 +690,22 @@ pub fn dispatch(cmd: &str, _a: &Args, raw: &[String]) -> Option<R> {
     }
     match c.sub.as_deref() {
         Some("post-setup") => Some(run_post_setup(&c)),
+        Some("explain") => Some(run_explain(&c)),
         Some("list") if c.platform.is_some() => Some(run_list(&c)),
         Some(v @ ("enable" | "disable")) if c.platform.is_some() => {
             Some(run_toggle(&c, v == "disable"))
         }
         _ => None,
     }
+}
+
+fn run_explain(c: &Cmd) -> R {
+    let name = c.names.first().ok_or_else(|| Fail::Usage("usage: seagent tools explain <tool> [--model M] [--channel C] [--sender S]".into()))?;
+    let cfg = load(&Paths::from_env());
+    let model = c.model.clone().unwrap_or_else(|| cfg.model.default.clone());
+    let origin = seagent_security::toolpolicy::Origin { model, channel: c.channel.clone().or_else(|| c.platform.clone().filter(|p| p != "cli")), sender: c.sender.clone() };
+    println!("{}", explain_tool(&cfg, name, &origin));
+    Ok(0)
 }
 
 fn run_summary() -> R {
@@ -902,6 +953,31 @@ mod tests {
     }
 
     #[test]
+    fn explain_replays_layers_and_names_the_fix() {
+        let mut cfg = Config::default();
+        cfg.model.default = "openai/gpt-4o".into();
+        let origin = seagent_security::toolpolicy::Origin { model: "ollama/llama3".into(), channel: Some("telegram".into()), sender: Some("7".into()) };
+        // `shell` is available by default.
+        let s = explain_tool(&cfg, "shell", &origin);
+        assert!(s.contains("✓ available"), "{s}");
+        cfg.tools.by_provider.insert("ollama".into(), seagent_security::toolpolicy::Layer { deny: vec!["shell".into()], ..Default::default() });
+        cfg.tools.by_channel.insert("telegram".into(), seagent_security::toolpolicy::Layer { deny: vec!["group:runtime".into()], ..Default::default() });
+        cfg.tools.by_sender.insert("telegram:7".into(), seagent_security::toolpolicy::Layer { deny: vec!["write".into()], ..Default::default() });
+        let s = explain_tool(&cfg, "shell", &origin);
+        assert!(s.contains("blocked by tools.by_provider.ollama, tools.by_channel.telegram"), "{s}");
+        assert!(s.contains("[tools.by_provider.ollama]") && s.contains("also_allow"), "{s}");
+        // A disabled tool is a separate, earlier layer with its own fix.
+        cfg.tools.disabled = vec!["write".into()];
+        let s = explain_tool(&cfg, "write", &origin);
+        assert!(s.contains("tools.disabled") && s.contains("seagent tools enable write"), "{s}");
+        // The parse path accepts the model/channel/sender selectors.
+        let raw: Vec<String> = ["explain", "shell", "--model", "ollama/llama3", "--channel=telegram", "--sender", "7"].iter().map(|s| s.to_string()).collect();
+        let c = parse(&raw).unwrap();
+        assert_eq!((c.sub.as_deref(), c.names[0].as_str()), (Some("explain"), "shell"));
+        assert_eq!((c.model.as_deref(), c.channel.as_deref(), c.sender.as_deref()), (Some("ollama/llama3"), Some("telegram"), Some("7")));
+    }
+
+    #[test]
     fn dispatch_scope() {
         // `dispatch` really runs the command (`disable … --platform=telegram` writes config
         // through `Paths::from_env()`): point SEAGENT_HOME at a throwaway home for the duration,
@@ -938,6 +1014,7 @@ mod tests {
         )
         .is_some());
         assert!(dispatch("tools", &a, &raw(&["list", "--platform", "telegram"])).is_some());
+        assert!(dispatch("tools", &a, &raw(&["explain", "shell"])).is_some());
         assert!(dispatch(
             "tools",
             &a,

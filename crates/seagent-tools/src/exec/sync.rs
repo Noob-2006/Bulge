@@ -707,18 +707,23 @@ mod tests {
 
     #[test]
     fn credential_files_land_under_remote_home() {
+        let _lock = crate::exec::sync::common::fakecli::lock_path();
         let fakehome = tmpdir("credhome");
-        let real_home = std::env::var("HOME").unwrap();
-        let src = Path::new(&real_home).join(format!(".seagent-cred-test-{}", std::process::id()));
+        let hosthome = tmpdir("credrealhome");
+        std::fs::create_dir_all(&hosthome).unwrap();
+        let src = hosthome.join(format!(".seagent-cred-test-{}", std::process::id()));
         std::fs::write(&src, "token=1").unwrap();
         let runner = |script: &str, stdin: Option<&[u8]>| local_runner(&format!("export HOME={}\n{script}", fakehome.display()), stdin);
         let rel = format!("~/{}", src.file_name().unwrap().to_string_lossy());
-        assert_eq!(upload_files(&runner, &[rel], true).unwrap(), 1);
+        {
+            let _home = crate::testutil::test_home(&hosthome);
+            assert_eq!(upload_files(&runner, &[rel], true).unwrap(), 1);
+            assert!(upload_files(&runner, &["/nonexistent/x".into()], false).is_err());
+            assert!(upload_files(&runner, &["/tmp".into()], false).unwrap_err().contains("not a regular file"));
+        }
         let got = fakehome.join(src.file_name().unwrap());
         assert_eq!(std::fs::read_to_string(&got).unwrap(), "token=1");
         assert_eq!(std::fs::metadata(&got).unwrap().mode() & 0o777, 0o600);
         let _ = std::fs::remove_file(&src);
-        assert!(upload_files(&runner, &["/nonexistent/x".into()], false).is_err());
-        assert!(upload_files(&runner, &["/tmp".into()], false).unwrap_err().contains("not a regular file"));
     }
 }

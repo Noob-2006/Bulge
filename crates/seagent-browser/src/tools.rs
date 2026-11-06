@@ -117,25 +117,45 @@ fn merge(v: &mut Value, extra: Value) {
 
 const BOT_TITLES: &[&str] = &["access denied", "access to this page has been denied", "blocked", "bot detected", "verification required", "please verify", "are you a robot", "captcha", "cloudflare", "ddos protection", "checking your browser", "just a moment", "attention required"];
 
-/// Navigate a tab with the guard, wait for load, re-check the final URL.
+/// Navigate a tab with the guard, wait for load, re-check the final URL. Under strict SSRF
+/// policy the document requests are fenced before Chrome sends them, so a redirect hop is
+/// checked (and failed closed) before it can reach a private host.
 pub fn navigate(env: &Env, b: &Browser, t: &str, url: &str, timeout: Duration) -> Result<(String, String), String> {
     let url = policy::check_navigation(&env.cfg, url, local_route(b))?;
-    let (l, n) = b.page(t, |p| (p.load_seq, p.nav_seq));
-    let r = b.page_call(t, "Page.navigate", json!({"url": url}))?;
-    if let Some(e) = r["errorText"].as_str().filter(|e| !e.is_empty()) {
-        return Err(format!("Navigation failed: {e}"));
+    let fenced = policy::strict_ssrf(&env.cfg) && url != "about:blank";
+    if fenced {
+        b.begin_navigation_guard(t, env.cfg.private_allowed()).map_err(|_| policy::UNINSPECTABLE_REDIRECTS.to_string())?;
     }
-    if r["loaderId"].is_string() {
-        b.wait_load(t, l, n + 1, timeout);
-    }
-    let (final_url, title) = b.url_title(t);
-    if final_url != url {
-        if let Some(why) = policy::check_final_url(&env.cfg, &final_url, local_route(b)) {
+    let r = (|| -> Result<(String, String), String> {
+        let (l, n) = b.page(t, |p| (p.load_seq, p.nav_seq));
+        let r = b.page_call(t, "Page.navigate", json!({"url": url}))?;
+        if let Some(why) = b.take_navigation_blocked(t) {
             let _ = b.page_call(t, "Page.navigate", json!({"url": "about:blank"}));
             return Err(why);
         }
+        if let Some(e) = r["errorText"].as_str().filter(|e| !e.is_empty()) {
+            return Err(format!("Navigation failed: {e}"));
+        }
+        if r["loaderId"].is_string() {
+            b.wait_load(t, l, n + 1, timeout);
+        }
+        if let Some(why) = b.take_navigation_blocked(t) {
+            let _ = b.page_call(t, "Page.navigate", json!({"url": "about:blank"}));
+            return Err(why);
+        }
+        let (final_url, title) = b.url_title(t);
+        if final_url != url {
+            if let Some(why) = policy::check_final_url(&env.cfg, &final_url, local_route(b)) {
+                let _ = b.page_call(t, "Page.navigate", json!({"url": "about:blank"}));
+                return Err(why);
+            }
+        }
+        Ok((final_url, title))
+    })();
+    if fenced {
+        b.end_navigation_guard(t);
     }
-    Ok((final_url, title))
+    r
 }
 
 fn compact_snapshot(env: &Env, b: &Browser, t: &str, full: bool) -> Result<(String, usize), String> {
@@ -541,7 +561,11 @@ impl HermesTool {
         let r = match self.name {
             "browser_navigate" => {
                 let url = input["url"].as_str().unwrap_or("");
-                policy::check_navigation(&env.cfg, url, false).and_then(|u| cf.navigate(&env.cfg, &env.home, sid, &u))
+                policy::check_navigation(&env.cfg, url, false).and_then(|u| {
+                    // Camofox navigates over its REST API, so strict mode cannot fence hops.
+                    policy::require_inspectable_redirects(&env.cfg, false, &u)?;
+                    cf.navigate(&env.cfg, &env.home, sid, &u)
+                })
             }
             "browser_snapshot" => cf.snapshot(&env.cfg, sid).map(|mut v| {
                 let s = crate::snapshot::truncate_store(v["snapshot"].as_str().unwrap_or(""), env.cfg.snapshot_threshold(), &env.dir().join("cache"));

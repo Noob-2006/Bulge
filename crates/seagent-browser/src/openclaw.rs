@@ -441,7 +441,9 @@ fn snapshot_action(env: &Env, ctx: &ToolCtx, b: &Browser, t: &str, p: &Value) ->
         let sid = b.attach(t)?;
         let tree = b.session_call(t, &sid, "Accessibility.getFullAXTree", json!({}), b.timeout)?;
         let limit = p["limit"].as_u64().unwrap_or(500).clamp(1, 2000) as usize;
-        let nodes: Vec<Value> = tree["nodes"].as_array().into_iter().flatten().filter(|n| n["ignored"] != true).take(limit).enumerate().map(|(i, n)| json!({"ref": format!("ax{}", i + 1), "role": snapshot::ax_str(&n["role"]), "name": policy::redact(&snapshot::ax_str(&n["name"])), "value": snapshot::ax_str(&n["value"]), "backendDOMNodeId": n["backendDOMNodeId"]})).collect();
+        let mut ax = tree["nodes"].as_array().cloned().unwrap_or_default();
+        snapshot::redact_sensitive_ax_values(&mut ax, |bk| actions::describe_field(b, t, &sid, bk));
+        let nodes: Vec<Value> = ax.iter().filter(|n| n["ignored"] != true).take(limit).enumerate().map(|(i, n)| json!({"ref": format!("ax{}", i + 1), "role": snapshot::ax_str(&n["role"]), "name": policy::redact(&snapshot::ax_str(&n["name"])), "value": snapshot::ax_str(&n["value"]), "backendDOMNodeId": n["backendDOMNodeId"]})).collect();
         let url = b.page(t, |pg| pg.url.clone());
         return Ok(Reply::Text(policy::wrap_untrusted(&serde_json::to_string_pretty(&json!({"ok": true, "format": "aria", "targetId": t, "url": url, "nodes": nodes})).unwrap(), true, "\n[truncated — retry with a smaller maxChars or limit]").0, true));
     }

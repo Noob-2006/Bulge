@@ -8,7 +8,7 @@
 //! [--skill s] [--limit n] · purge [--days n] [--dry-run]
 
 use super::settings::{Settings, Store};
-use super::{curator, ledger, usage};
+use super::{curator, ledger, manage, usage, workshop};
 use serde_json::Value;
 
 fn opt(argv: &[String], f: &str) -> Option<String> {
@@ -180,7 +180,46 @@ pub fn curator_cmd(cfg: &seagent_kernel::config::Config, paths: &seagent_kernel:
             let days = opt(argv, "--days").and_then(|d| d.parse().ok()).unwrap_or(s.curator.archive_ttl_days);
             curator::purge(s, st, days, flag(argv, "--dry-run")).map(|v| format!("{} {} archived skill(s){}", if flag(argv, "--dry-run") { "would purge" } else { "purged" }, v.len(), if v.is_empty() { String::new() } else { format!(": {}", v.join(", ")) }))
         }
-        o => Err(format!("unknown `seagent curator` subcommand `{o}` (status usage run pause resume pin unpin list-unmanaged adopt restore list-archived archive prune backup rollback ledger purge)")),
+        "diet" => {
+            // Shrink oversized SKILL.md files by moving their tail into references/, never by
+            // dropping content. The write goes through the same guarded writer as every skill.
+            let max = opt(argv, "--max-bytes").and_then(|d| d.parse().ok()).unwrap_or(s.workshop.diet_max_bytes);
+            if max < 2_000 {
+                return Err("--max-bytes must be at least 2000".into());
+            }
+            let apply = flag(argv, "--apply");
+            let ws = std::env::current_dir().unwrap_or_else(|_| paths.data.clone());
+            let mut out = Vec::new();
+            for sk in usage::local_skills(st) {
+                if usage::is_locked(st, &sk.name) {
+                    out.push(format!("{}: locked, skipped", sk.name));
+                    continue;
+                }
+                let md = std::fs::read_to_string(&sk.file).map_err(|e| format!("{}: {e}", sk.file.display()))?;
+                let Some(d) = workshop::diet_plan(&md, &sk.name, max) else { continue };
+                if !apply {
+                    out.push(format!("{}: {} → {} bytes, {} section(s) → {}", sk.name, d.before_bytes, d.after_bytes, d.moved_sections, d.reference_path));
+                    continue;
+                }
+                let ops = vec![
+                    manage::Op { action: "write_file".into(), name: sk.name.clone(), description: None, body: None, content: Some(d.reference.clone()), old_string: None, new_string: None, replace_all: false, file_path: Some(d.reference_path.clone()) },
+                    manage::Op { action: "update".into(), name: sk.name.clone(), description: None, body: None, content: Some(d.content.clone()), old_string: None, new_string: None, replace_all: false, file_path: None },
+                ];
+                let ctx = manage::Ctx { cfg, paths, ws: &ws, settings: s, session: None };
+                match manage::run(&ctx, &ops) {
+                    Ok(_) => out.push(format!("{}: {} → {} bytes, {} section(s) → {}", sk.name, d.before_bytes, d.after_bytes, d.moved_sections, d.reference_path)),
+                    Err(e) => out.push(format!("{}: {e}", sk.name)),
+                }
+            }
+            Ok(if out.is_empty() {
+                format!("no SKILL.md over {max} bytes")
+            } else if apply {
+                format!("dieted {} skill(s):\n{}", out.len(), out.join("\n"))
+            } else {
+                format!("{} skill(s) over {max} bytes (dry run; add --apply):\n{}", out.len(), out.join("\n"))
+            })
+        }
+        o => Err(format!("unknown `seagent curator` subcommand `{o}` (status usage run pause resume pin unpin list-unmanaged adopt restore list-archived archive prune backup rollback ledger purge diet)")),
     }
 }
 
@@ -221,6 +260,31 @@ mod tests {
         let compact = r(&["ledger", "--compact"]).unwrap();
         assert!(compact.contains("ledger compacted") && compact.contains("unreferenced blob(s)"), "{compact}");
         assert!(r(&["run", "--background"]).unwrap().contains("ran synchronously"));
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn curator_diet_shrinks_a_sprawling_skill_into_references() {
+        let d = seagent_core::tmp::scratch_path(format!("seagent-diet-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        let st = Store::at(&d);
+        let (cfg, paths) = (seagent_kernel::config::Config::default(), seagent_kernel::config::Paths { data: d.clone(), config_dir: d.join("cfg"), runtime: d.join("run"), ..Default::default() });
+        let s = Settings::from_table(&toml::Table::new());
+        let body = (0..60).map(|i| format!("## Section {i}\n{}", "a step that must survive\n".repeat(30))).collect::<Vec<_>>().join("\n");
+        std::fs::create_dir_all(st.skills.join("big")).unwrap();
+        std::fs::write(st.skills.join("big/SKILL.md"), format!("---\nname: big\ndescription: Big\n---\n\n# Big\n\n{body}")).unwrap();
+        let a = |v: &[&str]| v.iter().map(|x| x.to_string()).collect::<Vec<_>>();
+        let r = |v: &[&str]| curator_cmd(&cfg, &paths, &s, &st, &a(v), None);
+        let dry = r(&["diet"]).unwrap();
+        assert!(dry.contains("big:") && dry.contains("→"), "{dry}");
+        assert!(!st.skills.join("big/references/diet-big.md").exists(), "dry run writes nothing");
+        let out = r(&["diet", "--apply"]).unwrap();
+        assert!(out.contains("dieted 1 skill(s)"), "{out}");
+        let md = std::fs::read_to_string(st.skills.join("big/SKILL.md")).unwrap();
+        let reference = std::fs::read_to_string(st.skills.join("big/references/diet-big.md")).unwrap();
+        assert!(md.contains("## Details") && md.contains("references/diet-big.md"), "{md}");
+        assert!(reference.contains("## Section 59") && reference.contains("must survive"), "moved content is kept");
+        assert!(r(&["diet"]).unwrap().contains("no SKILL.md over"));
         let _ = std::fs::remove_dir_all(&d);
     }
 

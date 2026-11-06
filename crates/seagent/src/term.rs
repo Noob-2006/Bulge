@@ -315,6 +315,7 @@ fn kind_name(kind: &EventKind) -> &'static str {
         EventKind::System { .. } => "system",
         EventKind::Inbox { .. } => "inbox",
         EventKind::Message { .. } => "message",
+        EventKind::MessageBoundary => "message_boundary",
         EventKind::ToolCalled { .. } => "tool_called",
         EventKind::ToolSettled { .. } => "tool_settled",
         EventKind::Gate { .. } => "gate",
@@ -329,6 +330,7 @@ fn kind_name(kind: &EventKind) -> &'static str {
         EventKind::Title { .. } => "title",
         EventKind::Agent { .. } => "agent",
         EventKind::Tools { .. } => "tools",
+        EventKind::ToolGuard { .. } => "tool_guard",
         EventKind::Rewind { .. } => "rewind",
         EventKind::Meta { .. } => "meta",
         EventKind::OutputSchema { .. } => "output_schema",
@@ -338,6 +340,10 @@ fn kind_name(kind: &EventKind) -> &'static str {
         EventKind::Workspace { .. } => "workspace",
         EventKind::Fast { .. } => "fast",
         EventKind::AuxUsage { .. } => "aux_usage",
+        EventKind::Step { .. } => "step",
+        EventKind::SystemDelta { .. } => "system_delta",
+        EventKind::Request { .. } => "request",
+        EventKind::TurnDropped { .. } => "turn_dropped",
     }
 }
 

@@ -551,6 +551,47 @@ fn install_sh_installs_binary_and_share_under_posix_shells() {
     }
 }
 
+/// eb5d0cb5ea5: a caller with `umask 0002` must not leave the installed share tree
+/// group/world-writable. The script strips those bits without loosening a stricter mask.
+#[test]
+fn install_sh_never_installs_group_or_world_writable_files() {
+    if !have("tar") {
+        eprintln!("SKIP: no tar");
+        return;
+    }
+    let sb = Sandbox::new("install-umask");
+    let rel = served_release(&sb);
+    sums(&sb, &rel);
+    let home = sb.join("home");
+    let script = repo_root().join("packaging/install.sh");
+    let out = Command::new("sh")
+        .args(["-c", "umask 0002; exec \"$0\" --no-start", script.to_str().unwrap()])
+        .env_clear()
+        .env("PATH", std::env::var_os("PATH").unwrap())
+        .env("HOME", &home)
+        .env("TMPDIR", sb.join("tmp"))
+        .env("SEAGENT_RELEASE_BASE", format!("file://{}", rel.display()))
+        .output()
+        .unwrap();
+    assert_ok(&out, "install.sh under umask 0002");
+    let share = home.join(".local/lib/seagent/share");
+    assert!(share.is_dir(), "share not installed: {}", text(&out));
+    let mut checked = 0;
+    let mut stack = vec![share.clone()];
+    while let Some(p) = stack.pop() {
+        let mode = std::fs::metadata(&p).unwrap().permissions().mode();
+        assert_eq!(mode & 0o022, 0, "{} is group/world-writable (mode {:o})", p.display(), mode & 0o777);
+        checked += 1;
+        if p.is_dir() {
+            stack.extend(std::fs::read_dir(&p).unwrap().flatten().map(|e| e.path()));
+        }
+    }
+    assert!(checked > 10, "only {checked} paths checked");
+    let bin = home.join(".local/bin/seagent");
+    let mode = std::fs::metadata(&bin).unwrap().permissions().mode();
+    assert_eq!(mode & 0o022, 0, "binary is group/world-writable (mode {:o})", mode & 0o777);
+}
+
 #[test]
 fn install_sh_refuses_a_bad_checksum_and_checks_the_signature() {
     if !have("tar") {

@@ -225,6 +225,15 @@
 | microVM | `seagent sandbox vm status／image build／verify／snapshot／snapshots／undo／gc` 可用；`[exec.vm.readonly]` 逐工作區覆寫未實作；daemon 尚未自動回收閒置 VM | `crates/seagent-vm/src/`、`crates/seagent/src/exec_cli.rs` |
 | 艦隊 | `seagent fleet status／board／files／limits／resume`；檔案租約預設 1 小時、最長 7 天、過期自動釋放 | `crates/seagent-kernel/src/coord.rs`、`limits.rs` |
 | 技能相容 | 直接讀 `.claude/skills`、`metadata.openclaw`、`metadata.hermes`；只結構化使用 `name`／`description`，其餘欄位按需解讀 | `crates/seagent-skills/src/skill.rs` |
+| Notion／Airtable 技能 | 已移除隨附的 `productivity/notion`、`productivity/airtable`（上游 `8112254f8a` 同樣移除）。改用廠商 MCP server（`[mcp.notion]`、`[mcp.airtable]`）或 vendor-owned skill taps；不再隨附 `AIRTABLE_API_KEY` 範例 | [MCP 段落](#二mcp)、`share/skills/` |
+| 知識召回閘門 | `[memory.recall_gate]` off/shadow/live、逐頁決策模型分數、1.5s 預算、`shadow` 只記 log；實作於 `active::RecallGate` | `crates/seagent-memory/src/active.rs` |
+| 知識庫 ACL／歷史／取代鏈 | `[memory.wiki] agent_id/agents/stores/history`；`wiki_apply op=supersede` 與搜尋沿 supersede 鏈；`wiki_history`／`seagent wiki history` | `crates/seagent-memory/src/wiki.rs` |
+| 技能鎖 | `seagent skills lock/unlock`（使用者）；skill 工具、write/patch、shell 寫入與 curator archive 都拒絕；agent 不能 unlock | `crates/seagent-skills/src/core/usage.rs`、`crates/seagent-kernel/src/secgate.rs` |
+| 技能工坊 propose/auto 與 diet | `[skills.workshop] mode`；LLM 經驗回顧；propose 進 `/skills drafts` 審批；`seagent curator diet` 把尾段移入 references | `crates/seagent-skills/src/core/{review,workshop,cli}.rs` |
+| 深度研究工具 | `deep_research`：有界迴圈、逐字引文、支持稽核、numeric ledger、明確 gaps；不需 function calling | `crates/seagent-tools/src/research.rs` |
+| 常駐提醒 | `[memory.standing]` ＋ `seagent memory intents`：關鍵詞觸發、scope、cooldown、max fires、expiry | `crates/seagent-memory/src/standing.rs` |
+| 記憶供應商 profile/config hooks | `Provider::profile_created/profile_renamed/read_config/write_config` 與 plugin JSON-RPC；核心尚無 profile-create 指令（host 可呼叫） | `crates/seagent-memory/src/manager.rs` |
+| Ollama embeddings 私網政策 | loopback 與 LAN 預設可用，`[memory.search.embedding] allow_private = false` 只准 loopback；metadata 永遠拒絕 | `crates/seagent-memory/src/embed.rs` |
 | 核准疲勞統計 | **未實作**（沒有每日詢問次數／被拒比例／建議改預授權的統計） | `crates/seagent-security/src/approvals.rs`（`status` 只報規則數） |
 | 瀏覽器／電腦操作 | CDP client 與 AT-SPI／xdotool 有實作；端到端只對本機 Chromium 驗證過一部分 | `crates/seagent-browser`、`tests/real/chromium_real.sh` |
 

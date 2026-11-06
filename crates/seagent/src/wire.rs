@@ -59,6 +59,8 @@ pub fn attach(k: &Kernel, ws: &Path) {
     crate::meetings::teams::install(k, &k.cfg);
     // One `cron_execution` monitoring event per executed job (the scheduler lives in the kernel).
     seagent_kernel::automation::set_exec_observer(crate::agentcmds::monitoring::cron_observer());
+    // Busy-arrival telemetry (queued / steered / dropped) for `/metrics`.
+    seagent_kernel::kernel::set_busy_observer(Arc::new(|session: &str, outcome: &str| seagent_app::metrics::busy_arrival(session, outcome)));
 }
 
 /// Commands this module owns (dispatched before the binary's own argument parser, since

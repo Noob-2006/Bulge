@@ -30,6 +30,7 @@ pub mod rewrite;
 pub mod settings;
 pub mod slash;
 pub mod sigv4;
+pub mod standing;
 pub mod tools;
 pub mod trust;
 pub mod util;
@@ -249,10 +250,12 @@ pub fn lifecycles(h: &Arc<Host>, plugins: Vec<Arc<dyn manager::Provider>>) -> Ve
     }
     let mut v: Vec<Arc<dyn Lifecycle>> = vec![Arc::new(manager::MemoryManager::new(h.clone(), providers))];
     v.push(Arc::new(active::ActiveMemory::new(h.clone())));
+    v.push(Arc::new(active::RecallGate::new(h.clone())));
     if h.settings.vector.enabled {
         v.push(Arc::new(vector::AutoMemory(Arc::new(vector::VectorMemory::new(h.clone())))));
     }
     v.push(Arc::new(flush::Flush(h.clone())));
+    v.push(Arc::new(standing::StandingIntents::new(h.clone())));
     v
 }
 

@@ -95,6 +95,12 @@ pub struct JobExt {
     pub last_status: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_delivery: Option<String>,
+    /// Effective agent/owner id, used to pick `[automation.agents.<id>]` delivery defaults.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<String>,
+    /// Creating profile (`SEAGENT_PROFILE`), used to pick `[automation.creators.<id>]` defaults.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created_by: Option<String>,
 }
 
 const LAST_OUTPUT_CAP: usize = 8000;
@@ -108,6 +114,8 @@ pub struct Settings {
     pub default_model: String,
     /// `[automation] allow_agent_scheduling` (default true): cron runs may manage jobs.
     pub allow_in_cron: bool,
+    /// `[automation] agent` (default ""): owner recorded on new jobs.
+    pub default_agent: String,
 }
 
 impl Settings {
@@ -119,6 +127,7 @@ impl Settings {
             script_timeout: Duration::from_secs(a.get("script_timeout_seconds").and_then(|v| v.as_integer()).filter(|n| *n > 0).map(|n| n as u64).unwrap_or(script::DEFAULT_TIMEOUT_SECS)),
             default_model: cfg.model.default.clone(),
             allow_in_cron: a.get("allow_agent_scheduling").and_then(|v| v.as_bool()).unwrap_or(true),
+            default_agent: a.get("agent").or_else(|| a.get("default_agent")).and_then(|v| v.as_str()).map(str::trim).filter(|s| !s.is_empty()).unwrap_or("").to_string(),
         }
     }
 }
@@ -150,6 +159,10 @@ pub struct Spec {
     /// Reuse one session for every run (`/loop`: the current chat session).
     pub session: Option<String>,
     pub budget: Option<Budget>,
+    /// Owner agent for scoped delivery defaults (`[automation.agents.<id>]`).
+    pub agent: Option<String>,
+    /// Creating profile for scoped delivery defaults (`[automation.creators.<id>]`).
+    pub created_by: Option<String>,
 }
 
 /// Validate a delivery target string (comma-combined) without resolving `origin`.
@@ -261,13 +274,22 @@ pub fn create(data: &Path, st: &Settings, spec: Spec, ws: &Path) -> Result<Job, 
             wake_mode: spec.wake_mode.clone(),
             pacing: spec.pacing,
             created_at: Some(now),
+            agent: spec.agent.clone().or_else(|| (!st.default_agent.is_empty()).then(|| st.default_agent.clone())),
+            created_by: spec.created_by.clone().or_else(profile_creator),
             ..Default::default()
         },
+        claim: None,
     };
     with_list(&jobs_path(data), |v: &mut Vec<Job>| v.push(job.clone()))?;
     chronos::jobs_changed(data);
     fire_changed(None, "added", &job, json!({"next_run_at_ms": job.next_run * 1000, "enabled": job.enabled}));
     Ok(job)
+}
+
+/// The active profile, when one is selected (`SEAGENT_PROFILE`), stamped on new jobs so
+/// `[automation.creators.<profile>]` defaults can be resolved later.
+fn profile_creator() -> Option<String> {
+    std::env::var("SEAGENT_PROFILE").ok().map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
 }
 
 fn clean_list(v: Vec<String>) -> Vec<String> {
@@ -390,6 +412,12 @@ pub fn update(data: &Path, st: &Settings, id: &str, spec: Spec) -> Result<Job, S
         }
         if let Some(m) = &spec.model {
             j.model = Some(m.trim().to_string()).filter(|m| !m.is_empty());
+        }
+        if let Some(a) = &spec.agent {
+            j.ext.agent = Some(a.trim().to_string()).filter(|a| !a.is_empty());
+        }
+        if let Some(c) = &spec.created_by {
+            j.ext.created_by = Some(c.trim().to_string()).filter(|c| !c.is_empty());
         }
         if j.ext.no_agent && j.ext.script.is_none() {
             return Err("no_agent=True requires a script".into());
@@ -690,10 +718,105 @@ pub fn resolve_origin(data: &Path, session: &str) -> Option<Target> {
     Some(Target::Channel { name, chat: Some(chat), thread: None })
 }
 
-/// Concrete targets for a job's `deliver` (or `failure_deliver`) string.
+/// One routed delivery destination from config.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Route {
+    pub deliver: Option<String>,
+    pub failure_deliver: Option<String>,
+}
+
+/// Gateway, per-agent and per-creator delivery defaults (`[automation]` / OpenClaw `cron.*`).
+///
+/// ```toml
+/// [automation]
+/// default_deliver = "slack:ops"
+/// default_failure_deliver = "slack:oncall"
+/// agent = "ops"                      # owner recorded on new jobs
+/// [automation.agents.ops]
+/// deliver = "slack:C123"
+/// failure_deliver = "slack:C999"
+/// [automation.creators.alice]
+/// deliver = "telegram:42"
+/// ```
+///
+/// Precedence is most-specific first: the job's own field, then its creator, then its owner
+/// agent, then the gateway default. A missing `failure_deliver` falls back to that scope's
+/// `deliver`, then to the next scope, and finally to `origin` (the creating chat).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct DeliveryDefaults {
+    pub global: Route,
+    pub agents: HashMap<String, Route>,
+    pub creators: HashMap<String, Route>,
+}
+
+fn route_table(t: &toml::Table) -> Route {
+    let field = |keys: &[&str]| keys.iter().find_map(|k| t.get(*k).and_then(|v| v.as_str()).map(str::trim).filter(|v| !v.is_empty()).map(String::from));
+    Route {
+        deliver: field(&["deliver", "delivery", "default_deliver"]),
+        failure_deliver: field(&["failure_deliver", "failure_alert", "default_failure_deliver"]),
+    }
+}
+
+fn scoped(t: &toml::Table, key: &str) -> HashMap<String, Route> {
+    t.get(key).and_then(|v| v.as_table()).map(|m| m.iter().filter_map(|(k, v)| v.as_table().map(|r| (k.clone(), route_table(r)))).collect()).unwrap_or_default()
+}
+
+impl DeliveryDefaults {
+    pub fn from_config(cfg: &Config) -> DeliveryDefaults {
+        let a = &cfg.automation;
+        DeliveryDefaults {
+            global: Route {
+                deliver: a.get("default_deliver").and_then(|v| v.as_str()).map(str::trim).filter(|v| !v.is_empty()).map(String::from),
+                failure_deliver: a.get("default_failure_deliver").and_then(|v| v.as_str()).map(str::trim).filter(|v| !v.is_empty()).map(String::from),
+            },
+            agents: scoped(a, "agents"),
+            creators: scoped(a, "creators"),
+        }
+    }
+
+    fn agent_route(&self, job: &Job) -> Option<&Route> {
+        let id = job.ext.agent.as_deref()?.trim();
+        self.agents.get(id).or_else(|| self.agents.iter().find(|(k, _)| k.eq_ignore_ascii_case(id)).map(|(_, v)| v))
+    }
+
+    fn creator_route(&self, job: &Job) -> Option<&Route> {
+        let id = job.ext.created_by.as_deref()?.trim();
+        self.creators.get(id)
+    }
+
+    /// The effective `deliver` string for this job (job → creator → agent → gateway → origin).
+    pub fn deliver_for(&self, job: &Job) -> String {
+        let scoped = self.creator_route(job).and_then(|r| r.deliver.clone()).or_else(|| self.agent_route(job).and_then(|r| r.deliver.clone()));
+        job.ext.deliver.clone().or(scoped).or_else(|| self.global.deliver.clone()).unwrap_or_else(|| "origin".into())
+    }
+
+    /// The effective failure destination (job failure → job delivery → scoped failure/delivery →
+    /// gateway failure/delivery → origin).
+    pub fn failure_for(&self, job: &Job) -> String {
+        if let Some(d) = job.ext.failure_deliver.clone() {
+            return d;
+        }
+        if let Some(d) = job.ext.deliver.clone() {
+            return d;
+        }
+        let creator = self.creator_route(job);
+        let agent = self.agent_route(job);
+        creator
+            .and_then(|r| r.failure_deliver.clone().or_else(|| r.deliver.clone()))
+            .or_else(|| agent.and_then(|r| r.failure_deliver.clone().or_else(|| r.deliver.clone())))
+            .or_else(|| self.global.failure_deliver.clone().or_else(|| self.global.deliver.clone()))
+            .unwrap_or_else(|| "origin".into())
+    }
+}
+
+/// Concrete targets for a job's `deliver` (or `failure_deliver`) string, without config defaults.
 pub fn targets(data: &Path, job: &Job, failure: bool) -> Vec<Target> {
-    let raw = if failure { job.ext.failure_deliver.clone().or_else(|| job.ext.deliver.clone()) } else { job.ext.deliver.clone() };
-    let raw = raw.unwrap_or_else(|| "origin".into());
+    targets_with(data, job, failure, &DeliveryDefaults::default())
+}
+
+/// [`targets`] with gateway/agent/creator defaults applied.
+pub fn targets_with(data: &Path, job: &Job, failure: bool, defaults: &DeliveryDefaults) -> Vec<Target> {
+    let raw = if failure { defaults.failure_for(job) } else { defaults.deliver_for(job) };
     let mut out = Vec::new();
     for part in raw.split(',').map(str::trim).filter(|p| !p.is_empty()) {
         match part {
@@ -718,11 +841,16 @@ pub fn targets(data: &Path, job: &Job, failure: bool) -> Vec<Target> {
 
 /// Deliver a run's text (`[SILENT]` / empty → nothing). Returns the receipt line.
 pub fn deliver_result(data: &Path, job: &Job, text: &str, failure: bool) -> Option<String> {
+    deliver_result_with(data, job, text, failure, &DeliveryDefaults::default())
+}
+
+/// [`deliver_result`] with gateway/agent/creator defaults applied.
+pub fn deliver_result_with(data: &Path, job: &Job, text: &str, failure: bool, defaults: &DeliveryDefaults) -> Option<String> {
     let t = text.trim();
     if t.is_empty() || t == SILENT {
         return None;
     }
-    let ts = targets(data, job, failure);
+    let ts = targets_with(data, job, failure, defaults);
     if ts.is_empty() {
         return None;
     }
@@ -784,6 +912,8 @@ pub fn record_with(data: &Path, id: &str, status: &str, output: Option<&str>, de
             if delivery.is_some() {
                 j.ext.last_delivery = delivery.clone();
             }
+            // The claimed run reached a recorded outcome: no restart recovery for it.
+            j.claim = None;
         }
     });
     alert
@@ -799,6 +929,7 @@ pub fn block_and_pause(data: &Path, id: &str, reason: &str) {
 /// Shared by `automation::run_job`.
 pub fn pre_run(k: &Kernel, job: &Job, extra: Option<&str>) -> Prepared {
     let st = Settings::from_config(&k.cfg);
+    let defaults = DeliveryDefaults::from_config(&k.cfg);
     let ws = PathBuf::from(&job.workspace);
     let vault = k.vault.clone();
     begin_run(&job.id);
@@ -807,7 +938,7 @@ pub fn pre_run(k: &Kernel, job: &Job, extra: Option<&str>) -> Prepared {
     let data = &k.paths.data;
     match &p {
         Prepared::Direct { ok, text } => {
-            let d = deliver_result(data, job, text, !ok);
+            let d = deliver_result_with(data, job, text, !ok, &defaults);
             let status = if *ok { if text.trim().is_empty() { "silent" } else { "ok" } } else { "error" };
             let alert = record_with(data, &job.id, status, Some(text), d, (!ok).then_some(text.as_str()));
             finish_hook(k, job, status, (!ok).then_some(text.as_str()), alert);
@@ -818,7 +949,7 @@ pub fn pre_run(k: &Kernel, job: &Job, extra: Option<&str>) -> Prepared {
         }
         Prepared::Blocked(why) => {
             block_and_pause(data, &job.id, why);
-            let _ = deliver_result(data, job, &format!("Blocked by the cron prompt scanner and paused: {why}"), true);
+            let _ = deliver_result_with(data, job, &format!("Blocked by the cron prompt scanner and paused: {why}"), true, &defaults);
             finish_hook(k, job, "blocked", Some(why), None);
         }
         Prepared::SystemEvent(_) => {
@@ -846,19 +977,20 @@ fn finish_hook(k: &Kernel, job: &Job, status: &str, error: Option<&str>, alert: 
 /// After an agent run: record and deliver (Hermes `[SILENT]` / `[CRON_FAILURE]` semantics).
 pub fn post_run(k: &Kernel, job: &Job, outcome: Result<&crate::kernel::Outcome, &str>) {
     let data = &k.paths.data;
+    let defaults = DeliveryDefaults::from_config(&k.cfg);
     match outcome {
         Ok(o) => {
             let text = o.text.trim();
             let failed = !o.reason.ok() || text.lines().next().map(str::trim) == Some(FAILURE_MARK);
             let body = text.strip_prefix(FAILURE_MARK).map(str::trim_start).unwrap_or(text);
-            let d = if failed && !o.reason.ok() { deliver_result(data, job, &format!("{}\n{body}", o.reason.label()), true) } else { deliver_result(data, job, body, failed) };
+            let d = if failed && !o.reason.ok() { deliver_result_with(data, job, &format!("{}\n{body}", o.reason.label()), true, &defaults) } else { deliver_result_with(data, job, body, failed, &defaults) };
             let status = if failed { "error" } else if body == SILENT || body.is_empty() { "silent" } else { "ok" };
             let err: Option<String> = failed.then(|| if o.reason.ok() { body.to_string() } else { format!("{}\n{body}", o.reason.label()) });
             let alert = record_with(data, &job.id, status, Some(body), d, err.as_deref());
             finish_hook(k, job, status, err.as_deref(), alert);
         }
         Err(e) => {
-            let d = deliver_result(data, job, e, true);
+            let d = deliver_result_with(data, job, e, true, &defaults);
             let alert = record_with(data, &job.id, "error", Some(e), d, Some(e));
             finish_hook(k, job, "error", Some(e), alert);
         }

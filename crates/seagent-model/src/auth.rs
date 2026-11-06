@@ -419,12 +419,32 @@ pub fn source_for(
         ));
     }
     match names.first() {
-        Some(env) => Err(format!(
-            "provider `{}`: API key missing — set ${env}",
-            cfg.id
-        )),
+        Some(_) => Err(missing_key_message(cfg)),
         None => Ok(Arc::new(Static::new(None))),
     }
+}
+
+/// The error a missing API key deserves: the exact variable, the agent profile
+/// (when `$SEAGENT_AGENT` scopes the store), and the command that sets it — not a
+/// misleading 401 after a request with an empty key.
+pub fn missing_key_message(cfg: &ProviderConfig) -> String {
+    let names = cfg.key_env_names();
+    let env = names.first().map(String::as_str).unwrap_or("the provider key");
+    let alts = if names.len() > 1 {
+        format!(" (or {})", names[1..].iter().map(|n| format!("${n}")).collect::<Vec<_>>().join(", "))
+    } else {
+        String::new()
+    };
+    let profile = std::env::var("SEAGENT_AGENT")
+        .ok()
+        .map(|p| p.trim().to_string())
+        .filter(|p| !p.is_empty())
+        .map(|p| format!(" for agent profile `{p}`"))
+        .unwrap_or_default();
+    format!(
+        "provider `{}`: API key missing{profile} — set ${env}{alts}, then persist it with `seagent secrets set {env}` (or run `seagent setup`)",
+        cfg.id
+    )
 }
 
 // ───────────────────────── Azure Entra ID ─────────────────────────
@@ -1137,6 +1157,19 @@ mod tests {
             ..Default::default()
         };
         assert!(source_for(&c, None).err().unwrap().contains("seagent login"));
+
+        let c = ProviderConfig {
+            id: "deepseek".into(),
+            api_key_env: Some("SEAGENT_T_SRC_MISSING_KEY".into()),
+            key_envs: vec!["SEAGENT_T_SRC_MISSING_ALT".into()],
+            ..Default::default()
+        };
+        let e = missing_key_message(&c);
+        assert!(e.contains("$SEAGENT_T_SRC_MISSING_KEY"), "{e}");
+        assert!(e.contains("$SEAGENT_T_SRC_MISSING_ALT"), "{e}");
+        assert!(e.contains("`seagent secrets set SEAGENT_T_SRC_MISSING_KEY`"), "{e}");
+        assert!(e.contains("`seagent setup`"), "{e}");
+        assert_eq!(source_for(&c, None).err().unwrap(), e, "the chain reports the same actionable message");
     }
 
     #[test]

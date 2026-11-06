@@ -319,6 +319,11 @@ pub fn register() {
         let cfg = env.config::<Config>()?;
         Ok(tools(cfg))
     });
+    seagent_core::registry::register_tool_provider("deep-research", 305, |env| {
+        let cfg = env.config::<Config>()?;
+        let web = seagent_tools::web::WebConfig::from_value(serde_json::to_value(&cfg.web).unwrap_or(serde_json::Value::Null))?;
+        Ok(seagent_tools::research::tools(std::sync::Arc::new(web), seagent_tools::web::http::process_env()))
+    });
 }
 
 #[cfg(test)]

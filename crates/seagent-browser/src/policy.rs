@@ -170,7 +170,9 @@ pub fn check_navigation(cfg: &BrowserConfig, url: &str, local_route: bool) -> Re
     if always_blocked(&url) {
         return Err("Blocked: URL targets a cloud metadata endpoint".into());
     }
-    if !local_route && !cfg.private_allowed() && is_private(&url) {
+    // An explicit `allow_private_urls = false` is strict for every transport, including a
+    // local browser; the unset default still lets local browsers reach localhost.
+    if (strict_ssrf(cfg) || (!local_route && !cfg.private_allowed())) && is_private(&url) {
         return Err("Blocked: URL targets a private or internal address".into());
     }
     if let Some(r) = cfg.blocked_domains.iter().find(|r| domain_match(&h.host, r)) {
@@ -187,8 +189,8 @@ pub fn check_final_url(cfg: &BrowserConfig, final_url: &str, local_route: bool) 
     if always_blocked(final_url) {
         return Some("Blocked: redirect landed on a cloud metadata endpoint".into());
     }
-    if !local_route && !cfg.private_allowed() && is_private(final_url) {
-        return Some("Blocked: redirect landed on a private/internal address".into());
+    if strict_ssrf(cfg) || (!local_route && !cfg.private_allowed()) {
+        return nav_request_blocked(final_url, cfg.private_allowed());
     }
     None
 }
@@ -196,6 +198,42 @@ pub fn check_final_url(cfg: &BrowserConfig, final_url: &str, local_route: bool) 
 /// The SSRF guard applies (non-local backend, private URLs not allowed).
 pub fn ssrf_guard(cfg: &BrowserConfig) -> bool {
     !cfg.private_allowed()
+}
+
+/// Strict mode is the operator explicitly setting `browser.allow_private_urls = false`. The
+/// unset default (private allowed for local browsers) is not strict.
+pub fn strict_ssrf(cfg: &BrowserConfig) -> bool {
+    cfg.allow_private_urls == Some(false)
+}
+
+/// Verdict for one navigation hop. Runs on the Fetch interceptor before the request leaves
+/// Chrome, so a redirect cannot reach a private host and be refused only afterwards.
+pub fn nav_request_blocked(url: &str, allow_private: bool) -> Option<String> {
+    if always_blocked(url) {
+        return Some("Blocked: redirect landed on a cloud metadata endpoint".into());
+    }
+    if !allow_private && is_private(url) {
+        return Some("Blocked: redirect landed on a private/internal address".into());
+    }
+    None
+}
+
+/// The refusal text for a transport that cannot fence redirect hops (Camofox's HTTP API, or
+/// a CDP backend where Fetch interception is unavailable).
+pub const UNINSPECTABLE_REDIRECTS: &str = "Navigation blocked: strict SSRF policy (browser.allow_private_urls = false) requires redirect-hop inspection, which this browser backend cannot provide; use a CDP-backed browser or allow private URLs";
+
+/// Refuse an http(s) navigation under strict policy when the transport cannot inspect the
+/// redirect hops before they are sent.
+pub fn require_inspectable_redirects(cfg: &BrowserConfig, inspectable: bool, url: &str) -> Result<(), String> {
+    if !strict_ssrf(cfg) || inspectable {
+        return Ok(());
+    }
+    let u = url.trim().to_ascii_lowercase();
+    if u.starts_with("http://") || u.starts_with("https://") {
+        Err(UNINSPECTABLE_REDIRECTS.into())
+    } else {
+        Ok(())
+    }
 }
 
 /// First private / metadata http(s) literal in a JS expression (Hermes `_expression_targets_private_url`).
@@ -325,6 +363,21 @@ mod tests {
         assert!(check_navigation(&c, "https://other.example/", false).unwrap_err().contains("allowed_domains"));
         assert!(check_navigation(&c, "https://www.ok.example/", false).is_ok());
         assert_eq!(check_navigation(&c, "about:blank", false).unwrap(), "about:blank");
+    }
+
+    #[test]
+    fn strict_policy_checks_local_targets_and_uninspectable_redirects() {
+        let mut c = BrowserConfig { backend: "local".into(), allow_private_urls: Some(false), ..Default::default() };
+        assert!(check_navigation(&c, "http://127.0.0.1:3000/", true).unwrap_err().contains("private"), "explicit strict mode applies to local browsers too");
+        assert!(check_navigation(&c, "https://example.com/", true).is_ok());
+        assert_eq!(check_final_url(&c, "http://10.0.0.5/", true).as_deref(), Some("Blocked: redirect landed on a private/internal address"));
+        assert_eq!(nav_request_blocked("http://169.254.169.254/latest", false).as_deref(), Some("Blocked: redirect landed on a cloud metadata endpoint"));
+        assert!(nav_request_blocked("https://example.com/", false).is_none());
+        assert!(require_inspectable_redirects(&c, false, "https://example.com/").unwrap_err().contains("redirect-hop inspection"));
+        assert!(require_inspectable_redirects(&c, false, "about:blank").is_ok());
+        assert!(require_inspectable_redirects(&c, true, "https://example.com/").is_ok());
+        c.allow_private_urls = None;
+        assert!(require_inspectable_redirects(&c, false, "https://example.com/").is_ok(), "the unset default is not strict");
     }
 
     #[test]

@@ -83,7 +83,9 @@ pub fn status(k: &Kernel, caller: &str, input: &Value) -> Result<Value, String> 
     let updated = events.last().map(|e| e.ts).unwrap_or(0);
     let (pid, mname) = seagent_kernel::context::split_model(&v.model);
     let window = k.resolver.provider(pid).map(|p| p.caps(mname).context_window).unwrap_or(0);
-    let ctx = if window > 0 { format!("{} / {window} ({:.0}%)", v.last_input_tokens, v.last_input_tokens as f64 * 100.0 / window as f64) } else { v.last_input_tokens.to_string() };
+    let marker = k.window_marker(&v.model);
+    let note = if marker.is_empty() { String::new() } else { format!(" {marker}") };
+    let ctx = if window > 0 { format!("{} / {window}{note} ({:.0}%)", v.last_input_tokens, v.last_input_tokens as f64 * 100.0 / window as f64) } else { v.last_input_tokens.to_string() };
     let mut st = vec![
         format!("🧭 Session {id}{}", v.title.as_deref().map(|t| format!(" — {t}")).unwrap_or_default()),
         format!("🧠 Model: {}{}", v.model, v.thinking.as_deref().map(|t| format!(" · thinking {t}")).unwrap_or_default()),

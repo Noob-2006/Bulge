@@ -390,7 +390,7 @@ const EXEC_PRESETS: &[(&str, ap::ExecSecurity, ap::ExecAsk, ap::ExecSecurity)] =
     ("deny-all", ap::ExecSecurity::Deny, ap::ExecAsk::Off, ap::ExecSecurity::Deny),
 ];
 
-fn exec_policy_json(cfg: &Config, paths: &Paths) -> Value {
+pub(crate) fn exec_policy_json(cfg: &Config, paths: &Paths) -> Value {
     let e = &cfg.approvals.exec;
     let exec_grants: Vec<String> = ap::grants(&paths.data).into_iter().filter(|g| g.kind == ap::GrantKind::Exec).map(|g| g.pattern).collect();
     json!({
@@ -472,6 +472,18 @@ pub fn cmd_exec_policy(a: &Args, cfg: &Config, paths: &Paths, ws: &Path) -> R {
         print_exec_policy(&v);
     }
     Ok(0)
+}
+
+/// Persist `[approvals.exec]` from the console (same validation and rollback as
+/// `seagent exec-policy set`), returning the effective policy.
+pub(crate) fn set_exec_policy(paths: &Paths, ws: &Path, security: &str, ask: &str, fallback: &str) -> Result<Value, String> {
+    let sec = ap::ExecSecurity::parse(security).ok_or_else(|| format!("security `{security}`: use deny|allowlist|full"))?;
+    let ask = ap::ExecAsk::parse(ask).ok_or_else(|| format!("ask `{ask}`: use off|on-miss|always"))?;
+    let fb = ap::ExecSecurity::parse(fallback).ok_or_else(|| format!("ask_fallback `{fallback}`: use deny|allowlist|full"))?;
+    let kv = [("security", toml_str(sec.as_str())), ("ask", toml_str(ask.as_str())), ("ask_fallback", toml_str(fb.as_str()))];
+    persist(paths, ws, "approvals.exec", &kv, |c| c.approvals.exec.security == sec && c.approvals.exec.ask == ask && c.approvals.exec.ask_fallback == fb)?;
+    let now = Config::load(Some(&paths.user_config()), Some(&project_config(ws)), &[])?;
+    Ok(exec_policy_json(&now, paths))
 }
 
 pub fn cmd_pause(a: &Args, paths: &Paths, resume: bool) -> R {

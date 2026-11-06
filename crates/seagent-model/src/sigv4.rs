@@ -1,7 +1,7 @@
-//! AWS Signature Version 4 (request signing for Bedrock), and the AWS credential
-//! chain seagent understands without the SDK: `$AWS_ACCESS_KEY_ID`/`$AWS_SECRET_ACCESS_KEY`
-//! (+ `$AWS_SESSION_TOKEN`), then `~/.aws/credentials` for `$AWS_PROFILE` (default
-//! `default`), then `credential_process` from `~/.aws/config`.
+//! AWS Signature Version 4 (request signing for Bedrock), and the AWS default
+//! credential chain without the SDK: environment variables, web identity (EKS
+//! IRSA via STS), the shared credentials/config profile (including
+//! `credential_process`), ECS container credentials, then EC2 IMDSv2.
 
 use seagent_net::crypto::{hex, hmac_sha256, sha256};
 use std::time::Duration;
@@ -37,6 +37,9 @@ fn ini_section(text: &str, section: &str) -> Option<Vec<(String, String)>> {
 }
 
 impl AwsCreds {
+    /// AWS's default provider chain, without the SDK: environment, web identity
+    /// (EKS IRSA), the shared credentials/config profile (including
+    /// `credential_process`), ECS container credentials, then IMDSv2.
     pub fn from_env() -> Result<AwsCreds, String> {
         let get = |k: &str| {
             std::env::var(k)
@@ -44,60 +47,325 @@ impl AwsCreds {
                 .filter(|v| !v.trim().is_empty())
                 .map(|v| v.trim().to_string())
         };
-        if let (Some(a), Some(s)) = (get("AWS_ACCESS_KEY_ID"), get("AWS_SECRET_ACCESS_KEY")) {
-            return Ok(AwsCreds {
-                access_key: a,
-                secret_key: s,
-                session_token: get("AWS_SESSION_TOKEN"),
-            });
-        }
         let home = std::env::var_os("HOME")
             .map(std::path::PathBuf::from)
             .unwrap_or_default();
-        let profile = get("AWS_PROFILE").unwrap_or_else(|| "default".into());
-        let creds_file = get("AWS_SHARED_CREDENTIALS_FILE")
-            .map(Into::into)
-            .unwrap_or_else(|| home.join(".aws/credentials"));
-        if let Ok(t) = std::fs::read_to_string(&creds_file) {
-            if let Some(kv) = ini_section(&t, &profile) {
-                let f = |k: &str| kv.iter().find(|(a, _)| a == k).map(|(_, v)| v.clone());
-                if let (Some(a), Some(s)) = (f("aws_access_key_id"), f("aws_secret_access_key")) {
-                    return Ok(AwsCreds {
+        resolve(&get, &home)
+    }
+}
+
+/// The chain behind [`AwsCreds::from_env`], with the environment and home directory
+/// injected so every source can be exercised against a local fake endpoint.
+fn resolve(
+    get: &dyn Fn(&str) -> Option<String>,
+    home: &std::path::Path,
+) -> Result<AwsCreds, String> {
+    if let Some(c) = env_creds(get)? {
+        return Ok(c);
+    }
+    if let Some(c) = web_identity(get)? {
+        return Ok(c);
+    }
+    if let Some(c) = shared_profile(get, home)? {
+        return Ok(c);
+    }
+    if let Some(c) = ecs_creds(get)? {
+        return Ok(c);
+    }
+    if let Some(c) = imds_creds(get)? {
+        return Ok(c);
+    }
+    let profile = get("AWS_PROFILE").unwrap_or_else(|| "default".into());
+    Err(format!(
+        "no AWS credentials: checked the environment, web identity, profile `{profile}` in ~/.aws/credentials, ECS container credentials and EC2 IMDSv2 — set AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY, AWS_BEARER_TOKEN_BEDROCK, or configure the profile"
+    ))
+}
+
+fn env_creds(get: &dyn Fn(&str) -> Option<String>) -> Result<Option<AwsCreds>, String> {
+    let a = get("AWS_ACCESS_KEY_ID");
+    let s = get("AWS_SECRET_ACCESS_KEY");
+    match (a, s) {
+        (None, None) => Ok(None),
+        (Some(a), Some(s)) => Ok(Some(AwsCreds {
+            access_key: a,
+            secret_key: s,
+            session_token: get("AWS_SESSION_TOKEN"),
+        })),
+        _ => Err(
+            "AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY must both be set (or neither; the rest of the AWS chain is then tried)"
+                .into(),
+        ),
+    }
+}
+
+fn shared_profile(
+    get: &dyn Fn(&str) -> Option<String>,
+    home: &std::path::Path,
+) -> Result<Option<AwsCreds>, String> {
+    let profile = get("AWS_PROFILE").unwrap_or_else(|| "default".into());
+    let creds_file = get("AWS_SHARED_CREDENTIALS_FILE")
+        .map(Into::into)
+        .unwrap_or_else(|| home.join(".aws/credentials"));
+    if let Ok(t) = std::fs::read_to_string(&creds_file) {
+        if let Some(kv) = ini_section(&t, &profile) {
+            let f = |k: &str| kv.iter().find(|(a, _)| a == k).map(|(_, v)| v.clone());
+            match (f("aws_access_key_id"), f("aws_secret_access_key")) {
+                (Some(a), Some(s)) => {
+                    return Ok(Some(AwsCreds {
                         access_key: a,
                         secret_key: s,
                         session_token: f("aws_session_token"),
-                    });
+                    }))
+                }
+                (None, None) => {}
+                _ => {
+                    return Err(format!(
+                        "profile `{profile}` in {} needs both aws_access_key_id and aws_secret_access_key",
+                        creds_file.display()
+                    ))
                 }
             }
         }
-        let cfg_file = get("AWS_CONFIG_FILE")
-            .map(Into::into)
-            .unwrap_or_else(|| home.join(".aws/config"));
-        if let Ok(t) = std::fs::read_to_string(&cfg_file) {
-            let sec = if profile == "default" {
-                "default".to_string()
-            } else {
-                format!("profile {profile}")
-            };
-            if let Some(cmd) = ini_section(&t, &sec).and_then(|kv| {
-                kv.into_iter()
-                    .find(|(k, _)| k == "credential_process")
-                    .map(|(_, v)| v)
-            }) {
-                let out = crate::auth::run_capture(&cmd, Duration::from_secs(30))?;
-                let v: serde_json::Value = serde_json::from_str(&out)
-                    .map_err(|e| format!("credential_process output: {e}"))?;
-                let g = |k: &str| v[k].as_str().map(String::from);
-                return Ok(AwsCreds {
-                    access_key: g("AccessKeyId").ok_or("credential_process: no AccessKeyId")?,
-                    secret_key: g("SecretAccessKey")
-                        .ok_or("credential_process: no SecretAccessKey")?,
-                    session_token: g("SessionToken"),
-                });
-            }
-        }
-        Err(format!("no AWS credentials: set AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY, AWS_BEARER_TOKEN_BEDROCK, or configure profile `{profile}` in ~/.aws/credentials"))
     }
+    let cfg_file = get("AWS_CONFIG_FILE")
+        .map(Into::into)
+        .unwrap_or_else(|| home.join(".aws/config"));
+    if let Ok(t) = std::fs::read_to_string(&cfg_file) {
+        let sec = if profile == "default" {
+            "default".to_string()
+        } else {
+            format!("profile {profile}")
+        };
+        if let Some(cmd) = ini_section(&t, &sec).and_then(|kv| {
+            kv.into_iter()
+                .find(|(k, _)| k == "credential_process")
+                .map(|(_, v)| v)
+        }) {
+            let out = crate::auth::run_capture(&cmd, Duration::from_secs(30))?;
+            let v: serde_json::Value = serde_json::from_str(&out)
+                .map_err(|e| format!("credential_process output: {e}"))?;
+            let g = |k: &str| v[k].as_str().map(String::from);
+            return Ok(Some(AwsCreds {
+                access_key: g("AccessKeyId").ok_or("credential_process: no AccessKeyId")?,
+                secret_key: g("SecretAccessKey")
+                    .ok_or("credential_process: no SecretAccessKey")?,
+                session_token: g("SessionToken"),
+            }));
+        }
+    }
+    Ok(None)
+}
+
+fn web_identity(get: &dyn Fn(&str) -> Option<String>) -> Result<Option<AwsCreds>, String> {
+    let file = get("AWS_WEB_IDENTITY_TOKEN_FILE");
+    let role = get("AWS_ROLE_ARN");
+    let (Some(file), Some(role)) = (file.as_deref(), role.as_deref()) else {
+        return match (file, role) {
+            (None, None) => Ok(None),
+            _ => Err("web identity needs both AWS_WEB_IDENTITY_TOKEN_FILE and AWS_ROLE_ARN".into()),
+        };
+    };
+    let token = std::fs::read_to_string(file)
+        .map_err(|e| format!("web identity token file {file}: {e}"))?
+        .trim()
+        .to_string();
+    if token.is_empty() {
+        return Err(format!("web identity token file {file} is empty"));
+    }
+    let endpoint = get("AWS_ENDPOINT_URL_STS")
+        .unwrap_or_else(|| "https://sts.amazonaws.com".into());
+    let session = get("AWS_ROLE_SESSION_NAME").unwrap_or_else(|| "seagent".into());
+    let body = crate::login::form_encode(&[
+        ("Action", "AssumeRoleWithWebIdentity"),
+        ("Version", "2011-06-15"),
+        ("RoleArn", role),
+        ("RoleSessionName", &session),
+        ("WebIdentityToken", &token),
+    ]);
+    let (status, text) = http_request(
+        "POST",
+        endpoint.trim_end_matches('/'),
+        &[("content-type", "application/x-www-form-urlencoded"), ("accept", "application/xml")],
+        Some(body.as_bytes()),
+    )?;
+    if !(200..300).contains(&status) {
+        return Err(format!("AssumeRoleWithWebIdentity: HTTP {status}: {}", head(&text, 300)));
+    }
+    let tag = |name: &str| xml_tag(&text, name);
+    Ok(Some(AwsCreds {
+        access_key: tag("AccessKeyId").ok_or("AssumeRoleWithWebIdentity: no AccessKeyId")?,
+        secret_key: tag("SecretAccessKey")
+            .ok_or("AssumeRoleWithWebIdentity: no SecretAccessKey")?,
+        session_token: tag("SessionToken"),
+    }))
+}
+
+fn ecs_creds(get: &dyn Fn(&str) -> Option<String>) -> Result<Option<AwsCreds>, String> {
+    let uri = match (get("AWS_CONTAINER_CREDENTIALS_RELATIVE_URI"), get("AWS_CONTAINER_CREDENTIALS_FULL_URI")) {
+        (Some(rel), _) => format!("http://169.254.170.2{}", if rel.starts_with('/') { rel } else { format!("/{rel}") }),
+        (None, Some(full)) => full,
+        (None, None) => return Ok(None),
+    };
+    if !(uri.starts_with("https://")
+        || uri.starts_with("http://127.")
+        || uri.starts_with("http://localhost")
+        || uri.starts_with("http://[::1]"))
+    {
+        return Err(format!(
+            "AWS_CONTAINER_CREDENTIALS_FULL_URI must be https or loopback, got {}",
+            head(&uri, 120)
+        ));
+    }
+    let auth = get("AWS_CONTAINER_AUTHORIZATION_TOKEN").or_else(|| {
+        get("AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE")
+            .and_then(|p| std::fs::read_to_string(p).ok())
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+    });
+    let mut headers: Vec<(&str, &str)> = vec![("accept", "application/json")];
+    if let Some(t) = &auth {
+        headers.push(("authorization", t));
+    }
+    let (status, text) = http_request("GET", &uri, &headers, None)?;
+    if !(200..300).contains(&status) {
+        return Err(format!("ECS container credentials: HTTP {status}: {}", head(&text, 300)));
+    }
+    let v: serde_json::Value =
+        serde_json::from_str(&text).map_err(|e| format!("ECS container credentials: {e}"))?;
+    Ok(Some(creds_from_json(&v, "ECS container credentials")?))
+}
+
+fn imds_creds(get: &dyn Fn(&str) -> Option<String>) -> Result<Option<AwsCreds>, String> {
+    if get("AWS_EC2_METADATA_DISABLED").is_some_and(|v| {
+        !matches!(v.trim().to_ascii_lowercase().as_str(), "" | "0" | "false" | "no" | "off")
+    }) {
+        return Ok(None);
+    }
+    let base = get("AWS_EC2_METADATA_SERVICE_ENDPOINT")
+        .unwrap_or_else(|| "http://169.254.169.254".into());
+    let base = base.trim_end_matches('/');
+    // IMDSv2: a session token is required for every metadata read.
+    let token_url = format!("{base}/latest/api/token");
+    let (status, token) = http_request(
+        "PUT",
+        &token_url,
+        &[("x-aws-ec2-metadata-token-ttl-seconds", "21600")],
+        None,
+    )?;
+    if !(200..300).contains(&status) || token.trim().is_empty() {
+        return Ok(None);
+    }
+    let token = token.trim().to_string();
+    let roles_url = format!("{base}/latest/meta-data/iam/security-credentials/");
+    let (status, roles) = http_request(
+        "GET",
+        &roles_url,
+        &[("x-aws-ec2-metadata-token", &token)],
+        None,
+    )?;
+    if !(200..300).contains(&status) {
+        return Ok(None);
+    }
+    let Some(role) = roles.lines().map(str::trim).find(|l| !l.is_empty()) else {
+        return Ok(None);
+    };
+    let creds_url = format!("{roles_url}{}", crate::sigv4::uri_encode(role, false));
+    let (status, text) = http_request(
+        "GET",
+        &creds_url,
+        &[("x-aws-ec2-metadata-token", &token), ("accept", "application/json")],
+        None,
+    )?;
+    if !(200..300).contains(&status) {
+        return Ok(None);
+    }
+    let v: serde_json::Value =
+        serde_json::from_str(&text).map_err(|e| format!("IMDS credentials: {e}"))?;
+    Ok(Some(creds_from_json(&v, "IMDS credentials")?))
+}
+
+fn creds_from_json(v: &serde_json::Value, source: &str) -> Result<AwsCreds, String> {
+    let get = |k: &str| v[k].as_str().filter(|s| !s.trim().is_empty()).map(String::from);
+    Ok(AwsCreds {
+        access_key: get("AccessKeyId").ok_or_else(|| format!("{source}: no AccessKeyId"))?,
+        secret_key: get("SecretAccessKey")
+            .ok_or_else(|| format!("{source}: no SecretAccessKey"))?,
+        session_token: get("Token"),
+    })
+}
+
+fn http_request(
+    method: &str,
+    url: &str,
+    headers: &[(&str, &str)],
+    body: Option<&[u8]>,
+) -> Result<(u16, String), String> {
+    use std::io::Read;
+    let direct = url.starts_with("http://169.254.")
+        || url.starts_with("http://127.")
+        || url.starts_with("http://localhost")
+        || url.starts_with("http://[::1]");
+    let agent: ureq::Agent = if direct {
+        seagent_net::http::builder_direct()
+            .timeout_global(Some(Duration::from_secs(2)))
+            .max_redirects(0)
+            .http_status_as_error(false)
+            .build()
+            .into()
+    } else {
+        crate::net::agent(Duration::from_secs(20), url)
+    };
+    let resp = match (method, body) {
+        ("GET", _) => {
+            let mut req = agent.get(url);
+            for (k, v) in headers {
+                req = req.header(*k, *v);
+            }
+            req.call()
+        }
+        ("PUT", body) => {
+            let mut req = agent.put(url);
+            for (k, v) in headers {
+                req = req.header(*k, *v);
+            }
+            req.send(body.unwrap_or_default())
+        }
+        (_, body) => {
+            let mut req = agent.post(url);
+            for (k, v) in headers {
+                req = req.header(*k, *v);
+            }
+            req.send(body.unwrap_or_default())
+        }
+    }
+    .map_err(|e| format!("{method} {url}: {e}"))?;
+    let status = resp.status().as_u16();
+    let mut text = String::new();
+    resp.into_body()
+        .into_reader()
+        .take(1 << 20)
+        .read_to_string(&mut text)
+        .map_err(|e| format!("{method} {url}: {e}"))?;
+    Ok((status, text))
+}
+
+fn head(s: &str, n: usize) -> String {
+    s.chars().take(n).collect()
+}
+
+fn xml_tag(xml: &str, name: &str) -> Option<String> {
+    let open = format!("<{name}>");
+    let close = format!("</{name}>");
+    let start = xml.find(&open)? + open.len();
+    let end = xml[start..].find(&close)? + start;
+    let raw = xml[start..end].trim();
+    Some(
+        raw.replace("&amp;", "&")
+            .replace("&lt;", "<")
+            .replace("&gt;", ">")
+            .replace("&quot;", "\"")
+            .replace("&apos;", "'"),
+    )
 }
 
 /// `YYYYMMDDTHHMMSSZ` for unix seconds.
@@ -312,6 +580,160 @@ mod tests {
             .iter()
             .any(|(k, v)| k == "x-amz-security-token" && v == "T"));
         assert!(h[0].1.contains("x-amz-security-token"));
+    }
+
+    fn serve_seq(responses: Vec<(u16, String)>) -> (String, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
+        use std::io::{BufRead, BufReader, Read, Write};
+        use std::net::TcpListener;
+        let l = TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", l.local_addr().unwrap());
+        let log = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let log2 = log.clone();
+        std::thread::spawn(move || {
+            for (status, body) in responses {
+                let Ok((mut s, _)) = l.accept() else { return };
+                let mut r = BufReader::new(s.try_clone().unwrap());
+                let mut req = String::new();
+                let mut line = String::new();
+                r.read_line(&mut line).unwrap();
+                req.push_str(&line);
+                let mut len = 0;
+                loop {
+                    let mut h = String::new();
+                    r.read_line(&mut h).unwrap();
+                    if h.trim().is_empty() {
+                        req.push('\n');
+                        break;
+                    }
+                    if let Some((k, v)) = h.split_once(':') {
+                        if k.eq_ignore_ascii_case("content-length") {
+                            len = v.trim().parse().unwrap_or(0);
+                        }
+                    }
+                    req.push_str(&h);
+                }
+                let mut b = vec![0; len];
+                let _ = r.read_exact(&mut b);
+                req.push_str(&String::from_utf8_lossy(&b));
+                log2.lock().unwrap().push(req);
+                let _ = write!(s, "HTTP/1.1 {status} X\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}", body.len());
+            }
+        });
+        (base, log)
+    }
+
+    fn temp_home(tag: &str) -> std::path::PathBuf {
+        let d = seagent_core::tmp::scratch_path(format!("seagent-aws-{tag}-{}", crate::ratelimit::now_ms()));
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    /// ECS task-role credentials: the full URI is configured and no proxy or redirect
+    /// can receive the token.
+    #[test]
+    fn ecs_container_credentials_from_fake_endpoint() {
+        let (base, log) = serve_seq(vec![(200, r#"{"AccessKeyId":"AKECS","SecretAccessKey":"SKECS","Token":"STECS"}"#.into())]);
+        let uri = format!("{base}/v2/credentials/abc");
+        let get = |k: &str| match k {
+            "AWS_CONTAINER_CREDENTIALS_FULL_URI" => Some(uri.clone()),
+            "AWS_CONTAINER_AUTHORIZATION_TOKEN" => Some("auth-token".into()),
+            _ => None,
+        };
+        let c = ecs_creds(&get).unwrap().unwrap();
+        assert_eq!((c.access_key.as_str(), c.secret_key.as_str(), c.session_token.as_deref()), ("AKECS", "SKECS", Some("STECS")));
+        let req = log.lock().unwrap()[0].clone();
+        assert!(req.starts_with("GET /v2/credentials/abc"), "{req}");
+        assert!(req.to_lowercase().contains("authorization: auth-token"), "{req}");
+    }
+
+    /// IMDSv2: a PUT obtains the session token, and every read carries it. The role
+    /// name is taken from the metadata list, not from configuration.
+    #[test]
+    fn imds_v2_token_role_and_credentials_from_fake_endpoint() {
+        let (base, log) = serve_seq(vec![
+            (200, "IMDS_TOKEN".into()),
+            (200, "role-a\n".into()),
+            (200, r#"{"AccessKeyId":"AKIMDS","SecretAccessKey":"SKIMDS","Token":"STIMDS","Expiration":"2030-01-01T00:00:00Z"}"#.into()),
+        ]);
+        let get = |k: &str| match k {
+            "AWS_EC2_METADATA_SERVICE_ENDPOINT" => Some(base.clone()),
+            _ => None,
+        };
+        let c = imds_creds(&get).unwrap().unwrap();
+        assert_eq!((c.access_key.as_str(), c.session_token.as_deref()), ("AKIMDS", Some("STIMDS")));
+        let log = log.lock().unwrap();
+        assert!(log[0].starts_with("PUT /latest/api/token"), "{}", log[0]);
+        assert!(log[0].to_lowercase().contains("x-aws-ec2-metadata-token-ttl-seconds: 21600"), "{}", log[0]);
+        assert!(log[1].starts_with("GET /latest/meta-data/iam/security-credentials/"), "{}", log[1]);
+        assert!(log[1].to_lowercase().contains("x-aws-ec2-metadata-token: imds_token"), "{}", log[1]);
+        assert!(log[2].contains("/role-a"), "{}", log[2]);
+    }
+
+    /// EKS web identity: the token file is exchanged at STS for temporary credentials
+    /// and the response XML is parsed without an SDK.
+    #[test]
+    fn web_identity_exchanges_the_token_file_at_fake_sts() {
+        let home = temp_home("web");
+        let token_file = home.join("token");
+        std::fs::write(&token_file, "web-token\n").unwrap();
+        let (base, log) = serve_seq(vec![(200, r#"<AssumeRoleWithWebIdentityResponse><AssumeRoleWithWebIdentityResult><Credentials><AccessKeyId>AKWEB</AccessKeyId><SecretAccessKey>SKWEB</SecretAccessKey><SessionToken>STWEB</SessionToken></Credentials></AssumeRoleWithWebIdentityResult></AssumeRoleWithWebIdentityResponse>"#.into())]);
+        let get = |k: &str| match k {
+            "AWS_WEB_IDENTITY_TOKEN_FILE" => Some(token_file.to_string_lossy().to_string()),
+            "AWS_ROLE_ARN" => Some("arn:aws:iam::123:role/ops".into()),
+            "AWS_ROLE_SESSION_NAME" => Some("seagent-test".into()),
+            "AWS_ENDPOINT_URL_STS" => Some(base.clone()),
+            _ => None,
+        };
+        let c = web_identity(&get).unwrap().unwrap();
+        assert_eq!((c.access_key.as_str(), c.secret_key.as_str(), c.session_token.as_deref()), ("AKWEB", "SKWEB", Some("STWEB")));
+        let req = log.lock().unwrap()[0].clone();
+        assert!(req.starts_with("POST / "), "{req}");
+        assert!(req.contains("Action=AssumeRoleWithWebIdentity"), "{req}");
+        assert!(req.contains("RoleArn=arn%3Aaws%3Aiam%3A%3A123%3Arole%2Fops"), "{req}");
+        assert!(req.contains("WebIdentityToken=web-token"), "{req}");
+        let _ = std::fs::remove_dir_all(home);
+    }
+
+    /// Source precedence: env wins over the shared file, web identity wins over the
+    /// shared file, and a half-configured env pair names the missing variable instead
+    /// of silently trying another source.
+    #[test]
+    fn chain_order_and_partial_environment() {
+        let home = temp_home("order");
+        std::fs::create_dir_all(home.join(".aws")).unwrap();
+        std::fs::write(
+            home.join(".aws/credentials"),
+            "[default]\naws_access_key_id = AKFILE\naws_secret_access_key = SKFILE\n",
+        )
+        .unwrap();
+        let env: std::collections::BTreeMap<&str, &str> = [("AWS_ACCESS_KEY_ID", "AKENV"), ("AWS_SECRET_ACCESS_KEY", "SKENV")].into_iter().collect();
+        let get = |k: &str| env.get(k).map(|v| v.to_string());
+        assert_eq!(resolve(&get, &home).unwrap().access_key, "AKENV");
+        assert_eq!(resolve(&|_| None, &home).unwrap().access_key, "AKFILE", "shared profile is next");
+        let half = |k: &str| (k == "AWS_ACCESS_KEY_ID").then(|| "AKENV".to_string());
+        let e = resolve(&half, &home).unwrap_err();
+        assert!(e.contains("AWS_SECRET_ACCESS_KEY") && e.contains("both"), "{e}");
+        let empty = temp_home("empty");
+        let no_metadata = |k: &str| (k == "AWS_EC2_METADATA_DISABLED").then(|| "true".to_string());
+        let e = resolve(&no_metadata, &empty).unwrap_err();
+        assert!(e.contains("checked the environment") && e.contains("IMDSv2"), "{e}");
+        let _ = std::fs::remove_dir_all(home);
+        let _ = std::fs::remove_dir_all(empty);
+    }
+
+    #[test]
+    fn shared_profile_selects_the_named_profile() {
+        let home = temp_home("profile");
+        std::fs::create_dir_all(home.join(".aws")).unwrap();
+        std::fs::write(
+            home.join(".aws/credentials"),
+            "[default]\naws_access_key_id = AKD\naws_secret_access_key = SKD\n\n[work]\naws_access_key_id = AKW\naws_secret_access_key = SKW\naws_session_token = STW\n",
+        )
+        .unwrap();
+        let get = |k: &str| (k == "AWS_PROFILE").then(|| "work".to_string());
+        let c = shared_profile(&get, &home).unwrap().unwrap();
+        assert_eq!((c.access_key.as_str(), c.session_token.as_deref()), ("AKW", Some("STW")));
+        let _ = std::fs::remove_dir_all(home);
     }
 
     #[test]

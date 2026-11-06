@@ -344,6 +344,19 @@ pub fn jwt_claims(token: &str) -> Option<Value> {
     serde_json::from_slice(&seagent_net::crypto::b64url_decode(p)?).ok()
 }
 
+/// Largest millisecond timestamp a JSON client can hold exactly (2^53-1). An
+/// `expires_in` beyond it (or a non-finite/negative one) cannot be trusted: casting
+/// it would saturate and the refresh would never happen.
+const MAX_SAFE_MS: f64 = 9_007_199_254_740_991.0;
+
+fn safe_expiry(now: u64, seconds: f64) -> Option<u64> {
+    if !seconds.is_finite() || seconds <= 0.0 {
+        return None;
+    }
+    let ms = seconds * 1000.0;
+    (ms <= MAX_SAFE_MS).then(|| now.saturating_add(ms as u64))
+}
+
 /// Turn a token response into a store entry.
 pub fn entry_from(flow: &Flow, v: &Value, old: Option<&Entry>) -> Result<Entry, String> {
     let access = v["access_token"]
@@ -365,23 +378,29 @@ pub fn entry_from(flow: &Flow, v: &Value, old: Option<&Entry>) -> Result<Entry, 
     if let Some(r) = v["refresh_token"].as_str().filter(|s| !s.is_empty()) {
         e.refresh = Some(r.to_string());
     }
-    e.expires_at_ms = if let Some(s) = v["expires_in"]
+    // Response-derived expiry only. An OAuth refresh must never keep the previous
+    // (stale) expiry when the new response fails to state one.
+    let expires = if let Some(s) = v["expires_in"]
         .as_f64()
         .or_else(|| v["expires_in"].as_str().and_then(|s| s.parse().ok()))
     {
-        Some(now + (s * 1000.0) as u64)
+        safe_expiry(now, s)
     } else if let Some(x) = v["expired_in"].as_u64() {
         // MiniMax: unix ms, or a TTL in seconds.
         Some(if x > 1_000_000_000_000 {
             x
         } else {
-            now + x.max(1) * 1000
+            now.saturating_add(x.max(1).saturating_mul(1000))
         })
     } else {
         jwt_claims(access)
             .and_then(|c| c["exp"].as_u64())
-            .map(|c| c * 1000)
+            .and_then(|c| c.checked_mul(1000))
     };
+    if (flow.id == "xai" || flow.provider.starts_with("xai")) && expires.is_none_or(|x| x <= now) {
+        return Err("xAI OAuth token response is missing a usable access-token lifetime; re-run `seagent login xai`".into());
+    }
+    e.expires_at_ms = expires;
     for k in ["id_token", "scope", "token_type", "account_id"] {
         if let Some(x) = v.get(k).filter(|x| !x.is_null()) {
             e.extra.insert(k.into(), x.clone());
@@ -1491,6 +1510,32 @@ pub(crate) mod tests {
         for f in flows() {
             assert!(!f.title.is_empty());
         }
+    }
+
+    #[test]
+    fn xai_oauth_requires_a_usable_response_expiry() {
+        let f = flow("xai").unwrap();
+        let now = crate::ratelimit::now_ms();
+        let ok = entry_from(&f, &json!({"access_token": "a", "expires_in": 3600}), None).unwrap();
+        assert!(ok.expires_at_ms.unwrap() > now + 3_000_000);
+        for bad in [
+            json!({"access_token": "a"}),
+            json!({"access_token": "a", "expires_in": 0}),
+            json!({"access_token": "a", "expires_in": -1}),
+            json!({"access_token": "a", "expires_in": 1e300}),
+        ] {
+            let e = entry_from(&f, &bad, None).unwrap_err();
+            assert!(e.contains("usable access-token lifetime") && e.contains("seagent login xai"), "{e}");
+        }
+        // A JWT exp is a valid response-derived lifetime; a refresh publishes the new
+        // expiry instead of keeping the old one.
+        let exp = now / 1000 + 3600;
+        let jwt = format!("x.{}", seagent_net::crypto::b64url(format!(r#"{{"exp":{exp}}}"#).as_bytes()));
+        let old = Entry { expires_at_ms: Some(1_000), ..Entry::new("oauth", "default", Some("old".into())) };
+        let e = entry_from(&f, &json!({"access_token": jwt}), Some(&old)).unwrap();
+        assert_eq!(e.expires_at_ms, Some(exp * 1000));
+        let refreshed = entry_from(&f, &json!({"access_token": "b", "expires_in": 60}), Some(&old)).unwrap();
+        assert!(refreshed.expires_at_ms.unwrap() > now && refreshed.expires_at_ms != Some(1_000), "the old expiry is not retained");
     }
 
     #[test]

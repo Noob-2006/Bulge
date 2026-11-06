@@ -165,9 +165,32 @@ pub struct Runtime {
     /// Per-session context state: subdirectory trackers, micro-compaction, verify loop
     /// (`@`-references, subdirectory hints, `verify_on_stop`, BM25 tool search).
     pub ctx: crate::ctxstate::CtxState,
+    /// Provenance lines for calls the policy allowed without a prompt (tool_use id → line).
+    provenance: Mutex<HashMap<String, String>>,
 }
 
 pub type Kernel = Arc<Runtime>;
+
+/// Observer for busy-arrival telemetry: `(session, outcome)` with outcome one of
+/// `queued`, `steered`, `dropped`. Installed by the host (`seagent/src/wire.rs`) so the kernel
+/// itself stays free of the metrics crate; a later install replaces the previous one.
+pub type BusyObserver = Arc<dyn Fn(&str, &str) + Send + Sync>;
+
+fn busy_observer() -> &'static Mutex<Option<BusyObserver>> {
+    static O: std::sync::OnceLock<Mutex<Option<BusyObserver>>> = std::sync::OnceLock::new();
+    O.get_or_init(|| Mutex::new(None))
+}
+
+pub fn set_busy_observer(f: BusyObserver) {
+    *busy_observer().lock().unwrap_or_else(|e| e.into_inner()) = Some(f);
+}
+
+fn notify_busy(session: &str, outcome: &str) {
+    let f = busy_observer().lock().unwrap_or_else(|e| e.into_inner()).clone();
+    if let Some(f) = f {
+        f(session, outcome);
+    }
+}
 
 /// One waiting input entry as reported by `Runtime::queued`: `(inbox id, source, text)`.
 pub type QueuedInput = (String, String, String);
@@ -201,7 +224,7 @@ pub fn new_kernel(cfg: Config, paths: Paths, resolver: Arc<dyn Resolver>, tools:
         crate::sqlindex::relocate(&paths.data, Path::new(cfg.ha.index_dir.trim()));
     }
     cfg.security.activate_at(Some(&paths.config_dir));
-    Arc::new(Runtime { cfg, paths, store, resolver, tools, vault, approver, remembered: Remembered::default(), bus: Bus::default(), running: Mutex::new(HashMap::new()), benched: Mutex::new(HashMap::new()), no_reasoning: Mutex::new(std::collections::HashSet::new()), hooks: Default::default(), session_tools: Default::default(), taps: Default::default(), engine: Default::default(), lifecycles: Default::default(), slash: Default::default(), retry_sleep: None, subagents: Default::default(), end_turn: Default::default(), auto_resume: Default::default(), queue_settings: Default::default(), runtime_cfg: Default::default(), ctx: Default::default() })
+    Arc::new(Runtime { cfg, paths, store, resolver, tools, vault, approver, remembered: Remembered::default(), bus: Bus::default(), running: Mutex::new(HashMap::new()), benched: Mutex::new(HashMap::new()), no_reasoning: Mutex::new(std::collections::HashSet::new()), hooks: Default::default(), session_tools: Default::default(), taps: Default::default(), engine: Default::default(), lifecycles: Default::default(), slash: Default::default(), retry_sleep: None, subagents: Default::default(), end_turn: Default::default(), auto_resume: Default::default(), queue_settings: Default::default(), runtime_cfg: Default::default(), ctx: Default::default(), provenance: Mutex::new(HashMap::new()) })
 }
 
 #[derive(Debug)]
@@ -229,6 +252,14 @@ impl From<StoreError> for KernelError {
 const KERNEL_TOOL_SEARCH: &str = "session_search";
 const KERNEL_TOOL_GOAL_DONE: &str = "goal_done";
 
+fn goal_done_schema() -> ToolSchema {
+    ToolSchema {
+        name: KERNEL_TOOL_GOAL_DONE.into(),
+        description: "Declare the current goal achieved (or impossible) with a summary of the evidence. Only call when verified.".into(),
+        input_schema: json!({"type":"object","properties":{"summary":{"type":"string"},"achieved":{"type":"boolean"}},"required":["summary","achieved"]}),
+    }
+}
+
 impl Runtime {
     /// The config turns started now should use: `/debug set` runtime overrides replace the
     /// startup snapshot once they validate (OpenClaw `config/runtime-overrides.ts`).
@@ -243,6 +274,9 @@ impl Runtime {
         self.runtime_cfg.read().unwrap().clone()
     }
     pub fn specs(&self) -> Vec<ToolSpec> {
+        if crate::coderun::config().run_code_only {
+            return vec![];
+        }
         let cfg = self.cfg_now();
         let mut v: Vec<ToolSpec> = self.tools.iter().map(|t| t.spec()).filter(|s| !cfg.tools.disabled.contains(&s.name)).collect();
         v.extend(self.engine_tools().iter().map(|t| t.spec()).filter(|s| !cfg.tools.disabled.contains(&s.name)));
@@ -276,6 +310,14 @@ impl Runtime {
     }
 
     fn kernel_tools(&self, goal_mode: bool) -> Vec<ToolSchema> {
+        if crate::coderun::config().run_code_only {
+            let mut v = vec![crate::coderun::spec()];
+            // Goal completion is a loop control, not another code-execution tool.
+            if goal_mode {
+                v.push(goal_done_schema());
+            }
+            return v;
+        }
         let mut v = vec![
             crate::coderun::spec(),
             ToolSchema {
@@ -289,11 +331,7 @@ impl Runtime {
         }
         v.push(crate::ctxfetch::schema());
         if goal_mode {
-            v.push(ToolSchema {
-                name: KERNEL_TOOL_GOAL_DONE.into(),
-                description: "Declare the current goal achieved (or impossible) with a summary of the evidence. Only call when verified.".into(),
-                input_schema: json!({"type":"object","properties":{"summary":{"type":"string"},"achieved":{"type":"boolean"}},"required":["summary","achieved"]}),
-            });
+            v.push(goal_done_schema());
         }
         v
     }
@@ -517,11 +555,16 @@ impl Runtime {
             let s = self.queue_for(id);
             let item = (inbox_id, source.to_string(), text.to_string(), attachments);
             match s.mode {
-                crate::queue::Mode::Steer => r.queue.lock().unwrap().push(item),
+                crate::queue::Mode::Steer => {
+                    r.queue.lock().unwrap().push(item);
+                    notify_busy(id, "steered");
+                }
                 mode => {
-                    if let Some(n) = crate::queue::hold(&r.later, item, &s) {
+                    let dropped = crate::queue::hold(&r.later, item, &s);
+                    if let Some(n) = &dropped {
                         eprintln!("seagent: session {id}: {n}");
                     }
+                    notify_busy(id, if dropped.is_some() { "dropped" } else { "queued" });
                     if mode == crate::queue::Mode::Interrupt {
                         r.restart.store(true, std::sync::atomic::Ordering::SeqCst);
                         r.cancel.cancel();
@@ -595,9 +638,67 @@ impl Runtime {
             None => false,
         }
     }
+
+    /// An explicit user/operator Stop: cancel the run, attribute it in the audit log and fire
+    /// the `run_stopped` hook. Internal stops (shutdown, failover, timeout) use [`interrupt`]
+    /// instead and are deliberately not announced as user stops.
+    pub fn interrupt_as(&self, id: &str, who: &seagent_security::audit::Actor, source: &str) -> bool {
+        let stopped = self.interrupt(id);
+        if !stopped {
+            return false;
+        }
+        let cwd = self.store.read(id).ok().map(|ev| project(&ev).workspace).unwrap_or_default();
+        seagent_security::audit::record(
+            &self.paths.data,
+            seagent_security::audit::Event::new("run.stopped", who.clone(), id, "ok").session(id).detail(json!({"source": source, "run_id": id, "actor": who.label()})),
+        );
+        crate::hooks::fire_run_stopped(self, id, &cwd, source, &who.label(), id);
+        true
+    }
     pub fn is_running(&self, id: &str) -> bool {
         self.running.lock().unwrap().contains_key(id)
     }
+
+    /// Drop per-session in-memory state for sessions that have been idle for `idle`. The
+    /// transcript stays on disk and every cache here is rebuilt from config/events on the next
+    /// use, so this is a safe, on-demand restore rather than an eviction of anything the user
+    /// can see. Running sessions are never touched.
+    pub fn retire_idle_sessions(&self, idle: std::time::Duration) -> Vec<String> {
+        if idle.is_zero() {
+            return vec![];
+        }
+        let now = crate::event::now_ms();
+        let idle_ms = idle.as_millis() as u64;
+        let updated: std::collections::HashMap<String, u64> = self.store.list().into_iter().map(|s| (s.id, s.updated_ms)).collect();
+        let mut candidates: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+        candidates.extend(self.queue_settings.lock().unwrap().keys().cloned());
+        candidates.extend(self.session_tools.read().unwrap().keys().cloned());
+        candidates.extend(self.end_turn.lock().unwrap().iter().cloned());
+        candidates.extend(self.ctx.subdirs.lock().unwrap().keys().cloned());
+        candidates.extend(self.ctx.titles.lock().unwrap().keys().cloned());
+        candidates.extend(self.ctx.micro.lock().unwrap().keys().cloned());
+        candidates.extend(self.ctx.verify.lock().unwrap().keys().cloned());
+        let mut retired = Vec::new();
+        for id in candidates {
+            if self.is_running(&id) {
+                continue;
+            }
+            let last = updated.get(&id).copied().unwrap_or(0);
+            if now.saturating_sub(last) < idle_ms {
+                continue;
+            }
+            self.queue_settings.lock().unwrap().remove(&id);
+            self.session_tools.write().unwrap().remove(&id);
+            self.end_turn.lock().unwrap().remove(&id);
+            self.ctx.subdirs.lock().unwrap().remove(&id);
+            self.ctx.titles.lock().unwrap().remove(&id);
+            self.ctx.micro.lock().unwrap().remove(&id);
+            self.ctx.verify.lock().unwrap().remove(&id);
+            retired.push(id);
+        }
+        retired
+    }
+
     pub fn running_ids(&self) -> Vec<String> {
         self.running.lock().unwrap().keys().cloned().collect()
     }
@@ -636,6 +737,12 @@ impl Runtime {
         self.record(id, EventKind::Fast { tier: t.into() })
     }
 
+    /// Append one step's timing and usage after its tools settled.
+    #[allow(clippy::too_many_arguments)]
+    fn record_step(&self, log: &mut SessionLog, turn: u64, step: u64, model: &str, ttft_ms: u64, model_ms: u64, tool_ms: u64, tool_calls: u64, usage: Usage) -> Result<(), StoreError> {
+        self.append(log, EventKind::Step { turn, step, model: model.into(), ttft_ms, model_ms, tool_ms, tool_calls, usage }).map(|_| ())
+    }
+
     /// Record an auxiliary call's usage on the session and charge the running turn's ledger.
     fn aux_used(&self, log: &mut SessionLog, task: &str, model: &str, usage: Usage) {
         if usage.input_tokens + usage.output_tokens + usage.cache_read_tokens == 0 {
@@ -659,7 +766,15 @@ impl Runtime {
             st.insert(id.to_string(), tools);
         }
     }
+    /// Session-scoped tools registered by a host (an editor's MCP servers), read by fork
+    /// children so their request tool list matches the parent's.
+    pub(crate) fn session_tools_of(&self, id: &str) -> Option<Vec<Arc<dyn Tool>>> {
+        self.session_tools.read().unwrap().get(id).cloned()
+    }
     fn session_specs(&self, id: &str, model: &str) -> Vec<ToolSpec> {
+        if crate::coderun::config().run_code_only {
+            return vec![];
+        }
         let mut v = self.specs();
         if let Some(ts) = self.session_tools.read().unwrap().get(id) {
             v.extend(ts.iter().map(|t| ToolSpec { pinned: true, ..t.spec() }).filter(|s| !self.cfg.tools.disabled.contains(&s.name)));
@@ -673,7 +788,7 @@ impl Runtime {
     pub fn compact(&self, id: &str) -> Result<bool, KernelError> {
         let mut log = self.store.open(id)?;
         let view = project(log.events());
-        Ok(self.summarise(&mut log, &view, &Cancel::new())?)
+        Ok(self.summarise(&mut log, &view, None, &view.model, &Cancel::new())?)
     }
 
     /// Run until the inbox is empty (or the run stops). Blocks the caller.
@@ -785,6 +900,23 @@ impl Runtime {
         let mut log = self.store.open(id)?;
         self.append(&mut log, kind)?;
         Ok(())
+    }
+
+    /// Replace the session's system prompt. On a route configured for in-history updates
+    /// (`model.system_updates = "in_history"`) a change after the conversation started is appended
+    /// as a `SystemDelta` instead of rewriting the frozen head, so the provider's cached prefix is
+    /// preserved. Before the first message (or on a rewrite route) the head is replaced as before.
+    pub fn update_system(&self, id: &str, segments: Vec<SystemSegment>) -> Result<(), KernelError> {
+        let view = project(&self.store.read(id)?);
+        if view.system == segments {
+            return Ok(());
+        }
+        if self.cfg_now().in_history_system() && !view.messages.is_empty() {
+            if let Some(text) = system_delta(&view.system, &segments) {
+                return self.record(id, EventKind::SystemDelta { text });
+            }
+        }
+        self.record(id, EventKind::System { segments })
     }
 
     pub(crate) fn drain_queue(&self, log: &mut SessionLog, q: &Mutex<Vec<Queued>>) -> Result<(), StoreError> {
@@ -975,24 +1107,18 @@ impl Runtime {
             self.consume_inbox(log)?;
 
             let mut view = project(log.events());
-            if self.maybe_compact(log, &view, cancel)? {
-                view = project(log.events());
-            }
             let model = th.model.clone().unwrap_or_else(|| view.model.clone());
-            let mut req = context::build_request(&view, &cfg, &specs, &kernel_tools, &model);
-            req.options.native_compaction = cfg.compaction.native_threshold(self.window(&model));
-            if fast_until.is_some_and(|u| Instant::now() < u) {
-                req.options.service_tier = Some("priority".into());
-            }
-            self.assemble(log, &view, &mut req)?;
-            // C11 / srv-058: old long tool results go out clipped, with a context_fetch pointer.
-            context::trim_old_tool_results(&mut req.messages, cfg.compaction.max_tool_result_chars, cfg.compaction.keep_tool_results);
-            th.apply(&mut req);
-            if boost > 0 {
-                req.max_tokens = req.max_tokens.saturating_mul(1 << boost).min(MAX_BOOSTED_TOKENS);
+            // Build the envelope first: if compaction fires, its summary replays this exact
+            // request prefix, so the provider can reuse the warm KV cache.
+            let mut req = self.prepare_request(log, &view, &cfg, &specs, &kernel_tools, &model, &th, fast_until, boost)?;
+            if self.maybe_compact(log, &view, &req, &model, cancel)? {
+                view = project(log.events());
+                req = self.prepare_request(log, &view, &cfg, &specs, &kernel_tools, &model, &th, fast_until, boost)?;
             }
             let req_max = req.max_tokens;
-            let resp = match self.call_model(log, &model, req, cancel)? {
+            let step_started = Instant::now();
+            let ttft = Mutex::new(None);
+            let resp = match self.call_model(log, &model, req, cancel, &ttft)? {
                 Ok(r) => r,
                 Err(e) if e.kind == ProviderErrorKind::ContextOverflow && !overflow_retry => {
                     overflow_retry = true;
@@ -1000,7 +1126,8 @@ impl Runtime {
                     let v = project(log.events());
                     self.prune(log, &v, 0)?;
                     let v = project(log.events());
-                    self.summarise(log, &v, cancel)?;
+                    let prefix = self.prepare_request(log, &v, &cfg, &specs, &kernel_tools, &model, &th, fast_until, boost)?;
+                    self.summarise(log, &v, Some(&prefix), &model, cancel)?;
                     continue;
                 }
                 Err(e) if e.kind == ProviderErrorKind::Cancelled => break EndReason::Interrupted,
@@ -1023,8 +1150,11 @@ impl Runtime {
             // The provider answered: a pause from an earlier attempt is over.
             let _ = crate::limits::resumed(&self.paths.data, &log.id);
             steps += 1;
+            let model_ms = step_started.elapsed().as_millis() as u64;
+            let ttft_ms = ttft.lock().unwrap().map(|t| t.saturating_duration_since(step_started).as_millis() as u64).unwrap_or(model_ms);
             usage.add(&resp.usage);
             ledger.charge(&resp.usage, cfg.price(&model));
+            let step_model = resp.model.clone();
             let msg = sanitize_assistant(resp.message);
             let text = msg.text();
             let visible = !text.trim().is_empty();
@@ -1036,14 +1166,19 @@ impl Runtime {
             // them to "continue" restarts the thinking; retry with more room instead,
             // dropping the empty reply so the transcript stays valid.
             if matches!(resp.stop, StopReason::MaxTokens) && uses.is_empty() && !visible && req_max < MAX_BOOSTED_TOKENS {
+                self.record_step(log, turn_no, steps, &step_model, ttft_ms, model_ms, 0, 0, resp.usage)?;
                 boost += 1;
                 self.append(log, EventKind::Notice { level: "warn".into(), text: format!("output limit ({req_max} tokens) used up by reasoning with nothing visible; retrying with {}", req_max.saturating_mul(2).min(MAX_BOOSTED_TOKENS)) })?;
                 continue;
             }
-            self.append(log, EventKind::Message { message: msg, usage: Some(resp.usage), model: Some(resp.model.clone()), inbox: None })?;
+            self.append(log, EventKind::Message { message: msg, usage: Some(resp.usage), model: Some(step_model.clone()), inbox: None })?;
 
             if !uses.is_empty() {
+                let tool_started = Instant::now();
+                let tool_calls = uses.len() as u64;
                 let (results, goal_done) = self.execute(log, &view, uses.clone(), cancel, depth, ledger)?;
+                let tool_ms = tool_started.elapsed().as_millis() as u64;
+                self.record_step(log, turn_no, steps, &step_model, ttft_ms, model_ms, tool_ms, tool_calls, resp.usage)?;
                 let mut blocks = results;
                 // Watchdog: identical calls repeating.
                 for (_, name, input) in &uses {
@@ -1072,13 +1207,27 @@ impl Runtime {
                 }
                 continue;
             }
+            self.record_step(log, turn_no, steps, &step_model, ttft_ms, model_ms, 0, 0, resp.usage)?;
             match resp.stop {
                 StopReason::MaxTokens if continuations < cfg.runner.max_continuations => {
                     continuations += 1;
                     self.append(log, EventKind::Message { message: Message::user("[Your reply was cut off by the output limit. Continue exactly where you stopped.]"), usage: None, model: None, inbox: None })?;
                 }
                 StopReason::MaxTokens => break EndReason::MaxTokens,
-                StopReason::Refusal => break EndReason::Refusal,
+                StopReason::Refusal => {
+                    // Hermes safety-refusal drop: the provider judged the whole thread on every
+                    // later message, so a refused exchange left in the model context can lock the
+                    // session into a refusal loop. Keep it in the log/transcript, hide it from
+                    // later requests, and tell the user why.
+                    let (from, upto) = {
+                        let evs = log.events();
+                        let from = project(evs).user_turns.last().copied().unwrap_or_else(|| evs.last().map(|e| e.seq).unwrap_or(0));
+                        (from, evs.last().map(|e| e.seq).unwrap_or(from))
+                    };
+                    self.append(log, EventKind::TurnDropped { from_seq: from, upto_seq: upto, reason: "refusal".into() })?;
+                    self.append(log, EventKind::Notice { level: "warn".into(), text: "the provider refused this turn; it stays in the transcript but was removed from the model context so the conversation can continue. Use /undo to remove it from the transcript too.".into() })?;
+                    break EndReason::Refusal;
+                }
                 _ => {
                     // Steering that arrived during the last step continues the turn.
                     self.drain_queue(log, queue)?;
@@ -1204,10 +1353,42 @@ impl Runtime {
         }
     }
 
+    /// Build the exact request for this step: base assembly, context engine, send-time trimming,
+    /// turn hooks and the boosted output cap. `maybe_compact` uses the same envelope as the
+    /// summarizer prefix, so the summary request extends bytes the provider already cached.
+    #[allow(clippy::too_many_arguments)]
+    fn prepare_request(
+        &self,
+        log: &mut SessionLog,
+        view: &View,
+        cfg: &Config,
+        specs: &[ToolSpec],
+        kernel_tools: &[ToolSchema],
+        model: &str,
+        th: &hookpoints::TurnHooks,
+        fast_until: Option<Instant>,
+        boost: u32,
+    ) -> Result<ModelRequest, StoreError> {
+        let mut req = context::build_request(view, cfg, specs, kernel_tools, model);
+        req.options.native_compaction = cfg.compaction.native_threshold(self.window(model));
+        if fast_until.is_some_and(|u| Instant::now() < u) {
+            req.options.service_tier = Some("priority".into());
+        }
+        self.assemble(log, view, &mut req)?;
+        if !cfg.compaction.trim_under_pressure() || self.context_pressure(view, model) {
+            context::trim_old_tool_results(&mut req.messages, cfg.compaction.max_tool_result_chars, cfg.compaction.keep_tool_results);
+        }
+        th.apply(&mut req);
+        if boost > 0 {
+            req.max_tokens = req.max_tokens.saturating_mul(1 << boost).min(MAX_BOOSTED_TOKENS);
+        }
+        Ok(req)
+    }
+
     // ───────────────────────── model calls ─────────────────────────
 
     /// Retries with backoff, then falls back along the chain. Outer Err = store failure.
-    fn call_model(&self, log: &mut SessionLog, model: &str, mut req: ModelRequest, cancel: &Cancel) -> Result<Result<ModelResponse, ProviderError>, StoreError> {
+    fn call_model(&self, log: &mut SessionLog, model: &str, mut req: ModelRequest, cancel: &Cancel, ttft: &Mutex<Option<Instant>>) -> Result<Result<ModelResponse, ProviderError>, StoreError> {
         let mut chain = vec![model.to_string()];
         chain.extend(hookpoints::fallbacks(&self.cfg.model.fallback).into_iter().filter(|m| m != model));
         {
@@ -1294,11 +1475,31 @@ impl Runtime {
                     return Ok(Err(ProviderError::new(ProviderErrorKind::Cancelled, "cancelled")));
                 }
                 let bus = &self.bus;
-                let mut on = |e: StreamEvent| match e {
-                    StreamEvent::TextDelta(t) => bus.publish(BusMsg::Delta { session: session.clone(), text: t, thinking: false }),
-                    StreamEvent::ThinkingDelta(t) => bus.publish(BusMsg::Delta { session: session.clone(), text: t, thinking: true }),
-                    StreamEvent::ToolUseStart { .. } => {}
+                let mut notified = false;
+                let mut on = |e: StreamEvent| {
+                    // The first chunk means the provider has accepted the request and is
+                    // writing its prefix cache; batch siblings may start now.
+                    if !notified {
+                        notified = true;
+                        self.subagents.note_stream(&session);
+                    }
+                    if matches!(e, StreamEvent::TextDelta(_) | StreamEvent::ThinkingDelta(_)) {
+                        let mut g = ttft.lock().unwrap();
+                        if g.is_none() {
+                            *g = Some(Instant::now());
+                        }
+                    }
+                    match e {
+                        StreamEvent::TextDelta(t) => bus.publish(BusMsg::Delta { session: session.clone(), text: t, thinking: false }),
+                        StreamEvent::ThinkingDelta(t) => bus.publish(BusMsg::Delta { session: session.clone(), text: t, thinking: true }),
+                        StreamEvent::ToolUseStart { .. } => {}
+                    }
                 };
+                // Durable exact bytes: every send-time change (trimming, image prep, thinking,
+                // fallback model) is already applied, so this event can replay the request.
+                if self.cfg.model.log_requests {
+                    self.append(log, EventKind::Request { purpose: "conversation".into(), request: req.clone() })?;
+                }
                 match provider.complete(&req, &mut on, cancel) {
                     Ok(mut r) => {
                         if r.model.is_empty() {
@@ -1406,6 +1607,10 @@ impl Runtime {
 
     fn window(&self, model: &str) -> u64 {
         let (pid, m) = split_model(model);
+        // `model.context_length` is an explicit pin and wins everywhere (Hermes context_pin.py).
+        if let Some(w) = self.cfg.model.context_length.filter(|w| *w > 0) {
+            return w;
+        }
         // A window this endpoint reported about itself (its `/models` answer, recorded by
         // `seagent models list`) is more accurate than the catalogue guess — compaction thresholds
         // follow it, so an endpoint that really has 32k does not overflow twice before pruning.
@@ -1416,9 +1621,31 @@ impl Runtime {
         self.resolver.provider(pid).map(|p| p.caps(m).context_window).ok().filter(|w| *w > 0).unwrap_or(128_000)
     }
 
-    fn maybe_compact(&self, log: &mut SessionLog, view: &View, cancel: &Cancel) -> Result<bool, StoreError> {
-        let window = self.window(&view.model) as f64;
-        let used = if view.last_input_tokens > 0 { view.last_input_tokens } else { estimate_request_tokens(&ModelRequest { model: String::new(), system: view.system.clone(), messages: view.messages.clone(), tools: vec![], max_tokens: 0, temperature: None, cache_after_message: None, reasoning: None, options: Default::default() }) } as f64;
+    /// Where the displayed window came from: `pinned`, `fallback` (a default because no local
+    /// source knows the model) or `""` (the provider/catalogue/endpoint supplied it).
+    pub fn window_marker(&self, model: &str) -> &'static str {
+        let (pid, m) = split_model(model);
+        let base = self.cfg.providers.get(pid).and_then(|t| t.get("base_url")).and_then(|v| v.as_str()).unwrap_or("");
+        let shown = self.window(model);
+        let pin = self.cfg.model.context_length;
+        if seagent_model::contextpin::is_pinned(shown, pin) {
+            return "pinned";
+        }
+        if seagent_model::contextpin::is_fallback(shown, m, base, pin) {
+            return "fallback";
+        }
+        ""
+    }
+
+    /// True once the prompt crosses the cheap (prune) threshold, matching `maybe_compact`.
+    fn context_pressure(&self, view: &View, model: &str) -> bool {
+        let used = context_used(view) as f64;
+        used >= self.window(model) as f64 * self.cfg.compaction.prune_threshold
+    }
+
+    fn maybe_compact(&self, log: &mut SessionLog, view: &View, prefix: &ModelRequest, model: &str, cancel: &Cancel) -> Result<bool, StoreError> {
+        let window = self.window(model) as f64;
+        let used = context_used(view) as f64;
         let c = &self.cfg.compaction;
         if used < window * c.prune_threshold {
             return Ok(false);
@@ -1428,7 +1655,7 @@ impl Runtime {
             return Ok(pruned);
         }
         let v = if pruned { project(log.events()) } else { view.clone() };
-        Ok(self.summarise(log, &v, cancel)? || pruned)
+        Ok(self.summarise(log, &v, Some(prefix), model, cancel)? || pruned)
     }
 
     fn prune(&self, log: &mut SessionLog, view: &View, keep: usize) -> Result<bool, StoreError> {
@@ -1475,12 +1702,12 @@ impl Runtime {
         Ok((Message { role: Role::Assistant, content }, m, r.stop))
     }
 
-    fn summarise(&self, log: &mut SessionLog, view: &View, cancel: &Cancel) -> Result<bool, StoreError> {
+    fn summarise(&self, log: &mut SessionLog, view: &View, prefix: Option<&ModelRequest>, route: &str, cancel: &Cancel) -> Result<bool, StoreError> {
         // An engine that owns compaction writes the summary (and picks how much to keep).
         let mut owned = None;
         if let Some(e) = self.engine().filter(|e| e.owns_compaction()) {
             let current = estimate_tokens(&compaction::render_transcript(&view.messages, usize::MAX));
-            match e.compact(&log.id, &view.messages, self.window(&view.model), current, true) {
+            match e.compact(&log.id, &view.messages, self.window(route), current, true) {
                 Ok(Some(c)) => owned = Some(c),
                 Ok(None) => return Ok(false),
                 Err(w) => {
@@ -1490,9 +1717,23 @@ impl Runtime {
         }
         let keep = owned.as_ref().and_then(|c| c.keep_messages).unwrap_or(self.cfg.compaction.keep_messages);
         let Some(cut) = compaction::cut_index(&view.messages, keep) else { return Ok(false) };
-        let aux = self.cfg.task_model("compaction").to_string();
-        let (pid, m) = split_model(&aux);
+        let cfg = self.cfg_now();
+        // Explicit `[model.tasks] compaction` / `[auxiliary.compaction]` still wins. Otherwise the
+        // summary runs on the conversation's own route so the replayed prefix is a cache hit.
+        let explicit = cfg.model.tasks.get("compaction").is_some_and(|m| !m.is_empty()) || cfg.auxiliary.contains_key("compaction");
+        let summary_route = if explicit { cfg.task_model("compaction") } else { route.to_string() };
+        let (pid, m) = split_model(&summary_route);
         let before = estimate_tokens(&compaction::render_transcript(&view.messages, usize::MAX));
+        // The exact prefix the routed request would send: same system prompt, tools and messages.
+        let (system, tools, replay) = match prefix {
+            Some(p) => (p.system.clone(), p.tools.clone(), p.messages[..cut.min(p.messages.len())].to_vec()),
+            None => {
+                let specs = self.session_specs(&log.id, &view.model);
+                let kernel_tools: Vec<ToolSchema> = self.kernel_tools(false).into_iter().chain(view.output_schema.as_ref().map(crate::decision::structured_output_schema)).collect();
+                let base = context::build_request(view, &cfg, &specs, &kernel_tools, &view.model);
+                (base.system, base.tools, view.messages[..cut].to_vec())
+            }
+        };
         let hp = |n: &str, v: Value| {
             let mut p = hooks::payload(&log.id, &view.workspace, None, None, None, None);
             p["messages"] = view.messages.len().into();
@@ -1515,12 +1756,22 @@ impl Runtime {
             (Some(c), _) => (c.summary, false),
             (None, Ok(p)) => {
                 let metered = Metered { inner: p, usage: Mutex::new(Usage::default()) };
-                let r = compaction::summarise(&metered, m, &view.messages[..cut], cancel);
+                let mut log_err = None;
+                let r = compaction::summarise(&metered, m, &system, &tools, &replay, cancel, &mut |request| {
+                    if log_err.is_none() && self.cfg.model.log_requests {
+                        if let Err(e) = self.append(log, EventKind::Request { purpose: "compaction".into(), request: request.clone() }) {
+                            log_err = Some(e);
+                        }
+                    }
+                });
+                if let Some(e) = log_err {
+                    return Err(e);
+                }
                 let u = *metered.usage.lock().unwrap();
-                self.aux_used(log, "compaction", &aux, u);
+                self.aux_used(log, "compaction", &summary_route, u);
                 r
             }
-            (None, Err(_)) => (compaction::fallback_summary(&view.messages[..cut]), true),
+            (None, Err(_)) => (compaction::fallback_summary(&replay), true),
         };
         if fallback {
             self.append(log, EventKind::Notice { level: "warn".into(), text: "summary model unavailable or low quality; used deterministic digest".into() })?;
@@ -1561,7 +1812,12 @@ impl Runtime {
         let (pid, m) = split_model(&aux);
         let Ok(p) = self.resolver.provider(pid) else { return Ok(false) };
         let metered = Metered { inner: p, usage: Mutex::new(Usage::default()) };
-        let (fold, fallback) = compaction::summarise(&metered, m, &view.messages[start..end], cancel);
+        let mut micro_request = |r: &ModelRequest| {
+            if self.cfg.model.log_requests {
+                let _ = self.append(log, EventKind::Request { purpose: "micro_compaction".into(), request: r.clone() });
+            }
+        };
+        let (fold, fallback) = compaction::summarise(&metered, m, &view.system, &[], &view.messages[start..end], cancel, &mut micro_request);
         let u = *metered.usage.lock().unwrap();
         self.aux_used(log, "micro_compaction", &aux, u);
         if fallback || fold.trim().is_empty() {
@@ -1571,7 +1827,7 @@ impl Runtime {
         let before = estimate_tokens(&compaction::render_transcript(&view.messages[start..end], usize::MAX));
         let mut rolling = crate::ctxrun::micro_commit(&self.ctx, &log.id, &fold);
         if defrag {
-            let (condensed, _) = compaction::summarise(&metered, m, &[Message::user(rolling.clone())], cancel);
+            let (condensed, _) = compaction::summarise(&metered, m, &view.system, &[], &[Message::user(rolling.clone())], cancel, &mut |_| {});
             if !condensed.trim().is_empty() {
                 crate::ctxrun::micro_defrag(&self.ctx, &log.id, &condensed);
                 rolling = crate::ctxrun::micro_summary(&self.ctx, &log.id).unwrap_or(rolling);
@@ -1619,7 +1875,7 @@ impl Runtime {
             } else {
                 (name.clone(), input.clone())
             };
-            if !crate::subagents::tool_allowed(view, &tname) {
+            if !crate::subagents::tool_guarded(view, &tname) {
                 results[i] = Some(ToolOutput::err(format!("tool `{tname}` is not available in this session")));
                 continue;
             }
@@ -1854,6 +2110,9 @@ impl Runtime {
             if ran.contains(&i) {
                 content = self.guard_tool_output(&uses[i].1, content, out.is_error);
             }
+            if let Some(p) = self.take_provenance(id) {
+                content = format!("{content}\n\n{p}");
+            }
             let mut artifact = None;
             if content.len() > self.cfg.runner.spill_bytes {
                 let path = log.artifacts().join(format!("{}.txt", sanitize_id(id)));
@@ -1879,6 +2138,54 @@ impl Runtime {
         }
         blocks.extend(images);
         Ok((blocks, goal_done))
+    }
+
+    /// Remember why a call was allowed without a prompt; the tool result carries it.
+    pub(crate) fn note_provenance(&self, id: &str, line: String) {
+        let mut p = self.provenance.lock().unwrap_or_else(|x| x.into_inner());
+        if p.len() > 4096 {
+            p.clear();
+        }
+        p.insert(id.to_string(), line);
+    }
+
+    pub(crate) fn take_provenance(&self, id: &str) -> Option<String> {
+        self.provenance.lock().unwrap_or_else(|x| x.into_inner()).remove(id)
+    }
+
+    /// Run one tool call directly, without a model turn, through the same pipeline an agent
+    /// tool call uses: policy (`self.tool`), `tool_request`/`pre_tool` hooks, the security gate
+    /// (floors, approvals, audit), execution, result transform hooks and spill. Used by the
+    /// daemon's `tools.call` so scripts and runbooks cannot bypass a gate. MCP tools are ordinary
+    /// tools here, so `mcp__server__tool` works the same way. Returns `(content, is_error)`.
+    pub fn call_tool_as(self: &Arc<Self>, session: &str, name: &str, input: Value, who: &seagent_security::audit::Actor, source: &str) -> Result<(String, bool), KernelError> {
+        if !self.store.exists(session) {
+            return Err(KernelError::Invalid(format!("no such session `{session}`")));
+        }
+        let mut log = self.store.open(session)?;
+        let view = project(log.events());
+        let id = new_id();
+        let ledger = Ledger::new(self.cfg.budget.clone());
+        let uses = vec![(id.clone(), name.to_string(), input)];
+        let (blocks, _) = self.execute(&mut log, &view, uses, &Cancel::new(), 0, &ledger)?;
+        let (content, is_error) = blocks
+            .into_iter()
+            .find_map(|b| match b {
+                Block::ToolResult { content, is_error, .. } => Some((content, is_error)),
+                Block::Image { .. } => None,
+                _ => None,
+            })
+            .unwrap_or_else(|| ("not executed".into(), true));
+        seagent_security::audit::record(
+            &self.paths.data,
+            seagent_security::audit::Event::new("tool.call", who.clone(), name, if is_error { "error" } else { "ok" }).session(session).detail(json!({"source": source, "tool": name, "tool_use_id": id})),
+        );
+        Ok((content, is_error))
+    }
+
+    /// [`call_tool_as`] for the local owner (CLI / unix socket without a principal).
+    pub fn call_tool(self: &Arc<Self>, session: &str, name: &str, input: Value) -> Result<(String, bool), KernelError> {
+        self.call_tool_as(session, name, input, &seagent_security::audit::Actor::local(), "arp")
     }
 
     /// Returns Some(error output) if the call must not run (floors, gates, approvals: see secgate.rs).
@@ -1918,7 +2225,7 @@ impl Runtime {
         let mut handle = |nested: crate::coderun::Nested| -> ToolOutput {
             n += 1;
             let nid = format!("{parent_id}.{n}");
-            if !crate::subagents::tool_allowed(view, &nested.tool) {
+            if !crate::subagents::tool_guarded(view, &nested.tool) {
                 return ToolOutput::err(format!("tool `{}` is not available in this session", nested.tool));
             }
             let Some(tool) = self.tool(&log.id, &nested.tool) else {
@@ -1951,7 +2258,10 @@ impl Runtime {
                 store_err = Some(e);
                 return ToolOutput::err("kernel log error");
             }
-            let out = run_tool(tool.as_ref(), ctx, nested.input);
+            let mut out = run_tool(tool.as_ref(), ctx, nested.input);
+            if let Some(p) = self.take_provenance(&nid) {
+                out.content.push_str(&format!("\n\n{p}"));
+            }
             let _ = self.append(log, EventKind::ToolSettled { tool_use_id: nid, is_error: out.is_error, bytes: out.content.len(), artifact: None, ui_resource: None });
             ToolOutput { content: self.vault.redact(&out.content), is_error: out.is_error, ui_resource: None }
         };
@@ -2134,6 +2444,38 @@ impl Host {
     pub(crate) fn of(ctx: &ToolCtx) -> Option<&Host> {
         ctx.host.as_any()?.downcast_ref::<Host>()
     }
+
+    /// Emit the human-input hooks and wait. With `choices`, the approver's `clarify` path
+    /// publishes them so channel surfaces can render buttons; typed surfaces fall back to
+    /// the numbered list in [`Approver::clarify`](crate::approver::Approver::clarify).
+    fn ask_question(&self, question: &str, choices: &[String], multi: bool) -> Result<String, String> {
+        let mut p = hooks::payload(&self.session, &self.workspace.to_string_lossy(), None, None, None, None);
+        p["kind"] = "question".into();
+        p["message"] = question.into();
+        self.rt.emit(HookEvent::Notification, p.clone(), "");
+        self.rt.emit(HookEvent::HumanInputRequest, p.clone(), "");
+        let a = if choices.is_empty() {
+            self.rt.approver.ask(&self.session, question)
+        } else {
+            let q = crate::approver::ClarifyQuestion { qid: "ask_user".into(), question: question.into(), choices: choices.to_vec(), multi_select: multi };
+            let r = self.rt.approver.clarify(&self.session, std::slice::from_ref(&q));
+            match r.outcome.as_str() {
+                "submitted" => match r.answers.get("ask_user").cloned().flatten() {
+                    Some(serde_json::Value::Array(a)) => Ok(a.iter().map(|v| v.as_str().map(str::to_string).unwrap_or_else(|| v.to_string())).collect::<Vec<_>>().join(", ")),
+                    Some(serde_json::Value::String(s)) => Ok(s),
+                    Some(v) => Ok(v.to_string()),
+                    None => Err("the user skipped the question; proceed with your best judgement and state the assumption".into()),
+                },
+                _ => Err(r.notice.unwrap_or_else(|| format!("the question was not answered ({})", r.outcome))),
+            }
+        };
+        if self.rt.has_hooks(HookEvent::HumanInputResolved) {
+            p["answer"] = a.as_ref().map(|s| json!(s)).unwrap_or(Value::Null);
+            p["cancelled"] = a.is_err().into();
+            self.rt.emit(HookEvent::HumanInputResolved, p, "");
+        }
+        a
+    }
 }
 
 impl ToolHost for Host {
@@ -2151,21 +2493,17 @@ impl ToolHost for Host {
         }
     }
     fn ask_user(&self, question: &str) -> Result<String, String> {
-        let mut p = hooks::payload(&self.session, &self.workspace.to_string_lossy(), None, None, None, None);
-        p["kind"] = "question".into();
-        p["message"] = question.into();
-        self.rt.emit(HookEvent::Notification, p.clone(), "");
-        self.rt.emit(HookEvent::HumanInputRequest, p.clone(), "");
-        let a = self.rt.approver.ask(&self.session, question);
-        if self.rt.has_hooks(HookEvent::HumanInputResolved) {
-            p["answer"] = a.as_ref().map(|s| json!(s)).unwrap_or(Value::Null);
-            p["cancelled"] = a.is_err().into();
-            self.rt.emit(HookEvent::HumanInputResolved, p, "");
-        }
-        a
+        self.ask_question(question, &[], false)
+    }
+    fn ask_user_choice(&self, question: &str, choices: &[String], multi: bool) -> Result<String, String> {
+        self.ask_question(question, choices, multi)
     }
     fn progress(&self, text: &str) {
         self.rt.bus.publish(BusMsg::Delta { session: self.session.clone(), text: text.to_string(), thinking: true });
+    }
+    fn complete_text(&self, model: &str, system: &str, prompt: &str, max_tokens: u32) -> Result<String, String> {
+        let (m, _, _) = self.rt.sample((!model.trim().is_empty()).then_some(model), system, vec![Message::user(prompt)], vec![], max_tokens.clamp(1, 32_000), &Cancel::new())?;
+        Ok(m.text())
     }
     /// Screenshot analysis (Hermes auxiliary vision): the aux model when it has vision,
     /// else the session's default model; neither → an error the tool reports.
@@ -2205,6 +2543,34 @@ impl ToolHost for Host {
     }
 }
 
+/// Occupancy for pressure decisions: the provider-reported input size when a call has happened,
+/// else a local estimate over the projected request.
+fn context_used(view: &View) -> u64 {
+    if view.last_input_tokens > 0 {
+        return view.last_input_tokens;
+    }
+    estimate_request_tokens(&ModelRequest { model: String::new(), system: view.system.clone(), messages: view.messages.clone(), tools: vec![], max_tokens: 0, temperature: None, cache_after_message: None, reasoning: None, options: Default::default() })
+}
+
+/// Render only what changed between two system prompts. Fragment ids are stable, so unchanged
+/// sections are omitted and the appended note stays small.
+fn system_delta(old: &[SystemSegment], new: &[SystemSegment]) -> Option<String> {
+    let mut parts: Vec<String> = Vec::new();
+    for s in new {
+        match old.iter().find(|o| o.id == s.id) {
+            Some(o) if o.text == s.text => {}
+            Some(_) => parts.push(format!("The `{}` instructions have changed:\n{}", s.id, s.text)),
+            None => parts.push(format!("New `{}` instructions:\n{}", s.id, s.text)),
+        }
+    }
+    for o in old {
+        if !new.iter().any(|s| s.id == o.id) {
+            parts.push(format!("The `{}` instructions are withdrawn.", o.id));
+        }
+    }
+    (!parts.is_empty()).then(|| parts.join("\n\n"))
+}
+
 /// Mask PII in the text a session stores (messages and queued input). Tool inputs and
 /// results are left alone: masking them would change what tools did.
 fn mask_at_rest(kind: EventKind, c: &seagent_security::pii::PiiConfig) -> EventKind {
@@ -2218,6 +2584,22 @@ fn mask_at_rest(kind: EventKind, c: &seagent_security::pii::PiiConfig) -> EventK
             EventKind::Message { message, usage, model, inbox }
         }
         EventKind::Inbox { id, text, source, attachments } => EventKind::Inbox { id, text: seagent_security::pii::mask_with(&text, c), source, attachments },
+        EventKind::SystemDelta { text } => EventKind::SystemDelta { text: seagent_security::pii::mask_with(&text, c) },
+        EventKind::Request { purpose, mut request } => {
+            // The request log is for cache debugging; PII at rest still wins. Text blocks are
+            // masked like stored messages, tool arguments/results are left as the tools saw them.
+            for s in request.system.iter_mut() {
+                s.text = seagent_security::pii::mask_with(&s.text, c);
+            }
+            for m in request.messages.iter_mut() {
+                for b in m.content.iter_mut() {
+                    if let seagent_core::Block::Text { text } = b {
+                        *text = seagent_security::pii::mask_with(text, c);
+                    }
+                }
+            }
+            EventKind::Request { purpose, request }
+        }
         other => other,
     }
 }

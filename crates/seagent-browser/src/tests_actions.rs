@@ -45,7 +45,15 @@ fn fake_page2(downloads: std::path::PathBuf) -> crate::cdp::fake::Fake {
             "Page.getFrameTree" => (json!({"frameTree": {"frame": {"id": "MAIN", "url": st["url"]}}}), vec![]),
             "Page.navigate" => {
                 st["url"] = p["url"].clone();
-                (json!({"frameId": "MAIN", "loaderId": "L2"}), vec![ev("Page.frameNavigated", json!({"frame": {"id": "MAIN", "url": p["url"]}})), ev("Page.loadEventFired", json!({}))])
+                // A private redirect hop: only a strict-mode navigation fence pauses it.
+                (
+                    json!({"frameId": "MAIN", "loaderId": "L2"}),
+                    vec![
+                        json!({"method": "Fetch.requestPaused", "params": {"requestId": "R-redirect", "resourceType": "Document", "request": {"url": "http://10.0.0.5/admin"}}, "sessionId": sid}),
+                        ev("Page.frameNavigated", json!({"frame": {"id": "MAIN", "url": p["url"]}})),
+                        ev("Page.loadEventFired", json!({})),
+                    ],
+                )
             }
             "Runtime.evaluate" => {
                 let e = p["expression"].as_str().unwrap_or("");
@@ -83,7 +91,7 @@ fn fake_page2(downloads: std::path::PathBuf) -> crate::cdp::fake::Fake {
                 (json!({"result": {"type": "object", "value": v}}), vec![])
             }
             "Accessibility.getFullAXTree" => (json!({"nodes": [
-                {"nodeId": "1", "role": {"value": "RootWebArea"}, "name": {"value": "Login"}, "childIds": ["2", "3", "4", "5", "6", "7", "8", "9"], "backendDOMNodeId": 1},
+                {"nodeId": "1", "role": {"value": "RootWebArea"}, "name": {"value": "Login"}, "childIds": ["2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "14"], "backendDOMNodeId": 1},
                 {"nodeId": "2", "role": {"value": "button"}, "name": {"value": "Sign in"}, "childIds": [], "backendDOMNodeId": 20},
                 {"nodeId": "3", "role": {"value": "textbox"}, "name": {"value": "Email"}, "childIds": [], "backendDOMNodeId": 30},
                 {"nodeId": "4", "role": {"value": "button"}, "name": {"value": "Drag source"}, "childIds": [], "backendDOMNodeId": 40},
@@ -91,8 +99,33 @@ fn fake_page2(downloads: std::path::PathBuf) -> crate::cdp::fake::Fake {
                 {"nodeId": "6", "role": {"value": "checkbox"}, "name": {"value": "Remember me"}, "childIds": [], "backendDOMNodeId": 60},
                 {"nodeId": "7", "role": {"value": "combobox"}, "name": {"value": "Color"}, "childIds": [], "backendDOMNodeId": 70},
                 {"nodeId": "8", "role": {"value": "link"}, "name": {"value": "Download file"}, "childIds": [], "backendDOMNodeId": 80},
-                {"nodeId": "9", "role": {"value": "heading"}, "name": {"value": "Hello seagent"}, "childIds": [], "backendDOMNodeId": 90}
+                {"nodeId": "9", "role": {"value": "heading"}, "name": {"value": "Hello seagent"}, "childIds": [], "backendDOMNodeId": 90},
+                {"nodeId": "10", "role": {"value": "textbox"}, "name": {"value": "Visible email"}, "childIds": [], "backendDOMNodeId": 100, "value": {"value": "visible@example.test"}},
+                {"nodeId": "11", "role": {"value": "textbox"}, "name": {"value": "Code"}, "childIds": [], "backendDOMNodeId": 110, "value": {"value": "123456"}},
+                {"nodeId": "12", "role": {"value": "textbox"}, "name": {"value": "Card number"}, "childIds": ["13"], "backendDOMNodeId": 120, "value": {"value": "4242424242424242"}},
+                {"nodeId": "13", "role": {"value": "statictext"}, "name": {"value": "4242424242424242"}, "childIds": [], "backendDOMNodeId": 121, "value": {"value": "4242424242424242"}},
+                {"nodeId": "14", "role": {"value": "textbox"}, "name": {"value": "Security code"}, "childIds": [], "backendDOMNodeId": 130, "value": {"value": "123"}}
             ]}), vec![]),
+            "DOM.describeNode" => {
+                let bk = p["backendNodeId"].as_i64().unwrap_or(0);
+                let (tag, ty, ac) = match bk {
+                    100 => ("INPUT", Some("email"), Some("username")),
+                    110 => ("INPUT", Some("text"), Some("one-time-code")),
+                    120 => ("INPUT", Some("text"), Some("cc-number")),
+                    130 => ("INPUT", Some("text"), Some("cc-csc")),
+                    _ => ("DIV", None, None),
+                };
+                let mut attrs: Vec<Value> = vec![];
+                if let (Some(name), Some(value)) = (ty.map(|_| "type"), ty) {
+                    attrs.push(json!(name));
+                    attrs.push(json!(value));
+                }
+                if let (Some(name), Some(value)) = (ac.map(|_| "autocomplete"), ac) {
+                    attrs.push(json!(name));
+                    attrs.push(json!(value));
+                }
+                (json!({"node": {"backendNodeId": bk, "nodeName": tag, "attributes": attrs}}), vec![])
+            }
             "DOM.getContentQuads" => {
                 let q = match p["backendNodeId"].as_i64().unwrap_or(0) {
                     20 => json!([[10, 10, 110, 10, 110, 40, 10, 40]]),
@@ -236,6 +269,72 @@ fn openclaw_act_hover_drag_fill_select_focus_and_close() {
     let o = r(json!({"action": "close", "targetId": "PAGE3"}));
     assert!(!o.is_error && payload(&o.content)["closed"] == "PAGE3", "{}", o.content);
     assert!(f.seen.lock().unwrap().iter().any(|m| m["method"] == "Target.closeTarget" && m["params"]["targetId"] == "PAGE3"));
+    crate::manager::global().stop("cdp");
+}
+
+#[test]
+fn openclaw_snapshots_mask_password_otp_and_card_values() {
+    let _g = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    let c = ctx("mask", "sess-mask");
+    let f = fake_page2(started(&c).into());
+    let cfg = browser_cfg(&f);
+    let t = tool(&cfg, "browser");
+    let r = |input: Value| t.call(&c, input);
+    let o = r(json!({"action": "open", "url": "https://pay.example/checkout"}));
+    assert!(!o.is_error, "{}", o.content);
+    let snap = r(json!({"action": "snapshot", "maxChars": 0})).content;
+    assert!(snap.contains("visible@example.test"), "ordinary values stay readable: {snap}");
+    for secret in ["123456", "4242424242424242", "value=\"123\""] {
+        assert!(!snap.contains(secret), "{secret} reached the snapshot: {snap}");
+    }
+    assert!(snap.matches("[redacted]").count() >= 4, "masked OTP/card/CVC values: {snap}");
+    let aria = r(json!({"action": "snapshot", "snapshotFormat": "aria"})).content;
+    assert!(aria.contains("visible@example.test"), "{aria}");
+    for secret in ["123456", "4242424242424242"] {
+        assert!(!aria.contains(secret), "{secret} reached the ARIA snapshot: {aria}");
+    }
+    assert!(aria.contains("[redacted]"), "{aria}");
+    crate::manager::global().stop("cdp");
+}
+
+#[test]
+fn tab_close_is_exempt_from_strict_url_policy() {
+    let _g = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    let c = ctx("close-strict", "sess-close-strict");
+    let f = fake_page2(started(&c).into());
+    // Open a private page while private local URLs are still allowed.
+    let t = tool(&browser_cfg(&f), "browser");
+    let o = t.call(&c, json!({"action": "open", "url": "http://10.0.0.5/admin"}));
+    assert!(!o.is_error, "{}", o.content);
+    let target = payload(&o.content)["targetId"].as_str().unwrap().to_string();
+    // Closing never contacts the address, so strict URL policy must not leave the tab open.
+    let mut strict = browser_cfg(&f);
+    strict.allow_private_urls = Some(false);
+    let o = tool(&strict, "browser").call(&c, json!({"action": "close", "targetId": target}));
+    assert!(!o.is_error, "strict close failed: {}", o.content);
+    assert_eq!(payload(&o.content)["closed"], target);
+    assert!(f.seen.lock().unwrap().iter().any(|m| m["method"] == "Target.closeTarget" && m["params"]["targetId"] == target));
+    crate::manager::global().stop("cdp");
+}
+
+#[test]
+fn strict_navigation_refuses_a_private_redirect_hop() {
+    let _g = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    let c = ctx("strict", "sess-strict");
+    let f = fake_page2(started(&c).into());
+    let mut cfg = browser_cfg(&f);
+    cfg.allow_private_urls = Some(false);
+    let t = tool(&cfg, "browser");
+    let o = t.call(&c, json!({"action": "open", "url": "https://pay.example/checkout"}));
+    assert!(o.is_error, "the strict fence must refuse the private hop: {}", o.content);
+    assert!(o.content.contains("redirect landed on a private/internal address"), "{}", o.content);
+    let seen = f.seen.lock().unwrap();
+    assert!(
+        seen.iter().any(|m| m["method"] == "Fetch.failRequest" && m["params"]["requestId"] == "R-redirect" && m["params"]["errorReason"] == "BlockedByClient"),
+        "the hop was failed in Chrome before it was sent: {}",
+        seen.iter().filter(|m| m["method"].as_str().unwrap_or("").starts_with("Fetch.")).map(|m| m.to_string()).collect::<Vec<_>>().join("\n")
+    );
+    drop(seen);
     crate::manager::global().stop("cdp");
 }
 

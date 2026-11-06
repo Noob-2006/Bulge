@@ -461,7 +461,7 @@ fn build_agent(a: &Args, approver: Arc<dyn Approver>, with_channels: bool) -> Re
     let providers = Arc::new(Providers::new(&cfg.providers, vault.clone())?);
     let resolver: Arc<dyn Resolver> = providers.clone();
     let (ext, extra, hooks) = ext::load(&cfg, &paths, &vault, &ws, with_channels);
-    outbound_host::install(ext.channels.iter().map(|(n, (ch, c))| (n.clone(), (ch.clone(), c.default_chat().map(String::from)))).collect(), ext::secrets_fn(&vault));
+    outbound_host::install(ext.channels.iter().map(|(n, (ch, c))| (n.clone(), (ch.clone(), c.default_chat().map(String::from)))).collect(), ext::secrets_fn(&vault), paths.data.clone());
     for p in &ext.plugins {
         for (id, imp) in p.provider_impls() {
             providers.register(&id, imp);
@@ -1116,7 +1116,7 @@ fn cmd_fleet(a: &Args) -> R {
 
 // ───────────────────────── daemon ─────────────────────────
 
-const HOST_METHODS: &[&str] = &["channels.list", "pairing.list", "pairing.approve", "pairing.revoke", "mcp.list", "mcp.app_call", "plugins.list", "plugins.ui", "plugins.ui_call", "command.run"];
+const HOST_METHODS: &[&str] = &["channels.list", "pairing.list", "pairing.approve", "pairing.revoke", "mcp.list", "mcp.app_call", "plugins.list", "plugins.ui", "plugins.ui_call", "command.run", "session.handoff"];
 
 fn plugin_json(p: &Arc<seagent_plugin::PluginHost>) -> Value {
     json!({"name": p.name, "hooks": p.hooks(), "channels": p.channels(), "commands": p.commands, "routes": p.routes, "providers": p.providers, "services": p.services,
@@ -1168,6 +1168,7 @@ fn host_methods(paths: &Paths, ext: Option<&ext::Ext>) -> seagent_kernel::daemon
     let kslot: Arc<std::sync::OnceLock<Kernel>> = ext.map(|e| e.kernel.clone()).unwrap_or_default();
     let plugin_list: Vec<Value> = plugins.iter().map(plugin_json).collect();
     let channels: Vec<Value> = ext.map(|e| e.channels.iter().map(|(n, (ch, c))| json!({"name": n, "kind": c.kind, "caps": ch.caps(), "dm_policy": c.policy.dm_policy, "default_chat": c.default_chat})).collect()).unwrap_or_default();
+    let handoff_channels = ext.map(agentcmds::handoff::channels).unwrap_or_default();
     let mcp: Vec<Value> = ext.map(|e| e.registry.status().into_iter().map(|(n, tools, running)| json!({"name": n, "tools": tools, "running": running})).collect()).unwrap_or_default();
     // MCP Apps: tools a view may call, with the client that serves them.
     let app_tools: Vec<(String, seagent_plugin::ToolDef, Arc<seagent_plugin::Client>)> =
@@ -1200,6 +1201,14 @@ fn host_methods(paths: &Paths, ext: Option<&ext::Ext>) -> seagent_kernel::daemon
                     None => Ok(json!({"handled": false})),
                     Some(h) => h.command(name, rest[name.len()..].trim(), ctx).map(|r| json!({"handled": true, "text": r.text, "prompt": r.prompt})).map_err(|e| (-32000, e)),
                 }
+            }
+            // `/handoff` from a CLI process (its own router is not the daemon's).
+            "session.handoff" => {
+                let Some(k) = kslot.get() else { return Some(Err((-32000, "agent not ready".into()))) };
+                let target = agentcmds::handoff::Target { channel: s("channel"), chat: s("chat") };
+                agentcmds::handoff::perform(k, &handoff_channels, agentcmds::bindings::router().map(|r| r.as_ref()), &s("session"), &target)
+                    .map(|text| json!({"text": text, "session": s("session"), "channel": target.channel, "chat": target.chat}))
+                    .map_err(|e| (-32000, e))
             }
             "pairing.list" => Ok(json!({"pending": pairing.pending(), "approved": pairing.approved().into_iter().map(|(c, s, a)| json!({"channel": c, "sender": s, "name": a.sender_name, "approved_at": a.approved_at})).collect::<Vec<_>>()})),
             "pairing.approve" => pairing.approve(&s("channel"), &s("code")).map(|(sender, name)| json!({"sender": sender, "name": name})).map_err(|e| (-32001, e)),
@@ -1266,6 +1275,19 @@ fn cmd_daemon(a: &Args) -> R {
             }
             c.k.emit(seagent_kernel::hooks::HookEvent::DaemonStart, json!({"session_id": "", "cwd": c.workspace, "pid": std::process::id()}), "");
             let d = Arc::new(Daemon::new(c.k.clone(), pending));
+            // Opt-in unattended plugin updates (`[automation] plugin_auto_update_hours`, default
+            // off): the pass re-scans every candidate and skips caution verdicts for a human.
+            {
+                let (cfg, paths2) = (c.k.cfg.clone(), paths.clone());
+                d.add_maintenance(Arc::new(move || {
+                    let now = seagent_kernel::util::unix_now().max(0) as u64;
+                    match seagent_skills::hub::plugins::run_auto_update(&cfg, &paths2, now) {
+                        Ok(out) if out.contains("updated `") || out.contains("skipped:") => eprintln!("seagentd: {out}"),
+                        Ok(_) => {}
+                        Err(e) => eprintln!("seagentd: plugin auto-update: {e}"),
+                    }
+                }));
+            }
             seagent_app::node::init(&paths.data);
             d.add_methods(seagent_app::node::methods());
             let lk = c.k.clone();

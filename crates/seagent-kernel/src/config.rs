@@ -87,6 +87,8 @@ pub struct Config {
     pub trace: TraceConfig,
     /// Sub-agent delegation limits and behaviour (`delegate_task`, `sessions_spawn`).
     pub delegation: crate::subagents::DelegationConfig,
+    /// `[gateway]`: agent-to-agent loop guard (Hermes `gateway.bot_loop_guard`).
+    pub gateway: GatewayLoopConfig,
     /// Named agents (`[agents.<id>]`); `<config>/agents.toml` (managed by `seagent agents`) adds more.
     pub agents: BTreeMap<String, crate::agents::AgentDef>,
     /// Channel → agent routing (`[[bindings]]`).
@@ -156,6 +158,21 @@ pub struct Config {
     pub workers: crate::workers::WorkersConfig,
     /// `[cluster]`: node registry and central-console policy pull (ent-062).
     pub cluster: crate::cluster::ClusterConfig,
+}
+
+/// `[gateway]`: gateway-wide agent-to-agent loop guard. Its `max_hops` wins over
+/// `[delegation] max_hops` when set, matching Hermes' config path.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct GatewayLoopConfig {
+    pub bot_loop_guard: BotLoopGuardConfig,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct BotLoopGuardConfig {
+    /// Runtime hop cap for one bot-to-bot chain; unset = `delegation.max_hops`.
+    pub max_hops: Option<u32>,
 }
 
 /// `[display]`: user-facing presentation (Hermes `display.language`).
@@ -300,6 +317,10 @@ pub struct MemoryConfig {
     pub flush: toml::Table,
     /// `[memory.wiki]`: compiled wiki vault.
     pub wiki: toml::Table,
+    /// `[memory.recall_gate]`: per-turn decision-model scoring of knowledge pages.
+    pub recall_gate: toml::Table,
+    /// `[memory.standing]`: keyword-triggered standing reminders (OpenClaw memory-core).
+    pub standing: toml::Table,
     /// `[memory.rewrite]`: recall query rewrite.
     pub rewrite: toml::Table,
     /// `[memory.byterover]` / `[memory.retaindb]`: bundled external providers.
@@ -360,6 +381,10 @@ pub struct ModelConfig {
     pub verbosity: String,
     /// Ask OpenAI-style providers for strict (schema-enforced) tool arguments.
     pub strict_tools: bool,
+    /// OpenAI Daybreak (Trusted Access for Cyber) on the Codex subscription route.
+    /// Off by default; only the account's own Codex catalog-granted models accept it.
+    #[serde(default)]
+    pub daybreak: bool,
     /// Short names for models: `/model fast` → `aliases.fast`.
     pub aliases: BTreeMap<String, String>,
     /// When non-empty, sessions may only switch to these models (`provider/model`, `provider/*`).
@@ -370,6 +395,15 @@ pub struct ModelConfig {
     /// set = this wins and every surface labels it " (pinned)" (Hermes `model.context_length`).
     #[serde(default)]
     pub context_length: Option<u64>,
+    /// How a system-prompt change mid-session reaches the model: `rewrite` (default) replaces the
+    /// frozen `System` head; `in_history` appends the change after the cached history for routes
+    /// whose endpoint reads the latest system snapshot in `messages` (DSH `systemPromptUpdate:
+    /// in-history`). Only opt in when the route is known to support it.
+    pub system_updates: String,
+    /// Record each provider request verbatim as a `Request` session event, so a cache miss can
+    /// be replayed byte for byte. Off by default: every step stores the whole context again.
+    #[serde(default)]
+    pub log_requests: bool,
     /// Ask before selecting a model whose input/output price exceeds these (USD per million tokens).
     pub confirm_input_usd: f64,
     pub confirm_output_usd: f64,
@@ -492,6 +526,10 @@ pub struct CompactionConfig {
     pub max_tool_result_chars: usize,
     /// Most recent messages kept verbatim by summarisation.
     pub keep_messages: usize,
+    /// When to clip old long tool results before a request: `pressure` (default) only once the
+    /// prompt crosses `prune_threshold`; `always` restores the pre-DSH behaviour of trimming on
+    /// every request (which invalidates the provider prefix cache every few tool calls).
+    pub trim_tool_results: String,
     /// Hermes micro-compaction: after each turn fold the oldest un-absorbed exchange into a
     /// rolling summary (default false: every pass breaks the prompt cache).
     pub micro_compact: bool,
@@ -523,6 +561,11 @@ const NATIVE_MIN_THRESHOLD: u64 = 1_024;
 const NATIVE_DEFAULT_THRESHOLD: u64 = 200_000;
 
 impl CompactionConfig {
+    /// Whether old tool results are clipped on every request (`always`) or only under pressure.
+    pub fn trim_under_pressure(&self) -> bool {
+        self.trim_tool_results != "always"
+    }
+
     /// Server-side compaction threshold in tokens, or `None` when it is off.
     ///
     /// `window_tokens` is the model's context window: automatic mode stays strictly below the
@@ -586,7 +629,7 @@ pub struct ToolsConfig {
 
 impl ToolsConfig {
     pub fn layer(&self) -> seagent_security::toolpolicy::Layer {
-        seagent_security::toolpolicy::Layer { profile: self.profile.clone(), allow: self.allow.clone(), also_allow: self.also_allow.clone(), deny: self.deny.clone() }
+        seagent_security::toolpolicy::Layer { profile: self.profile.clone(), allow: self.allow.clone(), also_allow: self.also_allow.clone(), deny: self.deny.clone(), exec: None }
     }
     pub fn permits(&self, origin: &seagent_security::toolpolicy::Origin, tool: &str) -> bool {
         seagent_security::toolpolicy::allowed(&self.layer(), &self.by_provider, &self.by_channel, &self.by_sender, origin, tool)
@@ -634,10 +677,13 @@ impl Default for ModelConfig {
             fast_auto_seconds: 60,
             verbosity: String::new(),
             strict_tools: false,
+            daybreak: false,
             aliases: BTreeMap::new(),
             allow: vec![],
             tasks: BTreeMap::new(),
             context_length: None,
+            system_updates: "rewrite".into(),
+            log_requests: false,
             confirm_input_usd: 20.0,
             confirm_output_usd: 100.0,
         }
@@ -650,7 +696,7 @@ impl Default for RunnerConfig {
 }
 impl Default for CompactionConfig {
     fn default() -> Self {
-        CompactionConfig { threshold: 0.75, prune_threshold: 0.5, keep_tool_results: 6, max_tool_result_chars: 2000, keep_messages: 8, micro_compact: false, micro_compact_every_n_turns: 1, micro_compact_defrag_threshold_tokens: 2000, native: NativeCompactionConfig::default() }
+        CompactionConfig { threshold: 0.75, prune_threshold: 0.5, keep_tool_results: 6, max_tool_result_chars: 2000, keep_messages: 8, trim_tool_results: "pressure".into(), micro_compact: false, micro_compact_every_n_turns: 1, micro_compact_defrag_threshold_tokens: 2000, native: NativeCompactionConfig::default() }
     }
 }
 impl Default for ScheduleConfig {
@@ -671,6 +717,11 @@ impl CheckpointConfig {
 }
 
 impl Config {
+    /// Whether a mid-session system-prompt change is appended after the cached history.
+    pub fn in_history_system(&self) -> bool {
+        self.model.system_updates == "in_history"
+    }
+
     pub fn aux_model(&self) -> &str {
         if self.model.aux.is_empty() {
             &self.model.default
@@ -684,6 +735,11 @@ impl Config {
         } else {
             &self.model.subagent
         }
+    }
+    /// Agent-to-agent chain cap: `[gateway.bot_loop_guard] max_hops` if configured,
+    /// else `[delegation] max_hops` (default 4).
+    pub fn agent_max_hops(&self) -> u32 {
+        self.gateway.bot_loop_guard.max_hops.unwrap_or(self.delegation.max_hops).max(1)
     }
     pub fn price(&self, model: &str) -> Option<Price> {
         self.prices.get(model).copied().or_else(|| crate::ledger::fallback_price(model))
@@ -835,6 +891,9 @@ impl Config {
         if !matches!(self.model.fast.as_str(), "" | "normal" | "off" | "fast" | "priority" | "on" | "ultrafast" | "flex" | "auto" | "cold") {
             return Err(format!("model.fast `{}`: use fast, ultrafast, flex, auto, cold or leave empty", self.model.fast));
         }
+        if !matches!(self.model.system_updates.as_str(), "" | "rewrite" | "in_history") {
+            return Err(format!("model.system_updates `{}`: use rewrite or in_history", self.model.system_updates));
+        }
         if !matches!(self.model.verbosity.as_str(), "" | "low" | "medium" | "high") {
             return Err(format!("model.verbosity `{}`: use low, medium or high", self.model.verbosity));
         }
@@ -855,6 +914,9 @@ impl Config {
         let c = &self.compaction;
         if !(0.1..=0.98).contains(&c.threshold) || !(0.05..=c.threshold).contains(&c.prune_threshold) {
             return Err("compaction: need 0.05 <= prune_threshold <= threshold <= 0.98".into());
+        }
+        if !matches!(c.trim_tool_results.as_str(), "" | "pressure" | "always") {
+            return Err(format!("compaction.trim_tool_results `{}`: use pressure or always", c.trim_tool_results));
         }
         if crate::queue::Mode::parse(&self.runner.busy_mode).is_none() {
             return Err(format!("runner.busy_mode `{}`: use steer, followup, collect or interrupt", self.runner.busy_mode));
@@ -1244,6 +1306,26 @@ model = "zai/glm-5.3"
         // It round-trips through the sample dump.
         let c = Config::load(None, None, &["display.language=ja".into()]).unwrap();
         assert_eq!(c.display.language, "ja");
+    }
+
+    #[test]
+    fn cache_policy_keys_default_safely_and_validate() {
+        let d = tmp();
+        let f = d.join("c.toml");
+        let c = Config::default();
+        assert_eq!(c.model.system_updates, "rewrite");
+        assert!(!c.in_history_system());
+        assert!(c.compaction.trim_under_pressure(), "pressure-gated trimming is the default");
+        // Opt in to in-history system updates and the old trim behaviour.
+        fs::write(&f, "[model]\nsystem_updates = \"in_history\"\n[compaction]\ntrim_tool_results = \"always\"\n").unwrap();
+        let c = Config::load(Some(&f), None, &[]).unwrap();
+        assert!(c.in_history_system());
+        assert!(!c.compaction.trim_under_pressure());
+        // Values outside the documented set are refused.
+        fs::write(&f, "[model]\nsystem_updates = \"sometimes\"\n").unwrap();
+        assert!(Config::load(Some(&f), None, &[]).is_err());
+        fs::write(&f, "[compaction]\ntrim_tool_results = \"sometimes\"\n").unwrap();
+        assert!(Config::load(Some(&f), None, &[]).is_err());
     }
 
     #[test]

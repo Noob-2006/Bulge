@@ -49,17 +49,40 @@ pub struct DelegationConfig {
     pub orchestrator_enabled: bool,
     /// Background completions older than this are not replayed after a restart (hours).
     pub replay_max_age_hours: u64,
+    /// Batch prompt-cache warm-up (Hermes `delegation.prefix_stagger_seconds`): siblings on
+    /// the leader's route wait until its first response chunk starts, or this many seconds,
+    /// whichever comes first. 0 = off.
+    pub prefix_stagger_seconds: u64,
+    /// Agent-to-agent chain cap (Hermes `gateway.bot_loop_guard.max_hops`, default 4).
+    pub max_hops: u32,
+    /// Default and ceiling for one `ralph` run's fresh-context rounds.
+    pub ralph_max_rounds: u32,
+    /// Largest serialized report a Ralph round may hand to the next one.
+    pub ralph_max_handoff_chars: usize,
 }
 
 impl Default for DelegationConfig {
     fn default() -> Self {
-        DelegationConfig { max_concurrent_children: 10, max_async_children: 0, background: true, independent_completions: false, worktree_isolation: false, child_timeout_secs: 0, orchestrator_enabled: true, replay_max_age_hours: 48 }
+        DelegationConfig {
+            max_concurrent_children: 10,
+            max_async_children: 0,
+            background: true,
+            independent_completions: false,
+            worktree_isolation: false,
+            child_timeout_secs: 0,
+            orchestrator_enabled: true,
+            replay_max_age_hours: 48,
+            prefix_stagger_seconds: 0,
+            max_hops: 4,
+            ralph_max_rounds: 16,
+            ralph_max_handoff_chars: 16_384,
+        }
     }
 }
 
 /// Tools a child never gets (Hermes DELEGATE_BLOCKED_TOOLS): no user interaction,
 /// no writes to shared memory, no cross-platform side effects, no scheduling.
-pub const BLOCKED_FOR_CHILDREN: &[&str] = &["clarify", "ask_user", "memory", "channel_send", "message", "message_agent", "cronjob", "cronjob_manage", "automations", "suggest_task"];
+pub const BLOCKED_FOR_CHILDREN: &[&str] = &["clarify", "ask_user", "memory", "channel_send", "message", "message_agent", "cronjob", "cronjob_manage", "automations", "suggest_task", "ralph"];
 
 /// Named groups of tools (Hermes toolsets) usable wherever a tool list is accepted.
 pub const TOOLSETS: &[(&str, &[&str])] = &[
@@ -112,6 +135,22 @@ pub fn tool_allowed(view: &View, name: &str) -> bool {
         return false;
     }
     view.tool_allow.as_ref().is_none_or(|a| a.iter().any(|p| name_matches(p, name)))
+}
+
+/// May a tool call execute? This is [`tool_allowed`] plus the execution-only guard a fork
+/// child carries: its request still advertises the parent's tool list (so the provider's
+/// prefix is reused), but calls outside the child's assignment are refused here.
+pub fn tool_guarded(view: &View, name: &str) -> bool {
+    if !tool_allowed(view, name) {
+        return false;
+    }
+    if matches!(name, "tool_describe" | "tool_call" | "goal_done" | "structured_output" | "context_fetch") {
+        return true;
+    }
+    if view.tool_guard_deny.iter().any(|p| name_matches(p, name)) {
+        return false;
+    }
+    view.tool_guard_allow.as_ref().is_none_or(|a| a.iter().any(|p| name_matches(p, name)))
 }
 
 /// Ledger + list status of one child.
@@ -227,6 +266,8 @@ pub struct Rec {
     pub notify: bool,
     pub collect: bool,
     pub accepting_steer: bool,
+    /// The child's first model response has started streaming (prompt-cache warm-up gate).
+    pub streamed: bool,
     pub entry: Option<Entry>,
     pub delivered: bool,
     pub live_log: PathBuf,
@@ -292,6 +333,35 @@ impl Registry {
     }
     pub fn notify_all(&self) {
         self.cv.notify_all();
+    }
+    /// The first response chunk of `child` arrived: opens the batch's prefix gate.
+    pub fn note_stream(&self, child: &str) {
+        let mut g = self.lock();
+        if let Some(r) = g.recs.values_mut().find(|r| r.child == child && !r.streamed) {
+            r.streamed = true;
+            drop(g);
+            self.cv.notify_all();
+        }
+    }
+    /// Wait until `leader`'s first chunk, its completion, the deadline or cancellation.
+    /// Returns false only when `cancel` fired during the wait.
+    pub fn wait_for_leader(&self, leader: &str, max_wait: Duration, cancel: Option<&Cancel>) -> bool {
+        let deadline = Instant::now() + max_wait;
+        let mut g = self.lock();
+        loop {
+            if cancel.is_some_and(|c| c.is_cancelled()) {
+                return false;
+            }
+            let open = g.recs.values().any(|r| r.child == leader && (r.streamed || r.state.done()));
+            if open || Instant::now() >= deadline {
+                return true;
+            }
+            let left = deadline.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                return true;
+            }
+            g = self.wait_timeout(g, left.min(Duration::from_millis(50)));
+        }
     }
     fn wait_timeout<'a>(&self, g: MutexGuard<'a, Inner>, d: Duration) -> MutexGuard<'a, Inner> {
         self.cv.wait_timeout(g, d).map(|(g, _)| g).unwrap_or_else(|p| p.into_inner().0)
@@ -496,6 +566,37 @@ fn child_system_prompt(spec: &ChildSpec, workspace: &Path, depth: u32, max_depth
     parts.join("\n\n")
 }
 
+/// The first user turn of a fork child. A fork's system prompt and tool list are the
+/// parent's, byte for byte, so everything child-specific (role, context, workspace,
+/// completion contract) belongs here instead of in a new system segment.
+fn fork_brief(cfg: &crate::config::Config, spec: &ChildSpec, workspace: &Path, depth: u32, max_depth: u32, orchestrator: bool, agent: Option<&crate::agents::Resolved>) -> String {
+    let mut parts = vec!["You are a focused subagent working on a specific delegated task. The conversation above is inherited from the parent: use it as context, but this task message is your instruction.".to_string()];
+    if let Some(identity) = agent.and_then(|a| a.identity.as_ref()).filter(|i| !i.trim().is_empty()) {
+        parts.push(format!("ROLE:\n{identity}"));
+    }
+    if let Some(role) = agent.and_then(|a| a.role.as_deref()) {
+        if let Ok(r) = crate::roles::resolve(cfg, &crate::roles::Catalog::for_config(cfg), role) {
+            parts.push(format!("OCCUPATION:\n{}", r.segment().text));
+        } else {
+            parts.push(format!("OCCUPATION: {role}"));
+        }
+    }
+    if let Some(c) = spec.context.as_ref().filter(|c| !c.trim().is_empty()) {
+        parts.push(format!("CONTEXT:\n{c}"));
+    }
+    parts.push(format!("WORKSPACE PATH:\n{}\nUse this exact path for local repository/workdir operations unless the task explicitly says otherwise.", workspace.display()));
+    if let Some(s) = &spec.output_schema {
+        parts.push(crate::jsonschema::output_contract(s));
+    }
+    parts.push(COMPLETION_INSTRUCTIONS.into());
+    if orchestrator && depth < max_depth {
+        let note = if depth + 1 >= max_depth { "Your children will be leaf agents and cannot delegate further." } else { "Your children may delegate one level further." };
+        parts.push(format!("{ORCHESTRATOR_BLOCK}\nNOTE: You are at depth {depth}. The delegation tree is capped at max_spawn_depth={max_depth}. {note}"));
+    }
+    parts.push(format!("TASK:\n{}", spec.goal));
+    parts.join("\n\n")
+}
+
 fn image_block(path: &Path) -> Option<Block> {
     let ext = path.extension()?.to_string_lossy().to_lowercase();
     let media = match ext.as_str() {
@@ -534,7 +635,7 @@ pub const MAX_TASK_IMAGES: usize = 8;
 /// `sessions_yield`, `subagents`, `agents_list`). Registered by `new_kernel`; each one
 /// reaches the kernel through [`crate::kernel::Host::of`].
 pub fn tools() -> Vec<Arc<dyn Tool>> {
-    vec![Arc::new(DelegateTask), Arc::new(SessionsSpawn), Arc::new(AgentsWait), Arc::new(SessionsYield), Arc::new(SubagentsTool), Arc::new(AgentsList)]
+    vec![Arc::new(DelegateTask), Arc::new(SessionsSpawn), Arc::new(AgentsWait), Arc::new(SessionsYield), Arc::new(SubagentsTool), Arc::new(AgentsList), Arc::new(Ralph)]
 }
 
 fn kernel_host<'a>(ctx: &'a ToolCtx, tool: &str) -> Result<&'a Host, ToolOutput> {
@@ -1055,6 +1156,158 @@ impl Tool for AgentsList {
     }
 }
 
+// ───────────────────────── ralph (fresh-context rounds) ─────────────────────────
+
+/// `ralph` (DeepSeek Harness `tool-ralph`): one immutable objective, one fresh child per
+/// round, only the previous bounded structured report crossing rounds. The shared
+/// workspace (plus an explicit progress file) is the long-term memory.
+pub struct Ralph;
+
+fn ralph_schema() -> Value {
+    json!({
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+            "status": {"enum": ["continue", "complete", "blocked"]},
+            "summary": {"type": "string"},
+            "evidence": {"type": "array", "items": {"type": "string"}},
+            "next_steps": {"type": "array", "items": {"type": "string"}},
+            "blocker": {"type": "string"}
+        },
+        "required": ["status", "summary", "evidence", "next_steps", "blocker"]
+    })
+}
+
+const RALPH_DESCRIPTION: &str = "Run a foreground fresh-context loop toward ONE immutable objective (DeepSeek Harness Ralph). Each round starts a new child with no parent conversation and no prior child session; only the previous bounded structured report crosses rounds. The shared workspace is the long-term memory, and the run also keeps a readable progress file. Returns when a worker reports complete or blocked, or at the round limit. Use it ONLY when the user explicitly asks for Ralph / fresh-agent iteration; ordinary long-running work belongs in goals, and bounded fan-out in delegate_task.";
+
+fn ralph_round_prompt(objective: &str, round: u32, max_rounds: u32, previous: Option<&Value>, progress: &Path) -> String {
+    let prior = previous.map(|p| serde_json::to_string_pretty(p).unwrap_or_default()).unwrap_or_else(|| "(none — this is the first round)".into());
+    format!(
+        "You are one fresh worker in a foreground Ralph loop. You receive no parent conversation and no prior child session. Do not call the ralph tool: this round already is its worker.\n\nImmutable objective:\n{objective}\n\nRalph round: {round} of {max_rounds}.\n\nThe shared workspace and its current working tree are the long-term memory and source of truth. Inspect them before acting, preserve existing work, perform concrete in-scope work, and verify what you change. Treat the previous report only as a bounded handoff; confirm it against the workspace. Progress file: {}\n\nPrevious structured handoff:\n{prior}\n\nReturn one report with exact normalized strings. Use status continue with at least one next_steps entry while useful work remains; complete only with concrete evidence and no next_steps; blocked only when no meaningful progress is possible without human input or an external-state change. blocker must be empty unless blocked.",
+        progress.display()
+    )
+}
+
+fn ralph_report(v: &Value, max_chars: usize) -> Result<Value, String> {
+    let status = v.get("status").and_then(Value::as_str).unwrap_or("");
+    if !matches!(status, "continue" | "complete" | "blocked") {
+        return Err("Ralph round report status must be continue, complete or blocked".into());
+    }
+    let text = |key: &str| v.get(key).and_then(Value::as_str).map(str::to_string);
+    let summary = text("summary").filter(|s| !s.trim().is_empty() && s.trim() == s).ok_or("Ralph report summary must be non-empty and trimmed")?;
+    let blocker = text("blocker").filter(|s| s.trim() == s).ok_or("Ralph report blocker must be a trimmed string")?;
+    let list = |key: &str| -> Result<Vec<String>, String> {
+        let a = v.get(key).and_then(Value::as_array).ok_or_else(|| format!("Ralph report {key} must be an array of strings"))?;
+        a.iter().map(|x| x.as_str().filter(|s| !s.trim().is_empty() && s.trim() == *s).map(String::from).ok_or_else(|| format!("Ralph report {key} must contain only non-empty trimmed strings"))).collect()
+    };
+    let evidence = list("evidence")?;
+    let next_steps = list("next_steps")?;
+    match status {
+        "continue" if next_steps.is_empty() || !blocker.is_empty() => return Err("a continuing Ralph report needs next_steps and an empty blocker".into()),
+        "complete" if evidence.is_empty() || !next_steps.is_empty() || !blocker.is_empty() => return Err("a complete Ralph report needs evidence, no next_steps and an empty blocker".into()),
+        "blocked" if blocker.is_empty() => return Err("a blocked Ralph report needs a concrete blocker".into()),
+        _ => {}
+    }
+    let out = json!({"status": status, "summary": summary, "evidence": evidence, "next_steps": next_steps, "blocker": blocker});
+    let serialized = serde_json::to_string(&out).unwrap_or_default();
+    if serialized.len() > max_chars {
+        return Err(format!("Ralph round report exceeds delegation.ralph_max_handoff_chars ({max_chars})"));
+    }
+    Ok(out)
+}
+
+fn ralph(host: &Host, input: &Value, cancel: &Cancel) -> Result<Value, String> {
+    let objective = input.get("objective").and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty()).ok_or("ralph needs a non-empty `objective`")?;
+    let cfg = &host.rt.cfg.delegation;
+    let ceiling = cfg.ralph_max_rounds.max(1);
+    let requested = match input.get("max_rounds").or_else(|| input.get("maxRounds")).and_then(Value::as_u64) {
+        Some(n) => u32::try_from(n).map_err(|_| format!("max_rounds must be between 1 and {ceiling} (delegation.ralph_max_rounds)"))?,
+        None => ceiling,
+    };
+    if requested == 0 || requested > ceiling {
+        return Err(format!("max_rounds must be between 1 and {ceiling} (delegation.ralph_max_rounds)"));
+    }
+    let max_handoff = cfg.ralph_max_handoff_chars.max(256);
+    let run_id = format!("ralph-{}", crate::util::random_hex(6));
+    let progress = match input.get("progress_file").and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty()) {
+        Some(p) => host.workspace.join(crate::coord::normalize(p)?),
+        None => host.rt.paths.data.join("ralph").join(format!("{run_id}.md")),
+    };
+    if let Some(parent) = progress.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| format!("Ralph progress file: {e}"))?;
+    }
+    let mut log = format!("# Ralph progress\n\nObjective: {objective}\n\nRun: {run_id}\n");
+    let _ = crate::util::atomic_write(&progress, log.as_bytes());
+    let mut previous: Option<Value> = None;
+    let mut rounds_started = 0u32;
+    for round in 1..=requested {
+        if cancel.is_cancelled() {
+            return Err("Ralph run cancelled".into());
+        }
+        rounds_started = round;
+        let prompt = ralph_round_prompt(objective, round, requested, previous.as_ref(), &progress);
+        let spec = ChildSpec { goal: prompt, label: Some(format!("Ralph round {round}")), output_schema: Some(ralph_schema()), plain: true, ..Default::default() };
+        let out = host.rt.delegate(host, vec![spec], Mode::Sync, cancel)?;
+        let entry = out.get("results").and_then(|r| r.get(0)).cloned().unwrap_or_default();
+        let status = entry["status"].as_str().unwrap_or("failed");
+        let report = if status == "completed" {
+            match entry.get("structured").filter(|v| !v.is_null()) {
+                Some(v) => ralph_report(v, max_handoff)?,
+                None => {
+                    let text = entry["summary"].as_str().unwrap_or("");
+                    let mut errs = crate::jsonschema::validate_output(text, &ralph_schema()).err().unwrap_or_default();
+                    if errs.is_empty() {
+                        errs.push("Ralph round returned no structured report".into());
+                    }
+                    return Err(format!("Ralph round {round} failed its report contract: {}", errs.join("; ")));
+                }
+            }
+        } else {
+            let why = entry["error"].as_str().or_else(|| entry.get("summary").and_then(Value::as_str)).unwrap_or("round failed");
+            return Err(format!("Ralph round {round} failed ({status}): {why}"));
+        };
+        log.push_str(&format!("\n## Round {round}: {}\n\n```json\n{}\n```\n", report["status"].as_str().unwrap_or(""), serde_json::to_string_pretty(&report).unwrap_or_default()));
+        let _ = crate::util::atomic_write(&progress, log.as_bytes());
+        match report["status"].as_str() {
+            Some("complete") => return Ok(json!({"status": "complete", "rounds_started": rounds_started, "report": report, "progress_file": progress})),
+            Some("blocked") => return Ok(json!({"status": "blocked", "rounds_started": rounds_started, "report": report, "progress_file": progress})),
+            _ => previous = Some(report),
+        }
+    }
+    Ok(json!({"status": "budget-limited", "rounds_started": rounds_started, "report": previous, "progress_file": progress}))
+}
+
+impl Tool for Ralph {
+    fn spec(&self) -> ToolSpec {
+        ToolSpec {
+            name: "ralph".into(),
+            description: RALPH_DESCRIPTION.into(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "objective": {"type": "string", "description": "The immutable objective every fresh round works toward. Self-contained; no parent conversation is passed."},
+                    "max_rounds": {"type": "integer", "minimum": 1, "description": "Round cap for this run (default and ceiling: delegation.ralph_max_rounds)."},
+                    "progress_file": {"type": "string", "description": "Optional workspace-relative path for the human-readable progress file (default: <data>/ralph/<run>.md)."}
+                },
+                "required": ["objective"]
+            }),
+            parallel_safe: false,
+            idempotent: false,
+            pinned: false,
+        }
+    }
+    fn effects(&self, _: &ToolCtx, _: &Value) -> Vec<Effect> {
+        vec![Effect::Spawn]
+    }
+    fn call(&self, ctx: &ToolCtx, input: Value) -> ToolOutput {
+        let Ok(host) = kernel_host(ctx, "ralph") else { return ToolOutput::err("ralph needs the seagent kernel") };
+        match ralph(host, &input, &ctx.cancel) {
+            Ok(v) => json_output(&v),
+            Err(e) => ToolOutput::err(e),
+        }
+    }
+}
+
 // ───────────────────────── the runtime side ─────────────────────────
 
 struct Prepared {
@@ -1069,6 +1322,40 @@ struct Prepared {
     schema: Option<Value>,
     timeout: Option<u64>,
     spec: ChildSpec,
+}
+
+/// Batch prompt-cache warm-up (Hermes `PrefixCacheGate`). The leader (task 0) runs at
+/// once; siblings on the same route wait until its first response chunk has started, it
+/// has finished, or the configured cap elapses. The wait is bounded and opt-in.
+#[derive(Clone)]
+struct PrefixGate {
+    leader: String,
+    route: String,
+    max_wait: Duration,
+}
+
+fn route_key(rt: &Runtime, model: &str) -> String {
+    let provider = model.split('/').next().unwrap_or(model);
+    let base = rt.cfg.providers.get(provider).and_then(|t| t.get("base_url")).and_then(|v| v.as_str()).unwrap_or("");
+    format!("{model}\u{1}{base}")
+}
+
+impl PrefixGate {
+    fn for_batch(rt: &Runtime, prepared: &[Prepared], seconds: u64) -> Option<PrefixGate> {
+        let max_wait = Duration::from_secs(seconds.min(60));
+        if max_wait.is_zero() || prepared.len() < 2 {
+            return None;
+        }
+        let leader = prepared[0].child.clone();
+        let route = route_key(rt, &prepared[0].model);
+        prepared[1..].iter().any(|p| route_key(rt, &p.model) == route).then_some(PrefixGate { leader, route, max_wait })
+    }
+
+    fn wait(&self, rt: &Runtime, p: &Prepared, cancel: &Cancel) {
+        if p.child != self.leader && route_key(rt, &p.model) == self.route {
+            rt.subagents.wait_for_leader(&self.leader, self.max_wait, Some(cancel));
+        }
+    }
 }
 
 // ───────────────────────── thread-bound / visible children ─────────────────────────
@@ -1186,6 +1473,7 @@ impl Runtime {
                 }
             }
         }
+        let gate = PrefixGate::for_batch(self, &prepared, dc.prefix_stagger_seconds);
         match mode {
             Mode::Sync => {
                 let ledger = host.ledger.clone();
@@ -1193,7 +1481,13 @@ impl Runtime {
                 let entries: Vec<Entry> = std::thread::scope(|s| {
                     let hs: Vec<_> = prepared.into_iter().map(|p| {
                         let (ledger, cancel) = (ledger.clone(), cancel.child());
-                        s.spawn(move || self.run_child(p, ledger, depth + 1, cancel))
+                        let gate = gate.as_ref();
+                        s.spawn(move || {
+                            if let Some(g) = gate {
+                                g.wait(self, &p, &cancel);
+                            }
+                            self.run_child(p, ledger, depth + 1, cancel)
+                        })
                     }).collect();
                     hs.into_iter().map(|h| h.join().unwrap_or_default()).collect()
                 });
@@ -1216,7 +1510,13 @@ impl Runtime {
                     let r = self.subagents.get(&p.id).unwrap();
                     handles.push(json!({"subagent_id": p.id, "session_id": p.child, "goal": r.goal, "label": r.label, "model": p.model, "live_transcript": r.live_log, "worktree": p.worktree.as_ref().map(|w| &w.path)}));
                     let (rt, ledger, depth, cancel) = (self.clone(), host.ledger.child(Budget::default()), host.depth + 1, cancel.child());
-                    std::thread::spawn(move || rt.run_child(p, ledger, depth, cancel));
+                    let gate = gate.clone();
+                    std::thread::spawn(move || {
+                        if let Some(g) = &gate {
+                            g.wait(&rt, &p, &cancel);
+                        }
+                        rt.run_child(p, ledger, depth, cancel)
+                    });
                 }
                 let note = match mode {
                     Mode::Collect => "Children run in the background with no completion message: collect them with agents_wait (ids = subagent_id).",
@@ -1235,7 +1535,16 @@ impl Runtime {
             Some(a) => Some(crate::agents::resolve(&self.cfg, &self.paths, a).ok_or_else(|| format!("unknown agent `{a}` (see agents_list)"))?),
             None => None,
         };
-        let model = spec.model.clone().filter(|m| !m.is_empty()).or_else(|| agent.as_ref().and_then(|a| a.model.clone())).unwrap_or_else(|| self.cfg.subagent_model().to_string());
+        let parent_view = self.store.read(&host.session).map(|e| project(&e)).ok();
+        // A fork is a byte-prefix continuation of the parent: the same route is what makes
+        // the provider's cached prefix usable. Only an explicit model/agent overrides it.
+        let model = spec
+            .model
+            .clone()
+            .filter(|m| !m.is_empty())
+            .or_else(|| agent.as_ref().and_then(|a| a.model.clone()))
+            .or_else(|| spec.fork.then(|| parent_view.as_ref().map(|v| v.model.clone())).flatten())
+            .unwrap_or_else(|| self.cfg.subagent_model().to_string());
         let mut ws = spec.cwd.clone().or_else(|| agent.as_ref().and_then(|a| a.workspace.clone())).unwrap_or_else(|| host.workspace.clone());
         if !ws.is_absolute() {
             ws = host.workspace.join(ws);
@@ -1254,6 +1563,14 @@ impl Runtime {
         }
         let title: String = spec.label.clone().unwrap_or_else(|| spec.goal.chars().take(60).collect());
         let child = self.create_session(&ws, Some(&model), Some(&host.session), Some(&title)).map_err(|e| e.to_string())?;
+        if spec.fork {
+            // Session-scoped tools (an editor's MCP servers) are part of the parent's
+            // request too; the child needs them for the tool list to stay byte-identical.
+            let parent_tools = self.session_tools_of(&host.session);
+            if let Some(tools) = parent_tools {
+                self.set_session_tools(&child, tools);
+            }
+        }
         let mut sub = hooks::payload(&host.session, &host.workspace.to_string_lossy(), None, None, None, Some(&spec.goal));
         sub["subagent_id"] = child.clone().into();
         sub["child_subagent_id"] = id.clone().into();
@@ -1283,7 +1600,7 @@ impl Runtime {
                 }
             }
             // A child never gains a tool the parent lacks.
-            if let Ok(pv) = self.store.read(&host.session).map(|e| project(&e)) {
+            if let Some(pv) = &parent_view {
                 deny.extend(pv.tool_deny.iter().cloned());
                 if let (None, Some(pa)) = (&allow, &pv.tool_allow) {
                     allow = Some(pa.clone());
@@ -1293,25 +1610,35 @@ impl Runtime {
             }
             deny.sort();
             deny.dedup();
-            ap(&mut log, EventKind::Tools { allow, deny })?;
-            if !spec.plain || agent.is_some() {
-                let mut v = project(log.events());
-                if let Some(identity) = agent.as_ref().and_then(|a| a.identity.clone()) {
-                    if let Some(seg) = v.system.iter_mut().find(|s| s.id == "identity") {
-                        seg.text = format!("{}\n\n{identity}", seg.text);
+            if spec.fork {
+                // Reuse the parent's prefix verbatim. The child's narrower assignment is an
+                // execution-time guard, not a new tool list, so the provider cache still hits.
+                if let Some(pv) = &parent_view {
+                    ap(&mut log, EventKind::System { segments: pv.system.clone() })?;
+                    ap(&mut log, EventKind::Tools { allow: pv.tool_allow.clone(), deny: pv.tool_deny.clone() })?;
+                }
+                ap(&mut log, EventKind::ToolGuard { allow: allow.clone(), deny: deny.clone() })?;
+            } else {
+                ap(&mut log, EventKind::Tools { allow, deny })?;
+                if !spec.plain || agent.is_some() {
+                    let mut v = project(log.events());
+                    if let Some(identity) = agent.as_ref().and_then(|a| a.identity.clone()) {
+                        if let Some(seg) = v.system.iter_mut().find(|s| s.id == "identity") {
+                            seg.text = format!("{}\n\n{identity}", seg.text);
+                        }
                     }
+                    // The named agent's occupation (crate::roles) replaces the inherited one.
+                    if let Some(r) = agent.as_ref().and_then(|a| a.role.as_deref()) {
+                        let role = crate::roles::resolve(&self.cfg, &crate::roles::Catalog::for_config(&self.cfg), r)?;
+                        v.system.retain(|s| s.id != crate::roles::SEGMENT_ID);
+                        let at = v.system.iter().position(|s| s.id == "identity").map(|i| i + 1).unwrap_or(0);
+                        v.system.insert(at, role.segment());
+                    }
+                    if !spec.plain {
+                        v.system.push(seagent_core::SystemSegment { id: "subagent".into(), text: child_system_prompt(&spec, &ws, host.depth + 1, self.cfg.runner.max_spawn_depth, dc.orchestrator_enabled), cache: false });
+                    }
+                    ap(&mut log, EventKind::System { segments: v.system })?;
                 }
-                // The named agent's occupation (crate::roles) replaces the inherited one.
-                if let Some(r) = agent.as_ref().and_then(|a| a.role.as_deref()) {
-                    let role = crate::roles::resolve(&self.cfg, &crate::roles::Catalog::for_config(&self.cfg), r)?;
-                    v.system.retain(|s| s.id != crate::roles::SEGMENT_ID);
-                    let at = v.system.iter().position(|s| s.id == "identity").map(|i| i + 1).unwrap_or(0);
-                    v.system.insert(at, role.segment());
-                }
-                if !spec.plain {
-                    v.system.push(seagent_core::SystemSegment { id: "subagent".into(), text: child_system_prompt(&spec, &ws, host.depth + 1, self.cfg.runner.max_spawn_depth, dc.orchestrator_enabled), cache: false });
-                }
-                ap(&mut log, EventKind::System { segments: v.system })?;
             }
             if let Some(t) = spec.thinking.as_deref().filter(|t| !t.is_empty()) {
                 if !matches!(t, "off" | "low" | "medium" | "high") {
@@ -1320,11 +1647,13 @@ impl Runtime {
                 ap(&mut log, EventKind::Thinking { level: t.into() })?;
             }
             if spec.fork {
-                // Everything up to (not including) the assistant message that called the tool.
-                let upto = host.conversation.len().saturating_sub(1);
-                for m in &host.conversation[..upto] {
+                // `host.conversation` is the exact request prefix the parent sent before the
+                // assistant message that called this tool. Copy it verbatim, then mark the
+                // child's task as a separate user message (not merged into the parent's last).
+                for m in &host.conversation {
                     ap(&mut log, EventKind::Message { message: m.clone(), usage: None, model: None, inbox: None })?;
                 }
+                ap(&mut log, EventKind::MessageBoundary)?;
             }
             if spec.visible {
                 // A visible child carries its sidebar settings from the first turn on.
@@ -1352,7 +1681,11 @@ impl Runtime {
             prepared_thread = bound;
         }
         let live = self.store.dir(&child).join("live.log");
-        let mut task = spec.goal.clone();
+        let mut task = if spec.fork {
+            fork_brief(&self.cfg, &spec, &ws, host.depth + 1, self.cfg.runner.max_spawn_depth, dc.orchestrator_enabled, agent.as_ref())
+        } else {
+            spec.goal.clone()
+        };
         if spec.plain {
             if let Some(c) = spec.context.as_ref().filter(|c| !c.trim().is_empty()) {
                 task.push_str(&format!("\n\nContext:\n{c}"));
@@ -1409,6 +1742,7 @@ impl Runtime {
             notify,
             collect,
             accepting_steer: true,
+            streamed: false,
             entry: None,
             delivered: false,
             live_log: live,
@@ -1920,6 +2254,35 @@ mod tests {
         assert!(!tool_allowed(&v, "grep") && !tool_allowed(&v, "shell"));
         v.tool_allow = None;
         assert!(tool_allowed(&v, "shell"));
+        // Execution-only guard narrows calls without changing the request's tool list.
+        v.tool_guard_allow = Some(vec!["read".into()]);
+        v.tool_guard_deny = vec!["grep".into()];
+        assert!(tool_guarded(&v, "read") && tool_guarded(&v, "tool_describe"));
+        assert!(!tool_guarded(&v, "shell") && !tool_guarded(&v, "grep"));
+        let view = project(&[crate::event::Event { seq: 0, ts: 0, kind: EventKind::ToolGuard { allow: Some(vec!["read".into()]), deny: vec!["shell".into()] } }]);
+        assert!(view.tool_allow.is_none(), "a guard never rewrites the request policy");
+        assert!(tool_guarded(&view, "read") && !tool_guarded(&view, "shell"));
+    }
+
+    #[test]
+    fn prefix_gate_wakes_on_the_leaders_first_chunk() {
+        let reg = Arc::new(Registry::default());
+        let rec = Rec {
+            id: "l".into(), unit: "u".into(), task_index: 0, parent: "p".into(), child: "leader".into(), goal: "g".into(), label: None, model: "m".into(), group: None,
+            started_ms: 0, started: Instant::now(), state: State::Running, background: false, notify: false, collect: false, accepting_steer: true, streamed: false,
+            entry: None, delivered: false, live_log: PathBuf::new(), cancel: Cancel::new(),
+        };
+        reg.insert(rec);
+        let r = reg.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(80));
+            r.note_stream("leader");
+        });
+        let start = Instant::now();
+        assert!(reg.wait_for_leader("leader", Duration::from_secs(2), None));
+        assert!(start.elapsed() >= Duration::from_millis(50), "wait ends on the first chunk, not immediately");
+        // A finished leader also opens the gate; an unknown one waits out the cap.
+        assert!(reg.wait_for_leader("nobody", Duration::from_millis(20), None));
     }
 
     #[test]
@@ -1942,7 +2305,7 @@ mod tests {
     fn ready_buckets_respect_groups() {
         let mk = |id: &str, group: Option<&str>, done: bool| Rec {
             id: id.into(), unit: "u".into(), task_index: 0, parent: "p".into(), child: format!("c{id}"), goal: id.into(), label: None, model: "m".into(), group: group.map(String::from),
-            started_ms: 0, started: Instant::now(), state: if done { State::Completed } else { State::Running }, background: true, notify: true, collect: false, accepting_steer: true,
+            started_ms: 0, started: Instant::now(), state: if done { State::Completed } else { State::Running }, background: true, notify: true, collect: false, accepting_steer: true, streamed: false,
             entry: Some(Entry { subagent_id: id.into(), ..Default::default() }), delivered: false, live_log: PathBuf::new(), cancel: Cancel::new(),
         };
         let mut g = Inner::default();
@@ -1984,6 +2347,7 @@ impl Runtime {
             notify: true,
             collect: false,
             accepting_steer: false,
+            streamed: false,
             entry: None,
             delivered: false,
             live_log: self.store.dir(session).join("live.log"),

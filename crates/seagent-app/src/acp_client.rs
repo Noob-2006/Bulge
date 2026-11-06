@@ -131,6 +131,7 @@ pub const PRESETS: &[(&str, &str, &[&str], &str)] = &[
     ("kilocode", "npx", &["-y", "@kilocode/cli", "acp"], "Kilo Code"),
     ("kimi", "kimi", &["acp"], "Kimi CLI"),
     ("kiro", "kiro-cli", &["acp"], "Kiro CLI"),
+    ("qoder", "qodercli", &["--acp"], "Qoder CLI"),
     ("openclaw", "openclaw", &["acp"], "OpenClaw"),
     ("seagent", "seagent", &["acp"], "another seagent"),
 ];
@@ -904,6 +905,9 @@ mod tests {
         assert_eq!(c.agent("mine").unwrap().args, ["--acp"]);
         assert_eq!(c.agent("claude-code").unwrap().args[1], "@agentclientprotocol/claude-agent-acp");
         assert_eq!(c.agent("gemini").unwrap().args, ["--experimental-acp"]);
+        let q = c.agent("qoder").unwrap();
+        assert_eq!(q.command, "qodercli");
+        assert_eq!(q.args, vec!["--acp".to_string()]);
         assert!(c.agent("nope").unwrap_err().contains("codex"));
         assert_eq!(c.mode_for(&c.agent("mine").unwrap()), PermissionMode::DenyAll);
         assert!(AcpConfig::parse(&toml::from_str("permission_mode = \"yolo\"").unwrap()).is_err());

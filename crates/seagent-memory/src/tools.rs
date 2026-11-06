@@ -98,7 +98,7 @@ impl Tool for MemorySearch {
             }
         }
         if corpus == "wiki" || corpus == "all" {
-            for w in crate::wiki::search(h, query, max) {
+            for w in crate::wiki::search(h, query, max, "") {
                 results.push(json!({"path": w.path, "title": w.title, "score": w.score, "snippet": w.snippet, "source": "wiki", "citation": format!("wiki:{}", w.path)}));
             }
             results.sort_by(|a, b| b["score"].as_f64().partial_cmp(&a["score"].as_f64()).unwrap());
@@ -240,14 +240,14 @@ impl Tool for MemoryGet {
         let lines = arg_opt_u64(&input, "lines").map(|n| n as usize);
         let corpus = arg_opt_str(&input, "corpus").unwrap_or("memory");
         if corpus == "wiki" || (corpus == "all" && path.starts_with("wiki:")) {
-            return match crate::wiki::get(&self.0, path.trim_start_matches("wiki:"), from, lines) {
+            return match crate::wiki::get(&self.0, path.trim_start_matches("wiki:"), from, lines, "") {
                 Some(v) => out(v, false),
                 None => out(json!({"status": "not_found", "path": path, "text": ""}), false),
             };
         }
         let v = read_memory_file(&self.0, path, from, lines);
         if corpus == "all" && v["status"] == "not_found" {
-            if let Some(w) = crate::wiki::get(&self.0, path, from, lines) {
+            if let Some(w) = crate::wiki::get(&self.0, path, from, lines, "") {
                 return out(w, false);
             }
         }

@@ -41,8 +41,33 @@ pub(crate) fn apply_reply(st: &mut State, reply: &Value, rpc: Rpc) -> Flow {
     }
 }
 
+/// Re-read the current session's transcript (after `/undo` or a switch to a fork).
+pub(crate) fn reload_current(st: &mut State, rpc: Rpc) {
+    let Some(id) = st.current.clone() else { return };
+    st.lines.clear();
+    st.streaming.clear();
+    st.scroll = 0;
+    if let Ok(v) = rpc("session.view", json!({"id": id})) {
+        st.running = v["running"].as_bool().unwrap_or(false);
+        for m in v["messages"].as_array().into_iter().flatten() {
+            super::push_message(st, m);
+        }
+    }
+}
+
+/// Adopt an existing session (a `/branch` returns its id through a `local` action).
+fn adopt(st: &mut State, id: &str, rpc: Rpc) {
+    st.current = Some(id.to_string());
+    st.sessions = rpc("session.list", json!({"limit": 200})).ok().and_then(|v| v.as_array().cloned()).unwrap_or_default();
+    reload_current(st, rpc);
+    st.reload_display();
+}
+
 /// `/new` and `/clear`: create a session on the daemon and adopt it here.
 pub(crate) fn new_session(st: &mut State, clear: bool, rpc: Rpc) {
+    // `/new` mid-turn: the daemon keeps the old turn running; remember it so its
+    // completion is announced here when it lands.
+    let background = super::background_current(st);
     let create = rpc("session.create", json!({"workspace": st.workspace.display().to_string(), "title": "終端機對話"}));
     match create {
         Ok(r) => {
@@ -62,6 +87,9 @@ pub(crate) fn new_session(st: &mut State, clear: bool, rpc: Rpc) {
                     st.notice(format!("・已清空畫面，新對話 {id}"));
                 } else {
                     st.notice(format!("・新對話 {id}"));
+                }
+                if let Some(old) = background {
+                    st.notice(format!("・{old} 仍在背景執行；完成時會在這裡通知（原對話保留）"));
                 }
             }
             st.reload_display();
@@ -151,6 +179,12 @@ fn local(st: &mut State, name: &str, arg: &str, rpc: Rpc) {
         }
         // The slash layer already wrote `<data>/display.json`; mirror it for this frame.
         "verbose" | "timestamps" | "focus" | "trace" | "footer" => apply_display(st, name, arg),
+        // `/branch` / `/fork`: the reply names the new session id.
+        "session" => {
+            if !arg.is_empty() {
+                adopt(st, arg, rpc);
+            }
+        }
         // `/worktree new` moved the session in the daemon; adopt the tree here too.
         "workspace" => {
             if !arg.is_empty() {
@@ -245,6 +279,20 @@ mod tests {
     }
 
     #[test]
+    fn new_mid_turn_keeps_the_old_turn_in_the_background() {
+        let mut st = state("act-bg");
+        st.current = Some("old".into());
+        st.running = true;
+        st.sessions = vec![json!({"id": "old", "title": "deploy", "running": true})];
+        let (_log, mut rpc) = fake();
+        apply_reply(&mut st, &reply(json!({"kind": "new_session", "clear": false})), &mut rpc);
+        assert_eq!(st.current.as_deref(), Some("s-new"));
+        assert_eq!(st.background.get("old").map(String::as_str), Some("deploy"), "the old turn is remembered for its completion notice");
+        assert!(st.lines.iter().any(|l| l.text.contains("old") && l.text.contains("背景執行")), "the user is told it keeps running");
+        assert!(!st.running, "the new session is idle");
+    }
+
+    #[test]
     fn clear_clears_lines_and_repaints() {
         let mut st = state("act-clear");
         st.lines.push(Line::new("assistant", "long answer"));
@@ -255,6 +303,20 @@ mod tests {
         assert!(!st.lines.iter().any(|l| l.text == "long answer"));
         assert_eq!(st.scroll, 0);
         assert!(st.repaint, "/clear repaints the screen");
+    }
+
+    #[test]
+    fn branch_session_action_switches_to_the_fork() {
+        let mut st = state("act-fork");
+        st.current = Some("old".into());
+        st.lines.push(Line::new("user", "old line"));
+        let (log, mut rpc) = fake();
+        apply_reply(&mut st, &reply(json!({"kind": "local", "name": "session", "arg": "s-new"})), &mut rpc);
+        assert_eq!(st.current.as_deref(), Some("s-new"));
+        assert!(!st.lines.iter().any(|l| l.text == "old line"));
+        assert!(st.lines.iter().any(|l| l.text == "hi"), "the fork's transcript is loaded");
+        let names: Vec<String> = calls(&log).into_iter().map(|(m, _)| m).collect();
+        assert_eq!(names, ["session.list", "session.view"]);
     }
 
     #[test]

@@ -235,6 +235,9 @@ source: {}", p.name, p.description, p.url, p.auth, p.source);
             let t: toml::Table = block.parse().map_err(|e| format!("{e}"))?;
             let c: seagent_plugin::McpServerConfig = toml::Value::Table(t["mcp"][name].as_table().cloned().unwrap_or_default()).try_into().map_err(|e: toml::de::Error| e.message().to_string())?;
             c.validate(name)?;
+            if c.url.is_none() {
+                println!("{}", stdio_consent(name, &c));
+            }
             if let Some(d) = user.parent() {
                 std::fs::create_dir_all(d).map_err(|e| e.to_string())?;
             }
@@ -331,6 +334,75 @@ source: {}", p.name, p.description, p.url, p.auth, p.source);
     }
 }
 
+/// Env/flag names whose values are secret and must not be echoed back to the terminal.
+fn secret_name(name: &str) -> bool {
+    let n = name.to_ascii_lowercase();
+    ["secret", "token", "password", "passwd", "passphrase", "credential", "api_key", "apikey", "access_key", "private_key", "auth"]
+        .iter()
+        .any(|k| n.contains(k))
+}
+
+/// Escape bidi/zero-width controls (and other C0 controls) so a server name, argv or
+/// cwd cannot rewrite the consent line it is printed on.
+fn display_safe(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        let dangerous = matches!(c,
+            '\u{061c}' | '\u{200b}'..='\u{200f}' | '\u{202a}'..='\u{202e}'
+            | '\u{2060}'..='\u{2064}' | '\u{2066}'..='\u{2069}' | '\u{feff}'
+        ) || (c.is_control() && c != '\t' && c != '\n');
+        if dangerous {
+            out.push_str(&format!("\\u{{{:04x}}}", c as u32));
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+fn masked_arg(prev: Option<&str>, arg: &str) -> String {
+    let after_secret_flag = prev.is_some_and(|p| !p.trim_start_matches('-').is_empty() && secret_name(p));
+    if after_secret_flag {
+        return "<masked>".into();
+    }
+    if let Some((k, v)) = arg.split_once('=') {
+        if secret_name(k.trim_start_matches('-')) {
+            return format!("{k}=<masked>");
+        }
+        // `--header=Authorization=…` carries its secret in the nested name.
+        if let Some((n, _)) = v.split_once('=') {
+            if secret_name(n.trim_start_matches('-')) {
+                return format!("{k}={n}=<masked>");
+            }
+        }
+        if let Some(rest) = v.strip_prefix("@") {
+            // `-F file=@.env`-style: keep the operand's shape, not the path.
+            return format!("{k}=@{}", display_safe(rest));
+        }
+        return display_safe(arg);
+    }
+    display_safe(arg)
+}
+
+/// The consent line printed before a stdio MCP is written to config: the exact argv,
+/// env names (secret values masked) and cwd, with bidi/zero-width characters escaped.
+pub fn stdio_consent(name: &str, c: &seagent_plugin::McpServerConfig) -> String {
+    let mut argv = vec![display_safe(c.command.as_deref().unwrap_or(""))];
+    for (i, a) in c.args.iter().enumerate() {
+        let prev = i.checked_sub(1).map(|j| c.args[j].as_str());
+        argv.push(masked_arg(prev, a));
+    }
+    let env: Vec<String> = c.env.iter().map(|(k, v)| if secret_name(k) { format!("{k}=<masked>") } else { format!("{k}={}", display_safe(v)) }).collect();
+    let cwd = c.cwd.as_ref().map(|p| display_safe(&p.to_string_lossy())).unwrap_or_else(|| "(current directory)".into());
+    format!(
+        "mcp consent: [mcp.{name}] is a stdio server · command={} · argv=[{}] · env=[{}] · cwd={}",
+        display_safe(c.command.as_deref().unwrap_or("")),
+        argv.join(", "),
+        env.join(", "),
+        cwd
+    )
+}
+
 struct NoHost;
 impl seagent_core::ToolHost for NoHost {
     fn spawn_agent(&self, _: seagent_core::tool::SpawnRequest, _: &seagent_core::Cancel) -> Result<String, String> {
@@ -363,5 +435,37 @@ impl Write for RedactingWriter {
             self.inner.write_all(s.as_bytes())?;
         }
         self.inner.flush()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn cfg(s: &str) -> seagent_plugin::McpServerConfig {
+        toml::from_str(s).unwrap()
+    }
+
+    #[test]
+    fn stdio_consent_shows_argv_env_and_cwd_without_leaking_secrets() {
+        let c = cfg("command = \"npx\"\nargs = [\"-y\", \"pkg\", \"--token\", \"tok-123\", \"--password\", \"a=b\", \"--header=Authorization=abc\"]\ncwd = \"/srv/work\"\n[env]\nAPI_TOKEN = \"secret-value\"\nREGION = \"eu-west\"\n");
+        let s = stdio_consent("files", &c);
+        assert!(s.contains("command=npx") && s.contains("argv=[npx, -y, pkg, --token, <masked>, --password, <masked>, --header=Authorization=<masked>]"), "{s}");
+        assert!(s.contains("API_TOKEN=<masked>") && s.contains("REGION=eu-west"), "{s}");
+        assert!(!s.contains("secret-value") && !s.contains("tok-123") && !s.contains("Authorization=abc") && !s.contains("a=b"), "{s}");
+        assert!(s.contains("cwd=/srv/work"), "{s}");
+        // A missing cwd is stated explicitly, not silently omitted.
+        let c = cfg("command = \"mcp-server\"\n[env]\nHOME = \"/root\"\n");
+        let s = stdio_consent("x", &c);
+        assert!(s.contains("cwd=(current directory)"), "{s}");
+    }
+
+    #[test]
+    fn consent_line_escapes_bidi_and_zero_width_characters() {
+        let c = cfg("command = \"python3\"\nargs = [\"-m\", \"\u{202e}evil\", \"a\u{200b}b\"]\ncwd = \"/tmp/\u{202e}x\"\n");
+        let s = stdio_consent("x", &c);
+        assert!(s.contains("\\u{202e}evil") && s.contains("a\\u{200b}b"), "{s}");
+        assert!(s.contains("cwd=/tmp/\\u{202e}x"), "{s}");
+        assert!(!s.contains('\u{202e}') && !s.contains('\u{200b}'), "raw controls leaked: {s}");
     }
 }

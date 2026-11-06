@@ -9,7 +9,7 @@ platforms: [linux, macos, windows]
 metadata:
   hermes:
     tags: [Documents, OCR, Action-Items, Deadlines, Extraction]
-    related_skills: [pdf, pdf, docx, notion]
+    related_skills: [pdf, docx, google-workspace]
 ---
 # Document to Action Items
 
@@ -63,7 +63,7 @@ Present structured facts, high-risk clauses, low-confidence fields, and proposed
 
 ### 7. Create and verify records
 
-Use the user's approved destination — `notion`, a calendar, a spreadsheet via `xlsx`, or another task tracker. Attach document/page provenance and avoid copying unnecessary sensitive text. Read records back from the provider and verify owner/date/link. If a write times out ambiguously, search for the expected record before retrying. Done when every approved action is verified.
+Use the user's approved destination — a notes/tracker MCP server, a calendar, a spreadsheet via `xlsx`, or another task tracker. Attach document/page provenance and avoid copying unnecessary sensitive text. Read records back from the provider and verify owner/date/link. If a write times out ambiguously, search for the expected record before retrying. Done when every approved action is verified.
 
 ## Pitfalls
 

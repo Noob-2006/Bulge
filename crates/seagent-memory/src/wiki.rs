@@ -21,12 +21,64 @@ pub const AGING_DAYS: f64 = 30.0;
 pub const STALE_DAYS: f64 = 90.0;
 const HUMAN_START: &str = "<!-- seagent:human:start -->";
 
-pub fn root(h: &Host) -> PathBuf {
+fn default_root(h: &Host) -> PathBuf {
     if h.settings.wiki.vault_path.is_empty() {
         h.memory_dir().join("wiki")
     } else {
         seagent_core::tool::expand_home(&h.settings.wiki.vault_path)
     }
+}
+
+/// The default vault (no per-store ACL beyond the default store's `agents` list). Kept for
+/// callers that hold no store name; every tool/CLI path goes through [`root_in`].
+pub fn root(h: &Host) -> PathBuf {
+    default_root(h)
+}
+
+/// This agent's id: `[memory.wiki] agent_id`, else `$SEAGENT_AGENT`.
+pub fn agent_id(h: &Host) -> String {
+    let c = h.settings.wiki.agent_id.trim();
+    if !c.is_empty() {
+        return c.to_string();
+    }
+    std::env::var("SEAGENT_AGENT").unwrap_or_default().trim().to_string()
+}
+
+fn acl_allows(h: &Host, agents: &[String]) -> Result<(), String> {
+    if agents.is_empty() || agents.iter().any(|a| a == "*") {
+        return Ok(());
+    }
+    let me = agent_id(h);
+    if me.is_empty() {
+        return Err("this knowledge store is scoped to specific agents, but this process has no agent identity (set `[memory.wiki] agent_id` or $SEAGENT_AGENT)".into());
+    }
+    if agents.iter().any(|a| a == &me) {
+        Ok(())
+    } else {
+        Err(format!("agent `{me}` is not allowed on this knowledge store (allowed: {})", agents.join(", ")))
+    }
+}
+
+/// Resolve a store name (`""` / `default` = the default vault) and enforce its agent ACL.
+pub fn root_in(h: &Host, store: &str) -> Result<PathBuf, String> {
+    let name = store.trim();
+    if name.is_empty() || name == "default" {
+        acl_allows(h, &h.settings.wiki.agents)?;
+        return Ok(default_root(h));
+    }
+    let s = h.settings.wiki.stores.get(name).ok_or_else(|| format!("no knowledge store `{name}` (configure [memory.wiki.stores.{name}] path = \"…\")"))?;
+    if s.path.trim().is_empty() {
+        return Err(format!("[memory.wiki.stores.{name}] needs `path`"));
+    }
+    acl_allows(h, &s.agents)?;
+    Ok(seagent_core::tool::expand_home(s.path.trim()))
+}
+
+/// Store names for status/help (the default first).
+pub fn store_names(h: &Host) -> Vec<String> {
+    let mut v = vec!["default".to_string()];
+    v.extend(h.settings.wiki.stores.keys().cloned());
+    v
 }
 
 #[derive(Debug, Clone, Default)]
@@ -110,8 +162,8 @@ fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
     }
 }
 
-pub fn pages(h: &Host) -> Vec<Page> {
-    let r = root(h);
+pub fn pages(h: &Host, store: &str) -> Vec<Page> {
+    let Ok(r) = root_in(h, store) else { return Vec::new() };
     let mut out = Vec::new();
     for (kind, dir, _) in KINDS {
         let mut files = Vec::new();
@@ -136,8 +188,8 @@ fn write_if_missing(p: &Path, content: &str, created: &mut Vec<String>) -> Resul
     Ok(())
 }
 
-pub fn init(h: &Host) -> Result<Vec<String>, String> {
-    let r = root(h);
+pub fn init(h: &Host, store: &str) -> Result<Vec<String>, String> {
+    let r = root_in(h, store)?;
     let mut created = Vec::new();
     for d in DIRS {
         if !r.join(d).is_dir() {
@@ -152,8 +204,49 @@ pub fn init(h: &Host) -> Result<Vec<String>, String> {
     Ok(created)
 }
 
-fn log(h: &Host, op: &str, detail: Value) {
-    let _ = util::append_line(&root(h).join(".seagent-wiki/log.jsonl"), &json!({"ts": util::iso(util::now_ms()), "op": op, "detail": detail}).to_string());
+fn log(h: &Host, store: &str, op: &str, detail: Value) {
+    if let Ok(r) = root_in(h, store) {
+        let _ = util::append_line(&r.join(".seagent-wiki/log.jsonl"), &json!({"ts": util::iso(util::now_ms()), "op": op, "detail": detail}).to_string());
+    }
+}
+
+/// Keep a pre-mutation snapshot under `.seagent-wiki/history/<page>/`, trimming to `history_max`.
+/// Local files, no Git dependency: a page's audit trail survives edits and `seagent doctor` can
+/// read it without a repository.
+fn snapshot_history(h: &Host, store: &str, rel: &str, content: &str) -> Result<(), String> {
+    if !h.settings.wiki.history {
+        return Ok(());
+    }
+    let r = root_in(h, store)?;
+    let stem = rel.trim_end_matches(".md").replace('/', "__");
+    let dir = r.join(".seagent-wiki/history").join(&stem);
+    fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let name = format!("{}-{}.md", util::now_ms(), seagent_kernel::util::random_hex(3));
+    util::write_atomic(&dir.join(name), content.as_bytes())?;
+    let mut files: Vec<PathBuf> = fs::read_dir(&dir).into_iter().flatten().flatten().map(|e| e.path()).collect();
+    files.sort();
+    let max = h.settings.wiki.history_max.max(1);
+    while files.len() > max {
+        let old = files.remove(0);
+        let _ = fs::remove_file(old);
+    }
+    Ok(())
+}
+
+/// Newest first: `[{ts, file}]` snapshots of one page (metadata only; `wiki_get` reads the page).
+pub fn history(h: &Host, lookup: &str, store: &str) -> Result<Vec<Value>, String> {
+    let p = find(h, lookup, store).ok_or_else(|| format!("Wiki page not found: {lookup}"))?;
+    let r = root_in(h, store)?;
+    let stem = p.rel.trim_end_matches(".md").replace('/', "__");
+    let dir = r.join(".seagent-wiki/history").join(&stem);
+    let mut out: Vec<Value> = fs::read_dir(&dir).into_iter().flatten().flatten().map(|e| e.path()).filter(|p| p.extension().is_some_and(|x| x == "md")).map(|p| {
+        let file = p.file_name().unwrap_or_default().to_string_lossy().to_string();
+        let ts = file.split('-').next().and_then(|s| s.parse::<u64>().ok()).unwrap_or(0);
+        let bytes = fs::metadata(&p).map(|m| m.len()).unwrap_or(0);
+        json!({"ts": ts, "at": util::iso(ts), "file": file, "bytes": bytes})
+    }).collect();
+    out.sort_by_key(|v| std::cmp::Reverse(v["ts"].as_u64().unwrap_or(0)));
+    Ok(out)
 }
 
 fn managed(original: &str, tag: &str, heading: &str, body: &str) -> String {
@@ -175,7 +268,7 @@ fn link(h: &Host, p: &Page) -> String {
 }
 
 /// Bridge mode: mirror MEMORY.md, DREAMS.md and daily notes as source pages.
-fn sync_bridge(h: &Host) -> Result<usize, String> {
+fn sync_bridge(h: &Host, store: &str) -> Result<usize, String> {
     let mut n = 0;
     for f in crate::index::source_files(&h.data, &crate::settings::SearchSettings::default()) {
         if !(f.display == "MEMORY.md" || f.display == "DREAMS.md" || crate::index::dated(&f.display).is_some()) {
@@ -191,18 +284,18 @@ fn sync_bridge(h: &Host) -> Result<usize, String> {
         fm.insert("sourcePath".into(), json!(f.abs.display().to_string()));
         fm.insert("bridgeRelativePath".into(), json!(f.display));
         fm.insert("updatedAt".into(), json!(util::iso(util::now_ms())));
-        util::write_atomic(&root(h).join("sources").join(format!("{s}.md")), render(&fm, &text).as_bytes())?;
+        util::write_atomic(&root_in(h, store)?.join("sources").join(format!("{s}.md")), render(&fm, &text).as_bytes())?;
         n += 1;
     }
     Ok(n)
 }
 
 /// Rebuild index.md, per-page `## Related` blocks and the dashboards.
-pub fn compile(h: &Host) -> Result<String, String> {
-    init(h)?;
-    let bridged = if h.settings.wiki.bridge { sync_bridge(h)? } else { 0 };
-    let all = pages(h);
-    let r = root(h);
+pub fn compile(h: &Host, store: &str) -> Result<String, String> {
+    init(h, store)?;
+    let bridged = if h.settings.wiki.bridge { sync_bridge(h, store)? } else { 0 };
+    let all = pages(h, store);
+    let r = root_in(h, store)?;
     let mut body = Vec::new();
     for (kind, _, heading) in KINDS {
         let mut ps: Vec<&Page> = all.iter().filter(|p| p.kind == *kind).collect();
@@ -244,7 +337,7 @@ pub fn compile(h: &Host) -> Result<String, String> {
         }
     }
     if h.settings.wiki.create_dashboards {
-        let all = pages(h);
+        let all = pages(h, store);
         for (name, key, title) in [("open-questions", "questions", "Open Questions"), ("contradictions", "contradictions", "Contradictions")] {
             let mut lines = Vec::new();
             for p in all.iter().filter(|p| p.kind != "report") {
@@ -263,13 +356,13 @@ pub fn compile(h: &Host) -> Result<String, String> {
             util::write_atomic(&r.join("reports").join(format!("{name}.md")), render(&fm, &format!("# {title}\n\n{}", lines.join("\n"))).as_bytes())?;
         }
     }
-    log(h, "compile", json!({"pages": all.len(), "bridged": bridged}));
+    log(h, store, "compile", json!({"pages": all.len(), "bridged": bridged}));
     Ok(format!("compiled {} page(s){}", all.len(), if bridged > 0 { format!(", {bridged} bridged memory source(s)") } else { String::new() }))
 }
 
 /// Import a file (or text) as a raw source page.
-pub fn ingest(h: &Host, path: Option<&Path>, text: Option<&str>, title: Option<&str>) -> Result<String, String> {
-    init(h)?;
+pub fn ingest(h: &Host, path: Option<&Path>, text: Option<&str>, title: Option<&str>, store: &str) -> Result<String, String> {
+    init(h, store)?;
     let (content, src) = match (path, text) {
         (Some(p), _) => (fs::read_to_string(p).map_err(|e| format!("cannot read {}: {e}", p.display()))?, Some(p.display().to_string())),
         (None, Some(t)) => (t.to_string(), None),
@@ -286,9 +379,13 @@ pub fn ingest(h: &Host, path: Option<&Path>, text: Option<&str>, title: Option<&
     }
     fm.insert("updatedAt".into(), json!(util::iso(util::now_ms())));
     let rel = format!("sources/{s}.md");
-    util::write_atomic(&root(h).join(&rel), render(&fm, &content).as_bytes())?;
-    log(h, "ingest", json!({"page": rel}));
-    compile(h)?;
+    let path = root_in(h, store)?.join(&rel);
+    if let Ok(old) = fs::read_to_string(&path) {
+        snapshot_history(h, store, &rel, &old)?;
+    }
+    util::write_atomic(&path, render(&fm, &content).as_bytes())?;
+    log(h, store, "ingest", json!({"page": rel}));
+    compile(h, store)?;
     Ok(format!("ingested {rel} (id source.{s})"))
 }
 
@@ -435,16 +532,16 @@ impl EmptyArr for Option<&Vec<Value>> {
     }
 }
 
-pub fn lint(h: &Host) -> Result<(Vec<Issue>, String), String> {
-    init(h)?;
-    let issues = lint_pages(&pages(h), util::now_ms());
+pub fn lint(h: &Host, store: &str) -> Result<(Vec<Issue>, String), String> {
+    init(h, store)?;
+    let issues = lint_pages(&pages(h, store), util::now_ms());
     let body = if issues.is_empty() { "No issues found.".to_string() } else { issues.iter().map(|i| format!("- [{}] {} `{}`: {}", i.severity, i.code, i.path, i.message)).collect::<Vec<_>>().join("\n") };
     let mut fm = Map::new();
     fm.insert("id".into(), json!("report.lint"));
     fm.insert("pageType".into(), json!("report"));
     fm.insert("title".into(), json!("Lint Report"));
     fm.insert("updatedAt".into(), json!(util::iso(util::now_ms())));
-    util::write_atomic(&root(h).join("reports/lint.md"), render(&fm, &format!("# Lint Report\n\n{body}")).as_bytes())?;
+    util::write_atomic(&root_in(h, store)?.join("reports/lint.md"), render(&fm, &format!("# Lint Report\n\n{body}")).as_bytes())?;
     Ok((issues, "reports/lint.md".into()))
 }
 
@@ -456,11 +553,12 @@ pub fn lint_summary(issues: &[Issue], report: &str) -> String {
     format!("Issues: {} total ({} errors, {} warnings)\nContradictions: {}\nOpen questions: {}\nProvenance gaps: {}\nReport: {report}", issues.len(), issues.iter().filter(|i| i.severity == "error").count(), issues.iter().filter(|i| i.severity == "warning").count(), n("contradictions"), n("open-questions"), n("provenance"))
 }
 
-pub fn status(h: &Host) -> Value {
-    let all = pages(h);
+pub fn status(h: &Host, store: &str) -> Value {
+    let all = pages(h, store);
+    let r = root_in(h, store).unwrap_or_else(|_| default_root(h));
     let counts: BTreeMap<&str, usize> = KINDS.iter().map(|(k, _, _)| (*k, all.iter().filter(|p| p.kind == *k).count())).collect();
     let obsidian = std::env::var_os("PATH").map(|p| std::env::split_paths(&p).any(|d| d.join("obsidian").is_file() || d.join("obsidian-cli").is_file())).unwrap_or(false);
-    json!({"vault": root(h), "initialized": root(h).join("index.md").is_file(), "renderMode": h.settings.wiki.render_mode, "vaultMode": if h.settings.wiki.bridge { "bridge" } else { "isolated" }, "searchCorpus": h.settings.wiki.search_corpus, "pages": all.len(), "byKind": counts, "obsidianCli": obsidian})
+    json!({"vault": r, "store": if store.is_empty() { "default" } else { store }, "agent": agent_id(h), "initialized": r.join("index.md").is_file(), "renderMode": h.settings.wiki.render_mode, "vaultMode": if h.settings.wiki.bridge { "bridge" } else { "isolated" }, "searchCorpus": h.settings.wiki.search_corpus, "pages": all.len(), "byKind": counts, "obsidianCli": obsidian})
 }
 
 #[derive(Debug, Clone)]
@@ -472,14 +570,16 @@ pub struct WikiHit {
     pub snippet: String,
 }
 
-pub fn search(h: &Host, query: &str, max: usize) -> Vec<WikiHit> {
+pub fn search(h: &Host, query: &str, max: usize, store: &str) -> Vec<WikiHit> {
     let qt = util::token_set(query);
     if qt.is_empty() {
         return vec![];
     }
     let ql = query.trim().to_lowercase();
-    let mut out: Vec<WikiHit> = pages(h)
-        .into_iter()
+    let all = pages(h, store);
+    let out: Vec<WikiHit> = all
+        .iter()
+        .cloned()
         .filter_map(|p| {
             let title = util::token_set(&p.title);
             let body: Vec<String> = util::tokens(&p.body);
@@ -495,20 +595,37 @@ pub fn search(h: &Host, query: &str, max: usize) -> Vec<WikiHit> {
             Some(WikiHit { path: p.rel, title: p.title, id: p.id, score, snippet: clip(&line, 300) })
         })
         .collect();
-    out.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap().then(a.path.cmp(&b.path)));
-    out.truncate(max);
-    out
+    // Follow a supersede chain to the current record (OpenClaw recall-keyword): a hit on the
+    // old wording still points at the page that replaced it.
+    let mut seen = HashSet::new();
+    let mut followed: Vec<WikiHit> = Vec::new();
+    for mut hit in out {
+        if let Some(p) = all.iter().find(|p| p.rel == hit.path).filter(|p| p.fm.get("status").and_then(Value::as_str) == Some("superseded")) {
+            if let Some(next) = p.fm.get("supersededBy").and_then(Value::as_str).and_then(|n| all.iter().find(|q| q.id == n || q.rel == n)) {
+                hit.path = next.rel.clone();
+                hit.title = next.title.clone();
+                hit.id = next.id.clone();
+                hit.snippet = format!("supersedes {}: {}", p.rel, hit.snippet);
+            }
+        }
+        if seen.insert(hit.path.clone()) {
+            followed.push(hit);
+        }
+    }
+    followed.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap().then(a.path.cmp(&b.path)));
+    followed.truncate(max);
+    followed
 }
 
-pub fn find(h: &Host, lookup: &str) -> Option<Page> {
+pub fn find(h: &Host, lookup: &str, store: &str) -> Option<Page> {
     let l = lookup.trim().trim_start_matches("./");
-    let all = pages(h);
+    let all = pages(h, store);
     all.iter().find(|p| p.id == l || p.rel == l || p.rel.trim_end_matches(".md") == l).or_else(|| all.iter().find(|p| p.title.eq_ignore_ascii_case(l) || slug(&p.title) == slug(l))).cloned()
 }
 
-pub fn get(h: &Host, lookup: &str, from: Option<usize>, lines: Option<usize>) -> Option<Value> {
-    let p = find(h, lookup)?;
-    let text = fs::read_to_string(root(h).join(&p.rel)).ok()?;
+pub fn get(h: &Host, lookup: &str, from: Option<usize>, lines: Option<usize>, store: &str) -> Option<Value> {
+    let p = find(h, lookup, store)?;
+    let text = fs::read_to_string(root_in(h, store).ok()?.join(&p.rel)).ok()?;
     let mut v = crate::tools::excerpt(&text, &p.rel, from, lines);
     v["id"] = json!(p.id);
     v["title"] = json!(p.title);
@@ -518,11 +635,12 @@ pub fn get(h: &Host, lookup: &str, from: Option<usize>, lines: Option<usize>) ->
 }
 
 /// Narrow mutations: create_synthesis (synthesis) and update_metadata (metadata).
-pub fn apply(h: &Host, m: &Value) -> Result<Value, String> {
+pub fn apply(h: &Host, m: &Value, store: &str) -> Result<Value, String> {
     if !m.is_object() {
         return Err("wiki_apply needs an object".into());
     }
-    init(h)?;
+    init(h, store)?;
+    let root = root_in(h, store)?;
     let now = util::iso(util::now_ms());
     let op = m["op"].as_str().unwrap_or("");
     let meta_keys = ["sourceIds", "claims", "contradictions", "questions", "confidence", "status"];
@@ -532,9 +650,10 @@ pub fn apply(h: &Host, m: &Value) -> Result<Value, String> {
             let body = m["body"].as_str().filter(|t| !t.trim().is_empty()).ok_or("create_synthesis needs `body`")?;
             let s = slug(title);
             let rel = format!("syntheses/{s}.md");
-            let path = root(h).join(&rel);
+            let path = root.join(&rel);
             let (mut fm, human) = match fs::read_to_string(&path) {
                 Ok(t) => {
+                    snapshot_history(h, store, &rel, &t)?;
                     let (fm, b) = parse(&t);
                     (fm, b.find(HUMAN_START).map(|i| b[i..].to_string()))
                 }
@@ -555,15 +674,17 @@ pub fn apply(h: &Host, m: &Value) -> Result<Value, String> {
                 b = format!("{b}\n\n{hb}");
             }
             util::write_atomic(&path, render(&fm, &b).as_bytes())?;
-            log(h, "create_synthesis", json!({"page": rel}));
-            compile(h)?;
+            log(h, store, "create_synthesis", json!({"page": rel}));
+            compile(h, store)?;
             Ok(json!({"op": "create_synthesis", "path": rel, "id": format!("synthesis.{s}"), "changed": true}))
         }
         "update_metadata" | "metadata" => {
             let lookup = m["lookup"].as_str().ok_or("update_metadata needs `lookup`")?;
-            let p = find(h, lookup).ok_or_else(|| format!("Wiki page not found: {lookup}"))?;
-            let path = root(h).join(&p.rel);
-            let (mut fm, body) = parse(&fs::read_to_string(&path).map_err(|e| e.to_string())?);
+            let p = find(h, lookup, store).ok_or_else(|| format!("Wiki page not found: {lookup}"))?;
+            let path = root.join(&p.rel);
+            let old = fs::read_to_string(&path).map_err(|e| e.to_string())?;
+            snapshot_history(h, store, &p.rel, &old)?;
+            let (mut fm, body) = parse(&old);
             let mut changed = Vec::new();
             for k in meta_keys {
                 if let Some(v) = m.get(k) {
@@ -580,15 +701,56 @@ pub fn apply(h: &Host, m: &Value) -> Result<Value, String> {
             }
             fm.insert("updatedAt".into(), json!(now));
             util::write_atomic(&path, render(&fm, &body).as_bytes())?;
-            log(h, "update_metadata", json!({"page": p.rel, "fields": changed}));
+            log(h, store, "update_metadata", json!({"page": p.rel, "fields": changed}));
             Ok(json!({"op": "update_metadata", "path": p.rel, "id": p.id, "fields": changed, "changed": true}))
         }
-        other => Err(format!("unknown wiki_apply op `{other}`; use create_synthesis or update_metadata")),
+        "supersede" => {
+            let lookup = m["lookup"].as_str().ok_or("supersede needs `lookup` (the page being replaced)")?;
+            let by = m["by"].as_str().or_else(|| m["supersedes"].as_str()).ok_or("supersede needs `by` (the page that replaces it)")?;
+            let old = find(h, lookup, store).ok_or_else(|| format!("Wiki page not found: {lookup}"))?;
+            let new = find(h, by, store).ok_or_else(|| format!("Wiki page not found: {by}"))?;
+            if old.rel == new.rel || (!old.id.is_empty() && old.id == new.id) {
+                return Err("a page cannot supersede itself".into());
+            }
+            let reason = m["reason"].as_str().unwrap_or("").trim().to_string();
+            let old_path = root.join(&old.rel);
+            let old_text = fs::read_to_string(&old_path).map_err(|e| e.to_string())?;
+            snapshot_history(h, store, &old.rel, &old_text)?;
+            let (mut ofm, obody) = parse(&old_text);
+            let old_id = if old.id.is_empty() { old.rel.clone() } else { old.id.clone() };
+            ofm.insert("status".into(), json!("superseded"));
+            ofm.insert("supersededBy".into(), json!(if new.id.is_empty() { new.rel.clone() } else { new.id.clone() }));
+            ofm.insert("supersededAt".into(), json!(now));
+            if !reason.is_empty() {
+                ofm.insert("supersededReason".into(), json!(reason));
+            }
+            ofm.insert("updatedAt".into(), json!(now));
+            util::write_atomic(&old_path, render(&ofm, &obody).as_bytes())?;
+
+            let new_path = root.join(&new.rel);
+            let new_text = fs::read_to_string(&new_path).map_err(|e| e.to_string())?;
+            snapshot_history(h, store, &new.rel, &new_text)?;
+            let (mut nfm, nbody) = parse(&new_text);
+            let mut supersedes: Vec<Value> = nfm.get("supersedes").and_then(Value::as_array).cloned().unwrap_or_default();
+            if !supersedes.iter().any(|v| v.as_str() == Some(old_id.as_str())) {
+                supersedes.push(json!(old_id));
+            }
+            nfm.insert("supersedes".into(), json!(supersedes));
+            if nfm.get("status").and_then(Value::as_str) == Some("superseded") {
+                nfm.insert("status".into(), json!("active"));
+            }
+            nfm.insert("updatedAt".into(), json!(now));
+            util::write_atomic(&new_path, render(&nfm, &nbody).as_bytes())?;
+            log(h, store, "supersede", json!({"from": old.rel, "to": new.rel, "reason": reason}));
+            compile(h, store)?;
+            Ok(json!({"op": "supersede", "from": old.rel, "to": new.rel, "fromId": old_id, "toId": new.id, "changed": true}))
+        }
+        other => Err(format!("unknown wiki_apply op `{other}`; use create_synthesis, update_metadata or supersede")),
     }
 }
 
 pub fn tools(h: &Arc<Host>) -> Vec<Arc<dyn Tool>> {
-    ["wiki_status", "wiki_search", "wiki_get", "wiki_apply", "wiki_lint"].iter().map(|n| Arc::new(WikiTool(h.clone(), n)) as Arc<dyn Tool>).collect()
+    ["wiki_status", "wiki_search", "wiki_get", "wiki_apply", "wiki_lint", "wiki_history"].iter().map(|n| Arc::new(WikiTool(h.clone(), n)) as Arc<dyn Tool>).collect()
 }
 
 pub struct WikiTool(pub Arc<Host>, pub &'static str);
@@ -596,18 +758,20 @@ pub struct WikiTool(pub Arc<Host>, pub &'static str);
 impl Tool for WikiTool {
     fn spec(&self) -> ToolSpec {
         let s = |d: &str| json!({"type":"string","description":d});
+        let store = json!({"type":"string","description":"Knowledge store name (default: the main vault; configure [memory.wiki.stores.<name>])"});
         let (desc, schema) = match self.1 {
-            "wiki_status" => ("Inspect the memory wiki vault mode, health, and Obsidian CLI availability.", json!({"type":"object","properties":{}})),
-            "wiki_search" => ("Search wiki pages by title, path, id, or body text (corpus=all also searches memory).", json!({"type":"object","properties":{"query":{"type":"string","minLength":1},"maxResults":{"type":"integer","minimum":1},"corpus":{"type":"string","enum":["wiki","memory","all"]}},"required":["query"]})),
-            "wiki_get" => ("Read a wiki page by id or relative path (fromLine/lineCount for a bounded excerpt).", json!({"type":"object","properties":{"lookup":{"type":"string","minLength":1},"fromLine":{"type":"integer","minimum":1},"lineCount":{"type":"integer","minimum":1}},"required":["lookup"]})),
-            "wiki_apply" => ("Apply narrow wiki mutations for syntheses and page metadata without freeform markdown surgery. op=create_synthesis (title, body, sourceIds, claims, contradictions, questions, confidence, status) or op=update_metadata (lookup + fields).", json!({"type":"object","properties":{"op":{"type":"string","enum":["create_synthesis","update_metadata","synthesis","metadata"]},"title":s("Synthesis title"),"body":s("Synthesis Markdown body"),"lookup":s("Page id or path (update_metadata)"),"sourceIds":{"type":"array","items":{"type":"string"}},"claims":{"type":"array","items":{"type":"object","properties":{"id":{"type":"string"},"text":{"type":"string"},"status":{"type":"string"},"confidence":{"type":"number"},"evidence":{"type":"array","items":{"type":"object"}},"updatedAt":{"type":"string"}},"required":["text"]}},"contradictions":{"type":"array","items":{"type":"string"}},"questions":{"type":"array","items":{"type":"string"}},"confidence":{"type":["number","null"]},"status":{"type":"string"}},"required":["op"]})),
-            _ => ("Lint the wiki vault and surface structural issues, provenance gaps, contradictions, and open questions.", json!({"type":"object","properties":{}})),
+            "wiki_status" => ("Inspect a memory wiki store: mode, health, agent ACL and Obsidian CLI availability.", json!({"type":"object","properties":{"store":store}})),
+            "wiki_search" => ("Search wiki pages by title, path, id, or body text (corpus=all also searches memory); superseded pages resolve to the current record.", json!({"type":"object","properties":{"query":{"type":"string","minLength":1},"maxResults":{"type":"integer","minimum":1},"corpus":{"type":"string","enum":["wiki","memory","all"]},"store":store},"required":["query"]})),
+            "wiki_get" => ("Read a wiki page by id or relative path (fromLine/lineCount for a bounded excerpt).", json!({"type":"object","properties":{"lookup":{"type":"string","minLength":1},"fromLine":{"type":"integer","minimum":1},"lineCount":{"type":"integer","minimum":1},"store":store},"required":["lookup"]})),
+            "wiki_apply" => ("Apply narrow wiki mutations without freeform markdown surgery. op=create_synthesis (title, body, sourceIds, claims, contradictions, questions, confidence, status), op=update_metadata (lookup + fields) or op=supersede (lookup, by, reason).", json!({"type":"object","properties":{"op":{"type":"string","enum":["create_synthesis","update_metadata","synthesis","metadata","supersede"]},"title":s("Synthesis title"),"body":s("Synthesis Markdown body"),"lookup":s("Page id or path"),"by":s("Supersede: page id or path that replaces `lookup`"),"reason":s("Supersede: why the old page is replaced"),"sourceIds":{"type":"array","items":{"type":"string"}},"claims":{"type":"array","items":{"type":"object","properties":{"id":{"type":"string"},"text":{"type":"string"},"status":{"type":"string"},"confidence":{"type":"number"},"evidence":{"type":"array","items":{"type":"object"}},"updatedAt":{"type":"string"}},"required":["text"]}},"contradictions":{"type":"array","items":{"type":"string"}},"questions":{"type":"array","items":{"type":"string"}},"confidence":{"type":["number","null"]},"status":{"type":"string"},"store":store},"required":["op"]})),
+            "wiki_history" => ("List a page's pre-mutation snapshots, newest first.", json!({"type":"object","properties":{"lookup":{"type":"string","minLength":1},"store":store},"required":["lookup"]})),
+            _ => ("Lint the wiki vault and surface structural issues, provenance gaps, contradictions, and open questions.", json!({"type":"object","properties":{"store":store}})),
         };
         let ro = !matches!(self.1, "wiki_apply" | "wiki_lint");
         ToolSpec { name: self.1.into(), description: desc.into(), input_schema: schema, parallel_safe: ro, idempotent: ro, pinned: false }
     }
-    fn effects(&self, _: &ToolCtx, _: &Value) -> Vec<Effect> {
-        let path = root(&self.0);
+    fn effects(&self, _: &ToolCtx, input: &Value) -> Vec<Effect> {
+        let path = root_in(&self.0, input["store"].as_str().unwrap_or("")).unwrap_or_else(|_| default_root(&self.0));
         if matches!(self.1, "wiki_apply" | "wiki_lint") {
             vec![Effect::Write { path }]
         } else {
@@ -616,15 +780,19 @@ impl Tool for WikiTool {
     }
     fn call(&self, _: &ToolCtx, input: Value) -> ToolOutput {
         let h = &self.0;
+        let store = input["store"].as_str().unwrap_or("");
         match self.1 {
-            "wiki_status" => ToolOutput::ok(serde_json::to_string_pretty(&status(h)).unwrap_or_default()),
+            "wiki_status" => match root_in(h, store) {
+                Ok(_) => ToolOutput::ok(serde_json::to_string_pretty(&status(h, store)).unwrap_or_default()),
+                Err(e) => ToolOutput::err(e),
+            },
             "wiki_search" => {
                 let Some(q) = input["query"].as_str().filter(|q| !q.trim().is_empty()) else { return ToolOutput::err("wiki_search needs `query`") };
                 let max = input["maxResults"].as_u64().unwrap_or(10) as usize;
                 let corpus = input["corpus"].as_str().unwrap_or(&h.settings.wiki.search_corpus).to_string();
                 let mut res: Vec<Value> = Vec::new();
                 if corpus != "memory" {
-                    res.extend(search(h, q, max).into_iter().map(|w| json!({"corpus": "wiki", "path": w.path, "id": w.id, "title": w.title, "score": w.score, "snippet": w.snippet})));
+                    res.extend(search(h, q, max, store).into_iter().map(|w| json!({"corpus": "wiki", "path": w.path, "id": w.id, "title": w.title, "score": w.score, "snippet": w.snippet})));
                 }
                 if corpus != "wiki" {
                     if let Ok(o) = h.search(q, max, h.settings.search.min_score, &[]) {
@@ -643,16 +811,26 @@ impl Tool for WikiTool {
                 if l.is_empty() {
                     return ToolOutput::err("wiki_get requires a non-empty `lookup` path or id.");
                 }
-                match get(h, l, input["fromLine"].as_u64().map(|n| n as usize), input["lineCount"].as_u64().map(|n| n as usize)) {
+                match get(h, l, input["fromLine"].as_u64().map(|n| n as usize), input["lineCount"].as_u64().map(|n| n as usize), store) {
                     Some(v) => ToolOutput::ok(serde_json::to_string_pretty(&v).unwrap_or_default()),
                     None => ToolOutput::ok(format!("Wiki page not found: {l}")),
                 }
             }
-            "wiki_apply" => match apply(h, &input) {
+            "wiki_apply" => match apply(h, &input, store) {
                 Ok(v) => ToolOutput::ok(serde_json::to_string_pretty(&v).unwrap_or_default()),
                 Err(e) => ToolOutput::err(e),
             },
-            _ => match lint(h) {
+            "wiki_history" => {
+                let l = input["lookup"].as_str().unwrap_or("").trim();
+                if l.is_empty() {
+                    return ToolOutput::err("wiki_history requires a non-empty `lookup` path or id.");
+                }
+                match history(h, l, store) {
+                    Ok(v) => ToolOutput::ok(serde_json::to_string_pretty(&json!({"lookup": l, "history": v})).unwrap_or_default()),
+                    Err(e) => ToolOutput::err(e),
+                }
+            }
+            _ => match lint(h, store) {
                 Ok((i, r)) => ToolOutput::ok(lint_summary(&i, &r)),
                 Err(e) => ToolOutput::err(e),
             },
@@ -660,19 +838,38 @@ impl Tool for WikiTool {
     }
 }
 
-/// `seagent wiki <init|status|compile|ingest <file>|lint|search <q>|get <lookup>|apply <json>>`.
+/// `seagent wiki <init|status|compile|ingest <file>|lint|search <q>|get <lookup>|history <lookup>|apply <json>> [--store <name>]`.
 pub fn cli(h: &Host, args: &[String]) -> Result<String, String> {
-    let rest = args.get(1..).map(|r| r.join(" ")).unwrap_or_default();
-    match args.first().map(String::as_str).unwrap_or("status") {
-        "init" => Ok(format!("vault {}: {} created", root(h).display(), init(h)?.len())),
-        "status" => Ok(serde_json::to_string_pretty(&status(h)).unwrap_or_default()),
-        "compile" => compile(h),
-        "ingest" => ingest(h, Some(Path::new(args.get(1).ok_or("usage: seagent wiki ingest <file> [title]")?)), None, args.get(2).map(String::as_str)),
-        "lint" => lint(h).map(|(i, r)| lint_summary(&i, &r)),
-        "search" => Ok(search(h, &rest, 10).iter().map(|w| format!("{:.2}  {}  {}", w.score, w.path, w.title)).collect::<Vec<_>>().join("\n")),
-        "get" => get(h, &rest, None, None).and_then(|v| v["text"].as_str().map(str::to_string)).ok_or_else(|| format!("Wiki page not found: {rest}")),
-        "apply" => apply(h, &serde_json::from_str(&rest).map_err(|e| format!("apply needs a JSON mutation: {e}"))?).map(|v| v.to_string()),
-        other => Err(format!("unknown `wiki {other}`; use init, status, compile, ingest, lint, search, get or apply")),
+    let mut argv: Vec<String> = args.to_vec();
+    let mut store = String::new();
+    if let Some(i) = argv.iter().position(|a| a == "--store") {
+        store = argv.get(i + 1).cloned().unwrap_or_default();
+        argv.drain(i..(i + 2).min(argv.len()));
+    } else if let Some(i) = argv.iter().position(|a| a.starts_with("--store=")) {
+        store = argv[i]["--store=".len()..].to_string();
+        argv.remove(i);
+    }
+    let rest = argv.get(1..).map(|r| r.join(" ")).unwrap_or_default();
+    match argv.first().map(String::as_str).unwrap_or("status") {
+        "init" => Ok(format!("vault {}: {} created", root_in(h, &store)?.display(), init(h, &store)?.len())),
+        "status" => {
+            root_in(h, &store)?;
+            Ok(serde_json::to_string_pretty(&status(h, &store)).unwrap_or_default())
+        }
+        "compile" => compile(h, &store),
+        "ingest" => {
+            let path = argv.get(1).ok_or("usage: seagent wiki ingest <file> [title] [--store <name>]")?;
+            ingest(h, Some(Path::new(path)), None, argv.get(2).map(String::as_str), &store)
+        }
+        "lint" => lint(h, &store).map(|(i, r)| lint_summary(&i, &r)),
+        "search" => Ok(search(h, &rest, 10, &store).iter().map(|w| format!("{:.2}  {}  {}", w.score, w.path, w.title)).collect::<Vec<_>>().join("\n")),
+        "get" => get(h, &rest, None, None, &store).and_then(|v| v["text"].as_str().map(str::to_string)).ok_or_else(|| format!("Wiki page not found: {rest}")),
+        "history" => {
+            let rows = history(h, &rest, &store)?;
+            Ok(if rows.is_empty() { format!("no snapshots for {rest}") } else { rows.iter().map(|v| format!("{}  {}  {} bytes", v["at"].as_str().unwrap_or(""), v["file"].as_str().unwrap_or(""), v["bytes"])).collect::<Vec<_>>().join("\n") })
+        }
+        "apply" => apply(h, &serde_json::from_str(&rest).map_err(|e| format!("apply needs a JSON mutation: {e}"))?, &store).map(|v| v.to_string()),
+        other => Err(format!("unknown `wiki {other}`; use init, status, compile, ingest, lint, search, get, history or apply (add --store <name> for a named store)")),
     }
 }
 
@@ -683,31 +880,31 @@ mod tests {
     #[test]
     fn vault_lifecycle() {
         let h = crate::test_host("wiki", |_| {});
-        assert!(init(&h).unwrap().len() >= 8);
+        assert!(init(&h, "").unwrap().len() >= 8);
         let src = h.data.join("notes.md");
         fs::write(&src, "# Postgres\nWe run Postgres 16 with logical replication.").unwrap();
-        assert!(ingest(&h, Some(&src), None, Some("Postgres ops")).unwrap().contains("source.postgres-ops"));
-        let r = apply(&h, &json!({"op":"create_synthesis","title":"Database choice","body":"We chose [[sources/postgres-ops|Postgres]] over MySQL. See [[Nowhere]].","sourceIds":["source.postgres-ops"],"claims":[{"id":"db","text":"Primary DB is Postgres","confidence":0.4}],"questions":["Upgrade to 17?"]})).unwrap();
+        assert!(ingest(&h, Some(&src), None, Some("Postgres ops"), "").unwrap().contains("source.postgres-ops"));
+        let r = apply(&h, &json!({"op":"create_synthesis","title":"Database choice","body":"We chose [[sources/postgres-ops|Postgres]] over MySQL. See [[Nowhere]].","sourceIds":["source.postgres-ops"],"claims":[{"id":"db","text":"Primary DB is Postgres","confidence":0.4}],"questions":["Upgrade to 17?"]}), "").unwrap();
         assert_eq!(r["path"], "syntheses/database-choice.md");
         let idx = fs::read_to_string(root(&h).join("index.md")).unwrap();
         assert!(idx.contains("### Syntheses") && idx.contains("[[syntheses/database-choice|Database choice]]"));
         let src_page = fs::read_to_string(root(&h).join("sources/postgres-ops.md")).unwrap();
         assert!(src_page.contains("## Related") && src_page.contains("Backlink: [[syntheses/database-choice"), "{src_page}");
         assert!(fs::read_to_string(root(&h).join("reports/open-questions.md")).unwrap().contains("Upgrade to 17?"));
-        let (issues, rep) = lint(&h).unwrap();
+        let (issues, rep) = lint(&h, "").unwrap();
         let codes: Vec<&str> = issues.iter().map(|i| i.code).collect();
         assert!(codes.contains(&"broken-wikilink") && codes.contains(&"open-question") && codes.contains(&"claim-missing-evidence") && codes.contains(&"claim-low-confidence"), "{codes:?}");
         assert!(!codes.contains(&"missing-source-ids"));
         assert!(lint_summary(&issues, &rep).contains("Open questions: 1"));
-        let hits = search(&h, "postgres replication", 5);
+        let hits = search(&h, "postgres replication", 5, "");
         assert_eq!(hits[0].path, "sources/postgres-ops.md");
-        let g = get(&h, "synthesis.database-choice", Some(1), Some(3)).unwrap();
+        let g = get(&h, "synthesis.database-choice", Some(1), Some(3), "").unwrap();
         assert_eq!(g["found"], true);
-        apply(&h, &json!({"op":"metadata","lookup":"Database choice","questions":null,"confidence":0.9})).unwrap();
-        let p = find(&h, "synthesis.database-choice").unwrap();
+        apply(&h, &json!({"op":"metadata","lookup":"Database choice","questions":null,"confidence":0.9}), "").unwrap();
+        let p = find(&h, "synthesis.database-choice", "").unwrap();
         assert!(p.fm.get("questions").is_none() && p.fm["confidence"] == json!(0.9));
-        assert!(apply(&h, &json!({"op":"metadata","lookup":"nope","status":"x"})).is_err());
-        assert!(apply(&h, &json!({"op":"drop"})).is_err());
+        assert!(apply(&h, &json!({"op":"metadata","lookup":"nope","status":"x"}), "").is_err());
+        assert!(apply(&h, &json!({"op":"drop"}), "").is_err());
         let t = tools(&h);
         let c = crate::tools::tests_ctx(&h.data);
         assert!(t[1].call(&c, json!({"query":"database"})).content.contains("database-choice"));
@@ -715,6 +912,55 @@ mod tests {
         assert!(t[4].call(&c, json!({})).content.contains("Issues:"));
         assert!(t[0].call(&c, json!({})).content.contains("\"pages\""));
         assert!(cli(&h, &["search".into(), "postgres".into()]).unwrap().contains("postgres-ops"));
+    }
+
+    /// Per-store agent ACL, local history snapshots and supersede chains (extensions/knowledge
+    /// first slice): an old page is retired in place and search follows `supersededBy`.
+    #[test]
+    fn store_acl_history_and_supersede_chain() {
+        let d = crate::tmp("wiki-acl");
+        let team = d.join("team-vault");
+        let mut s = crate::settings::Settings::default();
+        s.wiki.agent_id = "ops".into();
+        s.wiki.history = true;
+        s.wiki.history_max = 3;
+        s.wiki.stores.insert("team".into(), crate::settings::WikiStore { path: team.display().to_string(), agents: vec!["ops".into()] });
+        let h = Host::with_settings(&d, s.clone(), Arc::new(|x: &str| x.to_string()), None);
+        h.set_embedder(None);
+        assert!(init(&h, "team").unwrap().len() >= 8);
+        assert!(ingest(&h, None, Some("# Legacy\nThe legacy wording says alpha."), Some("Legacy note"), "team").unwrap().contains("source.legacy-note"));
+        let old = apply(&h, &json!({"op":"create_synthesis","title":"Old answer","body":"The legacy wording says alpha.","sourceIds":["source.legacy-note"]}), "team").unwrap();
+        let new = apply(&h, &json!({"op":"create_synthesis","title":"New answer","body":"The current answer is beta.","sourceIds":["source.legacy-note"]}), "team").unwrap();
+        let r = apply(&h, &json!({"op":"supersede","lookup":old["path"],"by":new["path"],"reason":"updated runbook"}), "team").unwrap();
+        assert_eq!(r["from"], "syntheses/old-answer.md");
+        let retired = find(&h, "synthesis.old-answer", "team").unwrap();
+        assert_eq!(retired.fm["status"], "superseded");
+        assert_eq!(retired.fm["supersededBy"], "synthesis.new-answer");
+        let current = find(&h, "synthesis.new-answer", "team").unwrap();
+        assert_eq!(current.fm["supersedes"], json!(["synthesis.old-answer"]));
+        // Search on the retired wording resolves to the page that replaced it.
+        let hits = search(&h, "legacy", 5, "team");
+        assert!(hits.iter().any(|x| x.path == "syntheses/new-answer.md"), "{hits:?}");
+        assert!(!hits.iter().any(|x| x.path == "syntheses/old-answer.md"), "{hits:?}");
+        // History keeps the pre-supersede image, bounded by history_max.
+        let hist = history(&h, "syntheses/new-answer", "team").unwrap();
+        assert!(!hist.is_empty() && hist.len() <= 3, "{hist:?}");
+        assert!(!history(&h, "synthesis.old-answer", "team").unwrap().is_empty());
+        // Agent ACL: a different agent id cannot even initialize/read the team store.
+        let mut other = s.clone();
+        other.wiki.agent_id = "dev".into();
+        let h2 = Host::with_settings(&d, other, Arc::new(|x: &str| x.to_string()), None);
+        h2.set_embedder(None);
+        assert!(root_in(&h2, "team").unwrap_err().contains("not allowed"));
+        assert!(init(&h2, "team").unwrap_err().contains("not allowed"));
+        assert!(root_in(&h2, "").is_ok(), "the default store has no ACL here");
+        // Unknown and path-less stores are named, never silently mapped to the default.
+        assert!(root_in(&h, "missing").unwrap_err().contains("no knowledge store"));
+        let mut bad = s.clone();
+        bad.wiki.stores.insert("broken".into(), crate::settings::WikiStore::default());
+        let h3 = Host::with_settings(&d, bad, Arc::new(|x: &str| x.to_string()), None);
+        assert!(root_in(&h3, "broken").unwrap_err().contains("needs `path`"));
+        let _ = fs::remove_dir_all(&d);
     }
 
     #[test]

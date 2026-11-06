@@ -1262,9 +1262,9 @@ impl Channel for Matrix {
         let (token, _) = self.session(&Cancel::new())?;
         let auth = format!("Bearer {token}");
         let authed = format!("{}/_matrix/client/v1/media/download/{}/{}", self.hs, enc(server), enc(media));
-        let data = match crate::http::get_bytes(&authed, &[("authorization", &auth)], MAX_MEDIA) {
+        let data = match crate::http::get_bytes_trusted(&authed, &[("authorization", &auth)], MAX_MEDIA, &self.hs) {
             // Homeservers older than v1.11 only have the legacy endpoint.
-            Err(e) if matches!(e.kind, K::NotFound | K::Protocol) => crate::http::get_bytes(&format!("{}/_matrix/media/v3/download/{}/{}", self.hs, enc(server), enc(media)), &[("authorization", &auth)], MAX_MEDIA),
+            Err(e) if matches!(e.kind, K::NotFound | K::Protocol) => crate::http::get_bytes_trusted(&format!("{}/_matrix/media/v3/download/{}/{}", self.hs, enc(server), enc(media)), &[("authorization", &auth)], MAX_MEDIA, &self.hs),
             r => r,
         }?;
         match self.crypto().and_then(|c| c.file_for(url)) {

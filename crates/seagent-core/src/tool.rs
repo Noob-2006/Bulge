@@ -81,11 +81,32 @@ pub trait ToolHost: Send + Sync {
     fn spawn_agent(&self, req: SpawnRequest, cancel: &Cancel) -> Result<String, String>;
     /// Ask the human a question (may fail in headless mode).
     fn ask_user(&self, question: &str) -> Result<String, String>;
+    /// Ask with pickable choices. Hosts that can render native buttons use them; the
+    /// default falls back to a numbered list in the question text. The reply may be a
+    /// number, a label or free text ("Other").
+    fn ask_user_choice(&self, question: &str, choices: &[String], multi: bool) -> Result<String, String> {
+        let mut text = question.to_string();
+        if !choices.is_empty() {
+            text.push('\n');
+            for (i, c) in choices.iter().enumerate() {
+                text.push_str(&format!("  {}. {c}\n", i + 1));
+            }
+            text.push_str(&format!("  {}. Other (type your answer)\n", choices.len() + 1));
+            text.push_str(if multi { "Reply with one or more numbers (e.g. 1,3), or type your own answer." } else { "Reply with a number, or type your own answer." });
+        }
+        self.ask_user(&text)
+    }
     /// Live progress from a long-running tool, shown by attached UIs (not logged).
     fn progress(&self, _text: &str) {}
     /// The concrete host, for tools that live next to it (kernel session / sub-agent tools).
     fn as_any(&self) -> Option<&dyn std::any::Any> {
         None
+    }
+    /// One plain completion with no tools and no conversation (deep research, summarizers).
+    /// `model` empty = the host's default/aux model. The default is unavailable so foreign
+    /// hosts (tests, MCP servers) do not accidentally reach a model.
+    fn complete_text(&self, _model: &str, _system: &str, _prompt: &str, _max_tokens: u32) -> Result<String, String> {
+        Err("no model is available to this tool host".into())
     }
     /// Answer `question` about an image (base64 `data` of `media_type`) with a vision-capable
     /// model; used by screenshot tools (browser_vision, computer_use capture).

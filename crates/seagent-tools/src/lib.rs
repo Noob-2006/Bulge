@@ -26,6 +26,7 @@ mod memory;
 pub mod ops;
 mod plan;
 pub mod proc;
+pub mod research;
 mod search;
 /// Security-operations tools: scan reports, OSV, SIEM alerts, compliance checklists.
 pub mod secops;

@@ -48,6 +48,77 @@ pub struct Line {
     pub ref_id: Option<String>,
 }
 
+/// Replacement for password, one-time-code and card field values (OpenClaw
+/// `sensitive-field-values.ts`).
+pub const REDACTED_FIELD_VALUE: &str = "[redacted]";
+
+/// Roles whose snapshot entries can carry a form-field value.
+pub const VALUE_FIELD_ROLES: &[&str] = &["combobox", "searchbox", "spinbutton", "textbox"];
+
+/// WHATWG autofill names whose values are credentials or payment secrets.
+pub const SENSITIVE_AUTOCOMPLETE: &[&str] = &["cc-csc", "cc-number", "current-password", "new-password", "one-time-code"];
+
+/// `password` inputs and the credential/payment autofill tokens. Section, billing/shipping
+/// and contact tokens may precede the field name (e.g. `billing cc-number`).
+pub fn is_sensitive_field(tag: &str, field_type: Option<&str>, autocomplete: Option<&str>) -> bool {
+    if tag.eq_ignore_ascii_case("input") && field_type.is_some_and(|t| t.eq_ignore_ascii_case("password")) {
+        return true;
+    }
+    autocomplete.unwrap_or("").split_whitespace().any(|t| SENSITIVE_AUTOCOMPLETE.iter().any(|s| t.eq_ignore_ascii_case(s)))
+}
+
+/// Mask valued form fields before any snapshot format renders the AX nodes. `describe` reads
+/// the DOM attributes of a backend node; a field that cannot be resolved is masked (fail
+/// closed), and rendered text descendants of a masked field are masked too.
+pub fn redact_sensitive_ax_values<F>(nodes: &mut [Value], mut describe: F)
+where
+    F: FnMut(i64) -> Option<(String, Option<String>, Option<String>)>,
+{
+    let by_id: HashMap<String, usize> = nodes.iter().enumerate().filter_map(|(i, n)| Some((n["nodeId"].as_str()?.to_string(), i))).collect();
+    let targets: Vec<usize> = nodes
+        .iter()
+        .enumerate()
+        .filter(|(_, n)| VALUE_FIELD_ROLES.contains(&lower(&ax_str(&n["role"])).as_str()) && !ax_str(&n["value"]).trim().is_empty())
+        .map(|(i, _)| i)
+        .collect();
+    for i in targets {
+        let backend = nodes[i]["backendDOMNodeId"].as_i64().unwrap_or(0);
+        let field = (backend != 0).then(|| describe(backend)).flatten();
+        let sensitive = field.as_ref().is_none_or(|(tag, ty, ac)| is_sensitive_field(tag, ty.as_deref(), ac.as_deref()));
+        if sensitive {
+            redact_tree(nodes, i, &by_id);
+        }
+    }
+}
+
+fn redact_tree(nodes: &mut [Value], root: usize, by_id: &HashMap<String, usize>) {
+    let mut stack = vec![root];
+    let mut seen = HashSet::new();
+    while let Some(i) = stack.pop() {
+        if !seen.insert(i) {
+            continue;
+        }
+        let kids: Vec<usize> = nodes
+            .get(i)
+            .and_then(|n| n["childIds"].as_array())
+            .map(|a| a.iter().filter_map(|k| k.as_str().and_then(|k| by_id.get(k).copied())).collect())
+            .unwrap_or_default();
+        if i != root {
+            if let Some(name) = nodes[i].get_mut("name") {
+                if name["value"].as_str().is_some_and(|s| !s.trim().is_empty()) {
+                    name["value"] = json!(REDACTED_FIELD_VALUE);
+                }
+            }
+        }
+        if let Some(v) = nodes[i].get_mut("value") {
+            if v["value"].as_str().is_some_and(|s| !s.trim().is_empty()) || v["value"].is_number() {
+                v["value"] = json!(REDACTED_FIELD_VALUE);
+            }
+        }
+        stack.extend(kids);
+    }
+}
+
 pub fn ax_str(v: &Value) -> String {
     match &v["value"] {
         Value::String(s) => s.clone(),
@@ -351,6 +422,44 @@ mod tests {
         assert_eq!(f.text, "- RootWebArea \"Page\"\n  - button \"Submit\" [ref=e1] [disabled]\n  - textbox \"Email\" [ref=e2] value=\"a@b.c\"\n  - button \"Go\" [ref=e3]\n  - button \"Go\" [ref=e4] [nth=1]\n  - heading \"Title\" [ref=e5] [level=2]");
         assert_eq!(f.stats["interactive"], 4);
         assert_eq!(refs[3].1.backend, 18);
+    }
+
+    #[test]
+    fn sensitive_ax_values_are_masked_before_render() {
+        let mut nodes = vec![
+            node("1", "RootWebArea", "Form", &["2", "3", "4", "5"], 1),
+            node("2", "textbox", "Email", &[], 10),
+            node("3", "textbox", "Code", &[], 20),
+            node("4", "textbox", "Card", &["6"], 30),
+            node("5", "textbox", "Detached", &[], 40),
+            node("6", "statictext", "4242424242424242", &[], 31),
+        ];
+        nodes[1]["value"] = json!({"value": "visible@example.test"});
+        nodes[2]["value"] = json!({"value": "123456"});
+        nodes[3]["value"] = json!({"value": "4242424242424242"});
+        nodes[4]["value"] = json!({"value": "unresolvable"});
+        nodes[5]["value"] = json!({"value": "4242424242424242"});
+        redact_sensitive_ax_values(&mut nodes, |bk| match bk {
+            10 => Some(("INPUT".into(), Some("email".into()), Some("username".into()))),
+            20 => Some(("INPUT".into(), Some("text".into()), Some("one-time-code".into()))),
+            30 => Some(("INPUT".into(), Some("text".into()), Some("billing cc-number".into()))),
+            _ => None,
+        });
+        assert_eq!(nodes[1]["value"]["value"], "visible@example.test", "ordinary values stay readable");
+        assert_eq!(nodes[1]["name"]["value"], "Email");
+        for i in [2, 3, 4] {
+            assert_eq!(nodes[i]["value"]["value"], REDACTED_FIELD_VALUE, "node {i}");
+        }
+        assert_eq!(nodes[5]["value"]["value"], REDACTED_FIELD_VALUE);
+        assert_eq!(nodes[5]["name"]["value"], REDACTED_FIELD_VALUE, "rendered text descendant name");
+        assert!(is_sensitive_field("input", Some("password"), None));
+        assert!(!is_sensitive_field("input", Some("text"), Some("username")));
+        let mut refs = vec![];
+        let mut n = 0;
+        let (lines, _) = render(&nodes, &HashMap::new(), &Opts::default(), None, &mut n, &mut refs, 0);
+        let text = finish(lines, &refs, None, None, false, "").text;
+        assert!(!text.contains("123456") && !text.contains("4242424242424242") && !text.contains("unresolvable"), "{text}");
+        assert!(text.contains("value=\"visible@example.test\"") && text.contains("value=\"[redacted]\""), "{text}");
     }
 
     #[test]

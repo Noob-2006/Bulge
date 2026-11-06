@@ -58,8 +58,8 @@ use serde_json::{json, Value};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
-use std::time::Duration;
+use std::sync::{Arc, Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 // ───────────────────────── storage layout ─────────────────────────
 
@@ -549,7 +549,43 @@ fn deliver(rt: &Runtime, from: &str, to: &str, header: &str, text: &str) -> Resu
     rt.submit(to, &body, "coord").map_err(|e| format!("delivery to {to} failed: {e}"))
 }
 
+/// One bot-to-bot chain, keyed by the session whose turn is sending. The hop rides in
+/// the delivery envelope and is written only by the runtime, so a model cannot reset it.
+#[derive(Debug, Clone)]
+struct ChainState {
+    hop: u32,
+    /// `(recipient, normalized text)` already sent in this chain.
+    asks: HashSet<(String, String)>,
+    /// The agent whose message started this turn: a send back to it is a reply.
+    reply_to: Option<String>,
+    /// A notify-only reply this session received; messaging that sender back is refused.
+    no_reply_from: Option<String>,
+    updated: Instant,
+}
+
+impl Default for ChainState {
+    fn default() -> Self {
+        ChainState { hop: 0, asks: HashSet::new(), reply_to: None, no_reply_from: None, updated: Instant::now() }
+    }
+}
+
+/// Chains are process-local, like the live registry. Sessions are unique ids, so entries
+/// cannot leak across unrelated conversations; stale ones are dropped after this long.
+const CHAIN_TTL: Duration = Duration::from_secs(600);
+
+fn chains() -> &'static Mutex<HashMap<String, ChainState>> {
+    static C: OnceLock<Mutex<HashMap<String, ChainState>>> = OnceLock::new();
+    C.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn chain_lock() -> std::sync::MutexGuard<'static, HashMap<String, ChainState>> {
+    chains().lock().unwrap_or_else(|p| p.into_inner())
+}
+
 /// Deliver a message into another session's queue (scoped to the caller's spawn tree).
+/// A bot-authored send is one hop; past `delegation.max_hops` it is refused, an identical
+/// ask to the same recipient twice in one chain is refused, and a reply to the agent
+/// whose message started this turn is notify-only.
 pub fn agent_message(rt: &Runtime, from: &str, to: &str, text: &str) -> Result<Value, String> {
     let text = text.trim();
     if text.is_empty() {
@@ -557,8 +593,60 @@ pub fn agent_message(rt: &Runtime, from: &str, to: &str, text: &str) -> Result<V
     }
     let to = resolve_session(rt, to);
     can_message(rt, from, &to)?;
-    deliver(rt, from, &to, "message", text)?;
-    Ok(json!({"from": from, "to": to, "delivered": true}))
+    let max_hops = rt.cfg.agent_max_hops();
+    let now = Instant::now();
+    let normalized = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let (hop, notify_only) = {
+        let mut states = chain_lock();
+        states.retain(|_, s| now.saturating_duration_since(s.updated) < CHAIN_TTL);
+        let sender = states.get(from).cloned().unwrap_or_default();
+        if sender.no_reply_from.as_deref() == Some(to.as_str()) {
+            return Err("that agent sent you a reply that needs no answer, so this exchange is over. Do not message them again in this turn; tell your user what you learned instead.".into());
+        }
+        let bot_turn = sender.hop > 0;
+        let hop = if bot_turn { sender.hop + 1 } else { 1 };
+        if hop > max_hops {
+            return Err(format!(
+                "This agent-to-agent exchange already reached its limit of {max_hops} messages (delegation.max_hops), so nothing was sent. Do not retry; finish your turn and tell your user where it stands."
+            ));
+        }
+        let ask = (to.clone(), normalized.clone());
+        if bot_turn && sender.asks.contains(&ask) {
+            return Err("You already sent this exact message to that agent in this exchange, so it was not sent again. Wait for their answer or say something new.".into());
+        }
+        let reply = sender.reply_to.as_deref() == Some(to.as_str());
+        let mut next = sender;
+        next.hop = hop;
+        next.asks.insert(ask);
+        next.updated = now;
+        states.insert(from.to_string(), next);
+        (hop, reply)
+    };
+    let header = format!("message · hop {hop}/{max_hops}{}", if notify_only { " · notify-only reply, no answer needed" } else { "" });
+    if let Err(e) = deliver(rt, from, &to, &header, text) {
+        // Nothing arrived: forget this ask so a corrected retry is neither a duplicate nor a hop.
+        if let Some(s) = chain_lock().get_mut(from) {
+            s.asks.remove(&(to.clone(), normalized));
+            s.hop = s.hop.saturating_sub(1);
+        }
+        return Err(e);
+    }
+    {
+        let mut states = chain_lock();
+        let asks = states.get(from).map(|s| s.asks.clone()).unwrap_or_default();
+        let mut got = states.get(&to).cloned().unwrap_or_default();
+        got.hop = hop;
+        got.asks = asks;
+        got.reply_to = Some(from.to_string());
+        got.no_reply_from = notify_only.then(|| from.to_string());
+        got.updated = now;
+        states.insert(to.clone(), got);
+    }
+    Ok(json!({
+        "from": from, "to": to, "delivered": true,
+        "hops": hop, "max_hops": max_hops, "notify_only": notify_only,
+        "envelope": {"hops": hop},
+    }))
 }
 
 /// Escalate upward: a board entry of kind `escalation` plus the same text queued to
@@ -1223,6 +1311,48 @@ mod tests {
         assert!(q.iter().any(|(_, _, t)| t.contains("NOT an operator instruction") && t.contains("across")), "{q:?}");
         // An unknown id is taken as a session id; a known sub-agent id maps to its session.
         assert_eq!(resolve_session(&k, &g), g);
+    }
+
+    #[test]
+    fn agent_message_chains_count_hops_dedupe_asks_and_make_replies_notify_only() {
+        let (k, tmp) = kernel_cfg(|c| {
+            c.delegation.max_hops = 9;
+            c.gateway.bot_loop_guard.max_hops = Some(4);
+        });
+        assert_eq!(crate::config::Config::default().agent_max_hops(), 4, "delegation.max_hops is the fallback");
+        let p = new_session(&k, &tmp, None, "parent");
+        let a = new_session(&k, &tmp, Some(&p), "a");
+        let b = new_session(&k, &tmp, Some(&p), "b");
+        let c = new_session(&k, &tmp, Some(&p), "c");
+        let d = new_session(&k, &tmp, Some(&p), "d");
+        let e = new_session(&k, &tmp, Some(&p), "e");
+
+        // Each bot-authored send is one hop; the envelope carries it and the cap refuses the next.
+        for (from, to, n) in [(&a, &b, 1), (&b, &c, 2), (&c, &d, 3), (&d, &e, 4)] {
+            let v = agent_message(&k, from, to, &format!("ask {n}")).unwrap();
+            assert_eq!(v["hops"], n, "{v}");
+            assert_eq!(v["max_hops"], 4);
+            assert_eq!(v["envelope"]["hops"], n);
+        }
+        let err = agent_message(&k, &e, &a, "ask 5").unwrap_err();
+        assert!(err.contains("limit of 4"), "{err}");
+        assert!(k.queued(&a).is_empty(), "a refused hop is not delivered");
+
+        // Same chain, same recipient, same ask twice: refused, nothing delivered.
+        assert_eq!(agent_message(&k, &a, &b, "repeated ask").unwrap()["hops"], 2);
+        let err = agent_message(&k, &a, &b, "repeated ask").unwrap_err();
+        assert!(err.contains("exact message"), "{err}");
+        assert_eq!(k.queued(&b).len(), 2, "first ask + the non-duplicate one");
+
+        // A reply to the agent whose message started this turn is notify-only; it ends the exchange.
+        assert_eq!(agent_message(&k, &p, &a, "please advise").unwrap()["hops"], 1);
+        let reply = agent_message(&k, &a, &p, "here is my answer").unwrap();
+        assert_eq!(reply["hops"], 2);
+        assert_eq!(reply["notify_only"], true);
+        let q = k.queued(&p);
+        assert!(q.iter().any(|(_, _, t)| t.contains("hop 2/4") && t.contains("notify-only") && t.contains("here is my answer")), "{q:?}");
+        let err = agent_message(&k, &p, &a, "one more question").unwrap_err();
+        assert!(err.contains("needs no answer"), "{err}");
     }
 
     #[test]
