@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>SE Agent</title>
+  <link rel="stylesheet" href="vendor/theme.css">
+  <link rel="stylesheet" href="app.css">
+</head>
+<body class="splash">
+  <main class="card panel cornered" id="card">
+    <span class="corner tl star"></span><span class="corner tr star"></span>
+    <span class="corner bl star"></span><span class="corner br star"></span>
+
+    <header class="brand">
+      <span class="star glow pulse logo" id="logo"></span>
+      <div>
+        <h1>SE Agent</h1>
+        <p class="faint" id="version"></p>
+      </div>
+    </header>
+
+    <!-- Android: where should the agent run? (iOS goes straight to connect.html) -->
+    <section id="choose" hidden>
+      <h2 data-i18n="chooseTitle">要怎麼使用 SE Agent？</h2>
+      <button class="choice-card" id="chooseLocal">
+        <strong data-i18n="localTitle">在這支手機上執行</strong>
+        <span class="dim" data-i18n="localHint">Agent 以前景服務在手機上常駐，主控台在 http://127.0.0.1:8640。</span>
+      </button>
+      <button class="choice-card" id="chooseRemote">
+        <strong data-i18n="remoteTitle">連線到另一台電腦</strong>
+        <span class="dim" data-i18n="remoteHint">在區域網路中找到已安裝 SE Agent 的電腦並配對。</span>
+      </button>
+    </section>
+
+    <section id="progress">
+      <p class="title" id="title" data-i18n="preparing">準備中…</p>
+      <div class="bar" role="progressbar" aria-valuemin="0" aria-valuemax="100" id="bar"><span id="fill"></span></div>
+      <ol class="steps" id="steps"></ol>
+    </section>
+
+    <section id="failed" hidden>
+      <p class="title bad" data-i18n="failed">SE Agent 沒能啟動</p>
+      <p class="error" id="error"></p>
+      <div class="actions">
+        <button class="btn" id="retry" data-i18n="retry">重試</button>
+        <button class="btn ghost" id="copy" data-i18n="copy">複製詳細資訊</button>
+        <button class="btn ghost" id="toggle" data-i18n="show">顯示詳細資訊</button>
+      </div>
+      <pre class="details" id="details" hidden></pre>
+      <p class="faint small" id="copied" hidden data-i18n="copied">已複製。貼到 issue 或寄給管理員即可。</p>
+    </section>
+  </main>
+  <script src="i18n.js"></script>
+  <script src="boot.js"></script>
+</body>
+</html>

@@ -116,3 +116,30 @@ repository and are reviewed as code.
 **Gaps (reviewer action, not yet fixed):** `webpki-roots`, `ring` and `base64` are declared without
 a reason comment, which the budget rule above requires. They are load-bearing (TLS trust, crypto,
 wire encoding), so the fix is to add the comment, not to remove the crate.
+
+## App shell budget (`apps/desktop`, separate)
+
+The GUI app (Tauri 2: window, tray, installers, mobile targets) is a **separate Cargo workspace**
+with its own `apps/desktop/Cargo.lock`. It is *not* a member of the root workspace, so nothing
+above applies to it automatically and nothing in it reaches the agent: `cargo deny check`,
+`seagent security audit --supply-chain` and the SBOM at the repository root cover the agent only,
+and the agent binary that ships inside the app is byte-for-byte the one the root workspace builds.
+
+Why a separate budget: Tauri brings tokio, wry/tao, the WebView bindings (WebView2, WebKitGTK,
+WKWebView, Android WebView) and their build scripts — hundreds of crates that the headless agent
+must never depend on. Keeping them in their own lockfile keeps the agent's tree, review effort and
+attack surface unchanged.
+
+Rules for `apps/desktop`:
+
+* Same review process (who signs off, the checklist) applied to `apps/desktop/Cargo.lock`, run from
+  `apps/desktop`: `cargo deny check` (with the root `deny.toml`: `cargo deny --manifest-path
+  apps/desktop/Cargo.toml check --config deny.toml`), `cargo tree --duplicates`.
+* Direct dependencies are listed with a `#` reason in `apps/desktop/src-tauri/Cargo.toml` and
+  `plugins/seagent-mobile/Cargo.toml`: `tauri` and official `tauri-plugin-*` crates (single
+  instance, autostart, updater, dialog, opener, barcode scanner), `serde`/`serde_json`, `base64`,
+  `tokio` (already in Tauri's tree), `rustls` + `tokio-rustls` + `ring` (pinned TLS to a paired
+  host — `ring` provider, no `aws-lc`/cmake for mobile cross builds), `sys-locale`.
+  Anything else follows the budget rule above.
+* An advisory in the app's tree is triaged like one in the agent's, but ships through an app
+  release (the in-app updater), not an agent release.

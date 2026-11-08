@@ -50,7 +50,8 @@ iOS 不允許 App 開虛擬機、執行子程序或 JIT，因此 iOS 版是**純
 
 ## 安裝與圖形精靈
 
-- 新 crate `seagent-desktop`（Tauri 2）：視窗、系統匣、第一次啟動時安裝並啟動背景服務、開啟既有的網頁設定精靈。
+- 新 crate `seagent-desktop`（Tauri 2，`apps/desktop/`，獨立 workspace 與 Cargo.lock）：視窗、系統匣、第一次啟動時安裝並啟動背景服務、開啟既有的網頁設定精靈。
+  建置與簽章見 [apps/desktop/README.md](../apps/desktop/README.md)，手機見 [apps/desktop/MOBILE.md](../apps/desktop/MOBILE.md)。
 - 產出：Windows `.msi` / `.exe`、macOS `.dmg`、Linux `.AppImage` / `.deb` / `.rpm`、Android `.apk`、iOS（TestFlight / App Store）。
 - 精靈第 7 步「開機自動啟動」依平台走 systemd / Windows 服務 / launchd / Android Foreground Service。
 - 簽章：流程寫好、憑證留空位（CI secret）；未簽章前使用者會看到 SmartScreen / Gatekeeper 警告。

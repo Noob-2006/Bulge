@@ -1,0 +1,40 @@
+[package]
+name = "seagent-desktop"
+description = "SE Agent app: window, tray, first-run service install and setup wizard"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+default-run = "seagent-desktop"
+
+[lib]
+# staticlib: iOS, cdylib: Android, rlib: the desktop binary in main.rs.
+name = "seagent_desktop_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-opener = "2"                 # open external links from the console in the system browser
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+base64 = "0.22"                           # setup codes are base64url JSON
+tokio = { version = "1", features = ["net", "io-util", "rt", "time", "sync"] } # already in Tauri's tree; the pinned-TLS tunnel
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] } # TLS to a paired host with fingerprint pinning (ring: no cmake for Android/iOS cross builds)
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
+ring = "0.17"                             # SHA-256 of the host certificate (the pin)
+sys-locale = "0.3"                        # tray / dialog language (zh-* → Chinese)
+tauri-plugin-seagent-mobile = { path = "../plugins/seagent-mobile" }
+
+[target.'cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))'.dependencies]
+tauri = { version = "2", features = ["tray-icon", "image-png"] }
+tauri-plugin-single-instance = "2"
+tauri-plugin-autostart = "2"
+tauri-plugin-updater = "2"
+tauri-plugin-dialog = "2"                 # native "update available / stop the agent?" prompts
+
+[target.'cfg(any(target_os = "android", target_os = "ios"))'.dependencies]
+tauri-plugin-barcode-scanner = "2"        # QR pairing on phones

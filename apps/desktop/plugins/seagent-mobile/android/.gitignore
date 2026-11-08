@@ -1,0 +1,5 @@
+/build
+/.tauri
+# Put here by scripts/prepare-android.sh, never committed:
+/src/main/jniLibs/
+/src/main/assets/seagent-share/

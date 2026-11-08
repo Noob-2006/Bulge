@@ -1,0 +1,22 @@
+# SE Agent app shell (Tauri 2): desktop window + tray + installers, Android host, iOS client.
+#
+# This is deliberately its OWN workspace with its own Cargo.lock: Tauri, tokio, wry and the GTK /
+# WebView2 / WebKit bindings never enter the agent's dependency tree, `cargo deny` run or SBOM.
+# The agent (`seagent`) is built from the root workspace and bundled as a sidecar binary.
+# See README.md here and packaging/release/DEPENDENCY-REVIEW.md ("App shell budget").
+[workspace]
+resolver = "2"
+members = ["src-tauri", "plugins/seagent-mobile"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+rust-version = "1.80"
+
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = "s"
+panic = "abort"
+strip = true
