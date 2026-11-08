@@ -80,6 +80,10 @@ pub fn root() -> PathBuf {
     if let Some(d) = std::env::var_os("XDG_DATA_HOME").filter(|d| !d.is_empty()) {
         return PathBuf::from(d).join("seagent");
     }
+    // Windows has no `$HOME/.local/share`: the OS's per-user data dir (`%APPDATA%\seagent\…`).
+    #[cfg(windows)]
+    return seagent_core::layout::data_dir();
+    #[allow(unreachable_code)]
     if let Some(h) = std::env::var_os("HOME").filter(|h| !h.is_empty()) {
         return PathBuf::from(h).join(".local").join("share").join("seagent");
     }
@@ -321,7 +325,6 @@ pub fn voice_mode(m: &Media) -> bool {
 
 /// Atomic write with mode 0600 (the temp file is created private, then renamed).
 fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), String> {
-    use std::os::unix::fs::OpenOptionsExt;
     let dir = path.parent().filter(|d| !d.as_os_str().is_empty()).map(Path::to_path_buf).unwrap_or_else(|| PathBuf::from("."));
     std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
     let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "tts-prefs.json".into());
@@ -329,7 +332,14 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), String> {
     let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     let tmp = dir.join(format!(".{name}.{}.{seq}.tmp", std::process::id()));
     let write = || -> std::io::Result<()> {
-        let mut f = std::fs::OpenOptions::new().write(true).create(true).truncate(true).mode(0o600).open(&tmp)?;
+        #[cfg(unix)]
+        let mut f = {
+            use std::os::unix::fs::OpenOptionsExt;
+            std::fs::OpenOptions::new().write(true).create(true).truncate(true).mode(0o600).open(&tmp)?
+        };
+        // Windows: created with an owner-only DACL.
+        #[cfg(not(unix))]
+        let mut f = seagent_core::platform::fs_private::open_private(&tmp, seagent_core::platform::fs_private::OpenMode::Truncate)?;
         f.write_all(bytes)?;
         f.sync_all()?;
         Ok(())
@@ -348,7 +358,6 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::os::unix::fs::PermissionsExt;
 
     fn media(tag: &str) -> (Media, PathBuf) {
         let dir = crate::testutil::temp_dir(tag);
@@ -377,8 +386,12 @@ mod tests {
         };
         assert_eq!(save(&m, &p).unwrap(), file);
         assert_eq!(load(&m), p);
-        let mode = std::fs::metadata(&file).unwrap().permissions().mode() & 0o777;
-        assert_eq!(mode, 0o600, "prefs must not be world readable");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&file).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600, "prefs must not be world readable");
+        }
 
         // The JSON keeps OpenClaw's shape (`tts` object, camelCase keys).
         let raw: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();

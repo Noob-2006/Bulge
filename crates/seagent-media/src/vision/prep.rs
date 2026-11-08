@@ -153,6 +153,8 @@ fn scratch_dir() -> std::path::PathBuf {
         use std::os::unix::fs::PermissionsExt;
         let _ = std::fs::set_permissions(&d, std::fs::Permissions::from_mode(0o700));
     }
+    #[cfg(not(unix))]
+    let _ = seagent_core::platform::fs_private::set_private(&d);
     d
 }
 

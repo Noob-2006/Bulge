@@ -315,7 +315,8 @@ pub fn launch(exe: &Path, port: u16, profile_dir: &Path, headless: bool) -> Resu
         args.push("--headless=new".into());
         args.push("--disable-gpu".into());
     }
-    if unsafe { libc::geteuid() } == 0 {
+    // Chrome refuses to sandbox as root on unix; an elevated Windows token is no such case.
+    if cfg!(unix) && seagent_core::platform::sysinfo::is_root() {
         args.push("--no-sandbox".into());
     }
     // Our own log: if the browser refuses to start (broken snap, taken port, missing sandbox)
@@ -384,6 +385,7 @@ pub fn launch(exe: &Path, port: u16, profile_dir: &Path, headless: bool) -> Resu
 /// Terminate the browser *we* spawned and nothing else: `process_group(0)` made it the leader
 /// of its own group, so `-pid` reaches exactly its renderers/zygotes. SIGTERM first so a
 /// persistent profile is closed cleanly, SIGKILL only if it hangs.
+#[cfg(unix)]
 fn stop(child: &mut std::process::Child) {
     let pid = child.id() as i32;
     let signal = |s: i32| {
@@ -399,6 +401,15 @@ fn stop(child: &mut std::process::Child) {
         }
     }
     signal(libc::SIGKILL);
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+/// Windows: the browser's Job Object (from `spawn_tied`) is the group — CTRL_BREAK, a 3 s
+/// grace for the profile to close, then the whole tree is terminated.
+#[cfg(not(unix))]
+fn stop(child: &mut std::process::Child) {
+    seagent_core::platform::proc::kill_group(child.id() as i32, Duration::from_secs(3));
     let _ = child.kill();
     let _ = child.wait();
 }

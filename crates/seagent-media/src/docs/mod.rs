@@ -170,9 +170,14 @@ const SPECIAL_TOKENS: &[&str] = &[
 pub const SPECIAL_TOKEN_REPLACEMENT: &str = "[REMOVED_SPECIAL_TOKEN]";
 
 fn random_id() -> String {
-    use std::io::Read;
     let mut b = [0u8; 8];
-    let ok = std::fs::File::open("/dev/urandom").and_then(|mut f| f.read_exact(&mut b)).is_ok();
+    #[cfg(unix)]
+    let ok = {
+        use std::io::Read;
+        std::fs::File::open("/dev/urandom").and_then(|mut f| f.read_exact(&mut b)).is_ok()
+    };
+    #[cfg(not(unix))]
+    let ok = seagent_core::platform::random::fill_random(&mut b).is_ok();
     if !ok || b == [0u8; 8] {
         let t = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
         b = ((t as u64) ^ ((std::process::id() as u64) << 32) ^ crate::store::stem("m").len() as u64).to_le_bytes();

@@ -281,5 +281,6 @@ pub fn tools(m: &Arc<Media>) -> Vec<Arc<dyn Tool>> {
     transcripts::tools(m)
 }
 
-#[cfg(test)]
+// Unix only: the command providers under test are `#!/bin/sh` scripts.
+#[cfg(all(test, unix))]
 mod tests;

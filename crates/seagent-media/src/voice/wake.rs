@@ -152,7 +152,7 @@ while True:
 pub fn engine_command(m: &Media, provider: &str) -> Result<Vec<String>, String> {
     if provider == "command" {
         let c = wstr(m, "command").ok_or("[media.wake] command is not set")?;
-        return Ok(vec!["sh".into(), "-c".into(), c]);
+        return Ok(crate::proc::shell_argv(&c));
     }
     if provider == "porcupine" && std::env::var("PORCUPINE_ACCESS_KEY").map(|k| k.trim().is_empty()).unwrap_or(true) {
         return Err("Porcupine wake word requires PORCUPINE_ACCESS_KEY (get a free key at https://console.picovoice.ai).".into());

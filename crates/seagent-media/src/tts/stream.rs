@@ -20,7 +20,29 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 /// Players tried in order when `[media.tts] player` is unset.
+#[cfg(not(any(windows, target_vendor = "apple")))]
 const DEFAULT_PLAYERS: &[&str] = &["paplay", "pw-play", "aplay", "ffplay", "mpv"];
+/// macOS ships `afplay`.
+#[cfg(target_vendor = "apple")]
+const DEFAULT_PLAYERS: &[&str] = &["afplay", "ffplay", "mpv"];
+/// Windows: ffplay / mpv when installed, else the built-in media stack through PowerShell
+/// ([`windows_builtin_player`]).
+#[cfg(windows)]
+const DEFAULT_PLAYERS: &[&str] = &["ffplay", "mpv"];
+
+/// Windows' own player, no install needed: WPF `MediaPlayer` (wav/mp3/m4a/wma…) driven
+/// by Windows PowerShell, waiting for the clip to end so timeouts and cancellation apply.
+#[cfg(windows)]
+fn windows_builtin_player(file: &str) -> Vec<String> {
+    let path = file.replace('\'', "''");
+    let script = format!(
+        "Add-Type -AssemblyName PresentationCore; $p = New-Object System.Windows.Media.MediaPlayer; $p.Open([Uri]'{path}'); \
+         $t = 0; while (-not $p.NaturalDuration.HasTimeSpan -and $t -lt 100) {{ Start-Sleep -Milliseconds 50; $t++ }}; \
+         if (-not $p.NaturalDuration.HasTimeSpan) {{ [Console]::Error.WriteLine('cannot open audio file'); exit 1 }}; \
+         $p.Play(); Start-Sleep -Milliseconds ([int]$p.NaturalDuration.TimeSpan.TotalMilliseconds + 200); $p.Close()"
+    );
+    ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", &script].iter().map(|s| s.to_string()).collect()
+}
 
 /// Playback timeout (`[media.tts] timeout_secs`, default 60, clamped to 1 h).
 fn timeout(m: &Media) -> Duration {
@@ -94,6 +116,9 @@ fn player_argv(m: &Media, path: &Path) -> Result<Vec<String>, String> {
         };
         return Ok(argv);
     }
+    #[cfg(windows)]
+    return Ok(windows_builtin_player(&file));
+    #[allow(unreachable_code)]
     Err(format!(
         "no audio player found (tried {}); install one or set [media.tts] player",
         DEFAULT_PLAYERS.join(", ")
@@ -206,7 +231,8 @@ pub fn speak_streaming(m: &Media, text: &str, cancel: &Cancel) -> Result<(), Str
     }
 }
 
-#[cfg(test)]
+// Unix only: the fake players are `#!/bin/sh` scripts.
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use crate::testutil::{temp_dir, FakeServer};

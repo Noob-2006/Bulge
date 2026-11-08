@@ -184,7 +184,7 @@ impl SttProvider for Command {
             let line = render(&template, &[("input_path", &input.display().to_string()), ("output_path", &output.display().to_string()), ("output_dir", &dir.display().to_string()), ("format", &fmt), ("language", &lang), ("model", &model)]);
             let pass: Vec<String> = self.t.get("env_passthrough").and_then(|v| v.as_array()).map(|a| a.iter().filter_map(|x| x.as_str().map(|s| s.trim().to_string())).filter(|s| !s.is_empty()).collect()).unwrap_or_default();
             let mut argv = clean_env(&pass);
-            argv.extend(["sh".into(), "-c".into(), line]);
+            argv.extend(crate::proc::shell_argv(&line));
             let timeout = self.timeout();
             let o = match proc::run(&argv, None, Duration::from_secs_f64(timeout), cancel) {
                 Err(e) if e.contains("timed out") => return Err(format!("STT command provider '{name}' timed out after {timeout}s")),
