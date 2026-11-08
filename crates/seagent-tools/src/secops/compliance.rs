@@ -294,7 +294,8 @@ impl Tool for ComplianceCheck {
 }
 
 fn hostname() -> String {
-    std::fs::read_to_string("/proc/sys/kernel/hostname").map(|s| s.trim().to_string()).unwrap_or_default()
+    // Linux: `/proc/sys/kernel/hostname` as before; other systems: their own call.
+    seagent_core::platform::sysinfo::hostname()
 }
 
 #[cfg(test)]

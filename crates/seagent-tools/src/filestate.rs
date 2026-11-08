@@ -12,6 +12,7 @@
 
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
+#[cfg(unix)]
 use std::os::unix::fs::{FileTypeExt, MetadataExt};
 use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Condvar, Mutex, RwLock};
@@ -83,7 +84,12 @@ pub type Version = (i128, u64, u64);
 pub fn version(p: &Path) -> Option<Version> {
     let m = std::fs::metadata(p).ok()?;
     let mt = m.modified().ok()?.duration_since(UNIX_EPOCH).map(|d| d.as_nanos() as i128).unwrap_or(0);
-    Some((mt, m.len(), m.ino()))
+    #[cfg(unix)]
+    let ino = m.ino();
+    // No stable file id in std on Windows: mtime + size carry the version there.
+    #[cfg(not(unix))]
+    let ino = 0;
+    Some((mt, m.len(), ino))
 }
 
 fn now() -> f64 {
@@ -454,7 +460,22 @@ pub fn normalize(p: &Path) -> PathBuf {
 
 fn blocked_device_path(p: &Path) -> bool {
     let s = normalize(p).display().to_string();
-    BLOCKED_DEVICES.contains(&s.as_str()) || (s.starts_with("/proc/") && BLOCKED_PROC_SUFFIXES.iter().any(|x| s.ends_with(x)))
+    BLOCKED_DEVICES.contains(&s.as_str()) || (s.starts_with("/proc/") && BLOCKED_PROC_SUFFIXES.iter().any(|x| s.ends_with(x))) || (cfg!(windows) && windows_device(&p.display().to_string()))
+}
+
+/// Windows device paths: the `\\.\` / `\\?\GLOBALROOT` namespaces and the reserved DOS
+/// device names (`CON`, `NUL`, `COM1`…, also with an extension or as the last component:
+/// `C:\x\nul.txt` opens the device). Only consulted on Windows; on Unix these are ordinary
+/// file names.
+pub(crate) fn windows_device(s: &str) -> bool {
+    let lower = s.replace('/', "\\").to_ascii_lowercase();
+    if lower.starts_with("\\\\.\\") || lower.starts_with("\\\\?\\globalroot") || lower.starts_with("\\??\\") {
+        return true;
+    }
+    let last = lower.rsplit(['\\', '/']).next().unwrap_or("");
+    let stem = last.split('.').next().unwrap_or("").trim_end_matches([' ', ':']);
+    matches!(stem, "con" | "nul" | "prn" | "aux" | "conin$" | "conout$" | "clock$")
+        || (stem.len() == 4 && (stem.starts_with("com") || stem.starts_with("lpt")) && stem.as_bytes()[3].is_ascii_digit() && stem.as_bytes()[3] != b'0')
 }
 
 /// Literal path, every symlink hop, or final realpath is a device that hangs or leaks.
@@ -476,10 +497,20 @@ pub fn blocked_device(p: &Path) -> bool {
 
 /// Human name for a non-regular file that would hang a read.
 pub fn special_file_kind(p: &Path) -> Option<&'static str> {
+    if cfg!(windows) && windows_device(&p.display().to_string()) {
+        return Some("a device");
+    }
     let ft = std::fs::metadata(p).ok()?.file_type();
     if ft.is_file() || ft.is_dir() {
         None
-    } else if ft.is_fifo() {
+    } else {
+        unix_special_kind(&ft)
+    }
+}
+
+#[cfg(unix)]
+fn unix_special_kind(ft: &std::fs::FileType) -> Option<&'static str> {
+    if ft.is_fifo() {
         Some("a FIFO (named pipe)")
     } else if ft.is_socket() {
         Some("a socket")
@@ -490,6 +521,11 @@ pub fn special_file_kind(p: &Path) -> Option<&'static str> {
     } else {
         Some("a special (non-regular) file")
     }
+}
+
+#[cfg(not(unix))]
+fn unix_special_kind(_ft: &std::fs::FileType) -> Option<&'static str> {
+    Some("a special (non-regular) file")
 }
 
 const BLOCKED_ENV_BASENAMES: &[&str] = &[".env", ".env.local", ".env.development", ".env.production", ".env.test", ".env.staging", ".envrc"];

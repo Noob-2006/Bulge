@@ -25,7 +25,6 @@ use serde::Deserialize;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::os::unix::fs::PermissionsExt;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
@@ -262,7 +261,8 @@ impl OpenShellBackend {
         std::fs::create_dir_all(&dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
         let path = dir.join("ssh-config");
         crate::util::atomic_write(&path, out.stdout.as_bytes()).map_err(|e| format!("write {}: {e}", path.display()))?;
-        let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+        // chmod 0600 on Unix, an owner-only DACL on Windows.
+        let _ = seagent_core::platform::fs_private::set_private(&path);
         self.alias = alias;
         self.ssh_config = path;
         Ok(())
@@ -468,7 +468,7 @@ echo "unexpected: $*" >&2; exit 2
         assert_eq!(std::fs::read_to_string(remote.join("in.txt")).unwrap(), "host file");
         let landed = remote.join(cred.file_name().unwrap());
         assert_eq!(std::fs::read_to_string(&landed).unwrap(), "token=2\n");
-        assert_eq!(std::fs::metadata(&landed).unwrap().permissions().mode() & 0o777, 0o600);
+        assert_eq!(std::os::unix::fs::PermissionsExt::mode(&std::fs::metadata(&landed).unwrap().permissions()) & 0o777, 0o600);
         assert!(ssh_read().contains("-F ") && ssh_read().contains("-o RequestTTY=no"), "exec over the ssh-config: {}", ssh_read());
 
         // exec (pipe) and exec (pty) both work; `-tt` only for the pty.

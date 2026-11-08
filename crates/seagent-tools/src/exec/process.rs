@@ -551,12 +551,8 @@ pub fn kill(session: &str, id: u32) -> Result<(), String> {
     // A restored / tapped entry has no live child handle of its own: signal the
     // process group by pid (`setsid` gives a detached process pgid == pid).
     if let Some(pid) = pid {
-        // SAFETY: signal only; never to pid 0/1.
-        if pid > 1 {
-            unsafe {
-                libc::kill(-(pid as i32), libc::SIGKILL);
-            }
-        }
+        // Never pid 0/1 (checked inside). Windows: the job, or `TerminateProcess`.
+        super::local::kill_group_now(pid as i32);
     }
     let mut e = arc.lock().unwrap();
     e.exit.get_or_insert(-9);

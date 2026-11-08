@@ -167,7 +167,7 @@ fn run_client(argv: &[String], env: &[(String, String)], script: &str, lim: &Lim
     let mut tries = 0;
     let mut child = loop {
         match cmd.spawn() {
-            Err(e) if e.raw_os_error() == Some(libc::ETXTBSY) && tries < 20 => {
+            Err(e) if crate::exec::local::is_text_busy(&e) && tries < 20 => {
                 tries += 1;
                 std::thread::sleep(Duration::from_millis(10));
             }
@@ -199,7 +199,7 @@ fn run_client(argv: &[String], env: &[(String, String)], script: &str, lim: &Lim
             while !done.load(Ordering::SeqCst) {
                 if cancel.is_cancelled() || t0.elapsed() >= timeout {
                     timed_out.store(!cancel.is_cancelled(), Ordering::SeqCst);
-                    unsafe { libc::kill(pid, libc::SIGKILL) };
+                    crate::exec::local::kill_pid_now(pid);
                     return;
                 }
                 std::thread::sleep(Duration::from_millis(25));

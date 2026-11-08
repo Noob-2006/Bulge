@@ -250,8 +250,25 @@ pub fn server_for<'a>(servers: &'a [ServerDef], path: &Path) -> Option<&'a Serve
     servers.iter().find(|s| s.extensions.contains(&k))
 }
 
+/// Unix: an execute bit is set. Windows has no execute bit: the file exists (`PATHEXT`
+/// lookups go through `seagent_core::platform::layout::which`).
+fn executable(p: &Path) -> bool {
+    #[cfg(unix)]
+    {
+        std::fs::metadata(p).is_ok_and(|m| std::os::unix::fs::PermissionsExt::mode(&m.permissions()) & 0o111 != 0)
+    }
+    #[cfg(not(unix))]
+    {
+        p.is_file()
+    }
+}
+
 /// First of `names` found on PATH (or an existing path).
 pub fn which(names: &[String]) -> Option<PathBuf> {
+    #[cfg(windows)]
+    if let Some(p) = names.iter().filter(|n| !n.contains(['/', '\\'])).find_map(|n| seagent_core::platform::layout::which(n)) {
+        return Some(p);
+    }
     for n in names {
         let p = seagent_core::tool::expand_home(n);
         if p.components().count() > 1 {
@@ -262,7 +279,7 @@ pub fn which(names: &[String]) -> Option<PathBuf> {
         }
         for dir in std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()) {
             let c = dir.join(n);
-            if c.is_file() && std::fs::metadata(&c).is_ok_and(|m| std::os::unix::fs::PermissionsExt::mode(&m.permissions()) & 0o111 != 0) {
+            if c.is_file() && executable(&c) {
                 return Some(c);
             }
         }

@@ -157,8 +157,14 @@ fn run(p: &Provider, ctx: &seagent_core::ToolCtx, filter: &str, attrs: &[&str], 
         std::fs::create_dir_all(&ctx.artifacts).map_err(|e| e.to_string())?;
         let path = ctx.artifacts.join(format!(".ldap-{}", seagent_net::crypto::hex(&seagent_net::crypto::random_bytes(8))));
         {
-            use std::os::unix::fs::OpenOptionsExt;
-            let mut f = std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(&path).map_err(|e| e.to_string())?;
+            let mut o = std::fs::OpenOptions::new();
+            o.write(true).create_new(true);
+            #[cfg(unix)]
+            std::os::unix::fs::OpenOptionsExt::mode(&mut o, 0o600);
+            let mut f = o.open(&path).map_err(|e| e.to_string())?;
+            // Windows: an owner-only DACL before the password goes in (Unix: the 0600 above).
+            #[cfg(not(unix))]
+            seagent_core::platform::fs_private::set_private(&path).map_err(|e| e.to_string())?;
             std::io::Write::write_all(&mut f, password.as_bytes()).map_err(|e| e.to_string())?;
         }
         pw.0 = Some(path.clone());
@@ -170,7 +176,7 @@ fn run(p: &Provider, ctx: &seagent_core::ToolCtx, filter: &str, attrs: &[&str], 
     let mut tries = 0;
     let mut child = loop {
         match Command::new(&prog).args(&argv).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn() {
-            Err(e) if e.raw_os_error() == Some(26) && tries < 20 => {
+            Err(e) if crate::exec::local::is_text_busy(&e) && tries < 20 => {
                 tries += 1;
                 std::thread::sleep(std::time::Duration::from_millis(25));
             }
