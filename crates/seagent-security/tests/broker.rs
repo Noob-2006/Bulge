@@ -164,7 +164,7 @@ fn socket_round_trip_speaks_the_documented_protocol() {
     let sock = dir.join("run/broker.sock");
     let c = ctx(&dir, policy(vec!["127.0.0.1"]));
     let b = Broker::serve(&sock, c).unwrap();
-    let s = std::os::unix::net::UnixStream::connect(&sock).unwrap();
+    let s = broker::connect(&sock).unwrap();
     s.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
     let mut w = s.try_clone().unwrap();
     writeln!(w, "{}", json!({"id":"a","op":"health"})).unwrap();

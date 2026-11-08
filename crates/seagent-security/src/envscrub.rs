@@ -413,6 +413,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)] // the probe child is `sh`
     fn apply_removes_inherited_secret_from_child() {
         // An always-stripped internal-secret shape, so the policy toggles in the other test can't race it.
         std::env::set_var("AUXILIARY_ARKTEST9F_API_KEY", "s3cret");

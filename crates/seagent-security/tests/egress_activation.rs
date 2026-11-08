@@ -12,6 +12,9 @@
 //! * an `inject` rule whose value is `Bearer {{secret:…}}` arrives at the upstream server
 //!   expanded, and never in the client's response, the client's own header or a child
 //!   environment.
+//!
+//! Unix only: the child-environment checks run `sh` (the proxy itself is portable).
+#![cfg(unix)]
 
 use seagent_security::egress_proxy::{self, Inject, ProxyMode};
 use seagent_security::envscrub::{self, Surface};

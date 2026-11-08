@@ -169,11 +169,8 @@ pub struct Meta<'a> {
 
 fn random_id() -> String {
     let mut b = [0u8; 8];
-    if let Ok(mut f) = std::fs::File::open("/dev/urandom") {
-        use std::io::Read;
-        let _ = f.read_exact(&mut b);
-    }
-    if b == [0u8; 8] {
+    let _ = crate::os::fill_random(&mut b);
+    if b ==[0u8; 8] {
         let t = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
         b = (t as u64 ^ std::process::id() as u64).to_le_bytes();
     }

@@ -535,7 +535,6 @@ fn add(v: &mut Vec<Finding>, pid: &str, sev: Severity, cat: &str, rel: &str, m: 
 
 /// Structural anomalies: file count, sizes, binaries, stray executables, escaping symlinks.
 fn check_structure(dir: &Path, files: &[(String, std::path::PathBuf)]) -> Vec<Finding> {
-    use std::os::unix::fs::PermissionsExt;
     let mut v = Vec::new();
     let (mut count, mut total) = (0usize, 0u64);
     let root = fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf());
@@ -562,7 +561,7 @@ fn check_structure(dir: &Path, files: &[(String, std::path::PathBuf)]) -> Vec<Fi
         if SUSPICIOUS_BINARY_EXTENSIONS.contains(&ext.as_str()) {
             add(&mut v, "binary_file", Critical, "structural", rel, format!("binary: {ext}"), format!("binary/executable file ({ext}) should not be in a skill"));
         }
-        if !SCRIPT_EXTENSIONS.contains(&ext.as_str()) && lm.permissions().mode() & 0o111 != 0 {
+        if !SCRIPT_EXTENSIONS.contains(&ext.as_str()) && crate::os::is_executable(p, &lm) {
             add(&mut v, "unexpected_executable", Medium, "structural", rel, "executable bit set".into(), "file has executable permission but is not a recognized script type".into());
         }
     }

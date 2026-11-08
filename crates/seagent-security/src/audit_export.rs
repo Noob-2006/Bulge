@@ -4,6 +4,7 @@
 //! [audit.export.syslog]
 //! address = "udp://siem.corp:514"     # udp://, tcp:// (RFC 6587 octet counting),
 //!                                     # tls:// (RFC 5425) or unix:///dev/log
+//!                                     # (macOS: /var/run/syslog), Windows: eventlog://[source]
 //! app_name = "seagent"
 //! facility = 13                       # log audit
 //! format = "rfc5424"                  # rfc5424 (JSON record) | cef (ArcSight) | leef (QRadar)
@@ -186,7 +187,7 @@ pub fn rfc3339(ms: u64) -> String {
 }
 
 fn hostname() -> String {
-    std::fs::read_to_string("/proc/sys/kernel/hostname").map(|s| s.trim().to_string()).ok().filter(|s| !s.is_empty()).unwrap_or_else(|| "-".into())
+    crate::os::hostname()
 }
 
 fn severity(r: &Value) -> u8 {
@@ -352,14 +353,57 @@ fn send_syslog(c: &SyslogConfig, recs: &[Value]) -> Result<(), String> {
         s.close();
         r
     } else if let Some(p) = addr.strip_prefix("unix://") {
-        let sock = std::os::unix::net::UnixDatagram::unbound().map_err(|e| e.to_string())?;
-        for r in recs {
-            sock.send_to(syslog_line(r, c).as_bytes(), p).map_err(|e| format!("syslog {p}: {e}"))?;
-        }
-        Ok(())
+        send_unix(c, recs, p)
+    } else if let Some(source) = addr.strip_prefix("eventlog://") {
+        send_eventlog(c, recs, source)
     } else {
-        Err(format!("syslog address `{addr}`: use udp://host:port, tcp://host:port, tls://host:port or unix:///dev/log"))
+        Err(format!("syslog address `{addr}`: use udp://host:port, tcp://host:port, tls://host:port, unix:///dev/log or (Windows) eventlog://"))
     }
+}
+
+/// The local syslog daemon's datagram socket. macOS has no `/dev/log`; its syslogd listens
+/// on `/var/run/syslog`, so the documented default is translated there.
+#[cfg(unix)]
+fn send_unix(c: &SyslogConfig, recs: &[Value], p: &str) -> Result<(), String> {
+    #[cfg(any(target_os = "macos", target_os = "ios"))]
+    let p = if p == "/dev/log" && !Path::new(p).exists() { "/var/run/syslog" } else { p };
+    let sock = std::os::unix::net::UnixDatagram::unbound().map_err(|e| e.to_string())?;
+    for r in recs {
+        sock.send_to(syslog_line(r, c).as_bytes(), p).map_err(|e| format!("syslog {p}: {e}"))?;
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn send_unix(_: &SyslogConfig, _: &[Value], p: &str) -> Result<(), String> {
+    Err(format!("syslog unix://{p}: this platform has no local syslog socket; use eventlog:// (Windows Event Log) or udp://host:514"))
+}
+
+/// Windows Event Log (`eventlog://` or `eventlog://<source>`, default source = app name):
+/// the platform's local syslog. Each record is one Application-log event whose text is the
+/// sink's configured format; deny/error outcomes are warnings, like the syslog severity.
+#[cfg(windows)]
+fn send_eventlog(c: &SyslogConfig, recs: &[Value], source: &str) -> Result<(), String> {
+    use windows_sys::Win32::System::EventLog::{EVENTLOG_ERROR_TYPE, EVENTLOG_INFORMATION_TYPE, EVENTLOG_WARNING_TYPE};
+    let source = source.trim_matches('/');
+    let source = if !source.is_empty() { source } else if c.app_name.is_empty() { "seagent" } else { &c.app_name };
+    let lines: Vec<(u16, String)> = recs
+        .iter()
+        .map(|r| {
+            let kind = match severity(r) {
+                0..=3 => EVENTLOG_ERROR_TYPE,
+                4 => EVENTLOG_WARNING_TYPE,
+                _ => EVENTLOG_INFORMATION_TYPE,
+            };
+            (kind, syslog_line(r, c))
+        })
+        .collect();
+    crate::os::report_events(source, &lines)
+}
+
+#[cfg(not(windows))]
+fn send_eventlog(_: &SyslogConfig, _: &[Value], _: &str) -> Result<(), String> {
+    Err("syslog eventlog://: the Windows Event Log exists only on Windows; use unix:///dev/log or udp://".into())
 }
 
 fn agent() -> ureq::Agent {

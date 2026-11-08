@@ -12,7 +12,6 @@ serde_json.workspace = true
 regex.workspace = true
 ureq.workspace = true
 seagent-net.workspace = true # seagent_net::http::builder — the one outbound client builder (proxy/CA/offline)
-libc.workspace = true
 # Skills Guard: Hermes' scan table uses look-around (27 of 134 patterns).
 fancy-regex = { version = "0.14", default-features = false, features = ["std", "unicode"] }
 # A13/A18: Ed25519 signature verification for plugin/skill manifests and release
@@ -21,6 +20,13 @@ fancy-regex = { version = "0.14", default-features = false, features = ["std", "
 ring.workspace = true
 # Manifest signatures and detached `.sig` files are base64, not hex (already in the tree).
 base64.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true # getuid / gethostname (src/os.rs)
+
+[target.'cfg(windows)'.dependencies]
+# `eventlog://` audit sink (Windows Event Log, the platform's syslog). Same 0.52 ring already pulls in.
+windows-sys = { workspace = true, features = ["Win32_Foundation", "Win32_System_EventLog"] }
 
 [dev-dependencies]
 # `[security.egress_proxy]` is a real TOML table; the config test parses TOML, not JSON.

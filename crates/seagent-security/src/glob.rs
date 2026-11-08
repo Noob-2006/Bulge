@@ -145,6 +145,13 @@ pub fn expand_home(p: &str) -> String {
             return format!("{}{}", h.to_string_lossy(), &p[1..]);
         }
     }
+    // Windows: `~\x` too, and the profile directory when HOME is unset.
+    #[cfg(windows)]
+    if p == "~" || p.starts_with("~/") || p.starts_with("~\\") {
+        if let Some(h) = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")) {
+            return format!("{}{}", h.to_string_lossy(), &p[1..]);
+        }
+    }
     p.to_string()
 }
 

