@@ -594,8 +594,9 @@ mod tests {
 
     #[test]
     fn ca_bundle_errors_are_clear() {
-        // A readable file with no PEM in it, and a missing one: no scratch files needed.
-        assert!(load_ca("/proc/version").unwrap_err().contains("no certificates"));
+        // A readable file with no PEM in it (this crate's manifest exists on every OS), and a
+        // missing one: no scratch files needed.
+        assert!(load_ca(concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml")).unwrap_err().contains("no certificates"));
         assert!(load_ca("/nonexistent/ca.pem").is_err());
     }
 
