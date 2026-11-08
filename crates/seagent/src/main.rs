@@ -45,6 +45,8 @@ mod system_cli;
 mod telephony;
 mod term;
 mod vm_cli;
+#[cfg(target_os = "macos")]
+mod watch_parent;
 mod web_cli;
 mod wire;
 mod worktree_session;

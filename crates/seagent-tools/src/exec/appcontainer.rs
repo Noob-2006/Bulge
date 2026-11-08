@@ -50,9 +50,9 @@
 //! **Not verified on a real Windows machine yet** (cross-compiled `cargo check` only). Known
 //! risks: MSYS2 / Git Bash may need extra named-object or registry access inside an
 //! AppContainer (`SEAGENT_SHELL` can point at PowerShell instead); tools that stat the parent
-//! directories of the workspace (`C:\Users\<me>`) see access denied there; the process
-//! registry's `kill_group(pid)` (the kernel reaper) ends only the leader for these jobs
-//! (the job itself still dies with seagent, and `kill` on the child ends the whole tree).
+//! directories of the workspace (`C:\Users\<me>`) see access denied there. Each command's job
+//! is also registered with the core process registry (`proc::adopt_job`), so the kernel
+//! reaper's `kill_group(pid)` ends the whole tree, as it does for the `local` backend.
 
 #![cfg_attr(not(windows), allow(dead_code))]
 
@@ -804,7 +804,13 @@ mod win {
                 if !detach {
                     let job = new_job().and_then(|j| if AssignProcessToJobObject(j.0, pi.hProcess) == 0 { Err(io::Error::last_os_error()) } else { Ok(j) });
                     match job {
-                        Ok(j) => p.job = Some(j),
+                        Ok(j) => {
+                            // Also known to the core registry, so `kill_group(pid)` (the kernel
+                            // reaper) ends the whole tree, not only the leader. Best-effort: the
+                            // job we keep already ties the tree to seagent.
+                            let _ = seagent_core::platform::proc::adopt_job(j.0 as RawHandle, pi.dwProcessId);
+                            p.job = Some(j);
+                        }
                         Err(e) => {
                             TerminateProcess(pi.hProcess, 1);
                             return Err(io::Error::other(format!("cannot put pid {} in a job object: {e}", pi.dwProcessId)));

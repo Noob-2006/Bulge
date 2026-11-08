@@ -12,4 +12,4 @@ serde_json.workspace = true
 libc.workspace = true                                     # platform: process groups, PDEATHSIG, termios, statvfs, getrandom
 
 [target.'cfg(windows)'.dependencies]
-windows-sys.workspace = true                              # platform: Job Objects, named pipes, DACLs, console, ConPTY
+windows-sys = { workspace = true, features = ["Win32_System_Diagnostics_ToolHelp"] } # platform: Job Objects, named pipes, DACLs, console, ConPTY; ToolHelp: parent pid (already enabled by seagent-kernel)

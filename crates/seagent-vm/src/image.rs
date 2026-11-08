@@ -261,10 +261,7 @@ impl GuestImage {
 
         let verbose = std::env::var("SEAGENT_VM_BUILD_VERBOSE").map(|v| v == "1").unwrap_or(false);
         let mut cmd = Command::new("bash");
-        cmd.arg(&script).arg("--out").arg(&out);
-        if let Some(agent) = shipped_agent(&script) {
-            cmd.arg("--agent").arg(agent);
-        }
+        cmd.arg(&script).args(build_args(cfg, &out, shipped_agent(&script).as_deref(), std::env::consts::ARCH));
         cmd.stdout(if verbose { Stdio::inherit() } else { Stdio::null() });
         cmd.stderr(if verbose { Stdio::inherit() } else { Stdio::piped() });
         let output = cmd.output().map_err(|e| format!("guest image: cannot run {}: {e}", script.display()))?;
@@ -356,6 +353,34 @@ fn build_script_in(repo_root: Option<PathBuf>, share_env: Option<PathBuf>, exe: 
         return found;
     }
     PathBuf::from(BUILD_SCRIPT)
+}
+
+/// The builder's arguments after the script path.
+///
+/// * `--out DIR` always, `--agent PATH` when a prebuilt agent ships next to the script.
+/// * `--format disk` when `exec.vm.provider` names VirtualBox or Hyper-V, which cannot boot
+///   a kernel + initramfs and need `disk.raw` (a superset: the pair is still written). `auto`
+///   does not imply it — the disk needs a kernel built from source; name the provider.
+/// * `--arch <host arch>` when the host is not x86_64 (the guest must match the host CPU) or
+///   when a disk is built. A Firecracker / QEMU / `auto` build on an x86_64 host therefore
+///   runs the script exactly as before (`--out DIR [--agent PATH]`).
+fn build_args(cfg: &VmConfig, out: &Path, agent: Option<&Path>, host_arch: &str) -> Vec<std::ffi::OsString> {
+    let mut a: Vec<std::ffi::OsString> = vec!["--out".into(), out.into()];
+    if let Some(agent) = agent {
+        a.push("--agent".into());
+        a.push(agent.into());
+    }
+    let disk = matches!(crate::isolation::ProviderKind::parse(&cfg.provider), Some(crate::isolation::ProviderKind::VirtualBox | crate::isolation::ProviderKind::HyperV));
+    let arch = if matches!(host_arch, "aarch64" | "arm64") { "aarch64" } else { "x86_64" };
+    if arch != "x86_64" || disk {
+        a.push("--arch".into());
+        a.push(arch.into());
+    }
+    if disk {
+        a.push("--format".into());
+        a.push("disk".into());
+    }
+    a
 }
 
 /// The guest agent shipped next to the shipped builder script (release tarballs carry a static
@@ -485,6 +510,22 @@ mod tests {
         assert_eq!(build_script_in(Some(root.clone()), None, Some(&exe), &[]), root.join(BUILD_SCRIPT));
         assert_eq!(build_script_in(None, None, Some(&root.join("elsewhere/bin/seagent")), &[]), PathBuf::from(BUILD_SCRIPT));
         let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn builder_arguments_follow_the_provider_and_the_host_arch() {
+        let args = |provider: &str, arch: &str, agent: Option<&Path>| -> Vec<String> {
+            let cfg = VmConfig { provider: provider.into(), ..Default::default() };
+            build_args(&cfg, Path::new("/o"), agent, arch).into_iter().map(|s| s.to_string_lossy().into_owned()).collect()
+        };
+        // x86_64 Firecracker / QEMU / auto: the invocation is exactly the old one.
+        for p in ["auto", "firecracker", "qemu"] {
+            assert_eq!(args(p, "x86_64", None), ["--out", "/o"]);
+        }
+        assert_eq!(args("auto", "x86_64", Some(Path::new("/a"))), ["--out", "/o", "--agent", "/a"]);
+        assert_eq!(args("virtualbox", "x86_64", None), ["--out", "/o", "--arch", "x86_64", "--format", "disk"]);
+        assert_eq!(args("hyperv", "aarch64", None), ["--out", "/o", "--arch", "aarch64", "--format", "disk"]);
+        assert_eq!(args("vfkit", "aarch64", None), ["--out", "/o", "--arch", "aarch64"]);
     }
 
     #[test]

@@ -9,8 +9,12 @@
 //! * **macOS** — same process groups and signals; members and zombie state come from
 //!   `proc_listpgrppids` / `proc_pidinfo` (there is no `/proc`, which used to make
 //!   [`group_members`] empty and [`kill_group`] skip the grace period). The kernel has no
-//!   parent-death signal: a tied child outlives a `SIGKILL`ed seagent (a clean exit or a
-//!   [`kill_group`] still stops it).
+//!   parent-death signal: by default a tied child outlives a `SIGKILL`ed seagent (a clean exit
+//!   or a [`kill_group`] still stops it). Opt-in substitute (`SEAGENT_MACOS_WATCHDOG=1`, see
+//!   [`set_parent_watchdog`]): every child passed to [`spawn_in_group`] / [`adopt`] gets a
+//!   tiny watchdog process (`seagent __watch-parent`, its own session) that waits on kqueue
+//!   `EVFILT_PROC NOTE_EXIT` for seagent and for the child, and when seagent goes first
+//!   `SIGTERM`s the child's group, then `SIGKILL`s it after 2 s.
 //! * **Windows** — every group is a Job Object with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`, kept
 //!   in a process-wide registry keyed by the leader pid: when seagent exits, however it exits,
 //!   the kernel closes the job handle and kills the whole tree (the Windows form of PDEATHSIG).
@@ -63,29 +67,77 @@ pub fn spawn_in_group(cmd: &mut Command, own_session: bool) -> io::Result<Child>
             Ok(())
         });
     }
-    cmd.spawn()
+    let child = cmd.spawn()?;
+    #[cfg(target_os = "macos")]
+    mac::watch(child.id() as i32);
+    Ok(child)
 }
 
 /// See the Unix variant. A child that cannot be put in its job is killed again and the error
 /// returned: an untracked child would silently lose the die-with-seagent guarantee.
 #[cfg(windows)]
 pub fn spawn_in_group(cmd: &mut Command, own_session: bool) -> io::Result<Child> {
-    new_group(cmd, own_session);
-    let mut child = cmd.spawn()?;
-    if let Err(e) = adopt(&child) {
-        let _ = child.kill();
-        let _ = child.wait();
-        return Err(io::Error::other(format!("cannot put pid {} in a job object: {e}", child.id())));
+    spawn_in_group_with(cmd, own_session, 0)
+}
+
+/// [`spawn_in_group`] with extra Windows creation flags (see [`new_group_with`]); the flags are
+/// ignored on Unix.
+pub fn spawn_in_group_with(cmd: &mut Command, own_session: bool, windows_flags: u32) -> io::Result<Child> {
+    #[cfg(unix)]
+    {
+        let _ = windows_flags;
+        spawn_in_group(cmd, own_session)
     }
-    Ok(child)
+    #[cfg(windows)]
+    {
+        new_group_with(cmd, own_session, windows_flags);
+        let mut child = cmd.spawn()?;
+        if let Err(e) = adopt(&child) {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(io::Error::other(format!("cannot put pid {} in a job object: {e}", child.id())));
+        }
+        Ok(child)
+    }
+}
+
+/// Windows `CREATE_NO_WINDOW`, for [`new_group_with`] / [`spawn_in_group_with`]: the child
+/// gets a console that is never shown. Ignored on Unix.
+pub const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+/// The extra creation flags a child of *this* process needs: [`CREATE_NO_WINDOW`] on Windows
+/// when we have no console of our own (the daemon, a GUI host) — a console program started
+/// from there would otherwise pop up a new console window — and 0 when we have one (the child
+/// shares it, so `CTRL_BREAK` still reaches its group), and always 0 on Unix.
+pub fn console_flags() -> u32 {
+    #[cfg(windows)]
+    {
+        // SAFETY: plain call; 0 means "no console attached".
+        if unsafe { windows_sys::Win32::System::Console::GetConsoleWindow() } == 0 {
+            return CREATE_NO_WINDOW;
+        }
+        0
+    }
+    #[cfg(not(windows))]
+    {
+        0
+    }
 }
 
 /// Only the "new group" half of [`spawn_in_group`], for callers that spawn themselves.
 /// Unix: `setsid` / `setpgid(0, 0)` in the child. Windows: `CREATE_NEW_PROCESS_GROUP` (this
 /// replaces any creation flags set before); call [`adopt`] after the spawn.
 pub fn new_group(cmd: &mut Command, own_session: bool) {
+    new_group_with(cmd, own_session, 0)
+}
+
+/// [`new_group`] plus extra Windows creation flags (e.g. [`CREATE_NO_WINDOW`], or
+/// [`console_flags`]), OR-ed with `CREATE_NEW_PROCESS_GROUP`. `windows_flags` is ignored on
+/// Unix, so callers need no `cfg`.
+pub fn new_group_with(cmd: &mut Command, own_session: bool, windows_flags: u32) {
     #[cfg(unix)]
     {
+        let _ = windows_flags;
         use std::os::unix::process::CommandExt;
         // SAFETY: only async-signal-safe libc calls between fork and exec.
         unsafe {
@@ -103,7 +155,7 @@ pub fn new_group(cmd: &mut Command, own_session: bool) {
     {
         use std::os::windows::process::CommandExt;
         let _ = own_session;
-        cmd.creation_flags(windows_sys::Win32::System::Threading::CREATE_NEW_PROCESS_GROUP);
+        cmd.creation_flags(windows_sys::Win32::System::Threading::CREATE_NEW_PROCESS_GROUP | windows_flags);
     }
 }
 
@@ -132,7 +184,8 @@ pub fn die_with_parent(cmd: &mut Command) {
 
 /// Put an already spawned child (and everything it starts later) in a kill-on-close Job
 /// Object registered under its pid, so [`kill_group`] / [`group_members`] see the whole tree
-/// and the tree dies with seagent. Unix: no-op (the process group already is the unit).
+/// and the tree dies with seagent. Unix: no-op (the process group already is the unit), except
+/// that macOS arms the opt-in parent watchdog (see the module docs).
 pub fn adopt(child: &Child) -> io::Result<()> {
     #[cfg(windows)]
     {
@@ -140,9 +193,97 @@ pub fn adopt(child: &Child) -> io::Result<()> {
     }
     #[cfg(not(windows))]
     {
+        #[cfg(target_os = "macos")]
+        mac::watch(child.id() as i32);
         let _ = child;
         Ok(())
     }
+}
+
+/// [`adopt`] for a process started outside `std::process` (raw `CreateProcessW`): `process`
+/// is its handle (needs `PROCESS_SET_QUOTA | PROCESS_TERMINATE`), `pid` its id. It is put in a
+/// new kill-on-close job registered under `pid`. A process that is already in a job of its
+/// own should use [`adopt_job`] instead.
+#[cfg(windows)]
+pub fn adopt_handle(process: std::os::windows::io::RawHandle, pid: u32) -> io::Result<()> {
+    win::adopt_handle(process as windows_sys::Win32::Foundation::HANDLE, pid)
+}
+
+/// Register a Job Object the caller built itself (e.g. one with UI restrictions) as the group
+/// led by `pid`, so [`kill_group`] / [`group_members`] — the kernel reaper included — act on
+/// the whole tree. The handle is duplicated: the caller keeps (and closes) its own.
+#[cfg(windows)]
+pub fn adopt_job(job: std::os::windows::io::RawHandle, pid: u32) -> io::Result<()> {
+    win::adopt_job(job as windows_sys::Win32::Foundation::HANDLE, pid)
+}
+
+/// `CTRL_BREAK_EVENT` to the console process group led by `pid`. False when it cannot be
+/// delivered (no shared console).
+#[cfg(windows)]
+pub fn ctrl_break(pid: u32) -> bool {
+    win::ctrl_break(pid)
+}
+
+/// The parent pid of `pid`, `None` when it is gone (or, on iOS / BSDs, for any process but
+/// our own). Linux / Android: `/proc/<pid>/stat`; macOS: `proc_pidinfo`; Windows: a Toolhelp
+/// snapshot (the parent may have exited since: Windows does not reparent).
+pub fn parent_pid(pid: i32) -> Option<i32> {
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    {
+        let s = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+        // Fields after `comm`: state ppid ...
+        s.rsplit(')').next()?.split_whitespace().nth(1)?.parse().ok()
+    }
+    #[cfg(target_os = "macos")]
+    {
+        mac::bsdinfo(pid).map(|i| i.pbi_ppid as i32)
+    }
+    #[cfg(all(unix, not(any(target_os = "linux", target_os = "android", target_os = "macos"))))]
+    {
+        (pid as u32 == std::process::id()).then(|| unsafe { libc::getppid() })
+    }
+    #[cfg(windows)]
+    {
+        if pid <= 0 {
+            return None;
+        }
+        win::parent_pid(pid as u32).map(|p| p as i32)
+    }
+}
+
+/// The hidden command word of the macOS parent watchdog (`seagent __watch-parent <ppid>
+/// <pid> <start>`).
+pub const WATCH_PARENT_CMD: &str = "__watch-parent";
+/// Opt-in switch for the macOS parent watchdog: `1` arms it.
+pub const WATCHDOG_ENV: &str = "SEAGENT_MACOS_WATCHDOG";
+
+/// Name the executable that serves [`WATCH_PARENT_CMD`] (the `seagent` binary calls this at
+/// start-up). macOS only, and only when `SEAGENT_MACOS_WATCHDOG=1`: from then on every child
+/// passed to [`spawn_in_group`] / [`adopt`] gets a watchdog. Returns whether it is armed.
+/// Elsewhere a no-op returning false (Linux / Android have PDEATHSIG, Windows kill-on-close
+/// jobs, iOS spawns nothing).
+pub fn set_parent_watchdog(exe: std::path::PathBuf) -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        if std::env::var(WATCHDOG_ENV).as_deref() != Ok("1") {
+            return false;
+        }
+        let _ = mac::WATCHDOG.set(exe);
+        true
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = exe;
+        false
+    }
+}
+
+/// Body of `seagent __watch-parent <ppid> <pid> <start>` (macOS): wait until either process
+/// exits; if the parent went first, `SIGTERM` the child's group (or the child, when it leads
+/// none), then `SIGKILL` it after 2 s. Returns the exit code.
+#[cfg(target_os = "macos")]
+pub fn run_parent_watchdog(argv: &[String]) -> i32 {
+    mac::run_watchdog(argv)
 }
 
 // ───────────────────────── inspecting ─────────────────────────
@@ -303,6 +444,135 @@ mod mac {
         buf.truncate(got as usize / std::mem::size_of::<libc::pid_t>());
         buf
     }
+
+    // ───── the opt-in parent watchdog (see the module docs) ─────
+
+    use std::path::PathBuf;
+    use std::process::{Child, Command, Stdio};
+    use std::sync::{Mutex, OnceLock};
+    use std::time::{Duration, Instant};
+
+    /// The executable serving `__watch-parent`; set only when the watchdog is opted in.
+    pub static WATCHDOG: OnceLock<PathBuf> = OnceLock::new();
+
+    /// Start a watchdog for child `pid` (no-op unless armed). Best-effort: a watchdog that
+    /// cannot start leaves the child exactly as it was without one.
+    pub fn watch(pid: i32) {
+        let Some(exe) = WATCHDOG.get() else { return };
+        let Some(start) = super::start_time(pid) else { return };
+        let mut c = Command::new(exe);
+        c.arg(super::WATCH_PARENT_CMD).arg(std::process::id().to_string()).arg(pid.to_string()).arg(start.to_string());
+        c.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+        // Its own session: a kill_group of the child, or ^C in our terminal, never reaches it.
+        use std::os::unix::process::CommandExt;
+        // SAFETY: only async-signal-safe libc calls between fork and exec.
+        unsafe {
+            c.pre_exec(|| {
+                libc::setsid();
+                Ok(())
+            });
+        }
+        if let Ok(w) = c.spawn() {
+            reap_later(w);
+        }
+    }
+
+    /// Watchdogs are our children: one thread reaps the ones that finished.
+    fn reap_later(w: Child) {
+        static Q: OnceLock<Mutex<Vec<Child>>> = OnceLock::new();
+        let mut started = false;
+        let q = Q.get_or_init(|| {
+            started = true;
+            Mutex::new(Vec::new())
+        });
+        q.lock().unwrap_or_else(|e| e.into_inner()).push(w);
+        if started {
+            let _ = std::thread::Builder::new().name("seagent-watchdog-reaper".into()).stack_size(64 * 1024).spawn(move || loop {
+                std::thread::sleep(Duration::from_secs(2));
+                q.lock().unwrap_or_else(|e| e.into_inner()).retain_mut(|c| matches!(c.try_wait(), Ok(None)));
+            });
+        }
+    }
+
+    fn proc_event(pid: i32) -> libc::kevent {
+        libc::kevent { ident: pid as libc::uintptr_t, filter: libc::EVFILT_PROC, flags: libc::EV_ADD | libc::EV_ONESHOT | libc::EV_RECEIPT, fflags: libc::NOTE_EXIT, data: 0, udata: std::ptr::null_mut() }
+    }
+
+    pub fn run_watchdog(argv: &[String]) -> i32 {
+        let num = |i: usize| argv.get(i).and_then(|s| s.parse::<i64>().ok());
+        let (Some(ppid), Some(pid), Some(start)) = (num(0), num(1), num(2)) else {
+            eprintln!("usage: seagent {} <ppid> <pid> <start>", super::WATCH_PARENT_CMD);
+            return 2;
+        };
+        let (ppid, pid, start) = (ppid as i32, pid as i32, start as u64);
+        if pid <= 1 || ppid <= 1 {
+            return 2;
+        }
+        // SAFETY: kqueue / kevent on our own descriptor with stack-allocated event arrays of
+        // the sizes we pass.
+        let parent_gone = unsafe {
+            let kq = libc::kqueue();
+            if kq < 0 {
+                return 1;
+            }
+            let changes = [proc_event(ppid), proc_event(pid)];
+            let mut out: [libc::kevent; 2] = std::mem::zeroed();
+            let n = libc::kevent(kq, changes.as_ptr(), 2, out.as_mut_ptr(), 2, std::ptr::null());
+            let mut parent_gone = false;
+            for e in out.iter().take(n.max(0) as usize) {
+                if e.flags & libc::EV_ERROR != 0 && e.data != 0 {
+                    if e.ident == ppid as libc::uintptr_t {
+                        parent_gone = true; // ESRCH: seagent already exited
+                    } else {
+                        libc::close(kq);
+                        return 0; // the child already exited
+                    }
+                }
+            }
+            // Registered first, checked second: if seagent died before the registration we
+            // were reparented to launchd and see it here.
+            if libc::getppid() != ppid {
+                parent_gone = true;
+            }
+            if super::start_time(pid) != Some(start) {
+                libc::close(kq);
+                return 0; // the pid is no longer the child we were started for
+            }
+            while !parent_gone {
+                let mut ev: libc::kevent = std::mem::zeroed();
+                let n = libc::kevent(kq, std::ptr::null(), 0, &mut ev, 1, std::ptr::null());
+                if n < 0 {
+                    if std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted {
+                        continue;
+                    }
+                    break;
+                }
+                if n == 1 && ev.filter == libc::EVFILT_PROC {
+                    if ev.ident == pid as libc::uintptr_t {
+                        break; // the child went first: nothing to do
+                    }
+                    parent_gone = ev.ident == ppid as libc::uintptr_t;
+                }
+            }
+            libc::close(kq);
+            parent_gone
+        };
+        if parent_gone && super::start_time(pid) == Some(start) {
+            // SAFETY: plain signal syscalls; the target was re-checked to be our child.
+            unsafe {
+                let group = libc::getpgid(pid) == pid;
+                let target = if group { -pid } else { pid };
+                let running = || if group { super::group_alive(pid) } else { super::alive(pid) };
+                libc::kill(target, libc::SIGTERM);
+                let until = Instant::now() + Duration::from_secs(2);
+                while Instant::now() < until && running() {
+                    std::thread::sleep(Duration::from_millis(50));
+                }
+                libc::kill(target, libc::SIGKILL);
+            }
+        }
+        0
+    }
 }
 
 // ───────────────────────── Windows ─────────────────────────
@@ -430,6 +700,48 @@ pub(crate) mod win {
         Ok(())
     }
 
+    /// Register a duplicate of the caller's `job` under `pid` (the caller keeps its handle).
+    pub fn adopt_job(job: HANDLE, pid: u32) -> io::Result<()> {
+        use windows_sys::Win32::Foundation::{DuplicateHandle, DUPLICATE_SAME_ACCESS};
+        use windows_sys::Win32::System::Threading::GetCurrentProcess;
+        let mut dup: HANDLE = 0;
+        // SAFETY: duplicating a handle the caller owns into our own process.
+        if unsafe { DuplicateHandle(GetCurrentProcess(), job, GetCurrentProcess(), &mut dup, 0, 0, DUPLICATE_SAME_ACCESS) } == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        let job = Job(dup);
+        let mut m = jobs().lock().unwrap_or_else(|e| e.into_inner());
+        m.retain(|_, j| active(j.0) > 0);
+        m.insert(pid as i32, job);
+        Ok(())
+    }
+
+    /// The parent pid from a Toolhelp snapshot.
+    pub fn parent_pid(pid: u32) -> Option<u32> {
+        use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
+        use windows_sys::Win32::System::Diagnostics::ToolHelp::{CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W, TH32CS_SNAPPROCESS};
+        // SAFETY: snapshot handle owned and closed here; `e` is a POD with dwSize set.
+        unsafe {
+            let snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+            if snap == INVALID_HANDLE_VALUE {
+                return None;
+            }
+            let mut e: PROCESSENTRY32W = std::mem::zeroed();
+            e.dwSize = std::mem::size_of::<PROCESSENTRY32W>() as u32;
+            let mut found = None;
+            let mut ok = Process32FirstW(snap, &mut e);
+            while ok != 0 {
+                if e.th32ProcessID == pid {
+                    found = Some(e.th32ParentProcessID);
+                    break;
+                }
+                ok = Process32NextW(snap, &mut e);
+            }
+            CloseHandle(snap);
+            found
+        }
+    }
+
     fn active(job: HANDLE) -> u32 {
         // SAFETY: zeroed POD out-parameter of the size we pass.
         unsafe {
@@ -552,6 +864,18 @@ mod tests {
         kill_group(0, Duration::from_millis(1));
         assert!(!alive(0) && !alive(-5));
         assert!(alive(std::process::id() as i32));
+    }
+
+    #[test]
+    fn parent_pid_and_flags() {
+        assert_eq!(parent_pid(std::process::id() as i32), Some(unsafe { libc::getppid() }));
+        let mut c = sleeper();
+        let mut child = spawn_in_group_with(&mut c, false, CREATE_NO_WINDOW).unwrap();
+        assert_eq!(parent_pid(child.id() as i32), Some(std::process::id() as i32));
+        assert_eq!(console_flags(), 0, "no creation flags on Unix");
+        kill_group(child.id() as i32, Duration::from_secs(1));
+        let _ = child.wait();
+        assert!(!set_parent_watchdog("/nonexistent".into()) || cfg!(target_os = "macos"));
     }
 
     #[test]

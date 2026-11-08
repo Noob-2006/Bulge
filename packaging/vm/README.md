@@ -262,12 +262,24 @@ specs; CI additionally checks every built disk with `sgdisk -v`, `fsck.fat -n`
 and `mcopy`, and boots it under QEMU + OVMF (`packaging/vm/smoke-boot.sh`).
 `mkdisk.py list disk.raw` shows what is on an existing disk.
 
-**aarch64 disk caveat.** The arm64 disk boots (the agent starts from the embedded
-initramfs), but arm64 VirtualBox / Hyper-V expose PL011 UARTs (`ttyAMA*`), not
-16550s, so `/dev/ttyS1` (`proto::UART_DEVICE`) does not exist there and the
-`uart` channel cannot open until the guest agent falls back to `/dev/ttyAMA1` on
-aarch64 (and `provider/vbox.rs` stops passing the x86 `--uart1 0x3F8 4` I/O-port
-form on arm64 hosts). The x86_64 disk has no such gap.
+**aarch64 disk.** arm64 VirtualBox / Hyper-V expose PL011 UARTs (`ttyAMA*`), not
+16550s. The aarch64 guest agent therefore opens `/dev/ttyAMA1`
+(`proto::UART_DEVICE_PL011`) for the `uart` channel when it exists and falls back
+to `/dev/ttyS1`; the x86_64 agent always opens `/dev/ttyS1`, unchanged. On an
+aarch64 host `provider/vbox.rs` creates the VM with `createvm
+--platform-architecture arm --ostype Linux_arm64` (VirtualBox 7.1+, which selects
+the ARMv8 virtual chipset and its UEFI firmware, so no `--firmware`) and a
+virtio-scsi controller instead of AHCI. `VBoxManage --uartN` only has the
+`<I/O base> <IRQ>` form; on the arm platform those numbers are ignored and each
+enabled slot is a PL011 at the platform's fixed MMIO address, so the COM1/COM2
+defaults (`0x3F8 4`, `0x2F8 3`) are passed unchanged as slot markers. Not yet
+verified on real Apple Silicon VirtualBox.
+
+`seagent sandbox vm image build` passes `--format disk` (and `--arch <host
+arch>`) itself when `exec.vm.provider` is `virtualbox` or `hyperv`, and `--arch
+aarch64` on any arm64 host; `auto` does not build the disk (it needs a
+source-built kernel), so name the provider. On an x86_64 host with Firecracker /
+QEMU / `auto` the script is invoked exactly as before.
 
 ## Architectures and kernels
 
