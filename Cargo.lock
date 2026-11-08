@@ -780,6 +780,7 @@ dependencies = [
  "serde_json",
  "toml",
  "ureq",
+ "windows-sys",
 ]
 
 [[package]]
