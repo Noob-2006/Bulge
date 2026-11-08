@@ -1333,7 +1333,9 @@ fn cmd_daemon(a: &Args) -> R {
                 }));
             }
             // App server: web/desktop UI, WebSocket ARP, OpenAI-compatible API, A2A, nodes.
-            let app_cfg = seagent_app::AppConfig::parse(&c.k.cfg.app)?;
+            // LAN mode: native TLS with the generated identity (seagent_app::lan), paired devices.
+            let app_cfg = seagent_app::lan::effective(&seagent_app::AppConfig::parse(&c.k.cfg.app)?, &paths.data)?;
+            d.add_methods(ops::lan::methods(&paths, c.k.clone(), app_cfg.clone()));
             let _server = if app_cfg.enabled {
                 let token = app_cfg.token.as_deref().map(|t| (c.k.vault_substitute())(t)).unwrap_or_default();
                 if token.contains("{{secret:") {
@@ -1342,7 +1344,7 @@ fn cmd_daemon(a: &Args) -> R {
                 let mut host: Vec<String> = seagent_app::node::METHODS.iter().map(|s| s.to_string()).collect();
                 host.extend(HOST_METHODS.iter().chain(ops::ui_methods::METHODS).chain(ops::webui::METHODS).chain(ops::dock::METHODS).map(|s| s.to_string()));
                 host.extend(seagent_app::surfaces::METHODS.iter().map(|s| s.to_string()));
-                host.extend(seagent_kernel::cluster::METHODS.iter().map(|s| s.to_string()));
+                host.extend(seagent_kernel::cluster::METHODS.iter().chain(seagent_app::devices::METHODS).chain(ops::lan::METHODS).map(|s| s.to_string()));
                 // MCP event deliveries arrive as signed webhooks and are queued into the subscribing session.
                 let mut routes: Vec<(String, seagent_net::httpd::Handler)> = surfaces.clone().map(|s| seagent_app::surfaces::routes(s, token.clone())).unwrap_or_default();
                 if let Some(hub) = ext_arc.as_deref().and_then(|e| e.registry.events()) {
@@ -1363,8 +1365,8 @@ fn cmd_daemon(a: &Args) -> R {
                 host.extend(setup_web::METHODS.iter().map(|s| s.to_string()));
                 let app = Arc::new(seagent_app::App { d: d.clone(), cfg: app_cfg.clone(), token, host_methods: host, routes });
                 let srv = seagent_app::start(app)?;
-                eprintln!("seagentd: app server on http://{} (UI, /arp, /v1, {})", srv.local_addr(), if app_cfg.a2a.enabled { "/a2a" } else { "no a2a" });
-                Some(srv)
+                eprintln!("seagentd: app server on {}://{} (UI, /arp, /v1, {})", if srv.is_tls() { "https" } else { "http" }, srv.local_addr(), if app_cfg.a2a.enabled { "/a2a" } else { "no a2a" });
+                Some((srv, seagent_app::lan::advertise(&app_cfg, &paths.data).map_err(|e| eprintln!("seagentd: warning: {e}")).ok().flatten()))
             } else {
                 None
             };
@@ -2694,16 +2696,14 @@ fn cmd_nodes(a: &Args) -> R {
             if !app.nodes {
                 eprintln!("seagent: warning: [app] nodes = false; the app server will not accept nodes until you enable it");
             }
-            let url = match a.val("url") {
-                Some(u) => u.to_string(),
-                None => {
-                    let listen = app.listen.replace("0.0.0.0", &ops::hostos::etc_hostname().unwrap_or_else(|_| "localhost".into()).trim().to_lowercase());
-                    format!("ws://{listen}/node")
-                }
+            // Off loopback the URL is wss:// with LAN mode's certificate pinned (never cleartext).
+            let (url, fp) = match a.val("url") {
+                Some(u) => (u.to_string(), None),
+                None => ops::controlcmds::pairing_url(&cfg, &paths.data)?,
             };
             let ttl = a.num::<u64>("ttl").map_err(Fail::Usage)?.unwrap_or(10) * 60_000;
             let mut p = json!({"url": url, "ttlMs": ttl});
-            if let Some(f) = a.val("tls-fingerprint") {
+            if let Some(f) = a.val("tls-fingerprint").map(String::from).or(fp) {
                 p["tlsFingerprint"] = json!(f);
             }
             let r = daemon::call(&sock, "node.setup.create", p)?;

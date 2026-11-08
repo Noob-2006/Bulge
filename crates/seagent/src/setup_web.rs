@@ -206,6 +206,7 @@ pub fn status(paths: &Paths, token_ok: bool, reason: Option<&str>) -> Value {
         "channels": ["telegram", "discord"],
         "workspace": root.get("app").and_then(|a| a.get("workspace")).and_then(|v| v.as_str()).map(PathBuf::from).unwrap_or_else(|| paths.default_workspace()),
         "service": {"systemd": systemd, "mode": paths.mode.as_str()},
+        "lan": lan_of(&root),
         "expires_ms": expires,
     })
 }
@@ -283,6 +284,35 @@ pub fn apply_security(root: &mut toml::Table, mode: &str) -> Result<&'static str
         "balanced" => "balanced",
         _ => "relaxed",
     })
+}
+
+/// "Allow devices on this network to connect": LAN mode on (`[app.exposure] lan = true`, the
+/// listener on every interface — the server admits only private-range peers with a paired-device
+/// token and speaks TLS to them) or off (back to loopback).
+pub fn apply_lan(root: &mut toml::Table, on: bool) -> String {
+    let listen = listen_of(root);
+    let port = listen.rsplit_once(':').map(|(_, p)| p.to_string()).filter(|p| !p.is_empty()).unwrap_or_else(|| "8640".into());
+    let app = table(root, "app");
+    if on {
+        if seagent_security::exposure::is_loopback(&listen) {
+            app.insert("listen".into(), format!("0.0.0.0:{port}").into());
+        }
+        table(app, "exposure").insert("lan".into(), true.into());
+        format!("LAN: devices on this network can pair (https://<this computer>:{port}; `seagent pair code` or the console's Devices page)")
+    } else {
+        if let Some(e) = app.get_mut("exposure").and_then(|e| e.as_table_mut()) {
+            e.insert("lan".into(), false.into());
+        }
+        if listen.starts_with("0.0.0.0:") || listen.starts_with("[::]:") {
+            app.insert("listen".into(), format!("127.0.0.1:{port}").into());
+        }
+        "LAN: off (this computer only)".into()
+    }
+}
+
+/// `[app.exposure] lan` of a config table.
+pub fn lan_of(root: &toml::Table) -> bool {
+    root.get("app").and_then(|a| a.get("exposure")).and_then(|e| e.get("lan")).and_then(|v| v.as_bool()).unwrap_or(false)
 }
 
 /// `[app] workspace`, created when missing.
@@ -410,6 +440,9 @@ pub fn apply(paths: &Paths, p: &Value, discover: &dyn Fn(&str) -> Result<Value, 
         lines.push(format!("workspace: {}", apply_workspace(&mut root, w)?.display()));
     }
     lines.push(apply_auth(&mut root, &vault, &p["auth"], discover)?);
+    if let Some(on) = p["lan"].as_bool() {
+        lines.push(apply_lan(&mut root, on));
+    }
     let cfg = paths.user_config();
     crate::setup::save_config(&cfg, &root, existing.as_deref())?;
     lines.push(format!("wrote {}", cfg.display()));
@@ -743,6 +776,24 @@ mod tests {
         assert_eq!(v["ok"], json!(false));
         assert!(!v.to_string().contains("sk-secret-abcdef"));
         assert!(test_provider(&p, &json!({"provider": "openai"}))["error"].as_str().unwrap().contains("API key"));
+    }
+
+    #[test]
+    fn lan_toggle_switches_listen_and_mode() {
+        let mut root: toml::Table = "[app]\nenabled = true\nlisten = \"127.0.0.1:8640\"\n".parse().unwrap();
+        assert!(apply_lan(&mut root, true).contains("https://"));
+        assert!(lan_of(&root));
+        assert_eq!(listen_of(&root), "0.0.0.0:8640");
+        // The result is a config the app server accepts (LAN mode + TLS, no allow_public).
+        let app = seagent_app::AppConfig::parse(root["app"].as_table().unwrap()).unwrap();
+        assert!(app.exposure.lan && !app.exposure.allow_public && seagent_app::exposure::lan_only(&app));
+        apply_lan(&mut root, false);
+        assert!(!lan_of(&root));
+        assert_eq!(listen_of(&root), "127.0.0.1:8640");
+        // A specific private address the operator chose is kept.
+        let mut r2: toml::Table = "[app]\nlisten = \"192.168.1.5:9000\"\n".parse().unwrap();
+        apply_lan(&mut r2, true);
+        assert_eq!(listen_of(&r2), "192.168.1.5:9000");
     }
 
     #[test]

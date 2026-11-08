@@ -252,6 +252,10 @@ fn doctor(c: &Ctx) -> i32 {
         println!("{w}");
         bad += 1;
     }
+    // LAN interconnect posture (informational).
+    for l in crate::security_cli::lan_findings(&c.cfg, &c.paths.data) {
+        println!("{} {}", if l.severity == "warn" { "⚠" } else { "•" }, l.title);
+    }
     if !readable {
         println!("✗ allowlist {} is unreadable or malformed", hx::allowlist_path(&c.paths).display());
         bad += 1;

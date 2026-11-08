@@ -548,6 +548,7 @@ pub(crate) struct SurfaceCfg {
     pub origins: Vec<String>,
     pub rate_limit: bool,
     pub enabled: bool,
+    pub lan: bool,
 }
 
 impl SurfaceCfg {
@@ -562,6 +563,7 @@ impl SurfaceCfg {
             origins: &self.origins,
             rate_limit: self.rate_limit,
             enabled: self.enabled,
+            lan: self.lan,
         }
     }
 }
@@ -586,6 +588,7 @@ pub(crate) fn exposure_surfaces(cfg: &Config) -> Vec<SurfaceCfg> {
             origins: s.origins.to_vec(),
             rate_limit: s.rate_limit,
             enabled: s.enabled,
+            lan: s.lan,
         });
     }
     // Channels open their own listeners (`listen`) for callback webhooks.
@@ -610,6 +613,7 @@ pub(crate) fn exposure_surfaces(cfg: &Config) -> Vec<SurfaceCfg> {
             origins: callers,
             rate_limit: t.get("rate_limit").and_then(|v| v.as_integer()).is_some_and(|n| n > 0),
             enabled: true,
+            lan: false,
         });
     }
     out
@@ -643,6 +647,31 @@ pub(crate) fn exposure_findings(cfg: &Config) -> Vec<Finding> {
                 out.push(f("exposure.endpoint_enabled", "info", format!("{} scoped app token(s) are configured", app.tokens.len()), "[app] tokens", None));
             }
         }
+    }
+    out
+}
+
+/// LAN interconnect posture (docs/cross-platform.md): LAN mode, discovery, paired devices and
+/// the identity certificate's age — for `seagent security audit` and `seagent doctor`.
+pub(crate) fn lan_findings(cfg: &Config, data: &Path) -> Vec<Finding> {
+    let mut out = Vec::new();
+    let Ok(app) = seagent_app::AppConfig::parse(&cfg.app) else { return out };
+    if app.enabled && app.exposure.lan {
+        out.push(f("lan.mode_on", "info", "LAN mode is on: devices on private networks can pair with this host", format!("listen = {}; private-range peers only, TLS, paired-device tokens", app.listen), Some("[app.exposure] lan = false")));
+    }
+    if app.enabled && seagent_app::lan::discovery_enabled(&app) {
+        out.push(f("lan.discovery_on", "info", "this host advertises itself over mDNS (_seagent._tcp)", "TXT: protocol, host id, fingerprint prefix, name (no tokens)", Some("[app] discovery = \"off\"")));
+    }
+    let n = seagent_app::devices::list(data).len();
+    if n > 0 {
+        out.push(f("lan.paired_devices", "info", format!("{n} paired device(s) hold console tokens"), "seagent devices list", Some("seagent devices revoke ID")));
+    }
+    if let Some(id) = seagent_app::lan::load_identity(data) {
+        let now = seagent_kernel::event::now_ms();
+        let days = now.saturating_sub(id.created_ms) / 86_400_000;
+        let expired = id.not_after_ms > 0 && id.not_after_ms <= now;
+        let (sev, title) = if expired { ("warn", "the LAN certificate has expired (pinned apps keep working; browsers warn)".to_string()) } else { ("info", format!("LAN certificate {} is {days} day(s) old", id.sas())) };
+        out.push(f("lan.certificate_age", sev, title, id.cert.display().to_string(), Some("seagent tls rotate --yes (every device must pair again)")));
     }
     out
 }
@@ -746,6 +775,7 @@ pub fn audit(cfg: &Config, paths: &Paths, ws: &Path) -> Vec<Finding> {
     // A8–A12: every listening surface (app server, channel callbacks) against the same policy
     // the app server uses to refuse a public bind.
     out.extend(exposure_findings(cfg));
+    out.extend(lan_findings(cfg, &paths.data));
     // Dangerous flags.
     use seagent_kernel::gate::Mode as G;
     if cfg.gate.privilege == G::Allow || cfg.gate.egress == G::Allow {
