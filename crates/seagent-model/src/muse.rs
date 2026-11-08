@@ -77,7 +77,7 @@ impl Muse {
     }
 
     fn spawn(&self) -> Result<Host, ProviderError> {
-        let mut child = Command::new(&self.command)
+        let mut child = Command::new(crate::auth::program(&self.command))
             .args(&self.args)
             .current_dir(&self.cwd)
             .stdin(Stdio::piped())

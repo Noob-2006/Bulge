@@ -257,7 +257,7 @@ impl Provider for CliBackend {
     ) -> Result<ModelResponse, ProviderError> {
         let prompt = Self::prompt(req);
         let (argv, prompt_in_args) = self.argv(&req.model, &prompt);
-        let mut cmd = Command::new(&self.command);
+        let mut cmd = Command::new(crate::auth::program(&self.command));
         cmd.args(&argv)
             .stdin(if prompt_in_args {
                 Stdio::null()
@@ -414,7 +414,8 @@ impl Provider for CliBackend {
     }
 }
 
-#[cfg(test)]
+// Unix only: the fake CLIs are `#!/bin/sh` scripts.
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
 

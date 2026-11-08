@@ -685,7 +685,6 @@ dependencies = [
 name = "seagent-model"
 version = "0.1.0"
 dependencies = [
- "libc",
  "ring",
  "seagent-core",
  "seagent-net",

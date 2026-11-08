@@ -151,12 +151,24 @@ pub fn parse_minted(out: &str, now: u64) -> Result<(String, u64), String> {
     Ok((t.to_string(), now + NO_TTL_MS))
 }
 
+/// The program to spawn for an external CLI named `cmd`. Unix: `cmd` itself (`exec` searches
+/// `PATH`). Windows: `Command` only finds `.exe` files, but npm-installed CLIs (`claude`,
+/// `gemini`, `codex`, `copilot`) are `.cmd` shims, so the name is resolved through `PATHEXT`.
+#[cfg_attr(not(any(feature = "agent-cli", feature = "local")), allow(dead_code))]
+pub(crate) fn program(cmd: &str) -> std::path::PathBuf {
+    #[cfg(windows)]
+    if let Some(p) = seagent_core::platform::layout::which(cmd) {
+        return p;
+    }
+    std::path::PathBuf::from(cmd)
+}
+
 pub fn run_capture(cmd: &str, timeout: Duration) -> Result<String, String> {
     use std::io::Read;
-    use std::process::{Command, Stdio};
-    let mut child = Command::new("sh")
-        .arg("-c")
-        .arg(cmd)
+    use seagent_core::platform::shell::{command, Style};
+    use std::process::Stdio;
+    // `sh -c` on unix; this machine's shell (bash or PowerShell) on Windows.
+    let mut child = command(Style::Sh, cmd)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

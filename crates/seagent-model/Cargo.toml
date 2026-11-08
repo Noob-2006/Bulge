@@ -29,7 +29,6 @@ serde.workspace = true
 serde_json.workspace = true
 toml.workspace = true # [auxiliary.<task>] passthrough tables (aux.rs)
 ureq.workspace = true
-libc.workspace = true
 ring.workspace = true
 seagent-net.workspace = true
 # Child-process env scrub (`envscrub::apply`): a provider CLI is third-party code.

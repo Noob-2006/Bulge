@@ -81,10 +81,7 @@ pub fn mask(k: &str) -> String {
 
 fn random_id() -> String {
     let mut b = [0u8; 6];
-    if let Ok(mut f) = std::fs::File::open("/dev/urandom") {
-        use std::io::Read;
-        let _ = f.read_exact(&mut b);
-    }
+    let _ = seagent_core::platform::random::fill_random(&mut b);
     b.iter().map(|x| format!("{x:02x}")).collect()
 }
 
@@ -365,40 +362,31 @@ impl Store {
 }
 
 fn write_private(path: &Path, data: &[u8]) -> std::io::Result<()> {
+    use seagent_core::platform::fs_private::{open_private, OpenMode};
     use std::io::Write;
-    use std::os::unix::fs::OpenOptionsExt;
     let tmp = path.with_extension(format!("tmp{}", std::process::id()));
     {
-        let mut f = std::fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .mode(0o600)
-            .open(&tmp)?;
+        // 0600 on unix, an owner-only DACL on Windows.
+        let mut f = open_private(&tmp, OpenMode::Truncate)?;
         f.write_all(data)?;
         f.sync_all()?;
     }
     std::fs::rename(&tmp, path)
 }
 
-/// `flock`-based exclusive lock held for the read-modify-write.
+/// Exclusive lock held for the read-modify-write: `std::fs::File::lock` (`flock` on unix,
+/// `LockFileEx` on Windows).
 struct Lock(Option<std::fs::File>);
 
 impl Lock {
     fn acquire(path: &Path) -> Lock {
-        use std::os::unix::fs::OpenOptionsExt;
-        use std::os::unix::io::AsRawFd;
-        let f = std::fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .mode(0o600)
-            .open(path)
-            .ok();
+        let mut o = std::fs::OpenOptions::new();
+        o.write(true).create(true).truncate(false);
+        #[cfg(unix)]
+        std::os::unix::fs::OpenOptionsExt::mode(&mut o, 0o600);
+        let f = o.open(path).ok();
         if let Some(f) = &f {
-            unsafe {
-                libc::flock(f.as_raw_fd(), libc::LOCK_EX);
-            }
+            let _ = f.lock();
         }
         Lock(f)
     }
@@ -406,11 +394,8 @@ impl Lock {
 
 impl Drop for Lock {
     fn drop(&mut self) {
-        use std::os::unix::io::AsRawFd;
         if let Some(f) = &self.0 {
-            unsafe {
-                libc::flock(f.as_raw_fd(), libc::LOCK_UN);
-            }
+            let _ = f.unlock();
         }
     }
 }
@@ -473,11 +458,14 @@ mod tests {
         assert!(s.remove("openai", &c).unwrap());
         assert_eq!(s.entries("openai").len(), 2);
         assert_eq!(e.masked(), "sk-a…1111");
-        use std::os::unix::fs::PermissionsExt;
-        assert_eq!(
-            std::fs::metadata(s.path()).unwrap().permissions().mode() & 0o777,
-            0o600
-        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::metadata(s.path()).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        }
         assert_eq!(s.clear_provider("openai").unwrap(), 2);
         assert!(s.load().providers.is_empty());
     }
