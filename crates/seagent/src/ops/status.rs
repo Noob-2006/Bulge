@@ -900,6 +900,7 @@ fn json_report(st: &Status) -> Value {
 }
 
 #[cfg(test)]
+#[cfg_attr(not(unix), allow(dead_code, unused_imports))]
 mod tests {
     use super::*;
     #[cfg(unix)]

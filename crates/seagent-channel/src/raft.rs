@@ -538,6 +538,7 @@ pub fn build(ctx: &crate::config::Ctx, s: &serde_json::Map<String, Value>) -> Re
 }
 
 #[cfg(test)]
+#[cfg_attr(not(unix), allow(dead_code, unused_imports))]
 mod tests {
     use super::*;
     use crate::testutil::temp_dir;
@@ -628,7 +629,9 @@ mod tests {
         assert_eq!(v["events"].as_array().unwrap().len(), ACTIVITY_CAP - 203);
     }
 
+    #[cfg(unix)]
     fn stub(dir: &std::path::Path, body: &str) -> PathBuf {
+        #[cfg(unix)]
         use std::os::unix::fs::PermissionsExt;
         let p = dir.join("raft");
         std::fs::write(&p, format!("#!/bin/sh\nD={}\n{body}\n", dir.display())).unwrap();
@@ -647,6 +650,7 @@ mod tests {
         false
     }
 
+    #[cfg(unix)]
     #[test]
     fn spawns_bridge_with_token_restarts_and_stop_kills_it() {
         let dir = temp_dir("raft");
@@ -672,6 +676,7 @@ exec sleep 30"#);
         assert_eq!(unsafe { libc::kill(pid, 0) }, -1, "bridge process gone");
     }
 
+    #[cfg(unix)]
     #[test]
     fn bridge_exit_without_restart_surfaces_fatal() {
         let dir = temp_dir("raft");

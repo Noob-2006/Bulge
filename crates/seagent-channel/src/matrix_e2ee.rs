@@ -1098,6 +1098,7 @@ pub fn decrypt_attachment(data: &[u8], file: &Value) -> Result<Vec<u8>, ChannelE
 /// In-memory homeserver for the E2EE endpoints (unit tests here and the
 /// two-device round trip in `matrix`).
 #[cfg(test)]
+#[cfg_attr(not(unix), allow(dead_code, unused_imports))]
 pub(crate) mod fake_hs {
     use super::*;
     use std::collections::VecDeque;
@@ -1467,9 +1468,11 @@ mod tests {
         sync(&hs, &a, A, "ADEV");
         assert_eq!(a.decrypt_room(ROOM, &r), Err(DecryptError::MissingSession), "its room key was rejected");
         // Store: 0600, encrypted, reopened with the same identity; passphrase mode.
+        #[cfg(unix)]
         use std::os::unix::fs::PermissionsExt;
         let path = dir.join("ADEV.e2ee");
         a.flush();
+        #[cfg(unix)]
         for p in [path.clone(), path.with_extension("e2ee.key")] {
             assert_eq!(std::fs::metadata(&p).unwrap().permissions().mode() & 0o777, 0o600, "{}", p.display());
         }

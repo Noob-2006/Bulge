@@ -498,6 +498,7 @@ pub mod fake {
 /// `#!/bin/bash` stand-in into a temp dir and either puts that dir first on `PATH`
 /// or points the backend's `binary` / `command` setting at it.
 #[cfg(test)]
+#[cfg_attr(not(unix), allow(dead_code, unused_imports))]
 pub mod fakecli {
     use std::ffi::OsString;
     use std::path::{Path, PathBuf};
@@ -510,11 +511,13 @@ pub mod fakecli {
         PATH_LOCK.lock().unwrap_or_else(|e| e.into_inner())
     }
 
+    #[cfg(unix)]
     /// Write `dir/name` as an executable bash script.
     pub fn script(dir: &Path, name: &str, body: &str) -> PathBuf {
         std::fs::create_dir_all(dir).unwrap();
         let p = dir.join(name);
         std::fs::write(&p, body).unwrap();
+        #[cfg(unix)]
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
         p
@@ -538,6 +541,7 @@ pub mod fakecli {
         }
     }
 
+    #[cfg(unix)]
     /// A stand-in `ssh` in `dir`: records its argv to `log`, answers `-V`, treats
     /// `-O …` as "close the master", fails for hosts containing `unreachable`, and
     /// otherwise runs the trailing remote script **locally** with `HOME` pointing

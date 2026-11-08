@@ -246,6 +246,7 @@ mod tests {
         assert!(!cacheable(&cfg, "https://example.com/"));
     }
 
+    #[cfg(unix)]
     #[test]
     fn write_refuses_to_follow_symlinks() {
         let d = crate::testutil::tmpdir("webcache-ln");

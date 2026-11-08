@@ -714,6 +714,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&home);
     }
 
+    #[cfg(unix)]
     /// G13: `backend = "cua"` reaches [`crate::computer::cua::CuaDesk`] (recording fake driver);
     /// an unknown backend is refused with a clear message.
     #[test]

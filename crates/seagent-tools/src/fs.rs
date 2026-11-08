@@ -837,6 +837,7 @@ mod preview_tests {
 mod tests {
     use super::*;
     use crate::testutil::ctx;
+    #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
 
     /// Read a file in full so this session may overwrite it.
@@ -885,6 +886,7 @@ mod tests {
         assert!(o.content.contains("1 more lines (use offset=3"));
     }
 
+    #[cfg(unix)]
     #[test]
     fn read_failures() {
         let c = ctx("readf");
@@ -1032,6 +1034,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn write_failures() {
         let c = ctx("writef");
@@ -1143,6 +1146,7 @@ mod tests {
         assert!(o.is_error && o.content.contains("`path` is empty"), "{}", o.content);
     }
 
+    #[cfg(unix)]
     #[test]
     fn patch_rolls_back_when_second_write_fails() {
         let c = ctx("patchr");

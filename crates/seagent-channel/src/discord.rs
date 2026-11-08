@@ -2936,8 +2936,10 @@ mod tests {
         d.stop();
     }
 
+    #[cfg(unix)]
     #[test]
     fn shard_mention_and_dave_key_settings() {
+        #[cfg(unix)]
         use std::os::unix::fs::PermissionsExt;
         let secrets: crate::Secrets = Arc::new(|s: &str| s.to_string());
         let dir = temp_dir("dcs");

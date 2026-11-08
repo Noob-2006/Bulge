@@ -937,7 +937,9 @@ mod tests {
         assert!(t.elapsed() < Duration::from_secs(1));
     }
 
+    #[cfg(unix)]
     fn fake_node(dir: &std::path::Path, script: &str) -> String {
+        #[cfg(unix)]
         use std::os::unix::fs::PermissionsExt;
         let p = dir.join("fake-node");
         std::fs::write(&p, format!("#!/bin/sh\n{script}\n")).unwrap();
@@ -945,6 +947,7 @@ mod tests {
         p.display().to_string()
     }
 
+    #[cfg(unix)]
     #[test]
     fn supervises_bridge_restarts_and_kills_on_drop() {
         let dir = temp_dir("wa-sup");
@@ -1026,10 +1029,12 @@ mod tests {
         assert!(login.call(&ctx, json!({"action": "wait", "currentQrDataUrl": "http://x"})).is_error);
     }
 
+    #[cfg(unix)]
     /// OpenClaw `agent-tools-call.test.ts`: requester-bound target, TTS → WAV, MeowCaller argv,
     /// status/setup report, single active call, failure codes and window math.
     #[test]
     fn call_tool_places_requester_bound_calls_through_meowcaller() {
+        #[cfg(unix)]
         use std::os::unix::fs::PermissionsExt;
         let dir = temp_dir("wa-call");
         let bin = dir.join("meowcaller");

@@ -1071,6 +1071,7 @@ mod tests {
         assert_eq!(exit_code(&l.findings, Severity::Warning), 0);
     }
 
+    #[cfg(unix)]
     #[test]
     fn repair_flow_fixes_and_validates() {
         let stale_dir = seagent_core::tmp::scratch_path(format!("seagent-doc-gone-{}", seagent_kernel::util::random_hex(6)));
@@ -1164,6 +1165,7 @@ mod tests {
         assert!(seagent_kernel::vault::Vault::load(&c.paths.secrets()).unwrap().names().contains(&"WEB_TOKEN".to_string()));
     }
 
+    #[cfg(unix)]
     #[test]
     fn gateway_services_and_exec_credentials() {
         let _g = crate::testkit::env_lock();

@@ -942,6 +942,7 @@ mod tests {
         assert_eq!(command_line(&AgentSpec { command: "a b".into(), args: vec!["-y".into(), "it's".into()], ..Default::default() }), "'a b' -y 'it'\\''s'");
     }
 
+    #[cfg(unix)]
     #[test]
     fn confinement() {
         let d = tmp("conf");

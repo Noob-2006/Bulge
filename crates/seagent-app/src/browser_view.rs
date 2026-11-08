@@ -539,6 +539,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&home);
     }
 
+    #[cfg(unix)]
     /// Desktop targets: `view.desktop.list` shape, per-target leases, `view.desktop.input` only
     /// from the lease holder, frames and input reaching the VM over (fake) QMP, start/stop.
     #[test]

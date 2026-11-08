@@ -112,6 +112,7 @@ impl Backend for VmBackend {
 }
 
 #[cfg(test)]
+#[cfg_attr(not(unix), allow(dead_code, unused_imports))]
 mod tests {
     use crate::computer::fake_driver::{ctx, run};
     use crate::computer::hermes::ComputerUseTool;
@@ -121,6 +122,7 @@ mod tests {
     use serde_json::json;
     use std::sync::Arc;
 
+    #[cfg(unix)]
     /// computer_use with `target = "vm:desk"`: screenshot to the model, coordinate input over
     /// QMP, its own approval scope, and refusal while a human holds the VM's lease.
     #[test]

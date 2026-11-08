@@ -660,6 +660,7 @@ mod tests {
         assert!(read_tar(&raw[..514]).is_err(), "data cut short");
     }
 
+    #[cfg(unix)]
     #[test]
     fn path_safety() {
         let d = tmpdir("safep");
@@ -672,6 +673,7 @@ mod tests {
         assert!(link_stays_inside("a/b", "../c") && !link_stays_inside("a", "../../x") && !link_stays_inside("a", "/etc"));
     }
 
+    #[cfg(unix)]
     fn mirror(tag: &str, base64: bool) {
         let host = tmpdir(&format!("{tag}h"));
         let remote = tmpdir(&format!("{tag}r")).join("ws");
@@ -723,11 +725,13 @@ mod tests {
         assert!(r.skipped.iter().any(|x| x.contains("host copy kept")), "{r:?}");
     }
 
+    #[cfg(unix)]
     #[test]
     fn push_pull_mirror_raw() {
         mirror("syncraw", false);
     }
 
+    #[cfg(unix)]
     #[test]
     fn push_pull_mirror_base64() {
         mirror("sync64", true);
@@ -755,6 +759,7 @@ mod tests {
         assert!(small.push(&local_runner).unwrap_err().contains("refusing"));
     }
 
+    #[cfg(unix)]
     #[test]
     fn credential_files_land_under_remote_home() {
         let _lock = crate::exec::sync::common::fakecli::lock_path();

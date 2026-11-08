@@ -502,6 +502,7 @@ fn actions(input: &mut Value) {
 mod tests {
     use super::*;
     use crate::testutil::ctx;
+    #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
 
     #[test]
@@ -553,6 +554,7 @@ mod tests {
         assert_eq!(Memory.call(&c, json!({"action":"read"})).content.len(), 3000);
     }
 
+    #[cfg(unix)]
     #[test]
     fn unreadable_memory_file() {
         let c = ctx("memperm");

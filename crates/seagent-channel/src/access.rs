@@ -202,6 +202,7 @@ impl Pairing {
     }
 
         #[cfg(test)]
+    #[cfg_attr(not(unix), allow(dead_code))] // its only callers are unix-only tests
     fn with_clock(mut self, f: impl Fn() -> i64 + Send + Sync + 'static) -> Self {
         self.clock = Box::new(f);
         self
@@ -301,6 +302,7 @@ impl Pairing {
 }
 
 #[cfg(test)]
+#[cfg_attr(not(unix), allow(dead_code, unused_imports))]
 mod tests {
     use super::*;
     use crate::testutil::temp_dir;
@@ -355,6 +357,7 @@ mod tests {
         assert!(matches!(off.check(&m, &none, None), Verdict::Deny(_)));
     }
 
+    #[cfg(unix)]
     #[test]
     fn pairing_codes_limits_hashing_and_lockout() {
         let d = temp_dir("pair");
@@ -369,6 +372,7 @@ mod tests {
         assert!(code.bytes().all(|b| ALPHABET.contains(&b)));
         let file = std::fs::read_to_string(d.join("pairing.json")).unwrap();
         assert!(!file.contains(&code), "only a hash is stored");
+        #[cfg(unix)]
         use std::os::unix::fs::PermissionsExt;
         assert_eq!(std::fs::metadata(d.join("pairing.json")).unwrap().permissions().mode() & 0o777, 0o600);
         assert!(matches!(p.check(&dm("7"), &approved, Some(&pr)), Verdict::Deny(r) if r.contains("recently")), "cooldown");

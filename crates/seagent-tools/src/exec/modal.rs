@@ -602,6 +602,7 @@ class Sandbox:
         }
     }
 
+    #[cfg(unix)]
     /// `[exec] backend = "modal"` → `ExecEnv::backend` → spawn (the user-reachable path).
     /// The fake SDK gets its log path baked into the package and a wrapper `python`
     /// that sets `PYTHONPATH` itself, so this test needs no process-wide env.

@@ -371,8 +371,10 @@ mod tests {
         assert!(Env::create("modal", "x", None, "docker").is_err());
     }
 
+    #[cfg(unix)]
     #[test]
     fn docker_env_and_batch_file() {
+        #[cfg(unix)]
         use std::os::unix::fs::PermissionsExt;
         let d = dir();
         let fake = d.join("docker");

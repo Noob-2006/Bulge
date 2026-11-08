@@ -558,11 +558,14 @@ impl Tool for Deploy {
 }
 
 #[cfg(test)]
+#[cfg_attr(not(unix), allow(dead_code, unused_imports))]
 mod tests {
     use super::*;
+    #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
     use std::path::Path;
 
+    #[cfg(unix)]
     /// A fake CLI: logs its argv to `<dir>/calls.log` and answers from a script.
     fn fake(dir: &Path, name: &str, body: &str) -> String {
         let p = dir.join(name);
@@ -575,6 +578,7 @@ mod tests {
         std::fs::read_to_string(dir.join("calls.log")).unwrap_or_default()
     }
 
+    #[cfg(unix)]
     #[test]
     fn kubectl_plan_apply_rollback_round_trip_with_audit() {
         let ctx = crate::testutil::ctx("deploy-kube");
@@ -620,6 +624,7 @@ esac"#);
         assert_eq!(kinds, ["deploy.plan", "deploy.apply", "deploy.rollback"], "{kinds:?}");
     }
 
+    #[cfg(unix)]
     #[test]
     fn changed_files_failed_dry_runs_and_expired_plans_are_refused() {
         let ctx = crate::testutil::ctx("deploy-guard");
@@ -648,6 +653,7 @@ esac"#);
         assert!(t2.call(&ctx, json!({"action": "apply", "plan_id": id2})).content.contains("failed its dry-run"));
     }
 
+    #[cfg(unix)]
     #[test]
     fn helm_compose_and_systemd_prepare_their_rollbacks() {
         let ctx = crate::testutil::ctx("deploy-misc");

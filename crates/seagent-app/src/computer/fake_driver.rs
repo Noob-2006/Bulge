@@ -1,6 +1,7 @@
 //! A fake cua-driver for computer-use tests: it answers `manifest` and speaks MCP over stdio,
 //! logging every `tools/call`, so [`super::cua::Driver`] / [`super::cua::CuaBackend`] /
 //! [`super::cua::CuaDesk`] run their real code paths without a desktop or a real driver.
+#![cfg_attr(not(unix), allow(dead_code, unused_imports))]
 
 use serde_json::Value;
 use std::path::{Path, PathBuf};
@@ -128,11 +129,13 @@ pub struct FakeDriver {
 }
 
 impl FakeDriver {
+    #[cfg(unix)]
     /// Install at `<home>/bin/<name>` (None when this host has no python3).
     pub fn install(home: &Path, name: &str) -> Option<FakeDriver> {
         if !std::process::Command::new("python3").arg("-c").arg("1").output().is_ok_and(|o| o.status.success()) {
             return None;
         }
+        #[cfg(unix)]
         use std::os::unix::fs::PermissionsExt;
         let dir = home.join("bin");
         std::fs::create_dir_all(&dir).ok()?;

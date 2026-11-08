@@ -620,6 +620,7 @@ pub fn run_from_env(cfg: &toml::Table) -> i32 {
 }
 
 #[cfg(test)]
+#[cfg_attr(not(unix), allow(dead_code, unused_imports))]
 mod tests {
     use super::*;
     use std::sync::atomic::AtomicUsize;
@@ -635,6 +636,7 @@ mod tests {
         assert!(join_js("O'Neil \"x\"").contains("\"O'Neil \\\"x\\\"\""));
     }
 
+    #[cfg(unix)]
     /// The bot against a fake DevTools endpoint: join → lobby → admitted, captions deduped
     /// into the transcript, realtime say-queue spoken through a fake pactl/paplay, barge-in,
     /// leave on duration expiry.
@@ -679,6 +681,7 @@ mod tests {
         std::fs::write(&pactl, format!("#!/bin/sh\necho \"$@\" >> {}/pactl.log\necho 42\n", dir.display())).unwrap();
         std::fs::write(&player, format!("#!/bin/sh\necho \"$@\" >> {d}/play.log\ncat > {d}/played.raw\nsleep 3\n", d = dir.display())).unwrap();
         for f in [&pactl, &player] {
+            #[cfg(unix)]
             use std::os::unix::fs::PermissionsExt;
             std::fs::set_permissions(f, std::fs::Permissions::from_mode(0o755)).unwrap();
         }

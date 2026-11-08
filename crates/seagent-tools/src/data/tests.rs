@@ -2,6 +2,7 @@ use super::*;
 use crate::testutil::ctx;
 use crate::web::testutil::FakeServer;
 use serde_json::json;
+#[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
@@ -164,6 +165,7 @@ fn effects_name_the_file_or_host_but_never_the_statement() {
     assert_eq!(q.effects(&c, &json!({"source": "wh", "sql": "SELECT secret_col FROM t"})), vec![Effect::Net { dest: "db.internal:5432".into(), payload: String::new() }]);
 }
 
+#[cfg(unix)]
 /// Write an executable fake client that records stdin / argv / env and prints `body`.
 fn fake_client(dir: &Path, name: &str, body: &str) -> (String, PathBuf) {
     let out = dir.join(format!("{name}-out"));
@@ -174,6 +176,7 @@ fn fake_client(dir: &Path, name: &str, body: &str) -> (String, PathBuf) {
     (script.to_string_lossy().into_owned(), out)
 }
 
+#[cfg(unix)]
 #[test]
 fn postgres_goes_through_a_read_only_transaction_with_the_password_in_the_environment() {
     let c = ctx("sql-pg");
@@ -195,6 +198,7 @@ fn postgres_goes_through_a_read_only_transaction_with_the_password_in_the_enviro
     assert!(!out.join("stdin.txt").exists(), "the client was not even started");
 }
 
+#[cfg(unix)]
 /// SQL Server through `sqlcmd`: password in `SQLCMDPASSWORD`, `-K ReadOnly`, the statement in a
 /// rolled-back transaction, unit-separator output with NULLs; integrated auth without a user.
 #[test]
@@ -228,6 +232,7 @@ fn sqlserver_uses_sqlcmd_with_read_only_intent_and_a_rolled_back_transaction() {
     let _ = s;
 }
 
+#[cfg(unix)]
 /// Oracle through SQL*Plus: credentials in the CONNECT line on stdin, a READ ONLY transaction,
 /// CSV markup; PL/SQL network packages are refused before anything runs.
 #[test]
@@ -248,6 +253,7 @@ fn oracle_uses_sqlplus_with_a_read_only_transaction() {
     }
 }
 
+#[cfg(unix)]
 /// Any ODBC DSN through unixODBC `isql`: batch mode, unit-separator output, the DSN name from
 /// the connection string; isql's own error lines become errors.
 #[test]
@@ -267,6 +273,7 @@ fn odbc_uses_isql_in_batch_mode() {
     assert_eq!(q.effects(&c, &json!({"sql": "SELECT 1"})), vec![Effect::Net { dest: "DB2PROD".into(), payload: String::new() }]);
 }
 
+#[cfg(unix)]
 #[test]
 fn mysql_sets_a_read_only_session_and_transaction() {
     let c = ctx("sql-mysql");
@@ -286,6 +293,7 @@ fn mysql_sets_a_read_only_session_and_transaction() {
     assert!(std::fs::read_to_string(out.join("stdin.txt")).unwrap().contains("SET SESSION max_statement_time=30;"));
 }
 
+#[cfg(unix)]
 #[test]
 fn a_client_error_is_reported_without_the_password_and_a_huge_result_stops_the_client() {
     let c = ctx("sql-clienterr");
@@ -302,6 +310,7 @@ fn a_client_error_is_reported_without_the_password_and_a_huge_result_stops_the_c
     assert!(t0.elapsed() < Duration::from_secs(10));
 }
 
+#[cfg(unix)]
 #[test]
 fn a_slow_client_is_killed_at_the_timeout() {
     let c = ctx("sql-timeout");

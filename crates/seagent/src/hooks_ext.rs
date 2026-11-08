@@ -771,6 +771,7 @@ mod tests {
         assert_eq!(HooksExtra::parse(&Config::default()).unwrap().skill_watch_secs, None);
     }
 
+    #[cfg(unix)]
     #[test]
     fn consent_allowlist_opt_ins_and_revoke() {
         let root = tmp("consent");
@@ -785,6 +786,7 @@ mod tests {
         let (ok, _) = consented(&[h("echo b")], &HooksExtra { auto_accept: true, ..Default::default() }, &p);
         assert_eq!(ok.len(), 1);
         assert_eq!(load_allowlist(&p).0.len(), 2, "opt-in approvals are recorded");
+        #[cfg(unix)]
         use std::os::unix::fs::PermissionsExt;
         assert_eq!(std::fs::metadata(allowlist_path(&p)).unwrap().permissions().mode() & 0o777, 0o600);
         assert_eq!(revoke(&p, "echo a").unwrap(), 1);
@@ -794,6 +796,7 @@ mod tests {
         assert!(ok.is_empty() && warn[0].contains("unreadable"));
     }
 
+    #[cfg(unix)]
     #[test]
     fn script_path_and_exec_checks() {
         assert_eq!(script_path("bash ~/hooks/check.sh --x"), "~/hooks/check.sh");
@@ -804,6 +807,7 @@ mod tests {
         std::fs::write(&s, "#!/bin/sh\nexit 0\n").unwrap();
         assert!(!script_is_executable(&s.to_string_lossy()), "no exec bit");
         assert!(script_is_executable(&format!("bash {}", s.display())), "interpreter-prefixed needs read only");
+        #[cfg(unix)]
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&s, std::fs::Permissions::from_mode(0o755)).unwrap();
         assert!(script_is_executable(&s.to_string_lossy()));

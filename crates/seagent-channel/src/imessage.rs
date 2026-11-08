@@ -1007,13 +1007,16 @@ pub fn build(ctx: &crate::config::Ctx, s: &serde_json::Map<String, Value>) -> Re
 }
 
 #[cfg(test)]
+#[cfg_attr(not(unix), allow(dead_code, unused_imports))]
 mod tests {
     use super::*;
     use crate::testutil::temp_dir;
 
+    #[cfg(unix)]
     /// A fake `imsg rpc --json`: logs every request line, answers by method,
     /// emits `message` notifications after watch.subscribe, exits on `test.exit`.
     fn fake_imsg(dir: &std::path::Path) -> String {
+        #[cfg(unix)]
         use std::os::unix::fs::PermissionsExt;
         let log = dir.join("requests.log");
         let script = format!(
@@ -1054,10 +1057,12 @@ done
         p.display().to_string()
     }
 
+    #[cfg(unix)]
     fn open(dir: &std::path::Path) -> IMessage {
         open_with(dir, json!({}))
     }
 
+    #[cfg(unix)]
     fn open_with(dir: &std::path::Path, extra: Value) -> IMessage {
         let mut v = json!({"cli": fake_imsg(dir), "db": "/tmp/chat.db", "mention_names": ["@seagent"], "restart_backoff_ms": 50, "poll_timeout_secs": 2, "catchup_max_age_minutes": 0});
         for (k, x) in extra.as_object().unwrap() {
@@ -1084,6 +1089,7 @@ done
         format!("{}\n", json!({"jsonrpc": "2.0", "method": "message", "params": {"subscription": 1, "message": m}}))
     }
 
+    #[cfg(unix)]
     #[test]
     fn subscribes_and_parses_notifications() {
         let dir = temp_dir("imsg");
@@ -1118,6 +1124,7 @@ done
         assert!(args.starts_with("ARGS rpc --json --db /tmp/chat.db"), "{args}");
     }
 
+    #[cfg(unix)]
     #[test]
     fn send_actions_and_reply_fallback() {
         let dir = temp_dir("imsg");
@@ -1150,6 +1157,7 @@ done
         assert_eq!(r[9]["method"], "message.unsend");
     }
 
+    #[cfg(unix)]
     #[test]
     fn restarts_after_exit_and_resubscribes_then_kills_on_drop() {
         let dir = temp_dir("imsg");
@@ -1198,6 +1206,7 @@ done
         format!("{y:04}-{m:02}-{d:02}T{:02}:{:02}:{:02}Z", rem / 3600, rem / 60 % 60, rem % 60)
     }
 
+    #[cfg(unix)]
     #[test]
     fn catchup_cursor_replays_since_rowid_dedups_and_drops_stale() {
         let dir = temp_dir("imsg");
@@ -1242,6 +1251,7 @@ done
         assert_eq!(c.since(), Some(7));
     }
 
+    #[cfg(unix)]
     #[test]
     fn private_api_gates_bridge_actions() {
         let dir = temp_dir("imsg");
@@ -1293,8 +1303,10 @@ done
         assert_eq!(db_identity("/opt/wrap.sh", None, None), "local:cli:/opt/wrap.sh");
     }
 
+    #[cfg(unix)]
     #[test]
     fn remote_host_stages_outbound_files_and_fetches_inbound_with_scp() {
+        #[cfg(unix)]
         use std::os::unix::fs::PermissionsExt;
         let dir = temp_dir("imsg");
         let mac = dir.join("mac");
@@ -1331,6 +1343,7 @@ done
         assert_eq!(m.fetch_media(&Media { path: Some("/x/`id`".into()), ..Default::default() }).unwrap_err().kind, K::Fatal);
     }
 
+    #[cfg(unix)]
     #[test]
     fn cancel_errors_and_helpers() {
         let dir = temp_dir("imsg");

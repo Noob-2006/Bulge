@@ -1,6 +1,7 @@
 //! Runtime-path tests: the Lightpanda `serve` launcher and its Chrome fallback, `browser_exec`
 //! (Browser Use harness) and `seagent browser install` (Chrome for Testing). Everything here runs
 //! against fake binaries/servers; nothing needs the network.
+#![cfg_attr(not(unix), allow(dead_code, unused_imports))]
 
 use crate::config::BrowserConfig;
 use serde_json::json;
@@ -15,7 +16,9 @@ fn temp_dir(tag: &str) -> PathBuf {
     d
 }
 
+#[cfg(unix)]
 fn exe(path: &std::path::Path, body: &str) {
+    #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
     std::fs::write(path, body).unwrap();
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
@@ -58,6 +61,7 @@ class H(BaseHTTPRequestHandler):
 HTTPServer(("127.0.0.1",p),H).serve_forever()' "$port"
 "#;
 
+#[cfg(unix)]
 #[test]
 fn lightpanda_serve_launches_with_hermes_flags() {
     let _g = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
@@ -195,6 +199,7 @@ fn make_zip(path: &std::path::Path) {
     assert!(status.success());
 }
 
+#[cfg(unix)]
 #[test]
 fn browser_install_downloads_and_unpacks_chrome_for_testing() {
     let _g = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
@@ -226,6 +231,7 @@ fn browser_install_downloads_and_unpacks_chrome_for_testing() {
     let exe = crate::launch::install_chromium(&cfg, &home, None, &mut |l| log.push(l.to_string())).unwrap();
     assert_eq!(exe, home.join("browsers/chrome-linux64/chrome"));
     assert!(exe.is_file() && home.join("browsers/chrome-linux64/icudtl.dat").is_file());
+    #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
     assert_eq!(std::fs::metadata(&exe).unwrap().permissions().mode() & 0o111, 0o111, "the binary is executable");
     assert_eq!(crate::launch::installed_chrome_in(&home.join("browsers")).as_deref(), Some(exe.as_path()));

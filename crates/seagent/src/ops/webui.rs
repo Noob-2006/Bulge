@@ -947,6 +947,7 @@ mod tests {
         assert_eq!((r["ok"].as_bool(), r["checks"][0]["key_source"].as_str()), (Some(true), Some("vault")));
     }
 
+    #[cfg(unix)]
     #[test]
     fn models_key_stores_in_and_removes_from_the_vault() {
         let _g = env_lock();
@@ -970,7 +971,9 @@ mod tests {
         assert_eq!(err(&c, "ui.models.key", json!({"key": "x"})).0, -32602);
     }
 
+    #[cfg(unix)]
     fn modified_mode(p: &std::path::Path) -> u32 {
+        #[cfg(unix)]
         use std::os::unix::fs::PermissionsExt;
         std::fs::metadata(p).unwrap().permissions().mode() & 0o777
     }
@@ -1068,6 +1071,7 @@ mod tests {
         assert_eq!(ok(&c, "ui.devices.remove", json!({"id": id}))["removed"], true);
     }
 
+    #[cfg(unix)]
     #[test]
     fn uploads_are_private_and_reject_traversal() {
         let t = kit();

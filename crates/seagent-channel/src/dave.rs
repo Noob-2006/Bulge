@@ -710,8 +710,10 @@ mod tests {
         assert_eq!(displayable_code(&long, 30, 5).replace(' ', ""), "058708105556138052119572494877");
     }
 
+    #[cfg(unix)]
     #[test]
     fn persistent_signature_key_is_0600_and_reloaded() {
+        #[cfg(unix)]
         use std::os::unix::fs::PermissionsExt;
         let dir = crate::testutil::temp_dir("davekey");
         let path = dir.join("dave").join("dc.key");

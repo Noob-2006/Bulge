@@ -12,6 +12,10 @@
 //!
 //! Every process a test starts is owned by a drop guard (SIGCONT + SIGKILL + wait), so a failing
 //! assertion or a panic never leaves a daemon or worker behind. Only those pids are signalled.
+//!
+//! Unix only: the scenarios are POSIX signals (SIGKILL / SIGSTOP / SIGCONT) against real
+//! processes, and the shared data dir is a symlink.
+#![cfg(unix)]
 
 use seagent_core::tmp::TempDir;
 use serde_json::{json, Value};

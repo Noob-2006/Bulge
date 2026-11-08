@@ -8,6 +8,7 @@
 //! * `secrets migrate` folds an existing plaintext file in, is idempotent, and refuses to
 //!   report success twice;
 //! * `status --json` reports the same file and backend (the doctor/status wiring).
+#![cfg_attr(not(unix), allow(dead_code, unused_imports))]
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -52,6 +53,7 @@ fn env_key() -> Vec<(&'static str, &'static str)> {
     vec![("SEAGENT_VAULT_KEY", KEY), ("SEAGENT_VAULT_BACKEND", "env")]
 }
 
+#[cfg(unix)]
 #[test]
 fn secrets_are_encrypted_at_rest_and_reported_by_backend_and_status() {
     let h = home("store");
@@ -64,6 +66,7 @@ fn secrets_are_encrypted_at_rest_and_reported_by_backend_and_status() {
     assert!(!cfg.join("secrets.toml").exists(), "no plaintext file is created");
     let body = std::fs::read(&enc).unwrap();
     assert!(!body.windows(6).any(|w| w == b"sup3r"), "no plaintext value on disk");
+    #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
     assert_eq!(std::fs::metadata(&enc).unwrap().permissions().mode() & 0o777, 0o600);
 
@@ -89,12 +92,14 @@ fn secrets_are_encrypted_at_rest_and_reported_by_backend_and_status() {
     assert!(out.contains("\"secretsBackend\":\"env\"") && out.contains("secrets.enc"), "{out}");
 }
 
+#[cfg(unix)]
 #[test]
 fn migrate_folds_a_plaintext_file_in_and_is_idempotent() {
     let h = home("migrate");
     let cfg = h.0.join("config");
     let plain = cfg.join("secrets.toml");
     std::fs::write(&plain, "OLD = \"old-value\"\n").unwrap();
+    #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
     std::fs::set_permissions(&plain, std::fs::Permissions::from_mode(0o600)).unwrap();
 
@@ -113,12 +118,14 @@ fn migrate_folds_a_plaintext_file_in_and_is_idempotent() {
     assert!(err.contains("already encrypted"), "{err}");
 }
 
+#[cfg(unix)]
 #[test]
 fn a_passphrase_store_needs_the_passphrase_file_and_never_creates_one() {
     let h = home("pass");
     let cfg = h.0.join("config");
     let pass = h.0.join("pass");
     std::fs::write(&pass, "correct horse\n").unwrap();
+    #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
     std::fs::set_permissions(&pass, std::fs::Permissions::from_mode(0o600)).unwrap();
     let pass_s = pass.to_string_lossy().to_string();

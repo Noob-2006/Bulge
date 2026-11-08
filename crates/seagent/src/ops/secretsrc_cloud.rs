@@ -409,6 +409,8 @@ pub(crate) mod tests {
         assert_eq!(fetch_vault(&c, &env, data.path(), false).secrets["OPENAI_API_KEY"], "sk-rotated");
     }
 
+    // Unix only: the fake aws/gcloud/az are `#!/bin/sh` scripts.
+    #[cfg(unix)]
     #[test]
     fn cloud_clis_share_the_interface() {
         use std::os::unix::fs::PermissionsExt;

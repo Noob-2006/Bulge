@@ -871,10 +871,13 @@ fn run_install(d: &Desktop, cmd: &str, io: &mut dyn Io) -> i32 {
 }
 
 #[cfg(test)]
+#[cfg_attr(not(unix), allow(dead_code, unused_imports))]
 mod tests {
     use super::*;
 
+    #[cfg(unix)]
     fn fake_bin(dir: &Path, name: &str, body: &str) {
+        #[cfg(unix)]
         use std::os::unix::fs::PermissionsExt;
         let p = dir.join(name);
         std::fs::write(&p, format!("#!/bin/sh\n{body}\n")).unwrap();
@@ -908,6 +911,7 @@ mod tests {
         (d, bin)
     }
 
+    #[cfg(unix)]
     #[test]
     fn status_missing_and_install_command() {
         let (d, bin) = desk("status");
@@ -940,6 +944,7 @@ mod tests {
         assert_eq!(screen_cli(&d, &["bogus".into()], &mut io), 2);
     }
 
+    #[cfg(unix)]
     #[test]
     fn install_runs_package_manager_with_sudo_password_on_stdin() {
         let (mut d, bin) = desk("install");
@@ -1003,6 +1008,7 @@ mod tests {
         assert_eq!(io.0, vec!["Bot Desktop: packages already installed."]);
     }
 
+    #[cfg(unix)]
     #[test]
     fn start_status_stop_with_fake_launcher() {
         let (mut d, bin) = desk("start");
@@ -1085,6 +1091,7 @@ mod tests {
         assert_eq!(io.0, vec!["Bot Desktop: was not running"]);
     }
 
+    #[cfg(unix)]
     #[test]
     fn failed_launch_reports_log_tail_and_frees_display() {
         let (mut d, bin) = desk("fail");

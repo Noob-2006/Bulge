@@ -19,7 +19,9 @@
 //! The sandbox has its own `HOME`, `TMPDIR` and `SEAGENT_HOME` (`TempDir` removes it on drop), so
 //! nothing here can read or write the developer's real state, and no network is used: the SBOM
 //! script falls back to parsing `Cargo.lock` when `cargo metadata --offline` cannot answer.
+#![cfg_attr(not(unix), allow(dead_code, unused_imports))]
 
+#[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -372,6 +374,7 @@ fn verify(sb: &Sandbox, dir: &Path, pubkey: &Path) -> Output {
     sb.bash("verify-release.sh", &[dir.to_string_lossy().as_ref(), "--key", pubkey.to_string_lossy().as_ref()])
 }
 
+#[cfg(unix)]
 #[test]
 fn sign_refuses_group_readable_key() {
     if !have("openssl") {
@@ -396,6 +399,7 @@ fn sign_refuses_group_readable_key() {
 // Script hygiene
 // ---------------------------------------------------------------------------------------------
 
+#[cfg(unix)]
 #[test]
 fn scripts_are_executable_and_declare_their_interpreter() {
     let expected: &[(&str, &str)] = &[
@@ -444,6 +448,7 @@ fn repro_check_parses_but_is_not_run() {
 // Release tarball, installer, binary checks, secret scan, reproducibility guard
 // ---------------------------------------------------------------------------------------------
 
+#[cfg(unix)]
 fn fake_binary(sb: &Sandbox) -> PathBuf {
     let p = sb.join("fake-seagent");
     std::fs::write(&p, "#!/bin/sh\necho \"seagent 0.0.0-test\"\n").unwrap();
@@ -451,10 +456,12 @@ fn fake_binary(sb: &Sandbox) -> PathBuf {
     p
 }
 
+#[cfg(unix)]
 fn make_tarball(sb: &Sandbox, out: &Path) -> Output {
     sb.bash("make-tarball.sh", &["x86_64-unknown-linux-musl", fake_binary(sb).to_str().unwrap(), out.to_str().unwrap()])
 }
 
+#[cfg(unix)]
 #[test]
 fn tarball_carries_the_binary_and_share_and_is_deterministic() {
     if !have("tar") {
@@ -488,6 +495,7 @@ fn tarball_carries_the_binary_and_share_and_is_deterministic() {
     assert!(bytes.len() > 1000);
 }
 
+#[cfg(unix)]
 /// A release directory the way release.yml's publish job leaves it, served by `file://`.
 fn served_release(sb: &Sandbox) -> PathBuf {
     let rel = sb.join("rel");
@@ -518,6 +526,7 @@ fn install(sb: &Sandbox, shell: &str, rel: &Path, extra_env: &[(&str, &str)]) ->
     c.output().unwrap()
 }
 
+#[cfg(unix)]
 #[test]
 fn install_sh_installs_binary_and_share_under_posix_shells() {
     if !have("tar") {
@@ -551,6 +560,7 @@ fn install_sh_installs_binary_and_share_under_posix_shells() {
     }
 }
 
+#[cfg(unix)]
 /// eb5d0cb5ea5: a caller with `umask 0002` must not leave the installed share tree
 /// group/world-writable. The script strips those bits without loosening a stricter mask.
 #[test]
@@ -592,6 +602,7 @@ fn install_sh_never_installs_group_or_world_writable_files() {
     assert_eq!(mode & 0o022, 0, "binary is group/world-writable (mode {:o})", mode & 0o777);
 }
 
+#[cfg(unix)]
 #[test]
 fn install_sh_refuses_a_bad_checksum_and_checks_the_signature() {
     if !have("tar") {

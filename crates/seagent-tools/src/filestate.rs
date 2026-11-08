@@ -870,6 +870,7 @@ mod tests {
         assert!(t.join().unwrap() >= released);
     }
 
+    #[cfg(unix)]
     #[test]
     fn guards() {
         assert!(blocked_device(Path::new("/dev/zero")) && blocked_device(Path::new("/proc/self/environ")) && blocked_device(Path::new("/dev/./urandom")));
@@ -891,6 +892,7 @@ mod tests {
         assert_eq!(special_file_kind(&fifo), Some("a FIFO (named pipe)"));
     }
 
+    #[cfg(unix)]
     #[test]
     fn containment_and_suggestions() {
         let d = tmpdir("contain");

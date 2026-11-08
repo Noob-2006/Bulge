@@ -1004,6 +1004,7 @@ pub fn computer_use_cli(cu: &Cu, args: &[String], out: Out) -> i32 {
 }
 
 #[cfg(test)]
+#[cfg_attr(not(unix), allow(dead_code, unused_imports))]
 mod tests {
     use super::*;
     use crate::control::screen::Collect;
@@ -1017,8 +1018,10 @@ mod tests {
         d
     }
 
+    #[cfg(unix)]
     /// A fake cua-driver: manifest / --version / doctor --json / a stdio MCP server.
     fn fake_driver(path: &Path, manifest: &str, overall: &str) {
+        #[cfg(unix)]
         use std::os::unix::fs::PermissionsExt;
         let report = format!(
             r#"{{"schema_version":1,"platform":"linux","driver_version":"0.21.0","overall":"{overall}","checks":[{{"name":"display","status":"pass","message":"X11 :22"}},{{"name":"screenshot_probe","status":"{}","message":"probe","hint":"start the screen"}}]}}"#,
@@ -1068,6 +1071,7 @@ mod tests {
         assert_eq!(semver("v0.21.0-beta"), Some((0, 21, 0)));
     }
 
+    #[cfg(unix)]
     #[test]
     fn status_doctor_permissions_with_fake_driver() {
         let home = scratch("status");
@@ -1202,8 +1206,10 @@ mod tests {
         assert!(o.0[0].starts_with("usage: seagent screen"));
     }
 
+    #[cfg(unix)]
     /// A fake driver whose `status` reports a dead daemon (what a crashed `cua-driver serve` says).
     fn fake_dead_daemon(path: &Path) {
+        #[cfg(unix)]
         use std::os::unix::fs::PermissionsExt;
         let script = format!(
             "#!/bin/sh\ncase \"$1\" in\n manifest) echo '{MANIFEST}';;\n --version) echo 'cua-driver 0.21.0';;\n status) echo 'cua-driver: daemon not running' >&2; exit 1;;\n *) exit 0;;\nesac\n"
@@ -1213,6 +1219,7 @@ mod tests {
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
     }
 
+    #[cfg(unix)]
     #[test]
     fn linux_daemon_units_are_probed_by_status() {
         let home = scratch("daemon");
@@ -1262,8 +1269,10 @@ mod tests {
         assert!(o.0.last().unwrap().contains("seagent pin"));
     }
 
+    #[cfg(unix)]
     #[test]
     fn macos_readiness_folds_tcc_grants() {
+        #[cfg(unix)]
         use std::os::unix::fs::PermissionsExt;
         let home = scratch("mac");
         let c = cu(&home);
@@ -1293,6 +1302,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&home);
     }
 
+    #[cfg(unix)]
     #[test]
     fn install_downloads_verifies_and_unpacks() {
         let home = scratch("install");

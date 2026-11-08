@@ -782,6 +782,7 @@ mod tests {
         assert_eq!(kind_of(Path::new("/usr/bin/brave-browser")), "brave");
     }
 
+    #[cfg(unix)]
     #[test]
     fn devtools_port_file_and_stale_locks() {
         let d = seagent_core::tmp::scratch_path(format!("seagent-launch-{}", std::process::id()));

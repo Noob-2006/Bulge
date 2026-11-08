@@ -1,3 +1,4 @@
+#![cfg_attr(not(unix), allow(dead_code, unused_imports))]
 use seagent_core::tool::SpawnRequest;
 use seagent_core::{Cancel, ToolCtx, ToolHost};
 use std::path::PathBuf;

@@ -717,6 +717,7 @@ mod tests {
         assert!(status(&cfg2).contains("local headless Chromium"));
     }
 
+    #[cfg(unix)]
     /// Spawn the copied `/bin/sh` stand-in "chrome". Concurrent tests fork (screen/cua fakes) while this
     /// file may still be open for writing in that child, which surfaces as ETXTBSY — retry briefly.
     fn spawn_fake(fake: &Path, args: &[String]) -> std::process::Child {
@@ -732,6 +733,7 @@ mod tests {
         panic!("spawn {}: still ETXTBSY", fake.display());
     }
 
+    #[cfg(unix)]
     #[test]
     fn close_profile_cli() {
         let (c, h) = browser_cli(&[]);
@@ -774,6 +776,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    #[cfg(unix)]
     /// SAFETY: a temp profile must never match — let alone signal — a browser process that was started
     /// without `--user-data-dir` (the shape of every one of the user's own Chrome instances).
     #[test]

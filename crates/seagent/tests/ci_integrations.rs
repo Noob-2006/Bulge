@@ -6,9 +6,11 @@
 //! checked: the script's behaviour (diff in, review out, the agent never sees the posting
 //! token, fix rounds, patch contents, the comment request), and that the three CI files parse
 //! and wire the script correctly (their `run:` blocks even pass `sh -n`).
+#![cfg_attr(not(unix), allow(dead_code, unused_imports))]
 
 use seagent_core::tmp::TempDir;
 use serde_json::Value;
+#[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -21,6 +23,7 @@ fn script() -> PathBuf {
     root().join("integrations/ci/seagent-ci.sh")
 }
 
+#[cfg(unix)]
 fn write_exec(p: &Path, body: &str) {
     std::fs::write(p, body).unwrap();
     std::fs::set_permissions(p, std::fs::Permissions::from_mode(0o755)).unwrap();
@@ -38,6 +41,7 @@ struct Fixture {
     log: PathBuf,
 }
 
+#[cfg(unix)]
 /// A repo with `main` and a feature commit, a fake `seagent` that logs and answers, a fake `curl`.
 fn fixture(fake_seagent_body: &str) -> Fixture {
     let dir = TempDir::new("seagent-run-ci");
@@ -83,6 +87,7 @@ fn text(o: &Output) -> String {
     format!("{}{}", String::from_utf8_lossy(&o.stdout), String::from_utf8_lossy(&o.stderr))
 }
 
+#[cfg(unix)]
 #[test]
 fn review_hands_the_diff_over_as_data_and_never_the_posting_token() {
     let f = fixture("echo '### Review\n- blocker: division by zero in total() when xs is empty\nVerdict: REQUEST CHANGES'");
@@ -105,6 +110,7 @@ fn review_hands_the_diff_over_as_data_and_never_the_posting_token() {
     }
 }
 
+#[cfg(unix)]
 #[test]
 fn a_huge_diff_is_cut_and_the_model_is_told() {
     let f = fixture("echo ok");
@@ -118,6 +124,7 @@ fn a_huge_diff_is_cut_and_the_model_is_told() {
     assert!(stdin.len() < 12_000, "prompt is bounded: {}", stdin.len());
 }
 
+#[cfg(unix)]
 #[test]
 fn an_empty_change_is_not_sent_to_the_model() {
     let f = fixture("echo should-not-run");
@@ -127,6 +134,7 @@ fn an_empty_change_is_not_sent_to_the_model() {
     assert!(std::fs::read_to_string(f.repo.join(".seagent-ci/review.md")).unwrap().contains("No changes"));
 }
 
+#[cfg(unix)]
 #[test]
 fn a_failing_agent_fails_the_job() {
     let f = fixture("echo boom >&2; exit 3");
@@ -135,6 +143,7 @@ fn a_failing_agent_fails_the_job() {
     assert!(text(&o).contains("seagent failed"));
 }
 
+#[cfg(unix)]
 #[test]
 fn fix_tests_loops_until_green_and_leaves_a_patch_with_new_files() {
     // The first fix round does nothing useful, the second creates the file the tests need.
@@ -151,6 +160,7 @@ fn fix_tests_loops_until_green_and_leaves_a_patch_with_new_files() {
     assert!(stdin.contains("=== DATA: last 200 lines"), "the log is data");
 }
 
+#[cfg(unix)]
 #[test]
 fn fix_tests_gives_up_after_the_attempts_and_passing_tests_need_no_agent() {
     let f = fixture("echo tried");
@@ -165,6 +175,7 @@ fn fix_tests_gives_up_after_the_attempts_and_passing_tests_need_no_agent() {
     assert_eq!(g.run("fix-tests", &[]).status.code(), Some(2), "a test command is required");
 }
 
+#[cfg(unix)]
 #[test]
 fn run_mode_wraps_the_prompt_with_the_ci_rules() {
     let f = fixture("echo 'answer 42'");
@@ -174,6 +185,7 @@ fn run_mode_wraps_the_prompt_with_the_ci_rules() {
     assert!(stdin.contains("running unattended inside a CI job") && stdin.contains("Summarise the open TODOs"), "{stdin}");
 }
 
+#[cfg(unix)]
 #[test]
 fn posting_uses_the_forge_api_with_the_token_and_marks_the_comment() {
     let f = fixture("echo ok");

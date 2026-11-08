@@ -761,8 +761,10 @@ mod tests {
         assert!(e.contains("--agent must be one of codex, claude, pi"), "{e}");
     }
 
+    #[cfg(unix)]
     #[test]
     fn prepare_writes_private_artifacts() {
+        #[cfg(unix)]
         use std::os::unix::fs::PermissionsExt;
         let kit = crate::testkit::kit();
         let p = prepare(&kit.paths, Ok(&kit.k.cfg), &|_| true, true, None).unwrap();

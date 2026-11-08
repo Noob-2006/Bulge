@@ -733,6 +733,7 @@ mod tests {
         Paths { data: root.join("data"), config_dir: root.join("config"), runtime: root.join("run"), ..Default::default() }
     }
 
+    #[cfg(unix)]
     #[test]
     fn set_unset_keep_comments_and_validate() {
         let p = paths();
@@ -754,6 +755,7 @@ mod tests {
         assert!(!std::fs::read_to_string(p.user_config()).unwrap().contains("max_tokens"));
         assert!(unset(&p, "model.max_tokens").is_err());
         assert!(!backups(&p).is_empty() && backups(&p).len() <= KEEP_BACKUPS);
+        #[cfg(unix)]
         use std::os::unix::fs::PermissionsExt;
         assert_eq!(std::fs::metadata(p.user_config()).unwrap().permissions().mode() & 0o777, 0o600);
         assert_eq!(get(&p, Path::new("/nonexistent"), "model.default").unwrap(), "a/b");

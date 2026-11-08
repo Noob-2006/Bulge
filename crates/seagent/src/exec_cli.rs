@@ -1071,6 +1071,7 @@ mod tests {
         seagent_tools::exec::install(Arc::new(ExecEnv::default()));
     }
 
+    #[cfg(unix)]
     /// A1/A3/A5 in the daemon, without booting a VM: when the broker is on, `attach()` starts
     /// the socket the VM adapter talks to, hands it to every VM manager, and installs the
     /// capability gate on the egress proxy. The real-VM half of this is

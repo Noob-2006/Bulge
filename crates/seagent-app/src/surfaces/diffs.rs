@@ -718,12 +718,14 @@ mod tests {
         assert!(t2.call(&ctx, json!({"before": "a", "after": "b", "mode": "file"})).is_error);
     }
 
+    #[cfg(unix)]
     #[test]
     fn file_mode_renders_with_a_browser() {
         // A stand-in "browser" that writes the --screenshot target.
         let d = testkit::temp("fake-chrome");
         let bin = d.join("chromium");
         std::fs::write(&bin, "#!/bin/sh\nfor a in \"$@\"; do case \"$a\" in --screenshot=*) printf PNG > \"${a#--screenshot=}\";; --print-to-pdf=*) printf PDF > \"${a#--print-to-pdf=}\";; esac; done\n").unwrap();
+        #[cfg(unix)]
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
         let (env, _) = testkit::env("diffs3", &[], &format!("[diffs]\nbrowser = \"{}\"\n", bin.display()));

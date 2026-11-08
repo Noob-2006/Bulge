@@ -169,6 +169,7 @@ impl ExecBackend for SingularityBackend {
 }
 
 #[cfg(test)]
+#[cfg_attr(not(unix), allow(dead_code, unused_imports))]
 mod tests {
     use super::*;
     use crate::exec::sync::common::fakecli;
@@ -176,6 +177,7 @@ mod tests {
     use crate::testutil::tmpdir;
     use serde_json::json;
 
+    #[cfg(unix)]
     /// A stand-in `singularity`: `version` answers the preflight, `exec` records
     /// its argv and runs the trailing script locally (the workspace is bound at
     /// the same path, so local bash is a fair stand-in).
@@ -197,6 +199,7 @@ exec bash -c "$last"
         BackendCtx { workspace: ws.to_path_buf(), scope_key: "s-1".into(), secrets: std::sync::Arc::new(|s: &str| s.to_string()), home: home.to_path_buf(), sandboxed: true }
     }
 
+    #[cfg(unix)]
     #[test]
     fn exec_argv_bind_pty_and_errors() {
         let base = tmpdir("sing");

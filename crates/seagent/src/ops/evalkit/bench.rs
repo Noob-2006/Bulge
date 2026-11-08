@@ -759,8 +759,10 @@ mod tests {
         assert!(back.pass && back.status == "done");
     }
 
+    #[cfg(unix)]
     #[test]
     fn osworld_runs_in_a_named_bot_desktop_container_with_a_fake_runtime() {
+        #[cfg(unix)]
         use std::os::unix::fs::PermissionsExt;
         let out = seagent_core::tmp::scratch("seagent-osw");
         let sand = out.join("desk");

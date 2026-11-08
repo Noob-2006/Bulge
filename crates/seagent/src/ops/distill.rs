@@ -1096,6 +1096,7 @@ mod tests {
         assert!(m.contains("成員A") && m.contains("成員B"), "{m}");
     }
 
+    #[cfg(unix)]
     #[test]
     fn team_mode_refuses_without_authorization_and_masks_everything_it_keeps() {
         let _l = crate::testkit::env_lock();
@@ -1139,6 +1140,7 @@ mod tests {
         assert_eq!(masked, vec!["oncall-成員A.md".to_string()], "binary skipped, name masked in the file name");
         let body = std::fs::read_to_string(out.join("masked/oncall-成員A.md")).unwrap();
         assert!(!body.contains("王小明") && !body.contains("Alice") && !body.contains("ming@") && body.contains("[email]"), "{body}");
+        #[cfg(unix)]
         use std::os::unix::fs::PermissionsExt;
         assert_eq!(std::fs::metadata(out.join("masked/oncall-成員A.md")).unwrap().permissions().mode() & 0o777, 0o600);
         let skill = std::fs::read_to_string(out.join("pack/team-practice/SKILL.md")).unwrap();

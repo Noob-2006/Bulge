@@ -1055,6 +1055,7 @@ fn plugin_caps(p: &seagent_plugin::PluginHost) -> Value {
 mod tests {
     use super::*;
 
+    #[cfg(unix)]
     #[test]
     fn audit_flags_foot_guns() {
         let root = seagent_core::tmp::scratch_path(format!("seagent-audit-{}", std::process::id()));

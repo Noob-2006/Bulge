@@ -691,6 +691,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(c.home.parent().unwrap());
     }
 
+    #[cfg(unix)]
     /// The adapter to A's daemon broker: one JSON line in, one out.
     #[test]
     fn the_socket_broker_speaks_the_daemons_protocol() {

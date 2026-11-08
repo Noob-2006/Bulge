@@ -253,6 +253,7 @@ pub fn dispatch(cmd: &str, a: &Args, _raw: &[String]) -> Option<R> {
 mod tests {
     use super::*;
 
+    #[cfg(unix)]
     #[test]
     fn keygen_sign_and_verify_round_trip_without_a_daemon() {
         let d = seagent_core::tmp::TempDir::new("seagent-cluster-cli");
@@ -260,6 +261,7 @@ mod tests {
         let public = keygen(&seed).unwrap();
         assert!(public.starts_with("ed25519:"));
         assert!(keygen(&seed).unwrap_err().contains("refusing to overwrite"));
+        #[cfg(unix)]
         use std::os::unix::fs::PermissionsExt;
         assert_eq!(std::fs::metadata(&seed).unwrap().permissions().mode() & 0o777, 0o600);
         let b = cluster::sign_bundle(&read_seed(&seed).unwrap(), "[model]\nallow = [\"local/*\"]\n", 1).unwrap();

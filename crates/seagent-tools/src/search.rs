@@ -543,6 +543,7 @@ mod tests {
         assert!(Glob.call(&c, json!({"pattern":"*","path":"src/a.rs"})).is_error);
     }
 
+    #[cfg(unix)]
     #[test]
     fn symlink_cycles_do_not_hang() {
         let c = ctx("cycle");

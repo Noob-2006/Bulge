@@ -245,10 +245,12 @@ fn real_browser_dies_with_a_panicking_test() {
     assert!(gone, "Chrome group {pid} outlived the panicking test process");
 }
 
+#[cfg(unix)]
 /// A stand-in "browser": writes `DevToolsActivePort` into its `--user-data-dir` (what the
 /// launcher waits for), then becomes a long `sleep`. Lets the launcher's process tying be
 /// tested on every run, without Chrome.
 fn fake_browser(dir: &std::path::Path) -> std::path::PathBuf {
+    #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
     let exe = dir.join("fake-chrome");
     std::fs::write(&exe, "#!/bin/sh\nfor a in \"$@\"; do case \"$a\" in --user-data-dir=*) d=\"${a#*=}\";; esac; done\nprintf '9\\n/devtools/browser/fake\\n' > \"$d/DevToolsActivePort\"\nexec sleep 300\n").unwrap();
@@ -256,6 +258,7 @@ fn fake_browser(dir: &std::path::Path) -> std::path::PathBuf {
     exe
 }
 
+#[cfg(unix)]
 /// Child half of [`launcher_ties_the_browser_to_a_panicking_process`].
 #[test]
 fn launcher_panic_helper() {

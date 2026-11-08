@@ -725,10 +725,12 @@ impl ExecBackend for ContainerBackend {
 }
 
 #[cfg(test)]
+#[cfg_attr(not(unix), allow(dead_code, unused_imports))]
 mod tests {
     use super::*;
     use crate::exec::drain;
     use crate::testutil::tmpdir;
+    #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
     use std::sync::Arc;
 
@@ -772,6 +774,7 @@ exit 0
     }
 
     impl Fake {
+        #[cfg(unix)]
         fn new(tag: &str) -> Fake {
             let dir = tmpdir(tag);
             let bin = dir.join("docker");
@@ -816,6 +819,7 @@ exit 0
         log.contains(&format!("@@[run]{seq}"))
     }
 
+    #[cfg(unix)]
     #[test]
     fn exec_env_builds_the_container_backend_for_host_and_sandbox() {
         let f = Fake::new("ctr10");
@@ -862,6 +866,7 @@ exit 0
         assert!(ExecConfig::parse(&serde_json::json!({"podman": {"image": ""}})).is_err(), "an empty image is refused at config time");
     }
 
+    #[cfg(unix)]
     #[test]
     fn hardening_args_labels_and_mounts() {
         let f = Fake::new("ctr1");
@@ -899,6 +904,7 @@ exit 0
         assert_eq!(log.lines().filter(|l| l.contains("[run]")).count(), 1, "{log}");
     }
 
+    #[cfg(unix)]
     #[test]
     fn workspace_access_none_ro_rw_and_path_mapping() {
         let f = Fake::new("ctr2");
@@ -924,6 +930,7 @@ exit 0
         assert!(has(&be.run_args(), &["-v", mount.as_str()]));
     }
 
+    #[cfg(unix)]
     #[test]
     fn exec_runs_the_script_and_forwards_a_clean_env() {
         let f = Fake::new("ctr3");
@@ -953,6 +960,7 @@ exit 0
         assert!(f.log().contains("[exec][-t][-i]"), "{}", f.log());
     }
 
+    #[cfg(unix)]
     #[test]
     fn egress_proxy_env_follows_the_network_mode() {
         let f = Fake::new("ctr4");
@@ -998,6 +1006,7 @@ exit 0
         assert!(cfg.validate().is_err());
     }
 
+    #[cfg(unix)]
     #[test]
     fn proxy_sidecar_image_carries_the_allowlist() {
         let f = Fake::new("ctr5");
@@ -1026,6 +1035,7 @@ exit 0
         assert!(log.contains("[rm][-f][seagent-s1]") && log.contains("[rm][-f][seagent-egress-s1]"), "{log}");
     }
 
+    #[cfg(unix)]
     #[test]
     fn reattaches_a_running_container_and_starts_a_stopped_one() {
         let f = Fake::new("ctr6");
@@ -1045,6 +1055,7 @@ exit 0
         assert!(log.contains("[start][seagent-s1]") && !log.contains("[run]"), "{log}");
     }
 
+    #[cfg(unix)]
     #[test]
     fn cleanup_and_prune_remove_by_label() {
         let f = Fake::new("ctr7");
@@ -1063,6 +1074,7 @@ exit 0
         assert!(log.contains("[rm][-f][abc][def]"), "{log}");
     }
 
+    #[cfg(unix)]
     #[test]
     fn missing_binary_bad_binds_and_reserved_targets() {
         let f = Fake::new("ctr8");
@@ -1093,6 +1105,7 @@ exit 0
         assert_eq!(be.map_path(Path::new("/tmp/x/y")), "/data/x/y");
     }
 
+    #[cfg(unix)]
     #[test]
     fn credential_files_are_mounted_read_only_and_dangerous_ones_are_not() {
         // `[exec] credential_files`: a real file under $HOME is mounted read-only at the same
@@ -1118,6 +1131,7 @@ exit 0
         let _ = std::fs::remove_file(&src);
     }
 
+    #[cfg(unix)]
     #[test]
     fn podman_defaults_use_keep_id_instead_of_user() {
         let f = Fake::new("ctr9");

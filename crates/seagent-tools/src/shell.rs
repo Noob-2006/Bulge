@@ -587,6 +587,7 @@ mod tests {
     use super::*;
     use crate::testutil::ctx;
 
+    #[cfg(unix)]
     fn group_alive(pgid: i32) -> bool {
         unsafe { libc::kill(-pgid, 0) == 0 }
     }
@@ -628,6 +629,7 @@ mod tests {
         assert!(o.content.contains("/sub"), "{}", o.content);
     }
 
+    #[cfg(unix)]
     #[test]
     fn timeout_kills_whole_group() {
         let c = ctx("shto");

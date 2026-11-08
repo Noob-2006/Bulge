@@ -2531,6 +2531,7 @@ mod tests {
         assert!(render_mcp_prompt("{data}", &json!({"data": "x".repeat(MCP_DATA_CHARS + 10)}), "", "").contains("[truncated: the first 32000 of"));
     }
 
+    #[cfg(unix)]
     #[test]
     fn dynamic_subscriptions_hot_reload() {
         let dir = crate::testutil::temp_dir("whsub");
@@ -2542,6 +2543,7 @@ mod tests {
         let secret = stored["secret"].as_str().unwrap().to_string();
         assert!(secret.len() >= 40 && stored["created_at"].as_str().unwrap().ends_with('Z'));
         {
+            #[cfg(unix)]
             use std::os::unix::fs::PermissionsExt;
             assert_eq!(std::fs::metadata(&subs).unwrap().permissions().mode() & 0o777, 0o600);
         }

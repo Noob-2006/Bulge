@@ -1556,6 +1556,7 @@ pub fn build(ctx: &crate::config::Ctx, s: &serde_json::Map<String, Value>) -> Re
 }
 
 #[cfg(test)]
+#[cfg_attr(not(unix), allow(dead_code, unused_imports))]
 mod tests {
     use super::*;
     use crate::testutil::{temp_dir, FakeServer, Req};
@@ -2113,6 +2114,7 @@ mod tests {
         ["sh", "-c", script, "sh", "{in}", "{out}", "{rate}"].iter().map(|s| s.to_string()).collect()
     }
 
+    #[cfg(unix)]
     #[test]
     fn silk_voice_decode_encode_and_wav_url() {
         // QQ's pre-converted WAV wins over the SILK original.

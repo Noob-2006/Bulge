@@ -123,6 +123,7 @@ pub fn start(m: &Manager, env: &Env) -> Result<Arc<Browser>, String> {
 }
 
 #[cfg(test)]
+#[cfg_attr(not(unix), allow(dead_code, unused_imports))]
 mod tests {
     use super::*;
     use crate::config::BrowserConfig;
@@ -136,12 +137,14 @@ mod tests {
         assert_eq!(pick(None, false, false), "docker", "nothing installed: keep docker in the error message");
     }
 
+    #[cfg(unix)]
     #[test]
     fn refuses_host_network_and_stale_images() {
         let dir = seagent_core::tmp::scratch_path(format!("seagent-sbx-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let fake = dir.join("docker");
         std::fs::write(&fake, "#!/bin/sh\necho \"$@\" >> \"$(dirname \"$0\")/calls\"\ncase \"$1\" in image) echo old-contract ;; esac\n").unwrap();
+        #[cfg(unix)]
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
         std::env::set_var("SEAGENT_DOCKER", &fake);
@@ -163,6 +166,7 @@ mod tests {
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../packaging/sandbox-browser")
     }
 
+    #[cfg(unix)]
     #[test]
     fn sandbox_image_matches_the_contract() {
         let dir = packaging_dir();
@@ -199,6 +203,7 @@ mod tests {
             Err(_) => return, // no bash on this host: nothing to syntax-check with
         }
 
+        #[cfg(unix)]
         use std::os::unix::fs::PermissionsExt;
         let mode = std::fs::metadata(&entry_path).unwrap().permissions().mode();
         assert_ne!(mode & 0o111, 0, "entrypoint.sh must be executable (mode {:o})", mode);

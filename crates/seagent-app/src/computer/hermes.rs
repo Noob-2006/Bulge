@@ -616,6 +616,7 @@ impl ComputerUseTool {
 mod tests {
     use super::*;
 
+    #[cfg(unix)]
     /// G9: a real Hermes action path over a recording cua-driver — capture lists the driver's
     /// elements, click goes to that element's token, type/key reach the driver, and the
     /// post-action capture round-trips. No desktop, no real driver.

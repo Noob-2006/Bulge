@@ -655,6 +655,7 @@ mod tests {
         Ok(format!("spawned restart drain={d}"))
     }
 
+    #[cfg(unix)]
     #[test]
     fn diagnostics_bundle_is_private_and_redacted() {
         let t = kit();
@@ -669,6 +670,7 @@ mod tests {
         let p = std::fs::read_dir(t.paths.data.join("diagnostics")).unwrap().next().unwrap().unwrap().path();
         let body = std::fs::read_to_string(&p).unwrap();
         assert!(!body.contains("sk-live-abcdef") && body.contains("slow replies"));
+        #[cfg(unix)]
         use std::os::unix::fs::PermissionsExt;
         assert_eq!(std::fs::metadata(&p).unwrap().permissions().mode() & 0o777, 0o600);
     }

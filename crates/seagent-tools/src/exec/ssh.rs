@@ -483,11 +483,13 @@ impl ExecBackend for SshBackend {
 }
 
 #[cfg(test)]
+#[cfg_attr(not(unix), allow(dead_code, unused_imports))]
 mod tests {
     use super::*;
     use crate::exec::sync::common::fakecli;
     use crate::exec::ExecEnv;
     use crate::testutil::tmpdir;
+    #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
 
     fn cred_file(tag: &str, home: &Path) -> (PathBuf, String) {
@@ -497,6 +499,7 @@ mod tests {
         (p, rel)
     }
 
+    #[cfg(unix)]
     #[test]
     fn ssh_argv_push_pull_credentials_and_pty_honesty() {
         // The ControlMaster socket directory lives at a fixed name in the temp dir.
@@ -573,6 +576,7 @@ mod tests {
         fakecli::restore_path(old);
     }
 
+    #[cfg(unix)]
     #[test]
     fn persistent_shell_reuses_one_ssh_process_and_frames_exit_status() {
         let _lock = fakecli::lock_path();
@@ -605,6 +609,7 @@ mod tests {
         fakecli::restore_path(old);
     }
 
+    #[cfg(unix)]
     #[test]
     fn ssh_config_errors_and_remote_only_mode() {
         let _lock = fakecli::lock_path();

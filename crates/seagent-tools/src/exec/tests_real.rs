@@ -12,8 +12,10 @@
 //!
 //! Every container is named `seagent-test-realtest-*` and removed by a drop guard (also on a
 //! failed assertion); docker is skipped (and says so) when there is no `docker` client.
+#![cfg_attr(not(unix), allow(dead_code, unused_imports))]
 
 use super::container::{ContainerBackend, ContainerConfig};
+#[cfg(any(target_os = "linux", target_os = "android"))]
 use super::local::{BwrapBackend, BwrapConfig};
 use super::sandbox::SandboxConfig;
 use super::ssh::{SshBackend, SshConfig};
@@ -62,6 +64,7 @@ fn exists(bin: &str, name: &str) -> bool {
         || std::process::Command::new(bin).args(["ps", "-aq", "--filter", &format!("name=^{name}$")]).output().map(|o| !o.stdout.is_empty()).unwrap_or(false)
 }
 
+#[cfg(unix)]
 fn container_case(bin: &str) {
     let c = ctx(bin, true);
     std::fs::write(c.workspace.join("in.txt"), "from host\n").unwrap();
@@ -100,6 +103,7 @@ fn container_case(bin: &str) {
     assert!(seagent_core::proc::wait_until(Duration::from_secs(15), || !exists(bin, be.name())), "cleanup left {} behind", be.name());
 }
 
+#[cfg(unix)]
 #[test]
 #[ignore]
 fn real_backend_podman() {
@@ -110,6 +114,7 @@ fn real_backend_podman() {
     container_case("podman");
 }
 
+#[cfg(unix)]
 #[test]
 #[ignore]
 fn real_backend_docker() {
@@ -123,6 +128,7 @@ fn real_backend_docker() {
     container_case("docker");
 }
 
+#[cfg(any(target_os = "linux", target_os = "android"))]
 #[test]
 #[ignore]
 fn real_backend_bwrap() {

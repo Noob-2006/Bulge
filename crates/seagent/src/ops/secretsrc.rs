@@ -1281,6 +1281,7 @@ pub fn dispatch(cmd: &str, a: &Args, _raw: &[String]) -> Option<R> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
 
     fn root() -> PathBuf {
@@ -1289,6 +1290,7 @@ mod tests {
         d
     }
 
+    #[cfg(unix)]
     fn script(dir: &Path, name: &str, body: &str) -> PathBuf {
         let p = dir.join("bin").join(name);
         std::fs::write(&p, format!("#!/bin/sh\n{body}\n")).unwrap();
@@ -1306,6 +1308,7 @@ mod tests {
         s.parse().unwrap()
     }
 
+    #[cfg(unix)]
     #[test]
     fn bitwarden_fetch_cache_and_stale_fallback() {
         let d = root();
@@ -1359,6 +1362,7 @@ echo '[{{"key":"OPENAI_API_KEY","value":"sk-1"}},{{"key":"bad-name","value":"x"}
         assert!(enc_read(&d, "k1", "0.tok", 0.0).is_none());
     }
 
+    #[cfg(unix)]
     #[test]
     fn onepassword_reads_refs_with_terminator() {
         let d = root();
@@ -1402,6 +1406,7 @@ case "$ref" in op://v/openai/key) echo sk-op;; op://v/empty/x) echo "";; *) echo
         assert_eq!(fetch_command(&table(""), &env).error.unwrap().1, ErrorKind::NotConfigured);
     }
 
+    #[cfg(unix)]
     #[test]
     fn apply_all_precedence() {
         let d = root();
@@ -1426,6 +1431,7 @@ case "$ref" in op://v/openai/key) echo sk-op;; op://v/empty/x) echo "";; *) echo
         assert!(bw.skipped_existing.contains(&"KEEP_ME".to_string()));
     }
 
+    #[cfg(unix)]
     #[test]
     fn cli_setup_set_status_disable() {
         let d = root();
@@ -1452,6 +1458,7 @@ case "$ref" in op://v/openai/key) echo sk-op;; op://v/empty/x) echo "";; *) echo
         assert_eq!(classify("Error: dns lookup failed", BWS_RULES), ErrorKind::Network);
     }
 
+    #[cfg(unix)]
     #[test]
     fn bitwarden_setup_honors_token_env_and_server_env() {
         let d = root();
@@ -1482,6 +1489,7 @@ echo '[{{"key":"K","value":"v"}}]'"#, d.display()));
         assert_eq!(s(&section(&load_config(&paths), "bitwarden"), "server_url", ""), "https://vault.bitwarden.com");
     }
 
+    #[cfg(unix)]
     #[test]
     fn onepassword_token_is_verified_with_whoami() {
         let d = root();

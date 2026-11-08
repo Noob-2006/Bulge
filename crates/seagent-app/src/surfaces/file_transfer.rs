@@ -475,6 +475,7 @@ mod tests {
     use super::*;
     use std::sync::Mutex;
 
+    #[cfg(unix)]
     #[test]
     fn node_side_enforces_roots_and_writes_atomically() {
         let d = testkit::temp("ft-node");
@@ -552,6 +553,7 @@ mod tests {
         assert!(matches!(mk("file_write").effects(&ctx, &json!({"node": "n1", "path": "/x"}))[0], Effect::Remote { .. }));
     }
 
+    #[cfg(unix)]
     #[test]
     fn unpack_rejects_links() {
         let d = testkit::temp("ft-tar");

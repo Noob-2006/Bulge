@@ -2397,6 +2397,7 @@ mod tests {
         seagent_net::ws::header(head, "x-reef-handle") == Some("me") && seagent_net::crypto::ed25519_verify(&b64ud(&k.signing_pub).unwrap(), canonical(&input).as_bytes(), &sig)
     }
 
+    #[cfg(unix)]
     #[test]
     fn rest_catch_up_delivers_acks_on_next_poll_and_survives_restart() {
         let dir = temp_dir("reef");

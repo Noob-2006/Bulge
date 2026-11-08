@@ -223,6 +223,7 @@ mod tests {
         assert!(dispatch("not-worker", &a, &raw).is_none(), "other commands fall through");
     }
 
+    #[cfg(unix)]
     #[test]
     fn admission_rules() {
         let root = seagent_core::tmp::scratch_path(format!("seagent-wk-{}", seagent_kernel::util::random_hex(4)));

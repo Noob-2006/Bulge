@@ -737,6 +737,7 @@ impl E2ee {
 }
 
 #[cfg(test)]
+#[cfg_attr(not(unix), allow(dead_code, unused_imports))]
 mod tests {
     use super::*;
     use crate::matrix_e2ee::fake_hs::FakeHs;
@@ -799,6 +800,7 @@ mod tests {
         Opts { startup_verification: false, ..Opts::default() }
     }
 
+    #[cfg(unix)]
     #[test]
     fn cross_signing_secret_storage_and_backup_bootstrap() {
         let hs = FakeHs::new(ROOM, &[A, B], json!({"algorithm": MEGOLM}));
@@ -806,6 +808,7 @@ mod tests {
         let a = dev(&hs, &dir, A, "ADEV", quiet());
         // Recovery key written 0600, never in the notices' text.
         let rk_file = dir.join("ADEV.recovery-key");
+        #[cfg(unix)]
         use std::os::unix::fs::PermissionsExt;
         assert_eq!(std::fs::metadata(&rk_file).unwrap().permissions().mode() & 0o777, 0o600);
         let rk = std::fs::read_to_string(&rk_file).unwrap().trim().to_string();

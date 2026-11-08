@@ -417,6 +417,7 @@ mod tests {
         Args::parse(&v.iter().map(|s| s.to_string()).collect::<Vec<_>>()).unwrap()
     }
 
+    #[cfg(unix)]
     /// The acceptance run of this round: fake models through the whole pipeline on the shipped
     /// smoke suite (load → run → grade → report), plus an external agent as a command.
     #[test]
@@ -428,6 +429,7 @@ mod tests {
         let bin = out.join("fake-agent");
         std::fs::write(&bin, "#!/bin/sh\necho '{\"result\":\"FINAL ANSWER: Paris\",\"total_cost_usd\":0.01,\"usage\":{\"input_tokens\":12,\"output_tokens\":3}}'\n").unwrap();
         {
+            #[cfg(unix)]
             use std::os::unix::fs::PermissionsExt;
             std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
         }

@@ -656,8 +656,10 @@ mod tests {
         assert_eq!(k.cfg.tools.profile.as_deref(), Some("benchmark"));
     }
 
+    #[cfg(unix)]
     #[test]
     fn mini_harness_runs_in_a_named_task_container_and_grades_before_teardown() {
+        #[cfg(unix)]
         use std::os::unix::fs::PermissionsExt;
         let out = seagent_core::tmp::scratch("seagent-evmini");
         let bin = out.join("podman");

@@ -474,6 +474,7 @@ mod tests {
         assert!(glob_regex("team[1]/SOUL.md").unwrap().is_match("team1/SOUL.md"));
     }
 
+    #[cfg(unix)]
     #[test]
     fn extra_bootstrap_files_stay_inside_and_use_known_names() {
         let ws = tmp("boot");

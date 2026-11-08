@@ -1,7 +1,9 @@
+#![cfg_attr(not(unix), allow(dead_code, unused_imports))]
 use super::*;
 use crate::testutil::ctx;
 use crate::web::testutil::FakeServer;
 use serde_json::json;
+#[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
@@ -15,6 +17,7 @@ fn body(o: &ToolOutput) -> Value {
     serde_json::from_str(&o.content[o.content.find('{').unwrap()..=o.content.rfind('}').unwrap()]).unwrap()
 }
 
+#[cfg(unix)]
 /// A fake `ldapsearch` that records its argv and the password file's content, and answers by filter.
 fn fake_ldapsearch(dir: &Path) -> (String, PathBuf) {
     let out = dir.join("ld-out");
@@ -43,6 +46,7 @@ esac
     (script.to_string_lossy().into_owned(), out)
 }
 
+#[cfg(unix)]
 #[test]
 fn ldap_user_lookup_binds_through_a_private_file_and_drops_credentials() {
     let mut c = ctx("dir-ldap");
@@ -64,6 +68,7 @@ fn ldap_user_lookup_binds_through_a_private_file_and_drops_credentials() {
     assert!(left.is_empty(), "the password file is gone: {left:?}");
 }
 
+#[cfg(unix)]
 #[test]
 fn ldap_group_members_and_memberships() {
     let c = ctx("dir-ldap2");
@@ -79,6 +84,7 @@ fn ldap_group_members_and_memberships() {
     assert!(o.is_error && o.content.contains("no group"), "{}", o.content);
 }
 
+#[cfg(unix)]
 #[test]
 fn ldap_errors_hide_the_password_and_filters_are_escaped() {
     let mut c = ctx("dir-ldap3");

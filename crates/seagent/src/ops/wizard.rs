@@ -573,6 +573,7 @@ mod tests {
         assert!(!p2.user_config().exists());
     }
 
+    #[cfg(unix)]
     #[test]
     fn workspace_validation_and_conflict() {
         let (root, p) = paths();

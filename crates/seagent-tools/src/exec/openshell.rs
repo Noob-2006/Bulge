@@ -365,6 +365,7 @@ impl ExecBackend for OpenShellBackend {
 }
 
 #[cfg(test)]
+#[cfg_attr(not(unix), allow(dead_code, unused_imports))]
 mod tests {
     use super::*;
     use crate::exec::sync::common::fakecli;
@@ -373,6 +374,7 @@ mod tests {
     use serde_json::json;
     use std::sync::Arc;
 
+    #[cfg(unix)]
     /// A stand-in `openshell` CLI: keeps "sandboxes" as files in a state dir and
     /// prints a plausible `ssh-config`.
     fn fake_cli(bin: &Path, log: &Path, state: &Path) -> PathBuf {
@@ -412,6 +414,7 @@ echo "unexpected: $*" >&2; exit 2
         fakecli::script(bin, "openshell", &body)
     }
 
+    #[cfg(unix)]
     #[test]
     fn cli_lifecycle_exec_pty_sync_and_cleanup() {
         let _lock = fakecli::lock_path();
@@ -490,6 +493,7 @@ echo "unexpected: $*" >&2; exit 2
         fakecli::restore_path(old);
     }
 
+    #[cfg(unix)]
     #[test]
     fn errors_name_the_cli_and_what_to_check() {
         let _lock = fakecli::lock_path();

@@ -950,6 +950,7 @@ mod tests {
         assert_eq!(z.cursor.lock().unwrap().1, 0, "cursor untouched by an abandoned poll");
     }
 
+    #[cfg(unix)]
     #[test]
     fn supervises_restarts_and_stops_the_sidecar() {
         let d = temp_dir("zu");

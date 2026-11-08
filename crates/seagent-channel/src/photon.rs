@@ -637,8 +637,10 @@ mod tests {
         assert_eq!(bad.typing("c", None).unwrap_err().kind, K::Auth);
     }
 
+    #[cfg(unix)]
     #[test]
     fn supervision_config_and_cancel() {
+        #[cfg(unix)]
         use std::os::unix::fs::PermissionsExt;
         let dir = temp_dir("photon-sup");
         std::fs::write(dir.join("index.mjs"), "// fake").unwrap();

@@ -3,6 +3,7 @@
 //!
 //! It mirrors `seagent_browser::cdp::fake`, which is `#[cfg(test)]` inside seagent-browser and therefore
 //! not reachable from this crate's tests. `seagent_net::ws` does the framing.
+#![cfg_attr(not(unix), allow(dead_code, unused_imports))]
 
 use seagent_net::ws::Message;
 use serde_json::{json, Value};

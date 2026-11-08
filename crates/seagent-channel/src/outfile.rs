@@ -184,6 +184,7 @@ mod tests {
         seagent_core::tmp::TempDir::new(&format!("seagent-outfile-{tag}"))
     }
 
+    #[cfg(unix)]
     #[test]
     fn fallback_guard_confines_files_to_roots_and_follows_symlinks() {
         let ws = dir("ws");

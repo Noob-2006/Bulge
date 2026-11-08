@@ -455,6 +455,7 @@ impl Tool for Call {
     }
 }
 #[cfg(test)]
+#[cfg_attr(not(unix), allow(dead_code, unused_imports))]
 mod tests {
     //! Hermetic coverage for the two agent tools. `whatsapp_login` talks to a loopback
     //! `FakeServer` standing in for the bridge; `whatsapp_call` never leaves the machine (its
@@ -500,8 +501,10 @@ mod tests {
         sh
     }
 
+    #[cfg(unix)]
     /// A `meowcaller` stand-in: no PATH games, `find_binary` uses the path verbatim.
     fn fake_bin(dir: &Path, body: &str) -> PathBuf {
+        #[cfg(unix)]
         use std::os::unix::fs::PermissionsExt;
         let p = dir.join("meowcaller");
         std::fs::write(&p, format!("#!/bin/sh\n{body}\n")).unwrap();
@@ -663,6 +666,7 @@ mod tests {
 
     // ───────────── call ─────────────
 
+    #[cfg(unix)]
     /// `agent-tools-call.ts:237-241`: one whatsmeow session must never be driven twice.
     #[test]
     fn whatsapp_call_rejects_a_second_call_for_the_same_account() {
@@ -679,6 +683,7 @@ mod tests {
         assert!(!ran.exists(), "the guard rejects before MeowCaller is spawned");
     }
 
+    #[cfg(unix)]
     /// `agent-tools-call.ts:190-220`: `status` needs no requester and no TTS and must tell the
     /// truth about the companion's two prerequisites.
     #[test]
@@ -739,6 +744,7 @@ mod tests {
         assert!(call.effects(&ctx, &json!({"action": "status"})).is_empty(), "status sends nothing");
     }
 
+    #[cfg(unix)]
     /// The target comes from the session's route only (`agent-tools-call.ts:120-134, 222-235`):
     /// no route, another channel, a group without a sender or a LID all refuse instead of
     /// dialling something arbitrary.

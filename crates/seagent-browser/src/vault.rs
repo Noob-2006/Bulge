@@ -715,6 +715,7 @@ mod tests {
         assert!(js.contains("\"https://shop.example\"") && js.contains("n1"));
     }
 
+    #[cfg(unix)]
     #[test]
     fn local_store_and_external_managers() {
         let home = seagent_core::tmp::scratch_path(format!("seagent-vault-{}", std::process::id()));
@@ -729,6 +730,7 @@ mod tests {
         // Bitwarden through a fake `bw`.
         let bw = home.join("bw");
         std::fs::write(&bw, "#!/bin/sh\ncase \"$1\" in unlock) [ \"$SEAGENT_BW_MASTER\" = right ] && echo SESSION1 || { echo 'Invalid master password.' >&2; exit 1; } ;; list) [ \"$BW_SESSION\" = SESSION1 ] || { echo 'Vault is locked.' >&2; exit 1; }; echo '[{\"id\":\"i1\",\"type\":1,\"name\":\"Site\",\"login\":{\"username\":\"bob\",\"uris\":[{\"uri\":\"https://site.example/login\"},{\"uri\":\"https://never.example\",\"match\":5}]}}]' ;; get) [ \"$2\" = password ] && echo 'bw-pass' || echo 654321 ;; esac\n").unwrap();
+        #[cfg(unix)]
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&bw, std::fs::Permissions::from_mode(0o755)).unwrap();
         std::env::set_var("SEAGENT_BW", &bw);

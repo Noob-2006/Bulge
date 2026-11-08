@@ -288,11 +288,13 @@ mod tests {
         assert!(image_file("missing.png", d).is_err());
     }
 
+    #[cfg(unix)]
     /// `/prompt` (`/compose`): `$EDITOR` opens on the seeded draft and what it writes
     /// comes back as the message — the same `seagent_app::clip::compose` path `seagent chat` and
     /// the TUI use. The editor here is a shell script, so no terminal is needed.
     #[test]
     fn compose_opens_editor_with_the_draft() {
+        #[cfg(unix)]
         use std::os::unix::fs::PermissionsExt;
         let d = seagent_core::tmp::TempDir::new("seagent-compose");
         let editor = d.path().join("editor.sh");
@@ -335,10 +337,12 @@ mod tests {
         assert!(!std::path::Path::new(&draft).exists(), "no draft survives a failing editor: {draft}");
     }
 
+    #[cfg(unix)]
     /// The draft writer itself: a pre-existing file at the path (e.g. a 0644 leftover from an
     /// older seagent, or something another local user put there) is never reused.
     #[test]
     fn prompt_draft_is_private_and_replaces_a_world_readable_file() {
+        #[cfg(unix)]
         use std::os::unix::fs::PermissionsExt;
         let d = seagent_core::tmp::TempDir::new("seagent-prompt");
         let p = d.path().join("draft.md");
@@ -368,6 +372,7 @@ mod tests {
         assert!(matches!(image_file(&path, &d).unwrap(), Block::Image { .. }) && rest == "look");
     }
 
+    #[cfg(unix)]
     #[test]
     fn clipboard_tools_from_path() {
         // A fake xclip on PATH receives the text; paste returns its PNG bytes.
@@ -377,6 +382,7 @@ mod tests {
         let script = format!("#!/bin/sh\nif [ \"$5\" = \"-o\" ]; then printf '\\211PNG\\r\\n\\032\\nxx'; else cat > {}; fi\n", log.display());
         let bin = d.join("xclip");
         std::fs::write(&bin, script).unwrap();
+        #[cfg(unix)]
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
         let r = copy_in("copied text", d.as_os_str(), false);

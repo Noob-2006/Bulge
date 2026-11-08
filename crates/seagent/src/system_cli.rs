@@ -384,6 +384,7 @@ mod tests {
         assert!(stale.join("payload").is_file(), "a dry run must leave the tree intact");
     }
 
+    #[cfg(unix)]
     #[test]
     fn temp_clean_handles_files_and_never_follows_symlinks() {
         let root = seagent_core::tmp::TempDir::new("seagent-tmpclean");

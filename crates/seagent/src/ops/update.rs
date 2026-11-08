@@ -664,6 +664,7 @@ mod tests {
         assert!(p.binary.is_none() && p.binary_kept.is_some_and(|w| w.contains("Nix")), "{p:?}");
     }
 
+    #[cfg(unix)]
     /// A `--purge` target of `/`, `$HOME` or a system directory would take the machine (or the
     /// user's home) with it: the guard has to refuse those before anything is deleted.
     #[test]
@@ -696,6 +697,7 @@ mod tests {
         assert!(plan(&good, true, false, false, Path::new("/opt/seagent")).is_ok());
     }
 
+    #[cfg(unix)]
     #[test]
     fn fetch_verifies_checksums_against_a_fake_release_server() {
         // The asset name is the one release.yml publishes (not a name made up here), and the
@@ -748,6 +750,7 @@ mod tests {
         std::fs::create_dir_all(&d).unwrap();
         let exe = d.join("seagent");
         std::fs::write(&exe, "#!/bin/sh\necho seagent 0.0.1\n").unwrap();
+        #[cfg(unix)]
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755)).unwrap();
         install_binary(&exe, &bin).unwrap();

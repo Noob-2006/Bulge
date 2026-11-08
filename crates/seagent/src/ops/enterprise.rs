@@ -582,6 +582,7 @@ mod tests {
         assert_eq!(nagios(Some(&json!({"weird": 1})), None, 0).0, 3);
     }
 
+    #[cfg(unix)]
     #[test]
     fn audit_subcommands_verify_and_query() {
         let kit = crate::testkit::kit();
@@ -611,6 +612,7 @@ mod tests {
         assert!(audit_sub(p, &a(&["report", "--format", "pdf"])).unwrap().is_err());
         // A tampered archive makes `verify` exit 1.
         let seg = audit::segments(&p.data).into_iter().next().unwrap();
+        #[cfg(unix)]
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&seg, std::fs::Permissions::from_mode(0o600)).unwrap();
         std::fs::write(&seg, "{}\n").unwrap();

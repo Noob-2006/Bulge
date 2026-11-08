@@ -387,8 +387,10 @@ mod tests {
         assert!(on.epilogue(&[]).contains("state"));
     }
 
+    #[cfg(unix)]
     #[test]
     fn state_file_is_private() {
+        #[cfg(unix)]
         use std::os::unix::fs::PermissionsExt;
         let c = ctx("shperm");
         let o = Shell.call(&c, json!({"command":"export SEAGENT_PERM=x"}));
