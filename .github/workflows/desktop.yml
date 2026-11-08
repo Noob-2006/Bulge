@@ -1,0 +1,255 @@
+name: desktop
+# The SE Agent app (apps/desktop, Tauri 2, its own Cargo workspace): installers for Windows
+# (NSIS per-user .exe + MSI), macOS (universal .app/.dmg), Linux (.AppImage/.deb/.rpm), an Android
+# APK (agent bundled as libseagent.so under a foreground service) and an iOS simulator build
+# (client only: no VM / local shell on iOS). Each job first builds `seagent` for its target and
+# places it as the sidecar (desktop) or native lib (Android).
+#
+# Signing is optional; without the secrets every artifact is built unsigned:
+#   updater:  TAURI_SIGNING_PRIVATE_KEY, TAURI_SIGNING_PRIVATE_KEY_PASSWORD, TAURI_UPDATER_PUBKEY
+#   Windows:  WINDOWS_CERTIFICATE (base64 .pfx) + WINDOWS_CERTIFICATE_PASSWORD, or Azure Trusted
+#             Signing: AZURE_CLIENT_ID, AZURE_CLIENT_SECRET, AZURE_TENANT_ID,
+#             AZURE_TRUSTED_SIGNING_ENDPOINT, AZURE_TRUSTED_SIGNING_ACCOUNT, AZURE_TRUSTED_SIGNING_PROFILE
+#   macOS:    APPLE_CERTIFICATE (base64 .p12), APPLE_CERTIFICATE_PASSWORD, APPLE_SIGNING_IDENTITY,
+#             notarization: APPLE_ID, APPLE_PASSWORD (app-specific), APPLE_TEAM_ID
+#   Android:  ANDROID_KEYSTORE (base64), ANDROID_KEYSTORE_PASSWORD, ANDROID_KEY_ALIAS, ANDROID_KEY_PASSWORD
+# On a v* tag the installers (+ latest.json for the in-app updater) are added to the GitHub release
+# that release.yml creates for the same tag.
+on:
+  push:
+    tags: ["v*"]
+    branches: [main, cross-platform]
+    paths: ["apps/desktop/**", "ui/**", "share/**", ".github/workflows/desktop.yml"]
+  pull_request:
+    paths: ["apps/desktop/**", "ui/**", ".github/workflows/desktop.yml"]
+  workflow_dispatch:
+permissions:
+  contents: read
+env:
+  CARGO_INCREMENTAL: "0"
+  CARGO_TERM_COLOR: always
+  TAURI_CLI_VERSION: "^2"
+
+jobs:
+  desktop:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            triple: x86_64-pc-windows-msvc
+            rust_targets: x86_64-pc-windows-msvc
+            bundles: nsis,msi
+          - os: macos-latest
+            triple: universal-apple-darwin
+            rust_targets: aarch64-apple-darwin,x86_64-apple-darwin
+            bundles: app,dmg
+          - os: ubuntu-24.04
+            triple: x86_64-unknown-linux-gnu
+            rust_targets: x86_64-unknown-linux-gnu
+            bundles: appimage,deb,rpm
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    env:
+      TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+      TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+      TAURI_UPDATER_PUBKEY: ${{ secrets.TAURI_UPDATER_PUBKEY }}
+      WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
+      WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+      AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+      AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
+      AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+      AZURE_TRUSTED_SIGNING_ENDPOINT: ${{ secrets.AZURE_TRUSTED_SIGNING_ENDPOINT }}
+      AZURE_TRUSTED_SIGNING_ACCOUNT: ${{ secrets.AZURE_TRUSTED_SIGNING_ACCOUNT }}
+      AZURE_TRUSTED_SIGNING_PROFILE: ${{ secrets.AZURE_TRUSTED_SIGNING_PROFILE }}
+      APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+      APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+      APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+      APPLE_ID: ${{ secrets.APPLE_ID }}
+      APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+      APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          targets: ${{ matrix.rust_targets }}
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          key: desktop-${{ matrix.triple }}
+          workspaces: |
+            . -> target
+            apps/desktop -> target
+      - name: Linux build dependencies (WebKitGTK 4.1, tray, rpm/AppImage tooling)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libwebkit2gtk-4.1-dev libgtk-3-dev libsoup-3.0-dev \
+            libjavascriptcoregtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libxdo-dev patchelf file xdg-utils build-essential
+      - name: Tauri CLI
+        run: cargo install tauri-cli --version "$TAURI_CLI_VERSION" --locked
+      - name: Build seagent sidecar (${{ matrix.triple }})
+        run: apps/desktop/scripts/prepare-sidecar.sh '${{ matrix.triple }}'
+      - name: Windows code signing certificate (optional)
+        if: runner.os == 'Windows' && env.WINDOWS_CERTIFICATE != ''
+        shell: pwsh
+        run: |
+          $pfx = Join-Path $env:RUNNER_TEMP 'cert.pfx'
+          [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:WINDOWS_CERTIFICATE))
+          $pw = ConvertTo-SecureString $env:WINDOWS_CERTIFICATE_PASSWORD -AsPlainText -Force
+          $cert = Import-PfxCertificate -FilePath $pfx -CertStoreLocation Cert:\CurrentUser\My -Password $pw
+          Remove-Item $pfx
+          "WINDOWS_CERTIFICATE_THUMBPRINT=$($cert.Thumbprint)" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+      - name: Azure Trusted Signing tool (optional)
+        if: runner.os == 'Windows' && env.WINDOWS_CERTIFICATE == '' && env.AZURE_TRUSTED_SIGNING_ENDPOINT != ''
+        run: cargo install trusted-signing-cli --locked
+      - name: Signing / version config
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then export VERSION="${GITHUB_REF_NAME#v}"; fi
+          python3 apps/desktop/scripts/ci-config.py
+      - name: Build installers
+        working-directory: apps/desktop
+        run: cargo tauri build --ci --target '${{ matrix.triple }}' --bundles '${{ matrix.bundles }}' --config src-tauri/tauri.ci.conf.json
+      - name: Collect
+        run: apps/desktop/scripts/collect-bundles.sh '${{ matrix.triple }}' dist
+      - uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
+        with:
+          name: seagent-app-${{ matrix.triple }}
+          path: dist/*
+          if-no-files-found: error
+
+  android:
+    runs-on: ubuntu-24.04
+    env:
+      ANDROID_KEYSTORE: ${{ secrets.ANDROID_KEYSTORE }}
+      ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+      ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+      ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          targets: aarch64-linux-android
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          key: android
+          workspaces: |
+            . -> target
+            apps/desktop -> target
+      - name: Java 17 + NDK (preinstalled on the runner)
+        run: |
+          echo "JAVA_HOME=$JAVA_HOME_17_X64" >> "$GITHUB_ENV"
+          echo "NDK_HOME=$ANDROID_NDK_LATEST_HOME" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK_HOME=$ANDROID_NDK_LATEST_HOME" >> "$GITHUB_ENV"
+      - name: Tauri CLI
+        run: cargo install tauri-cli --version "$TAURI_CLI_VERSION" --locked
+      - name: Generate the Android project
+        working-directory: apps/desktop
+        run: |
+          cargo tauri android init --ci
+          # launcher icons into gen/android (keeps the committed desktop set)
+          cargo tauri icon ../../ui/icon.svg
+          git checkout -- src-tauri/icons
+      - name: Build seagent for aarch64-linux-android and bundle it as libseagent.so
+        run: apps/desktop/scripts/prepare-android.sh
+      - name: Build APK
+        working-directory: apps/desktop
+        run: |
+          if [ -n "$ANDROID_KEYSTORE" ]; then
+            cargo tauri android build --ci --apk --target aarch64
+          else
+            # No release keystore: a debug-signed APK still installs (sideload) and runs.
+            cargo tauri android build --ci --apk --target aarch64 --debug
+          fi
+      - name: Sign release APK (optional)
+        if: env.ANDROID_KEYSTORE != ''
+        run: |
+          set -euo pipefail
+          echo "$ANDROID_KEYSTORE" | base64 -d > "$RUNNER_TEMP/release.jks"
+          bt="$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -1)"
+          for apk in apps/desktop/src-tauri/gen/android/app/build/outputs/apk/*/release/*-unsigned.apk; do
+            "$bt/zipalign" -f 4 "$apk" "${apk%-unsigned.apk}-aligned.apk"
+            "$bt/apksigner" sign --ks "$RUNNER_TEMP/release.jks" --ks-pass env:ANDROID_KEYSTORE_PASSWORD \
+              --ks-key-alias "$ANDROID_KEY_ALIAS" --key-pass env:ANDROID_KEY_PASSWORD \
+              --out "${apk%-unsigned.apk}-signed.apk" "${apk%-unsigned.apk}-aligned.apk"
+          done
+          rm -f "$RUNNER_TEMP/release.jks"
+      - name: Collect
+        run: |
+          mkdir -p dist
+          find apps/desktop/src-tauri/gen/android/app/build/outputs/apk -name '*.apk' ! -name '*-aligned.apk' -exec cp {} dist/ \;
+          for f in dist/*.apk; do mv "$f" "dist/SE-Agent_android-arm64_$(basename "$f")"; done
+          ls -l dist
+      - uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
+        with:
+          name: seagent-app-android
+          path: dist/*
+          if-no-files-found: error
+
+  ios:
+    # Client only (platform policy: no VM, no subprocess, no local shell), so there is no seagent
+    # binary to build for iOS — the app pairs with a host on the LAN. Unsigned simulator build;
+    # a device/TestFlight build needs an Apple team (see apps/desktop/MOBILE.md).
+    runs-on: macos-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          targets: aarch64-apple-ios,aarch64-apple-ios-sim
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          key: ios
+          workspaces: apps/desktop -> target
+      - name: Tauri CLI
+        run: cargo install tauri-cli --version "$TAURI_CLI_VERSION" --locked
+      - name: Generate the Xcode project
+        working-directory: apps/desktop
+        run: |
+          cargo tauri ios init --ci
+          cargo tauri icon ../../ui/icon.svg
+          git checkout -- src-tauri/icons
+      - name: Build for the simulator
+        working-directory: apps/desktop
+        run: cargo tauri ios build --ci --target aarch64-sim --debug
+      - name: Collect
+        run: |
+          mkdir -p dist
+          app="$(find apps/desktop/src-tauri/gen/apple/build -name '*.app' -path '*simulator*' -maxdepth 6 | head -1)"
+          [ -z "$app" ] && app="$(find apps/desktop/src-tauri/gen/apple/build -name '*.app' | head -1)"
+          (cd "$(dirname "$app")" && ditto -c -k --keepParent "$(basename "$app")" "$GITHUB_WORKSPACE/dist/SE-Agent_ios-simulator.app.zip")
+          ls -l dist
+      - uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
+        with:
+          name: seagent-app-ios-simulator
+          path: dist/*
+
+  publish:
+    # Adds the installers and latest.json (in-app updater) to the release of this tag.
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [desktop, android]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6
+        with:
+          pattern: seagent-app-*
+          path: dist
+          merge-multiple: true
+      - name: latest.json
+        run: python3 apps/desktop/scripts/latest-json.py dist "${GITHUB_REF_NAME#v}" "$GITHUB_REF_NAME" "$GITHUB_REPOSITORY"
+      - name: Upload to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          # release.yml creates the release for this tag; wait for it (up to an hour) rather than racing it.
+          for i in $(seq 1 120); do
+            gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1 && break
+            sleep 30
+          done
+          gh release view "$GITHUB_REF_NAME" >/dev/null || gh release create "$GITHUB_REF_NAME" --verify-tag --title "$GITHUB_REF_NAME" --notes "SE Agent $GITHUB_REF_NAME"
+          gh release upload "$GITHUB_REF_NAME" dist/* --clobber

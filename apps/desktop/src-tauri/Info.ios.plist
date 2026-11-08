@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Merged into the generated iOS Info.plist by the Tauri CLI. -->
+<plist version="1.0">
+<dict>
+  <key>NSLocalNetworkUsageDescription</key>
+  <string>SE Agent looks for your SE Agent computer on this network and connects to it. 在區域網路中尋找並連線到你的 SE Agent 電腦。</string>
+  <key>NSBonjourServices</key>
+  <array>
+    <string>_seagent._tcp</string>
+  </array>
+  <key>NSCameraUsageDescription</key>
+  <string>Scan the pairing QR code shown by SE Agent on your computer. 掃描電腦上 SE Agent 顯示的配對 QR 碼。</string>
+  <key>NSAppTransportSecurity</key>
+  <dict>
+    <!-- The console is loaded from the app's own loopback tunnel (http://127.0.0.1), which
+         carries pinned TLS to the paired host. Nothing else may be cleartext. -->
+    <key>NSAllowsLocalNetworking</key>
+    <true/>
+  </dict>
+</dict>
+</plist>

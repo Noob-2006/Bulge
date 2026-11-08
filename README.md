@@ -46,6 +46,12 @@ curl --proto '=https' --tlsv1.2 -fsSL https://github.com/se-agent/System-Enginee
 
 從原始碼：`cargo build --release && packaging/install.sh --local-binary target/release/seagent`。也有 [Dockerfile](Dockerfile) 與 [Nix flake](flake.nix)。
 
+### 圖形安裝（App，不需終端機）
+
+從 [Releases](https://github.com/se-agent/System-Engineering-Agent/releases/latest) 下載一個檔、點兩下就裝好：Windows `SE-Agent_*_x64-setup.exe`（個人安裝，不需管理員；另有 `.msi`）、macOS `.dmg`、Linux `.AppImage` / `.deb` / `.rpm`、Android `.apk`。App 第一次開啟會安裝並啟動背景服務，接著在視窗裡開同一個設定精靈；之後常駐系統匣（開啟主控台、暫停、重新啟動服務、登入時啟動、檢查更新）。原始碼與建置方式見 [apps/desktop/README.md](apps/desktop/README.md)。
+
+**iOS 是純用戶端**：iOS 不允許 App 開虛擬機或執行本機 shell，所以 iPhone / iPad 上**沒有 VM 與本機 shell**。iOS App 在區域網路中尋找已安裝 SE Agent 的電腦（Bonjour），掃 QR 或輸入 8 碼配對碼配對、釘選主機的 TLS 指紋，然後開那台主機的主控台；需要 shell / VM 的工作在那台電腦上執行。詳見 [apps/desktop/MOBILE.md](apps/desktop/MOBILE.md)。
+
 ## 快速開始
 
 ```bash

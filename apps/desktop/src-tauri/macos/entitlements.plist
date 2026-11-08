@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Hardened runtime entitlements (not App Sandbox: the agent runs shells, VMs and a local
+     server for the user). The bundled seagent uses Virtualization.framework, or QEMU + HVF as
+     the fallback, for microVM isolation on macOS. -->
+<plist version="1.0">
+<dict>
+  <key>com.apple.security.virtualization</key>
+  <true/>
+  <key>com.apple.security.hypervisor</key>
+  <true/>
+</dict>
+</plist>

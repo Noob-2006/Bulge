@@ -1,0 +1,13 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "app": {
+    "security": {
+      "capabilities": ["main", "mobile"]
+    }
+  },
+  "bundle": {
+    "iOS": {
+      "minimumSystemVersion": "14.0"
+    }
+  }
+}

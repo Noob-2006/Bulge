@@ -1,0 +1,23 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "main",
+  "description": "The app's own pages (splash, connect) in the main window.",
+  "windows": ["main"],
+  "permissions": [
+    "core:default",
+    "allow-app-info",
+    "allow-boot-start",
+    "allow-boot-state",
+    "allow-set-mode",
+    "allow-autostart-get",
+    "allow-autostart-set",
+    "allow-discover-hosts",
+    "allow-parse-setup-code",
+    "allow-probe-host",
+    "allow-pair-host",
+    "allow-hosts-list",
+    "allow-host-open",
+    "allow-host-forget",
+    "allow-show-local"
+  ]
+}

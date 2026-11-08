@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>SE Agent</title>
+  <link rel="stylesheet" href="vendor/theme.css">
+  <link rel="stylesheet" href="app.css">
+</head>
+<body class="connect">
+  <main class="column">
+    <header class="brand">
+      <span class="star glow logo"></span>
+      <h1 data-i18n="connectTitle">連線到 SE Agent 主機</h1>
+    </header>
+
+    <!-- Required by platform policy: say plainly what iOS cannot do. -->
+    <aside class="notice panel" id="iosNotice" hidden>
+      <span class="star warn"></span>
+      <p data-i18n="iosNotice"></p>
+    </aside>
+
+    <section class="panel block" id="pairedBlock">
+      <h2 data-i18n="paired">已配對的主機</h2>
+      <ul class="hosts" id="paired"></ul>
+      <p class="faint" id="pairedNone" data-i18n="none">還沒有配對任何主機。</p>
+    </section>
+
+    <section class="panel block">
+      <h2 data-i18n="nearby">區域網路中的主機</h2>
+      <ul class="hosts" id="nearby"></ul>
+      <p class="faint" id="nearbyState" data-i18n="searching">搜尋中…</p>
+      <button class="btn ghost small" id="rescan" data-i18n="rescan">重新搜尋</button>
+    </section>
+
+    <section class="panel block">
+      <button class="btn wide" id="scan" data-i18n="scan">掃描 QR 碼</button>
+      <p class="faint small" data-i18n="scanHint"></p>
+      <h3 data-i18n="orCode">或輸入 8 碼配對碼</h3>
+      <form id="codeForm" autocomplete="off">
+        <label><span data-i18n="address">主機位址</span>
+          <input type="text" id="address" placeholder="studio.local:8640" inputmode="url" autocapitalize="off" spellcheck="false"></label>
+        <label><span data-i18n="code">配對碼</span>
+          <input type="text" id="code" placeholder="ABCD-2345" maxlength="9" autocapitalize="characters" spellcheck="false"></label>
+        <button class="btn" type="submit" data-i18n="check">下一步</button>
+      </form>
+    </section>
+
+    <section class="panel block" id="confirm" hidden>
+      <h2 data-i18n="fpTitle">確認主機指紋</h2>
+      <p class="fp mono" id="fp"></p>
+      <p class="dim small" data-i18n="fpHint"></p>
+      <div class="actions">
+        <button class="btn" id="doPair" data-i18n="pair">配對</button>
+        <button class="btn ghost" id="cancelPair" data-i18n="cancel">取消</button>
+      </div>
+    </section>
+
+    <p class="status" id="status" role="status"></p>
+    <button class="linkish" id="useLocal" hidden data-i18n="useLocal">改為在這支手機上執行</button>
+  </main>
+  <script src="i18n.js"></script>
+  <script src="connect.js"></script>
+</body>
+</html>

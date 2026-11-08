@@ -113,6 +113,10 @@
     try {
       const r = await rpc('setup.apply', params);
       sessionStorage.removeItem('seagent.setup');
+      // Inside the SE Agent app (apps/desktop): "start automatically" also sets the app's login
+      // item / Android boot start. The app only lets this page call autostart_get/autostart_set.
+      const tauri = window.__TAURI__ && window.__TAURI__.core;
+      if (tauri) tauri.invoke('autostart_set', { enabled: params.autostart }).catch(() => {});
       for (const id of ['apiKey', 'oidcSecret', 'channelToken']) $(id).value = '';
       $('wizard').hidden = true;
       $('intro').hidden = true;

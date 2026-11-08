@@ -1,0 +1,17 @@
+[package]
+name = "tauri-plugin-seagent-mobile"
+description = "SE Agent mobile glue: Android foreground service for the bundled agent, Bonjour/NSD host discovery"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+links = "tauri-plugin-seagent-mobile"
+
+[dependencies]
+tauri = { version = "2", features = [] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[build-dependencies]
+tauri-plugin = { version = "2", features = ["build"] }

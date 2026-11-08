@@ -1,0 +1,10 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "console",
+  "description": "The local agent's setup wizard / console (http://127.0.0.1:<port>) may only sync the 'start at login' choice with the app. Nothing else from those pages reaches native code.",
+  "windows": ["main"],
+  "remote": {
+    "urls": ["http://127.0.0.1:*/*", "http://localhost:*/*"]
+  },
+  "permissions": ["allow-autostart-get", "allow-autostart-set"]
+}

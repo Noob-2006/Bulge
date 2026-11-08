@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Cleartext only to loopback: the bundled agent's console and the app's pinned-TLS tunnel to a
+     paired host both listen on 127.0.0.1. Everything else must be TLS.
+     Referenced from the app manifest by scripts/prepare-android.sh
+     (android:networkSecurityConfig="@xml/seagent_network_security"). -->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="false" />
+    <domain-config cleartextTrafficPermitted="true">
+        <domain includeSubdomains="false">127.0.0.1</domain>
+        <domain includeSubdomains="false">localhost</domain>
+        <domain includeSubdomains="false">tauri.localhost</domain>
+    </domain-config>
+</network-security-config>
