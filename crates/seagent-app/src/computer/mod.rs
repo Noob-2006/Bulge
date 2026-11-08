@@ -57,6 +57,10 @@ pub fn available(cfg: &ComputerUseConfig, home: &Path) -> bool {
     if driver_kind(cfg, home) == "cua" {
         return cua::resolve_driver(cfg, home).is_some();
     }
+    // Windows / macOS: the logged-in desktop is the display and input is OS-native.
+    if native::os_input() && matches!(cfg.backend.as_str(), "auto" | "native") {
+        return true;
+    }
     let env = seagent_browser::control::screen::Desktop::new(home).published_env();
     let display = !env.is_empty() || std::env::var_os("DISPLAY").is_some() || std::env::var_os("WAYLAND_DISPLAY").is_some() || cfg.bot_desktop.auto_start;
     display && native::input_tool(&cfg.backend, &env).is_some()
@@ -143,10 +147,15 @@ pub(crate) const TAKEOVER: &str = "A human took over this desktop while the acti
 
 /// A new file under `<home>/<subdir>` (owner-only dir); the oldest `prefix*` files beyond `cap - 1` are removed.
 pub(crate) fn cache_file(home: &Path, subdir: &str, name: &str, prefix: &str, cap: usize) -> Option<PathBuf> {
-    use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
     let dir = home.join(subdir);
-    std::fs::DirBuilder::new().recursive(true).mode(0o700).create(&dir).ok()?;
-    let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700));
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+        std::fs::DirBuilder::new().recursive(true).mode(0o700).create(&dir).ok()?;
+        let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700));
+    }
+    #[cfg(not(unix))]
+    seagent_core::platform::fs_private::create_dir_private(&dir).ok()?;
     let mut files: Vec<(std::time::SystemTime, PathBuf)> = std::fs::read_dir(&dir).ok()?.flatten().filter(|e| e.file_name().to_string_lossy().starts_with(prefix)).filter_map(|e| Some((e.metadata().ok()?.modified().ok()?, e.path()))).collect();
     files.sort();
     let excess = files.len().saturating_sub(cap.saturating_sub(1));
@@ -159,8 +168,13 @@ pub(crate) fn cache_file(home: &Path, subdir: &str, name: &str, prefix: &str, ca
 /// Write `data` owner-only (0600): a capture is as sensitive as the screen it came from.
 pub(crate) fn write_private(path: &Path, data: &[u8]) -> Option<()> {
     use std::io::Write;
-    use std::os::unix::fs::OpenOptionsExt;
-    let mut f = std::fs::OpenOptions::new().write(true).create(true).truncate(true).mode(0o600).open(path).ok()?;
+    #[cfg(unix)]
+    let mut f = {
+        use std::os::unix::fs::OpenOptionsExt;
+        std::fs::OpenOptions::new().write(true).create(true).truncate(true).mode(0o600).open(path).ok()?
+    };
+    #[cfg(not(unix))]
+    let mut f = seagent_core::platform::fs_private::open_private(path, seagent_core::platform::fs_private::OpenMode::Truncate).ok()?;
     f.write_all(data).ok()
 }
 

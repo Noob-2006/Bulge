@@ -585,7 +585,7 @@ fn node_run_plain(command: &str, p: &Value) -> Result<Value, String> {
         "canvas.a2ui.push" | "canvas.a2ui.pushJSONL" => file_url(&renderer_html("A2UI", &a2ui_messages(p)?))?,
         c => return Err(format!("`{c}` needs `cdp_url` in node.toml (a browser started with --remote-debugging-port)")),
     };
-    std::process::Command::new("xdg-open").arg(&target).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).spawn().map_err(|e| format!("xdg-open: {e}"))?;
+    super::open_in_browser(&target)?;
     Ok(json!({"presented": target}))
 }
 
@@ -604,6 +604,10 @@ fn file_url(html: &str) -> Result<String, String> {
     let dir = std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from).filter(|d| d.is_dir()).unwrap_or_else(std::env::temp_dir);
     let f = dir.join(format!("seagent-canvas-{}-{}.html", std::process::id(), seagent_net::crypto::random_token(6)));
     write_atomic(&f, html.as_bytes())?;
+    // Windows: `file:///C:/…` (drive letter after the third slash, forward slashes).
+    #[cfg(windows)]
+    return Ok(format!("file:///{}", f.display().to_string().replace('\\', "/")));
+    #[cfg(not(windows))]
     Ok(format!("file://{}", f.display()))
 }
 

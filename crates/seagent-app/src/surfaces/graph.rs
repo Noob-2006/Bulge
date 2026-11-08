@@ -849,7 +849,7 @@ impl Rt<'_> {
 
     fn process(&self, n: &Node, state: &Value) -> Result<String, String> {
         use std::process::Stdio;
-        let argv: Vec<String> = if n.argv.is_empty() { vec!["sh".into(), "-c".into(), render(n.cmd.as_deref().unwrap_or(""), state)] } else { n.argv.iter().map(|a| render(a, state)).collect() };
+        let argv: Vec<String> = if n.argv.is_empty() { super::sh_argv(render(n.cmd.as_deref().unwrap_or(""), state)) } else { n.argv.iter().map(|a| render(a, state)).collect() };
         let t = n.timeout_ms.map(Duration::from_millis).unwrap_or_else(|| self.left().unwrap_or_default()).min(self.left()?);
         let mut cmd = std::process::Command::new(&argv[0]);
         cmd.args(&argv[1..]).current_dir(self.cwd(n)).stdin(if n.stdin.is_some() { Stdio::piped() } else { Stdio::null() }).stdout(Stdio::piped()).stderr(Stdio::piped());

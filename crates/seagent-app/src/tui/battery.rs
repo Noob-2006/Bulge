@@ -1,6 +1,6 @@
 //! Host battery read-out for the status bar (Hermes `agent/battery.py`). Linux reads
 //! `/sys/class/power_supply` (BAT* capacity/status, AC/ADP/USB `online`); macOS parses
-//! `pmset -g batt`. Everything degrades to "unavailable"; readings are memoised for 8 s
+//! `pmset -g batt`; Windows asks `GetSystemPowerStatus`. Everything degrades to "unavailable"; readings are memoised for 8 s
 //! because the status bar repaints on every keystroke.
 
 use std::path::Path;
@@ -78,6 +78,30 @@ pub fn parse_pmset(out: &str) -> Battery {
     Battery { available: true, percent: Some(pct.min(100)), plugged }
 }
 
+/// `GetSystemPowerStatus`: battery percent and AC line state.
+#[cfg(windows)]
+fn read_windows() -> Battery {
+    use windows_sys::Win32::System::Power::{GetSystemPowerStatus, SYSTEM_POWER_STATUS};
+    // SAFETY: zeroed POD out-parameter.
+    let mut s: SYSTEM_POWER_STATUS = unsafe { std::mem::zeroed() };
+    // SAFETY: `s` is a valid SYSTEM_POWER_STATUS.
+    if unsafe { GetSystemPowerStatus(&mut s) } == 0 || s.BatteryFlag & 128 != 0 || s.BatteryFlag == 255 || s.BatteryLifePercent == 255 {
+        return UNAVAILABLE;
+    }
+    let plugged = match s.ACLineStatus {
+        1 => Some(true),
+        0 => Some(false),
+        _ => None,
+    };
+    Battery { available: true, percent: Some(s.BatteryLifePercent.min(100)), plugged }
+}
+
+#[cfg(windows)]
+fn read_uncached() -> Battery {
+    read_windows()
+}
+
+#[cfg(not(windows))]
 fn read_uncached() -> Battery {
     if cfg!(target_os = "macos") {
         return std::process::Command::new("pmset").args(["-g", "batt"]).output().ok().map(|o| parse_pmset(&String::from_utf8_lossy(&o.stdout))).unwrap_or(UNAVAILABLE);

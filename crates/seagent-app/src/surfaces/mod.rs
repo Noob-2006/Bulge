@@ -277,15 +277,47 @@ pub(crate) fn parse_iso(s: &str) -> Option<u64> {
     u64::try_from(secs * 1000 + ms).ok()
 }
 
+/// `sh -c SCRIPT` as an argv (Windows: this machine's shell, `seagent_core::platform::shell`).
+pub(crate) fn sh_argv(script: String) -> Vec<String> {
+    #[cfg(not(windows))]
+    {
+        vec!["sh".into(), "-c".into(), script]
+    }
+    #[cfg(windows)]
+    {
+        let (prog, args) = seagent_core::platform::shell::argv(seagent_core::platform::shell::Style::Sh, &script);
+        std::iter::once(prog).chain(args).map(|a| a.to_string_lossy().into_owned()).collect()
+    }
+}
+
+/// Open `target` (a URL or `file://` page) in the default browser: xdg-open (freedesktop),
+/// `open` (macOS), the URL protocol handler (Windows; no shell parses the URL).
+pub(crate) fn open_in_browser(target: &str) -> Result<(), String> {
+    let (opener, pre): (&str, &[&str]) = if cfg!(windows) {
+        ("rundll32", &["url.dll,FileProtocolHandler"])
+    } else if cfg!(target_os = "macos") {
+        ("open", &[])
+    } else {
+        ("xdg-open", &[])
+    };
+    std::process::Command::new(opener).args(pre).arg(target).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).spawn().map(|_| ()).map_err(|e| format!("{opener}: {e}"))
+}
+
 /// Write via a temp file + rename, mode 0600.
 pub(crate) fn write_atomic(p: &Path, data: &[u8]) -> Result<(), String> {
     use std::io::Write;
-    use std::os::unix::fs::OpenOptionsExt;
     if let Some(d) = p.parent() {
         std::fs::create_dir_all(d).map_err(|e| format!("{}: {e}", d.display()))?;
     }
     let tmp = p.with_extension(format!("tmp-{}", seagent_net::crypto::random_token(6)));
-    let mut f = std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(&tmp).map_err(|e| format!("{}: {e}", tmp.display()))?;
+    #[cfg(unix)]
+    let opened = {
+        use std::os::unix::fs::OpenOptionsExt;
+        std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(&tmp)
+    };
+    #[cfg(not(unix))]
+    let opened = seagent_core::platform::fs_private::open_private(&tmp, seagent_core::platform::fs_private::OpenMode::CreateNew);
+    let mut f = opened.map_err(|e| format!("{}: {e}", tmp.display()))?;
     f.write_all(data).and_then(|_| f.sync_all()).map_err(|e| e.to_string())?;
     std::fs::rename(&tmp, p).map_err(|e| format!("{}: {e}", p.display()))
 }

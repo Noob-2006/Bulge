@@ -30,7 +30,6 @@ seagent-channel = { path = "../seagent-channel", default-features = false }
 serde.workspace = true
 serde_json.workspace = true
 toml.workspace = true
-libc.workspace = true
 regex.workspace = true
 ring.workspace = true
 ureq.workspace = true
@@ -38,3 +37,11 @@ ureq.workspace = true
 # SAML (ent-048): a strict, pull-based XML tokenizer; seagent builds its own tree for exclusive C14N.
 quick-xml = { version = "0.42", default-features = false }
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp"] }
+
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
+
+# Node host on Windows (docs/cross-platform.md): SendInput / cursor for computer.act, the
+# battery read-out of the TUI status bar.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { workspace = true, features = ["Win32_UI_Input_KeyboardAndMouse", "Win32_UI_WindowsAndMessaging", "Win32_System_Power"] }

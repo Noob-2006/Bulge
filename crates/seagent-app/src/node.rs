@@ -24,6 +24,8 @@
 
 pub(crate) mod a11y;
 mod cdp;
+#[cfg(any(windows, target_os = "macos"))]
+pub(crate) mod host_os;
 mod talk;
 
 use crate::App;
@@ -157,13 +159,18 @@ pub fn init(data: &Path) {
 }
 
 fn write_private(p: &Path, data: &[u8]) -> std::io::Result<()> {
-    use std::os::unix::fs::PermissionsExt;
     if let Some(d) = p.parent() {
         std::fs::create_dir_all(d)?;
     }
     let tmp = p.with_extension("tmp");
     std::fs::write(&tmp, data)?;
-    std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600))?;
+    }
+    #[cfg(not(unix))]
+    seagent_core::platform::fs_private::set_private(&tmp)?;
     std::fs::rename(&tmp, p)
 }
 
@@ -1036,8 +1043,15 @@ pub struct HostPolicy {
     pub mcp: BTreeMap<String, seagent_plugin::McpServerConfig>,
 }
 
+#[cfg(not(windows))]
 pub(crate) fn which(bin: &str) -> Option<PathBuf> {
     std::env::var_os("PATH").and_then(|p| std::env::split_paths(&p).map(|d| d.join(bin)).find(|f| f.is_file()))
+}
+
+/// `PATH` lookup with `PATHEXT` (`ffmpeg` finds `ffmpeg.exe`).
+#[cfg(windows)]
+pub(crate) fn which(bin: &str) -> Option<PathBuf> {
+    seagent_core::platform::layout::which(bin)
 }
 
 fn within(roots: &[PathBuf], p: &Path) -> bool {
@@ -1071,6 +1085,7 @@ pub(crate) fn with_env<R>(env: &[(String, String)], f: impl FnOnce() -> R) -> R 
     r
 }
 
+#[cfg(not(any(windows, target_vendor = "apple")))]
 fn x11_override() -> bool {
     ENV.with(|e| e.borrow().iter().any(|(k, v)| k == "DISPLAY" && !v.is_empty()))
 }
@@ -1388,30 +1403,38 @@ pub fn host_commands(policy: &HostPolicy) -> Vec<&'static str> {
     if policy.run != "deny" && !policy.run.is_empty() {
         c.push("system.run");
     }
-    let shot = which("grim").is_some() || which("import").is_some();
-    if policy.screen && shot {
-        c.push("screen.snapshot");
-    }
-    if policy.screen && (which("ffmpeg").is_some() || which("wf-recorder").is_some()) {
-        c.push("screen.record");
-    }
-    if policy.camera && which("ffmpeg").is_some() {
-        c.extend(["camera.list", "camera.snap"]);
-    }
-    if policy.location {
-        c.push("location.get");
-    }
-    if policy.computer && (input_backend().is_some() || which("gdbus").is_some() || !policy.cdp_url.is_empty()) {
-        c.push("computer.act");
-    }
-    if policy.microphone && policy.stt.is_some() && talk::available() {
-        c.extend(["talk.ptt.start", "talk.ptt.stop", "talk.ptt.cancel", "talk.ptt.once"]);
-    }
-    if policy.canvas && which("xdg-open").is_some() {
-        c.push("canvas.present");
-    }
-    if policy.notifications && (which("dunstctl").is_some() || which("makoctl").is_some()) {
-        c.extend(["notifications.list", "notifications.actions"]);
+    // Windows / macOS: their own capture, input, notification and media tools (`host_os`).
+    #[cfg(any(windows, target_os = "macos"))]
+    c.extend(host_os::commands(policy));
+    // iOS has no desktop tools (only the portable commands); Android probes the same tools as
+    // Linux (a Termux userland may have them).
+    #[cfg(not(any(windows, target_vendor = "apple")))]
+    {
+        let shot = which("grim").is_some() || which("import").is_some();
+        if policy.screen && shot {
+            c.push("screen.snapshot");
+        }
+        if policy.screen && (which("ffmpeg").is_some() || which("wf-recorder").is_some()) {
+            c.push("screen.record");
+        }
+        if policy.camera && which("ffmpeg").is_some() {
+            c.extend(["camera.list", "camera.snap"]);
+        }
+        if policy.location {
+            c.push("location.get");
+        }
+        if policy.computer && (input_backend().is_some() || which("gdbus").is_some() || !policy.cdp_url.is_empty()) {
+            c.push("computer.act");
+        }
+        if policy.microphone && policy.stt.is_some() && talk::available() {
+            c.extend(["talk.ptt.start", "talk.ptt.stop", "talk.ptt.cancel", "talk.ptt.once"]);
+        }
+        if policy.canvas && which("xdg-open").is_some() {
+            c.push("canvas.present");
+        }
+        if policy.notifications && (which("dunstctl").is_some() || which("makoctl").is_some()) {
+            c.extend(["notifications.list", "notifications.actions"]);
+        }
     }
     c.extend(crate::surfaces::canvas::node_commands(policy.canvas, !policy.cdp_url.is_empty()).into_iter().filter(|x| !c.contains(x)).collect::<Vec<_>>());
     c.extend(["dir.list", "dir.fetch"].into_iter().chain((!policy.write_roots.is_empty()).then_some("file.write")));
@@ -1427,6 +1450,22 @@ pub(crate) fn tmp_file(tag: &str, ext: &str) -> PathBuf {
     dir.join(format!("seagent-{tag}-{}-{}.{ext}", std::process::id(), seagent_net::crypto::random_token(6)))
 }
 
+/// PNG of the screen (Windows: GDI `CopyFromScreen`; macOS: `screencapture`; see `host_os`).
+#[cfg(any(windows, target_os = "macos"))]
+pub(crate) fn snapshot(t: Duration) -> Result<Vec<u8>, String> {
+    host_os::snapshot(t)
+}
+
+#[cfg(target_os = "ios")]
+pub(crate) fn snapshot(_t: Duration) -> Result<Vec<u8>, String> {
+    Err(MOBILE_NOTE.into())
+}
+
+/// Why a desktop command does nothing on a phone.
+#[cfg(target_os = "ios")]
+pub(crate) const MOBILE_NOTE: &str = "screen capture and desktop input are not available on iOS (the OS allows no screen access or input injection from an app); run them on a paired computer node";
+
+#[cfg(not(any(windows, target_vendor = "apple")))]
 pub(crate) fn snapshot(t: Duration) -> Result<Vec<u8>, String> {
     let tmp = tmp_file("shot", "png");
     let path = tmp.display().to_string();
@@ -1442,6 +1481,10 @@ pub fn host_run(policy: &HostPolicy, command: &str, p: &Value) -> Result<Value, 
 
 pub fn host_run_ctl(policy: &HostPolicy, command: &str, p: &Value, ctl: &Ctl) -> Result<Value, String> {
     let t = Duration::from_millis(p["timeoutMs"].as_u64().unwrap_or(30_000).min(300_000));
+    #[cfg(any(windows, target_os = "macos"))]
+    if let Some(r) = host_os::run(policy, command, p, t, ctl) {
+        return r;
+    }
     match command {
         // Canvas over DevTools and file transfer (surfaces::canvas, surfaces::file_transfer).
         c if crate::surfaces::canvas::node_handles(policy.canvas, !policy.cdp_url.is_empty(), c) => crate::surfaces::canvas::node_run(&policy.cdp_url, c, p, t),
@@ -1467,7 +1510,10 @@ pub fn host_run_ctl(policy: &HostPolicy, command: &str, p: &Value, ctl: &Ctl) ->
                 "allowlist" if policy.allow.iter().any(|a| a == first || a == cmd) => {}
                 _ => return Err(format!("`{first}` is not allowed on this node (run policy: {})", if policy.run.is_empty() { "deny" } else { &policy.run })),
             }
-            run_ctl(&["sh", "-c", cmd], t, ctl, p["stdin"] == true).map(Value::String)
+            // `sh -c` (Windows: Git Bash / MSYS2 bash, else PowerShell).
+            let argv = crate::surfaces::sh_argv(cmd.to_string());
+            let a: Vec<&str> = argv.iter().map(String::as_str).collect();
+            run_ctl(&a, t, ctl, p["stdin"] == true).map(Value::String)
         }
         "screen.snapshot" if policy.screen => Ok(json!({"mime": "image/png", "base64": seagent_net::crypto::b64(&snapshot(t)?)})),
         "screen.record" if policy.screen => {
@@ -1535,11 +1581,16 @@ pub fn host_run_ctl(policy: &HostPolicy, command: &str, p: &Value, ctl: &Ctl) ->
                     }
                     let f = tmp_file("canvas", "html");
                     write_private(&f, h.as_bytes()).map_err(|e| e.to_string())?;
-                    format!("file://{}", f.display())
+                    // Windows: `file:///C:/…`.
+                    if cfg!(windows) {
+                        format!("file:///{}", f.display().to_string().replace('\\', "/"))
+                    } else {
+                        format!("file://{}", f.display())
+                    }
                 }
                 (None, None) => return Err("canvas.present needs url or html".into()),
             };
-            std::process::Command::new("xdg-open").arg(&target).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).spawn().map_err(|e| format!("xdg-open: {e}"))?;
+            crate::surfaces::open_in_browser(&target)?;
             Ok(json!({"presented": target}))
         }
         "notifications.list" if policy.notifications => {

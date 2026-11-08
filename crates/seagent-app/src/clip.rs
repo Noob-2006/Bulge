@@ -1,5 +1,5 @@
 //! Terminal input helpers shared by `seagent chat` and the TUI: clipboard copy (OSC 52
-//! plus wl-copy / xclip / xsel / pbcopy), clipboard image paste, local image
+//! plus wl-copy / xclip / xsel / pbcopy; Windows `clip.exe`), clipboard image paste, local image
 //! attachments and composing a message in `$EDITOR` (Hermes `/copy`, `/paste`,
 //! `/image`, `/prompt`).
 
@@ -40,6 +40,20 @@ pub fn copy(text: &str) -> Result<String, String> {
 }
 
 fn copy_in(text: &str, path: &std::ffi::OsStr, wayland: bool) -> Result<String, String> {
+    // Windows: clip.exe reads UTF-16LE with a BOM as Unicode (anything else as the OEM codepage).
+    #[cfg(windows)]
+    if let Some(p) = seagent_core::platform::layout::which("clip") {
+        if let Ok(mut child) = Command::new(p).stdin(Stdio::piped()).stdout(Stdio::null()).stderr(Stdio::null()).spawn() {
+            if let Some(mut i) = child.stdin.take() {
+                let mut b = vec![0xff, 0xfe];
+                b.extend(text.encode_utf16().flat_map(u16::to_le_bytes));
+                let _ = i.write_all(&b);
+            }
+            if child.wait().is_ok_and(|s| s.success()) {
+                return Ok("clip".into());
+            }
+        }
+    }
     let tools: &[(&str, &[&str])] = if wayland {
         &[("wl-copy", &[]), ("xclip", &["-selection", "clipboard"]), ("xsel", &["--clipboard", "--input"]), ("pbcopy", &[])]
     } else {
@@ -146,11 +160,45 @@ pub fn image_file(path: &str, cwd: &Path) -> Result<Block, String> {
     image_block(&std::fs::read(&pb).map_err(|e| format!("{}: {e}", pb.display()))?)
 }
 
-/// Clipboard image (`/paste`): wl-paste, xclip or pngpaste.
+/// Clipboard image (`/paste`): wl-paste, xclip or pngpaste (macOS: else AppleScript's
+/// `«class PNGf»`; Windows: `System.Windows.Forms.Clipboard` through PowerShell).
 pub fn paste_image() -> Result<Block, String> {
-    paste_in(&std::env::var_os("PATH").unwrap_or_default())
+    #[cfg(windows)]
+    return paste_windows();
+    #[cfg(not(windows))]
+    {
+        let r = paste_in(&std::env::var_os("PATH").unwrap_or_default());
+        #[cfg(target_os = "macos")]
+        if r.is_err() {
+            return paste_macos().or(r);
+        }
+        r
+    }
 }
 
+#[cfg(windows)]
+fn paste_windows() -> Result<Block, String> {
+    const PS: &str = "Add-Type -AssemblyName System.Windows.Forms,System.Drawing; $i=[System.Windows.Forms.Clipboard]::GetImage(); if ($i) { $m=New-Object System.IO.MemoryStream; $i.Save($m,[System.Drawing.Imaging.ImageFormat]::Png); $o=[Console]::OpenStandardOutput(); $o.Write($m.ToArray(),0,[int]$m.Length); $o.Flush() }";
+    let o = Command::new("powershell").args(["-NoProfile", "-NonInteractive", "-STA", "-Command", PS]).stderr(Stdio::null()).output().map_err(|e| format!("powershell: {e}"))?;
+    if o.status.success() && !o.stdout.is_empty() {
+        return image_block(&o.stdout);
+    }
+    Err("no image on the clipboard (powershell)".into())
+}
+
+#[cfg(target_os = "macos")]
+fn paste_macos() -> Result<Block, String> {
+    let guard = seagent_core::tmp::TempDir::new("seagent-paste");
+    let f = guard.path().join("clip.png");
+    let script = format!("set f to (open for access POSIX file \"{}\" with write permission)\ntry\nwrite (the clipboard as «class PNGf») to f\nend try\nclose access f", f.display());
+    let ok = Command::new("osascript").args(["-e", &script]).stdout(Stdio::null()).stderr(Stdio::null()).status().is_ok_and(|s| s.success());
+    match std::fs::read(&f) {
+        Ok(b) if ok && !b.is_empty() => image_block(&b),
+        _ => Err("no image on the clipboard (pngpaste, osascript)".into()),
+    }
+}
+
+#[cfg_attr(windows, allow(dead_code))]
 fn paste_in(path: &std::ffi::OsStr) -> Result<Block, String> {
     let attempts: &[(&str, &[&str])] = &[("wl-paste", &["--no-newline", "--type", "image/png"]), ("xclip", &["-selection", "clipboard", "-t", "image/png", "-o"]), ("pngpaste", &["-"])];
     let mut tried = vec![];
@@ -174,18 +222,24 @@ fn paste_in(path: &std::ffi::OsStr) -> Result<Block, String> {
 /// could have planted a symlink or a file we do not own — it is unlinked and recreated, so the
 /// draft the editor opens is always ours and always private.
 fn private_draft(path: &Path, text: &str) -> Result<(), String> {
-    use std::os::unix::fs::OpenOptionsExt;
     if std::fs::symlink_metadata(path).is_ok() {
         std::fs::remove_file(path).map_err(|e| format!("{}: {e}", path.display()))?;
     }
-    let mut f = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        // A planted dangling symlink would otherwise be followed by a plain `create`.
-        .custom_flags(libc::O_NOFOLLOW)
-        .open(path)
-        .map_err(|e| format!("{}: {e}", path.display()))?;
+    #[cfg(unix)]
+    let opened = {
+        use std::os::unix::fs::OpenOptionsExt;
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            // A planted dangling symlink would otherwise be followed by a plain `create`.
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(path)
+    };
+    // Windows: CREATE_NEW (an existing name or link fails) with an owner-only DACL from creation.
+    #[cfg(not(unix))]
+    let opened = seagent_core::platform::fs_private::open_private(path, seagent_core::platform::fs_private::OpenMode::CreateNew);
+    let mut f = opened.map_err(|e| format!("{}: {e}", path.display()))?;
     f.write_all(text.as_bytes()).map_err(|e| e.to_string())?;
     f.sync_all().map_err(|e| e.to_string())
 }
@@ -193,7 +247,8 @@ fn private_draft(path: &Path, text: &str) -> Result<(), String> {
 /// Open `$VISUAL`/`$EDITOR` on a temporary Markdown file and return what was written
 /// (`#`-comment lines from the template removed).
 pub fn compose(initial: &str) -> Result<String, String> {
-    let editor = std::env::var("VISUAL").or_else(|_| std::env::var("EDITOR")).unwrap_or_else(|_| "vi".into());
+    // Windows has no vi; Notepad blocks until its window closes, like a terminal editor.
+    let editor = std::env::var("VISUAL").or_else(|_| std::env::var("EDITOR")).unwrap_or_else(|_| if cfg!(windows) { "notepad" } else { "vi" }.into());
     // Guard: the draft's directory is removed on every exit path (the 0600 file lives inside it).
     let guard = seagent_core::tmp::TempDir::new("seagent-prompt");
     let tmp = guard.path().join("prompt.md");
