@@ -23,6 +23,17 @@ const FILES: &[(&str, &str, &str, &str)] = &[
     ("/setup", "text/html; charset=utf-8", "web/setup.html", include_str!("../../../ui/web/setup.html")),
     ("/ui/setup.js", JS, "web/setup.js", include_str!("../../../ui/web/setup.js")),
 ];
+/// Binary files (PWA icons: Android needs 192/512 PNGs and a maskable one, iOS an opaque
+/// 180×180 apple-touch-icon; generated from `ui/icon.svg` like the desktop app's icons).
+const BINARY: &[(&str, &str, &[u8])] = &[
+    ("/ui/icons/icon-192.png", PNG, include_bytes!("../../../ui/web/icons/icon-192.png")),
+    ("/ui/icons/icon-512.png", PNG, include_bytes!("../../../ui/web/icons/icon-512.png")),
+    ("/ui/icons/icon-maskable-512.png", PNG, include_bytes!("../../../ui/web/icons/icon-maskable-512.png")),
+    ("/ui/icons/apple-touch-icon.png", PNG, include_bytes!("../../../ui/web/icons/apple-touch-icon.png")),
+    // iOS asks for this path on its own when no link tag is honoured.
+    ("/apple-touch-icon.png", PNG, include_bytes!("../../../ui/web/icons/apple-touch-icon.png")),
+];
+const PNG: &str = "image/png";
 const JS: &str = "text/javascript; charset=utf-8";
 const CSS: &str = "text/css; charset=utf-8";
 const SVG: &str = "image/svg+xml";
@@ -55,6 +66,9 @@ pub fn serve(path: &str) -> Response {
             .with_header("x-content-type-options", "nosniff")
             .with_header("referrer-policy", "no-referrer")
             .with_header("cache-control", "no-cache");
+    }
+    if let Some((_, ctype, bytes)) = BINARY.iter().find(|f| f.0 == path) {
+        return Response::new(200, ctype, bytes.to_vec()).with_header("x-content-type-options", "nosniff").with_header("cache-control", "public, max-age=86400");
     }
     let Some((_, ctype, rel, embedded)) = FILES.iter().find(|f| f.0 == path) else {
         return Response::text(404, "not found");
@@ -132,6 +146,26 @@ mod tests {
         assert_eq!(serve("/ui/pages.css").status, 200);
         let index = body(serve("/"));
         assert!(index.contains("src=\"/ui/pages.js\"") && index.contains("/ui/pages.css") && index.contains("id=\"showControl\""));
+    }
+
+    #[test]
+    fn pwa_icons_are_served_and_listed_in_the_manifest() {
+        for (p, _, _) in BINARY {
+            let r = serve(p);
+            assert_eq!(r.status, 200, "{p}");
+            let b = match r.body {
+                seagent_net::httpd::Body::Bytes(b) => b,
+                _ => panic!("bytes"),
+            };
+            assert_eq!(&b[..8], b"\x89PNG\r\n\x1a\n", "{p}");
+        }
+        let m: serde_json::Value = serde_json::from_str(FILES.iter().find(|f| f.0 == "/manifest.webmanifest").unwrap().3).unwrap();
+        let icons = m["icons"].as_array().unwrap();
+        for (src, sizes) in [("/ui/icons/icon-192.png", "192x192"), ("/ui/icons/icon-512.png", "512x512"), ("/ui/icons/icon-maskable-512.png", "512x512")] {
+            assert!(icons.iter().any(|i| i["src"] == src && i["sizes"] == sizes), "{src}");
+        }
+        assert!(icons.iter().any(|i| i["purpose"] == "maskable"));
+        assert!(INDEX.contains("apple-touch-icon"));
     }
 
     #[test]

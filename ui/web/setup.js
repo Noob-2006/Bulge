@@ -108,6 +108,8 @@
       if ($('channelOwner').value.trim()) params.channel.owner = $('channelOwner').value.trim();
     }
     params.autostart = $('autostart').checked;
+    // LAN mode (docs/cross-platform.md): devices on this network may pair.
+    params.lan = $('lan').checked;
     $('apply').disabled = true;
     say(st, '寫入設定中…');
     try {
@@ -174,6 +176,7 @@
       $('model').value = rest.join('/');
     }
     $('workspace').value = s.workspace || '';
+    $('lan').checked = !!s.lan;
     $('modeHint').textContent = s.mode === 'system'
       ? '系統服務模式：設定在 ' + s.paths.config + '，資料在 ' + s.paths.data + '。'
       : '使用者模式：設定在 ' + s.paths.config + '。';

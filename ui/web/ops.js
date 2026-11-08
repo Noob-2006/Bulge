@@ -216,12 +216,68 @@ VIEWS.agents = {
   },
 };
 
+// ── LAN: paired phones / browsers / PCs (`devices.*`), pairing card, discovery (`discovery.list`,
+// `lan.probe`, `lan.connect`). The QR code is an SVG the server renders (seagent_app::qr).
+function lanSection(d, lan) {
+  if (!d) return ''; // not an admin: the device list needs admin scope
+  const on = lan && lan.lan;
+  const devs = d.devices || [], pend = d.pending || [];
+  let h = `<section class="c12">${secH('05', L('區域網路裝置', 'LAN devices'), on ? `<button data-lanpair data-write>${L('配對裝置', 'Pair a device')}</button> <button data-lanscan>${L('掃描網路', 'Scan network')}</button>` : '')}`;
+  if (!on) h += `<div class="none">${L('區域網路模式未開啟。在設定精靈勾選「允許這個網路上的裝置連線」，或設定', 'LAN mode is off. Tick "Allow devices on this network to connect" in the setup wizard, or set')} <code>[app.exposure] lan = true</code>.</div>`;
+  else h += `<p class="dim">${L('本機指紋', 'This host')} <code>${ov((lan.identity && lan.identity.sas) || '—')}</code> · ${ov(lan.address || '')} · ${lan.discovery ? L('mDNS 廣播中', 'advertised over mDNS') : L('不廣播', 'not advertised')}</p>`;
+  h += '<div id="lanPair"></div>';
+  if (pend.length) h += '<div class="slist">' + pend.map((p) => `<div class="srow"><span class="light warn"></span><span><strong>${ov(p.name)}</strong> <span class="faint">${ov(p.platform)}</span><span class="sub">${L('配對碼', 'code')} ${ov(p.code)} · ${ov(p.ip)} · ${L('確認對方畫面顯示的指紋與本機相同再核准', 'approve only if the device shows the same fingerprint as this host')}</span></span><span class="r"><button class="btn small" data-lanapprove="${ov(p.code)}" data-write>${L('核准', 'Approve')}</button> <button class="btn ghost small" data-lanreject="${ov(p.code)}" data-write>${L('拒絕', 'Reject')}</button></span></div>`).join('') + '</div>';
+  h += '<div class="slist">' + (devs.length ? devs.map((x) => `<div class="srow"><span class="light ok"></span><span><strong>${ov(x.name)}</strong> <span class="faint mono">${ov(x.id).slice(0, 12)}</span><span class="sub">${ov(x.platform || '—')} · ${ov(x.scope)} · ${L('最近使用', 'seen')} ${ago(x.lastSeenMs)}</span></span><span class="r"><button class="btn ghost small" data-lanrevoke="${ov(x.id)}" data-write>${L('撤銷', 'Revoke')}</button></span></div>`).join('') : `<div class="none">${L('還沒有配對的裝置。', 'No paired devices yet.')}</div>`) + '</div>';
+  h += '<div id="lanFound"></div></section>';
+  return h;
+}
+function bindLan(el) {
+  const rerender = () => VIEWS.devices.render(el);
+  const act = async (fn, ok) => { try { await fn(); if (ok) toast(ok); rerender(); } catch (e) { toast(e.message, true); } };
+  for (const b of el.querySelectorAll('[data-lanapprove]')) b.onclick = () => act(() => S.arp.call('devices.approve', { code: b.dataset.lanapprove }), L('已核准', 'Approved'));
+  for (const b of el.querySelectorAll('[data-lanreject]')) b.onclick = () => act(() => S.arp.call('devices.reject', { code: b.dataset.lanreject }), L('已拒絕', 'Rejected'));
+  for (const b of el.querySelectorAll('[data-lanrevoke]')) b.onclick = () => { if (confirm(L('撤銷後這台裝置要重新配對。確定？', 'The device will have to pair again. Revoke?'))) act(() => S.arp.call('devices.revoke', { id: b.dataset.lanrevoke }), L('已撤銷', 'Revoked')); };
+  const pair = el.querySelector('[data-lanpair]');
+  if (pair) pair.onclick = async () => {
+    try {
+      const o = await S.arp.call('devices.pair.create', { ttlMin: 10 });
+      const code = o.code.slice(0, 4) + '-' + o.code.slice(4);
+      el.querySelector('#lanPair').innerHTML = `<div class="cols"><div class="c5" style="max-width:260px;background:#fff;padding:8px;border-radius:8px">${o.qrSvg || ''}</div><div class="c7"><p>${L('用手機相機掃描（會開啟主控台並自動配對），或在 SE Agent App 掃描。', 'Scan with the phone camera (opens this console and pairs it) or with the SE Agent app.')}</p><p>${L('或在裝置上輸入', 'Or type on the device')}: <code>${ov(o.address.replace(/^https?:\/\//, ''))}</code> · ${L('配對碼', 'code')} <strong class="mono" style="font-size:20px">${ov(code)}</strong></p><p>${L('主機指紋', 'Host fingerprint')} <strong class="mono">${ov(o.sas || '—')}</strong> — ${L('裝置上顯示的必須相同', 'the device must show the same')}</p><p class="dim">${L('10 分鐘內有效，QR 只能用一次。', 'Valid 10 minutes; the QR code works once.')}</p></div></div>`;
+    } catch (e) { toast(e.message, true); }
+  };
+  const scan = el.querySelector('[data-lanscan]');
+  if (scan) scan.onclick = async () => {
+    const box = el.querySelector('#lanFound');
+    box.innerHTML = '<span class="star spin"></span>';
+    try {
+      const r = await S.arp.call('discovery.list', { timeoutMs: 2500 });
+      const hosts = (r.hosts || []).filter((x) => !x.self);
+      box.innerHTML = secH('06', L('這個網路上的 SE Agent', 'SE Agent on this network')) + '<div class="slist">' + (hosts.length ? hosts.map((x, i) => `<div class="srow"><span class="light ok"></span><span><strong>${ov(x.name)}</strong> <span class="faint mono">${ov(x.address)}</span><span class="sub">${L('指紋', 'fingerprint')} ${ov(x.sas)}</span></span><span class="r"><button class="btn small" data-lanconnect="${i}" data-write>${L('連線', 'Connect')}</button></span></div>`).join('') : `<div class="none">${L('沒有找到（對方需開啟區域網路模式；有些網路會擋 multicast）。', 'None found (the other host must be in LAN mode; some networks block multicast).')}</div>`) + '</div>';
+      for (const b of box.querySelectorAll('[data-lanconnect]')) b.onclick = () => lanConnect(hosts[+b.dataset.lanconnect], rerender);
+    } catch (e) { box.innerHTML = `<p class="bad">${ov(e.message)}</p>`; }
+  };
+}
+// PC-to-PC: the other host shows an 8-character code (`seagent pair code` / its console); this
+// host checks the fingerprint, asks the user to compare, then pairs and adds it as a cluster node.
+async function lanConnect(host, done) {
+  try {
+    const p = await S.arp.call('lan.probe', { address: host.address });
+    if (host.fpPrefix && !p.fingerprint.startsWith(host.fpPrefix)) throw new Error(L('對方憑證與廣播內容不符，已停止', 'the certificate does not match the announcement; stopped'));
+    const code = prompt(L(`在 ${host.name} 上產生配對碼（裝置頁 → 配對裝置），輸入那 8 碼。\n對方指紋應為 ${p.sas}`, `Create a pairing code on ${host.name} (Devices → Pair a device) and type its 8 characters.\nIts fingerprint must read ${p.sas}`));
+    if (!code) return;
+    toast(L('等待對方核准…', 'Waiting for the other host to approve…'));
+    const r = await S.arp.call('lan.connect', { address: host.address, code, fingerprint: p.fingerprint, fpPrefix: host.fpPrefix, name: host.name });
+    toast(L(`已連線並加入叢集節點 ${r.node}`, `Paired; added cluster node ${r.node}`));
+    done();
+  } catch (e) { toast(e.message, true); }
+}
+
 // ── 04 devices ──
 VIEWS.devices = {
   title: () => L('裝置與叢集', 'Devices & cluster'),
   async render(el) {
     el.innerHTML = '<div class="ops"><span class="star spin"></span></div>';
-    const [dev, cl, desks] = await Promise.all([S.arp.call('ui.devices').catch((e) => ({ error: e.message })), S.arp.call('cluster.status').catch(() => null), S.arp.call('view.desktop.list').catch(() => [])]);
+    const [dev, cl, desks, lanDev, lan] = await Promise.all([S.arp.call('ui.devices').catch((e) => ({ error: e.message })), S.arp.call('cluster.status').catch(() => null), S.arp.call('view.desktop.list').catch(() => []), S.arp.call('devices.list').catch(() => null), S.arp.call('lan.status').catch(() => null)]);
     if (S.view !== 'devices') return;
     OPS.devices = dev;
     const nodes = dev.nodes || [], paired = dev.paired || [], pending = dev.pending || [];
@@ -241,9 +297,11 @@ VIEWS.devices = {
       ${pending.length ? secH('02', L('等待配對', 'Pending pairing')) + '<div class="slist">' + pending.map((p) => `<div class="srow"><span class="light warn"></span><span>${ov(p.name || p.id)}<span class="sub">${ov(p.platform || '')} · code ${ov(p.code || '')}</span></span><span class="r"><button class="btn small" data-pair="${ov(p.code || p.id)}" data-write>${L('核准', 'Approve')}</button></span></div>`).join('') + '</div>' : ''}</section>`;
     h += `<section class="c7">${secH('03', L('桌面與虛擬機', 'Desktops & VMs'))}<div class="slist">${(desks || []).map((d) => `<div class="srow"><span class="light ${d.running ? 'ok' : ''}"></span><span><strong>${ov(d.label || d.id)}</strong> <span class="faint mono">${ov(d.id)}</span><span class="sub">${ov(d.kind)}${d.accel ? ' · ' + ov(d.accel) : ''} · ${ov(d.width)}×${ov(d.height)} · ${d.controller === 'human' ? L('人工控制中', 'human in control') : L('代理控制', 'agent in control')}${d.kind === 'vm' && !d.imageBuilt ? ' · ' + L('映像未建置（seagent vm desktop build）', 'image not built (seagent vm desktop build)') : ''}</span></span><span class="r">${d.kind === 'vm' && d.imageBuilt ? (d.running ? `<button class="btn ghost small" data-vmstop="${ov(d.id)}" data-write>${L('關機', 'Stop')}</button>` : `<button class="btn small" data-vmstart="${ov(d.id)}" data-write>${L('啟動', 'Start')}</button>`) : (d.running ? L('執行中', 'running') : L('未執行', 'off'))}</span></div>`).join('') || `<div class="none">${L('沒有桌面。', 'No desktops.')}</div>`}</div></section>`;
     h += `<section class="c5">${secH('04', L('叢集', 'Cluster'), `<button data-page="cluster">${L('管理 →', 'Manage →')}</button>`)}<div class="slist">${(cnodes.length ? cnodes : [{ node: (cl && cl.self) || 'local', alive: true, self: true, role: ha.role || 'single' }]).map((n) => `<div class="srow"><span class="light ${n.alive ? 'ok' : 'crit'}"></span><span><strong>${ov(n.node)}</strong>${n.self ? ` <span class="faint">${L('本機', 'this')}</span>` : ''}<span class="sub">${ov(n.role || '—')} · ${ov(n.version || '')} ${ov(n.advertise || n.url || '')}</span></span><span class="r">${ov((n.running || []).length)} ${L('執行', 'run')}</span></div>`).join('')}</div></section>`;
+    h += lanSection(lanDev, lan);
     h += '</div></div>';
     el.innerHTML = h;
     bindCommon(el);
+    bindLan(el);
     for (const b of el.querySelectorAll('[data-page]')) b.onclick = () => { S.pageNav = 'showNodes'; openPage(b.dataset.page); };
     for (const b of el.querySelectorAll('[data-vmstart]')) b.onclick = async () => { b.disabled = true; b.textContent = L('開機中…', 'Booting…'); try { await S.arp.call('view.vm.start', { name: b.dataset.vmstart.replace(/^vm:/, '') }); toast(L('桌面 VM 已啟動', 'Desktop VM started')); } catch (e) { toast(e.message, true); } VIEWS.devices.render(el); };
     for (const b of el.querySelectorAll('[data-vmstop]')) b.onclick = async () => { b.disabled = true; try { await S.arp.call('view.vm.stop', { name: b.dataset.vmstop.replace(/^vm:/, '') }); } catch (e) { toast(e.message, true); } VIEWS.devices.render(el); };

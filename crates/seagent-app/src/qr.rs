@@ -1,9 +1,10 @@
 //! A small QR Code encoder (ISO/IEC 18004): byte mode, error correction level M,
-//! versions 1–10 (up to 213 bytes), rendered for terminals with Unicode half blocks.
-//! Used to show node setup codes (`seagent nodes setup-code`).
+//! versions 1–15 (up to 412 bytes), rendered for terminals with Unicode half blocks or as an
+//! inline SVG (the console's pairing card). Used to show node and device setup codes
+//! (`seagent nodes setup-code`, `seagent pair code`).
 
 /// Per version (1-based): EC codewords per block and the block layout `(count, data codewords)`.
-const BLOCKS_M: [(usize, &[(usize, usize)]); 10] = [
+const BLOCKS_M: [(usize, &[(usize, usize)]); 15] = [
     (10, &[(1, 16)]),
     (16, &[(1, 28)]),
     (26, &[(1, 44)]),
@@ -14,8 +15,29 @@ const BLOCKS_M: [(usize, &[(usize, usize)]); 10] = [
     (22, &[(2, 38), (2, 39)]),
     (22, &[(3, 36), (2, 37)]),
     (26, &[(4, 43), (1, 44)]),
+    (30, &[(1, 50), (4, 51)]),
+    (22, &[(6, 36), (2, 37)]),
+    (22, &[(8, 37), (1, 38)]),
+    (24, &[(4, 40), (5, 41)]),
+    (24, &[(5, 41), (5, 42)]),
 ];
-const ALIGN: [&[usize]; 10] = [&[], &[6, 18], &[6, 22], &[6, 26], &[6, 30], &[6, 34], &[6, 22, 38], &[6, 24, 42], &[6, 26, 46], &[6, 28, 50]];
+const ALIGN: [&[usize]; 15] = [
+    &[],
+    &[6, 18],
+    &[6, 22],
+    &[6, 26],
+    &[6, 30],
+    &[6, 34],
+    &[6, 22, 38],
+    &[6, 24, 42],
+    &[6, 26, 46],
+    &[6, 28, 50],
+    &[6, 30, 54],
+    &[6, 32, 58],
+    &[6, 34, 62],
+    &[6, 26, 46, 66],
+    &[6, 26, 48, 70],
+];
 
 pub struct Qr {
     pub version: usize,
@@ -146,9 +168,9 @@ impl Grid {
 }
 
 impl Qr {
-    /// Encode `data`; `None` when it does not fit version 10-M (213 bytes).
+    /// Encode `data`; `None` when it does not fit version 15-M (412 bytes).
     pub fn encode(data: &[u8]) -> Option<Qr> {
-        let v = (1..=10).find(|&v| 4 + if v < 10 { 8 } else { 16 } + data.len() * 8 <= data_capacity(v) * 8)?;
+        let v = (1..=BLOCKS_M.len()).find(|&v| 4 + if v < 10 { 8 } else { 16 } + data.len() * 8 <= data_capacity(v) * 8)?;
         let cap = data_capacity(v);
         let mut bits: Vec<bool> = Vec::with_capacity(cap * 8);
         let push = |val: u32, n: usize, bits: &mut Vec<bool>| (0..n).rev().for_each(|i| bits.push((val >> i) & 1 != 0));
@@ -260,6 +282,21 @@ impl Qr {
 
     pub fn dark(&self, x: usize, y: usize) -> bool {
         x < self.size && y < self.size && self.modules[y * self.size + x]
+    }
+
+    /// An SVG drawing (dark modules as one path on a white square, `quiet` modules of margin),
+    /// safe to inline in the console: no script, no external reference.
+    pub fn svg(&self, quiet: usize) -> String {
+        let n = self.size + 2 * quiet;
+        let mut d = String::new();
+        for y in 0..self.size {
+            for x in 0..self.size {
+                if self.dark(x, y) {
+                    d.push_str(&format!("M{} {}h1v1h-1z", x + quiet, y + quiet));
+                }
+            }
+        }
+        format!("<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 {n} {n}\" shape-rendering=\"crispEdges\" role=\"img\" aria-label=\"QR code\"><rect width=\"{n}\" height=\"{n}\" fill=\"#fff\"/><path fill=\"#000\" d=\"{d}\"/></svg>")
     }
 
     /// Two module rows per text line. Light modules are drawn (█▀▄) so the code reads
@@ -435,16 +472,18 @@ mod tests {
 
     #[test]
     fn round_trips_every_version_and_renders() {
-        for (v, n) in [(1, 14), (2, 26), (3, 42), (4, 62), (5, 84), (6, 106), (7, 122), (8, 152), (9, 180), (10, 213)] {
+        for (v, n) in [(1, 14), (2, 26), (3, 42), (4, 62), (5, 84), (6, 106), (7, 122), (8, 152), (9, 180), (10, 213), (11, 251), (12, 287), (13, 331), (14, 362), (15, 412)] {
             let msg: Vec<u8> = (0..n).map(|i| b"eyJ1cmwiOiJ3czovL2"[i % 18]).collect();
             let q = Qr::encode(&msg).unwrap();
             assert_eq!((q.version, q.size), (v, 17 + 4 * v));
             assert_eq!(decode(&q), msg, "version {v}");
-            if n < 213 {
+            if n < 412 {
                 assert_eq!(Qr::encode(&vec![b'x'; n + 1]).unwrap().version, v + 1, "capacity boundary after v{v}");
             }
         }
-        assert!(Qr::encode(&[0u8; 214]).is_none());
+        assert!(Qr::encode(&[0u8; 413]).is_none());
+        let svg = Qr::encode(b"https://192.168.1.20:8640/#setup=x").unwrap().svg(4);
+        assert!(svg.starts_with("<svg ") && svg.contains("viewBox=\"0 0 37 37\"") && !svg.contains("<script"));
         let q = Qr::encode(b"hi").unwrap();
         // Finder corners: dark ring, light separator.
         assert!(q.dark(0, 0) && q.dark(6, 6) && !q.dark(7, 7) && q.dark(3, 3) && !q.dark(1, 1));
