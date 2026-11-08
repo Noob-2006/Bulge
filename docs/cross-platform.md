@@ -33,6 +33,17 @@
 | 錄音 / 通知 | pw-record / dunst | WASAPI / Toast | AVFoundation / UserNotifications | 系統 API | 系統 API |
 | syslog | /dev/log | Windows Event Log | os_log / UDP syslog | logcat | os_log |
 
+### macOS：子程序跟著 seagent 結束（選用）
+
+macOS 沒有 PDEATHSIG。預設情況下，seagent 被 `SIGKILL` 時，綁定的子程序會留下來（正常結束或 `kill_group` 仍會收掉）。
+設 `SEAGENT_MACOS_WATCHDOG=1` 可開啟替代機制：每個經 `proc::spawn_in_group` / `proc::adopt` 啟動的子程序，
+都會多一個極小的看門程序 `seagent __watch-parent <ppid> <pid> <start>`（自己的 session）。
+它用 kqueue `EVFILT_PROC NOTE_EXIT` 同時監看 seagent 與子程序：子程序先結束就直接退出；
+seagent 先結束就對子程序的程序群組送 `SIGTERM`，2 秒後 `SIGKILL`。
+啟動前會比對子程序的啟動時間，避免 pid 被重用而誤殺。
+已知缺口：子程序 spawn 與看門程序就位之間若 seagent 剛好被殺，子程序仍會留下；每個子程序多一個行程。
+尚未在真實 macOS 上驗證，所以預設關閉。iOS 不會 spawn 子程序，不適用。
+
 ### iOS 的限制（平台政策，無法繞過）
 
 iOS 不允許 App 開虛擬機、執行子程序或 JIT，因此 iOS 版是**純 App**：

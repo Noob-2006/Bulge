@@ -36,11 +36,16 @@ pub fn bash(script: &str) -> Result<Command, String> {
 }
 
 /// Own process group + die with seagent, `PDEATHSIG = SIGKILL` (see the module docs).
+/// Windows: plus `CREATE_NO_WINDOW` when seagent has no console (the daemon), so a hook or
+/// script does not flash a console window.
 pub fn tie(cmd: &mut Command) {
     #[cfg(unix)]
     tie_with(cmd, libc::SIGKILL);
     #[cfg(not(unix))]
-    seagent_core::platform::proc::new_group(cmd, false);
+    {
+        use seagent_core::platform::proc;
+        proc::new_group_with(cmd, false, proc::console_flags());
+    }
 }
 
 /// [`tie`] with another parent-death signal (Linux / Android).

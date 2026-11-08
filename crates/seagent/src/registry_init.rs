@@ -38,6 +38,8 @@ pub fn register() {
     crate::message_cli::register_route();
     crate::role_cli::register_route();
     crate::vm_cli::register_route();
+    #[cfg(target_os = "macos")]
+    crate::watch_parent::register_route();
     crate::pro_tools::register();
 }
 
