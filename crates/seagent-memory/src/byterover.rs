@@ -185,7 +185,8 @@ impl Tool for BrvTool {
 }
 
 // Unix only: the fake `brv` CLI is a `#!/bin/sh` script.
-#[cfg(all(test, unix))]
+#[cfg(test)]
+#[cfg(unix)]
 mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;

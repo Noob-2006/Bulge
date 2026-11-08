@@ -66,7 +66,8 @@ pub fn sandbox_binds(entries: &[String], container_home: &str, host_home: &Path,
 }
 
 // Unix only: the fixtures symlink to /etc/hostname (sandbox binds are a unix concept).
-#[cfg(all(test, unix))]
+#[cfg(test)]
+#[cfg(unix)]
 mod tests {
     use super::*;
 

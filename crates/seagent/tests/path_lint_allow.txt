@@ -1,5 +1,5 @@
 # Reviewed absolute-path literals in non-test code (crates/seagent/tests/path_lint.rs).
-# file<TAB>literal — tool fallbacks after a $PATH lookup, paths inside containers/VMs SE Agent builds,
+# file<TAB>literal — tool fallbacks after a $PATH lookup, paths inside containers/VMs seagent builds,
 # sensitive-path deny lists, platform locations. Everything else comes from seagent_core::layout.
 crates/seagent-browser/src/control/screen.rs	/tmp
 crates/seagent-browser/src/launch.rs	/opt/brave-bin/brave
@@ -26,6 +26,7 @@ crates/seagent-browser/src/launch.rs	/usr/lib/chromium/chromium
 crates/seagent-browser/src/launch.rs	/usr/local/share
 crates/seagent-browser/src/launch.rs	/usr/share
 crates/seagent-browser/src/launch.rs	/var/lib/snapd/desktop
+crates/seagent-browser/src/launch_os.rs	/Applications
 crates/seagent-core/src/exec.rs	/tmp
 crates/seagent-core/src/layout.rs	/usr/bin/seagent
 crates/seagent-core/src/layout.rs	/usr/lib/systemd/system
@@ -43,11 +44,26 @@ crates/seagent-kernel/src/gate.rs	/srv
 crates/seagent-kernel/src/gate.rs	/usr
 crates/seagent-kernel/src/gate.rs	/var
 crates/seagent-kernel/src/gate.rs	/var/tmp
+crates/seagent-kernel/src/gate/os.rs	/Applications
+crates/seagent-kernel/src/gate/os.rs	/Library
+crates/seagent-kernel/src/gate/os.rs	/Library/
+crates/seagent-kernel/src/gate/os.rs	/System
+crates/seagent-kernel/src/gate/os.rs	/tmp
+crates/seagent-kernel/src/gate/os.rs	/usr/local/Cellar
+crates/seagent-kernel/src/gate/os.rs	/var/db/dslocal/nodes/default/users/
+crates/seagent-kernel/src/gate/os.rs	/var/folders
+crates/seagent-kernel/src/secretstore/keyring.rs	/usr/bin/security
 crates/seagent-kernel/src/subdir.rs	/home
 crates/seagent-kernel/src/subdir.rs	/root
 crates/seagent-media/src/stt/local.rs	/usr/sbin/sysctl
 crates/seagent-memory/src/byterover.rs	/usr/local/bin/brv
 crates/seagent-plugin/src/builtin/disk_cleanup.rs	/tmp
+crates/seagent-security/src/audit_export.rs	/var/run/syslog
+crates/seagent-security/src/paths.rs	/Library/LaunchAgents
+crates/seagent-security/src/paths.rs	/Library/LaunchDaemons
+crates/seagent-security/src/paths.rs	/System
+crates/seagent-security/src/paths.rs	/etc/master.passwd
+crates/seagent-security/src/paths.rs	/etc/pam.d
 crates/seagent-security/src/paths.rs	/etc/sudoers.d
 crates/seagent-security/src/paths.rs	/etc/systemd
 crates/seagent-security/src/risk.rs	/mnt/backups
@@ -72,19 +88,17 @@ crates/seagent-tools/src/exec/container.rs	/var/tmp:rw,noexec,size=256m
 crates/seagent-tools/src/exec/daytona.rs	/home/daytona
 crates/seagent-tools/src/exec/local.rs	/bin
 crates/seagent-tools/src/exec/local.rs	/etc
-crates/seagent-tools/src/exec/local.rs	/home
 crates/seagent-tools/src/exec/local.rs	/lib
 crates/seagent-tools/src/exec/local.rs	/lib32
 crates/seagent-tools/src/exec/local.rs	/lib64
 crates/seagent-tools/src/exec/local.rs	/nix
 crates/seagent-tools/src/exec/local.rs	/opt
-crates/seagent-tools/src/exec/local.rs	/root
-crates/seagent-tools/src/exec/local.rs	/run
 crates/seagent-tools/src/exec/local.rs	/run/current-system
 crates/seagent-tools/src/exec/local.rs	/sbin
 crates/seagent-tools/src/exec/local.rs	/tmp
 crates/seagent-tools/src/exec/local.rs	/usr
 crates/seagent-tools/src/exec/mod.rs	/tmp/.seagent-stdin-{tag}-{}-{}
+crates/seagent-tools/src/exec/mod.rs	/usr/bin/sandbox-exec
 crates/seagent-tools/src/exec/modal.rs	/root/workspace
 crates/seagent-tools/src/exec/openshell.rs	/tmp
 crates/seagent-tools/src/exec/sandbox.rs	/boot
@@ -95,6 +109,21 @@ crates/seagent-tools/src/exec/sandbox.rs	/run/docker.sock
 crates/seagent-tools/src/exec/sandbox.rs	/run/podman
 crates/seagent-tools/src/exec/sandbox.rs	/var/run
 crates/seagent-tools/src/exec/sandbox.rs	/var/run/docker.sock
+crates/seagent-tools/src/exec/sandbox_linux.rs	/home
+crates/seagent-tools/src/exec/sandbox_linux.rs	/root
+crates/seagent-tools/src/exec/sandbox_linux.rs	/run
+crates/seagent-tools/src/exec/sandbox_linux.rs	/tmp
+crates/seagent-tools/src/exec/seatbelt.rs	/Applications
+crates/seagent-tools/src/exec/seatbelt.rs	/Library
+crates/seagent-tools/src/exec/seatbelt.rs	/System
+crates/seagent-tools/src/exec/seatbelt.rs	/bin
+crates/seagent-tools/src/exec/seatbelt.rs	/etc
+crates/seagent-tools/src/exec/seatbelt.rs	/opt
+crates/seagent-tools/src/exec/seatbelt.rs	/sbin
+crates/seagent-tools/src/exec/seatbelt.rs	/usr
+crates/seagent-tools/src/exec/seatbelt.rs	/usr/bin/sandbox-exec
+crates/seagent-tools/src/exec/seatbelt.rs	/usr/bin/true
+crates/seagent-tools/src/exec/seatbelt.rs	/var/db/timezone
 crates/seagent-tools/src/exec/singularity.rs	/tmp
 crates/seagent-tools/src/exec/ssh.rs	/home/{}
 crates/seagent-tools/src/exec/ssh.rs	/root
@@ -106,10 +135,15 @@ crates/seagent-tools/src/filestate.rs	/etc/
 crates/seagent-tools/src/filestate.rs	/run/docker.sock
 crates/seagent-tools/src/filestate.rs	/usr/lib/systemd/
 crates/seagent-tools/src/filestate.rs	/var/run/docker.sock
-crates/seagent-vm/src/bin/seagent-vm-guest.rs	/run
-crates/seagent-vm/src/bin/seagent-vm-guest.rs	/tmp
-crates/seagent-vm/src/bin/seagent-vm-guest.rs	/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+crates/seagent-vm/src/bin/seagent-vm-guest/linux.rs	/run
+crates/seagent-vm/src/bin/seagent-vm-guest/linux.rs	/tmp
+crates/seagent-vm/src/bin/seagent-vm-guest/linux.rs	/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 crates/seagent-vm/src/config.rs	/tmp
+crates/seagent-vm/src/host.rs	/Applications/VirtualBox.app/Contents/MacOS
+crates/seagent-vm/src/host.rs	/opt/homebrew/bin
+crates/seagent-vm/src/host.rs	/opt/homebrew/share/qemu/edk2-aarch64-code.fd
+crates/seagent-vm/src/host.rs	/usr/local/bin
+crates/seagent-vm/src/host.rs	/usr/local/share/qemu/edk2-aarch64-code.fd
 crates/seagent-vm/src/proto.rs	/home/agent
 crates/seagent/src/ext.rs	/bin
 crates/seagent/src/ext.rs	/lib
@@ -147,6 +181,3 @@ crates/seagent/src/ops/update.rs	/usr/sbin/
 crates/seagent/src/ops/update.rs	/var
 crates/seagent/src/ops/wizard.rs	/Applications
 crates/seagent/src/ops/wizard.rs	/usr/share/applications
-crates/seagent/src/security_cli.rs	/bin
-crates/seagent/src/security_cli.rs	/home/sandbox
-crates/seagent/src/security_cli.rs	/usr

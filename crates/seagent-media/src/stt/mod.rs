@@ -282,5 +282,6 @@ pub fn tools(m: &Arc<Media>) -> Vec<Arc<dyn Tool>> {
 }
 
 // Unix only: the command providers under test are `#!/bin/sh` scripts.
-#[cfg(all(test, unix))]
+#[cfg(test)]
+#[cfg(unix)]
 mod tests;

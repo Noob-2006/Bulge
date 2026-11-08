@@ -330,7 +330,8 @@ mod tests {
             ws.display()
         );
         let mut r = req(&script);
-        r.env.push(("HOME_REAL".into(), std::env::var("HOME").unwrap_or_default()));
+        // The test's own scratch home (bwrap must hide it), never the real $HOME (test_hygiene rule b).
+        r.env.push(("HOME_REAL".into(), home.display().to_string()));
         r.cwd = Some(ws.clone());
         let (st, out) = drain(b.spawn(&r).unwrap(), Duration::from_secs(15)).unwrap();
         let s = String::from_utf8_lossy(&out);

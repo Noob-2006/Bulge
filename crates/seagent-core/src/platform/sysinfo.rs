@@ -279,9 +279,10 @@ mod tests {
         if let Some(a) = available_memory() {
             assert!(a <= total);
         }
-        let d = disk_space(&std::env::temp_dir()).unwrap();
+        let scratch = crate::tmp::TempDir::new("seagent-core-tmp-sysinfo");
+        let d = disk_space(scratch.path()).unwrap();
         assert!(d.total > 0 && d.available <= d.total);
-        assert_eq!(disk_free(&std::env::temp_dir()).unwrap() > 0, d.available > 0);
+        assert_eq!(disk_free(scratch.path()).unwrap() > 0, d.available > 0);
         assert!(disk_space(Path::new("/definitely/not/here")).is_err());
         assert!(!current_user().is_empty());
         assert!(home_dir().is_absolute());

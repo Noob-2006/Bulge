@@ -578,8 +578,8 @@ pub fn die_with_parent(parent: i32) {
 }
 
 /// No parent-death signal outside Linux / Android: macOS children are stopped by
-/// `LocalChild`'s drop; Windows children die with their kill-on-close Job Object.
-#[cfg(not(any(target_os = "linux", target_os = "android")))]
+/// `LocalChild`'s drop. (Windows has no caller: children die with their kill-on-close Job Object.)
+#[cfg(all(unix, not(any(target_os = "linux", target_os = "android"))))]
 pub fn die_with_parent(_parent: i32) {}
 
 #[cfg(test)]

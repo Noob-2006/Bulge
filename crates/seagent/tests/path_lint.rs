@@ -26,6 +26,7 @@ const LAYOUT_OWNERS: &[(&str, &str)] = &[
     ("crates/seagent-core/src/layout.rs", "the one definition of the layout"),
     ("crates/seagent-vm/src/proto.rs", "guest-side socket inside the VM image (fixed image layout)"),
     ("crates/seagent-vm/src/bin/seagent-vm-guest.rs", "guest agent inside the VM image (fixed image layout)"),
+    ("crates/seagent-vm/src/bin/seagent-vm-guest/linux.rs", "the guest agent's Linux body, moved out of seagent-vm-guest.rs (same fixed image layout)"),
     ("crates/seagent-vm/src/image.rs", "seagent-vm stays dependency-free; mirrors layout::system::SHARE"),
     ("crates/seagent-kernel/src/config.rs", "short socket-dir fallback /tmp/seagent-<uid> (sun_path limit)"),
     ("crates/seagent-security/src/threat.rs", "detection patterns for access to seagent's own secrets"),

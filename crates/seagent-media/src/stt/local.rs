@@ -157,7 +157,8 @@ print(json.dumps({"text": " ".join(x["text"] for x in out).strip(), "language": 
 pub struct FasterWhisper;
 
 /// The child program text (test-only: the helper can't run without faster-whisper).
-#[cfg(all(test, unix))]
+#[cfg(test)]
+#[cfg(unix)]
 pub(crate) fn helper_script() -> &'static str {
     FASTER_WHISPER_PY
 }

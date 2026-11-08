@@ -180,7 +180,8 @@ pub fn format(r: &Report, limit: usize) -> String {
 }
 
 // Unix only: the fake scanners are `#!/bin/sh` scripts.
-#[cfg(all(test, unix))]
+#[cfg(test)]
+#[cfg(unix)]
 mod tests {
     use super::*;
     use serde_json::json;

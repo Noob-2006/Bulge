@@ -40,6 +40,13 @@ pub struct TempDir {
     keep: bool,
 }
 
+/// The OS temp root (`TMPDIR` / `%TEMP%`), for code that only needs to *name* it — e.g. a backend
+/// reporting where its marker files go on a non-unix host. Creating scratch trees there goes through
+/// [`TempDir`], which cleans up; this keeps the raw `std::env::temp_dir` call in this one module.
+pub fn system_temp_root() -> PathBuf {
+    std::env::temp_dir()
+}
+
 impl TempDir {
     /// Create `<temp_dir>/<prefix>-<random>`. `TMPDIR` (via [`std::env::temp_dir`]) is respected.
     ///

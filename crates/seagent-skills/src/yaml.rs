@@ -730,7 +730,8 @@ mod tests {
         assert_eq!(parse(&to_yaml(&v)).unwrap(), v);
     }
 }
-#[cfg(all(test, unix))] // the corpus is listed with `find` / `ls`
+#[cfg(test)]
+#[cfg(unix)] // the corpus is listed with `find` / `ls`
 mod corpus {
     /// `SEAGENT_UPSTREAM_HERMES` / `SEAGENT_UPSTREAM_OPENCLAW`: the upstream checkouts.
     #[test]

@@ -415,7 +415,8 @@ impl Provider for CliBackend {
 }
 
 // Unix only: the fake CLIs are `#!/bin/sh` scripts.
-#[cfg(all(test, unix))]
+#[cfg(test)]
+#[cfg(unix)]
 mod tests {
     use super::*;
 

@@ -232,7 +232,8 @@ pub fn speak_streaming(m: &Media, text: &str, cancel: &Cancel) -> Result<(), Str
 }
 
 // Unix only: the fake players are `#!/bin/sh` scripts.
-#[cfg(all(test, unix))]
+#[cfg(test)]
+#[cfg(unix)]
 mod tests {
     use super::*;
     use crate::testutil::{temp_dir, FakeServer};

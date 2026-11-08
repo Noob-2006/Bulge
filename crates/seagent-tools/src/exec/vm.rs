@@ -137,12 +137,10 @@ impl SocketBroker {
     }
     fn call(&self, op: Value) -> Result<Value, String> {
         use std::io::{BufRead, BufReader, Write};
-        // Unix socket on Unix (unchanged); the daemon's owner-only named pipe on Windows.
-        #[cfg(unix)]
-        let sock = std::os::unix::net::UnixStream::connect(&self.path);
-        #[cfg(not(unix))]
-        let sock = seagent_core::platform::ipc::IpcStream::connect(&self.path);
-        let mut sock = sock.map_err(|e| format!("daemon broker {}: {e}", self.path.display()))?;
+        // The broker's own client: the unix socket on Unix (same connect, same message:
+        // "daemon broker <path>: <err>"); elsewhere the loopback endpoint + token that
+        // `seagent_security::broker` writes at `path`.
+        let mut sock = seagent_security::broker::connect(&self.path).map_err(|e| format!("daemon {e}"))?;
         sock.set_read_timeout(Some(self.timeout)).ok();
         sock.write_all(format!("{op}\n").as_bytes()).map_err(|e| format!("broker write: {e}"))?;
         sock.flush().ok();

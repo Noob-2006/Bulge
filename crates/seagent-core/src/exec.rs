@@ -102,7 +102,7 @@ pub trait ExecBackend: Send + Sync {
         if cfg!(unix) {
             "/tmp".into()
         } else {
-            std::env::temp_dir().display().to_string()
+            crate::tmp::system_temp_root().display().to_string()
         }
     }
     /// Push workspace changes before a command (remote backends).

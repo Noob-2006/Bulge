@@ -272,7 +272,8 @@ impl TtsProvider for Local {
 }
 
 // Unix only: the fake engines are `#!/bin/sh` scripts.
-#[cfg(all(test, unix))]
+#[cfg(test)]
+#[cfg(unix)]
 mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
