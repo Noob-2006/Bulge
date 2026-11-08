@@ -4,6 +4,7 @@
 //! environment snapshot) so `cd` and `export` persist across calls.
 
 pub mod ansi;
+pub mod appcontainer;
 pub mod container;
 pub mod daytona;
 pub mod process;
@@ -282,7 +283,7 @@ fn os_sandbox(name: &str, cfg: &ExecConfig, ctx: &BackendCtx) -> Result<Arc<dyn 
         #[cfg(target_os = "macos")]
         "seatbelt" => Ok(Arc::new(local::SeatbeltBackend::new(&cfg.sandbox, ctx)?)),
         #[cfg(windows)]
-        "appcontainer" => Err("exec backend appcontainer is not available on windows yet: the AppContainer launcher is not implemented in this build; use `docker` (Docker Desktop runs containers in a VM), `vm`, `ssh`, or `local` (NOT ISOLATED)".into()),
+        "appcontainer" => Ok(Arc::new(appcontainer::AppContainerBackend::new(&cfg.sandbox, ctx)?)),
         #[cfg(not(any(target_os = "linux", target_os = "android")))]
         "bwrap" => Err(local::not_available("bwrap", "bubblewrap needs Linux namespaces")),
         #[cfg(not(any(target_os = "linux", target_os = "android")))]
@@ -296,10 +297,14 @@ fn os_sandbox(name: &str, cfg: &ExecConfig, ctx: &BackendCtx) -> Result<Arc<dyn 
 }
 
 /// The OS sandbox that stands in for bwrap / Landlock on this OS (docs/cross-platform.md:
-/// Seatbelt on macOS), if any. Windows has none in this build, so `auto` stays honest there.
+/// Seatbelt on macOS, AppContainer on Windows), if any. Windows counts only when an
+/// AppContainer can actually be created here (the restricted-token fallback is never offered
+/// by `auto`), so the plan stays honest.
 fn native_sandbox() -> Option<&'static str> {
     if cfg!(target_os = "macos") && Path::new("/usr/bin/sandbox-exec").is_file() {
         Some("seatbelt")
+    } else if cfg!(windows) && appcontainer::available() {
+        Some("appcontainer")
     } else {
         None
     }
@@ -319,16 +324,17 @@ pub fn os_plan(mut plan: seagent_vm::policy::Plan, sandboxed: bool) -> seagent_v
     use seagent_vm::policy::Origin;
     use seagent_vm::IsolationLevel;
     let Some(name) = native_sandbox() else { return plan };
+    let os_warning = if name == "appcontainer" { appcontainer::WARNING } else { OS_SANDBOX_WARNING };
     if plan.backend == name && plan.level <= IsolationLevel::OsSandbox {
         plan.level = IsolationLevel::OsSandbox;
-        plan.warning = Some(format!("{name}: {OS_SANDBOX_WARNING}"));
+        plan.warning = Some(format!("{name}: {os_warning}"));
     } else if plan.backend == "local" && plan.origin == Origin::AutoHost {
         plan = seagent_vm::policy::Plan {
             backend: name.into(),
             provider: None,
             level: IsolationLevel::OsSandbox,
             origin: Origin::AutoFallback,
-            warning: Some(format!("no microVM available on this {} machine; {} runs in the {name} sandbox instead (host home and keys not readable) — {OS_SANDBOX_WARNING}", std::env::consts::OS, if sandboxed { "this session" } else { "the agent" })),
+            warning: Some(format!("no microVM available on this {} machine; {} runs in the {name} sandbox instead (host home and keys not readable) — {os_warning}", std::env::consts::OS, if sandboxed { "this session" } else { "the agent" })),
             reason: format!("auto: no microVM, the agent still runs isolated in the {} OS sandbox ({name})", std::env::consts::OS),
         };
     }
