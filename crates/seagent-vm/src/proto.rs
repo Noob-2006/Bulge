@@ -28,6 +28,10 @@ pub const SERIAL_DEVICE: &str = "/dev/vport0p1";
 /// neither offers virtio-serial or a host-reachable vsock, both serve a COM port to the host
 /// as a socket / named pipe. `ttyS0` stays the boot console.
 pub const UART_DEVICE: &str = "/dev/ttyS1";
+/// The same second UART on arm64 VirtualBox / Hyper-V, which emulate PL011s (`ttyAMA*`)
+/// instead of 16550s. The aarch64 guest agent opens it when it exists and falls back to
+/// [`UART_DEVICE`] (a 16550 on an arm64 machine model); x86_64 only ever uses [`UART_DEVICE`].
+pub const UART_DEVICE_PL011: &str = "/dev/ttyAMA1";
 /// Where the guest agent lets in-VM programs ask the daemon for things
 /// (privileged command, egress). Inside the VM only; never a host socket.
 pub const BROKER_SOCKET: &str = "/run/seagent/broker.sock";

@@ -65,9 +65,28 @@ pub fn channel_endpoint(spec: &VmSpec, windows: bool) -> Endpoint {
     }
 }
 
-/// Every `VBoxManage` invocation that creates and boots `spec`, in order (pure: the shape is
-/// tested without VirtualBox).
+/// Every `VBoxManage` invocation that creates and boots `spec` on this host, in order.
+/// The guest architecture follows the host's: VirtualBox runs arm64 VMs only on Apple
+/// Silicon (7.1+) and x86_64 VMs only on x86_64 hosts.
 pub fn create_commands(spec: &VmSpec, vdi: &Path, chan: &Endpoint) -> Vec<Vec<String>> {
+    create_commands_for(spec, vdi, chan, cfg!(target_arch = "aarch64"))
+}
+
+/// [`create_commands`] for an explicit guest architecture (pure: the shape is tested without
+/// VirtualBox).
+///
+/// * x86_64: `--ostype Linux_64`, `--firmware efi`, an AHCI controller, COM1/COM2 at the
+///   16550 I/O ports `0x3F8/4` and `0x2F8/3` (guest `ttyS0` / `ttyS1`).
+/// * arm64 (`aarch64 = true`): `createvm --platform-architecture arm` (VirtualBox 7.1+,
+///   which also selects the ARMv8 virtual chipset and its only firmware, UEFI — so no
+///   `--firmware`), `--ostype Linux_arm64`, a virtio-scsi controller (the arm platform has
+///   no AHCI-only boot path; the firmware reads the ESP through it and the guest never mounts
+///   the disk). The UARTs: `VBoxManage --uartN` only has the `<I/O base> <IRQ>` form, and on
+///   the arm platform VirtualBox ignores those numbers and maps each enabled slot to a PL011
+///   at the platform's fixed MMIO address, so the same COM1/COM2 values are passed as the slot
+///   defaults; the guest sees `ttyAMA0` (console) and `ttyAMA1` (the channel, which the agent
+///   probes for on aarch64).
+pub fn create_commands_for(spec: &VmSpec, vdi: &Path, chan: &Endpoint, aarch64: bool) -> Vec<Vec<String>> {
     let name = vm_name(spec);
     let s = |v: &[&str]| v.iter().map(|x| x.to_string()).collect::<Vec<_>>();
     let chan_path = match chan {
@@ -75,13 +94,24 @@ pub fn create_commands(spec: &VmSpec, vdi: &Path, chan: &Endpoint) -> Vec<Vec<St
         Endpoint::Pipe(n) => n.clone(),
         Endpoint::Tcp(a) => a.to_string(),
     };
-    let mut modify = s(&["modifyvm", &name, "--cpus", &spec.vcpu.to_string(), "--memory", &spec.mem_mb.to_string(), "--firmware", "efi", "--nic1", "none", "--usb", "off", "--boot1", "disk", "--boot2", "none", "--boot3", "none", "--boot4", "none"]);
+    let mut create = s(&["createvm", "--name", &name, "--basefolder", &spec.run_dir.display().to_string()]);
+    if aarch64 {
+        create.extend(s(&["--platform-architecture", "arm", "--ostype", "Linux_arm64", "--register"]));
+    } else {
+        create.extend(s(&["--ostype", "Linux_64", "--register"]));
+    }
+    let mut modify = s(&["modifyvm", &name, "--cpus", &spec.vcpu.to_string(), "--memory", &spec.mem_mb.to_string()]);
+    if !aarch64 {
+        modify.extend(s(&["--firmware", "efi"]));
+    }
+    modify.extend(s(&["--nic1", "none", "--usb", "off", "--boot1", "disk", "--boot2", "none", "--boot3", "none", "--boot4", "none"]));
     modify.extend(s(&["--uart1", "0x3F8", "4", "--uartmode1", "file", &spec.console_log().display().to_string(), "--uart2", "0x2F8", "3", "--uartmode2", "server", &chan_path]));
+    let (ctl, add, controller) = if aarch64 { ("VirtIO", "virtio", "VirtIO") } else { ("SATA", "sata", "IntelAhci") };
     vec![
-        s(&["createvm", "--name", &name, "--basefolder", &spec.run_dir.display().to_string(), "--ostype", "Linux_64", "--register"]),
+        create,
         modify,
-        s(&["storagectl", &name, "--name", "SATA", "--add", "sata", "--controller", "IntelAhci", "--portcount", "1"]),
-        s(&["storageattach", &name, "--storagectl", "SATA", "--port", "0", "--device", "0", "--type", "hdd", "--medium", &vdi.display().to_string(), "--mtype", "immutable"]),
+        s(&["storagectl", &name, "--name", ctl, "--add", add, "--controller", controller, "--portcount", "1"]),
+        s(&["storageattach", &name, "--storagectl", ctl, "--port", "0", "--device", "0", "--type", "hdd", "--medium", &vdi.display().to_string(), "--mtype", "immutable"]),
         s(&["startvm", &name, "--type", "headless"]),
     ]
 }
@@ -252,7 +282,7 @@ mod tests {
         let s = spec();
         assert_eq!(raw_disk("", &s), PathBuf::from("/img/disk.raw"), "the disk lives next to the kernel");
         let unix = channel_endpoint(&s, false);
-        let cmds = create_commands(&s, Path::new("/img/disk.vdi"), &unix);
+        let cmds = create_commands_for(&s, Path::new("/img/disk.vdi"), &unix, false);
         let names: Vec<&str> = cmds.iter().map(|c| c[0].as_str()).collect();
         assert_eq!(names, ["createvm", "modifyvm", "storagectl", "storageattach", "startvm"]);
         let modify = cmds[1].join(" ");
@@ -261,7 +291,26 @@ mod tests {
         assert!(cmds[3].join(" ").ends_with("--medium /img/disk.vdi --mtype immutable"), "nothing the guest writes survives a boot");
         assert_eq!(cmds[4], ["startvm", "seagent-v-1", "--type", "headless"]);
         // Windows: COM2 is a named pipe.
-        let win = create_commands(&s, Path::new("disk.vdi"), &channel_endpoint(&s, true))[1].join(" ");
+        let win = create_commands_for(&s, Path::new("disk.vdi"), &channel_endpoint(&s, true), false)[1].join(" ");
         assert!(win.contains(r"--uartmode2 server \\.\pipe\seagent-v-1"), "{win}");
+        // The x86_64 shape is exactly what it always was.
+        assert_eq!(cmds[0].join(" "), "createvm --name seagent-v-1 --basefolder /r/v-1 --ostype Linux_64 --register");
+        assert!(modify.contains("--firmware efi") && modify.contains("--uart1 0x3F8 4") && modify.contains("--uart2 0x2F8 3"), "{modify}");
+        assert_eq!(cmds[2].join(" "), "storagectl seagent-v-1 --name SATA --add sata --controller IntelAhci --portcount 1");
+    }
+
+    #[test]
+    fn virtualbox_on_arm64_creates_an_arm_platform_vm() {
+        let s = spec();
+        let cmds = create_commands_for(&s, Path::new("/img/disk.vdi"), &channel_endpoint(&s, false), true);
+        let names: Vec<&str> = cmds.iter().map(|c| c[0].as_str()).collect();
+        assert_eq!(names, ["createvm", "modifyvm", "storagectl", "storageattach", "startvm"]);
+        let create = cmds[0].join(" ");
+        assert!(create.contains("--platform-architecture arm") && create.contains("--ostype Linux_arm64"), "{create}");
+        let modify = cmds[1].join(" ");
+        assert!(!modify.contains("--firmware"), "arm VMs are UEFI-only: {modify}");
+        assert!(modify.contains("--nic1 none") && modify.contains("--uartmode2 server /r/v-1/chan.sock"), "{modify}");
+        assert!(cmds[2].join(" ").contains("--add virtio --controller VirtIO"), "{:?}", cmds[2]);
+        assert!(cmds[3].join(" ").contains("--storagectl VirtIO") && cmds[3].join(" ").ends_with("--mtype immutable"));
     }
 }

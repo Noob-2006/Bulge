@@ -37,7 +37,7 @@
 
 use seagent_vm::limits::{apply_guest_limits, Limits};
 use seagent_vm::proto::{
-    check_rel_path, decode, encode, FileBlob, GuestMsg, HostMsg, AGENT_HOME, AGENT_UID, BROKER_SOCKET, GUEST_WORKSPACE, MAX_FRAME, SERIAL_DEVICE, UART_DEVICE, VERSION,
+    check_rel_path, decode, encode, FileBlob, GuestMsg, HostMsg, AGENT_HOME, AGENT_UID, BROKER_SOCKET, GUEST_WORKSPACE, MAX_FRAME, SERIAL_DEVICE, UART_DEVICE, UART_DEVICE_PL011, VERSION,
     VSOCK_PORT,
 };
 use base64::engine::general_purpose::STANDARD as B64;
@@ -442,21 +442,45 @@ enum TransportSetup {
     VsockListener(RawFd),
 }
 
+/// The guest end of the `uart` channel (COM2). x86_64: always the 16550 `ttyS1`. aarch64:
+/// arm64 VirtualBox / Hyper-V emulate PL011s, so the second one (`ttyAMA1`) when it exists,
+/// else `ttyS1` (a machine model with 16550s).
+fn uart_device() -> &'static str {
+    #[cfg(target_arch = "aarch64")]
+    {
+        uart_device_in(|p| Path::new(p).exists())
+    }
+    #[cfg(not(target_arch = "aarch64"))]
+    {
+        UART_DEVICE
+    }
+}
+
+#[cfg_attr(not(any(test, target_arch = "aarch64")), allow(dead_code))]
+fn uart_device_in(exists: impl Fn(&str) -> bool) -> &'static str {
+    if exists(UART_DEVICE_PL011) {
+        UART_DEVICE_PL011
+    } else {
+        UART_DEVICE
+    }
+}
+
 fn prepare_transport(cfg: &GuestCfg) -> Result<TransportSetup, String> {
     if cfg.channel == "uart" {
         // VirtualBox / Hyper-V: the host end of COM2 is a socket or named pipe; the guest
         // side is a plain 16550, put in raw 8N1 so no byte of a frame is reinterpreted.
-        let f = OpenOptions::new().read(true).write(true).open(UART_DEVICE).map_err(|e| format!("cannot open {UART_DEVICE}: {e}"))?;
+        let dev = uart_device();
+        let f = OpenOptions::new().read(true).write(true).open(dev).map_err(|e| format!("cannot open {dev}: {e}"))?;
         // SAFETY: termios calls on an fd we own; `t` is fully initialised by tcgetattr.
         unsafe {
             let mut t: libc::termios = std::mem::zeroed();
             if libc::tcgetattr(f.as_raw_fd(), &mut t) != 0 {
-                return Err(format!("tcgetattr {UART_DEVICE}: {}", std::io::Error::last_os_error()));
+                return Err(format!("tcgetattr {dev}: {}", std::io::Error::last_os_error()));
             }
             libc::cfmakeraw(&mut t);
             libc::cfsetspeed(&mut t, libc::B115200);
             if libc::tcsetattr(f.as_raw_fd(), libc::TCSANOW, &t) != 0 {
-                return Err(format!("tcsetattr {UART_DEVICE}: {}", std::io::Error::last_os_error()));
+                return Err(format!("tcsetattr {dev}: {}", std::io::Error::last_os_error()));
             }
         }
         return Ok(TransportSetup::Serial(f));
@@ -1450,6 +1474,14 @@ mod unit {
         assert_eq!(c.workspace, PathBuf::from(GUEST_WORKSPACE));
         assert!(c.nproc > 0);
         assert!(!c.workspace_ro);
+    }
+
+    #[test]
+    fn the_uart_channel_prefers_the_pl011_only_when_present() {
+        assert_eq!(uart_device_in(|p| p == UART_DEVICE_PL011), UART_DEVICE_PL011);
+        assert_eq!(uart_device_in(|_| false), UART_DEVICE);
+        #[cfg(target_arch = "x86_64")]
+        assert_eq!(uart_device(), UART_DEVICE, "x86_64 never probes: always the 16550 ttyS1");
     }
 
     #[test]
