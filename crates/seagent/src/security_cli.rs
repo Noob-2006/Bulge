@@ -17,6 +17,7 @@ use seagent_security::approvals as ap;
 use seagent_security::broker::Broker;
 use seagent_security::{estop, osv, plugin_guard, url_safety};
 use serde_json::{json, Value};
+#[cfg(all(unix, test))]
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
@@ -366,7 +367,7 @@ fn persist(paths: &Paths, ws: &Path, section: &str, kv: &[(&str, String)], ok: i
         std::fs::create_dir_all(d).map_err(|e| e.to_string())?;
     }
     std::fs::write(&p, &after).map_err(|e| format!("{}: {e}", p.display()))?;
-    let _ = std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o600));
+    let _ = crate::ops::hostos::set_mode(&p, 0o600);
     let restore = || match &before {
         Some(t) => std::fs::write(&p, t).map_err(|e| e.to_string()),
         None => std::fs::remove_file(&p).map_err(|e| e.to_string()),
@@ -526,7 +527,7 @@ fn f(id: &'static str, severity: &'static str, title: impl Into<String>, detail:
 }
 
 fn mode_of(p: &Path) -> Option<u32> {
-    std::fs::metadata(p).ok().map(|m| m.permissions().mode() & 0o777)
+    crate::ops::hostos::mode_of(p).ok().map(|m| m & 0o777)
 }
 
 fn is_loopback(listen: &str) -> bool {
@@ -832,12 +833,12 @@ fn local_server_dirs(cfg: &Config) -> Vec<(String, PathBuf)> {
 fn fix(paths: &Paths) -> Vec<String> {
     let mut done = vec![];
     for p in [paths.user_config(), paths.secrets()] {
-        if mode_of(&p).is_some_and(|m| m & 0o077 != 0) && std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o600)).is_ok() {
+        if mode_of(&p).is_some_and(|m| m & 0o077 != 0) && crate::ops::hostos::set_mode(&p, 0o600).is_ok() {
             done.push(format!("chmod 600 {}", p.display()));
         }
     }
     for d in [paths.data.clone(), paths.sessions(), paths.config_dir.clone()] {
-        if mode_of(&d).is_some_and(|m| m & 0o077 != 0) && std::fs::set_permissions(&d, std::fs::Permissions::from_mode(0o700)).is_ok() {
+        if mode_of(&d).is_some_and(|m| m & 0o077 != 0) && crate::ops::hostos::set_mode(&d, 0o700).is_ok() {
             done.push(format!("chmod 700 {}", d.display()));
         }
     }

@@ -529,10 +529,10 @@ pub fn command_line(agent: &str, prompt_path: &Path) -> String {
 }
 
 fn on_path(bin: &str) -> Option<PathBuf> {
-    std::env::var_os("PATH").and_then(|p| std::env::split_paths(&p).map(|d| d.join(bin)).find(|c| {
-        use std::os::unix::fs::PermissionsExt;
-        c.metadata().is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
-    }))
+    #[cfg(not(unix))]
+    return seagent_core::platform::layout::which(bin); // PATHEXT: `claude` → claude.cmd
+    #[cfg(unix)]
+    std::env::var_os("PATH").and_then(|p| std::env::split_paths(&p).map(|d| d.join(bin)).find(|c| c.metadata().is_ok_and(|m| crate::ops::hostos::is_executable(c, &m))))
 }
 
 pub fn detect_agents() -> Vec<String> {
@@ -540,11 +540,8 @@ pub fn detect_agents() -> Vec<String> {
 }
 
 fn write_private(p: &Path, data: &str) -> Result<(), String> {
-    use std::io::Write;
-    use std::os::unix::fs::OpenOptionsExt;
     std::fs::create_dir_all(p.parent().unwrap()).map_err(|e| e.to_string())?;
-    let mut f = std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(p).map_err(|e| format!("{}: {e}", p.display()))?;
-    f.write_all(data.as_bytes()).map_err(|e| e.to_string())
+    crate::ops::hostos::create_private(p, data.as_bytes()).map_err(|e| format!("{}: {e}", p.display()))
 }
 
 pub struct Prepared {

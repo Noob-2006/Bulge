@@ -305,8 +305,7 @@ pub fn write_validated(paths: &Paths, text: &str, backup: bool) -> Result<(), St
         }
     }
     seagent_kernel::util::atomic_write(&p, text.as_bytes()).map_err(|e| e.to_string())?;
-    use std::os::unix::fs::PermissionsExt;
-    let _ = std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o600));
+    let _ = crate::ops::hostos::set_mode(&p, 0o600);
     Ok(())
 }
 
@@ -631,9 +630,8 @@ fn check(paths: &Paths, a: &Args) -> R {
     let defaults = to_table(&Config::default());
     let missing: Vec<&String> = defaults.keys().filter(|k| !t.contains_key(*k) && !FREE.contains(&k.as_str())).collect();
     println!("· sections using built-in defaults: {}", if missing.is_empty() { "none".into() } else { missing.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", ") });
-    if let Ok(m) = std::fs::metadata(paths.user_config()) {
-        use std::os::unix::fs::PermissionsExt;
-        if m.permissions().mode() & 0o077 != 0 {
+    if let Ok(m) = crate::ops::hostos::mode_of(&paths.user_config()) {
+        if m & 0o077 != 0 {
             issues += 1;
             println!("✗ {} is readable by others (chmod 600)", paths.user_config().display());
         }

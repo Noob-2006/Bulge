@@ -550,10 +550,14 @@ fn dur(d: Duration) -> String {
 fn status_text(st: std::process::ExitStatus) -> String {
     match st.code() {
         Some(c) => format!("exit {c}"),
+        #[cfg(unix)]
         None => {
             use std::os::unix::process::ExitStatusExt;
             format!("killed by signal {}", st.signal().unwrap_or(0))
         }
+        // Windows always has an exit code; kept for exhaustiveness.
+        #[cfg(not(unix))]
+        None => "killed".into(),
     }
 }
 

@@ -240,7 +240,7 @@ pub struct Scrub {
 impl Scrub {
     /// This process's identity (`$HOME`, `$USER`, `/etc/hostname`) plus the workspace path.
     pub fn here(workspace: Option<&Path>) -> Scrub {
-        let host = std::fs::read_to_string("/etc/hostname").map(|s| s.trim().to_string()).ok().filter(|s| !s.is_empty()).or_else(|| std::env::var("HOSTNAME").ok()).unwrap_or_default();
+        let host = crate::ops::hostos::etc_hostname().map(|s| s.trim().to_string()).ok().filter(|s| !s.is_empty()).or_else(|| std::env::var("HOSTNAME").ok()).unwrap_or_default();
         let user = std::env::var("USER").or_else(|_| std::env::var("LOGNAME")).unwrap_or_default();
         let home = std::env::var("HOME").unwrap_or_default();
         let extra = workspace.map(|w| vec![(w.display().to_string(), "<workspace>".to_string())]).unwrap_or_default();

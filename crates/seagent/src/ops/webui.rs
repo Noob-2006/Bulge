@@ -778,12 +778,7 @@ fn upload(c: &WebCtx, name: &str, data: &str) -> Res {
     std::fs::create_dir_all(&dir).map_err(io_fail)?;
     let file = format!("{}-{}", seagent_kernel::util::random_hex(8), name);
     let path = dir.join(&file);
-    {
-        use std::io::Write;
-        use std::os::unix::fs::OpenOptionsExt;
-        let mut f = std::fs::OpenOptions::new().create_new(true).write(true).mode(0o600).open(&path).map_err(io_fail)?;
-        f.write_all(&bytes).map_err(io_fail)?;
-    }
+    crate::ops::hostos::create_private(&path, &bytes).map_err(io_fail)?;
     let mime = mime.filter(|m| !m.is_empty()).unwrap_or_else(|| mime_of(&name));
     Ok(json!({"path": path.display().to_string(), "name": name, "bytes": bytes.len(), "mime": mime}))
 }

@@ -55,7 +55,23 @@ pub fn is_tailnet_v6(a: Ipv6Addr) -> bool {
     s[0] == 0xfd7a && s[1] == 0x115c && s[2] == 0xa1e0
 }
 
+/// (first tailnet IPv4, first tailnet IPv6) of this host's interfaces (`GetAdaptersAddresses`).
+#[cfg(windows)]
+pub fn tailnet_ips() -> (Option<Ipv4Addr>, Option<Ipv6Addr>) {
+    let ips = crate::ops::hostos::local_ips();
+    let v4 = ips.iter().find_map(|a| match a {
+        std::net::IpAddr::V4(ip) if is_tailnet_v4(*ip) => Some(*ip),
+        _ => None,
+    });
+    let v6 = ips.iter().find_map(|a| match a {
+        std::net::IpAddr::V6(ip) if is_tailnet_v6(*ip) => Some(*ip),
+        _ => None,
+    });
+    (v4, v6)
+}
+
 /// (first tailnet IPv4, first tailnet IPv6) of this host's interfaces.
+#[cfg(unix)]
 pub fn tailnet_ips() -> (Option<Ipv4Addr>, Option<Ipv6Addr>) {
     let mut v4 = None;
     let mut v6 = None;
@@ -125,6 +141,12 @@ fn txt_quote(s: &str) -> String {
     format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""))
 }
 
+#[cfg(not(any(target_os = "linux", target_os = "android")))]
+fn hostname() -> String {
+    seagent_core::platform::sysinfo::hostname().split('.').next().unwrap_or("").to_string()
+}
+
+#[cfg(any(target_os = "linux", target_os = "android"))]
 fn hostname() -> String {
     std::fs::read_to_string("/proc/sys/kernel/hostname").or_else(|_| std::fs::read_to_string("/etc/hostname")).map(|s| s.trim().split('.').next().unwrap_or("").to_string()).unwrap_or_default()
 }
@@ -216,6 +238,8 @@ fn default_dir() -> PathBuf {
     if cfg!(target_os = "macos") {
         let prefix = std::process::Command::new("brew").arg("--prefix").output().ok().map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string()).filter(|s| !s.is_empty()).unwrap_or_else(|| "/opt/homebrew".into());
         PathBuf::from(prefix).join("etc/coredns")
+    } else if cfg!(windows) {
+        PathBuf::from(std::env::var("ProgramData").unwrap_or_else(|_| "C:\\ProgramData".into())).join("coredns")
     } else {
         PathBuf::from("/etc/coredns")
     }
@@ -244,8 +268,13 @@ pub fn dispatch(cmd: &str, a: &Args, _raw: &[String]) -> Option<R> {
                     return Ok(0);
                 }
                 let dir = a.val("coredns-dir").map(PathBuf::from).unwrap_or_else(default_dir);
-                for l in apply(&dir, &zone, &domain, v4, v6, true)? {
+                for l in apply(&dir, &zone, &domain, v4, v6, cfg!(unix))? {
                     println!("{l}");
+                }
+                if cfg!(windows) {
+                    // CoreDNS has no standard service wrapper on Windows (and seagent never elevates).
+                    println!("Restart CoreDNS (or its service) so it loads {}. Then publish this host with `seagent dns zone --domain {} --write`.", dir.display(), domain.trim_end_matches('.'));
+                    return Ok(0);
                 }
                 println!("Restarting CoreDNS…");
                 let restart = if cfg!(target_os = "macos") { vec!["sudo", "brew", "services", "restart", "coredns"] } else { vec!["sudo", "systemctl", "restart", "coredns"] };

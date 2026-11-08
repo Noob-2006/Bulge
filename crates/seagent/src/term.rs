@@ -399,16 +399,18 @@ pub struct TtyApprover {
 
 impl TtyApprover {
     pub fn available() -> bool {
-        std::fs::OpenOptions::new().read(true).write(true).open("/dev/tty").is_ok() && std::io::stderr().is_terminal()
+        std::fs::OpenOptions::new().read(true).write(true).open(crate::ops::hostos::TTY_IN).is_ok() && std::io::stderr().is_terminal()
     }
     pub fn new() -> Self {
         TtyApprover { lock: Mutex::new(()) }
     }
     fn prompt(&self, text: &str) -> Option<String> {
         let _g = self.lock.lock().unwrap();
-        let mut tty = std::fs::OpenOptions::new().read(true).write(true).open("/dev/tty").ok()?;
-        write!(tty, "{text}").ok()?;
-        tty.flush().ok()?;
+        let tty = std::fs::OpenOptions::new().read(true).write(true).open(crate::ops::hostos::TTY_IN).ok()?;
+        // One device on Unix; the console's output is a separate one on Windows (`CONOUT$`).
+        let mut out = if cfg!(windows) { std::fs::OpenOptions::new().write(true).open(crate::ops::hostos::TTY_OUT).ok()? } else { tty.try_clone().ok()? };
+        write!(out, "{text}").ok()?;
+        out.flush().ok()?;
         let mut line = String::new();
         BufReader::new(tty).read_line(&mut line).ok()?;
         Some(line.trim().to_string())

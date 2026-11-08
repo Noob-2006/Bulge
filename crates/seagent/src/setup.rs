@@ -64,7 +64,7 @@ struct Io {
 
 impl Io {
     fn new() -> Io {
-        let tty = std::io::stdin().is_terminal().then(|| std::fs::OpenOptions::new().read(true).write(true).open("/dev/tty").ok()).flatten();
+        let tty = std::io::stdin().is_terminal().then(|| std::fs::OpenOptions::new().read(true).write(true).open(crate::ops::hostos::TTY_IN).ok()).flatten();
         let input: Box<dyn BufRead> = match &tty {
             Some(f) => Box::new(BufReader::new(f.try_clone().expect("tty"))),
             None => Box::new(BufReader::new(std::io::stdin())),
@@ -97,20 +97,9 @@ impl Io {
     /// A secret: echo is turned off on a terminal so it never shows on screen.
     fn secret(&mut self, q: &str) -> Result<String, String> {
         let Some(tty) = &self.tty else { return self.line(&format!("{q}: ")) };
-        use std::os::fd::AsRawFd;
-        let fd = tty.as_raw_fd();
-        let mut old: libc::termios = unsafe { std::mem::zeroed() };
-        let have = unsafe { libc::tcgetattr(fd, &mut old) } == 0;
-        if have {
-            let mut quiet = old;
-            quiet.c_lflag &= !libc::ECHO;
-            quiet.c_lflag |= libc::ECHONL;
-            unsafe { libc::tcsetattr(fd, libc::TCSANOW, &quiet) };
-        }
+        let quiet = crate::ops::hostos::EchoOff::file(tty, true);
         let r = self.line(&format!("{q} {}: ", t("（輸入不會顯示）", "(hidden)")));
-        if have {
-            unsafe { libc::tcsetattr(fd, libc::TCSANOW, &old) };
-        }
+        drop(quiet);
         r
     }
     fn choose(&mut self, q: &str, items: &[String], default: usize) -> Result<usize, String> {

@@ -24,6 +24,7 @@ use std::time::{Duration, Instant};
 
 static STOP: AtomicBool = AtomicBool::new(false);
 
+#[cfg(unix)]
 extern "C" fn on_signal(_: libc::c_int) {
     STOP.store(true, Ordering::SeqCst);
 }
@@ -201,6 +202,24 @@ impl State {
     }
 }
 
+/// Minutes east of UTC now (`GetTimeZoneInformation`: UTC = local + bias).
+#[cfg(windows)]
+fn local_offset_minutes() -> i32 {
+    use windows_sys::Win32::System::Time::{GetTimeZoneInformation, TIME_ZONE_INFORMATION};
+    // SAFETY: zeroed POD out-parameter.
+    unsafe {
+        let mut tz: TIME_ZONE_INFORMATION = std::mem::zeroed();
+        let id = GetTimeZoneInformation(&mut tz);
+        let extra = match id {
+            2 => tz.DaylightBias, // TIME_ZONE_ID_DAYLIGHT
+            1 => tz.StandardBias, // TIME_ZONE_ID_STANDARD
+            _ => 0,
+        };
+        -(tz.Bias + extra)
+    }
+}
+
+#[cfg(not(windows))]
 fn local_offset_minutes() -> i32 {
     // SAFETY: localtime_r only writes into the struct we pass.
     unsafe {
@@ -570,10 +589,13 @@ fn speech_from_config() -> Option<Speech> {
 /// `seagent meet bot`: the detached bot process (configuration from `SEAGENT_MEET_*`).
 pub fn run_from_env(cfg: &toml::Table) -> i32 {
     // SAFETY: installing a handler that only stores to an atomic.
+    #[cfg(unix)]
     unsafe {
         libc::signal(libc::SIGTERM, on_signal as *const () as libc::sighandler_t);
         libc::signal(libc::SIGINT, on_signal as *const () as libc::sighandler_t);
     }
+    #[cfg(windows)]
+    crate::ops::hostos::on_stop_signals(&STOP);
     let env = |k: &str| std::env::var(k).ok().map(|v| v.trim().to_string()).filter(|v| !v.is_empty());
     let Some(out) = env("SEAGENT_MEET_OUT_DIR") else {
         eprintln!("google_meet bot: SEAGENT_MEET_OUT_DIR is required");

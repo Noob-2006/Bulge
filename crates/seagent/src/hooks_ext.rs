@@ -147,12 +147,17 @@ pub fn set_enabled(paths: &Paths, name: &str, on: bool) -> Result<(), String> {
 }
 
 pub fn write_private(path: &Path, body: &str) -> Result<(), String> {
-    use std::os::unix::fs::OpenOptionsExt;
     if let Some(d) = path.parent() {
         std::fs::create_dir_all(d).map_err(|e| format!("{}: {e}", d.display()))?;
     }
     let tmp = path.with_extension("tmp");
-    let mut f = std::fs::OpenOptions::new().write(true).create(true).truncate(true).mode(0o600).open(&tmp).map_err(|e| format!("{}: {e}", tmp.display()))?;
+    #[cfg(unix)]
+    let mut f = {
+        use std::os::unix::fs::OpenOptionsExt;
+        std::fs::OpenOptions::new().write(true).create(true).truncate(true).mode(0o600).open(&tmp).map_err(|e| format!("{}: {e}", tmp.display()))?
+    };
+    #[cfg(not(unix))]
+    let mut f = seagent_core::platform::fs_private::open_private(&tmp, seagent_core::platform::fs_private::OpenMode::Truncate).map_err(|e| format!("{}: {e}", tmp.display()))?;
     f.write_all(body.as_bytes()).map_err(|e| e.to_string())?;
     std::fs::rename(&tmp, path).map_err(|e| format!("{}: {e}", path.display()))
 }
@@ -237,7 +242,6 @@ pub fn script_mtime(command: &str) -> Option<String> {
 
 /// Runnable as configured: a bare script needs the exec bit, an interpreter-prefixed one read access.
 pub fn script_is_executable(command: &str) -> bool {
-    use std::os::unix::fs::PermissionsExt;
     let sp = script_path(command);
     let path = expand(&sp);
     let Ok(md) = std::fs::metadata(&path) else { return false };
@@ -246,7 +250,7 @@ pub fn script_is_executable(command: &str) -> bool {
     }
     let first = command.split_whitespace().next().unwrap_or("").trim_matches(|c| c == '"' || c == '\'');
     if first == sp {
-        md.permissions().mode() & 0o111 != 0
+        crate::ops::hostos::is_executable(&path, &md)
     } else {
         std::fs::File::open(&path).is_ok()
     }

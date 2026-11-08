@@ -19,7 +19,6 @@ use crate::R;
 use seagent_core::ToolSpec;
 use seagent_kernel::config::{Config, Paths};
 use serde_json::{json, Value};
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
 pub const COMMANDS: &[&str] = &[];
@@ -306,7 +305,11 @@ fn on_path(bin: &str) -> Option<PathBuf> {
     if bin.contains('/') {
         return Some(PathBuf::from(bin)).filter(|p| p.exists());
     }
-    std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()).map(|d| d.join(bin)).find(|p| std::fs::metadata(p).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0))
+    #[cfg(not(unix))]
+    if let Some(p) = seagent_core::platform::layout::which(bin) {
+        return Some(p); // PATHEXT lookup (`bwrap` → never; `docker` → docker.exe)
+    }
+    std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()).map(|d| d.join(bin)).find(|p| std::fs::metadata(p).is_ok_and(|m| crate::ops::hostos::is_executable(p, &m)))
 }
 
 /// `[exec]` from the user config file (`backend`, `bwrap.binary`).
@@ -354,7 +357,7 @@ fn detect_workspace(c: &Ctx) -> Result<Vec<Finding>, String> {
     let mut out = vec![];
     match std::fs::metadata(&c.ws) {
         Err(e) => out.push(finding(ID, Severity::Error, format!("workspace {} is not accessible: {e}", c.ws.display())).path(c.ws.display().to_string())),
-        Ok(m) if m.permissions().readonly() || unsafe { libc::access(std::ffi::CString::new(c.ws.as_os_str().as_encoded_bytes()).unwrap_or_default().as_ptr(), libc::W_OK) } != 0 => {
+        Ok(m) if m.permissions().readonly() || !crate::ops::hostos::writable(&c.ws) => {
             out.push(finding(ID, Severity::Warning, format!("workspace {} is not writable; file tools and checkpoints will fail", c.ws.display())).path(c.ws.display().to_string()))
         }
         _ => {}
@@ -392,7 +395,7 @@ fn repair_workspace(c: &Ctx, f: &[Finding], dry: bool) -> Result<Repair, String>
 // ───────────────────────── removed / stale state ─────────────────────────
 
 fn pid_alive(pid: i32) -> bool {
-    pid > 0 && unsafe { libc::kill(pid, 0) } == 0
+    crate::ops::hostos::pid_alive(pid as i64)
 }
 
 fn stale_state(c: &Ctx) -> Vec<(PathBuf, String)> {
@@ -452,7 +455,7 @@ fn secret_files(c: &Ctx) -> Vec<PathBuf> {
 
 fn detect_secret_perms(c: &Ctx) -> Result<Vec<Finding>, String> {
     Ok(secret_files(c).into_iter().filter_map(|p| {
-        let mode = std::fs::metadata(&p).ok()?.permissions().mode() & 0o777;
+        let mode = crate::ops::hostos::mode_of(&p).ok()? & 0o777;
         (mode & 0o077 != 0).then(|| finding("core/doctor/secret-permissions", Severity::Error, format!("{} is readable by others (mode {mode:o})", p.display())).path(p.display().to_string()).hint("Run `seagent doctor --fix` (chmod 600).")
         )
     }).collect())
@@ -461,10 +464,10 @@ fn detect_secret_perms(c: &Ctx) -> Result<Vec<Finding>, String> {
 fn repair_secret_perms(c: &Ctx, _: &[Finding], dry: bool) -> Result<Repair, String> {
     let mut r = Repair::default();
     for p in secret_files(c) {
-        let mode = std::fs::metadata(&p).map_err(|e| e.to_string())?.permissions().mode() & 0o777;
+        let mode = crate::ops::hostos::mode_of(&p).map_err(|e| e.to_string())? & 0o777;
         if mode & 0o077 != 0 {
             if !dry {
-                std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o600)).map_err(|e| e.to_string())?;
+                crate::ops::hostos::set_mode(&p, 0o600).map_err(|e| e.to_string())?;
             }
             r.changes.push(format!("{} {} {mode:o} → 600", if dry { "would chmod" } else { "chmod" }, p.display()));
         }
@@ -588,6 +591,15 @@ fn detect_gateway_services(c: &Ctx) -> Result<Vec<Finding>, String> {
             }
         }
     }
+    // launchd agent / Task Scheduler task / Windows Service (ops::service_os); not installed is fine.
+    #[cfg(any(target_os = "macos", windows))]
+    for i in crate::ops::service::audit(&c.ws).into_iter().filter(|i| i.code != "unit-missing") {
+        let f = finding("core/doctor/gateway-services", Severity::Warning, i.message.clone());
+        v.push(match i.fix {
+            Some(fix) => f.req(fix).hint("Run `seagent doctor --fix` (or `seagent service install`) to rewrite it."),
+            None => f,
+        });
+    }
     let starts = crate::ops::service::recent_starts(&c.paths, seagent_kernel::util::unix_now()).len();
     if starts >= crate::ops::service::STORM_THRESHOLD {
         v.push(
@@ -612,6 +624,9 @@ fn repair_gateway_services(c: &Ctx, f: &[Finding], dry: bool) -> Result<Repair, 
         return Ok(r);
     }
     r.warnings.push(crate::ops::service::install_user(&c.ws, false)?);
+    #[cfg(any(target_os = "macos", windows, target_os = "android", target_os = "ios"))]
+    r.changes.push("rewrote the autostart entry — run `seagent service restart` to apply".into());
+    #[cfg(not(any(target_os = "macos", windows, target_os = "android", target_os = "ios")))]
     r.changes.push(format!("rewrote {} — run `systemctl --user daemon-reload && systemctl --user restart {}` to apply", path.display(), crate::ops::service::unit_name()));
     Ok(r)
 }
@@ -653,8 +668,8 @@ fn detect_exec_credential(c: &Ctx) -> Result<Vec<Finding>, String> {
         let p = expand(key);
         if !p.exists() {
             v.push(finding("core/doctor/exec-credential", Severity::Warning, format!("exec.ssh.identity_file {} does not exist", p.display())).path("exec.ssh.identity_file").hint("Point exec.ssh.identity_file at the private key, or leave it empty to use ssh-agent."));
-        } else if let Ok(md) = std::fs::metadata(&p) {
-            if md.permissions().mode() & 0o077 != 0 {
+        } else if let Ok(mode) = crate::ops::hostos::mode_of(&p) {
+            if mode & 0o077 != 0 {
                 v.push(finding("core/doctor/exec-credential", Severity::Warning, format!("exec.ssh.identity_file {} is readable by others (ssh refuses it)", p.display())).path(p.display().to_string()).hint("chmod 600 the key."));
             }
         }
@@ -838,7 +853,7 @@ fn build_ctx(a: &Args) -> Result<Ctx, crate::Fail> {
         Err(crate::Fail::Msg(m) | crate::Fail::Usage(m)) => Err(m),
     };
     let secret_names = seagent_kernel::vault::Vault::load(&paths.secrets()).map(|v| v.names()).unwrap_or_default();
-    let daemon_running = std::os::unix::net::UnixStream::connect(paths.socket()).is_ok();
+    let daemon_running = crate::ops::hostos::daemon_reachable(&paths.socket());
     Ok(Ctx { paths, cfg, ws, specs, secret_names, daemon_running })
 }
 
@@ -903,6 +918,8 @@ pub fn dispatch(cmd: &str, a: &Args, _raw: &[String]) -> Option<R> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
 
     fn ctx(f: impl FnOnce(&mut Config)) -> Ctx {
         let root = seagent_core::tmp::scratch_path(format!("seagent-doc-{}", seagent_kernel::util::random_hex(6)));

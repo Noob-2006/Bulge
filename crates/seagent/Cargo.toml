@@ -61,6 +61,18 @@ ring.workspace = true
 [target.'cfg(target_env = "musl")'.dependencies]
 mimalloc = { version = "0.1", default-features = false }
 
+# Windows port (docs/cross-platform.md): console Ctrl handlers, the Windows Service entry point
+# (`seagent daemon service`) and interface addresses for `seagent dns`. Same 0.52 crate that
+# seagent-core already uses; only these API families are added.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { workspace = true, features = [
+    "Win32_NetworkManagement_IpHelper",
+    "Win32_NetworkManagement_Ndis",
+    "Win32_Networking_WinSock",
+    "Win32_System_Services",
+    "Win32_System_Time",
+] }
+
 [dev-dependencies]
 # `cdp::fake` is test-only in seagent-browser; enable it for this crate's unit tests.
 seagent-browser = { workspace = true, features = ["test-util"] }

@@ -72,6 +72,7 @@ pub fn cli(cmd: &str, argv: &[String]) -> Result<i32, String> {
 /// Advisory cross-process lock on `<path>.lock` (Hermes `_file_lock`): waits up to 10 s, then
 /// gives up with upstream's message. `f` runs under the lock; dropping the file releases it.
 pub fn with_lock<T>(path: &Path, f: impl FnOnce() -> std::io::Result<T>) -> std::io::Result<T> {
+    #[cfg(unix)]
     use std::os::unix::io::AsRawFd;
     let lock_path = path.with_file_name(format!("{}.lock", path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()));
     if let Some(d) = lock_path.parent() {
@@ -80,13 +81,23 @@ pub fn with_lock<T>(path: &Path, f: impl FnOnce() -> std::io::Result<T>) -> std:
     let file = std::fs::OpenOptions::new().create(true).write(true).truncate(false).open(&lock_path)?;
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
     loop {
-        // SAFETY: plain flock(2) on a descriptor we own.
-        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
-            break;
+        #[cfg(unix)]
+        {
+            // SAFETY: plain flock(2) on a descriptor we own.
+            if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
+                break;
+            }
+            let e = std::io::Error::last_os_error();
+            if e.raw_os_error() != Some(libc::EWOULDBLOCK) {
+                return Err(e);
+            }
         }
-        let e = std::io::Error::last_os_error();
-        if e.raw_os_error() != Some(libc::EWOULDBLOCK) {
-            return Err(e);
+        // std's portable lock (LockFileEx on Windows).
+        #[cfg(not(unix))]
+        match file.try_lock() {
+            Ok(()) => break,
+            Err(std::fs::TryLockError::WouldBlock) => {}
+            Err(std::fs::TryLockError::Error(e)) => return Err(e),
         }
         if std::time::Instant::now() > deadline {
             return Err(std::io::Error::new(std::io::ErrorKind::WouldBlock, format!("Timed out waiting for say queue lock ({})", lock_path.display())));

@@ -127,7 +127,7 @@ pub fn cmd_mcp(a: &Args) -> R {
                 fn open(&self, url: &str) {
                     println!("在瀏覽器開啟以下網址完成授權：\n\n  {url}\n");
                     if self.0 {
-                        let _ = std::process::Command::new("xdg-open").arg(url).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).spawn();
+                        crate::ops::hostos::open_url(url);
                     }
                 }
                 fn device(&self, uri: &str, code: &str, complete: Option<&str>) {

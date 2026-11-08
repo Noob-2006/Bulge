@@ -239,8 +239,7 @@ pub fn cmd(a: &Args) -> Result<i32, String> {
 }
 
 fn is_exec(p: &Path) -> bool {
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::metadata(p).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+    std::fs::metadata(p).is_ok_and(|m| crate::ops::hostos::is_executable(p, &m))
 }
 
 /// Hermes `hooks doctor`: exec bit, allowlist, mtime drift, JSON validity, synthetic run timing.
@@ -358,7 +357,7 @@ fn install(a: &Args, c: &Ctx) -> Result<i32, String> {
     }
     std::fs::create_dir_all(hx::hooks_dir(&c.paths)).map_err(|e| e.to_string())?;
     if a.flag("link") {
-        std::os::unix::fs::symlink(&src, &dest).map_err(|e| format!("link: {e}"))?;
+        crate::ops::hostos::symlink(&src, &dest).map_err(|e| format!("link: {e}"))?;
     } else {
         copy_dir(&src, &dest)?;
     }

@@ -29,9 +29,15 @@ pub fn cmd_app(a: &Args) -> R {
             }
             // The token travels in the fragment, which browsers never send to servers or logs.
             let link = format!("{url}/#token={token}");
-            let opened = ["chromium", "google-chrome", "brave-browser"].iter().any(|b| std::process::Command::new(b).arg(format!("--app={link}")).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).spawn().is_ok());
-            if !opened {
-                let _ = std::process::Command::new("xdg-open").arg(&link).spawn();
+            // Windows: Edge / Chrome `--app=`, else the default browser; macOS: `open -na`.
+            #[cfg(any(windows, target_os = "macos"))]
+            crate::ops::hostos::open_app_window(&link);
+            #[cfg(not(any(windows, target_os = "macos")))]
+            {
+                let opened = ["chromium", "google-chrome", "brave-browser"].iter().any(|b| std::process::Command::new(b).arg(format!("--app={link}")).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).spawn().is_ok());
+                if !opened {
+                    let _ = std::process::Command::new("xdg-open").arg(&link).spawn();
+                }
             }
             println!("{url}");
             Ok(0)
