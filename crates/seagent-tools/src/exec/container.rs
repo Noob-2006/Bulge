@@ -28,6 +28,18 @@
 
 use super::local::{spawn_command, which};
 use super::sandbox::{parse_bind, sanitize_forwarded, unsafe_env_value, SandboxConfig};
+
+/// `--user uid:gid` of the host user, so bind-mount writes are owned by us (Unix). Docker
+/// Desktop (macOS, Windows) runs the engine in a VM and maps file ownership itself: omitted.
+#[cfg(any(target_os = "linux", target_os = "android"))]
+fn host_user() -> Option<String> {
+    // SAFETY: getuid/getgid are always safe.
+    Some(format!("{}:{}", unsafe { libc::getuid() }, unsafe { libc::getgid() }))
+}
+#[cfg(not(any(target_os = "linux", target_os = "android")))]
+fn host_user() -> Option<String> {
+    None
+}
 use super::{BackendCtx, ExecConfig};
 use seagent_core::exec::{ExecBackend, ExecChild, ExecRequest};
 use serde::Deserialize;
@@ -374,8 +386,7 @@ impl ContainerBackend {
         if !self.cfg.userns.trim().is_empty() {
             return None; // rootless keep-id already maps the host user
         }
-        // SAFETY: getuid/getgid are always safe.
-        Some(format!("{}:{}", unsafe { libc::getuid() }, unsafe { libc::getgid() }))
+        host_user()
     }
 
     fn labels(&self) -> Vec<String> {

@@ -16,7 +16,6 @@
 use seagent_core::exec::ExecBackend;
 use std::collections::BTreeMap;
 use std::io;
-use std::os::unix::fs::DirBuilderExt;
 use std::path::{Path, PathBuf};
 
 /// Variables the shell maintains itself; replaying them would fight bash.
@@ -39,8 +38,11 @@ pub struct ShellState {
 }
 
 impl ShellState {
-    pub fn new(_backend: &dyn ExecBackend, workspace: &Path, persistent: bool) -> ShellState {
-        ShellState { cwd: workspace.to_path_buf(), persistent, env: BTreeMap::new(), dir: PathBuf::new() }
+    pub fn new(backend: &dyn ExecBackend, workspace: &Path, persistent: bool) -> ShellState {
+        // The snapshot prologue / epilogue are bash. A host shell that is PowerShell (Windows
+        // without Git Bash) gets no persistence rather than a script it cannot parse.
+        let posix = backend.id() != "local" || seagent_core::platform::shell::active().kind.is_posix();
+        ShellState { cwd: workspace.to_path_buf(), persistent: persistent && posix, env: BTreeMap::new(), dir: PathBuf::new() }
     }
 
     /// Point the snapshot at `<home>/shell/<scope>` (created private, 0700), loading what a
@@ -51,7 +53,16 @@ impl ShellState {
     pub fn set_state_dir(&mut self, home: &Path, scope: &str, skip: &[String], scrub: bool, passthrough: &[String]) -> io::Result<()> {
         let dir = home.join("shell").join(scope);
         if self.dir != dir {
-            std::fs::DirBuilder::new().recursive(true).mode(0o700).create(&dir)?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::DirBuilderExt;
+                std::fs::DirBuilder::new().recursive(true).mode(0o700).create(&dir)?;
+            }
+            #[cfg(not(unix))]
+            {
+                std::fs::create_dir_all(&dir)?;
+                seagent_core::platform::fs_private::set_private(&dir)?;
+            }
             self.dir = dir;
             self.reload(skip, scrub, passthrough);
         }

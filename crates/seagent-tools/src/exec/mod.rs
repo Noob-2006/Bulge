@@ -9,9 +9,18 @@ pub mod daytona;
 pub mod process;
 pub mod hints;
 pub mod local;
+#[cfg(unix)]
+mod local_unix;
+#[cfg(windows)]
+mod local_windows;
 pub mod modal;
 pub mod sandbox;
+#[cfg(any(target_os = "linux", target_os = "android"))]
+mod sandbox_linux;
+#[cfg(any(target_os = "linux", target_os = "android"))]
 pub mod seccomp;
+#[cfg(target_os = "macos")]
+mod seatbelt;
 pub mod openshell;
 pub mod ptyq;
 pub mod session;
@@ -182,7 +191,7 @@ impl ExecConfig {
     }
 }
 
-pub const BACKENDS: &[&str] = &["auto", "local", "vm", "bwrap", "landlock", "docker", "podman", "singularity", "apptainer", "ssh", "modal", "daytona", "vercel", "openshell"];
+pub const BACKENDS: &[&str] = &["auto", "local", "vm", "bwrap", "landlock", "seatbelt", "appcontainer", "docker", "podman", "singularity", "apptainer", "ssh", "modal", "daytona", "vercel", "openshell"];
 
 /// What a backend constructor gets.
 #[derive(Clone)]
@@ -238,15 +247,14 @@ pub fn build_backend(name: &str, cfg: &ExecConfig, extra: &Value, ctx: &BackendC
         // `auto`: the policy table, not this function, decides (A1/B1). `ExecEnv::backend`
         // resolves it before calling us; this arm covers embedders that ask directly.
         "auto" => {
-            let plan = seagent_vm::policy::resolve(&seagent_vm::policy::Query { requested: "auto", cfg: &cfg.vm, data: &ctx.home, sandboxed: ctx.sandboxed });
+            let plan = os_plan(seagent_vm::policy::resolve(&seagent_vm::policy::Query { requested: "auto", cfg: &cfg.vm, data: &ctx.home, sandboxed: ctx.sandboxed }), ctx.sandboxed);
             build_planned(&plan, cfg, extra, ctx)?
         }
         "local" => Arc::new(local::LocalBackend::new()),
         // `main` decides the trust tier when the daemon has not installed a
         // classifier: a sandboxed (non-operator) session is never treated as the owner.
         "vm" => Arc::new(vm::VmBackend::new(&cfg.vm, &cfg.sandbox, ctx, !ctx.sandboxed)?),
-        "bwrap" => Arc::new(local::BwrapBackend::new(&cfg.bwrap, &cfg.sandbox, ctx)?),
-        "landlock" => Arc::new(local::LandlockBackend::new(&cfg.sandbox, ctx)?),
+        "bwrap" | "landlock" | "seatbelt" | "appcontainer" => os_sandbox(name, cfg, ctx)?,
         "docker" => Arc::new(container::ContainerBackend::new(&cfg.docker, &cfg.sandbox, cfg, ctx)?),
         "podman" => Arc::new(container::ContainerBackend::new(&cfg.podman, &cfg.sandbox, cfg, ctx)?),
         "singularity" | "apptainer" => Arc::new(singularity::SingularityBackend::new(&cfg.singularity, name, &cfg.sandbox, ctx)?),
@@ -260,6 +268,70 @@ pub fn build_backend(name: &str, cfg: &ExecConfig, extra: &Value, ctx: &BackendC
             p(extra, ctx)?
         }
     })
+}
+
+/// The OS sandbox backends: each exists on its own OS only; elsewhere the name is an
+/// explicit "not available on <os>" error (never a silent fallback to the host).
+fn os_sandbox(name: &str, cfg: &ExecConfig, ctx: &BackendCtx) -> Result<Arc<dyn ExecBackend>, String> {
+    let _ = (cfg, ctx);
+    match name {
+        #[cfg(any(target_os = "linux", target_os = "android"))]
+        "bwrap" => Ok(Arc::new(local::BwrapBackend::new(&cfg.bwrap, &cfg.sandbox, ctx)?)),
+        #[cfg(any(target_os = "linux", target_os = "android"))]
+        "landlock" => Ok(Arc::new(local::LandlockBackend::new(&cfg.sandbox, ctx)?)),
+        #[cfg(target_os = "macos")]
+        "seatbelt" => Ok(Arc::new(local::SeatbeltBackend::new(&cfg.sandbox, ctx)?)),
+        #[cfg(windows)]
+        "appcontainer" => Err("exec backend appcontainer is not available on windows yet: the AppContainer launcher is not implemented in this build; use `docker` (Docker Desktop runs containers in a VM), `vm`, `ssh`, or `local` (NOT ISOLATED)".into()),
+        #[cfg(not(any(target_os = "linux", target_os = "android")))]
+        "bwrap" => Err(local::not_available("bwrap", "bubblewrap needs Linux namespaces")),
+        #[cfg(not(any(target_os = "linux", target_os = "android")))]
+        "landlock" => Err(local::not_available("landlock", "Landlock is a Linux security module")),
+        #[cfg(not(target_os = "macos"))]
+        "seatbelt" => Err(local::not_available("seatbelt", "Seatbelt (sandbox-exec) is the macOS sandbox")),
+        #[cfg(not(windows))]
+        "appcontainer" => Err(local::not_available("appcontainer", "AppContainer is the Windows sandbox")),
+        other => Err(format!("unknown OS sandbox `{other}`")),
+    }
+}
+
+/// The OS sandbox that stands in for bwrap / Landlock on this OS (docs/cross-platform.md:
+/// Seatbelt on macOS), if any. Windows has none in this build, so `auto` stays honest there.
+fn native_sandbox() -> Option<&'static str> {
+    if cfg!(target_os = "macos") && Path::new("/usr/bin/sandbox-exec").is_file() {
+        Some("seatbelt")
+    } else {
+        None
+    }
+}
+
+/// What an OS sandbox (Seatbelt / AppContainer) gives, said with the same honesty as the
+/// levels in `seagent_vm::isolation` (it is reported at the namespace-sandbox level).
+pub const OS_SANDBOX_WARNING: &str = "OS sandbox (macOS Seatbelt): shares the host kernel, file access limited to system files, the workspace and a private temp dir; home unreadable. One kernel or sandbox bug from the host; weaker than a microVM.";
+
+/// Make an `auto` plan honest on macOS / Windows: the policy table in `seagent-vm` knows
+/// bwrap and Landlock, which these systems lack, so "no microVM, no namespace sandbox" would
+/// otherwise mean the host. Here the OS sandbox takes that place, and an explicitly
+/// configured `seatbelt` / `appcontainer` is reported at its real level instead of "host".
+/// Identity on Linux and Android.
+pub fn os_plan(mut plan: seagent_vm::policy::Plan, sandboxed: bool) -> seagent_vm::policy::Plan {
+    use seagent_vm::policy::Origin;
+    use seagent_vm::IsolationLevel;
+    let Some(name) = native_sandbox() else { return plan };
+    if plan.backend == name && plan.level == IsolationLevel::Host {
+        plan.level = IsolationLevel::UserNamespace;
+        plan.warning = Some(format!("{name}: {OS_SANDBOX_WARNING}"));
+    } else if plan.backend == "local" && plan.origin == Origin::AutoHost {
+        plan = seagent_vm::policy::Plan {
+            backend: name.into(),
+            provider: None,
+            level: IsolationLevel::UserNamespace,
+            origin: Origin::AutoFallback,
+            warning: Some(format!("no microVM available on this {} machine; {} runs in the {name} sandbox instead (host home and keys not readable) — {OS_SANDBOX_WARNING}", std::env::consts::OS, if sandboxed { "this session" } else { "the agent" })),
+            reason: format!("auto: no microVM, the agent still runs isolated in the {} OS sandbox ({name})", std::env::consts::OS),
+        };
+    }
+    plan
 }
 
 /// Build what an `auto` plan chose. srv-015: the owner's (unsandboxed) session on a namespace
@@ -384,7 +456,7 @@ impl ExecEnv {
     /// backend even when the session is sandboxed, so the session flag alone is not enough).
     pub fn plan_for(&self, sandboxed: bool, _workspace: &Path, home: &Path) -> seagent_vm::policy::Plan {
         let (requested, stated) = if sandboxed { (self.cfg.sandbox.backend.as_str(), self.cfg.sandbox.backend_set) } else { (self.cfg.backend.as_str(), self.cfg.backend_set) };
-        seagent_vm::policy::resolve(&seagent_vm::policy::Query { requested: if stated { requested } else { "auto" }, cfg: &self.cfg.vm, data: home, sandboxed })
+        os_plan(seagent_vm::policy::resolve(&seagent_vm::policy::Query { requested: if stated { requested } else { "auto" }, cfg: &self.cfg.vm, data: home, sandboxed }), sandboxed)
     }
 
     /// Container / sandbox identity for this session per `sandbox.scope`.
@@ -606,7 +678,7 @@ pub fn retry_etxtbsy<T>(mut f: impl FnMut() -> std::io::Result<T>) -> std::io::R
     let mut attempt = 0u32;
     loop {
         match f() {
-            Err(e) if e.raw_os_error() == Some(libc::ETXTBSY) && attempt < 40 => {
+            Err(e) if local::is_text_busy(&e) && attempt < 40 => {
                 attempt += 1;
                 std::thread::sleep(Duration::from_millis(25));
             }

@@ -215,10 +215,8 @@ impl Term {
             std::thread::sleep(Duration::from_millis(2));
         }
         if let Some(pid) = self.pid.filter(|p| *p > 1) {
-            // SAFETY: a plain signal to the process group this pane started; never pid 1.
-            unsafe {
-                libc::kill(-(pid as i32), libc::SIGKILL);
-            }
+            // The process group this pane started (Windows: its job); never pid 1.
+            crate::exec::local::kill_group_now(pid as i32);
         }
     }
     pub fn lines(&self) -> Vec<String> {

@@ -62,7 +62,7 @@ pub fn run(argv: &[String], cwd: Option<&Path>, timeout: Duration, cancel: &Canc
     let mut child = loop {
         match cmd.spawn() {
             Ok(c) => break c,
-            Err(e) if e.raw_os_error() == Some(libc::ETXTBSY) && tries < 20 => {
+            Err(e) if crate::exec::local::is_text_busy(&e) && tries < 20 => {
                 tries += 1;
                 std::thread::sleep(Duration::from_millis(25));
             }

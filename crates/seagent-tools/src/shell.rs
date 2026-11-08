@@ -106,7 +106,14 @@ impl Tool for Shell {
     fn spec(&self) -> ToolSpec {
         ToolSpec {
             name: "shell".into(),
-            description: "Run a bash command in the workspace. Returns combined stdout/stderr and exit code. `cd` and `export` persist between calls, `env` adds variables for this call, `pty` gives a terminal, and `yield_ms`/`background` return a process handle instead of blocking. Use {{secret:NAME}} for credentials.".into(),
+            description: {
+                let d = "Run a bash command in the workspace. Returns combined stdout/stderr and exit code. `cd` and `export` persist between calls, `env` adds variables for this call, `pty` gives a terminal, and `yield_ms`/`background` return a process handle instead of blocking. Use {{secret:NAME}} for credentials.";
+                // Windows / Android: say which shell actually runs (PowerShell needs its own syntax).
+                match crate::exec::local::shell_note() {
+                    Some(n) => format!("{d} {n}"),
+                    None => d.to_string(),
+                }
+            },
             input_schema: json!({"type":"object","properties":{
                 "command":{"type":"string"},
                 "timeout_secs":{"type":"integer","minimum":1,"maximum":MAX_TIMEOUT,"default":DEFAULT_TIMEOUT},
@@ -560,7 +567,7 @@ fn term_size(input: &Value) -> Result<(u16, u16), String> {
 /// If seagent is killed (even SIGKILL), the command dies too instead of finishing
 /// unobserved: crash recovery reports "side effects unknown", and an orphan
 /// completing later would make that report wrong.
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "android"))]
 pub fn die_with_parent(parent: i32) {
     unsafe {
         libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL);
@@ -570,7 +577,9 @@ pub fn die_with_parent(parent: i32) {
     }
 }
 
-#[cfg(not(target_os = "linux"))]
+/// No parent-death signal outside Linux / Android: macOS children are stopped by
+/// `LocalChild`'s drop; Windows children die with their kill-on-close Job Object.
+#[cfg(not(any(target_os = "linux", target_os = "android")))]
 pub fn die_with_parent(_parent: i32) {}
 
 #[cfg(test)]

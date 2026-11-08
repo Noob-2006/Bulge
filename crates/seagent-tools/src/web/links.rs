@@ -427,21 +427,13 @@ pub fn fetch_link(cfg: &WebConfig, home: &Path, url: &str, timeout_secs: u64) ->
 /// Run `argv` with `input` on stdin; trimmed stdout on exit 0. The process group is killed
 /// on timeout (also when descendants keep stdout open past the deadline).
 pub fn run_cli(argv: &[String], input: &str, timeout: Duration, env: &[(&str, &str)]) -> Result<String, String> {
-    use std::os::unix::process::CommandExt;
     let (cmd, args) = argv.split_first().ok_or("empty command")?;
-    let mut child = Command::new(cmd)
-        .args(args)
-        .envs(env.iter().copied())
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .process_group(0)
-        .spawn()
-        .map_err(|e| format!("spawn failed: {e}"))?;
-    let pgid = child.id() as libc::pid_t;
-    let kill_group = || unsafe {
-        libc::killpg(pgid, libc::SIGKILL);
-    };
+    let mut c = Command::new(cmd);
+    c.args(args).envs(env.iter().copied()).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null());
+    // Own process group (Windows: a kill-on-close job), so the whole tree can be killed.
+    let mut child = crate::exec::local::spawn_own_group(&mut c).map_err(|e| format!("spawn failed: {e}"))?;
+    let pgid = child.id() as i32;
+    let kill_group = || crate::exec::local::kill_group_now(pgid);
     if let Some(mut stdin) = child.stdin.take() {
         let data = input.as_bytes().to_vec();
         std::thread::spawn(move || {

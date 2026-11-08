@@ -1,131 +1,51 @@
-//! Host-side processes: the local backend, the two OS sandboxes (bubblewrap
-//! namespaces, Landlock), and `spawn_command`, which every wrapper backend
-//! (docker exec, ssh, apptainer exec…) uses to run its client program with
-//! merged output pipes or a pseudo-terminal.
+//! Host-side processes: the local backend, the process-group registry the kernel's reaper
+//! reads, the mount layout the OS sandboxes share, and `spawn_command`, which every wrapper
+//! backend (docker exec, ssh, apptainer exec…) uses to run its client program with merged
+//! output pipes or a pseudo-terminal.
+//!
+//! The OS mechanics live in one file per family (docs/cross-platform.md):
+//!
+//! | | Linux / Android / macOS (`local_unix`) | Windows (`local_windows`) |
+//! |---|---|---|
+//! | output | one pipe, `poll(2)` | anonymous pipe + reader thread |
+//! | terminal | `posix_openpt` | ConPTY |
+//! | group | `setpgid` / `setsid` (+ PDEATHSIG on Linux / Android) | kill-on-close Job Object |
+//! | detached | `/bin/sh` wrapper writes the exit file | PowerShell wrapper writes the exit file |
+//!
+//! The OS sandboxes: bubblewrap and Landlock (`sandbox_linux`, Linux / Android), Seatbelt
+//! (`seatbelt`, macOS). On Windows the commands run in a kill-on-close Job Object only (no
+//! file-system sandbox yet: `appcontainer` is an explicit "not available" error and `auto`
+//! reports the host level). iOS cannot start processes; every spawn there is an error.
 
 use super::sandbox::SandboxConfig;
 use super::BackendCtx;
 use seagent_core::exec::{ExecBackend, ExecChild, ExecRequest, ExitInfo};
 use serde::Deserialize;
-use std::ffi::CString;
-use std::fs::File;
-use std::io::{self, Read, Seek, SeekFrom, Write};
-use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
-use std::os::unix::ffi::OsStrExt;
-use std::os::unix::process::{CommandExt, ExitStatusExt};
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
-use std::time::Duration;
+use std::process::Command;
 
-fn cvt(r: libc::c_int) -> io::Result<libc::c_int> {
-    if r < 0 {
-        Err(io::Error::last_os_error())
-    } else {
-        Ok(r)
-    }
-}
+#[cfg(unix)]
+use super::local_unix as imp;
+#[cfg(windows)]
+use super::local_windows as imp;
 
-/// Wait until `fd` is readable (or hung up), at most `timeout`.
-fn poll_in(fd: RawFd, timeout: Duration) -> io::Result<bool> {
-    let mut p = libc::pollfd { fd, events: libc::POLLIN, revents: 0 };
-    let ms = timeout.as_millis().min(i32::MAX as u128) as i32;
-    loop {
-        // SAFETY: one valid pollfd.
-        let r = unsafe { libc::poll(&mut p, 1, ms) };
-        if r < 0 {
-            let e = io::Error::last_os_error();
-            if e.kind() == io::ErrorKind::Interrupted {
-                continue;
-            }
-            return Err(e);
-        }
-        return Ok(r > 0);
-    }
-}
+pub use imp::{pid_alive, LocalChild};
 
-fn read_fd(fd: RawFd, buf: &mut [u8]) -> io::Result<usize> {
-    loop {
-        // SAFETY: buf is valid for buf.len() bytes.
-        let n = unsafe { libc::read(fd, buf.as_mut_ptr().cast(), buf.len()) };
-        if n >= 0 {
-            return Ok(n as usize);
-        }
-        let e = io::Error::last_os_error();
-        match e.raw_os_error() {
-            Some(libc::EINTR) => continue,
-            // A PTY master reads EIO once the slave side is closed: that is EOF.
-            Some(libc::EIO) => return Ok(0),
-            _ => return Err(e),
-        }
-    }
-}
-
-fn write_all_fd(fd: RawFd, mut data: &[u8]) -> io::Result<()> {
-    while !data.is_empty() {
-        // SAFETY: data valid for its length.
-        let n = unsafe { libc::write(fd, data.as_ptr().cast(), data.len()) };
-        if n < 0 {
-            let e = io::Error::last_os_error();
-            if e.kind() == io::ErrorKind::Interrupted {
-                continue;
-            }
-            return Err(e);
-        }
-        data = &data[n as usize..];
-    }
-    Ok(())
-}
-
-fn kill_group(pgid: i32, sig: i32) {
-    if pgid > 1 {
-        // SAFETY: plain syscall; negative pid targets the process group.
-        unsafe {
-            libc::kill(-pgid, sig);
-        }
-    }
-}
-
-fn exit_of(s: std::process::ExitStatus) -> ExitInfo {
-    ExitInfo { code: s.code(), signal: s.signal() }
-}
-
-/// A pseudo-terminal pair: (master, slave).
-fn open_pty(rows: u16, cols: u16) -> io::Result<(OwnedFd, OwnedFd)> {
-    // SAFETY: standard posix_openpt sequence; fds are checked and owned.
-    unsafe {
-        let m = cvt(libc::posix_openpt(libc::O_RDWR | libc::O_NOCTTY | libc::O_CLOEXEC))?;
-        let master = OwnedFd::from_raw_fd(m);
-        cvt(libc::grantpt(m))?;
-        cvt(libc::unlockpt(m))?;
-        let mut name = [0 as libc::c_char; 128];
-        if libc::ptsname_r(m, name.as_mut_ptr(), name.len()) != 0 {
-            return Err(io::Error::last_os_error());
-        }
-        let s = cvt(libc::open(name.as_ptr(), libc::O_RDWR | libc::O_NOCTTY | libc::O_CLOEXEC))?;
-        let slave = OwnedFd::from_raw_fd(s);
-        let ws = libc::winsize { ws_row: rows.max(1), ws_col: cols.max(1), ws_xpixel: 0, ws_ypixel: 0 };
-        libc::ioctl(m, libc::TIOCSWINSZ, &ws);
-        Ok((master, slave))
-    }
-}
-
-fn pipe() -> io::Result<(OwnedFd, OwnedFd)> {
-    let mut fds = [0; 2];
-    // SAFETY: fds has room for two descriptors.
-    cvt(unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) })?;
-    // SAFETY: both fds are fresh and owned here.
-    Ok(unsafe { (OwnedFd::from_raw_fd(fds[0]), OwnedFd::from_raw_fd(fds[1])) })
-}
+#[cfg(any(target_os = "linux", target_os = "android"))]
+pub use super::sandbox_linux::{landlock_abi, probe_net_namespace, BwrapBackend, LandlockBackend};
+#[cfg(target_os = "macos")]
+pub use super::seatbelt::SeatbeltBackend;
 
 /// Hooks a sandbox backend runs in the child after fork, before exec
-/// (Landlock). Must be async-signal-safe.
+/// (Landlock). Must be async-signal-safe. Unix only: on Windows a hook is refused.
 pub type PreExec = Box<dyn FnMut() -> io::Result<()> + Send + Sync>;
 
 /// Remove inherited variables that are blocked by policy but whose names bash's `unset`
 /// cannot touch (`FOO-BAR-API-KEY` — the shell tool only unsets shell identifiers, so this is
 /// where those names leave the child's environment). Runs before `req.env`, so a value a
 /// tool sets on purpose still wins.
-fn drop_odd_named_secrets(cmd: &mut Command) {
+pub(super) fn drop_odd_named_secrets(cmd: &mut Command) {
     use seagent_security::envscrub::{is_blocked, Surface};
     for (k, _) in std::env::vars_os() {
         if let Some(k) = k.to_str() {
@@ -138,119 +58,50 @@ fn drop_odd_named_secrets(cmd: &mut Command) {
 
 /// Spawn `cmd` (the backend's client program) for `req`: merged output on one
 /// pipe or a PTY, own process group, dies with seagent unless `req.detach`.
-pub fn spawn_command(mut cmd: Command, req: &ExecRequest, mut extra: Option<PreExec>) -> io::Result<Box<dyn ExecChild>> {
+pub fn spawn_command(mut cmd: Command, req: &ExecRequest, extra: Option<PreExec>) -> io::Result<Box<dyn ExecChild>> {
+    if cfg!(target_os = "ios") {
+        return Err(io::Error::new(io::ErrorKind::Unsupported, "running commands is not available on iOS: apps cannot start processes there; pair a computer and run the command on it (`node_invoke`)"));
+    }
     drop_odd_named_secrets(&mut cmd);
     for (k, v) in &req.env {
         cmd.env(k, v);
     }
     if req.detach {
-        return spawn_detached(cmd, req, extra);
+        return imp::spawn_detached(cmd, req, extra);
     }
-    let parent = std::process::id() as i32;
-    let pty = req.pty;
-    let (reader, stdin_fd, slave_fd): (OwnedFd, Option<OwnedFd>, Option<RawFd>) = if let Some((rows, cols)) = pty {
-        let (master, slave) = open_pty(rows, cols)?;
-        let sfd = slave.as_raw_fd();
-        cmd.stdin(Stdio::from(slave.try_clone()?)).stdout(Stdio::from(slave.try_clone()?)).stderr(Stdio::from(slave));
-        let w = master.try_clone()?;
-        (master, Some(w), Some(sfd))
-    } else {
-        let (r, w) = pipe()?;
-        cmd.stdout(Stdio::from(w.try_clone()?)).stderr(Stdio::from(w));
-        cmd.stdin(if req.stdin || req.stdin_data.is_some() { Stdio::piped() } else { Stdio::null() });
-        (r, None, None)
-    };
-    let _ = slave_fd;
-    // SAFETY: only async-signal-safe calls (setsid/setpgid/ioctl/prctl/getppid) and
-    // the backend's own pre-exec hook, which must obey the same rule.
-    unsafe {
-        cmd.pre_exec(move || {
-            if pty.is_some() {
-                // New session so the PTY becomes the controlling terminal (stdin is the slave).
-                if libc::setsid() < 0 {
-                    return Err(io::Error::last_os_error());
-                }
-                libc::ioctl(0, libc::TIOCSCTTY, 0);
-            } else if libc::setpgid(0, 0) != 0 {
-                return Err(io::Error::last_os_error());
-            }
-            crate::shell::die_with_parent(parent);
-            if let Some(f) = extra.as_mut() {
-                f()?;
-            }
-            Ok(())
-        });
-    }
-    let mut child = cmd.spawn()?;
-    register_child(child.id(), "");
-    drop(cmd); // closes our copies of the slave / write ends
-    let stdin_pipe = child.stdin.take();
-    let mut c = LocalChild { child: Some(child), out: Some(reader), pty_master: stdin_fd, stdin: stdin_pipe, detached: None, exit: None };
-    if let Some(d) = &req.stdin_data {
-        c.write_stdin(d)?;
-        if !req.stdin {
-            c.close_stdin();
-        }
-    }
-    Ok(Box::new(c))
+    imp::spawn_attached(cmd, req, extra)
 }
 
-/// Detached: own session, output appended to `log_file`, exit status written to
-/// `exit_file` by a tiny wrapper shell, no parent-death signal.
-fn spawn_detached(cmd: Command, req: &ExecRequest, mut extra: Option<PreExec>) -> io::Result<Box<dyn ExecChild>> {
-    let log = req.log_file.clone().ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "detached process needs log_file"))?;
-    let exit = req.exit_file.clone().ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "detached process needs exit_file"))?;
-    let _ = std::fs::remove_file(&exit);
-    let out = std::fs::OpenOptions::new().create(true).append(true).open(&log)?;
-    // sh -c '"$@"; echo $? > exit' sh <program> <args…>
-    let mut w = Command::new("/bin/sh");
-    w.arg("-c").arg("\"$@\"; s=$?; echo $s > \"$SEAGENT_EXIT_FILE.tmp\" && mv -f \"$SEAGENT_EXIT_FILE.tmp\" \"$SEAGENT_EXIT_FILE\"").arg("sh").arg(cmd.get_program()).args(cmd.get_args());
-    if let Some(d) = cmd.get_current_dir() {
-        w.current_dir(d);
-    }
-    for (k, v) in cmd.get_envs() {
-        match v {
-            Some(v) => w.env(k, v),
-            None => w.env_remove(k),
-        };
-    }
-    w.env("SEAGENT_EXIT_FILE", &exit).stdin(Stdio::null()).stdout(Stdio::from(out.try_clone()?)).stderr(Stdio::from(out));
-    // SAFETY: setsid + optional async-signal-safe hook.
-    unsafe {
-        w.pre_exec(move || {
-            libc::setsid();
-            if let Some(f) = extra.as_mut() {
-                f()?;
-            }
-            Ok(())
-        });
-    }
-    let child = w.spawn()?;
-    register_child(child.id(), "detached");
-    Ok(Box::new(LocalChild { detached: Some(Detached { pid: child.id(), log: File::open(&log)?, exit_file: exit, start: proc_start_time(child.id()) }), child: Some(child), out: None, pty_master: None, stdin: None, exit: None }))
-}
-
-struct Detached {
-    pid: u32,
-    log: File,
-    exit_file: PathBuf,
-    start: Option<u64>,
-}
-
-/// `/proc/<pid>/stat` start time (field 22): tells a reused pid from ours.
+/// Start time of `pid` as an opaque token (Linux: `/proc/<pid>/stat` field 22, as before;
+/// macOS: `proc_pidinfo`; Windows: creation time): tells a reused pid from ours.
 pub fn proc_start_time(pid: u32) -> Option<u64> {
-    let s = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
-    let after = &s[s.rfind(')')? + 2..];
-    after.split_whitespace().nth(19)?.parse().ok()
+    seagent_core::platform::proc::start_time(pid as i32)
+}
+
+/// The status a detached wrapper wrote to its exit file (`None` while it runs). Unix shells
+/// report a signal death as `128 + n`.
+pub(super) fn exit_file_status(path: &Path) -> Option<ExitInfo> {
+    let s = std::fs::read_to_string(path).ok()?;
+    #[cfg(unix)]
+    {
+        let c: i32 = s.trim().parse().ok()?;
+        Some(if c > 128 { ExitInfo { code: Some(c), signal: Some(c - 128) } } else { ExitInfo::code(c) })
+    }
+    #[cfg(not(unix))]
+    {
+        // Windows exit codes are 32-bit unsigned (NTSTATUS values such as 0xC0000005).
+        let c: i64 = s.trim().parse().ok()?;
+        Some(ExitInfo::code(c as u32 as i32))
+    }
 }
 
 // ───────── process-group registry (section C7; the reaper lives in seagent-kernel) ─────────
 //
-// Every child starts its own group (`setpgid(0,0)` / `setsid`), so pgid == pid. Recording it
-// in `<home>/reaper/procs.jsonl` is what lets the kernel reap a crashed session's children
-// without guessing: the line carries the `/proc` start time (PID reuse check) and the seagent pid
-// (is the owner still alive?). Best-effort by design — a command must never fail to run
-// because its bookkeeping could not be written.
+// Every child starts its own group (`setpgid(0,0)` / `setsid`; a Job Object on Windows), so
+// pgid == pid. Recording it in `<home>/reaper/procs.jsonl` is what lets the kernel reap a
+// crashed session's children without guessing: the line carries the start time (PID reuse
+// check) and the seagent pid (is the owner still alive?). Best-effort by design — a command
+// must never fail to run because its bookkeeping could not be written.
 
 static REAPER_HOME: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
 
@@ -275,6 +126,10 @@ static CGROUPS: std::sync::OnceLock<(seagent_vm::cgroup::Cgroups, CgroupConfig)>
 pub fn enable_cgroups(cfg: &CgroupConfig, root: &Path) -> Result<seagent_vm::hostcaps::CgroupVersion, String> {
     if !cfg.enabled {
         return Err("[exec.cgroups] enabled = false".into());
+    }
+    if !cfg!(any(target_os = "linux", target_os = "android")) {
+        // The per-command group on this OS is the Job Object the local backend already uses.
+        return Err(format!("[exec.cgroups] is not available on {}: cgroups are a Linux kernel feature (commands are still tracked as one process group / job each)", std::env::consts::OS));
     }
     let cg = seagent_vm::cgroup::Cgroups::discover(root)?;
     cg.prepare()?;
@@ -347,7 +202,7 @@ fn register_pgid_in(home: &Path, pgid: u32, session: &str, tool: &str, cgroup: O
 /// Register a freshly spawned child (best-effort, never fails a command). `kind` overrides the
 /// recorded tool name ("" = the [`reap_scope`] tool, else `exec`); `"detached"` marks a process
 /// meant to survive an seagent restart, which the reaper records but never kills.
-fn register_child(pid: u32, kind: &str) {
+pub(super) fn register_child(pid: u32, kind: &str) {
     let scope = REAPER_SCOPE.with(|s| s.borrow().clone());
     let named = |t: &str| if kind.is_empty() { t.to_string() } else { kind.to_string() };
     // A detached job is meant to outlive this seagent: it is not put in a cgroup seagent may reap.
@@ -359,152 +214,89 @@ fn register_child(pid: u32, kind: &str) {
     }
 }
 
-pub struct LocalChild {
-    child: Option<Child>,
-    out: Option<OwnedFd>,
-    pty_master: Option<OwnedFd>,
-    stdin: Option<std::process::ChildStdin>,
-    detached: Option<Detached>,
-    exit: Option<ExitInfo>,
+// ───────── small portable process helpers (used across the crate) ─────────
+
+/// `SIGKILL` the process group `pgid` at once (Windows: terminate its job, or the process).
+/// Never pgid 0/1.
+pub fn kill_group_now(pgid: i32) {
+    if pgid <= 1 {
+        return;
+    }
+    #[cfg(unix)]
+    // SAFETY: a plain signal to a process group; never pid 0/1.
+    unsafe {
+        libc::kill(-pgid, libc::SIGKILL);
+    }
+    #[cfg(not(unix))]
+    seagent_core::platform::proc::kill_group(pgid, std::time::Duration::ZERO);
 }
 
-impl LocalChild {
-    /// Re-attach to a detached process after an seagent restart (no stdin, no wait()).
-    pub fn reattach(pid: u32, start: Option<u64>, log: &Path, exit_file: &Path, offset: u64) -> io::Result<LocalChild> {
-        let mut f = File::open(log)?;
-        f.seek(SeekFrom::Start(offset))?;
-        Ok(LocalChild { child: None, out: None, pty_master: None, stdin: None, detached: Some(Detached { pid, log: f, exit_file: exit_file.to_path_buf(), start }), exit: None })
+/// `SIGKILL` one process (Windows: `TerminateProcess`, or its job when it leads one).
+pub fn kill_pid_now(pid: i32) {
+    if pid <= 1 {
+        return;
     }
-    fn pgid(&self) -> i32 {
-        self.child.as_ref().map(|c| c.id() as i32).or(self.detached.as_ref().map(|d| d.pid as i32)).unwrap_or(0)
+    #[cfg(unix)]
+    // SAFETY: a plain signal to one process.
+    unsafe {
+        libc::kill(pid, libc::SIGKILL);
     }
-    fn detached_exit(d: &Detached) -> Option<ExitInfo> {
-        let s = std::fs::read_to_string(&d.exit_file).ok()?;
-        let c: i32 = s.trim().parse().ok()?;
-        Some(if c > 128 { ExitInfo { code: Some(c), signal: Some(c - 128) } } else { ExitInfo::code(c) })
-    }
-    pub fn start_time(&self) -> Option<u64> {
-        self.detached.as_ref().and_then(|d| d.start)
-    }
+    #[cfg(not(unix))]
+    seagent_core::platform::proc::kill_group(pid, std::time::Duration::ZERO);
 }
 
-impl ExecChild for LocalChild {
-    fn pid(&self) -> Option<u32> {
-        let p = self.pgid();
-        (p > 0).then_some(p as u32)
+/// Spawn `cmd` as the leader of a new process group (`process_group(0)`; Windows: a new
+/// console process group in a kill-on-close job), so [`kill_group_now`] reaches its tree.
+pub fn spawn_own_group(cmd: &mut Command) -> io::Result<std::process::Child> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        cmd.process_group(0).spawn()
     }
-    fn read(&mut self, buf: &mut [u8], timeout: Duration) -> io::Result<usize> {
-        if let Some(d) = self.detached.as_mut() {
-            let n = d.log.read(buf)?;
-            if n > 0 {
-                return Ok(n);
-            }
-            if self.exit.is_some() || LocalChild::detached_exit(d).is_some() {
-                // One more read: output written just before the exit file.
-                return d.log.read(buf);
-            }
-            std::thread::sleep(timeout.min(Duration::from_millis(50)));
-            return Err(io::ErrorKind::TimedOut.into());
+    #[cfg(not(unix))]
+    {
+        seagent_core::platform::proc::new_group(cmd, false);
+        let mut child = cmd.spawn()?;
+        if let Err(e) = seagent_core::platform::proc::adopt(&child) {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(io::Error::other(format!("cannot put pid {} in a job object: {e}", child.id())));
         }
-        let Some(fd) = self.out.as_ref().map(|f| f.as_raw_fd()) else { return Ok(0) };
-        if !poll_in(fd, timeout)? {
-            return Err(io::ErrorKind::TimedOut.into());
-        }
-        let n = read_fd(fd, buf)?;
-        if n == 0 {
-            self.out = None;
-        }
-        Ok(n)
-    }
-    fn write_stdin(&mut self, data: &[u8]) -> io::Result<()> {
-        if let Some(m) = &self.pty_master {
-            return write_all_fd(m.as_raw_fd(), data);
-        }
-        match self.stdin.as_mut() {
-            Some(s) => {
-                s.write_all(data)?;
-                s.flush()
-            }
-            None => Err(io::Error::new(io::ErrorKind::BrokenPipe, "stdin is closed (start the process with stdin or pty to write to it)")),
-        }
-    }
-    fn close_stdin(&mut self) {
-        if self.pty_master.is_some() {
-            // EOF on a terminal is ^D at line start.
-            let _ = self.write_stdin(b"\x04");
-        }
-        self.stdin = None;
-    }
-    fn try_wait(&mut self) -> io::Result<Option<ExitInfo>> {
-        if let Some(e) = self.exit {
-            return Ok(Some(e));
-        }
-        if let Some(c) = self.child.as_mut() {
-            if let Some(s) = c.try_wait()? {
-                let mut e = exit_of(s);
-                if let Some(d) = &self.detached {
-                    // The wrapper shell exits 0; the real status is in the exit file.
-                    e = LocalChild::detached_exit(d).unwrap_or(e);
-                }
-                self.exit = Some(e);
-            }
-        } else if let Some(d) = &self.detached {
-            if let Some(e) = LocalChild::detached_exit(d) {
-                self.exit = Some(e);
-            } else if !pid_alive(d.pid, d.start) {
-                self.exit = Some(ExitInfo { code: None, signal: None });
-            }
-        }
-        Ok(self.exit)
-    }
-    fn kill(&mut self, force: bool) {
-        let pgid = self.pgid();
-        if self.exit.is_none() {
-            kill_group(pgid, if force { libc::SIGKILL } else { libc::SIGTERM });
-        }
-    }
-    fn resize(&mut self, rows: u16, cols: u16) -> io::Result<()> {
-        let Some(m) = &self.pty_master else { return Err(io::Error::new(io::ErrorKind::Unsupported, "this process has no terminal (start it with pty=true)")) };
-        let ws = libc::winsize { ws_row: rows.max(1), ws_col: cols.max(1), ws_xpixel: 0, ws_ypixel: 0 };
-        // SAFETY: valid fd and winsize.
-        cvt(unsafe { libc::ioctl(m.as_raw_fd(), libc::TIOCSWINSZ, &ws) })?;
-        Ok(())
-    }
-    fn is_pty(&self) -> bool {
-        self.pty_master.is_some()
+        Ok(child)
     }
 }
 
-impl Drop for LocalChild {
-    fn drop(&mut self) {
-        if self.detached.is_none() {
-            if let Some(c) = self.child.as_mut() {
-                if matches!(c.try_wait(), Ok(None)) {
-                    kill_group(c.id() as i32, libc::SIGKILL);
-                    let _ = c.wait();
-                }
-            }
-        } else if let Some(c) = self.child.as_mut() {
-            let _ = c.try_wait(); // reap if done; a running detached process keeps going
-        }
+/// `ETXTBSY` ("Text file busy"): a program just written is still open for writing in a
+/// sibling thread's fork that has not reached exec yet. Unix only; never on Windows.
+pub fn is_text_busy(e: &io::Error) -> bool {
+    #[cfg(unix)]
+    {
+        e.raw_os_error() == Some(libc::ETXTBSY)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = e;
+        false
     }
 }
 
-/// Is `pid` alive and still the process we started (start time matches)?
-pub fn pid_alive(pid: u32, start: Option<u64>) -> bool {
-    // SAFETY: signal 0 only probes.
-    let alive = unsafe { libc::kill(pid as i32, 0) == 0 } || io::Error::last_os_error().raw_os_error() == Some(libc::EPERM);
-    let zombie = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok().and_then(|s| s.rfind(')').and_then(|i| s[i + 2..].chars().next())) == Some('Z');
-    alive && !zombie && (start.is_none() || proc_start_time(pid) == start)
-}
+// ───────────── the local backend ─────────────
 
-fn bash_command(req: &ExecRequest) -> Command {
-    let mut cmd = Command::new("bash");
-    cmd.arg(if req.login { "-lc" } else { "-c" }).arg(&req.script);
+/// `bash -c` / `bash -lc` on Linux and macOS exactly as before; elsewhere this machine's
+/// shell (`seagent_core::platform::shell`: Android `sh`, Windows Git Bash / PowerShell).
+pub(super) fn bash_command(req: &ExecRequest) -> Command {
+    let mut cmd = seagent_core::platform::shell::command(seagent_core::platform::shell::Style::bash(req.login), &req.script);
     if let Some(d) = &req.cwd {
         cmd.current_dir(d);
     }
     cmd
+}
+
+/// The sentence that tells the model which shell runs its commands, when it is not the
+/// plain Unix bash (Windows, Android). `None` on Linux and macOS.
+pub fn shell_note() -> Option<String> {
+    let sh = seagent_core::platform::shell::active();
+    (cfg!(windows) || sh.kind != seagent_core::platform::shell::ShellKind::Bash).then(|| sh.prompt_note())
 }
 
 /// Commands run directly on this machine.
@@ -522,7 +314,10 @@ impl ExecBackend for LocalBackend {
         "local"
     }
     fn describe(&self) -> String {
-        "local: commands run directly on this machine as the seagent user".into()
+        match shell_note() {
+            Some(n) => format!("local: commands run directly on this machine as the seagent user. {n}"),
+            None => "local: commands run directly on this machine as the seagent user".into(),
+        }
     }
     fn spawn(&self, req: &ExecRequest) -> io::Result<Box<dyn ExecChild>> {
         spawn_command(bash_command(req), req, None)
@@ -532,9 +327,28 @@ impl ExecBackend for LocalBackend {
     }
 }
 
-// ───────────── bubblewrap ─────────────
+/// `bin` on `PATH` (or `bin` itself when it is a path). Windows: `PATHEXT` and `\` paths too.
+pub fn which(bin: &str) -> Option<PathBuf> {
+    #[cfg(windows)]
+    {
+        if bin.contains(['/', '\\']) {
+            return Path::new(bin).is_file().then(|| PathBuf::from(bin));
+        }
+        seagent_core::platform::layout::which(bin)
+    }
+    #[cfg(not(windows))]
+    {
+        if bin.contains('/') {
+            return Path::new(bin).is_file().then(|| PathBuf::from(bin));
+        }
+        std::env::var_os("PATH").and_then(|p| std::env::split_paths(&p).map(|d| d.join(bin)).find(|f| f.is_file()))
+    }
+}
 
-/// `[exec.bwrap]`
+// ───────────── what the OS sandboxes share ─────────────
+
+/// `[exec.bwrap]` (parsed on every OS so one config file works everywhere; the backend
+/// itself exists on Linux / Android only).
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct BwrapConfig {
@@ -552,24 +366,24 @@ impl Default for BwrapConfig {
     }
 }
 
-/// Mount layout shared by the bwrap and Landlock sandboxes: the workspace
-/// (or its private scratch copy) is the only user data visible.
-struct Layout {
-    workspace: PathBuf,
-    writable: bool,
-    tmp: PathBuf,
-    binds: Vec<(PathBuf, String, bool)>,
-    network: bool,
+/// Mount layout shared by the OS sandboxes (bwrap, Landlock, Seatbelt, AppContainer): the
+/// workspace (or its private scratch copy) is the only user data visible.
+pub(super) struct Layout {
+    pub workspace: PathBuf,
+    pub writable: bool,
+    pub tmp: PathBuf,
+    pub binds: Vec<(PathBuf, String, bool)>,
+    pub network: bool,
 }
 
-fn layout(sb: &SandboxConfig, ctx: &BackendCtx) -> Result<Layout, String> {
+pub(super) fn layout(sb: &SandboxConfig, ctx: &BackendCtx) -> Result<Layout, String> {
     // `[exec] credential_files` are relative to the user's home, as configured.
     let home = super::sandbox::host_home();
     layout_with(sb, ctx, &super::global().cfg.credential_files, &home)
 }
 
 /// [`layout`] with the credential entries and the user's home spelled out (tests, embedders).
-fn layout_with(sb: &SandboxConfig, ctx: &BackendCtx, creds: &[String], host_home: &Path) -> Result<Layout, String> {
+pub(super) fn layout_with(sb: &SandboxConfig, ctx: &BackendCtx, creds: &[String], host_home: &Path) -> Result<Layout, String> {
     let (workspace, writable) = match (ctx.sandboxed, sb.workspace_access.as_str()) {
         (true, "none") => {
             let w = sb.scratch_workspace(&ctx.home, &ctx.scope_key);
@@ -589,291 +403,29 @@ fn layout_with(sb: &SandboxConfig, ctx: &BackendCtx, creds: &[String], host_home
     Ok(Layout { workspace, writable, tmp, binds, network: sb.network == "host" })
 }
 
-/// Linux namespaces via bubblewrap: private mount/pid/ipc/uts (and net unless
-/// `network = "host"`) namespaces, system dirs read-only, home hidden, all
-/// capabilities dropped.
-pub struct BwrapBackend {
-    cfg: BwrapConfig,
-    l: Layout,
-}
-
-impl BwrapBackend {
-    pub fn new(cfg: &BwrapConfig, sb: &SandboxConfig, ctx: &BackendCtx) -> Result<BwrapBackend, String> {
-        if which(&cfg.binary).is_none() {
-            return Err(format!("exec backend bwrap: `{}` not found (install bubblewrap, or use landlock / docker)", cfg.binary));
-        }
-        let l = layout(sb, ctx)?;
-        if !l.network {
-            // Fail at construction, not silently at exec time: a sandbox that claims
-            // "network disabled" but cannot create its network namespace must refuse to run.
-            probe_net_namespace(&cfg.binary)?;
-        }
-        Ok(BwrapBackend { cfg: cfg.clone(), l })
-    }
-    pub fn args(&self, req: &ExecRequest) -> Vec<String> {
-        let mut a: Vec<String> = ["--die-with-parent", "--unshare-user-try", "--unshare-pid", "--unshare-ipc", "--unshare-uts", "--unshare-cgroup-try", "--new-session", "--cap-drop", "ALL"].map(String::from).to_vec();
-        if req.pty.is_some() || req.detach {
-            a.retain(|x| x != "--new-session"); // keep the controlling terminal
-        }
-        if req.detach {
-            a.retain(|x| x != "--die-with-parent");
-        }
-        if !self.l.network {
-            a.push("--unshare-net".into());
-        }
-        for p in &self.cfg.ro_paths {
-            a.extend(["--ro-bind-try".into(), p.clone(), p.clone()]);
-        }
-        a.extend(["--dev", "/dev", "--proc", "/proc", "--tmpfs", "/home", "--tmpfs", "/root", "--tmpfs", "/run"].map(String::from));
-        a.extend(["--bind".into(), self.l.tmp.display().to_string(), "/tmp".into()]);
-        let ws = self.l.workspace.display().to_string();
-        a.extend([if self.l.writable { "--bind" } else { "--ro-bind" }.into(), ws.clone(), ws.clone()]);
-        for (src, dst, ro) in &self.l.binds {
-            a.extend([if *ro { "--ro-bind" } else { "--bind" }.into(), src.display().to_string(), dst.clone()]);
-        }
-        let cwd = req.cwd.as_ref().map(|c| c.display().to_string()).filter(|c| Path::new(c).starts_with(&self.l.workspace)).unwrap_or(ws);
-        // The host's TMPDIR usually lives under the hidden /home: point it at the private /tmp.
-        a.extend(["--chdir".into(), cwd, "--setenv".into(), "HOME".into(), "/tmp".into(), "--setenv".into(), "TMPDIR".into(), "/tmp".into()]);
-        a.extend(self.cfg.extra_args.iter().cloned());
-        a.extend(["bash".into(), if req.login { "-lc" } else { "-c" }.into(), req.script.clone()]);
-        a
-    }
-}
-
-impl ExecBackend for BwrapBackend {
-    fn id(&self) -> &str {
-        "bwrap"
-    }
-    fn describe(&self) -> String {
-        format!(
-            "bwrap: Linux namespace sandbox; workspace {} {}, network {}, home hidden, /tmp private, all capabilities dropped, seccomp {}",
-            self.l.workspace.display(),
-            if self.l.writable { "read-write" } else { "read-only" },
-            if self.l.network { "shared with host" } else { "disabled" },
-            if self.cfg.seccomp && super::seccomp::program().is_some() { "deny-list on" } else { "off" }
-        )
-    }
-    fn spawn(&self, req: &ExecRequest) -> io::Result<Box<dyn ExecChild>> {
-        let mut cmd = Command::new(&self.cfg.binary);
-        let mut args = self.args(req);
-        // ent-023: the seccomp deny-list travels as a pipe fd; only the child sees it (the
-        // pre-exec hook clears close-on-exec there), and the parent's copy closes on return.
-        let filter = if self.cfg.seccomp { super::seccomp::pipe_with_program()? } else { None };
-        let mut hook: Option<PreExec> = None;
-        if let Some(fd) = &filter {
-            use std::os::fd::AsRawFd;
-            let raw = fd.as_raw_fd();
-            let at = args.len().saturating_sub(3); // before `bash -c <script>`
-            args.splice(at..at, ["--seccomp".to_string(), raw.to_string()]);
-            hook = Some(Box::new(move || {
-                // SAFETY: fcntl on an fd this process owns, in the forked child before exec.
-                if unsafe { libc::fcntl(raw, libc::F_SETFD, 0) } != 0 {
-                    return Err(io::Error::last_os_error());
-                }
-                Ok(())
-            }));
-        }
-        cmd.args(args);
-        let mut req = req.clone();
-        req.cwd = None;
-        let child = spawn_command(cmd, &req, hook);
-        drop(filter);
-        child
-    }
-    fn temp_dir(&self) -> String {
-        "/tmp".into()
-    }
-}
-
-pub fn which(bin: &str) -> Option<PathBuf> {
-    if bin.contains('/') {
-        return Path::new(bin).is_file().then(|| PathBuf::from(bin));
-    }
-    std::env::var_os("PATH").and_then(|p| std::env::split_paths(&p).map(|d| d.join(bin)).find(|f| f.is_file()))
-}
-
-/// Can `bwrap` actually create a network namespace here? `--unshare-net` is not a
-/// `-try` flag: this probe runs the same flag the sandbox will use, so a host with
-/// user namespaces / netns disabled is refused up front instead of handing the
-/// command the host network after a silent partial failure.
-pub fn probe_net_namespace(bin: &str) -> Result<(), String> {
-    let script = format!("exec {} --unshare-net --unshare-user-try --die-with-parent --ro-bind / / true", super::sh_quote(bin));
-    let (st, out) = super::run_capture(&LocalBackend, &script, None, Duration::from_secs(15)).map_err(|e| format!("exec backend bwrap: cannot probe `--unshare-net`: {e}"))?;
-    if st.success() {
-        return Ok(());
-    }
-    let detail = String::from_utf8_lossy(&out);
-    let detail = detail.trim();
-    Err(format!(
-        "exec backend bwrap: `--unshare-net` failed ({}) — this host cannot create a network namespace (unprivileged user namespaces or netns are disabled); set exec.sandbox.network = \"host\" to accept the host network, or use the landlock / docker backend",
-        if detail.is_empty() { "bwrap exited nonzero with no message" } else { detail }
-    ))
-}
-
-// ───────────── Landlock ─────────────
-
-const LANDLOCK_CREATE_RULESET_VERSION: u32 = 1;
-const LANDLOCK_RULE_PATH_BENEATH: u32 = 1;
-const FS_EXECUTE: u64 = 1;
-const FS_READ_FILE: u64 = 1 << 2;
-const FS_READ_DIR: u64 = 1 << 3;
-const FS_WRITE_FILE: u64 = 1 << 1;
-const NET_BIND_TCP: u64 = 1;
-const NET_CONNECT_TCP: u64 = 2;
-
-#[repr(C)]
-struct RulesetAttr {
-    handled_access_fs: u64,
-    handled_access_net: u64,
-}
-
-#[repr(C, packed)]
-struct PathBeneath {
-    allowed_access: u64,
-    parent_fd: i32,
-}
-
-/// Highest Landlock ABI the kernel supports (0 = unavailable).
-pub fn landlock_abi() -> i64 {
-    // SAFETY: version query with NULL attr is the documented probe.
-    unsafe { libc::syscall(libc::SYS_landlock_create_ruleset, std::ptr::null::<RulesetAttr>(), 0usize, LANDLOCK_CREATE_RULESET_VERSION) }.max(0)
-}
-
-fn fs_all(abi: i64) -> u64 {
-    // ABI 1: bits 0..=12; 2 adds REFER (13); 3 adds TRUNCATE (14); 5 adds IOCTL_DEV (15).
-    let mut m = (1u64 << 13) - 1;
-    if abi >= 2 {
-        m |= 1 << 13;
-    }
-    if abi >= 3 {
-        m |= 1 << 14;
-    }
-    if abi >= 5 {
-        m |= 1 << 15;
-    }
-    m
-}
-
-/// Landlock LSM: the command may read system dirs and the workspace, write
-/// only the workspace (unless read-only) and its private /tmp; TCP blocked
-/// when `network = "none"` (ABI ≥ 4). No namespaces, so it works where user
-/// namespaces are disabled. Home and other users' data are unreadable.
-pub struct LandlockBackend {
-    l: Layout,
-    abi: i64,
-    ro_paths: Vec<String>,
-}
-
-impl LandlockBackend {
-    pub fn new(sb: &SandboxConfig, ctx: &BackendCtx) -> Result<LandlockBackend, String> {
-        let abi = landlock_abi();
-        if abi < 1 {
-            return Err("exec backend landlock: the kernel has no Landlock support (CONFIG_SECURITY_LANDLOCK, lsm=landlock); use bwrap or docker".into());
-        }
-        let l = layout(sb, ctx)?;
-        if !l.network && abi < 4 {
-            return Err(format!("exec backend landlock: kernel Landlock ABI {abi} cannot restrict networking (needs 4); set exec.sandbox.network = \"host\" or use bwrap"));
-        }
-        let mut ro_paths = BwrapConfig::default().ro_paths;
-        ro_paths.extend(["/dev", "/proc", "/sys"].map(String::from));
-        Ok(LandlockBackend { l, abi, ro_paths })
-    }
-
-    /// Pre-exec hook applying the ruleset in the child.
-    fn hook(&self) -> io::Result<PreExec> {
-        let abi = self.abi;
-        let all = fs_all(abi);
-        let read = FS_EXECUTE | FS_READ_FILE | FS_READ_DIR;
-        let mut rules: Vec<(CString, u64)> = Vec::new();
-        let c = |p: &Path| CString::new(p.as_os_str().as_bytes()).map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "path with NUL"));
-        for p in &self.ro_paths {
-            if Path::new(p).exists() {
-                rules.push((c(Path::new(p))?, read));
-            }
-        }
-        rules.push((c(Path::new("/dev/null"))?, read | FS_WRITE_FILE));
-        rules.push((c(Path::new("/dev/tty"))?, read | FS_WRITE_FILE));
-        rules.push((c(Path::new("/dev/pts"))?, read | FS_WRITE_FILE));
-        rules.push((c(&self.l.tmp)?, all));
-        rules.push((c(&self.l.workspace)?, if self.l.writable { all } else { read }));
-        for (src, _, ro) in &self.l.binds {
-            rules.push((c(src)?, if *ro { read } else { all }));
-        }
-        let net = if self.l.network { 0 } else { NET_BIND_TCP | NET_CONNECT_TCP };
-        Ok(Box::new(move || {
-            // Only async-signal-safe syscalls below.
-            let attr = RulesetAttr { handled_access_fs: all, handled_access_net: net };
-            let size = if abi >= 4 { std::mem::size_of::<RulesetAttr>() } else { 8 };
-            // SAFETY: attr outlives the call; size matches the ABI.
-            let rs = unsafe { libc::syscall(libc::SYS_landlock_create_ruleset, &attr as *const RulesetAttr, size, 0u32) };
-            if rs < 0 {
-                return Err(io::Error::last_os_error());
-            }
-            for (path, access) in &rules {
-                // SAFETY: valid C string; O_PATH fd closed after use.
-                let fd = unsafe { libc::open(path.as_ptr(), libc::O_PATH | libc::O_CLOEXEC) };
-                if fd < 0 {
-                    continue; // missing optional path
-                }
-                // Directories get the full mask; files only file rights.
-                let mut st: libc::stat = unsafe { std::mem::zeroed() };
-                // SAFETY: valid fd and stat buffer.
-                let is_dir = unsafe { libc::fstat(fd, &mut st) } == 0 && (st.st_mode & libc::S_IFMT) == libc::S_IFDIR;
-                let allowed = if is_dir { *access } else { *access & (FS_EXECUTE | FS_READ_FILE | FS_WRITE_FILE | (1 << 14)) };
-                let pb = PathBeneath { allowed_access: allowed & all, parent_fd: fd };
-                // SAFETY: rule struct valid for the call.
-                unsafe {
-                    libc::syscall(libc::SYS_landlock_add_rule, rs, LANDLOCK_RULE_PATH_BENEATH, &pb as *const PathBeneath, 0u32);
-                    libc::close(fd);
-                }
-            }
-            // SAFETY: plain prctl/syscall.
-            unsafe {
-                if libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0 {
-                    return Err(io::Error::last_os_error());
-                }
-                if libc::syscall(libc::SYS_landlock_restrict_self, rs, 0u32) != 0 {
-                    return Err(io::Error::last_os_error());
-                }
-                libc::close(rs as i32);
-            }
-            Ok(())
-        }))
-    }
-}
-
-impl ExecBackend for LandlockBackend {
-    fn id(&self) -> &str {
-        "landlock"
-    }
-    fn describe(&self) -> String {
-        format!(
-            "landlock: Landlock ABI {} file-system sandbox; workspace {} {}, network {}, home unreadable",
-            self.abi,
-            self.l.workspace.display(),
-            if self.l.writable { "read-write" } else { "read-only" },
-            if self.l.network { "allowed" } else { "TCP blocked" }
-        )
-    }
-    fn spawn(&self, req: &ExecRequest) -> io::Result<Box<dyn ExecChild>> {
-        let mut cmd = bash_command(req);
-        if req.cwd.as_ref().is_none_or(|c| !c.starts_with(&self.l.workspace)) {
-            cmd.current_dir(&self.l.workspace);
-        }
-        cmd.env("HOME", &self.l.tmp).env("TMPDIR", &self.l.tmp);
-        spawn_command(cmd, req, Some(self.hook()?))
-    }
-    fn temp_dir(&self) -> String {
-        self.l.tmp.display().to_string()
-    }
+/// The error a sandbox backend name gives on an OS that does not have it.
+pub fn not_available(backend: &str, why: &str) -> String {
+    let os = std::env::consts::OS;
+    let alt = if cfg!(target_os = "macos") {
+        "use `seatbelt`, `docker` or `vm`"
+    } else if cfg!(windows) {
+        "use `appcontainer`, `docker` or `vm`"
+    } else if cfg!(any(target_os = "linux", target_os = "android")) {
+        "use `bwrap`, `landlock`, `docker` or `vm`"
+    } else {
+        "use a remote backend (`ssh`) or a paired node"
+    };
+    format!("exec backend {backend} is not available on {os}: {why}; {alt}")
 }
 
 #[cfg(test)]
+#[cfg(unix)]
 mod tests {
     use super::*;
     use crate::exec::{drain, run_capture};
     use crate::testutil::tmpdir;
     use std::sync::Arc;
+    use std::time::Duration;
 
     fn req(script: &str) -> ExecRequest {
         ExecRequest { script: script.into(), ..Default::default() }
@@ -918,6 +470,7 @@ mod tests {
     /// ent-024: with `[exec.cgroups]` on and a delegated (here: fake v2) subtree, a spawned
     /// command lands in its own cgroup with the caps, and the reaper line names it.
     #[test]
+    #[cfg(any(target_os = "linux", target_os = "android"))]
     fn commands_get_their_own_cgroup_when_enabled() {
         assert!(enable_cgroups(&CgroupConfig::default(), Path::new("/")).unwrap_err().contains("enabled = false"));
         let root = tmpdir("cgroot");
@@ -1010,116 +563,16 @@ mod tests {
     }
 
     #[test]
-    fn bwrap_hides_home_and_blocks_network() {
-        if which("bwrap").is_none() || run_capture(&LocalBackend, "bwrap --unshare-user-try --ro-bind / / true", None, Duration::from_secs(5)).map(|r| !r.0.success()).unwrap_or(true) {
-            eprintln!("skipping bwrap_hides_home_and_blocks_network: bwrap is not usable on this host (missing, or user namespaces disabled)");
-            return;
-        }
-        let ws = tmpdir("bwrapws");
-        // Trailing newline: `cat` is followed by more commands and the last line is asserted.
-        std::fs::write(ws.join("f.txt"), "inside\n").unwrap();
-        let home = tmpdir("bwraphome");
-        let sb = SandboxConfig { workspace_access: "rw".into(), ..Default::default() };
-        let ctx = BackendCtx { workspace: ws.clone(), scope_key: "t".into(), secrets: Arc::new(|s: &str| s.to_string()), home: home.clone(), sandboxed: true };
-        let b = BwrapBackend::new(&BwrapConfig::default(), &sb, &ctx).unwrap();
-        // Capabilities are dropped before the command runs.
-        let a = b.args(&req("true"));
-        assert!(a.windows(2).any(|w| w[0] == "--cap-drop" && w[1] == "ALL"), "{a:?}");
-        assert!(a.iter().any(|x| x == "--unshare-net"), "{a:?}");
-        let script = format!(
-            "cat {}/f.txt; echo w > {}/new.txt; ls $HOME_REAL 2>&1 | head -1\n\
-             echo ROUTE; cat /proc/net/route\n\
-             echo IPROUTE; ip route 2>&1\n\
-             echo DEV; cat /proc/net/dev\n\
-             echo TCP; (exec 3<>/dev/tcp/1.1.1.1/80) 2>/dev/null && echo net-open || echo net-denied",
-            ws.display(),
-            ws.display()
-        );
-        let mut r = req(&script);
-        r.env.push(("HOME_REAL".into(), std::env::var("HOME").unwrap_or_default()));
-        r.cwd = Some(ws.clone());
-        let (st, out) = drain(b.spawn(&r).unwrap(), Duration::from_secs(15)).unwrap();
-        let s = String::from_utf8_lossy(&out);
-        assert!(st.success() && s.contains("inside"), "{s}");
-        assert!(ws.join("new.txt").exists(), "rw workspace");
-        let section = |name: &str| -> String {
-            let start = match s.find(&format!("\n{name}\n")) {
-                Some(i) => i + name.len() + 2,
-                None => return String::new(),
-            };
-            s[start..].split('\n').take_while(|l| !["ROUTE", "IPROUTE", "DEV", "TCP"].contains(l)).collect::<Vec<_>>().join("\n")
-        };
-        // No routes at all: /proc/net/route has only its header line.
-        let route = section("ROUTE");
-        let lines: Vec<&str> = route.lines().filter(|l| !l.trim().is_empty()).collect();
-        assert_eq!(lines.len(), 1, "only the /proc/net/route header, got {route:?}");
-        assert!(lines[0].starts_with("Iface"), "{route:?}");
-        // `ip route` prints nothing, and only loopback exists.
-        assert_eq!(section("IPROUTE").trim(), "", "ip route must be empty in the sandbox");
-        let dev = section("DEV");
-        assert!(dev.contains("lo:") && !dev.contains("eth0") && !dev.contains("enp") && !dev.contains("wlan"), "only loopback: {dev:?}");
-        // Opening a TCP connection to the outside fails.
-        assert!(section("TCP").contains("net-denied"), "{s}");
-        // ro
-        let sb = SandboxConfig { workspace_access: "ro".into(), ..Default::default() };
-        let b = BwrapBackend::new(&BwrapConfig::default(), &sb, &ctx).unwrap();
-        let (st, _) = drain(b.spawn(&req(&format!("echo x > {}/ro.txt", ws.display()))).unwrap(), Duration::from_secs(10)).unwrap();
-        assert!(!st.success() && !ws.join("ro.txt").exists());
-        // none: real workspace invisible, scratch dir used.
-        let sb = SandboxConfig::default();
-        let b = BwrapBackend::new(&BwrapConfig::default(), &sb, &ctx).unwrap();
-        let (_, out) = drain(b.spawn(&req(&format!("cat {}/f.txt 2>&1; pwd", ws.display()))).unwrap(), Duration::from_secs(10)).unwrap();
-        let s = String::from_utf8_lossy(&out);
-        assert!(!s.contains("inside") && s.contains("sandboxes/t/workspace"), "{s}");
-        assert!(b.describe().contains("network disabled"));
-        // ent-023: the seccomp deny-list is on — a new user namespace or a keyring call from
-        // inside is refused, ordinary commands still run.
-        assert!(b.describe().contains("seccomp deny-list on"), "{}", b.describe());
-        if which("unshare").is_some() {
-            let (_, out) = drain(b.spawn(&req("unshare -U true 2>/dev/null; echo rc=$?; echo fine")).unwrap(), Duration::from_secs(10)).unwrap();
-            let s = String::from_utf8_lossy(&out);
-            assert!(s.contains("fine") && !s.contains("rc=0"), "unshare must be refused: {s}");
-        }
-        let off = BwrapConfig { seccomp: false, ..BwrapConfig::default() };
-        assert!(BwrapBackend::new(&off, &sb, &ctx).unwrap().describe().contains("seccomp off"));
-    }
-
-    #[test]
-    fn bwrap_network_probe_reports_an_unusable_netns() {
-        // A bwrap binary that always fails stands in for a host without netns:
-        // construction must refuse with a message naming `--unshare-net`.
-        let d = tmpdir("bwrapfake");
-        let bin = d.join("bwrap");
-        std::fs::write(&bin, "#!/bin/sh\necho 'bwrap: Failed to unshare network namespace: Operation not permitted' >&2\nexit 1\n").unwrap();
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
-        let cfg = BwrapConfig { binary: bin.display().to_string(), ..Default::default() };
-        let e = probe_net_namespace(&cfg.binary).unwrap_err();
-        assert!(e.contains("--unshare-net") && e.contains("exec.sandbox.network"), "{e}");
-        let ctx = BackendCtx { workspace: d.clone(), scope_key: "t".into(), secrets: Arc::new(|s: &str| s.to_string()), home: d.clone(), sandboxed: true };
-        let err = BwrapBackend::new(&cfg, &SandboxConfig::default(), &ctx).err().expect("network-none bwrap must refuse to build");
-        assert!(err.contains("--unshare-net"), "{err}");
-        // network = "host" is the documented way out; no probe is attempted.
-        let host = SandboxConfig { network: "host".into(), ..Default::default() };
-        assert!(BwrapBackend::new(&cfg, &host, &ctx).is_ok());
-    }
-
-    #[test]
-    fn landlock_restricts_writes_and_home() {
-        if landlock_abi() < 4 {
-            eprintln!("skipping: landlock ABI {}", landlock_abi());
-            return;
-        }
-        let ws = tmpdir("llws");
-        let home = tmpdir("llhome");
-        let outside = tmpdir("lloutside");
-        let sb = SandboxConfig { workspace_access: "rw".into(), ..Default::default() };
-        let ctx = BackendCtx { workspace: ws.clone(), scope_key: "t".into(), secrets: Arc::new(|s: &str| s.to_string()), home, sandboxed: true };
-        let b = LandlockBackend::new(&sb, &ctx).unwrap();
-        let script = format!("echo ok > {ws}/in.txt && echo in-ok; echo bad > {out}/x.txt 2>/dev/null || echo out-denied; cat {out}/../ 2>/dev/null; (exec 3<>/dev/tcp/127.0.0.1/9 && echo net-open) 2>/dev/null || echo net-denied", ws = ws.display(), out = outside.display());
-        let (_, out) = drain(b.spawn(&req(&script)).unwrap(), Duration::from_secs(10)).unwrap();
-        let s = String::from_utf8_lossy(&out);
-        assert!(s.contains("in-ok") && s.contains("out-denied") && s.contains("net-denied"), "{s}");
-        assert!(!outside.join("x.txt").exists());
+    fn portable_helpers_keep_unix_semantics() {
+        assert!(is_text_busy(&io::Error::from_raw_os_error(libc::ETXTBSY)));
+        assert!(!is_text_busy(&io::Error::from_raw_os_error(libc::ENOENT)));
+        let mut c = Command::new("sleep");
+        c.arg("30");
+        let mut child = spawn_own_group(&mut c).unwrap();
+        kill_group_now(child.id() as i32);
+        use std::os::unix::process::ExitStatusExt;
+        assert_eq!(child.wait().unwrap().signal(), Some(9));
+        assert!(not_available("seatbelt", "no Seatbelt").contains("not available on"));
+        assert_eq!(exit_file_status(Path::new("/nonexistent/exit")), None);
     }
 }

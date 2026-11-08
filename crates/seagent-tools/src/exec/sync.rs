@@ -14,9 +14,58 @@ pub mod common;
 use seagent_core::exec::ExitInfo;
 use std::collections::HashMap;
 use std::fs;
+#[cfg(unix)]
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Component, Path, PathBuf};
 use std::sync::Mutex;
+
+// Portable metadata for the manifest and the tar stream. Unix: the real mtime / mode, as
+// before. Elsewhere: mtime from `modified()`, mode 0644 / 0755 (directories), read-only
+// files 0444 — the fields stay, with the defaults a Unix receiver expects.
+#[cfg(unix)]
+fn mtime_of(m: &fs::Metadata) -> (i64, i64) {
+    (m.mtime(), m.mtime_nsec())
+}
+#[cfg(not(unix))]
+fn mtime_of(m: &fs::Metadata) -> (i64, i64) {
+    let d = m.modified().ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).unwrap_or_default();
+    (d.as_secs() as i64, d.subsec_nanos() as i64)
+}
+#[cfg(unix)]
+fn mode_of(m: &fs::Metadata) -> u32 {
+    m.mode()
+}
+#[cfg(not(unix))]
+fn mode_of(m: &fs::Metadata) -> u32 {
+    let base = if m.is_dir() { 0o755 } else { 0o644 };
+    if m.permissions().readonly() {
+        base & 0o555
+    } else {
+        base
+    }
+}
+#[cfg(unix)]
+fn set_mode(p: &Path, mode: u32) {
+    let _ = fs::set_permissions(p, fs::Permissions::from_mode(mode));
+}
+#[cfg(not(unix))]
+fn set_mode(p: &Path, mode: u32) {
+    // Only the write bit has a Windows meaning (the read-only attribute).
+    if let Ok(m) = fs::metadata(p) {
+        let mut perm = m.permissions();
+        perm.set_readonly(mode & 0o222 == 0);
+        let _ = fs::set_permissions(p, perm);
+    }
+}
+#[cfg(unix)]
+fn make_symlink(target: &str, dest: &Path) -> std::io::Result<()> {
+    std::os::unix::fs::symlink(target, dest)
+}
+#[cfg(windows)]
+fn make_symlink(target: &str, dest: &Path) -> std::io::Result<()> {
+    // Needs Developer Mode or SeCreateSymbolicLinkPrivilege; the error says so if missing.
+    std::os::windows::fs::symlink_file(target, dest)
+}
 
 /// Run `script` remotely with `stdin`, returning exit status and merged output.
 pub type Runner<'a> = &'a dyn Fn(&str, Option<&[u8]>) -> Result<(ExitInfo, Vec<u8>), String>;
@@ -52,7 +101,8 @@ pub struct SyncReport {
 type Key = (u64, i64, i64);
 
 fn key_of(m: &fs::Metadata) -> Key {
-    (m.len(), m.mtime(), m.mtime_nsec())
+    let (s, ns) = mtime_of(m);
+    (m.len(), s, ns)
 }
 
 #[derive(Default)]
@@ -143,14 +193,14 @@ impl WorkspaceSync {
             }
             if m.file_type().is_symlink() {
                 let target = fs::read_link(path).map_err(|e| format!("readlink {}: {e}", path.display()))?;
-                tar.symlink(rel, &target.to_string_lossy(), m.mtime());
+                tar.symlink(rel, &target.to_string_lossy(), mtime_of(&m).0);
             } else {
                 rep.bytes += m.len();
                 if rep.bytes > self.opts.max_push_bytes {
                     return Err(format!("workspace sync: more than {} bytes changed; refusing to upload (exclude large dirs or raise the limit)", self.opts.max_push_bytes));
                 }
                 let data = fs::read(path).map_err(|e| format!("read {}: {e}", path.display()))?;
-                tar.file(rel, &data, m.mode() & 0o7777, m.mtime());
+                tar.file(rel, &data, mode_of(&m) & 0o7777, mtime_of(&m).0);
             }
             rep.uploaded += 1;
         }
@@ -287,7 +337,7 @@ find . -mindepth 1 -type d \\({prune} -false \\) -o \\( -type f -o -type l \\) -
                         continue;
                     }
                     let _ = fs::remove_file(&dest);
-                    std::os::unix::fs::symlink(&e.link, &dest).map_err(|err| format!("symlink {}: {err}", dest.display()))?;
+                    make_symlink(&e.link, &dest).map_err(|err| format!("symlink {}: {err}", dest.display()))?;
                 }
                 b'0' => {
                     if cur.as_ref().is_some_and(|m| m.is_file()) && fs::read(&dest).ok().as_deref() == Some(&e.data[..]) {
@@ -300,7 +350,7 @@ find . -mindepth 1 -type d \\({prune} -false \\) -o \\( -type f -o -type l \\) -
                         let _ = fs::remove_file(&dest);
                     }
                     crate::util::atomic_write(&dest, &e.data).map_err(|err| format!("write {}: {err}", dest.display()))?;
-                    let _ = fs::set_permissions(&dest, fs::Permissions::from_mode(e.mode & 0o777));
+                    set_mode(&dest, e.mode & 0o777);
                     rep.bytes += e.data.len() as u64;
                 }
                 _ => continue,
@@ -337,11 +387,11 @@ pub fn upload_files(run: Runner, files: &[String], base64: bool) -> Result<usize
         let data = fs::read(&host).map_err(|e| format!("credential file {f}: {e}"))?;
         match host.strip_prefix(&home) {
             Ok(rel) if !home.as_os_str().is_empty() => {
-                home_tar.file(&rel.to_string_lossy(), &data, 0o600, m.mtime());
+                home_tar.file(&rel.to_string_lossy(), &data, 0o600, mtime_of(&m).0);
                 nh += 1;
             }
             _ => {
-                abs_tar.file(host.to_string_lossy().trim_start_matches('/'), &data, 0o600, m.mtime());
+                abs_tar.file(host.to_string_lossy().trim_start_matches('/'), &data, 0o600, mtime_of(&m).0);
                 na += 1;
             }
         }

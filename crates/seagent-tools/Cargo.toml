@@ -10,7 +10,6 @@ seagent-security.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 regex = { workspace = true, features = ["unicode-case"] } # case-insensitive grep
-libc.workspace = true
 seagent-net.workspace = true # sha256 / random ids / base64 for web caches and envelopes
 ureq.workspace = true
 toml.workspace = true # post-write TOML syntax lint (existing workspace dep)
@@ -18,3 +17,9 @@ seagent-vm.workspace = true # microVM exec backend (B1): the `vm` backend delega
 base64.workspace = true # base64 frames on the guest channel (seagent-vm protocol)
 rusqlite = { version = "0.40", features = ["bundled"] } # sql_query on local SQLite files (opened read-only); same build as seagent-kernel's index
 ring.workspace = true # RS256 JWT for GitHub App installation tokens (forge)
+
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true # process groups, poll, PTY, Landlock / seccomp syscalls (local backend)
+
+[target.'cfg(windows)'.dependencies]
+windows-sys.workspace = true # local backend: console process groups, creation flags (already in the tree via seagent-core)

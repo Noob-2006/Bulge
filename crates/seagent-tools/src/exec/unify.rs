@@ -156,8 +156,8 @@ fn table_caps(name: &str, cfg: &ExecConfig, ctx: &BackendCtx) -> Result<EnvCaps,
     }
     let (copy, uid) = match name {
         // Local work runs as the seagent user; Landlock changes permissions, not identity.
-        "local" | "landlock" => (false, Some(current_uid())),
-        "bwrap" | "docker" | "podman" | "singularity" | "apptainer" => (false, None),
+        "local" | "landlock" | "seatbelt" => (false, current_uid()),
+        "bwrap" | "appcontainer" | "docker" | "podman" | "singularity" | "apptainer" => (false, None),
         "ssh" | "modal" | "daytona" | "vercel" | "openshell" => (true, None),
         other => return Err(format!("unknown exec backend `{other}`: no isolation level in seagent's table")),
     };
@@ -191,9 +191,15 @@ fn extra_config(cfg: &ExecConfig, name: &str) -> Value {
     }
 }
 
-fn current_uid() -> u32 {
+/// The seagent user's uid; `None` where the OS has no numeric uid (Windows).
+#[cfg(unix)]
+fn current_uid() -> Option<u32> {
     // SAFETY: `getuid` has no preconditions and cannot fail.
-    unsafe { libc::getuid() }
+    Some(unsafe { libc::getuid() })
+}
+#[cfg(not(unix))]
+fn current_uid() -> Option<u32> {
+    None
 }
 
 // ───────────── the microVM adapter ─────────────
@@ -307,7 +313,7 @@ impl IsolatedEnv for BackendEnv {
             snapshots: false,
             broker: false,
             uid: match self.name.as_str() {
-                "local" | "landlock" => Some(current_uid()),
+                "local" | "landlock" | "seatbelt" => current_uid(),
                 _ => None,
             },
         }
