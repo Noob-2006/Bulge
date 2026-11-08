@@ -1,6 +1,7 @@
 # The SE Agent microVM guest image
 
-One kernel and one initramfs. Boot them and the kernel starts the SE Agent guest
+One kernel and one initramfs (per architecture, plus an optional raw UEFI disk
+that carries the same guest for VirtualBox / Hyper-V). Boot them and the kernel starts the SE Agent guest
 agent as PID 1; the agent mounts what it needs, drops to uid 1000 and speaks
 the single channel protocol (`crates/seagent-vm/src/proto.rs`) with the host.
 
@@ -85,7 +86,9 @@ reinterpreted: `seagent.workspace=../../etc` leaves `/workspace` in place.
 
 ## Kernel
 
-The image uses the Firecracker CI `vmlinux` 5.10.223
+By default (x86_64, `--format initramfs`) the image uses the Firecracker CI `vmlinux` 5.10.223 — aarch64,
+the disk and `--build-kernel` use a kernel built from source instead, see
+[Architectures and kernels](#architectures-and-kernels)
 (`https://s3.amazonaws.com/spec.ccfc.min/firecracker-ci/v1.10/x86_64/vmlinux-5.10.223`,
 sha256 `2284737572…0c1e65`). It is chosen because it is small, boots in well
 under a second and has everything the agent needs **built in** — devtmpfs,
@@ -194,9 +197,122 @@ The guest is always Linux; each host OS boots it with its own hypervisor
 | Android | AVF `vm run` (crosvm, pKVM) | arm64 kernel + initramfs | `vsock` (host AF_VSOCK to the CID) |
 | iOS | none (platform policy) | — | — |
 
-Not built by `build-image.sh` yet: the arm64 variant and the raw UEFI disk (`disk.raw`,
-an ESP that boots the same kernel + initramfs with `seagent.channel=uart`). Until they
-exist, those providers report the missing artefact instead of booting.
+Which build feeds which row:
+
+```sh
+# Linux / Windows QEMU (x86_64): the default, unchanged
+packaging/vm/build-image.sh --out "$OUT"
+# VirtualBox / Hyper-V (x86_64): adds disk.raw next to vmlinux
+packaging/vm/build-image.sh --out "$OUT" --format disk
+# macOS Apple Silicon (vfkit, QEMU+HVF), Android AVF, arm64 Linux
+packaging/vm/build-image.sh --out "$OUT" --arch aarch64
+# VirtualBox on Apple Silicon / Hyper-V on Windows-on-Arm (see the caveat below)
+packaging/vm/build-image.sh --out "$OUT" --arch aarch64 --format disk
+```
+
+Put the directory where the provider looks (`<data>/vm/image/`, or `<data>/vm/kernel/`
+for the legacy layout): `vmlinux` is `spec.kernel`, and VirtualBox / Hyper-V take
+`disk.raw` from the same directory (`provider::vbox::raw_disk`) unless
+`exec.vm.disk_image` says otherwise. They convert it once to `disk.vdi` /
+`disk.vhdx` next to it; the builder deletes those on every disk build so a stale
+conversion is never booted.
+
+| provider | file it boots | how |
+| --- | --- | --- |
+| Firecracker | `vmlinux` (ELF on x86_64, arm64 `Image` on aarch64) + `initramfs.cpio.gz` | `boot-source`, virtio-mmio, `vsock` |
+| QEMU (KVM/WHPX/HVF/TCG) | same pair | `-kernel/-initrd/-append`, virtio-serial-pci (needs a source-built kernel on x86_64, see below) |
+| vfkit | same pair (`--arch aarch64`) | `--bootloader linux,kernel=…,initrd=…`, virtio-vsock, console `hvc0` |
+| AVF / crosvm | same pair (`--arch aarch64`) | `vm run` config `kernel`/`initrd`/`params`, vsock to the CID |
+| VirtualBox | `disk.raw` → `disk.vdi` (immutable) | EFI firmware → `\EFI\BOOT\BOOTX64.EFI`, COM1 console, COM2 = `/dev/ttyS1` channel |
+| Hyper-V Gen 2 | `disk.raw` → `disk.vhdx` (differencing child) | same, Secure Boot off, COM2 = named pipe |
+
+### The disk (`--format disk`)
+
+`disk.raw` is a GPT disk (66 MiB: 1 MiB head, a 64 MiB FAT32 EFI System
+Partition, 1 MiB tail for the backup GPT) whose ESP holds exactly one file:
+
+| arch | ESP path | what it is |
+| --- | --- | --- |
+| x86_64 | `\EFI\BOOT\BOOTX64.EFI` | the kernel's `bzImage` (EFI stub, PE/COFF) |
+| aarch64 | `\EFI\BOOT\BOOTAA64.EFI` | the arm64 `Image` (EFI stub, PE/COFF) |
+
+That is the removable-media path every UEFI firmware boots without a boot entry,
+so there is **no boot loader**: the kernel is the EFI application, the initramfs
+is built into it (`CONFIG_INITRAMFS_SOURCE` = the very `initramfs.cpio.gz` shipped
+next to it, used as-is) and so is the command line, forced so that whatever load
+options the firmware passes are ignored (`CONFIG_CMDLINE_OVERRIDE` on x86_64,
+`CONFIG_CMDLINE_FORCE` on arm64):
+
+```
+console=ttyS0 quiet rdinit=/sbin/init seagent.channel=uart seagent.workspace=/workspace
+```
+
+(`console=ttyAMA0` on aarch64.) `seagent.vm`, `seagent.tier` and the limits are
+deliberately absent: a disk is shared by every VM, so those come from the host's
+`Limits` message (the guest defaults until then), as `provider/vbox.rs` notes.
+The guest never mounts the disk: after the firmware has loaded the kernel the
+root is still the initramfs, so B2 holds exactly as with direct boot.
+
+The disk is written by `packaging/vm/mkdisk.py` (Python standard library only,
+no root, no loop device, no mtools): deterministic — GUIDs and the volume serial
+are derived from the contents, timestamps are fixed — and read back after
+writing (both GPT copies and CRCs, both FATs, the file bytes).
+`python3 -I packaging/vm/test_mkdisk.py` tests it against the GPT and FAT32
+specs; CI additionally checks every built disk with `sgdisk -v`, `fsck.fat -n`
+and `mcopy`, and boots it under QEMU + OVMF (`packaging/vm/smoke-boot.sh`).
+`mkdisk.py list disk.raw` shows what is on an existing disk.
+
+**aarch64 disk caveat.** The arm64 disk boots (the agent starts from the embedded
+initramfs), but arm64 VirtualBox / Hyper-V expose PL011 UARTs (`ttyAMA*`), not
+16550s, so `/dev/ttyS1` (`proto::UART_DEVICE`) does not exist there and the
+`uart` channel cannot open until the guest agent falls back to `/dev/ttyAMA1` on
+aarch64 (and `provider/vbox.rs` stops passing the x86 `--uart1 0x3F8 4` I/O-port
+form on arm64 hosts). The x86_64 disk has no such gap.
+
+## Architectures and kernels
+
+| build | direct-boot `vmlinux` | disk kernel |
+| --- | --- | --- |
+| x86_64 (default) | Firecracker CI 5.10.223, pinned sha256 (virtio-mmio only) | built from source |
+| x86_64 `--build-kernel` | built from source: ELF `vmlinux` with PVH (Firecracker + QEMU, virtio-PCI) | built from source |
+| aarch64 | built from source: arm64 `Image` (vfkit, QEMU `virt`, crosvm, Firecracker) | built from source |
+
+"From source" is the pinned kernel.org tarball `linux-6.12.114.tar.xz` (6.12 LTS,
+sha256 `7a858991…4b4af3` from kernel.org's `sha256sums.asc`, re-checked on every
+use like the other downloads; `--kernel-src` for an offline copy), configured as
+`make allnoconfig` + `packaging/vm/kernel/common.config` + `x86_64.config` /
+`arm64.config`. Everything is built in (`CONFIG_MODULES` off): virtio PCI *and*
+MMIO, virtio-vsock, -blk, -net, -console, -rng, -balloon, 8250 (+ PL011 on arm64),
+devtmpfs, tmpfs, ACPI + EFI (x86_64 adds KVM/Hyper-V guest support, PVH and the
+EFI stub). After configuring, the builder checks that **every** line of the
+fragments is in `.config` verbatim and fails otherwise, so a symbol that loses a
+dependency in a newer kernel is a build error, not a guest that does not boot.
+The resolved configs are kept as `build/kernel-<arch>-{direct,disk}.config.full`.
+
+Building a kernel needs (Debian/Ubuntu):
+
+```sh
+sudo apt-get install build-essential flex bison bc libelf-dev xz-utils cpio python3
+sudo apt-get install gcc-aarch64-linux-gnu      # only to cross-build --arch aarch64 on x86_64
+```
+
+The builder checks for these first and names what is missing. Cross builds pick
+`CROSS_COMPILE=aarch64-linux-gnu-` automatically when that gcc is installed;
+`LLVM=1` builds with clang/lld instead. The agent for aarch64 is
+`aarch64-unknown-linux-musl` (falling back to a static `aarch64-unknown-linux-gnu`
+build like on x86_64); `cargo zigbuild` is the easy cross route, as `release.yml`
+does. A macOS or Android host does not build the image itself: take the
+`seagent-vm-image-aarch64` artefact of the `vm-image` workflow
+(`.github/workflows/vm-image.yml`, which builds, checks and boots both
+architectures on native runners).
+
+`manifest.json` gains `"arch"`, `kernel.format` (`elf` / `arm64-image`),
+`kernel.linux` (version, URL, sha256 of the source tarball, when one was used) and,
+for `--format disk`, a `"disk"` object (path, sha256, size, ESP file, its sha256,
+the baked command line). `GuestImage` ignores the extra keys. `SEAGENT_VM_ARCH`
+and `SEAGENT_VM_FORMAT` set the defaults of `--arch` / `--format`, so
+`seagent sandbox vm image build` (which only passes `--out`) can be steered
+without a code change.
 
 ## One interface for every backend
 

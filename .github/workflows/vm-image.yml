@@ -1,0 +1,90 @@
+name: vm-image
+# The microVM guest image (packaging/vm): x86_64 and aarch64, each as kernel + initramfs
+# (Firecracker / QEMU / vfkit / AVF) and as the raw UEFI disk (VirtualBox / Hyper-V).
+# Built natively per arch (no cross toolchain), the disk is checked with independent tools
+# (sgdisk, fsck.fat, mtools) and both boot paths are booted under QEMU before upload.
+on:
+  push:
+    paths: ["packaging/vm/**", "crates/seagent-vm/**", ".github/workflows/vm-image.yml"]
+  pull_request:
+    paths: ["packaging/vm/**", "crates/seagent-vm/**", ".github/workflows/vm-image.yml"]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  lint:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - name: shell + disk writer unit tests
+        run: |
+          set -euo pipefail
+          bash -n packaging/vm/build-image.sh packaging/vm/smoke-boot.sh
+          shellcheck -S warning packaging/vm/build-image.sh packaging/vm/smoke-boot.sh
+          python3 -I packaging/vm/test_mkdisk.py
+  build:
+    needs: lint
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { arch: x86_64, runner: ubuntu-24.04, qemu: qemu-system-x86, firmware: ovmf }
+          - { arch: aarch64, runner: ubuntu-24.04-arm, qemu: qemu-system-arm, firmware: qemu-efi-aarch64 }
+    runs-on: ${{ matrix.runner }}
+    env:
+      CARGO_INCREMENTAL: "0"
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          targets: ${{ matrix.arch }}-unknown-linux-musl
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          key: vm-guest-${{ matrix.arch }}
+      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2
+      - name: packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends build-essential flex bison bc libelf-dev \
+            cpio xz-utils gdisk dosfstools mtools ${{ matrix.qemu }} ${{ matrix.firmware }}
+          # KVM for the boot smoke test where the runner offers it (TCG otherwise).
+          if [ -e /dev/kvm ]; then sudo chmod 666 /dev/kvm; fi
+      - name: guest agent (static musl)
+        run: |
+          cargo install --locked cargo-zigbuild
+          cargo zigbuild --release --locked --target ${{ matrix.arch }}-unknown-linux-musl -p seagent-vm --bin seagent-vm-guest
+      - name: build image (initramfs + disk)
+        run: |
+          set -euo pipefail
+          export SOURCE_DATE_EPOCH="$(git log -1 --format=%ct)"
+          # --build-kernel on x86_64 too: CI boots the virtio-PCI kernel directly below.
+          packaging/vm/build-image.sh --out "$RUNNER_TEMP/img" --arch ${{ matrix.arch }} --format disk --build-kernel \
+            --agent target/${{ matrix.arch }}-unknown-linux-musl/release/seagent-vm-guest
+          cat "$RUNNER_TEMP/img/manifest.json"
+      - name: disk checked by independent tools
+        run: |
+          set -euo pipefail
+          d="$RUNNER_TEMP/img"
+          sgdisk -v "$d/disk.raw" | tee /dev/stderr | grep -q 'No problems found'
+          start="$(sgdisk -i 1 "$d/disk.raw" | awk '/First sector/ {print $3}')"
+          end="$(sgdisk -i 1 "$d/disk.raw" | awk '/Last sector/ {print $3}')"
+          dd if="$d/disk.raw" of="$RUNNER_TEMP/esp.img" bs=512 skip="$start" count=$((end - start + 1)) status=none
+          fsck.fat -n -v "$RUNNER_TEMP/esp.img"
+          efi="$(python3 -I -c 'import json,sys; print(json.load(open(sys.argv[1]))["disk"]["efi_binary"])' "$d/manifest.json")"
+          mdir -i "$RUNNER_TEMP/esp.img" -/ ::
+          mcopy -i "$RUNNER_TEMP/esp.img" "::$efi" "$RUNNER_TEMP/efi.bin"
+          cmp "$RUNNER_TEMP/efi.bin" "$d/build/$(basename "$efi")"
+      - name: boot the disk through UEFI (VirtualBox / Hyper-V path)
+        run: packaging/vm/smoke-boot.sh "$RUNNER_TEMP/img" ${{ matrix.arch }} disk 600
+      - name: boot kernel + initramfs directly (QEMU / vfkit / AVF path)
+        run: packaging/vm/smoke-boot.sh "$RUNNER_TEMP/img" ${{ matrix.arch }} direct 600
+      - uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
+        with:
+          name: seagent-vm-image-${{ matrix.arch }}
+          path: |
+            ${{ runner.temp }}/img/vmlinux
+            ${{ runner.temp }}/img/initramfs.cpio.gz
+            ${{ runner.temp }}/img/disk.raw
+            ${{ runner.temp }}/img/manifest.json
+            ${{ runner.temp }}/img/build/kernel-${{ matrix.arch }}-*.config.full
+          if-no-files-found: error
