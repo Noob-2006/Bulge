@@ -255,11 +255,11 @@ pub fn managed(exe: &Path) -> Option<&'static str> {
 
 /// Put `bytes` in place of `exe` (old kept as `<exe>.prev`) after a `--version` smoke test.
 pub fn install_binary(exe: &Path, bytes: &[u8]) -> Result<PathBuf, String> {
-    use std::os::unix::fs::PermissionsExt;
     let dir = exe.parent().ok_or("no install directory")?;
-    let tmp = dir.join(format!(".seagent-new-{}", std::process::id()));
+    // Windows only runs `.exe` files.
+    let tmp = dir.join(format!(".seagent-new-{}{}", std::process::id(), std::env::consts::EXE_SUFFIX));
     std::fs::write(&tmp, bytes).map_err(|e| format!("{}: {e} (no write access? reinstall with the installer)", tmp.display()))?;
-    std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o755)).map_err(|e| e.to_string())?;
+    crate::ops::hostos::set_mode(&tmp, 0o755).map_err(|e| e.to_string())?;
     let ok = std::process::Command::new(&tmp).arg("version").output().map(|o| o.status.success() && String::from_utf8_lossy(&o.stdout).starts_with("seagent ")).unwrap_or(false);
     if !ok {
         let _ = std::fs::remove_file(&tmp);
@@ -267,8 +267,30 @@ pub fn install_binary(exe: &Path, bytes: &[u8]) -> Result<PathBuf, String> {
     }
     let prev = exe.with_extension("prev");
     std::fs::copy(exe, &prev).map_err(|e| format!("backup {}: {e}", prev.display()))?;
-    std::fs::rename(&tmp, exe).map_err(|e| e.to_string())?;
+    replace_exe(&tmp, exe)?;
     Ok(prev)
+}
+
+/// Move `new` over `exe`. Unix: one atomic rename (a running binary keeps its inode).
+/// Windows cannot overwrite a running `.exe` but can rename it: the current one moves aside to
+/// `<exe>.old` (removed on the next update once nothing runs it), then `new` takes its name.
+fn replace_exe(new: &Path, exe: &Path) -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        let old = exe.with_extension("old");
+        let _ = std::fs::remove_file(&old);
+        let old = if old.exists() { exe.with_extension(format!("old-{}", std::process::id())) } else { old };
+        std::fs::rename(exe, &old).map_err(|e| format!("move {} aside: {e}", exe.display()))?;
+        if let Err(e) = std::fs::rename(new, exe) {
+            let _ = std::fs::rename(&old, exe);
+            return Err(e.to_string());
+        }
+        Ok(())
+    }
+    #[cfg(not(windows))]
+    {
+        std::fs::rename(new, exe).map_err(|e| e.to_string())
+    }
 }
 
 pub fn rollback(exe: &Path) -> Result<(), String> {
@@ -278,7 +300,7 @@ pub fn rollback(exe: &Path) -> Result<(), String> {
     }
     let tmp = exe.with_extension("rollback");
     std::fs::copy(&prev, &tmp).map_err(|e| e.to_string())?;
-    std::fs::rename(&tmp, exe).map_err(|e| e.to_string())
+    replace_exe(&tmp, exe)
 }
 
 fn daemon_running(paths: &Paths) -> bool {
@@ -346,9 +368,15 @@ fn cmd_update(a: &Args) -> R {
     }
     println!("updated seagent {} → {} (previous binary: {}; `seagent update --rollback` restores it)", env!("CARGO_PKG_VERSION"), r.tag, prev.display());
     if restart {
+        #[cfg(not(any(target_os = "macos", windows, target_os = "android", target_os = "ios")))]
         let unit = std::process::Command::new("systemctl").args(["--user", "is-active", "--quiet", "seagentd.service"]).status().is_ok_and(|s| s.success());
+        #[cfg(any(target_os = "macos", windows, target_os = "android", target_os = "ios"))]
+        let unit = crate::ops::service_os::managed();
         if unit {
+            #[cfg(not(any(target_os = "macos", windows, target_os = "android", target_os = "ios")))]
             let _ = std::process::Command::new("systemctl").args(["--user", "restart", "seagentd.service"]).status();
+            #[cfg(any(target_os = "macos", windows, target_os = "android", target_os = "ios"))]
+            let _ = crate::ops::service_os::restart_managed();
         } else {
             run_self(&["daemon", "start"]);
         }

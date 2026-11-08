@@ -101,9 +101,8 @@ fn sessions_human(v: &Value) -> String {
 }
 
 fn read_seed(p: &Path) -> Result<String, String> {
-    use std::os::unix::fs::PermissionsExt;
-    let m = std::fs::metadata(p).map_err(|e| format!("{}: {e} (create one with `seagent cluster keygen`)", p.display()))?;
-    if m.permissions().mode() & 0o077 != 0 {
+    let m = crate::ops::hostos::mode_of(p).map_err(|e| format!("{}: {e} (create one with `seagent cluster keygen`)", p.display()))?;
+    if m & 0o077 != 0 {
         return Err(format!("{}: the signing seed must not be readable by group/other (chmod 600)", p.display()));
     }
     Ok(std::fs::read_to_string(p).map_err(|e| e.to_string())?.trim().to_string())
@@ -117,16 +116,13 @@ fn default_seed() -> PathBuf {
 pub fn keygen(out: &Path) -> Result<String, String> {
     use base64::Engine;
     use ring::rand::SecureRandom;
-    use std::io::Write;
-    use std::os::unix::fs::OpenOptionsExt;
     let mut seed = [0u8; 32];
     ring::rand::SystemRandom::new().fill(&mut seed).map_err(|_| "no system randomness".to_string())?;
     let b64 = base64::engine::general_purpose::STANDARD.encode(seed);
     if let Some(d) = out.parent() {
         std::fs::create_dir_all(d).map_err(|e| format!("{}: {e}", d.display()))?;
     }
-    let mut f = std::fs::OpenOptions::new().create_new(true).write(true).mode(0o600).open(out).map_err(|e| format!("{}: {e} (refusing to overwrite an existing seed)", out.display()))?;
-    f.write_all(b64.as_bytes()).map_err(|e| e.to_string())?;
+    crate::ops::hostos::create_private(out, b64.as_bytes()).map_err(|e| format!("{}: {e} (refusing to overwrite an existing seed)", out.display()))?;
     seagent_security::signing::public_of(&b64)
 }
 

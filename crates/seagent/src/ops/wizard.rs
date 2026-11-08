@@ -125,7 +125,7 @@ pub fn validate_workspace_path(dir: &Path) -> Result<(), String> {
                 let m = if m.file_type().is_symlink() {
                     match std::fs::metadata(&c) {
                         Ok(m) => m,
-                        Err(e) if e.raw_os_error() == Some(libc::ELOOP) => return Err(format!("{} {}", c.display(), t("是循環的符號連結", "is a symlink loop"))),
+                        Err(e) if e.raw_os_error() == Some(crate::ops::hostos::ELOOP) => return Err(format!("{} {}", c.display(), t("是循環的符號連結", "is a symlink loop"))),
                         Err(_) => return Err(format!("{} {}", c.display(), t("是指向不存在位置的符號連結", "is a symlink to a missing directory"))),
                     }
                 } else {
@@ -133,7 +133,7 @@ pub fn validate_workspace_path(dir: &Path) -> Result<(), String> {
                 };
                 return if m.is_dir() { Ok(()) } else { Err(format!("{} {}", c.display(), t("不是目錄", "is not a directory"))) };
             }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound || e.raw_os_error() == Some(libc::ENOTDIR) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound || crate::ops::hostos::is_enotdir(&e) => {}
             Err(e) => return Err(format!("{}: {e}", c.display())),
         }
         match c.parent() {

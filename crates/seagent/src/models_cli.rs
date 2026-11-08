@@ -144,10 +144,11 @@ impl Prompter for Tty {
 }
 
 fn open_browser(url: &str) {
-    if std::env::var_os("DISPLAY").is_none() && std::env::var_os("WAYLAND_DISPLAY").is_none() {
+    // X11 / Wayland desktops only; macOS and Windows always have one.
+    if cfg!(not(any(target_os = "macos", windows))) && std::env::var_os("DISPLAY").is_none() && std::env::var_os("WAYLAND_DISPLAY").is_none() {
         return;
     }
-    let _ = std::process::Command::new("xdg-open").arg(url).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).spawn();
+    crate::ops::hostos::open_url(url);
 }
 
 // ───────────────────────── login / logout ─────────────────────────
@@ -224,21 +225,11 @@ pub fn cmd_logout(a: &Args, paths: &Paths) -> R {
 fn read_secret(prompt: &str) -> String {
     eprint!("{prompt}");
     let _ = std::io::stderr().flush();
-    let echo_off = unsafe {
-        let mut t: libc::termios = std::mem::zeroed();
-        if libc::tcgetattr(0, &mut t) == 0 {
-            let old = t;
-            t.c_lflag &= !libc::ECHO;
-            libc::tcsetattr(0, libc::TCSANOW, &t);
-            Some(old)
-        } else {
-            None
-        }
-    };
+    let echo_off = crate::ops::hostos::EchoOff::stdin(false);
     let mut s = String::new();
     let _ = std::io::stdin().lock().read_line(&mut s);
-    if let Some(old) = echo_off {
-        unsafe { libc::tcsetattr(0, libc::TCSANOW, &old) };
+    if let Some(guard) = echo_off {
+        drop(guard);
         eprintln!();
     }
     match seagent_model::auth::clean_key(&s) {

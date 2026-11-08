@@ -161,8 +161,7 @@ pub fn create(name: &str, o: &CreateOpts) -> Result<PathBuf, String> {
     for d in ["config", "data", "run"] {
         std::fs::create_dir_all(dir.join(d)).map_err(|e| e.to_string())?;
     }
-    use std::os::unix::fs::PermissionsExt;
-    let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700));
+    let _ = crate::ops::hostos::set_mode(&dir, 0o700);
     if let Some(src) = &o.clone_from {
         if !exists(src) {
             return Err(format!("no profile `{src}`"));
@@ -291,7 +290,7 @@ fn alias_path(alias: &str) -> Option<PathBuf> {
 }
 
 fn alias_path_in(home: &Path, alias: &str) -> Option<PathBuf> {
-    valid_name(alias).ok().map(|_| bin_dir_in(home).join(alias))
+    valid_name(alias).ok().map(|_| bin_dir_in(home).join(if cfg!(windows) { format!("{alias}.cmd") } else { alias.to_string() }))
 }
 
 const ALIAS_MARK: &str = "# seagent profile wrapper";
@@ -309,9 +308,12 @@ fn make_alias_in(home: &Path, alias: &str, profile: &str) -> Result<PathBuf, Str
     }
     std::fs::create_dir_all(bin_dir_in(home)).map_err(|e| e.to_string())?;
     let exe = std::env::current_exe().map(|e| e.display().to_string()).unwrap_or_else(|_| "seagent".into());
+    #[cfg(unix)]
     std::fs::write(&p, format!("#!/bin/sh\n{ALIAS_MARK}\nexec '{}' -p {profile} \"$@\"\n", exe.replace('\'', "'\\''"))).map_err(|e| e.to_string())?;
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).map_err(|e| e.to_string())?;
+    // Windows: a batch file (`<alias>.cmd`, found through PATHEXT) instead of a shell script.
+    #[cfg(not(unix))]
+    std::fs::write(&p, format!("@echo off\r\nrem {ALIAS_MARK}\r\n\"{exe}\" -p {profile} %*\r\n")).map_err(|e| e.to_string())?;
+    crate::ops::hostos::set_mode(&p, 0o755).map_err(|e| e.to_string())?;
     Ok(p)
 }
 

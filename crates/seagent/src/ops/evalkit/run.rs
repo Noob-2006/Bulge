@@ -30,18 +30,33 @@ use std::time::{Duration, Instant};
 /// killed so nothing a task started outlives the run.
 pub fn capture(mut cmd: std::process::Command, timeout: Duration) -> Result<(String, i32), String> {
     use std::io::Read;
-    use std::os::unix::process::CommandExt;
     use std::process::Stdio;
-    cmd.process_group(0);
-    let mut child = cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().map_err(|e| e.to_string())?;
+    #[cfg(unix)]
+    let mut child = {
+        use std::os::unix::process::CommandExt;
+        cmd.process_group(0);
+        cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().map_err(|e| e.to_string())?
+    };
+    // Windows: a kill-on-close job object is the group.
+    #[cfg(not(unix))]
+    let mut child = {
+        cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
+        seagent_core::platform::proc::spawn_in_group(&mut cmd, false).map_err(|e| e.to_string())?
+    };
     let pgid = child.id() as i32;
+    fn kill_group(pgid: i32) {
+        #[cfg(unix)]
+        unsafe {
+            libc::kill(-pgid, libc::SIGKILL);
+        }
+        #[cfg(not(unix))]
+        seagent_core::platform::proc::kill_group(pgid, Duration::ZERO);
+    }
     struct Group(i32, bool);
     impl Drop for Group {
         fn drop(&mut self) {
             if !self.1 {
-                unsafe {
-                    libc::kill(-self.0, libc::SIGKILL);
-                }
+                kill_group(self.0);
             }
         }
     }
@@ -63,9 +78,7 @@ pub fn capture(mut cmd: std::process::Command, timeout: Duration) -> Result<(Str
             break s;
         }
         if start.elapsed() > timeout {
-            unsafe {
-                libc::kill(-pgid, libc::SIGKILL);
-            }
+            kill_group(pgid);
             let _ = child.wait();
             guard.1 = true;
             return Err(format!("timed out after {}s", timeout.as_secs()));
@@ -73,9 +86,7 @@ pub fn capture(mut cmd: std::process::Command, timeout: Duration) -> Result<(Str
         std::thread::sleep(Duration::from_millis(10));
     };
     // the leader exited; reap anything it left in the group
-    unsafe {
-        libc::kill(-pgid, libc::SIGKILL);
-    }
+    kill_group(pgid);
     guard.1 = true;
     let mut out = String::from_utf8_lossy(&ho.join().unwrap_or_default()).into_owned();
     out.push_str(&String::from_utf8_lossy(&he.join().unwrap_or_default()));

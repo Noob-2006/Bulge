@@ -259,12 +259,14 @@ impl Source {
 
 fn which(name: &str, env: &HashMap<String, String>) -> Option<PathBuf> {
     let path = env.get("PATH").cloned().or_else(|| std::env::var("PATH").ok()).unwrap_or_default();
+    #[cfg(not(unix))]
+    return seagent_core::platform::layout::which_in_pathext(name, Some(std::ffi::OsStr::new(&path)), std::env::var("PATHEXT").ok().as_deref()); // bw → bw.exe / op.exe
+    #[cfg(unix)]
     std::env::split_paths(&path).map(|d| d.join(name)).find(|p| is_exec(p))
 }
 
 fn is_exec(p: &Path) -> bool {
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::metadata(p).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+    std::fs::metadata(p).is_ok_and(|m| crate::ops::hostos::is_executable(p, &m))
 }
 
 pub struct Out {
@@ -328,12 +330,11 @@ fn cache_file(data: &Path, name: &str) -> PathBuf {
 }
 
 fn write_private(p: &Path, body: &[u8]) {
-    use std::os::unix::fs::PermissionsExt;
     if let Some(d) = p.parent() {
         let _ = std::fs::create_dir_all(d);
     }
     if seagent_kernel::util::atomic_write(p, body).is_ok() {
-        let _ = std::fs::set_permissions(p, std::fs::Permissions::from_mode(0o600));
+        let _ = crate::ops::hostos::set_mode(p, 0o600);
     }
 }
 
@@ -725,10 +726,24 @@ pub fn parse_kv(stdout: &str) -> BTreeMap<String, String> {
 /// Run the helper via `/bin/sh -c` in its own process group; the key travels only as data
 /// in `SEAGENT_SECRET_KEY`. Failures log structured fields only (never the command, stderr or values).
 pub fn run_helper(command: &str, key: &str, timeout: f64, env: &HashMap<String, String>) -> Result<String, String> {
-    use std::os::unix::process::CommandExt;
     let mut e = env.clone();
     e.insert("SEAGENT_SECRET_KEY".into(), key.into());
-    let mut child = Command::new("/bin/sh").arg("-c").arg(command).env_clear().envs(&e).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null()).process_group(0).spawn().map_err(|e| format!("helper failed to spawn; resolving no value: errno={}", e.raw_os_error().unwrap_or(0)))?;
+    #[cfg(unix)]
+    let mut child = {
+        use std::os::unix::process::CommandExt;
+        Command::new("/bin/sh").arg("-c").arg(command).env_clear().envs(&e).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null()).process_group(0).spawn().map_err(|e| format!("helper failed to spawn; resolving no value: errno={}", e.raw_os_error().unwrap_or(0)))?
+    };
+    // Windows: this machine's shell (Git Bash, else PowerShell) in a kill-on-close job object;
+    // the shells need `SystemRoot` even with an otherwise cleared environment.
+    #[cfg(not(unix))]
+    let mut child = {
+        if let Ok(v) = std::env::var("SystemRoot") {
+            e.entry("SystemRoot".into()).or_insert(v);
+        }
+        let mut c = seagent_core::platform::shell::command(seagent_core::platform::shell::Style::BinSh, command);
+        c.env_clear().envs(&e).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null());
+        seagent_core::platform::proc::spawn_in_group(&mut c, false).map_err(|e| format!("helper failed to spawn; resolving no value: errno={}", e.raw_os_error().unwrap_or(0)))?
+    };
     let mut so = child.stdout.take().unwrap();
     let h = std::thread::spawn(move || {
         let mut v = vec![];
@@ -741,7 +756,10 @@ pub fn run_helper(command: &str, key: &str, timeout: f64, env: &HashMap<String, 
             break st;
         }
         if start.elapsed().as_secs_f64() > timeout {
+            #[cfg(unix)]
             unsafe { libc::kill(-(child.id() as i32), libc::SIGKILL) };
+            #[cfg(not(unix))]
+            seagent_core::platform::proc::kill_group(child.id() as i32, Duration::ZERO);
             let _ = child.wait();
             return Err(format!("helper timed out after {timeout}s; resolving no value"));
         }
@@ -749,8 +767,13 @@ pub fn run_helper(command: &str, key: &str, timeout: f64, env: &HashMap<String, 
     };
     let out = h.join().unwrap_or_default();
     if !st.success() {
+        #[cfg(unix)]
         use std::os::unix::process::ExitStatusExt;
-        return Err(match st.signal() {
+        #[cfg(unix)]
+        let signal = st.signal();
+        #[cfg(not(unix))]
+        let signal: Option<i32> = None; // Windows has no signals: the exit code says it all
+        return Err(match signal {
             Some(sig) => format!("helper failed; resolving no value: code=? signal={sig}"),
             None => format!("helper failed; resolving no value: code={} signal=none", st.code().unwrap_or(-1)),
         });

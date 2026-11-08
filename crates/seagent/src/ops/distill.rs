@@ -652,10 +652,10 @@ const TEAM_EXT: &[&str] = &["md", "txt", "log", "json", "csv", "yaml", "yml"];
 
 /// Copy the input into `out/masked` (masked, 0600); refuses names that survive masking.
 pub fn mask_corpus(input: &Path, out: &Path, subjects: &[Subject]) -> Result<Vec<String>, String> {
-    use std::os::unix::fs::PermissionsExt;
+    use crate::ops::hostos::set_mode;
     let dst = out.join("masked");
     std::fs::create_dir_all(&dst).map_err(|e| e.to_string())?;
-    std::fs::set_permissions(out, std::fs::Permissions::from_mode(0o700)).map_err(|e| e.to_string())?;
+    set_mode(out, 0o700).map_err(|e| e.to_string())?;
     let mut files = vec![];
     fn walk(d: &Path, v: &mut Vec<PathBuf>) {
         let Ok(rd) = std::fs::read_dir(d) else { return };
@@ -688,7 +688,7 @@ pub fn mask_corpus(input: &Path, out: &Path, subjects: &[Subject]) -> Result<Vec
         let q = dst.join(&rel_masked);
         std::fs::create_dir_all(q.parent().unwrap_or(&dst)).map_err(|e| e.to_string())?;
         std::fs::write(&q, masked).map_err(|e| e.to_string())?;
-        std::fs::set_permissions(&q, std::fs::Permissions::from_mode(0o600)).map_err(|e| e.to_string())?;
+        set_mode(&q, 0o600).map_err(|e| e.to_string())?;
         files.push(rel_masked);
     }
     if files.is_empty() {
@@ -758,10 +758,7 @@ pub fn team(r: &Runner, model: &str, ti: &TeamInput, out: &Path) -> Result<Resea
     write_json(&out.join("authorization.json"), &json!({"basis": auth.basis, "granted_by": auth.granted_by, "authority": auth.authority, "granted_at": auth.granted_at, "purpose": auth.purpose, "retention_days": auth.retention_days, "cross_border": auth.cross_border, "subjects": auth.subjects.len(), "masked_files": files.len(), "run_at": today}))?;
     // the real names stay in the caller's file; the check stage needs them, kept 0600 here
     write_json(&out.join(".names.json"), &real)?;
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(out.join(".names.json"), std::fs::Permissions::from_mode(0o600));
-    }
+    let _ = crate::ops::hostos::set_mode(&out.join(".names.json"), 0o600);
     let paths = Paths::from_env();
     seagent_security::audit::record(
         &paths.data,

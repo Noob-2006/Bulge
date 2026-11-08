@@ -31,7 +31,6 @@ use seagent_kernel::vault::Vault;
 use seagent_tools::exec::ExecConfig;
 use serde_json::{json, Value};
 use std::io::{BufRead, BufReader, Write};
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -269,7 +268,7 @@ pub fn snapshot(paths: &Paths, workspace: PathBuf, cfg: Result<Config, String>, 
 // ───────────────────────── daemon ─────────────────────────
 
 fn pid_alive(pid: i32) -> bool {
-    pid > 0 && unsafe { libc::kill(pid, 0) } == 0
+    crate::ops::hostos::pid_alive(pid as i64)
 }
 
 /// Minimal JSON-RPC call with a short timeout: `daemon::call` waits 30s, far too long for a
@@ -434,7 +433,7 @@ fn deep_checks(st: &Status) -> Vec<Check> {
         blocking: true,
         detail: if bad.is_empty() { format!("{} configured, all parse", st.channels.len()) } else { bad.join("; ") },
     });
-    let writable = unsafe { libc::access(std::ffi::CString::new(st.workspace.as_os_str().as_encoded_bytes()).unwrap_or_default().as_ptr(), libc::W_OK) } == 0;
+    let writable = crate::ops::hostos::writable(&st.workspace);
     out.push(Check { name: "workspace", ok: writable, blocking: true, detail: if writable { format!("writable ({})", st.workspace.display()) } else { format!("not writable ({})", st.workspace.display()) } });
     let secrets = st.paths.secrets();
     let mode = secret_mode(&secrets);
@@ -528,7 +527,7 @@ fn ago(secs: i64) -> String {
 }
 
 fn secret_mode(path: &Path) -> Option<u32> {
-    std::fs::metadata(path).ok().map(|m| m.permissions().mode() & 0o777)
+    crate::ops::hostos::mode_of(path).ok().map(|m| m & 0o777)
 }
 
 fn offset(st: &Status) -> i32 {
@@ -903,6 +902,7 @@ fn json_report(st: &Status) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
     use std::os::unix::net::UnixListener;
     use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -922,7 +922,7 @@ mod tests {
 
     fn write_secret(paths: &Paths, name: &str, value: &str) {
         std::fs::write(paths.secrets(), format!("{name} = \"{value}\"\n")).unwrap();
-        std::fs::set_permissions(paths.secrets(), std::fs::Permissions::from_mode(0o600)).unwrap();
+        crate::ops::hostos::set_mode(&paths.secrets(), 0o600).unwrap();
     }
 
     fn keyless_config(paths: &Paths) {
@@ -939,6 +939,7 @@ mod tests {
     }
 
     /// Answers every JSON-RPC request with a `ping` result until stopped.
+    #[cfg(unix)]
     fn ping_responder(listener: UnixListener, stop: Arc<AtomicBool>) -> std::thread::JoinHandle<()> {
         std::thread::spawn(move || {
             listener.set_nonblocking(true).unwrap();
@@ -995,6 +996,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn daemon_state_follows_socket_and_pid() {
         let (paths, ws) = temp_home("daemon");

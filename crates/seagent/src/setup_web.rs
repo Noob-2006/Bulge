@@ -55,13 +55,13 @@ fn digest(token: &str) -> String {
 }
 
 fn write_private(p: &Path, body: &[u8]) -> Result<(), String> {
-    use std::os::unix::fs::PermissionsExt;
+    use crate::ops::hostos::set_mode;
     if let Some(d) = p.parent() {
         std::fs::create_dir_all(d).map_err(|e| format!("{}: {e}", d.display()))?;
-        let _ = std::fs::set_permissions(d, std::fs::Permissions::from_mode(0o700));
+        let _ = set_mode(d, 0o700);
     }
     seagent_kernel::util::atomic_write(p, body).map_err(|e| format!("{}: {e}", p.display()))?;
-    std::fs::set_permissions(p, std::fs::Permissions::from_mode(0o600)).map_err(|e| e.to_string())
+    set_mode(p, 0o600).map_err(|e| e.to_string())
 }
 
 /// Setup is complete (the wizard is locked).
@@ -350,6 +350,13 @@ fn discover_http(url: &str) -> Result<Value, String> {
 /// What the host does beyond files (service autostart), so tests can fake it.
 pub type Autostart<'a> = &'a dyn Fn(&Paths) -> String;
 
+/// launchd agent / Task Scheduler logon task / the phones' host app (ops::service_os).
+#[cfg(any(target_os = "macos", windows, target_os = "android", target_os = "ios"))]
+fn real_autostart(paths: &Paths) -> String {
+    crate::ops::service_os::autostart(paths)
+}
+
+#[cfg(not(any(target_os = "macos", windows, target_os = "android", target_os = "ios")))]
 fn real_autostart(paths: &Paths) -> String {
     use seagent_core::layout::Mode;
     if paths.mode == Mode::System {
@@ -455,16 +462,23 @@ pub fn after_stop() -> i32 {
     if let Some(i) = args.iter().position(|a| a == "run") {
         args[i] = "start".into();
     }
-    let mut c = std::process::Command::new("sh");
-    c.arg("-c").arg("while kill -0 \"$0\" 2>/dev/null; do sleep 0.2; done; exec \"$@\"").arg(std::process::id().to_string()).arg(&exe).args(&args);
+    #[cfg(unix)]
+    let mut c = {
+        let mut c = std::process::Command::new("sh");
+        c.arg("-c").arg("while kill -0 \"$0\" 2>/dev/null; do sleep 0.2; done; exec \"$@\"").arg(std::process::id().to_string()).arg(&exe).args(&args);
+        c
+    };
+    // No `sh` on Windows: the waiting helper is PowerShell (Wait-Process, then the same command).
+    #[cfg(not(unix))]
+    let mut c = {
+        let quote = |s: &str| format!("'{}'", s.replace('\'', "''"));
+        let script = format!("Wait-Process -Id {} -ErrorAction SilentlyContinue; & {} {}", std::process::id(), quote(&exe.to_string_lossy()), args.iter().map(|a| quote(a)).collect::<Vec<_>>().join(" "));
+        let mut c = std::process::Command::new("powershell.exe");
+        c.args(["-NoProfile", "-NonInteractive", "-Command", &script]);
+        c
+    };
     c.stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null());
-    use std::os::unix::process::CommandExt;
-    unsafe {
-        c.pre_exec(|| {
-            libc::setsid();
-            Ok(())
-        });
-    }
+    crate::ops::hostos::detach(&mut c);
     let _ = c.spawn();
     eprintln!("seagentd: configuration changed by the setup wizard; restarting");
     0
@@ -549,7 +563,7 @@ pub fn methods(paths: &Paths) -> seagent_kernel::daemon::MethodExt {
 /// terminal wizard (`setup`). Every way of finishing setup locks the web wizard: there is one setup.
 pub fn dispatch(a: &crate::args::Args) -> Result<i32, String> {
     let paths = Paths::from_env();
-    if matches!(a.pos(0), Some("link" | "bootstrap")) {
+    if matches!(a.pos(0), Some("link" | "bootstrap" | "status")) {
         return cli(&paths, a);
     }
     let (rc, how) = if setup_server::wanted(a, &setup_server::real_env) {
@@ -564,12 +578,43 @@ pub fn dispatch(a: &crate::args::Args) -> Result<i32, String> {
     Ok(rc)
 }
 
-/// `seagent setup link|bootstrap`.
+/// `seagent setup link|bootstrap|status`. With `--json` (the desktop shell) every outcome is one
+/// JSON object on stdout; a failure is `{"error": …}` with exit status 1.
 pub fn cli(paths: &Paths, a: &crate::args::Args) -> Result<i32, String> {
+    let json_out = a.flag("json");
+    match cli_inner(paths, a) {
+        Err(e) if json_out => {
+            println!("{}", json!({"error": e}));
+            Ok(1)
+        }
+        r => r,
+    }
+}
+
+fn cli_inner(paths: &Paths, a: &crate::args::Args) -> Result<i32, String> {
     match a.pos(0) {
+        Some("status") => {
+            let (root, _) = read_root(paths)?;
+            let listen = listen_of(&root);
+            let console = format!("{}/", base_url(&listen));
+            if a.flag("json") {
+                println!("{}", json!({"done": locked(paths), "listen": listen, "console_url": console}));
+            } else {
+                println!("{} · {console}", if locked(paths) { t("設定已完成", "setup complete") } else { t("尚未設定", "setup not done yet") });
+            }
+            Ok(0)
+        }
         Some("bootstrap") => {
-            for l in bootstrap(paths, a.val("listen"))? {
-                eprintln!("  {l}");
+            std::fs::create_dir_all(&paths.data).map_err(|e| format!("{}: {e}", paths.data.display()))?;
+            let lines = bootstrap(paths, a.val("listen"))?;
+            if a.flag("json") {
+                let (root, _) = read_root(paths)?;
+                let listen = listen_of(&root);
+                println!("{}", json!({"ok": true, "changes": lines, "listen": listen, "config": paths.user_config(), "console_url": format!("{}/", base_url(&listen))}));
+            } else {
+                for l in lines {
+                    eprintln!("  {l}");
+                }
             }
             Ok(0)
         }
@@ -579,14 +624,14 @@ pub fn cli(paths: &Paths, a: &crate::args::Args) -> Result<i32, String> {
             let (token, expires) = issue(paths, ttl, a.flag("reopen"))?;
             let url = format!("{}/setup#token={token}", base_url(&listen_of(&root)));
             if a.flag("json") {
-                println!("{}", json!({"url": url, "expires_ms": expires}));
+                println!("{}", json!({"url": url, "expires_ms": expires, "expires_at_ms": expires}));
             } else {
                 println!("{url}");
                 eprintln!("  {} {} {}", t("一次性設定連結，", "one-time setup link, valid for"), ttl / 60, t("分鐘內有效", "minutes"));
             }
             Ok(0)
         }
-        _ => Err("usage: seagent setup link [--ttl MINUTES] [--reopen] [--json] | seagent setup bootstrap [--listen HOST:PORT]".into()),
+        _ => Err("usage: seagent setup link [--ttl MINUTES] [--reopen] [--json] | seagent setup bootstrap [--listen HOST:PORT] [--json] | seagent setup status [--json]".into()),
     }
 }
 
@@ -609,8 +654,8 @@ mod tests {
         let (tok, exp) = issue(&p, 600, false).unwrap();
         let stored = std::fs::read_to_string(token_file(&p)).unwrap();
         assert!(!stored.contains(&tok), "only the hash is stored");
-        use std::os::unix::fs::PermissionsExt;
-        assert_eq!(std::fs::metadata(token_file(&p)).unwrap().permissions().mode() & 0o777, 0o600);
+        #[cfg(unix)]
+        assert_eq!(crate::ops::hostos::mode_of(&token_file(&p)).unwrap() & 0o777, 0o600);
         assert_eq!(check(&p, Some(&tok), now_ms()), None);
         assert_eq!(check(&p, Some("wrong"), now_ms()), Some("invalid setup token"));
         assert_eq!(check(&p, None, now_ms()), Some("missing setup token"));

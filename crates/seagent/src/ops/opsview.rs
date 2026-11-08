@@ -60,6 +60,7 @@ fn cpu_times(stat: &str) -> Option<CpuTimes> {
     Some(CpuTimes { busy: total.saturating_sub(idle), total })
 }
 
+#[cfg_attr(not(any(target_os = "linux", target_os = "android")), allow(dead_code))]
 fn meminfo(s: &str) -> (u64, u64, u64, u64) {
     let get = |k: &str| s.lines().find(|l| l.starts_with(k)).and_then(|l| l.split_whitespace().nth(1)).and_then(|v| v.parse::<u64>().ok()).unwrap_or(0) * 1024;
     (get("MemTotal:"), get("MemAvailable:"), get("SwapTotal:"), get("SwapFree:"))
@@ -83,6 +84,13 @@ fn net_bytes(s: &str) -> (u64, u64) {
     (rx, tx)
 }
 
+/// (available, total) bytes (`GetDiskFreeSpaceExW` through `platform::sysinfo`).
+#[cfg(not(unix))]
+fn space(p: &Path) -> Option<(u64, u64)> {
+    seagent_core::platform::sysinfo::disk_space(p).ok().map(|d| (d.available, d.total))
+}
+
+#[cfg(unix)]
 fn space(p: &Path) -> Option<(u64, u64)> {
     let c = std::ffi::CString::new(p.to_string_lossy().as_bytes()).ok()?;
     let mut s: libc::statvfs = unsafe { std::mem::zeroed() };
@@ -108,7 +116,12 @@ fn proc_self() -> Value {
 /// Host metrics and one series sample; rates are per second since the previous call.
 fn host(c: &UiCtx, running: usize, now: u64) -> Value {
     let cpu_now = cpu_times(&read("/proc/stat"));
+    #[cfg(any(target_os = "linux", target_os = "android"))]
     let (mt, ma, st, sf) = meminfo(&read("/proc/meminfo"));
+    // No /proc here: memory from platform::sysinfo, swap unknown (0); CPU / load / network
+    // stay 0 until a per-OS sampler exists.
+    #[cfg(not(any(target_os = "linux", target_os = "android")))]
+    let (mt, ma, st, sf) = (seagent_core::platform::sysinfo::total_memory().unwrap_or(0), seagent_core::platform::sysinfo::available_memory().unwrap_or(0), 0u64, 0u64);
     let load: Vec<f64> = read("/proc/loadavg").split_whitespace().take(3).filter_map(|x| x.parse().ok()).collect();
     let uptime = read("/proc/uptime").split_whitespace().next().and_then(|x| x.parse::<f64>().ok()).unwrap_or(0.0);
     let (rx, tx) = net_bytes(&read("/proc/net/dev"));
@@ -136,7 +149,10 @@ fn host(c: &UiCtx, running: usize, now: u64) -> Value {
         .iter()
         .filter_map(|(label, p)| space(p).map(|(free, total)| json!({"label": label, "path": p.display().to_string(), "free": free, "total": total})))
         .collect();
+    #[cfg(any(target_os = "linux", target_os = "android"))]
     let hostname = read("/proc/sys/kernel/hostname").trim().to_string();
+    #[cfg(not(any(target_os = "linux", target_os = "android")))]
+    let hostname = seagent_core::platform::sysinfo::hostname();
     json!({
         "hostname": hostname,
         "os": os_name(),

@@ -384,7 +384,7 @@ fn secretish(t: &toml::Table) -> bool {
 }
 
 fn host_name() -> String {
-    std::env::var("HOSTNAME").ok().filter(|h| !h.trim().is_empty()).or_else(|| std::fs::read_to_string("/etc/hostname").ok().map(|s| s.trim().to_string())).filter(|h| !h.is_empty()).unwrap_or_else(|| "this host".into())
+    std::env::var("HOSTNAME").ok().filter(|h| !h.trim().is_empty()).or_else(|| crate::ops::hostos::etc_hostname().ok().map(|s| s.trim().to_string())).filter(|h| !h.is_empty()).unwrap_or_else(|| "this host".into())
 }
 
 /// Security posture: every listening surface with its auth/layers, the app's tokens and

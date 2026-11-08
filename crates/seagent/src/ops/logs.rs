@@ -78,8 +78,7 @@ impl Writer {
         if g.is_none() {
             let _ = std::fs::create_dir_all(&self.dir);
             *g = std::fs::OpenOptions::new().create(true).append(true).open(&p).ok();
-            use std::os::unix::fs::PermissionsExt;
-            let _ = std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o600));
+            let _ = crate::ops::hostos::set_mode(&p, 0o600);
         }
         if let Some(f) = g.as_mut() {
             let _ = writeln!(f, "{v}");

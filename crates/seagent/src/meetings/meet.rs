@@ -126,14 +126,8 @@ impl Manager {
             cmd.env("SEAGENT_MEET_AUTH_STATE", a);
         }
         cmd.envs(self.env.iter().map(|(k, v)| (k, v)));
-        use std::os::unix::process::CommandExt;
-        // SAFETY: setsid is async-signal-safe; detaches the bot from our signals.
-        unsafe {
-            cmd.pre_exec(|| {
-                libc::setsid();
-                Ok(())
-            });
-        }
+        // setsid (Windows: no console, own process group): detaches the bot from our signals.
+        crate::ops::hostos::detach(&mut cmd);
         let child = match cmd.spawn() {
             Ok(c) => c,
             Err(e) => return json!({"ok": false, "error": format!("cannot start the meet bot: {e}")}),
@@ -217,10 +211,8 @@ impl Manager {
         let Some(a) = self.active() else { return no_active() };
         let pid = a["pid"].as_i64().unwrap_or(0);
         if pid_alive(pid) {
-            // SAFETY: plain kill(2) on the bot we spawned.
-            unsafe {
-                libc::kill(pid as i32, libc::SIGTERM);
-            }
+            // SIGTERM the bot we spawned (Windows: terminated at once).
+            crate::ops::hostos::terminate(pid, false);
             let mut gone = false;
             for _ in 0..40 {
                 if !pid_alive(pid) {
@@ -230,10 +222,7 @@ impl Manager {
                 std::thread::sleep(Duration::from_millis(250));
             }
             if !gone {
-                // SAFETY: as above.
-                unsafe {
-                    libc::kill(pid as i32, libc::SIGKILL);
-                }
+                crate::ops::hostos::terminate(pid, true);
             }
         }
         let _ = std::fs::remove_file(self.active_file());

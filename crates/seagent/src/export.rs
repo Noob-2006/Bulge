@@ -451,16 +451,27 @@ pub fn save_sharegpt(events: &[Event], specs: &[seagent_core::ToolSpec], dir: &P
 /// Whole-line append under an exclusive lock so concurrent writers never interleave.
 fn append_locked(path: &Path, line: &str) -> Result<(), String> {
     use std::io::Write;
-    use std::os::unix::io::AsRawFd;
     if let Some(d) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
         std::fs::create_dir_all(d).map_err(|e| e.to_string())?;
     }
     let mut f = std::fs::OpenOptions::new().create(true).append(true).open(path).map_err(|e| format!("{}: {e}", path.display()))?;
-    // SAFETY: flock on our own fd; released on close.
-    unsafe { libc::flock(f.as_raw_fd(), libc::LOCK_EX) };
-    let r = f.write_all(line.as_bytes()).and_then(|_| f.flush());
-    unsafe { libc::flock(f.as_raw_fd(), libc::LOCK_UN) };
-    r.map_err(|e| e.to_string())
+    #[cfg(unix)]
+    {
+        use std::os::unix::io::AsRawFd;
+        // SAFETY: flock on our own fd; released on close.
+        unsafe { libc::flock(f.as_raw_fd(), libc::LOCK_EX) };
+        let r = f.write_all(line.as_bytes()).and_then(|_| f.flush());
+        unsafe { libc::flock(f.as_raw_fd(), libc::LOCK_UN) };
+        r.map_err(|e| e.to_string())
+    }
+    // std's portable lock (LockFileEx on Windows).
+    #[cfg(not(unix))]
+    {
+        let _ = f.lock();
+        let r = f.write_all(line.as_bytes()).and_then(|_| f.flush());
+        let _ = f.unlock();
+        r.map_err(|e| e.to_string())
+    }
 }
 
 /// OpenClaw-style bundle: `<dir>/{manifest.json, events.jsonl, metadata.json}`.

@@ -32,25 +32,16 @@ impl screen::Io for Term {
 /// One line with echo off (a package-manager password must not land in a terminal log).
 fn hidden_line(prompt: &str) -> Option<String> {
     use std::io::Write as _;
-    use std::os::fd::AsRawFd;
-    let tty = std::io::stdin().is_terminal().then(|| std::fs::OpenOptions::new().read(true).write(true).open("/dev/tty").ok()).flatten()?;
-    let mut out = std::fs::OpenOptions::new().write(true).open("/dev/tty").ok()?;
+    use crate::ops::hostos::{EchoOff, TTY_IN, TTY_OUT};
+    let tty = std::io::stdin().is_terminal().then(|| std::fs::OpenOptions::new().read(true).write(true).open(TTY_IN).ok()).flatten()?;
+    let mut out = std::fs::OpenOptions::new().write(true).open(TTY_OUT).ok()?;
     let _ = out.write_all(prompt.as_bytes());
     let _ = out.flush();
-    let fd = tty.as_raw_fd();
-    let mut old: libc::termios = unsafe { std::mem::zeroed() };
-    let have = unsafe { libc::tcgetattr(fd, &mut old) } == 0;
-    if have {
-        let mut quiet = old;
-        quiet.c_lflag &= !libc::ECHO;
-        quiet.c_lflag |= libc::ECHONL;
-        unsafe { libc::tcsetattr(fd, libc::TCSANOW, &quiet) };
-    }
+    let quiet = EchoOff::file(&tty, true);
     let mut line = String::new();
-    let r = std::io::BufReader::new(tty).read_line(&mut line);
-    if have {
-        unsafe { libc::tcsetattr(fd, libc::TCSANOW, &old) };
-    }
+    // Read through a reference: the terminal must still be open when the echo is restored.
+    let r = std::io::BufReader::new(&tty).read_line(&mut line);
+    drop(quiet);
     r.ok().filter(|n| *n > 0).map(|_| line.trim_end_matches(['\n', '\r']).to_string())
 }
 

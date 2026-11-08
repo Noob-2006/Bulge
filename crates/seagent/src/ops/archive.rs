@@ -331,8 +331,7 @@ pub fn collect(dir: &Path, prefix: &str, skip: &dyn Fn(&Path) -> bool, out: &mut
             out.push(Entry { path: name.clone(), data: vec![], mode: 0o700, dir: true });
             collect(&p, &format!("{name}/"), skip, out)?;
         } else if ft.is_file() {
-            use std::os::unix::fs::PermissionsExt;
-            let mode = e.metadata().map(|m| m.permissions().mode() & 0o777).unwrap_or(0o600);
+            let mode = crate::ops::hostos::mode_of(&p).map(|m| m & 0o777).unwrap_or(0o600);
             out.push(Entry { path: name, data: std::fs::read(&p).map_err(|x| format!("{}: {x}", p.display()))?, mode, dir: false });
         }
     }
@@ -341,7 +340,6 @@ pub fn collect(dir: &Path, prefix: &str, skip: &dyn Fn(&Path) -> bool, out: &mut
 
 /// Write entries under `root` (paths checked), keeping file modes.
 pub fn extract(entries: &[Entry], root: &Path) -> Result<usize, String> {
-    use std::os::unix::fs::PermissionsExt;
     let mut n = 0;
     for e in entries {
         let p = safe_join(root, &e.path)?;
@@ -353,7 +351,7 @@ pub fn extract(entries: &[Entry], root: &Path) -> Result<usize, String> {
             std::fs::create_dir_all(d).map_err(|x| format!("{}: {x}", d.display()))?;
         }
         std::fs::write(&p, &e.data).map_err(|x| format!("{}: {x}", p.display()))?;
-        let _ = std::fs::set_permissions(&p, std::fs::Permissions::from_mode(if e.mode == 0 { 0o600 } else { e.mode & 0o777 }));
+        let _ = crate::ops::hostos::set_mode(&p, if e.mode == 0 { 0o600 } else { e.mode & 0o777 });
         n += 1;
     }
     Ok(n)

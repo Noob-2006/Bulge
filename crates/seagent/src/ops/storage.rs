@@ -369,6 +369,13 @@ impl Location {
     }
 }
 
+/// (available, total) bytes (`GetDiskFreeSpaceExW` through `platform::sysinfo`).
+#[cfg(not(unix))]
+fn space(p: &Path) -> Option<(u64, u64)> {
+    seagent_core::platform::sysinfo::disk_space(p).ok().map(|d| (d.available, d.total))
+}
+
+#[cfg(unix)]
 fn space(p: &Path) -> Option<(u64, u64)> {
     let c = std::ffi::CString::new(p.to_string_lossy().as_bytes()).ok()?;
     let mut s: libc::statvfs = unsafe { std::mem::zeroed() };

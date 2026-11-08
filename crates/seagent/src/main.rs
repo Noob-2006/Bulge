@@ -68,7 +68,7 @@ use serde_json::{json, Value};
 use std::io::{BufRead, IsTerminal, Read, Write};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -83,7 +83,8 @@ fn main() {
     }
     let mut raw: Vec<String> = std::env::args().collect();
     ops::early(&mut raw);
-    let argv0 = raw.first().map(|s| Path::new(s).file_name().and_then(|f| f.to_str()).unwrap_or("").to_string()).unwrap_or_default();
+    // Windows: the shim is `seagent-call.exe` (any case): compare the lowercased stem there.
+    let argv0 = raw.first().map(|s| if cfg!(windows) { Path::new(s).file_stem().and_then(|f| f.to_str()).unwrap_or("").to_ascii_lowercase() } else { Path::new(s).file_name().and_then(|f| f.to_str()).unwrap_or("").to_string() }).unwrap_or_default();
     let rest: Vec<String> = if argv0 == "seagent-call" { std::iter::once("call".to_string()).chain(raw.into_iter().skip(1)).collect() } else { raw.into_iter().skip(1).collect() };
     let code = match dispatch(rest) {
         Ok(c) => c,
@@ -624,14 +625,7 @@ fn exit_code(r: &EndReason) -> i32 {
     }
 }
 
-static SIGINTS: AtomicU32 = AtomicU32::new(0);
-extern "C" fn on_sigint(_: libc::c_int) {
-    if SIGINTS.fetch_add(1, Ordering::SeqCst) >= 1 {
-        // Second Ctrl-C: give up immediately. The log is append-only and fsynced,
-        // so the next run recovers.
-        unsafe { libc::_exit(130) };
-    }
-}
+use ops::hostos::SIGINTS; // Ctrl-C counter (signal handler / console Ctrl handler)
 
 /// Run a session in the foreground with live output and Ctrl-C → interrupt.
 fn run_foreground(c: &Ctx, id: &str, a: &Args, opts: RunOpts) -> R {
@@ -642,10 +636,7 @@ fn run_foreground(c: &Ctx, id: &str, a: &Args, opts: RunOpts) -> R {
     let prefs = term::Prefs::for_session(&c.paths, id).quiet(quiet).offset(c.k.cfg.schedule.utc_offset_minutes);
     let focus = prefs.focus;
     let printer = std::thread::spawn(move || term::render_with(rx, sid, json, &prefs));
-    SIGINTS.store(0, Ordering::SeqCst);
-    unsafe {
-        libc::signal(libc::SIGINT, on_sigint as *const () as libc::sighandler_t);
-    }
+    ops::hostos::catch_sigint();
     let k2 = c.k.clone();
     let id2 = id.to_string();
     let done = Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -664,9 +655,7 @@ fn run_foreground(c: &Ctx, id: &str, a: &Args, opts: RunOpts) -> R {
     let r = c.k.run(id, opts);
     done.store(true, Ordering::SeqCst);
     let _ = watcher.join();
-    unsafe {
-        libc::signal(libc::SIGINT, libc::SIG_DFL);
-    }
+    ops::hostos::default_sigint();
     close_printer(&c.k, printer);
     let o = r.map_err(|e| Fail::Msg(e.to_string()))?;
     if !a.flag("quiet") && !a.flag("json") && !focus {
@@ -1412,13 +1401,7 @@ fn cmd_daemon(a: &Args) -> R {
             if a.flag("yolo") {
                 cmd.arg("--yolo");
             }
-            use std::os::unix::process::CommandExt;
-            unsafe {
-                cmd.pre_exec(|| {
-                    libc::setsid();
-                    Ok(())
-                });
-            }
+            ops::hostos::detach(&mut cmd);
             let mut child = cmd.spawn().map_err(|e| e.to_string())?;
             let until = Instant::now() + Duration::from_secs(8);
             while Instant::now() < until {
@@ -1437,10 +1420,12 @@ fn cmd_daemon(a: &Args) -> R {
             match daemon::call(&sock, "shutdown", json!({})) {
                 Ok(_) => {
                     let until = Instant::now() + Duration::from_secs(15);
-                    while sock.exists() && Instant::now() < until {
+                    // A named pipe (Windows) is no file: wait until nobody answers on it.
+                    let up = || if cfg!(windows) { ops::hostos::daemon_reachable(&sock) } else { sock.exists() };
+                    while up() && Instant::now() < until {
                         std::thread::sleep(Duration::from_millis(100));
                     }
-                    println!("{}", if sock.exists() { "seagentd is still shutting down" } else { "seagentd stopped" });
+                    println!("{}", if up() { "seagentd is still shutting down" } else { "seagentd stopped" });
                 }
                 Err(_) => println!("seagentd is not running"),
             }
@@ -2333,6 +2318,8 @@ fn cmd_doctor(a: &Args) -> R {
     }
     let tool = |bin: &str| std::process::Command::new(bin).arg("--version").output().map(|o| String::from_utf8_lossy(&o.stdout).lines().next().unwrap_or("").to_string()).map_err(|e| e.to_string());
     check("bash", tool("bash"));
+    #[cfg(not(target_os = "linux"))] // shell, control endpoint, autostart, VM providers of this OS
+    ops::service_os::doctor_checks(&paths).into_iter().for_each(|(n, r)| check(&n, r));
     check("git (checkpoints)", tool("git"));
     check("python3 (code mode)", tool("python3"));
     // The bundled skills / roles / catalogs: a binary copied without its share/ has none of them.
@@ -2615,10 +2602,7 @@ fn cmd_acp_client(a: &Args) -> R {
         })));
     }
     // Ctrl-C → session/cancel (a second one quits).
-    SIGINTS.store(0, Ordering::SeqCst);
-    unsafe {
-        libc::signal(libc::SIGINT, on_sigint as *const () as libc::sighandler_t);
-    }
+    ops::hostos::catch_sigint();
     let cancel = seagent_core::Cancel::new();
     let c2 = cancel.clone();
     std::thread::spawn(move || loop {
@@ -2656,8 +2640,8 @@ fn cmd_node(a: &Args) -> R {
         }
         None => (a.val("url").ok_or("--url ws://host:8640/node (or --setup-code CODE) is required")?.to_string(), None, None),
     };
-    let host = std::fs::read_to_string("/etc/hostname").unwrap_or_else(|_| "linux".into()).trim().to_string();
-    let id = a.val("session").map(str::to_string).unwrap_or_else(|| format!("linux-{host}"));
+    let host = ops::hostos::etc_hostname().unwrap_or_else(|_| std::env::consts::OS.into()).trim().to_string();
+    let id = a.val("session").map(str::to_string).unwrap_or_else(|| format!("{}-{host}", std::env::consts::OS));
     let policy_path = paths.config_dir.join("node.toml");
     let policy: seagent_app::node::HostPolicy = match std::fs::read_to_string(&policy_path) {
         Ok(t) => toml::from_str(&t).map_err(|e| format!("{}: {e}", policy_path.display()))?,
@@ -2713,7 +2697,7 @@ fn cmd_nodes(a: &Args) -> R {
             let url = match a.val("url") {
                 Some(u) => u.to_string(),
                 None => {
-                    let listen = app.listen.replace("0.0.0.0", &std::fs::read_to_string("/etc/hostname").unwrap_or_else(|_| "localhost".into()).trim().to_lowercase());
+                    let listen = app.listen.replace("0.0.0.0", &ops::hostos::etc_hostname().unwrap_or_else(|_| "localhost".into()).trim().to_lowercase());
                     format!("ws://{listen}/node")
                 }
             };

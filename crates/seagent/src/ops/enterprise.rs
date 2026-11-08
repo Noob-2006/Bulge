@@ -282,12 +282,7 @@ pub fn audit_sub(paths: &Paths, a: &Args) -> Option<R> {
             if let Some(parent) = p.parent() {
                 std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
             }
-            {
-                use std::io::Write;
-                use std::os::unix::fs::OpenOptionsExt;
-                let mut f = std::fs::OpenOptions::new().create_new(true).write(true).mode(0o600).open(&p).map_err(|e| format!("{}: {e}", p.display()))?;
-                writeln!(f, "{seed}").map_err(|e| e.to_string())?;
-            }
+            crate::ops::hostos::create_private(&p, format!("{seed}\n").as_bytes()).map_err(|e| format!("{}: {e}", p.display()))?;
             audit::record(d, audit::Event::new("audit.seal_key", Actor::local(), "audit", "ok").detail(json!({"public_key": public})));
             out(format!("seal key written to {} (mode 0600)\n[audit]\nseal_key = \"{}\"\nseal_pubkey = \"{public}\"   # give this to the auditor", p.display(), p.display()))
         })(),

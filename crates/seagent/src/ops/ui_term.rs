@@ -3,11 +3,18 @@
 //! `ui.terminal.open` → id, `write` (keystrokes), `read` (output since an offset),
 //! `resize`, `close`. Off unless `[app] terminal = true`; at most `MAX_TERMS` at once,
 //! idle ones are reaped after `IDLE`, and each keeps the last `KEEP` bytes of output.
+//!
+//! Unix: `posix_openpt`, the shell as session leader with the PTY as controlling terminal.
+//! Windows: a ConPTY pseudo console (`platform::term::ConPty`) running PowerShell / cmd /
+//! Git Bash, the child in a kill-on-close job; the same RPCs and output buffering.
 
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::io::{Read, Write};
-use std::os::fd::{FromRawFd, OwnedFd, RawFd};
+#[cfg(any(target_os = "linux", target_os = "android"))]
+use std::os::fd::FromRawFd;
+#[cfg(unix)]
+use std::os::fd::{OwnedFd, RawFd};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -25,13 +32,53 @@ pub const ALLOWED_PROGRAMS: &[&str] =
 
 /// Shells the PTY may run: the terminal page is a shell, and these are the only programs it
 /// needs. Everything else is refused even when it exists on `$PATH`.
+#[cfg(not(windows))]
 pub const ALLOWED_SHELLS: &[&str] = &["sh", "bash", "zsh", "fish", "dash", "ksh"];
+/// Windows shells (found through `PATH` + `PATHEXT`).
+#[cfg(windows)]
+pub const ALLOWED_SHELLS: &[&str] = &["pwsh", "powershell", "cmd", "bash", "sh"];
 
 type Res = Result<Value, (i32, String)>;
 
+#[cfg(unix)]
+type Child = std::process::Child;
+
+/// The shell on a pseudo console; dropping it closes the console (the reader sees EOF).
+#[cfg(windows)]
+struct Child {
+    proc: seagent_core::platform::term::PtyChild,
+    pty: seagent_core::platform::term::ConPty,
+}
+
+#[cfg(windows)]
+struct WinExit(u32);
+
+#[cfg(windows)]
+impl WinExit {
+    fn code(&self) -> Option<i32> {
+        Some(self.0 as i32)
+    }
+}
+
+#[cfg(windows)]
+impl Child {
+    /// The shell and everything it started (its job object).
+    fn kill(&mut self) -> std::io::Result<()> {
+        seagent_core::platform::proc::kill_group(self.proc.id() as i32, Duration::ZERO);
+        Ok(())
+    }
+    fn wait(&mut self) -> std::io::Result<u32> {
+        self.proc.wait()
+    }
+    fn try_wait(&mut self) -> std::io::Result<Option<WinExit>> {
+        self.proc.try_wait().map(|c| c.map(WinExit))
+    }
+}
+
 struct Term {
+    /// Keystrokes go here: the PTY master (Unix) / the pseudo console's input pipe (Windows).
     master: std::fs::File,
-    child: std::process::Child,
+    child: Child,
     /// Output buffer and the absolute offset of its first byte.
     out: Arc<Mutex<(Vec<u8>, u64, bool)>>,
     last: Instant,
@@ -61,6 +108,7 @@ fn fail(e: impl Into<String>) -> (i32, String) {
 /// The last check is a writability test: a group/world-writable binary on `$PATH` can be swapped
 /// by another local user between the check and the exec, so it is refused outright.
 fn resolve_program(name: &str, path: &std::ffi::OsStr) -> Result<std::path::PathBuf, String> {
+    #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
     let name = name.trim();
     if name.is_empty() {
@@ -79,6 +127,12 @@ fn resolve_program(name: &str, path: &std::ffi::OsStr) -> Result<std::path::Path
     if !ALLOWED_PROGRAMS.contains(&name) && !ALLOWED_SHELLS.contains(&name) {
         return Err(format!("refusing `{name}`: not an allowed terminal program (allowed: {})", allowed_list()));
     }
+    // Windows: `PATHEXT` decides what runs (`pwsh` → pwsh.exe); there are no mode bits to check.
+    #[cfg(not(unix))]
+    if let Some(p) = seagent_core::platform::layout::which_in_pathext(name, Some(path), std::env::var("PATHEXT").ok().as_deref()) {
+        return std::fs::canonicalize(&p).map_err(|e| format!("{}: {e}", p.display()));
+    }
+    #[cfg(unix)]
     for dir in std::env::split_paths(path) {
         let p = dir.join(name);
         // Follow symlinks (`/bin/sh` is one on most systems): the target is what gets executed.
@@ -98,7 +152,15 @@ fn allowed_list() -> String {
     ALLOWED_PROGRAMS.iter().chain(ALLOWED_SHELLS).copied().collect::<Vec<_>>().join(", ")
 }
 
+/// A new PTY pair: (master, slave). (Other Unixes: `platform::term::open_pty`, which copes
+/// with a libc without `ptsname_r` / `O_CLOEXEC` on `posix_openpt`.)
+#[cfg(all(unix, not(any(target_os = "linux", target_os = "android"))))]
+fn openpty() -> Result<(OwnedFd, OwnedFd), String> {
+    seagent_core::platform::term::open_pty(24, 80).map_err(|e| format!("openpty: {e}"))
+}
+
 /// A new PTY pair: (master, slave).
+#[cfg(any(target_os = "linux", target_os = "android"))]
 fn openpty() -> Result<(OwnedFd, OwnedFd), String> {
     // SAFETY: plain libc calls; every fd is checked and wrapped in OwnedFd.
     unsafe {
@@ -122,6 +184,7 @@ fn openpty() -> Result<(OwnedFd, OwnedFd), String> {
     }
 }
 
+#[cfg(unix)]
 fn set_size(fd: RawFd, cols: u16, rows: u16) {
     let ws = libc::winsize { ws_row: rows, ws_col: cols, ws_xpixel: 0, ws_ypixel: 0 };
     // SAFETY: TIOCSWINSZ with a valid winsize on an open pty fd.
@@ -130,6 +193,46 @@ fn set_size(fd: RawFd, cols: u16, rows: u16) {
     }
 }
 
+/// The shell on a ConPTY of `cols` × `rows` in `ws`.
+#[cfg(windows)]
+fn spawn(ws: &Path, shell: &Path, cols: u16, rows: u16) -> Result<Term, String> {
+    use seagent_core::platform::term::{windows_command_line, ConPty};
+    let pty = ConPty::open(rows, cols).map_err(|e| format!("ConPTY: {e}"))?;
+    let mut env: Vec<(std::ffi::OsString, std::ffi::OsString)> = std::env::vars_os().filter(|(k, _)| k != "TERM" && k != "SEAGENT_TERMINAL").collect();
+    env.push(("TERM".into(), "xterm-256color".into()));
+    env.push(("SEAGENT_TERMINAL".into(), "1".into()));
+    let proc = pty.spawn(&windows_command_line(&shell.to_string_lossy(), &[]), Some(ws), Some(&env)).map_err(|e| format!("{}: {e}", shell.display()))?;
+    let master = pty.input().map_err(|e| e.to_string())?;
+    let out = pump(pty.output().map_err(|e| e.to_string())?);
+    Ok(Term { master, child: Child { proc, pty }, out, last: Instant::now() })
+}
+
+/// Copy everything the terminal prints into the shared buffer (bounded to `KEEP`).
+fn pump(mut reader: std::fs::File) -> Arc<Mutex<(Vec<u8>, u64, bool)>> {
+    let out = Arc::new(Mutex::new((Vec::new(), 0u64, false)));
+    let o = out.clone();
+    std::thread::spawn(move || {
+        let mut buf = [0u8; 8192];
+        loop {
+            match reader.read(&mut buf) {
+                Ok(0) | Err(_) => break,
+                Ok(n) => {
+                    let mut g = o.lock().unwrap();
+                    g.0.extend_from_slice(&buf[..n]);
+                    if g.0.len() > KEEP {
+                        let cut = g.0.len() - KEEP;
+                        g.0.drain(..cut);
+                        g.1 += cut as u64;
+                    }
+                }
+            }
+        }
+        o.lock().unwrap().2 = true;
+    });
+    out
+}
+
+#[cfg(unix)]
 fn spawn(ws: &Path, shell: &Path, cols: u16, rows: u16) -> Result<Term, String> {
     use std::os::fd::AsRawFd;
     use std::os::unix::process::CommandExt;
@@ -151,27 +254,8 @@ fn spawn(ws: &Path, shell: &Path, cols: u16, rows: u16) -> Result<Term, String> 
     let child = cmd.spawn().map_err(|e| format!("{}: {e}", shell.display()))?;
     drop(slave);
     let master = std::fs::File::from(master);
-    let mut reader = master.try_clone().map_err(|e| e.to_string())?;
-    let out = Arc::new(Mutex::new((Vec::new(), 0u64, false)));
-    let o = out.clone();
-    std::thread::spawn(move || {
-        let mut buf = [0u8; 8192];
-        loop {
-            match reader.read(&mut buf) {
-                Ok(0) | Err(_) => break,
-                Ok(n) => {
-                    let mut g = o.lock().unwrap();
-                    g.0.extend_from_slice(&buf[..n]);
-                    if g.0.len() > KEEP {
-                        let cut = g.0.len() - KEEP;
-                        g.0.drain(..cut);
-                        g.1 += cut as u64;
-                    }
-                }
-            }
-        }
-        o.lock().unwrap().2 = true;
-    });
+    let reader = master.try_clone().map_err(|e| e.to_string())?;
+    let out = pump(reader);
     Ok(Term { master, child, out, last: Instant::now() })
 }
 
@@ -215,9 +299,18 @@ pub fn call(terms: &Terminals, enabled: bool, ws: &Path, op: &str, p: &Value) ->
                     let path = resolve_program(name, &std::env::var_os("PATH").unwrap_or_default()).map_err(fail)?;
                     (path, format!("requested `{name}`"))
                 }
+                #[cfg(unix)]
                 None => {
                     let shell = std::env::var("SHELL").ok().filter(|s| Path::new(s).is_absolute() && Path::new(s).is_file()).unwrap_or_else(|| "/bin/sh".into());
                     (std::path::PathBuf::from(shell), "default $SHELL".into())
+                }
+                // Windows: this machine's shell (Git Bash, pwsh or Windows PowerShell), else %ComSpec%.
+                #[cfg(not(unix))]
+                None => {
+                    let sh = seagent_core::platform::shell::active();
+                    let program = if sh.program.is_absolute() { Some(sh.program.clone()) } else { seagent_core::platform::layout::which(&sh.program.to_string_lossy()) };
+                    let program = program.or_else(|| std::env::var_os("ComSpec").map(std::path::PathBuf::from)).ok_or_else(|| fail("no shell found (set SEAGENT_SHELL)"))?;
+                    (program, format!("default shell ({})", sh.reason))
                 }
             };
             // Which binary a Web UI request launched is worth a line in seagentd.log.
@@ -245,8 +338,13 @@ pub fn call(terms: &Terminals, enabled: bool, ws: &Path, op: &str, p: &Value) ->
                     Ok(json!({"data": String::from_utf8_lossy(chunk), "offset": g.1 + g.0.len() as u64, "truncated": since < g.1, "exited": exited.is_some(), "code": exited.flatten()}))
                 }
                 "resize" => {
-                    use std::os::fd::AsRawFd;
-                    set_size(t.master.as_raw_fd(), cols, rows);
+                    #[cfg(unix)]
+                    {
+                        use std::os::fd::AsRawFd;
+                        set_size(t.master.as_raw_fd(), cols, rows);
+                    }
+                    #[cfg(windows)]
+                    t.child.pty.resize(rows, cols).map_err(|e| fail(e.to_string()))?;
                     Ok(json!({"cols": cols, "rows": rows}))
                 }
                 "close" => {
@@ -262,6 +360,7 @@ pub fn call(terms: &Terminals, enabled: bool, ws: &Path, op: &str, p: &Value) ->
 }
 
 #[cfg(test)]
+#[cfg(unix)]
 mod tests {
     use super::*;
 

@@ -3,8 +3,10 @@
 //!
 //! - systemd user unit (default) or system unit (`--system`, `User=` set; needs root — seagent
 //!   never escalates, it prints the `sudo` commands instead).
-//! - launchd agent plist (`--launchd`; installed with `launchctl` on macOS, printed elsewhere).
-//! - Windows schtasks: N/A — seagent has no Windows build (unix sockets, POSIX signals).
+//! - launchd agent plist (`--launchd`: printed on Linux). On macOS, Windows, Android and iOS
+//!   every subcommand goes to `ops::service_os` instead: launchd LaunchAgent, Task Scheduler
+//!   (or a Windows Service with `--system`), and an explicit answer on the phones.
+//! - `daemon service`: the Windows Service entry point (`ops::winservice`).
 //! - One unit per profile: `seagentd.service`, `seagentd-<profile>.service`.
 //! - `audit` compares the installed unit with what this version would write.
 //! - Restart storms: each daemon start is logged to `<data>/restarts.log`; three or more
@@ -32,7 +34,7 @@ pub fn unit_name() -> String {
     }
 }
 
-fn profile_arg() -> String {
+pub(crate) fn profile_arg() -> String {
     match crate::ops::profile::current().as_str() {
         "default" | "custom SEAGENT_HOME" => String::new(),
         p => format!(" -p {p}"),
@@ -351,6 +353,7 @@ pub fn audit_text(installed: &str, expected: &str, exe: &Path) -> Vec<Issue> {
     v
 }
 
+#[cfg_attr(any(target_os = "macos", windows, target_os = "android", target_os = "ios"), allow(dead_code))]
 pub fn linger_enabled() -> Option<bool> {
     let user = std::env::var("USER").ok()?;
     let o = std::process::Command::new("loginctl").args(["show-user", &user, "-p", "Linger"]).output().ok()?;
@@ -359,6 +362,18 @@ pub fn linger_enabled() -> Option<bool> {
 
 /// Full audit of the installed user unit (empty = fine or not installed → one issue).
 pub fn audit(ws: &Path) -> Vec<Issue> {
+    #[cfg(any(target_os = "macos", windows, target_os = "android", target_os = "ios"))]
+    {
+        crate::ops::service_os::audit(ws)
+    }
+    #[cfg(not(any(target_os = "macos", windows, target_os = "android", target_os = "ios")))]
+    {
+        audit_systemd(ws)
+    }
+}
+
+#[cfg(not(any(target_os = "macos", windows, target_os = "android", target_os = "ios")))]
+fn audit_systemd(ws: &Path) -> Vec<Issue> {
     let path = user_unit_dir().join(unit_name());
     let Ok(installed) = std::fs::read_to_string(&path) else {
         return vec![Issue { code: "unit-missing", message: format!("{} is not installed (seagent service install)", unit_name()), fix: None }];
@@ -374,6 +389,7 @@ pub fn audit(ws: &Path) -> Vec<Issue> {
 
 /// Result of trying to keep the user service alive after logout and start it at boot.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(any(target_os = "macos", windows, target_os = "android", target_os = "ios"), allow(dead_code))]
 pub enum Linger {
     Already,
     Enabled,
@@ -384,6 +400,7 @@ pub enum Linger {
 /// Turn lingering on without ever raising an authorisation prompt (`--no-ask-password`: if
 /// polkit would need to ask, it fails and we print the command instead). Pure over its inputs
 /// so the decision is testable; [`ensure_linger`] wires the real `loginctl`.
+#[cfg_attr(any(target_os = "macos", windows, target_os = "android", target_os = "ios"), allow(dead_code))]
 pub fn ensure_linger_with(status: Option<bool>, enable: &dyn Fn() -> Result<(), String>, user: &str) -> Linger {
     if status == Some(true) {
         return Linger::Already;
@@ -394,6 +411,13 @@ pub fn ensure_linger_with(status: Option<bool>, enable: &dyn Fn() -> Result<(), 
     }
 }
 
+/// launchd agents, Task Scheduler logon tasks and the phones have no lingering to turn on.
+#[cfg(any(target_os = "macos", windows, target_os = "android", target_os = "ios"))]
+pub fn ensure_linger() -> Linger {
+    Linger::Already
+}
+
+#[cfg(not(any(target_os = "macos", windows, target_os = "android", target_os = "ios")))]
 pub fn ensure_linger() -> Linger {
     let user = std::env::var("USER").or_else(|_| std::env::var("LOGNAME")).unwrap_or_default();
     ensure_linger_with(
@@ -416,6 +440,12 @@ pub fn ensure_linger() -> Linger {
     )
 }
 
+#[cfg(any(target_os = "macos", windows, target_os = "android", target_os = "ios"))]
+pub fn install_user(ws: &Path, start: bool) -> Result<String, String> {
+    crate::ops::service_os::install_user(ws, start)
+}
+
+#[cfg(not(any(target_os = "macos", windows, target_os = "android", target_os = "ios")))]
 pub fn install_user(ws: &Path, start: bool) -> Result<String, String> {
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
     let dir = user_unit_dir();
@@ -447,12 +477,18 @@ pub fn restart(paths: &Paths, drain: Duration) -> Result<String, String> {
         }
     }
     let still = seagent_kernel::daemon::call(&sock, "ping", json!({})).ok().and_then(|r| r["running"].as_array().map(|a| a.len())).unwrap_or(0);
+    #[cfg(not(any(target_os = "macos", windows, target_os = "android", target_os = "ios")))]
     let active = std::process::Command::new("systemctl").args(["--user", "is-active", "--quiet", &unit_name()]).status().is_ok_and(|s| s.success());
+    #[cfg(any(target_os = "macos", windows, target_os = "android", target_os = "ios"))]
+    let active = crate::ops::service_os::managed();
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
     if active {
+        #[cfg(not(any(target_os = "macos", windows, target_os = "android", target_os = "ios")))]
         if !systemctl(false, &["restart", &unit_name()]) {
             return Err("systemctl --user restart failed".into());
         }
+        #[cfg(any(target_os = "macos", windows, target_os = "android", target_os = "ios"))]
+        crate::ops::service_os::restart_managed()?;
     } else {
         let _ = std::process::Command::new(&exe).args(["daemon", "stop"]).status();
         let ok = std::process::Command::new(&exe).args(["daemon", "start"]).status().is_ok_and(|s| s.success());
@@ -468,24 +504,46 @@ pub fn restart_detached(drain_secs: u64) -> Result<String, String> {
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
     let mut c = std::process::Command::new(exe);
     c.args(["service", "restart", "--drain", &drain_secs.to_string()]).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null());
-    use std::os::unix::process::CommandExt;
-    unsafe {
-        c.pre_exec(|| {
-            libc::setsid();
-            Ok(())
-        });
-    }
+    crate::ops::hostos::detach(&mut c);
     c.spawn().map_err(|e| e.to_string())?;
     Ok(format!("restarting seagentd once running turns finish (up to {drain_secs}s)…"))
 }
 
-pub fn dispatch(cmd: &str, a: &Args, _raw: &[String]) -> Option<R> {
+/// `seagent daemon service` (Windows Service entry point): the same loop as `daemon run`.
+fn daemon_service(raw: &[String]) -> R {
+    static ARGS: std::sync::OnceLock<Args> = std::sync::OnceLock::new();
+    let mut run: Vec<String> = raw.to_vec();
+    if let Some(i) = run.iter().position(|x| x == "service") {
+        run[i] = "run".into();
+    }
+    let parsed = Args::parse(&run).map_err(crate::Fail::Usage)?;
+    let _ = ARGS.set(parsed);
+    let daemon = || match ARGS.get().map(crate::cmd_daemon) {
+        Some(Ok(code)) => code,
+        Some(Err(crate::Fail::Msg(m) | crate::Fail::Usage(m))) => {
+            eprintln!("seagentd: {m}");
+            1
+        }
+        None => 1,
+    };
+    let code = crate::ops::winservice::run(&crate::ops::service_os::windows_name(), &Paths::from_env().daemon_log(), daemon, seagent_kernel::daemon::Daemon::stop)?;
+    Ok(code)
+}
+
+pub fn dispatch(cmd: &str, a: &Args, raw: &[String]) -> Option<R> {
+    if cmd == "daemon" && a.pos(0) == Some("service") {
+        return Some(daemon_service(raw));
+    }
     if cmd != "service" && !(cmd == "daemon" && a.pos(0) == Some("install")) {
         return None;
     }
     Some((|| -> R {
         let paths = Paths::from_env();
         let sub = if cmd == "daemon" { "install" } else { a.pos(0).unwrap_or("status") };
+        #[cfg(any(target_os = "macos", windows, target_os = "android", target_os = "ios"))]
+        if !a.flag("launchd") || cfg!(target_os = "macos") {
+            return crate::ops::service_os::dispatch(sub, a, &paths);
+        }
         let system = a.flag("system");
         let name = unit_name();
         match sub {

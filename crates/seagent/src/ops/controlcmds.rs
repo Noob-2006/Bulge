@@ -47,8 +47,7 @@ pub fn diagnostics_bundle(c: &Ctx, note: &str) -> Result<(PathBuf, Value), Strin
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     let p = dir.join(format!("diag-{now}.json"));
     seagent_kernel::util::atomic_write(&p, serde_json::to_string_pretty(&b).unwrap_or_default().as_bytes()).map_err(|e| e.to_string())?;
-    use std::os::unix::fs::PermissionsExt;
-    let _ = std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o600));
+    let _ = crate::ops::hostos::set_mode(&p, 0o600);
     Ok((p, b))
 }
 
@@ -256,7 +255,7 @@ pub fn rescue_policy(c: &Ctx) -> Result<(), String> {
 pub type Spawn = fn(u64) -> Result<String, String>;
 
 fn daemon_up(c: &Ctx) -> bool {
-    std::os::unix::net::UnixStream::connect(c.k.paths.socket()).is_ok()
+    crate::ops::hostos::daemon_reachable(&c.k.paths.socket())
 }
 
 fn kind_of(name: &str, t: &toml::Table) -> String {

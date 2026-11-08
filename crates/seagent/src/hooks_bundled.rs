@@ -267,6 +267,7 @@ impl Hook for CommandLogger {
         e == HookEvent::Command
     }
     fn run(&self, _: HookEvent, p: &Value) -> Result<HookDecision, String> {
+        #[cfg(unix)]
         use std::os::unix::fs::OpenOptionsExt;
         let dir = self.path.parent().unwrap_or(Path::new("."));
         std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
@@ -279,7 +280,16 @@ impl Hook for CommandLogger {
             "senderId": p["sender_id"].as_str().filter(|s| !s.is_empty()).unwrap_or("unknown"),
             "source": p["source"].as_str().filter(|s| !s.is_empty()).unwrap_or("unknown"),
         });
+        #[cfg(unix)]
         let mut f = std::fs::OpenOptions::new().create(true).append(true).mode(0o600).custom_flags(libc::O_NOFOLLOW).open(&self.path).map_err(|e| format!("{}: {e}", self.path.display()))?;
+        // No O_NOFOLLOW on Windows: refuse a symlinked log file explicitly, then open owner-only.
+        #[cfg(not(unix))]
+        let mut f = {
+            if std::fs::symlink_metadata(&self.path).is_ok_and(|m| m.file_type().is_symlink()) {
+                return Err(format!("{} is a symlink; not logging", self.path.display()));
+            }
+            seagent_core::platform::fs_private::open_private(&self.path, seagent_core::platform::fs_private::OpenMode::Append).map_err(|e| format!("{}: {e}", self.path.display()))?
+        };
         writeln!(f, "{line}").map_err(|e| e.to_string())?;
         Ok(HookDecision::Allow)
     }

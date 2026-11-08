@@ -14,6 +14,15 @@ pub fn cmd_app(a: &Args) -> R {
     let token = app.token.as_deref().map(|t| vault.substitute(t)).filter(|t| !t.contains("{{secret:")).unwrap_or_default();
     let url = format!("http://{}", app.listen);
     match a.pos(0).unwrap_or("status") {
+        // `--json` (desktop shell): `{"token","url"}`, or `{"error"}` and exit 1 without a token.
+        "token" if a.flag("json") => {
+            if token.is_empty() {
+                println!("{}", serde_json::json!({"error": "no [app] token is configured (run `seagent setup bootstrap`)"}));
+                return Ok(1);
+            }
+            println!("{}", serde_json::json!({"token": token, "url": format!("{}/#token={token}", crate::setup_web::base_url(&app.listen))}));
+            Ok(0)
+        }
         "token" => {
             if token.is_empty() {
                 let t = seagent_net::crypto::random_token(24);
@@ -29,9 +38,15 @@ pub fn cmd_app(a: &Args) -> R {
             }
             // The token travels in the fragment, which browsers never send to servers or logs.
             let link = format!("{url}/#token={token}");
-            let opened = ["chromium", "google-chrome", "brave-browser"].iter().any(|b| std::process::Command::new(b).arg(format!("--app={link}")).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).spawn().is_ok());
-            if !opened {
-                let _ = std::process::Command::new("xdg-open").arg(&link).spawn();
+            // Windows: Edge / Chrome `--app=`, else the default browser; macOS: `open -na`.
+            #[cfg(any(windows, target_os = "macos"))]
+            crate::ops::hostos::open_app_window(&link);
+            #[cfg(not(any(windows, target_os = "macos")))]
+            {
+                let opened = ["chromium", "google-chrome", "brave-browser"].iter().any(|b| std::process::Command::new(b).arg(format!("--app={link}")).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).spawn().is_ok());
+                if !opened {
+                    let _ = std::process::Command::new("xdg-open").arg(&link).spawn();
+                }
             }
             println!("{url}");
             Ok(0)

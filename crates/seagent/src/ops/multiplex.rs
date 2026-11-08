@@ -113,8 +113,7 @@ pub fn profile_running(name: &str) -> bool {
 }
 
 fn pid_alive(pid: i64) -> bool {
-    // SAFETY: signal 0 only checks existence/permission.
-    pid > 0 && unsafe { libc::kill(pid as i32, 0) } == 0
+    crate::ops::hostos::pid_alive(pid)
 }
 
 pub fn facts() -> Vec<ProfileFacts> {
@@ -165,9 +164,14 @@ pub struct Slot {
 
 fn term(c: &mut Child) {
     // SAFETY: plain kill(2) on a pid we spawned.
+    #[cfg(unix)]
     unsafe {
         libc::kill(c.id() as i32, libc::SIGTERM);
     }
+    // Windows has no SIGTERM for a process outside our console: go straight to TerminateProcess
+    // (the daemon's session logs are append-only and fsynced, so the next start recovers).
+    #[cfg(not(unix))]
+    let _ = c.kill();
     let until = Instant::now() + Duration::from_secs(10);
     while Instant::now() < until {
         if c.try_wait().ok().flatten().is_some() {
@@ -222,6 +226,7 @@ pub fn supervise(slots: &mut [Slot], stop: &AtomicBool, tick: Duration, log: &mu
 }
 
 static STOP: AtomicBool = AtomicBool::new(false);
+#[cfg(unix)]
 extern "C" fn on_signal(_: libc::c_int) {
     STOP.store(true, Ordering::SeqCst);
 }
@@ -297,10 +302,13 @@ pub fn dispatch(cmd: &str, a: &Args, _raw: &[String]) -> Option<R> {
                 let _ = std::fs::create_dir_all(sp.parent().unwrap());
                 let _ = seagent_kernel::util::atomic_write(&sp, json!({"pid": std::process::id(), "served_profiles": p.served, "standalone": p.standalone, "started_at": seagent_kernel::util::unix_now()}).to_string().as_bytes());
                 // SAFETY: installing an async-signal-safe handler that only stores an atomic.
+                #[cfg(unix)]
                 unsafe {
                     libc::signal(libc::SIGINT, on_signal as *const () as libc::sighandler_t);
                     libc::signal(libc::SIGTERM, on_signal as *const () as libc::sighandler_t);
                 }
+                #[cfg(windows)]
+                crate::ops::hostos::on_stop_signals(&STOP);
                 eprintln!("seagent gateway multiplex: serving {}", p.served.join(", "));
                 supervise(&mut slots, &STOP, Duration::from_millis(500), &mut |m| eprintln!("seagent gateway multiplex: {m}"));
                 let _ = seagent_kernel::util::atomic_write(&sp, json!({"pid": null, "served_profiles": p.served, "stopped_at": seagent_kernel::util::unix_now()}).to_string().as_bytes());

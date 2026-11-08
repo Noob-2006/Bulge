@@ -49,7 +49,7 @@ pub fn default_dir(paths: &Paths, cfg: &BackupConfig) -> PathBuf {
 }
 
 fn host() -> String {
-    std::fs::read_to_string("/etc/hostname").map(|s| s.trim().to_string()).ok().filter(|s| !s.is_empty()).unwrap_or_else(|| "host".into())
+    crate::ops::hostos::etc_hostname().map(|s| s.trim().to_string()).ok().filter(|s| !s.is_empty()).unwrap_or_else(|| "host".into())
 }
 
 pub fn plan(paths: &Paths, o: &Opts) -> Result<Vec<Entry>, String> {
@@ -89,13 +89,11 @@ pub fn create(paths: &Paths, out: &Path, o: &Opts) -> Result<(PathBuf, Value), S
     let file = if out.extension().is_some_and(|e| e == "gz") { out.to_path_buf() } else { out.join(format!("seagent-{}-{}.tar.gz", host(), stamp())) };
     if let Some(d) = file.parent() {
         std::fs::create_dir_all(d).map_err(|e| e.to_string())?;
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(d, std::fs::Permissions::from_mode(0o700));
+        let _ = crate::ops::hostos::set_mode(d, 0o700);
     }
     let tmp = file.with_extension("partial");
     std::fs::write(&tmp, &bytes).map_err(|e| format!("{}: {e}", tmp.display()))?;
-    use std::os::unix::fs::PermissionsExt;
-    let _ = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600));
+    let _ = crate::ops::hostos::set_mode(&tmp, 0o600);
     std::fs::rename(&tmp, &file).map_err(|e| e.to_string())?;
     Ok((file, manifest))
 }
