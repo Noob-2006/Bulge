@@ -55,6 +55,11 @@ use std::time::{Duration, Instant};
 pub struct ExposureConfig {
     /// Written on purpose by the operator: a non-loopback `listen` needs this.
     pub allow_public: bool,
+    /// LAN mode (docs/cross-platform.md): a private-range `listen` (or `0.0.0.0`) without
+    /// `allow_public`. Implies native TLS with a generated certificate (`<data>/tls/`, unless
+    /// `cert`/`key` are set), refuses peers outside private ranges, and accepts only
+    /// paired-device tokens (`seagent pair code`) from the network.
+    pub lan: bool,
     /// An https reverse proxy (or tunnel) terminates TLS in front of seagent.
     pub behind_proxy: bool,
     /// seagent terminates TLS itself (`cert` + `key`; ent-121).
@@ -200,7 +205,7 @@ impl ClientIdentity {
 
 impl Default for ExposureConfig {
     fn default() -> Self {
-        ExposureConfig { allow_public: false, behind_proxy: false, tls: false, cert: None, key: None, client_auth: "off".into(), client_ca: None, client_identities: vec![], node_identities: vec![], rate_limit_per_min: 1200, trusted_proxies: vec![], proxy_auth: ProxyAuthConfig::default() }
+        ExposureConfig { allow_public: false, lan: false, behind_proxy: false, tls: false, cert: None, key: None, client_auth: "off".into(), client_ca: None, client_identities: vec![], node_identities: vec![], rate_limit_per_min: 1200, trusted_proxies: vec![], proxy_auth: ProxyAuthConfig::default() }
     }
 }
 
@@ -215,6 +220,9 @@ impl ExposureConfig {
             key: self.key.clone().unwrap_or_default(),
             client_ca: self.client_ca.clone(),
             client_auth: self.client_auth_mode().unwrap_or_default(),
+            // LAN mode: this machine keeps `http://127.0.0.1:<port>` (local console, desktop
+            // app, setup wizard); the network has to speak TLS.
+            loopback_plain: self.lan,
         })
     }
     /// The access a verified client certificate identity maps to (first match wins).
@@ -413,11 +421,24 @@ pub fn surface(cfg: &AppConfig) -> policy::Surface<'_> {
         origins: &cfg.allow_origins,
         rate_limit: cfg.exposure.rate_limit_per_min > 0,
         enabled: cfg.enabled,
+        lan: cfg.exposure.lan,
     }
+}
+
+/// LAN mode is in force: `lan = true` without `allow_public` (with `allow_public` the full
+/// public rules apply and the LAN restrictions are not needed).
+pub fn lan_only(cfg: &AppConfig) -> bool {
+    cfg.exposure.lan && !cfg.exposure.allow_public
 }
 
 /// What callers can prove. A bare token — even several, even scoped — is one shared string.
 pub fn auth_strength(cfg: &AppConfig) -> policy::AuthStrength {
+    // LAN mode: network peers can only present per-device, revocable tokens issued after an
+    // out-of-band pairing (QR / approved code), so the surface is device-authenticated.
+    // Only on a private / every-interface bind: a public address keeps the full public rules.
+    if lan_only(cfg) && matches!(policy::classify_host(policy::host_of(&cfg.listen)), policy::AddrClass::Private | policy::AddrClass::Unspecified) {
+        return policy::AuthStrength::Device;
+    }
     // Required mutual TLS: every caller holds a device-bound key before any token is looked at.
     if cfg.exposure.tls && cfg.exposure.client_auth_mode() == Ok(seagent_net::tlsd::ClientAuth::Require) && cfg.exposure.client_ca.is_some() {
         return policy::AuthStrength::Device;

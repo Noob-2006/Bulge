@@ -30,6 +30,8 @@ pub mod logbook;
 pub mod conversations;
 pub mod cron_fire;
 pub mod dashboard_auth;
+pub mod devices;
+pub mod lan;
 pub mod node;
 pub mod openai;
 pub mod qr;
@@ -95,11 +97,14 @@ pub struct AppConfig {
     pub metrics_public: bool,
     /// SCIM 2.0 provisioning at `/scim/v2` (ent-049). Off by default: no route while off.
     pub scim: bool,
+    /// LAN discovery: `"mdns"` advertises `_seagent._tcp.local`, `"off"` does not; empty (the
+    /// default) = on exactly when `[app.exposure] lan = true`.
+    pub discovery: String,
 }
 
 impl Default for AppConfig {
     fn default() -> Self {
-        AppConfig { enabled: false, listen: d_listen(), token: None, allow_origins: vec![], ui: true, openai_api: false, nodes: false, a2a: a2a::A2aConfig::default(), max_conns: d_conns(), workspace: None, terminal: false, auth: dashboard_auth::AuthConfig::default(), tokens: vec![], exposure: exposure::ExposureConfig::default(), rbac: None, metrics_public: false, scim: false }
+        AppConfig { enabled: false, listen: d_listen(), token: None, allow_origins: vec![], ui: true, openai_api: false, nodes: false, a2a: a2a::A2aConfig::default(), max_conns: d_conns(), workspace: None, terminal: false, auth: dashboard_auth::AuthConfig::default(), tokens: vec![], exposure: exposure::ExposureConfig::default(), rbac: None, metrics_public: false, scim: false, discovery: String::new() }
     }
 }
 
@@ -146,6 +151,9 @@ impl AppConfig {
             rb.validate()?;
         }
         c.exposure.proxy_auth.validate()?;
+        if !matches!(c.discovery.trim(), "" | "auto" | "mdns" | "off") {
+            return Err(format!("[app] discovery = `{}`: use \"mdns\" or \"off\" (empty = on in LAN mode)", c.discovery));
+        }
         Ok(c)
     }
 }
