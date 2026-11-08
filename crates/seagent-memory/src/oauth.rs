@@ -12,7 +12,6 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::io::{BufRead, BufReader, Write};
 use std::net::TcpListener;
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -103,7 +102,14 @@ pub fn start(data: &Path, provider: &str, cfg: &OAuthConfig) -> Result<Value, St
                 let mut tok = tok;
                 tok["obtained_ms"] = json!(util::now_ms());
                 if util::write_json(&p, &tok).is_ok() {
-                    let _ = std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o600));
+                    #[cfg(unix)]
+                    {
+                        use std::os::unix::fs::PermissionsExt;
+                        let _ = std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o600));
+                    }
+                    // Windows: an owner-only DACL on the token file.
+                    #[cfg(not(unix))]
+                    let _ = seagent_core::platform::fs_private::set_private(&p);
                 }
                 set_status(&data, &provider, json!({"status": "connected"}));
             }

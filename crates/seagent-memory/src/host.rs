@@ -202,14 +202,13 @@ mod tests {
     #[test]
     fn secret_placeholders_in_the_embedding_config_come_from_the_vault() {
         use crate::util::testutil::fake;
-        use std::os::unix::fs::PermissionsExt;
         let d = crate::tmp("host-secret");
         let paths = Paths { data: d.clone(), config_dir: d.join("config"), runtime: d.join("run"), ..Default::default() };
         // The vault the binary reads (`seagent secrets set EMBED_KEY …`).
         let secrets = paths.secrets();
         std::fs::create_dir_all(secrets.parent().unwrap()).unwrap();
         std::fs::write(&secrets, "EMBED_KEY = \"sk-from-the-vault\"\n").unwrap();
-        std::fs::set_permissions(&secrets, std::fs::Permissions::from_mode(0o600)).unwrap();
+        seagent_core::platform::fs_private::set_private(&secrets).unwrap();
         let f = fake(|_r, _n| (200, serde_json::json!({"data": [{"index": 0, "embedding": [1.0, 0.0]}]}).to_string()));
         let cfg = Config {
             memory: toml::from_str(&format!(

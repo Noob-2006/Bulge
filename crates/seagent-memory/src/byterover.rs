@@ -26,6 +26,11 @@ pub struct Byterover {
 }
 
 fn find_brv() -> Option<PathBuf> {
+    // Windows: npm installs `brv.cmd` (PATHEXT), under %APPDATA%\npm.
+    #[cfg(windows)]
+    if let Some(p) = seagent_core::platform::layout::which("brv") {
+        return Some(p);
+    }
     if let Some(p) = std::env::var_os("PATH") {
         for d in std::env::split_paths(&p) {
             let c = d.join("brv");
@@ -179,7 +184,8 @@ impl Tool for BrvTool {
     }
 }
 
-#[cfg(test)]
+// Unix only: the fake `brv` CLI is a `#!/bin/sh` script.
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
