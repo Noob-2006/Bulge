@@ -162,8 +162,8 @@ fn device_id(st: &AppState) -> String {
     id
 }
 
-/// Pair with a host: `POST /pair/client` over pinned TLS (PROPOSED agent endpoint, see
-/// apps/desktop/MOBILE.md) → a per-device console token, stored with the pin.
+/// Pair with a host: `POST /pair/client` over pinned TLS (see apps/desktop/MOBILE.md and
+/// `crates/seagent-app/src/devices.rs`) → a per-device console token, stored with the pin.
 #[tauri::command]
 pub async fn pair_host(st: State<'_, AppState>, args: PairArgs) -> R<Value> {
     let (addr, bootstrap, code, pin) = match &args.setup_code {
@@ -193,7 +193,18 @@ pub async fn pair_host(st: State<'_, AppState>, args: PairArgs) -> R<Value> {
     let name = args.device_name.clone().unwrap_or_else(|| format!("SE Agent ({})", platform()));
     let id = device_id(&st);
     let body = pair::claim_body(bootstrap.as_deref(), code.as_deref(), &id, &name, platform());
-    let (status, v) = tls::post_json(&addr, &pin, "/pair/client", &body).await?;
+    // A typed code waits for the host's approval: 202 + requestId, poll (the host long-polls
+    // up to 15 s per request) until 200, a refusal, or 15 minutes.
+    let (mut status, mut v) = tls::post_json(&addr, &pin, "/pair/client", &body).await?;
+    let until = std::time::Instant::now() + std::time::Duration::from_secs(15 * 60);
+    while status == 202 && std::time::Instant::now() < until {
+        let rid = v["requestId"].as_str().unwrap_or("").to_string();
+        tokio::time::sleep(std::time::Duration::from_millis(v["retryAfterMs"].as_u64().unwrap_or(1000).min(5000))).await;
+        (status, v) = tls::post_json(&addr, &pin, "/pair/client", &pair::with_request_id(body.clone(), &rid)).await?;
+    }
+    if status == 202 {
+        return Err("the host did not approve this device in time; create a new pairing code there".into());
+    }
     if status == 404 {
         return Err("this host's SE Agent is too old for app pairing (no /pair/client); update it".into());
     }

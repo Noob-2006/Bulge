@@ -58,6 +58,38 @@ WebSocket 連上後，伺服器先送 `ready` 通知；也可以隨時呼叫 `in
 - `pending {kind: approval|question, id, session, …}`：需要人回應。
 - `heartbeat`：每 15 秒，兼作斷線偵測。
 
+## 區域網路裝置（LAN 模式，`[app.exposure] lan = true`）
+
+App、手機瀏覽器與其他電腦以 `POST /pair/client` 配對（在憑證檢查之前處理、每個位址限速、結果寫入稽核流）：
+
+```text
+{"bootstrapToken": "…", "device": {"id": "<1–64 英數 - _>", "name": "…", "platform": "ios|android|web|…"}}
+  → 200 {"consoleToken": "sed1_…", "hostId": "<16 hex>", "name": "<主機名稱>", "deviceId": "…", "scope": "write"}
+{"code": "ABCD2345", "device": {…}}                       → 202 {"status": "pending", "requestId", "retryAfterMs", "expiresAtMs", "sas"}
+{"code": "ABCD2345", "requestId": "…", "device": {…}}     → 每次最多等 15 秒；核准後 200（同上），拒絕 403
+錯誤：400 格式、403 未知／已用／過期、409 配對碼已被別的裝置使用、415 非 JSON、429 太頻繁
+```
+
+`bootstrapToken` 來自 setup code（QR／連結，一次性）；8 碼配對碼來自 `seagent pair code` 或主控台「配對裝置」，
+只是「申請」，要管理員核准（雙方畫面顯示的短指紋——憑證 SHA-256 前 16 hex、四碼一組——必須相同）。
+`consoleToken` 是每台裝置一個、可撤銷的憑證（只存加鹽雜湊，`<data>/devices.json`），用法與 app token 相同
+（`Authorization: Bearer`、`seagent.token.<t>` 子協定、WebSocket 升級的 `?token=`、網頁 `#token=`），預設 `write`。
+LAN 模式下網路上的連線**只**接受這種 token；撤銷後開著的 WebSocket 一秒內斷線。
+
+| 方法 | 權限 | 說明 |
+|---|---|---|
+| `devices.list` | admin | `{devices, pending}`（不含 token） |
+| `devices.pending` | admin | 等待核准的配對申請 |
+| `devices.approve {code}` / `devices.reject {code}` | admin | 核准／拒絕 |
+| `devices.revoke {id}` | admin | 撤銷裝置 |
+| `devices.pair.create {ttlMin?, scope?}` | admin | `{setupCode, pairUri, link, url, address, code, expiresAtMs, fingerprint, sas, qrSvg, qrText}` |
+| `discovery.list {timeoutMs?}` | read | mDNS 找到的 SE Agent 主機 `{hosts: [{id, name, address, url, fpPrefix, sas, self}]}` |
+| `lan.status` | read | LAN 模式、探索、位址、憑證、已配對裝置數 |
+| `lan.probe {address}` | admin | 對方憑證指紋（TOFU 比對用） |
+| `lan.connect {address, code \| setupCode, fingerprint?, fpPrefix?, name?}` | admin | 本機以裝置身分配對對方，token 存入 vault，登記為叢集節點（`https://`＋釘選指紋） |
+
+mDNS：`_seagent._tcp.local`，TXT 只有 `v=seagent/2`、`id`、`fp`（指紋前 16 hex）、`name`，從不帶 token。
+
 ## 裝置協議（`/node`）
 
 1. 伺服器送 `connect.challenge {nonce}`。
@@ -69,7 +101,7 @@ WebSocket 連上後，伺服器先送 `ready` 通知；也可以隨時呼叫 `in
 
 ARP 方法：`node.list`、`node.describe`（含指令參數 schema）、`node.rename`、`node.invoke`、`node.invoke.cancel`、`node.invoke.input`、`node.pending.enqueue`、`node.queue`、`node.events`、`node.token.rotate`、`node.setup.create`、`node.pair.list/approve/reject`、`node.remove`。
 
-Setup code 與 OpenClaw 相同：base64url(JSON `{url, bootstrapToken, expiresAtMs, tlsFingerprint?}`)。`seagent nodes setup-code [--url ws://…] [--ttl 分鐘] [--tls-fingerprint SHA256]` 在終端機顯示 QR code（byte 模式、EC M、版本 1–10），裝置端 `seagent node --setup-code <code>`；有 `tlsFingerprint` 時裝置只接受該憑證（wss）。
+Setup code 與 OpenClaw 相同：base64url(JSON `{url, bootstrapToken, expiresAtMs, tlsFingerprint?}`)。`seagent nodes setup-code [--url ws://…] [--ttl 分鐘] [--tls-fingerprint SHA256]` 在終端機顯示 QR code（byte 模式、EC M、版本 1–15），裝置端 `seagent node --setup-code <code>`；有 `tlsFingerprint` 時裝置在 TLS 握手時只接受該憑證（wss，自簽憑證亦可）。不在 loopback 的 URL 一律是 `wss://`（LAN 模式自動帶指紋），不再產生明文 `ws://` 的區網配對碼。
 
 Linux 裝置：`seagent node --url ws://主機:8640/node`。允許的指令由裝置端 `~/.config/seagent/node.toml` 決定（`run = "deny" | "allowlist" | "full"`、`allow`、`camera`、`screen`（含 `screen.record`，ffmpeg x11grab 或 wf-recorder）、`location`、`computer`（`computer.act`：X11 用 xdotool、Wayland 用 ydotool，預設關）、`canvas`（`canvas.present` 以預設瀏覽器開 URL/HTML）、`notifications`（dunst/mako 的 `notifications.list/actions`）、`read_roots`、`microphone`＋`[stt]`（`talk.ptt.start/stop/cancel/once`：pw-record 或 ffmpeg 錄音，OpenAI 相容 `/audio/transcriptions` 轉寫；`url`、`key` 或 `key_env`、`model`、`language`）、`cdp_url`（computer.act 瀏覽器動作，只接受本機 `http://127.0.0.1:<port>`）、`[plugins.<名>]`（外掛的 `node_commands` 由此裝置提供）），伺服器無法越權。`computer = true` 時 computer.act 也有 v2 動作：`list_apps`、`list_windows`、`get_accessibility_tree`／`get_window_state`、`set_value`、`bring_to_front`、以 `elementRef` 點擊（AT-SPI：有 python3-gi 用 Atspi，否則 `gdbus`）、`launch_app`（`gtk-launch` 桌面項目 id）、`get_browser_state`、`browser_navigate`、`browser_click`、`browser_type`（CDP）。外掛指令在 `node.connect` 以 `commandMeta {指令: {description, dangerous, params}}` 告知伺服器，`node.describe` 顯示其 schema，`dangerous` 者先經 egress 閘門。手機 App 專屬指令（photos、contacts、calendar、reminders、sms…）SE Agent 沒有裝置端，但裝置宣告了就能呼叫，參數依內建 schema 檢查，危險指令一律先經 egress 閘門詢問。
 
