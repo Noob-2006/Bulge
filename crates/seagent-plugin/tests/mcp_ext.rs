@@ -294,8 +294,11 @@ fn events_subscribe_verify_deliver_dedupe_gap_terminate_unsubscribe() {
     let secret = p["delivery"]["secret"].as_str().unwrap().to_string();
     let sub = hub.subscriptions()[&route].clone();
     assert_eq!((sub.subscription_id.as_deref(), sub.expires_at), (Some("sub-1"), seagent_plugin::events::parse_rfc3339("2099-01-01T00:00:00Z").unwrap()));
-    use std::os::unix::fs::PermissionsExt;
-    assert_eq!(std::fs::metadata(dir.join("mcp-events.json")).unwrap().permissions().mode() & 0o777, 0o600, "secrets on disk are private");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(std::fs::metadata(dir.join("mcp-events.json")).unwrap().permissions().mode() & 0o777, 0o600, "secrets on disk are private");
+    }
     let post = |body: Value, secret: &str, id: &str| -> u16 {
         let b = body.to_string();
         let sig = seagent_plugin::events::sign_standard_webhook(b.as_bytes(), secret, id, now());

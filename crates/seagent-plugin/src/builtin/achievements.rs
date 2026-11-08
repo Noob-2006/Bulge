@@ -929,6 +929,7 @@ pub fn aggregate_stats(sessions: &[SessionStats]) -> Aggregate {
 }
 
 /// `(tm_wday, tm_hour)` with Python's `tm_wday` (Monday=0 … Sunday=6) in the machine's local zone.
+#[cfg(unix)]
 fn local_clock(unix_secs: i64) -> Option<(i32, i32)> {
     // SAFETY: `localtime_r` writes into the caller-owned `tm` and takes its own lock internally.
     unsafe {
@@ -941,6 +942,32 @@ fn local_clock(unix_secs: i64) -> Option<(i32, i32)> {
         let py_wday = (tm.tm_wday + 6) % 7;
         Some((py_wday, tm.tm_hour))
     }
+}
+
+/// Windows: the UTC instant as a FILETIME, converted with the machine's time-zone rules
+/// (`SystemTimeToTzSpecificLocalTime`, DST included) — the `localtime_r` of Win32.
+#[cfg(windows)]
+fn local_clock(unix_secs: i64) -> Option<(i32, i32)> {
+    use windows_sys::Win32::Foundation::{FILETIME, SYSTEMTIME};
+    use windows_sys::Win32::System::Time::{FileTimeToSystemTime, SystemTimeToTzSpecificLocalTime};
+    // 100 ns ticks since 1601-01-01.
+    let ticks = u64::try_from(unix_secs.checked_add(11_644_473_600)?.checked_mul(10_000_000)?).ok()?;
+    let ft = FILETIME { dwLowDateTime: ticks as u32, dwHighDateTime: (ticks >> 32) as u32 };
+    // SAFETY: plain out-parameters owned here; a null zone means "the current one".
+    unsafe {
+        let mut utc: SYSTEMTIME = std::mem::zeroed();
+        let mut local: SYSTEMTIME = std::mem::zeroed();
+        if FileTimeToSystemTime(&ft, &mut utc) == 0 || SystemTimeToTzSpecificLocalTime(std::ptr::null(), &utc, &mut local) == 0 {
+            return None;
+        }
+        // wDayOfWeek: Sunday=0 … Saturday=6, like C's tm_wday.
+        Some(((local.wDayOfWeek as i32 + 6) % 7, local.wHour as i32))
+    }
+}
+
+#[cfg(not(any(unix, windows)))]
+fn local_clock(_unix_secs: i64) -> Option<(i32, i32)> {
+    None
 }
 
 /// `evidence_for(definition, sessions)`: the best session for a `max_*` metric.

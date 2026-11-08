@@ -221,13 +221,25 @@ impl ExecBackend for WorkspaceCopy {
     }
     fn spawn(&self, req: &ExecRequest) -> io::Result<Box<dyn ExecChild>> {
         let mut script = String::new();
+        #[cfg(not(unix))]
+        let mut cwd = self.dir.clone();
         if let Some(c) = &req.cwd {
             let rel = c.strip_prefix(&self.src).map(|r| r.to_path_buf()).unwrap_or_default();
             let dir = if rel.as_os_str().is_empty() { self.dir.clone() } else { self.dir.join(rel) };
+            #[cfg(unix)]
             script.push_str(&format!("mkdir -p {0} && cd {0} || exit 126\n", shell_quote(&dir)));
+            // Not every Windows shell is POSIX: make the directory here and start in it.
+            #[cfg(not(unix))]
+            {
+                std::fs::create_dir_all(&dir)?;
+                cwd = dir;
+            }
         }
         script.push_str(&req.script);
-        PipeChild::start(&script, req, &self.dir)
+        #[cfg(unix)]
+        return PipeChild::start(&script, req, &self.dir);
+        #[cfg(not(unix))]
+        PipeChild::start(&script, req, &cwd)
     }
     fn map_path(&self, host: &Path) -> String {
         match host.strip_prefix(&self.src) {
@@ -243,6 +255,7 @@ impl ExecBackend for WorkspaceCopy {
     }
 }
 
+#[cfg(unix)]
 fn shell_quote(p: &Path) -> String {
     format!("'{}'", p.display().to_string().replace('\'', "'\\''"))
 }
@@ -260,16 +273,36 @@ struct PipeChild {
 
 impl PipeChild {
     fn start(script: &str, req: &ExecRequest, cwd: &Path) -> io::Result<Box<dyn ExecChild>> {
-        let mut cmd = Command::new("bash");
-        // `exec 2>&1` merges stderr into the one pipe the reader thread drains.
-        let body = format!("exec 2>&1\n{script}");
-        cmd.arg(if req.login { "-lc" } else { "-c" }).arg(body).current_dir(cwd);
-        for (k, v) in &req.env {
-            cmd.env(k, v);
-        }
-        cmd.stdin(if req.stdin || req.stdin_data.is_some() { Stdio::piped() } else { Stdio::null() }).stdout(Stdio::piped());
-        let mut child = cmd.spawn()?;
-        let stdout = child.stdout.take().ok_or_else(|| io::Error::other("no stdout pipe"))?;
+        #[cfg(unix)]
+        let (child, stdout) = {
+            let mut cmd = Command::new("bash");
+            // `exec 2>&1` merges stderr into the one pipe the reader thread drains.
+            let body = format!("exec 2>&1\n{script}");
+            cmd.arg(if req.login { "-lc" } else { "-c" }).arg(body).current_dir(cwd);
+            for (k, v) in &req.env {
+                cmd.env(k, v);
+            }
+            cmd.stdin(if req.stdin || req.stdin_data.is_some() { Stdio::piped() } else { Stdio::null() }).stdout(Stdio::piped());
+            let mut child = cmd.spawn()?;
+            let stdout = child.stdout.take().ok_or_else(|| io::Error::other("no stdout pipe"))?;
+            (child, stdout)
+        };
+        // Windows: this machine's shell (Git Bash, else PowerShell); stdout and stderr share
+        // one anonymous pipe, which is what `exec 2>&1` does for bash.
+        #[cfg(not(unix))]
+        let (child, stdout) = {
+            use seagent_core::platform::shell::{command, Style};
+            let mut cmd = command(Style::bash(req.login), script);
+            cmd.current_dir(cwd);
+            for (k, v) in &req.env {
+                cmd.env(k, v);
+            }
+            let (reader, writer) = std::io::pipe()?;
+            cmd.stdin(if req.stdin || req.stdin_data.is_some() { Stdio::piped() } else { Stdio::null() }).stdout(writer.try_clone()?).stderr(writer);
+            let child = cmd.spawn()?;
+            drop(cmd); // our copies of the write end: the reader sees EOF when the child exits
+            (child, reader)
+        };
         let (tx, rx) = mpsc::channel();
         std::thread::spawn(move || {
             let mut r = stdout;
@@ -334,10 +367,17 @@ impl ExecChild for PipeChild {
     fn try_wait(&mut self) -> io::Result<Option<ExitInfo>> {
         if self.exit.is_none() {
             if let Some(st) = self.child.try_wait()? {
-                use std::os::unix::process::ExitStatusExt;
+                #[cfg(unix)]
+                let signal = {
+                    use std::os::unix::process::ExitStatusExt;
+                    st.signal()
+                };
+                // Windows exit statuses always carry a code.
+                #[cfg(not(unix))]
+                let signal = None;
                 self.exit = Some(match st.code() {
                     Some(c) => ExitInfo::code(c),
-                    None => ExitInfo { code: None, signal: st.signal() },
+                    None => ExitInfo { code: None, signal },
                 });
             }
         }

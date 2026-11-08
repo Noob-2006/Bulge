@@ -69,12 +69,11 @@ impl State {
         }
     }
     pub fn save(&self, path: &Path) -> Result<(), String> {
-        use std::os::unix::fs::OpenOptionsExt;
         if let Some(d) = path.parent() {
             std::fs::create_dir_all(d).map_err(|e| e.to_string())?;
         }
         let tmp = path.with_extension("tmp");
-        let mut f = std::fs::OpenOptions::new().write(true).create(true).truncate(true).mode(0o600).open(&tmp).map_err(|e| e.to_string())?;
+        let mut f = crate::oauth::create_private(&tmp).map_err(|e| e.to_string())?;
         std::io::Write::write_all(&mut f, &serde_json::to_vec_pretty(self).unwrap_or_default()).map_err(|e| e.to_string())?;
         std::fs::rename(&tmp, path).map_err(|e| e.to_string())
     }
@@ -342,8 +341,11 @@ mod tests {
         assert!(State::load_or_create(&path, "https://other.example").unwrap_err().contains("belongs to"));
         let sig = crypto::b64url_decode(&s.sign_challenge("n", "relay.example")).unwrap();
         assert!(crypto::ed25519_verify(&crypto::b64url_decode(&s.public_key()).unwrap(), b"openclaw-mcp-relay/v1\nn\nrelay.example", &sig));
-        use std::os::unix::fs::PermissionsExt;
-        assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
+        }
         std::fs::remove_dir_all(dir).ok();
         assert_eq!(parse_relay_url("https://mcp.openclaw.ai/").unwrap(), "https://mcp.openclaw.ai");
         assert_eq!(parse_relay_url("http://127.0.0.1:9").unwrap(), "http://127.0.0.1:9");
