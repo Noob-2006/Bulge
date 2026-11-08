@@ -224,9 +224,16 @@ pub fn restart_command() -> Result<String, String> {
     }
     let rest = daemon_args().ok_or("restart applies to the seagent daemon (seagentd); this session is not running inside it")?;
     let exe = std::env::current_exe().map_err(|e| e.to_string())?.display().to_string();
+    // Windows without a bash: the line runs in PowerShell (`&` calls a quoted path, `''` escapes).
+    #[cfg(windows)]
+    if !seagent_core::platform::shell::active().kind.is_posix() {
+        let q = |s: &str| format!("'{}'", s.replace('\'', "''"));
+        return Ok(format!("Start-Sleep 2; & {e} daemon stop; & {e} daemon start {}", rest.iter().map(|s| q(s)).collect::<Vec<_>>().join(" "), e = q(&exe)));
+    }
     Ok(format!("sleep 2; {e} daemon stop; {e} daemon start {}", rest.iter().map(|s| quote(s)).collect::<Vec<_>>().join(" "), e = quote(&exe)))
 }
 
+#[cfg(unix)]
 fn spawn_detached(line: &str) -> Result<(), String> {
     use std::os::unix::process::CommandExt;
     let mut cmd = std::process::Command::new("sh");
@@ -237,6 +244,16 @@ fn spawn_detached(line: &str) -> Result<(), String> {
             Ok(())
         });
     }
+    cmd.spawn().map(|_| ()).map_err(|e| format!("restart: {e}"))
+}
+
+/// Windows: this machine's shell in a new process group, outside any Job Object (it has to
+/// outlive the daemon it restarts).
+#[cfg(not(unix))]
+fn spawn_detached(line: &str) -> Result<(), String> {
+    let mut cmd = seagent_core::platform::shell::command(seagent_core::platform::shell::Style::Sh, line);
+    cmd.stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null());
+    seagent_core::platform::proc::new_group(&mut cmd, true);
     cmd.spawn().map(|_| ()).map_err(|e| format!("restart: {e}"))
 }
 

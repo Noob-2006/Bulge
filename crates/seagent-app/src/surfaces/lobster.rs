@@ -531,7 +531,7 @@ fn exec_argv(args: &Map<String, Value>) -> Result<Vec<String>, String> {
     if pos.is_empty() {
         return Err("exec requires a command".into());
     }
-    Ok(if args.get("shell") == Some(&Value::Bool(true)) { vec!["sh".into(), "-c".into(), pos.join(" ")] } else { pos })
+    Ok(if args.get("shell") == Some(&Value::Bool(true)) { super::sh_argv(pos.join(" ")) } else { pos })
 }
 
 /// Run `stages[start..]` over `input`.
@@ -1172,7 +1172,7 @@ fn run_workflow(rt: &Rt, file: &Path, wf: &Value, mut st: Paused) -> Result<WfOu
                 if let Some(cmd) = step["run"].as_str().or(step["command"].as_str()) {
                     let line = res(cmd);
                     let stdin = stdin_val.as_ref().map(as_text);
-                    let out = srt.process(&["sh".into(), "-c".into(), line], stdin, timeout)?;
+                    let out = srt.process(&super::sh_argv(line), stdin, timeout)?;
                     return Ok(Some(json!({"id": id, "stdout": out, "json": parse_json_loose(&out)})));
                 }
                 if let Some(p) = step["pipeline"].as_str() {

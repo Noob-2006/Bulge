@@ -1,5 +1,6 @@
-//! talk.ptt.* (OpenClaw `TalkCommands`, MIT): push-to-talk on a Linux node. `start` records
-//! the default microphone (pw-record, else ffmpeg + PulseAudio) to a 16 kHz mono WAV and
+//! talk.ptt.* (OpenClaw `TalkCommands`, MIT): push-to-talk on a node. `start` records
+//! the default microphone (Linux: pw-record, else ffmpeg + PulseAudio; Windows: ffmpeg DirectShow;
+//! macOS: SoX `rec`, else ffmpeg AVFoundation) to a 16 kHz mono WAV and
 //! returns `{captureId}`; `stop` ends it and transcribes through the node's `[stt]` (an
 //! OpenAI-compatible `/audio/transcriptions`), returning `{captureId, transcript, status}`;
 //! `cancel` discards it; `once` records `durationMs` and transcribes.
@@ -36,10 +37,40 @@ static ACTIVE: Mutex<Option<Capture>> = Mutex::new(None);
 /// A forgotten capture is dropped after this long.
 const MAX_CAPTURE: Duration = Duration::from_secs(300);
 
+#[cfg(not(any(windows, target_os = "macos")))]
+#[cfg_attr(target_os = "ios", allow(dead_code))]
 pub fn available() -> bool {
     which("pw-record").is_some() || which("ffmpeg").is_some()
 }
 
+/// Windows: ffmpeg with a DirectShow microphone. macOS: SoX `rec`, else ffmpeg AVFoundation.
+#[cfg(any(windows, target_os = "macos"))]
+pub fn available() -> bool {
+    (cfg!(target_os = "macos") && which("rec").is_some()) || !super::host_os::devices("audio").is_empty()
+}
+
+/// The recorder argv on Windows / macOS (16 kHz mono s16 WAV, like the Linux one).
+#[cfg(any(windows, target_os = "macos"))]
+fn recorder(path: &str, secs: Option<f64>) -> Vec<String> {
+    let s = |v: &[&str]| v.iter().map(|x| x.to_string()).collect::<Vec<_>>();
+    if cfg!(target_os = "macos") && which("rec").is_some() {
+        let mut v = s(&["rec", "-q", "-r", "16000", "-c", "1", "-b", "16", path]);
+        if let Some(t) = secs {
+            v.extend(s(&["trim", "0", &format!("{t:.1}")]));
+        }
+        return v;
+    }
+    let mut v = s(&["ffmpeg", "-loglevel", "error", "-y"]);
+    // A missing device shows up as ffmpeg's own error when it starts.
+    v.extend(super::host_os::ffmpeg_input("audio", None).unwrap_or_default());
+    if let Some(t) = secs {
+        v.extend(s(&["-t", &format!("{t:.1}")]));
+    }
+    v.extend(s(&["-ac", "1", "-ar", "16000", path]));
+    v
+}
+
+#[cfg(not(any(windows, target_os = "macos")))]
 fn recorder(path: &str, secs: Option<f64>) -> Vec<String> {
     let s = |v: &[&str]| v.iter().map(|x| x.to_string()).collect::<Vec<_>>();
     match (which("pw-record").is_some(), secs) {
@@ -51,12 +82,22 @@ fn recorder(path: &str, secs: Option<f64>) -> Vec<String> {
 }
 
 fn spawn(argv: &[String]) -> Result<Child, String> {
-    Command::new(&argv[0]).args(&argv[1..]).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn().map_err(|e| format!("{}: {e}", argv[0]))
+    // Windows: stdin stays open so `finish` can send ffmpeg its `q` (there is no SIGINT).
+    let stdin = if cfg!(windows) { Stdio::piped() } else { Stdio::null() };
+    Command::new(&argv[0]).args(&argv[1..]).stdin(stdin).stdout(Stdio::null()).stderr(Stdio::null()).spawn().map_err(|e| format!("{}: {e}", argv[0]))
 }
 
-/// SIGINT lets both recorders finish the WAV header.
+/// SIGINT lets both recorders finish the WAV header (Windows: ffmpeg's `q` on stdin).
 fn finish(mut c: Capture) -> PathBuf {
-    unsafe { libc::kill(c.child.id() as i32, libc::SIGINT) };
+    #[cfg(unix)]
+    unsafe {
+        libc::kill(c.child.id() as i32, libc::SIGINT)
+    };
+    #[cfg(windows)]
+    if let Some(mut i) = c.child.stdin.take() {
+        use std::io::Write;
+        let _ = i.write_all(b"q");
+    }
     let until = Instant::now() + Duration::from_secs(5);
     while Instant::now() < until && matches!(c.child.try_wait(), Ok(None)) {
         std::thread::sleep(Duration::from_millis(20));

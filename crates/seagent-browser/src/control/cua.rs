@@ -448,11 +448,17 @@ fn fetch(cu: &Cu) -> Result<PathBuf, String> {
     let dst = cu.managed_path();
     std::fs::create_dir_all(dst.parent().unwrap()).map_err(|e| e.to_string())?;
     let _ = std::fs::remove_file(&dst);
-    std::os::unix::fs::symlink(&found, &dst)
-        .or_else(|_| std::fs::copy(&found, &dst).map(|_| ()))
-        .map_err(|e| e.to_string())?;
-    use std::os::unix::fs::PermissionsExt;
-    let _ = std::fs::set_permissions(&found, std::fs::Permissions::from_mode(0o755));
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(&found, &dst)
+            .or_else(|_| std::fs::copy(&found, &dst).map(|_| ()))
+            .map_err(|e| e.to_string())?;
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&found, std::fs::Permissions::from_mode(0o755));
+    }
+    // Symlinks need a privilege on Windows; a copy runs the same.
+    #[cfg(not(unix))]
+    std::fs::copy(&found, &dst).map_err(|e| e.to_string())?;
     Ok(dst)
 }
 

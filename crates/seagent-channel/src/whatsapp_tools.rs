@@ -18,6 +18,7 @@ use seagent_core::{Effect, Tool, ToolCtx, ToolOutput, ToolSpec};
 use serde_json::{json, Value};
 use std::collections::HashSet;
 use std::io::Read;
+#[cfg(unix)]
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -271,13 +272,18 @@ fn run_bounded(argv: &[String], cwd: &Path, window: Duration, cancel: &seagent_c
     let mut cmd = Command::new(&argv[0]);
     cmd.args(&argv[1..]).current_dir(cwd).env("MEOW_LOG_LEVEL", "warn").stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
     // SAFETY: setpgid is async-signal-safe.
+    #[cfg(unix)]
     unsafe {
         cmd.pre_exec(|| {
             libc::setpgid(0, 0);
             Ok(())
         });
     }
+    #[cfg(unix)]
     let mut child = cmd.spawn().map_err(|e| format!("cannot start MeowCaller: {e}"))?;
+    // Windows: a kill-on-close Job Object is the process group.
+    #[cfg(not(unix))]
+    let mut child = seagent_core::platform::proc::spawn_in_group(&mut cmd, false).map_err(|e| format!("cannot start MeowCaller: {e}"))?;
     let out = Arc::new(Mutex::new(Vec::new()));
     let mut readers = Vec::new();
     for r in [child.stdout.take().map(|s| Box::new(s) as Box<dyn Read + Send>), child.stderr.take().map(|s| Box::new(s) as Box<dyn Read + Send>)].into_iter().flatten() {
@@ -304,9 +310,12 @@ fn run_bounded(argv: &[String], cwd: &Path, window: Duration, cancel: &seagent_c
         let why = if cancel.is_cancelled() { Some(Ended::Cancelled) } else if Instant::now() >= until { Some(Ended::Timeout) } else { None };
         if let Some(w) = why {
             // SAFETY: kill(2) on the child's own process group.
+            #[cfg(unix)]
             unsafe {
                 libc::kill(-pid, libc::SIGKILL);
             }
+            #[cfg(not(unix))]
+            seagent_core::platform::proc::kill_group(pid, Duration::ZERO);
             let _ = child.wait();
             break w;
         }
@@ -382,8 +391,13 @@ impl Call {
         let audio = tmp.join("message.wav");
         let res = (|| {
             {
-                use std::os::unix::fs::OpenOptionsExt;
-                let mut f = std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(&audio).map_err(|e| e.to_string())?;
+                #[cfg(unix)]
+                let mut f = {
+                    use std::os::unix::fs::OpenOptionsExt;
+                    std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(&audio).map_err(|e| e.to_string())?
+                };
+                #[cfg(not(unix))]
+                let mut f = seagent_core::platform::fs_private::open_private(&audio, seagent_core::platform::fs_private::OpenMode::CreateNew).map_err(|e| e.to_string())?;
                 std::io::Write::write_all(&mut f, &wav).map_err(|e| e.to_string())?;
             }
             let argv: Vec<String> = [bin.display().to_string(), "notify".into(), "--store".into(), store.display().to_string(), "--answer-timeout".into(), "45s".into(), "--max-duration".into(), "65s".into(), target.into(), audio.display().to_string()].into();

@@ -375,7 +375,12 @@ impl BrowserConfig {
     pub fn no_sandbox(&self) -> bool {
         match &self.no_sandbox {
             toml::Value::Boolean(b) => *b,
+            #[cfg(unix)]
             _ => (unsafe { libc::geteuid() }) == 0 || std::path::Path::new("/.dockerenv").exists() || std::fs::read_to_string("/proc/1/cgroup").is_ok_and(|c| c.contains("docker") || c.contains("kubepods")) || apparmor_restricts_userns(),
+            // Windows: Chromium's sandbox (restricted token + job + desktop) works for every
+            // account, including elevated ones, so it stays on unless configured off.
+            #[cfg(not(unix))]
+            _ => false,
         }
     }
 }

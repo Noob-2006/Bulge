@@ -27,6 +27,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, HashMap};
 use std::io::{BufRead, BufReader, Read as _, Write};
+#[cfg(unix)]
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
@@ -265,6 +266,7 @@ pub fn command_line(spec: &AgentSpec) -> String {
 /// Own process group: kill reaches a terminal's children, and the terminal's
 /// Ctrl-C doesn't hit the agent. (No PDEATHSIG: it fires when the spawning
 /// *thread* ends; agents exit on stdin EOF instead.)
+#[cfg(unix)]
 fn own_group(cmd: &mut Command) {
     // SAFETY: only async-signal-safe calls between fork and exec.
     unsafe {
@@ -273,6 +275,21 @@ fn own_group(cmd: &mut Command) {
             Ok(())
         });
     }
+}
+
+/// Windows: a new console process group (Ctrl-C in our console skips it); [`adopt`] after the
+/// spawn puts the tree in a Job Object so `kill_term` reaches its children.
+#[cfg(not(unix))]
+fn own_group(cmd: &mut Command) {
+    seagent_core::platform::proc::new_group(cmd, false);
+}
+
+/// Windows: the Job Object half of [`own_group`] (Unix: the process group already is the unit).
+fn adopt(child: &std::process::Child) {
+    #[cfg(not(unix))]
+    let _ = seagent_core::platform::proc::adopt(child);
+    #[cfg(unix)]
+    let _ = child;
 }
 
 impl AcpClient {
@@ -286,6 +303,7 @@ impl AcpClient {
         // Out of the terminal's group: Ctrl-C becomes session/cancel, not a dead agent.
         own_group(&mut cmd);
         let mut child = cmd.spawn().map_err(|e| format!("cannot start ACP agent `{name}` ({}): {e}", command_line(spec)))?;
+        adopt(&child);
         let stdin = child.stdin.take().ok_or("no stdin")?;
         let stdout = child.stdout.take().ok_or("no stdout")?;
         let mut stderr = child.stderr.take().ok_or("no stderr")?;
@@ -645,9 +663,8 @@ fn terminal_create(st: &State, p: &Value) -> RpcResult {
         return Err((-32000, format!("running `{line}` was not permitted (permission mode)")));
     }
     let mut cmd = if args.is_empty() {
-        let mut c = Command::new("/bin/sh");
-        c.arg("-c").arg(command);
-        c
+        // `/bin/sh -c` (Windows: this machine's shell, `seagent_core::platform::shell`).
+        seagent_core::platform::shell::command(seagent_core::platform::shell::Style::BinSh, command)
     } else {
         let mut c = Command::new(command);
         c.args(&args);
@@ -662,6 +679,7 @@ fn terminal_create(st: &State, p: &Value) -> RpcResult {
     }
     own_group(&mut cmd);
     let mut child = cmd.spawn().map_err(|e| (-32603, format!("{line}: {e}")))?;
+    adopt(&child);
     let limit = p["outputByteLimit"].as_u64().unwrap_or(1 << 20).max(1) as usize;
     let out: Arc<Mutex<(String, bool)>> = Arc::default();
     let pipes: Vec<Box<dyn std::io::Read + Send>> = vec![Box::new(child.stdout.take().unwrap()), Box::new(child.stderr.take().unwrap())];
@@ -697,14 +715,20 @@ fn poll_term(t: &Term) -> Option<(Option<i32>, Option<String>)> {
     if let Some(s) = t.status.lock().unwrap().clone() {
         return Some(s);
     }
-    use std::os::unix::process::ExitStatusExt;
     let st = t.child.lock().unwrap().try_wait().ok().flatten()?;
-    let s = (st.code(), st.signal().map(|n| match n {
-        9 => "SIGKILL".to_string(),
-        15 => "SIGTERM".to_string(),
-        2 => "SIGINT".to_string(),
-        n => format!("SIG{n}"),
-    }));
+    #[cfg(unix)]
+    let s = {
+        use std::os::unix::process::ExitStatusExt;
+        (st.code(), st.signal().map(|n| match n {
+            9 => "SIGKILL".to_string(),
+            15 => "SIGTERM".to_string(),
+            2 => "SIGINT".to_string(),
+            n => format!("SIG{n}"),
+        }))
+    };
+    // Windows has no signals: every exit is a code.
+    #[cfg(not(unix))]
+    let s: (Option<i32>, Option<String>) = (st.code(), None);
     // Let the pipe readers drain what the process wrote last.
     std::thread::sleep(Duration::from_millis(30));
     *t.status.lock().unwrap() = Some(s.clone());
@@ -715,9 +739,12 @@ fn kill_term(t: &Term) {
     if poll_term(t).is_none() {
         let pid = t.child.lock().unwrap().id() as i32;
         // SAFETY: plain syscall; negative pid = the terminal's process group.
+        #[cfg(unix)]
         unsafe {
             libc::kill(-pid, libc::SIGKILL);
         }
+        #[cfg(not(unix))]
+        seagent_core::platform::proc::kill_group(pid, Duration::ZERO);
         let _ = t.child.lock().unwrap().wait();
         poll_term(t);
     }

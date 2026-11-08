@@ -331,12 +331,17 @@ pub fn accounts(data: &Path) -> Vec<ServiceAccount> {
 }
 
 fn save_accounts(data: &Path, v: &[ServiceAccount]) -> Result<(), String> {
-    use std::os::unix::fs::PermissionsExt;
     let p = accounts_path(data);
     std::fs::create_dir_all(p.parent().unwrap()).map_err(|e| e.to_string())?;
     let tmp = p.with_extension("tmp");
     std::fs::write(&tmp, serde_json::to_string_pretty(v).unwrap_or_default()).map_err(|e| e.to_string())?;
-    let _ = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600));
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600));
+    }
+    #[cfg(not(unix))]
+    let _ = seagent_core::platform::fs_private::set_private(&tmp);
     std::fs::rename(&tmp, &p).map_err(|e| e.to_string())
 }
 

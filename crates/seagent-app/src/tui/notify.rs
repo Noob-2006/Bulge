@@ -49,9 +49,12 @@ pub fn sequence(env: &HashMap<String, String>, context: &str, prompt: bool, sess
     s
 }
 
+/// The controlling terminal (Windows: the console's screen buffer).
+const TTY: &str = if cfg!(windows) { "CONOUT$" } else { "/dev/tty" };
+
 /// Write raw escapes to `/dev/tty`, falling back to stdout. Never fails.
 pub fn write_tty(seq: &str) {
-    if let Ok(mut f) = std::fs::OpenOptions::new().write(true).open("/dev/tty") {
+    if let Ok(mut f) = std::fs::OpenOptions::new().write(true).open(TTY) {
         if f.write_all(seq.as_bytes()).is_ok() {
             return;
         }

@@ -388,9 +388,19 @@ impl RouteTable {
     /// Re-read the subscriptions file when its identity (inode, size, mtime) changed;
     /// a malformed file keeps the last good snapshot.
     fn reload(&mut self, id: &str, listen: &str, secret: &Option<String>) {
-        use std::os::unix::fs::MetadataExt;
         let Some(p) = &self.subs else { return };
-        let key = std::fs::metadata(p).ok().map(|m| (m.ino(), m.len(), m.mtime(), m.mtime_nsec()));
+        #[cfg(unix)]
+        let key = {
+            use std::os::unix::fs::MetadataExt;
+            std::fs::metadata(p).ok().map(|m| (m.ino(), m.len(), m.mtime(), m.mtime_nsec()))
+        };
+        // No portable inode: size + mtime (the writer renames a fresh temp file into place,
+        // which always moves the mtime).
+        #[cfg(not(unix))]
+        let key = std::fs::metadata(p).ok().map(|m| {
+            let t = m.modified().ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).unwrap_or_default();
+            (0, m.len(), t.as_secs() as i64, t.subsec_nanos() as i64)
+        });
         if key == self.stat {
             return;
         }
@@ -1005,9 +1015,28 @@ fn run_script(dir: Option<&Path>, script: &str, payload: &Value, timeout: Durati
     if !path.starts_with(&root) || !path.is_file() {
         return fail(format!("script path resolves outside {} or is not a file", root.display()));
     }
+    #[cfg(unix)]
     let mut cmd = match path.extension().and_then(|e| e.to_str()).map(str::to_ascii_lowercase).as_deref() {
         Some("py") => Command::new("python3"),
         Some("sh" | "bash") => Command::new("bash"),
+        _ => Command::new(&path),
+    };
+    #[cfg(not(unix))]
+    let mut cmd = match path.extension().and_then(|e| e.to_str()).map(str::to_ascii_lowercase).as_deref() {
+        Some("py") => {
+            use seagent_core::platform::layout::which;
+            match which("python3").or_else(|| which("python")).or_else(|| which("py")) {
+                Some(p) => Command::new(p),
+                None => return fail("python script but no python3 / python / py on PATH".into()),
+            }
+        }
+        Some("sh" | "bash") => {
+            let sh = seagent_core::platform::shell::active();
+            if !sh.kind.is_posix() {
+                return fail(format!("{} needs bash (Git for Windows or MSYS2); this machine's shell is {}", path.display(), sh.kind.as_str()));
+            }
+            Command::new(&sh.program)
+        }
         _ => Command::new(&path),
     };
     if cmd.get_program() != path.as_os_str() {
@@ -1019,14 +1048,30 @@ fn run_script(dir: Option<&Path>, script: &str, payload: &Value, timeout: Durati
             cmd.env(k, v);
         }
     }
+    // Windows programs cannot start (or find their profile / temp dir) without these.
+    #[cfg(windows)]
+    for k in ["SYSTEMROOT", "WINDIR", "USERPROFILE", "TEMP", "TMP", "PATHEXT", "COMSPEC"] {
+        if let Ok(v) = std::env::var(k) {
+            cmd.env(k, v);
+        }
+    }
+    #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
         cmd.process_group(0);
     }
+    #[cfg(not(unix))]
+    seagent_core::platform::proc::new_group(&mut cmd, false);
     let mut child = match cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn() {
         Ok(c) => c,
         Err(e) => return fail(format!("cannot run {}: {e}", path.display())),
     };
+    #[cfg(not(unix))]
+    if let Err(e) = seagent_core::platform::proc::adopt(&child) {
+        let _ = child.kill();
+        let _ = child.wait();
+        return fail(format!("cannot contain {}: {e}", path.display()));
+    }
     let (mut stdin, stdout, stderr) = (child.stdin.take()?, child.stdout.take()?, child.stderr.take()?);
     let input = payload.to_string();
     std::thread::spawn(move || {
@@ -1047,7 +1092,12 @@ fn run_script(dir: Option<&Path>, script: &str, payload: &Value, timeout: Durati
             Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(10)),
             _ => {
                 // SAFETY: signalling the process group we created for this child.
-                unsafe { libc::kill(-(child.id() as i32), libc::SIGKILL) };
+                #[cfg(unix)]
+                unsafe {
+                    libc::kill(-(child.id() as i32), libc::SIGKILL)
+                };
+                #[cfg(not(unix))]
+                seagent_core::platform::proc::kill_group(child.id() as i32, Duration::ZERO);
                 let _ = child.wait();
                 return fail(format!("script timed out: {}", path.display()));
             }
@@ -1087,12 +1137,11 @@ pub fn subscriptions_path(state_dir: &Path, channel: &str) -> PathBuf {
 }
 
 fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
-    use std::os::unix::fs::OpenOptionsExt;
     if let Some(d) = path.parent() {
         std::fs::create_dir_all(d)?;
     }
     let tmp = path.with_extension(format!("tmp{}", std::process::id()));
-    let mut f = std::fs::OpenOptions::new().create(true).truncate(true).write(true).mode(0o600).open(&tmp)?;
+    let mut f = crate::open_private_tmp(&tmp)?;
     f.write_all(bytes)?;
     f.sync_all()?;
     std::fs::rename(&tmp, path) // new inode: the listener's stat check sees it

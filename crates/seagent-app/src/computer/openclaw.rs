@@ -571,13 +571,17 @@ impl Desk for NativeDesk {
         if let Some(w) = p["windowRef"].as_str() {
             a11y::act(&json!({"action": "bring_to_front", "windowRef": w}))?;
         }
-        let b = self.input.ok_or(native::NO_INPUT)?;
-        let out = native::run_steps(b, p, self.t)?;
+        // Windows / macOS: OS-native input (SendInput / CGEvent) when no xdotool / ydotool.
+        let (out, backend) = match self.input {
+            Some(b) => (native::run_steps(b, p, self.t)?, format!("{b:?}").to_lowercase()),
+            None if native::os_input() => (native::run_os(p, self.t)?, "os".to_string()),
+            None => return Err(native::NO_INPUT.into()),
+        };
         if action == "get_cursor_position" {
             let get = |k: &str| out.lines().find_map(|l| l.strip_prefix(k)).and_then(|v| v.trim().parse::<i64>().ok());
             return Ok(json!({"ok": true, "details": {"x": get("X="), "y": get("Y=")}}));
         }
-        Ok(json!({"ok": true, "effect": "unverifiable", "route": "global_input", "backend": format!("{b:?}").to_lowercase()}))
+        Ok(json!({"ok": true, "effect": "unverifiable", "route": "global_input", "backend": backend}))
     }
 }
 

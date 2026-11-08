@@ -209,8 +209,13 @@ impl Pairing {
 
     fn save(&self, st: &PairState) {
         if write_atomic(&self.path, serde_json::to_string(st).unwrap_or_default().as_bytes()).is_ok() {
-            use std::os::unix::fs::PermissionsExt;
-            let _ = std::fs::set_permissions(&self.path, std::fs::Permissions::from_mode(0o600));
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let _ = std::fs::set_permissions(&self.path, std::fs::Permissions::from_mode(0o600));
+            }
+            #[cfg(not(unix))]
+            let _ = seagent_core::platform::fs_private::set_private(&self.path);
             *self.seen.lock().unwrap() = std::fs::metadata(&self.path).and_then(|m| m.modified()).ok();
         }
     }

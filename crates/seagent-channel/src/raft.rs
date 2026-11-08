@@ -282,6 +282,10 @@ fn spawn_bridge(cmd: &BridgeCmd, profile: &str, endpoint: &str, token: &str) -> 
             Ok(())
         });
     }
+    // Windows: a kill-on-close Job Object stands in for the group and PDEATHSIG.
+    #[cfg(not(unix))]
+    return seagent_core::platform::proc::spawn_in_group(&mut c, false);
+    #[cfg(unix)]
     c.spawn()
 }
 
@@ -291,8 +295,9 @@ fn kill_group(child: &mut Child) {
     unsafe {
         libc::kill(-pid, libc::SIGTERM);
     }
+    // CTRL_BREAK, then the whole job after the same 5 s.
     #[cfg(not(unix))]
-    let _ = child.kill();
+    seagent_core::platform::proc::kill_group(pid, Duration::from_secs(5));
     let until = Instant::now() + Duration::from_secs(5);
     while Instant::now() < until {
         if matches!(child.try_wait(), Ok(Some(_))) {

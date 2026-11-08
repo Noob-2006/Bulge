@@ -23,5 +23,11 @@ serde_json.workspace = true
 toml.workspace = true
 ureq.workspace = true
 regex.workspace = true
-libc.workspace = true
 ring.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
+
+# The vault's masked console prompt (CONIN$ echo off).
+[target.'cfg(windows)'.dependencies]
+windows-sys = { workspace = true }

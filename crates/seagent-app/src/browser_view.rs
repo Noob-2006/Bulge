@@ -198,8 +198,14 @@ fn host_input(home: &Path, e: &Value) -> Result<Value, (i64, String)> {
         I::Drag { from, to, .. } => json!({"action": "left_click_drag", "fromX": from.0, "fromY": from.1, "x": to.0, "y": to.1}),
     };
     let env = seagent_browser::control::screen::Desktop::new(home).published_env();
-    let tool = crate::computer::native::input_tool("auto", &env).ok_or_else(|| (-32001, crate::computer::native::NO_INPUT.to_string()))?;
-    crate::node::with_env(&env, || crate::computer::native::run_steps(tool, &p, std::time::Duration::from_secs(10))).map_err(|m| (-32000, m))?;
+    use crate::computer::native;
+    let t = std::time::Duration::from_secs(10);
+    match native::input_tool("auto", &env) {
+        Some(tool) => crate::node::with_env(&env, || native::run_steps(tool, &p, t)).map_err(|m| (-32000, m))?,
+        // Windows / macOS: SendInput / CGEvent.
+        None if native::os_input() => native::run_os(&p, t).map_err(|m| (-32000, m))?,
+        None => return Err((-32001, native::NO_INPUT.to_string())),
+    };
     Ok(json!({"ok": true, "type": ev.kind()}))
 }
 

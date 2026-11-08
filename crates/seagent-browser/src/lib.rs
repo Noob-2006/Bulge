@@ -21,6 +21,7 @@ pub mod extension;
 pub mod extension;
 pub mod keys;
 pub mod launch;
+pub mod launch_os;
 pub mod lease;
 pub mod manager;
 pub mod openclaw;

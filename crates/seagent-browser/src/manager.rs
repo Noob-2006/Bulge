@@ -127,6 +127,10 @@ pub fn desktop_env(home: &Path) -> Vec<(String, String)> {
 }
 
 fn has_display(env: &[(String, String)]) -> bool {
+    // Windows / macOS: the logged-in desktop session is the display (no DISPLAY variable).
+    if cfg!(any(windows, target_os = "macos")) {
+        return true;
+    }
     env.iter().any(|(k, _)| k == "DISPLAY") || std::env::var_os("DISPLAY").is_some() || std::env::var_os("WAYLAND_DISPLAY").is_some()
 }
 

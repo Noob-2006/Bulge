@@ -1,6 +1,7 @@
-//! Native Linux driver: xdotool (X11) / ydotool (Wayland) input, `import`/`grim` captures and
-//! AT-SPI accessibility — the same code the paired-node `computer.act` runs (`node.rs`,
-//! `node/a11y.rs`), here on the gateway itself. Every command runs under the env the caller
+//! Native driver: on Linux xdotool (X11) / ydotool (Wayland) input, `import`/`grim` captures and
+//! AT-SPI accessibility; on Windows `SendInput` + GDI captures, on macOS CGEvent / cliclick +
+//! `screencapture` (`node::host_os`, no accessibility tree yet) — the same code the paired-node
+//! `computer.act` runs (`node.rs`, `node/a11y.rs`), here on the gateway itself. Every command runs under the env the caller
 //! applies with `node::with_env` (the Bot Desktop's DISPLAY / XAUTHORITY / session bus).
 //!
 //! Input is global XTest/uinput injection: there is no background (focus-preserving)
@@ -25,7 +26,33 @@ pub fn which_in(env: &[(String, String)], bin: &str) -> Option<PathBuf> {
     env_get(env, "PATH").and_then(|p| std::env::split_paths(&p).map(|d| d.join(bin)).find(|f| f.is_file()))
 }
 
+/// Windows / macOS drive input natively (`node::host_os`: SendInput / CGEvent), never
+/// through xdotool or ydotool.
+#[cfg(any(windows, target_os = "macos"))]
+pub fn input_tool(_backend: &str, _env: &[(String, String)]) -> Option<Input> {
+    None
+}
+
+/// Is OS-native input available (Windows / macOS) when [`input_tool`] finds no tool?
+pub fn os_input() -> bool {
+    cfg!(any(windows, target_os = "macos"))
+}
+
+/// One `computer.act` step through the OS-native input ([`os_input`]).
+pub fn run_os(p: &Value, t: Duration) -> Result<String, String> {
+    #[cfg(any(windows, target_os = "macos"))]
+    {
+        node::host_os::act(p, t)
+    }
+    #[cfg(not(any(windows, target_os = "macos")))]
+    {
+        let _ = (p, t);
+        Err(NO_INPUT.into())
+    }
+}
+
 /// The input tool for `backend` (auto/native: ydotool on Wayland, xdotool with a DISPLAY).
+#[cfg(not(any(windows, target_os = "macos")))]
 pub fn input_tool(backend: &str, env: &[(String, String)]) -> Option<Input> {
     let (x, y) = (which_in(env, "xdotool").is_some(), which_in(env, "ydotool").is_some());
     match backend {
@@ -43,7 +70,10 @@ pub fn input_tool(backend: &str, env: &[(String, String)]) -> Option<Input> {
     }
 }
 
+#[cfg(not(target_os = "ios"))]
 pub const NO_INPUT: &str = "no input tool: install xdotool (X11) or ydotool (Wayland, needs ydotoold), or install cua-driver (`seagent computer-use install`)";
+#[cfg(target_os = "ios")]
+pub const NO_INPUT: &str = "desktop input is not available on iOS (no input injection from an app); use a paired computer node";
 
 /// Run the commands of one `computer.act` step (node.rs `computer_argv`).
 pub fn run_steps(b: Input, p: &Value, t: Duration) -> Result<String, String> {
@@ -55,7 +85,14 @@ pub fn run_steps(b: Input, p: &Value, t: Duration) -> Result<String, String> {
     Ok(out)
 }
 
+/// A region of the desktop (Windows / macOS: the screenshot, cropped in memory).
+#[cfg(any(windows, target_os = "macos"))]
+pub fn crop(_env: &[(String, String)], x: i64, y: i64, w: i64, h: i64, t: Duration) -> Result<Vec<u8>, String> {
+    node::host_os::crop(x, y, w, h, t)
+}
+
 /// A region of the desktop (`import -crop` / `grim -g`), for OpenClaw `zoom`.
+#[cfg(not(any(windows, target_os = "macos")))]
 pub fn crop(env: &[(String, String)], x: i64, y: i64, w: i64, h: i64, t: Duration) -> Result<Vec<u8>, String> {
     if w <= 0 || h <= 0 {
         return Err("zoom region must have x2 > x1 and y2 > y1".into());
@@ -144,12 +181,16 @@ impl NativeBackend {
         if let Err(r) = self.raise(d, action) {
             return *r;
         }
-        let Some(b) = self.input else { return ActionResult::refuse(action, NO_INPUT).code("background_unavailable") };
-        match run_steps(b, &p, self.t) {
+        let (ran, path) = match self.input {
+            Some(b) => (run_steps(b, &p, self.t), format!("{}_global", format!("{b:?}").to_lowercase())),
+            None if os_input() => (run_os(&p, self.t), "os_global".to_string()),
+            None => return ActionResult::refuse(action, NO_INPUT).code("background_unavailable"),
+        };
+        match ran {
             Ok(_) => {
                 let mut r = ActionResult::ok(action, "");
                 r.effect = Some("unverifiable".into());
-                r.path = Some(format!("{}_global", format!("{b:?}").to_lowercase()));
+                r.path = Some(path);
                 r.delivery_mode = d.mode.clone();
                 r.meta.insert("note".into(), json!("native input is injected globally (XTest/uinput); there is no background routing"));
                 r

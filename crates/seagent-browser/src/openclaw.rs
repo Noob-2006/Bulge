@@ -506,9 +506,10 @@ pub fn doctor(env: &Env, profile: Option<&str>) -> Value {
                 Err(e) => add("managed-executable", "Chromium executable", "fail", e, Some("Install Chrome/Chromium/Brave/Edge or set browser.executable.")),
             }
             add("headless-mode", "Headless mode", "info", if cfg.headless { "Managed browsers use headless mode by default".into() } else { "Managed browsers run headed".into() }, None);
-            if !cfg.headless && std::env::var_os("DISPLAY").is_none() && std::env::var_os("WAYLAND_DISPLAY").is_none() && manager::desktop_env(&env.home).is_empty() {
+            if !cfg!(any(windows, target_os = "macos")) && !cfg.headless && std::env::var_os("DISPLAY").is_none() && std::env::var_os("WAYLAND_DISPLAY").is_none() && manager::desktop_env(&env.home).is_empty() {
                 add("display", "Display", "warn", "No DISPLAY or WAYLAND_DISPLAY is set while headed mode is selected (browser.headless = false). Managed browser launch needs a desktop session, `seagent screen start`, or browser.headless = true.".into(), None);
             }
+            #[cfg(unix)]
             if (unsafe { libc::geteuid() }) == 0 && cfg.no_sandbox == toml::Value::Boolean(false) {
                 add("linux-sandbox", "Linux sandbox", "warn", "Running as root while browser.no_sandbox is false".into(), Some("Set browser.no_sandbox = true for container/root Chromium runtimes."));
             }

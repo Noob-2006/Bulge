@@ -713,15 +713,28 @@ pub(crate) fn sleep_cancellable(d: Duration, cancel: &Cancel) -> bool {
 /// Atomic write with 0600 permissions (key material, encrypted stores).
 pub(crate) fn write_private(path: &std::path::Path, data: &[u8]) -> std::io::Result<()> {
     use std::io::Write;
-    use std::os::unix::fs::OpenOptionsExt;
     if let Some(d) = path.parent() {
         std::fs::create_dir_all(d)?;
     }
     let tmp = path.with_extension(format!("tmp{}", std::process::id()));
-    let mut f = std::fs::OpenOptions::new().write(true).create(true).truncate(true).mode(0o600).open(&tmp)?;
+    let mut f = open_private_tmp(&tmp)?;
     f.write_all(data)?;
     f.sync_all()?;
     std::fs::rename(&tmp, path)
+}
+
+/// Create/truncate `tmp` for writing, owner-only from the first byte: mode `0600` on Unix,
+/// an owner-only DACL elsewhere (`seagent_core::platform::fs_private`).
+pub(crate) fn open_private_tmp(tmp: &std::path::Path) -> std::io::Result<std::fs::File> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        std::fs::OpenOptions::new().write(true).create(true).truncate(true).mode(0o600).open(tmp)
+    }
+    #[cfg(not(unix))]
+    {
+        seagent_core::platform::fs_private::open_private(tmp, seagent_core::platform::fs_private::OpenMode::Truncate)
+    }
 }
 
 pub(crate) fn write_atomic(path: &std::path::Path, data: &[u8]) -> std::io::Result<()> {

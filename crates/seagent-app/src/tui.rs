@@ -165,46 +165,30 @@ fn fit(s: &str, width: usize) -> String {
     out
 }
 
+/// Raw mode (`seagent_core::platform::term`: termios `cfmakeraw`, `VMIN 0` / `VTIME 1` on Unix;
+/// console modes with VT input/output on Windows) plus the alternate screen.
 struct Raw {
-    orig: libc::termios,
-    raw: libc::termios,
+    mode: seagent_core::platform::term::RawMode,
 }
 
 impl Raw {
     fn enter() -> std::io::Result<Raw> {
-        // SAFETY: plain termios calls on stdin.
-        unsafe {
-            let mut t: libc::termios = std::mem::zeroed();
-            if libc::tcgetattr(0, &mut t) != 0 {
-                return Err(std::io::Error::last_os_error());
-            }
-            let orig = t;
-            libc::cfmakeraw(&mut t);
-            t.c_cc[libc::VMIN] = 0;
-            t.c_cc[libc::VTIME] = 1;
-            libc::tcsetattr(0, libc::TCSANOW, &t);
-            print!("\x1b[?1049h\x1b[?25l\x1b[?2004h");
-            let _ = std::io::stdout().flush();
-            Ok(Raw { orig, raw: t })
-        }
+        let mode = seagent_core::platform::term::RawMode::enter()?;
+        print!("\x1b[?1049h\x1b[?25l\x1b[?2004h");
+        let _ = std::io::stdout().flush();
+        Ok(Raw { mode })
     }
 
     /// Hand the terminal back for `$EDITOR` (`/prompt`): cooked mode, normal screen.
     fn suspend(&self) {
-        // SAFETY: restore the saved terminal state.
-        unsafe {
-            libc::tcsetattr(0, libc::TCSANOW, &self.orig);
-        }
+        self.mode.suspend();
         print!("\x1b[?2004l\x1b[?25h\x1b[?1049l\x1b[0m");
         let _ = std::io::stdout().flush();
     }
 
     /// Take the alternate screen and raw mode back after the editor exits.
     fn resume(&self) {
-        // SAFETY: re-apply the raw termios captured in `enter`.
-        unsafe {
-            libc::tcsetattr(0, libc::TCSANOW, &self.raw);
-        }
+        self.mode.resume();
         print!("\x1b[?1049h\x1b[?25l\x1b[?2004h\x1b[2J\x1b[3J\x1b[H");
         let _ = std::io::stdout().flush();
     }
@@ -212,24 +196,18 @@ impl Raw {
 
 impl Drop for Raw {
     fn drop(&mut self) {
-        // SAFETY: restore the saved terminal state.
-        unsafe {
-            libc::tcsetattr(0, libc::TCSANOW, &self.orig);
-        }
+        // Cooked mode first, then the normal screen (the RawMode field restores it again, a no-op).
+        self.mode.suspend();
         print!("\x1b[?2004l\x1b[?25h\x1b[?1049l\x1b[0m");
         let _ = std::io::stdout().flush();
     }
 }
 
 fn term_size() -> (usize, usize) {
-    // SAFETY: TIOCGWINSZ fills a winsize struct.
-    unsafe {
-        let mut ws: libc::winsize = std::mem::zeroed();
-        if libc::ioctl(1, libc::TIOCGWINSZ, &mut ws) == 0 && ws.ws_col > 0 {
-            return (ws.ws_col as usize, ws.ws_row as usize);
-        }
+    match seagent_core::platform::term::window_size() {
+        Some((c, r)) => (c as usize, r as usize),
+        None => (100, 30),
     }
-    (100, 30)
 }
 
 /// One drawn transcript row: text, colour, and an optional image escape.
@@ -789,6 +767,11 @@ pub fn run(sock: &Path, workspace: &Path, yolo: bool) -> Result<(), String> {
         }
         let _ = out.write_all(draw(&mut st).as_bytes());
         let _ = out.flush();
+        // Windows consoles have no VTIME: wait up to the same 100 ms for input before reading.
+        #[cfg(windows)]
+        if !seagent_core::platform::term::wait_stdin(Duration::from_millis(100)) {
+            continue;
+        }
         let n = std::io::stdin().read(&mut buf).unwrap_or(0);
         if n == 0 {
             std::thread::sleep(Duration::from_millis(30));
