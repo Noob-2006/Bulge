@@ -9,7 +9,7 @@ use super::settings::Settings;
 use regex::Regex;
 use std::io::Read;
 use std::path::Path;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
@@ -54,10 +54,11 @@ pub fn elide(s: &str, max: usize) -> String {
     format!("{}\n[… {} chars elided …]\n{}", &s[..a], z - a, &s[z..])
 }
 
-/// Run one snippet with `bash -c`; stdout (stderr when stdout is empty), trimmed and capped.
+/// Run one snippet with `bash -c` (Windows: this machine's shell, `seagent_core::platform::shell`);
+/// stdout (stderr when stdout is empty), trimmed and capped.
 pub fn run_inline_shell(command: &str, cwd: Option<&Path>, timeout: u64) -> String {
-    let mut c = Command::new("bash");
-    c.arg("-c").arg(command).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    let mut c = seagent_core::platform::shell::command(seagent_core::platform::shell::Style::Bash, command);
+    c.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
     if let Some(d) = cwd {
         c.current_dir(d);
     }

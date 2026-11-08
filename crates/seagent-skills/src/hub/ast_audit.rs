@@ -298,7 +298,10 @@ mod tests {
         std::fs::write(d.join("pkg/ok.py"), "m = __import__(name)\n").unwrap();
         std::fs::write(d.join("pkg/notes.md"), "__import__(name)\n").unwrap();
         std::fs::write(d.join("pkg/data.txt"), "__import__(name)\n").unwrap();
+        #[cfg(unix)]
         let _ = std::os::unix::fs::symlink(&d, d.join("pkg/loop"));
+        #[cfg(windows)]
+        let _ = std::os::windows::fs::symlink_dir(&d, d.join("pkg/loop"));
         let f = scan_path(&d);
         assert_eq!(f.len(), 1, "{f:?}");
         assert_eq!(f[0].0, "pkg/ok.py");

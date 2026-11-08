@@ -748,7 +748,6 @@ name = "seagent-skills"
 version = "0.1.0"
 dependencies = [
  "base64",
- "libc",
  "miniz_oxide 0.9.1",
  "regex",
  "ring",
