@@ -249,7 +249,8 @@ pub struct VmBackend {
     main: bool,
     read_only: bool,
     /// Namespace fallback, used when no microVM can boot here.
-    fallback: Option<super::local::BwrapBackend>,
+    /// (bwrap on Linux / Android, Seatbelt on macOS; none in this build on Windows.)
+    fallback: Option<Arc<dyn ExecBackend>>,
     isolation: IsolationLevel,
     warning: Option<String>,
 }
@@ -266,8 +267,17 @@ impl VmBackend {
         let fallback = if kind.is_vm() {
             None
         } else {
-            // Explicit, logged downgrade: the same bwrap sandbox seagent already had.
-            Some(super::local::BwrapBackend::new(&super::global().cfg.bwrap, sb, ctx)?)
+            // Explicit, logged downgrade: the same OS sandbox seagent already had (bwrap).
+            let name = if cfg!(any(target_os = "linux", target_os = "android")) {
+                "bwrap"
+            } else if cfg!(target_os = "macos") {
+                "seatbelt"
+            } else {
+                "appcontainer"
+            };
+            let mut cfg = super::global().cfg.clone();
+            cfg.sandbox = sb.clone();
+            Some(super::os_sandbox(name, &cfg, ctx)?)
         };
         let tier = tier_of(&ctx.scope_key, !ctx.sandboxed);
         // Same rule as the bwrap layout: `workspace_access = "none"` means a
@@ -343,8 +353,8 @@ impl ExecBackend for VmBackend {
     }
     fn describe(&self) -> String {
         match (&self.fallback, &self.warning) {
-            (Some(_), Some(w)) => format!("vm: microVM unavailable, running in a namespace sandbox (bwrap). {w}"),
-            (Some(_), None) => "vm: microVM unavailable, running in a namespace sandbox (bwrap)".into(),
+            (Some(f), Some(w)) => format!("vm: microVM unavailable, running in a namespace sandbox ({}). {w}", f.id()),
+            (Some(f), None) => format!("vm: microVM unavailable, running in a namespace sandbox ({})", f.id()),
             (None, Some(w)) => format!("vm: {} ({} isolation); {w}", self.mgr.status().iter().map(|s| s.provider.clone()).next().unwrap_or_else(|| "microVM".into()), self.isolation.label()),
             (None, None) => format!(
                 "vm: commands run inside a microVM ({} isolation) with a {} copy of the workspace; no host socket, no keys, snapshots on",

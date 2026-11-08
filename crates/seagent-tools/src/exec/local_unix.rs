@@ -12,7 +12,9 @@ use super::local::{proc_start_time, register_child, PreExec};
 use seagent_core::exec::{ExecChild, ExecRequest, ExitInfo};
 use std::fs::File;
 use std::io::{self, Read, Seek, SeekFrom, Write};
-use std::os::fd::{AsFd, AsRawFd, FromRawFd, OwnedFd, RawFd};
+#[cfg(any(target_os = "linux", target_os = "android"))]
+use std::os::fd::FromRawFd;
+use std::os::fd::{AsFd, AsRawFd, OwnedFd, RawFd};
 use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};

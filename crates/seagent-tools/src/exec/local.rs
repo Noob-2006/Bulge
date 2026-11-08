@@ -367,7 +367,9 @@ impl Default for BwrapConfig {
 }
 
 /// Mount layout shared by the OS sandboxes (bwrap, Landlock, Seatbelt, AppContainer): the
-/// workspace (or its private scratch copy) is the only user data visible.
+/// workspace (or its private scratch copy) is the only user data visible. Unused where the
+/// OS has no sandbox backend in this build (Windows, iOS).
+#[cfg_attr(not(any(target_os = "linux", target_os = "android", target_os = "macos")), allow(dead_code))]
 pub(super) struct Layout {
     pub workspace: PathBuf,
     pub writable: bool,
@@ -376,6 +378,7 @@ pub(super) struct Layout {
     pub network: bool,
 }
 
+#[cfg_attr(not(any(target_os = "linux", target_os = "android", target_os = "macos")), allow(dead_code))]
 pub(super) fn layout(sb: &SandboxConfig, ctx: &BackendCtx) -> Result<Layout, String> {
     // `[exec] credential_files` are relative to the user's home, as configured.
     let home = super::sandbox::host_home();
@@ -383,6 +386,7 @@ pub(super) fn layout(sb: &SandboxConfig, ctx: &BackendCtx) -> Result<Layout, Str
 }
 
 /// [`layout`] with the credential entries and the user's home spelled out (tests, embedders).
+#[cfg_attr(not(any(target_os = "linux", target_os = "android", target_os = "macos")), allow(dead_code))]
 pub(super) fn layout_with(sb: &SandboxConfig, ctx: &BackendCtx, creds: &[String], host_home: &Path) -> Result<Layout, String> {
     let (workspace, writable) = match (ctx.sandboxed, sb.workspace_access.as_str()) {
         (true, "none") => {

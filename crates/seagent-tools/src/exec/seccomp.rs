@@ -24,8 +24,18 @@ const AUDIT_ARCH: u32 = 0xc000_003e;
 #[cfg(target_arch = "aarch64")]
 const AUDIT_ARCH: u32 = 0xc000_00b7;
 
+/// `kexec_file_load`: the libc crate names it on Linux but not for Android (bionic), where
+/// the kernel has the same number (x86_64 320, aarch64 294).
+#[cfg(all(target_os = "linux", any(target_arch = "x86_64", target_arch = "aarch64")))]
+const SYS_KEXEC_FILE_LOAD: i64 = libc::SYS_kexec_file_load;
+#[cfg(all(target_os = "android", target_arch = "x86_64"))]
+const SYS_KEXEC_FILE_LOAD: i64 = 320;
+#[cfg(all(target_os = "android", target_arch = "aarch64"))]
+const SYS_KEXEC_FILE_LOAD: i64 = 294;
+
 /// The refused syscalls on this architecture.
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+#[cfg_attr(not(target_arch = "x86_64"), allow(unused_mut))]
 pub fn denied() -> Vec<(&'static str, i64)> {
     let mut v = vec![
         ("keyctl", libc::SYS_keyctl),
@@ -40,7 +50,7 @@ pub fn denied() -> Vec<(&'static str, i64)> {
         ("unshare", libc::SYS_unshare),
         ("setns", libc::SYS_setns),
         ("kexec_load", libc::SYS_kexec_load),
-        ("kexec_file_load", libc::SYS_kexec_file_load),
+        ("kexec_file_load", SYS_KEXEC_FILE_LOAD),
         ("init_module", libc::SYS_init_module),
         ("finit_module", libc::SYS_finit_module),
         ("delete_module", libc::SYS_delete_module),
