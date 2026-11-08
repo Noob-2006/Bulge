@@ -72,9 +72,14 @@ pub fn store_path(home: &Path) -> PathBuf {
 pub fn load(home: &Path) -> Result<Vec<Item>, String> {
     let p = store_path(home);
     let Ok(s) = std::fs::read_to_string(&p) else { return Ok(vec![]) };
-    use std::os::unix::fs::PermissionsExt;
-    if std::fs::metadata(&p).map(|m| m.permissions().mode() & 0o077 != 0).unwrap_or(false) {
-        return Err(format!("{} must not be readable by group/others (chmod 600)", p.display()));
+    // Windows: the store is written with an owner-only DACL (`util::write_private`); there is
+    // no mode to check.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if std::fs::metadata(&p).map(|m| m.permissions().mode() & 0o077 != 0).unwrap_or(false) {
+            return Err(format!("{} must not be readable by group/others (chmod 600)", p.display()));
+        }
     }
     serde_json::from_str(&s).map_err(|e| format!("{}: {e}", p.display()))
 }
@@ -585,7 +590,23 @@ pub fn set_prompter(f: Option<PromptFn>) {
 }
 
 pub fn can_prompt() -> bool {
-    PROMPTER.get().is_some_and(|p| p.lock().unwrap().is_some()) || (std::fs::OpenOptions::new().read(true).write(true).open("/dev/tty").is_ok() && std::env::var("SEAGENT_NO_TTY_PROMPT").is_err())
+    PROMPTER.get().is_some_and(|p| p.lock().unwrap().is_some()) || (tty_available() && std::env::var("SEAGENT_NO_TTY_PROMPT").is_err())
+}
+
+/// Is there a controlling terminal to prompt on (`/dev/tty`; Windows: the console, `CONIN$`)?
+fn tty_available() -> bool {
+    #[cfg(unix)]
+    {
+        std::fs::OpenOptions::new().read(true).write(true).open("/dev/tty").is_ok()
+    }
+    #[cfg(windows)]
+    {
+        std::fs::OpenOptions::new().read(true).write(true).open("CONIN$").is_ok()
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        false
+    }
 }
 
 /// Ask on the controlling terminal; `masked` turns echo off. None = declined/unavailable.
@@ -598,6 +619,11 @@ pub fn prompt(label: &str, masked: bool) -> Option<String> {
     if std::env::var("SEAGENT_NO_TTY_PROMPT").is_ok() {
         return None;
     }
+    tty_prompt(label, masked)
+}
+
+#[cfg(unix)]
+fn tty_prompt(label: &str, masked: bool) -> Option<String> {
     use std::io::{BufRead, Write};
     use std::os::unix::io::AsRawFd;
     let mut tty = std::fs::OpenOptions::new().read(true).write(true).open("/dev/tty").ok()?;
@@ -620,6 +646,42 @@ pub fn prompt(label: &str, masked: bool) -> Option<String> {
     r.ok()?;
     let v = line.trim_end_matches(['\r', '\n']).to_string();
     (!v.is_empty()).then_some(v)
+}
+
+/// The console (`CONIN$` / `CONOUT$`, even when stdio is redirected); `masked` clears
+/// `ENABLE_ECHO_INPUT` on the input handle for the read and restores the old mode after.
+#[cfg(windows)]
+fn tty_prompt(label: &str, masked: bool) -> Option<String> {
+    use std::io::{BufRead, Write};
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::System::Console::{GetConsoleMode, SetConsoleMode, ENABLE_ECHO_INPUT};
+    let input = std::fs::OpenOptions::new().read(true).write(true).open("CONIN$").ok()?;
+    let mut out = std::fs::OpenOptions::new().write(true).open("CONOUT$").ok()?;
+    let h = input.as_raw_handle() as windows_sys::Win32::Foundation::HANDLE;
+    let mut old = 0u32;
+    // SAFETY: `h` is a console input handle we own for the duration of the call.
+    let have = unsafe { GetConsoleMode(h, &mut old) } != 0;
+    if masked && have {
+        // SAFETY: as above.
+        unsafe { SetConsoleMode(h, old & !ENABLE_ECHO_INPUT) };
+    }
+    let _ = write!(out, "\n[seagent browser vault] {label}: ");
+    let _ = out.flush();
+    let mut line = String::new();
+    let r = std::io::BufReader::new(&input).read_line(&mut line);
+    if masked && have {
+        // SAFETY: restore the mode captured above.
+        unsafe { SetConsoleMode(h, old) };
+        let _ = writeln!(out);
+    }
+    r.ok()?;
+    let v = line.trim_end_matches(['\r', '\n']).to_string();
+    (!v.is_empty()).then_some(v)
+}
+
+#[cfg(not(any(unix, windows)))]
+fn tty_prompt(_label: &str, _masked: bool) -> Option<String> {
+    None
 }
 
 #[cfg(test)]

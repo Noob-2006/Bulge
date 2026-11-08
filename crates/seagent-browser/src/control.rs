@@ -198,8 +198,17 @@ pub fn launch_debug_browser(cfg: &BrowserConfig, home: &Path, port: u16) -> Resu
     let args = debug_args(port, &dir);
     let manual = format!("{} {}", exe.display(), args.join(" "));
     let log = std::fs::File::create(dir.join("launch-stderr.log")).map_err(|e| e.to_string())?;
-    use std::os::unix::process::CommandExt;
-    let mut child = std::process::Command::new(&exe).args(&args).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(log).process_group(0).spawn().map_err(|e| format!("could not start {}: {e}\n     Launch a Chromium-family browser manually:\n     {manual}", exe.display()))?;
+    let mut cmd = std::process::Command::new(&exe);
+    cmd.args(&args).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(log);
+    // Its own group, not tied to seagent: the debug browser outlives this command.
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        cmd.process_group(0);
+    }
+    #[cfg(not(unix))]
+    seagent_core::platform::proc::new_group(&mut cmd, false);
+    let mut child = cmd.spawn().map_err(|e| format!("could not start {}: {e}\n     Launch a Chromium-family browser manually:\n     {manual}", exe.display()))?;
     for _ in 0..40 {
         if let Some(u) = discover_local(port, Duration::from_millis(500)) {
             std::mem::forget(child);

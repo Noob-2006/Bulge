@@ -11,7 +11,9 @@
 use crate::{lease, util};
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant};
+use std::time::Duration;
+#[cfg(target_os = "linux")]
+use std::time::Instant;
 
 /// The launcher, embedded (written to `<home>/bot-desktop/launcher.sh` at start).
 pub const LAUNCHER: &str = include_str!("launcher.sh");
@@ -119,7 +121,10 @@ impl Desktop {
             launcher: None,
             x_lock_dir: PathBuf::from("/tmp"),
             unix_table: PathBuf::from("/proc/net/unix"),
+            #[cfg(unix)]
             euid_root: unsafe { libc::geteuid() } == 0,
+            #[cfg(not(unix))]
+            euid_root: seagent_core::platform::sysinfo::is_root(),
             wait: Duration::from_secs(15),
         }
     }
@@ -307,10 +312,14 @@ impl Desktop {
     }
 
     /// Start this home's desktop (idempotent); blocks until the launcher publishes its env.
+    #[cfg(not(target_os = "linux"))]
     pub fn start(&self) -> Result<Status, String> {
-        if !cfg!(target_os = "linux") {
-            return Err("Bot Desktop runs on Linux gateway hosts only".into());
-        }
+        Err(NOT_HERE.into())
+    }
+
+    /// Start this home's desktop (idempotent); blocks until the launcher publishes its env.
+    #[cfg(target_os = "linux")]
+    pub fn start(&self) -> Result<Status, String> {
         let missing = self.missing_binaries();
         if !missing.is_empty() {
             let need = format!(
@@ -345,6 +354,7 @@ impl Desktop {
         r
     }
 
+    #[cfg(target_os = "linux")]
     fn spawn_and_wait(&self, sd: &Path) -> Result<Status, String> {
         let num = self.pick_display()?;
         std::fs::write(sd.join("display"), num.to_string()).map_err(|e| e.to_string())?;
@@ -453,8 +463,11 @@ impl Desktop {
             return false;
         };
         util::kill_group(pid, Duration::from_secs(5));
-        let mut st = 0;
-        unsafe { libc::waitpid(pid, &mut st, libc::WNOHANG) };
+        #[cfg(unix)]
+        {
+            let mut st = 0;
+            unsafe { libc::waitpid(pid, &mut st, libc::WNOHANG) };
+        }
         for n in ["launcher.pid", "env", "activity"] {
             let _ = std::fs::remove_file(sd.join(n));
         }
@@ -502,6 +515,7 @@ fn parse_geometry(g: &str) -> bool {
 }
 
 /// Desktop-entry Exec quoting (spec §Exec: double quotes, escape `"` `` ` `` `$` `\`).
+#[cfg(target_os = "linux")]
 fn desktop_quote(s: &str) -> String {
     if !s.contains([' ', '"', '\'', '\\', '$', '`']) {
         return s.to_string();
@@ -517,7 +531,14 @@ fn desktop_quote(s: &str) -> String {
     o
 }
 
+/// Process start time as an opaque token (`seagent_core::platform::proc::start_time`).
+#[cfg(not(any(target_os = "linux", target_os = "android")))]
+pub fn start_time(pid: i32) -> Option<u64> {
+    seagent_core::platform::proc::start_time(pid)
+}
+
 /// Process start time in clock ticks (`/proc/<pid>/stat` field 22): pid identity across recycling.
+#[cfg(any(target_os = "linux", target_os = "android"))]
 pub fn start_time(pid: i32) -> Option<u64> {
     let s = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
     s.rsplit_once(')')?
@@ -563,18 +584,18 @@ fn mem_limit_mb() -> Option<u64> {
     mem_info().1
 }
 
+/// An exclusive lock on a file until dropped (std: flock on Unix, LockFileEx on Windows).
 struct Flock(Option<std::fs::File>);
 
 impl Flock {
     fn new(p: &Path) -> Flock {
-        use std::os::unix::io::AsRawFd;
         let f = std::fs::OpenOptions::new()
             .create(true)
             .append(true)
             .open(p)
             .ok();
         if let Some(f) = &f {
-            unsafe { libc::flock(f.as_raw_fd(), libc::LOCK_EX) };
+            let _ = f.lock();
         }
         Flock(f)
     }
@@ -582,12 +603,14 @@ impl Flock {
 
 impl Drop for Flock {
     fn drop(&mut self) {
-        use std::os::unix::io::AsRawFd;
         if let Some(f) = &self.0 {
-            unsafe { libc::flock(f.as_raw_fd(), libc::LOCK_UN) };
+            let _ = f.unlock();
         }
     }
 }
+
+/// Why `seagent screen` does nothing here, and what replaces it.
+pub const NOT_HERE: &str = "Bot Desktop screens (TigerVNC Xvnc + Xfce) run on Linux gateway hosts only. On Windows and macOS this computer keeps its real desktop: computer_use acts on it directly and the agent's browser runs headed there or headless. For an isolated desktop, start a VM desktop from seagent-vm (the UI's Desktop → VM targets) instead.";
 
 /// Interaction for `screen install` (confirmation and the sudo password come from the terminal).
 pub trait Io {
@@ -630,7 +653,7 @@ pub fn screen_cli(d: &Desktop, args: &[String], io: &mut dyn Io) -> i32 {
                 return if st.running { 0 } else { 1 };
             }
             if !st.supported {
-                io.line("Bot Desktop screens run on Linux gateway hosts only (this host keeps its real display).");
+                io.line(if cfg!(target_os = "linux") { "Bot Desktop screens run on Linux gateway hosts only (this host keeps its real display)." } else { NOT_HERE });
                 return 1;
             }
             if !st.installed {
@@ -728,11 +751,14 @@ pub fn screen_cli(d: &Desktop, args: &[String], io: &mut dyn Io) -> i32 {
 /// Exit code for "no sudo on this host" (Hermes `install.NO_SUDO`).
 pub const NO_SUDO: i32 = -2;
 
+#[cfg(not(target_os = "linux"))]
+fn install(_d: &Desktop, _yes: bool, io: &mut dyn Io) -> i32 {
+    io.line(NOT_HERE);
+    1
+}
+
+#[cfg(target_os = "linux")]
 fn install(d: &Desktop, yes: bool, io: &mut dyn Io) -> i32 {
-    if !cfg!(target_os = "linux") {
-        io.line("Bot Desktop screens run on Linux gateway hosts only.");
-        return 1;
-    }
     if d.missing_binaries().is_empty() {
         io.line("Bot Desktop: packages already installed.");
         return 0;
@@ -770,6 +796,7 @@ fn install(d: &Desktop, yes: bool, io: &mut dyn Io) -> i32 {
 }
 
 /// Run the package install; sudo's password goes on stdin (`-S`), never on the command line.
+#[cfg(target_os = "linux")]
 fn run_install(d: &Desktop, cmd: &str, io: &mut dyn Io) -> i32 {
     let mut argv: Vec<String> = cmd.split_whitespace().map(str::to_string).collect();
     let mut stdin: Option<String> = None;

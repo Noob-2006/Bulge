@@ -23,6 +23,7 @@ pub fn now_s() -> f64 {
     now_ms() as f64 / 1000.0
 }
 
+#[cfg(unix)]
 pub fn which(bin: &str) -> Option<PathBuf> {
     if bin.contains('/') {
         let p = PathBuf::from(bin);
@@ -31,22 +32,44 @@ pub fn which(bin: &str) -> Option<PathBuf> {
     std::env::var_os("PATH").and_then(|p| std::env::split_paths(&p).map(|d| d.join(bin)).find(|f| f.is_file()))
 }
 
+/// `PATH` lookup with `PATHEXT` (`chrome` finds `chrome.exe`); a path is taken as is.
+#[cfg(not(unix))]
+pub fn which(bin: &str) -> Option<PathBuf> {
+    if bin.contains(['/', '\\']) {
+        let p = PathBuf::from(bin);
+        return p.is_file().then_some(p);
+    }
+    seagent_core::platform::layout::which(bin)
+}
+
 /// Create a directory readable only by the owner.
 pub fn private_dir(p: &Path) -> std::io::Result<()> {
     std::fs::create_dir_all(p)?;
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::set_permissions(p, std::fs::Permissions::from_mode(0o700))
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(p, std::fs::Permissions::from_mode(0o700))
+    }
+    #[cfg(not(unix))]
+    {
+        seagent_core::platform::fs_private::set_private(p)
+    }
 }
 
 /// Write a file atomically with mode 0600.
 pub fn write_private(p: &Path, data: &[u8]) -> std::io::Result<()> {
     use std::io::Write;
-    use std::os::unix::fs::OpenOptionsExt;
     if let Some(d) = p.parent() {
         std::fs::create_dir_all(d)?;
     }
     let tmp = p.with_extension(format!("tmp{}", std::process::id()));
-    let mut f = std::fs::OpenOptions::new().write(true).create(true).truncate(true).mode(0o600).open(&tmp)?;
+    #[cfg(unix)]
+    let mut f = {
+        use std::os::unix::fs::OpenOptionsExt;
+        std::fs::OpenOptions::new().write(true).create(true).truncate(true).mode(0o600).open(&tmp)?
+    };
+    #[cfg(not(unix))]
+    let mut f = seagent_core::platform::fs_private::open_private(&tmp, seagent_core::platform::fs_private::OpenMode::Truncate)?;
     f.write_all(data)?;
     f.sync_all()?;
     std::fs::rename(&tmp, p)
@@ -67,7 +90,7 @@ pub fn run(argv: &[&str], timeout: Duration, stdin: Option<&[u8]>, env: &[(&str,
     let mut tries = 0;
     let mut child = loop {
         match cmd.spawn() {
-            Err(e) if e.raw_os_error() == Some(libc::ETXTBSY) && tries < 40 => {
+            Err(e) if text_busy(&e) && tries < 40 => {
                 tries += 1;
                 std::thread::sleep(std::time::Duration::from_millis(25));
             }
@@ -109,12 +132,26 @@ pub fn run(argv: &[&str], timeout: Duration, stdin: Option<&[u8]>, env: &[(&str,
     Ok((status.code().unwrap_or(-1), out, err))
 }
 
+/// `ETXTBSY` (Unix only: Windows refuses to *write* a running image instead).
+fn text_busy(e: &std::io::Error) -> bool {
+    #[cfg(unix)]
+    {
+        e.raw_os_error() == Some(libc::ETXTBSY)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = e;
+        false
+    }
+}
+
 /// A free loopback TCP port.
 pub fn free_port() -> u16 {
     std::net::TcpListener::bind("127.0.0.1:0").and_then(|l| l.local_addr()).map(|a| a.port()).unwrap_or(0)
 }
 
 /// Is a process alive (and not a zombie)?
+#[cfg(unix)]
 pub fn pid_alive(pid: i32) -> bool {
     if pid <= 0 || unsafe { libc::kill(pid, 0) } != 0 {
         return false;
@@ -122,7 +159,20 @@ pub fn pid_alive(pid: i32) -> bool {
     !std::fs::read_to_string(format!("/proc/{pid}/stat")).is_ok_and(|s| s.rsplit(')').next().is_some_and(|r| r.trim_start().starts_with('Z')))
 }
 
+/// Is a process alive? (`seagent_core::platform::proc`.)
+#[cfg(not(unix))]
+pub fn pid_alive(pid: i32) -> bool {
+    seagent_core::platform::proc::alive(pid)
+}
+
+/// Terminate a process group (Windows: CTRL_BREAK, then end its Job Object after `grace`).
+#[cfg(not(unix))]
+pub fn kill_group(pgid: i32, grace: Duration) {
+    seagent_core::platform::proc::kill_group(pgid, grace)
+}
+
 /// Terminate a process group: TERM, then KILL after `grace`.
+#[cfg(unix)]
 pub fn kill_group(pgid: i32, grace: Duration) {
     if pgid <= 1 {
         return;

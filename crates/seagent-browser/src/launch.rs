@@ -11,6 +11,8 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 /// Fallback install locations (OpenClaw's Linux search list), tried after the `PATH_NAMES` on `$PATH`.
+/// Windows / macOS: `launch_os::install_paths`.
+#[cfg(not(any(windows, target_os = "macos")))]
 const LINUX_PATHS: &[&str] = &[
     "/usr/bin/google-chrome",
     "/usr/bin/google-chrome-stable",
@@ -58,6 +60,9 @@ pub fn find_executable(explicit: &str) -> Result<PathBuf, String> {
             return Ok(e.into());
         }
     }
+    if cfg!(any(target_os = "android", target_os = "ios")) {
+        return Err(crate::launch_os::MOBILE_NOTE.into());
+    }
     if let Some(p) = default_browser_exe() {
         return Ok(p);
     }
@@ -68,10 +73,15 @@ pub fn find_executable(explicit: &str) -> Result<PathBuf, String> {
             return Ok(p);
         }
     }
+    #[cfg(not(any(windows, target_os = "macos")))]
     for p in LINUX_PATHS {
         if Path::new(p).is_file() {
             return Ok(p.into());
         }
+    }
+    #[cfg(any(windows, target_os = "macos"))]
+    if let Some((_, p)) = crate::launch_os::install_paths().into_iter().find(|(_, p)| p.is_file()) {
+        return Ok(p);
     }
     if let Some(p) = playwright_chromium() {
         return Ok(p);
@@ -123,7 +133,7 @@ pub fn installed_chrome_in(root: &Path) -> Option<PathBuf> {
     let mut dirs: Vec<PathBuf> = std::fs::read_dir(root).ok()?.flatten().map(|e| e.path()).filter(|p| p.is_dir()).collect();
     dirs.sort();
     dirs.into_iter().find_map(|d| {
-        let p = d.join("chrome");
+        let p = d.join(crate::launch_os::cft_exe_rel());
         (p.is_file()).then_some(p)
     })
 }
@@ -136,12 +146,14 @@ pub const PINNED_CFT_SHA256: &str = "8cdeb344e9b2cefe59f4aea8d1d93d5d93054c03cde
 
 /// The Chrome for Testing build bundled with seagent: `<share>/browsers/chrome-linux64/chrome`
 /// (install.sh --with-browser, offline bundle), else `<data>/browsers/*/chrome` (`seagent browser
-/// install`), else `<cache>/browsers/chrome-linux64/chrome`.
+/// install`), else `<cache>/browsers/chrome-linux64/chrome`. Other OSes: the same places with
+/// their Chrome for Testing directory and executable (`launch_os::cft_dir` / `cft_exe_rel`).
 pub fn bundled_chrome() -> Option<PathBuf> {
-    seagent_core::share::share_path("browsers/chrome-linux64/chrome")
+    let rel = format!("browsers/{}/{}", crate::launch_os::cft_dir(), crate::launch_os::cft_exe_rel());
+    seagent_core::share::share_path(&rel)
         .filter(|p| p.is_file())
         .or_else(installed_chrome)
-        .or_else(|| Some(seagent_core::layout::cache_dir().join("browsers/chrome-linux64/chrome")).filter(|p| p.is_file()))
+        .or_else(|| Some(seagent_core::layout::cache_dir().join(&rel)).filter(|p| p.is_file()))
 }
 
 /// Where the download index lives (Google's Chrome for Testing "last known good versions").
@@ -156,7 +168,9 @@ pub fn chromium_download_url(cfg: &crate::config::BrowserConfig, explicit: Optio
         return Ok(u.to_string());
     }
     let base = cfg.install_base_url.trim();
-    if explicit.is_none() {
+    let platform = crate::launch_os::cft_platform().ok_or_else(|| format!("Chrome for Testing has no build for this OS. {}", crate::launch_os::MOBILE_NOTE))?;
+    // The pinned build is the linux64 one; other OSes take the index's current stable build.
+    if explicit.is_none() && (base.ends_with(".zip") || platform == "linux64") {
         return Ok(if base.ends_with(".zip") { base.to_string() } else { PINNED_CFT_URL.to_string() });
     }
     let body = seagent_net::http::agent().get(CFT_INDEX)
@@ -168,7 +182,6 @@ pub fn chromium_download_url(cfg: &crate::config::BrowserConfig, explicit: Optio
         .read_to_vec()
         .map_err(|e| format!("Chrome for Testing index: {e}"))?;
     let v: serde_json::Value = serde_json::from_slice(&body).map_err(|e| format!("Chrome for Testing index is not JSON: {e}"))?;
-    let platform = "linux64";
     v["channels"]["Stable"]["downloads"]["chrome"]
         .as_array()
         .into_iter()
@@ -176,7 +189,7 @@ pub fn chromium_download_url(cfg: &crate::config::BrowserConfig, explicit: Optio
         .find(|d| d["platform"] == platform)
         .and_then(|d| d["url"].as_str())
         .map(str::to_string)
-        .ok_or_else(|| "the Chrome for Testing index has no linux64 chrome build; pass --url".to_string())
+        .ok_or_else(|| format!("the Chrome for Testing index has no {platform} chrome build; pass --url"))
 }
 
 /// Download + unpack a Chrome for Testing zip into `<home>/browsers/chrome-linux64`.
@@ -208,18 +221,27 @@ pub fn install_chromium(cfg: &crate::config::BrowserConfig, home: &Path, explici
     log(&format!("   unpacking {} bytes", body.len()));
     unpack_zip(&zip, &stage)?;
     let _ = std::fs::remove_file(&zip);
-    let exe = find_file(&stage, "chrome", 4).ok_or("the archive has no chrome binary")?;
+    let exe = find_file(&stage, crate::launch_os::cft_exe_name(), 4).ok_or("the archive has no chrome binary")?;
+    // macOS: move the whole unpacked folder (the executable sits deep inside an .app bundle).
+    #[cfg(target_os = "macos")]
+    let top = stage.join(exe.strip_prefix(&stage).ok().and_then(|r| r.components().next()).ok_or("the archive has no chrome directory")?);
+    #[cfg(target_os = "macos")]
+    let src = top.as_path();
+    #[cfg(not(target_os = "macos"))]
     let src = exe.parent().ok_or("the archive has no chrome directory")?;
-    let dst = home.join("browsers").join("chrome-linux64");
+    let dst = home.join("browsers").join(crate::launch_os::cft_dir());
     let _ = std::fs::remove_dir_all(&dst);
     std::fs::create_dir_all(dst.parent().unwrap()).map_err(|e| e.to_string())?;
     std::fs::rename(src, &dst).or_else(|_| copy_tree(src, &dst)).map_err(|e| e.to_string())?;
-    let exe = dst.join("chrome");
-    use std::os::unix::fs::PermissionsExt;
-    for b in ["chrome", "chrome_crashpad_handler", "chrome_sandbox"] {
-        let p = dst.join(b);
-        if p.is_file() {
-            let _ = std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755));
+    let exe = dst.join(crate::launch_os::cft_exe_rel());
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        for b in ["chrome", "chrome_crashpad_handler", "chrome_sandbox"] {
+            let p = dst.join(b);
+            if p.is_file() {
+                let _ = std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755));
+            }
         }
     }
     std::fs::write(dst.join(".seagent-source"), format!("{url}\n")).map_err(|e| e.to_string())?;
@@ -236,6 +258,15 @@ fn unpack_zip(zip: &Path, into: &Path) -> Result<(), String> {
             return Ok(());
         }
         return Err(format!("unzip failed: {}", err.trim()));
+    }
+    // Windows 10+ ships bsdtar (System32\tar.exe), which reads zip archives.
+    #[cfg(windows)]
+    if let Some(tar) = util::which("tar") {
+        let (code, _, err) = util::run(&[&tar.to_string_lossy(), "-xf", &z, "-C", &d], Duration::from_secs(180), None, &[])?;
+        if code == 0 {
+            return Ok(());
+        }
+        return Err(format!("tar -xf failed: {}", err.trim()));
     }
     // No unzip: python3 ships zipfile everywhere seagent runs.
     let (code, _, err) = util::run(&["python3", "-c", "import sys,zipfile; zipfile.ZipFile(sys.argv[1]).extractall(sys.argv[2])", &z, &d], Duration::from_secs(180), None, &[])?;
@@ -264,14 +295,21 @@ fn find_file(dir: &Path, name: &str, depth: u32) -> Option<PathBuf> {
 }
 
 fn playwright_chromium() -> Option<PathBuf> {
-    let base = std::env::var_os("PLAYWRIGHT_BROWSERS_PATH").map(PathBuf::from).or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cache/ms-playwright")))?;
+    #[cfg(not(any(windows, target_os = "macos")))]
+    let (base, rel) = (std::env::var_os("PLAYWRIGHT_BROWSERS_PATH").map(PathBuf::from).or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cache/ms-playwright")))?, "chrome-linux/chrome");
+    #[cfg(any(windows, target_os = "macos"))]
+    let (base, rel) = crate::launch_os::playwright_layout()?;
     let mut dirs: Vec<PathBuf> = std::fs::read_dir(base).ok()?.flatten().map(|e| e.path()).filter(|p| p.file_name().is_some_and(|n| n.to_string_lossy().starts_with("chromium-"))).collect();
     dirs.sort();
-    dirs.into_iter().rev().map(|d| d.join("chrome-linux/chrome")).find(|p| p.is_file())
+    dirs.into_iter().rev().map(|d| d.join(rel)).find(|p| p.is_file())
 }
 
 /// `xdg-settings get default-web-browser` → its .desktop Exec when Chromium-family.
 fn default_browser_exe() -> Option<PathBuf> {
+    // xdg-settings is a freedesktop tool; Windows / macOS go straight to the install paths.
+    if cfg!(any(windows, target_vendor = "apple")) {
+        return None;
+    }
     let (_, out, _) = util::run(&["xdg-settings", "get", "default-web-browser"], Duration::from_secs(2), None, &[]).ok()?;
     let desktop = out.trim();
     if desktop.is_empty() {
@@ -385,6 +423,7 @@ pub fn launch(o: &LaunchOpts, timeout: Duration) -> Result<Launched, String> {
     let mut cmd = Command::new(o.exe);
     cmd.args(chrome_args(o)).stdin(Stdio::null()).stdout(log.try_clone().map_err(|e| e.to_string())?).stderr(log);
     // Chrome's SingletonSocket lives under $TMPDIR; deep dirs overflow AF_UNIX paths.
+    #[cfg(unix)]
     cmd.env("TMPDIR", "/tmp");
     for (k, v) in &o.env {
         cmd.env(k, v);
@@ -425,6 +464,21 @@ fn chromey(name: &str) -> bool {
 
 /// Pids of browser processes using `dir` as user-data-dir (including the default dir
 /// when the process passes none and `default_dir` is set).
+#[cfg(any(windows, target_os = "macos"))]
+pub fn processes_on(dir: &Path, default_dir: bool) -> Vec<i32> {
+    crate::launch_os::processes_on(dir, default_dir, chromey)
+}
+
+/// iOS: no other processes are visible to an app.
+#[cfg(target_os = "ios")]
+pub fn processes_on(_dir: &Path, _default_dir: bool) -> Vec<i32> {
+    let _ = chromey;
+    vec![]
+}
+
+/// Pids of browser processes using `dir` as user-data-dir (including the default dir
+/// when the process passes none and `default_dir` is set).
+#[cfg(not(any(windows, target_vendor = "apple")))]
 pub fn processes_on(dir: &Path, default_dir: bool) -> Vec<i32> {
     let want = dir.to_string_lossy().trim_end_matches('/').to_string();
     let mut out = vec![];
@@ -457,14 +511,24 @@ pub fn close_profile(dir: &Path, default_dir: bool) -> Result<String, String> {
         return Ok(format!("no browser is using {}", dir.display()));
     }
     for p in &pids {
-        unsafe { libc::kill(*p, libc::SIGTERM) };
+        #[cfg(unix)]
+        unsafe {
+            libc::kill(*p, libc::SIGTERM)
+        };
+        #[cfg(windows)]
+        crate::launch_os::ask_exit(*p);
     }
     let until = Instant::now() + Duration::from_secs(8);
     while Instant::now() < until && pids.iter().any(|p| util::pid_alive(*p)) {
         std::thread::sleep(Duration::from_millis(200));
     }
     for p in pids.iter().filter(|p| util::pid_alive(**p)) {
-        unsafe { libc::kill(*p, libc::SIGKILL) };
+        #[cfg(unix)]
+        unsafe {
+            libc::kill(*p, libc::SIGKILL)
+        };
+        #[cfg(windows)]
+        crate::launch_os::force_exit(*p);
     }
     let until = Instant::now() + Duration::from_secs(15);
     while Instant::now() < until && singleton_pid(dir).is_some_and(util::pid_alive) {
@@ -511,6 +575,17 @@ pub fn detect_real_browser() -> Result<RealBrowser, String> {
     Ok(RealBrowser { name, data_dir, exe })
 }
 
+#[cfg(any(windows, target_os = "macos"))]
+pub fn real_data_dir(name: &str) -> Option<PathBuf> {
+    crate::launch_os::real_data_dir(name)
+}
+
+#[cfg(any(windows, target_os = "macos"))]
+fn real_binary(name: &str) -> Option<PathBuf> {
+    crate::launch_os::real_binary(name)
+}
+
+#[cfg(not(any(windows, target_os = "macos")))]
 pub fn real_data_dir(name: &str) -> Option<PathBuf> {
     let home = PathBuf::from(std::env::var_os("HOME")?);
     let cfg = std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from).unwrap_or_else(|| home.join(".config"));
@@ -529,6 +604,7 @@ pub fn real_data_dir(name: &str) -> Option<PathBuf> {
     c.iter().find(|p| p.is_dir()).cloned().or(Some(c[0].clone()))
 }
 
+#[cfg(not(any(windows, target_os = "macos")))]
 fn real_binary(name: &str) -> Option<PathBuf> {
     let (names, abs): (&[&str], &[&str]) = match name {
         "chrome" => (&["google-chrome", "google-chrome-stable"], &["/opt/google/chrome/chrome", "/usr/bin/google-chrome", "/usr/bin/google-chrome-stable"]),

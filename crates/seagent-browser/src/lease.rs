@@ -38,14 +38,13 @@ fn locked<T>(home: &Path, f: impl FnOnce() -> T) -> T {
     let dir = home.join("bot-desktop");
     let _ = util::private_dir(&dir);
     let lf = std::fs::OpenOptions::new().create(true).append(true).open(dir.join("lease.lock"));
-    use std::os::unix::io::AsRawFd;
-    let fd = lf.as_ref().map(|f| f.as_raw_fd()).unwrap_or(-1);
-    if fd >= 0 {
-        unsafe { libc::flock(fd, libc::LOCK_EX) };
+    // std's lock is flock(LOCK_EX) on Unix and LockFileEx on Windows.
+    if let Ok(l) = &lf {
+        let _ = l.lock();
     }
     let r = f();
-    if fd >= 0 {
-        unsafe { libc::flock(fd, libc::LOCK_UN) };
+    if let Ok(l) = &lf {
+        let _ = l.unlock();
     }
     r
 }
