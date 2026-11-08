@@ -42,6 +42,8 @@ pub fn short_fingerprint(fp: &str) -> String {
 impl SetupCode {
     pub fn decode(input: &str, now_ms: u64) -> Result<SetupCode, String> {
         let t = input.trim();
+        // The host's QR code is a link a phone camera opens (`https://<ip>:<port>/#setup=<code>`).
+        let t = t.split_once("#setup=").map(|(_, c)| c.split('&').next().unwrap_or("")).unwrap_or(t);
         let code = ["seagent-pair://", "oc-pair://"].iter().find_map(|p| t.get(..p.len()).filter(|h| h.eq_ignore_ascii_case(p)).map(|_| &t[p.len()..])).unwrap_or(t);
         let code = code.trim_end_matches('/');
         if code.is_empty() || !code.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '=') {
@@ -184,7 +186,9 @@ impl Store {
     }
 }
 
-/// The body of the PROPOSED `POST /pair/client` on the host's App Server.
+/// The body of `POST /pair/client` on the host's App Server (`crates/seagent-app/src/devices.rs`).
+/// A code claim answers `202 {"status":"pending","requestId",…}` until the host approves it;
+/// poll with the same body plus that `requestId` (see [`with_request_id`]).
 pub fn claim_body(bootstrap_token: Option<&str>, code: Option<&str>, device_id: &str, device_name: &str, platform: &str) -> Value {
     let mut v = serde_json::json!({"device": {"id": device_id, "name": device_name, "platform": platform}});
     if let Some(t) = bootstrap_token {
@@ -194,6 +198,12 @@ pub fn claim_body(bootstrap_token: Option<&str>, code: Option<&str>, device_id: 
         v["code"] = c.trim().to_ascii_uppercase().replace(['-', ' '], "").into();
     }
     v
+}
+
+/// The poll body after a `202`: the claim plus the host's `requestId`.
+pub fn with_request_id(mut body: Value, request_id: &str) -> Value {
+    body["requestId"] = request_id.into();
+    body
 }
 
 /// The 8-character pairing alphabet of the agent (`node.rs` `add_pending`): no 0/O/1/I.
@@ -219,6 +229,7 @@ mod tests {
         assert_eq!(sc.address().unwrap(), Address { host: "192.168.1.20".into(), port: 8640, tls: true });
         assert_eq!(SetupCode::decode(&format!("seagent-pair://{code}"), 1000).unwrap(), sc);
         assert_eq!(SetupCode::decode(&format!("SEAGENT-PAIR://{code}"), 1000).unwrap(), sc);
+        assert_eq!(SetupCode::decode(&format!("https://192.168.1.20:8640/#setup={code}"), 1000).unwrap(), sc);
         assert!(SetupCode::decode(&code, 3000).unwrap_err().contains("expired"));
         assert!(SetupCode::decode("not base64!", 0).is_err());
         assert!(SetupCode::decode(&enc(&serde_json::json!({"url": "http://x", "bootstrapToken": "t"})), 0).is_err());

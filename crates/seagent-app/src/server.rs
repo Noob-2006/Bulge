@@ -104,6 +104,12 @@ impl App {
     /// or a configured token. `None` = no valid credential.
     pub fn principal(&self, r: &Request) -> Option<Principal> {
         let ip = self.client_ip(r).map(|i| i.to_string()).unwrap_or_default();
+        // LAN mode: a network peer proves itself with a paired-device token and nothing else —
+        // not the shared app token, not a scoped token, not a dashboard password (they are one
+        // string that cannot be revoked per device).
+        if self.lan_peer(r) {
+            return self.device_principal(r, ip);
+        }
         if self.cfg.auth.enabled {
             if let Some(l) = crate::dashboard_auth::login_from(self, r) {
                 return Some(Principal { kind: l.kind, name: l.name, access: Access::Roles(l.roles), ip, tenant: l.tenant });
@@ -146,9 +152,25 @@ impl App {
             let tenant = crate::tenant::credential_viewer(self, &a.org, &a.team, access.has(identity::Role::Admin) || access == Access::Scope(Scope::Admin), &a.name);
             return Some(Principal { kind: "service".into(), name: a.name, access, ip, tenant });
         }
+        if given.starts_with("sed1_") {
+            return self.device_principal(r, ip);
+        }
         let (access, name, org, team) = self.scope_of(&given)?;
         let tenant = crate::tenant::credential_viewer(self, &org, &team, access.has(identity::Role::Admin) || access == Access::Scope(Scope::Admin), &name);
         Some(Principal { kind: "token".into(), name, access, ip, tenant })
+    }
+
+    /// LAN mode is on and the request comes from another machine (any non-loopback peer).
+    pub fn lan_peer(&self, r: &Request) -> bool {
+        exposure::lan_only(&self.cfg) && r.peer.is_some_and(|p| seagent_security::exposure::classify_ip(p.ip()) != seagent_security::exposure::AddrClass::Loopback)
+    }
+
+    /// A paired device (`crate::devices`), from the token the request presents.
+    fn device_principal(&self, r: &Request, ip: String) -> Option<Principal> {
+        let given = self.presented(r)?;
+        let (id, scope) = crate::devices::authenticate(&self.d.k.paths.data, &given)?;
+        let tenant = crate::tenant::credential_viewer(self, "", "", scope == Scope::Admin, &id);
+        Some(Principal { kind: "device".into(), name: id, access: Access::Scope(scope), ip, tenant })
     }
 
     /// Is a principal captured earlier (an open WebSocket) still valid? A login whose profile
@@ -157,6 +179,8 @@ impl App {
     pub fn still_valid(&self, p: &Principal) -> bool {
         match p.kind.as_str() {
             "service" => identity::accounts(&self.d.k.paths.data).iter().any(|a| a.name == p.name && a.active(seagent_security::audit::now_ms())),
+            // `seagent devices revoke` closes the device's open sockets too.
+            "device" => crate::devices::is_active(&self.d.k.paths.data, &p.name),
             "sso" | "saml" | "basic" | "plugin" | "header" => !seagent_kernel::agents::find_login(&self.d.k.paths, &p.name, &p.name).is_some_and(|u| u.disabled),
             _ => true,
         }
@@ -237,13 +261,24 @@ impl App {
             "server": {"name": "seagent", "version": env!("CARGO_PKG_VERSION")},
             "methods": methods,
             "events": ["event", "delta", "pending", "heartbeat"],
-            "features": {"openai": self.cfg.openai_api, "a2a": self.cfg.a2a.enabled, "nodes": self.cfg.nodes, "ui": self.cfg.ui},
+            "features": {"openai": self.cfg.openai_api, "a2a": self.cfg.a2a.enabled, "nodes": self.cfg.nodes, "ui": self.cfg.ui, "lan": self.cfg.exposure.lan},
         })
     }
 
     pub(crate) fn handle(self: &Arc<Self>, r: Request) -> Response {
         let path = r.path.clone();
+        // LAN mode (docs/cross-platform.md): only peers in private ranges, whatever the bind.
+        if exposure::lan_only(&self.cfg) && r.peer.is_some_and(|p| !seagent_security::exposure::is_local_network(p.ip())) {
+            crate::metrics::inc("http_lan_refused", "");
+            return Response::json(403, &json!({"error": "forbidden: LAN mode only admits devices on the local network"}).to_string());
+        }
+        let lan_peer = self.lan_peer(&r);
         if let Some((_, h)) = self.routes.iter().find(|(pre, _)| path.starts_with(pre.as_str())) {
+            // Host routes authenticate themselves with their own secrets; in LAN mode the
+            // network only gets paired-device credentials, so they stay local.
+            if lan_peer {
+                return Response::json(403, &json!({"error": "forbidden: this endpoint is only reachable from this machine in LAN mode"}).to_string());
+            }
             return h(r);
         }
         // A page on another site must not be able to make this server *do* anything (A11):
@@ -277,8 +312,10 @@ impl App {
                 }
                 Response::text(200, &crate::metrics::render(&self.d)).with_header("content-type", "text/plain; version=0.0.4").with_header("cache-control", "no-store")
             }
-            ("GET", p) if self.cfg.ui && (p == "/" || p.starts_with("/ui/") || p == "/manifest.webmanifest" || p == "/sw.js" || p == "/setup") => ui::serve(p),
-            ("GET", "/.well-known/agent-card.json") | ("GET", "/.well-known/agent.json") if self.cfg.a2a.enabled => a2a::card(self, &r),
+            ("GET", p) if self.cfg.ui && (p == "/" || p.starts_with("/ui/") || p == "/manifest.webmanifest" || p == "/sw.js" || p == "/setup" || p == "/apple-touch-icon.png") => ui::serve(p),
+            // Phones, tablets, browsers and other PCs pair here (LAN mode; see `devices`).
+            ("POST", "/pair/client") if self.cfg.exposure.lan => crate::devices::handle_pair_client(self, &r),
+            ("GET", "/.well-known/agent-card.json") | ("GET", "/.well-known/agent.json") if self.cfg.a2a.enabled && !lan_peer => a2a::card(self, &r),
             // Devices prove themselves with an Ed25519 key and operator-approved pairing.
             (_, p) if p.starts_with("/node") && self.cfg.nodes && r.is_upgrade() => {
                 let me = self.clone();
@@ -286,6 +323,9 @@ impl App {
                 let workload = self.workload_identity(&r);
                 Response::upgrade(Box::new(move |s, head, rest| crate::node::session(&me, s, &head, rest, workload)))
             }
+            // LAN peers: everything else needs a paired-device token (A2A, SSO, SCIM and public
+            // plugin routes bring their own credentials and are not offered to the network).
+            _ if lan_peer => self.credentialed(r),
             (_, p) if p.starts_with("/plugins/") => self.plugin_route(&r),
             // A2A authenticates its own peers (per-peer tokens) before anything else.
             // ent-095: an HA standby starts no turns (its store is fenced anyway); say where to go.
@@ -298,19 +338,25 @@ impl App {
                 None => Response::json(401, &json!({"schemas": ["urn:ietf:params:scim:api:messages:2.0:Error"], "status": "401", "detail": "unauthorized"}).to_string()).with_header("www-authenticate", "Bearer"),
             },
             // Everything below needs a credential; how much depends on what is asked for.
-            _ => match self.principal(&r) {
-                Some(p) => self.routed(r, p),
-                None => {
-                    crate::metrics::inc("http_unauthorized", "");
-                    // A credential that matches nothing is worth a record (guessing, a revoked
-                    // or expired token); a bare request without one is not.
-                    if self.presented(&r).is_some() {
-                        let ip = self.client_ip(&r).map(|i| i.to_string()).unwrap_or_default();
-                        seagent_security::audit::record(&self.d.k.paths.data, seagent_security::audit::Event::new("auth.failed", seagent_security::audit::Actor::new("anonymous", "").with_ip(&ip), &r.path, "deny"));
-                    }
-                    Response::json(401, &json!({"error": "unauthorized: send the app token (Authorization: Bearer …)"}).to_string()).with_header("www-authenticate", "Bearer")
+            _ => self.credentialed(r),
+        }
+    }
+
+    /// The credential check in front of [`App::routed`].
+    fn credentialed(self: &Arc<Self>, r: Request) -> Response {
+        match self.principal(&r) {
+            Some(p) => self.routed(r, p),
+            None => {
+                crate::metrics::inc("http_unauthorized", "");
+                // A credential that matches nothing is worth a record (guessing, a revoked
+                // or expired token); a bare request without one is not.
+                if self.presented(&r).is_some() {
+                    let ip = self.client_ip(&r).map(|i| i.to_string()).unwrap_or_default();
+                    seagent_security::audit::record(&self.d.k.paths.data, seagent_security::audit::Event::new("auth.failed", seagent_security::audit::Actor::new("anonymous", "").with_ip(&ip), &r.path, "deny"));
                 }
-            },
+                let msg = if self.lan_peer(&r) { "unauthorized: pair this device first (seagent pair code on the host)" } else { "unauthorized: send the app token (Authorization: Bearer …)" };
+                Response::json(401, &json!({"error": msg}).to_string()).with_header("www-authenticate", "Bearer")
+            }
         }
     }
 
@@ -1263,5 +1309,120 @@ mod tests {
         let m = body_text(&a.clone().handle(req("GET", "/metrics", &[("authorization", "Bearer op-token")], "")));
         assert!(m.contains("seagent_up 1") && m.contains("seagent_arp_forbidden_total") && m.contains("seagent_arp_requests_total{method=\"session.list\"}") && m.contains("seagent_ready{check=\"test:ok\"} 1"), "{m}");
         assert!(m.contains("seagent_audit_seq "));
+    }
+
+    /// LAN mode, a server in LAN mode built the way the daemon builds it (generated identity).
+    fn lan_app() -> Arc<App> {
+        let mut cfg = AppConfig { enabled: true, listen: "127.0.0.1:0".into(), ..AppConfig::default() };
+        cfg.exposure.lan = true;
+        let a0 = app(cfg);
+        let eff = crate::lan::effective(&a0.cfg, &a0.d.k.paths.data).unwrap();
+        Arc::new(App { d: a0.d.clone(), cfg: eff, token: "admin-token".into(), host_methods: vec![], routes: vec![] })
+    }
+
+    fn device_body(extra: Value) -> String {
+        let mut b = json!({"device": {"id": "0123456789abcdef0123456789abcdef", "name": "Test phone", "platform": "ios"}});
+        b.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+        b.to_string()
+    }
+
+    /// The whole LAN path over a real socket: rustls serves the generated self-signed
+    /// certificate, a client pinning its SHA-256 pairs with a setup code's bootstrap token,
+    /// gets a per-device console token and uses it on `POST /arp`; a used token, a wrong pin and
+    /// a revoked device are refused.
+    #[test]
+    fn lan_mode_tls_pairing_end_to_end() {
+        let a = lan_app();
+        let srv = start(a.clone()).unwrap();
+        assert!(srv.is_tls());
+        let base = format!("https://127.0.0.1:{}", srv.local_addr().port());
+        let fp = crate::lan::served_fingerprint(&a.cfg).unwrap();
+        let post = |path: &str, pin: &str, auth: Option<&str>, body: &str| {
+            let bearer = auth.map(|t| format!("Bearer {t}"));
+            let mut h = vec![("Content-Type", "application/json")];
+            if let Some(b) = &bearer {
+                h.push(("Authorization", b.as_str()));
+            }
+            seagent_net::stream::pinned_request(&format!("{base}{path}"), pin, "POST", &h, body.as_bytes(), Duration::from_secs(10))
+        };
+        let (bt, _) = crate::node::bootstrap_token(Duration::from_secs(60));
+        let (st, body) = post("/pair/client", &fp, None, &device_body(json!({"bootstrapToken": bt}))).unwrap();
+        assert_eq!(st, 200, "{body}");
+        let v: Value = serde_json::from_str(&body).unwrap();
+        let token = v["consoleToken"].as_str().unwrap().to_string();
+        assert_eq!(v["hostId"].as_str().unwrap(), crate::lan::host_id(&a.d.k.paths.data));
+        assert_eq!(v["scope"], "write");
+        // Single use.
+        let (st, body) = post("/pair/client", &fp, None, &device_body(json!({"bootstrapToken": bt}))).unwrap();
+        assert_eq!(st, 403, "{body}");
+        // The device token works on the console API, within its scope.
+        let (st, body) = post("/arp", &fp, Some(&token), &rpc("session.list")).unwrap();
+        assert!(st == 200 && body.contains("\"result\""), "{st} {body}");
+        let (_, body) = post("/arp", &fp, Some(&token), &rpc("config.get")).unwrap();
+        assert!(body.contains("forbidden"), "{body}");
+        // A different certificate is not this host.
+        assert!(post("/arp", &"ab".repeat(32), Some(&token), &rpc("session.list")).unwrap_err().contains("fingerprint"));
+        assert!(crate::devices::revoke(&a.d.k.paths.data, "0123456789abcdef0123456789abcdef").unwrap());
+        assert_eq!(post("/arp", &fp, Some(&token), &rpc("session.list")).unwrap().0, 401);
+        let audit = seagent_security::audit::query(&a.d.k.paths.data, &seagent_security::audit::Query { kind: Some("device.pair".into()), ..Default::default() });
+        assert!(audit.iter().any(|e| e["outcome"] == "ok") && audit.iter().any(|e| e["outcome"] == "deny"), "{audit:?}");
+    }
+
+    /// LAN peers: private addresses only, paired-device tokens only (the shared app token is
+    /// refused from the network), the 8-character code flow with admin approval, expired
+    /// bootstrap tokens, and the loopback Host/Origin the desktop app's tunnel sends.
+    #[test]
+    fn lan_peers_need_private_addresses_and_device_tokens() {
+        let a = lan_app();
+        let data = a.d.k.paths.data.clone();
+        let from = |ip: &str, mut r: Request| {
+            r.peer = Some(format!("{ip}:50000").parse().unwrap());
+            r
+        };
+        let public = a.clone().handle(from("8.8.8.8", json_req("/arp", &[("authorization", "Bearer admin-token")], &rpc("session.list"))));
+        assert_eq!(public.status, 403, "a public peer never gets in");
+        let lan_admin = a.clone().handle(from("192.168.1.50", json_req("/arp", &[("authorization", "Bearer admin-token")], &rpc("session.list"))));
+        assert_eq!(lan_admin.status, 401, "the shared app token is not a LAN credential");
+        let local_admin = a.clone().handle(from("127.0.0.1", json_req("/arp", &[("authorization", "Bearer admin-token")], &rpc("session.list"))));
+        assert_eq!(local_admin.status, 200, "this machine keeps the app token");
+        // Code flow: request → 202 → admin approves → poll → 200.
+        let (code, _) = crate::devices::create_offer(&data, Duration::from_secs(60), Scope::Write).unwrap();
+        let first = crate::devices::handle_pair_client_with(&a, &from("192.168.1.50", json_req("/pair/client", &[], &device_body(json!({"code": code})))), Duration::ZERO);
+        assert_eq!(first.status, 202, "{}", body_text(&first));
+        let rid = serde_json::from_str::<Value>(&body_text(&first)).unwrap()["requestId"].as_str().unwrap().to_string();
+        assert_eq!(crate::devices::pending(&data).len(), 1);
+        crate::devices::approve(&data, &code).unwrap();
+        let done = a.clone().handle(from("192.168.1.50", json_req("/pair/client", &[], &device_body(json!({"code": code, "requestId": rid})))));
+        assert_eq!(done.status, 200, "{}", body_text(&done));
+        let token = serde_json::from_str::<Value>(&body_text(&done)).unwrap()["consoleToken"].as_str().unwrap().to_string();
+        let ok = a.clone().handle(from("192.168.1.50", json_req("/arp", &[("authorization", &format!("Bearer {token}"))], &rpc("session.list"))));
+        assert_eq!(ok.status, 200, "{}", body_text(&ok));
+        // The app's loopback tunnel: Host/Origin 127.0.0.1:<local port> over a LAN connection.
+        let tunnel = [("host", "127.0.0.1:53111"), ("origin", "http://127.0.0.1:53111")];
+        let ws = a.clone().handle(from("192.168.1.50", upgrade_req(&format!("/arp?token={token}"), &tunnel)));
+        assert_eq!(ws.status, 101, "{}", body_text(&ws));
+        // Expired and unknown bootstrap tokens.
+        let (old, _) = crate::node::bootstrap_token(Duration::from_millis(1));
+        std::thread::sleep(Duration::from_millis(5));
+        let r = a.clone().handle(from("192.168.1.51", json_req("/pair/client", &[], &device_body(json!({"bootstrapToken": old})))));
+        assert_eq!(r.status, 403, "{}", body_text(&r));
+        assert_eq!(a.clone().handle(from("192.168.1.51", json_req("/pair/client", &[], "{}"))).status, 400);
+        // Host routes and A2A-style self-authenticating endpoints stay local in LAN mode.
+        assert_eq!(a.clone().handle(from("192.168.1.50", req("GET", "/scim/v2/Users", &[], ""))).status, 401);
+        // The UI shell is public so a phone can open it.
+        assert_eq!(a.clone().handle(from("192.168.1.50", req("GET", "/", &[], ""))).status, 200);
+    }
+
+    #[test]
+    fn lan_mode_still_refuses_a_public_bind() {
+        let mut cfg = AppConfig { enabled: true, listen: "203.0.113.5:8640".into(), token: Some("t".into()), ..AppConfig::default() };
+        cfg.exposure.lan = true;
+        let home = seagent_core::tmp::TempDir::new("seagent-lan-public");
+        let eff = crate::lan::effective(&cfg, home.path()).unwrap();
+        let e = crate::exposure::check_start(&eff).unwrap_err();
+        assert!(e.contains("LAN mode only covers private addresses") && e.contains("allow_public"), "{e}");
+        assert_eq!(crate::exposure::auth_strength(&eff), seagent_security::exposure::AuthStrength::Token);
+        let ok = AppConfig { listen: "192.168.1.5:8640".into(), ..eff };
+        assert!(crate::exposure::check_start(&ok).is_ok(), "{:?}", crate::exposure::check_start(&ok));
     }
 }

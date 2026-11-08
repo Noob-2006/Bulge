@@ -13,7 +13,7 @@ use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 
 pub const COMMANDS: &[&str] = &["ha", "workers", "cluster"];
-pub const VALUE_FLAGS: &[&str] = &["token-secret", "admin-secret", "node"];
+pub const VALUE_FLAGS: &[&str] = &["token-secret", "admin-secret", "node", "fingerprint"];
 pub const BOOL_FLAGS: &[&str] = &[];
 
 fn daemon(method: &str, params: Value) -> Result<Value, String> {
@@ -181,7 +181,9 @@ fn run(a: &Args) -> R {
                 let name = a.need(3, "name")?;
                 let url = a.need(4, "url")?;
                 let tok = a.val("token-secret").ok_or_else(|| crate::Fail::Usage("--token-secret NAME is required (a vault secret holding a read token for that node)".into()))?;
-                let v = daemon("cluster.node.add", json!({"name": name, "url": url, "token_secret": tok, "admin_secret": a.val("admin-secret").unwrap_or("")}))?;
+                // `--fingerprint`: a LAN peer's self-signed certificate (`seagent nodes discover` /
+                // `seagent lan connect` fill it in), reached over pinned TLS.
+                let v = daemon("cluster.node.add", json!({"name": name, "url": url, "token_secret": tok, "admin_secret": a.val("admin-secret").unwrap_or(""), "fingerprint": a.val("fingerprint").unwrap_or("")}))?;
                 print(a, &v, |_| format!("registered node {name} at {url}"));
             }
             "remove" | "rm" => {

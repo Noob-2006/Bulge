@@ -476,52 +476,15 @@ fn node_call(c: &Ctx, m: &str, p: Value) -> Result<Value, String> {
     (seagent_app::node::methods())(m, &p).unwrap_or_else(|| Err((-32601, m.into()))).map_err(|e| e.1)
 }
 
-fn ip4(h: &str) -> Option<[u8; 4]> {
-    h.parse::<std::net::Ipv4Addr>().ok().map(|a| a.octets())
-}
+#[cfg(test)]
+use seagent_app::lan::SECURE_FIX;
 
-/// ws:// setup codes are only for loopback, private LAN, link-local, `.local` and the
-/// Android emulator (OpenClaw `isMobilePairingCleartextAllowedHost`).
-pub fn cleartext_ok(host: &str) -> bool {
-    let h = host.trim_start_matches('[').trim_end_matches(']').trim_end_matches('.').to_lowercase();
-    if h == "localhost" || h == "::1" || h.ends_with(".local") || h == "10.0.2.2" {
-        return true;
-    }
-    if let Some([a, b, ..]) = ip4(&h) {
-        return a == 127 || a == 10 || (a == 172 && (16..=31).contains(&b)) || (a == 192 && b == 168) || (a == 169 && b == 254);
-    }
-    if let Ok(v6) = h.parse::<std::net::Ipv6Addr>() {
-        let first = v6.segments()[0];
-        return (first & 0xfe00) == 0xfc00 || (first & 0xffc0) == 0xfe80;
-    }
-    false
-}
-
-pub const SECURE_FIX: &str = "Public mobile pairing requires a secure URL (wss://). Fix: use a private LAN address, or set `[surfaces] public_url` to an https:// URL (Tailscale Serve/Funnel or a reverse proxy). ws:// setup codes are only valid for localhost/loopback, private LAN addresses, .local hosts, or the Android emulator.";
-
-fn lan_ip() -> Option<String> {
-    let s = std::net::UdpSocket::bind("0.0.0.0:0").ok()?;
-    s.connect("10.254.254.254:9").ok()?;
-    s.local_addr().ok().map(|a| a.ip().to_string()).filter(|ip| ip != "0.0.0.0")
-}
-
-/// The `/node` URL a device should dial.
-pub fn pairing_url(cfg: &seagent_kernel::config::Config) -> Result<String, String> {
-    if let Some(u) = cfg.surfaces.get("public_url").and_then(|v| v.as_str()).map(|u| u.trim().trim_end_matches('/')).filter(|u| !u.is_empty()) {
-        let ws = u.replacen("https://", "wss://", 1).replacen("http://", "ws://", 1);
-        let host = ws.split("://").nth(1).unwrap_or("").split(['/', ':']).next().unwrap_or("");
-        if ws.starts_with("ws://") && !cleartext_ok(host) {
-            return Err(SECURE_FIX.into());
-        }
-        return Ok(format!("{ws}/node"));
-    }
-    let app = seagent_app::AppConfig::parse(&cfg.app)?;
-    let (host, port) = app.listen.rsplit_once(':').ok_or("bad [app] listen")?;
-    let host = if host == "0.0.0.0" || host == "::" || host == "[::]" { lan_ip().unwrap_or_else(|| "127.0.0.1".into()) } else { host.to_string() };
-    if !cleartext_ok(&host) {
-        return Err(SECURE_FIX.into());
-    }
-    Ok(format!("ws://{host}:{port}/node"))
+/// The `/node` URL a device should dial and the certificate it must pin. Off loopback this is
+/// always `wss://` (LAN mode's own certificate, or `[surfaces] public_url` over https): the
+/// address classification and the rule live in `seagent_security::exposure` / `seagent_app::lan`.
+pub fn pairing_url(cfg: &seagent_kernel::config::Config, data: &std::path::Path) -> Result<(String, Option<String>), String> {
+    let app = seagent_app::lan::effective(&seagent_app::AppConfig::parse(&cfg.app)?, data)?;
+    seagent_app::lan::pairing_url(&app, cfg.surfaces.get("public_url").and_then(|v| v.as_str()))
 }
 
 pub fn format_pending(v: &Value) -> String {
@@ -578,8 +541,12 @@ pub fn pair(c: &Ctx, a: &str) -> Result<String, String> {
             if !app.enabled || !app.nodes {
                 return Ok("Device pairing needs the app server with nodes: set `[app] enabled = true` and `nodes = true`, then /restart.".into());
             }
-            let url = pairing_url(&c.k.cfg)?;
-            let r = node_call(c, "node.setup.create", json!({"url": url, "ttlMs": 10 * 60_000}))?;
+            let (url, fp) = pairing_url(&c.k.cfg, &c.k.paths.data)?;
+            let mut p = json!({"url": url, "ttlMs": 10 * 60_000});
+            if let Some(f) = fp {
+                p["tlsFingerprint"] = json!(f);
+            }
+            let r = node_call(c, "node.setup.create", p)?;
             let code = r["code"].as_str().unwrap_or("");
             let mut out = String::from("Pairing setup code generated.\n1) Open the seagent app (or run `seagent node --setup-code CODE`) on the device\n2) Paste the setup code below and connect\n3) Back here, run /pair approve\n\n");
             if action == "qr" {
@@ -758,15 +725,21 @@ mod tests {
 
     #[test]
     fn pair_urls_codes_and_approval() {
-        assert!(cleartext_ok("127.0.0.1") && cleartext_ok("192.168.1.5") && cleartext_ok("pi.local") && cleartext_ok("fd00::1") && cleartext_ok("10.0.2.2"));
-        assert!(!cleartext_ok("8.8.8.8") && !cleartext_ok("example.com") && !cleartext_ok("172.32.0.1"));
+        let home = seagent_core::tmp::TempDir::new("seagent-pair-url");
         let mut cfg = seagent_kernel::config::Config::default();
         cfg.surfaces.insert("public_url".into(), toml::Value::String("https://seagent.example.com/".into()));
-        assert_eq!(pairing_url(&cfg).unwrap(), "wss://seagent.example.com/node");
-        cfg.surfaces.insert("public_url".into(), toml::Value::String("http://example.com".into()));
-        assert_eq!(pairing_url(&cfg).unwrap_err(), SECURE_FIX);
+        assert_eq!(pairing_url(&cfg, home.path()).unwrap().0, "wss://seagent.example.com/node");
+        // Cleartext pairing off this machine is gone, LAN addresses included.
+        cfg.surfaces.insert("public_url".into(), toml::Value::String("http://192.168.1.5:8640".into()));
+        assert_eq!(pairing_url(&cfg, home.path()).unwrap_err(), SECURE_FIX);
         let lo = seagent_kernel::config::Config::default();
-        assert_eq!(pairing_url(&lo).unwrap(), "ws://127.0.0.1:8640/node");
+        assert_eq!(pairing_url(&lo, home.path()).unwrap().0, "ws://127.0.0.1:8640/node");
+        let mut lan = seagent_kernel::config::Config::default();
+        lan.app.insert("listen".into(), toml::Value::String("192.168.1.5:8640".into()));
+        lan.app.insert("exposure".into(), toml::Value::Table("lan = true".parse::<toml::Table>().unwrap()));
+        let (u, fp) = pairing_url(&lan, home.path()).unwrap();
+        assert_eq!(u, "wss://192.168.1.5:8640/node");
+        assert_eq!(fp.unwrap().len(), 64);
         assert_eq!(format_pending(&json!([])), "No pending device pairing requests.");
         assert_eq!(format_pending(&json!([{"code": "AB12", "id": "n1", "name": "phone", "platform": "android"}])), "Pending device pairing requests:\n- AB12 · name=phone · platform=android · id=n1");
 

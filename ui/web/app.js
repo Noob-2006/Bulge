@@ -1016,6 +1016,57 @@ function askToken() {
     if ($('remember').checked) store.set('seagent.token', tk);
     start(tk);
   };
+  $('pairForm').onsubmit = async (e) => {
+    e.preventDefault();
+    const code = $('pairCode').value.trim().toUpperCase().replace(/[-\s]/g, '');
+    if (!/^[A-HJ-NP-Z2-9]{8}$/.test(code)) { $('pairStatus').textContent = '配對碼是 8 個英數字（沒有 0、O、1、I）'; return; }
+    $('pairBtn').disabled = true;
+    try { finishPairing(await pairDevice({ code })); } catch (err) { $('pairStatus').textContent = err.message; } finally { $('pairBtn').disabled = false; }
+  };
+}
+
+// ── pairing this browser as a device (LAN mode, POST /pair/client; see seagent_app::devices) ──
+function deviceId() {
+  let id = store.get('seagent.deviceId');
+  if (!id || !/^[0-9a-f]{32}$/.test(id)) {
+    const b = new Uint8Array(16);
+    crypto.getRandomValues(b);
+    id = Array.from(b, (x) => x.toString(16).padStart(2, '0')).join('');
+    store.set('seagent.deviceId', id);
+  }
+  return id;
+}
+function deviceName() {
+  const ua = navigator.userAgent;
+  const what = /iPhone/.test(ua) ? 'iPhone' : /iPad/.test(ua) ? 'iPad' : /Android/.test(ua) ? 'Android' : /Mac/.test(ua) ? 'Mac' : /Windows/.test(ua) ? 'Windows' : /Linux/.test(ua) ? 'Linux' : 'device';
+  return `Browser on ${what}`;
+}
+// One claim, polling while the host has not approved an 8-character code yet.
+async function pairDevice(claim) {
+  const body = { ...claim, device: { id: deviceId(), name: deviceName(), platform: 'web' } };
+  for (let i = 0; i < 600; i++) {
+    const r = await fetch('/pair/client', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
+    const v = await r.json().catch(() => ({}));
+    if (r.status === 200 && v.consoleToken) return v;
+    if (r.status !== 202) throw new Error(v.error || `配對失敗（HTTP ${r.status}）`);
+    body.requestId = v.requestId;
+    const st = $('pairStatus');
+    if (st) st.textContent = `等待主機核准…主機的指紋應為 ${v.sas || '（未知）'}`;
+    await new Promise((res) => setTimeout(res, Math.min(5000, v.retryAfterMs || 1000)));
+  }
+  throw new Error('等待核准逾時，請重新產生配對碼');
+}
+function finishPairing(v) {
+  store.set('seagent.token', v.consoleToken);
+  try { $('login').close(); } catch {}
+  history.replaceState(null, '', location.pathname);
+  start(v.consoleToken);
+}
+// `#setup=<setup code>` (the QR code of `seagent pair code` / the console's pairing card).
+function setupFromHash() {
+  const raw = new URLSearchParams(location.hash.slice(1)).get('setup');
+  if (!raw) return null;
+  try { return JSON.parse(atob(raw.replace(/-/g, '+').replace(/_/g, '/').padEnd(Math.ceil(raw.length / 4) * 4, '='))); } catch { return null; }
 }
 
 // ── wiring ──
@@ -1085,6 +1136,11 @@ applyI18n();
 const fromHash = new URLSearchParams(location.hash.slice(1)).get('token');
 if (fromHash) { store.set('seagent.token', fromHash); history.replaceState(null, '', location.pathname); }
 const saved = fromHash || store.get('seagent.token');
-saved ? start(saved) : askToken();
+const setup = setupFromHash();
+if (setup && setup.bootstrapToken) {
+  // A phone that scanned the pairing QR: claim the one-time token, keep the device token.
+  history.replaceState(null, '', location.pathname);
+  pairDevice({ bootstrapToken: setup.bootstrapToken }).then(finishPairing).catch((e) => { askToken(); $('pairStatus').textContent = e.message; });
+} else saved ? start(saved) : askToken();
 // A link with #token=… opened on an already-loaded page.
-addEventListener('hashchange', () => { if (new URLSearchParams(location.hash.slice(1)).get('token')) location.reload(); });
+addEventListener('hashchange', () => { const h = new URLSearchParams(location.hash.slice(1)); if (h.get('token') || h.get('setup')) location.reload(); });

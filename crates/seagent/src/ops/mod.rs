@@ -36,6 +36,7 @@ pub mod service;
 pub mod service_os;
 pub mod winservice;
 pub mod hostos;
+pub mod lan;
 pub mod slashops;
 pub mod status;
 pub mod telemetry;
@@ -108,6 +109,7 @@ const MODULES: &[Module] = &[
     (triage::COMMANDS, triage::VALUE_FLAGS, triage::BOOL_FLAGS, triage::dispatch),
     (worker::COMMANDS, worker::VALUE_FLAGS, worker::BOOL_FLAGS, worker::dispatch),
     (cluster::COMMANDS, cluster::VALUE_FLAGS, cluster::BOOL_FLAGS, cluster::dispatch),
+    (lan::COMMANDS, lan::VALUE_FLAGS, lan::BOOL_FLAGS, lan::dispatch),
     (dns::COMMANDS, dns::VALUE_FLAGS, dns::BOOL_FLAGS, dns::dispatch),
     (proxy::COMMANDS, proxy::VALUE_FLAGS, proxy::BOOL_FLAGS, proxy::dispatch),
     (directory::COMMANDS, directory::VALUE_FLAGS, directory::BOOL_FLAGS, directory::dispatch),

@@ -53,11 +53,39 @@ iOS 不允許 App 開虛擬機、執行子程序或 JIT，因此 iOS 版是**純
 
 ## 區域網路互聯
 
-- `[app.exposure] lan = true`：允許綁定私有網段位址，但強制 TLS；公網位址仍需完整防線。
-- 第一次啟動自動產生長期自簽憑證到 `<data>/tls/`，指紋即伺服器身分；配對碼一律帶 `wss://` 與指紋 pin。
-- mDNS / DNS-SD 廣播 `_seagent._tcp.local`（TXT 只放協定版本、id、指紋前綴，不放任何 token），預設只在 LAN 模式開啟。
-- 配對：掃 QR（帶指紋與一次性 bootstrap token）或 8 碼配對碼＋雙方顯示短指紋確認；每台裝置拿到可撤銷的專屬 token。
-- 被發現的 LAN 裝置**不會**變成 web/fetch 工具的 SSRF 例外，只能透過 node / ARP 客戶端連。
+開法：設定精靈勾「允許這個網路上的裝置連線」，或 `[app.exposure] lan = true`（listen 改 `0.0.0.0:8640` 或某個私有位址）。
+
+- **綁定規則**（`seagent_security::exposure`，位址分類的唯一來源，配對 URL 與探索共用）：LAN 模式允許私有網段
+  （RFC1918、169.254/16、fe80::/10、fc00::/7、100.64/10）或 `0.0.0.0`／`::`，不需要 `allow_public`；但必須原生 TLS
+  （反向代理不算——客戶端釘選的是我們的憑證）、有速率限制、origin 不得為 `*`。公網位址或主機名稱仍走完整防線
+  （錯誤訊息會說明 LAN 模式只涵蓋私有位址）。
+- **執行時防線**（`seagent_app::server`）：非私有網段的來源一律 403；網路上的連線**只接受已配對裝置的 token**
+  （app token、`[app] tokens`、服務帳號、登入、host routes、A2A／SCIM 都只留給本機）；本機 loopback 可在同一個 port
+  用明文 `http://127.0.0.1:8640`（依第一個位元組判斷，0x16＝TLS），本機主控台、桌面 App 本機模式與精靈照常使用。
+  App 的本機通道送來的 `Host`／`Origin: 127.0.0.1:<port>` 在 TLS 連線上照常接受（同源判斷）。
+- **身分憑證**（`seagent_net::x509`，手寫 DER，不加 crate）：第一次以 LAN 模式啟動時產生 ECDSA P-256 自簽憑證到
+  `<data>/tls/lan-cert.pem`／`lan-key.pem`（僅擁有者可讀），SAN 含主機名、`<主機>.local`、目前 LAN IP、`localhost`、
+  `127.0.0.1`；效期 825 天（瀏覽器的上限；釘選的 App 不看效期）。指紋＝DER 葉憑證的 SHA-256 小寫 hex；只有
+  `seagent tls rotate --yes` 會換（所有裝置需重新配對）。
+- **mDNS / DNS-SD**（`seagent_net::mdns`）：廣播 `_seagent._tcp.local` PTR/SRV/TXT/A，TXT 只有 `v=seagent/2`、`id`
+  （`<data>/tls/host-id`）、`fp`（指紋前 16 hex）、`name`，從不帶 token；啟動時宣告兩次、回應查詢（含 legacy unicast）、
+  停止時送 TTL 0 告別。`[app] discovery = "mdns" | "off"`，預設只在 LAN 模式開。UDP 5353 以 `SO_REUSEADDR`
+  （unix 另加 `SO_REUSEPORT`）與系統的 Avahi／mDNSResponder／Windows DNS client 共用；若被獨佔則只是不可被發現
+  （仍可用位址或 QR 配對）。限制：僅 IPv4、只走系統預設的多播介面。瀏覽：`seagent nodes discover [--json]`、
+  ARP `discovery.list`（從臨時 port 發查詢，對方以 unicast 回覆，所以不需要搶 5353）。
+- **配對**（`seagent_app::devices`，協定見 [arp.md](arp.md)）：`seagent pair code` 或主控台「裝置 → 配對裝置」產生
+  ① QR／連結 `https://<ip>:8640/#setup=<setup code>`（手機相機開啟即配對；App 也接受）、② `seagent-pair://` setup code
+  （`wss://` URL＋一次性 bootstrap token＋憑證指紋）、③ 8 碼配對碼（輸入後要在主機核准，雙方顯示四碼一組的短指紋）。
+  每台裝置拿到專屬、可撤銷、預設 `write` 的 console token（只存加鹽雜湊）；`seagent devices list|approve|reject|revoke`。
+  配對、核准、拒絕、撤銷、憑證輪替都寫入稽核流；`/pair/client` 每個位址每分鐘 30 次、10 分鐘內失敗 10 次即暫停。
+  手機瀏覽器會先看到自簽憑證警告（接受一次即可；它是用 QR 裡的 bootstrap token 證明自己）。
+- **電腦對電腦**：`seagent nodes discover` 列出主機與可直接貼上的 `seagent lan connect <位址> --code <碼>`；配對後
+  token 存入 vault（`LAN_<名稱>_TOKEN`），對方登記為叢集節點（`https://`＋釘選指紋，`seagent cluster status` 可見）。
+  主控台「掃描網路 → 連線」做同樣的事。`seagent node --setup-code` 也以握手時釘選的方式連自簽主機。
+- **PWA**：manifest 與 `index.html` 帶 192／512／maskable 512 PNG 與 180×180 apple-touch-icon。
+- 被發現的 LAN 裝置**不會**變成 web/fetch 工具的 SSRF 例外（`url_safety` 不變），只有 node / ARP / 叢集客戶端用
+  `seagent_net::stream::pinned_request` 連它們。
+- `seagent security audit`／`seagent doctor`：`lan.mode_on`、`lan.discovery_on`、`lan.paired_devices`、`lan.certificate_age`。
 
 ## 安裝與圖形精靈
 

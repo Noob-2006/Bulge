@@ -283,6 +283,35 @@ pub struct Remote {
     pub admin_secret: String,
     #[serde(default)]
     pub added_ms: u64,
+    /// SHA-256 of the node's TLS certificate (lower-case hex): a LAN peer with a self-signed
+    /// identity (`seagent lan connect`) is reached over pinned TLS instead of public CAs.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub fingerprint: String,
+}
+
+impl Remote {
+    /// [`arp_call`] to this node, pinned when it has a fingerprint.
+    pub fn call(&self, token: &str, method: &str, params: Value, timeout: Duration) -> Result<Value, String> {
+        if self.fingerprint.is_empty() {
+            return arp_call(&self.url, token, method, params, timeout);
+        }
+        let endpoint = format!("{}/arp", self.url.trim_end_matches('/'));
+        let body = json!({"jsonrpc": "2.0", "id": 1, "method": method, "params": params}).to_string();
+        let auth = format!("Bearer {token}");
+        let mut headers = vec![("Content-Type", "application/json")];
+        if !token.is_empty() {
+            headers.push(("Authorization", auth.as_str()));
+        }
+        let (status, text) = seagent_net::stream::pinned_request(&endpoint, &self.fingerprint, "POST", &headers, body.as_bytes(), timeout)?;
+        if !(200..300).contains(&status) {
+            return Err(format!("HTTP {status}: {}", text.chars().take(200).collect::<String>()));
+        }
+        let v: Value = serde_json::from_str(&text).map_err(|e| format!("bad JSON-RPC reply: {e}"))?;
+        if let Some(e) = v.get("error") {
+            return Err(e["message"].as_str().unwrap_or("error").to_string());
+        }
+        Ok(v.get("result").cloned().unwrap_or(Value::Null))
+    }
 }
 
 fn remotes_path(data: &Path) -> PathBuf {
@@ -308,6 +337,9 @@ pub fn remote_add(data: &Path, r: Remote) -> Result<(), String> {
         if s.contains("{{") || s.contains(' ') {
             return Err("give the *name* of a vault secret (`seagent secrets set NAME …`), not the token".into());
         }
+    }
+    if !r.fingerprint.is_empty() && !(r.fingerprint.len() == 64 && r.fingerprint.chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()) && r.url.starts_with("https://")) {
+        return Err("fingerprint: the SHA-256 of the node's certificate as 64 lower-case hex digits, with an https:// URL".into());
     }
     let mut all = remotes(data);
     all.retain(|x| x.name != r.name);
@@ -427,7 +459,7 @@ pub fn nodes(d: &Daemon) -> Vec<Value> {
     }
     for r in remotes(data) {
         let tok = secret(d, &r.token_secret);
-        match arp_call(&r.url, &tok, "cluster.self.status", json!({}), Duration::from_secs(5)) {
+        match r.call(&tok, "cluster.self.status", json!({}), Duration::from_secs(5)) {
             Ok(mut v) => {
                 v["alive"] = json!(true);
                 v["source"] = json!("remote");
@@ -460,7 +492,7 @@ pub fn sessions(d: &Daemon, all_nodes: &[Value], limit: usize) -> Vec<Value> {
         .collect();
     for r in remotes(&d.k.paths.data) {
         let tok = secret(d, &r.token_secret);
-        if let Ok(Value::Array(list)) = arp_call(&r.url, &tok, "session.list", json!({"limit": limit}), Duration::from_secs(5)) {
+        if let Ok(Value::Array(list)) = r.call(&tok, "session.list", json!({"limit": limit}), Duration::from_secs(5)) {
             for mut s in list {
                 s["node"] = json!(r.name);
                 s["store"] = json!(r.name);
@@ -562,7 +594,7 @@ pub fn call(d: &Daemon, m: &str, p: &Value) -> Option<Res> {
             }))
         }
         "cluster.node.add" => {
-            let r = Remote { name: s("name"), url: s("url"), token_secret: s("token_secret"), admin_secret: s("admin_secret"), added_ms: crate::event::now_ms() };
+            let r = Remote { name: s("name"), url: s("url"), token_secret: s("token_secret"), admin_secret: s("admin_secret"), added_ms: crate::event::now_ms(), fingerprint: s("fingerprint").to_ascii_lowercase().replace(':', "") };
             let target = r.name.clone();
             let res = remote_add(&data, r.clone()).map_err(bad);
             audit(&data, "cluster.node.add", p, &target, if res.is_ok() { "ok" } else { "error" }, json!({"url": r.url, "token_secret": r.token_secret}));
@@ -613,7 +645,7 @@ pub fn call(d: &Daemon, m: &str, p: &Value) -> Option<Res> {
             let mut results = vec![];
             for r in remotes(&data).into_iter().filter(|r| only.is_empty() || r.name == only) {
                 let tok = secret(d, if r.admin_secret.is_empty() { &r.token_secret } else { &r.admin_secret });
-                let out = arp_call(&r.url, &tok, "cluster.policy.apply", json!({"bundle": b}), Duration::from_secs(10));
+                let out = r.call(&tok, "cluster.policy.apply", json!({"bundle": b}), Duration::from_secs(10));
                 audit(&data, "cluster.policy.push", p, &r.name, if out.is_ok() { "ok" } else { "error" }, json!({"version": b.version, "error": out.as_ref().err()}));
                 results.push(match out {
                     Ok(v) => json!({"node": r.name, "ok": true, "result": v}),
@@ -743,9 +775,9 @@ mod tests {
         assert_eq!(n.len(), 2);
         assert_eq!((n[0]["node"].as_str(), n[0]["alive"].as_bool()), (Some("a"), Some(true)));
         assert_eq!(n[1]["alive"], false);
-        assert!(remote_add(d.path(), Remote { name: "far".into(), url: "ftp://x".into(), token_secret: "T".into(), admin_secret: String::new(), added_ms: 0 }).is_err());
-        assert!(remote_add(d.path(), Remote { name: "far".into(), url: "https://x".into(), token_secret: "{{secret:T}}".into(), admin_secret: String::new(), added_ms: 0 }).is_err());
-        remote_add(d.path(), Remote { name: "far".into(), url: "https://far.example:8640".into(), token_secret: "FAR_TOKEN".into(), admin_secret: String::new(), added_ms: 0 }).unwrap();
+        assert!(remote_add(d.path(), Remote { name: "far".into(), url: "ftp://x".into(), token_secret: "T".into(), admin_secret: String::new(), added_ms: 0, fingerprint: String::new() }).is_err());
+        assert!(remote_add(d.path(), Remote { name: "far".into(), url: "https://x".into(), token_secret: "{{secret:T}}".into(), admin_secret: String::new(), added_ms: 0, fingerprint: String::new() }).is_err());
+        remote_add(d.path(), Remote { name: "far".into(), url: "https://far.example:8640".into(), token_secret: "FAR_TOKEN".into(), admin_secret: String::new(), added_ms: 0, fingerprint: String::new() }).unwrap();
         assert_eq!(remotes(d.path()).len(), 1);
         #[cfg(unix)]
         {

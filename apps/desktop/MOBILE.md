@@ -100,23 +100,28 @@ nothing and the typed-address flow still works after allowing it in Settings ›
 The Swift side (`plugins/seagent-mobile/ios`) only does discovery; TLS pinning, pairing and the
 tunnel are shared Rust (`src-tauri/src/tls.rs`, `pair.rs`).
 
-## Agent-side changes needed
+## Agent-side contract
 
-The app is written against these; they are not in the agent yet (other workstreams: LAN, binary):
+Items 1–5 are implemented in the agent (branch `xp/lan`: `crates/seagent-app/src/{devices,lan}.rs`,
+`crates/seagent-net/src/{x509,mdns}.rs`; protocol in `docs/arp.md`):
 
 1. **`POST /pair/client`** on the App Server (TLS, LAN mode), served before the app-token check:
    request `{"bootstrapToken": "…"}` *or* `{"code": "ABCD2345"}`, plus
    `{"device": {"id": "<32 hex, stable per install>", "name": "…", "platform": "ios|android|…"}}`;
-   response `200 {"consoleToken": "…", "hostId": "…", "name": "<host name>"}`, errors
-   `4xx {"error": "…"}`. The bootstrap token is the one in the setup code (single use); the code
-   is a short-lived 8-character code (alphabet `ABCDEFGHJKLMNPQRSTUVWXYZ23456789`, like node
-   pairing) shown on the host. `consoleToken` is a **per-device, revocable** console credential the
-   web console accepts in `#token=` (listed and revocable next to nodes), never the admin
-   `APP_TOKEN`. Rate-limit and audit failures.
-2. **`seagent pair code [--json] [--ttl MIN]`** (and a "Devices" page in the console): shows the QR
-   (`seagent-pair://` + base64url `{url: "wss://<lan-ip>:<port>/node", bootstrapToken, expiresAtMs,
-   tlsFingerprint}`), the 8-character code and the short fingerprint (first 16 hex digits, grouped
-   by four — the app shows the same).
+   response `200 {"consoleToken": "…", "hostId": "…", "name": "<host name>", "deviceId", "scope"}`,
+   errors `4xx {"error": "…"}`. The bootstrap token is the one in the setup code (single use).
+   **Change from the first proposal:** a typed 8-character code only *requests* pairing — the host
+   answers `202 {"status": "pending", "requestId", "retryAfterMs", "expiresAtMs", "sas"}` (after
+   long-polling up to 15 s) until an admin approves it; the app re-posts the same body plus
+   `requestId` until `200` (or `403` rejected / expired). `pair_host` does this (15 min cap).
+   `consoleToken` (`sed1_…`) is a **per-device, revocable** console credential the web console
+   accepts in `#token=`, never the admin `APP_TOKEN`; it is the *only* credential LAN peers may use.
+   Rate-limited and audited.
+2. **`seagent pair code [--json] [--ttl MIN] [--scope write|admin]`** (and "Devices → Pair a device"
+   in the console): shows the QR — now the link `https://<lan-ip>:<port>/#setup=<setup code>` so a
+   plain phone camera opens the console and pairs; `SetupCode::decode` accepts that form as well as
+   `seagent-pair://<code>` — the 8-character code and the short fingerprint (first 16 hex digits,
+   grouped by four — the app shows the same).
 3. **TLS fingerprint** = SHA-256 over the DER leaf certificate in `<data>/tls/`, lower-case hex
    (what `normalize_fingerprint` already accepts).
 4. **mDNS** `_seagent._tcp.local` with TXT `v=<protocol>`, `id=<host id>`, `fp=<first 16 hex of the

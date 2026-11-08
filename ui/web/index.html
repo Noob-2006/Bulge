@@ -7,6 +7,11 @@
 <title>SE Agent</title>
 <link rel="manifest" href="/manifest.webmanifest">
 <link rel="icon" href="/ui/star.svg" type="image/svg+xml">
+<link rel="icon" href="/ui/icons/icon-192.png" type="image/png" sizes="192x192">
+<link rel="apple-touch-icon" href="/ui/icons/apple-touch-icon.png" sizes="180x180">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="SE Agent">
 <link rel="stylesheet" href="/ui/theme.css">
 <link rel="stylesheet" href="/ui/app.css">
 <link rel="stylesheet" href="/ui/pages.css">
@@ -152,6 +157,12 @@
     <input id="token" type="password" autocomplete="current-password" placeholder="token" required>
     <label class="check"><input type="checkbox" id="remember" checked> <span data-i18n="remember">記住這台裝置</span></label>
     <menu><button class="btn" value="ok" data-i18n="connect">連線</button></menu>
+  </form>
+  <form id="pairForm" class="pair-form">
+    <p class="dim">或用配對碼：在主機上執行 <code>seagent pair code</code>（或在主控台「裝置」頁按「配對裝置」），輸入顯示的 8 碼，再到主機上核准。</p>
+    <input id="pairCode" autocomplete="off" autocapitalize="characters" placeholder="ABCD-2345" maxlength="9">
+    <p class="dim" id="pairStatus"></p>
+    <menu><button class="btn ghost" type="submit" id="pairBtn">用配對碼配對</button></menu>
   </form>
 </dialog>
 

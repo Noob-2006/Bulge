@@ -490,6 +490,18 @@ pub fn bootstrap_token(ttl: Duration) -> (String, u64) {
     (token, exp)
 }
 
+/// Spend a setup code's bootstrap token (single use): `Ok` exactly once per token before it
+/// expires. Device pairing (`POST /pair/client`) uses the same tokens as nodes.
+pub fn consume_bootstrap(token: &str) -> Result<(), String> {
+    let mut r = reg().lock().unwrap();
+    let t = now_ms();
+    r.bootstrap.retain(|(_, exp)| *exp > t);
+    let h = token_hash("bootstrap", token.trim());
+    let i = r.bootstrap.iter().position(|(x, _)| seagent_net::crypto::ct_eq(x.as_bytes(), h.as_bytes())).ok_or("this setup code is unknown, already used or expired; show a new one on the host")?;
+    r.bootstrap.remove(i);
+    Ok(())
+}
+
 /// Invalidate every unused setup code (`/pair cleanup`); returns how many were active.
 pub fn clear_bootstrap() -> usize {
     let mut r = reg().lock().unwrap();
@@ -1744,7 +1756,9 @@ pub fn run_host(c: &HostConn, policy: &HostPolicy) -> Result<(), String> {
         }
     };
     let kp = ring::signature::Ed25519KeyPair::from_pkcs8(&pkcs8).map_err(|_| format!("{} is not an Ed25519 key", c.key_path.display()))?;
-    let (mut ws, _) = WebSocket::connect(&c.url, &[], Duration::from_secs(15)).map_err(|e| format!("connect {}: {e}", c.url))?;
+    // A pinned setup code (LAN mode's self-signed certificate) is verified during the handshake
+    // instead of against public CAs.
+    let (mut ws, _) = WebSocket::connect_pinned(&c.url, &[], Duration::from_secs(15), c.tls_fingerprint.as_deref()).map_err(|e| format!("connect {}: {e}", c.url))?;
     if let Some(want) = &c.tls_fingerprint {
         match ws.get_ref().peer_fingerprint() {
             Some(got) if seagent_net::crypto::ct_eq(got.as_bytes(), want.as_bytes()) => {}
