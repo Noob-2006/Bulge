@@ -102,7 +102,12 @@ env_passthrough = ["BUILD_ID"]
 [exec.vm]
 # auto = 有 KVM 就用 Firecracker，其次 QEMU；都沒有才退回 bwrap 並在
 # `seagent sandbox explain` / 系統提示裡標明隔離等級較低（不會靜默降級）。
-provider = "auto"                   # auto | firecracker | qemu | gvisor | bwrap
+provider = "auto"                   # auto | firecracker | qemu | vfkit | virtualbox | hyperv | avf | gvisor | bwrap
+# auto 依作業系統：Linux firecracker > qemu(KVM)；macOS vfkit(Virtualization.framework) > qemu(HVF) > virtualbox；
+# Windows qemu(WHPX) > hyperv > virtualbox；沒有硬體加速時 qemu 以 TCG 執行（會明示警告）；Android avf；iOS 不支援 VM。
+# vboxmanage = "VBoxManage"
+# vfkit = "vfkit"
+# disk_image = ""                   # VirtualBox / Hyper-V 用的可開機 UEFI raw 磁碟（預設 <data>/vm/kernel/disk.raw）
 allow_fallback = true               # false = 寧可拒絕執行，也不要降級
 # 客體映像：`seagent sandbox vm image build`（packaging/vm/build-image.sh）會下載
 # 官方 kernel 與 Alpine rootfs、放入 seagent-vm-guest，並寫 manifest.json。

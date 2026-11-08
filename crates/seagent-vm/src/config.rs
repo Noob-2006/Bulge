@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct VmConfig {
-    /// `auto` | `firecracker` | `qemu` | `gvisor` | `bwrap`.
+    /// `auto` | `firecracker` | `qemu` | `vfkit` | `virtualbox` | `hyperv` | `avf` | `gvisor` | `bwrap`.
     /// `bwrap`/`gvisor` are the *explicit* weaker fallbacks; `auto` uses them only
     /// when no microVM can boot, and always with the isolation warning.
     pub provider: String,
@@ -26,7 +26,18 @@ pub struct VmConfig {
     /// Where images, per-VM run dirs and snapshots live. Default `<data>/vm`.
     pub image_dir: String,
     pub firecracker: String,
+    /// QEMU system emulator. Default: the host's own architecture (`qemu-system-x86_64`;
+    /// `qemu-system-aarch64` on Apple Silicon / ARM Windows), because KVM/WHPX/HVF only
+    /// accelerate same-architecture guests.
     pub qemu: String,
+    /// `VBoxManage` (VirtualBox provider).
+    pub vboxmanage: String,
+    /// `vfkit` (Apple Virtualization.framework provider, macOS).
+    pub vfkit: String,
+    /// Bootable guest disk for the providers that cannot boot a kernel + initramfs directly
+    /// (VirtualBox, Hyper-V): a raw UEFI disk whose ESP boots the same guest. Default
+    /// `<data>/vm/kernel/disk.raw`; converted on first use to `.vdi` / `.vhdx`.
+    pub disk_image: String,
     pub vcpu: u16,
     pub memory_mb: u32,
     /// Size of the guest `/tmp` tmpfs (MB). 0 = provider default (256).
@@ -75,7 +86,10 @@ impl Default for VmConfig {
             initramfs: String::new(),
             image_dir: String::new(),
             firecracker: "firecracker".into(),
-            qemu: "qemu-system-x86_64".into(),
+            qemu: crate::host::native_qemu().into(),
+            vboxmanage: "VBoxManage".into(),
+            vfkit: "vfkit".into(),
+            disk_image: String::new(),
             vcpu: 2,
             memory_mb: 1024,
             disk_mb: 0,
@@ -116,7 +130,7 @@ impl VmConfig {
                 Err(format!("exec.vm.{k} `{v}`: use {}", ok.join(" | ")))
             }
         };
-        one("provider", &self.provider, &["auto", "firecracker", "fc", "qemu", "gvisor", "runsc", "bwrap"])?;
+        one("provider", &self.provider, &["auto", "firecracker", "fc", "qemu", "vfkit", "vz", "virtualbox", "vbox", "hyperv", "hyper-v", "avf", "crosvm", "gvisor", "runsc", "bwrap"])?;
         one("workspace_access", &self.workspace_access, &["rw", "ro"])?;
         one("network", &self.network, &["broker", "none"])?;
         if self.vcpu == 0 || self.vcpu > 32 {
@@ -157,6 +171,14 @@ impl VmConfig {
             self.root(data).join("kernel").join("initramfs.cpio.gz")
         } else {
             expand(&self.initramfs)
+        }
+    }
+    /// The bootable disk VirtualBox / Hyper-V need (next to the kernel by default).
+    pub fn disk_image_path(&self, data: &Path) -> PathBuf {
+        if self.disk_image.is_empty() {
+            self.root(data).join("kernel").join("disk.raw")
+        } else {
+            expand(&self.disk_image)
         }
     }
     /// Run dir for one VM: sockets, console log, snapshots.

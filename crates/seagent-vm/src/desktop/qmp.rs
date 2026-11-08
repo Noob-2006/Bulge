@@ -1,11 +1,12 @@
-//! A minimal QMP client (QEMU Machine Protocol over the VM's private unix socket): enough
+//! A minimal QMP client (QEMU Machine Protocol over the VM's private unix socket — a loopback
+//! TCP port recorded in the same path on Windows, see [`crate::channel::Endpoint`]): enough
 //! for `screendump` (PNG frames) and `input-send-event` (absolute pointer, buttons, wheel,
 //! keys) — so neither seagent nor the web console needs a VNC client to see or drive the guest.
 
 use super::keys;
 use serde_json::{json, Value};
+use crate::channel::{Endpoint, Stream};
 use std::io::{BufRead, BufReader, Write};
-use std::os::unix::net::UnixStream;
 use std::path::Path;
 use std::time::Duration;
 
@@ -13,14 +14,14 @@ use std::time::Duration;
 pub const ABS_MAX: u32 = 0x7fff;
 
 pub struct Qmp {
-    r: BufReader<UnixStream>,
-    w: UnixStream,
+    r: BufReader<Stream>,
+    w: Stream,
 }
 
 impl Qmp {
     /// Connect, read the greeting and negotiate capabilities.
     pub fn connect(sock: &Path, timeout: Duration) -> Result<Qmp, String> {
-        let s = UnixStream::connect(sock).map_err(|e| format!("QMP {}: {e}", sock.display()))?;
+        let s = Endpoint::locate(sock).and_then(|e| e.connect()).map_err(|e| format!("QMP {}: {e}", sock.display()))?;
         s.set_read_timeout(Some(timeout)).ok();
         s.set_write_timeout(Some(timeout)).ok();
         let w = s.try_clone().map_err(|e| e.to_string())?;

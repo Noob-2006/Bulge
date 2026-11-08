@@ -24,6 +24,13 @@
 //! is "running" while its pid is alive *and* that process's command line names this VM's
 //! QMP socket (pid reuse cannot be mistaken for it). [`DesktopVms::reap`] clears what a dead
 //! VM left behind and stops VMs idle past `idle_timeout_secs`.
+//!
+//! Other hosts (docs/cross-platform.md): macOS runs the same QEMU with `hvf` (Intel Macs; the
+//! desktop image is x86_64, so Apple Silicon emulates it under TCG and says so) and unix
+//! sockets. Windows QEMU has neither unix sockets nor `-daemonize`: QMP and the text port are
+//! TCP servers on 127.0.0.1 whose ports are recorded in the `qmp.sock` / `text.sock` files
+//! ([`crate::channel::Endpoint`]), there is no VNC socket, the detached QEMU's pid is written
+//! by seagent, and `whpx` accelerates it when the Windows Hypervisor Platform is on.
 
 pub mod config;
 pub mod fake;
@@ -34,6 +41,7 @@ pub mod qmp;
 pub use config::DesktopConfig;
 pub use qmp::Input;
 
+use crate::channel::Endpoint;
 use serde::Serialize;
 use serde_json::{json, Value};
 use std::collections::HashMap;
@@ -83,7 +91,7 @@ pub(crate) fn run_tool(bin: &Path, args: &[&str]) -> Result<String, String> {
 
 /// Is `/dev/kvm` usable by this user?
 pub fn kvm_usable() -> bool {
-    std::fs::OpenOptions::new().read(true).write(true).open("/dev/kvm").is_ok()
+    crate::host::kvm_usable()
 }
 
 /// The accelerator for `cfg.accel`, with the warning to show when it is the slow one.
@@ -91,6 +99,13 @@ pub fn accel(cfg: &DesktopConfig) -> (&'static str, Option<String>) {
     match cfg.accel.as_str() {
         "tcg" => ("tcg", Some("desktop_vm.accel = \"tcg\": software emulation, expect a slow desktop".into())),
         "kvm" => ("kvm", None),
+        "whpx" => ("whpx", None),
+        "hvf" => ("hvf", None),
+        _ if cfg!(windows) && crate::host::whpx_available() => ("whpx", None),
+        _ if cfg!(windows) => ("tcg", Some("the Windows Hypervisor Platform is not enabled: the desktop VM runs under TCG software emulation (slow). Enable the optional feature `HypervisorPlatform` for -accel whpx.".into())),
+        // The desktop image is x86_64: HVF accelerates it on Intel Macs only.
+        _ if cfg!(target_os = "macos") && cfg!(target_arch = "x86_64") && crate::host::hvf_available() => ("hvf", None),
+        _ if cfg!(target_os = "macos") => ("tcg", Some("the desktop image is x86_64 and this Mac cannot accelerate it (Apple Silicon, or no Hypervisor.framework): it runs under TCG software emulation (slow)".into())),
         _ if kvm_usable() => ("kvm", None),
         _ => ("tcg", Some("/dev/kvm is missing or not writable: the desktop VM runs under TCG software emulation (slow). Add this user to the `kvm` group for hardware virtualisation.".into())),
     }
@@ -128,19 +143,16 @@ fn qmp_lock(sock: &Path) -> Arc<Mutex<()>> {
 }
 
 fn pid_alive(pid: u32) -> bool {
-    // SAFETY: signal 0 only checks that the process exists.
-    if unsafe { libc::kill(pid as i32, 0) } != 0 {
-        return false;
-    }
-    // A zombie is gone for our purposes.
-    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).unwrap_or_default();
-    !stat.rsplit(')').next().unwrap_or("").trim_start().starts_with('Z')
+    crate::host::pid_alive(pid)
 }
 
 fn private_dir(p: &Path) -> Result<(), String> {
-    use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
-    std::fs::DirBuilder::new().recursive(true).mode(0o700).create(p).map_err(|e| format!("create {}: {e}", p.display()))?;
-    std::fs::set_permissions(p, std::fs::Permissions::from_mode(0o700)).map_err(|e| e.to_string())
+    crate::host::private_dir(p)
+}
+
+/// The endpoint behind one of the VM's socket names (the socket itself on unix).
+fn endpoint(p: &Path) -> Endpoint {
+    Endpoint::locate(p).unwrap_or_else(|_| Endpoint::Unix(p.to_path_buf()))
 }
 
 /// The desktop VMs of one seagent home.
@@ -219,9 +231,13 @@ impl DesktopVms {
         if !pid_alive(pid) {
             return None;
         }
-        let cmd = std::fs::read(format!("/proc/{pid}/cmdline")).ok()?;
+        let cmd = crate::host::process_identity(pid)?;
+        if cfg!(windows) {
+            // Windows reports the image path only; the pid file is ours and private.
+            return cmd.to_ascii_lowercase().contains("qemu").then_some(pid);
+        }
         let want = self.qmp_path(name).display().to_string();
-        String::from_utf8_lossy(&cmd).contains(&want).then_some(pid)
+        cmd.contains(&want).then_some(pid)
     }
     pub fn is_running(&self, name: &str) -> bool {
         self.pid(name).is_some()
@@ -293,9 +309,9 @@ impl DesktopVms {
             "-name".into(),
             format!("seagent-desktop-{name}"),
             "-machine".into(),
-            format!("q35,accel={accel}"),
+            if accel == "whpx" { "q35,accel=whpx,kernel-irqchip=off".into() } else { format!("q35,accel={accel}") },
             "-cpu".into(),
-            if accel == "kvm" { "host".into() } else { "max".into() },
+            if accel == "kvm" || accel == "hvf" { "host".into() } else { "max".into() },
             "-smp".into(),
             c.cpus.to_string(),
             "-m".into(),
@@ -314,7 +330,7 @@ impl DesktopVms {
             "-device".into(),
             "virtio-serial-pci".into(),
             "-chardev".into(),
-            format!("socket,id=seagenttext,path={},server=on,wait=off", self.text_path(name).display()),
+            endpoint(&self.text_path(name)).qemu_chardev("seagenttext"),
             "-device".into(),
             "virtserialport,chardev=seagenttext,name=org.seagent.text".into(),
             "-smbios".into(),
@@ -326,11 +342,13 @@ impl DesktopVms {
         } else {
             a.extend(["-nic".into(), "none".into()]);
         }
+        // VNC on a private unix socket; Windows QEMU has none, and frames come over QMP anyway.
+        let vnc = if cfg!(unix) { format!("unix:{}", self.vnc_path(name).display()) } else { "none".into() };
         a.extend([
             "-vnc".into(),
-            format!("unix:{}", self.vnc_path(name).display()),
+            vnc,
             "-qmp".into(),
-            format!("unix:{},server=on,wait=off", self.qmp_path(name).display()),
+            endpoint(&self.qmp_path(name)).qemu_monitor(),
             "-monitor".into(),
             "none".into(),
             "-parallel".into(),
@@ -339,8 +357,10 @@ impl DesktopVms {
             format!("file:{}", self.vm_dir(name).join("console.log").display()),
             "-pidfile".into(),
             self.pid_path(name).display().to_string(),
-            "-daemonize".into(),
         ]);
+        if cfg!(unix) {
+            a.push("-daemonize".into());
+        }
         a
     }
 
@@ -359,7 +379,7 @@ impl DesktopVms {
         let (vm, run) = (self.vm_dir(name), self.run_dir(name));
         private_dir(&vm)?;
         private_dir(&run)?;
-        if [self.qmp_path(name), self.vnc_path(name), self.text_path(name)].iter().any(|p| p.as_os_str().len() > 100) {
+        if cfg!(unix) && [self.qmp_path(name), self.vnc_path(name), self.text_path(name)].iter().any(|p| p.as_os_str().len() > 100) {
             return Err(format!("runtime dir {} is too long for unix sockets (≤ 100 bytes); set a shorter SEAGENT runtime dir", run.display()));
         }
         for p in [&vm, &run, &img] {
@@ -378,12 +398,25 @@ impl DesktopVms {
         let (acc, warn) = accel(&self.cfg);
         let _ = std::fs::remove_file(vm.join(CDP_FILE));
         let cdp_port = if self.cfg.network == "user" { Some(free_loopback_port()?) } else { None };
-        let out = Command::new(&qemu).args(self.cmdline(name, &disk, acc, cdp_port)).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).output().map_err(|e| format!("start {}: {e}", qemu.display()))?;
-        if !out.status.success() {
-            return Err(format!("qemu failed to start the desktop VM: {}", String::from_utf8_lossy(&out.stderr).trim()));
+        if !cfg!(unix) {
+            // Loopback ports for QMP and the text channel, recorded where the sockets would be.
+            Endpoint::allocate(&self.qmp_path(name))?;
+            Endpoint::allocate(&self.text_path(name))?;
+        }
+        if cfg!(unix) {
+            let out = Command::new(&qemu).args(self.cmdline(name, &disk, acc, cdp_port)).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).output().map_err(|e| format!("start {}: {e}", qemu.display()))?;
+            if !out.status.success() {
+                return Err(format!("qemu failed to start the desktop VM: {}", String::from_utf8_lossy(&out.stderr).trim()));
+            }
+        } else {
+            // No -daemonize on Windows: a detached QEMU whose pid seagent records itself.
+            let log = std::fs::File::create(vm.join("qemu.log")).map_err(|e| e.to_string())?;
+            let child = crate::host::spawn_vmm(Command::new(&qemu).args(self.cmdline(name, &disk, acc, cdp_port)).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::from(log))).map_err(|e| format!("start {}: {e}", qemu.display()))?;
+            std::fs::write(self.pid_path(name), child.id().to_string()).map_err(|e| e.to_string())?;
         }
         let t0 = Instant::now();
-        while !(self.qmp_path(name).exists() && self.is_running(name)) {
+        let qmp_up = |n: &str| cfg!(unix) || endpoint(&self.qmp_path(n)).connect().is_ok();
+        while !(self.qmp_path(name).exists() && self.is_running(name) && qmp_up(name)) {
             if t0.elapsed() > Duration::from_secs(15) {
                 self.kill(name);
                 return Err("qemu daemonized but its QMP socket never appeared".into());
@@ -419,10 +452,10 @@ impl DesktopVms {
 
     fn kill(&self, name: &str) {
         if let Some(pid) = self.pid(name) {
-            // SAFETY: the pid was checked to be this VM's QEMU (command line names its socket).
-            unsafe { libc::kill(pid as i32, libc::SIGTERM) };
+            // The pid was checked to be this VM's QEMU (command line names its socket).
+            crate::host::kill_pid(pid, false);
             if !self.wait_exit(pid, Duration::from_secs(3)) {
-                unsafe { libc::kill(pid as i32, libc::SIGKILL) };
+                crate::host::kill_pid(pid, true);
                 self.wait_exit(pid, Duration::from_secs(2));
             }
         }
@@ -521,7 +554,7 @@ impl DesktopVms {
         if text.len() > 16 * 1024 {
             return Err("text longer than 16 KiB".into());
         }
-        let mut s = std::os::unix::net::UnixStream::connect(self.text_path(name)).map_err(|e| format!("text channel of `{name}`: {e} (VM started by an older seagent?)"))?;
+        let mut s = endpoint(&self.text_path(name)).connect().map_err(|e| format!("text channel of `{name}`: {e} (VM started by an older seagent?)"))?;
         s.set_write_timeout(Some(Duration::from_secs(5))).ok();
         let line = format!("{}\n", base64::engine::general_purpose::STANDARD.encode(text.as_bytes()));
         s.write_all(line.as_bytes()).map_err(|e| format!("text channel write: {e}"))?;
@@ -577,5 +610,5 @@ impl DesktopVms {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests;

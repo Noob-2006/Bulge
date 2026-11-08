@@ -246,19 +246,10 @@ impl VmManager {
     }
     /// Machine capabilities, re-detected (never cached: a binary can vanish).
     pub fn capabilities(&self) -> Capabilities {
-        let mut caps = Capabilities::detect(Some(&self.cfg.kernel_path(&self.data)), Some(&self.cfg.initramfs_path(&self.data)));
-        // `[exec.vm] firecracker`/`qemu` may be an absolute path outside PATH
-        // (a tarball unpacked into a data dir); honour it.
-        // A firecracker tarball unpacked into the data dir is the common case
-        // (`packaging/vm/README.md`); no PATH or root needed.
-        let local_fc = self.data.join("vm").join("bin").join("firecracker");
-        if let Some(p) = crate::isolation::which(&self.cfg.firecracker).or(local_fc.is_file().then_some(local_fc)) {
-            caps.firecracker = Some(p);
-        }
-        if let Some(p) = crate::isolation::which(&self.cfg.qemu) {
-            caps.qemu = Some(p);
-        }
-        caps
+        // `[exec.vm] firecracker`/`qemu` may be an absolute path outside PATH (a tarball
+        // unpacked into the data dir is the common case, `packaging/vm/README.md`); the
+        // policy module applies exactly those rules, so explain/doctor and the pool agree.
+        crate::policy::capabilities(&self.cfg, &self.data)
     }
     /// Test hook: run the pool against an in-process fake agent instead of a VM.
     pub fn set_provider_override(&self, p: Arc<dyn crate::provider::VmProvider>) {
@@ -339,10 +330,7 @@ impl VmManager {
             mem_mb: self.cfg.memory_mb,
             workspace: Some(crate::provider::Workspace { host: workspace.to_path_buf(), guest: crate::proto::GUEST_WORKSPACE.into(), read_only }),
             limits,
-            transport: match kind {
-                ProviderKind::Firecracker => crate::channel::Transport::Vsock { port: crate::proto::VSOCK_PORT },
-                _ => crate::channel::Transport::Serial,
-            },
+            transport: crate::provider::transport_for(kind),
             firecracker: crate::isolation::which(&self.cfg.firecracker).or_else(|| Some(PathBuf::from(&self.cfg.firecracker))),
             qemu: crate::isolation::which(&self.cfg.qemu).or_else(|| Some(PathBuf::from(&self.cfg.qemu))),
             extra_args: self.cfg.extra_args.clone(),
@@ -839,8 +827,7 @@ fn host_manifest(workspace: &Path, guard: &SecretGuard, max_mb: u64) -> Result<H
                 return Err(format!("workspace exceeds exec.vm.workspace_max_mb ({} MB): refusing a partial sync", max_mb));
             }
             let mtime = md.modified().ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map(|d| d.as_secs() as i64).unwrap_or(0);
-            use std::os::unix::fs::PermissionsExt;
-            out.insert(child_rel, (md.len(), mtime, md.permissions().mode() & 0o777));
+            out.insert(child_rel, (md.len(), mtime, crate::host::mode_bits(&md)));
         }
     }
     Ok(out)

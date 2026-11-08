@@ -179,6 +179,25 @@ seagent-broker '{"kind":"egress.http","payload":{"url":"https://example.com"}}'
 # -> {"ok":true,"payload":{…}}   exit 0, or {"ok":false,"error":"…"} exit 1
 ```
 
+## Booting it on other hosts
+
+The guest is always Linux; each host OS boots it with its own hypervisor
+(`crates/seagent-vm/src/provider/`, chosen by `isolation::Capabilities::vm_candidates`):
+
+| host | provider (auto order) | needs from the image | channel (`seagent.channel=`) |
+| --- | --- | --- | --- |
+| Linux | Firecracker → QEMU-KVM | `vmlinux` + `initramfs.cpio.gz` (unchanged) | `vsock` / `virtio-serial` |
+| Windows | QEMU+WHPX (TCG fallback, warned) | same files; PCI kernel for virtio-serial | `virtio-serial` over 127.0.0.1 TCP |
+| Windows | Hyper-V (Gen 2, elevated) | **raw UEFI disk** → `disk.vhdx` via `qemu-img convert -O vhdx` (wired) | `uart` (`/dev/ttyS1`, named pipe) |
+| Win / macOS / Linux | VirtualBox | **raw UEFI disk** → `disk.vdi` via `VBoxManage convertfromraw` (wired), attached immutable | `uart` (unix socket / named pipe) |
+| macOS | vfkit (Virtualization.framework) → QEMU+HVF | **arm64** kernel `Image` + initramfs on Apple Silicon (virtio-PCI + vsock built in) | `vsock` (no preface) |
+| Android | AVF `vm run` (crosvm, pKVM) | arm64 kernel + initramfs | `vsock` (host AF_VSOCK to the CID) |
+| iOS | none (platform policy) | — | — |
+
+Not built by `build-image.sh` yet: the arm64 variant and the raw UEFI disk (`disk.raw`,
+an ESP that boots the same kernel + initramfs with `seagent.channel=uart`). Until they
+exist, those providers report the missing artefact instead of booting.
+
 ## One interface for every backend
 
 `seagent_vm::unify::IsolatedEnv` is the interface every execution environment

@@ -27,6 +27,9 @@
 //! (the builder's default); when it is missing the test prints how to build it
 //! and returns instead of failing, so `--ignored` stays usable on a machine
 //! without an image.
+//!
+//! Linux only: the guest agent is a Linux PID 1 and both VMMs here are Linux VMMs.
+#![cfg(target_os = "linux")]
 
 #[path = "../src/bin/seagent-vm-guest.rs"]
 #[allow(dead_code)]

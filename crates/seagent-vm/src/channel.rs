@@ -1,42 +1,434 @@
-//! Host side of the guest channel: one unix socket to the VM's transport,
+//! Host side of the guest channel: one byte stream to the VM's transport,
 //! carrying framed [`HostMsg`]/[`GuestMsg`] traffic.
 //!
-//! Both providers expose the guest's single channel as a host unix socket, so
+//! Every provider exposes the guest's single channel as one host stream, so
 //! this is the only transport code there is:
 //!
 //! * Firecracker: `vsock` uds + the `CONNECT <port>\n` handshake
 //!   (`<run>/vsock.sock`). The guest listens on AF_VSOCK `VSOCK_PORT`.
 //! * QEMU: `-chardev socket,...,server=on` + virtio-serial, so the guest reads
-//!   `/dev/vport0p1` (`<run>/chan.sock`). No handshake.
+//!   `/dev/vport0p1` (`<run>/chan.sock`). No handshake. On Windows (no unix
+//!   sockets for QEMU) the chardev is a TCP server on 127.0.0.1 and
+//!   `<run>/chan.sock` is a small file naming its port ([`Endpoint`]).
+//! * vfkit (Apple Virtualization.framework): `virtio-vsock,…,listen` proxies
+//!   a unix socket straight to the guest's vsock port — no preface
+//!   ([`Transport::VsockProxy`]).
+//! * VirtualBox / Hyper-V: the guest's second UART (`/dev/ttyS1`), served by the
+//!   hypervisor as a unix socket (VirtualBox on Linux/macOS) or a named pipe
+//!   (Windows) — [`Transport::Uart`].
+//! * Android AVF (crosvm): a direct AF_VSOCK connection to the guest's CID.
 //!
-//! Read and write halves are separate fds: a command streams output while the
+//! Read and write halves are separate handles: a command streams output while the
 //! caller writes stdin from another thread.
 
 use crate::proto::{decode, encode, GuestMsg, HostMsg};
 use std::io::{ErrorKind, Read, Write};
+use std::net::{SocketAddr, TcpStream};
+#[cfg(unix)]
 use std::os::unix::net::UnixStream;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Transport {
-    /// Guest listens on AF_VSOCK; the host socket needs the CONNECT preamble.
+    /// Guest listens on AF_VSOCK; the host socket needs the CONNECT preamble (Firecracker).
     Vsock { port: u32 },
     /// Guest uses a virtio-serial port; the host socket is transparent.
     Serial,
+    /// Guest listens on AF_VSOCK and the VMM (vfkit, crosvm) connects the host stream
+    /// straight to that port: no preamble.
+    VsockProxy { port: u32 },
+    /// Guest uses its second 16550 UART (`/dev/ttyS1`): VirtualBox, Hyper-V COM ports.
+    Uart,
 }
 
 impl Transport {
+    /// What the guest is told on its kernel command line (`seagent.channel=`).
     pub fn name(&self) -> &'static str {
         match self {
-            Transport::Vsock { .. } => "vsock",
+            Transport::Vsock { .. } | Transport::VsockProxy { .. } => "vsock",
             Transport::Serial => "virtio-serial",
+            Transport::Uart => "uart",
+        }
+    }
+}
+
+/// One connected host-side stream. Linux keeps its unix socket (same fd, same syscalls);
+/// the other variants exist only where a VMM cannot offer one.
+#[derive(Debug)]
+pub enum Stream {
+    #[cfg(unix)]
+    Unix(UnixStream),
+    /// QEMU's `-chardev socket,host=127.0.0.1,…` on Windows.
+    Tcp(TcpStream),
+    /// A hypervisor-served named pipe (VirtualBox / Hyper-V COM port on Windows).
+    #[cfg(windows)]
+    Pipe(pipe::Pipe),
+}
+
+impl Stream {
+    pub fn connect_unix(path: &Path) -> std::io::Result<Stream> {
+        #[cfg(unix)]
+        {
+            UnixStream::connect(path).map(Stream::Unix)
+        }
+        #[cfg(not(unix))]
+        {
+            Err(std::io::Error::new(ErrorKind::Unsupported, format!("{}: unix sockets are not available to VMMs on this OS", path.display())))
+        }
+    }
+
+    pub fn connect_tcp(addr: SocketAddr) -> std::io::Result<Stream> {
+        let s = TcpStream::connect_timeout(&addr, Duration::from_secs(2))?;
+        s.set_nodelay(true).ok();
+        Ok(Stream::Tcp(s))
+    }
+
+    /// Connect AF_VSOCK to `cid:port` (Android AVF: the host talks to the guest directly).
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    pub fn connect_vsock(cid: u32, port: u32) -> std::io::Result<Stream> {
+        use std::os::fd::FromRawFd;
+        // SAFETY: plain socket calls; the fd is owned by the UnixStream on success (a stream
+        // socket of any family supports the read/write/timeout/shutdown calls it makes).
+        unsafe {
+            let fd = libc::socket(libc::AF_VSOCK, libc::SOCK_STREAM | libc::SOCK_CLOEXEC, 0);
+            if fd < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            let mut a: libc::sockaddr_vm = std::mem::zeroed();
+            a.svm_family = libc::AF_VSOCK as libc::sa_family_t;
+            a.svm_cid = cid;
+            a.svm_port = port;
+            if libc::connect(fd, (&a as *const libc::sockaddr_vm).cast(), std::mem::size_of::<libc::sockaddr_vm>() as libc::socklen_t) != 0 {
+                let e = std::io::Error::last_os_error();
+                libc::close(fd);
+                return Err(e);
+            }
+            Ok(Stream::Unix(UnixStream::from_raw_fd(fd)))
+        }
+    }
+
+    /// A connected pair (tests, in-process fakes).
+    pub fn pair() -> std::io::Result<(Stream, Stream)> {
+        #[cfg(unix)]
+        {
+            UnixStream::pair().map(|(a, b)| (Stream::Unix(a), Stream::Unix(b)))
+        }
+        #[cfg(not(unix))]
+        {
+            let l = std::net::TcpListener::bind("127.0.0.1:0")?;
+            let a = TcpStream::connect(l.local_addr()?)?;
+            let (b, _) = l.accept()?;
+            Ok((Stream::Tcp(a), Stream::Tcp(b)))
+        }
+    }
+
+    pub fn try_clone(&self) -> std::io::Result<Stream> {
+        Ok(match self {
+            #[cfg(unix)]
+            Stream::Unix(s) => Stream::Unix(s.try_clone()?),
+            Stream::Tcp(s) => Stream::Tcp(s.try_clone()?),
+            #[cfg(windows)]
+            Stream::Pipe(p) => Stream::Pipe(p.try_clone()?),
+        })
+    }
+    pub fn set_read_timeout(&self, t: Option<Duration>) -> std::io::Result<()> {
+        match self {
+            #[cfg(unix)]
+            Stream::Unix(s) => s.set_read_timeout(t),
+            Stream::Tcp(s) => s.set_read_timeout(t),
+            #[cfg(windows)]
+            Stream::Pipe(p) => p.set_read_timeout(t),
+        }
+    }
+    pub fn set_write_timeout(&self, t: Option<Duration>) -> std::io::Result<()> {
+        match self {
+            #[cfg(unix)]
+            Stream::Unix(s) => s.set_write_timeout(t),
+            Stream::Tcp(s) => s.set_write_timeout(t),
+            #[cfg(windows)]
+            Stream::Pipe(_) => Ok(()),
+        }
+    }
+    pub fn shutdown(&self, how: std::net::Shutdown) -> std::io::Result<()> {
+        match self {
+            #[cfg(unix)]
+            Stream::Unix(s) => s.shutdown(how),
+            Stream::Tcp(s) => s.shutdown(how),
+            #[cfg(windows)]
+            Stream::Pipe(p) => p.close(),
+        }
+    }
+}
+
+impl Read for &Stream {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        match *self {
+            #[cfg(unix)]
+            Stream::Unix(s) => (&*s).read(buf),
+            Stream::Tcp(s) => (&*s).read(buf),
+            #[cfg(windows)]
+            Stream::Pipe(p) => p.read(buf),
+        }
+    }
+}
+
+impl Write for &Stream {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        match *self {
+            #[cfg(unix)]
+            Stream::Unix(s) => (&*s).write(buf),
+            Stream::Tcp(s) => (&*s).write(buf),
+            #[cfg(windows)]
+            Stream::Pipe(p) => p.write(buf),
+        }
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        match *self {
+            #[cfg(unix)]
+            Stream::Unix(s) => (&*s).flush(),
+            Stream::Tcp(s) => (&*s).flush(),
+            #[cfg(windows)]
+            Stream::Pipe(_) => Ok(()),
+        }
+    }
+}
+
+impl Read for Stream {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        (&*self).read(buf)
+    }
+}
+
+impl Write for Stream {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        (&*self).write(buf)
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        (&*self).flush()
+    }
+}
+
+/// Where a VMM serves one host-side socket (guest channel, QMP, a text port).
+///
+/// The *name* of an endpoint is always a path in the VM's private run dir. On unix that path
+/// is the unix socket itself — exactly what Linux always used. On Windows a VMM cannot bind a
+/// unix socket, so the path is a one-line record (`tcp:127.0.0.1:<port>` or
+/// `pipe:\\.\pipe\<name>`) written when the VM is configured and read by whoever connects.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Endpoint {
+    Unix(PathBuf),
+    Tcp(SocketAddr),
+    Pipe(String),
+}
+
+/// A port on host loopback nobody listens on right now (the VMM binds it a moment later).
+pub fn free_loopback_port() -> Result<u16, String> {
+    std::net::TcpListener::bind("127.0.0.1:0").and_then(|l| l.local_addr()).map(|a| a.port()).map_err(|e| format!("no free loopback port: {e}"))
+}
+
+impl Endpoint {
+    /// The endpoint a VMM should serve for `path`: the unix socket itself where the OS has
+    /// them, else a free loopback port recorded in `path`.
+    pub fn allocate(path: &Path) -> Result<Endpoint, String> {
+        let _ = std::fs::remove_file(path);
+        if cfg!(unix) {
+            return Ok(Endpoint::Unix(path.to_path_buf()));
+        }
+        let ep = Endpoint::Tcp(SocketAddr::from(([127, 0, 0, 1], free_loopback_port()?)));
+        ep.record(path)?;
+        Ok(ep)
+    }
+
+    /// A named pipe endpoint (Windows), recorded in `path`.
+    pub fn allocate_pipe(path: &Path, name: &str) -> Result<Endpoint, String> {
+        let ep = Endpoint::Pipe(format!(r"\\.\pipe\{name}"));
+        ep.record(path)?;
+        Ok(ep)
+    }
+
+    fn record(&self, path: &Path) -> Result<(), String> {
+        let line = match self {
+            Endpoint::Unix(p) => format!("unix:{}", p.display()),
+            Endpoint::Tcp(a) => format!("tcp:{a}"),
+            Endpoint::Pipe(n) => format!("pipe:{n}"),
+        };
+        std::fs::write(path, format!("{line}\n")).map_err(|e| format!("record endpoint {}: {e}", path.display()))
+    }
+
+    /// Where to connect for `path`. NotFound while the VM has not created it yet.
+    pub fn locate(path: &Path) -> std::io::Result<Endpoint> {
+        if cfg!(unix) {
+            return Ok(Endpoint::Unix(path.to_path_buf()));
+        }
+        let s = std::fs::read_to_string(path)?;
+        let s = s.trim();
+        if let Some(a) = s.strip_prefix("tcp:") {
+            return a.parse().map(Endpoint::Tcp).map_err(|e| std::io::Error::new(ErrorKind::InvalidData, format!("{}: {e}", path.display())));
+        }
+        if let Some(n) = s.strip_prefix("pipe:") {
+            return Ok(Endpoint::Pipe(n.to_string()));
+        }
+        Err(std::io::Error::new(ErrorKind::InvalidData, format!("{}: not an endpoint record", path.display())))
+    }
+
+    pub fn connect(&self) -> std::io::Result<Stream> {
+        match self {
+            Endpoint::Unix(p) => Stream::connect_unix(p),
+            Endpoint::Tcp(a) => Stream::connect_tcp(*a),
+            #[cfg(windows)]
+            Endpoint::Pipe(n) => pipe::Pipe::open(n).map(Stream::Pipe),
+            #[cfg(not(windows))]
+            Endpoint::Pipe(n) => Err(std::io::Error::new(ErrorKind::Unsupported, format!("{n}: named pipes exist on Windows only"))),
+        }
+    }
+
+    /// QEMU `-chardev` spec serving this endpoint.
+    pub fn qemu_chardev(&self, id: &str) -> String {
+        match self {
+            Endpoint::Unix(p) => format!("socket,id={id},path={},server=on,wait=off", p.display()),
+            Endpoint::Tcp(a) => format!("socket,id={id},host={},port={},server=on,wait=off", a.ip(), a.port()),
+            Endpoint::Pipe(n) => format!("pipe,id={id},path={}", n.trim_start_matches(r"\\.\pipe\")),
+        }
+    }
+
+    /// QEMU `-qmp` / `-monitor` spec serving this endpoint.
+    pub fn qemu_monitor(&self) -> String {
+        match self {
+            Endpoint::Unix(p) => format!("unix:{},server=on,wait=off", p.display()),
+            Endpoint::Tcp(a) => format!("tcp:{a},server=on,wait=off"),
+            Endpoint::Pipe(n) => format!("pipe:{}", n.trim_start_matches(r"\\.\pipe\")),
+        }
+    }
+
+    /// Listen on this endpoint (in-process fakes standing in for a VMM).
+    pub fn listen(&self) -> std::io::Result<Listener> {
+        match self {
+            #[cfg(unix)]
+            Endpoint::Unix(p) => std::os::unix::net::UnixListener::bind(p).map(Listener::Unix),
+            Endpoint::Tcp(a) => std::net::TcpListener::bind(a).map(Listener::Tcp),
+            _ => Err(std::io::Error::new(ErrorKind::Unsupported, "cannot listen on this endpoint here")),
+        }
+    }
+}
+
+/// The listening side of an [`Endpoint`] (test fakes).
+#[derive(Debug)]
+pub enum Listener {
+    #[cfg(unix)]
+    Unix(std::os::unix::net::UnixListener),
+    Tcp(std::net::TcpListener),
+}
+
+impl Listener {
+    pub fn accept(&self) -> std::io::Result<Stream> {
+        match self {
+            #[cfg(unix)]
+            Listener::Unix(l) => l.accept().map(|(s, _)| Stream::Unix(s)),
+            Listener::Tcp(l) => l.accept().map(|(s, _)| Stream::Tcp(s)),
+        }
+    }
+    pub fn set_nonblocking(&self, on: bool) -> std::io::Result<()> {
+        match self {
+            #[cfg(unix)]
+            Listener::Unix(l) => l.set_nonblocking(on),
+            Listener::Tcp(l) => l.set_nonblocking(on),
+        }
+    }
+}
+
+impl Stream {
+    pub fn set_nonblocking(&self, on: bool) -> std::io::Result<()> {
+        match self {
+            #[cfg(unix)]
+            Stream::Unix(s) => s.set_nonblocking(on),
+            Stream::Tcp(s) => s.set_nonblocking(on),
+            #[cfg(windows)]
+            Stream::Pipe(_) => Ok(()),
+        }
+    }
+}
+
+#[cfg(windows)]
+pub mod pipe {
+    //! Client end of a hypervisor-served named pipe (`\\.\pipe\…`). Synchronous pipe handles
+    //! serialise every I/O on the file object, so a reader blocked in `ReadFile` would stall
+    //! the writer; reads therefore only happen once `PeekNamedPipe` says bytes are waiting,
+    //! which also gives `set_read_timeout` its meaning.
+    use std::fs::File;
+    use std::io::{ErrorKind, Read, Write};
+    use std::os::windows::io::AsRawHandle;
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+
+    #[derive(Debug)]
+    pub struct Pipe {
+        file: File,
+        timeout_ms: Arc<AtomicU64>,
+        closed: Arc<AtomicBool>,
+    }
+
+    impl Pipe {
+        pub fn open(name: &str) -> std::io::Result<Pipe> {
+            let file = std::fs::OpenOptions::new().read(true).write(true).open(name)?;
+            Ok(Pipe { file, timeout_ms: Arc::new(AtomicU64::new(0)), closed: Arc::new(AtomicBool::new(false)) })
+        }
+        pub fn try_clone(&self) -> std::io::Result<Pipe> {
+            Ok(Pipe { file: self.file.try_clone()?, timeout_ms: self.timeout_ms.clone(), closed: self.closed.clone() })
+        }
+        pub fn set_read_timeout(&self, t: Option<Duration>) -> std::io::Result<()> {
+            self.timeout_ms.store(t.map(|d| d.as_millis().max(1) as u64).unwrap_or(0), Ordering::SeqCst);
+            Ok(())
+        }
+        pub fn close(&self) -> std::io::Result<()> {
+            self.closed.store(true, Ordering::SeqCst);
+            Ok(())
+        }
+        fn available(&self) -> std::io::Result<u32> {
+            let mut avail = 0u32;
+            // SAFETY: peek without a buffer, only the byte count.
+            let ok = unsafe { windows_sys::Win32::System::Pipes::PeekNamedPipe(self.file.as_raw_handle() as isize, std::ptr::null_mut(), 0, std::ptr::null_mut(), &mut avail, std::ptr::null_mut()) };
+            if ok == 0 {
+                let e = std::io::Error::last_os_error();
+                // ERROR_BROKEN_PIPE: the hypervisor closed its end (VM gone) = EOF.
+                return if e.raw_os_error() == Some(109) { Ok(u32::MAX) } else { Err(e) };
+            }
+            Ok(avail)
+        }
+        pub fn read(&self, buf: &mut [u8]) -> std::io::Result<usize> {
+            let t = self.timeout_ms.load(Ordering::SeqCst);
+            let deadline = (t > 0).then(|| Instant::now() + Duration::from_millis(t));
+            loop {
+                if self.closed.load(Ordering::SeqCst) {
+                    return Ok(0);
+                }
+                match self.available()? {
+                    u32::MAX => return Ok(0),
+                    0 => {}
+                    n => {
+                        let want = buf.len().min(n as usize);
+                        return (&self.file).read(&mut buf[..want]);
+                    }
+                }
+                if deadline.is_some_and(|d| Instant::now() >= d) {
+                    return Err(std::io::Error::new(ErrorKind::TimedOut, "named pipe read timed out"));
+                }
+                std::thread::sleep(Duration::from_millis(2));
+            }
+        }
+        pub fn write(&self, buf: &[u8]) -> std::io::Result<usize> {
+            if self.closed.load(Ordering::SeqCst) {
+                return Err(std::io::Error::new(ErrorKind::BrokenPipe, "channel closed"));
+            }
+            (&self.file).write(buf)
         }
     }
 }
 
 pub struct Channel {
-    w: UnixStream,
-    r: UnixStream,
+    w: Stream,
+    r: Stream,
     /// Bytes read but not yet a complete frame, and frames decoded ahead of the
     /// caller (one read may yield several). Behind a mutex so `recv` can take
     /// `&self`: the pool hands the same `Arc<Channel>` to a command's reader
@@ -53,7 +445,14 @@ impl std::fmt::Debug for Channel {
 
 impl Channel {
     /// Wrap a connected socket. `port` is the vsock port for the handshake.
-    pub fn from_stream(stream: UnixStream, transport: Transport) -> Result<Channel, String> {
+    #[cfg(unix)]
+    pub fn from_unix(stream: UnixStream, transport: Transport) -> Result<Channel, String> {
+        Channel::from_stream(Stream::Unix(stream), transport)
+    }
+
+    /// Wrap a connected stream. `Transport::Vsock { port }` performs Firecracker's
+    /// `CONNECT <port>\n` handshake first.
+    pub fn from_stream(stream: Stream, transport: Transport) -> Result<Channel, String> {
         if let Transport::Vsock { port } = transport {
             let mut w = stream.try_clone().map_err(|e| format!("clone channel: {e}"))?;
             w.set_write_timeout(Some(Duration::from_secs(5))).ok();
@@ -83,11 +482,12 @@ impl Channel {
     }
 
     /// Connect to `<run>/chan.sock` (QEMU) or `<run>/vsock.sock` (Firecracker),
-    /// retrying until the VM has created it.
+    /// retrying until the VM has created it. On Windows `path` is the endpoint record
+    /// ([`Endpoint::locate`]).
     pub fn connect(path: &std::path::Path, transport: Transport, wait: Duration) -> Result<Channel, String> {
         let deadline = Instant::now() + wait;
         loop {
-            match UnixStream::connect(path) {
+            match Endpoint::locate(path).and_then(|ep| ep.connect()) {
                 Ok(s) => match Channel::from_stream(s, transport) {
                     Ok(c) => return Ok(c),
                     // Firecracker answers CONNECT and closes it while the guest
@@ -128,7 +528,7 @@ impl Channel {
         loop {
             let left = deadline.saturating_duration_since(Instant::now());
             self.r.set_read_timeout(Some(left.max(Duration::from_millis(1)))).ok();
-            // `Read for &UnixStream`: the fd is shared, the read state is not.
+            // `Read for &Stream`: the handle is shared, the read state is not.
             match (&self.r).read(&mut chunk) {
                 Ok(0) => {
                     // Closed. Any buffered frames are still valid.
@@ -189,8 +589,8 @@ mod tests {
     use crate::proto::FileBlob;
 
     /// A paired guest that answers like the agent would (no VM needed).
-    fn pair() -> (Channel, UnixStream) {
-        let (a, b) = UnixStream::pair().unwrap();
+    fn pair() -> (Channel, Stream) {
+        let (a, b) = Stream::pair().unwrap();
         (Channel::from_stream(a, Transport::Serial).unwrap(), b)
     }
 
@@ -243,7 +643,7 @@ mod tests {
 
     #[test]
     fn vsock_handshake_rejects_garbage() {
-        let (a, mut b) = UnixStream::pair().unwrap();
+        let (a, mut b) = Stream::pair().unwrap();
         let t = std::thread::spawn(move || {
             let mut buf = [0u8; 32];
             let n = b.read(&mut buf).unwrap();
@@ -254,5 +654,33 @@ mod tests {
         let e = Channel::from_stream(a, Transport::Vsock { port: 5000 }).unwrap_err();
         assert!(e.contains("refused"), "{e}");
         let _ = t.join();
+    }
+
+    #[test]
+    fn a_proxied_vsock_and_a_uart_need_no_preamble_and_tell_the_guest_what_to_open() {
+        assert_eq!(Transport::VsockProxy { port: 5000 }.name(), "vsock", "vfkit/crosvm guests listen on AF_VSOCK");
+        assert_eq!(Transport::Uart.name(), "uart");
+        let (a, mut b) = Stream::pair().unwrap();
+        let ch = Channel::from_stream(a, Transport::VsockProxy { port: 5000 }).unwrap();
+        b.write_all(&encode(&GuestMsg::Pong { id: 0 }).unwrap()).unwrap();
+        assert!(matches!(ch.expect(Duration::from_secs(2), "pong").unwrap(), GuestMsg::Pong { .. }), "the first bytes are frames, not a CONNECT reply");
+    }
+
+    #[test]
+    fn endpoints_are_unix_sockets_on_unix_and_loopback_records_elsewhere() {
+        let p = PathBuf::from("/run/vm/x/chan.sock");
+        assert_eq!(Endpoint::Unix(p.clone()).qemu_chardev("seagent0"), format!("socket,id=seagent0,path={},server=on,wait=off", p.display()), "Linux keeps its exact chardev");
+        assert_eq!(Endpoint::Unix(p.clone()).qemu_monitor(), format!("unix:{},server=on,wait=off", p.display()));
+        let tcp = Endpoint::Tcp("127.0.0.1:4555".parse().unwrap());
+        assert_eq!(tcp.qemu_chardev("c"), "socket,id=c,host=127.0.0.1,port=4555,server=on,wait=off", "Windows QEMU: loopback only");
+        assert_eq!(tcp.qemu_monitor(), "tcp:127.0.0.1:4555,server=on,wait=off");
+        if cfg!(unix) {
+            assert_eq!(Endpoint::locate(&p).unwrap(), Endpoint::Unix(p));
+        }
+        // The record format round-trips (what Windows writes into `chan.sock`).
+        let t = crate::hostcaps::tests_support::seagent_tmp("endpoint");
+        let rec = t.join("chan.sock");
+        tcp.record(&rec).unwrap();
+        assert_eq!(std::fs::read_to_string(&rec).unwrap(), "tcp:127.0.0.1:4555\n");
     }
 }

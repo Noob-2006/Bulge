@@ -21,6 +21,7 @@
 //! always honoured verbatim (this module only answers the `auto` question).
 
 use crate::config::VmConfig;
+use crate::host::HostOs;
 use crate::isolation::{isolation_of_backend, Capabilities, IsolationLevel};
 use crate::provider;
 use serde::Serialize;
@@ -131,7 +132,7 @@ pub fn auto_with(caps: &Capabilities, cfg: &VmConfig, sandboxed: bool) -> Plan {
         };
     }
     let why = blockers(caps);
-    let fix = if caps.kvm { " Build the guest image (`seagent sandbox vm image build`) for a microVM." } else { "" };
+    let fix = if caps.hardware_accel() { " Build the guest image (`seagent sandbox vm image build`) for a microVM." } else { "" };
     let (backend, degraded) = namespace_choice(caps);
     let level = isolation_of_backend(backend);
     let degraded = if degraded.is_empty() { String::new() } else { format!(" Degraded: {}.", degraded.join("; ")) };
@@ -171,7 +172,7 @@ pub fn namespace_choice(caps: &Capabilities) -> (&'static str, Vec<String>) {
         }
         degraded.push(format!("bwrap is installed but unprivileged user namespaces are disabled ({})", h.userns_blocker.as_deref().unwrap_or("sysctl")));
     }
-    if cfg!(target_os = "linux") {
+    if caps.os == HostOs::Linux {
         if h.landlock_abi >= 1 {
             if h.landlock_abi < 4 {
                 degraded.push(format!("Landlock ABI {} restricts files only (a sandboxed session with network = \"none\" needs ABI 4 / kernel 6.7)", h.landlock_abi));
@@ -181,7 +182,11 @@ pub fn namespace_choice(caps: &Capabilities) -> (&'static str, Vec<String>) {
         degraded.push(if h.version < (5, 13) && h.version != (0, 0) { format!("kernel {}.{} has no Landlock (needs 5.13+)", h.version.0, h.version.1) } else { "Landlock is not in the kernel's active LSM list".to_string() });
     }
     if caps.docker.is_some() {
-        degraded.push("using the docker container backend (shared kernel, root daemon)".into());
+        degraded.push(if matches!(caps.os, HostOs::Windows | HostOs::Macos) {
+            "using the docker container backend (Docker Desktop: containers share the kernel of Docker's own Linux VM, not this host's)".into()
+        } else {
+            "using the docker container backend (shared kernel, root daemon)".into()
+        });
         return ("docker", degraded);
     }
     if caps.podman.is_some() {
@@ -214,17 +219,47 @@ pub fn host_plan(why: &str, fix: &str) -> Plan {
 pub fn capabilities(cfg: &VmConfig, data: &Path) -> Capabilities {
     let mut caps = Capabilities::detect(Some(&cfg.kernel_path(data)), Some(&cfg.initramfs_path(data)));
     let local_fc = data.join("vm").join("bin").join("firecracker");
-    if let Some(p) = crate::isolation::which(&cfg.firecracker).or(local_fc.is_file().then_some(local_fc)) {
-        caps.firecracker = Some(p);
+    if caps.os == HostOs::Linux {
+        if let Some(p) = crate::isolation::which(&cfg.firecracker).or(local_fc.is_file().then_some(local_fc)) {
+            caps.firecracker = Some(p);
+        }
     }
-    if let Some(p) = crate::isolation::which(&cfg.qemu) {
+    if let Some(p) = crate::host::find_tool(&cfg.qemu) {
         caps.qemu = Some(p);
     }
+    if let Some(p) = crate::host::find_tool(&cfg.vboxmanage) {
+        caps.vbox = Some(p);
+    }
+    if caps.os == HostOs::Macos {
+        if let Some(p) = crate::host::find_tool(&cfg.vfkit) {
+            caps.vfkit = Some(p);
+        }
+    }
+    let disk = cfg.disk_image_path(data);
+    caps.disk_image = disk.is_file().then_some(disk);
     caps
 }
 
 /// Why no microVM: one short phrase, the first real blocker.
 pub fn blockers(caps: &Capabilities) -> String {
+    match caps.os {
+        HostOs::Linux => {}
+        HostOs::Ios | HostOs::Other => return "iOS does not let an app run a virtual machine (platform policy); delegate VM work to a paired host".into(),
+        HostOs::Android if caps.avf.is_none() || !caps.kvm => return format!("VM isolation unavailable on this device ({}); delegate to a paired host", crate::provider::hosted::AVF_MISSING),
+        HostOs::Windows if caps.qemu.is_none() && caps.hyperv.is_none() && caps.vbox.is_none() => {
+            return "no hypervisor found: install QEMU (with the Windows feature `HypervisorPlatform` for WHPX), or enable Hyper-V, or install VirtualBox".into()
+        }
+        HostOs::Macos if caps.vfkit.is_none() && caps.qemu.is_none() && caps.vbox.is_none() => return "no hypervisor front-end found: `brew install vfkit` (Virtualization.framework) or `brew install qemu` (HVF)".into(),
+        _ => {
+            if caps.kernel.is_none() {
+                return "the guest kernel is not built".into();
+            }
+            if caps.initramfs.is_none() {
+                return "the guest initramfs is not built".into();
+            }
+            return format!("no usable VMM ({})", if caps.os == HostOs::Macos && !caps.hvf { "Hypervisor.framework unavailable" } else { "the providers found need a bootable guest disk (exec.vm.disk_image) or hardware acceleration" });
+        }
+    }
     if !caps.kvm {
         return "/dev/kvm is missing or not writable (no hardware virtualisation)".into();
     }
@@ -326,6 +361,29 @@ mod tests {
         let p = auto_with(&caps, &vm_cfg(), false);
         assert_eq!(p.backend, "bwrap", "{p:?}");
         assert!(p.warning.as_deref().unwrap_or("").contains("/dev/kvm"), "{p:?}");
+    }
+
+    #[test]
+    fn other_operating_systems_get_their_own_vm_or_an_honest_reason() {
+        let image = |os| Capabilities { os, kernel: Some("/k".into()), initramfs: Some("/i".into()), ..Default::default() };
+        // Windows with WHPX + QEMU: a hardware VM, with the loopback-channel note.
+        let p = auto_with(&Capabilities { whpx: true, qemu: Some("qemu".into()), ..image(HostOs::Windows) }, &vm_cfg(), true);
+        assert_eq!((p.backend.as_str(), p.provider.as_deref(), p.level), ("vm", Some("qemu"), IsolationLevel::MicroVm), "{p:?}");
+        // macOS with vfkit: Virtualization.framework, no warning.
+        let p = auto_with(&Capabilities { hvf: true, vfkit: Some("vfkit".into()), qemu: Some("qemu".into()), ..image(HostOs::Macos) }, &vm_cfg(), true);
+        assert_eq!((p.provider.as_deref(), p.warning.as_deref()), (Some("vfkit"), None), "{p:?}");
+        // macOS with nothing but Docker Desktop: the container backend, and it says whose kernel.
+        let p = auto_with(&Capabilities { docker: Some("docker".into()), ..image(HostOs::Macos) }, &vm_cfg(), true);
+        assert_eq!(p.backend, "docker", "{p:?}");
+        let w = p.warning.unwrap();
+        assert!(w.contains("no hypervisor front-end") && w.contains("Docker Desktop"), "{w}");
+        // Android without AVF: no VM, and the delegation path is named.
+        let p = auto_with(&image(HostOs::Android), &vm_cfg(), true);
+        assert!(!p.uses_microvm() && p.warning.unwrap().contains("paired host"));
+        // iOS: never a VM, and the reason is the platform's policy.
+        let p = auto_with(&Capabilities { qemu: Some("qemu".into()), ..image(HostOs::Ios) }, &vm_cfg(), true);
+        assert!(!p.uses_microvm(), "{p:?}");
+        assert!(p.warning.unwrap().contains("iOS does not let an app run a virtual machine"));
     }
 
     #[test]

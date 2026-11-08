@@ -10,13 +10,12 @@
 //! decides isolation, never this fake.
 
 use super::{VmInstance, VmProvider, VmSpec, VmUsage};
-use crate::channel::{Channel, Transport};
+use crate::channel::{Channel, Endpoint, Listener, Stream, Transport};
 use crate::isolation::ProviderKind;
 use crate::proto::{decode, encode, GuestMsg, HostMsg, VERSION};
 use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine as _;
 use std::io::{Read, Write};
-use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
@@ -47,8 +46,9 @@ impl VmProvider for FakeProvider {
     fn start(&self, spec: &VmSpec) -> Result<Box<dyn VmInstance>, String> {
         let sock = spec.channel_path();
         std::fs::create_dir_all(&spec.run_dir).map_err(|e| format!("run dir: {e}"))?;
-        let _ = std::fs::remove_file(&sock);
-        let listener = std::os::unix::net::UnixListener::bind(&sock).map_err(|e| format!("bind {}: {e}", sock.display()))?;
+        // A unix socket where the OS has them (as before), a loopback port recorded in
+        // `chan.sock` elsewhere — the same endpoint rules a real VMM follows.
+        let listener = Endpoint::allocate(&sock)?.listen().map_err(|e| format!("bind {}: {e}", sock.display()))?;
         let root = if self.root.as_os_str().is_empty() { spec.run_dir.clone() } else { self.root.clone() };
         std::fs::create_dir_all(root.join("workspace")).ok();
         let running = Arc::new(AtomicBool::new(true));
@@ -66,8 +66,8 @@ struct AgentThread {
 }
 
 impl AgentThread {
-    fn serve(self, listener: std::os::unix::net::UnixListener) {
-        let Ok((stream, _)) = listener.accept() else { return };
+    fn serve(self, listener: Listener) {
+        let Ok(stream) = listener.accept() else { return };
         let (mut r, mut w) = (stream.try_clone().unwrap(), stream);
         let _ = w.write_all(&encode(&GuestMsg::Hello { version: VERSION, agent: "fake-agent".into(), kernel: "fake".into(), cid: None, transport: self.spec.transport.name().into(), uid: 1000 }).unwrap());
         let mut buf = Vec::new();
@@ -153,7 +153,7 @@ impl AgentThread {
                         let mut open = readers.len();
                         // Read both pipes without blocking forever: a line-based
                         // read is enough for the tests that use this.
-                        let send_out = |w: &mut UnixStream, data: &[u8]| {
+                        let send_out = |w: &mut Stream, data: &[u8]| {
                             if !data.is_empty() {
                                 send(w, GuestMsg::Out { id, data: B64.encode(data) });
                             }
@@ -199,7 +199,7 @@ impl AgentThread {
     }
 }
 
-fn send(w: &mut UnixStream, m: GuestMsg) {
+fn send(w: &mut Stream, m: GuestMsg) {
     if let Ok(b) = encode(&m) {
         let _ = w.write_all(&b);
     }

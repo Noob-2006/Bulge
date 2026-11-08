@@ -24,6 +24,10 @@ pub const VERSION: u32 = 1;
 pub const VSOCK_PORT: u32 = 5000;
 /// virtio-serial port the guest agent uses under QEMU (`/dev/vport0p1`).
 pub const SERIAL_DEVICE: &str = "/dev/vport0p1";
+/// Second 16550 UART, the channel under VirtualBox and Hyper-V (`seagent.channel=uart`):
+/// neither offers virtio-serial or a host-reachable vsock, both serve a COM port to the host
+/// as a socket / named pipe. `ttyS0` stays the boot console.
+pub const UART_DEVICE: &str = "/dev/ttyS1";
 /// Where the guest agent lets in-VM programs ask the daemon for things
 /// (privileged command, egress). Inside the VM only; never a host socket.
 pub const BROKER_SOCKET: &str = "/run/seagent/broker.sock";

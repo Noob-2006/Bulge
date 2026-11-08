@@ -33,9 +33,8 @@ use crate::isolation::ProviderKind;
 use crate::limits::proc_usage;
 use crate::proto;
 use serde_json::{json, Value};
+use crate::channel::Stream;
 use std::io::{ErrorKind, Read, Write};
-use std::os::unix::net::UnixStream;
-use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::Arc;
@@ -96,13 +95,7 @@ impl VmProvider for FirecrackerProvider {
         let log = std::fs::File::create(spec.log()).map_err(|e| format!("create vm log: {e}"))?;
         let err = log.try_clone().map_err(|e| format!("clone log: {e}"))?;
         let bin = self.bin_for(spec);
-        let mut child = Command::new(&bin)
-            .args(self.cmdline(spec))
-            .stdin(Stdio::null())
-            .stdout(Stdio::from(log))
-            .stderr(Stdio::from(err))
-            .process_group(0)
-            .spawn()
+        let mut child = crate::host::spawn_vmm(Command::new(&bin).args(self.cmdline(spec)).stdin(Stdio::null()).stdout(Stdio::from(log)).stderr(Stdio::from(err)))
             .map_err(|e| format!("start {}: {e}", bin.display()))?;
 
         // Fail here, not when the first command hangs: a VMM without /dev/kvm,
@@ -116,7 +109,7 @@ impl VmProvider for FirecrackerProvider {
             }
             // Probe with a real connection: the socket file may exist a moment
             // before the API is listening (and a stale one must not count).
-            if UnixStream::connect(&api).is_ok() {
+            if Stream::connect_unix(&api).is_ok() {
                 break;
             }
             if Instant::now() >= deadline {
@@ -259,7 +252,7 @@ impl Api {
     /// the API produces for the calls this provider makes.
     pub fn call(&self, method: &str, path: &str, body: &Value) -> Result<(), String> {
         let body = body.to_string();
-        let mut s = UnixStream::connect(&self.sock).map_err(|e| format!("firecracker api {method} {path}: connect {}: {e}", self.sock.display()))?;
+        let mut s = Stream::connect_unix(&self.sock).map_err(|e| format!("firecracker api {method} {path}: connect {}: {e}", self.sock.display()))?;
         s.set_read_timeout(Some(API_TIMEOUT)).ok();
         s.set_write_timeout(Some(API_TIMEOUT)).ok();
         let req = format!(
@@ -280,7 +273,7 @@ impl Api {
 /// Read one HTTP reply: until the body announced by `Content-Length` is in, or
 /// the peer closes, or the read times out (a server that ignores
 /// `Connection: close`).
-fn read_reply(s: &mut UnixStream) -> Result<Vec<u8>, String> {
+fn read_reply(s: &mut Stream) -> Result<Vec<u8>, String> {
     const MAX_REPLY: usize = 1 << 20;
     let mut raw = Vec::new();
     let mut want: Option<usize> = None;
@@ -357,23 +350,9 @@ fn log_tail(path: &Path) -> String {
     lines[lines.len().saturating_sub(6)..].join(" | ")
 }
 
-/// SIGTERM the VM's process group, wait, then SIGKILL. `process_group(0)` at
-/// spawn makes the group ours alone, so this can never reach another process.
+/// SIGTERM the VM's process group, wait, then SIGKILL ([`crate::host::stop_vmm`]).
 fn kill_group(child: &mut Child) {
-    let pid = child.id() as i32;
-    // SAFETY: we own this process group (process_group(0) at spawn).
-    unsafe { libc::kill(-pid, libc::SIGTERM) };
-    for _ in 0..50 {
-        if matches!(child.try_wait(), Ok(Some(_))) {
-            return;
-        }
-        std::thread::sleep(Duration::from_millis(20));
-    }
-    if matches!(child.try_wait(), Ok(None)) {
-        // SAFETY: as above; only our own child group.
-        unsafe { libc::kill(-pid, libc::SIGKILL) };
-        let _ = child.wait();
-    }
+    crate::host::stop_vmm(child)
 }
 
 pub struct FirecrackerInstance {
