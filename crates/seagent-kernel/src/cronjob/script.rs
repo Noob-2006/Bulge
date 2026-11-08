@@ -8,7 +8,6 @@
 //! returned to the prompt or a delivery target.
 
 use std::io::Read;
-use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
@@ -27,7 +26,7 @@ pub fn validate_for_create(data: &Path, script: &str) -> Option<String> {
         return None;
     }
     let dir = scripts_dir(data);
-    if raw.starts_with('/') || raw.starts_with('~') {
+    if raw.starts_with('/') || raw.starts_with('~') || Path::new(raw).is_absolute() {
         return Some(format!("Script path must be relative to {}/. Got absolute or home-relative path: {raw:?}. Place scripts in {}/ and use just the filename.", dir.display(), dir.display()));
     }
     resolve(data, raw).err()
@@ -81,7 +80,36 @@ fn normalize(p: &Path) -> PathBuf {
 /// credential (Hermes `build_subprocess_env`, SECURITY.md §2.3).
 pub fn scrubbed_env() -> Vec<(String, String)> {
     const KEEP: &[&str] = &["PATH", "HOME", "USER", "LOGNAME", "LANG", "LC_ALL", "LC_CTYPE", "TZ", "TERM", "SHELL", "TMPDIR", "XDG_RUNTIME_DIR"];
-    std::env::vars().filter(|(k, _)| KEEP.contains(&k.as_str()) && !secretish(k)).collect()
+    // Windows: names are case-insensitive (`Path`), and a child without `SystemRoot` cannot
+    // even open a socket; these carry no credentials.
+    #[cfg(windows)]
+    const KEEP_OS: &[&str] = &["PATH", "SystemRoot", "windir", "SystemDrive", "ComSpec", "PATHEXT", "TEMP", "TMP", "USERPROFILE", "USERNAME", "APPDATA", "LOCALAPPDATA", "ProgramData", "ProgramFiles", "NUMBER_OF_PROCESSORS", "PROCESSOR_ARCHITECTURE", "OS"];
+    #[cfg(windows)]
+    let keep = |k: &str| KEEP.contains(&k) || KEEP_OS.iter().any(|n| n.eq_ignore_ascii_case(k));
+    #[cfg(not(windows))]
+    let keep = |k: &str| KEEP.contains(&k);
+    std::env::vars().filter(|(k, _)| keep(k) && !secretish(k)).collect()
+}
+
+/// The interpreter for a script: `bash` for `.sh` / `.bash`, else `python3` (Unix: those
+/// names on `PATH`, as always; Windows: the platform's bash, the Python launcher).
+fn interpreter(bash: bool) -> Result<(String, Command), String> {
+    #[cfg(windows)]
+    {
+        if bash {
+            let sh = seagent_core::platform::shell::active();
+            if sh.kind != seagent_core::platform::shell::ShellKind::Bash {
+                return Err(format!("Script execution failed: bash is not available on windows (no Git Bash / MSYS2 found; this machine's shell is {}); use a .py script or install Git for Windows", sh.kind.as_str()));
+            }
+            return Ok(("bash".into(), Command::new(&sh.program)));
+        }
+        Ok(("python3".into(), Command::new(crate::coderun::python_program())))
+    }
+    #[cfg(not(windows))]
+    {
+        let interp = if bash { "bash" } else { "python3" };
+        Ok((interp.into(), Command::new(interp)))
+    }
 }
 
 fn secretish(k: &str) -> bool {
@@ -96,11 +124,18 @@ pub fn run(data: &Path, script: &str, workdir: Option<&Path>, timeout: Duration,
         Err(e) => return (false, e),
     };
     let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("").to_ascii_lowercase();
-    let interp = if ext == "sh" || ext == "bash" { "bash" } else { "python3" };
+    let (interp, mut cmd) = match interpreter(ext == "sh" || ext == "bash") {
+        Ok(x) => x,
+        Err(e) => return (false, e),
+    };
     let cwd = workdir.map(Path::to_path_buf).unwrap_or_else(|| path.parent().map(Path::to_path_buf).unwrap_or_else(|| PathBuf::from(".")));
-    let mut cmd = Command::new(interp);
-    cmd.arg(&path).current_dir(&cwd).env_clear().envs(scrubbed_env()).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).process_group(0);
-    let mut child = match cmd.spawn() {
+    cmd.arg(&path).current_dir(&cwd).env_clear().envs(scrubbed_env()).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    // Own process group (Windows: a new group plus a Job Object, added by `childproc::spawn`).
+    #[cfg(unix)]
+    std::os::unix::process::CommandExt::process_group(&mut cmd, 0);
+    #[cfg(not(unix))]
+    seagent_core::platform::proc::new_group(&mut cmd, false);
+    let mut child = match crate::childproc::spawn(&mut cmd) {
         Ok(c) => c,
         Err(e) => return (false, format!("Script execution failed: {interp}: {e}")),
     };
@@ -126,9 +161,7 @@ pub fn run(data: &Path, script: &str, workdir: Option<&Path>, timeout: Duration,
             Ok(Some(s)) => break Some(s),
             Ok(None) if start.elapsed() >= timeout => {
                 // Whole process group: backgrounded grandchildren die with the script.
-                unsafe {
-                    libc::kill(-(child.id() as i32), libc::SIGKILL);
-                }
+                crate::childproc::kill_group_now(child.id() as i32);
                 let _ = child.wait();
                 break None;
             }
@@ -184,12 +217,15 @@ mod tests {
         assert!(validate_for_create(&d, "~/x.sh").unwrap().contains("must be relative"));
         assert!(validate_for_create(&d, "../outside.sh").unwrap().contains("outside the scripts directory"));
         assert!(validate_for_create(&d, "missing.sh").unwrap().contains("Script not found"));
-        std::os::unix::fs::symlink(d.join("outside.sh"), scripts_dir(&d).join("link.sh")).unwrap();
-        assert!(resolve(&d, "link.sh").unwrap_err().contains("outside"), "symlink escape");
+        // Windows: creating a symlink needs Developer Mode / the privilege; skip when refused.
+        if crate::util::symlink_file(&d.join("outside.sh"), &scripts_dir(&d).join("link.sh")).is_ok() {
+            assert!(resolve(&d, "link.sh").unwrap_err().contains("outside"), "symlink escape");
+        }
         assert!(resolve(&d, "a\0b").unwrap_err().contains("NUL"));
         assert!(resolve(&d, &d.join("outside.sh").to_string_lossy()).unwrap_err().contains("outside"), "absolute at run time too");
     }
 
+    #[cfg(unix)]
     #[test]
     fn runs_with_scrubbed_env_timeout_and_redaction() {
         let d = data();

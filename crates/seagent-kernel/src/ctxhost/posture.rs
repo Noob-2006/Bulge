@@ -191,6 +191,18 @@ pub fn version_of(out: &str) -> Option<String> {
 
 /// The executable `name` in the first of `dirs` that holds an executable file of that name.
 pub fn find_in(dirs: &[PathBuf], name: &str) -> Option<PathBuf> {
+    // Windows: executables carry an extension (`cargo.exe`, `npm.cmd`), resolved by PATHEXT.
+    #[cfg(windows)]
+    {
+        let joined = std::env::join_paths(dirs).ok()?;
+        seagent_core::platform::layout::which_in_pathext(name, Some(joined.as_os_str()), std::env::var("PATHEXT").ok().as_deref())
+    }
+    #[cfg(not(windows))]
+    find_in_unix(dirs, name)
+}
+
+#[cfg(not(windows))]
+fn find_in_unix(dirs: &[PathBuf], name: &str) -> Option<PathBuf> {
     for d in dirs {
         let p = d.join(name);
         let Ok(md) = std::fs::metadata(&p) else { continue };

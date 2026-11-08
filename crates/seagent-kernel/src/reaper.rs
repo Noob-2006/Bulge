@@ -146,53 +146,23 @@ fn recorded_start(pgid: u32) -> Option<u64> {
     known().read().unwrap().get(&pgid).copied().flatten()
 }
 
-/// `/proc/<pid>/stat` fields 3 (state), 4 (ppid) and 5 (pgrp), after the `(comm)` field.
-fn stat_fields(pid: u32) -> Option<(char, u32, u32)> {
-    let s = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
-    let rest = &s[s.rfind(')')? + 2..];
-    let mut it = rest.split_whitespace();
-    let state = it.next()?.chars().next()?;
-    let ppid: u32 = it.next()?.parse().ok()?;
-    let pgrp: u32 = it.next()?.parse().ok()?;
-    Some((state, ppid, pgrp))
-}
-
-/// `/proc/<pid>/stat` start time (field 22): tells a reused pid from ours.
-pub fn start_time(pgid: u32) -> Option<u64> {
-    let s = std::fs::read_to_string(format!("/proc/{pgid}/stat")).ok()?;
-    let after = &s[s.rfind(')')? + 2..];
-    after.split_whitespace().nth(19)?.parse().ok()
-}
-
-/// Process group → does it still have a live (non-zombie) member? A zombie leader whose
-/// children still run keeps the group alive: that is the orphan case this module is for.
-fn pgrp_index() -> BTreeMap<u32, bool> {
-    let mut out = BTreeMap::new();
-    let Ok(rd) = std::fs::read_dir("/proc") else { return out };
-    for e in rd.flatten() {
-        let Some(pid) = e.file_name().to_str().and_then(|s| s.parse::<u32>().ok()) else { continue };
-        let Some((state, _, pgrp)) = stat_fields(pid) else { continue };
-        let live = state != 'Z' && state != 'X';
-        let slot = out.entry(pgrp).or_insert(false);
-        *slot |= live;
-    }
-    out
-}
+use os::{live_groups, parent_and_group, LiveGroups};
+pub use os::start_time;
 
 /// Is any process of group `pgid` still running?
 pub fn alive(pgid: u32) -> bool {
     if pgid <= 1 {
         return false;
     }
-    pgrp_index().get(&pgid).copied().unwrap_or(false)
+    live_groups().has(pgid)
 }
 
 /// Live process groups registered for `session` (what `[limits] max_processes_per_agent`
 /// counts). Unattributed entries (`session = ""`) are not counted for anybody.
 pub fn live_count(home: &Path, session: &str) -> usize {
     let recs = read(home);
-    let idx = pgrp_index();
-    recs.iter().filter(|r| r.session == session && idx.get(&r.pgid).copied().unwrap_or(false)).count()
+    let idx = live_groups();
+    recs.iter().filter(|r| r.session == session && idx.has(r.pgid)).count()
 }
 
 /// Our own line of ancestors (`self`, parent, …) as pids.
@@ -200,7 +170,7 @@ fn ancestry() -> Vec<u32> {
     let mut out = vec![std::process::id()];
     let mut pid = std::process::id();
     for _ in 0..64 {
-        let Some((_, ppid, _)) = stat_fields(pid) else { break };
+        let Some((ppid, _)) = parent_and_group(pid) else { break };
         if ppid <= 1 || out.contains(&ppid) {
             break;
         }
@@ -212,10 +182,10 @@ fn ancestry() -> Vec<u32> {
 
 /// Would signalling `-pgid` hit seagent itself (its own group, or an ancestor's)?
 fn is_our_own_or_ancestor_group(pgid: u32) -> bool {
-    if pgid == std::process::id() || pgid == unsafe { libc::getpgrp() } as u32 {
+    if pgid == std::process::id() || pgid == os::own_group() {
         return true;
     }
-    ancestry().iter().any(|pid| *pid == pgid || stat_fields(*pid).is_some_and(|(_, _, pgrp)| pgrp == pgid))
+    ancestry().iter().any(|pid| *pid == pgid || parent_and_group(*pid).is_some_and(|(_, pgrp)| pgrp == pgid))
 }
 
 fn log_refusal(pgid: u32, why: &str) {
@@ -252,13 +222,11 @@ pub fn kill_group_at(pgid: u32, expect: Option<u64>) -> bool {
     if !alive(pgid) {
         return true;
     }
-    // SAFETY: negative pid targets the process group, as intended.
-    unsafe { libc::kill(-(pgid as i32), libc::SIGTERM) };
+    os::term_group(pgid);
     if wait_until_gone(pgid, Duration::from_secs(2), Duration::from_millis(20)) {
         return true;
     }
-    // SAFETY: same as above, escalating.
-    unsafe { libc::kill(-(pgid as i32), libc::SIGKILL) };
+    os::kill_group_now(pgid);
     wait_until_gone(pgid, Duration::from_secs(1), Duration::from_millis(10))
 }
 
@@ -267,12 +235,12 @@ pub fn kill_group_at(pgid: u32, expect: Option<u64>) -> bool {
 fn wait_until_gone(pgid: u32, timeout: Duration, step: Duration) -> bool {
     let deadline = Instant::now() + timeout;
     loop {
-        reap_child(pgid);
+        os::reap_child(pgid);
         if !alive(pgid) {
             // The leader may have died between the reap and the scan: collect the zombie now,
             // otherwise `kill(-pgid, 0)` keeps reporting the group for the rest of our life.
             for _ in 0..50 {
-                if reap_child(pgid) || !Path::new(&format!("/proc/{pgid}")).exists() {
+                if os::reap_child(pgid) || os::leader_gone(pgid) {
                     break;
                 }
                 std::thread::sleep(Duration::from_millis(2));
@@ -284,13 +252,6 @@ fn wait_until_gone(pgid: u32, timeout: Duration, step: Duration) -> bool {
         }
         std::thread::sleep(step);
     }
-}
-
-/// Reap `pgid` if it is our exited child; `true` when a child was collected.
-fn reap_child(pgid: u32) -> bool {
-    let mut st: libc::c_int = 0;
-    // SAFETY: waitpid on our own child; WNOHANG never blocks.
-    unsafe { libc::waitpid(pgid as i32, &mut st, libc::WNOHANG) == pgid as i32 }
 }
 
 /// [`kill_group_at`] for a group named by the last registry read ([`read`]), so the recorded
@@ -328,7 +289,7 @@ fn pid_alive(pid: u32) -> bool {
     if pid <= 1 {
         return false;
     }
-    stat_fields(pid).is_some_and(|(state, _, _)| state != 'Z' && state != 'X')
+    os::proc_live(pid)
 }
 
 pub fn session_marker(home: &Path, session: &str) -> PathBuf {
@@ -355,11 +316,11 @@ enum Action {
     Keep(String),
 }
 
-fn decide(home: &Path, rec: &Record, live: &BTreeMap<u32, bool>) -> Action {
+fn decide(home: &Path, rec: &Record, live: &LiveGroups) -> Action {
     if rec.pgid <= 1 {
         return Action::Drop("pgid 0/1 is not a process group".into());
     }
-    if !live.get(&rec.pgid).copied().unwrap_or(false) {
+    if !live.has(rec.pgid) {
         return Action::Drop("process group gone".into());
     }
     if !rec.reapable() {
@@ -404,8 +365,7 @@ fn kill_cgroup(dir: &str) -> usize {
         return members.len();
     }
     for p in &members {
-        // SAFETY: kill(2) on a pid listed in a cgroup this seagent instance created for the command.
-        unsafe { libc::kill(*p as i32, libc::SIGKILL) };
+        os::kill_pid_now(*p);
     }
     members.len()
 }
@@ -417,7 +377,7 @@ fn run(home: &Path, only: Option<&str>) -> SweepReport {
     let path = registry(home);
     let Ok(text) = std::fs::read_to_string(&path) else { return rep };
     let cutoff = text.len() as u64;
-    let live = pgrp_index();
+    let live = live_groups();
     let mut keep: Vec<String> = Vec::new();
     let mut dropped = false;
     for line in text.lines() {
@@ -452,7 +412,7 @@ fn run(home: &Path, only: Option<&str>) -> SweepReport {
         }
         match decision {
             Action::Keep(why) => {
-                rep.alive += usize::from(live.get(&rec.pgid).copied().unwrap_or(false));
+                rep.alive += usize::from(live.has(rec.pgid));
                 rep.skipped.push((rec.pgid, why));
                 keep.push(line.to_string());
             }
@@ -572,7 +532,7 @@ pub fn spawn_sweeper(home: PathBuf, interval: Duration) -> std::thread::JoinHand
 /// Dry-run report for `seagent doctor` / the CLI: what a sweep *would* do. Sends no signal.
 pub fn sweep_json(home: &Path) -> Value {
     let recs = read(home);
-    let live = pgrp_index();
+    let live = live_groups();
     let mut would = Vec::new();
     let mut kept = Vec::new();
     for rec in &recs {
@@ -590,7 +550,230 @@ pub fn sweep_json(home: &Path) -> Value {
     })
 }
 
+/// The OS half of the reaper. Linux / Android: `/proc` and process-group signals, exactly as
+/// before. macOS: the same signals, with `proc_pidinfo` / the platform layer in place of
+/// `/proc`. Windows: a "group" is the Job Object `seagent_core::platform::proc` keeps under the
+/// leader's pid (no zombies, no signals: CTRL_BREAK then `TerminateJobObject`), parents come
+/// from a Toolhelp snapshot.
+mod os {
+    #[cfg(not(any(target_os = "linux", target_os = "android")))]
+    use seagent_core::platform::proc as pp;
+
+    // ───── Linux / Android: /proc ─────
+
+    /// `/proc/<pid>/stat` fields 3 (state), 4 (ppid) and 5 (pgrp), after the `(comm)` field.
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    fn stat_fields(pid: u32) -> Option<(char, u32, u32)> {
+        let s = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+        let rest = &s[s.rfind(')')? + 2..];
+        let mut it = rest.split_whitespace();
+        let state = it.next()?.chars().next()?;
+        let ppid: u32 = it.next()?.parse().ok()?;
+        let pgrp: u32 = it.next()?.parse().ok()?;
+        Some((state, ppid, pgrp))
+    }
+
+    /// `/proc/<pid>/stat` start time (field 22): tells a reused pid from ours.
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    pub fn start_time(pgid: u32) -> Option<u64> {
+        let s = std::fs::read_to_string(format!("/proc/{pgid}/stat")).ok()?;
+        let after = &s[s.rfind(')')? + 2..];
+        after.split_whitespace().nth(19)?.parse().ok()
+    }
+
+    /// `(ppid, pgrp)` of `pid`.
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    pub fn parent_and_group(pid: u32) -> Option<(u32, u32)> {
+        stat_fields(pid).map(|(_, ppid, pgrp)| (ppid, pgrp))
+    }
+
+    /// Running, in any state except zombie / dead.
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    pub fn proc_live(pid: u32) -> bool {
+        stat_fields(pid).is_some_and(|(state, _, _)| state != 'Z' && state != 'X')
+    }
+
+    /// Process group → does it still have a live (non-zombie) member? A zombie leader whose
+    /// children still run keeps the group alive: that is the orphan case this module is for.
+    /// One `/proc` scan per sweep.
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    pub struct LiveGroups(std::collections::BTreeMap<u32, bool>);
+
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    impl LiveGroups {
+        pub fn has(&self, pgid: u32) -> bool {
+            self.0.get(&pgid).copied().unwrap_or(false)
+        }
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    pub fn live_groups() -> LiveGroups {
+        let mut out = std::collections::BTreeMap::new();
+        let Ok(rd) = std::fs::read_dir("/proc") else { return LiveGroups(out) };
+        for e in rd.flatten() {
+            let Some(pid) = e.file_name().to_str().and_then(|s| s.parse::<u32>().ok()) else { continue };
+            let Some((state, _, pgrp)) = stat_fields(pid) else { continue };
+            let live = state != 'Z' && state != 'X';
+            let slot = out.entry(pgrp).or_insert(false);
+            *slot |= live;
+        }
+        LiveGroups(out)
+    }
+
+    /// The leader's `/proc` entry is gone (reaped, not just a zombie).
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    pub fn leader_gone(pgid: u32) -> bool {
+        !std::path::Path::new(&format!("/proc/{pgid}")).exists()
+    }
+
+    // ───── everything else: the platform layer ─────
+
+    /// The platform layer's start-time token (macOS: µs since the epoch; Windows: creation
+    /// FILETIME). Registries are written by the same layer on the same OS, so they agree.
+    #[cfg(not(any(target_os = "linux", target_os = "android")))]
+    pub fn start_time(pgid: u32) -> Option<u64> {
+        pp::start_time(pgid as i32)
+    }
+
+    #[cfg(not(any(target_os = "linux", target_os = "android")))]
+    pub fn proc_live(pid: u32) -> bool {
+        pp::alive(pid as i32)
+    }
+
+    /// Asked per group: there is no cheap table of every process group outside `/proc`.
+    #[cfg(not(any(target_os = "linux", target_os = "android")))]
+    pub struct LiveGroups;
+
+    #[cfg(not(any(target_os = "linux", target_os = "android")))]
+    impl LiveGroups {
+        pub fn has(&self, pgid: u32) -> bool {
+            pgid > 1 && pp::group_alive(pgid as i32)
+        }
+    }
+
+    #[cfg(not(any(target_os = "linux", target_os = "android")))]
+    pub fn live_groups() -> LiveGroups {
+        LiveGroups
+    }
+
+    #[cfg(not(any(target_os = "linux", target_os = "android")))]
+    pub fn leader_gone(pgid: u32) -> bool {
+        start_time(pgid).is_none()
+    }
+
+    /// macOS: `proc_pidinfo(PROC_PIDTBSDINFO)`.
+    #[cfg(target_os = "macos")]
+    pub fn parent_and_group(pid: u32) -> Option<(u32, u32)> {
+        let size = std::mem::size_of::<libc::proc_bsdinfo>() as libc::c_int;
+        // SAFETY: zeroed POD out-parameter of exactly `size` bytes.
+        let mut info: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };
+        let n = unsafe { libc::proc_pidinfo(pid as i32, libc::PROC_PIDTBSDINFO, 0, (&mut info as *mut libc::proc_bsdinfo).cast(), size) };
+        (n == size).then_some((info.pbi_ppid, info.pbi_pgid))
+    }
+
+    /// Other Unixes (iOS, BSDs): `getpgid`; the parent is known for ourselves only.
+    #[cfg(all(unix, not(any(target_os = "linux", target_os = "android", target_os = "macos"))))]
+    pub fn parent_and_group(pid: u32) -> Option<(u32, u32)> {
+        // SAFETY: plain queries without preconditions.
+        let g = unsafe { libc::getpgid(pid as libc::pid_t) };
+        if g < 0 {
+            return None;
+        }
+        let ppid = if pid == std::process::id() { (unsafe { libc::getppid() }) as u32 } else { 0 };
+        Some((ppid, g as u32))
+    }
+
+    /// Windows: the parent from a Toolhelp snapshot; a process is its own "group" (groups are
+    /// named by their leader's pid).
+    #[cfg(windows)]
+    pub fn parent_and_group(pid: u32) -> Option<(u32, u32)> {
+        use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
+        use windows_sys::Win32::System::Diagnostics::ToolHelp::{CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W, TH32CS_SNAPPROCESS};
+        // SAFETY: snapshot handle owned and closed here; `e` is a POD with dwSize set.
+        unsafe {
+            let snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+            if snap == INVALID_HANDLE_VALUE {
+                return None;
+            }
+            let mut e: PROCESSENTRY32W = std::mem::zeroed();
+            e.dwSize = std::mem::size_of::<PROCESSENTRY32W>() as u32;
+            let mut found = None;
+            let mut ok = Process32FirstW(snap, &mut e);
+            while ok != 0 {
+                if e.th32ProcessID == pid {
+                    found = Some((e.th32ParentProcessID, pid));
+                    break;
+                }
+                ok = Process32NextW(snap, &mut e);
+            }
+            CloseHandle(snap);
+            found
+        }
+    }
+
+    #[cfg(not(any(unix, windows)))]
+    pub fn parent_and_group(_pid: u32) -> Option<(u32, u32)> {
+        None
+    }
+
+    // ───── signals ─────
+
+    pub fn own_group() -> u32 {
+        seagent_core::platform::proc::own_group() as u32
+    }
+
+    /// SIGTERM the group (Windows: CTRL_BREAK, a 2 s grace, then terminate its job).
+    pub fn term_group(pgid: u32) {
+        // SAFETY: negative pid targets the process group, as intended.
+        #[cfg(unix)]
+        {
+            unsafe { libc::kill(-(pgid as i32), libc::SIGTERM) };
+        }
+        #[cfg(not(unix))]
+        pp::kill_group(pgid as i32, std::time::Duration::from_secs(2));
+    }
+
+    /// SIGKILL the group (Windows: terminate its job / the process now).
+    pub fn kill_group_now(pgid: u32) {
+        // SAFETY: same as above, escalating.
+        #[cfg(unix)]
+        {
+            unsafe { libc::kill(-(pgid as i32), libc::SIGKILL) };
+        }
+        #[cfg(not(unix))]
+        pp::kill_group(pgid as i32, std::time::Duration::ZERO);
+    }
+
+    /// SIGKILL one pid (a member of a cgroup seagent created for the command).
+    pub fn kill_pid_now(pid: u32) {
+        // SAFETY: kill(2) on a pid listed in a cgroup this seagent instance created for the command.
+        #[cfg(unix)]
+        {
+            unsafe { libc::kill(pid as i32, libc::SIGKILL) };
+        }
+        #[cfg(not(unix))]
+        pp::kill_group(pid as i32, std::time::Duration::ZERO);
+    }
+
+    /// Reap `pgid` if it is our exited child; `true` when a child was collected. Windows has
+    /// no zombies to collect.
+    pub fn reap_child(pgid: u32) -> bool {
+        #[cfg(unix)]
+        {
+            let mut st: libc::c_int = 0;
+            // SAFETY: waitpid on our own child; WNOHANG never blocks.
+            unsafe { libc::waitpid(pgid as i32, &mut st, libc::WNOHANG) == pgid as i32 }
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = pgid;
+            false
+        }
+    }
+}
+
 #[cfg(test)]
+#[cfg(unix)]
 mod tests {
     use super::*;
     use std::os::unix::process::CommandExt;

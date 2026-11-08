@@ -524,7 +524,9 @@ pub fn bump_pause(home: &Path, p: &Pause) -> Pause {
 mod tests {
     use super::*;
     use crate::config::{Config, Paths};
+    #[cfg(unix)]
     use std::os::unix::process::CommandExt;
+    #[cfg(unix)]
     use std::process::{Child, Command, Stdio};
     use std::sync::Arc;
 
@@ -636,6 +638,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn process_cap_counts_the_registry() {
         let tmp = Tmp::new("procs");
@@ -698,10 +701,12 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     fn own_group() -> Child {
         Command::new("/bin/sh").arg("-c").arg("sleep 60").stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).process_group(0).spawn().expect("spawn sleep")
     }
 
+    #[cfg(unix)]
     fn kill_own(c: &mut Child) {
         // SAFETY: our own child's process group.
         unsafe { libc::kill(-(c.id() as i32), libc::SIGKILL) };

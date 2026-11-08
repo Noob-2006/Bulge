@@ -6,6 +6,7 @@ pub mod approver;
 pub mod automation;
 pub mod change_control;
 pub mod checkpoint;
+pub(crate) mod childproc;
 pub mod coderun;
 pub mod commands;
 pub mod compaction;

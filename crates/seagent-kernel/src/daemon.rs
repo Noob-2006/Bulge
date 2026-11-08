@@ -1,5 +1,6 @@
 //! seagentd: the long-running host. Serves ARP (JSON-RPC 2.0, one JSON object per
-//! line) on a 0600 unix socket, runs the scheduler and goals, and resumes
+//! line) on a 0600 unix socket (Windows: an owner-only named pipe, see
+//! `seagent_core::platform::ipc`), runs the scheduler and goals, and resumes
 //! interrupted sessions after a crash or reboot.
 
 use crate::approver::{Pending, PendingItem};
@@ -9,9 +10,8 @@ use crate::kernel::{BusMsg, Kernel, Runtime};
 use crate::util::unix_now;
 use serde_json::{json, Value};
 use std::collections::HashSet;
+use seagent_core::platform::ipc::{IpcListener, IpcStream};
 use std::io::{BufRead, BufReader, Write};
-use std::os::unix::fs::PermissionsExt;
-use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
@@ -20,8 +20,33 @@ use std::time::{Duration, Instant};
 pub const PROTOCOL_VERSION: u32 = 1;
 
 static STOP: AtomicBool = AtomicBool::new(false);
+#[cfg(unix)]
 extern "C" fn on_signal(_: libc::c_int) {
     STOP.store(true, Ordering::SeqCst);
+}
+
+/// Windows: Ctrl+C, Ctrl+Break, console close, logoff and shutdown all ask for the same
+/// graceful stop SIGTERM / SIGINT ask for on Unix. Returning TRUE tells the system the
+/// event is handled; the accept loop sees `STOP` within 50 ms.
+#[cfg(windows)]
+unsafe extern "system" fn on_console_event(_ctrl: u32) -> windows_sys::Win32::Foundation::BOOL {
+    STOP.store(true, Ordering::SeqCst);
+    1
+}
+
+/// SIGTERM / SIGINT (Unix) or the console control events (Windows) set `STOP`.
+fn install_stop_handlers() {
+    // SAFETY: installing a handler that only stores to an atomic.
+    #[cfg(unix)]
+    unsafe {
+        libc::signal(libc::SIGTERM, on_signal as *const () as libc::sighandler_t);
+        libc::signal(libc::SIGINT, on_signal as *const () as libc::sighandler_t);
+    }
+    // SAFETY: registering a handler that only stores to an atomic.
+    #[cfg(windows)]
+    unsafe {
+        windows_sys::Win32::System::Console::SetConsoleCtrlHandler(Some(on_console_event), 1);
+    }
 }
 
 /// Pending approvals/questions published on the kernel bus once it exists.
@@ -137,24 +162,20 @@ impl Daemon {
     pub fn run(self: Arc<Self>) -> Result<(), String> {
         let rt = &self.k.paths.runtime;
         std::fs::create_dir_all(rt).map_err(|e| format!("{}: {e}", rt.display()))?;
-        std::fs::set_permissions(rt, std::fs::Permissions::from_mode(0o700)).map_err(|e| e.to_string())?;
+        // 0700 on Unix; an owner-only DACL on Windows.
+        seagent_core::platform::fs_private::set_private(rt).map_err(|e| e.to_string())?;
         let sock = self.k.paths.socket();
-        if sock.exists() {
-            if UnixStream::connect(&sock).is_ok() {
-                return Err(format!("seagentd is already running ({})", sock.display()));
-            }
-            std::fs::remove_file(&sock).map_err(|e| e.to_string())?; // stale
-        }
-        let listener = UnixListener::bind(&sock).map_err(|e| format!("bind {}: {e}", sock.display()))?;
-        std::fs::set_permissions(&sock, std::fs::Permissions::from_mode(0o600)).map_err(|e| e.to_string())?;
+        // Unix: a live socket is refused, a stale one removed, the new one chmod 0600.
+        // Windows: the owner-only named pipe derived from the same path.
+        let listener = match IpcListener::bind(&sock) {
+            Ok(l) => l,
+            Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => return Err(format!("seagentd is already running ({})", seagent_core::platform::ipc::endpoint_display(&sock))),
+            Err(e) => return Err(format!("bind {}: {e}", seagent_core::platform::ipc::endpoint_display(&sock))),
+        };
         listener.set_nonblocking(true).map_err(|e| e.to_string())?;
         let pid_path = rt.join("seagentd.pid");
         let _ = std::fs::write(&pid_path, std::process::id().to_string());
-        // SAFETY: installing a handler that only stores to an atomic.
-        unsafe {
-            libc::signal(libc::SIGTERM, on_signal as *const () as libc::sighandler_t);
-            libc::signal(libc::SIGINT, on_signal as *const () as libc::sighandler_t);
-        }
+        install_stop_handlers();
         STOP.store(false, Ordering::SeqCst);
         spawn_watchdog(sock.clone(), self.k.paths.data.clone(), watch_pid_from_env());
 
@@ -179,7 +200,7 @@ impl Daemon {
 
         while !STOP.load(Ordering::SeqCst) {
             match listener.accept() {
-                Ok((conn, _)) => {
+                Ok(conn) => {
                     let me = self.clone();
                     std::thread::spawn(move || me.serve(conn));
                 }
@@ -573,7 +594,7 @@ impl Daemon {
         }
     }
 
-    fn serve(&self, conn: UnixStream) {
+    fn serve(&self, conn: IpcStream) {
         let Ok(mut w) = conn.try_clone() else { return };
         let reader = BufReader::new(conn);
         for line in reader.lines() {
@@ -803,7 +824,7 @@ impl Daemon {
 
     /// Stream events. For `session.attach`: replay the log from `from_seq`, then
     /// follow live; ends when the client disconnects.
-    fn stream(&self, w: &mut UnixStream, id: Value, method: &str, p: &Value) {
+    fn stream(&self, w: &mut IpcStream, id: Value, method: &str, p: &Value) {
         let mut sink = |v: &Value| send(w, v);
         self.stream_to(&mut sink, id, method, p, &|| false);
     }
@@ -906,7 +927,7 @@ fn pending_json(i: PendingItem) -> Value {
     }
 }
 
-fn send(w: &mut UnixStream, v: &Value) -> std::io::Result<()> {
+fn send(w: &mut IpcStream, v: &Value) -> std::io::Result<()> {
     let mut b = serde_json::to_vec(v)?;
     b.push(b'\n');
     w.write_all(&b)?;
@@ -914,28 +935,48 @@ fn send(w: &mut UnixStream, v: &Value) -> std::io::Result<()> {
 }
 
 /// systemd `Type=notify` readiness (no crate: one datagram to $NOTIFY_SOCKET).
+/// A no-op where there is no systemd (other Unixes: no `NOTIFY_SOCKET` is ever set; Windows
+/// services report readiness through the service control manager, not this call).
 pub fn sd_notify(state: &str) {
-    let Some(path) = std::env::var_os("NOTIFY_SOCKET") else { return };
-    let sock = match std::os::unix::net::UnixDatagram::unbound() {
-        Ok(s) => s,
-        Err(_) => return,
-    };
-    let p = path.to_string_lossy().into_owned();
-    if let Some(abs) = p.strip_prefix('@') {
-        // Abstract namespace socket.
-        use std::os::linux::net::SocketAddrExt;
-        if let Ok(addr) = std::os::unix::net::SocketAddr::from_abstract_name(abs.as_bytes()) {
-            let _ = sock.send_to_addr(state.as_bytes(), &addr);
+    #[cfg(unix)]
+    {
+        let Some(path) = std::env::var_os("NOTIFY_SOCKET") else { return };
+        let sock = match std::os::unix::net::UnixDatagram::unbound() {
+            Ok(s) => s,
+            Err(_) => return,
+        };
+        let p = path.to_string_lossy().into_owned();
+        if let Some(abs) = p.strip_prefix('@') {
+            // Abstract namespace socket (Linux / Android kernels only).
+            #[cfg(target_os = "linux")]
+            {
+                use std::os::linux::net::SocketAddrExt;
+                if let Ok(addr) = std::os::unix::net::SocketAddr::from_abstract_name(abs.as_bytes()) {
+                    let _ = sock.send_to_addr(state.as_bytes(), &addr);
+                }
+            }
+            #[cfg(target_os = "android")]
+            {
+                use std::os::android::net::SocketAddrExt;
+                if let Ok(addr) = std::os::unix::net::SocketAddr::from_abstract_name(abs.as_bytes()) {
+                    let _ = sock.send_to_addr(state.as_bytes(), &addr);
+                }
+            }
+            #[cfg(not(any(target_os = "linux", target_os = "android")))]
+            let _ = abs;
+        } else {
+            let _ = sock.send_to(state.as_bytes(), &p);
         }
-    } else {
-        let _ = sock.send_to(state.as_bytes(), &p);
     }
+    #[cfg(not(unix))]
+    let _ = state;
 }
 
 // ───────────────────────── client side ─────────────────────────
 
-pub fn connect(sock: &Path) -> Result<UnixStream, String> {
-    UnixStream::connect(sock).map_err(|e| format!("seagentd is not running ({}: {e}). Start it with `seagent daemon start`.", sock.display()))
+/// Connect to seagentd's control endpoint (Unix socket; Windows named pipe for the same path).
+pub fn connect(sock: &Path) -> Result<IpcStream, String> {
+    IpcStream::connect(sock).map_err(|e| format!("seagentd is not running ({}: {e}). Start it with `seagent daemon start`.", seagent_core::platform::ipc::endpoint_display(sock)))
 }
 
 pub fn call(sock: &Path, method: &str, params: Value) -> Result<Value, String> {
@@ -1158,14 +1199,26 @@ pub fn watch_pid_from_env() -> Option<i32> {
 pub fn watchdog_reason(sock: &Path, data: Option<&Path>, watch: Option<i32>) -> Option<String> {
     if let Some(pid) = watch {
         // ESRCH only: EPERM means it exists (another user), which never happens for our parent.
-        if unsafe { libc::kill(pid, 0) } != 0 && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH) {
+        #[cfg(unix)]
+        let gone = unsafe { libc::kill(pid, 0) } != 0 && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH);
+        // Windows: a process we may not open counts as alive (the EPERM case).
+        #[cfg(not(unix))]
+        let gone = !seagent_core::platform::proc::alive(pid);
+        if gone {
             return Some(format!("watched process {pid} exited (SEAGENT_DAEMON_WATCH_PID)"));
         }
     }
     // The control socket was removed (its SEAGENT_HOME/runtime dir deleted): nobody can reach or
     // stop this daemon any more, so it stops itself instead of lingering unreachable.
+    #[cfg(unix)]
     if !sock.exists() {
         return Some(format!("control socket {} was removed", sock.display()));
+    }
+    // Windows: the endpoint is a named pipe with no file at `sock`; the runtime directory
+    // that names it is what a deleted SEAGENT_HOME takes away.
+    #[cfg(not(unix))]
+    if let Some(rt) = sock.parent().filter(|p| !p.as_os_str().is_empty() && !p.exists()) {
+        return Some(format!("runtime directory {} of control endpoint {} was removed", rt.display(), seagent_core::platform::ipc::endpoint_display(sock)));
     }
     // Same for the data directory (SEAGENT_HOME deleted while the socket lives elsewhere, e.g. a
     // long SEAGENT_HOME whose socket moved to $XDG_RUNTIME_DIR).
@@ -1194,6 +1247,7 @@ fn spawn_watchdog(sock: std::path::PathBuf, data: std::path::PathBuf, watch: Opt
 }
 
 #[cfg(test)]
+#[cfg(unix)]
 mod watchdog_tests {
     use super::*;
 

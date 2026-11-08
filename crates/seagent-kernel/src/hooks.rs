@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::io::{Read, Write};
 use std::path::Path;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::time::{Duration, Instant};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -406,23 +406,13 @@ impl Hook for ShellHook {
         let mut input = payload.clone();
         input["hook_event_name"] = event.claude_name().into();
         let cwd = payload.get("cwd").and_then(Value::as_str).filter(|c| Path::new(c).is_dir()).unwrap_or("/");
-        let parent = std::process::id() as i32;
-        let mut cmd = Command::new("bash");
+        // `bash -c <command>` (Windows: Git Bash / MSYS2 bash, else an explicit error).
+        let mut cmd = crate::childproc::bash(&self.cfg.command).map_err(|e| format!("start hook: {e}"))?;
         seagent_security::envscrub::apply(&mut cmd, seagent_security::envscrub::Surface::Hook);
-        cmd.arg("-c").arg(&self.cfg.command).current_dir(cwd).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
-        // SAFETY: async-signal-safe calls only.
-        unsafe {
-            use std::os::unix::process::CommandExt;
-            cmd.pre_exec(move || {
-                libc::setpgid(0, 0);
-                libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL);
-                if libc::getppid() != parent {
-                    libc::_exit(137);
-                }
-                Ok(())
-            });
-        }
-        let mut child = cmd.spawn().map_err(|e| format!("start hook: {e}"))?;
+        cmd.current_dir(cwd).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
+        // Own process group, PDEATHSIG=SIGKILL (Windows: kill-on-close job).
+        crate::childproc::tie(&mut cmd);
+        let mut child = crate::childproc::spawn(&mut cmd).map_err(|e| format!("start hook: {e}"))?;
         let pgid = child.id() as i32;
         let body = input.to_string();
         let mut stdin = child.stdin.take();
@@ -442,7 +432,7 @@ impl Hook for ShellHook {
                 Ok(Some(s)) => break s,
                 Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(10)),
                 Ok(None) => {
-                    unsafe { libc::kill(-pgid, libc::SIGKILL) };
+                    crate::childproc::kill_group_now(pgid);
                     let _ = child.wait();
                     return Err(format!("timed out after {}s", self.cfg.timeout_secs));
                 }

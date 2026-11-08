@@ -19,10 +19,17 @@ serde.workspace = true
 serde_json.workspace = true
 toml.workspace = true
 regex.workspace = true
-libc.workspace = true
 ureq.workspace = true # decision provider HTTP (OpenAI /decisions)
 seagent-net.workspace = true # seagent_net::http::builder — the one outbound client builder (proxy/CA/offline)
 base64.workspace = true
 # SQLite index (sessions FTS5, unified memory table, chunk vectors, spilled tool output).
 # `bundled` compiles SQLite in statically: no system libsqlite3, works for the musl build.
 rusqlite = { version = "0.40", features = ["bundled"] }
+
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true # process groups, signals, waitpid, uid / mode checks (Unix only)
+
+[target.'cfg(windows)'.dependencies]
+# Console stop events (daemon), Toolhelp parents (reaper), directory identity (checkpoint),
+# DPAPI (secret store), the session-log writer lock (LockFileEx + OVERLAPPED).
+windows-sys = { workspace = true, features = ["Win32_Foundation", "Win32_Storage_FileSystem", "Win32_System_Console", "Win32_System_Diagnostics_ToolHelp", "Win32_Security_Cryptography", "Win32_System_IO"] }

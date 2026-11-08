@@ -98,20 +98,18 @@ struct FileLock {
 impl Drop for FileLock {
     fn drop(&mut self) {
         if let Some(f) = self.file.take() {
-            use std::os::unix::io::AsRawFd;
-            // SAFETY: unlocking a valid fd we hold; closing the file would release it anyway.
-            unsafe { libc::flock(f.as_raw_fd(), libc::LOCK_UN) };
+            // Closing the file would release it anyway.
+            let _ = f.unlock();
         }
     }
 }
 
 fn lock(dir: &Path, name: &str) -> FileLock {
-    use std::os::unix::io::AsRawFd;
     let _ = std::fs::create_dir_all(dir);
     let file = std::fs::OpenOptions::new().create(true).truncate(false).write(true).open(dir.join(name)).ok();
     if let Some(f) = &file {
-        // SAFETY: flock on a valid fd; `FileLock::drop` unlocks (and close releases).
-        unsafe { libc::flock(f.as_raw_fd(), libc::LOCK_EX) };
+        // flock(LOCK_EX) on Unix, LockFileEx on Windows; `FileLock::drop` unlocks.
+        let _ = f.lock();
     }
     FileLock { file }
 }

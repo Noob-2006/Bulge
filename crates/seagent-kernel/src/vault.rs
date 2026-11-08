@@ -120,6 +120,7 @@ impl Vault {
 }
 
 #[cfg(test)]
+#[cfg(unix)] // pins the 0600 file modes
 mod tests {
     use super::*;
     use std::fs;

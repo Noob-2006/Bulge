@@ -8,7 +8,6 @@ use crate::util::atomic_write;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::fs::OpenOptions;
-use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
 
 pub const FORMAT_VERSION: u32 = 1;
@@ -319,18 +318,14 @@ impl Lock {
     fn take(path: &Path) -> Result<Lock, String> {
         std::fs::create_dir_all(path.parent().unwrap_or(Path::new("."))).map_err(|e| e.to_string())?;
         let f = OpenOptions::new().create(true).truncate(false).write(true).open(path).map_err(|e| format!("{}: {e}", path.display()))?;
-        // SAFETY: blocking flock on an fd we own.
-        if unsafe { libc::flock(f.as_raw_fd(), libc::LOCK_EX) } != 0 {
-            return Err(std::io::Error::last_os_error().to_string());
-        }
+        // Blocking flock(LOCK_EX) on Unix, LockFileEx on Windows.
+        f.lock().map_err(|e| e.to_string())?;
         Ok(Lock(f))
     }
 }
 impl Drop for Lock {
     fn drop(&mut self) {
-        unsafe {
-            libc::flock(self.0.as_raw_fd(), libc::LOCK_UN);
-        }
+        let _ = self.0.unlock();
     }
 }
 

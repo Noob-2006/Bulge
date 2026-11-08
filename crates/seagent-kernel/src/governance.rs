@@ -134,6 +134,19 @@ pub struct AlertsConfig {
 /// map it in the NMS, or load the varbinds by OID).
 pub const SNMP_TRAP_OID: &str = "1.3.6.1.4.1.32473.1.0.1";
 
+/// `ETXTBSY` (a just-written executable still open for writing elsewhere). Windows reports the
+/// same race as a sharing violation (`ERROR_SHARING_VIOLATION`, 32).
+fn text_busy(e: &std::io::Error) -> bool {
+    #[cfg(unix)]
+    {
+        e.raw_os_error() == Some(libc::ETXTBSY)
+    }
+    #[cfg(not(unix))]
+    {
+        e.raw_os_error() == Some(32)
+    }
+}
+
 /// Send one SNMPv2c trap through `snmptrap`: `target` is `snmp://community@host[:port]`.
 /// Varbinds: `.1.1` the alert key, `.1.2` the text (both strings).
 pub fn snmp_trap(bin: &str, target: &str, key: &str, text: &str) -> Result<String, String> {
@@ -150,7 +163,7 @@ pub fn snmp_trap(bin: &str, target: &str, key: &str, text: &str) -> Result<Strin
     let out = loop {
         match cmd.output() {
             // A just-written binary can be briefly busy (another thread's fork); retry.
-            Err(e) if e.raw_os_error() == Some(libc::ETXTBSY) && tries < 20 => {
+            Err(e) if text_busy(&e) && tries < 20 => {
                 tries += 1;
                 std::thread::sleep(std::time::Duration::from_millis(10));
             }
@@ -726,6 +739,7 @@ mod tests {
 
     /// Legacy NMS: an `snmp://community@host` alert target sends an SNMPv2c trap through
     /// `snmptrap` (a fake binary here) with the key and text as string varbinds.
+    #[cfg(unix)]
     #[test]
     fn alerts_reach_a_legacy_nms_as_snmp_traps() {
         use std::os::unix::fs::PermissionsExt;

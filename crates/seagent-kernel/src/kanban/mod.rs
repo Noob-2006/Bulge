@@ -238,8 +238,10 @@ pub fn kernel() -> Option<Kernel> {
 
 // ───────────────────────── process identity ─────────────────────────
 
+/// `/proc/sys/kernel/hostname`, then `/etc/hostname` on Linux (the platform layer reads the
+/// same files); `gethostname` / `GetComputerNameExW` elsewhere; `"localhost"` when unknown.
 pub fn hostname() -> String {
-    std::fs::read_to_string("/proc/sys/kernel/hostname").or_else(|_| std::fs::read_to_string("/etc/hostname")).map(|s| s.trim().to_string()).ok().filter(|s| !s.is_empty()).unwrap_or_else(|| "localhost".into())
+    seagent_core::platform::sysinfo::hostname()
 }
 /// Every claim issued on this host starts with this.
 pub fn host_prefix() -> String {
@@ -249,6 +251,7 @@ pub fn host_prefix() -> String {
 pub fn claimer_id() -> String {
     format!("{}{}", host_prefix(), std::process::id())
 }
+#[cfg(unix)]
 pub fn pid_alive(pid: u32) -> bool {
     if pid == 0 {
         return false;
@@ -261,10 +264,22 @@ pub fn pid_alive(pid: u32) -> bool {
     }
     std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
 }
+/// Windows: `OpenProcess` + exit code (a process we may not open counts as alive, like EPERM).
+#[cfg(not(unix))]
+pub fn pid_alive(pid: u32) -> bool {
+    pid != 0 && seagent_core::platform::proc::alive(pid as i32)
+}
 /// Process start time (clock ticks since boot): tells our process from a recycled pid.
+#[cfg(any(target_os = "linux", target_os = "android"))]
 pub fn process_birth(pid: u32) -> Option<u64> {
     let s = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
     s.rsplit(')').next()?.split_whitespace().nth(19)?.parse().ok()
+}
+/// Process start time as the platform layer's opaque token (macOS: µs since the epoch;
+/// Windows: creation FILETIME): tells our process from a recycled pid.
+#[cfg(not(any(target_os = "linux", target_os = "android")))]
+pub fn process_birth(pid: u32) -> Option<u64> {
+    seagent_core::platform::proc::start_time(pid as i32)
 }
 /// Live and the same process that was recorded (birth matches when known).
 pub fn process_alive(pid: u32, birth: Option<u64>) -> bool {

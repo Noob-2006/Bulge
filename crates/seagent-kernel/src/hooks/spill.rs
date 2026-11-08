@@ -10,6 +10,7 @@
 
 use serde::Deserialize;
 use std::io::Write as _;
+#[cfg(unix)]
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::RwLock;
@@ -61,19 +62,31 @@ fn base_dir(c: &SpillConfig) -> PathBuf {
 }
 
 fn ensure_private_dir(p: &Path) -> std::io::Result<()> {
+    #[cfg(unix)]
     std::fs::DirBuilder::new().recursive(true).mode(0o700).create(p)?;
+    #[cfg(not(unix))]
+    std::fs::create_dir_all(p)?;
     let md = std::fs::symlink_metadata(p)?;
     if !md.file_type().is_dir() {
         return Err(std::io::Error::other(format!("spill dir is not a directory (symlink?): {}", p.display())));
     }
+    #[cfg(unix)]
     if md.permissions().mode() & 0o777 != 0o700 {
         std::fs::set_permissions(p, std::fs::Permissions::from_mode(0o700))?;
     }
+    // Windows: a protected owner-only DACL instead of 0700.
+    #[cfg(not(unix))]
+    seagent_core::platform::fs_private::set_private(p)?;
     Ok(())
 }
 
 fn write_exclusive(p: &Path, text: &str) -> std::io::Result<()> {
+    #[cfg(unix)]
     let mut f = std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).custom_flags(libc::O_NOFOLLOW).open(p)?;
+    // Windows: CREATE_NEW fails on anything already there (a planted link included), and the
+    // file is born with the owner-only DACL.
+    #[cfg(not(unix))]
+    let mut f = seagent_core::platform::fs_private::open_private(p, seagent_core::platform::fs_private::OpenMode::CreateNew)?;
     f.write_all(text.as_bytes())?;
     if !text.ends_with('\n') {
         f.write_all(b"\n")?;
@@ -114,6 +127,7 @@ pub fn spill(text: &str, session: &str, source: &str) -> String {
 }
 
 #[cfg(test)]
+#[cfg(unix)] // checks 0600 / 0700 modes
 mod tests {
     use super::*;
 

@@ -51,7 +51,6 @@ pub fn set(
     by: &seagent_security::audit::Actor,
     owner: &str,
 ) -> Result<Review, String> {
-    use std::os::unix::fs::OpenOptionsExt;
     if session.trim().is_empty() {
         return Err("missing session id".into());
     }
@@ -78,12 +77,15 @@ pub fn set(
     };
     let p = path(data);
     std::fs::create_dir_all(p.parent().unwrap()).map_err(|e| e.to_string())?;
-    let mut f = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .mode(0o600)
-        .open(&p)
-        .map_err(|e| format!("{}: {e}", p.display()))?;
+    #[cfg(unix)]
+    let opened = {
+        use std::os::unix::fs::OpenOptionsExt;
+        std::fs::OpenOptions::new().create(true).append(true).mode(0o600).open(&p)
+    };
+    // Windows: created with an owner-only DACL.
+    #[cfg(not(unix))]
+    let opened = seagent_core::platform::fs_private::open_private(&p, seagent_core::platform::fs_private::OpenMode::Append);
+    let mut f = opened.map_err(|e| format!("{}: {e}", p.display()))?;
     writeln!(f, "{}", serde_json::to_string(&r).unwrap_or_default()).map_err(|e| e.to_string())?;
     seagent_security::audit::emit(
         data,
