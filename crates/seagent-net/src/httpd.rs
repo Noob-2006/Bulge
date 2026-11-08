@@ -150,6 +150,7 @@ impl Server {
     pub fn bind_tls(addr: &str, opts: Opts, handler: Handler, tls: &crate::tlsd::ServerTls) -> io::Result<Server> {
         use crate::tlsd::{H_CLIENT, H_PEER, H_SECRET};
         let cfg = tls.config().map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
+        let loopback_plain = tls.loopback_plain;
         let secret = Arc::new(crate::crypto::random_token(24));
         let s2 = secret.clone();
         let wrapped: Handler = Arc::new(move |mut r: Request| {
@@ -183,9 +184,9 @@ impl Server {
                     continue; // dropped before the handshake: no plaintext 503 on a TLS port
                 }
                 live.fetch_add(1, Ordering::SeqCst);
-                let (c, sec, lv, t) = (cfg.clone(), secret.clone(), live.clone(), opts.read_timeout);
+                let (c, sec, lv, t, plain) = (cfg.clone(), secret.clone(), live.clone(), opts.read_timeout, loopback_plain);
                 let spawned = std::thread::Builder::new().name("httpsd conn".into()).spawn(move || {
-                    let _ = crate::tlsd::terminate(s, c, inner_addr, &sec, t);
+                    let _ = crate::tlsd::terminate(s, c, inner_addr, &sec, t, plain);
                     lv.fetch_sub(1, Ordering::SeqCst);
                 });
                 if spawned.is_err() {
@@ -478,7 +479,7 @@ mod tests {
     #[test]
     fn tls_and_mutual_tls_with_the_real_peer_and_client_identity() {
         let td = |f: &str| format!("{}/src/testdata/{f}", env!("CARGO_MANIFEST_DIR"));
-        let tls = crate::tlsd::ServerTls { cert: td("server.pem"), key: td("server.key"), client_ca: Some(td("ca.pem")), client_auth: crate::tlsd::ClientAuth::Optional };
+        let tls = crate::tlsd::ServerTls { cert: td("server.pem"), key: td("server.key"), client_ca: Some(td("ca.pem")), client_auth: crate::tlsd::ClientAuth::Optional, loopback_plain: false };
         let h: Handler = Arc::new(|r: Request| {
             Response::text(200, &format!("peer={} client={} forged={}", r.peer.map(|p| p.ip().to_string()).unwrap_or_default(), r.header("x-seagent-tls-client").unwrap_or("-"), r.header("x-seagent-tls-peer").unwrap_or("-")))
         });
@@ -520,5 +521,24 @@ mod tests {
         let call2 = |c| crate::http::with_config(c, || crate::http::agent().get(&url2).call().map(|mut r| r.body_mut().read_to_string().unwrap()).map_err(|e| e.to_string()));
         assert!(call2(trust).is_err());
         assert_eq!(call2(with_cert).unwrap(), "spiffe://example.org/ark/node/n1");
+    }
+
+    /// LAN mode's port speaks TLS to everyone and also plain HTTP to loopback clients (the
+    /// local console); a forged terminator header is still stripped on the plain path.
+    #[test]
+    fn loopback_plain_shares_the_tls_port() {
+        let td = |f: &str| format!("{}/src/testdata/{f}", env!("CARGO_MANIFEST_DIR"));
+        let tls = crate::tlsd::ServerTls { cert: td("server.pem"), key: td("server.key"), loopback_plain: true, ..Default::default() };
+        let h: Handler = Arc::new(|r: Request| Response::text(200, &format!("peer={} client={}", r.peer.map(|p| p.ip().to_string()).unwrap_or_default(), r.header("x-seagent-tls-client").unwrap_or("-"))));
+        let srv = Server::bind_tls("127.0.0.1:0", Opts::default(), h, &tls).unwrap();
+        let mut s = TcpStream::connect(srv.local_addr()).unwrap();
+        s.write_all(b"GET /x HTTP/1.1\r\nHost: 127.0.0.1\r\nx-seagent-tls-client: spiffe://evil\r\nConnection: close\r\n\r\n").unwrap();
+        let mut out = String::new();
+        let _ = s.read_to_string(&mut out);
+        assert!(out.starts_with("HTTP/1.1 200") && out.ends_with("peer=127.0.0.1 client=-"), "{out}");
+        let trust = crate::http::NetConfig { ca_file: Some(td("ca.pem")), ..Default::default() };
+        let url = format!("https://localhost:{}/x", srv.local_addr().port());
+        let body = crate::http::with_config(trust, || crate::http::agent().get(&url).call().map(|mut r| r.body_mut().read_to_string().unwrap()).map_err(|e| e.to_string()));
+        assert_eq!(body.unwrap(), "peer=127.0.0.1 client=-");
     }
 }

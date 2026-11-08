@@ -80,8 +80,17 @@ pub fn header<'a>(head: &'a str, name: &str) -> Option<&'a str> {
 impl WebSocket<Stream> {
     /// Connect to `ws://` or `wss://`. Returns the socket and the server's response head.
     pub fn connect(url: &str, headers: &[(&str, &str)], timeout: Duration) -> io::Result<(Self, String)> {
+        Self::connect_pinned(url, headers, timeout, None)
+    }
+
+    /// [`WebSocket::connect`], but `wss://` to a LAN peer pinned by its certificate's SHA-256
+    /// (no CA) when `fingerprint` is given.
+    pub fn connect_pinned(url: &str, headers: &[(&str, &str)], timeout: Duration, fingerprint: Option<&str>) -> io::Result<(Self, String)> {
         let u = Url::parse(url).map_err(bad)?;
-        let mut s = Stream::connect(&u.host, u.port, u.tls(), timeout)?;
+        let mut s = match fingerprint {
+            Some(fp) if u.tls() => Stream::connect_pinned(&u.host, u.port, Some(fp), timeout)?,
+            _ => Stream::connect(&u.host, u.port, u.tls(), timeout)?,
+        };
         let key = crypto::b64(&crypto::random_bytes(16));
         let mut req = format!(
             "GET {} HTTP/1.1\r\nHost: {}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: {key}\r\nSec-WebSocket-Version: 13\r\nUser-Agent: seagent\r\n",

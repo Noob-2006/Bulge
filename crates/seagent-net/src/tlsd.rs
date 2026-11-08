@@ -52,6 +52,11 @@ pub struct ServerTls {
     /// Roots that client certificates must chain to (mTLS). Required unless `client_auth` is off.
     pub client_ca: Option<String>,
     pub client_auth: ClientAuth,
+    /// Also accept plain HTTP on the same port, **from loopback peers only** (LAN mode: the
+    /// local console, the desktop app's local mode and the setup wizard keep using
+    /// `http://127.0.0.1:<port>`, while every LAN peer has to speak TLS). Decided per
+    /// connection by the first byte (a TLS ClientHello starts with 0x16).
+    pub loopback_plain: bool,
 }
 
 fn key_der(k: &ureq::tls::PrivateKey<'static>) -> rustls::pki_types::PrivateKeyDer<'static> {
@@ -185,10 +190,17 @@ pub const H_CLIENT: &str = "x-seagent-tls-client";
 
 /// Serve one TLS connection: handshake, forward the (rewritten) request to the plain server at
 /// `inner`, then pump bytes both ways until either side closes.
-pub(crate) fn terminate(tcp: TcpStream, cfg: Arc<rustls::ServerConfig>, inner: SocketAddr, secret: &str, timeout: Duration) -> io::Result<()> {
+pub(crate) fn terminate(tcp: TcpStream, cfg: Arc<rustls::ServerConfig>, inner: SocketAddr, secret: &str, timeout: Duration, loopback_plain: bool) -> io::Result<()> {
     let peer = tcp.peer_addr()?;
     tcp.set_read_timeout(Some(timeout))?;
     tcp.set_write_timeout(Some(timeout))?;
+    let local = peer.ip().is_loopback() || matches!(peer.ip(), std::net::IpAddr::V6(v6) if v6.to_ipv4_mapped().is_some_and(|v| v.is_loopback()));
+    if loopback_plain && local {
+        let mut first = [0u8; 1];
+        if tcp.peek(&mut first)? == 1 && first[0] != 0x16 {
+            return pass_plain(tcp, inner, secret, timeout, peer);
+        }
+    }
     let conn = rustls::ServerConnection::new(cfg).map_err(io::Error::other)?;
     let mut tls = rustls::StreamOwned::new(conn, tcp);
     while tls.conn.is_handshaking() {
@@ -196,6 +208,36 @@ pub(crate) fn terminate(tcp: TcpStream, cfg: Arc<rustls::ServerConfig>, inner: S
     }
     let client = tls.conn.peer_certificates().and_then(|c| c.first()).map(|c| CertIdentity::from_der(c.as_ref()).primary());
     let (head, rest) = crate::ws::read_head(&mut tls, 32 * 1024)?;
+    let out = rewrite_head(&head, secret, peer, client);
+    let mut up = TcpStream::connect_timeout(&inner, timeout)?;
+    up.write_all(out.as_bytes())?;
+    up.write_all(&rest)?;
+    pump(tls, up)
+}
+
+/// A loopback client speaking plain HTTP on a LAN-mode TLS port: same header rewrite (no
+/// client identity), then copy both ways.
+fn pass_plain(mut tcp: TcpStream, inner: SocketAddr, secret: &str, timeout: Duration, peer: SocketAddr) -> io::Result<()> {
+    let (head, rest) = crate::ws::read_head(&mut tcp, 32 * 1024)?;
+    let out = rewrite_head(&head, secret, peer, None);
+    let mut up = TcpStream::connect_timeout(&inner, timeout)?;
+    up.write_all(out.as_bytes())?;
+    up.write_all(&rest)?;
+    tcp.set_read_timeout(None)?;
+    up.set_read_timeout(None)?;
+    let (mut from_client, mut to_up) = (tcp.try_clone()?, up.try_clone()?);
+    let t = std::thread::spawn(move || {
+        let _ = io::copy(&mut from_client, &mut to_up);
+        let _ = to_up.shutdown(std::net::Shutdown::Write);
+    });
+    let _ = io::copy(&mut up, &mut tcp);
+    let _ = tcp.shutdown(std::net::Shutdown::Both);
+    let _ = t.join();
+    Ok(())
+}
+
+/// Drop client-sent `x-seagent-tls-*` headers and add ours (secret, real peer, identity).
+fn rewrite_head(head: &str, secret: &str, peer: SocketAddr, client: Option<String>) -> String {
     let mut lines = head.trim_end_matches("\r\n").split("\r\n");
     let mut out = format!("{}\r\n", lines.next().unwrap_or(""));
     for l in lines {
@@ -210,10 +252,7 @@ pub(crate) fn terminate(tcp: TcpStream, cfg: Arc<rustls::ServerConfig>, inner: S
         out.push_str(&format!("{H_CLIENT}: {c}\r\n"));
     }
     out.push_str("\r\n");
-    let mut up = TcpStream::connect_timeout(&inner, timeout)?;
-    up.write_all(out.as_bytes())?;
-    up.write_all(&rest)?;
-    pump(tls, up)
+    out
 }
 
 fn would_block(e: &io::Error) -> bool {
@@ -290,7 +329,7 @@ mod tests {
     #[test]
     fn config_errors_are_clear() {
         assert!(ServerTls::default().config().unwrap_err().contains("certificate"));
-        let t = ServerTls { cert: td("server.pem"), key: td("server.key"), client_ca: None, client_auth: ClientAuth::Require };
+        let t = ServerTls { cert: td("server.pem"), key: td("server.key"), client_ca: None, client_auth: ClientAuth::Require, loopback_plain: false };
         assert!(t.config().unwrap_err().contains("client_ca"));
         assert!(ServerTls { client_auth: ClientAuth::Off, ..t.clone() }.config().is_ok());
         assert!(ServerTls { client_ca: Some(td("ca.pem")), ..t }.config().is_ok());

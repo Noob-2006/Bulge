@@ -50,6 +50,42 @@ fn tls_config() -> Arc<rustls::ClientConfig> {
     cfg
 }
 
+/// Certificate pinning for LAN peers (SHA-256 of the leaf, the peer's identity): no CA and no
+/// host-name check, but the handshake signature is still verified against the leaf's key.
+/// `want == None` probes (accepts any certificate; read it with [`Stream::peer_fingerprint`]).
+#[derive(Debug)]
+struct Pin {
+    want: Option<String>,
+    provider: Arc<rustls::crypto::CryptoProvider>,
+}
+
+impl rustls::client::danger::ServerCertVerifier for Pin {
+    fn verify_server_cert(&self, end_entity: &rustls::pki_types::CertificateDer<'_>, _i: &[rustls::pki_types::CertificateDer<'_>], _n: &rustls::pki_types::ServerName<'_>, _o: &[u8], _now: rustls::pki_types::UnixTime) -> Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
+        let fp = crate::crypto::hex(&crate::crypto::sha256(end_entity.as_ref()));
+        match &self.want {
+            Some(w) if !crate::crypto::ct_eq(w.as_bytes(), fp.as_bytes()) => Err(rustls::Error::InvalidCertificate(rustls::CertificateError::ApplicationVerificationFailure)),
+            _ => Ok(rustls::client::danger::ServerCertVerified::assertion()),
+        }
+    }
+    fn verify_tls12_signature(&self, m: &[u8], c: &rustls::pki_types::CertificateDer<'_>, d: &rustls::DigitallySignedStruct) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        rustls::crypto::verify_tls12_signature(m, c, d, &self.provider.signature_verification_algorithms)
+    }
+    fn verify_tls13_signature(&self, m: &[u8], c: &rustls::pki_types::CertificateDer<'_>, d: &rustls::DigitallySignedStruct) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        rustls::crypto::verify_tls13_signature(m, c, d, &self.provider.signature_verification_algorithms)
+    }
+    fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
+        self.provider.signature_verification_algorithms.supported_schemes()
+    }
+}
+
+/// A client config that pins the server certificate's SHA-256 (`None`: probe).
+pub(crate) fn pinned_config(want: Option<String>) -> Arc<rustls::ClientConfig> {
+    let provider = Arc::new(rustls::crypto::ring::default_provider());
+    let want = want.map(|w| w.trim().to_ascii_lowercase().replace(':', ""));
+    let pin = Arc::new(Pin { want, provider: provider.clone() });
+    Arc::new(rustls::ClientConfig::builder_with_provider(provider).with_safe_default_protocol_versions().expect("rustls protocol versions").dangerous().with_custom_certificate_verifier(pin).with_no_client_auth())
+}
+
 /// Open a TCP connection to `host:port`, through the configured HTTP proxy (`CONNECT`) unless
 /// NO_PROXY says direct (ent-036: gateways and IRC follow the same proxy as HTTP).
 fn open_tcp(host: &str, port: u16, timeout: Duration) -> io::Result<TcpStream> {
@@ -135,6 +171,24 @@ impl Stream {
         let mut s = rustls::StreamOwned::new(conn, tcp);
         while s.conn.is_handshaking() {
             s.conn.complete_io(&mut s.sock)?;
+        }
+        Ok(Stream::Tls(Box::new(s)))
+    }
+
+    /// TLS to a LAN peer pinned by certificate fingerprint (`None`: probe and report it via
+    /// [`Stream::peer_fingerprint`]). Direct TCP: a LAN peer is never reached through the proxy.
+    pub fn connect_pinned(host: &str, port: u16, fingerprint: Option<&str>, timeout: Duration) -> io::Result<Stream> {
+        let addr = (host, port).to_socket_addrs()?.next().ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, format!("cannot resolve {host}")))?;
+        let tcp = TcpStream::connect_timeout(&addr, timeout)?;
+        tcp.set_nodelay(true)?;
+        tcp.set_read_timeout(Some(timeout))?;
+        tcp.set_write_timeout(Some(timeout))?;
+        // The name only feeds SNI; an IP literal is fine.
+        let name = rustls::pki_types::ServerName::try_from(host.trim_matches(['[', ']']).to_string()).map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e.to_string()))?;
+        let conn = rustls::ClientConnection::new(pinned_config(fingerprint.map(str::to_string)), name).map_err(|e| io::Error::other(e.to_string()))?;
+        let mut s = rustls::StreamOwned::new(conn, tcp);
+        while s.conn.is_handshaking() {
+            s.conn.complete_io(&mut s.sock).map_err(|e| if fingerprint.is_some() && e.to_string().contains("ApplicationVerificationFailure") { io::Error::other("the peer's certificate fingerprint does not match the pinned one") } else { e })?;
         }
         Ok(Stream::Tls(Box::new(s)))
     }
@@ -225,6 +279,47 @@ impl Write for Stream {
 /// True for the error kinds a read timeout produces.
 pub fn is_timeout(e: &io::Error) -> bool {
     matches!(e.kind(), io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut)
+}
+
+/// One HTTP/1.1 request to a LAN peer over pinned TLS (`Connection: close`): `(status, body)`.
+/// For node / cluster / pairing clients only — never a web or fetch tool (those keep the SSRF
+/// rules of `seagent_security::url_safety`).
+pub fn pinned_request(url: &str, fingerprint: &str, method: &str, headers: &[(&str, &str)], body: &[u8], timeout: Duration) -> Result<(u16, String), String> {
+    let u = Url::parse(url)?;
+    if !u.tls() {
+        return Err(format!("{url}: a pinned request needs https://"));
+    }
+    let mut s = Stream::connect_pinned(&u.host, u.port, Some(fingerprint), timeout).map_err(|e| format!("{}:{}: {e}", u.host, u.port))?;
+    let host = if u.host.contains(':') { format!("[{}]:{}", u.host, u.port) } else { format!("{}:{}", u.host, u.port) };
+    let mut req = format!("{method} {} HTTP/1.1\r\nHost: {host}\r\nUser-Agent: seagent\r\nContent-Length: {}\r\nConnection: close\r\n", u.path, body.len());
+    for (k, v) in headers {
+        if k.contains(['\r', '\n']) || v.contains(['\r', '\n']) {
+            return Err("header contains a newline".into());
+        }
+        req.push_str(&format!("{k}: {v}\r\n"));
+    }
+    req.push_str("\r\n");
+    s.write_all(req.as_bytes()).and_then(|_| s.write_all(body)).and_then(|_| s.flush()).map_err(|e| e.to_string())?;
+    let mut raw = Vec::new();
+    let _ = (&mut s).take(8 << 20).read_to_end(&mut raw);
+    let split = raw.windows(4).position(|w| w == b"\r\n\r\n").ok_or("malformed HTTP response")?;
+    let head = String::from_utf8_lossy(&raw[..split]).to_string();
+    let status = head.split_whitespace().nth(1).and_then(|s| s.parse::<u16>().ok()).ok_or("malformed HTTP status")?;
+    let mut rest = raw[split + 4..].to_vec();
+    if head.lines().any(|l| l.to_ascii_lowercase().replace(' ', "") == "transfer-encoding:chunked") {
+        let mut out = Vec::new();
+        let mut cur = &rest[..];
+        while let Some(i) = cur.windows(2).position(|w| w == b"\r\n") {
+            let n = usize::from_str_radix(String::from_utf8_lossy(&cur[..i]).split(';').next().unwrap_or("").trim(), 16).map_err(|_| "bad chunk")?;
+            if n == 0 {
+                break;
+            }
+            out.extend_from_slice(cur.get(i + 2..i + 2 + n).ok_or("short chunk")?);
+            cur = cur.get(i + 4 + n..).unwrap_or(&[]);
+        }
+        rest = out;
+    }
+    Ok((status, String::from_utf8_lossy(&rest).into_owned()))
 }
 
 /// Parsed `scheme://host[:port]/path?query`.

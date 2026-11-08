@@ -704,11 +704,13 @@ name = "seagent-net"
 version = "0.1.0"
 dependencies = [
  "base64",
+ "libc",
  "ring",
  "rustls",
  "serde",
  "ureq",
  "webpki-roots",
+ "windows-sys",
 ]
 
 [[package]]

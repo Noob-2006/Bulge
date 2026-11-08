@@ -15,3 +15,12 @@ base64.workspace = true
 # ureq agent in the workspace (ent-036/037/039). Already in the tree; adds no crate.
 ureq.workspace = true
 serde.workspace = true
+
+# mDNS (`mdns.rs`): one setsockopt (SO_REUSEADDR / SO_REUSEPORT) before bind so the responder
+# shares UDP 5353 with the system's own (Avahi, mDNSResponder, the Windows DNS client). Both
+# crates are already in the tree (seagent-core); no new crate.
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { workspace = true, features = ["Win32_Networking_WinSock"] }
