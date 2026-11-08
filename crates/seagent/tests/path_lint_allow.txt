@@ -181,3 +181,6 @@ crates/seagent/src/ops/update.rs	/usr/sbin/
 crates/seagent/src/ops/update.rs	/var
 crates/seagent/src/ops/wizard.rs	/Applications
 crates/seagent/src/ops/wizard.rs	/usr/share/applications
+crates/seagent/src/security_cli.rs	/bin
+crates/seagent/src/security_cli.rs	/home/sandbox
+crates/seagent/src/security_cli.rs	/usr
