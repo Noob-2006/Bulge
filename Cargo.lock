@@ -792,6 +792,7 @@ dependencies = [
  "seagent-net",
  "serde",
  "serde_json",
+ "windows-sys",
 ]
 
 [[package]]

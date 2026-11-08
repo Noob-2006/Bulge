@@ -45,11 +45,19 @@ fn own_paths(root: &Path) -> Vec<(String, String)> {
     }).collect()
 }
 
+#[cfg(unix)]
 fn writable(p: &Path) -> bool {
     use std::os::unix::ffi::OsStrExt;
     let Ok(c) = std::ffi::CString::new(p.as_os_str().as_bytes()) else { return false };
     // SAFETY: access(2) on a NUL-terminated path.
     p.is_dir() && unsafe { libc::access(c.as_ptr(), libc::W_OK) } == 0
+}
+
+/// cgroups are a Linux kernel feature; elsewhere a "cgroup tree" can only be a test fixture.
+/// The Windows substitute for the VMM's ceiling is the Job Object in [`crate::host::VmmJob`].
+#[cfg(not(unix))]
+fn writable(p: &Path) -> bool {
+    p.is_dir() && std::fs::metadata(p).is_ok_and(|m| !m.permissions().readonly())
 }
 
 fn write(p: &Path, v: &str) -> Result<(), String> {
@@ -184,8 +192,13 @@ impl Group {
             return members.len();
         }
         for p in &members {
+            #[cfg(unix)]
             // SAFETY: plain kill(2) on a pid read from our own cgroup.
-            unsafe { libc::kill(*p as i32, libc::SIGKILL) };
+            unsafe {
+                libc::kill(*p as i32, libc::SIGKILL)
+            };
+            #[cfg(not(unix))]
+            crate::host::kill_pid(*p, true);
         }
         members.len()
     }

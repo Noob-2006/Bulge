@@ -15,6 +15,13 @@ seagent-net.workspace = true        # sha256 for image / snapshot manifests
 base64.workspace = true
 libc.workspace = true           # AF_VSOCK in the guest agent, process groups
 
+# Windows port (docs/cross-platform.md): the VMM process runs in a Job Object (memory/CPU caps,
+# kill-on-close), WHPX is probed through WinHvPlatform.dll, the VirtualBox / Hyper-V serial
+# channel is a named pipe. Same windows-sys 0.52 the workspace (and ring) already pull in; only
+# two more API families are enabled here.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { workspace = true, features = ["Win32_System_LibraryLoader", "Win32_System_ProcessStatus"] }
+
 [dev-dependencies]
 seagent-core.workspace = true       # tests only: self-cleaning scratch dirs
 

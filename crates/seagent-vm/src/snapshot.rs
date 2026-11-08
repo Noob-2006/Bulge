@@ -205,7 +205,13 @@ fn copy_tree(src: &Path, dst: &Path, rel: &Path, t: &mut Tally) -> Result<(), St
                 t.dropped.push(format!("{}\t->\t{}", child_rel.display(), target.display()));
                 continue;
             }
-            let _ = std::os::unix::fs::symlink(&target, &to);
+            // unix: always a real symlink (as before). Windows refuses symlinks without
+            // Developer Mode / elevation; then the link is recorded as dropped (like an
+            // escaping one) rather than materialised as a copy `verify` would not recognise.
+            if !crate::host::relink(&target, &to).unwrap_or(cfg!(unix)) {
+                t.dropped.push(format!("{}\t->\t{}\t(no symlink privilege on this host)", child_rel.display(), target.display()));
+                continue;
+            }
             t.symlinks += 1;
             t.idx.push(format!("{}\tlink:{}\t0\t0", child_rel.display(), target.display()));
             continue;
@@ -349,6 +355,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn symlinks_are_never_followed_out_of_the_workspace() {
         let root = tmp("links");
         let w = ws("links-ws");

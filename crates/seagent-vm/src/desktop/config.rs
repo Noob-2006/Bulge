@@ -7,7 +7,7 @@
 //! default = "desk"              # VM name used when a call names none
 //! qemu = "qemu-system-x86_64"
 //! qemu_img = "qemu-img"
-//! accel = "auto"                # auto (KVM when /dev/kvm is usable, else TCG + warning) | kvm | tcg
+//! accel = "auto"                # auto (KVM / WHPX / HVF when usable, else TCG + warning) | kvm | whpx | hvf | tcg
 //! memory_mb = 2048
 //! cpus = 2
 //! width = 1280                  # screen size (EDID preferred mode + xrandr in the guest)
@@ -120,8 +120,16 @@ impl DesktopConfig {
     }
 
     pub fn validate(&self) -> Result<(), String> {
-        if !matches!(self.accel.as_str(), "auto" | "kvm" | "tcg") {
-            return Err(format!("desktop_vm.accel `{}`: use auto | kvm | tcg", self.accel));
+        // Each host names its own accelerator (Linux: KVM, Windows: WHPX, macOS: HVF).
+        let ok: &[&str] = if cfg!(windows) {
+            &["auto", "whpx", "tcg"]
+        } else if cfg!(target_os = "macos") {
+            &["auto", "hvf", "tcg"]
+        } else {
+            &["auto", "kvm", "tcg"]
+        };
+        if !ok.contains(&self.accel.as_str()) {
+            return Err(format!("desktop_vm.accel `{}`: use {}", self.accel, ok.join(" | ")));
         }
         if !matches!(self.network.as_str(), "user" | "none") {
             return Err(format!("desktop_vm.network `{}`: use user | none", self.network));

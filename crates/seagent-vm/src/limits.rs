@@ -39,11 +39,12 @@ impl Default for Limits {
 /// (`RLIMIT_NPROC` is per-uid, and the uid has no CAP_SYS_RESOURCE).
 #[cfg(unix)]
 pub fn apply_guest_limits(l: &Limits) {
-    // glibc takes `__rlimit_resource_t` (u32); musl's `c_int`.
-    #[cfg(target_env = "musl")]
-    type Res = libc::c_int;
-    #[cfg(not(target_env = "musl"))]
+    // glibc takes `__rlimit_resource_t` (u32); musl, bionic (Android) and the BSD libc of
+    // macOS/iOS take `c_int`.
+    #[cfg(all(target_os = "linux", not(target_env = "musl")))]
     type Res = libc::__rlimit_resource_t;
+    #[cfg(not(all(target_os = "linux", not(target_env = "musl"))))]
+    type Res = libc::c_int;
     let set = |res: Res, v: u64| {
         if v == 0 {
             return;
@@ -83,8 +84,12 @@ impl Watchdog {
     }
 }
 
-/// CPU ticks and RSS of a process from `/proc`, without extra dependencies.
+/// CPU ticks and RSS of a process from `/proc`, without extra dependencies. Where there is no
+/// `/proc` (macOS, Windows) the OS's own process accounting answers ([`crate::host::usage`]).
 pub fn proc_usage(pid: u32) -> Option<(u64, u64)> {
+    if !cfg!(any(target_os = "linux", target_os = "android")) {
+        return crate::host::usage(pid);
+    }
     let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
     let close = stat.rfind(')')?;
     let f: Vec<&str> = stat[close + 2..].split_whitespace().collect();
@@ -125,6 +130,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(any(target_os = "linux", target_os = "android", target_os = "macos", windows))]
     fn proc_usage_reads_this_process() {
         let (ticks, rss) = proc_usage(std::process::id()).unwrap();
         assert!(ticks < 10_000_000);

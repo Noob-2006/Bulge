@@ -9,6 +9,9 @@
 //! The one test that needs the real thing (`boots_a_real_microvm`) is
 //! `#[ignore]`d and gated on `FC_KERNEL`/`FC_INITRAMFS` + a `firecracker` on
 //! `PATH`; it prints why it skipped instead of failing.
+//!
+//! Linux only: Firecracker is a Linux/KVM VMM.
+#![cfg(target_os = "linux")]
 
 use seagent_vm::channel::Transport;
 use seagent_vm::config::VmConfig;

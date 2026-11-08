@@ -4,8 +4,10 @@
 //! Layers, bottom-up:
 //! * [`isolation`] — what wall each backend gives you, and the warning when it is
 //!   weaker than a microVM. Nothing here silently downgrades.
-//! * [`provider`] — boot one VM (Firecracker / QEMU-KVM) and hand back a
-//!   [`channel::Channel`].
+//! * [`provider`] — boot one VM (Firecracker / QEMU-KVM on Linux; QEMU+WHPX, Hyper-V,
+//!   VirtualBox on Windows; vfkit (Virtualization.framework), QEMU+HVF, VirtualBox on macOS;
+//!   AVF on Android; nothing on iOS) and hand back a [`channel::Channel`].
+//! * [`host`] — the per-OS accelerator probes and VMM process handling behind them.
 //! * [`proto`] / [`channel`] — the single guest channel: tool I/O, plus *requests*
 //!   from the guest to the daemon (privileged commands, egress); the guest never
 //!   gets a host socket or a key.
@@ -20,6 +22,7 @@ pub mod cgroup;
 pub mod channel;
 pub mod config;
 pub mod desktop;
+pub mod host;
 pub mod hostcaps;
 pub mod image;
 pub mod isolation;

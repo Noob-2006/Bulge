@@ -5,8 +5,8 @@
 //! `qemu-system-x86_64` script for lifecycle tests.
 
 use serde_json::{json, Value};
+use crate::channel::Endpoint;
 use std::io::{BufRead, BufReader, Write};
-use std::os::unix::net::UnixListener;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -35,14 +35,15 @@ impl FakeQmp {
         if let Some(d) = path.parent() {
             let _ = std::fs::create_dir_all(d);
         }
-        let l = UnixListener::bind(path).expect("bind fake QMP socket");
+        // A unix socket at `path` (Windows: a loopback port recorded there), like real QEMU.
+        let l = Endpoint::allocate(path).and_then(|e| e.listen().map_err(|e| e.to_string())).expect("bind fake QMP socket");
         l.set_nonblocking(true).unwrap();
         let log = Arc::new(Mutex::new(vec![]));
         let stop = Arc::new(AtomicBool::new(false));
         let (lg, st) = (log.clone(), stop.clone());
         let th = std::thread::spawn(move || {
             while !st.load(Ordering::SeqCst) {
-                let Ok((c, _)) = l.accept() else {
+                let Ok(c) = l.accept() else {
                     std::thread::sleep(Duration::from_millis(10));
                     continue;
                 };
@@ -101,8 +102,8 @@ impl Drop for FakeQmp {
 /// the file; the qemu script records its argv to `<dir>/qemu.args`, writes `-pidfile` with
 /// the pid of a background loop whose command line still names the QMP socket (as a real
 /// daemonized QEMU's does), touches `<dir>/spawned`, and exits 0 (`-daemonize`).
+#[cfg(unix)]
 pub fn fake_qemu(dir: &Path) -> (PathBuf, PathBuf) {
-    use std::os::unix::fs::PermissionsExt;
     std::fs::create_dir_all(dir).unwrap();
     let q = dir.join("qemu-system-x86_64");
     let img = dir.join("qemu-img");
@@ -117,13 +118,15 @@ pub fn fake_qemu(dir: &Path) -> (PathBuf, PathBuf) {
     // `create … <file>` or `create … <file> <size>`: touch the file argument.
     std::fs::write(&img, "#!/bin/sh\nf=''\nfor a in \"$@\"; do case \"$a\" in *G) ;; *) f=\"$a\" ;; esac; done\n[ \"$1\" = create ] && : > \"$f\"\nexit 0\n").unwrap();
     for p in [&q, &img] {
-        std::fs::set_permissions(p, std::fs::Permissions::from_mode(0o755)).unwrap();
+        crate::host::make_executable(p).unwrap();
     }
     (q, img)
 }
 
 /// Desktop VMs under `dir` whose QEMU is [`fake_qemu`] and whose image is a placeholder file
-/// (`build` is not run): `start` works and the QMP side is up to the caller.
+/// (`build` is not run): `start` works and the QMP side is up to the caller. (unix: the fake
+/// QEMU is a shell script.)
+#[cfg(unix)]
 pub fn fake_vms(dir: &Path) -> super::DesktopVms {
     let (q, img) = fake_qemu(&dir.join("bin"));
     let cfg = super::DesktopConfig { qemu: q.display().to_string(), qemu_img: img.display().to_string(), stop_timeout_secs: 1, ..Default::default() };
@@ -135,6 +138,7 @@ pub fn fake_vms(dir: &Path) -> super::DesktopVms {
 }
 
 /// Start VM `name` of [`fake_vms`] (rooted at `dir`) with a fake QMP server of `w`×`h` behind it.
+#[cfg(unix)]
 pub fn start_fake(v: &super::DesktopVms, dir: &Path, name: &str, w: u32, h: u32) -> FakeQmp {
     let (marker, sock) = (dir.join("bin/spawned"), v.qmp_path(name));
     let _ = std::fs::remove_file(&marker);
