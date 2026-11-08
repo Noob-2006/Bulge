@@ -213,7 +213,7 @@ obtain() {
 stage_checkout_share() {
     mkdir -p "$tmp/share/vm" "$tmp/share/sandbox-browser"
     cp -R "$1/share/." "$tmp/share/"
-    [ -f "$1/packaging/vm/build-image.sh" ] && cp "$1/packaging/vm/build-image.sh" "$1/packaging/vm/README.md" "$tmp/share/vm/" 2>/dev/null || true
+    [ -f "$1/packaging/vm/build-image.sh" ] && cp -R "$1/packaging/vm/." "$tmp/share/vm/" 2>/dev/null || true
     [ -d "$1/packaging/sandbox-browser" ] && cp -R "$1/packaging/sandbox-browser/." "$tmp/share/sandbox-browser/"
     src_share="$tmp/share"
 }

@@ -6,7 +6,7 @@
 # Layout (a prefix, so `tar -xzf … -C ~/.local` and `-C /usr/local` both work):
 #   bin/seagent
 #   share/seagent/{skills,optional-skills,optional-mcps,plugin-catalog,roles,blueprints.json}
-#   share/seagent/vm/{build-image.sh,README.md[,seagent-vm-guest]}     microVM guest image builder
+#   share/seagent/vm/{build-image.sh,mkdisk.py,kernel/,README.md[,seagent-vm-guest]}     microVM guest image builder
 #   share/seagent/sandbox-browser/…                                sandbox-browser image sources
 #   share/seagent/systemd/{seagentd.service,seagentd-system.service,…}     generated units, sysusers, tmpfiles
 #   share/doc/seagent/{README.md,THIRD_PARTY_NOTICES.md}
@@ -46,6 +46,8 @@ cp -R "$ROOT/share/." "$S/"
 mkdir -p "$S/vm" "$S/sandbox-browser" "$S/systemd"
 install -m 0755 "$ROOT/packaging/vm/build-image.sh" "$S/vm/build-image.sh"
 install -m 0644 "$ROOT/packaging/vm/README.md" "$S/vm/README.md"
+install -m 0755 "$ROOT/packaging/vm/mkdisk.py" "$S/vm/mkdisk.py"
+mkdir -p "$S/vm/kernel" && install -m 0644 "$ROOT"/packaging/vm/kernel/*.config "$S/vm/kernel/"
 if [ -n "$AGENT" ]; then
     [ -f "$AGENT" ] || die "no such vm agent: $AGENT"
     install -m 0755 "$AGENT" "$S/vm/seagent-vm-guest"
