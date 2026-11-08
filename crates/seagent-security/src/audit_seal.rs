@@ -64,7 +64,6 @@ fn seal_message(seal_path: &Path) -> Result<Vec<u8>, String> {
 
 /// Sign (and optionally timestamp) every seal that has no `.sig` yet. Returns how many.
 pub fn sign_pending(data: &Path, seed_b64: &str, tsa_url: Option<&str>) -> Result<usize, String> {
-    use std::os::unix::fs::PermissionsExt;
     let key = crate::signing::public_of(seed_b64)?;
     let mut n = 0;
     for sp in seals(data) {
@@ -86,7 +85,7 @@ pub fn sign_pending(data: &Path, seed_b64: &str, tsa_url: Option<&str>) -> Resul
             serde_json::to_string_pretty(&rec).unwrap_or_default(),
         )
         .map_err(|e| format!("{}: {e}", sig_path.display()))?;
-        let _ = std::fs::set_permissions(&sig_path, std::fs::Permissions::from_mode(0o400));
+        let _ = crate::os::set_mode(&sig_path, 0o400);
         n += 1;
     }
     if n > 0 {
@@ -361,13 +360,12 @@ mod tests {
     struct Clean(PathBuf);
     impl Drop for Clean {
         fn drop(&mut self) {
-            use std::os::unix::fs::PermissionsExt;
             for e in std::fs::read_dir(audit::archive_dir(&self.0))
                 .into_iter()
                 .flatten()
                 .flatten()
             {
-                let _ = std::fs::set_permissions(e.path(), std::fs::Permissions::from_mode(0o600));
+                let _ = crate::os::set_mode(&e.path(), 0o600);
             }
         }
     }
@@ -394,9 +392,8 @@ mod tests {
             crate::signing::public_of("ICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICA=").unwrap();
         assert!(!check_all(d, other.as_bytes()).errors.is_empty());
         // Rewriting the seal (to match a rewritten segment) breaks the signature.
-        use std::os::unix::fs::PermissionsExt;
         let sp = seals(d)[0].clone();
-        std::fs::set_permissions(&sp, std::fs::Permissions::from_mode(0o600)).unwrap();
+        crate::os::set_mode(&sp, 0o600).unwrap();
         let t = std::fs::read_to_string(&sp)
             .unwrap()
             .replace("\"last_seq\": 3", "\"last_seq\": 4");

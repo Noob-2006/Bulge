@@ -381,7 +381,15 @@ pub fn is_backup_or_prod_path(p: &Path) -> bool {
 fn exec_tier(cmd: &str, c: &Candidate) -> Tier {
     let l = cmd.to_ascii_lowercase();
     let system = ["systemctl", "service ", "apt-get", "apt ", "dnf ", "yum ", "pacman", "snap ", "launchctl", "mount ", "umount", "modprobe", "sysctl", "iptables", "ufw "];
-    if system.iter().any(|k| l.trim_start().starts_with(k) || l.contains(&format!(" {k}"))) {
+    // The same system layer on Windows (services, packages, registry machine hive, firewall)
+    // and macOS (launchd is above; updates, firewall, power/network settings, pkg installs).
+    let system_other = [
+        "sc.exe ", "sc config ", "sc stop ", "sc start ", "sc create ", "sc delete ", "net stop ", "net start ", "winget ", "choco ", "msiexec", "dism ", "netsh ",
+        "restart-service", "start-service", "set-service", "new-service", "reg add ", "reg import ", "set-itemproperty hklm:", "new-itemproperty hklm:", "set-executionpolicy",
+        "enable-windowsoptionalfeature", "install-windowsfeature", "new-netfirewallrule", "set-netfirewallprofile", "schtasks /create", "schtasks /change",
+        "softwareupdate", "pfctl", "systemsetup", "pmset ", "networksetup", "installer -pkg",
+    ];
+    if system.iter().chain(system_other.iter()).any(|k| l.trim_start().starts_with(k) || l.contains(&format!(" {k}"))) {
         // Installing a package or restarting a service is undoable; the *broker* tier
         // here only says it reaches the system layer (2), not that it is dangerous.
         return if c.sandboxed { Tier::Sandboxed } else { Tier::Impactful };
@@ -454,7 +462,31 @@ pub fn destructive_command(cmd: &str, c: &Candidate) -> Option<Destructive> {
     if let Some(d) = command_exfil(&l, c) {
         return Some(d);
     }
-    None
+    macos_destructive(&l)
+}
+
+/// macOS counterparts of the unix classes above: `diskutil` erases (the `mkfs`/`dd` of the
+/// Mac), directory-service account edits and SIP (the `usermod`/`setcap` class), and Time
+/// Machine snapshot deletion (backups).
+fn macos_destructive(l: &str) -> Option<Destructive> {
+    use std::sync::OnceLock;
+    static R: OnceLock<[regex::Regex; 3]> = OnceLock::new();
+    let [disk, perms, backup] = R.get_or_init(|| {
+        [
+            regex::Regex::new(r"\bdiskutil\s+(?:erase\w*|zerodisk|secureerase|randomdisk|partitiondisk|reformat|apfs\s+(?:deletecontainer|deletevolume|erase\w*))\b").expect("diskutil regex"),
+            regex::Regex::new(r"\bdscl\s+\S+\s+-(?:create|delete|append|merge|passwd|change)\b|\bdseditgroup\s+(?:\S+\s+)*-o\s+edit\b|\bcsrutil\s+disable\b|\bsysadminctl\s+-(?:adduser|deleteuser|secuser)").expect("macos perms regex"),
+            regex::Regex::new(r"\btmutil\s+(?:delete|deletelocalsnapshots|thinlocalsnapshots)\b").expect("tmutil regex"),
+        ]
+    });
+    if disk.is_match(l) {
+        Some(Destructive::DiskWipe)
+    } else if perms.is_match(l) {
+        Some(Destructive::AccountPerms)
+    } else if backup.is_match(l) {
+        Some(Destructive::MassDelete)
+    } else {
+        None
+    }
 }
 
 fn normalize(s: &str) -> String {
@@ -483,6 +515,25 @@ pub fn windows_destructive(cmd: &str) -> Option<&'static str> {
             // Force process/service stops: -f is unambiguous -Force on these cmdlets.
             (r#"(?is)\bstop-process\b[^\n;&|]*\s-f(?:o(?:r(?:c(?:e)?)?)?)?\b"#, "force kill processes (Stop-Process -Force)"),
             (r#"(?is)\bstop-service\b[^\n;&|]*\s-f(?:o(?:r(?:c(?:e)?)?)?)?\b"#, "force stop service (Stop-Service -Force)"),
+            // Backups and recovery: shadow copies, Windows Server Backup catalogs, boot entries.
+            (r#"(?is)\bvssadmin(?:\.exe)?\s+(?:delete\s+shadows|resize\s+shadowstorage)\b"#, "delete volume shadow copies (vssadmin)"),
+            (r#"(?is)\bwbadmin(?:\.exe)?\s+delete\b"#, "delete Windows backups (wbadmin)"),
+            (r#"(?is)\bbcdedit(?:\.exe)?\b[^\n;&|]*\s/(?:delete|deletevalue)\b"#, "delete boot configuration (bcdedit)"),
+            // Disk wipes: the mkfs / dd / shred of Windows.
+            (r#"(?is)\b(?:format-volume|clear-disk|initialize-disk|remove-partition)\b"#, "wipe a disk or volume (Storage cmdlets)"),
+            (r#"(?is)(?:^|[\s;&|"'])format(?:\.com)?\s+[a-z]:"#, "format a drive"),
+            (r#"(?is)\bdiskpart\b[^\n]*(?:/s\b|\bclean\b)"#, "diskpart script / clean"),
+            (r#"(?is)\bcipher(?:\.exe)?\s+/w\b"#, "wipe free space (cipher /w)"),
+            // Account and permission changes: the usermod / chmod -R 777 / visudo of Windows.
+            (r#"(?is)\bnet(?:\.exe)?\s+user\s+\S+[^\n;&|]*\s/(?:add|delete|active:yes)\b"#, "create/delete a local account (net user)"),
+            (r#"(?is)\bnet(?:\.exe)?\s+localgroup\s+[^\n;&|]*\s/(?:add|delete)\b"#, "change local group membership (net localgroup)"),
+            (r#"(?is)\b(?:add-localgroupmember|remove-localgroupmember|new-localuser|remove-localuser|set-localuser|enable-localuser)\b"#, "change local accounts (LocalAccounts cmdlets)"),
+            (r#"(?is)\bicacls(?:\.exe)?\b[^\n;&|]*\s/(?:grant|setowner|reset)\b[^\n;&|]*(?:everyone|\*s-1-1-0|users|/t)"#, "broad ACL change (icacls)"),
+            (r#"(?is)\btakeown(?:\.exe)?\b[^\n;&|]*\s/r\b"#, "recursive ownership takeover (takeown /r)"),
+            (r#"(?is)\bset-mppreference\b[^\n;&|]*-disable\w*"#, "disable Microsoft Defender protection"),
+            // Machine-wide registry deletes.
+            (r#"(?is)\breg(?:\.exe)?\s+delete\s+(?:hklm|hkey_local_machine)\b"#, "delete machine registry keys (reg delete HKLM)"),
+            (r#"(?is)\bremove-item(?:property)?\b[^\n;&|]*\bhklm:"#, "delete machine registry keys (Remove-Item HKLM:)"),
         ]
         .into_iter()
         .map(|(p, what)| (regex::Regex::new(p).expect("windows destructive regex"), what))
@@ -1708,6 +1759,63 @@ time: "10:30""#;
         for cmd in ["Stop-Process -Name app", "wmic shadowcopy list", "Get-ChildItem C:\\data", "Remove-Item notes.txt"] {
             let a = assess(&cand(&[cmd]));
             assert!(!a.destructive.contains(&Destructive::WindowsDestructive), "{cmd}: {a:?}");
+        }
+    }
+
+    /// Windows and macOS shells get the same four tiers as bash: read-only work stays low,
+    /// system-layer changes are tier 2, irreversible ones tier 3.
+    #[test]
+    fn windows_and_macos_commands_get_the_four_tiers() {
+        for cmd in [
+            "vssadmin delete shadows /all /quiet",
+            "wbadmin delete catalog -quiet",
+            "bcdedit /delete {current}",
+            "Format-Volume -DriveLetter D",
+            "Get-Disk 1 | Clear-Disk -RemoveData",
+            "format d: /q",
+            "cmd /c format e: /fs:ntfs",
+            "diskpart /s wipe.txt",
+            "cipher /w:C:\\",
+            "net user eve P@ss /add",
+            "net localgroup administrators eve /add",
+            "Add-LocalGroupMember -Group Administrators -Member eve",
+            "icacls C:\\data /grant Everyone:F /t",
+            "takeown /f C:\\data /r",
+            "Set-MpPreference -DisableRealtimeMonitoring $true",
+            "reg delete HKLM\\Software\\Vendor /f",
+            "Remove-Item -Path HKLM:\\Software\\Vendor",
+        ] {
+            let a = assess(&cand(&[cmd]));
+            assert_eq!(a.tier, Tier::Irreversible, "{cmd}: {a:?}");
+            assert!(a.destructive.contains(&Destructive::WindowsDestructive), "{cmd}: {a:?}");
+        }
+        for (cmd, d) in [
+            ("diskutil eraseDisk APFS X disk2", Destructive::DiskWipe),
+            ("diskutil apfs deleteContainer disk3", Destructive::DiskWipe),
+            ("sudo dscl . -create /Users/eve", Destructive::AccountPerms),
+            ("dseditgroup -o edit -a eve -t user admin", Destructive::AccountPerms),
+            ("csrutil disable", Destructive::AccountPerms),
+            ("tmutil delete /Volumes/Backup/x", Destructive::MassDelete),
+        ] {
+            let a = assess(&cand(&[cmd]));
+            assert_eq!(a.tier, Tier::Irreversible, "{cmd}: {a:?}");
+            assert!(a.destructive.contains(&d), "{cmd}: {a:?}");
+        }
+        // System layer, recoverable: tier 2 outside the sandbox (like apt-get install /
+        // systemctl restart), tier 0 inside it.
+        let host = |cmd: &str| {
+            let mut c = cand(&[cmd]);
+            c.sandboxed = false;
+            assess(&c)
+        };
+        for cmd in ["winget install Git.Git", "choco install nodejs -y", "sc.exe config spooler start= disabled", "net stop spooler", "Restart-Service spooler", "reg add HKLM\\Software\\X /v a /d 1", "netsh advfirewall set allprofiles state off", "Set-ExecutionPolicy RemoteSigned", "softwareupdate -i -a", "sudo installer -pkg x.pkg -target /", "pmset -a sleep 0"] {
+            assert_eq!(host(cmd).tier, Tier::Impactful, "{cmd}");
+            assert_eq!(assess(&cand(&[cmd])).tier, Tier::Sandboxed, "{cmd}");
+        }
+        // Read-only and ordinary work never climbs.
+        for cmd in ["diskutil list", "dscl . -read /Users/eve", "tmutil listbackups", "net user", "icacls C:\\data", "vssadmin list shadows", "Get-Service", "git log --format=%H", "Get-ChildItem HKLM:\\Software"] {
+            let a = host(cmd);
+            assert!(a.tier < Tier::Impactful, "{cmd}: {a:?}");
         }
     }
 

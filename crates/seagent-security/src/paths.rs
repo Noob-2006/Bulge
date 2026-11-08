@@ -5,7 +5,9 @@
 //! value is a clear denial for models that respect tool errors and an audit trail.
 //! The OS sandbox (exec backends) is what actually confines a hostile process.
 
-use crate::glob::{expand_home, fnmatch, normalize};
+#[cfg(not(windows))]
+use crate::glob::normalize;
+use crate::glob::{expand_home, fnmatch};
 use serde::{Deserialize, Serialize};
 use std::path::{Component, Path, PathBuf};
 
@@ -34,6 +36,77 @@ const HOME_WRITE_DENIED: &[&str] = &[".ssh/authorized_keys", ".ssh/id_rsa", ".ss
 pub const HOME_CREDENTIAL_DIRS: &[&str] = &[".ssh", ".aws", ".gnupg", ".kube", ".docker", ".azure", ".config/gh", ".config/gcloud"];
 const SYSTEM_WRITE_DENIED: &[&str] = &["/etc/sudoers", "/etc/passwd", "/etc/shadow"];
 const SYSTEM_WRITE_DENIED_DIRS: &[&str] = &["/etc/sudoers.d", "/etc/systemd"];
+/// macOS: `/etc` is a symlink to `/private/etc`, so both spellings are listed (a resolved path
+/// is always the `/private` one); launchd plists are the boot-persistence twin of systemd units.
+const MACOS_WRITE_DENIED: &[&str] = &["/etc/sudoers", "/private/etc/sudoers", "/etc/passwd", "/private/etc/passwd", "/etc/master.passwd", "/private/etc/master.passwd"];
+const MACOS_WRITE_DENIED_DIRS: &[&str] = &["/etc/sudoers.d", "/private/etc/sudoers.d", "/etc/pam.d", "/private/etc/pam.d", "/System", "/Library/LaunchDaemons", "/Library/LaunchAgents"];
+
+/// Which OS's system-file table applies (a parameter, so every table is testable anywhere).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SystemTable {
+    /// Linux, Android and other unixes: the original `/etc` list.
+    Unix,
+    MacOs,
+    Windows,
+}
+
+impl SystemTable {
+    pub fn current() -> SystemTable {
+        if cfg!(windows) {
+            SystemTable::Windows
+        } else if cfg!(any(target_os = "macos", target_os = "ios")) {
+            SystemTable::MacOs
+        } else {
+            SystemTable::Unix
+        }
+    }
+}
+
+/// Windows system trees: the OS (`%SystemRoot%`, which holds `System32` and the registry
+/// hive files under `System32\config`), installed programs, and the all-users Startup folder
+/// (the boot-persistence twin of `/etc/systemd`). Read from the environment with the stock
+/// locations as fallback, so a relocated `%SystemRoot%` is still covered.
+fn windows_denied_dirs(env: &dyn Fn(&str) -> Option<String>) -> Vec<String> {
+    let drive = env("SystemDrive").filter(|d| !d.is_empty()).unwrap_or_else(|| "C:".into());
+    let mut v = vec![format!(r"{drive}\Windows"), format!(r"{drive}\Program Files"), format!(r"{drive}\Program Files (x86)"), format!(r"{drive}\ProgramData\Microsoft\Windows\Start Menu\Programs\StartUp")];
+    for k in ["SystemRoot", "windir", "ProgramFiles", "ProgramFiles(x86)", "ProgramW6432"] {
+        if let Some(d) = env(k).filter(|d| !d.trim().is_empty()) {
+            v.push(d);
+        }
+    }
+    if let Some(pd) = env("ProgramData").filter(|d| !d.trim().is_empty()) {
+        v.push(format!(r"{pd}\Microsoft\Windows\Start Menu\Programs\StartUp"));
+    }
+    v
+}
+
+/// Case-insensitive, separator-agnostic "`p` is `base` or below it" for the Windows and
+/// macOS tables (both default to case-insensitive file systems). `\\?\` prefixes are ignored.
+fn under_folded(p: &str, base: &str) -> bool {
+    let (p, b) = (fold(p), fold(base));
+    !b.is_empty() && (p == b || p.starts_with(&format!("{b}/")))
+}
+
+fn fold(s: &str) -> String {
+    let s = s.strip_prefix(r"\\?\").unwrap_or(s).replace('\\', "/").to_lowercase();
+    s.trim_end_matches('/').to_string()
+}
+
+/// Whether the resolved path `r` is a protected system file or lies in a protected system
+/// tree on `table`'s OS.
+pub fn system_write_protected(table: SystemTable, r: &Path, env: &dyn Fn(&str) -> Option<String>) -> bool {
+    match table {
+        SystemTable::Unix => SYSTEM_WRITE_DENIED.iter().any(|f| r == Path::new(f)) || SYSTEM_WRITE_DENIED_DIRS.iter().any(|d| under(r, Path::new(d))),
+        SystemTable::MacOs => {
+            let s = r.to_string_lossy();
+            MACOS_WRITE_DENIED.iter().any(|f| fold(&s) == fold(f)) ||MACOS_WRITE_DENIED_DIRS.iter().any(|d| under_folded(&s, d))
+        }
+        SystemTable::Windows => {
+            let s = r.to_string_lossy();
+            windows_denied_dirs(env).iter().any(|d| under_folded(&s, d))
+        }
+    }
+}
 /// Project env files: secrets by convention (`.env.example` is the documented shape).
 pub const ENV_BASENAMES: &[&str] = &[".env", ".env.local", ".env.development", ".env.production", ".env.test", ".env.staging", ".envrc"];
 /// Under the data dir: credentials and seagent's own security state.
@@ -45,27 +118,69 @@ const DATA_PROTECTED: &[&str] = &["sessions", "checkpoints"];
 /// deepest existing ancestor and appends the rest lexically).
 pub fn realpath(p: &Path) -> PathBuf {
     let p = PathBuf::from(expand_home(&p.to_string_lossy()));
-    if let Ok(c) = p.canonicalize() {
+    if let Ok(c) = canonical(&p) {
         return c;
     }
     let mut tail: Vec<std::ffi::OsString> = Vec::new();
     let mut cur = p.clone();
     loop {
-        if let Ok(c) = cur.canonicalize() {
+        if let Ok(c) = canonical(&cur) {
             let mut out = c;
             for t in tail.iter().rev() {
                 out.push(t);
             }
-            return PathBuf::from(normalize(&out.to_string_lossy()));
+            return lexical(&out);
         }
         match (cur.file_name().map(|f| f.to_os_string()), cur.parent()) {
             (Some(f), Some(parent)) => {
                 tail.push(f);
                 cur = parent.to_path_buf();
             }
-            _ => return PathBuf::from(normalize(&p.to_string_lossy())),
+            _ => return lexical(&p),
         }
     }
+}
+
+#[cfg(not(windows))]
+fn canonical(p: &Path) -> std::io::Result<PathBuf> {
+    p.canonicalize()
+}
+
+/// Windows `canonicalize` answers in `\\?\C:\…` form; every comparison here (and every
+/// message) wants the ordinary `C:\…` spelling, so the verbatim prefix is dropped.
+#[cfg(windows)]
+fn canonical(p: &Path) -> std::io::Result<PathBuf> {
+    let c = p.canonicalize()?.to_string_lossy().into_owned();
+    Ok(PathBuf::from(match c.strip_prefix(r"\\?\UNC\") {
+        Some(unc) => format!(r"\\{unc}"),
+        None => c.strip_prefix(r"\\?\").map(str::to_string).unwrap_or(c),
+    }))
+}
+
+#[cfg(not(windows))]
+fn lexical(p: &Path) -> PathBuf {
+    PathBuf::from(normalize(&p.to_string_lossy()))
+}
+
+/// Lexical `.`/`..` resolution by path components (drive prefixes and both separators),
+/// the Windows counterpart of [`normalize`], which only knows `/`.
+#[cfg(windows)]
+fn lexical(p: &Path) -> PathBuf {
+    let mut out: Vec<Component> = Vec::new();
+    for c in p.components() {
+        match c {
+            Component::CurDir => {}
+            Component::ParentDir => match out.last() {
+                Some(Component::Normal(_)) => {
+                    out.pop();
+                }
+                Some(Component::RootDir | Component::Prefix(_)) => {}
+                _ => out.push(c),
+            },
+            c => out.push(c),
+        }
+    }
+    out.iter().collect()
 }
 
 fn under(p: &Path, base: &Path) -> bool {
@@ -78,7 +193,16 @@ fn homes() -> Vec<PathBuf> {
         v.push(realpath(Path::new(&h)));
     }
     // The real account home, when HOME was redirected (sandbox / profile homes).
+    // Windows: the profile directory (HOME is usually unset there, or set by Git Bash).
+    #[cfg(not(unix))]
+    if let Some(h) = std::env::var_os("USERPROFILE") {
+        let d = realpath(Path::new(&h));
+        if !v.contains(&d) {
+            v.push(d);
+        }
+    }
     // SAFETY: getpwuid returns a pointer into static storage or NULL.
+    #[cfg(unix)]
     unsafe {
         let pw = libc::getpwuid(libc::getuid());
         if !pw.is_null() && !(*pw).pw_dir.is_null() {
@@ -135,7 +259,7 @@ pub fn write_block(path: &Path, dirs: &SeagentDirs, policy: &PathPolicy) -> Opti
             return denied("a protected system/credential file");
         }
     }
-    if SYSTEM_WRITE_DENIED.iter().any(|f| r == Path::new(f)) || SYSTEM_WRITE_DENIED_DIRS.iter().any(|d| under(&r, Path::new(d))) {
+    if system_write_protected(SystemTable::current(), &r, &|k| std::env::var(k).ok()) {
         return denied("a protected system/credential file");
     }
     if under(&r, &realpath(&dirs.config_dir.join("secrets.toml"))) {
@@ -220,8 +344,12 @@ mod tests {
         // A symlink into the vault is followed.
         std::fs::create_dir_all(&dirs.config_dir).unwrap();
         std::fs::write(dirs.config_dir.join("secrets.toml"), "").unwrap();
-        std::os::unix::fs::symlink(dirs.config_dir.join("secrets.toml"), root.join("innocent.txt")).unwrap();
-        assert!(read_block(&root.join("innocent.txt"), &dirs, &PathPolicy::default()).is_some());
+        // (Windows needs developer mode for symlinks; without it this part is skipped.)
+        let linked = crate::os::symlink(dirs.config_dir.join("secrets.toml"), root.join("innocent.txt"));
+        assert!(linked.is_ok() || !cfg!(unix), "{linked:?}");
+        if linked.is_ok() {
+            assert!(read_block(&root.join("innocent.txt"), &dirs, &PathPolicy::default()).is_some());
+        }
     }
 
     #[test]
@@ -229,12 +357,15 @@ mod tests {
         let root = tmp();
         let dirs = SeagentDirs { config_dir: root.join("cfg"), data_dir: root.join("data") };
         let p = PathPolicy::default();
-        let home = std::env::var("HOME").unwrap();
+        let home = std::env::var("HOME").or_else(|_| std::env::var("USERPROFILE")).unwrap();
         assert!(write_block(Path::new(&format!("{home}/.ssh/authorized_keys")), &dirs, &p).is_some());
         assert!(write_block(Path::new(&format!("{home}/.aws/credentials")), &dirs, &p).is_some());
         assert!(write_block(Path::new(&format!("{home}/.ssh/config")), &dirs, &p).is_none(), "approval-gated, not denied");
         assert!(write_needs_approval(Path::new(&format!("{home}/.ssh/config"))));
+        #[cfg(unix)]
         assert!(write_block(Path::new("/etc/sudoers.d/x"), &dirs, &p).is_some());
+        #[cfg(windows)]
+        assert!(write_block(Path::new(r"C:\Windows\System32\drivers\etc\hosts"), &dirs, &p).is_some());
         assert!(write_block(&dirs.data_dir.join("sessions/abc/log.jsonl"), &dirs, &p).is_some());
         assert!(write_block(&dirs.data_dir.join("approvals/allowlist.json"), &dirs, &p).is_some());
         assert!(write_block(&root.join("proj/x.rs"), &dirs, &p).is_none());
@@ -251,12 +382,49 @@ mod tests {
         std::fs::create_dir_all(ws.join("sub")).unwrap();
         assert!(outside_workspace(&ws.join("sub/new.txt"), &ws, &[]).is_none());
         assert!(outside_workspace(&ws.join("../escape.txt"), &ws, &[]).is_some());
-        std::os::unix::fs::symlink("/etc", ws.join("etc-link")).unwrap();
-        assert!(outside_workspace(&ws.join("etc-link/hosts"), &ws, &[]).is_some());
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink("/etc", ws.join("etc-link")).unwrap();
+            assert!(outside_workspace(&ws.join("etc-link/hosts"), &ws, &[]).is_some());
+        }
         assert!(outside_workspace(&root.join("art/x.txt"), &ws, &[root.join("art")]).is_none());
         assert!(validate_within_dir(&ws.join("sub/../sub/a"), &ws).is_none());
         assert!(validate_within_dir(&ws.join("../x"), &ws).is_some());
         assert!(has_traversal_component("a/../b") && !has_traversal_component("a/b..c"));
         assert!(has_unsafe_path_chars("a\nb") && has_unsafe_path_chars("a\u{2028}") && !has_unsafe_path_chars("a b/ü"));
+    }
+
+    #[test]
+    fn every_os_has_its_system_write_table() {
+        let none = |_: &str| None;
+        let t = |table, p: &str| system_write_protected(table, Path::new(p), &none);
+        // Unix (Linux/Android): exactly the original list.
+        assert!(t(SystemTable::Unix, "/etc/sudoers") && t(SystemTable::Unix, "/etc/systemd/system/x.service") && t(SystemTable::Unix, "/etc/sudoers.d/x"));
+        assert!(!t(SystemTable::Unix, "/etc/hosts") && !t(SystemTable::Unix, "/etc/sudoers.bak") && !t(SystemTable::Unix, "/home/u/x"));
+        // macOS: both /etc spellings, launchd persistence, the sealed system volume; case-folded.
+        for p in ["/private/etc/sudoers", "/etc/sudoers", "/private/etc/sudoers.d/x", "/Library/LaunchDaemons/evil.plist", "/library/launchagents/x.plist", "/System/Library/x", "/private/etc/master.passwd"] {
+            assert!(t(SystemTable::MacOs, p), "{p}");
+        }
+        for p in ["/Users/u/Library/LaunchAgents/x.plist", "/private/etc/hosts", "/Systematic", "/private/etc/sudoers.bak"] {
+            assert!(!t(SystemTable::MacOs, p), "{p}");
+        }
+        // Windows: the OS tree (System32, registry hives), program dirs, all-users Startup.
+        for p in [r"C:\Windows\System32\drivers\etc\hosts", r"c:\windows\system32\config\SAM", r"\\?\C:\Windows\System32\x.dll", r"C:\Program Files\App\a.exe", r"C:\Program Files (x86)\x", r"C:\ProgramData\Microsoft\Windows\Start Menu\Programs\StartUp\run.lnk", "C:/Windows/win.ini"] {
+            assert!(t(SystemTable::Windows, p), "{p}");
+        }
+        for p in [r"C:\Users\u\project\a.rs", r"C:\WindowsApps", r"D:\Windows\x", r"C:\ProgramData\app\x"] {
+            assert!(!t(SystemTable::Windows, p), "{p}");
+        }
+        // A relocated %SystemRoot% / %ProgramFiles% is covered through the environment.
+        let env = |k: &str| match k {
+            "SystemRoot" => Some(r"D:\Win".to_string()),
+            "SystemDrive" => Some("D:".to_string()),
+            "ProgramFiles" => Some(r"E:\Apps".to_string()),
+            _ => None,
+        };
+        assert!(system_write_protected(SystemTable::Windows, Path::new(r"D:\Win\System32\x"), &env));
+        assert!(system_write_protected(SystemTable::Windows, Path::new(r"E:\Apps\tool\x.exe"), &env));
+        assert!(system_write_protected(SystemTable::Windows, Path::new(r"D:\Windows\x"), &env));
+        assert_eq!(SystemTable::current(), if cfg!(windows) { SystemTable::Windows } else if cfg!(any(target_os = "macos", target_os = "ios")) { SystemTable::MacOs } else { SystemTable::Unix });
     }
 }

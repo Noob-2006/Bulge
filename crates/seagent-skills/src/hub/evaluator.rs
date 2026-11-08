@@ -80,15 +80,23 @@ pub fn parse(report: &Value) -> Report {
     Report { available: true, passed: !failed && findings.is_empty(), findings, incomplete, error: String::new() }
 }
 
+#[cfg(unix)]
 fn which(bin: &str) -> Option<std::path::PathBuf> {
     // `shutil.which`: only an executable regular file counts, so a non-executable stub earlier in
     // PATH cannot shadow a working scanner further down.
     std::env::var_os("PATH").and_then(|p| std::env::split_paths(&p).map(|d| d.join(bin)).find(|c| is_executable(c)))
 }
 
+#[cfg(unix)]
 fn is_executable(p: &Path) -> bool {
     use std::os::unix::fs::PermissionsExt;
     p.metadata().map(|m| m.is_file() && m.permissions().mode() & 0o111 != 0).unwrap_or(false)
+}
+
+/// Windows: no execute bit; `shutil.which` there walks `PATHEXT`.
+#[cfg(not(unix))]
+fn which(bin: &str) -> Option<std::path::PathBuf> {
+    seagent_core::platform::layout::which(bin)
 }
 
 pub fn run(dir: &Path, timeout: u64) -> Report {
@@ -171,7 +179,8 @@ pub fn format(r: &Report, limit: usize) -> String {
     l.join("\n")
 }
 
-#[cfg(test)]
+// Unix only: the fake scanners are `#!/bin/sh` scripts.
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use serde_json::json;

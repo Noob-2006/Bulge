@@ -30,6 +30,7 @@ pub mod external;
 pub mod glob;
 pub mod guidance;
 pub mod hardline;
+mod os;
 pub mod osv;
 pub mod paths;
 pub mod pii;

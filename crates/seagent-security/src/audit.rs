@@ -54,7 +54,7 @@ impl Actor {
     }
     /// The OS user running this process (the owner of the unix socket).
     pub fn local() -> Actor {
-        let name = std::env::var("USER").or_else(|_| std::env::var("LOGNAME")).unwrap_or_else(|_| format!("uid:{}", unsafe { libc::getuid() }));
+        let name = crate::os::user_name();
         Actor { kind: "local".into(), name, role: "admin".into(), ip: String::new() }
     }
     pub fn channel(channel: &str, sender: &str) -> Actor {
@@ -267,21 +267,19 @@ fn cap_value(v: &Value) -> Value {
 struct Lock(File);
 impl Drop for Lock {
     fn drop(&mut self) {
-        use std::os::unix::io::AsRawFd;
-        unsafe { libc::flock(self.0.as_raw_fd(), libc::LOCK_UN) };
+        let _ = self.0.unlock();
     }
 }
 
+/// `File::lock` is `flock(LOCK_EX)` on unix and `LockFileEx` on Windows.
 fn lock(data: &Path) -> Result<Lock, String> {
-    use std::os::unix::fs::OpenOptionsExt;
-    use std::os::unix::io::AsRawFd;
     // Never resurrect a removed home: the data dir may be created, but its parent must exist.
     if !data.exists() && !data.parent().is_some_and(Path::exists) {
         return Err(format!("audit: {} does not exist", data.display()));
     }
     fs::create_dir_all(dir(data)).map_err(|e| format!("audit: {e}"))?;
-    let f = OpenOptions::new().create(true).truncate(false).write(true).mode(0o600).open(dir(data).join(".lock")).map_err(|e| format!("audit: {e}"))?;
-    if unsafe { libc::flock(f.as_raw_fd(), libc::LOCK_EX) } != 0 {
+    let f = crate::os::with_mode(OpenOptions::new().create(true).truncate(false).write(true), 0o600).open(dir(data).join(".lock")).map_err(|e| format!("audit: {e}"))?;
+    if f.lock().is_err() {
         return Err("audit: cannot lock".into());
     }
     Ok(Lock(f))
@@ -310,7 +308,6 @@ pub fn head(data: &Path) -> Head {
 
 /// Append one record. Returns its sequence number.
 pub fn emit(data: &Path, ev: Event) -> Result<u64, String> {
-    use std::os::unix::fs::OpenOptionsExt;
     let _l = lock(data)?;
     let h = head(data);
     let seq = h.seq + 1;
@@ -341,7 +338,7 @@ pub fn emit(data: &Path, ev: Event) -> Result<u64, String> {
     let hash = chain_hash(&h.hash, &body);
     body["hash"] = Value::String(hash.clone());
     let p = live(data);
-    let mut f = OpenOptions::new().create(true).append(true).mode(0o600).open(&p).map_err(|e| format!("audit: {e}"))?;
+    let mut f = crate::os::with_mode(OpenOptions::new().create(true).append(true), 0o600).open(&p).map_err(|e| format!("audit: {e}"))?;
     writeln!(f, "{}", canonical(&body)).map_err(|e| format!("audit: {e}"))?;
     let _ = f.sync_data();
     let tmp = head_path(data).with_extension("tmp");
@@ -383,7 +380,6 @@ pub fn rotate(data: &Path) -> Result<Option<PathBuf>, String> {
 }
 
 fn rotate_locked(data: &Path) -> Result<Option<PathBuf>, String> {
-    use std::os::unix::fs::PermissionsExt;
     let p = live(data);
     let lines = read_lines(&p);
     let (Some(first), Some(last)) = (lines.first(), lines.last()) else { return Ok(None) };
@@ -398,10 +394,10 @@ fn rotate_locked(data: &Path) -> Result<Option<PathBuf>, String> {
         "sha256": sha256_hex(&bytes), "sealed_at": now_ms(),
     });
     fs::rename(&p, &dest).map_err(|e| format!("audit: {e}"))?;
-    let _ = fs::set_permissions(&dest, fs::Permissions::from_mode(0o400));
+    let _ = crate::os::set_mode(&dest, 0o400);
     let sp = dest.with_extension("seal");
     fs::write(&sp, serde_json::to_string_pretty(&seal).unwrap_or_default()).map_err(|e| format!("audit: {e}"))?;
-    let _ = fs::set_permissions(&sp, fs::Permissions::from_mode(0o400));
+    let _ = crate::os::set_mode(&sp, 0o400);
     Ok(Some(dest))
 }
 
@@ -584,8 +580,7 @@ pub fn prune(data: &Path, cutoff_ms: u64, held: bool) -> Result<usize, String> {
             if seal["last_ts"].as_u64().is_none_or(|t| t >= cutoff_ms) {
                 break;
             }
-            use std::os::unix::fs::PermissionsExt;
-            let _ = fs::set_permissions(&p, fs::Permissions::from_mode(0o600));
+            let _ = crate::os::set_mode(&p, 0o600);
             fs::remove_file(&p).map_err(|e| format!("audit: {e}"))?;
             let _ = fs::remove_file(p.with_extension("seal"));
             removed.push(json!({"segment": p.file_name().map(|n| n.to_string_lossy().to_string()), "last_seq": seal["last_seq"], "last_hash": seal["last_hash"]}));
@@ -616,9 +611,8 @@ mod tests {
     struct G(PathBuf);
     impl Drop for G {
         fn drop(&mut self) {
-            use std::os::unix::fs::PermissionsExt;
             for p in segments(&self.0) {
-                let _ = fs::set_permissions(&p, fs::Permissions::from_mode(0o600));
+                let _ = crate::os::set_mode(&p, 0o600);
             }
             let _ = fs::remove_dir_all(&self.0);
         }
@@ -676,8 +670,7 @@ mod tests {
         assert!(v.ok && v.events == 6 && v.segments == 2, "{v:?}");
         assert_eq!(all(d)[3]["prev"], all(d)[2]["hash"]);
         // Tamper with the archived segment.
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(&seg, fs::Permissions::from_mode(0o600)).unwrap();
+        crate::os::set_mode(&seg, 0o600).unwrap();
         let t = fs::read_to_string(&seg).unwrap().replace("\"target\":\"1\"", "\"target\":\"9\"");
         fs::write(&seg, t).unwrap();
         assert!(verify(d, None).error.unwrap().contains("seal"));

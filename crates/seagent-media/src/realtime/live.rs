@@ -240,6 +240,12 @@ fn default_recorder(rate: u32) -> Option<String> {
         ))
     } else if p("arecord").is_some() {
         Some(format!("arecord -q -f S16_LE -r {rate} -c 1 -t raw"))
+    } else if cfg!(any(windows, target_vendor = "apple")) {
+        // No PipeWire/Pulse/ALSA there: ffmpeg's native capture (AVFoundation / DirectShow).
+        let ff = crate::audio::ffmpeg()?;
+        let input = crate::voice::record::ffmpeg_input(&ff)?;
+        let q = |s: &str| crate::proc::shell_quote(s);
+        Some(format!("{} -nostdin -loglevel quiet {} -ac 1 -ar {rate} -f s16le -", q(&ff.display().to_string()), input.iter().map(|a| q(a)).collect::<Vec<_>>().join(" ")))
     } else {
         None
     }
@@ -255,6 +261,9 @@ fn default_player(rate: u32) -> Option<String> {
         ))
     } else if p("aplay").is_some() {
         Some(format!("aplay -q -f S16_LE -r {rate} -c 1 -t raw"))
+    } else if cfg!(any(windows, target_vendor = "apple")) && p("ffplay").is_some() {
+        // Raw PCM from stdin through ffplay (part of every ffmpeg build).
+        Some(format!("ffplay -nodisp -autoexit -loglevel quiet -f s16le -ar {rate} -ch_layout mono -i -"))
     } else {
         None
     }
@@ -270,9 +279,7 @@ impl ProcAudio {
     }
 
     pub fn new(recorder: &str, player: &str, rate: u32) -> Result<ProcAudio, String> {
-        let mut child = Command::new("sh")
-            .arg("-c")
-            .arg(recorder)
+        let mut child = crate::proc::shell_command(recorder)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
@@ -326,9 +333,7 @@ impl ProcAudio {
             self.player = None;
         }
         if self.player.is_none() {
-            let c = Command::new("sh")
-                .arg("-c")
-                .arg(&self.player_cmd)
+            let c = crate::proc::shell_command(&self.player_cmd)
                 .stdin(Stdio::piped())
                 .stdout(Stdio::null())
                 .stderr(Stdio::null())

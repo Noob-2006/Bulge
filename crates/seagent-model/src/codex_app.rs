@@ -136,7 +136,7 @@ impl Provider for AppServer {
         on_event: &mut dyn FnMut(StreamEvent),
         cancel: &Cancel,
     ) -> Result<ModelResponse, ProviderError> {
-        let mut child = Command::new(&self.command)
+        let mut child = Command::new(crate::auth::program(&self.command))
             .args(&self.args)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())

@@ -109,6 +109,9 @@ fn missing_binary_and_bad_protocol_are_clear_errors() {
     assert!(Client::new("older", cfg, no_secrets()).unwrap().list_tools().is_ok(), "older supported version accepted");
 
     // A server that exits immediately: error shows its stderr.
+    if cfg!(not(unix)) {
+        return; // the dying server is an `sh -c` one-liner
+    }
     let cfg = McpServerConfig { command: Some("sh".into()), args: vec!["-c".into(), "echo 'fatal: bad config' >&2; exit 2".into()], timeout_secs: Some(3), ..Default::default() };
     let e = Client::new("dies", cfg, no_secrets()).unwrap().info().unwrap_err();
     assert!(e.contains("fatal: bad config"), "{e}");
@@ -432,12 +435,7 @@ fn seagent_client_talks_to_seagent_server_end_to_end() {
     assert!(l.contains("via pipe"));
 }
 
-fn pipe() -> (std::fs::File, std::fs::File) {
-    use std::os::fd::FromRawFd;
-    let mut fds = [0; 2];
-    // SAFETY: plain syscall; the fds are owned by the returned Files.
-    unsafe {
-        assert_eq!(libc::pipe(fds.as_mut_ptr()), 0);
-        (std::fs::File::from_raw_fd(fds[0]), std::fs::File::from_raw_fd(fds[1]))
-    }
+/// An OS pipe pair (std's portable `io::pipe`: pipe(2) on unix, an anonymous pipe on Windows).
+fn pipe() -> (std::io::PipeReader, std::io::PipeWriter) {
+    std::io::pipe().unwrap()
 }

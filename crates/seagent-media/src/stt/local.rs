@@ -157,7 +157,7 @@ print(json.dumps({"text": " ".join(x["text"] for x in out).strip(), "language": 
 pub struct FasterWhisper;
 
 /// The child program text (test-only: the helper can't run without faster-whisper).
-#[cfg(test)]
+#[cfg(all(test, unix))]
 pub(crate) fn helper_script() -> &'static str {
     FASTER_WHISPER_PY
 }
@@ -402,7 +402,7 @@ impl SttProvider for LocalCommand {
             let out_dir = dir.join("out");
             std::fs::create_dir_all(&out_dir).map_err(|e| e.to_string())?;
             let line = super::command::render(&template, &[("input_path", &input.display().to_string()), ("output_dir", &out_dir.display().to_string()), ("language", &lang), ("model", &model)]);
-            let argv = super::command::clean_env(&[]).into_iter().chain(["sh".to_string(), "-c".into(), line]).collect::<Vec<_>>();
+            let argv = super::command::clean_env(&[]).into_iter().chain(crate::proc::shell_argv(&line)).collect::<Vec<_>>();
             let o = proc::run(&argv, None, Duration::from_secs(300), cancel).map_err(|e| format!("Local transcription failed: {e}"))?;
             if !o.success() {
                 let detail = if o.stderr.trim().is_empty() { String::from_utf8_lossy(&o.stdout).trim().to_string() } else { o.stderr.trim().to_string() };

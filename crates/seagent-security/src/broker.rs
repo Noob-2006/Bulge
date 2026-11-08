@@ -569,14 +569,7 @@ impl Broker {
             }
         }
         let _ = std::fs::remove_file(path);
-        let listener = std::os::unix::net::UnixListener::bind(path).map_err(|e| format!("cannot listen on {}: {e}", path.display()))?;
-        // 0600, as the interface promises: the directory is 0700 too, but the mode must not
-        // depend on the umask (`bind` creates the socket 0777 & ~umask).
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).map_err(|e| format!("chmod {}: {e}", path.display()))?;
-        }
+        let listener = endpoint::bind(path)?;
         let stop = Arc::new(AtomicBool::new(false));
         let flag = stop.clone();
         let ctx = Arc::new(ctx);
@@ -589,12 +582,17 @@ impl Broker {
                 let Ok(stream) = conn else { continue };
                 let _ = stream.set_read_timeout(Some(Duration::from_secs(300)));
                 let ctx = ctx.clone();
+                let listener_auth = listener.auth();
                 std::thread::spawn(move || {
                     let mut writer = match stream.try_clone() {
                         Ok(w) => w,
                         Err(_) => return,
                     };
-                    for line in BufReader::new(stream).lines() {
+                    let mut reader = BufReader::new(stream);
+                    if !endpoint::admit(&mut reader, &listener_auth) {
+                        return;
+                    }
+                    for line in reader.lines() {
                         let Ok(line) = line else { break };
                         if line.trim().is_empty() {
                             continue;
@@ -621,8 +619,125 @@ impl Broker {
 
     pub fn stop(&self) {
         self.stop.store(true, Ordering::SeqCst);
-        let _ = std::os::unix::net::UnixStream::connect(&self.path);
+        endpoint::wake(&self.path);
         let _ = std::fs::remove_file(&self.path);
+    }
+}
+
+/// A client connection to a broker at `path` (what the VM-side forwarder and tests use):
+/// a unix socket on unix; on other systems the loopback endpoint named by the file at
+/// `path`, already authenticated with its token. Speak JSON lines on it.
+pub fn connect(path: &Path) -> Result<Conn, String> {
+    endpoint::connect(path)
+}
+
+/// The stream type [`connect`] returns.
+#[cfg(unix)]
+pub type Conn = std::os::unix::net::UnixStream;
+/// The stream type [`connect`] returns.
+#[cfg(not(unix))]
+pub type Conn = std::net::TcpStream;
+
+/// Where the broker listens. Unix: a 0600 unix socket at `path`, exactly as the interface
+/// document says. Elsewhere (Windows has no unix sockets in std): a `127.0.0.1` TCP port with
+/// a 256-bit token. `path` then holds `seagent-broker tcp <addr> <token>`; the client sends
+/// the token as its first line and anything else is dropped unanswered, so another local
+/// user who can reach the port but not read the file gets nothing.
+#[cfg(unix)]
+mod endpoint {
+    use std::io::BufRead;
+    use std::path::Path;
+
+    pub struct Listener(std::os::unix::net::UnixListener);
+    impl Listener {
+        pub fn incoming(&self) -> std::os::unix::net::Incoming<'_> {
+            self.0.incoming()
+        }
+        pub fn auth(&self) {}
+    }
+
+    pub fn bind(path: &Path) -> Result<Listener, String> {
+        let listener = std::os::unix::net::UnixListener::bind(path).map_err(|e| format!("cannot listen on {}: {e}", path.display()))?;
+        // 0600, as the interface promises: the directory is 0700 too, but the mode must not
+        // depend on the umask (`bind` creates the socket 0777 & ~umask).
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).map_err(|e| format!("chmod {}: {e}", path.display()))?;
+        Ok(Listener(listener))
+    }
+
+    pub fn admit(_: &mut impl BufRead, _: &()) -> bool {
+        true
+    }
+
+    pub fn wake(path: &Path) {
+        let _ = std::os::unix::net::UnixStream::connect(path);
+    }
+
+    pub fn connect(path: &Path) -> Result<super::Conn, String> {
+        std::os::unix::net::UnixStream::connect(path).map_err(|e| format!("broker {}: {e}", path.display()))
+    }
+}
+
+#[cfg(not(unix))]
+mod endpoint {
+    use std::io::{BufRead, Write};
+    use std::net::{TcpListener, TcpStream};
+    use std::path::Path;
+    use std::time::Duration;
+
+    pub struct Listener(TcpListener, String);
+    impl Listener {
+        pub fn incoming(&self) -> std::net::Incoming<'_> {
+            self.0.incoming()
+        }
+        pub fn auth(&self) -> String {
+            self.1.clone()
+        }
+    }
+
+    pub fn bind(path: &Path) -> Result<Listener, String> {
+        let l = TcpListener::bind("127.0.0.1:0").map_err(|e| format!("cannot listen on 127.0.0.1 for {}: {e}", path.display()))?;
+        let addr = l.local_addr().map_err(|e| e.to_string())?;
+        let mut b = [0u8; 32];
+        if !crate::os::fill_random(&mut b) {
+            return Err("broker: no OS random source for the endpoint token".into());
+        }
+        let token: String = b.iter().map(|x| format!("{x:02x}")).collect();
+        std::fs::write(path, format!("seagent-broker tcp {addr} {token}\n")).map_err(|e| format!("{}: {e}", path.display()))?;
+        Ok(Listener(l, token))
+    }
+
+    /// Constant-time check of the first line against the token.
+    pub fn admit(r: &mut impl BufRead, token: &str) -> bool {
+        let mut line = String::new();
+        if r.read_line(&mut line).is_err() {
+            return false;
+        }
+        let got = line.trim_end().as_bytes();
+        got.len() == token.len() && got.iter().zip(token.as_bytes()).fold(0u8, |acc, (a, b)| acc | (a ^ b)) == 0
+    }
+
+    fn read(path: &Path) -> Result<(String, String), String> {
+        let s = std::fs::read_to_string(path).map_err(|e| format!("broker {}: {e}", path.display()))?;
+        let mut it = s.split_whitespace();
+        match (it.next(), it.next(), it.next(), it.next()) {
+            (Some("seagent-broker"), Some("tcp"), Some(addr), Some(token)) => Ok((addr.to_string(), token.to_string())),
+            _ => Err(format!("broker {}: not a broker endpoint file", path.display())),
+        }
+    }
+
+    pub fn wake(path: &Path) {
+        if let Ok((addr, _)) = read(path) {
+            let _ = TcpStream::connect(addr);
+        }
+    }
+
+    pub fn connect(path: &Path) -> Result<super::Conn, String> {
+        let (addr, token) = read(path)?;
+        let mut s = TcpStream::connect(&addr).map_err(|e| format!("broker {addr}: {e}"))?;
+        let _ = s.set_write_timeout(Some(Duration::from_secs(10)));
+        s.write_all(format!("{token}\n").as_bytes()).map_err(|e| format!("broker {addr}: {e}"))?;
+        Ok(s)
     }
 }
 

@@ -261,9 +261,14 @@ pub fn stem(kind: &str) -> String {
 
 /// Eight random bytes as hex (`/dev/urandom`, clock+pid fallback when it is unavailable).
 fn random_hex() -> String {
-    use std::io::Read;
     let mut b = [0u8; 8];
-    let ok = std::fs::File::open("/dev/urandom").and_then(|mut f| f.read_exact(&mut b)).is_ok();
+    #[cfg(unix)]
+    let ok = {
+        use std::io::Read;
+        std::fs::File::open("/dev/urandom").and_then(|mut f| f.read_exact(&mut b)).is_ok()
+    };
+    #[cfg(not(unix))]
+    let ok = seagent_core::platform::random::fill_random(&mut b).is_ok();
     if !ok || b == [0u8; 8] {
         let t = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos() as u64).unwrap_or(0);
         b = (t ^ ((std::process::id() as u64) << 32)).to_le_bytes();
@@ -287,9 +292,10 @@ pub fn private_dir(dir: &Path) -> Result<(), String> {
         use std::os::unix::fs::DirBuilderExt;
         std::fs::DirBuilder::new().recursive(true).mode(0o700).create(dir).map_err(|e| format!("{}: {e}", dir.display()))
     }
+    // Windows: an owner-only DACL on the new directory (inherited by what goes in it).
     #[cfg(not(unix))]
     {
-        std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))
+        seagent_core::platform::fs_private::create_dir_private(dir).map_err(|e| format!("{}: {e}", dir.display()))
     }
 }
 

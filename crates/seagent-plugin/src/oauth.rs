@@ -490,19 +490,19 @@ impl Store {
     }
 }
 
-/// Exclusive `flock` held until drop (best effort: no lock if the file cannot be opened).
+/// Exclusive lock held until drop (best effort: no lock if the file cannot be opened).
+/// `std::fs::File::lock`: `flock` on unix, `LockFileEx` on Windows.
 struct FileLock(Option<std::fs::File>);
 
 impl FileLock {
     fn acquire(path: &Path) -> FileLock {
-        use std::os::unix::fs::OpenOptionsExt;
-        use std::os::unix::io::AsRawFd;
-        let f = std::fs::OpenOptions::new().write(true).create(true).truncate(false).mode(0o600).open(path).ok();
+        let mut o = std::fs::OpenOptions::new();
+        o.write(true).create(true).truncate(false);
+        #[cfg(unix)]
+        std::os::unix::fs::OpenOptionsExt::mode(&mut o, 0o600);
+        let f = o.open(path).ok();
         if let Some(f) = &f {
-            // SAFETY: flock on a file descriptor we own.
-            unsafe {
-                libc::flock(f.as_raw_fd(), libc::LOCK_EX);
-            }
+            let _ = f.lock();
         }
         FileLock(f)
     }
@@ -510,27 +510,36 @@ impl FileLock {
 
 impl Drop for FileLock {
     fn drop(&mut self) {
-        use std::os::unix::io::AsRawFd;
         if let Some(f) = &self.0 {
-            // SAFETY: as above.
-            unsafe {
-                libc::flock(f.as_raw_fd(), libc::LOCK_UN);
-            }
+            let _ = f.unlock();
         }
     }
 }
 
 fn write_private(path: &Path, data: &[u8]) -> std::io::Result<()> {
-    use std::os::unix::fs::OpenOptionsExt;
     if let Some(d) = path.parent() {
         std::fs::create_dir_all(d)?;
     }
     let tmp = path.with_extension("tmp");
     {
-        let mut f = std::fs::OpenOptions::new().write(true).create(true).truncate(true).mode(0o600).open(&tmp)?;
+        let mut f = create_private(&tmp)?;
         std::io::Write::write_all(&mut f, data)?;
     }
     std::fs::rename(&tmp, path)
+}
+
+/// Create/truncate `path` for writing, owner-only from the first byte: mode 0600 on unix,
+/// an owner-only DACL on Windows (`seagent_core::platform::fs_private`).
+pub(crate) fn create_private(path: &Path) -> std::io::Result<std::fs::File> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        std::fs::OpenOptions::new().write(true).create(true).truncate(true).mode(0o600).open(path)
+    }
+    #[cfg(not(unix))]
+    {
+        seagent_core::platform::fs_private::open_private(path, seagent_core::platform::fs_private::OpenMode::Truncate)
+    }
 }
 
 fn callback_page(ok: bool) -> String {
@@ -649,8 +658,11 @@ mod tests {
         let dir = seagent_core::tmp::scratch_path(format!("seagent-oauth-{}", std::process::id()));
         let store = Store::new(&dir, "srv");
         store.save(Tokens { expires_at: now() + 10, ..t }).unwrap();
-        use std::os::unix::fs::PermissionsExt;
-        assert_eq!(std::fs::metadata(store.path()).unwrap().permissions().mode() & 0o777, 0o600);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(std::fs::metadata(store.path()).unwrap().permissions().mode() & 0o777, 0o600);
+        }
         assert_eq!(store.bearer().as_deref(), Some("at-2"), "near-expiry token refreshed");
         assert_eq!(Store::new(&dir, "srv").bearer().as_deref(), Some("at-2"), "persisted; refresh token kept");
         assert_eq!(f.token_calls.load(Ordering::SeqCst), 2);

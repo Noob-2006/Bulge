@@ -85,7 +85,7 @@ impl Managed {
             .iter()
             .map(|a| a.replace("{port}", &port.to_string()))
             .collect();
-        let mut child = Command::new(&self.command)
+        let mut child = Command::new(crate::auth::program(&self.command))
             .args(&args)
             .stdin(Stdio::null())
             .stdout(Stdio::null())

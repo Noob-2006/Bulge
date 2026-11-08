@@ -189,7 +189,7 @@ impl TtsProvider for Command {
         let timeout = self.t.get("timeout").or_else(|| self.t.get("timeout_seconds")).and_then(|v| v.as_float().or_else(|| v.as_integer().map(|i| i as f64))).filter(|t| *t > 0.0).unwrap_or(120.0);
         let pass: Vec<String> = self.t.get("env_passthrough").and_then(|v| v.as_array()).map(|a| a.iter().filter_map(|x| x.as_str().map(|s| s.trim().to_string())).filter(|s| !s.is_empty()).collect()).unwrap_or_default();
         let mut argv = clean_env(&pass);
-        argv.extend(["sh".into(), "-c".into(), line]);
+        argv.extend(crate::proc::shell_argv(&line));
         let r = proc::run(&argv, None, Duration::from_secs_f64(timeout), cancel);
         let res = match r {
             Err(e) if e.contains("timed out") => Err(format!("TTS provider '{}' timed out after {timeout}s", self.name)),
@@ -329,13 +329,21 @@ impl TtsProvider for LocalCli {
         let args: Vec<String> = base.iter().map(|a| apply_template(a, &ctx)).collect();
         let mut argv: Vec<String> = Vec::new();
         let env: Vec<(String, String)> = cfg.get("env").and_then(|e| e.as_table()).map(|t| t.iter().filter_map(|(k, v)| v.as_str().map(|v| (k.clone(), v.to_string()))).collect()).unwrap_or_default();
-        if let Some(cwd) = opt(m, "tts-local-cli", "cwd") {
+        let cwd = opt(m, "tts-local-cli", "cwd");
+        #[cfg(unix)]
+        if let Some(cwd) = cwd.clone() {
             argv.extend(["sh".into(), "-c".into(), "cd \"$0\" && exec \"$@\"".into(), cwd]);
         }
         argv.extend(args);
         let timeout = Duration::from_millis(super::num(m, "tts-local-cli", "timeout_ms").unwrap_or(120_000.0) as u64);
         let stdin = if uses_text { None } else { Some(text.as_bytes()) };
-        let r = proc::run_env(&argv, stdin, &env, timeout, cancel);
+        #[cfg(unix)]
+        let r = {
+            let _ = &cwd;
+            proc::run_env(&argv, stdin, &env, timeout, cancel)
+        };
+        #[cfg(not(unix))]
+        let r = proc::run_env_in(&argv, stdin, &env, cwd.as_deref().map(std::path::Path::new), timeout, cancel);
         let res = (|| {
             let o = r.map_err(|e| if e.contains("timed out") { format!("CLI TTS timed out after {}ms", timeout.as_millis()) } else { format!("CLI TTS failed: {e}") })?;
             if !o.success() {

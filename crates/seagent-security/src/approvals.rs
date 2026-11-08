@@ -669,10 +669,7 @@ fn unix_now() -> u64 {
 
 fn new_id() -> String {
     let mut b = [0u8; 6];
-    if let Ok(mut f) = std::fs::File::open("/dev/urandom") {
-        use std::io::Read;
-        let _ = f.read_exact(&mut b);
-    }
+    let _ = crate::os::fill_random(&mut b);
     b.iter().map(|x| format!("{x:02x}")).collect()
 }
 

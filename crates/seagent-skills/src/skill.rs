@@ -264,6 +264,11 @@ pub fn has_bin(bin: &str) -> bool {
             p.is_file()
         }
     };
+    // Windows: `git` is `git.exe` (PATHEXT), and paths may use `\`.
+    #[cfg(not(unix))]
+    if seagent_core::platform::layout::which(bin).is_some() {
+        return true;
+    }
     if bin.contains('/') {
         return executable(Path::new(bin));
     }

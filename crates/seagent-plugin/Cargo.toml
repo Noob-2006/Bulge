@@ -17,8 +17,14 @@ seagent-security.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 ureq.workspace = true
-libc.workspace = true
 seagent-net.workspace = true
 toml.workspace = true # `[builtin_plugins.<name>]` settings tables
 seagent-kernel = { path = "../seagent-kernel", default-features = false } # built-in plugins (`src/builtin`: tools + Hook + Slash integration)
 fancy-regex = { version = "0.14", default-features = false, features = ["std", "unicode"] } # security-guidance rules use look-behind (already in the tree via seagent-security)
+
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true # MCP server process groups / PDEATHSIG (transport.rs), localtime_r (achievements)
+
+[target.'cfg(windows)'.dependencies]
+# Local wall clock for achievements (SystemTimeToTzSpecificLocalTime). Same 0.52 ring pulls in.
+windows-sys = { workspace = true, features = ["Win32_Foundation", "Win32_System_Time"] }

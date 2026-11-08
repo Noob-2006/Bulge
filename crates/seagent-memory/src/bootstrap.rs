@@ -266,6 +266,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)] // symlink fixture
     fn skips_dirs_symlinks_and_missing() {
         let ws = crate::tmp("bootstrap-skip");
         let elsewhere = crate::tmp("bootstrap-skip-target");

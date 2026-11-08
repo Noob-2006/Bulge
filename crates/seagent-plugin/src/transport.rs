@@ -6,6 +6,7 @@ use seagent_core::Cancel;
 use serde_json::{json, Value};
 use std::collections::{HashMap, VecDeque};
 use std::io::{BufRead, BufReader, Read, Write};
+#[cfg(unix)]
 use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
 use std::process::{ChildStdin, Command, Stdio as PStdio};
@@ -173,24 +174,37 @@ impl StdioConn {
         let alive = Arc::new(AtomicBool::new(true));
         let pending: Pending = Arc::default();
         let stderr: Arc<Mutex<VecDeque<u8>>> = Arc::default();
+        // Windows: `npx`/`uvx` are `.cmd`/`.exe` shims found through PATHEXT.
+        #[cfg(not(unix))]
+        let mut cmd = Command::new(seagent_core::platform::layout::which(command).unwrap_or_else(|| PathBuf::from(command)));
+        #[cfg(unix)]
         let mut cmd = Command::new(command);
         seagent_security::envscrub::apply(&mut cmd, seagent_security::envscrub::Surface::Server);
         cmd.args(args).envs(env.iter().map(|(k, v)| (k, v))).stdin(PStdio::piped()).stdout(PStdio::piped()).stderr(PStdio::piped());
         if let Some(d) = cwd {
             cmd.current_dir(d);
         }
+        // Windows: its own console process group now, a kill-on-close Job Object after the
+        // spawn (the server dies with seagent, like PDEATHSIG).
+        #[cfg(not(unix))]
+        seagent_core::platform::proc::new_group(&mut cmd, false);
+        #[cfg(unix)]
         let parent = std::process::id() as i32;
         // SAFETY: setpgid, prctl and getppid are async-signal-safe.
+        #[cfg(unix)]
         unsafe {
             cmd.pre_exec(move || {
                 libc::setpgid(0, 0);
-                #[cfg(target_os = "linux")]
+                #[cfg(any(target_os = "linux", target_os = "android"))]
                 {
                     libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL);
                     if libc::getppid() != parent {
                         libc::_exit(137);
                     }
                 }
+                // macOS / iOS: no parent-death signal (Drop still kills the group).
+                #[cfg(not(any(target_os = "linux", target_os = "android")))]
+                let _ = parent;
                 Ok(())
             });
         }
@@ -207,6 +221,13 @@ impl StdioConn {
                     return;
                 }
             };
+            #[cfg(not(unix))]
+            if let Err(e) = seagent_core::platform::proc::adopt(&child) {
+                let _ = child.kill();
+                let _ = child.wait();
+                let _ = tx.send(Err(format!("cannot start `{label}`: no job object for it: {e}")));
+                return;
+            }
             let io = (child.stdin.take(), child.stdout.take(), child.stderr.take(), child.id() as i32);
             if tx.send(Ok(io)).is_err() {
                 let _ = child.kill();
@@ -329,9 +350,13 @@ impl Drop for StdioConn {
         self.stdin.lock().unwrap().take(); // EOF lets polite servers exit
         if self.alive() {
             // SAFETY: plain syscall on our own process group.
+            #[cfg(unix)]
             unsafe {
                 libc::kill(-self.pgid, libc::SIGKILL);
             }
+            // The server's job, terminated at once (the SIGKILL of Windows).
+            #[cfg(not(unix))]
+            seagent_core::platform::proc::kill_group(self.pgid, Duration::ZERO);
         }
     }
 }

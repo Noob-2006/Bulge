@@ -88,7 +88,7 @@ impl CopilotAcp {
                 ),
             ));
         }
-        let mut child = Command::new(&self.command)
+        let mut child = Command::new(crate::auth::program(&self.command))
             .args(&self.args)
             .current_dir(&self.cwd)
             .stdin(Stdio::piped())
@@ -144,7 +144,7 @@ impl CopilotAcp {
         if let Some(v) = cache.lock().unwrap().get(&self.command).copied() {
             return Some(v);
         }
-        let mut child = Command::new(&self.command)
+        let mut child = Command::new(crate::auth::program(&self.command))
             .arg("--help")
             .stdin(Stdio::null())
             .stdout(Stdio::piped())

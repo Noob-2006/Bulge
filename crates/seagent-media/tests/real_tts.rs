@@ -9,6 +9,8 @@
 //! `speaker_id` / `length_scale` — through `tts::synthesize` (the entry point the
 //! `text_to_speech` tool uses), not a fake binary. No cloud provider, no API key.
 //! Everything it writes stays under the temporary `SEAGENT_HOME` and `$TMPDIR`.
+//! Unix only: the opt-in setup (`tts_up.sh`) and the wrapper it builds are shell scripts.
+#![cfg(unix)]
 
 use seagent_core::Cancel;
 use seagent_media::tts::{self, TtsRequest};

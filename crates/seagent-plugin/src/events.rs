@@ -163,13 +163,12 @@ impl Hub {
     }
 
     fn save(&self, subs: &BTreeMap<String, Sub>) {
-        use std::os::unix::fs::OpenOptionsExt;
         if let Some(d) = self.path.parent() {
             let _ = std::fs::create_dir_all(d);
         }
         // Secrets inside: owner-only.
         let tmp = self.path.with_extension("tmp");
-        let ok = std::fs::OpenOptions::new().write(true).create(true).truncate(true).mode(0o600).open(&tmp).and_then(|mut f| std::io::Write::write_all(&mut f, &serde_json::to_vec_pretty(subs).unwrap_or_default()));
+        let ok = crate::oauth::create_private(&tmp).and_then(|mut f| std::io::Write::write_all(&mut f, &serde_json::to_vec_pretty(subs).unwrap_or_default()));
         if ok.is_ok() {
             let _ = std::fs::rename(&tmp, &self.path);
         }

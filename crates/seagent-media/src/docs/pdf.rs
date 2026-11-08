@@ -1003,8 +1003,14 @@ fn scratch() -> std::path::PathBuf {
     // 0700 at creation, not after the input PDF lands in it: the scratch dir holds the document's
     // extracted text and page renders, so on a multi-user box a 0755/0775 directory would let
     // other local users walk it while poppler is still writing.
-    use std::os::unix::fs::DirBuilderExt;
-    let _ = std::fs::DirBuilder::new().mode(0o700).create(&d);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        let _ = std::fs::DirBuilder::new().mode(0o700).create(&d);
+    }
+    // Windows: an owner-only DACL right after creation (nothing is in it yet).
+    #[cfg(not(unix))]
+    let _ = seagent_core::platform::fs_private::create_dir_private(&d);
     d
 }
 
@@ -1330,10 +1336,14 @@ mod tests {
     /// walk in and read the user's document mid-render.
     #[test]
     fn scratch_dir_is_created_private_and_cleaned_up() {
-        use std::os::unix::fs::PermissionsExt;
         let d = scratch();
-        let mode = std::fs::metadata(&d).unwrap().permissions().mode() & 0o777;
-        assert_eq!(mode, 0o700, "{} was created {mode:o}", d.display());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&d).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o700, "{} was created {mode:o}", d.display());
+        }
+        assert!(d.is_dir());
         std::fs::write(d.join("in.pdf"), b"%PDF-1.7\n").unwrap();
         std::fs::remove_dir_all(&d).unwrap();
         assert!(!d.exists(), "the cleanup path still works");

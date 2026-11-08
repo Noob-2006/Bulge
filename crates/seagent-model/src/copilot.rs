@@ -142,7 +142,7 @@ pub fn cli_token() -> Option<String> {
             return Some(v.trim().to_string());
         }
     }
-    let home = std::path::PathBuf::from(std::env::var_os("HOME")?);
+    let home = std::path::PathBuf::from(std::env::var_os("HOME").or_else(|| if cfg!(windows) { std::env::var_os("USERPROFILE") } else { None })?);
     let read = |p: std::path::PathBuf| -> Option<serde_json::Value> {
         let s = std::fs::read_to_string(p).ok()?;
         // JSONC: drop `//` comment lines.
@@ -161,8 +161,11 @@ pub fn cli_token() -> Option<String> {
             return Some(t);
         }
     }
+    // The editor plugins' token store: `$XDG_CONFIG_HOME/github-copilot` (Linux, macOS) or
+    // `%LOCALAPPDATA%\github-copilot` (Windows).
     let cfg = std::env::var_os("XDG_CONFIG_HOME")
         .map(std::path::PathBuf::from)
+        .or_else(|| if cfg!(windows) { std::env::var_os("LOCALAPPDATA").map(std::path::PathBuf::from) } else { None })
         .unwrap_or_else(|| home.join(".config"));
     for f in ["apps.json", "hosts.json"] {
         if let Some(v) = read(cfg.join("github-copilot").join(f)) {
@@ -174,8 +177,9 @@ pub fn cli_token() -> Option<String> {
             }
         }
     }
+    // stderr is captured by run_capture anyway; the redirect is only spelled where it parses.
     crate::auth::run_capture(
-        "gh auth token 2>/dev/null",
+        if cfg!(windows) { "gh auth token" } else { "gh auth token 2>/dev/null" },
         std::time::Duration::from_secs(5),
     )
     .ok()

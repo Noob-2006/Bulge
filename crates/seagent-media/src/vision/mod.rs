@@ -352,6 +352,8 @@ fn attach(m: &Media, ctx: &ToolCtx, bytes: &[u8], mime: &str) -> Result<String, 
         use std::os::unix::fs::PermissionsExt;
         let _ = std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o600));
     }
+    #[cfg(not(unix))]
+    let _ = seagent_core::platform::fs_private::set_private(&p);
     Ok(seagent_core::tool::image_marker(mime, &p))
 }
 

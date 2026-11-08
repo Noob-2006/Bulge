@@ -3,7 +3,8 @@
 //!
 //! Capture runs an external recorder that writes raw 16 kHz mono s16le PCM to stdout:
 //! `[media.voice] record_command` (a shell line), else `pw-record`, `parec`,
-//! `arecord` or `ffmpeg -f pulse`, whichever is installed. The silence detector and
+//! `arecord` or `ffmpeg -f pulse` (macOS: `-f avfoundation`, Windows: `-f dshow`),
+//! whichever is installed. The silence detector and
 //! barge-in VAD are ports of Hermes' state machines, driven by sample time so they
 //! behave identically on any source.
 //!
@@ -45,15 +46,69 @@ pub fn recorder_argv(name: &str, ffmpeg: Option<std::path::PathBuf>) -> Option<V
         // `--raw`: parec writes a WAV header ahead of the PCM without it.
         "parec" => v(&["parec", "--raw", "--format=s16le", "--rate=16000", "--channels=1"]),
         "arecord" => v(&["arecord", "-q", "-f", "S16_LE", "-r", "16000", "-c", "1", "-t", "raw", "-"]),
-        "ffmpeg" => vec![ffmpeg?.display().to_string(), "-nostdin".into(), "-loglevel".into(), "quiet".into(), "-f".into(), "pulse".into(), "-i".into(), "default".into(), "-ac".into(), "1".into(), "-ar".into(), "16000".into(), "-f".into(), "s16le".into(), "-".into()],
+        "ffmpeg" => {
+            let ffmpeg = ffmpeg?;
+            let mut a = vec![ffmpeg.display().to_string(), "-nostdin".into(), "-loglevel".into(), "quiet".into()];
+            a.extend(ffmpeg_input(&ffmpeg)?);
+            a.extend(v(&["-ac", "1", "-ar", "16000", "-f", "s16le", "-"]));
+            a
+        }
         _ => return None,
     })
+}
+
+/// ffmpeg's input for this OS's default microphone: PulseAudio/PipeWire `default` (Linux and
+/// other unixes, unchanged), AVFoundation device `:0` (macOS), the first DirectShow audio
+/// capture device (Windows; ffmpeg has no "default" there, so it is listed and picked).
+pub fn ffmpeg_input(ffmpeg: &std::path::Path) -> Option<Vec<String>> {
+    let v = |a: &[&str]| a.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+    #[cfg(target_vendor = "apple")]
+    {
+        let _ = ffmpeg;
+        Some(v(&["-f", "avfoundation", "-i", ":0"]))
+    }
+    #[cfg(windows)]
+    {
+        windows_default_mic(ffmpeg).map(|d| v(&["-f", "dshow", "-i", &format!("audio={d}")]))
+    }
+    #[cfg(not(any(target_vendor = "apple", windows)))]
+    {
+        let _ = ffmpeg;
+        Some(v(&["-f", "pulse", "-i", "default"]))
+    }
+}
+
+/// The first DirectShow audio device ffmpeg lists (`"Microphone (…)" (audio)`).
+#[cfg(windows)]
+pub fn windows_default_mic(ffmpeg: &std::path::Path) -> Option<String> {
+    let o = Command::new(ffmpeg).args(["-hide_banner", "-list_devices", "true", "-f", "dshow", "-i", "dummy"]).stdin(Stdio::null()).output().ok()?;
+    parse_dshow_audio(&String::from_utf8_lossy(&o.stderr))
+}
+
+/// Parse `ffmpeg -list_devices true -f dshow` output (pure, tested on every host).
+pub fn parse_dshow_audio(listing: &str) -> Option<String> {
+    let mut audio_section = false;
+    for l in listing.lines() {
+        if l.contains("DirectShow audio devices") {
+            audio_section = true;
+        }
+        if l.contains("Alternative name") {
+            continue;
+        }
+        let quoted = l.split('"').nth(1).filter(|s| !s.is_empty());
+        if let Some(name) = quoted {
+            if l.contains("(audio)") || audio_section {
+                return Some(name.to_string());
+            }
+        }
+    }
+    None
 }
 
 /// The recorder argv for this host (`None` = no recorder installed).
 pub fn recorder_command(m: &Media) -> Option<Vec<String>> {
     if let Some(c) = m.cfg.str("voice.record_command") {
-        return Some(vec!["sh".into(), "-c".into(), c]);
+        return Some(crate::proc::shell_argv(&c));
     }
     for name in ["pw-record", "parec", "arecord"] {
         if crate::proc::which(name).is_some() {
@@ -453,7 +508,16 @@ mod tests {
         let m = Media::new(crate::MediaConfig::from_toml(
             "[voice]\nrecord_command = \"cat /dev/zero\"\n",
         ));
-        assert_eq!(recorder_command(&m).unwrap(), ["sh", "-c", "cat /dev/zero"]);
+        assert_eq!(recorder_command(&m).unwrap(), crate::proc::shell_argv("cat /dev/zero"));
+    }
+
+    #[test]
+    fn dshow_listing_yields_the_first_microphone() {
+        let new_style = "[dshow @ 0000] \"Integrated Camera\" (video)\n[dshow @ 0000]   Alternative name \"@device_pnp_x\"\n[dshow @ 0000] \"Microphone (Realtek(R) Audio)\" (audio)\n[dshow @ 0000]   Alternative name \"@device_cm_y\"\n";
+        assert_eq!(parse_dshow_audio(new_style).as_deref(), Some("Microphone (Realtek(R) Audio)"));
+        let old_style = "[dshow @ 0] DirectShow video devices\n[dshow @ 0]  \"Cam\"\n[dshow @ 0] DirectShow audio devices\n[dshow @ 0]  \"Mic Array\"\n";
+        assert_eq!(parse_dshow_audio(old_style).as_deref(), Some("Mic Array"));
+        assert_eq!(parse_dshow_audio("dummy: Immediate exit requested"), None);
     }
 
     #[test]

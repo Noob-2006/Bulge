@@ -16,6 +16,9 @@ const MAX_SEGMENTS: usize = 25_000;
 const CMDPOS: &str = r"(?:^|[\n`]|\$\()\s*(?:sudo\s+(?:-[^\s]+\s+)*)?(?:env\s+(?:\w+=\S*\s+)*)?(?:(?:exec|nohup|setsid|time)\s+)*\s*";
 const SYSTEM_DIRS: &str = r"/home|/home/\*|/root|/root/\*|/etc|/etc/\*|/usr|/usr/\*|/var|/var/\*|/bin|/bin/\*|/sbin|/sbin/\*|/boot|/boot/\*|/lib|/lib/\*";
 
+/// A drive root (`C:\`, `C:\*`) or the Windows / Users / Program Files trees, optionally quoted.
+const WIN_ROOTS: &str = r#"["']?[a-z]:(?:[\\/]+(?:windows|users|program files(?: \(x86\))?|programdata)?)?[\\/]*\*?["']?"#;
+
 fn rm_path(alt: &str) -> String {
     format!(r#"(?:["'](?:{alt})["']|(?:{alt})(?:\s|$|[)`;|&]))"#)
 }
@@ -44,6 +47,10 @@ fn rules() -> &'static [Rule] {
             (format!(r"{CMDPOS}init\s+[06]\b"), "init 0/6 (shutdown/reboot)", false),
             (format!(r"{CMDPOS}systemctl\s+(poweroff|reboot|halt|kexec)\b"), "systemctl poweroff/reboot", false),
             (format!(r"{CMDPOS}telinit\s+[06]\b"), "telinit 0/6 (shutdown/reboot)", false),
+            // Windows twins (PowerShell / cmd statements; `shutdown /s` is caught above).
+            (format!(r"{CMDPOS}(?:remove-item|ri|rd|rmdir|del|erase)\s+(?:[^\n]*\s)?(?:-r\w*|/s)\b[^\n]*\s{WIN_ROOTS}(?:\s|$|[)`;|&])"), "recursive delete of a drive root or Windows system directory", false),
+            (format!(r"{CMDPOS}(?:remove-item|ri|rd|rmdir|del|erase)\s+(?:[^\n]*\s)?{WIN_ROOTS}\s[^\n]*(?:-r\w*|/s)\b"), "recursive delete of a drive root or Windows system directory", false),
+            (format!(r"{CMDPOS}(?:stop-computer|restart-computer)\b"), "system shutdown/reboot (PowerShell)", false),
         ];
         table.into_iter().map(|(p, what, quote_masked)| Rule { re: Regex::new(&format!("(?is){p}")).expect("hardline regex"), what, quote_masked }).collect()
     })
@@ -428,6 +435,25 @@ mod tests {
             "ls 2>&1 >/dev/null",
         ] {
             assert_eq!(detect(cmd, &[]), None, "{cmd}");
+        }
+    }
+
+    #[test]
+    fn windows_floors_mirror_the_unix_ones() {
+        for cmd in [
+            r"Remove-Item -Recurse -Force C:\",
+            r"Remove-Item C:\* -Recurse",
+            r"rd /s /q C:\",
+            r"rmdir /s /q C:\Windows",
+            r#"Remove-Item -Recurse -Force "C:\Users""#,
+            r"Get-Date; Remove-Item -Recurse 'C:\Program Files'",
+            "Stop-Computer -Force",
+            "Restart-Computer",
+        ] {
+            assert!(detect(cmd, &[]).is_some(), "{cmd}");
+        }
+        for cmd in [r"Remove-Item -Recurse C:\build", r"rd /s /q C:\Users\me\tmp", r"Remove-Item C:\notes.txt", r"del C:\x.txt", r"Remove-Item -Recurse C:\Windows\Temp\x", "echo 'Stop-Computer'"] {
+            assert!(detect(cmd, &[]).is_none(), "{cmd}");
         }
     }
 

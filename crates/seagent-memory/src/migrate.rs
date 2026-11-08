@@ -10,8 +10,20 @@
 use crate::util;
 use serde_json::{json, Value};
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
+
+/// Owner-only copy: mode 0600 on unix, an owner-only DACL on Windows.
+fn private(t: &Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(t, fs::Permissions::from_mode(0o600))
+    }
+    #[cfg(not(unix))]
+    {
+        seagent_core::platform::fs_private::set_private(t)
+    }
+}
 
 pub const BUNDLED: &[&str] = &["byterover", "retaindb"];
 /// Providers that live outside the core (Hermes `_LEFT_CORE` minus the two seagent bundles).
@@ -88,7 +100,7 @@ fn copy_dir(src: &Path, dst: &Path) -> std::io::Result<()> {
             copy_dir(&e.path(), &t)?;
         } else if e.file_type()?.is_file() {
             fs::copy(e.path(), &t)?;
-            fs::set_permissions(&t, fs::Permissions::from_mode(0o600))?;
+            private(&t)?;
         }
     }
     Ok(())
@@ -109,7 +121,7 @@ pub fn clone_provider_config(src: &Path, dst: &Path, provider: &str) -> Result<b
         fs::create_dir_all(dst).map_err(|e| e.to_string())?;
         let t = dst.join(format!("{provider}.json"));
         fs::copy(&f, &t).map_err(|e| e.to_string())?;
-        fs::set_permissions(&t, fs::Permissions::from_mode(0o600)).map_err(|e| e.to_string())?;
+        private(&t).map_err(|e| e.to_string())?;
         copied = true;
     }
     Ok(copied)
@@ -205,7 +217,11 @@ mod tests {
         fs::write(a.join("mem0.json"), "{\"k\":1}").unwrap();
         assert!(clone_provider_config(&a, &b, "hindsight").unwrap());
         assert!(clone_provider_config(&a, &b, "mem0").unwrap());
-        assert_eq!(fs::metadata(b.join("mem0.json")).unwrap().permissions().mode() & 0o777, 0o600);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(fs::metadata(b.join("mem0.json")).unwrap().permissions().mode() & 0o777, 0o600);
+        }
         assert!(!clone_provider_config(&a, &b, "../x").unwrap());
         let hj = a.join("honcho.json");
         fs::write(&hj, r#"{"hosts":{"hermes.work":{"workspace":"w"}}}"#).unwrap();
