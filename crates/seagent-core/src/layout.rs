@@ -30,7 +30,13 @@
 //! the old locations are still read: `/var/lib/seagent/config` while `/etc/seagent/config.toml` does
 //! not exist yet, and `/var/lib/seagent/data` whenever it exists (the package's post-install step
 //! copies the old config to `/etc/seagent`; data is never moved).
+//!
+//! Other operating systems (macOS `~/Library`, Windows `%APPDATA%` / `%LOCALAPPDATA%` /
+//! `%ProgramData%`, Android / iOS app sandboxes) take their defaults from
+//! [`crate::platform::layout`]; the order of the modes and the per-directory overrides are the
+//! same everywhere. On Linux nothing above changes.
 
+use crate::platform::layout::{self as os_layout, Os};
 use std::path::{Path, PathBuf};
 
 /// The FHS layout of the system service, and the directories seagent itself installs to.
@@ -91,7 +97,7 @@ pub struct Layout {
 
 impl Layout {
     pub fn workspace(&self) -> PathBuf {
-        if self.mode == Mode::System {
+        if self.mode == Mode::System && cfg!(unix) {
             return PathBuf::from(system::WORKSPACE);
         }
         self.data.join("workspace")
@@ -111,14 +117,19 @@ fn abs(v: Option<String>) -> Option<PathBuf> {
     v.filter(|s| !s.is_empty()).map(PathBuf::from).filter(|p| p.is_absolute())
 }
 
-/// `$HOME`, else the passwd entry's home, else the temp dir (never a shared fixed path).
+/// `$HOME`, else (Windows) `%USERPROFILE%`, else the passwd entry's home, else the temp dir
+/// (never a shared fixed path).
 pub fn home_with(p: &Probe) -> PathBuf {
-    abs((p.env)("HOME")).or_else(|| p.pw_home.clone()).unwrap_or_else(std::env::temp_dir)
+    abs((p.env)("HOME")).or_else(|| if cfg!(windows) { abs((p.env)("USERPROFILE")) } else { None }).or_else(|| p.pw_home.clone()).unwrap_or_else(std::env::temp_dir)
 }
 
 /// The user (XDG) layout, ignoring `SEAGENT_HOME` / `SEAGENT_MODE` (profiles live under it).
+/// Outside Linux / the other Unixes: the OS's own per-user directories.
 pub fn user_with(p: &Probe) -> Layout {
     let home = home_with(p);
+    if let Some(d) = os_layout::user_dirs(Os::current(), p.env, &home) {
+        return Layout { mode: Mode::User, reason: d.reason.into(), config: d.config, data: d.data, cache: d.cache, logs: d.logs, runtime: d.runtime, legacy: vec![] };
+    }
     let xdg = |var: &str, def: &str| abs((p.env)(var)).unwrap_or_else(|| home.join(def));
     let data = xdg("XDG_DATA_HOME", ".local/share").join("seagent");
     let runtime = abs((p.env)("XDG_RUNTIME_DIR")).map(|r| r.join("seagent")).unwrap_or_else(|| data.join("run"));
@@ -126,6 +137,9 @@ pub fn user_with(p: &Probe) -> Layout {
 }
 
 fn system_with(p: &Probe, reason: String) -> Layout {
+    if let Some(d) = os_layout::system_dirs(Os::current(), p.env) {
+        return Layout { mode: Mode::System, reason, config: d.config, data: d.data, cache: d.cache, logs: d.logs, runtime: d.runtime, legacy: vec![] };
+    }
     let mut legacy = vec![];
     let mut config = PathBuf::from(system::CONFIG);
     if !(p.exists)(&config.join("config.toml")) && (p.exists)(&Path::new(system::LEGACY_CONFIG).join("config.toml")) {
@@ -167,6 +181,12 @@ fn real_env(k: &str) -> Option<String> {
     std::env::var(k).ok()
 }
 
+#[cfg(not(unix))]
+fn pw_home(_uid: u32) -> Option<PathBuf> {
+    None
+}
+
+#[cfg(unix)]
 fn pw_home(uid: u32) -> Option<PathBuf> {
     use std::ffi::CStr;
     use std::os::unix::ffi::OsStrExt;
@@ -182,7 +202,12 @@ fn pw_home(uid: u32) -> Option<PathBuf> {
 }
 
 fn with_probe<T>(f: impl FnOnce(&Probe) -> T) -> T {
+    #[cfg(unix)]
     let euid = unsafe { libc::geteuid() };
+    // No uids on Windows: an elevated process counts as root (it only matters for the
+    // service-account rule, which needs a passwd home anyway).
+    #[cfg(not(unix))]
+    let euid = if crate::platform::sysinfo::is_root() { 0 } else { 1 };
     let exists = |p: &Path| p.exists();
     f(&Probe { env: &real_env, exists: &exists, euid, pw_home: pw_home(euid) })
 }
@@ -213,10 +238,17 @@ pub fn cache_dir() -> PathBuf {
 }
 
 /// The first executable called `name` on `$PATH` (tool discovery instead of fixed paths).
+/// Windows: `PATHEXT` extensions are tried ([`os_layout::which_in_pathext`]).
 pub fn which(name: &str) -> Option<PathBuf> {
     which_in(name, std::env::var_os("PATH").as_deref())
 }
 
+#[cfg(not(unix))]
+pub fn which_in(name: &str, path: Option<&std::ffi::OsStr>) -> Option<PathBuf> {
+    os_layout::which_in_pathext(name, path, std::env::var("PATHEXT").ok().as_deref())
+}
+
+#[cfg(unix)]
 pub fn which_in(name: &str, path: Option<&std::ffi::OsStr>) -> Option<PathBuf> {
     use std::os::unix::fs::PermissionsExt;
     if name.contains('/') {
@@ -226,6 +258,7 @@ pub fn which_in(name: &str, path: Option<&std::ffi::OsStr>) -> Option<PathBuf> {
 }
 
 #[cfg(test)]
+#[cfg(all(unix, not(any(target_vendor = "apple", target_os = "android"))))]
 mod tests {
     use super::*;
     use std::collections::HashMap;

@@ -161,9 +161,13 @@ impl ToolCtx {
     }
 }
 
+/// `~/x` → `$HOME/x`. Windows also takes `~\x` and falls back to `%USERPROFILE%` (HOME is
+/// usually unset there).
 pub fn expand_home(p: &str) -> PathBuf {
-    if let Some(rest) = p.strip_prefix("~/") {
-        if let Some(h) = std::env::var_os("HOME") {
+    let rest = if cfg!(windows) { p.strip_prefix("~/").or_else(|| p.strip_prefix("~\\")) } else { p.strip_prefix("~/") };
+    if let Some(rest) = rest {
+        let home = std::env::var_os("HOME").or_else(|| if cfg!(windows) { std::env::var_os("USERPROFILE") } else { None });
+        if let Some(h) = home {
             return Path::new(&h).join(rest);
         }
     }

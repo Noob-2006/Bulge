@@ -7,4 +7,9 @@ license.workspace = true
 [dependencies]
 serde.workspace = true
 serde_json.workspace = true
-libc.workspace = true                                     # proc: PDEATHSIG / process groups for tied children
+
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true                                     # platform: process groups, PDEATHSIG, termios, statvfs, getrandom
+
+[target.'cfg(windows)'.dependencies]
+windows-sys.workspace = true                              # platform: Job Objects, named pipes, DACLs, console, ConPTY

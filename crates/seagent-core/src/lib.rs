@@ -8,6 +8,7 @@ pub mod exec;
 pub mod imageevict;
 pub mod layout;
 pub mod legacy;
+pub mod platform;
 pub mod proc;
 pub mod provider;
 pub mod registry;

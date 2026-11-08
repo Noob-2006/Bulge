@@ -99,7 +99,11 @@ pub trait ExecBackend: Send + Sync {
     }
     /// Directory for snapshot / marker files, as seen by the backend.
     fn temp_dir(&self) -> String {
-        "/tmp".into()
+        if cfg!(unix) {
+            "/tmp".into()
+        } else {
+            std::env::temp_dir().display().to_string()
+        }
     }
     /// Push workspace changes before a command (remote backends).
     fn before_exec(&self) -> Result<(), String> {

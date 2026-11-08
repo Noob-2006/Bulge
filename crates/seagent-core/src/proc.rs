@@ -14,6 +14,9 @@
 //! * [`ChildGuard`] / [`PidGuard`] — tests (and callers that own a child for one scope): the
 //!   whole process group is terminated on drop, which includes unwinding from a failed
 //!   assertion.
+//!
+//! The OS mechanics (process groups, PDEATHSIG, `/proc`, and the macOS / Windows equivalents)
+//! live in [`crate::platform::proc`]; this module keeps the spawner thread and the guards.
 
 use std::io;
 use std::process::{Child, Command};
@@ -21,9 +24,11 @@ use std::sync::mpsc;
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
+pub use crate::platform::proc::{alive, group_alive, group_members, kill_group};
 /// Signal delivered to a tied child when seagent dies. `SIGTERM` lets Chrome close its profile
 /// and take its helpers down; [`ChildGuard`] escalates to `SIGKILL` itself.
-pub const DEATH_SIGNAL: i32 = libc::SIGTERM;
+#[cfg(unix)]
+pub use crate::platform::proc::DEATH_SIGNAL;
 
 type Job = (Command, bool, mpsc::Sender<io::Result<Child>>);
 
@@ -45,80 +50,17 @@ fn spawner() -> &'static Mutex<mpsc::Sender<Job>> {
 }
 
 fn fork_tied(cmd: &mut Command, setsid: bool) -> io::Result<Child> {
-    use std::os::unix::process::CommandExt;
-    let parent = std::process::id() as libc::pid_t;
-    // SAFETY: only async-signal-safe libc calls between fork and exec.
-    unsafe {
-        cmd.pre_exec(move || {
-            if setsid {
-                libc::setsid();
-            } else {
-                libc::setpgid(0, 0);
-            }
-            #[cfg(target_os = "linux")]
-            {
-                libc::prctl(libc::PR_SET_PDEATHSIG, DEATH_SIGNAL as libc::c_ulong);
-                // The parent may already be gone (it died between fork and prctl).
-                if libc::getppid() != parent {
-                    libc::_exit(137);
-                }
-            }
-            Ok(())
-        });
-    }
-    cmd.spawn()
+    crate::platform::proc::spawn_in_group(cmd, setsid)
 }
 
 /// Spawn `cmd` as the leader of its own process group (`setsid` when `own_session`, else
 /// `setpgid`) with a parent-death signal, from the process-lifetime spawner thread.
 /// The returned [`Child`] behaves like any other (wait / try_wait / kill from any thread).
+/// On Windows the group is a kill-on-close Job Object (see [`crate::platform::proc`]).
 pub fn spawn_tied(cmd: Command, own_session: bool) -> io::Result<Child> {
     let (tx, rx) = mpsc::channel();
     spawner().lock().unwrap_or_else(|e| e.into_inner()).send((cmd, own_session, tx)).map_err(|_| io::Error::other("seagent-proc-spawner is gone"))?;
     rx.recv().map_err(|_| io::Error::other("seagent-proc-spawner dropped the request"))?
-}
-
-/// Is `pid` alive (and not a zombie)?
-pub fn alive(pid: i32) -> bool {
-    if pid <= 0 || unsafe { libc::kill(pid, 0) } != 0 {
-        return false;
-    }
-    !std::fs::read_to_string(format!("/proc/{pid}/stat")).is_ok_and(|s| s.rsplit(')').next().is_some_and(|r| r.trim_start().starts_with('Z')))
-}
-
-/// Is any process still in group `pgid`?
-pub fn group_alive(pgid: i32) -> bool {
-    pgid > 1 && unsafe { libc::kill(-pgid, 0) } == 0 && !group_members(pgid).is_empty()
-}
-
-/// Live (non-zombie) members of process group `pgid`, read from `/proc`.
-pub fn group_members(pgid: i32) -> Vec<i32> {
-    let Ok(rd) = std::fs::read_dir("/proc") else { return vec![] };
-    rd.flatten()
-        .filter_map(|e| e.file_name().to_str()?.parse::<i32>().ok())
-        .filter(|pid| {
-            let Ok(s) = std::fs::read_to_string(format!("/proc/{pid}/stat")) else { return false };
-            // Fields after `comm`: state ppid pgrp ...
-            let mut f = s.rsplit(')').next().unwrap_or("").split_whitespace();
-            let state = f.next().unwrap_or("Z");
-            let _ppid = f.next();
-            state != "Z" && f.next().and_then(|g| g.parse::<i32>().ok()) == Some(pgid)
-        })
-        .collect()
-}
-
-/// `SIGTERM` the group, wait up to `grace`, then `SIGKILL` it. Never signals pgid 0/1 or our
-/// own group.
-pub fn kill_group(pgid: i32, grace: Duration) {
-    if pgid <= 1 || pgid == unsafe { libc::getpgrp() } {
-        return;
-    }
-    unsafe { libc::kill(-pgid, libc::SIGTERM) };
-    let until = Instant::now() + grace;
-    while Instant::now() < until && group_alive(pgid) {
-        std::thread::sleep(Duration::from_millis(50));
-    }
-    unsafe { libc::kill(-pgid, libc::SIGKILL) };
 }
 
 /// Wait until `pred` holds or `timeout` passes.
@@ -187,6 +129,7 @@ impl Drop for PidGuard {
 }
 
 #[cfg(test)]
+#[cfg(unix)]
 mod tests {
     use super::*;
     use std::process::Stdio;

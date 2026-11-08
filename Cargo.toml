@@ -6,7 +6,9 @@ members = ["crates/seagent-core", "crates/seagent-security", "crates/seagent-ker
 version = "0.1.0"
 edition = "2021"
 license = "MIT"
-rust-version = "1.80"
+# 1.89: std `File::lock` / `try_lock` (stable since 1.89) replace `libc::flock`, so file locks work
+# the same on Linux, macOS and Windows (docs/cross-platform.md, phase 1).
+rust-version = "1.89"
 
 # Dependency budget (see 架構設計-v0.md §6). Every entry needs a reason.
 [workspace.dependencies]
@@ -21,6 +23,22 @@ rustls = { version = "0.23", default-features = false, features = ["ring", "std"
 webpki-roots = "1"
 ring = "0.17"
 base64 = "0.23"
+# Windows port (docs/cross-platform.md): Job Objects, named pipes, owner-only DACLs, console modes,
+# ConPTY, system facts, OS RNG for `seagent_core::platform`. 0.52 is the version ring already pulls
+# in on Windows, so this adds no new crate to the tree; only the API families used are enabled.
+windows-sys = { version = "0.52", default-features = false, features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_Security_Cryptography",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Console",
+    "Win32_System_IO",
+    "Win32_System_JobObjects",
+    "Win32_System_Pipes",
+    "Win32_System_SystemInformation",
+    "Win32_System_Threading",
+] }
 
 seagent-core = { path = "crates/seagent-core" }
 seagent-security = { path = "crates/seagent-security" }
