@@ -720,6 +720,8 @@ fn save_secret(path: &std::path::Path, v: &Value) -> std::io::Result<()> {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
     }
+    #[cfg(not(unix))]
+    seagent_core::platform::fs_private::set_private(path)?;
     Ok(())
 }
 

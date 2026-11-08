@@ -234,6 +234,8 @@ impl Shared {
             use std::os::unix::fs::PermissionsExt;
             std::fs::set_permissions(&self.cfg.state, std::fs::Permissions::from_mode(0o600)).map_err(err)?;
         }
+        #[cfg(not(unix))]
+        seagent_core::platform::fs_private::set_private(&self.cfg.state).map_err(err)?;
         Ok(())
     }
 

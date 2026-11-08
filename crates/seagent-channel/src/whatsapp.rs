@@ -22,6 +22,7 @@ use crate::{sleep_cancellable, Caps, Channel, ChannelError, ChannelErrorKind as 
 use seagent_core::Cancel;
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, VecDeque};
+#[cfg(unix)]
 use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
@@ -136,23 +137,42 @@ impl Supervisor {
                     if let Some(d) = &spec.cwd {
                         cmd.current_dir(d);
                     }
-                    let parent = std::process::id() as i32;
-                    // SAFETY: setpgid, prctl, getppid and _exit are async-signal-safe.
-                    unsafe {
-                        cmd.pre_exec(move || {
-                            libc::setpgid(0, 0);
-                            #[cfg(target_os = "linux")]
-                            {
-                                libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL);
-                                if libc::getppid() != parent {
-                                    libc::_exit(137);
+                    #[cfg(unix)]
+                    {
+                        let parent = std::process::id() as i32;
+                        #[cfg(not(target_os = "linux"))]
+                        let _ = parent;
+                        // SAFETY: setpgid, prctl, getppid and _exit are async-signal-safe.
+                        unsafe {
+                            cmd.pre_exec(move || {
+                                libc::setpgid(0, 0);
+                                #[cfg(target_os = "linux")]
+                                {
+                                    libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL);
+                                    if libc::getppid() != parent {
+                                        libc::_exit(137);
+                                    }
                                 }
-                            }
-                            Ok(())
-                        });
+                                Ok(())
+                            });
+                        }
                     }
+                    // Windows: a new console group in a kill-on-close Job Object (the group
+                    // dies with seagent, like PDEATHSIG).
+                    #[cfg(not(unix))]
+                    seagent_core::platform::proc::new_group(&mut cmd, false);
                     let started = Instant::now();
-                    match cmd.spawn() {
+                    let spawned = cmd.spawn();
+                    #[cfg(not(unix))]
+                    let spawned = spawned.and_then(|mut c| match seagent_core::platform::proc::adopt(&c) {
+                        Ok(()) => Ok(c),
+                        Err(e) => {
+                            let _ = c.kill();
+                            let _ = c.wait();
+                            Err(e)
+                        }
+                    });
+                    match spawned {
                         Err(e) => push_log(&s2, format!("cannot start `{}`: {e}", spec.program)),
                         Ok(mut child) => {
                             *s2.pid.lock().unwrap() = Some(child.id() as i32);
@@ -208,9 +228,13 @@ impl Supervisor {
         Box::new(move || {
             if let Some(pid) = *st.pid.lock().unwrap() {
                 // SAFETY: plain kill(2) on the child's process group.
+                #[cfg(unix)]
                 unsafe {
                     libc::kill(-pid, libc::SIGTERM);
                 }
+                // Windows has no SIGTERM: CTRL_BREAK the group, then end its job.
+                #[cfg(not(unix))]
+                seagent_core::platform::proc::kill_group(pid, Duration::ZERO);
             }
         })
     }
@@ -225,18 +249,26 @@ impl Supervisor {
     pub fn stop(&self) {
         self.st.stop.store(true, Ordering::SeqCst);
         let Some(pid) = self.pid() else { return };
-        // SAFETY: plain kill(2) on the child's process group.
-        unsafe {
-            libc::kill(-pid, libc::SIGTERM);
+        #[cfg(not(unix))]
+        {
+            // CTRL_BREAK, up to 1.5 s of grace, then TerminateJobObject.
+            seagent_core::platform::proc::kill_group(pid, Duration::from_millis(1500));
         }
-        let until = Instant::now() + Duration::from_millis(1500);
-        while self.running() && Instant::now() < until {
-            std::thread::sleep(Duration::from_millis(20));
-        }
-        if self.running() {
-            // SAFETY: as above.
+        #[cfg(unix)]
+        {
+            // SAFETY: plain kill(2) on the child's process group.
             unsafe {
-                libc::kill(-pid, libc::SIGKILL);
+                libc::kill(-pid, libc::SIGTERM);
+            }
+            let until = Instant::now() + Duration::from_millis(1500);
+            while self.running() && Instant::now() < until {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            if self.running() {
+                // SAFETY: as above.
+                unsafe {
+                    libc::kill(-pid, libc::SIGKILL);
+                }
             }
         }
     }

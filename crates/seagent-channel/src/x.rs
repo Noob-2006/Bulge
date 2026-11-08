@@ -124,7 +124,10 @@ fn write_private(path: &std::path::Path, data: &[u8]) -> std::io::Result<()> {
     o.write(true).create(true).truncate(true);
     #[cfg(unix)]
     std::os::unix::fs::OpenOptionsExt::mode(&mut o, 0o600);
+    #[cfg(unix)]
     let mut f = o.open(&tmp)?;
+    #[cfg(not(unix))]
+    let mut f = crate::open_private_tmp(&tmp)?;
     f.write_all(data)?;
     f.sync_all()?;
     #[cfg(unix)]

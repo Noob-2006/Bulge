@@ -283,6 +283,8 @@ pub fn save_account(state_dir: &Path, name: &str, a: &Account) -> std::io::Resul
         use std::os::unix::fs::PermissionsExt;
         let _ = std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o600));
     }
+    #[cfg(not(unix))]
+    let _ = seagent_core::platform::fs_private::set_private(&p);
     Ok(())
 }
 
