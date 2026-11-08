@@ -31,5 +31,5 @@ libc.workspace = true # process groups, signals, waitpid, uid / mode checks (Uni
 
 [target.'cfg(windows)'.dependencies]
 # Console stop events (daemon), Toolhelp parents (reaper), directory identity (checkpoint),
-# DPAPI (secret store).
-windows-sys = { workspace = true, features = ["Win32_Foundation", "Win32_Storage_FileSystem", "Win32_System_Console", "Win32_System_Diagnostics_ToolHelp", "Win32_Security_Cryptography"] }
+# DPAPI (secret store), the session-log writer lock (LockFileEx + OVERLAPPED).
+windows-sys = { workspace = true, features = ["Win32_Foundation", "Win32_Storage_FileSystem", "Win32_System_Console", "Win32_System_Diagnostics_ToolHelp", "Win32_Security_Cryptography", "Win32_System_IO"] }

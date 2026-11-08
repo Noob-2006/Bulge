@@ -2,7 +2,9 @@
 //! (`civil_from_days`), id generation and head/tail truncation.
 
 use std::fs;
-use std::io::{Read, Write};
+#[cfg(unix)]
+use std::io::Read;
+use std::io::Write;
 use std::path::Path;
 
 /// Days since 1970-01-01 → (year, month, day). Howard Hinnant's algorithm.

@@ -104,10 +104,10 @@ pub fn term_then_kill(pgid: i32, grace: Duration) {
 }
 
 #[cfg(test)]
+#[cfg(all(unix, not(target_os = "android")))]
 mod tests {
     use super::*;
 
-    #[cfg(all(unix, not(target_os = "android")))]
     #[test]
     fn tied_bash_runs_in_its_own_group_and_is_killed() {
         let mut c = bash("sleep 30").unwrap();

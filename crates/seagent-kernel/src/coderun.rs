@@ -465,6 +465,7 @@ pub fn client(tool: &str, input: &str) -> Result<String, String> {
 mod tests {
     use super::*;
 
+    #[cfg(unix)]
     fn dir() -> PathBuf {
         let d = seagent_core::tmp::scratch_path(format!("seagent-run-{}", crate::util::random_hex(6)));
         std::fs::create_dir_all(&d).unwrap();

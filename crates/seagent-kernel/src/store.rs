@@ -229,9 +229,8 @@ fn valid_id(id: &str) -> bool {
 fn lock(f: &File, id: &str) -> Result<(), StoreError> {
     let deadline = std::time::Instant::now() + std::time::Duration::from_millis(1500);
     loop {
-        // `try_lock` is flock(LOCK_EX | LOCK_NB) on Unix, LockFileEx on Windows; released
-        // when the file closes.
-        match f.try_lock() {
+        // `try_lock` is flock(LOCK_EX | LOCK_NB) on Unix; released when the file closes.
+        match try_lock_writer(f) {
             Ok(()) => return Ok(()),
             Err(std::fs::TryLockError::WouldBlock) => {}
             Err(std::fs::TryLockError::Error(err)) => return Err(err.into()),
@@ -240,6 +239,38 @@ fn lock(f: &File, id: &str) -> Result<(), StoreError> {
             return Err(StoreError::Locked(id.to_string()));
         }
         std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+}
+
+#[cfg(not(windows))]
+fn try_lock_writer(f: &File) -> Result<(), std::fs::TryLockError> {
+    f.try_lock()
+}
+
+/// Windows byte-range locks are mandatory: `File::try_lock` (the whole file) would stop every
+/// other process from *reading* the log while a writer holds it. The writer lock is therefore
+/// one byte at the very end of the 64-bit range, which no read or append ever touches: still
+/// one exclusive writer per log, readers unaffected. Released when the handle closes.
+#[cfg(windows)]
+fn try_lock_writer(f: &File) -> Result<(), std::fs::TryLockError> {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Foundation::{ERROR_IO_PENDING, ERROR_LOCK_VIOLATION};
+    use windows_sys::Win32::Storage::FileSystem::{LockFileEx, LOCKFILE_EXCLUSIVE_LOCK, LOCKFILE_FAIL_IMMEDIATELY};
+    use windows_sys::Win32::System::IO::OVERLAPPED;
+    // SAFETY: zeroed OVERLAPPED with the lock offset set; synchronous handle, valid for the call.
+    let ok = unsafe {
+        let mut ov: OVERLAPPED = std::mem::zeroed();
+        ov.Anonymous.Anonymous.Offset = 0xFFFF_FFFE;
+        ov.Anonymous.Anonymous.OffsetHigh = 0x7FFF_FFFF;
+        LockFileEx(f.as_raw_handle() as _, LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY, 0, 1, 0, &mut ov)
+    };
+    if ok != 0 {
+        return Ok(());
+    }
+    let e = std::io::Error::last_os_error();
+    match e.raw_os_error().map(|c| c as u32) {
+        Some(ERROR_LOCK_VIOLATION) | Some(ERROR_IO_PENDING) => Err(std::fs::TryLockError::WouldBlock),
+        _ => Err(std::fs::TryLockError::Error(e)),
     }
 }
 
