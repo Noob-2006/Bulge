@@ -11,8 +11,10 @@
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::io::{Read, Write};
+#[cfg(any(target_os = "linux", target_os = "android"))]
+use std::os::fd::FromRawFd;
 #[cfg(unix)]
-use std::os::fd::{FromRawFd, OwnedFd, RawFd};
+use std::os::fd::{OwnedFd, RawFd};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};

@@ -563,7 +563,7 @@ pub fn methods(paths: &Paths) -> seagent_kernel::daemon::MethodExt {
 /// terminal wizard (`setup`). Every way of finishing setup locks the web wizard: there is one setup.
 pub fn dispatch(a: &crate::args::Args) -> Result<i32, String> {
     let paths = Paths::from_env();
-    if matches!(a.pos(0), Some("link" | "bootstrap")) {
+    if matches!(a.pos(0), Some("link" | "bootstrap" | "status")) {
         return cli(&paths, a);
     }
     let (rc, how) = if setup_server::wanted(a, &setup_server::real_env) {
@@ -578,12 +578,43 @@ pub fn dispatch(a: &crate::args::Args) -> Result<i32, String> {
     Ok(rc)
 }
 
-/// `seagent setup link|bootstrap`.
+/// `seagent setup link|bootstrap|status`. With `--json` (the desktop shell) every outcome is one
+/// JSON object on stdout; a failure is `{"error": …}` with exit status 1.
 pub fn cli(paths: &Paths, a: &crate::args::Args) -> Result<i32, String> {
+    let json_out = a.flag("json");
+    match cli_inner(paths, a) {
+        Err(e) if json_out => {
+            println!("{}", json!({"error": e}));
+            Ok(1)
+        }
+        r => r,
+    }
+}
+
+fn cli_inner(paths: &Paths, a: &crate::args::Args) -> Result<i32, String> {
     match a.pos(0) {
+        Some("status") => {
+            let (root, _) = read_root(paths)?;
+            let listen = listen_of(&root);
+            let console = format!("{}/", base_url(&listen));
+            if a.flag("json") {
+                println!("{}", json!({"done": locked(paths), "listen": listen, "console_url": console}));
+            } else {
+                println!("{} · {console}", if locked(paths) { t("設定已完成", "setup complete") } else { t("尚未設定", "setup not done yet") });
+            }
+            Ok(0)
+        }
         Some("bootstrap") => {
-            for l in bootstrap(paths, a.val("listen"))? {
-                eprintln!("  {l}");
+            std::fs::create_dir_all(&paths.data).map_err(|e| format!("{}: {e}", paths.data.display()))?;
+            let lines = bootstrap(paths, a.val("listen"))?;
+            if a.flag("json") {
+                let (root, _) = read_root(paths)?;
+                let listen = listen_of(&root);
+                println!("{}", json!({"ok": true, "changes": lines, "listen": listen, "config": paths.user_config(), "console_url": format!("{}/", base_url(&listen))}));
+            } else {
+                for l in lines {
+                    eprintln!("  {l}");
+                }
             }
             Ok(0)
         }
@@ -593,14 +624,14 @@ pub fn cli(paths: &Paths, a: &crate::args::Args) -> Result<i32, String> {
             let (token, expires) = issue(paths, ttl, a.flag("reopen"))?;
             let url = format!("{}/setup#token={token}", base_url(&listen_of(&root)));
             if a.flag("json") {
-                println!("{}", json!({"url": url, "expires_ms": expires}));
+                println!("{}", json!({"url": url, "expires_ms": expires, "expires_at_ms": expires}));
             } else {
                 println!("{url}");
                 eprintln!("  {} {} {}", t("一次性設定連結，", "one-time setup link, valid for"), ttl / 60, t("分鐘內有效", "minutes"));
             }
             Ok(0)
         }
-        _ => Err("usage: seagent setup link [--ttl MINUTES] [--reopen] [--json] | seagent setup bootstrap [--listen HOST:PORT]".into()),
+        _ => Err("usage: seagent setup link [--ttl MINUTES] [--reopen] [--json] | seagent setup bootstrap [--listen HOST:PORT] [--json] | seagent setup status [--json]".into()),
     }
 }
 

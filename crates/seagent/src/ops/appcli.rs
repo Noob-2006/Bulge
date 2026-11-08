@@ -14,6 +14,15 @@ pub fn cmd_app(a: &Args) -> R {
     let token = app.token.as_deref().map(|t| vault.substitute(t)).filter(|t| !t.contains("{{secret:")).unwrap_or_default();
     let url = format!("http://{}", app.listen);
     match a.pos(0).unwrap_or("status") {
+        // `--json` (desktop shell): `{"token","url"}`, or `{"error"}` and exit 1 without a token.
+        "token" if a.flag("json") => {
+            if token.is_empty() {
+                println!("{}", serde_json::json!({"error": "no [app] token is configured (run `seagent setup bootstrap`)"}));
+                return Ok(1);
+            }
+            println!("{}", serde_json::json!({"token": token, "url": format!("{}/#token={token}", crate::setup_web::base_url(&app.listen))}));
+            Ok(0)
+        }
         "token" => {
             if token.is_empty() {
                 let t = seagent_net::crypto::random_token(24);

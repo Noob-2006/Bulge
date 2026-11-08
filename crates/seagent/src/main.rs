@@ -83,7 +83,8 @@ fn main() {
     }
     let mut raw: Vec<String> = std::env::args().collect();
     ops::early(&mut raw);
-    let argv0 = raw.first().map(|s| Path::new(s).file_name().and_then(|f| f.to_str()).unwrap_or("").to_string()).unwrap_or_default();
+    // Windows: the shim is `seagent-call.exe` (any case): compare the lowercased stem there.
+    let argv0 = raw.first().map(|s| if cfg!(windows) { Path::new(s).file_stem().and_then(|f| f.to_str()).unwrap_or("").to_ascii_lowercase() } else { Path::new(s).file_name().and_then(|f| f.to_str()).unwrap_or("").to_string() }).unwrap_or_default();
     let rest: Vec<String> = if argv0 == "seagent-call" { std::iter::once("call".to_string()).chain(raw.into_iter().skip(1)).collect() } else { raw.into_iter().skip(1).collect() };
     let code = match dispatch(rest) {
         Ok(c) => c,

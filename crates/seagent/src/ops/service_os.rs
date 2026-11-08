@@ -28,7 +28,7 @@ use crate::{args::Args, R};
 #[cfg(any(target_os = "macos", windows, target_os = "android", target_os = "ios"))]
 use seagent_kernel::config::Paths;
 use std::path::Path;
-#[cfg(any(target_os = "macos", windows))]
+#[cfg(target_os = "macos")]
 use std::path::PathBuf;
 
 #[cfg(any(windows, target_os = "macos"))]
