@@ -1014,9 +1014,13 @@ fn short_runtime(dir: PathBuf) -> PathBuf {
     if let Some(r) = std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from).filter(|r| r.is_absolute() && r.as_os_str().len() + tag.len() < RUNTIME_MAX) {
         return r.join(tag);
     }
-    // Shared /tmp: our own 0700 directory, refusing one someone else planted.
+    // Shared /tmp: our own 0700 directory, refusing one someone else planted. Android has no
+    // /tmp: the app's own temp dir (TMPDIR, set by the host app to its cache dir) instead.
     let uid = unsafe { libc::getuid() };
+    #[cfg(not(target_os = "android"))]
     let base = PathBuf::from(format!("/tmp/seagent-{uid}"));
+    #[cfg(target_os = "android")]
+    let base = seagent_core::tmp::system_temp_root().join(format!("seagent-{uid}"));
     let _ = std::fs::DirBuilder::new().mode(0o700).create(&base);
     match std::fs::symlink_metadata(&base) {
         Ok(m) if m.is_dir() && m.uid() == uid && m.mode() & 0o077 == 0 => base.join(tag),

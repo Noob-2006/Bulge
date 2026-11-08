@@ -77,4 +77,3 @@ println crates/seagent-tools/src/exec/vercel.rs 1
 println crates/seagent-tools/src/exec/vm.rs 2
 println crates/seagent-tools/src/web/links.rs 2
 println crates/seagent-tools/src/web/ssrf.rs 1
-println crates/seagent-vm/src/bin/seagent-vm-guest.rs 13

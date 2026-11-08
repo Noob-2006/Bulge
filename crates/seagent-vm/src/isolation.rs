@@ -16,6 +16,10 @@ use std::path::{Path, PathBuf};
 pub enum IsolationLevel {
     /// No wall at all: the process runs as the seagent user (`local`).
     Host,
+    /// The OS's own policy sandbox on the shared kernel, without a separate filesystem view:
+    /// macOS Seatbelt (`sandbox-exec`), Windows AppContainer. Same tier as namespaces
+    /// ([`IsolationLevel::rank`] 1), reported under its own name so nobody calls it bwrap.
+    OsSandbox,
     /// Namespaces/seccomp only, shared kernel: bwrap, Landlock.
     UserNamespace,
     /// Container with its own rootfs, shared kernel: docker, podman.
@@ -31,17 +35,19 @@ impl IsolationLevel {
     pub fn label(self) -> &'static str {
         match self {
             IsolationLevel::Host => "host",
+            IsolationLevel::OsSandbox => "os-sandbox",
             IsolationLevel::UserNamespace => "user-namespace",
             IsolationLevel::Container => "container",
             IsolationLevel::AppKernel => "app-kernel (gVisor)",
             IsolationLevel::MicroVm => "microVM",
         }
     }
-    /// 0..=4, for sorting and for "is this at least as strong as X?" checks.
+    /// 0..=4, for sorting and for "is this at least as strong as X?" checks. The numbers are
+    /// part of `seagent exec` JSON output, so they never change; an OS sandbox shares tier 1.
     pub fn rank(self) -> u8 {
         match self {
             IsolationLevel::Host => 0,
-            IsolationLevel::UserNamespace => 1,
+            IsolationLevel::OsSandbox | IsolationLevel::UserNamespace => 1,
             IsolationLevel::Container => 2,
             IsolationLevel::AppKernel => 3,
             IsolationLevel::MicroVm => 4,
@@ -55,6 +61,7 @@ impl IsolationLevel {
             IsolationLevel::AppKernel => Some("gVisor: the guest shares the host kernel through a user-space kernel; kernel bugs are contained but not eliminated. Keys and the daemon socket stay outside either way."),
             IsolationLevel::Container => Some("container: shares the host kernel and (for docker/podman) the host's namespaces; a kernel bug or a misconfigured mount reaches the host. Not equivalent to a microVM."),
             IsolationLevel::UserNamespace => Some("namespace sandbox (bwrap/Landlock): shares the host kernel, one kernel bug from the host. Treat untrusted code as able to read anything the seagent user can read."),
+            IsolationLevel::OsSandbox => Some("OS policy sandbox (macOS Seatbelt / Windows AppContainer): the OS refuses access outside the allowed paths, but the command sees the real filesystem and shares the host kernel. Not equivalent to a microVM."),
             IsolationLevel::Host => Some("NO isolation: commands run directly on this machine as the seagent user. Only acceptable for the operator's own trusted work."),
         }
     }
@@ -69,6 +76,7 @@ pub fn isolation_of_backend(name: &str) -> IsolationLevel {
     match name {
         "local" => IsolationLevel::Host,
         "bwrap" | "landlock" => IsolationLevel::UserNamespace,
+        "seatbelt" | "appcontainer" => IsolationLevel::OsSandbox,
         "docker" | "podman" | "singularity" | "apptainer" | "openshell" => IsolationLevel::Container,
         "gvisor" | "runsc" => IsolationLevel::AppKernel,
         "vm" | "firecracker" | "qemu" => IsolationLevel::MicroVm,
@@ -424,9 +432,17 @@ mod tests {
         assert!(isolation_of_backend("gvisor") > isolation_of_backend("docker"));
         assert!(isolation_of_backend("docker") > isolation_of_backend("bwrap"));
         assert!(isolation_of_backend("bwrap") > isolation_of_backend("local"));
+        // The OS policy sandboxes: above no isolation, same tier as namespaces, own name.
+        for os in ["seatbelt", "appcontainer"] {
+            let l = isolation_of_backend(os);
+            assert_eq!(l, IsolationLevel::OsSandbox);
+            assert!(l > IsolationLevel::Host && l < IsolationLevel::UserNamespace);
+            assert_eq!(l.rank(), IsolationLevel::UserNamespace.rank());
+            assert_ne!(l.label(), IsolationLevel::UserNamespace.label());
+        }
         // Only a real VM is warning-free.
         assert!(IsolationLevel::MicroVm.warning().is_none());
-        for l in [IsolationLevel::Host, IsolationLevel::UserNamespace, IsolationLevel::Container, IsolationLevel::AppKernel] {
+        for l in [IsolationLevel::Host, IsolationLevel::OsSandbox, IsolationLevel::UserNamespace, IsolationLevel::Container, IsolationLevel::AppKernel] {
             assert!(l.warning().is_some(), "{l:?} must warn");
         }
         assert!(isolation_of_backend("local").warning().unwrap().contains("NO isolation"));

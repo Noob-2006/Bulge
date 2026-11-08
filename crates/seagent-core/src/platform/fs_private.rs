@@ -101,15 +101,21 @@ pub fn write_private(path: &Path, data: impl AsRef<[u8]>) -> io::Result<()> {
     f.flush()
 }
 
-/// Is `path` readable by its owner only? Unix: no group / other bits. Windows: not checked
-/// (`Ok(true)` would be a guess, so this reports `Unsupported`).
+/// Is `path` readable by its owner only? Unix: no group / other bits. Windows: every
+/// access-allowed entry in the DACL grants to the current user, `SYSTEM` or `Administrators`
+/// (the Windows counterpart of "root can always read"); a NULL DACL (everyone) is not private.
+/// Elsewhere: `Unsupported` (an `Ok(true)` would be a guess).
 pub fn is_private(path: &Path) -> io::Result<bool> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         Ok(std::fs::metadata(path)?.permissions().mode() & 0o077 == 0)
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    {
+        win::dacl_is_owner_only(path)
+    }
+    #[cfg(not(any(unix, windows)))]
     {
         Err(io::Error::new(io::ErrorKind::Unsupported, format!("permission check not implemented on this OS ({})", path.display())))
     }
@@ -225,6 +231,76 @@ pub(crate) mod win {
             return Err(io::Error::from_raw_os_error(rc as i32));
         }
         Ok(())
+    }
+
+    /// SIDs besides the current user that may hold access without making a file "shared":
+    /// LocalSystem and the built-in Administrators group (both can take ownership anyway).
+    const TRUSTED_SIDS: &[&str] = &["S-1-5-18", "S-1-5-32-544"];
+
+    /// Does the DACL of `path` grant access only to the current user (plus [`TRUSTED_SIDS`])?
+    pub fn dacl_is_owner_only(path: &Path) -> io::Result<bool> {
+        use windows_sys::Win32::Security::Authorization::GetNamedSecurityInfoW;
+        use windows_sys::Win32::Security::{GetAce, ACE_HEADER};
+        // ACCESS_ALLOWED_ACE_TYPE; the other allow types (object / callback ACEs) carry extra
+        // fields before the SID, so they are treated as "not owner-only" rather than parsed.
+        const ACCESS_ALLOWED: u8 = 0;
+        const ALLOW_TYPES: &[u8] = &[0, 4, 5, 9, 11];
+        const INHERIT_ONLY: u8 = 0x08;
+        let me = user_sid()?;
+        let w = wide(path.as_os_str());
+        let mut acl: *mut ACL = std::ptr::null_mut();
+        let mut sd: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
+        // SAFETY: valid path; out-pointers are local; `sd` is LocalFree'd below.
+        let rc = unsafe { GetNamedSecurityInfoW(w.as_ptr(), SE_FILE_OBJECT, DACL_SECURITY_INFORMATION, std::ptr::null_mut(), std::ptr::null_mut(), &mut acl, std::ptr::null_mut(), &mut sd) };
+        if rc != 0 {
+            return Err(io::Error::from_raw_os_error(rc as i32));
+        }
+        let verdict = (|| -> io::Result<bool> {
+            if acl.is_null() {
+                return Ok(false); // NULL DACL: full access for everyone
+            }
+            // SAFETY: `acl` points into `sd`, alive until LocalFree below.
+            let count = unsafe { (*acl).AceCount };
+            for i in 0..count as u32 {
+                let mut ace: *mut core::ffi::c_void = std::ptr::null_mut();
+                // SAFETY: index < AceCount.
+                if unsafe { GetAce(acl, i, &mut ace) } == 0 {
+                    return Err(io::Error::last_os_error());
+                }
+                // SAFETY: every ACE starts with an ACE_HEADER.
+                let h = unsafe { &*(ace as *const ACE_HEADER) };
+                if !ALLOW_TYPES.contains(&h.AceType) || h.AceFlags & INHERIT_ONLY != 0 {
+                    continue; // deny entries and entries that only pass to children
+                }
+                if h.AceType != ACCESS_ALLOWED {
+                    return Ok(false);
+                }
+                // ACCESS_ALLOWED_ACE = { ACE_HEADER (4), Mask: u32 (4), SidStart }.
+                // SAFETY: the SID follows at offset 8 within AceSize bytes.
+                let sid = unsafe { (ace as *mut u8).add(8) } as *mut core::ffi::c_void;
+                let mut s: *mut u16 = std::ptr::null_mut();
+                // SAFETY: `sid` is a valid SID inside the ACE; `s` is LocalFree'd.
+                if unsafe { ConvertSidToStringSidW(sid, &mut s) } == 0 {
+                    return Err(io::Error::last_os_error());
+                }
+                let text = unsafe {
+                    let mut n = 0;
+                    while *s.add(n) != 0 {
+                        n += 1;
+                    }
+                    let t = String::from_utf16_lossy(std::slice::from_raw_parts(s, n));
+                    LocalFree(s.cast());
+                    t
+                };
+                if text != me && !TRUSTED_SIDS.contains(&text.as_str()) {
+                    return Ok(false);
+                }
+            }
+            Ok(true)
+        })();
+        // SAFETY: allocated by GetNamedSecurityInfoW.
+        unsafe { LocalFree(sd) };
+        verdict
     }
 
     /// Create `path` with the owner-only DACL; `Ok(false)` when it already exists.

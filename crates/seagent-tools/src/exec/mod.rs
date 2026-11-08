@@ -306,7 +306,8 @@ fn native_sandbox() -> Option<&'static str> {
 }
 
 /// What an OS sandbox (Seatbelt / AppContainer) gives, said with the same honesty as the
-/// levels in `seagent_vm::isolation` (it is reported at the namespace-sandbox level).
+/// levels in `seagent_vm::isolation` (reported as `IsolationLevel::OsSandbox`, the
+/// namespace-sandbox tier under its own name).
 pub const OS_SANDBOX_WARNING: &str = "OS sandbox (macOS Seatbelt): shares the host kernel, file access limited to system files, the workspace and a private temp dir; home unreadable. One kernel or sandbox bug from the host; weaker than a microVM.";
 
 /// Make an `auto` plan honest on macOS / Windows: the policy table in `seagent-vm` knows
@@ -318,14 +319,14 @@ pub fn os_plan(mut plan: seagent_vm::policy::Plan, sandboxed: bool) -> seagent_v
     use seagent_vm::policy::Origin;
     use seagent_vm::IsolationLevel;
     let Some(name) = native_sandbox() else { return plan };
-    if plan.backend == name && plan.level == IsolationLevel::Host {
-        plan.level = IsolationLevel::UserNamespace;
+    if plan.backend == name && plan.level <= IsolationLevel::OsSandbox {
+        plan.level = IsolationLevel::OsSandbox;
         plan.warning = Some(format!("{name}: {OS_SANDBOX_WARNING}"));
     } else if plan.backend == "local" && plan.origin == Origin::AutoHost {
         plan = seagent_vm::policy::Plan {
             backend: name.into(),
             provider: None,
-            level: IsolationLevel::UserNamespace,
+            level: IsolationLevel::OsSandbox,
             origin: Origin::AutoFallback,
             warning: Some(format!("no microVM available on this {} machine; {} runs in the {name} sandbox instead (host home and keys not readable) — {OS_SANDBOX_WARNING}", std::env::consts::OS, if sandboxed { "this session" } else { "the agent" })),
             reason: format!("auto: no microVM, the agent still runs isolated in the {} OS sandbox ({name})", std::env::consts::OS),

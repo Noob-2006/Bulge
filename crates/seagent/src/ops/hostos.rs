@@ -194,10 +194,10 @@ pub fn set_mode(p: &Path, mode: u32) -> io::Result<()> {
 }
 
 /// The permission bits of `p` (follows symlinks). Windows synthesises them: `0o644` / `0o755`
-/// when `fs_private::is_private` says others have access, `0o600` / `0o700` otherwise (also
-/// while that check is not implemented there: the files seagent writes get the owner-only
-/// DACL through [`set_mode`] / [`create_private`], and refusing every secret file would make
-/// the checks useless), write bits cleared for read-only files and exec bits for directories
+/// when `fs_private::is_private` (a DACL check on Windows) says others have access, `0o600` /
+/// `0o700` otherwise (also when the DACL cannot be read: the files seagent writes get the
+/// owner-only DACL through [`set_mode`] / [`create_private`], and refusing every secret file
+/// would make the checks useless), write bits cleared for read-only files and exec bits for directories
 /// and [`is_executable`] files — so `mode & 0o077` keeps meaning "others can read it" and
 /// `mode & 0o111` "it runs".
 pub fn mode_of(p: &Path) -> io::Result<u32> {
