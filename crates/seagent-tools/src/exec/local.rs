@@ -13,9 +13,9 @@
 //! | detached | `/bin/sh` wrapper writes the exit file | PowerShell wrapper writes the exit file |
 //!
 //! The OS sandboxes: bubblewrap and Landlock (`sandbox_linux`, Linux / Android), Seatbelt
-//! (`seatbelt`, macOS). On Windows the commands run in a kill-on-close Job Object only (no
-//! file-system sandbox yet: `appcontainer` is an explicit "not available" error and `auto`
-//! reports the host level). iOS cannot start processes; every spawn there is an error.
+//! (`seatbelt`, macOS), AppContainer (`appcontainer`, Windows; the `local` backend there runs
+//! commands in a kill-on-close Job Object only). iOS cannot start processes; every spawn
+//! there is an error.
 
 use super::sandbox::SandboxConfig;
 use super::BackendCtx;
