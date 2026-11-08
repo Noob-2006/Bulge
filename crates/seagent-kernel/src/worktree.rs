@@ -241,7 +241,23 @@ pub fn newest_mtime(p: &Path) -> Option<std::time::SystemTime> {
     newest
 }
 
+/// Is a process working in this tree? Windows: the OS itself refuses to delete a directory
+/// that is a process's working directory, so the removal fails safely instead.
+#[cfg(windows)]
+fn tree_in_use(_p: &Path) -> bool {
+    false
+}
+
+/// Other systems without `/proc` (macOS, iOS): there is no cheap way to list working
+/// directories, so every tree counts as in use and idle reclamation never removes one
+/// (a leak, never a removed checkout under a running process).
+#[cfg(not(any(target_os = "linux", target_os = "android", windows)))]
+fn tree_in_use(_p: &Path) -> bool {
+    true
+}
+
 /// Is a process working in this tree? (`/proc/<pid>/cwd`; skips our own pid.)
+#[cfg(any(target_os = "linux", target_os = "android"))]
 fn tree_in_use(p: &Path) -> bool {
     let Ok(canon) = p.canonicalize() else { return false };
     let me = std::process::id();
@@ -410,6 +426,7 @@ mod tests {
         assert!(finalize(&a, true).pruned);
     }
 
+    #[cfg(any(target_os = "linux", target_os = "android", windows))] // elsewhere every tree counts as in use
     #[test]
     fn prune_idle_respects_age_and_symlinks() {
         let repo = test_repo("idle");

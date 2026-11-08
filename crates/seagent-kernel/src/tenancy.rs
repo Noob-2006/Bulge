@@ -345,11 +345,10 @@ fn stamps(data: &Path) -> BTreeMap<String, Tenant> {
 /// Exclusive `flock` on `<data>/tenancy/.lock` while a stamp is read-modified-written (the
 /// daemon and a CLI may stamp at the same time). Released when the file closes.
 fn lock(data: &Path) -> Option<std::fs::File> {
-    use std::os::unix::io::AsRawFd;
     std::fs::create_dir_all(dir(data)).ok()?;
     let f = std::fs::OpenOptions::new().create(true).truncate(false).write(true).open(dir(data).join(".lock")).ok()?;
-    // SAFETY: flock on an fd we own; released when it closes.
-    unsafe { libc::flock(f.as_raw_fd(), libc::LOCK_EX) };
+    // flock(LOCK_EX) on Unix, LockFileEx on Windows; released when it closes.
+    let _ = f.lock();
     Some(f)
 }
 

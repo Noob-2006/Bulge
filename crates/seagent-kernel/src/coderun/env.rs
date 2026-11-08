@@ -6,6 +6,13 @@
 const SAFE_PREFIXES: [&str; 15] = ["PATH", "HOME", "USER", "LANG", "LC_", "TERM", "TMPDIR", "TMP", "TEMP", "SHELL", "LOGNAME", "XDG_", "PYTHONPATH", "VIRTUAL_ENV", "CONDA"];
 /// Non-secret runtime locations a script may need (Hermes `_HERMES_CHILD_ALLOWED`).
 const SEAGENT_ALLOWED: [&str; 5] = ["SEAGENT_PROFILE", "SEAGENT_CONFIG", "SEAGENT_DATA_DIR", "SEAGENT_BIN", "SEAGENT_HOME"];
+/// Windows: variables a process cannot start (or open a socket) without, matched without case
+/// as Windows does. `SystemRoot` in particular: Winsock fails to initialise (WSAEPROVIDERFAILEDINIT)
+/// in a child that lacks it. None of them carry a credential.
+#[cfg(windows)]
+const OS_REQUIRED: &[&str] = &["SystemRoot", "windir", "SystemDrive", "ComSpec", "PATHEXT", "USERPROFILE", "APPDATA", "LOCALAPPDATA", "ProgramData", "ProgramFiles", "ProgramFiles(x86)", "ProgramW6432", "CommonProgramFiles", "NUMBER_OF_PROCESSORS", "PROCESSOR_ARCHITECTURE", "OS", "USERNAME", "COMPUTERNAME"];
+#[cfg(not(windows))]
+const OS_REQUIRED: &[&str] = &[];
 
 /// Credential-shaped names are one rule for every child (`seagent_security::envscrub`): the code-mode
 /// substring list, the sandbox credential-shape list and the Tier-1 names.
@@ -25,7 +32,7 @@ pub fn scrub<I: IntoIterator<Item = (String, String)>>(source: I, passthrough: &
         if tier1 || is_secret_name(&k) {
             continue;
         }
-        if SAFE_PREFIXES.iter().any(|p| k.starts_with(p)) || SEAGENT_ALLOWED.contains(&k.as_str()) {
+        if SAFE_PREFIXES.iter().any(|p| k.starts_with(p)) || SEAGENT_ALLOWED.contains(&k.as_str()) || OS_REQUIRED.iter().any(|n| n.eq_ignore_ascii_case(&k)) {
             out.push((k, v));
         }
     }

@@ -230,7 +230,9 @@ mod tests {
         // A symlink under a scratch root is never followed or removed.
         let outside = tmp("outside");
         std::fs::write(outside.join("keep"), "keep").unwrap();
-        std::os::unix::fs::symlink(&outside, paths.data.join("tmp/link")).unwrap();
+        // Windows may refuse to create one (no Developer Mode): then there is nothing to keep.
+        let linked = crate::util::symlink_dir(&outside, &paths.data.join("tmp/link")).is_ok();
+        assert!(linked || cfg!(windows), "symlink");
 
         let st = Settings { scratch_ttl_hours: 24, worktree_idle_hours: 0, cleanup_interval_secs: 3600 };
         let dry = expire_at(&paths, unix_now(), &st, &[], &|_| false, true);
@@ -242,7 +244,7 @@ mod tests {
         assert!(!paths.sessions().join("s1/artifacts/old.txt").exists());
         assert!(paths.data.join("tmp/fresh/x").exists(), "fresh scratch kept");
         assert!(paths.sessions().join("s2/artifacts/live.txt").exists(), "live session artifacts kept");
-        assert!(paths.data.join("tmp/link").is_symlink(), "symlink kept");
+        assert!(!linked || paths.data.join("tmp/link").is_symlink(), "symlink kept");
         assert!(outside.join("keep").exists(), "symlink target untouched");
     }
 

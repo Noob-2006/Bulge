@@ -349,17 +349,12 @@ fn tail(s: &str) -> String {
 }
 
 fn spawn_shell(cmd: &str, root: &Path) -> std::io::Result<std::process::Child> {
-    use std::os::unix::process::CommandExt;
-    let mut c = Command::new("bash");
-    c.arg("-c").arg(cmd).current_dir(root).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
-    // Own process group so teardown reaches the whole tree.
-    unsafe {
-        c.pre_exec(|| {
-            libc::setsid();
-            Ok(())
-        });
-    }
-    c.spawn()
+    let mut c = crate::childproc::bash(cmd).map_err(std::io::Error::other)?;
+    c.current_dir(root).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    // Own process group (Unix: a new session, `setsid`) so teardown reaches the whole tree.
+    // Windows: a new process group plus a Job Object for the tree.
+    seagent_core::platform::proc::new_group(&mut c, true);
+    crate::childproc::spawn(&mut c)
 }
 
 /// Collect stdout+stderr on threads (combined, arrival order per stream).
@@ -386,6 +381,20 @@ fn kill_group(child: &mut std::process::Child) {
     if let Ok(Some(_)) = child.try_wait() {
         return;
     }
+    // Windows: CTRL_BREAK, up to 10 s for the group to leave, then its job is terminated.
+    #[cfg(not(unix))]
+    {
+        seagent_core::platform::proc::kill_group(pid, Duration::from_secs(10));
+        let _ = child.wait();
+    }
+    #[cfg(unix)]
+    {
+        unix_term_then_kill(child, pid);
+    }
+}
+
+#[cfg(unix)]
+fn unix_term_then_kill(child: &mut std::process::Child, pid: i32) {
     unsafe { libc::killpg(pid, libc::SIGTERM) };
     let until = Instant::now() + Duration::from_secs(10);
     while Instant::now() < until {

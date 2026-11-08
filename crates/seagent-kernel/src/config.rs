@@ -991,8 +991,17 @@ fn project_trusted(user: &toml::Table, project: &Path) -> bool {
 /// Unix socket paths are capped at 107 bytes and the runtime dir holds
 /// `call-<16 hex>.sock`, so a deep home moves its runtime dir somewhere short.
 /// The replacement is derived from the original path, so daemon and clients agree.
+#[cfg(unix)]
 const RUNTIME_MAX: usize = 80;
 
+/// Windows: endpoints are named pipes (`seagent_core::platform::ipc::pipe_name`), whose
+/// names are fixed-length hashes of the path, so the runtime directory never has to move.
+#[cfg(not(unix))]
+fn short_runtime(dir: PathBuf) -> PathBuf {
+    dir
+}
+
+#[cfg(unix)]
 fn short_runtime(dir: PathBuf) -> PathBuf {
     use std::os::unix::ffi::OsStrExt;
     use std::os::unix::fs::{DirBuilderExt, MetadataExt};
@@ -1221,6 +1230,7 @@ model = "zai/glm-5.3"
     }
 
     #[test]
+    #[cfg(unix)]
     fn deep_runtime_dir_is_shortened_deterministically() {
         let short = PathBuf::from("/home/u/.local/share/seagent/run");
         assert_eq!(short_runtime(short.clone()), short);

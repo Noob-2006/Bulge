@@ -9,7 +9,6 @@ use crate::util::{atomic_write, new_id, unix_now};
 use seagent_core::Block;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::fs::{File, OpenOptions};
-use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 
@@ -43,18 +42,14 @@ pub fn read_list<T: DeserializeOwned>(path: &Path) -> Result<Vec<T>, String> {
 struct FileLock<'a>(&'a File);
 impl<'a> FileLock<'a> {
     fn new(f: &'a File) -> Result<Self, String> {
-        // SAFETY: blocking flock on an fd we own.
-        if unsafe { libc::flock(f.as_raw_fd(), libc::LOCK_EX) } != 0 {
-            return Err(std::io::Error::last_os_error().to_string());
-        }
+        // Blocking flock(LOCK_EX) on Unix, LockFileEx on Windows.
+        f.lock().map_err(|e| e.to_string())?;
         Ok(FileLock(f))
     }
 }
 impl Drop for FileLock<'_> {
     fn drop(&mut self) {
-        unsafe {
-            libc::flock(self.0.as_raw_fd(), libc::LOCK_UN);
-        }
+        let _ = self.0.unlock();
     }
 }
 

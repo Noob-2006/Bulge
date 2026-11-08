@@ -1,5 +1,10 @@
 //! The only two gates: Egress (data leaving the machine) and Privilege
 //! (needs root / touches the system). Everything else is allowed.
+//!
+//! The Linux / Unix rules below apply everywhere; on Windows and macOS the gate also consults
+//! that system's own paths and admin commands (`gate/os.rs`), and only there.
+
+mod os;
 
 use crate::shell::{self, Simple};
 use crate::vault::Vault;
@@ -233,6 +238,18 @@ const SYSTEM_PREFIXES: &[&str] = &["/etc", "/usr", "/bin", "/sbin", "/lib", "/li
 const SAFE_DEV: &[&str] = &["/dev/null", "/dev/stdout", "/dev/stderr", "/dev/tty", "/dev/zero", "/dev/random", "/dev/urandom", "/dev/shm"];
 
 pub fn system_path(p: &str) -> bool {
+    if cfg!(windows) && os::windows_system_path(p) {
+        return true;
+    }
+    if cfg!(target_os = "macos") {
+        if let Some(v) = os::macos_system_path(&normalize(p)) {
+            return v;
+        }
+    }
+    unix_system_path(p)
+}
+
+fn unix_system_path(p: &str) -> bool {
     let p = normalize(p);
     if p == "/" {
         return true;
@@ -288,6 +305,8 @@ pub fn sensitive_path(p: &str) -> bool {
         || name.ends_with(".pfx")
         || name.ends_with(".kdbx")
         || name.contains("credential")
+        || (cfg!(windows) && os::windows_sensitive_path(&lower))
+        || (cfg!(target_os = "macos") && os::macos_sensitive_path(&lower))
 }
 
 fn patterns() -> &'static [(Regex, &'static str)] {
@@ -381,6 +400,17 @@ pub fn privileged(cmds: &[Simple]) -> Option<String> {
         };
         if reason.is_some() {
             return reason;
+        }
+        // The same question in Windows / macOS terms (only on that system).
+        let native = if cfg!(windows) {
+            os::windows_privileged(c)
+        } else if cfg!(target_os = "macos") {
+            os::macos_privileged(c)
+        } else {
+            None
+        };
+        if native.is_some() {
+            return native;
         }
         if matches!(n, "rm" | "mv" | "cp" | "ln" | "chmod" | "chown" | "chgrp" | "tee" | "install" | "touch" | "mkdir" | "rmdir" | "truncate" | "shred" | "rsync" | "sed" | "unlink" | "patch") {
             let is_sed_in_place = n != "sed" || args.iter().any(|a| a.starts_with("-i") || *a == "--in-place");

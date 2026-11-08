@@ -13,7 +13,6 @@ use crate::kernel::{EndReason, Kernel, RunOpts};
 use serde::Serialize;
 use serde_json::json;
 use std::collections::HashMap;
-use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
@@ -434,22 +433,30 @@ impl TickLock {
     fn try_take(path: &Path) -> Option<TickLock> {
         std::fs::create_dir_all(path.parent()?).ok()?;
         let f = std::fs::OpenOptions::new().create(true).truncate(false).write(true).open(path).ok()?;
-        // SAFETY: non-blocking flock on an fd we own.
-        (unsafe { libc::flock(f.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0).then_some(TickLock(f))
+        // Non-blocking flock(LOCK_EX | LOCK_NB) on Unix, LockFileEx on Windows.
+        f.try_lock().is_ok().then_some(TickLock(f))
     }
 }
 impl Drop for TickLock {
     fn drop(&mut self) {
-        unsafe {
-            libc::flock(self.0.as_raw_fd(), libc::LOCK_UN);
-        }
+        let _ = self.0.unlock();
     }
 }
 
+/// (MemTotal, MemAvailable) in kB.
+#[cfg(any(target_os = "linux", target_os = "android"))]
 fn mem_sample() -> Option<(u64, u64)> {
     let s = std::fs::read_to_string("/proc/meminfo").ok()?;
     let get = |k: &str| s.lines().find(|l| l.starts_with(k)).and_then(|l| l.split_whitespace().nth(1)).and_then(|v| v.parse::<u64>().ok());
     Some((get("MemTotal:")?, get("MemAvailable:")?))
+}
+
+/// (total, available) in kB from the platform layer; `None` where the OS reports no
+/// available-memory figure (macOS), which reads as "unknown" pressure.
+#[cfg(not(any(target_os = "linux", target_os = "android")))]
+fn mem_sample() -> Option<(u64, u64)> {
+    use seagent_core::platform::sysinfo;
+    Some((sysinfo::total_memory()? / 1024, sysinfo::available_memory()? / 1024))
 }
 /// MemTotal / 512 MiB clamped to 2..=8; None when unknown.
 pub fn derived_max_in_progress() -> Option<usize> {

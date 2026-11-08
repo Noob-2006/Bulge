@@ -75,11 +75,23 @@ fn audit(data: &Path, kind: &str, p: &Value, target: &str, outcome: &str, detail
 
 fn write_atomic(path: &Path, bytes: &[u8], mode: u32) -> Result<(), String> {
     use std::io::Write;
-    use std::os::unix::fs::OpenOptionsExt;
     let dir = path.parent().ok_or("no parent directory")?;
     std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
     let tmp = dir.join(format!(".{}.{}", path.file_name().and_then(|n| n.to_str()).unwrap_or("x"), std::process::id()));
-    let mut f = std::fs::OpenOptions::new().create(true).truncate(true).write(true).mode(mode).open(&tmp).map_err(|e| format!("{}: {e}", tmp.display()))?;
+    #[cfg(unix)]
+    let opened = {
+        use std::os::unix::fs::OpenOptionsExt;
+        std::fs::OpenOptions::new().create(true).truncate(true).write(true).mode(mode).open(&tmp)
+    };
+    // Windows: no mode bits; private files (mode without group/other bits) get the owner-only
+    // DACL, the rest inherit the directory's ACL like a 0644 file would be readable.
+    #[cfg(not(unix))]
+    let opened = if mode & 0o077 == 0 {
+        seagent_core::platform::fs_private::open_private(&tmp, seagent_core::platform::fs_private::OpenMode::Truncate)
+    } else {
+        std::fs::OpenOptions::new().create(true).truncate(true).write(true).open(&tmp)
+    };
+    let mut f = opened.map_err(|e| format!("{}: {e}", tmp.display()))?;
     f.write_all(bytes).and_then(|_| f.sync_all()).map_err(|e| e.to_string())?;
     std::fs::rename(&tmp, path).map_err(|e| format!("{}: {e}", path.display()))
 }
@@ -735,8 +747,11 @@ mod tests {
         assert!(remote_add(d.path(), Remote { name: "far".into(), url: "https://x".into(), token_secret: "{{secret:T}}".into(), admin_secret: String::new(), added_ms: 0 }).is_err());
         remote_add(d.path(), Remote { name: "far".into(), url: "https://far.example:8640".into(), token_secret: "FAR_TOKEN".into(), admin_secret: String::new(), added_ms: 0 }).unwrap();
         assert_eq!(remotes(d.path()).len(), 1);
-        use std::os::unix::fs::PermissionsExt;
-        assert_eq!(std::fs::metadata(remotes_path(d.path())).unwrap().permissions().mode() & 0o777, 0o600);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(std::fs::metadata(remotes_path(d.path())).unwrap().permissions().mode() & 0o777, 0o600);
+        }
         assert!(remote_remove(d.path(), "far").unwrap());
         assert!(!remote_remove(d.path(), "far").unwrap());
     }

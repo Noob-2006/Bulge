@@ -190,15 +190,28 @@ impl Pool {
     fn spawn(&self, idx: usize, slot: &mut Slot) {
         let mut cmd = Command::new(&self.command[0]);
         cmd.args(&self.command[1..]).envs(self.env.iter().map(|(k, v)| (k, v))).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::inherit());
-        use std::os::unix::process::CommandExt;
-        // SAFETY: prctl is async-signal-safe; no allocation between fork and exec.
-        unsafe {
-            cmd.pre_exec(|| {
-                libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM as libc::c_ulong, 0, 0, 0);
-                Ok(())
-            });
+        #[cfg(any(target_os = "linux", target_os = "android"))]
+        {
+            use std::os::unix::process::CommandExt;
+            // SAFETY: prctl is async-signal-safe; no allocation between fork and exec.
+            unsafe {
+                cmd.pre_exec(|| {
+                    libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM as libc::c_ulong, 0, 0, 0);
+                    Ok(())
+                });
+            }
         }
-        match cmd.spawn() {
+        // Windows: a kill-on-close Job Object is the parent-death tie (macOS has none; the
+        // worker also exits on stdin EOF, which a dead daemon produces).
+        match cmd.spawn().and_then(|c| match seagent_core::platform::proc::adopt(&c) {
+            Ok(()) => Ok(c),
+            Err(e) => {
+                let mut c = c;
+                let _ = c.kill();
+                let _ = c.wait();
+                Err(e)
+            }
+        }) {
             Ok(mut c) => {
                 slot.gen += 1;
                 slot.pid = c.id();
@@ -334,6 +347,8 @@ impl Pool {
             }).collect()
         };
         let until = Instant::now() + Duration::from_secs(3);
+        // Windows has no SIGTERM: the stdin EOF above is the polite stop, `kill` the fallback.
+        #[cfg(unix)]
         for c in &children {
             // SAFETY: signalling a child we spawned and have not reaped yet (pid is ours).
             unsafe { libc::kill(c.id() as libc::pid_t, libc::SIGTERM) };
@@ -370,6 +385,7 @@ impl Drop for Pool {
 }
 
 #[cfg(test)]
+#[cfg(unix)] // the fake worker is a POSIX sh script
 mod tests {
     use super::*;
 

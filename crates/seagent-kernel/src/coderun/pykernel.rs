@@ -10,14 +10,13 @@
 //! `\n<SENTINEL> <byte-length>\n<json>` with a per-kernel random sentinel. Bytes outside frames
 //! are raw fd output attributed to the running cell (calls are serialised per kernel).
 
+use super::callsock::{self, CallListener};
 use super::{kill_group, serve, Budget, Nested};
 use seagent_core::{Cancel, ToolOutput};
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::io::{Read, Write};
-use std::os::unix::net::UnixListener;
-use std::os::unix::process::CommandExt;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
@@ -40,8 +39,13 @@ def seagent_call(tool, input=None, **kw):
     """Call an seagent tool; returns its output text, raises RuntimeError on a tool error."""
     if input is None:
         input = kw
-    s = socket.socket(socket.AF_UNIX)
-    s.connect(os.environ["SEAGENT_CALL_SOCK"])
+    a = os.environ["SEAGENT_CALL_SOCK"]
+    if a.startswith("tcp:"):
+        h, _, p = a[4:].rpartition(":")
+        s = socket.create_connection((h, int(p)))
+    else:
+        s = socket.socket(socket.AF_UNIX)
+        s.connect(a)
     s.sendall((json.dumps({"token": os.environ["SEAGENT_CALL_TOKEN"], "tool": tool, "input": input}) + "\n").encode())
     r = json.loads(s.makefile().readline())
     s.close()
@@ -77,7 +81,8 @@ pub struct Kernel {
     out: mpsc::Receiver<Vec<u8>>,
     nested: mpsc::Receiver<Nested>,
     sentinel: String,
-    sock: PathBuf,
+    /// The `SEAGENT_CALL_SOCK` value (socket path, or `tcp:` address on Windows).
+    sock: String,
     done: Arc<AtomicBool>,
     last_used: Instant,
     cells: u64,
@@ -88,8 +93,8 @@ impl Drop for Kernel {
         kill_group(self.child.id() as i32);
         let _ = self.child.wait();
         self.done.store(true, Ordering::SeqCst);
-        let _ = std::os::unix::net::UnixStream::connect(&self.sock);
-        let _ = std::fs::remove_file(&self.sock);
+        let _ = callsock::connect(&self.sock);
+        callsock::cleanup(&self.sock);
     }
 }
 
@@ -117,35 +122,35 @@ pub fn live() -> usize {
 fn spawn(runtime_dir: &Path, ws: &Path, path_env: &str) -> Result<Kernel, String> {
     let token = crate::util::random_hex(32);
     let sentinel = format!("SEAGENT-KERNEL-{}", crate::util::random_hex(16));
-    let sock = runtime_dir.join(format!("kernel-{}.sock", crate::util::random_hex(8)));
-    let listener = UnixListener::bind(&sock).map_err(|e| format!("cannot bind {}: {e}", sock.display()))?;
+    let listener = CallListener::bind(runtime_dir, "kernel")?;
+    let sock = listener.addr().to_string();
     let (ntx, nrx) = mpsc::channel::<Nested>();
     let tok = token.clone();
     let done = Arc::new(AtomicBool::new(false));
     let done2 = done.clone();
-    std::thread::spawn(move || {
-        for conn in listener.incoming() {
-            let Ok(conn) = conn else { break };
-            if done2.load(Ordering::SeqCst) {
-                break;
-            }
-            let tx = ntx.clone();
-            let tok = tok.clone();
-            std::thread::spawn(move || serve(conn, &tok, tx));
+    std::thread::spawn(move || loop {
+        let Ok(conn) = listener.accept() else { break };
+        if done2.load(Ordering::SeqCst) {
+            break;
         }
+        let tx = ntx.clone();
+        let tok = tok.clone();
+        std::thread::spawn(move || serve(conn, &tok, tx));
     });
-    let mut cmd = Command::new("python3");
+    let mut cmd = Command::new(super::python_program());
     cmd.env_clear().envs(super::env::child_env()).arg("-u").arg("-c").arg(RUNNER).current_dir(ws).env("PATH", path_env).env("SEAGENT_CALL_SOCK", &sock).env("SEAGENT_CALL_TOKEN", &token).env("SEAGENT_KERNEL_SENTINEL", &sentinel);
     cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
-    // SAFETY: setpgid only (the runner watches its parent pid itself: PDEATHSIG is bound to the
+    // Unix: setpgid only (the runner watches its parent pid itself: PDEATHSIG is bound to the
     // spawning thread, and kernels outlive the turn thread that started them).
-    unsafe {
-        cmd.pre_exec(|| {
-            libc::setpgid(0, 0);
-            Ok(())
-        });
-    }
+    // Windows: a new process group plus a kill-on-close Job Object (not thread-bound, so it
+    // also covers a seagent that dies without running drop handlers).
+    seagent_core::platform::proc::new_group(&mut cmd, false);
     let mut child = cmd.spawn().map_err(|e| format!("cannot start python3: {e}"))?;
+    if let Err(e) = seagent_core::platform::proc::adopt(&child) {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err(format!("cannot tie python3 to seagent: {e}"));
+    }
     let stdin = child.stdin.take().ok_or("no stdin")?;
     let (otx, orx) = mpsc::channel::<Vec<u8>>();
     for r in [child.stdout.take().map(|s| Box::new(s) as Box<dyn Read + Send>), child.stderr.take().map(|s| Box::new(s) as Box<dyn Read + Send>)].into_iter().flatten() {

@@ -456,7 +456,10 @@ pub fn presence_path(data: &Path) -> PathBuf {
 /// Refresh this process's presence entry (`seagent system presence`; OpenClaw `system-presence`).
 pub fn touch_presence(data: &Path, mode: &str) {
     let pid = std::process::id();
+    #[cfg(any(target_os = "linux", target_os = "android"))]
     let host = std::fs::read_to_string("/proc/sys/kernel/hostname").map(|h| h.trim().to_string()).unwrap_or_default();
+    #[cfg(not(any(target_os = "linux", target_os = "android")))]
+    let host = seagent_core::platform::sysinfo::hostname();
     let _ = crate::automation::with_list(&presence_path(data), |v: &mut Vec<Value>| {
         v.retain(|e| e["pid"].as_u64() != Some(pid as u64) && e["ts"].as_i64().is_some_and(|t| unix_now() - t < 7 * 86_400));
         v.push(json!({"mode": mode, "pid": pid, "host": host, "version": env!("CARGO_PKG_VERSION"), "platform": format!("{} {}", std::env::consts::OS, std::env::consts::ARCH), "ts": unix_now()}));
@@ -472,7 +475,10 @@ pub fn presence(data: &Path) -> Vec<Value> {
         .map(|mut e| {
             let pid = e["pid"].as_u64().unwrap_or(0) as i32;
             let fresh = e["ts"].as_i64().is_some_and(|t| now - t < 300);
+            #[cfg(unix)]
             let alive = pid > 0 && unsafe { libc::kill(pid, 0) } == 0;
+            #[cfg(not(unix))]
+            let alive = pid > 0 && seagent_core::platform::proc::alive(pid);
             e["alive"] = json!(alive && fresh);
             e["age_secs"] = json!(e["ts"].as_i64().map(|t| now - t));
             e

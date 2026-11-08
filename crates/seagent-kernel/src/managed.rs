@@ -96,6 +96,7 @@ fn files_in(dir: &Path) -> Vec<PathBuf> {
 }
 
 /// Refuse a policy file a non-root user could have written. Only enforced for `/etc/seagent`.
+#[cfg(unix)]
 fn check_owner(p: &Path) -> Result<(), String> {
     use std::os::unix::fs::MetadataExt;
     if !p.starts_with(SYSTEM_DIR) {
@@ -106,6 +107,16 @@ fn check_owner(p: &Path) -> Result<(), String> {
         return Err(format!("{}: managed policy must be owned by root and not group/world-writable", p.display()));
     }
     Ok(())
+}
+
+/// No uid / mode bits here: a system policy file whose ownership cannot be proven is refused
+/// rather than trusted (an explicit error, never a silent pass).
+#[cfg(not(unix))]
+fn check_owner(p: &Path) -> Result<(), String> {
+    if !p.starts_with(SYSTEM_DIR) {
+        return Ok(());
+    }
+    Err(format!("{}: managed policy ownership cannot be verified on {} (no root-owned check is implemented for its ACLs yet)", p.display(), std::env::consts::OS))
 }
 
 /// `[managed]` keys only the system files may set (never a cluster bundle).

@@ -136,4 +136,5 @@ pub(crate) fn workspace_of(k: &Kernel, session: Option<&str>) -> PathBuf {
 }
 
 #[cfg(test)]
+#[cfg(unix)] // fake toolchains are `#!/bin/sh` scripts with the executable bit
 mod tests;

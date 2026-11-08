@@ -31,11 +31,20 @@
 //!   replace keeping secrets out of the VM — the broker injects them at the boundary. See
 //!   `docs/SECURITY.md`.
 
+//!
+//! Per OS (docs/cross-platform.md): `keyring` is Secret Service on Linux, the login Keychain on
+//! macOS and DPAPI on Windows (see `keyring.rs`); `tpm` is Linux-only (systemd-creds); on
+//! Android / iOS the host app holds the key (Keystore / Keychain) and hands it over as
+//! `SEAGENT_VAULT_KEY`, so `env` or `passphrase` are the backends there.
+
+mod keyring;
+
 use seagent_security::secretbox;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fs;
 use std::io::Write;
+#[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -114,6 +123,11 @@ impl Backend {
     /// Human sentence for `seagent secrets backend` / `seagent doctor`.
     pub fn explain(self) -> &'static str {
         match self {
+            #[cfg(target_os = "macos")]
+            Backend::Keyring => "encrypted, key in the OS keyring (the macOS login Keychain)",
+            #[cfg(windows)]
+            Backend::Keyring => "encrypted, key sealed with Windows DPAPI for this account (secrets.dpapi)",
+            #[cfg(not(any(target_os = "macos", windows)))]
             Backend::Keyring => "encrypted, key in the OS keyring (Secret Service via secret-tool)",
             Backend::Tpm => "encrypted, data key sealed to the TPM (systemd-creds --with-key=tpm2)",
             Backend::Passphrase => "encrypted, key derived from the passphrase (PBKDF2-HMAC-SHA256)",
@@ -263,8 +277,24 @@ fn which_on_path(name: &str) -> Option<PathBuf> {
     std::env::split_paths(&path).map(|d| d.join(name)).find(|p| p.is_file() && is_executable(p))
 }
 
+#[cfg(unix)]
 fn is_executable(p: &Path) -> bool {
     fs::metadata(p).map(|m| m.permissions().mode() & 0o111 != 0).unwrap_or(false)
+}
+
+/// No execute bit: an existing file is runnable as far as the store is concerned.
+#[cfg(not(unix))]
+fn is_executable(p: &Path) -> bool {
+    p.is_file()
+}
+
+/// The OS key holder for the `keyring` backend (see `keyring.rs`). A configured stand-in
+/// `secret-tool` that does not exist means "not usable here", as for the other tools.
+fn keyring_holder(opts: &Options, store: &Path) -> Option<keyring::Holder> {
+    match &opts.keyring_tool {
+        Some(_) => tool(opts, KeyringTool::SecretService).map(|t| keyring::Holder::SecretTool(t)),
+        None => keyring::holder(None, which_on_path, store),
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -285,16 +315,24 @@ pub fn tpm_available(opts: &Options) -> bool {
 /// opens (and in every test that opens one). Only a root service gets it silently; other
 /// users can still choose it explicitly with `SEAGENT_VAULT_BACKEND=tpm` (§0: no prompt storms).
 fn tpm_without_prompt() -> bool {
-    // SAFETY: geteuid has no preconditions and cannot fail.
-    unsafe { libc::geteuid() == 0 }
+    #[cfg(unix)]
+    {
+        // SAFETY: geteuid has no preconditions and cannot fail.
+        unsafe { libc::geteuid() == 0 }
+    }
+    #[cfg(not(unix))]
+    {
+        false
+    }
 }
 
-/// Is the `keyring` backend usable (the libsecret CLI, which needs a session bus to work)?
+/// Is the `keyring` backend usable (the libsecret CLI, which needs a session bus to work;
+/// the Keychain CLI on macOS; DPAPI on Windows)?
 pub fn keyring_available(opts: &Options) -> bool {
     // The CLI alone is not enough: Secret Service lives on the session D-Bus, which a headless
     // or SSH login does not have (secret-tool then fails with "Cannot spawn a message bus").
     // A configured stand-in tool (tests) is taken as is.
-    tool(opts, KeyringTool::SecretService).is_some() && (opts.keyring_tool.is_some() || session_bus())
+    keyring_holder(opts, Path::new("")).is_some_and(|h| !h.needs_session_bus() || opts.keyring_tool.is_some() || session_bus())
 }
 
 fn session_bus() -> bool {
@@ -348,10 +386,17 @@ impl Store {
                 store.notes.push(format!("{} was migrated to {} ({}), the plaintext file was removed", plaintext.display(), store.path.display(), backend.as_str()));
             } else {
                 store.notes.push(format!("secrets stay in plaintext at {} — no key source (keyring, TPM, passphrase, {}); see `seagent secrets backend`", plaintext.display(), ENV_KEY));
-                let mode = fs::metadata(plaintext).map(|m| m.permissions().mode() & 0o777).unwrap_or(0);
-                if mode & 0o077 != 0 {
-                    return Err(format!("{} must not be readable by group/others (chmod 600)", plaintext.display()));
+                #[cfg(unix)]
+                {
+                    let mode = fs::metadata(plaintext).map(|m| m.permissions().mode() & 0o777).unwrap_or(0);
+                    if mode & 0o077 != 0 {
+                        return Err(format!("{} must not be readable by group/others (chmod 600)", plaintext.display()));
+                    }
                 }
+                // No mode bits to check: make the plaintext file owner-only instead (an
+                // explicit error when that fails, never a silently readable file).
+                #[cfg(not(unix))]
+                seagent_core::platform::fs_private::set_private(plaintext).map_err(|e| format!("{} could not be made private to this account: {e}", plaintext.display()))?;
             }
         }
         Ok(store)
@@ -395,20 +440,24 @@ impl Store {
                 secretbox::derive_key(&pw, &self.salt, self.iterations).map(|k| k.to_vec())
             }
             Backend::Keyring => {
-                let t = tool(&self.opts, KeyringTool::SecretService).ok_or_else(|| "secret-tool is not installed (apt install libsecret-tools), so the keyring store cannot be opened".to_string())?;
+                let t = keyring_holder(&self.opts, &self.path).ok_or_else(|| format!("{}, so the keyring store cannot be opened", keyring::missing()))?;
                 let detail = |e: String| if e.trim().is_empty() { String::new() } else { format!(" ({})", e.trim()) };
                 let account = keyring_account(&self.path);
-                let found = |service: &str, account: &str| run(&t, &["lookup", "service", service, "account", account], None).ok().and_then(|o| String::from_utf8(o).ok()).filter(|s| !s.trim().is_empty());
+                let found = |service: &str, account: &str| t.lookup(service, account).ok().filter(|s| !s.trim().is_empty());
                 if found(KEYRING_SERVICE, &account).is_none() {
                     if let Some(old) = found(LEGACY_KEYRING_SERVICE, &keyring_account(&legacy_store_path(&self.path))) {
                         // Pre-rename entry: copy it under the current name (the old one stays).
-                        let _ = store_in_keyring(&t, &account, old.trim());
+                        let _ = t.store(&account, old.trim());
                         return secretbox::parse_key(old.trim()).map(|k| k.to_vec());
                     }
                 }
-                let out = run(&t, &["lookup", "service", KEYRING_SERVICE, "account", &account], None)
-                    .map_err(|e| format!("no keyring entry for {} — the key was deleted or the login keyring is locked{}", self.path.display(), detail(e)))?;
-                let s = String::from_utf8(out).map_err(|_| "the keyring returned non-UTF-8 data".to_string())?;
+                let s = t.lookup(KEYRING_SERVICE, &account).map_err(|e| {
+                    if e.contains("non-UTF-8") {
+                        e
+                    } else {
+                        format!("no keyring entry for {} — the key was deleted or the login keyring is locked{}", self.path.display(), detail(e))
+                    }
+                })?;
                 if s.trim().is_empty() {
                     return Err(format!("no keyring entry for {} — the key was deleted or the login keyring is locked", self.path.display()));
                 }
@@ -445,21 +494,19 @@ impl Store {
                 Ok(())
             }
             Backend::Keyring => {
-                let t = tool(&self.opts, KeyringTool::SecretService).ok_or_else(|| "secret-tool is not installed (apt install libsecret-tools)".to_string())?;
+                let t = keyring_holder(&self.opts, &self.path).ok_or_else(|| keyring::missing().to_string())?;
                 let account = keyring_account(&self.path);
-                if let Ok(out) = run(&t, &["lookup", "service", KEYRING_SERVICE, "account", &account], None) {
-                    if let Ok(s) = String::from_utf8(out) {
-                        if !s.trim().is_empty() {
-                            self.key = secretbox::parse_key(s.trim())?.to_vec();
-                            return Ok(());
-                        }
+                if let Ok(s) = t.lookup(KEYRING_SERVICE, &account) {
+                    if !s.trim().is_empty() {
+                        self.key = secretbox::parse_key(s.trim())?.to_vec();
+                        return Ok(());
                     }
                 }
                 if !provisioning {
                     return Err("no keyring entry and this is not a new store".into());
                 }
                 let key = secretbox::random_key()?;
-                store_in_keyring(&t, &account, &secretbox::hex(&key))?;
+                t.store(&account, &secretbox::hex(&key))?;
                 self.key = key.to_vec();
                 Ok(())
             }
@@ -599,7 +646,7 @@ impl Store {
             Err(e) => {
                 self.notes.push(format!("could not remove {} ({e}); delete it by hand", self.legacy.display()));
                 // A plaintext file left behind must at least stay private.
-                let _ = fs::set_permissions(&self.legacy, fs::Permissions::from_mode(0o600));
+                let _ = seagent_core::platform::fs_private::set_private(&self.legacy);
             }
         }
     }
@@ -626,7 +673,12 @@ fn parse_plaintext(path: &Path, text: &str) -> Result<BTreeMap<String, String>, 
 fn pick_backend(plaintext: &Path, opts: &Options, notes: &mut Vec<String>) -> Result<Backend, String> {
     if let Some(b) = opts.backend {
         return match b {
-            Backend::Keyring if !keyring_available(opts) => Err("the keyring backend needs the secret-tool CLI (apt install libsecret-tools) and a desktop login session (D-Bus); on a server use tpm or passphrase".into()),
+            Backend::Keyring if !keyring_available(opts) => Err(if cfg!(any(target_os = "macos", windows, target_os = "android", target_os = "ios")) && opts.keyring_tool.is_none() {
+                format!("the keyring backend is not usable here: {}; use passphrase or env", keyring::missing())
+            } else {
+                "the keyring backend needs the secret-tool CLI (apt install libsecret-tools) and a desktop login session (D-Bus); on a server use tpm or passphrase".into()
+            }),
+            Backend::Tpm if !tpm_available(opts) && !cfg!(target_os = "linux") => Err(format!("the tpm backend is Linux-only (systemd-creds --with-key=tpm2) and not available on {}; use keyring, passphrase or env", std::env::consts::OS)),
             Backend::Tpm if !tpm_available(opts) => Err(format!("the tpm backend needs systemd-creds and a TPM device; {} is not usable here", key_path(plaintext).display())),
             Backend::Env if opts.key.is_none() => Err(format!("{ENV_KEY} is not set (32 bytes, hex or base64)")),
             Backend::Passphrase if opts.passphrase.is_none() => Err(format!("set {ENV_PASSPHRASE_FILE} (a 0600 file holding the passphrase) or {ENV_PASSPHRASE}")),
@@ -725,9 +777,9 @@ pub fn rekey(plaintext: &Path, old: &Options, new: &Options) -> Result<(usize, B
     let result = (|| -> Result<(), String> {
         match backend {
             Backend::Keyring => {
-                let t = tool(&store.opts, KeyringTool::SecretService).ok_or("secret-tool is not installed")?;
+                let t = keyring_holder(&store.opts, &store.path).ok_or_else(|| keyring::missing().to_string())?;
                 let key = secretbox::random_key()?;
-                store_in_keyring(&t, &keyring_account(&store.path), &secretbox::hex(&key))?;
+                t.store(&keyring_account(&store.path), &secretbox::hex(&key))?;
                 store.key = key.to_vec();
             }
             Backend::Tpm => {
@@ -843,10 +895,19 @@ fn write_private(path: &Path, bytes: &[u8]) -> Result<(), String> {
         fs::create_dir_all(d).map_err(|e| format!("{}: {e}", d.display()))?;
     }
     crate::util::atomic_write(path, bytes).map_err(|e| e.to_string())?;
-    fs::set_permissions(path, fs::Permissions::from_mode(0o600)).map_err(|e| e.to_string())
+    #[cfg(unix)]
+    {
+        fs::set_permissions(path, fs::Permissions::from_mode(0o600)).map_err(|e| e.to_string())
+    }
+    // Windows: the protected owner-only DACL (the parent is the per-user profile directory).
+    #[cfg(not(unix))]
+    {
+        seagent_core::platform::fs_private::set_private(path).map_err(|e| e.to_string())
+    }
 }
 
 #[cfg(test)]
+#[cfg(unix)] // stand-in tools are `#!/bin/sh` scripts; modes are checked
 mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;

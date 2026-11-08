@@ -366,26 +366,48 @@ impl StoreLock {
         std::fs::OpenOptions::new().create(true).truncate(false).write(true).open(base.join(".lock")).map_err(|e| e.to_string())
     }
     fn shared(base: &Path) -> Result<StoreLock, String> {
-        use std::os::unix::io::AsRawFd;
         let f = Self::open(base)?;
-        // SAFETY: flock on an fd we own; released when it closes.
-        unsafe { libc::flock(f.as_raw_fd(), libc::LOCK_SH) };
+        // flock(LOCK_SH) on Unix (LockFileEx on Windows); released when the file closes.
+        // Best effort, as before: a failed lock does not stop the snapshot.
+        let _ = f.lock_shared();
         Ok(StoreLock { _file: f })
     }
     fn exclusive(base: &Path) -> Result<StoreLock, String> {
-        use std::os::unix::io::AsRawFd;
         let f = Self::open(base)?;
-        // SAFETY: as above.
-        if unsafe { libc::flock(f.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+        // flock(LOCK_EX | LOCK_NB) on Unix.
+        if f.try_lock().is_err() {
             return Err(format!("checkpoint store is busy: {}", base.display()));
         }
         Ok(StoreLock { _file: f })
     }
 }
 
+#[cfg(unix)]
 fn dir_identity(p: &Path) -> Option<(u64, u64)> {
     use std::os::unix::fs::MetadataExt;
     std::fs::metadata(p).ok().map(|m| (m.dev(), m.ino()))
+}
+
+/// Windows: volume serial number + file index (the NTFS equivalent of device + inode),
+/// read through `GetFileInformationByHandle` on a directory handle.
+#[cfg(windows)]
+fn dir_identity(p: &Path) -> Option<(u64, u64)> {
+    use std::os::windows::fs::OpenOptionsExt;
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Storage::FileSystem::{GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION, FILE_FLAG_BACKUP_SEMANTICS};
+    // FILE_FLAG_BACKUP_SEMANTICS is what lets CreateFileW open a directory.
+    let f = std::fs::OpenOptions::new().read(true).custom_flags(FILE_FLAG_BACKUP_SEMANTICS).open(p).ok()?;
+    // SAFETY: zeroed POD out-parameter; valid handle owned by `f`.
+    let mut info: BY_HANDLE_FILE_INFORMATION = unsafe { std::mem::zeroed() };
+    if unsafe { GetFileInformationByHandle(f.as_raw_handle() as _, &mut info) } == 0 {
+        return None;
+    }
+    Some((info.dwVolumeSerialNumber as u64, ((info.nFileIndexHigh as u64) << 32) | info.nFileIndexLow as u64))
+}
+
+#[cfg(not(any(unix, windows)))]
+fn dir_identity(_p: &Path) -> Option<(u64, u64)> {
+    None
 }
 
 pub fn dir_size(p: &Path) -> u64 {

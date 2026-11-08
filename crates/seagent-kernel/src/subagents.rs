@@ -453,11 +453,10 @@ fn ledger_path(data: &Path) -> PathBuf {
 }
 
 fn ledger_lock(data: &Path) -> Option<std::fs::File> {
-    use std::os::unix::io::AsRawFd;
     let _ = std::fs::create_dir_all(data);
     let f = std::fs::OpenOptions::new().create(true).truncate(false).write(true).open(data.join("subagents.lock")).ok()?;
-    // SAFETY: flock on a valid fd; released on close.
-    unsafe { libc::flock(f.as_raw_fd(), libc::LOCK_EX) };
+    // flock(LOCK_EX) on Unix, LockFileEx on Windows; released on close.
+    let _ = f.lock();
     Some(f)
 }
 
@@ -482,8 +481,15 @@ fn ledger_row(r: &Rec) -> LedgerRow {
 }
 
 fn pid_alive(pid: u32) -> bool {
-    // SAFETY: signal 0 only checks for existence.
-    pid == std::process::id() || unsafe { libc::kill(pid as i32, 0) } == 0
+    #[cfg(unix)]
+    {
+        // SAFETY: signal 0 only checks for existence.
+        pid == std::process::id() || unsafe { libc::kill(pid as i32, 0) } == 0
+    }
+    #[cfg(not(unix))]
+    {
+        pid == std::process::id() || seagent_core::platform::proc::alive(pid as i32)
+    }
 }
 
 // ───────────────────────── live transcripts ─────────────────────────

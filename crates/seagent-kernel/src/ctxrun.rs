@@ -105,10 +105,10 @@ pub fn verify_message(cfg: &Config, st: &CtxState, session: &str, ws: &str, repl
 /// JSON on stdout keeps the turn going). Bounded, and a failure is never fatal.
 pub fn run_pre_verify(cmd: &str, session: &str, ws: &str, changed: &[String], attempt: u32, reply: &str) -> Option<String> {
     use std::io::Write;
-    use std::process::{Command, Stdio};
-    let mut child = Command::new("bash")
-        .arg("-c")
-        .arg(cmd)
+    use std::process::Stdio;
+    // `bash -c` (Windows: Git Bash / MSYS2; without one the hook is skipped, never fatal).
+    let mut child = crate::childproc::bash(cmd)
+        .ok()?
         .current_dir(ws)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())

@@ -9,16 +9,16 @@
 //! (`env`), and when the session's execution backend is not the local host the script runs
 //! inside it with a file-based call protocol (`remote`).
 
+mod callsock;
 mod env;
 pub mod pykernel;
 mod remote;
 
+use callsock::{CallConn, CallListener};
 use seagent_core::{Cancel, ToolOutput};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::io::{BufRead, BufReader, Read, Write};
-use std::os::unix::net::{UnixListener, UnixStream};
-use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::{mpsc, Arc, RwLock};
@@ -146,7 +146,7 @@ pub fn run_opts(runtime_dir: &Path, r: &RunReq, cancel: &Cancel, handle: &mut dy
             return ToolOutput::err(format!("cannot create runtime dir: {e}"));
         }
         let path = match shim_dir(runtime_dir) {
-            Ok(d) => format!("{}:{}", d.display(), std::env::var("PATH").unwrap_or_default()),
+            Ok(d) => prepend_path(&d),
             Err(e) => return ToolOutput::err(e),
         };
         let cell = pykernel::CellReq { code: r.script, session: r.session, workspace: r.workspace, timeout: r.timeout, reset: r.reset, max_kernels: cfg.max_kernels, idle_timeout: Duration::from_secs(cfg.kernel_idle_timeout_secs.max(1)), path_env: path };
@@ -203,11 +203,11 @@ fn run_local(runtime_dir: &Path, script: &str, interp: &str, timeout: Duration, 
         return ToolOutput::err(format!("cannot create runtime dir: {e}"));
     }
     let token = crate::util::random_hex(32);
-    let sock = runtime_dir.join(format!("call-{}.sock", crate::util::random_hex(8)));
-    let listener = match UnixListener::bind(&sock) {
+    let listener = match CallListener::bind(runtime_dir, "call") {
         Ok(l) => l,
-        Err(e) => return ToolOutput::err(format!("cannot bind {}: {e}", sock.display())),
+        Err(e) => return ToolOutput::err(e),
     };
+    let sock = listener.addr().to_string();
     let _cleanup = Cleanup(sock.clone());
     let bin_dir = match shim_dir(runtime_dir) {
         Ok(d) => d,
@@ -217,36 +217,32 @@ fn run_local(runtime_dir: &Path, script: &str, interp: &str, timeout: Duration, 
     let tok = token.clone();
     let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let done2 = done.clone();
-    let accept = std::thread::spawn(move || {
-        for conn in listener.incoming() {
-            if done2.load(std::sync::atomic::Ordering::SeqCst) {
-                break;
-            }
-            let Ok(conn) = conn else { break };
-            let tx = tx.clone();
-            let tok = tok.clone();
-            std::thread::spawn(move || serve(conn, &tok, tx));
+    let accept = std::thread::spawn(move || loop {
+        let conn = listener.accept();
+        if done2.load(std::sync::atomic::Ordering::SeqCst) {
+            break;
         }
+        let Ok(conn) = conn else { break };
+        let tx = tx.clone();
+        let tok = tok.clone();
+        std::thread::spawn(move || serve(conn, &tok, tx));
     });
 
-    let path = format!("{}:{}", bin_dir.display(), std::env::var("PATH").unwrap_or_default());
-    let mut cmd = Command::new(interp);
+    let path = prepend_path(&bin_dir);
+    let mut cmd = match interp_command(interp, script) {
+        Ok(c) => c,
+        Err(e) => {
+            wake(&sock, &done);
+            let _ = accept.join();
+            return ToolOutput::err(e);
+        }
+    };
     cmd.env_clear().envs(env::child_env());
-    cmd.arg("-c").arg(script).current_dir(workspace).env("PATH", path).env("SEAGENT_CALL_SOCK", &sock).env("SEAGENT_CALL_TOKEN", &token).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
-    let parent = std::process::id() as i32;
-    // SAFETY: setpgid in the child before exec so the whole tree can be killed;
-    // PDEATHSIG so a SIGKILLed seagent doesn't leave the script running unobserved.
-    unsafe {
-        cmd.pre_exec(move || {
-            libc::setpgid(0, 0);
-            libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL);
-            if libc::getppid() != parent {
-                libc::_exit(137);
-            }
-            Ok(())
-        });
-    }
-    let mut child = match cmd.spawn() {
+    cmd.current_dir(workspace).env("PATH", path).env("SEAGENT_CALL_SOCK", &sock).env("SEAGENT_CALL_TOKEN", &token).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    // Own process group (the whole tree can be killed) + PDEATHSIG=SIGKILL, so a SIGKILLed
+    // seagent does not leave the script running unobserved (Windows: a kill-on-close job).
+    crate::childproc::tie(&mut cmd);
+    let mut child = match crate::childproc::spawn(&mut cmd) {
         Ok(c) => c,
         Err(e) => {
             wake(&sock, &done);
@@ -301,20 +297,52 @@ fn run_local(runtime_dir: &Path, script: &str, interp: &str, timeout: Duration, 
     }
 }
 
-struct Cleanup(PathBuf);
-impl Drop for Cleanup {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.0);
+/// `<bin_dir>` in front of our `PATH` (`:` on Unix, `;` on Windows).
+fn prepend_path(bin_dir: &Path) -> String {
+    let sep = if cfg!(windows) { ';' } else { ':' };
+    format!("{}{sep}{}", bin_dir.display(), std::env::var("PATH").unwrap_or_default())
+}
+
+/// The python interpreter: `python3` on Unix (as always). Windows installs usually have no
+/// `python3.exe` (or only the Store alias), so `python`, then the `py` launcher, are tried.
+pub(crate) fn python_program() -> PathBuf {
+    #[cfg(windows)]
+    {
+        use seagent_core::platform::layout::which;
+        which("python3").filter(|p| !p.to_string_lossy().to_ascii_lowercase().contains("\\windowsapps\\")).or_else(|| which("python")).or_else(|| which("py")).unwrap_or_else(|| PathBuf::from("python"))
+    }
+    #[cfg(not(windows))]
+    {
+        PathBuf::from("python3")
     }
 }
 
-/// Unblock `incoming()` so the accept thread exits.
-fn wake(sock: &Path, done: &std::sync::atomic::AtomicBool) {
-    done.store(true, std::sync::atomic::Ordering::SeqCst);
-    let _ = UnixStream::connect(sock);
+/// `interp -c script`. Unix: exactly `bash -c` / `python3 -c`. Windows: `bash` is the
+/// platform layer's bash (Git Bash / MSYS2); when the machine has only PowerShell a bash
+/// script cannot run, and the call says so instead of handing bash syntax to PowerShell.
+fn interp_command(interp: &str, script: &str) -> Result<Command, String> {
+    if interp == "bash" {
+        return crate::childproc::bash(script).map_err(|e| format!("lang=bash: {e} — use lang=python3"));
+    }
+    let mut c = if cfg!(windows) { Command::new(python_program()) } else { Command::new(interp) };
+    c.arg("-c").arg(script);
+    Ok(c)
 }
 
-pub(crate) fn serve(conn: UnixStream, token: &str, tx: mpsc::Sender<Nested>) {
+struct Cleanup(String);
+impl Drop for Cleanup {
+    fn drop(&mut self) {
+        callsock::cleanup(&self.0);
+    }
+}
+
+/// Unblock `accept()` so the accept thread exits.
+fn wake(sock: &str, done: &std::sync::atomic::AtomicBool) {
+    done.store(true, std::sync::atomic::Ordering::SeqCst);
+    let _ = callsock::connect(sock);
+}
+
+pub(crate) fn serve(conn: CallConn, token: &str, tx: mpsc::Sender<Nested>) {
     let mut w = match conn.try_clone() {
         Ok(w) => w,
         Err(_) => return,
@@ -361,18 +389,13 @@ fn reader<R: Read + Send + 'static>(r: Option<R>) -> std::thread::JoinHandle<Str
     })
 }
 
+/// SIGTERM, 300 ms, SIGKILL to the script's group (Windows: CTRL_BREAK, then its job).
 pub(crate) fn kill_group(pid: i32) {
-    // SAFETY: plain signal syscalls on our own child's process group.
-    unsafe {
-        libc::kill(-pid, libc::SIGTERM);
-    }
-    std::thread::sleep(Duration::from_millis(300));
-    unsafe {
-        libc::kill(-pid, libc::SIGKILL);
-    }
+    crate::childproc::term_then_kill(pid, Duration::from_millis(300));
 }
 
 /// `seagent-call` shim: a symlink to the running seagent binary.
+#[cfg(unix)]
 fn shim_dir(runtime_dir: &Path) -> Result<PathBuf, String> {
     let dir = runtime_dir.join("bin");
     let link = dir.join("seagent-call");
@@ -386,12 +409,46 @@ fn shim_dir(runtime_dir: &Path) -> Result<PathBuf, String> {
     Ok(dir)
 }
 
+/// `seagent-call.exe` shim. Windows: a file symlink when the account may create one
+/// (Developer Mode / the privilege), else a hard link (same volume), else a copy of the
+/// binary. A shim that already matches (same link target, or same size and not older) is kept.
+#[cfg(not(unix))]
+fn shim_dir(runtime_dir: &Path) -> Result<PathBuf, String> {
+    let dir = runtime_dir.join("bin");
+    let link = dir.join(format!("seagent-call{}", std::env::consts::EXE_SUFFIX));
+    let exe = std::env::var_os("SEAGENT_BIN").map(PathBuf::from).or_else(|| std::env::current_exe().ok()).ok_or("cannot locate seagent binary")?;
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let current = match (std::fs::symlink_metadata(&link), std::fs::metadata(&exe)) {
+        (Ok(l), _) if l.file_type().is_symlink() => std::fs::read_link(&link).ok().as_deref() == Some(exe.as_path()),
+        (Ok(l), Ok(e)) => l.len() == e.len() && l.modified().ok() >= e.modified().ok(),
+        _ => false,
+    };
+    if !current {
+        let tmp = dir.join(format!(".seagent-call-{}{}", crate::util::random_hex(6), std::env::consts::EXE_SUFFIX));
+        #[cfg(windows)]
+        let linked = std::os::windows::fs::symlink_file(&exe, &tmp).is_ok();
+        #[cfg(not(windows))]
+        let linked = false;
+        if !linked && std::fs::hard_link(&exe, &tmp).is_err() {
+            std::fs::copy(&exe, &tmp).map_err(|e| format!("cannot install the seagent-call shim in {}: {e}", dir.display()))?;
+        }
+        // Windows refuses to replace a running .exe: a shim busy in another script stays.
+        if let Err(e) = std::fs::rename(&tmp, &link) {
+            let _ = std::fs::remove_file(&tmp);
+            if !link.exists() {
+                return Err(e.to_string());
+            }
+        }
+    }
+    Ok(dir)
+}
+
 /// Client side, used by `seagent call` / `seagent-call`.
 pub fn client(tool: &str, input: &str) -> Result<String, String> {
     let sock = std::env::var("SEAGENT_CALL_SOCK").map_err(|_| "SEAGENT_CALL_SOCK not set: seagent-call only works inside the `run` tool")?;
     let token = std::env::var("SEAGENT_CALL_TOKEN").unwrap_or_default();
     let input: Value = if input.trim().is_empty() { json!({}) } else { serde_json::from_str(input).map_err(|e| format!("input is not JSON: {e}"))? };
-    let mut s = UnixStream::connect(&sock).map_err(|e| format!("connect {sock}: {e}"))?;
+    let mut s = callsock::connect(&sock).map_err(|e| format!("connect {sock}: {e}"))?;
     serde_json::to_writer(&mut s, &CallRequest { token, tool: tool.into(), input }).map_err(|e| e.to_string())?;
     s.write_all(b"\n").map_err(|e| e.to_string())?;
     let mut line = String::new();
@@ -416,6 +473,7 @@ mod tests {
 
     // Nested calls are exercised end-to-end through the real binary in the CLI
     // tests; here we drive the socket protocol directly.
+    #[cfg(unix)]
     #[test]
     fn script_output_exit_codes_and_nested_protocol() {
         let d = dir();
@@ -432,6 +490,7 @@ mod tests {
         assert_eq!(std::fs::read_dir(&d).unwrap().filter(|e| e.as_ref().unwrap().path().extension().is_some_and(|x| x == "sock")).count(), 0, "socket cleaned up");
     }
 
+    #[cfg(unix)]
     #[test]
     fn failures_timeout_cancel_and_bad_lang() {
         let d = dir();
@@ -454,6 +513,7 @@ mod tests {
         assert!(o.is_error && o.content.contains("ZeroDivisionError"));
     }
 
+    #[cfg(unix)]
     #[test]
     fn persistent_python_kernel_reset_and_nested_calls() {
         let d = dir();
@@ -501,14 +561,17 @@ mod tests {
 
     /// A backend that runs scripts locally but shares nothing with the host: private temp dir,
     /// empty environment — like a container or SSH host.
+    #[cfg(unix)]
     struct FakeRemote {
         tmp: PathBuf,
     }
+    #[cfg(unix)]
     struct FakeChild {
         c: std::process::Child,
         rx: mpsc::Receiver<Vec<u8>>,
         stdin: Option<std::process::ChildStdin>,
     }
+    #[cfg(unix)]
     impl seagent_core::exec::ExecChild for FakeChild {
         fn pid(&self) -> Option<u32> {
             Some(self.c.id())
@@ -537,6 +600,7 @@ mod tests {
             let _ = self.c.kill();
         }
     }
+    #[cfg(unix)]
     impl seagent_core::exec::ExecBackend for FakeRemote {
         fn id(&self) -> &str {
             "fake-remote"
@@ -575,6 +639,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn remote_backend_file_rpc_and_no_host_env() {
         let d = dir();

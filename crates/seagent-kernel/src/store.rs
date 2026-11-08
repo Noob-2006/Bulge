@@ -3,7 +3,6 @@
 use crate::event::{now_ms, Event, EventKind, LOG_VERSION};
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, Seek, SeekFrom, Write};
-use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
 
 #[derive(Debug)]
@@ -230,13 +229,12 @@ fn valid_id(id: &str) -> bool {
 fn lock(f: &File, id: &str) -> Result<(), StoreError> {
     let deadline = std::time::Instant::now() + std::time::Duration::from_millis(1500);
     loop {
-        // SAFETY: flock on a valid fd owned by `f`; released when the fd closes.
-        if unsafe { libc::flock(f.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
-            return Ok(());
-        }
-        let err = std::io::Error::last_os_error();
-        if err.raw_os_error() != Some(libc::EWOULDBLOCK) {
-            return Err(err.into());
+        // `try_lock` is flock(LOCK_EX | LOCK_NB) on Unix, LockFileEx on Windows; released
+        // when the file closes.
+        match f.try_lock() {
+            Ok(()) => return Ok(()),
+            Err(std::fs::TryLockError::WouldBlock) => {}
+            Err(std::fs::TryLockError::Error(err)) => return Err(err.into()),
         }
         if std::time::Instant::now() >= deadline {
             return Err(StoreError::Locked(id.to_string()));

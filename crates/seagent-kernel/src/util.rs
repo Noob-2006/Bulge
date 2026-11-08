@@ -41,9 +41,58 @@ pub fn unix_now() -> i64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0)
 }
 
+/// Random bytes for ids and tokens: `/dev/urandom` on Unix (as always); the OS generator of the
+/// platform layer elsewhere (`BCryptGenRandom` on Windows), so tokens such as the code-mode
+/// call token stay unguessable on every OS.
+fn os_random(buf: &mut [u8]) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        fs::File::open("/dev/urandom").and_then(|mut f| f.read_exact(buf))
+    }
+    #[cfg(not(unix))]
+    {
+        seagent_core::platform::random::fill_random(buf)
+    }
+}
+
+/// A file symlink `link -> target`. Windows: `symlink_file` (needs Developer Mode or the
+/// privilege), so callers must handle the refusal (tests skip, shims fall back to a copy).
+pub fn symlink_file(target: &Path, link: &Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(target, link)
+    }
+    #[cfg(windows)]
+    {
+        std::os::windows::fs::symlink_file(target, link)
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = (target, link);
+        Err(std::io::Error::new(std::io::ErrorKind::Unsupported, "symlinks are not available on this target"))
+    }
+}
+
+/// A directory symlink `link -> target` (Windows: `symlink_dir`, same caveat as [`symlink_file`]).
+pub fn symlink_dir(target: &Path, link: &Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(target, link)
+    }
+    #[cfg(windows)]
+    {
+        std::os::windows::fs::symlink_dir(target, link)
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = (target, link);
+        Err(std::io::Error::new(std::io::ErrorKind::Unsupported, "symlinks are not available on this target"))
+    }
+}
+
 pub fn random_hex(n: usize) -> String {
     let mut buf = vec![0u8; n.div_ceil(2)];
-    if fs::File::open("/dev/urandom").and_then(|mut f| f.read_exact(&mut buf)).is_err() {
+    if os_random(&mut buf).is_err() {
         // Fallback: time + address entropy. Only used for ids, never for secrets.
         let seed = crate::event::now_ms() ^ (&buf as *const _ as u64);
         for (i, b) in buf.iter_mut().enumerate() {
