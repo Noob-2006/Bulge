@@ -158,6 +158,8 @@ fn real_device_keys_renewal_and_devices_panel() {
     assert_eq!(dev.eval("S.arp.call('session.list').then(() => true, (e) => e.message)"), json!(true));
     assert_eq!(dev.eval("fetch('/arp', {method: 'POST', headers: {'content-type': 'application/json', authorization: 'Bearer ' + DevAuth.current()}, body: JSON.stringify({jsonrpc: '2.0', id: 2, method: 'session.list'})}).then(r => r.status)"), json!(200), "the renewed token works on new requests");
     assert_eq!(http(port, "POST", "/arp", first.as_str(), &json!({"jsonrpc": "2.0", "id": 1, "method": "session.list"}).to_string()).0, 401, "the first one has expired");
+    let denied = arp(port, "audit.query", json!({"kind": "device.refresh"}));
+    assert!(denied.as_array().is_some_and(|a| a.is_empty()), "no renewal was refused, not even once: {denied}");
 
     // ── the admin's devices panel ──
     let admin = open_page(&conn, &format!("{base}/#token={ADMIN}"));

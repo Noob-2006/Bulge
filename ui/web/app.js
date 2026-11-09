@@ -1053,6 +1053,7 @@ function deviceName() {
 // One claim, polling while the host has not approved an 8-character code yet.
 async function pairDevice(claim) {
   const body = { ...claim, device: { id: deviceId(), name: deviceName(), platform: 'web', publicKey: window.DevAuth ? await DevAuth.publicKey() : undefined } };
+  if (body.device.publicKey) body.device.keyStore = 'webcrypto';
   for (let i = 0; i < 600; i++) {
     const r = await fetch('/pair/client', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
     const v = await r.json().catch(() => ({}));

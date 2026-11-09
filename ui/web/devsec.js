@@ -17,7 +17,7 @@ function devSecSection(d, lan) {
     h += '<table class="kv"><tr><th>' + [L('裝置', 'Device'), L('權限', 'Access'), L('裝置金鑰', 'Device key'), L('最近', 'Last seen'), L('位址', 'Address')].join('</th><th>') + '</th></tr>';
     h += devs.map((x) => `<tr><td><strong>${ov(x.name)}</strong> <span class="faint">${ov(x.platform || '')}</span></td>`
       + `<td><select data-devsec-scope="${ov(x.id)}" data-write>${DEVSEC_SCOPES.map(([v, zh, en]) => `<option value="${v}"${x.scope === v ? ' selected' : ''}>${L(zh, en)}</option>`).join('')}${x.scope === 'admin' ? '<option value="admin" selected>admin</option>' : ''}</select></td>`
-      + `<td>${x.keyBound ? `<span class="ok">${L('已綁定', 'bound')}</span>` : `<span class="warn" title="${L('舊版 App／瀏覽器：下次啟動時自動綁定', 'older app / browser: binds on its next start')}">${L('未綁定', 'not bound')}</span>`}</td>`
+      + `<td>${x.keyBound ? `<span class="ok">${L('已綁定', 'bound')}</span>${x.keyStore ? ` <span class="faint mono">${ov(x.keyStore)}</span>` : ''}` : `<span class="warn" title="${L('舊版 App／瀏覽器：下次啟動時自動綁定', 'older app / browser: binds on its next start')}">${L('未綁定', 'not bound')}</span>`}</td>`
       + `<td>${ago(x.lastSeenMs)}</td><td class="mono">${ov(x.lastIp || '—')}</td></tr>`).join('');
     h += '</table>';
   }

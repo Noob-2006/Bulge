@@ -760,6 +760,8 @@ pub fn start(app: Arc<App>) -> Result<httpd::Server, String> {
     }
     // A8/A9: refusing here means a misconfigured public bind never listens, not even briefly.
     crate::exposure::check_start(&app.cfg).map_err(|e| format!("app server: {e}"))?;
+    // The refresh replay floor is this start, not the first refresh (device_auth::started_ms).
+    crate::device_auth::started_ms();
     if let Some(w) = crate::netguard::public_warning(&app.cfg) {
         let bar = "!".repeat(78);
         eprintln!("seagentd: {bar}\nseagentd: WARNING: {w}\nseagentd: {bar}");

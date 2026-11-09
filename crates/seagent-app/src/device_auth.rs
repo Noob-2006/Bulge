@@ -104,6 +104,7 @@ pub fn verify(data: &std::path::Path, token: &str, body: &Value, now: u64, floor
 /// `GET /pair/info`: what a device signs for — the host id (public: mDNS carries it too) and the
 /// host clock, so a device with a wrong clock can still sign a timestamp inside [`SKEW`].
 pub fn info(app: &crate::App) -> seagent_net::httpd::Response {
+    started_ms(); // a timestamp from this clock is never below the floor
     reply(200, json!({"hostId": crate::lan::host_id(&app.d.k.paths.data), "nowMs": now_ms(), "protocol": crate::lan::PROTOCOL, "refresh": true}))
 }
 
