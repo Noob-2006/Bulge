@@ -197,6 +197,25 @@ The guest is always Linux; each host OS boots it with its own hypervisor
 | Android | AVF `vm run` (crosvm, pKVM) | arm64 kernel + initramfs | `vsock` (host AF_VSOCK to the CID) |
 | iOS | none (platform policy) | — | — |
 
+**Windows, measured** (Windows 11 Home, QEMU 11.1.0 from `winget install
+SoftwareFreedomConservancy.QEMU`, image built with `--build-kernel --format disk`):
+`seagent sandbox vm exec -- <cmd>` picks QEMU + WHPX, boots to the agent's `Hello` in
+≈0.5 s, runs the command and powers the guest off in ≈0.1 s; under `-accel tcg` the same
+guest says `Hello` after ≈1 s. Things that matter there:
+
+* the image must have a PCI kernel (`--build-kernel`): the default Firecracker CI `vmlinux`
+  never probes QEMU's virtio-serial-pci;
+* WHPX needs `kernel-irqchip=off` (with the in-kernel irqchip the guest hangs:
+  `WHPX: Unexpected VP exit code 4`) — the provider always passes it;
+* the channel is a `127.0.0.1` TCP chardev with `nodelay=on` (without it every command
+  round trip waits ≈200 ms for a delayed ACK);
+* WHPX is the optional feature "Windows Hypervisor Platform" (`dism /online
+  /enable-feature /featurename:HypervisorPlatform`, then reboot); seagent probes it
+  unelevated through `WinHvPlatform.dll`. Windows **Home** has no Hyper-V role at all, so the
+  Hyper-V provider reports that and `auto` goes on to QEMU;
+* copy `vmlinux`, `initramfs.cpio.gz`, `manifest.json` (and `disk.raw`) into
+  `<data>\vm\image\` (`seagent doctor` prints `<data>`).
+
 Which build feeds which row:
 
 ```sh
@@ -239,7 +258,10 @@ Partition, 1 MiB tail for the backup GPT) whose ESP holds exactly one file:
 That is the removable-media path every UEFI firmware boots without a boot entry,
 so there is **no boot loader**: the kernel is the EFI application, the initramfs
 is built into it (`CONFIG_INITRAMFS_SOURCE` = the very `initramfs.cpio.gz` shipped
-next to it, used as-is) and so is the command line, forced so that whatever load
+next to it, used as-is, followed by one extra gzip member holding only `/dev/console` —
+direct boot gets that node from the kernel's default built-in archive, which a configured
+`INITRAMFS_SOURCE` replaces; without it PID 1 starts with no fds 0-2 and the kernel panics
+with `Attempted to kill init! exitcode=0x0000000b`) and so is the command line, forced so that whatever load
 options the firmware passes are ignored (`CONFIG_CMDLINE_OVERRIDE` on x86_64,
 `CONFIG_CMDLINE_FORCE` on arm64):
 

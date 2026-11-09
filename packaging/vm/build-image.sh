@@ -337,7 +337,10 @@ if [ "$NEED_KERNEL_TREE" = 1 ]; then
 	[ -n "${LLVM:-}" ] && KMAKE+=(LLVM="$LLVM")
 	# Reproducible kernel: no build clock in the version string.
 	export KBUILD_BUILD_TIMESTAMP="${SOURCE_DATE_EPOCH:+@$SOURCE_DATE_EPOCH}"
-	[ -n "$KBUILD_BUILD_TIMESTAMP" ] || export KBUILD_BUILD_TIMESTAMP="1970-01-01"
+	# Explicitly UTC: a bare "1970-01-01" is local midnight, i.e. a *negative* epoch east of
+	# Greenwich (-28800 in UTC+8), and gen_init_cpio then fails with "Timestamp out of range
+	# for cpio format" while packing the kernel's built-in initramfs.
+	[ -n "$KBUILD_BUILD_TIMESTAMP" ] || export KBUILD_BUILD_TIMESTAMP="1970-01-01 00:00:00 UTC"
 fi
 
 # ── kernel source tree (only when something is built from source) ────────────
@@ -529,9 +532,27 @@ DISK_JSON=""
 if [ "$FORMAT" = disk ]; then
 	note "building linux-$LINUX_VERSION for $ARCH (EFI disk: initramfs + cmdline built in)"
 	# The kernel takes a `.cpio.gz` as INITRAMFS_SOURCE as-is (no re-compression),
-	# so the disk embeds byte-for-byte the archive that is also shipped separately.
+	# so the disk embeds byte-for-byte the archive that is also shipped separately —
+	# followed by one more tiny gzip member holding /dev/console.
+	# Direct boot gets that node from the kernel's *default* built-in archive
+	# (usr/default_cpio_list), unpacked before the external initrd; a configured
+	# INITRAMFS_SOURCE replaces that default, and without /dev/console PID 1 starts
+	# with fds 0-2 closed: Rust's runtime then cannot open /dev/null, aborts, and the
+	# kernel panics with "Attempted to kill init! exitcode=0x0000000b". Only the
+	# console, exactly like the default list: the agent mounts devtmpfs only when
+	# /dev/null is absent, so shipping /dev/null would hide /dev/ttyS1 (the channel).
+	# The node is written by the kernel's own gen_init_cpio (no root, no mknod); the
+	# kernel's unpacker reads concatenated archives, each compressed on its own.
+	DISK_INITRAMFS="$OUT/build/initramfs-disk.cpio.gz"
+	printf 'dir /dev 0755 0 0\nnod /dev/console 0600 0 0 c 5 1\n' >"$OUT/build/dev-nodes.list"
+	"${HOSTCC:-cc}" -O2 -o "$OUT/build/gen_init_cpio" "$KSRC/usr/gen_init_cpio.c" ||
+		die "cannot build the kernel's usr/gen_init_cpio with ${HOSTCC:-cc}"
 	{
-		printf 'CONFIG_INITRAMFS_SOURCE="%s"\n' "$INITRAMFS_OUT"
+		cat -- "$INITRAMFS_OUT"
+		"$OUT/build/gen_init_cpio" -t 0 "$OUT/build/dev-nodes.list" | gzip -1 -n
+	} >"$DISK_INITRAMFS"
+	{
+		printf 'CONFIG_INITRAMFS_SOURCE="%s"\n' "$DISK_INITRAMFS"
 		if [ "$ARCH" = x86_64 ]; then
 			printf 'CONFIG_CMDLINE_BOOL=y\nCONFIG_CMDLINE="%s"\nCONFIG_CMDLINE_OVERRIDE=y\n' "$DISK_CMDLINE"
 		else
