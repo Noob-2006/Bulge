@@ -412,6 +412,24 @@ mod tests {
         assert!(on.epilogue(&[]).contains("state"));
     }
 
+    /// Regression (Git Bash on Windows): an exported value with doubled backslashes (a UNC path,
+    /// `\\.\pipe\…`) and a non-ASCII part survives replay after replay unchanged. On Windows the
+    /// script used to reach bash with every `\\` halved. A PowerShell host keeps no snapshot.
+    #[test]
+    fn exported_backslashes_survive_replay() {
+        let c = ctx("shunc");
+        let want = r"\\srv\share\文件\x";
+        let o = Shell.call(&c, json!({"command": format!("export SEAGENT_UNC='{want}'")}));
+        assert!(!o.is_error, "{}", o.content);
+        if !script_shell(&crate::exec::local::LocalBackend::new()).is_posix() {
+            return;
+        }
+        for _ in 0..3 {
+            let o = Shell.call(&c, json!({"command": "printf '<%s>' \"$SEAGENT_UNC\""}));
+            assert!(o.content.contains(&format!("<{want}>")), "replayed value changed: {}", o.content);
+        }
+    }
+
     /// A command that neither `cd`s nor exports leaves the snapshot untouched (same mtime, no
     /// leftover temporary file); a real change still republishes it.
     #[test]
@@ -428,11 +446,10 @@ mod tests {
             assert!(!f.exists(), "no snapshot file on a non-POSIX host shell");
             return;
         }
-        // Settling calls: the first snapshot can differ from the steady state (OLDPWD; on Git
-        // Bash an inherited value with a leading `\\` comes back with one backslash once).
-        for _ in 0..3 {
-            assert!(!Shell.call(&c, json!({"command":"true"})).is_error);
-        }
+        // One settling call: the first snapshot can differ from the steady state (OLDPWD).
+        // Inherited values with `\\` (Windows `\\.\pipe\…`) must replay byte for byte, or the
+        // snapshot never settles (`platform::shell::cygwin_quote`).
+        assert!(!Shell.call(&c, json!({"command":"true"})).is_error);
         let old = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000_000);
         std::fs::OpenOptions::new().write(true).open(&f).unwrap().set_modified(old).unwrap();
         for _ in 0..3 {

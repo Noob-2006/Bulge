@@ -549,6 +549,14 @@ pub fn read(dir: &Path, s: &Settings, q: &Query, now_ms: u64) -> Found {
     f
 }
 
+/// The newest `limit` failed calls of the last 7 days (diagnostics bundle), oldest first.
+pub fn recent_failures(paths: &Paths, cfg: &Config, limit: usize, now_ms: u64) -> Vec<Value> {
+    let dir = paths.log_dir();
+    flush_dir(&dir);
+    let q = Query { ok: Some(false), since_ms: Some(now_ms.saturating_sub(7 * DAY_MS)), limit: limit.max(1), ..Default::default() };
+    read(&dir, &Settings::from_config(cfg), &q, now_ms).records
+}
+
 // ───────────────────────── export ─────────────────────────
 
 /// `2026-11-09 14:03:07` at `offset_min` east of UTC.

@@ -40,6 +40,8 @@ pub fn diagnostics_bundle(c: &Ctx, note: &str) -> Result<(PathBuf, Value), Strin
         "service": crate::ops::service::audit(&c.workspace).iter().map(|i| format!("{i:?}")).collect::<Vec<_>>(),
         "recent_starts": crate::ops::service::recent_starts(paths, (now / 1000) as i64),
         "recent_log": recent,
+        // The last tool calls that failed (tool, args summary and error, already redacted).
+        "tool_failures": crate::ops::toollog::recent_failures(paths, &c.k.cfg, 50, now),
         "channels": c.k.cfg.channels.iter().map(|(n, t)| json!({"name": n, "kind": t.get("kind").and_then(|k| k.as_str()).unwrap_or(n)})).collect::<Vec<_>>(),
         "note": note.trim(),
     });
@@ -57,8 +59,9 @@ pub fn cmd_diagnostics(c: &Ctx, a: &str) -> Result<Reply, String> {
     }
     let (p, b) = diagnostics_bundle(c, a)?;
     let errors = b["recent_log"].as_array().map(|v| v.iter().filter(|r| r["level"] == "error").count()).unwrap_or(0);
+    let tool_failures = b["tool_failures"].as_array().map(Vec::len).unwrap_or(0);
     text(format!(
-        "Diagnostics can include sensitive local logs and host-level runtime metadata.\nTreat diagnostics bundles like secrets and review what they contain before sharing.\n\nbundle: {}\nseagent {} ({}) · profile {} · {} session(s) · config {} · {} recent error(s), {} service issue(s)\nShare it with `seagent debug share` only after reviewing it.",
+        "Diagnostics can include sensitive local logs and host-level runtime metadata.\nTreat diagnostics bundles like secrets and review what they contain before sharing.\n\nbundle: {}\nseagent {} ({}) · profile {} · {} session(s) · config {} · {} recent error(s), {} failed tool call(s), {} service issue(s)\nShare it with `seagent debug share` only after reviewing it.",
         p.display(),
         b["version"].as_str().unwrap_or(""),
         b["target"].as_str().unwrap_or(""),
@@ -66,6 +69,7 @@ pub fn cmd_diagnostics(c: &Ctx, a: &str) -> Result<Reply, String> {
         b["sessions"],
         if b["config"]["error"].is_null() { "valid" } else { "INVALID" },
         errors,
+        tool_failures,
         b["service"].as_array().map(|a| a.len()).unwrap_or(0),
     ))
 }
@@ -640,6 +644,25 @@ mod tests {
         #[cfg(unix)]
         use std::os::unix::fs::PermissionsExt;
         assert_eq!(std::fs::metadata(&p).unwrap().permissions().mode() & 0o777, 0o600);
+    }
+
+    /// The bundle carries the recent failed tool calls from the tool-call log (every OS).
+    #[test]
+    fn diagnostics_bundle_includes_recent_tool_failures() {
+        let t = kit();
+        let log = crate::ops::toollog::Log::new(t.paths.log_dir(), Default::default());
+        let now = seagent_kernel::event::now_ms();
+        log.append(&json!({"ts": now - 5000, "session": "s1", "id": "a", "tool": "shell", "args": "command=make", "ms": 3, "ok": false, "err": "make: *** [all] Error 2"}));
+        log.append(&json!({"ts": now - 4000, "session": "s1", "id": "b", "tool": "read", "args": "path=x", "ms": 1, "ok": true}));
+        log.flush();
+        let c = ctx(&t, Surface::Channel, dm(true));
+        let out = cmd_diagnostics(&c, "").unwrap().text.unwrap();
+        assert!(out.contains("1 failed tool call(s)"), "{out}");
+        let p = std::fs::read_dir(t.paths.data.join("diagnostics")).unwrap().next().unwrap().unwrap().path();
+        let b: Value = serde_json::from_str(&std::fs::read_to_string(&p).unwrap()).unwrap();
+        let f = b["tool_failures"].as_array().unwrap();
+        assert_eq!(f.len(), 1);
+        assert_eq!((f[0]["tool"].as_str(), f[0]["err"].as_str()), (Some("shell"), Some("make: *** [all] Error 2")));
     }
 
     #[test]

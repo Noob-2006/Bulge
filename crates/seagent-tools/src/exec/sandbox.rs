@@ -557,6 +557,8 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn dangerous_binds_refused() {
+        // `/tmp` binds are judged against the ambient HOME (see `testutil::home_lock`).
+        let _home = crate::testutil::home_lock();
         assert!(parse_bind("/etc:/x").is_err());
         assert!(parse_bind("/:/x").is_err());
         assert!(parse_bind("/var/run/docker.sock:/var/run/docker.sock").is_err());
@@ -575,6 +577,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn sandbox_config_refuses_dangerous_binds() {
+        let _home = crate::testutil::home_lock();
         // `[exec.sandbox] binds = ["/etc:/x"]` must not deserialize into a usable config,
         // and must be refused again when a container is built from it.
         let e = ExecConfig::parse(&json!({"sandbox": {"binds": ["/etc:/x"]}})).unwrap_err();

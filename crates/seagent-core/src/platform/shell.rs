@@ -160,14 +160,64 @@ pub fn argv(style: Style, script: &str) -> (OsString, Vec<OsString>) {
             return ("sh".into(), vec!["-c".into(), script.into()]);
         }
         let sh = active();
+        #[cfg(windows)]
+        if sh.kind.is_posix() {
+            let inline = msys_inline(script);
+            return (sh.program.clone().into_os_string(), sh.args(style, &inline));
+        }
         (sh.program.clone().into_os_string(), sh.args(style, script))
     }
+}
+
+/// Longest quoted script handed to Git Bash on its command line. The Cygwin runtime cuts a
+/// `-c` argument at about 8 KiB (measured on Git for Windows: the shell then fails with
+/// "unexpected EOF while looking for matching `''"), and a persistent-shell prologue that
+/// replays a Windows environment (PATH alone is kilobytes of `\`) easily goes past it.
+pub const MSYS_INLINE_MAX: usize = 6 * 1024;
+
+/// `script` itself when its quoted form fits [`MSYS_INLINE_MAX`]; otherwise a one-line script
+/// that sources a private copy written to the temp directory, which removes itself first
+/// (`source` reads the whole file before running it). Exit status and output are the
+/// script's own.
+pub fn msys_inline(script: &str) -> std::borrow::Cow<'_, str> {
+    if super::layout::msys_quote(script).len() <= MSYS_INLINE_MAX {
+        return std::borrow::Cow::Borrowed(script);
+    }
+    match spill_script(&std::env::temp_dir().join("seagent-sh"), script) {
+        Ok(p) => std::borrow::Cow::Owned(format!(". '{}'", p.replace('\'', "'\\''"))),
+        Err(_) => std::borrow::Cow::Borrowed(script),
+    }
+}
+
+/// Write `script` to a fresh file under `dir` (forward-slash path, as Git Bash reads it),
+/// prefixed with its own removal. Leftovers older than a day (a shell that never started)
+/// are swept on the way.
+pub fn spill_script(dir: &Path, script: &str) -> std::io::Result<String> {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static N: AtomicU64 = AtomicU64::new(0);
+    std::fs::create_dir_all(dir)?;
+    if let Ok(rd) = std::fs::read_dir(dir) {
+        for e in rd.flatten() {
+            if e.metadata().and_then(|m| m.modified()).ok().and_then(|t| t.elapsed().ok()).is_some_and(|age| age.as_secs() > 86_400) {
+                let _ = std::fs::remove_file(e.path());
+            }
+        }
+    }
+    let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
+    let path = dir.join(format!("s-{}-{}-{nanos}.sh", std::process::id(), N.fetch_add(1, Ordering::Relaxed)));
+    let posix = path.to_string_lossy().replace('\\', "/");
+    let quoted = posix.replace('\'', "'\\''");
+    std::fs::write(&path, format!("rm -f -- '{quoted}'\n{script}"))?;
+    Ok(posix)
 }
 
 /// A `Command` that runs `script` in `style` (see the module docs).
 pub fn command(style: Style, script: &str) -> Command {
     let (prog, args) = argv(style, script);
     let mut c = Command::new(prog);
+    // Git Bash / MSYS2: `layout::msys_args` quotes for the Cygwin runtime's command-line parser
+    // (std's MSVCRT quoting loses every `\\` and lets the runtime glob). Callers that rebuild
+    // the command (`local_windows::msys_requoted`) see the plain arguments through `get_args`.
     c.args(args);
     #[cfg(windows)]
     if let Some(dir) = python_shims() {
@@ -364,5 +414,54 @@ mod tests {
         let out = shell_command("printf %s \"$((1+2))\"").output().unwrap();
         assert_eq!(String::from_utf8_lossy(&out.stdout), "3");
         assert_eq!(active().kind, ShellKind::Bash);
+    }
+
+    /// Regression (Git Bash on Windows): a script reaches the shell byte for byte — doubled
+    /// backslashes, a trailing backslash, embedded double quotes, non-ASCII — when its
+    /// arguments go through `layout::msys_args` as the exec backends do. Runs on every OS with
+    /// whatever shell is active; a PowerShell host runs the same check in its syntax.
+    #[test]
+    fn scripts_reach_the_shell_unchanged() {
+        let want = "\\\\.\\pipe\\x|say \"hi\"|tail\\|文件";
+        let script = if active().kind.is_posix() || cfg!(unix) {
+            "printf '%s' '\\\\.\\pipe\\x|say \"hi\"|tail\\|文件'".to_string()
+        } else {
+            "[Console]::OutputEncoding = [Text.Encoding]::UTF8; [Console]::Out.Write('\\\\.\\pipe\\x|say \"hi\"|tail\\|文件')".to_string()
+        };
+        let (prog, args) = argv(Style::Bash, &script);
+        let mut c = Command::new(prog);
+        crate::platform::layout::msys_args(&mut c, &args);
+        let out = c.output().unwrap();
+        assert_eq!(String::from_utf8_lossy(&out.stdout), want, "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    }
+
+    /// A long script (a persistent-shell prologue replaying a whole Windows environment) is not
+    /// cut: past `MSYS_INLINE_MAX` Git Bash sources a self-removing copy. Every OS runs the
+    /// spill itself through the active POSIX shell; Windows also runs it through `argv`.
+    #[test]
+    fn long_scripts_run_whole_and_spill_files_remove_themselves() {
+        let body: String = (0..400).map(|i| format!("export V{i}='C:\\\\Program Files\\\\x{i}'\n")).collect();
+        let script = format!("{body}printf '<%s|%s>' \"$V0\" \"$V399\"");
+        assert!(crate::platform::layout::msys_quote(&script).len() > MSYS_INLINE_MAX);
+        let want = "<C:\\\\Program Files\\\\x0|C:\\\\Program Files\\\\x399>";
+        let dir = crate::tmp::TempDir::new("seagent-spill");
+        let p = spill_script(dir.path(), &script).unwrap();
+        if active().kind.is_posix() || cfg!(unix) {
+            let (prog, _) = argv(Style::Bash, "true");
+            let mut c = Command::new(prog);
+            crate::platform::layout::msys_args(&mut c, &["-c".to_string(), format!(". '{p}'")]);
+            let out = c.output().unwrap();
+            assert_eq!(String::from_utf8_lossy(&out.stdout), want, "stderr: {}", String::from_utf8_lossy(&out.stderr));
+            assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0, "the copy removed itself");
+            if cfg!(windows) {
+                let (prog, args) = argv(Style::Bash, &script);
+                assert!(args[1].len() < 1024, "spilled, not inline");
+                let mut c = Command::new(prog);
+                crate::platform::layout::msys_args(&mut c, &args);
+                let out = c.output().unwrap();
+                assert_eq!(String::from_utf8_lossy(&out.stdout), want, "stderr: {}", String::from_utf8_lossy(&out.stderr));
+            }
+        }
+        assert_eq!(msys_inline("echo short"), "echo short");
     }
 }

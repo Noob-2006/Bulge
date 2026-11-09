@@ -1077,6 +1077,9 @@ exit 0
     #[cfg(unix)]
     #[test]
     fn missing_binary_bad_binds_and_reserved_targets() {
+        // The `/tmp` binds below are judged against the ambient `HOME`: no other test may point
+        // it into `/tmp` (which would put `~/.aws` under the bind) while this one runs.
+        let _home = crate::testutil::home_lock();
         let f = Fake::new("ctr8");
         let ctx = BackendCtx { workspace: tmpdir("ctr8w"), scope_key: "s1".into(), secrets: Arc::new(|s: &str| s.to_string()), home: tmpdir("ctr8h"), sandboxed: true };
         let sb = SandboxConfig { workspace_access: "rw".into(), ..Default::default() };

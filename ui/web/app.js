@@ -1132,9 +1132,17 @@ $('showSettings').onclick = () => showPanel(t('settings'), async () => {
 if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js').catch(() => {});
 
 applyI18n();
+// `#a=1&token=x&page=p` minus `key` (`#a=1&page=p`; '' when nothing is left).
+function hashWithout(hash, key) {
+  const h = new URLSearchParams(String(hash || '').replace(/^#/, ''));
+  h.delete(key);
+  const rest = h.toString();
+  return rest ? '#' + rest : '';
+}
 // Token: #token=… (from `seagent app open`), saved token, or ask.
 const fromHash = new URLSearchParams(location.hash.slice(1)).get('token');
-if (fromHash) { store.set('seagent.token', fromHash); history.replaceState(null, '', location.pathname); }
+// Only the token leaves the address bar: `#token=…&page=logs` still deep-links to the page.
+if (fromHash) { store.set('seagent.token', fromHash); history.replaceState(null, '', location.pathname + hashWithout(location.hash, 'token')); }
 const saved = fromHash || store.get('seagent.token');
 const setup = setupFromHash();
 if (setup && setup.bootstrapToken) {
