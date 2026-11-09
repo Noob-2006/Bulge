@@ -59,7 +59,7 @@ pub fn shell_argv(line: &str) -> Vec<String> {
 /// A `Command` for [`shell_argv`] (the long-lived recorder/player pipes in realtime voice).
 pub fn shell_command(line: &str) -> Command {
     let argv = shell_argv(line);
-    let mut c = Command::new(&argv[0]);
+    let mut c = seagent_core::platform::layout::program_command(&argv[0]);
     c.args(&argv[1..]);
     c
 }
@@ -119,7 +119,8 @@ pub fn run_env_in(argv: &[String], stdin: Option<&[u8]>, env: &[(String, String)
             }
             _ => (None, prog, args),
         };
-        let mut cmd = Command::new(which(prog).unwrap_or_else(|| PathBuf::from(prog)));
+        // PATHEXT shims, `sh`/`bash` = Git Bash, `python3` = `py -3` (`layout::program_command`).
+        let mut cmd = seagent_core::platform::layout::program_command(prog);
         if let Some(pairs) = scrub {
             cmd.env_clear();
             for k in WINDOWS_BASE_ENV {

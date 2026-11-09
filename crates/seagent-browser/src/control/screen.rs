@@ -829,7 +829,7 @@ fn run_install(d: &Desktop, cmd: &str, io: &mut dyn Io) -> i32 {
     }
     io.line(&format!("$ {cmd}"));
     use std::io::{BufRead, Write};
-    let mut c = std::process::Command::new(&argv[0]);
+    let mut c = seagent_core::platform::layout::program_command(&argv[0]);
     c.args(&argv[1..])
         .env("DEBIAN_FRONTEND", "noninteractive")
         .env("LC_ALL", "C.UTF-8")

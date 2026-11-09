@@ -204,7 +204,8 @@ fn manual_actions_stop_the_join_and_agent_mode_speaks() {
         )
     });
     let out = temp_dir("meet-say");
-    let m = media(&format!("[meeting]\ncdp_url = \"{}\"\njoin_timeout_secs = 5\nplayer = \"cp {{path}} {}/said-{{sink}}.wav\"\n[tts]\nprovider = \"openai\"\n[providers.openai]\napi_key = \"k\"\nbase_url = \"{}\"\n", http.url, out.display(), tts.url));
+    // TOML literal string + shell spelling for the player line (Windows: `C:/…`).
+    let m = media(&format!("[meeting]\ncdp_url = \"{}\"\njoin_timeout_secs = 5\nplayer = 'cp {{path}} {}/said-{{sink}}.wav'\n[tts]\nprovider = \"openai\"\n[providers.openai]\napi_key = \"k\"\nbase_url = \"{}\"\n", http.url, seagent_core::platform::shell::path_str(&out), tts.url));
     let r = call(
         &m,
         Platform::Teams,
@@ -923,7 +924,8 @@ fn drive_zoom_page(exe: &std::path::Path, url: &str) -> Result<(), String> {
         .unwrap()
         .port();
     let prof = temp_dir("meet-chrome");
-    let m = media(&format!("[meeting]\nport = {port}\nheadless = true\nexecutable = \"{}\"\nprofile_dir = \"{}\"\nguest_name = \"seagent bot\"\njoin_timeout_secs = 20\n", exe.display(), prof.display()));
+    // TOML literal strings: `C:\Program Files\…` / `C:\Users\…` are not escapes there.
+    let m = media(&format!("[meeting]\nport = {port}\nheadless = true\nexecutable = '{}'\nprofile_dir = '{}'\nguest_name = \"seagent bot\"\njoin_timeout_secs = 20\n", exe.display(), prof.display()));
     let mt = meetings(&m);
     let r = mt.join_url(Platform::Zoom, url, "transcribe", &Cancel::new())?;
     // The join launched this browser (that is the code under test); close exactly it when the

@@ -166,7 +166,7 @@ fn codex_native_and_responses_transports() {
 fn codex_reads_auth_file() {
     let d = testutil::temp_dir("codexauth");
     std::fs::write(d.join("auth.json"), r#"{"tokens":{"access_token":"tok","account_id":"a1"}}"#).unwrap();
-    let m = Media::new(MediaConfig::from_toml(&format!("[providers.openai-codex]\nauth_file = \"{}\"\n", d.join("auth.json").display())));
+    let m = Media::new(MediaConfig::from_toml(&format!("[providers.openai-codex]\nauth_file = '{}'\n", d.join("auth.json").display())));
     assert!(openai::Codex.configured(&m));
 }
 

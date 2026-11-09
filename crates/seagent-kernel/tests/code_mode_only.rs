@@ -87,7 +87,13 @@ fn run_code_only_exposes_run_and_nested_calls_still_work() {
         steps: Mutex::new(VecDeque::from([
             Step::call(
                 "run",
-                json!({"script": "python3 - <<'PY'\nimport os,socket,json\ns=socket.socket(socket.AF_UNIX); s.connect(os.environ['SEAGENT_CALL_SOCK'])\ns.sendall((json.dumps({'token':os.environ['SEAGENT_CALL_TOKEN'],'tool':'echo','input':{'text':'from nested'}})+'\\n').encode())\nprint(s.makefile().readline().strip())\nPY"}),
+                // Unix: the call socket is a unix socket. Windows: `tcp:127.0.0.1:<port>` + the
+                // same token (Python has no AF_UNIX there).
+                if cfg!(windows) {
+                    json!({"script": "python3 - <<'PY'\nimport os,socket,json\nh,p=os.environ['SEAGENT_CALL_SOCK'][4:].rsplit(':',1); s=socket.create_connection((h,int(p)))\ns.sendall((json.dumps({'token':os.environ['SEAGENT_CALL_TOKEN'],'tool':'echo','input':{'text':'from nested'}})+'\\n').encode())\nprint(s.makefile().readline().strip())\nPY"})
+                } else {
+                    json!({"script": "python3 - <<'PY'\nimport os,socket,json\ns=socket.socket(socket.AF_UNIX); s.connect(os.environ['SEAGENT_CALL_SOCK'])\ns.sendall((json.dumps({'token':os.environ['SEAGENT_CALL_TOKEN'],'tool':'echo','input':{'text':'from nested'}})+'\\n').encode())\nprint(s.makefile().readline().strip())\nPY"})
+                },
             ),
             Step::text("done"),
         ])),

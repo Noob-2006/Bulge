@@ -174,9 +174,11 @@ pub fn python3_command() -> std::process::Command {
 /// (the `py -3` launcher) rather than the WindowsApps Store alias, which only prints
 /// "Python was not found" and exits 9009 — configs written on Linux say `python3` — and a
 /// bare `sh` / `bash` means [`bash`] (Git Bash / MSYS2) when there is one.
-pub fn program_command(name: &str) -> std::process::Command {
+pub fn program_command(name: impl AsRef<OsStr>) -> std::process::Command {
     #[cfg(windows)]
     {
+        let raw = name.as_ref();
+        let name = raw.to_string_lossy();
         let bare = name.trim_end_matches(".exe").to_ascii_lowercase();
         if bare == "python3" || bare == "python" {
             if let Some((p, args)) = python3() {
@@ -191,12 +193,31 @@ pub fn program_command(name: &str) -> std::process::Command {
                 return std::process::Command::new(b);
             }
         }
-        std::process::Command::new(which(name).unwrap_or_else(|| PathBuf::from(name)))
+        if let Some(p) = which(&name) {
+            return std::process::Command::new(p);
+        }
+        // A POSIX tool a Linux config names (`cat`, `grep`, `false`…): Git for Windows / MSYS2
+        // ship them next to their bash, outside PATH.
+        if !name.contains(['/', '\\']) {
+            if let Some(p) = bash().and_then(|b| posix_tools_dir(&b)).map(|d| d.join(format!("{bare}.exe"))).filter(|p| p.is_file()) {
+                return std::process::Command::new(p);
+            }
+        }
+        std::process::Command::new(raw)
     }
     #[cfg(not(windows))]
     {
         std::process::Command::new(name)
     }
+}
+
+/// The `usr\bin` holding the coreutils of a Git for Windows / MSYS2 bash: Git's
+/// `…\Git\bin\bash.exe` → `…\Git\usr\bin`; MSYS2's bash already lives there.
+#[cfg(windows)]
+fn posix_tools_dir(bash: &Path) -> Option<PathBuf> {
+    let dir = bash.parent()?;
+    let usr_bin = if dir.ends_with("usr\\bin") || dir.ends_with("usr/bin") { dir.to_path_buf() } else { dir.parent()?.join("usr").join("bin") };
+    usr_bin.is_dir().then_some(usr_bin)
 }
 
 /// A bash that really is bash: Unix `bash` from `PATH`; Windows the platform shell's bash (Git

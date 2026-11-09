@@ -531,7 +531,8 @@ mod tests {
     /// fake server for the provider `id` (`[providers.<id>] api_key/base_url`).
     fn media_for(id: &str, base: &str, tag: &str, extra: &str) -> Media {
         let dir = temp_dir(tag);
-        let cfg = format!("output_dir = \"{}\"\n[tts]\nprefs_path = \"{}\"\n{extra}", dir.join("media").display(), dir.join("p.json").display());
+        // TOML literal strings: a Windows path's `\` is not an escape there.
+        let cfg = format!("output_dir = '{}'\n[tts]\nprefs_path = '{}'\n{extra}", dir.join("media").display(), dir.join("p.json").display());
         Media { cfg: crate::testutil::cfg_for(id, base, &cfg), http: Default::default() }
     }
 

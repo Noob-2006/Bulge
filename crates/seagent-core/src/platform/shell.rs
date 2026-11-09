@@ -169,7 +169,49 @@ pub fn command(style: Style, script: &str) -> Command {
     let (prog, args) = argv(style, script);
     let mut c = Command::new(prog);
     c.args(args);
+    #[cfg(windows)]
+    if let Some(dir) = python_shims() {
+        // `python3` in a Git Bash script would hit the Store alias; the shim runs `py -3`.
+        let path = std::env::var_os("PATH").unwrap_or_default();
+        let mut p = dir.clone().into_os_string();
+        p.push(";");
+        p.push(path);
+        c.env("PATH", p);
+    }
     c
+}
+
+/// Windows + Git Bash: python.org installs only `py.exe` / `python.exe`, so `python3` on PATH is
+/// the WindowsApps Store alias ("Python was not found", exit 9009 / 49). When that is the case
+/// and a real Python exists, a `python3` (and `python`) shim script in
+/// `%LOCALAPPDATA%\seagent\shims` runs it, and [`command`] puts that directory first on PATH.
+#[cfg(windows)]
+pub fn python_shims() -> Option<&'static PathBuf> {
+    static DIR: std::sync::OnceLock<Option<PathBuf>> = std::sync::OnceLock::new();
+    DIR.get_or_init(|| {
+        if !active().kind.is_posix() {
+            return None;
+        }
+        let missing = |n: &str| super::layout::which(n).is_none_or(|p| super::layout::is_windows_apps_alias(&p));
+        let need: Vec<&str> = ["python3", "python"].into_iter().filter(|n| missing(n)).collect();
+        if need.is_empty() {
+            return None;
+        }
+        let (py, lead) = super::layout::python3()?;
+        let base = std::env::var_os("LOCALAPPDATA").map(PathBuf::from).unwrap_or_else(std::env::temp_dir);
+        let dir = base.join("seagent").join("shims");
+        std::fs::create_dir_all(&dir).ok()?;
+        let target = py.to_string_lossy().replace('\\', "/");
+        let body = format!("#!/bin/sh\nexec \"{target}\" {} \"$@\"\n", lead.join(" "));
+        for n in need {
+            let f = dir.join(n);
+            if std::fs::read_to_string(&f).ok().as_deref() != Some(body.as_str()) {
+                std::fs::write(&f, &body).ok()?;
+            }
+        }
+        Some(dir)
+    })
+    .as_ref()
 }
 
 /// A path spelled for the shell that will read it (as a script argument or inside a script).

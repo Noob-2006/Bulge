@@ -21,7 +21,7 @@ use std::io::Read;
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
@@ -269,7 +269,7 @@ enum Ended {
 
 /// Run `argv` in its own process group; kill the group on timeout or cancel.
 fn run_bounded(argv: &[String], cwd: &Path, window: Duration, cancel: &seagent_core::Cancel) -> Result<(Ended, String), String> {
-    let mut cmd = Command::new(&argv[0]);
+    let mut cmd = seagent_core::platform::layout::program_command(&argv[0]);
     cmd.args(&argv[1..]).current_dir(cwd).env("MEOW_LOG_LEVEL", "warn").stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
     // SAFETY: setpgid is async-signal-safe.
     #[cfg(unix)]

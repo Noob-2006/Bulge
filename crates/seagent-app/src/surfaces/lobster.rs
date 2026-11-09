@@ -432,7 +432,7 @@ impl Rt<'_> {
     pub fn process(&self, argv: &[String], stdin: Option<String>, timeout: Option<Duration>) -> Result<String, String> {
         use std::process::Stdio;
         let t = timeout.map(|t| t.min(self.left().unwrap_or_default())).unwrap_or(self.left()?);
-        let mut cmd = std::process::Command::new(&argv[0]);
+        let mut cmd = seagent_core::platform::layout::program_command(&argv[0]);
         cmd.args(&argv[1..]).current_dir(&self.cwd).stdin(if stdin.is_some() { Stdio::piped() } else { Stdio::null() }).stdout(Stdio::piped()).stderr(Stdio::piped());
         for (k, v) in &self.vars {
             cmd.env(k, v);

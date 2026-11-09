@@ -578,7 +578,7 @@ pub fn run_command(argv: &[&str], dry_run: bool, timeout: Duration) -> Result<St
     if dry_run {
         return Ok(format!("would run: {cmd}"));
     }
-    let mut child = std::process::Command::new(prog)
+    let mut child = seagent_core::platform::layout::program_command(prog)
         .args(args)
         .stdin(std::process::Stdio::inherit())
         .stdout(std::process::Stdio::inherit())

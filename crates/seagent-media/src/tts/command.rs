@@ -315,7 +315,9 @@ impl TtsProvider for LocalCli {
         // Unique per call and owner-only: this directory holds the spoken text (0700).
         let dir = crate::store::temp_dir("cli-tts")?;
         let out_path = dir.join(format!("speech.{fmt}"));
-        let (op, od) = (out_path.display().to_string(), dir.display().to_string());
+        // The template is often a shell line (`sh -c "… > {{OutputPath}}"`): Git Bash on Windows
+        // needs `C:/…` (Windows programs accept it too). Unix: the path as is.
+        let (op, od) = (seagent_core::platform::shell::path_str(&out_path), seagent_core::platform::shell::path_str(&dir));
         let ctx = [("Text", text.as_str()), ("OutputPath", op.as_str()), ("OutputDir", od.as_str()), ("OutputBase", "speech")];
         let mut base = parse_command(&command);
         if base.is_empty() {

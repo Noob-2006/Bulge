@@ -120,7 +120,13 @@ pub fn recorder_command(m: &Media) -> Option<Vec<String>> {
 
 /// Why capture is unavailable (`None` = a recorder exists).
 pub fn audio_unavailable_reason(m: &Media) -> Option<String> {
-    recorder_command(m).is_none().then(|| "No audio recorder found: install pipewire (pw-record), pulseaudio-utils (parec), alsa-utils (arecord) or ffmpeg, or set [media.voice] record_command".to_string())
+    #[cfg(windows)]
+    let hint = "No audio recorder found: install ffmpeg (it records the first DirectShow microphone) and make sure a microphone is connected and allowed (Settings → Privacy → Microphone), or set [media.voice] record_command";
+    #[cfg(target_vendor = "apple")]
+    let hint = "No audio recorder found: install ffmpeg (brew install ffmpeg; it records AVFoundation device :0) or set [media.voice] record_command";
+    #[cfg(not(any(windows, target_vendor = "apple")))]
+    let hint = "No audio recorder found: install pipewire (pw-record), pulseaudio-utils (parec), alsa-utils (arecord) or ffmpeg, or set [media.voice] record_command";
+    recorder_command(m).is_none().then(|| hint.to_string())
 }
 
 /// A live recorder child process.
@@ -136,7 +142,7 @@ impl Mic {
     }
     pub fn spawn(argv: &[String]) -> Result<Mic, String> {
         let (prog, args) = argv.split_first().ok_or("empty recorder command")?;
-        let mut child = Command::new(prog).args(args).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null()).spawn().map_err(|e| format!("cannot start recorder `{prog}`: {e}"))?;
+        let mut child = seagent_core::platform::layout::program_command(prog).args(args).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null()).spawn().map_err(|e| format!("cannot start recorder `{prog}`: {e}"))?;
         let mut out = child.stdout.take().ok_or("recorder has no stdout")?;
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
@@ -501,7 +507,18 @@ mod tests {
         }
         let a = recorder_argv("arecord", None).unwrap();
         assert!(a.windows(2).any(|w| w == ["-t", "raw"]) && a.last().unwrap() == "-", "{a:?}");
+        // Linux: PulseAudio `default`. Windows: the first DirectShow microphone, so `None` on a
+        // machine without one; the raw-PCM output is the same either way.
+        #[cfg(not(windows))]
         let f = recorder_argv("ffmpeg", Some("/usr/bin/ffmpeg".into())).unwrap();
+        #[cfg(windows)]
+        let f = match crate::audio::ffmpeg().and_then(|ff| recorder_argv("ffmpeg", Some(ff))) {
+            Some(f) => {
+                assert!(f.windows(2).any(|w| w == ["-f", "dshow"]), "{f:?}");
+                f
+            }
+            None => vec!["-f".into(), "s16le".into(), "-".into()],
+        };
         assert!(f.windows(2).any(|w| w == ["-f", "s16le"]) && f.last().unwrap() == "-", "{f:?}");
         assert!(recorder_argv("sox", None).is_none());
         // `record_command` still wins over every discovered recorder.
@@ -525,7 +542,8 @@ mod tests {
         let w = crate::audio::pcm16_to_bytes(&tone(0.1, 1000.0));
         let d = crate::testutil::temp_dir("mic");
         std::fs::write(d.join("pcm.raw"), &w).unwrap();
-        let m = Media::new(crate::MediaConfig::from_toml(&format!("[voice]\nrecord_command = \"cat {}\"\n", d.join("pcm.raw").display())));
+        // A shell line (Git Bash on Windows: `C:/…`), in a TOML literal string.
+        let m = Media::new(crate::MediaConfig::from_toml(&format!("[voice]\nrecord_command = 'cat {}'\n", seagent_core::platform::shell::path_str(&d.join("pcm.raw")))));
         let mut mic = Mic::open(&m).unwrap();
         let mut got = Vec::new();
         while let Some(b) = mic.read(&Cancel::new()).unwrap() {

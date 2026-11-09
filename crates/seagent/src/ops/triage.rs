@@ -594,7 +594,7 @@ pub fn report(p: &Prepared, agents: &[String]) -> serde_json::Value {
 }
 
 fn launch(argv: &[String], stdin_file: Option<&Path>) -> Result<i32, String> {
-    let mut c = std::process::Command::new(&argv[0]);
+    let mut c = seagent_core::platform::layout::program_command(&argv[0]);
     c.args(&argv[1..]);
     if let Some(f) = stdin_file {
         c.stdin(std::fs::File::open(f).map_err(|e| e.to_string())?);

@@ -271,14 +271,39 @@ pub fn find_chrome(explicit: &str) -> Option<std::path::PathBuf> {
     if !explicit.is_empty() {
         return Some(explicit.into()).filter(|p: &std::path::PathBuf| p.exists());
     }
-    crate::proc::which_any(&[
+    let found = crate::proc::which_any(&[
         "google-chrome",
         "google-chrome-stable",
         "chromium",
         "chromium-browser",
         "brave-browser",
         "microsoft-edge",
-    ])
+    ]);
+    #[cfg(any(windows, target_os = "macos"))]
+    let found = found.or_else(installed_chrome);
+    found
+}
+
+/// Windows / macOS install their browsers outside `PATH`: Chrome, Edge (always present on
+/// Windows 10+), Brave and Chromium in their standard locations.
+#[cfg(any(windows, target_os = "macos"))]
+fn installed_chrome() -> Option<std::path::PathBuf> {
+    use std::path::PathBuf;
+    #[cfg(windows)]
+    let candidates: Vec<PathBuf> = {
+        let env = |k: &str| std::env::var_os(k).filter(|v| !v.is_empty()).map(PathBuf::from);
+        let mut v = vec![];
+        for base in [env("ProgramFiles"), env("ProgramFiles(x86)"), env("LOCALAPPDATA")].into_iter().flatten() {
+            v.push(base.join("Google\\Chrome\\Application\\chrome.exe"));
+            v.push(base.join("Microsoft\\Edge\\Application\\msedge.exe"));
+            v.push(base.join("BraveSoftware\\Brave-Browser\\Application\\brave.exe"));
+            v.push(base.join("Chromium\\Application\\chrome.exe"));
+        }
+        v
+    };
+    #[cfg(target_os = "macos")]
+    let candidates: Vec<PathBuf> = ["Google Chrome.app/Contents/MacOS/Google Chrome", "Microsoft Edge.app/Contents/MacOS/Microsoft Edge", "Brave Browser.app/Contents/MacOS/Brave Browser", "Chromium.app/Contents/MacOS/Chromium"].iter().map(|a| PathBuf::from("/Applications").join(a)).collect();
+    candidates.into_iter().find(|p| p.is_file())
 }
 
 /// Browsers [`launch`] started, by DevTools port → process-group id (tests stop exactly theirs).

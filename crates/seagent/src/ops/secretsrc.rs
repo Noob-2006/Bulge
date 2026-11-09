@@ -28,7 +28,9 @@ use serde_json::{json, Value};
 use std::collections::{BTreeMap, HashMap};
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+#[cfg(unix)]
+use std::process::Command;
+use std::process::Stdio;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
@@ -277,7 +279,7 @@ pub struct Out {
 
 /// Run a helper CLI (argv, never a shell) with an allowlisted env, stdin = /dev/null.
 fn run_cli(argv: &[String], env: &HashMap<String, String>, timeout: Duration, label: &str) -> Result<Out, String> {
-    let mut cmd = Command::new(&argv[0]);
+    let mut cmd = seagent_core::platform::layout::program_command(&argv[0]);
     cmd.args(&argv[1..]).env_clear().envs(env).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
     let mut child = cmd.spawn().map_err(|e| format!("failed to invoke {label}: {e}"))?;
     let (mut so, mut se) = (child.stdout.take().unwrap(), child.stderr.take().unwrap());

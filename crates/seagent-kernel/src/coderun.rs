@@ -300,6 +300,11 @@ fn run_local(runtime_dir: &Path, script: &str, interp: &str, timeout: Duration, 
 /// `<bin_dir>` in front of our `PATH` (`:` on Unix, `;` on Windows).
 fn prepend_path(bin_dir: &Path) -> String {
     let sep = if cfg!(windows) { ';' } else { ':' };
+    // Windows + Git Bash: the `python3` shim (the Store alias would answer instead).
+    #[cfg(windows)]
+    if let Some(shims) = seagent_core::platform::shell::python_shims() {
+        return format!("{}{sep}{}{sep}{}", bin_dir.display(), shims.display(), std::env::var("PATH").unwrap_or_default());
+    }
     format!("{}{sep}{}", bin_dir.display(), std::env::var("PATH").unwrap_or_default())
 }
 
