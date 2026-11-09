@@ -536,7 +536,11 @@ impl VmManager {
     pub fn snapshot(&self, session: &str, tier: TrustTier, workspace: &Path, reason: &str) -> Result<SnapshotMeta, String> {
         let stack = SnapshotStack::new(self.cfg.snapshot_root(&self.data).join(self.key_for(session, tier, workspace)), self.cfg.snapshot_keep);
         let m = stack.create(workspace, reason)?;
-        if let Ok(slot) = self.slot(session, tier, workspace) {
+        // Only a VM that is already running has RAM worth imaging. (This used `slot()`, which
+        // *booted* a VM when none ran — `seagent sandbox vm snapshot` started a guest just to
+        // image its fresh memory and killed it again on exit.)
+        let running = self.slots.lock().unwrap().get(&self.key_for(session, tier, workspace)).cloned();
+        if let Some(slot) = running {
             if let Ok(Some(_)) = slot.inst.lock().unwrap().ram_snapshot(&self.cfg.snapshot_root(&self.data).join(&slot.key).join(&m.name)) {
                 // RAM image written next to the workspace tree; the meta stays
                 // the source of truth for what exists.

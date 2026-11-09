@@ -445,7 +445,10 @@ mod tests {
         // Paths are single argv entries (no shell, no re-quoting), spaces and all.
         assert_eq!(after("-kernel"), r"C:\Users\a b\seagent\vm\image\vmlinux");
         assert_eq!(after("-initrd"), r"C:\Users\a b\seagent\vm\image\initramfs.cpio.gz");
-        assert_eq!(after("-serial"), r"file:C:\Users\a b\seagent\vm\run\s-1\console.log");
+        // (`join` uses the separator of the OS running the test; on Windows this is
+        // `file:C:\Users\a b\seagent\vm\run\s-1\console.log`.)
+        assert_eq!(after("-serial"), format!("file:{}", s.console_log().display()));
+        assert!(after("-serial").starts_with(r"file:C:\Users\a b\seagent\vm\run\s-1"));
         // The channel: loopback TCP, no Nagle delay; the monitor: loopback too.
         assert_eq!(after("-chardev"), "socket,id=seagent0,host=127.0.0.1,port=40001,server=on,wait=off,nodelay=on");
         assert_eq!(after("-monitor"), "tcp:127.0.0.1:40002,server=on,wait=off");
