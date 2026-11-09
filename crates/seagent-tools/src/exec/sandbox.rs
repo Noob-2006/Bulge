@@ -132,7 +132,21 @@ fn pat_match(p: &str, name: &str) -> bool {
 
 /// `src:dst[:ro|rw]` → (src, dst, read_only).
 pub fn parse_bind(s: &str) -> Result<(PathBuf, String, bool), String> {
+    #[cfg(unix)]
     let parts: Vec<&str> = s.split(':').collect();
+    // Windows: the host side may start with a drive (`C:\src:/data:ro`); its colon is not a
+    // field separator.
+    #[cfg(not(unix))]
+    let parts: Vec<&str> = {
+        let b = s.as_bytes();
+        let drive = b.len() >= 3 && b[0].is_ascii_alphabetic() && b[1] == b':' && (b[2] == b'\\' || b[2] == b'/');
+        let (head, rest) = if drive { s.split_at(2) } else { ("", s) };
+        let mut v: Vec<&str> = rest.split(':').collect();
+        if drive {
+            v[0] = &s[..head.len() + v[0].len()];
+        }
+        v
+    };
     let (src, dst, ro) = match parts.as_slice() {
         [src, dst] => (*src, *dst, false),
         [src, dst, mode @ ("ro" | "rw")] => (*src, *dst, *mode == "ro"),
@@ -148,16 +162,49 @@ pub fn parse_bind(s: &str) -> Result<(PathBuf, String, bool), String> {
 
 /// OpenClaw validate-sandbox-security: host paths that must never be exposed.
 const BLOCKED_HOST_PATHS: &[&str] = &["/etc", "/proc", "/sys", "/dev", "/root", "/boot", "/run", "/var/run", "/var/run/docker.sock", "/run/docker.sock", "/run/podman"];
+#[cfg_attr(not(unix), allow(dead_code))]
 const BLOCKED_HOME_SUBPATHS: &[&str] = &[".aws", ".cargo", ".config", ".docker", ".gnupg", ".netrc", ".npm", ".ssh", ".kube", ".local/share/seagent"];
 
+/// Windows counterparts of [`BLOCKED_HOST_PATHS`]: the system directory, machine-wide program
+/// data (service secrets, the Docker engine's state) and the container engines' named pipes.
+#[cfg(not(unix))]
+fn windows_blocked_host_paths() -> Vec<PathBuf> {
+    let env = |k: &str| std::env::var_os(k).filter(|v| !v.is_empty()).map(PathBuf::from);
+    let mut v: Vec<PathBuf> = [env("SystemRoot").unwrap_or_else(|| PathBuf::from(r"C:\Windows")), env("ProgramData").unwrap_or_else(|| PathBuf::from(r"C:\ProgramData"))].into_iter().collect();
+    v.extend([r"\\.\pipe\docker_engine", r"\\.\pipe\dockerDesktopLinuxEngine", r"\\.\pipe\podman-machine-default"].map(PathBuf::from));
+    v
+}
+
+/// Home subpaths a bind may not expose on Windows, on top of [`BLOCKED_HOME_SUBPATHS`]:
+/// seagent's own data (`AppData\Local\seagent`, config in `AppData\Roaming`), the Edge / Chrome
+/// profiles and Windows' credential vaults. `AppData\Local\Temp` stays bindable.
+#[cfg(not(unix))]
+const WINDOWS_BLOCKED_HOME_SUBPATHS: &[&str] = &[".aws", ".cargo", ".config", ".docker", ".gnupg", ".netrc", ".npm", ".ssh", ".kube", ".local/share/seagent", "appdata/roaming", "appdata/local/seagent", "appdata/local/microsoft", "appdata/local/google"];
+
+#[cfg(not(unix))]
+fn win_lower(p: &Path) -> PathBuf {
+    PathBuf::from(p.to_string_lossy().replace('/', "\\").to_lowercase())
+}
+
 pub fn validate_bind_source(src: &Path) -> Result<(), String> {
+    // Windows: the profile (`USERPROFILE`) holds the keys and AppData even when some tool set
+    // a different `HOME`; both are floors.
+    #[cfg(not(unix))]
+    if let Some(profile) = std::env::var_os("USERPROFILE").filter(|p| !p.is_empty()).map(PathBuf::from) {
+        if profile != host_home() {
+            validate_bind_source_in(src, &profile)?;
+        }
+    }
     validate_bind_source_in(src, &host_home())
 }
 
 /// [`validate_bind_source`] against an explicit home (credential mounts validate the same
 /// floor against the home their entries are relative to).
 pub fn validate_bind_source_in(src: &Path, home: &Path) -> Result<(), String> {
-    validate_bind_source_with(src, home, BLOCKED_HOME_SUBPATHS)
+    #[cfg(unix)]
+    return validate_bind_source_with(src, home, BLOCKED_HOME_SUBPATHS);
+    #[cfg(not(unix))]
+    return validate_bind_source_with(src, home, WINDOWS_BLOCKED_HOME_SUBPATHS);
 }
 
 /// The floor itself: system paths, container sockets, `/`, the whole home, plus `denied`
@@ -166,8 +213,17 @@ fn validate_bind_source_with(src: &Path, home: &Path, denied: &[&str]) -> Result
     if !src.is_absolute() {
         return Err(format!("bind source {} must be absolute", src.display()));
     }
+    #[cfg(unix)]
     let norm = src.canonicalize().unwrap_or_else(|_| src.to_path_buf());
+    // Windows: no `\\?\` prefix and lowercase (paths are case-insensitive), so it compares
+    // with `C:\Windows` and the home below.
+    #[cfg(not(unix))]
+    let norm = win_lower(&seagent_core::platform::layout::canonicalize(src).unwrap_or_else(|_| src.to_path_buf()));
     if norm == Path::new("/") {
+        return Err("refusing to bind-mount the host root into a sandbox".into());
+    }
+    #[cfg(not(unix))]
+    if norm.parent().is_none() {
         return Err("refusing to bind-mount the host root into a sandbox".into());
     }
     for b in BLOCKED_HOST_PATHS {
@@ -176,8 +232,17 @@ fn validate_bind_source_with(src: &Path, home: &Path, denied: &[&str]) -> Result
             return Err(format!("refusing to bind-mount {} into a sandbox: it exposes {}", src.display(), b.display()));
         }
     }
+    #[cfg(not(unix))]
+    for b in windows_blocked_host_paths().iter().map(|b| win_lower(b)) {
+        if norm.starts_with(&b) || b.starts_with(&norm) {
+            return Err(format!("refusing to bind-mount {} into a sandbox: it exposes {}", src.display(), b.display()));
+        }
+    }
     if !home.as_os_str().is_empty() {
+        #[cfg(unix)]
         let home = home.canonicalize().unwrap_or_else(|_| home.to_path_buf());
+        #[cfg(not(unix))]
+        let home = win_lower(&seagent_core::platform::layout::canonicalize(home).unwrap_or_else(|_| home.to_path_buf()));
         if norm == home {
             return Err("refusing to bind-mount the whole home directory into a sandbox".into());
         }
@@ -198,6 +263,11 @@ const CREDENTIAL_DENIED_HOME: &[&str] = &[".ssh"];
 
 /// The user's home: `[exec] credential_files` entries are relative to it.
 pub fn host_home() -> PathBuf {
+    #[cfg(not(unix))]
+    if std::env::var_os("HOME").is_none() {
+        // Windows has no `HOME` unless a POSIX shell set one; the profile is the home.
+        return std::env::var_os("USERPROFILE").map(PathBuf::from).unwrap_or_default();
+    }
     std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default()
 }
 
@@ -438,7 +508,8 @@ mod tests {
         std::fs::write(home.join("api-token"), "t").unwrap();
         let entries: Vec<String> = ["api-token", ".config/gh/hosts.yml", ".ssh/id_rsa", "/etc/passwd", "../x", "missing"].iter().map(|s| s.to_string()).collect();
         let (binds, errs) = credential_binds(&entries, "/home/seagent", &home);
-        let canon = |p: &str| std::fs::canonicalize(home.join(p)).unwrap();
+        // `layout::canonicalize` = std on Unix; no `\\?\` prefix on Windows (like the binds).
+        let canon = |p: &str| seagent_core::platform::layout::canonicalize(&home.join(p)).unwrap();
         assert_eq!(
             binds,
             vec![
@@ -449,12 +520,41 @@ mod tests {
         );
         assert!(binds.iter().all(|(_, _, ro)| *ro));
         for (needle, why) in [(".ssh/id_rsa", "exposes ~/.ssh"), ("/etc/passwd", "must be relative"), ("../x", "traversal"), ("missing", "does not exist")] {
-            assert!(errs.iter().any(|e| e.contains(needle) && e.contains(why)), "{needle}/{why}: {errs:?}");
+            // Windows prints the refused host path with `\`.
+            assert!(errs.iter().any(|e| e.replace('\\', "/").contains(needle) && e.contains(why)), "{needle}/{why}: {errs:?}");
         }
         assert_eq!(errs.len(), 4, "{errs:?}");
         assert_eq!(credential_binds(&[], "/home/seagent", &home), (vec![], vec![]), "nothing configured: nothing mounted");
     }
 
+    /// Windows counterpart of `dangerous_binds_refused`: drive-letter sources, the system
+    /// directory, ProgramData, the Docker engine pipe, a drive root and the profile.
+    #[cfg(windows)]
+    #[test]
+    fn dangerous_windows_binds_refused() {
+        let sysroot = std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".into());
+        assert!(parse_bind(&format!(r"{sysroot}:/x")).is_err());
+        assert!(parse_bind(&format!(r"{sysroot}\System32\config:/x")).is_err());
+        assert!(parse_bind(r"C:\:/x").is_err(), "a drive root is the host root");
+        assert!(parse_bind(r"\\.\pipe\docker_engine:/var/run/docker.sock").is_err());
+        assert!(parse_bind(r"relative:/x").is_err());
+        let tmp = crate::testutil::tmpdir("winbind");
+        assert!(parse_bind(&format!("{}:x", tmp.display())).is_err(), "container side must be absolute");
+        let profile = std::env::var("USERPROFILE").unwrap();
+        assert!(parse_bind(&format!(r"{profile}\.ssh:/k")).is_err());
+        assert!(parse_bind(&format!(r"{profile}\AppData\Local:/k")).is_err());
+        assert!(parse_bind(&format!("{profile}:/h")).is_err());
+        let (src, dst, ro) = parse_bind(&format!("{}:/data:ro", tmp.display())).unwrap();
+        assert_eq!((src, dst.as_str(), ro), (tmp.clone(), "/data", true));
+        let (src, _, ro) = parse_bind(&format!("{}:/data", tmp.display().to_string().replace('\\', "/"))).unwrap();
+        assert_eq!((src, ro), (PathBuf::from(tmp.display().to_string().replace('\\', "/")), false));
+        let e = ExecConfig::parse(&json!({"sandbox": {"binds": [format!("{sysroot}:/x")]}})).unwrap_err();
+        assert!(e.contains("refusing to bind-mount"), "{e}");
+        assert!(ExecConfig::parse(&json!({"sandbox": {"binds": [format!("{}:/data:ro", tmp.display())]}})).is_ok());
+    }
+
+    // Unix host paths (`/etc`, `/var/run/docker.sock`); Windows: `dangerous_windows_binds_refused`.
+    #[cfg(unix)]
     #[test]
     fn dangerous_binds_refused() {
         assert!(parse_bind("/etc:/x").is_err());
@@ -471,6 +571,8 @@ mod tests {
         assert!(SandboxConfig { backend: "local".into(), ..Default::default() }.validate().is_err());
     }
 
+    // Unix host paths; Windows: `dangerous_windows_binds_refused` covers the config path too.
+    #[cfg(unix)]
     #[test]
     fn sandbox_config_refuses_dangerous_binds() {
         // `[exec.sandbox] binds = ["/etc:/x"]` must not deserialize into a usable config,

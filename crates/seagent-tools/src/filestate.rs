@@ -560,12 +560,26 @@ const SENSITIVE_PREFIXES: &[&str] = &["/etc/", "/boot/", "/usr/lib/systemd/", "/
 const SENSITIVE_EXACT: &[&str] = &["/var/run/docker.sock", "/run/docker.sock"];
 
 /// Writes refused outright: system paths, the docker socket, seagent's own config and vault.
+#[cfg(windows)]
+fn windows_sensitive(c: &Path) -> bool {
+    let c = seagent_core::platform::layout::simplify_verbatim(c);
+    let env = |k: &str, d: &str| std::env::var_os(k).filter(|v| !v.is_empty()).map(PathBuf::from).unwrap_or_else(|| PathBuf::from(d));
+    let roots = [env("SystemRoot", r"C:\Windows"), env("ProgramFiles", r"C:\Program Files"), env("ProgramFiles(x86)", r"C:\Program Files (x86)"), env("ProgramData", r"C:\ProgramData")];
+    let lower = |p: &Path| p.to_string_lossy().replace('/', "\\").to_ascii_lowercase();
+    let s = lower(&c);
+    s.starts_with(r"\\.\pipe\docker") || roots.iter().any(|r| s.starts_with(&format!("{}\\", lower(r).trim_end_matches('\\'))))
+}
+
 pub fn sensitive_write_error(p: &Path) -> Option<String> {
     let cands = [std::fs::canonicalize(p).unwrap_or_else(|_| normalize(p)), normalize(p)];
     let hit = cands.iter().any(|c| {
         let s = c.display().to_string();
         SENSITIVE_PREFIXES.iter().any(|x| s.starts_with(x)) || SENSITIVE_EXACT.contains(&s.as_str())
     });
+    // Windows counterparts: the system directory (hosts file, drivers), installed programs,
+    // machine-wide ProgramData and the Docker engine pipe.
+    #[cfg(windows)]
+    let hit = hit || cands.iter().any(|c| windows_sensitive(c));
     if hit {
         return Some(format!("Refusing to write to sensitive system path: {}\nUse the shell tool (with sudo if needed) if you need to modify system files.", p.display()));
     }

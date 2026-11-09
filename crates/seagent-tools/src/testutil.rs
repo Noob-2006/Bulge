@@ -10,6 +10,35 @@ pub fn tmpdir(tag: &str) -> PathBuf {
     seagent_core::tmp::scratch(&format!("seagent-tools-{tag}"))
 }
 
+/// The bash that plays a POSIX remote in the fake-backend tests: `bash` on Unix (as always),
+/// Git Bash / MSYS2 on Windows (never `System32\bash.exe`, which is WSL with other files).
+pub fn remote_bash() -> std::process::Command {
+    #[cfg(unix)]
+    return std::process::Command::new("bash");
+    #[cfg(not(unix))]
+    return std::process::Command::new(seagent_core::platform::layout::bash().expect("Git Bash / MSYS2 bash for the remote fakes"));
+}
+
+/// A local directory as that remote spells it: unchanged on Unix, `/c/Users/…` on Windows.
+pub fn remote_path(p: &std::path::Path) -> String {
+    #[cfg(unix)]
+    return p.display().to_string();
+    #[cfg(not(unix))]
+    return format!("/{}", crate::exec::sync::windows_remote_rel(p));
+}
+
+/// The reverse of [`remote_path`]: where a remote path (`/tmp/x`, `/c/Users/…`) is on this
+/// host. Unix: the same path; Windows: `cygpath -w` from that bash.
+pub fn local_of_remote(p: &str) -> PathBuf {
+    #[cfg(unix)]
+    return PathBuf::from(p);
+    #[cfg(not(unix))]
+    {
+        let o = remote_bash().arg("-c").arg("cygpath -w \"$1\"").arg("cygpath").arg(p).output().expect("cygpath");
+        PathBuf::from(String::from_utf8_lossy(&o.stdout).trim())
+    }
+}
+
 /// Point `HOME` at a test tree for the duration, restoring it on drop. Tests that exercise
 /// `~` expansion / credential upload must not read or write the real home directory.
 pub struct HomeGuard(Option<std::ffi::OsString>);

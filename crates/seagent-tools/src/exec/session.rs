@@ -25,6 +25,17 @@ const MAX_VALUE: usize = 8 * 1024;
 /// Upper bound for the whole prologue.
 const MAX_PROLOGUE: usize = 96 * 1024;
 
+/// The shell family a backend runs scripts in: the host shell for `local`, the sandbox's
+/// own (PowerShell instead of MSYS bash) for `appcontainer`, POSIX for every remote or
+/// container backend.
+pub fn script_shell(backend: &dyn ExecBackend) -> seagent_core::platform::shell::ShellKind {
+    match backend.id() {
+        "local" => seagent_core::platform::shell::active().kind,
+        "appcontainer" => super::appcontainer::sandbox_shell().kind,
+        _ => seagent_core::platform::shell::ShellKind::Bash,
+    }
+}
+
 /// Per-session, per-backend shell state: working directory + exported environment.
 pub struct ShellState {
     /// Where the next command starts.
@@ -41,7 +52,7 @@ impl ShellState {
     pub fn new(backend: &dyn ExecBackend, workspace: &Path, persistent: bool) -> ShellState {
         // The snapshot prologue / epilogue are bash. A host shell that is PowerShell (Windows
         // without Git Bash) gets no persistence rather than a script it cannot parse.
-        let posix = backend.id() != "local" || seagent_core::platform::shell::active().kind.is_posix();
+        let posix = script_shell(backend).is_posix();
         ShellState { cwd: workspace.to_path_buf(), persistent: persistent && posix, env: BTreeMap::new(), dir: PathBuf::new() }
     }
 

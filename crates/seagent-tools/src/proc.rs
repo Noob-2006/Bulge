@@ -851,8 +851,18 @@ mod tests {
         let id = start(&c, "cat -v", json!({"pty":true}));
         let o = Proc.call(&c, json!({"action":"paste","id":id,"text":"hi"}));
         assert!(o.content.contains("bracketed paste"), "{}", o.content);
-        let t = until(&c, id, "201~");
-        assert!(t.contains("^[[200~hi^[[201~"), "cat -v shows the markers: {t}");
+        #[cfg(unix)]
+        {
+            let t = until(&c, id, "201~");
+            assert!(t.contains("^[[200~hi^[[201~"), "cat -v shows the markers: {t}");
+        }
+        // Windows: ConPTY (conhost) reads the markers as VT input and delivers the pasted text
+        // as key events, so a program that did not ask for bracketed paste sees just the text.
+        #[cfg(windows)]
+        {
+            let t = until(&c, id, "hi");
+            assert!(t.contains("hi"), "the pasted text arrives: {t}");
+        }
         // A pipe process gets the text as-is (no terminal to interpret the markers).
         let pipe = start(&c, "cat", json!({}));
         let o = Proc.call(&c, json!({"action":"paste","id":pipe,"text":"plain"}));

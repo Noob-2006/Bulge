@@ -243,7 +243,8 @@ pub(super) fn spawn_detached(cmd: Command, req: &ExecRequest, extra: Option<PreE
     let log = req.log_file.clone().ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "detached process needs log_file"))?;
     let exit = req.exit_file.clone().ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "detached process needs exit_file"))?;
     let _ = std::fs::remove_file(&exit);
-    let out = std::fs::OpenOptions::new().create(true).append(true).open(&log)?;
+    // Not an append-only handle: Git Bash exits 1 at startup on one (`open_child_log`).
+    let out = seagent_core::platform::proc::open_child_log(&log)?;
     let args: Vec<String> = cmd.get_args().map(|a| windows_quote(&a.to_string_lossy())).collect();
     let mut w = Command::new(windows_powershell());
     w.args(["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", DETACH_WRAPPER]);
@@ -336,10 +337,19 @@ impl LocalChild {
     fn finish(&mut self, code: i32) -> ExitInfo {
         if self.force_killed {
             ExitInfo { code: None, signal: Some(9) }
+        } else if let Some(sig) = msys_signal(code) {
+            ExitInfo { code: None, signal: Some(sig) }
         } else {
             ExitInfo::code(code)
         }
     }
+}
+
+/// MSYS / Cygwin bash reports "killed by signal N" to Windows as exit code `N << 8` (a bash
+/// `exit` status is always 0–255), so `kill -9 $$` reads as signal 9, as on Unix.
+fn msys_signal(code: i32) -> Option<i32> {
+    let sig = code >> 8;
+    (code & 0xff == 0 && (1..=64).contains(&sig) && seagent_core::platform::shell::active().kind.is_posix()).then_some(sig)
 }
 
 impl ExecChild for LocalChild {
