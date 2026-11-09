@@ -205,6 +205,83 @@ mod tests {
         m
     }
 
+    /// Throughput of the Linux path on our side of the socket (not run by default):
+    /// `cargo test --release -p seagent-app rfb_busy_window_throughput -- --ignored --nocapture`.
+    /// A fake Xvnc answers every incremental request on a 1920×1080 screen with a fresh
+    /// 1600×980 Raw rectangle (a scrolling editor), through the real RFB client, the region
+    /// pipeline's parallel encoders and in-order sending; only Xvnc's own work is missing.
+    #[test]
+    #[ignore]
+    fn rfb_busy_window_throughput() {
+        use crate::live_regions::{stream, Sink};
+        let (client, mut srv) = UnixStream::pair().unwrap();
+        std::thread::spawn(move || {
+            srv.write_all(b"RFB 003.008\n").unwrap();
+            let _ = rd(&mut srv, 12);
+            srv.write_all(&[1, 1]).unwrap();
+            let _ = rd(&mut srv, 1);
+            srv.write_all(&0u32.to_be_bytes()).unwrap();
+            let _ = rd(&mut srv, 1);
+            let mut init = vec![7, 128, 4, 56];
+            init.extend_from_slice(&[32, 24, 0, 1, 0, 255, 0, 255, 0, 255, 0, 8, 16, 0, 0, 0]);
+            init.extend_from_slice(&0u32.to_be_bytes());
+            srv.write_all(&init).unwrap();
+            let _ = rd(&mut srv, 20);
+            let _ = rd(&mut srv, 16);
+            // A text-like pattern that moves one line per update (a scrolling editor).
+            let mut n = 0u32;
+            while let Ok(req) = rd(&mut srv, 10) {
+                let (x, y, w, h) = if req[1] == 0 { (0u16, 0u16, 1920u16, 1080u16) } else { (40, 30, 1600, 980) };
+                let mut m = vec![0, 0, 0, 1];
+                for v in [x, y, w, h] {
+                    m.extend_from_slice(&v.to_be_bytes());
+                }
+                m.extend_from_slice(&0i32.to_be_bytes());
+                m.reserve(usize::from(w) * usize::from(h) * 4);
+                for yy in 0..u32::from(h) {
+                    let row = (yy + n) % 18;
+                    for xx in 0..u32::from(w) {
+                        let ink = row < 12 && !(xx / 7 + (yy + n) / 18).is_multiple_of(5) && (xx % 7) < 5;
+                        let v = if ink { 30 } else { 250 };
+                        m.extend_from_slice(&[v, v, v, 0]);
+                    }
+                }
+                n += 1;
+                if srv.write_all(&m).is_err() {
+                    break;
+                }
+            }
+        });
+        let mut r = Rfb::handshake(client, Box::new(|s: &UnixStream, t| {
+            let _ = s.set_read_timeout(t);
+        }))
+        .unwrap();
+        struct Count(u32, u64, std::time::Instant);
+        impl Sink for Count {
+            fn poll(&mut self) -> Result<Option<(u8, u32)>, Option<String>> {
+                if self.2.elapsed() > Duration::from_secs(6) {
+                    return Err(None);
+                }
+                Ok(None)
+            }
+            fn send(&mut self, m: &serde_json::Value, j: &[u8]) -> Result<(), Option<String>> {
+                if m["t"] == "patch" {
+                    self.0 += 1;
+                }
+                self.1 += j.len() as u64;
+                Ok(())
+            }
+            fn text(&mut self, _v: &serde_json::Value) -> Result<(), Option<String>> {
+                Ok(())
+            }
+        }
+        let mut c = Count(0, 0, std::time::Instant::now());
+        let _ = stream(&mut c, "host", &mut r, 85, 30);
+        let fps = f64::from(c.0) / 6.0;
+        eprintln!("LIVE RFB path (fake Xvnc, 1600x980 changed per update at 1080p, choice 30): {fps:.1} updates/s, {:.2} MB/s, {} encoders", c.1 as f64 / 6e6, crate::live_regions::encoders());
+        assert!(fps >= 30.0, "{fps:.1}");
+    }
+
     /// A fake Xvnc: handshake, then a full frame, a raw rectangle, a CopyRect, and silence.
     #[test]
     fn reads_the_framebuffer_incrementally() {
