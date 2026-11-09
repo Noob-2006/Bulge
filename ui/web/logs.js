@@ -63,7 +63,7 @@
       <td class="tl-t">${v(when(r.ts))}</td>
       <td class="tl-hide-sm"><span class="tl-sid" data-tl-session="${v(r.session)}" title="${v(r.session)}">${v(short(r.session))}</span></td>
       <td><b>${v(r.tool)}</b></td>
-      <td class="tl-res">${r.ok ? '成功' : '失敗'}</td>
+      <td class="tl-res">${r.ok ? '成功' : r.gate ? `閘門擋下（${v(r.gate)}）` : '失敗'}</td>
       <td class="tl-ms">${v(ms(r.ms))}</td>
       <td class="tl-a">${v(r.args)}</td>
       <td class="tl-e">${v(r.err || '')}</td></tr>`).join('');

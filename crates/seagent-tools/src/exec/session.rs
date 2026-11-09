@@ -410,6 +410,13 @@ mod tests {
         assert!(!o.is_error, "{}", o.content);
         let dir = c.home.join("shell").join(crate::exec::global().scope_key(&c.session_id, &c.workspace));
         let f = dir.join("state");
+        if !script_shell(&crate::exec::local::LocalBackend::new()).is_posix() {
+            // A PowerShell host keeps no snapshot at all (`ShellState::new`): nothing is written,
+            // so there is nothing to rewrite either.
+            assert!(!Shell.call(&c, json!({"command":"echo same"})).is_error);
+            assert!(!f.exists(), "no snapshot file on a non-POSIX host shell");
+            return;
+        }
         // One settling call: the first snapshot can differ from the steady state (OLDPWD).
         assert!(!Shell.call(&c, json!({"command":"true"})).is_error);
         let old = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000_000);

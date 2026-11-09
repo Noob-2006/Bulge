@@ -4,10 +4,11 @@
 //! `seagent logs export` read; the session event log stays the source of truth.
 //!
 //! The record is built from the kernel's event tap (no change to the event schema): the
-//! `tool_called` event opens it (name, input, start time), `tool_settled` stamps the end, and
-//! the tool-result message closes it with the outcome and the error text. A call the gate
-//! refused never settles; its result message still closes the record. Calls left open when the
-//! turn ends (an interrupt) are closed as failures by `turn_end`.
+//! assistant's `tool_use` block opens it (name, input), `tool_called` marks when it started to
+//! run, `tool_settled` when it ended, a refusing `gate` event names the gate, and the
+//! tool-result message closes it with the outcome and the error text. A call a gate refused
+//! never gets `tool_called` at all — it is logged as a failure with `gate` set. Calls left open
+//! when the turn ends (an interrupt) are closed as failures by `turn_end`.
 //!
 //! Cheap by design: records go to a buffered writer that is flushed at turn end, when the
 //! buffer fills, when somebody reads the log, and at shutdown — no fsync per line. `[tool_log]
@@ -182,6 +183,7 @@ struct Open {
     tool: String,
     args: String,
     settled: Option<(u64, usize)>,
+    gate: Option<String>,
 }
 
 /// Pairs `tool_called` / `tool_settled` / tool-result events into records.
@@ -199,22 +201,48 @@ fn rec(session: &str, id: &str, o: Open, end: u64, ok: bool, err: Option<String>
     if let Some(e) = err.filter(|e| !e.is_empty()) {
         r["err"] = json!(e);
     }
+    if let Some(g) = o.gate {
+        r["gate"] = json!(g);
+    }
     r
 }
 
 impl Tracker {
     /// Feed one event; returns the records it completes.
+    fn open_call(&mut self, session: &str, id: &str, ts: u64, name: &str, input: &Value, redact: &dyn Fn(&str) -> String) {
+        if let Some(o) = self.open.get_mut(&(session.to_string(), id.to_string())) {
+            // Requested earlier (the assistant message); the duration counts from execution.
+            o.ts = ts;
+            return;
+        }
+        if self.open.len() >= OPEN_MAX {
+            // Never grow without bound: the oldest open calls are the least likely to close.
+            let mut all: Vec<u64> = self.open.values().map(|o| o.ts).collect();
+            all.sort_unstable();
+            let cut = all[OPEN_MAX / 2];
+            self.open.retain(|_, o| o.ts > cut);
+        }
+        self.open.insert((session.to_string(), id.to_string()), Open { ts, tool: name.to_string(), args: summarize_args(input, redact), settled: None, gate: None });
+    }
+
     pub fn observe(&mut self, session: &str, e: &Event, redact: &dyn Fn(&str) -> String) -> Vec<Value> {
         match &e.kind {
             EventKind::ToolCalled { tool_use_id, name, input, .. } => {
-                if self.open.len() >= OPEN_MAX {
-                    // Never grow without bound: the oldest open calls are the least likely to close.
-                    let mut ts: Vec<u64> = self.open.values().map(|o| o.ts).collect();
-                    ts.sort_unstable();
-                    let cut = ts[OPEN_MAX / 2];
-                    self.open.retain(|_, o| o.ts > cut);
+                self.open_call(session, tool_use_id, e.ts, name, input, redact);
+                vec![]
+            }
+            EventKind::Message { message, .. } if message.role == seagent_core::Role::Assistant => {
+                for b in &message.content {
+                    if let Block::ToolUse { id, name, input } = b {
+                        self.open_call(session, id, e.ts, name, input, redact);
+                    }
                 }
-                self.open.insert((session.to_string(), tool_use_id.clone()), Open { ts: e.ts, tool: name.clone(), args: summarize_args(input, redact), settled: None });
+                vec![]
+            }
+            EventKind::Gate { tool_use_id, gate, verdict, .. } if verdict != "allow" => {
+                if let Some(o) = self.open.get_mut(&(session.to_string(), tool_use_id.clone())) {
+                    o.gate = Some(gate.clone());
+                }
                 vec![]
             }
             EventKind::ToolSettled { tool_use_id, bytes, .. } => {
@@ -408,7 +436,7 @@ pub fn install(k: &seagent_kernel::kernel::Kernel) -> Option<Arc<Log>> {
     let tracker = Mutex::new(Tracker::default());
     let w = log.clone();
     k.add_tap(Arc::new(move |sid: &str, e: &Event| {
-        if !matches!(e.kind, EventKind::ToolCalled { .. } | EventKind::ToolSettled { .. } | EventKind::Message { .. } | EventKind::TurnEnd { .. }) {
+        if !matches!(e.kind, EventKind::ToolCalled { .. } | EventKind::ToolSettled { .. } | EventKind::Message { .. } | EventKind::Gate { .. } | EventKind::TurnEnd { .. }) {
             return;
         }
         let redact = |s: &str| seagent_kernel::trajectory::redact_patterns(&vault.redact(s));
@@ -557,9 +585,9 @@ pub fn render(format: &str, found: &Found, q: &Query, offset_min: i32, now_ms: u
             Ok((format!("seagent-tool-calls-{stamp}.jsonl"), "application/x-ndjson", out))
         }
         "csv" => {
-            let mut out = String::from("time_utc,session,tool,status,duration_ms,args,error,bytes,call_id\r\n");
+            let mut out = String::from("time_utc,session,tool,status,duration_ms,args,error,gate,bytes,call_id\r\n");
             for r in &found.records {
-                let cells = [utc_iso(r["ts"].as_u64().unwrap_or(0)), s(&r["session"]), s(&r["tool"]), if r["ok"] == true { "ok".into() } else { "error".into() }, r["ms"].to_string(), s(&r["args"]), s(&r["err"]), r["bytes"].as_u64().map(|b| b.to_string()).unwrap_or_default(), s(&r["id"])];
+                let cells = [utc_iso(r["ts"].as_u64().unwrap_or(0)), s(&r["session"]), s(&r["tool"]), if r["ok"] == true { "ok".into() } else { "error".into() }, r["ms"].to_string(), s(&r["args"]), s(&r["err"]), s(&r["gate"]), r["bytes"].as_u64().map(|b| b.to_string()).unwrap_or_default(), s(&r["id"])];
                 out.push_str(&cells.iter().map(|c| csv_cell(c)).collect::<Vec<_>>().join(","));
                 out.push_str("\r\n");
             }
@@ -596,7 +624,11 @@ fn html(found: &Found, q: &Query, offset_min: i32, now_ms: u64) -> String {
             html_esc(&clock(r["ts"].as_u64().unwrap_or(0), offset_min)),
             html_esc(&r["session"].as_str().unwrap_or("").chars().take(24).collect::<String>()),
             st("tool"),
-            if ok { "ok" } else { "failed" },
+            match (ok, r["gate"].as_str()) {
+                (true, _) => "ok".to_string(),
+                (false, Some(g)) => format!("blocked ({})", html_esc(g)),
+                (false, None) => "failed".to_string(),
+            },
             r["ms"].as_u64().unwrap_or(0),
             st("args"),
             st("err"),
@@ -795,8 +827,10 @@ mod tests {
         assert!(t.observe("s1", &ev(2, 1001, called("b", "write", json!({"path": "x.txt", "content": "hello world"}))), &none).is_empty());
         t.observe("s1", &ev(3, 1040, settled("a", false)), &none);
         t.observe("s1", &ev(4, 1050, settled("b", true)), &none);
-        // A gate-refused call never settles; its result still closes it.
-        t.observe("s1", &ev(5, 1060, called("c", "shell", json!({"command": "sudo rm -rf /"}))), &none);
+        // A gate-refused call has no `tool_called` at all: the assistant's request opens it.
+        let ask = Message { role: Role::Assistant, content: vec![Block::ToolUse { id: "c".into(), name: "shell".into(), input: json!({"command": "sudo rm -rf /"}) }] };
+        t.observe("s1", &ev(5, 1060, EventKind::Message { message: ask, usage: None, model: None, inbox: None }), &none);
+        t.observe("s1", &ev(5, 1062, EventKind::Gate { tool_use_id: "c".into(), gate: "privilege".into(), verdict: "deny".into(), reason: "sudo".into() }), &none);
         let out = t.observe("s1", &ev(6, 1070, results(&[("a", "files", false), ("b", "permission denied: x.txt\nmore", true), ("c", "refused by the privilege gate", true)])), &none);
         assert_eq!(out.len(), 3);
         assert_eq!((out[0]["tool"].as_str(), out[0]["ok"].as_bool(), out[0]["ms"].as_u64(), out[0]["bytes"].as_u64()), (Some("shell"), Some(true), Some(40), Some(7)));
@@ -804,7 +838,9 @@ mod tests {
         assert!(out[0].get("err").is_none());
         assert_eq!(out[1]["args"], "path=x.txt content=<11 chars>", "bulk content is logged as its size");
         assert_eq!((out[1]["ok"].as_bool(), out[1]["err"].as_str(), out[1]["ms"].as_u64()), (Some(false), Some("permission denied: x.txt more"), Some(49)));
-        assert_eq!((out[2]["ok"].as_bool(), out[2]["ms"].as_u64()), (Some(false), Some(10)));
+        assert_eq!((out[2]["ok"].as_bool(), out[2]["ms"].as_u64(), out[2]["gate"].as_str()), (Some(false), Some(10), Some("privilege")));
+        assert_eq!(out[2]["args"], "command=sudo rm -rf /");
+        assert!(out[0].get("gate").is_none());
         // Left open by an interrupt: closed as a failure at turn end, other sessions untouched.
         t.observe("s1", &ev(7, 2000, called("d", "web_fetch", json!({"url": "https://example.com"}))), &none);
         t.observe("s2", &ev(1, 2001, called("e", "read", json!({"path": "a"}))), &none);
