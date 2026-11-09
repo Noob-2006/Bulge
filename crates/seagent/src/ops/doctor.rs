@@ -317,10 +317,30 @@ fn exec_table(paths: &Paths) -> toml::Table {
     std::fs::read_to_string(paths.user_config()).ok().and_then(|t| t.parse::<toml::Table>().ok()).and_then(|t| t.get("exec").and_then(|e| e.as_table()).cloned()).unwrap_or_default()
 }
 
+#[cfg_attr(windows, allow(unreachable_code, unused_variables))]
 fn detect_native(c: &Ctx) -> Result<Vec<Finding>, String> {
     const ID: &str = "core/doctor/native-status";
     let exec = exec_table(&c.paths);
     let backend = exec.get("backend").and_then(|v| v.as_str()).unwrap_or("local").to_string();
+    // Windows: bwrap / Landlock / user namespaces / cgroups do not exist; the native sandbox
+    // is an AppContainer (restricted token + low integrity when profiles cannot be created).
+    #[cfg(windows)]
+    {
+        let _ = &backend;
+        let mut out = vec![];
+        let ac = seagent_tools::exec::appcontainer::available();
+        let sev = if ac { Severity::Info } else if backend == "appcontainer" { Severity::Error } else { Severity::Warning };
+        out.push(finding(ID, sev, if ac { "appcontainer: available (Windows AppContainer + Job Object)".to_string() } else { "appcontainer: AppContainer profiles cannot be created here; the sandbox degrades to a restricted token at low integrity".to_string() }).hint("exec.backend = \"appcontainer\" (or `auto`) runs tools in an AppContainer; for a microVM build the guest image (`seagent sandbox vm image build`) and enable Hyper-V or QEMU with WHPX."));
+        for b in ["docker", "podman"] {
+            if backend == b {
+                let found = on_path(b);
+                out.push(finding(ID, if found.is_some() { Severity::Info } else { Severity::Error }, format!("{b}: {}", found.map(|p| format!("available at {}", p.display())).unwrap_or_else(|| "not installed".into()))).hint(format!("Install {b} (Docker Desktop / Podman machine) or choose another exec.backend.")));
+            }
+        }
+        let git = on_path("git");
+        out.push(finding(ID, if git.is_some() { Severity::Info } else if c.cfg.checkpoint.enabled { Severity::Error } else { Severity::Warning }, format!("git (checkpoints): {}", if git.is_some() { "available" } else { "not installed" })).hint("Install Git for Windows, or set checkpoint.enabled = false."));
+        return Ok(out);
+    }
     // ent-023/026: one kernel probe shared with the sandbox policy (`seagent sandbox explain`).
     let hk = seagent_vm::hostcaps::HostKernel::detect();
     let landlock = hk.landlock_abi > 0;

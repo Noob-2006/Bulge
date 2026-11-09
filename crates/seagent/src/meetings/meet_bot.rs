@@ -259,6 +259,7 @@ struct Bridge {
 }
 
 impl Bridge {
+    #[cfg_attr(windows, allow(dead_code))]
     fn setup(pactl: &str) -> Result<Bridge, String> {
         let run = |args: &[&str]| -> Result<String, String> {
             let o = Command::new(pactl).args(args).stdin(Stdio::null()).output().map_err(|e| if e.kind() == std::io::ErrorKind::NotFound { "pactl not found — install PulseAudio/pipewire-pulse".to_string() } else { e.to_string() })?;
@@ -387,7 +388,13 @@ pub fn run(cfg: BotConfig) -> i32 {
         if cfg.speech.is_none() {
             st.set(json!({"error": "realtime mode requested but no text-to-speech provider is configured ([media.tts]) — falling back to transcribe"}));
         } else {
-            match Bridge::setup(&cfg.pactl) {
+            // Windows has no PulseAudio null-sink: the virtual microphone would be a third-party
+            // audio cable driver (VB-CABLE), not wired up yet — say so and transcribe.
+            #[cfg(windows)]
+            let setup: Result<Bridge, String> = Err("realtime speaking needs a virtual microphone; on Windows that is a virtual audio cable driver, which seagent does not drive yet (run the bot on a Linux / macOS node for realtime)".into());
+            #[cfg(not(windows))]
+            let setup = Bridge::setup(&cfg.pactl);
+            match setup {
                 Ok(b) => {
                     st.set(json!({"realtime": true, "realtimeDevice": b.source}));
                     env.push(("PULSE_SOURCE".to_string(), b.source.clone()));
@@ -552,8 +559,10 @@ fn cfg_str(cfg: &toml::Table, k: &str) -> Option<String> {
 
 /// `None` when the plugin can run locally, else what is missing (upstream `check_meet_requirements`).
 pub fn prerequisites(cfg: &toml::Table) -> Option<String> {
-    if !cfg!(any(target_os = "linux", target_os = "macos")) {
-        return Some("google_meet is supported on Linux and macOS only".into());
+    // Windows: the transcript bot drives Edge / Chrome over CDP like elsewhere; realtime
+    // speaking (the virtual microphone) is Linux / macOS only and reported when asked for.
+    if !cfg!(any(target_os = "linux", target_os = "macos", windows)) {
+        return Some("google_meet is supported on Linux, macOS and Windows only".into());
     }
     if cfg_str(cfg, "cdp_url").is_some() {
         return None;

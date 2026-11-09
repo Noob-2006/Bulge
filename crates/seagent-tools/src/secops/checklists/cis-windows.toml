@@ -1,0 +1,283 @@
+# CIS-style Windows host baseline (read-only checks; subset of the CIS Microsoft Windows 10/11
+# and Windows Server Level 1 items). The Windows counterpart of cis-linux: every check runs a
+# fixed, read-only command (`reg query`, `net accounts`, `netsh … show`, `sc query`, `auditpol
+# /get`, `findstr`), none needs elevation, and a check whose input is unreadable (an absent
+# policy value, `auditpol` without admin rights) is "skip", never "pass". Map the numbering to
+# the exact benchmark version your organisation adopted before using the result as evidence.
+#
+# `reg query` and `sc` print the same text on every display language; `net accounts`, `net
+# user` and `netsh` translate their labels, so on a non-English Windows those checks report
+# "fail" — read their evidence, or run the check from an English-language account.
+#
+# Field reference: see cis-linux.toml.
+
+[meta]
+id = "cis-windows"
+title = "CIS-style Windows host baseline (Level 1 subset)"
+
+[[check]]
+id = "1.1.1"
+section = "1 Account Policies"
+title = "Password history remembers at least 24 passwords"
+severity = "medium"
+cmd = ["net", "accounts"]
+pattern = '(?i)password history maintained:\s+(\d+)'
+min = 24
+fix = "Set 'Enforce password history' to 24 or more (secpol.msc → Account Policies → Password Policy)."
+
+[[check]]
+id = "1.1.2"
+section = "1 Account Policies"
+title = "Maximum password age is 365 days or less"
+severity = "low"
+cmd = ["net", "accounts"]
+pattern = '(?i)maximum password age \(days\):\s+(\d+)'
+max = 365
+fix = "Set 'Maximum password age' to 365 or fewer days (not Unlimited)."
+
+[[check]]
+id = "1.1.4"
+section = "1 Account Policies"
+title = "Minimum password length is at least 14"
+severity = "high"
+cmd = ["net", "accounts"]
+pattern = '(?i)minimum password length:\s+(\d+)'
+min = 14
+fix = "Set 'Minimum password length' to 14 or more."
+
+[[check]]
+id = "1.2.1"
+section = "1 Account Policies"
+title = "Account lockout threshold is set (1–5 attempts)"
+severity = "medium"
+cmd = ["net", "accounts"]
+pattern = '(?i)lockout threshold:\s+(\d+)'
+min = 1
+max = 5
+fix = "Set 'Account lockout threshold' to 5 or fewer invalid attempts (not 0 / Never)."
+
+[[check]]
+id = "1.2.2"
+section = "1 Account Policies"
+title = "Lockout duration is at least 15 minutes"
+severity = "low"
+cmd = ["net", "accounts"]
+pattern = '(?i)lockout duration \(minutes\):\s+(\d+)'
+min = 15
+fix = "Set 'Account lockout duration' to 15 minutes or more."
+
+[[check]]
+id = "2.3.1"
+section = "2 Local Policies"
+title = "The built-in Guest account is disabled"
+severity = "medium"
+cmd = ["net", "user", "Guest"]
+match = '(?i)account active\s+no'
+fix = "Disable the Guest account (lusrmgr.msc or `net user Guest /active:no`)."
+
+[[check]]
+id = "2.3.7"
+section = "2 Local Policies"
+title = "UAC is enabled (EnableLUA = 1)"
+severity = "high"
+cmd = ["reg", "query", 'HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System', "/v", "EnableLUA"]
+match = '(?i)EnableLUA\s+REG_DWORD\s+0x1\b'
+fix = "Turn on User Account Control (EnableLUA = 1)."
+
+[[check]]
+id = "2.3.8"
+section = "2 Local Policies"
+title = "UAC prompts administrators on the secure desktop"
+severity = "medium"
+cmd = ["reg", "query", 'HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System', "/v", "PromptOnSecureDesktop"]
+match = '(?i)PromptOnSecureDesktop\s+REG_DWORD\s+0x1\b'
+fix = "Set 'Switch to the secure desktop when prompting for elevation' to Enabled."
+
+[[check]]
+id = "2.3.9"
+section = "2 Local Policies"
+title = "Admin Approval Mode prompts for consent (not 'elevate without prompting')"
+severity = "medium"
+cmd = ["reg", "query", 'HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System', "/v", "ConsentPromptBehaviorAdmin"]
+not_match = '(?i)ConsentPromptBehaviorAdmin\s+REG_DWORD\s+0x0\b'
+fix = "Set ConsentPromptBehaviorAdmin to 2 (prompt for consent on the secure desktop) or 5."
+
+[[check]]
+id = "2.3.10"
+section = "2 Local Policies"
+title = "Anonymous enumeration of SAM accounts is restricted"
+severity = "medium"
+cmd = ["reg", "query", 'HKLM\SYSTEM\CurrentControlSet\Control\Lsa', "/v", "RestrictAnonymousSAM"]
+match = '(?i)RestrictAnonymousSAM\s+REG_DWORD\s+0x1\b'
+fix = "Set 'Network access: Do not allow anonymous enumeration of SAM accounts' to Enabled."
+
+[[check]]
+id = "2.3.11"
+section = "2 Local Policies"
+title = "LAN Manager hashes are not stored"
+severity = "high"
+cmd = ["reg", "query", 'HKLM\SYSTEM\CurrentControlSet\Control\Lsa', "/v", "NoLMHash"]
+match = '(?i)NoLMHash\s+REG_DWORD\s+0x1\b'
+fix = "Set 'Network security: Do not store LAN Manager hash value on next password change' to Enabled."
+
+[[check]]
+id = "2.3.12"
+section = "2 Local Policies"
+title = "LAN Manager authentication level sends NTLMv2 only"
+severity = "high"
+cmd = ["reg", "query", 'HKLM\SYSTEM\CurrentControlSet\Control\Lsa', "/v", "LmCompatibilityLevel"]
+pattern = '(?i)LmCompatibilityLevel\s+REG_DWORD\s+0x0*(\d)\b'
+min = 5
+fix = "Set 'Network security: LAN Manager authentication level' to 'Send NTLMv2 response only. Refuse LM & NTLM' (5)."
+
+[[check]]
+id = "2.3.13"
+section = "2 Local Policies"
+title = "SMB server requires signing"
+severity = "medium"
+cmd = ["reg", "query", 'HKLM\SYSTEM\CurrentControlSet\Services\LanmanServer\Parameters', "/v", "RequireSecuritySignature"]
+match = '(?i)RequireSecuritySignature\s+REG_DWORD\s+0x1\b'
+fix = "Set 'Microsoft network server: Digitally sign communications (always)' to Enabled."
+
+[[check]]
+id = "2.3.14"
+section = "2 Local Policies"
+title = "SMB client requires signing"
+severity = "medium"
+cmd = ["reg", "query", 'HKLM\SYSTEM\CurrentControlSet\Services\LanmanWorkstation\Parameters', "/v", "RequireSecuritySignature"]
+match = '(?i)RequireSecuritySignature\s+REG_DWORD\s+0x1\b'
+fix = "Set 'Microsoft network client: Digitally sign communications (always)' to Enabled."
+
+[[check]]
+id = "3.1"
+section = "3 Network"
+title = "Windows Defender Firewall is on for every profile"
+severity = "high"
+cmd = ["netsh", "advfirewall", "show", "allprofiles", "state"]
+match = '(?i)state\s+on'
+not_match = '(?i)state\s+off'
+fix = "Turn Windows Defender Firewall on for the Domain, Private and Public profiles."
+
+[[check]]
+id = "3.2"
+section = "3 Network"
+title = "SMBv1 server is disabled"
+severity = "high"
+cmd = ["reg", "query", 'HKLM\SYSTEM\CurrentControlSet\Services\LanmanServer\Parameters', "/v", "SMB1"]
+match = '(?i)SMB1\s+REG_DWORD\s+0x0\b'
+on_error = "skip"
+fix = "Disable SMBv1 (Set-SmbServerConfiguration -EnableSMB1Protocol $false, or remove the SMB1Protocol feature)."
+
+[[check]]
+id = "3.3"
+section = "3 Network"
+title = "LLMNR (multicast name resolution) is turned off"
+severity = "medium"
+cmd = ["reg", "query", 'HKLM\SOFTWARE\Policies\Microsoft\Windows NT\DNSClient', "/v", "EnableMulticast"]
+match = '(?i)EnableMulticast\s+REG_DWORD\s+0x0\b'
+on_error = "fail"
+fix = "Set 'Turn off multicast name resolution' to Enabled (Group Policy → Network → DNS Client)."
+
+[[check]]
+id = "3.4"
+section = "3 Network"
+title = "Remote Desktop requires Network Level Authentication"
+severity = "medium"
+cmd = ["reg", "query", 'HKLM\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp', "/v", "UserAuthentication"]
+match = '(?i)UserAuthentication\s+REG_DWORD\s+0x1\b'
+fix = "Require Network Level Authentication for Remote Desktop connections."
+
+[[check]]
+id = "3.5"
+section = "3 Network"
+title = "The Remote Registry service is not running"
+severity = "medium"
+cmd = ["sc", "query", "RemoteRegistry"]
+not_match = '(?i)STATE\s+:\s+\d+\s+RUNNING'
+ok_exit = [0, 1060]
+fix = "Stop and disable the Remote Registry service."
+
+[[check]]
+id = "4.1"
+section = "4 Services"
+title = "Microsoft Defender Antivirus service is running"
+severity = "high"
+cmd = ["sc", "query", "WinDefend"]
+match = '(?i)STATE\s+:\s+\d+\s+RUNNING'
+on_error = "fail"
+fix = "Keep Microsoft Defender Antivirus (or another registered antivirus) running."
+
+[[check]]
+id = "4.2"
+section = "4 Services"
+title = "Windows Update service is not disabled"
+severity = "medium"
+cmd = ["sc", "qc", "wuauserv"]
+not_match = '(?i)START_TYPE\s+:\s+4\s+DISABLED'
+fix = "Set the Windows Update service start type to Manual or Automatic."
+
+[[check]]
+id = "4.3"
+section = "4 Services"
+title = "Windows Event Log service is running"
+severity = "high"
+cmd = ["sc", "query", "EventLog"]
+match = '(?i)STATE\s+:\s+\d+\s+RUNNING'
+on_error = "fail"
+fix = "Start the Windows Event Log service and set it to Automatic."
+
+[[check]]
+id = "5.1"
+section = "5 Logging"
+title = "Logon events are audited (success and failure)"
+severity = "medium"
+cmd = ["auditpol", "/get", "/subcategory:Logon"]
+match = '(?i)Logon\s+Success and Failure'
+fix = "Audit Logon: Success and Failure (Advanced Audit Policy → Logon/Logoff). Needs an elevated prompt to read; skipped otherwise."
+
+[[check]]
+id = "5.2"
+section = "5 Logging"
+title = "PowerShell script block logging is on"
+severity = "medium"
+cmd = ["reg", "query", 'HKLM\SOFTWARE\Policies\Microsoft\Windows\PowerShell\ScriptBlockLogging', "/v", "EnableScriptBlockLogging"]
+match = '(?i)EnableScriptBlockLogging\s+REG_DWORD\s+0x1\b'
+on_error = "fail"
+fix = "Turn on PowerShell Script Block Logging (Group Policy → Windows Components → Windows PowerShell)."
+
+[[check]]
+id = "6.1"
+section = "6 System"
+title = "AutoRun is disabled for all drives"
+severity = "medium"
+cmd = ["reg", "query", 'HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\Explorer', "/v", "NoDriveTypeAutoRun"]
+match = '(?i)NoDriveTypeAutoRun\s+REG_DWORD\s+0xff\b'
+on_error = "fail"
+fix = "Set 'Turn off AutoPlay' to Enabled for All drives (NoDriveTypeAutoRun = 0xff)."
+
+[[check]]
+id = "6.2"
+section = "6 System"
+title = "Secure Boot is on"
+severity = "medium"
+cmd = ["reg", "query", 'HKLM\SYSTEM\CurrentControlSet\Control\SecureBoot\State', "/v", "UEFISecureBootEnabled"]
+match = '(?i)UEFISecureBootEnabled\s+REG_DWORD\s+0x1\b'
+fix = "Enable Secure Boot in the UEFI firmware settings."
+
+[[check]]
+id = "6.3"
+section = "6 System"
+title = "WDigest does not keep plaintext credentials in memory"
+severity = "high"
+cmd = ["reg", "query", 'HKLM\SYSTEM\CurrentControlSet\Control\SecurityProviders\WDigest', "/v", "UseLogonCredential"]
+not_match = '(?i)UseLogonCredential\s+REG_DWORD\s+0x1\b'
+ok_exit = [0, 1]
+fix = "Set UseLogonCredential = 0 (or leave it absent on Windows 8.1 / Server 2012 R2 and later)."
+
+[[check]]
+id = "7.1"
+section = "7 Organisation"
+title = "BitLocker recovery keys are escrowed"
+manual = true
+evidence = "Where the BitLocker recovery keys of this machine are stored (Entra ID / AD / key vault), and who can read them."
+fix = "Escrow the recovery keys and record the location."
