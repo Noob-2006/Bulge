@@ -510,16 +510,23 @@ fn page_uncovered(app: &App, b: &seagent_browser::engine::Browser, g: &seagent_b
     }
 }
 
-/// The desktop picture with the page area blacked out, hashed: changes only outside the page.
+/// A hash of the desktop picture outside the page area (sampled rows, in place): it changes
+/// only when something other than the page does.
 fn hash_outside(img: &image::DynamicImage, g: &seagent_browser::live::OnScreen) -> u64 {
-    let mut rgba = img.to_rgba8();
-    let (w, h) = (rgba.width() as i64, rgba.height() as i64);
-    for y in i64::from(g.y).max(0)..(i64::from(g.y) + i64::from(g.height)).min(h) {
-        for x in i64::from(g.x).max(0)..(i64::from(g.x) + i64::from(g.width)).min(w) {
-            rgba.put_pixel(x as u32, y as u32, image::Rgba([0, 0, 0, 255]));
+    let (w, h) = (img.width() as usize, img.height() as usize);
+    let px = img.as_bytes();
+    let bpp = px.len().checked_div(w * h).unwrap_or(4).max(1);
+    let (x0, x1) = ((g.x.max(0) as usize).min(w), ((g.x.max(0) as usize) + g.width as usize).min(w));
+    let (y0, y1) = ((g.y.max(0) as usize).min(h), ((g.y.max(0) as usize) + g.height as usize).min(h));
+    let mut acc = 0xcbf2_9ce4_8422_2325u64;
+    for y in (0..h).step_by(2) {
+        let row = &px[y * w * bpp..(y + 1) * w * bpp];
+        let parts: [&[u8]; 2] = if (y0..y1).contains(&y) { [&row[..x0 * bpp], &row[x1 * bpp..]] } else { [row, &[]] };
+        for part in parts {
+            acc = (acc ^ frame_hash(part)).wrapping_mul(0x0100_0000_01b3);
         }
     }
-    frame_hash(rgba.as_raw())
+    acc
 }
 
 /// Bot Desktop stream in patch mode: a base picture of the whole desktop (full size, re-sent
@@ -534,14 +541,25 @@ fn desktop_patched(l: &mut Link, t: &crate::browser_view::Target, (quality, fps)
     // The base capture's interval: 250 ms after a change, backing off to 1 s while idle.
     let rest = AtomicU64::new(250);
     std::thread::scope(|sc| {
-        let (tx, rx) = std::sync::mpsc::sync_channel::<Captured>(1);
-        let (stop_p, rest_p, app_p) = (&stop, &rest, app.clone());
+        let (tx, rx) = std::sync::mpsc::sync_channel::<BaseCapture>(1);
+        let (stop_p, rest_p, app_p, b_p) = (&stop, &rest, app.clone(), b.clone());
+        let mut tab_p = tab.clone();
         sc.spawn(move || {
             let mut grabber = Grabber::default();
             while !stop_p.load(Ordering::SeqCst) {
                 let t0 = Instant::now();
                 let r = grab_for(&app_p, t, &mut grabber, 3840);
-                if tx.send((r, t0.elapsed())).is_err() {
+                let took = t0.elapsed();
+                // Window moved / resized, tab switched, something on top.
+                let geo = match seagent_browser::live::page_on_screen(&b_p, &tab_p) {
+                    Ok(g) if g.visible => Some((tab_p.clone(), g)),
+                    _ => seagent_browser::live::visible_page(&b_p),
+                };
+                if let Some((t2, _)) = &geo {
+                    tab_p = t2.clone();
+                }
+                let clear = geo.as_ref().is_some_and(|(_, g)| page_uncovered(&app_p, &b_p, g));
+                if tx.send(((r, took), geo, clear)).is_err() {
                     break;
                 }
                 let until = Instant::now() + Duration::from_millis(rest_p.load(Ordering::SeqCst));
@@ -558,7 +576,7 @@ fn desktop_patched(l: &mut Link, t: &crate::browser_view::Target, (quality, fps)
 }
 
 #[allow(clippy::too_many_arguments)]
-fn patched_consume(l: &mut Link, app: &App, id: &str, (quality, fps): (u8, u32), b: &Arc<seagent_browser::engine::Browser>, mut tab: String, mut g: seagent_browser::live::OnScreen, rx: &std::sync::mpsc::Receiver<Captured>, rest: &std::sync::atomic::AtomicU64) -> Flow {
+fn patched_consume(l: &mut Link, app: &App, id: &str, (quality, fps): (u8, u32), b: &Arc<seagent_browser::engine::Browser>, mut tab: String, mut g: seagent_browser::live::OnScreen, rx: &std::sync::mpsc::Receiver<BaseCapture>, rest: &std::sync::atomic::AtomicU64) -> Flow {
     use std::sync::atomic::Ordering;
     use seagent_browser::live;
     let opts = |g: &live::OnScreen, q: u8, f: u32| live::Opts { max_width: g.width, max_height: g.height, quality: q, fps: f }.clamped();
@@ -566,7 +584,7 @@ fn patched_consume(l: &mut Link, app: &App, id: &str, (quality, fps): (u8, u32),
     let mut v = live::watch(b, &tab, opts(&g, quality, fps)).map_err(Some)?;
     let (mut st, mut last, mut seq, mut base_sent, mut dark) = (Stats::default(), 0u64, 0u64, false, false);
     let mut uncovered = page_uncovered(app, b, &g);
-    let (mut polled, mut checked) = (Instant::now(), Instant::now());
+    let mut polled = Instant::now();
     loop {
         if polled.elapsed() >= Duration::from_millis(20) {
             l.poll()?;
@@ -576,28 +594,22 @@ fn patched_consume(l: &mut Link, app: &App, id: &str, (quality, fps): (u8, u32),
             adapt.choose(q, f);
             v.retune(opts(&g, q, f));
         }
-        // Window moved / resized, tab switched, something on top: every 500 ms.
-        if checked.elapsed() >= Duration::from_millis(500) {
-            checked = Instant::now();
-            match live::page_on_screen(b, &tab) {
-                Ok(ng) if ng.visible => {
+        // The base picture (when something outside the page changed) and where the page is now.
+        if let Ok(((r, took), geo, clear)) = rx.try_recv() {
+            match geo {
+                Some((nt, ng)) if nt != tab => {
+                    v = live::watch(b, &nt, opts(&ng, adapt.quality, adapt.fps)).map_err(Some)?;
+                    (tab, g) = (nt, ng);
+                }
+                Some((_, ng)) => {
                     if (ng.width, ng.height) != (g.width, g.height) {
                         v.retune(opts(&ng, adapt.quality, adapt.fps));
                     }
                     g = ng;
                 }
-                _ => match live::visible_page(b) {
-                    Some((nt, ng)) => {
-                        v = live::watch(b, &nt, opts(&ng, adapt.quality, adapt.fps)).map_err(Some)?;
-                        (tab, g) = (nt, ng);
-                    }
-                    None => return l.text(&json!({"t": "end", "reason": "the Bot Desktop browser shows no page"})),
-                },
+                None => return l.text(&json!({"t": "end", "reason": "the Bot Desktop browser shows no page"})),
             }
-            uncovered = page_uncovered(app, b, &g);
-        }
-        // The base picture, when something outside the page changed.
-        if let Ok((r, took)) = rx.try_recv() {
+            uncovered = clear;
             match r {
                 Ok(img) => {
                     dark = false;
@@ -650,6 +662,11 @@ fn patched_consume(l: &mut Link, app: &App, id: &str, (quality, fps): (u8, u32),
 
 /// One captured picture and how long the capture took.
 type Captured = (Result<image::DynamicImage, String>, Duration);
+
+/// Patch mode's base capture: the picture, how long it took, and where the browser's visible
+/// page is now and whether nothing covers it (looked up on the capture thread, off the
+/// thread that forwards the page frames).
+type BaseCapture = (Captured, Option<(String, seagent_browser::live::OnScreen)>, bool);
 
 /// The desktop stream over any frame source: changed pictures only, paced by [`Pace`]; a
 /// source without a picture sends `nodisplay` once and is retried every 2 s. Capture and
@@ -995,6 +1012,23 @@ mod tests {
         b.push(&"你".as_bytes()[1..]);
         assert_eq!(b.take(&secrets, &redact, false).as_deref(), Some("你"));
         assert_eq!(b.take(&secrets, &redact, true), None);
+    }
+
+    #[test]
+    fn the_base_picture_changes_only_outside_the_page() {
+        let g = seagent_browser::live::OnScreen { x: 100, y: 80, width: 400, height: 300, visible: true };
+        let mut img = image::RgbaImage::from_pixel(800, 600, image::Rgba([20, 20, 20, 255]));
+        let h0 = hash_outside(&image::DynamicImage::ImageRgba8(img.clone()), &g);
+        for y in 80..380 {
+            for x in 100..500 {
+                img.put_pixel(x, y, image::Rgba([250, 10, 10, 255]));
+            }
+        }
+        assert_eq!(hash_outside(&image::DynamicImage::ImageRgba8(img.clone()), &g), h0, "the page area is the patches' job");
+        for x in 0..800 {
+            img.put_pixel(x, 10, image::Rgba([0, 200, 0, 255]));
+        }
+        assert_ne!(hash_outside(&image::DynamicImage::ImageRgba8(img), &g), h0, "a change outside the page re-sends the base");
     }
 
     #[test]
