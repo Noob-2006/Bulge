@@ -265,9 +265,19 @@ pub fn has_bin(bin: &str) -> bool {
         }
     };
     // Windows: `git` is `git.exe` (PATHEXT), and paths may use `\`.
+    // `bash` / `python3` mean the real thing: not System32\bash.exe (WSL) or the WindowsApps
+    // Store aliases, which `which` finds on every Windows 10/11 machine.
     #[cfg(not(unix))]
-    if seagent_core::platform::layout::which(bin).is_some() {
-        return true;
+    {
+        use seagent_core::platform::layout;
+        match bin {
+            "bash" | "bash.exe" => return layout::bash().is_some(),
+            "python3" | "python" | "python3.exe" | "python.exe" => return layout::python3().is_some(),
+            _ => {}
+        }
+        if layout::which(bin).is_some_and(|p| !layout::is_windows_apps_alias(&p)) {
+            return true;
+        }
     }
     if bin.contains('/') {
         return executable(Path::new(bin));
@@ -455,6 +465,8 @@ mod tests {
 
     /// OpenClaw `metadata.<ns>.requires` + Hermes `platforms:` decide eligibility; the reasons are
     /// reported in the OpenClaw summary shape.
+    // Requires `sh` + `/bin/sh` and os [linux, macos]: a Unix host by construction.
+    #[cfg(unix)]
     #[test]
     fn requirements_gate_bins_anybins_env_config_and_os() {
         let base = seagent_core::tmp::scratch_path(format!("seagent-skill-req-{}", std::process::id()));

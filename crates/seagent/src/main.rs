@@ -2356,18 +2356,37 @@ fn cmd_doctor(a: &Args) -> R {
     // 9009, so only a successful `--version` counts as installed.
     #[cfg(windows)]
     let tool = |bin: &str| match std::process::Command::new(bin).arg("--version").output() {
-        Ok(o) if o.status.success() => Ok(String::from_utf8_lossy(if o.stdout.is_empty() { &o.stderr } else { &o.stdout }).lines().next().unwrap_or("").trim().to_string()),
+        Ok(o) if o.status.success() && !(o.stdout.is_empty() && o.stderr.is_empty()) => Ok(String::from_utf8_lossy(if o.stdout.is_empty() { &o.stderr } else { &o.stdout }).lines().next().unwrap_or("").trim().to_string()),
         Ok(o) => Err(format!("not usable (`{bin} --version` exited {})", o.status.code().unwrap_or(-1))),
         Err(e) => Err(e.to_string()),
     };
-    // Windows: `bash` on PATH is usually System32\bash.exe (the WSL launcher), which the shell
-    // detection deliberately skips; the `shell` line below says what tool calls really use.
     #[cfg(not(windows))]
     check("bash", tool("bash"));
+    // Windows: `bash` on PATH is usually System32\bash.exe (the WSL launcher): only the bash the
+    // shell detection picked (Git Bash / MSYS2 / SEAGENT_SHELL) counts.
+    #[cfg(windows)]
+    check("bash", match seagent_core::platform::layout::bash() {
+        Some(p) => tool(&p.to_string_lossy()),
+        None => Err("not found (Git for Windows / MSYS2; System32\\bash.exe is the WSL launcher and does not count): bash scripts and lang=bash are unavailable, tool calls use PowerShell".into()),
+    });
     #[cfg(not(target_os = "linux"))] // shell, control endpoint, autostart, VM providers of this OS
     ops::service_os::doctor_checks(&paths).into_iter().for_each(|(n, r)| check(&n, r));
     check("git (checkpoints)", tool("git"));
+    #[cfg(not(windows))]
     check("python3 (code mode)", tool("python3"));
+    // Windows: `py -3` or a real python (never the WindowsApps Store alias), as code mode runs it.
+    #[cfg(windows)]
+    check("python3 (code mode)", match seagent_core::platform::layout::python3() {
+        Some((p, args)) => {
+            let shown = std::iter::once(p.display().to_string()).chain(args.iter().cloned()).collect::<Vec<_>>().join(" ");
+            match std::process::Command::new(&p).args(&args).arg("--version").output() {
+                Ok(o) if o.status.success() && !(o.stdout.is_empty() && o.stderr.is_empty()) => Ok(format!("{} ({shown})", String::from_utf8_lossy(if o.stdout.is_empty() { &o.stderr } else { &o.stdout }).trim())),
+                Ok(o) => Err(format!("{shown} is not usable (--version exited {})", o.status.code().unwrap_or(-1))),
+                Err(e) => Err(format!("{shown}: {e}")),
+            }
+        }
+        None => Err("not found (py -3 / python3 / python; the WindowsApps Store alias does not count)".into()),
+    });
     // The bundled skills / roles / catalogs: a binary copied without its share/ has none of them.
     check("bundled share/", seagent_core::share::share_dir().filter(|d| d.join("skills").is_dir() && d.join("plugin-catalog").is_dir()).map(|d| d.display().to_string()).ok_or_else(|| "not found (bundled skills and catalogs are unavailable): install with install.sh / the release tarball, or set SEAGENT_SHARE_DIR".to_string()));
     check("data dir", std::fs::create_dir_all(&paths.data).map(|_| paths.data.display().to_string()).map_err(|e| e.to_string()));
