@@ -76,7 +76,9 @@ pub fn isolation_of_backend(name: &str) -> IsolationLevel {
     match name {
         "local" => IsolationLevel::Host,
         "bwrap" | "landlock" => IsolationLevel::UserNamespace,
-        "seatbelt" | "appcontainer" => IsolationLevel::OsSandbox,
+        // `wasm`: the WASI interpreter of seagent-tools (iOS) — a policy wall enforced by the
+        // interpreter in-process, the same tier as the OS policy sandboxes.
+        "seatbelt" | "appcontainer" | "wasm" => IsolationLevel::OsSandbox,
         "docker" | "podman" | "singularity" | "apptainer" | "openshell" => IsolationLevel::Container,
         "gvisor" | "runsc" => IsolationLevel::AppKernel,
         "vm" | "firecracker" | "qemu" => IsolationLevel::MicroVm,

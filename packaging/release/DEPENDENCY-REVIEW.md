@@ -113,6 +113,39 @@ repository and are reviewed as code.
 | `ring` | 0.17 | Ed25519/HMAC primitives for signing and secret sealing — *no reason comment yet* |
 | `base64` | 0.23 | Encoding for tokens, signatures and attachments — *no reason comment yet* |
 
+| `wasmi` | 2 | iOS shell substitute: the `wasm` exec backend runs WASI tools in this WebAssembly *interpreter* (see below). Optional; not in the default build |
+
+### `wasmi` (iOS only, review notes)
+
+* **Why**: iOS forbids `fork`/`exec`, JIT and hypervisors, so commands cannot run as processes, in
+  a microVM or under a JIT runtime (wasmtime, V8). An interpreter running code inside the app's
+  sandbox is the accepted pattern. `wasmi` is the pure-Rust, non-JIT, `no_std`-capable
+  interpreter used by Parity/Substrate; it is what `exec.backend = "wasm"`
+  (`crates/seagent-tools/src/exec/wasm/`) runs `wasm32-wasip1` tools with. WASI preview 1 itself
+  is implemented in that module (≈900 lines, no `wasmi_wasi` / `wasi-common` / `cap-std` tree).
+* **Where it is linked**: `seagent-tools` declares it as a target dependency for
+  `cfg(target_os = "ios")` and as an optional dependency behind the `wasm` feature (`seagent`'s
+  `wasm` feature forwards it). The default Linux/macOS/Windows/Android binaries do not contain it
+  (`cargo tree -p seagent -e normal -i wasmi` is empty for them).
+* **Features**: `default-features = false`, `std` + `validate` (every module is validated before
+  it is translated) + `auto-dispatch` (tail-call dispatch only when the build guarantees sibling
+  calls; a debug build overflows the stack without it) + `simd` (uutils coreutils' WASI build
+  contains simd128 paths). No `wat` text parser, no `memory64`.
+* **Tree**: `wasmi` 2.0.0, `wasmi_core`, `wasmi_ir`, `wasmi_collections` (same project and owner),
+  `wasmparser` 0.228 (Bytecode Alliance), `spin` 0.9 (no-std locks). Licenses MIT / Apache-2.0
+  (`wasmparser`: Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT). No C code.
+* **Build scripts**: `wasmi` and `wasmi_ir` emit `cfg`s from `OPT_LEVEL` / target arch / target
+  features only (read: no file system, network or tool invocation); `wasmparser`'s sets a cfg.
+* **`unsafe`**: ≈300 sites in `wasmi` (the register-machine executor and linear-memory access),
+  ≈140 in `spin`. That is the interpreter's job; the agent never hands it a pointer, and the guest
+  can only reach the host through the WASI functions in `exec/wasm/wasi.rs`, which bounds-check
+  every guest buffer and confine every path. Fuel metering (resumable on exhaustion) gives the
+  kill/timeout path; `StoreLimits` caps linear memory.
+* **Payload**: the iOS app bundles WASI *modules* as data (uutils coreutils 0.12.0, built from
+  crates.io with `--locked` by `apps/desktop/scripts/build-wasi-tools.sh`; each module's SHA-256
+  is pinned in `tools.json` and the backend refuses a mismatch). They are code for the
+  interpreter, never for the CPU, and are reviewed like any other bundled tool set.
+
 **Gaps (reviewer action, not yet fixed):** `webpki-roots`, `ring` and `base64` are declared without
 a reason comment, which the budget rule above requires. They are load-bearing (TLS trust, crypto,
 wire encoding), so the fix is to add the comment, not to remove the crate.

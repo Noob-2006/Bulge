@@ -24,6 +24,9 @@ default = ["channel", "providers"]
 # GPT-Live / realtime speech-to-speech, the Chrome-extension relay and real-profile import.
 # `cargo build -p seagent --features personal` brings them (and their tests) back.
 personal = ["seagent-media/personal", "seagent-browser/personal"]
+# `exec.backend = "wasm"` (WASI tools in the wasmi interpreter) on a desktop/server build; iOS
+# always has it. Not in `default`: it adds an interpreter the Linux binary does not need.
+wasm = ["seagent-tools/wasm"]
 # Chat channels: every platform (`seagent-channel/all`).
 channel = ["seagent-channel/all", "seagent-app/channel"]
 # Optional model adapters; off only with `--no-default-features` (docs/BUILD.md).
