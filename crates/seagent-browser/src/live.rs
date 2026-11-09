@@ -107,6 +107,11 @@ pub struct CastState {
     /// go out one per fps interval, so the in-flight window cannot raise the rate.
     pub unacked: VecDeque<(u64, i64)>,
     pub last_ack: Option<Instant>,
+    /// How long Chrome takes from an ack to the next frame (capture + encode), smoothed: acks
+    /// are released that much early, so frames *arrive* at the fps cap instead of cap + lead.
+    pub lead: Duration,
+    /// An ack went out with nothing else in flight: the next frame's arrival measures the lead.
+    lead_probe: Option<Instant>,
     /// What each viewer asks for (by viewer id); the screencast runs at the best of them.
     pub wants: BTreeMap<u64, Opts>,
     next_viewer: u64,
@@ -121,7 +126,16 @@ pub struct CastState {
 impl CastState {
     /// A frame arrived (it replaces the newest one: viewers only ever get the latest). Returns
     /// an ack to send at once only when more than [`MAX_IN_FLIGHT`] frames wait.
-    pub fn offer(&mut self, mut f: LiveFrame, ack_id: i64) -> Option<i64> {
+    pub fn offer(&mut self, f: LiveFrame, ack_id: i64) -> Option<i64> {
+        self.offer_at(f, ack_id, Instant::now())
+    }
+
+    /// [`Self::offer`] at a given time (tests).
+    pub fn offer_at(&mut self, mut f: LiveFrame, ack_id: i64, now: Instant) -> Option<i64> {
+        if let Some(t) = self.lead_probe.take() {
+            let took = now.saturating_duration_since(t).min(Duration::from_millis(500));
+            self.lead = (self.lead * 3 + took) / 4;
+        }
         self.seq += 1;
         self.frames_in += 1;
         f.seq = self.seq;
@@ -166,12 +180,16 @@ impl CastState {
         match self.unacked.front() {
             Some(&(s, id)) if s <= seen => {
                 if let Some(t) = self.last_ack {
-                    let due = t + min_gap;
+                    // Early by Chrome's production time, but never more than half an interval.
+                    let due = t + min_gap - self.lead.min(min_gap / 2);
                     if due > now {
                         return Release::Wait(due - now);
                     }
                 }
                 self.unacked.pop_front();
+                if self.unacked.is_empty() {
+                    self.lead_probe = Some(now);
+                }
                 self.last_ack = Some(now);
                 self.acks += 1;
                 Release::Ack(id)
@@ -414,7 +432,7 @@ mod tests {
         let t0 = Instant::now();
         let mut s = CastState::default();
         assert_eq!(s.release(0, t0, gap), Release::Nothing, "no frame yet");
-        assert_eq!(s.offer(frame(1), 11), None);
+        assert_eq!(s.offer_at(frame(1), 11, t0), None);
         // Backpressure: nobody took frame 1, so it is not acked (Chrome sends nothing more).
         assert_eq!(s.release(0, t0, gap), Release::Nothing);
         assert_eq!(s.unacked, [(1, 11)]);
@@ -422,7 +440,7 @@ mod tests {
         assert_eq!(s.release(1, t0, gap), Release::Ack(11));
         assert_eq!(s.release(1, t0, gap), Release::Nothing, "acked once");
         // The next frame arrives 10 ms later and is delivered at once: the cap holds the ack.
-        s.offer(frame(2), 12);
+        s.offer_at(frame(2), 12, t0);
         let t1 = t0 + Duration::from_millis(10);
         assert_eq!(s.release(2, t1, gap), Release::Wait(Duration::from_millis(90)));
         assert_eq!(s.release(2, t0 + gap, gap), Release::Ack(12));
@@ -430,22 +448,57 @@ mod tests {
     }
 
     #[test]
+    fn acks_go_out_early_by_chromes_production_time() {
+        let gap = Duration::from_millis(33);
+        let ms = Duration::from_millis;
+        let t0 = Instant::now();
+        let mut s = CastState::default();
+        s.offer_at(frame(1), 1, t0);
+        assert_eq!(s.release(1, t0, gap), Release::Ack(1));
+        // Chrome needs 10 ms after each ack to produce the next frame.
+        let mut t = t0;
+        for i in 2..40 {
+            let arrive = t + ms(10);
+            s.offer_at(frame(i as u8), i, arrive);
+            let due = match s.release(i as u64, arrive, gap) {
+                Release::Wait(d) => arrive + d,
+                Release::Ack(_) => arrive,
+                Release::Nothing => panic!("frame {i} pending"),
+            };
+            assert!(matches!(s.release(i as u64, due, gap), Release::Ack(_)));
+            t = due;
+        }
+        assert!(s.lead >= ms(9) && s.lead <= ms(10), "learned lead {:?}", s.lead);
+        // Frames now arrive one interval apart (ack at +23 ms, frame 10 ms later), not 43 ms.
+        let a = t + ms(10);
+        s.offer_at(frame(99), 99, a);
+        let Release::Wait(d) = s.release(99, a, gap) else { panic!() };
+        assert!((ms(22)..=ms(24)).contains(&(d + ms(10))), "ack {:?} after the previous", d + ms(10));
+        // The lead never takes more than half an interval off.
+        s.lead = ms(500);
+        let b = a + d;
+        assert_eq!(s.release(99, b, gap), Release::Ack(99));
+        s.offer_at(frame(100), 100, b);
+        assert_eq!(s.release(100, b, gap), Release::Wait(gap - gap / 2));
+    }
+
+    #[test]
     fn a_slow_viewer_only_ever_gets_the_newest_frame() {
         let gap = Duration::ZERO;
         let t = Instant::now();
         let mut s = CastState::default();
-        s.offer(frame(1), 1);
+        s.offer_at(frame(1), 1, t);
         // A fast viewer drains, a slow one has seen nothing.
         assert_eq!(s.release(1, t, gap), Release::Ack(1));
-        s.offer(frame(2), 2);
+        s.offer_at(frame(2), 2, t);
         assert_eq!(s.release(1, t, gap), Release::Nothing, "a viewer that has not delivered frame 2 cannot release it");
         assert_eq!(s.release(2, t, gap), Release::Ack(2));
-        s.offer(frame(3), 3);
+        s.offer_at(frame(3), 3, t);
         // One slot, newest wins: memory stays one frame whatever a viewer's speed.
         assert_eq!(s.latest.as_ref().unwrap().seq, 3);
         assert_eq!(s.latest.as_ref().unwrap().data, vec![0xff, 0xd8, 3]);
         // Chrome's in-flight window (two frames) does not raise the rate: the second waits its turn.
-        assert_eq!(s.offer(frame(4), 4), None);
+        assert_eq!(s.offer_at(frame(4), 4, t), None);
         assert_eq!(s.unacked, [(3, 3), (4, 4)]);
         let gap = Duration::from_millis(100);
         let t = t + Duration::from_secs(1);
@@ -454,9 +507,9 @@ mod tests {
         assert_eq!(s.release(4, t + gap, gap), Release::Ack(4));
         // A runaway window is cut at MAX_IN_FLIGHT: the oldest is acked at once.
         for i in 5..5 + MAX_IN_FLIGHT as i64 {
-            assert_eq!(s.offer(frame(i as u8), i), None);
+            assert_eq!(s.offer_at(frame(i as u8), i, t), None);
         }
-        assert_eq!(s.offer(frame(99), 99), Some(5));
+        assert_eq!(s.offer_at(frame(99), 99, t), Some(5));
         assert_eq!(s.unacked.len(), MAX_IN_FLIGHT);
     }
 

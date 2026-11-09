@@ -191,9 +191,13 @@ fn capture(name: &str) -> Result<Shot, String> {
         let out = if dc == 0 {
             Err(format!("no display DC for {name} ({})", last_error()))
         } else {
+            use windows_sys::Win32::Graphics::Gdi::{GetDeviceCaps, HORZRES, VERTRES};
+            let (w, h) = (GetDeviceCaps(dc, HORZRES as i32), GetDeviceCaps(dc, VERTRES as i32));
             match grab(dc) {
-                // Not the active desktop: nothing was rendered to the framebuffer.
+                // Not the active desktop: nothing was rendered to the framebuffer (it reads as
+                // black, or cannot be read at all) — compose the picture from its windows.
                 Ok(s) if is_black(&s.bgra) => compose(hdesk, dc, s.width, s.height).or(Ok(s)),
+                Err(e) if w > 0 && h > 0 => compose(hdesk, dc, w, h).map_err(|c| format!("{e}; {c}")),
                 other => other,
             }
         };
