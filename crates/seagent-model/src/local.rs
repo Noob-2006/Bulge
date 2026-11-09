@@ -6,7 +6,7 @@
 use crate::auth::{Cred, CredSource};
 use crate::ProviderConfig;
 use seagent_core::{ProviderError, ProviderErrorKind as K};
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, Stdio};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -85,7 +85,7 @@ impl Managed {
             .iter()
             .map(|a| a.replace("{port}", &port.to_string()))
             .collect();
-        let mut child = Command::new(crate::auth::program(&self.command))
+        let mut child = crate::auth::program(&self.command)
             .args(&args)
             .stdin(Stdio::null())
             .stdout(Stdio::null())

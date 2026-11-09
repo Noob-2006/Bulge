@@ -80,6 +80,24 @@ pub fn spawn_in_group(cmd: &mut Command, own_session: bool) -> io::Result<Child>
     spawn_in_group_with(cmd, own_session, 0)
 }
 
+/// A log file to hand to a child as stdout / stderr, appending. Unix: `O_APPEND`, as always.
+/// Windows: write access positioned at the end instead of an append-only handle — MSYS /
+/// Cygwin programs (Git Bash and everything it runs) exit 1 at startup when their stdout
+/// lacks `FILE_WRITE_DATA`.
+pub fn open_child_log(p: &std::path::Path) -> io::Result<std::fs::File> {
+    #[cfg(windows)]
+    {
+        use std::io::Seek;
+        let mut f = std::fs::OpenOptions::new().create(true).write(true).open(p)?;
+        f.seek(std::io::SeekFrom::End(0))?;
+        Ok(f)
+    }
+    #[cfg(not(windows))]
+    {
+        std::fs::OpenOptions::new().create(true).append(true).open(p)
+    }
+}
+
 /// [`spawn_in_group`] with extra Windows creation flags (see [`new_group_with`]); the flags are
 /// ignored on Unix.
 pub fn spawn_in_group_with(cmd: &mut Command, own_session: bool, windows_flags: u32) -> io::Result<Child> {

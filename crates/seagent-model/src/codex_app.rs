@@ -8,7 +8,7 @@ use crate::{finalize_usage, ProviderConfig};
 use seagent_core::*;
 use serde_json::{json, Value};
 use std::io::{BufRead, BufReader, Write};
-use std::process::{Child, ChildStdin, Command, Stdio};
+use std::process::{Child, ChildStdin, Stdio};
 use std::sync::mpsc::{self, Receiver};
 use std::time::{Duration, Instant};
 
@@ -136,7 +136,7 @@ impl Provider for AppServer {
         on_event: &mut dyn FnMut(StreamEvent),
         cancel: &Cancel,
     ) -> Result<ModelResponse, ProviderError> {
-        let mut child = Command::new(crate::auth::program(&self.command))
+        let mut child = crate::auth::program(&self.command)
             .args(&self.args)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())

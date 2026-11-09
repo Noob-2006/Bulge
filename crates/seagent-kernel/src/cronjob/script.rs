@@ -129,7 +129,9 @@ pub fn run(data: &Path, script: &str, workdir: Option<&Path>, timeout: Duration,
         Err(e) => return (false, e),
     };
     let cwd = workdir.map(Path::to_path_buf).unwrap_or_else(|| path.parent().map(Path::to_path_buf).unwrap_or_else(|| PathBuf::from(".")));
-    cmd.arg(&path).current_dir(&cwd).env_clear().envs(scrubbed_env()).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    // Windows: MSYS bash needs `C:/…/x.sh` (no `\\?\`, no backslashes); Unix: the path as is.
+    let script_arg = if interp == "bash" { seagent_core::platform::shell::path_arg(&path) } else { path.clone().into_os_string() };
+    cmd.arg(&script_arg).current_dir(&cwd).env_clear().envs(scrubbed_env()).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
     // Own process group (Windows: a new group plus a Job Object, added by `childproc::spawn`).
     #[cfg(unix)]
     std::os::unix::process::CommandExt::process_group(&mut cmd, 0);

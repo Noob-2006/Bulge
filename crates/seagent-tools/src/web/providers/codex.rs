@@ -7,7 +7,7 @@ use super::{Citation, SearchOutput, SearchRequest, WebProvider};
 use crate::web::http::WebCtx;
 use serde_json::{json, Map, Value};
 use std::io::{BufRead, BufReader, Write};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
@@ -76,7 +76,8 @@ pub fn run_turn(c: &WebCtx, query: &str, timeout: Duration) -> Result<(String, V
         Some(a) => a.iter().filter_map(|x| x.as_str().map(str::to_string)).collect(),
         None => vec!["app-server".to_string()],
     };
-    let mut child = Command::new(&cmd).args(&args).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null()).spawn().map_err(|e| format!("Codex hosted search could not start `{cmd}`: {e}. Install the Codex CLI and sign in (codex login)."))?;
+    // Windows: `codex.cmd` (npm shim) through PATHEXT; Unix: `Command::new(cmd)`.
+    let mut child = seagent_core::platform::layout::program_command(&cmd).args(&args).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null()).spawn().map_err(|e| format!("Codex hosted search could not start `{cmd}`: {e}. Install the Codex CLI and sign in (codex login)."))?;
     let mut stdin = child.stdin.take().unwrap();
     let stdout = child.stdout.take().unwrap();
     let (tx, rx) = mpsc::channel::<Value>();
@@ -254,7 +255,9 @@ for line in sys.stdin:
         assert_eq!(p, json!({"query":"a","queries":["a","b"]}));
         let c = wctx(json!({"providers":{"codex":{"command":"/nonexistent/codex"}}}), &[]);
         assert!(Codex.search(&c, &SearchRequest { query: "q".into(), ..Default::default() }).unwrap_err().contains("could not start"));
-        let c = wctx(json!({"providers":{"codex":{"command":"true","args":[]}}}), &[]);
+        // A program that exits at once: `true`; Windows has no `true.exe`, so `cmd /c exit 0`.
+        let quick = if cfg!(windows) { json!({"command":"cmd","args":["/c","exit 0"]}) } else { json!({"command":"true","args":[]}) };
+        let c = wctx(json!({"providers":{"codex":quick}}), &[]);
         assert!(Codex.search(&c, &SearchRequest { query: "q".into(), ..Default::default() }).unwrap_err().contains("exited"));
         assert_eq!(thread_config(&wctx(json!({"providers":{"codex":{"allowed_domains":["a.com"],"location_country":"TW"}}}), &[]))["tools.web_search.location.country"], "TW");
     }

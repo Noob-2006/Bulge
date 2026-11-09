@@ -172,6 +172,29 @@ pub fn command(style: Style, script: &str) -> Command {
     c
 }
 
+/// A path spelled for the shell that will read it (as a script argument or inside a script).
+/// Unix: unchanged. Windows: without the verbatim `\\?\` prefix, and with `/` separators when
+/// the shell is a bash (MSYS bash reads `C:/x/y.sh`, but eats the backslashes of `C:\x\y.sh`).
+pub fn path_arg(p: &Path) -> OsString {
+    #[cfg(windows)]
+    {
+        let plain = super::layout::simplify_verbatim(p);
+        if active().kind.is_posix() {
+            return plain.to_string_lossy().replace('\\', "/").into();
+        }
+        plain.into_os_string()
+    }
+    #[cfg(not(windows))]
+    {
+        p.as_os_str().to_os_string()
+    }
+}
+
+/// [`path_arg`] as text, for splicing into a script (quote it for the shell yourself).
+pub fn path_str(p: &Path) -> String {
+    path_arg(p).to_string_lossy().into_owned()
+}
+
 /// `bash -c SCRIPT` (or this machine's shell).
 pub fn shell_command(script: &str) -> Command {
     command(Style::Bash, script)

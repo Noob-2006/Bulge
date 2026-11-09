@@ -9,7 +9,7 @@ use std::io::{BufRead, BufReader, Read, Write};
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
-use std::process::{ChildStdin, Command, Stdio as PStdio};
+use std::process::{ChildStdin, Stdio as PStdio};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex};
@@ -174,11 +174,9 @@ impl StdioConn {
         let alive = Arc::new(AtomicBool::new(true));
         let pending: Pending = Arc::default();
         let stderr: Arc<Mutex<VecDeque<u8>>> = Arc::default();
-        // Windows: `npx`/`uvx` are `.cmd`/`.exe` shims found through PATHEXT.
-        #[cfg(not(unix))]
-        let mut cmd = Command::new(seagent_core::platform::layout::which(command).unwrap_or_else(|| PathBuf::from(command)));
-        #[cfg(unix)]
-        let mut cmd = Command::new(command);
+        // Unix: `Command::new(command)`. Windows: `npx`/`uvx` are `.cmd`/`.exe` shims found
+        // through PATHEXT, and `python3` is the Python launcher, not the Store alias.
+        let mut cmd = seagent_core::platform::layout::program_command(command);
         seagent_security::envscrub::apply(&mut cmd, seagent_security::envscrub::Surface::Server);
         cmd.args(args).envs(env.iter().map(|(k, v)| (k, v))).stdin(PStdio::piped()).stdout(PStdio::piped()).stderr(PStdio::piped());
         if let Some(d) = cwd {

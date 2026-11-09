@@ -7,7 +7,7 @@ use crate::{finalize_usage, ProviderConfig};
 use seagent_core::*;
 use serde_json::Value;
 use std::io::{BufRead, BufReader, Write};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
@@ -257,7 +257,7 @@ impl Provider for CliBackend {
     ) -> Result<ModelResponse, ProviderError> {
         let prompt = Self::prompt(req);
         let (argv, prompt_in_args) = self.argv(&req.model, &prompt);
-        let mut cmd = Command::new(crate::auth::program(&self.command));
+        let mut cmd = crate::auth::program(&self.command);
         cmd.args(&argv)
             .stdin(if prompt_in_args {
                 Stdio::null()

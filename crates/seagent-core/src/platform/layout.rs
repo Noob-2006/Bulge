@@ -168,6 +168,37 @@ pub fn python3_command() -> std::process::Command {
     }
 }
 
+/// A `Command` for a configured program name (MCP servers, LSP servers, agent CLIs, model
+/// runtimes). Unix: exactly `Command::new(name)`. Windows: the name is resolved through
+/// `PATHEXT` (npm CLIs are `.cmd` shims), a bare `python3` / `python` means [`python3`]
+/// (the `py -3` launcher) rather than the WindowsApps Store alias, which only prints
+/// "Python was not found" and exits 9009 — configs written on Linux say `python3` — and a
+/// bare `sh` / `bash` means [`bash`] (Git Bash / MSYS2) when there is one.
+pub fn program_command(name: &str) -> std::process::Command {
+    #[cfg(windows)]
+    {
+        let bare = name.trim_end_matches(".exe").to_ascii_lowercase();
+        if bare == "python3" || bare == "python" {
+            if let Some((p, args)) = python3() {
+                let mut c = std::process::Command::new(p);
+                c.args(args);
+                return c;
+            }
+        }
+        // `sh -c …` / `bash script` in a config: Git Bash / MSYS2, never WSL's `bash.exe`.
+        if bare == "sh" || bare == "bash" {
+            if let Some(b) = bash() {
+                return std::process::Command::new(b);
+            }
+        }
+        std::process::Command::new(which(name).unwrap_or_else(|| PathBuf::from(name)))
+    }
+    #[cfg(not(windows))]
+    {
+        std::process::Command::new(name)
+    }
+}
+
 /// A bash that really is bash: Unix `bash` from `PATH`; Windows the platform shell's bash (Git
 /// Bash / MSYS2 / `SEAGENT_SHELL`), never `System32\bash.exe` (the WSL launcher) or a
 /// WindowsApps alias. `None` when there is none.
@@ -208,6 +239,18 @@ pub fn simplify_verbatim(p: &Path) -> PathBuf {
         return p.to_path_buf();
     }
     PathBuf::from(plain)
+}
+
+/// A *relative* path as the model sees it (tool output, patch summaries): `/` between components
+/// on every OS, so `src\a.rs` on Windows reads `src/a.rs`, as models and patches expect.
+/// Absolute paths are spelled natively (`C:\Users\…`). Unix: `p.display()` unchanged.
+pub fn model_path(p: &Path) -> String {
+    let s = p.display().to_string();
+    #[cfg(windows)]
+    if p.is_relative() {
+        return s.replace('\\', "/");
+    }
+    s
 }
 
 /// Windows executable search: `name` in each `;`-separated directory of `path`, trying the

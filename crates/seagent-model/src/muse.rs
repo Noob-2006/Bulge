@@ -19,7 +19,7 @@ use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
-use std::process::{Child, ChildStdin, Command, Stdio};
+use std::process::{Child, ChildStdin, Stdio};
 use std::sync::mpsc::{self, Receiver};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
@@ -77,7 +77,7 @@ impl Muse {
     }
 
     fn spawn(&self) -> Result<Host, ProviderError> {
-        let mut child = Command::new(crate::auth::program(&self.command))
+        let mut child = crate::auth::program(&self.command)
             .args(&self.args)
             .current_dir(&self.cwd)
             .stdin(Stdio::piped())

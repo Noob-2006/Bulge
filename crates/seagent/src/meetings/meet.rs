@@ -109,7 +109,7 @@ impl Manager {
             let _ = std::fs::remove_file(out.join(f));
         }
         let log_path = out.join("bot.log");
-        let log = match std::fs::OpenOptions::new().create(true).append(true).open(&log_path) {
+        let log = match seagent_core::platform::proc::open_child_log(&log_path) {
             Ok(f) => f,
             Err(e) => return json!({"ok": false, "error": format!("cannot open {}: {e}", log_path.display())}),
         };

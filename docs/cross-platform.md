@@ -33,6 +33,28 @@
 | 錄音 / 通知 | pw-record / dunst | WASAPI / Toast | AVFoundation / UserNotifications | 系統 API | 系統 API |
 | syslog | /dev/log | Windows Event Log | os_log / UDP syslog | logcat | os_log |
 
+### Windows：路徑、shell 與外部程式（原生 Windows 測試後的決定）
+
+- **給模型看的路徑**：工作區內的**相對路徑一律用 `/`**（`src/a.rs`，不是 `src\a.rs`）：glob / grep /
+  read / write / edit / patch 的輸出與 patch 摘要都經 `seagent_tools::util::display_path` →
+  `seagent_core::platform::layout::model_path`。模型與 patch 格式都假設 `/`，Windows 的檔案 API 也接受 `/`。
+  **絕對路徑保持原生寫法**（`C:\Users\…`，例如溢出檔、工作區外的檔案），因為使用者會拿去貼上或開啟。
+  Linux / macOS 上 `model_path` 就是 `p.display()`，輸出逐位元不變。同步到遠端 POSIX 沙盒的 tar 條目也一律 `/`；
+  工作區外的 Windows 絕對路徑在遠端落在 `/c/…`（MSYS / WSL 慣例）。
+- **交給 shell 的路徑**：`shell::path_arg` / `path_str` —— Unix 不變；Windows 去掉 `\\?\`，shell 是 bash 時改成
+  `C:/…`（MSYS bash 會吃掉 `C:\…` 的反斜線）。cron 腳本、webhook 腳本、hook 命令都走它。
+- **設定裡的程式名**：`layout::program_command`（MCP / LSP / ACP / 模型 runtime / link processor / ops run）——
+  Unix 就是 `Command::new(name)`；Windows 走 PATHEXT（npm 的 `.cmd` shim）、`python3`/`python` 指 `py -3`
+  （不是會印「Python was not found」並以 9009 結束的 Store 別名）、`sh`/`bash` 指 Git Bash（不是 WSL 的 `bash.exe`）。
+- **交給子程序的 log 檔**：`proc::open_child_log` —— Windows 不用 append-only handle（缺 `FILE_WRITE_DATA`），
+  否則 Git Bash 一啟動就以 1 結束、沒有任何輸出（detached job、AppContainer detached、seagentd 服務 log、Meet bot）。
+- **AppContainer 內的 shell**：MSYS 執行階段在 AppContainer / 低完整性下無法建立 `\BaseNamedObjects\msys-*`
+  （`0xC0000022`），所以主機 shell 是 Git Bash 時，沙盒命令改用 Windows PowerShell，並在 backend 說明與
+  `unset` 前導中照實反映；`SEAGENT_APPCONTAINER_SHELL` 可指定其他 shell。
+- **MSYS 的訊號**：Git Bash 被訊號 N 結束時對 Windows 回報 `N << 8`，本機 backend 換回「signal N」，與 Unix 同義。
+- **ConPTY**：PTY 的輸出要等 pseudo console 關閉才會 EOF，process registry 讀不到資料時會順便 `try_wait`。
+  ConPTY 會把 bracketed-paste 標記當作輸入解讀，沒要求 bracketed paste 的程式只收到文字。
+
 ### macOS：子程序跟著 seagent 結束（選用）
 
 macOS 沒有 PDEATHSIG。預設情況下，seagent 被 `SIGKILL` 時，綁定的子程序會留下來（正常結束或 `kill_group` 仍會收掉）。
