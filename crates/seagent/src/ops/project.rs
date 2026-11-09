@@ -426,6 +426,15 @@ pub fn dispatch(cmd: &str, a: &Args, _raw: &[String]) -> Option<R> {
 mod tests {
     use super::*;
 
+    /// A fixture path: `/src/a` on Unix, `C:\src\a` on Windows (where `/src/a` is not absolute).
+    fn fx(s: &str) -> String {
+        if cfg!(windows) {
+            format!("C:{}", s.replace('/', "\\"))
+        } else {
+            s.to_string()
+        }
+    }
+
     fn np<'a>(name: &'a str, folders: &[&str]) -> NewProject<'a> {
         NewProject { name, slug: None, folders: folders.iter().map(|s| s.to_string()).collect(), primary: None, description: None, icon: None, color: None, board: None }
     }
@@ -433,28 +442,28 @@ mod tests {
     #[test]
     fn create_folders_primary_and_lookup() {
         let mut db = Db::default();
-        let id = create(&mut db, &np("Hermes Agent!", &["/src/a", "/src/b/", "/src/a"])).unwrap();
+        let id = create(&mut db, &np("Hermes Agent!", &[&fx("/src/a"), &fx("/src/b/"), &fx("/src/a")])).unwrap();
         let p = db.get(&id).unwrap().clone();
         assert_eq!(p.slug, "hermes-agent");
         assert_eq!(p.folders.len(), 2, "dedup + trailing slash normalised");
-        assert_eq!(p.primary_path.as_deref(), Some("/src/a"));
+        assert_eq!(p.primary_path.as_deref(), Some(fx("/src/a").as_str()));
         assert!(db.get("HERMES-AGENT").is_some(), "slug lookup is case-insensitive");
-        assert!(create(&mut db, &np("Other", &["/src/a"])).unwrap_err().contains("already belongs"));
+        assert!(create(&mut db, &np("Other", &[&fx("/src/a")])).unwrap_err().contains("already belongs"));
         let id2 = create(&mut db, &np("Hermes Agent", &[])).unwrap();
         assert_eq!(db.get(&id2).unwrap().slug, "hermes-agent-2", "unique slug (upstream numbers from -2)");
         assert!(normalize_slug("-bad").is_err() && normalize_slug("Ok_1").unwrap() == "ok_1");
         assert_eq!(slugify("  ***  "), "project");
 
-        assert_eq!(add_folder(&mut db, &id, "/src/c", Some("docs"), true).unwrap(), "/src/c");
-        assert_eq!(db.get(&id).unwrap().primary_path.as_deref(), Some("/src/c"));
-        assert_eq!(db.for_path("/src/b/deep/file.rs").unwrap().id, id);
-        assert!(remove_folder(&mut db, &id, "/src/c").unwrap());
-        assert_eq!(db.get(&id).unwrap().primary_path.as_deref(), Some("/src/a"), "primary repointed to the oldest folder");
-        assert!(!remove_folder(&mut db, &id, "/nope").unwrap());
-        assert!(!set_primary(&mut db, &id, "/nope").unwrap());
-        assert!(set_primary(&mut db, &id, "/src/b").unwrap());
-        assert!(add_folder(&mut db, "missing", "/x", None, false).unwrap_err().contains("no such project"));
-        assert_eq!(norm_path("/a/b/../c/./"), "/a/c");
+        assert_eq!(add_folder(&mut db, &id, &fx("/src/c"), Some("docs"), true).unwrap(), fx("/src/c"));
+        assert_eq!(db.get(&id).unwrap().primary_path.as_deref(), Some(fx("/src/c").as_str()));
+        assert_eq!(db.for_path(&fx("/src/b/deep/file.rs")).unwrap().id, id);
+        assert!(remove_folder(&mut db, &id, &fx("/src/c")).unwrap());
+        assert_eq!(db.get(&id).unwrap().primary_path.as_deref(), Some(fx("/src/a").as_str()), "primary repointed to the oldest folder");
+        assert!(!remove_folder(&mut db, &id, &fx("/nope")).unwrap());
+        assert!(!set_primary(&mut db, &id, &fx("/nope")).unwrap());
+        assert!(set_primary(&mut db, &id, &fx("/src/b")).unwrap());
+        assert!(add_folder(&mut db, "missing", &fx("/x"), None, false).unwrap_err().contains("no such project"));
+        assert_eq!(norm_path(&fx("/a/b/../c/./")), fx("/a/c"));
         db.active = Some(id.clone());
         let t = list_text(&db, false);
         assert!(t.starts_with("* hermes-agent"), "{t}");
@@ -467,7 +476,7 @@ mod tests {
     fn persists_per_profile() {
         let kit = crate::testkit::kit();
         let mut db = load(&kit.paths);
-        create(&mut db, &np("X", &["/x"])).unwrap();
+        create(&mut db, &np("X", &[&fx("/x")])).unwrap();
         save(&kit.paths, &db).unwrap();
         assert_eq!(load(&kit.paths).projects.len(), 1);
     }
@@ -498,15 +507,15 @@ mod tests {
             let a = Args::parse(&v.iter().map(|s| s.to_string()).collect::<Vec<_>>())?;
             dispatch("project", &a, &[]).ok_or_else(|| "project is not dispatched".to_string())?.map_err(|e| e.to_string())
         };
-        assert_eq!(run(&["create", "Demo", "/src/demo", "--slug", "demo", "--use"]).unwrap(), 0);
+        assert_eq!(run(&["create", "Demo", &fx("/src/demo"), "--slug", "demo", "--use"]).unwrap(), 0);
         let db = load(&Paths::from_env());
         let p = &db.projects[0];
-        assert_eq!((p.slug.as_str(), p.primary_path.as_deref()), ("demo", Some("/src/demo")));
+        assert_eq!((p.slug.as_str(), p.primary_path.as_deref()), ("demo", Some(fx("/src/demo").as_str())));
         assert_eq!(db.active.as_deref(), Some(p.id.as_str()), "--use sets the active project");
         assert_eq!(run(&["list"]).unwrap(), 0);
-        assert_eq!(run(&["add-folder", "demo", "/src/other", "--label", "docs"]).unwrap(), 0);
+        assert_eq!(run(&["add-folder", "demo", &fx("/src/other"), "--label", "docs"]).unwrap(), 0);
         assert!(load(&Paths::from_env()).projects[0].folders.iter().any(|f| f.label.as_deref() == Some("docs")));
-        assert_eq!(run(&["which", "/src/other/x.rs"]).unwrap(), 0);
+        assert_eq!(run(&["which", &fx("/src/other/x.rs")]).unwrap(), 0);
         assert_eq!(run(&["use", "demo"]).unwrap(), 0);
         assert_eq!(run(&["archive", "demo"]).unwrap(), 0);
         assert!(load(&Paths::from_env()).projects[0].archived);

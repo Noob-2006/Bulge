@@ -431,7 +431,9 @@ fn repro_check_parses_but_is_not_run() {
     // Compiling the workspace twice takes minutes, which does not belong in `cargo test`. The
     // script's syntax and its documented default are what this test can hold still.
     let path = script("repro-check.sh");
-    let out = Command::new("bash").arg("-n").arg(&path).output().expect("bash -n");
+    // Unix: `bash` from PATH; Windows: Git Bash (WSL's launcher would see other files).
+    let bash = seagent_core::platform::layout::bash().expect("bash");
+    let out = Command::new(bash).arg("-n").arg(seagent_core::platform::shell::path_arg(&path)).output().expect("bash -n");
     assert!(
         out.status.success(),
         "bash -n {} failed: {}",
@@ -663,7 +665,8 @@ fn check_binary_tells_static_from_dynamic_and_glibc_floors() {
 }
 
 fn secret_scan(dir: &Path, extra: &[&str]) -> Output {
-    Command::new("python3").arg("-I").arg(repo_root().join("tools/secret-scan.py")).arg("--root").arg(dir).args(extra).output().expect("python3")
+    // `python3` on Unix; the `py -3` launcher on Windows (not the Store alias).
+    seagent_core::platform::layout::python3_command().arg("-I").arg(repo_root().join("tools/secret-scan.py")).arg("--root").arg(dir).args(extra).output().expect("python3")
 }
 
 #[test]
