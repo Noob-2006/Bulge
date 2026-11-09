@@ -127,6 +127,27 @@ mod tests {
     use super::*;
     use std::time::{Duration, Instant};
 
+    /// A visible top-level window of the displayed desktop whose title contains `needle`.
+    fn titled(needle: &str) -> Option<isize> {
+        use windows::Win32::Foundation::{LPARAM, TRUE};
+        use windows::Win32::UI::WindowsAndMessaging::{EnumWindows, GetWindowTextW, IsWindowVisible};
+        unsafe extern "system" fn cb(h: HWND, p: LPARAM) -> windows::core::BOOL {
+            // SAFETY: `p` is the `Vec` below, alive for the whole enumeration.
+            unsafe { (*(p.0 as *mut Vec<HWND>)).push(h) };
+            TRUE
+        }
+        let mut all: Vec<HWND> = Vec::new();
+        // SAFETY: enumeration into a local; window text read into a local buffer.
+        unsafe {
+            let _ = EnumWindows(Some(cb), LPARAM(&mut all as *mut _ as isize));
+            all.into_iter().find(|h| {
+                let mut buf = [0u16; 256];
+                let n = GetWindowTextW(*h, &mut buf);
+                IsWindowVisible(*h).as_bool() && String::from_utf16_lossy(&buf[..n.max(0) as usize]).contains(needle)
+            }).map(|h| h.0 as isize)
+        }
+    }
+
     /// Does WGC deliver frames for a window on a desktop that is not the displayed one? (not
     /// run by default): `SEAGENT_REAL_TESTS=1 cargo test -p seagent-browser real_wgc -- --ignored --nocapture`.
     /// An animated page in Edge on the isolated Bot Desktop; distinct frames over 5 s.
@@ -174,8 +195,10 @@ mod tests {
             let shown = format!("\"{}\" --user-data-dir=\"{}\" --inprivate --no-first-run --no-default-browser-check --window-position=0,0 --window-size=1200,800 --app=\"{url}\"", exe.display(), root.path().join("q").display());
             let pid = super::super::screen_windows::spawn_on_desktop("WinSta0\\Default", &shown).unwrap();
             std::thread::sleep(Duration::from_secs(4));
-            // SAFETY: a lookup by window title.
-            let found = unsafe { windows::Win32::UI::WindowsAndMessaging::FindWindowW(None, windows::core::w!("wgcprobe")) }.ok().map(|h| h.0 as isize);
+            let found = (0..40).find_map(|_| titled("wgcprobe").or_else(|| {
+                std::thread::sleep(Duration::from_millis(250));
+                None
+            }));
             match found {
                 Some(h) => say("on the displayed desktop (control)", measure(h), h),
                 None => eprintln!("WGC control: no window for pid {pid}"),
