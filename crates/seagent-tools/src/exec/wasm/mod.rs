@@ -385,7 +385,7 @@ impl ExecBackend for WasmBackend {
         let kill = Arc::new(AtomicBool::new(false));
         let (tx, rx) = mpsc::channel::<Vec<u8>>();
         let tx = Mutex::new(tx);
-        let sink: Arc<dyn Fn(&[u8]) + Send + Sync> = Arc::new(move |b: &[u8]| {
+        let sink: shell::SinkFn = Arc::new(move |b: &[u8]| {
             let _ = tx.lock().unwrap().send(b.to_vec());
         });
         let (stdin_tx, stdin) = if req.stdin {

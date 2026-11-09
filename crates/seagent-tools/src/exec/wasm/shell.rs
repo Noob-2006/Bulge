@@ -96,11 +96,14 @@ impl Read for InReader {
     }
 }
 
+/// A byte sink (the child's merged output).
+pub type SinkFn = Arc<dyn Fn(&[u8]) + Send + Sync>;
+
 /// Where output goes.
 #[derive(Clone)]
 pub enum Out {
     Null,
-    Sink(Arc<dyn Fn(&[u8]) + Send + Sync>),
+    Sink(SinkFn),
     Buf(Arc<Mutex<Vec<u8>>>),
     File(Arc<Mutex<File>>),
 }
@@ -1479,10 +1482,8 @@ impl<'a> Shell<'a> {
             if piece.is_empty() {
                 continue;
             }
-            if !first || (starts_ws && (!cur.text.is_empty() || cur.quoted)) {
-                if !cur.text.is_empty() || cur.quoted {
-                    out.push(std::mem::take(cur));
-                }
+            if (!first || starts_ws) && (!cur.text.is_empty() || cur.quoted) {
+                out.push(std::mem::take(cur));
             }
             cur.text.push_str(piece);
             cur.pat.push_str(&escape_glob(piece));
@@ -2284,7 +2285,7 @@ impl<'a> Shell<'a> {
         if x.len() == 2 && x.starts_with('-') && a.get(*i + 1).is_some() && x != "-a" && x != "-o" {
             let arg = a[*i + 1].clone();
             *i += 2;
-            let f = |follow: bool| self.policy.host(&join(&self.cwd, &arg), false, follow).ok().map(|(h, i)| (h, i));
+            let f = |follow: bool| self.policy.host(&join(&self.cwd, &arg), false, follow).ok();
             let md = || f(true).and_then(|(h, _)| std::fs::metadata(h).ok());
             return Ok(match x.as_str() {
                 "-z" => arg.is_empty(),
@@ -2357,8 +2358,7 @@ impl<'a> Shell<'a> {
             return Ok(v);
         }
         let mut lhs = self.a_unary(t, p)?;
-        loop {
-            let Some(op) = t.get(*p).cloned() else { break };
+        while let Some(op) = t.get(*p).cloned() {
             let prec = match op.as_str() {
                 "?" => 1,
                 "||" => 2,
