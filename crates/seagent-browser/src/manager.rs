@@ -449,7 +449,7 @@ fn basic_from_url(u: &str) -> Option<String> {
     Some(format!("Basic {}", seagent_net::crypto::b64(seagent_net::urldecode(auth).as_bytes())))
 }
 
-fn start_recording(env: &Env, b: &Browser, target: &str, sid: &str) {
+pub(crate) fn start_recording(env: &Env, b: &Browser, target: &str, sid: &str) {
     let rec = env.dir().join("recordings");
     util::prune(&rec, "session_", Duration::from_secs(72 * 3600));
     let short: String = sid.chars().filter(|c| c.is_ascii_alphanumeric()).take(16).collect();
@@ -458,16 +458,37 @@ fn start_recording(env: &Env, b: &Browser, target: &str, sid: &str) {
         return;
     }
     if let Ok(psid) = b.attach(target) {
-        b.state.lock().unwrap().recording.insert(psid.clone(), (d, 0));
-        let _ = b.session_call(target, &psid, "Page.startScreencast", json!({"format": "jpeg", "quality": 60, "everyNthFrame": 2}), Duration::from_secs(5));
+        // A console viewer may already run this page's screencast: share it (the recording
+        // takes over the acks, so any frame the viewers were holding is released now).
+        let watched = {
+            let mut s = b.state.lock().unwrap();
+            s.recording.insert(psid.clone(), (d, 0));
+            s.live.get(&psid).map(|c| c.take_unacked())
+        };
+        match watched {
+            Some(ids) => {
+                for id in ids {
+                    b.conn.send_nowait("Page.screencastFrameAck", json!({"sessionId": id}), Some(&psid));
+                }
+            }
+            None => {
+                let _ = b.session_call(target, &psid, "Page.startScreencast", json!({"format": "jpeg", "quality": 60, "everyNthFrame": 2}), Duration::from_secs(5));
+            }
+        }
     }
 }
 
 /// Encode recorded frames (`ffmpeg` → webm; without ffmpeg the JPEG frames stay).
 pub fn finish_recordings(b: &Browser) {
-    let recs: Vec<(String, (PathBuf, u64))> = b.state.lock().unwrap().recording.drain().collect();
+    let (recs, watched): (Vec<(String, (PathBuf, u64))>, Vec<String>) = {
+        let mut s = b.state.lock().unwrap();
+        (s.recording.drain().collect(), s.live.keys().cloned().collect())
+    };
     for (sid, (dir, n)) in recs {
-        let _ = b.conn.call_with("Page.stopScreencast", json!({}), Some(&sid), Duration::from_secs(3), &|| None);
+        // A console viewer keeps the screencast (its acks pace it again from the next frame).
+        if !watched.contains(&sid) {
+            let _ = b.conn.call_with("Page.stopScreencast", json!({}), Some(&sid), Duration::from_secs(3), &|| None);
+        }
         if n == 0 {
             let _ = std::fs::remove_dir(&dir);
             continue;

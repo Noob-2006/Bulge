@@ -261,12 +261,18 @@ pub fn handle_event(st: &Mutex<State>, conn: &Conn, method: &str, p: &Value, sid
                     let _ = std::fs::write(dir.join(format!("frame_{:06}.jpg", n)), b);
                 }
             }
-            // A watched page: the viewers ack (paced), unless this frame superseded one.
+            // A watched page. While a recording runs it keeps its own pace (every frame is acked
+            // here) and viewers take the newest frame at their fps; otherwise the viewers ack.
+            let recording = sid.is_some_and(|x| s.recording.contains_key(x));
             if let Some(cast) = sid.and_then(|x| s.live.get(x)) {
-                if let (Some(stale), Some(x)) = (cast.offer(p), sid) {
-                    conn.send_nowait("Page.screencastFrameAck", json!({"sessionId": stale}), Some(x));
+                if recording {
+                    cast.offer_unpaced(p);
+                } else {
+                    if let (Some(stale), Some(x)) = (cast.offer(p), sid) {
+                        conn.send_nowait("Page.screencastFrameAck", json!({"sessionId": stale}), Some(x));
+                    }
+                    return;
                 }
-                return;
             }
             conn.send_nowait("Page.screencastFrameAck", json!({"sessionId": p["sessionId"]}), sid);
             return;

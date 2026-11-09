@@ -7,8 +7,10 @@
 //!
 //! Nothing runs while nobody watches: the screencast starts with the first [`Viewer`] of a
 //! page session and stops when the last one is dropped. The browser's idle clock is never
-//! touched (watching does not keep an idle browser alive), and a screencast the agent's own
-//! recording (`browser record`) started is shared, never restarted or stopped from here.
+//! touched (watching does not keep an idle browser alive). A recording (`browser record`)
+//! and the viewers share one screencast whichever started first: neither restarts or stops it
+//! under the other; while a recording runs it acks every frame itself (its own pace) and each
+//! viewer takes the newest frame at its fps cap.
 //!
 //! The engine's event supervisor hands frames to [`Cast::offer`] (`engine::handle_event`).
 
@@ -122,6 +124,15 @@ impl CastState {
         None
     }
 
+    /// A frame while a recording paces the screencast (it acks every frame itself): store it
+    /// for the viewers, never queue an ack.
+    pub fn offer_unpaced(&mut self, mut f: LiveFrame) {
+        self.seq += 1;
+        self.frames_in += 1;
+        f.seq = self.seq;
+        self.latest = Some(Arc::new(f));
+    }
+
     /// A viewer has delivered every frame up to `seen`: may the pending frame be acked yet?
     pub fn release(&mut self, seen: u64, now: Instant, min_gap: Duration) -> Release {
         match self.unacked.front() {
@@ -163,6 +174,19 @@ impl Cast {
         self.cv.notify_all();
         stale
     }
+
+    /// [`CastState::offer_unpaced`] from the CDP I/O thread (the caller acks the frame).
+    pub fn offer_unpaced(&self, p: &Value) {
+        if let Some((f, _)) = LiveFrame::from_event(p) {
+            self.state.lock().unwrap().offer_unpaced(f);
+            self.cv.notify_all();
+        }
+    }
+
+    /// Hand every pending ack to the caller (a recording takes the screencast's pacing over).
+    pub fn take_unacked(&self) -> Vec<i64> {
+        self.state.lock().unwrap().unacked.drain(..).map(|(_, id)| id).collect()
+    }
 }
 
 fn ack(b: &Browser, page_session: &str, id: i64) {
@@ -177,6 +201,9 @@ pub struct Viewer {
     pub target: String,
     /// (url, title, when read): refreshed from the browser at most once a second.
     info: Option<(String, String, Instant)>,
+    /// When this viewer last got a frame: its fps cap also holds while a recording, not the
+    /// acks, paces the screencast.
+    delivered: Option<Instant>,
 }
 
 /// Start (or join) the live stream of `target`.
@@ -200,7 +227,7 @@ pub fn watch(b: &Arc<Browser>, target: &str, opts: Opts) -> Result<Viewer, Strin
         cast.state.lock().unwrap().viewers += 1;
         (cast, fresh, recording)
     };
-    let v = Viewer { b: b.clone(), cast, seen: 0, target: target.to_string(), info: None };
+    let v = Viewer { b: b.clone(), cast, seen: 0, target: target.to_string(), info: None, delivered: None };
     if fresh && !recording {
         let o = v.cast.opts;
         let p = json!({"format": "jpeg", "quality": o.quality, "maxWidth": o.max_width, "maxHeight": o.max_height, "everyNthFrame": 1});
@@ -233,8 +260,14 @@ impl Viewer {
                 Release::Nothing => {}
             }
             if g.seq > self.seen {
-                self.seen = g.seq;
-                return g.latest.clone();
+                match self.delivered.map(|t| t + gap).filter(|due| *due > now) {
+                    Some(due) => wake = wake.min(due),
+                    None => {
+                        self.seen = g.seq;
+                        self.delivered = Some(now);
+                        return g.latest.clone();
+                    }
+                }
             }
             if now >= deadline || self.b.conn.is_closed() {
                 return None;
@@ -420,5 +453,68 @@ mod tests {
         assert!(b.state.lock().unwrap().live.is_empty());
         assert!(b.idle_for() + Duration::from_millis(20) >= idle.elapsed(), "watching does not touch the idle clock");
         let _ = std::fs::remove_dir_all(&env.home);
+    }
+
+    /// `browser record` and console viewers share one screencast whichever starts first:
+    /// neither restarts nor stops it under the other, the recording keeps every frame while a
+    /// viewer watches (it acks them itself), and a viewer keeps its fps cap meanwhile.
+    #[test]
+    fn recording_and_viewers_share_one_screencast() {
+        use std::sync::atomic::{AtomicI64, Ordering};
+        let n = Arc::new(AtomicI64::new(0));
+        let n2 = n.clone();
+        // Chrome-like: one frame on start and one per ack, endlessly (a frame every ~4 ms).
+        let next = move || {
+            std::thread::sleep(Duration::from_millis(4));
+            let i = n2.fetch_add(1, Ordering::SeqCst) + 1;
+            json!({"method": "Page.screencastFrame", "sessionId": "SP1", "params": {"data": seagent_net::crypto::b64(&[0xff, 0xd8, (i % 250) as u8]), "sessionId": i, "metadata": {"deviceWidth": 640, "deviceHeight": 480}}})
+        };
+        let f = crate::cdp::fake::start(Arc::new(move |m, p, _| match m {
+            "Target.getTargets" => (json!({"targetInfos": [{"targetId": "P1", "type": "page", "url": "https://example.com/", "title": "Example"}]}), vec![]),
+            "Target.attachToTarget" => (json!({"sessionId": format!("S{}", p["targetId"].as_str().unwrap())}), vec![]),
+            "Page.startScreencast" | "Page.screencastFrameAck" => (json!({}), vec![next()]),
+            _ => (json!({}), vec![]),
+        }));
+        let d = seagent_core::tmp::TempDir::new("seagent-live-rec");
+        let cfg = BrowserConfig { backend: "cdp".into(), cdp_url: f.http.clone(), ..Default::default() };
+        let env = Env { cfg, home: d.path().to_path_buf(), secrets: Arc::new(|s: &str| s.to_string()) };
+        let m = Manager::default();
+        let b = m.browser(&env, "cdp").unwrap();
+        let sent = |m: &str| f.seen.lock().unwrap().iter().filter(|x| x["method"] == m).count();
+        let rec_frames = |b: &Browser| b.state.lock().unwrap().recording.values().map(|(_, n)| *n).sum::<u64>();
+        let take = |v: &mut Viewer, k: usize| (0..k).filter_map(|_| v.next(Duration::from_secs(3))).count();
+
+        // ① viewer first, then a recording joins and leaves.
+        let mut v = watch(&b, "P1", Opts { fps: 2, ..Default::default() }).unwrap();
+        assert_eq!(take(&mut v, 1), 1);
+        crate::manager::start_recording(&env, &b, "P1", "s1");
+        assert_eq!(sent("Page.startScreencast"), 1, "the recording joins the viewer's screencast");
+        let t0 = Instant::now();
+        assert_eq!(take(&mut v, 4), 4);
+        let secs = t0.elapsed().as_secs_f64();
+        assert!(4.0 / secs <= 2.6, "the viewer's 2 fps cap holds while the recording paces the screencast: {:.1}", 4.0 / secs);
+        let recorded = rec_frames(&b) as f64;
+        assert!(recorded / secs >= 6.0, "the recording is not held to the viewer's 2 fps: {recorded} frames in {secs:.2} s");
+        crate::manager::finish_recordings(&b);
+        assert_eq!(sent("Page.stopScreencast"), 0, "stopping the recording leaves the viewer's screencast running");
+        assert_eq!(take(&mut v, 3), 3, "the viewer still gets frames (paced by its acks again)");
+        drop(v);
+        std::thread::sleep(Duration::from_millis(100));
+        assert_eq!(sent("Page.stopScreencast"), 1);
+
+        // ② recording first, then a viewer joins and leaves.
+        crate::manager::start_recording(&env, &b, "P1", "s2");
+        assert_eq!(sent("Page.startScreencast"), 2);
+        let mut v = watch(&b, "P1", Opts::default()).unwrap();
+        assert_eq!(sent("Page.startScreencast"), 2, "the viewer joins the recording's screencast");
+        assert_eq!(take(&mut v, 3), 3);
+        let before = rec_frames(&b);
+        drop(v);
+        std::thread::sleep(Duration::from_millis(200));
+        assert_eq!(sent("Page.stopScreencast"), 1, "the viewer leaving does not stop the recording");
+        assert!(rec_frames(&b) > before, "the recording keeps getting frames");
+        assert!(b.state.lock().unwrap().live.is_empty());
+        crate::manager::finish_recordings(&b);
+        assert_eq!(sent("Page.stopScreencast"), 2);
     }
 }

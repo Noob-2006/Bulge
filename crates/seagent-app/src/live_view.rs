@@ -13,7 +13,8 @@
 //!   without a display says `{"t":"nodisplay"}` and the console shows the terminal instead.
 //! - `terminal` (`session`): the agent's commands as they run — script, output, exit — from
 //!   every exec backend, the microVM included (`seagent_tools::exec::live`). Secrets are
-//!   redacted (`Vault::redact`) on whole lines.
+//!   redacted (`Vault::redact`), and a secret split across reads is held back until it can be
+//!   redacted whole ([`Redacting`]).
 //!
 //! Server → client: text `{"t":"hello"|"frame"|"term"|"stats"|"nodisplay"|"error"|"end"|
 //! "revoked"|"input"}`; each `frame` header is followed by one binary message (the JPEG).
@@ -383,48 +384,65 @@ fn desktop_loop(l: &mut Link, id: &str, (max_w, quality, fps): (u32, u8, u32), g
 
 // ── terminal ──
 
-/// Line-buffered, redacted text of one command's output (a secret split across two reads is
-/// still caught; a partial line is flushed after [`LineBuf::FLUSH`]).
+/// Secrets shorter than this are not redacted (the vault's own floor, `MIN_REDACT_LEN`).
+const MIN_SECRET: usize = 6;
+
+/// One command's output on its way to the console, redacted without ever letting a secret
+/// through in pieces: a secret split across reads (or across a flush) would not match the
+/// vault's whole-value replacement, so the tail that could still be the start of a secret is
+/// held back (at most the longest secret's length − 1; usually nothing), and a cut never
+/// falls inside a secret. UTF-8 characters are never split either.
 #[derive(Default)]
-pub struct LineBuf {
+pub struct Redacting {
     pending: Vec<u8>,
-    since: Option<Instant>,
 }
 
-impl LineBuf {
-    pub const FLUSH: Duration = Duration::from_millis(150);
-
+impl Redacting {
     pub fn push(&mut self, b: &[u8]) {
-        if self.pending.is_empty() {
-            self.since = Some(Instant::now());
-        }
         self.pending.extend_from_slice(b);
     }
 
-    /// The text ready to show: complete lines, or everything once it waited `FLUSH` (or grew
-    /// past 16 KiB) — never splitting a UTF-8 character.
-    pub fn take(&mut self, force: bool) -> Option<String> {
+    /// The text that is safe to show now, redacted with `redact`; `force` (the command ended)
+    /// releases everything.
+    pub fn take(&mut self, secrets: &[String], redact: &dyn Fn(&str) -> String, force: bool) -> Option<String> {
         if self.pending.is_empty() {
             return None;
         }
-        let old = force || self.since.is_some_and(|t| t.elapsed() >= Self::FLUSH) || self.pending.len() > 16 * 1024;
-        let cut = if old {
-            match std::str::from_utf8(&self.pending) {
-                Ok(_) => self.pending.len(),
-                Err(e) if e.error_len().is_none() && !force => e.valid_up_to(),
-                Err(_) => self.pending.len(),
+        let p = &self.pending;
+        let mut cut = p.len();
+        if !force {
+            for sec in secrets.iter().map(String::as_bytes).filter(|s| s.len() >= MIN_SECRET) {
+                // The longest suffix of the output that is a proper prefix of this secret.
+                let held = (1..sec.len().min(p.len() + 1)).rev().find(|&k| p.ends_with(&sec[..k])).unwrap_or(0);
+                cut = cut.min(p.len() - held);
+                // Never cut through a whole occurrence.
+                let mut i = 0;
+                while let Some(off) = p[i..].windows(sec.len()).position(|w| w == sec) {
+                    let (a, b) = (i + off, i + off + sec.len());
+                    if a < cut && cut < b {
+                        cut = a;
+                    }
+                    i = b;
+                }
             }
-        } else {
-            self.pending.iter().rposition(|c| *c == b'\n').map_or(0, |i| i + 1)
-        };
+            cut = match std::str::from_utf8(&p[..cut]) {
+                Ok(_) => cut,
+                Err(e) if e.error_len().is_none() => e.valid_up_to(),
+                Err(_) => cut,
+            };
+        }
         if cut == 0 {
             return None;
         }
         let rest = self.pending.split_off(cut);
         let text = String::from_utf8_lossy(&std::mem::replace(&mut self.pending, rest)).into_owned();
-        self.since = (!self.pending.is_empty()).then(Instant::now);
-        Some(text)
+        Some(redact(&text))
     }
+}
+
+/// The vault's secret values (to know what may be arriving in pieces).
+fn secret_values(v: &seagent_kernel::vault::Vault) -> Vec<String> {
+    v.names().iter().map(|n| v.substitute(&format!("{{{{secret:{n}}}}}"))).filter(|x| x.len() >= MIN_SECRET && !x.contains("{{secret:")).collect()
 }
 
 fn terminal(l: &mut Link) -> Flow {
@@ -433,18 +451,23 @@ fn terminal(l: &mut Link) -> Flow {
     let sub = live::subscribe(session.as_deref());
     l.text(&json!({"t": "hello", "kind": "terminal", "session": session}))?;
     let vault = l.app.d.k.vault.clone();
-    let mut bufs: std::collections::BTreeMap<u64, (String, LineBuf)> = Default::default();
+    let redact = |t: &str| vault.redact(t);
+    let (mut secrets, mut fetched) = (secret_values(&vault), Instant::now());
+    let mut bufs: std::collections::BTreeMap<u64, (String, Redacting)> = Default::default();
     loop {
         l.poll()?;
+        if fetched.elapsed() >= Duration::from_secs(5) {
+            (secrets, fetched) = (secret_values(&vault), Instant::now());
+        }
         let mut out = vec![];
         for e in sub.next(Duration::from_millis(50)) {
             match e {
                 Event::Start { cmd, session, backend, script } => out.push(json!({"e": "start", "cmd": cmd, "session": session, "backend": backend, "script": vault.redact(&script)})),
-                Event::Out { cmd, session, data } => bufs.entry(cmd).or_insert_with(|| (session, LineBuf::default())).1.push(&data),
+                Event::Out { cmd, session, data } => bufs.entry(cmd).or_insert_with(|| (session, Redacting::default())).1.push(&data),
                 Event::Exit { cmd, session, code, signal } => {
                     if let Some((_, mut b)) = bufs.remove(&cmd) {
-                        if let Some(t) = b.take(true) {
-                            out.push(json!({"e": "out", "cmd": cmd, "session": session, "data": vault.redact(&t)}));
+                        if let Some(t) = b.take(&secrets, &redact, true) {
+                            out.push(json!({"e": "out", "cmd": cmd, "session": session, "data": t}));
                         }
                     }
                     out.push(json!({"e": "exit", "cmd": cmd, "session": session, "code": code, "signal": signal}));
@@ -453,8 +476,8 @@ fn terminal(l: &mut Link) -> Flow {
             }
         }
         for (cmd, (session, b)) in bufs.iter_mut() {
-            if let Some(t) = b.take(false) {
-                out.push(json!({"e": "out", "cmd": cmd, "session": session, "data": vault.redact(&t)}));
+            if let Some(t) = b.take(&secrets, &redact, false) {
+                out.push(json!({"e": "out", "cmd": cmd, "session": session, "data": t}));
             }
         }
         if !out.is_empty() {
@@ -539,20 +562,36 @@ mod tests {
     }
 
     #[test]
-    fn line_buffer_keeps_lines_and_characters_whole() {
-        let mut b = LineBuf::default();
-        b.push(b"tok=s3c");
-        assert_eq!(b.take(false), None, "a partial line waits (a secret is redacted whole)");
-        b.push(b"r3t\nnext");
-        assert_eq!(b.take(false).as_deref(), Some("tok=s3cr3t\n"));
-        assert_eq!(b.take(true).as_deref(), Some("next"));
-        // "你" is three bytes: a flush never cuts it in half.
+    fn a_secret_split_across_reads_is_still_redacted() {
+        let secrets = vec!["tok-s3cr3t-value".to_string(), "hunter22".to_string()];
+        let redact = |t: &str| t.replace("tok-s3cr3t-value", "{{secret:API}}").replace("hunter22", "{{secret:PW}}");
+        let mut b = Redacting::default();
+        // Split mid-secret across two reads (and a line break before it).
+        b.push(b"line one\nkey=tok-s3");
+        assert_eq!(b.take(&secrets, &redact, false).as_deref(), Some("line one\nkey="), "the possible secret start is held back");
+        b.push(b"cr3t-value\ndone");
+        assert_eq!(b.take(&secrets, &redact, false).as_deref(), Some("{{secret:API}}\ndone"));
+        // Byte by byte: nothing of the secret ever leaves unredacted.
+        let mut shown = String::new();
+        for c in b"pw: hunter22 ok".iter() {
+            b.push(&[*c]);
+            shown += &b.take(&secrets, &redact, false).unwrap_or_default();
+        }
+        assert_eq!(shown, "pw: {{secret:PW}} ok");
+        assert!(!shown.contains("hunt"), "{shown}");
+        // A tail that only looked like a secret's start is released once it diverges.
+        b.push(b"tok-s3x");
+        assert_eq!(b.take(&secrets, &redact, false).as_deref(), Some("tok-s3x"));
+        // Held at most longest-secret − 1 bytes; the command's end flushes it.
+        b.push(b"tok-s3cr3t-valu");
+        assert_eq!(b.take(&secrets, &redact, false), None);
+        assert_eq!(b.take(&secrets, &redact, true).as_deref(), Some("tok-s3cr3t-valu"));
+        // Short secrets (below the vault's floor) hold nothing back; UTF-8 is never split.
         b.push(&"a你".as_bytes()[..2]);
-        b.since = Some(Instant::now() - LineBuf::FLUSH);
-        assert_eq!(b.take(false).as_deref(), Some("a"));
+        assert_eq!(b.take(&["abc".into()], &redact, false).as_deref(), Some("a"));
         b.push(&"你".as_bytes()[1..]);
-        assert_eq!(b.take(true).as_deref(), Some("你"));
-        assert_eq!(b.take(true), None);
+        assert_eq!(b.take(&secrets, &redact, false).as_deref(), Some("你"));
+        assert_eq!(b.take(&secrets, &redact, true), None);
     }
 
     #[test]
@@ -567,7 +606,8 @@ mod tests {
     #[test]
     fn live_stream_needs_a_credential_and_streams_the_terminal() {
         let home = seagent_core::tmp::scratch_path(format!("seagent-live-{}-{}", std::process::id(), seagent_net::crypto::random_token(4)));
-        let srv = crate::server::start(app(&home)).unwrap();
+        let srv_app = app(&home);
+        let srv = crate::server::start(srv_app.clone()).unwrap();
         let addr = srv.local_addr();
         let path = format!("{ROUTE}?kind=terminal&session=lvt-app");
         assert!(status(addr, &path, &[]).contains(" 401"), "no credential");
@@ -585,9 +625,11 @@ mod tests {
         assert!(String::from_utf8_lossy(&b[..n]).contains(" 426"));
 
         // The terminal: a command of the watched session, as it runs.
+        srv_app.d.k.vault.set("DEPLOY_KEY", "dk_live_7f3a9c2e").unwrap();
         let mut ws = connect(addr, "kind=terminal&session=lvt-app", "live-ro-token");
         assert_eq!(next_text(&mut ws)["t"], "hello");
-        let mut child = seagent_tools::exec::live::tee(Box::new(Chunks(vec![b"building...\n".to_vec(), b"done\n".to_vec()])), "lvt-app", "vm", "make all");
+        // The secret arrives split across two reads: it must still be redacted whole.
+        let mut child = seagent_tools::exec::live::tee(Box::new(Chunks(vec![b"building...\nkey=dk_live_7f".to_vec(), b"3a9c2e\ndone\n".to_vec()])), "lvt-app", "vm", "make all");
         let mut other = seagent_tools::exec::live::tee(Box::new(Chunks(vec![b"elsewhere\n".to_vec()])), "lvt-other", "vm", "true");
         let mut buf = [0u8; 64];
         while child.read(&mut buf, Duration::ZERO).unwrap() > 0 {}
@@ -601,7 +643,8 @@ mod tests {
         }
         assert_eq!((events[0]["e"].as_str(), events[0]["script"].as_str(), events[0]["backend"].as_str()), (Some("start"), Some("make all"), Some("vm")), "{events:?}");
         let text: String = events.iter().filter(|e| e["e"] == "out").map(|e| e["data"].as_str().unwrap()).collect();
-        assert_eq!(text, "building...\ndone\n");
+        assert_eq!(text, "building...\nkey={{secret:DEPLOY_KEY}}\ndone\n");
+        assert!(!text.contains("dk_live"), "no piece of the secret leaks: {text}");
         assert!(events.iter().all(|e| e["session"].is_null() || e["session"] == "lvt-app"), "another session's command stays out: {events:?}");
         // Read scope: watching yes, input no.
         ws.send_text(&json!({"t": "input", "viewer": "viewer-0001", "event": {"type": "click", "x": 0.5, "y": 0.5}}).to_string()).unwrap();
