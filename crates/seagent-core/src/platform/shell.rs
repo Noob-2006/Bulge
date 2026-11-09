@@ -96,6 +96,9 @@ impl Shell {
     }
 
     /// Arguments that make this shell run `script` (also for building a remote or PTY argv).
+    /// PowerShell first switches its output (and its console, for native programs it starts)
+    /// to UTF-8 ([`POWERSHELL_UTF8`]): left alone it writes the console code page (CP950,
+    /// CP936, CP1252…), which reads back as mojibake.
     pub fn args(&self, style: Style, script: &str) -> Vec<OsString> {
         match self.kind {
             ShellKind::Bash => vec![if style.login() { "-lc" } else { "-c" }.into(), script.into()],
@@ -105,12 +108,17 @@ impl Shell {
                 if !style.login() {
                     a.push("-NoProfile".into());
                 }
-                a.extend(["-NonInteractive".into(), "-Command".into(), script.into()]);
+                a.extend(["-NonInteractive".into(), "-Command".into(), format!("{POWERSHELL_UTF8}{script}").into()]);
                 a
             }
         }
     }
 }
+
+/// Prepended to every PowerShell script: UTF-8 for its own output and the pipeline into native
+/// programs, and the console's output code page (what `cmd`, `ipconfig`… write) set to 65001.
+/// Without a console (a service) the console setter fails harmlessly.
+pub const POWERSHELL_UTF8: &str = "try { [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false) } catch {}; $OutputEncoding = [System.Text.UTF8Encoding]::new($false); ";
 
 /// The shell of this machine (decided once per process on Windows / Android).
 pub fn active() -> &'static Shell {
@@ -391,12 +399,28 @@ mod tests {
     #[test]
     fn powershell_arguments() {
         let s = Shell { kind: ShellKind::Pwsh, program: "pwsh".into(), reason: String::new() };
-        assert_eq!(s.args(Style::Bash, "ls"), ["-NoProfile", "-NonInteractive", "-Command", "ls"].map(OsString::from));
-        assert_eq!(s.args(Style::BashLogin, "ls"), ["-NonInteractive", "-Command", "ls"].map(OsString::from));
+        let ls = OsString::from(format!("{POWERSHELL_UTF8}ls"));
+        assert_eq!(s.args(Style::Bash, "ls"), [OsString::from("-NoProfile"), "-NonInteractive".into(), "-Command".into(), ls.clone()]);
+        assert_eq!(s.args(Style::BashLogin, "ls"), [OsString::from("-NonInteractive"), "-Command".into(), ls]);
         let b = Shell { kind: ShellKind::Bash, program: "bash".into(), reason: String::new() };
         assert_eq!(b.args(Style::BashLogin, "ls"), ["-lc", "ls"].map(OsString::from));
         assert!(s.prompt_note().contains("PowerShell") && b.prompt_note().contains("bash"));
         assert!(ShellKind::Bash.is_posix() && !ShellKind::Pwsh.is_posix());
+    }
+
+    /// Chinese output from PowerShell and from a native program it starts comes back as UTF-8,
+    /// whatever the console code page of this Windows (CP950 on a zh-TW machine).
+    #[cfg(windows)]
+    #[test]
+    fn powershell_output_is_utf8_on_any_code_page() {
+        let s = Shell { kind: ShellKind::WindowsPowerShell, program: "powershell.exe".into(), reason: String::new() };
+        let script = "Write-Output '繁體中文 你好'; cmd /c echo 原生程式輸出; [Console]::Error.WriteLine('錯誤訊息')";
+        let o = std::process::Command::new(&s.program).args(s.args(Style::Bash, script)).output().expect("Windows PowerShell");
+        let out = String::from_utf8(o.stdout.clone()).unwrap_or_else(|_| panic!("stdout is not UTF-8: {:?}", o.stdout));
+        let err = String::from_utf8(o.stderr.clone()).unwrap_or_else(|_| panic!("stderr is not UTF-8: {:?}", o.stderr));
+        assert!(out.contains("繁體中文 你好"), "{out}");
+        assert!(out.contains("原生程式輸出"), "a native program's output too: {out}");
+        assert!(err.contains("錯誤訊息"), "{err}");
     }
 
     #[cfg(all(unix, not(target_os = "android")))]

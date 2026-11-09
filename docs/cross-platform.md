@@ -201,4 +201,6 @@ seagent screen 的平台替身（control/screen.rs 按 OS 分支）：
 - **macOS**（control/screen_macos.rs）：无进程级 desktop 对象；agent 浏览器跑在登录会话（其 CDP 截图与 computer_use 驱动在此可用），隔离由该会话提供，报告为「supported、already running」，不发布 SEAGENT_BD_DESKTOP。完全无头的 Mac 需虚拟显示器（私有 CGVirtualDisplay、HDMI 模拟器）或第二个 launchd GUI 会话——属主机置备，seagent 不代为安装。
 - **iOS / Android**：无桌面。
 
+即时画面（主控台 `/view/live`，`crates/seagent-app/src/live_view.rs`）各平台的来源：浏览器一律是 CDP screencast（各 OS 相同）；Bot Desktop 在 Linux 是 Xvnc display（`import`/`grim`），Windows 是 CreateDesktopW desktop 的 GDI 抓取（未建立时退回主屏幕），macOS 是登录会话（`screencapture`）；桌面 VM 是 QMP `screendump`（QEMU+KVM／WHPX／HVF 相同）。没有画面的地方（无 Bot Desktop 的服务器、iOS、只有 microVM 的主机）以即时终端机替代：shell／job 工具启动的每个命令都经 `seagent_tools::exec::live` 转送输出，涵盖 Firecracker、QEMU、VirtualBox、vfkit、AppContainer、Seatbelt、bwrap 与 iOS 的 WASM 解释器。
+
 虚拟音频（Meet 说话）：不安装任何驱动。可选方案见下节「虚拟音频」。

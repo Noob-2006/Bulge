@@ -9,7 +9,10 @@
 //! control by switching to the default desktop; the browser keeps running on the isolated
 //! desktop throughout, and its CDP screenshots work whether or not it is the active desktop.
 //! [`WinDesktop::screenshot`] additionally grabs the desktop's framebuffer through GDI for the
-//! full-desktop computer_use path (black until the desktop has been active at least once).
+//! full-desktop computer_use path and the console's live view. While the desktop is not the
+//! active one its framebuffer is black, so the picture is then composed from its windows
+//! instead: each visible top-level window renders itself (`PrintWindow`, full content) and is
+//! placed bottom-to-top at its position — the visible desktop is never switched.
 //!
 //! A keep-alive process (an idle Windows PowerShell pinned to the desktop with `lpDesktop`)
 //! holds the desktop object open independently of any daemon, the way the Linux launcher
@@ -152,10 +155,10 @@ impl WinDesktop {
         Ok(())
     }
 
-    /// A BGRA framebuffer grab of the desktop (`width`, `height`, `bgra`), taken by binding a
-    /// throwaway thread to it — the visible desktop is never changed. The pixels are black until
-    /// the desktop has been the active desktop at least once (Windows renders only the active
-    /// one); the browser's own CDP screenshots do not have that limitation.
+    /// A BGRA picture of the desktop (`width`, `height`, `bgra`), taken by binding a throwaway
+    /// thread to it — the visible desktop is never changed. Windows renders only the active
+    /// desktop, so while this one is not active the picture is composed from its windows
+    /// (`PrintWindow`) instead of read from the (black) framebuffer.
     pub fn screenshot(&self) -> Result<Shot, String> {
         let name = self.name();
         // The capture runs on its own thread: SetThreadDesktop only takes effect on a thread with
@@ -188,7 +191,15 @@ fn capture(name: &str) -> Result<Shot, String> {
         let out = if dc == 0 {
             Err(format!("no display DC for {name} ({})", last_error()))
         } else {
-            grab(dc)
+            use windows_sys::Win32::Graphics::Gdi::{GetDeviceCaps, HORZRES, VERTRES};
+            let (w, h) = (GetDeviceCaps(dc, HORZRES as i32), GetDeviceCaps(dc, VERTRES as i32));
+            match grab(dc) {
+                // Not the active desktop: nothing was rendered to the framebuffer (it reads as
+                // black, or cannot be read at all) — compose the picture from its windows.
+                Ok(s) if is_black(&s.bgra) => compose(hdesk, dc, s.width, s.height).or(Ok(s)),
+                Err(e) if w > 0 && h > 0 => compose(hdesk, dc, w, h).map_err(|c| format!("{e}; {c}")),
+                other => other,
+            }
         };
         if dc != 0 {
             DeleteDC(dc);
@@ -225,6 +236,208 @@ unsafe fn grab(dc: HDC) -> Result<Shot, String> {
     Ok(Shot { width: w, height: h, bgra })
 }
 
+/// A capture worker for a live stream: one thread bound to the desktop for the stream's
+/// lifetime, holding its desktop handle and display DC, so a frame costs the grab itself (no
+/// thread, desktop open and DC per frame). Frames come at most `max_w` wide: an inactive
+/// desktop is composed straight at that size (each window `StretchBlt`ed, HALFTONE), so less
+/// is copied, hashed and encoded. Dropping it ends the worker.
+/// One frame request to the capture worker: (max width, where to answer).
+type CaptureRequest = (u32, std::sync::mpsc::Sender<Result<Shot, String>>);
+
+pub struct LiveCapture {
+    tx: Option<std::sync::mpsc::Sender<CaptureRequest>>,
+    worker: Option<std::thread::JoinHandle<()>>,
+}
+
+impl LiveCapture {
+    pub fn start(desktop_name: &str) -> LiveCapture {
+        let (tx, rx) = std::sync::mpsc::channel::<CaptureRequest>();
+        let name = desktop_name.to_string();
+        let worker = std::thread::Builder::new()
+            .name("seagent-bd-capture".into())
+            .spawn(move || {
+                let wname = wide(&name);
+                // SAFETY: this window-less thread binds to the desktop once, keeps one display DC
+                // for its lifetime and frees both when the stream ends.
+                unsafe {
+                    let hdesk = CreateDesktopW(wname.as_ptr(), std::ptr::null(), std::ptr::null(), 0, DESKTOP_ACCESS, std::ptr::null());
+                    let ok = hdesk != 0 && SetThreadDesktop(hdesk) != 0;
+                    let display = wide("DISPLAY");
+                    let dc: HDC = if ok { CreateDCW(display.as_ptr(), std::ptr::null(), std::ptr::null(), std::ptr::null()) } else { 0 };
+                    for (max_w, reply) in rx {
+                        let r = if dc == 0 { Err(format!("the Bot Desktop {name} is not available ({})", last_error())) } else { capture_on(hdesk, dc, max_w) };
+                        let _ = reply.send(r);
+                    }
+                    if dc != 0 {
+                        DeleteDC(dc);
+                    }
+                    if hdesk != 0 {
+                        CloseDesktop(hdesk);
+                    }
+                }
+            })
+            .ok();
+        LiveCapture { tx: worker.as_ref().map(|_| tx), worker }
+    }
+
+    /// One frame, at most `max_w` wide.
+    pub fn grab(&self, max_w: u32) -> Result<Shot, String> {
+        let tx = self.tx.as_ref().ok_or("the capture worker did not start")?;
+        let (rtx, rrx) = std::sync::mpsc::channel();
+        tx.send((max_w, rtx)).map_err(|_| "the capture worker stopped".to_string())?;
+        rrx.recv().map_err(|_| "the capture worker stopped".to_string())?
+    }
+}
+
+impl Drop for LiveCapture {
+    fn drop(&mut self) {
+        self.tx = None;
+        if let Some(w) = self.worker.take() {
+            let _ = w.join();
+        }
+    }
+}
+
+/// SAFETY: `hdesk` is an open desktop handle and `dc` a display DC, both of the calling thread.
+unsafe fn capture_on(hdesk: HDESK, dc: HDC, max_w: u32) -> Result<Shot, String> {
+    use windows_sys::Win32::Graphics::Gdi::{GetDeviceCaps, HORZRES, VERTRES};
+    let (w, h) = (GetDeviceCaps(dc, HORZRES as i32), GetDeviceCaps(dc, VERTRES as i32));
+    if w <= 0 || h <= 0 {
+        return Err("the desktop has no size yet".into());
+    }
+    // An active desktop renders to its framebuffer; an inactive one reads black or fails.
+    if let Ok(s) = grab(dc) {
+        if !is_black(&s.bgra) {
+            return Ok(s);
+        }
+    }
+    let scale = (f64::from(max_w.max(160)) / f64::from(w)).min(1.0);
+    compose_scaled(hdesk, dc, w, h, scale)
+}
+
+/// [`compose`] straight into a `scale`d bitmap (HALFTONE `StretchBlt` per window).
+/// SAFETY: as for [`compose`].
+unsafe fn compose_scaled(hdesk: HDESK, dc: HDC, w: i32, h: i32, scale: f64) -> Result<Shot, String> {
+    use windows_sys::Win32::Foundation::{HWND, RECT};
+    use windows_sys::Win32::Graphics::Gdi::{SetBrushOrgEx, SetStretchBltMode, StretchBlt, HALFTONE};
+    use windows_sys::Win32::System::StationsAndDesktops::EnumDesktopWindows;
+    use windows_sys::Win32::UI::WindowsAndMessaging::{GetWindowRect, IsIconic, IsWindowVisible};
+    unsafe extern "system" fn cb(hwnd: HWND, param: LPARAM) -> BOOL {
+        (*(param as *mut Vec<HWND>)).push(hwnd);
+        TRUE
+    }
+    let (tw, th) = (((f64::from(w) * scale).round() as i32).max(1), ((f64::from(h) * scale).round() as i32).max(1));
+    let mut wins: Vec<HWND> = Vec::new();
+    EnumDesktopWindows(hdesk, Some(cb), &mut wins as *mut _ as LPARAM);
+    let mem = CreateCompatibleDC(dc);
+    let bmp = CreateCompatibleBitmap(dc, tw, th);
+    let old = SelectObject(mem, bmp as _);
+    SetStretchBltMode(mem, HALFTONE as _);
+    SetBrushOrgEx(mem, 0, 0, std::ptr::null_mut());
+    let mut drawn = 0;
+    for &hwnd in wins.iter().rev() {
+        let mut r: RECT = std::mem::zeroed();
+        if IsWindowVisible(hwnd) == 0 || IsIconic(hwnd) != 0 || GetWindowRect(hwnd, &mut r) == 0 {
+            continue;
+        }
+        let (ww, wh) = (r.right - r.left, r.bottom - r.top);
+        if ww <= 1 || wh <= 1 || r.right <= 0 || r.bottom <= 0 || r.left >= w || r.top >= h {
+            continue;
+        }
+        let wdc = CreateCompatibleDC(dc);
+        let wbmp = CreateCompatibleBitmap(dc, ww, wh);
+        let wold = SelectObject(wdc, wbmp as _);
+        if PrintWindow(hwnd, wdc, PW_RENDERFULLCONTENT) != 0 {
+            let s = |v: i32| (f64::from(v) * scale).round() as i32;
+            if scale >= 1.0 {
+                BitBlt(mem, r.left, r.top, ww, wh, wdc, 0, 0, SRCCOPY);
+            } else {
+                StretchBlt(mem, s(r.left), s(r.top), s(ww).max(1), s(wh).max(1), wdc, 0, 0, ww, wh, SRCCOPY);
+            }
+            drawn += 1;
+        }
+        SelectObject(wdc, wold);
+        DeleteObject(wbmp as _);
+        DeleteDC(wdc);
+    }
+    let mut bi: BITMAPINFO = std::mem::zeroed();
+    bi.bmiHeader = BITMAPINFOHEADER { biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32, biWidth: tw, biHeight: -th, biPlanes: 1, biBitCount: 32, biCompression: BI_RGB, ..std::mem::zeroed() };
+    let mut bgra = vec![0u8; (tw * th * 4) as usize];
+    let rows = GetDIBits(mem, bmp, 0, th as u32, bgra.as_mut_ptr() as _, &mut bi, DIB_RGB_COLORS);
+    SelectObject(mem, old);
+    DeleteObject(bmp as _);
+    DeleteDC(mem);
+    if rows == 0 || drawn == 0 {
+        return Err(format!("no window on the desktop could be rendered ({} top-level windows)", wins.len()));
+    }
+    Ok(Shot { width: tw, height: th, bgra })
+}
+
+/// Every pixel black (sampled): an inactive desktop's framebuffer.
+fn is_black(bgra: &[u8]) -> bool {
+    (0..bgra.len() / 4).step_by(97).all(|i| bgra[i * 4] == 0 && bgra[i * 4 + 1] == 0 && bgra[i * 4 + 2] == 0)
+}
+
+#[link(name = "user32")]
+extern "system" {
+    // windows-sys files this under `Win32_Storage_Xps`; one import is not worth the feature.
+    fn PrintWindow(hwnd: windows_sys::Win32::Foundation::HWND, hdc: HDC, flags: u32) -> BOOL;
+}
+const PW_RENDERFULLCONTENT: u32 = 2;
+
+/// The desktop's picture composed from its windows (`w`×`h`, the display's size): each
+/// visible, non-minimised top-level window renders itself into a bitmap (`PrintWindow`, which
+/// works on a desktop that is not being displayed) and is drawn bottom-to-top at its place.
+/// SAFETY: `hdesk` is an open desktop handle and `dc` a display DC bound to it.
+unsafe fn compose(hdesk: HDESK, dc: HDC, w: i32, h: i32) -> Result<Shot, String> {
+    use windows_sys::Win32::Foundation::{HWND, RECT};
+    use windows_sys::Win32::System::StationsAndDesktops::EnumDesktopWindows;
+    use windows_sys::Win32::UI::WindowsAndMessaging::{GetWindowRect, IsIconic, IsWindowVisible};
+    unsafe extern "system" fn cb(hwnd: HWND, param: LPARAM) -> BOOL {
+        (*(param as *mut Vec<HWND>)).push(hwnd);
+        TRUE
+    }
+    let mut wins: Vec<HWND> = Vec::new();
+    EnumDesktopWindows(hdesk, Some(cb), &mut wins as *mut _ as LPARAM);
+    let mem = CreateCompatibleDC(dc);
+    let bmp = CreateCompatibleBitmap(dc, w, h);
+    let old = SelectObject(mem, bmp as _);
+    let (mut drawn, mut visible) = (0, 0);
+    // EnumDesktopWindows lists top-first: paint from the bottom up.
+    for &hwnd in wins.iter().rev() {
+        let mut r: RECT = std::mem::zeroed();
+        if IsWindowVisible(hwnd) == 0 || IsIconic(hwnd) != 0 || GetWindowRect(hwnd, &mut r) == 0 {
+            continue;
+        }
+        let (ww, wh) = (r.right - r.left, r.bottom - r.top);
+        if ww <= 1 || wh <= 1 || r.right <= 0 || r.bottom <= 0 || r.left >= w || r.top >= h {
+            continue;
+        }
+        visible += 1;
+        let wdc = CreateCompatibleDC(dc);
+        let wbmp = CreateCompatibleBitmap(dc, ww, wh);
+        let wold = SelectObject(wdc, wbmp as _);
+        if PrintWindow(hwnd, wdc, PW_RENDERFULLCONTENT) != 0 {
+            BitBlt(mem, r.left, r.top, ww, wh, wdc, 0, 0, SRCCOPY);
+            drawn += 1;
+        }
+        SelectObject(wdc, wold);
+        DeleteObject(wbmp as _);
+        DeleteDC(wdc);
+    }
+    let mut bi: BITMAPINFO = std::mem::zeroed();
+    bi.bmiHeader = BITMAPINFOHEADER { biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32, biWidth: w, biHeight: -h, biPlanes: 1, biBitCount: 32, biCompression: BI_RGB, ..std::mem::zeroed() };
+    let mut bgra = vec![0u8; (w * h * 4) as usize];
+    let rows = GetDIBits(mem, bmp, 0, h as u32, bgra.as_mut_ptr() as _, &mut bi, DIB_RGB_COLORS);
+    SelectObject(mem, old);
+    DeleteObject(bmp as _);
+    DeleteDC(mem);
+    if rows == 0 || drawn == 0 {
+        return Err(format!("no window on the desktop could be rendered ({} top-level windows, {visible} visible on screen, {drawn} rendered)", wins.len()));
+    }
+    Ok(Shot { width: w, height: h, bgra })
+}
+
 /// Run `f` with the calling thread bound to the isolated desktop `qualified` (`WinSta0\name`),
 /// restoring the previous desktop after. A child spawned inside `f` with a std `Command`
 /// inherits this desktop, since std leaves `STARTUPINFO.lpDesktop` null (= inherit the parent
@@ -248,6 +461,175 @@ pub fn on_desktop<T>(qualified: &str, f: impl FnOnce() -> T) -> Result<T, String
         }
         CloseDesktop(h);
         Ok(out)
+    }
+}
+
+/// Start `cmdline` (a full Windows command line) with its windows on the desktop `qualified`
+/// (`WinSta0\name`), naming the desktop in `STARTUPINFOW.lpDesktop` explicitly. Returns the
+/// pid. (A child spawned with a std `Command` from a thread bound with [`on_desktop`] was seen to
+/// open its windows elsewhere on Windows 11, so callers that must land on the desktop use this.)
+pub fn spawn_on_desktop(qualified: &str, cmdline: &str) -> Result<u32, String> {
+    use windows_sys::Win32::Foundation::CloseHandle;
+    use windows_sys::Win32::System::Threading::{CreateProcessW, PROCESS_INFORMATION, STARTUPINFOW};
+    let mut desk = wide(qualified);
+    let mut cmd = wide(cmdline);
+    // SAFETY: plain CreateProcessW with owned, NUL-terminated buffers that outlive the call;
+    // both returned handles are closed.
+    unsafe {
+        let mut si: STARTUPINFOW = std::mem::zeroed();
+        si.cb = std::mem::size_of::<STARTUPINFOW>() as u32;
+        si.lpDesktop = desk.as_mut_ptr();
+        let mut pi: PROCESS_INFORMATION = std::mem::zeroed();
+        if CreateProcessW(std::ptr::null(), cmd.as_mut_ptr(), std::ptr::null(), std::ptr::null(), 0, 0, std::ptr::null(), std::ptr::null(), &si, &mut pi) == 0 {
+            return Err(format!("CreateProcessW on {qualified} failed ({})", last_error()));
+        }
+        CloseHandle(pi.hThread);
+        CloseHandle(pi.hProcess);
+        Ok(pi.dwProcessId)
+    }
+}
+
+/// Quote one argument the way `CommandLineToArgvW` / the MSVC runtime read it back.
+pub fn quote_arg(a: &str) -> String {
+    if !a.is_empty() && !a.contains([' ', '\t', '\n', '"']) {
+        return a.to_string();
+    }
+    let mut s = String::from('"');
+    let mut bs = 0;
+    for c in a.chars() {
+        match c {
+            '\\' => bs += 1,
+            '"' => {
+                s.push_str(&"\\".repeat(bs * 2 + 1));
+                s.push('"');
+                bs = 0;
+            }
+            _ => {
+                s.push_str(&"\\".repeat(bs));
+                bs = 0;
+                s.push(c);
+            }
+        }
+    }
+    s.push_str(&"\\".repeat(bs * 2));
+    s.push('"');
+    s
+}
+
+/// A process [`spawn_logged_on_desktop`] started (its handle is closed on drop; the process
+/// itself lives on, tied to seagent by its Job Object).
+pub struct DesktopChild {
+    pub pid: u32,
+    handle: windows_sys::Win32::Foundation::HANDLE,
+}
+
+// SAFETY: a process handle is usable from any thread.
+unsafe impl Send for DesktopChild {}
+
+impl DesktopChild {
+    /// The exit code once it has exited.
+    pub fn try_wait(&self) -> Option<u32> {
+        use windows_sys::Win32::System::Threading::GetExitCodeProcess;
+        let mut code = 0u32;
+        // SAFETY: a live process handle we own.
+        let ok = unsafe { GetExitCodeProcess(self.handle, &mut code) };
+        (ok != 0 && code != 259 /* STILL_ACTIVE */).then_some(code)
+    }
+    /// Block until it exits.
+    pub fn wait(&self) {
+        // SAFETY: a live process handle we own.
+        unsafe { windows_sys::Win32::System::Threading::WaitForSingleObject(self.handle, u32::MAX) };
+    }
+}
+
+impl Drop for DesktopChild {
+    fn drop(&mut self) {
+        // SAFETY: we own the handle.
+        unsafe { windows_sys::Win32::Foundation::CloseHandle(self.handle) };
+    }
+}
+
+/// Start `exe args` with its windows on the desktop `qualified` (`WinSta0\name`, named in
+/// `STARTUPINFOW.lpDesktop` — std cannot, and a null lpDesktop means the desktop of *this
+/// process*, not of the calling thread), this process's environment plus `env`, stdout and
+/// stderr appended to `log`, in its own process group and kill-on-close Job Object exactly
+/// like `seagent_core::proc::spawn_tied` (created suspended, put in the job, then resumed).
+pub fn spawn_logged_on_desktop(qualified: &str, exe: &Path, args: &[String], env: &[(String, String)], log: &std::fs::File) -> Result<DesktopChild, String> {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Foundation::{CloseHandle, DuplicateHandle, HANDLE};
+    use windows_sys::Win32::System::Threading::{CreateProcessW, GetCurrentProcess, ResumeThread, TerminateProcess, PROCESS_INFORMATION, STARTUPINFOW};
+    const CREATE_SUSPENDED: u32 = 0x4;
+    const CREATE_NEW_PROCESS_GROUP: u32 = 0x200;
+    const CREATE_UNICODE_ENVIRONMENT: u32 = 0x400;
+    const STARTF_USESTDHANDLES: u32 = 0x100;
+    const DUPLICATE_SAME_ACCESS: u32 = 2;
+    let line = std::iter::once(quote_arg(&exe.display().to_string())).chain(args.iter().map(|a| quote_arg(a))).collect::<Vec<_>>().join(" ");
+    let mut cmd = wide(&line);
+    let mut desk = wide(qualified);
+    // Environment block: this process's variables with `env` on top, sorted, NUL-separated.
+    let mut vars: std::collections::BTreeMap<String, (String, String)> = std::env::vars_os().map(|(k, v)| (k.to_string_lossy().into_owned(), v.to_string_lossy().into_owned())).map(|(k, v)| (k.to_uppercase(), (k, v))).collect();
+    for (k, v) in env {
+        vars.insert(k.to_uppercase(), (k.clone(), v.clone()));
+    }
+    let mut block: Vec<u16> = vars.values().flat_map(|(k, v)| std::ffi::OsStr::new(&format!("{k}={v}")).encode_wide().chain(Some(0)).collect::<Vec<_>>()).collect();
+    block.push(0);
+    // SAFETY: CreateProcessW with owned NUL-terminated buffers that outlive the call; the
+    // inheritable duplicate of the log handle and the thread handle are closed here, the
+    // process handle is owned by the returned DesktopChild.
+    unsafe {
+        let me = GetCurrentProcess();
+        let mut out: HANDLE = 0;
+        if DuplicateHandle(me, log.as_raw_handle() as HANDLE, me, &mut out, 0, 1, DUPLICATE_SAME_ACCESS) == 0 {
+            return Err(format!("cannot hand the log to the child ({})", last_error()));
+        }
+        let mut si: STARTUPINFOW = std::mem::zeroed();
+        si.cb = std::mem::size_of::<STARTUPINFOW>() as u32;
+        si.lpDesktop = desk.as_mut_ptr();
+        si.dwFlags = STARTF_USESTDHANDLES;
+        si.hStdOutput = out;
+        si.hStdError = out;
+        let mut pi: PROCESS_INFORMATION = std::mem::zeroed();
+        let flags = CREATE_SUSPENDED | CREATE_NEW_PROCESS_GROUP | CREATE_UNICODE_ENVIRONMENT | seagent_core::platform::proc::console_flags();
+        let ok = CreateProcessW(std::ptr::null(), cmd.as_mut_ptr(), std::ptr::null(), std::ptr::null(), 1, flags, block.as_ptr().cast(), std::ptr::null(), &si, &mut pi);
+        let err = last_error();
+        CloseHandle(out);
+        if ok == 0 {
+            return Err(format!("CreateProcessW({}) on {qualified} failed ({err})", exe.display()));
+        }
+        if let Err(e) = seagent_core::platform::proc::adopt_raw(pi.hProcess, pi.dwProcessId) {
+            TerminateProcess(pi.hProcess, 1);
+            CloseHandle(pi.hThread);
+            CloseHandle(pi.hProcess);
+            return Err(format!("cannot put pid {} in a job object: {e}", pi.dwProcessId));
+        }
+        ResumeThread(pi.hThread);
+        CloseHandle(pi.hThread);
+        Ok(DesktopChild { pid: pi.dwProcessId, handle: pi.hProcess })
+    }
+}
+
+/// Visible top-level windows on the desktop `name` (diagnostics and tests).
+pub fn visible_windows(name: &str) -> Result<usize, String> {
+    use windows_sys::Win32::Foundation::HWND;
+    use windows_sys::Win32::System::StationsAndDesktops::EnumDesktopWindows;
+    use windows_sys::Win32::UI::WindowsAndMessaging::IsWindowVisible;
+    unsafe extern "system" fn cb(hwnd: HWND, param: LPARAM) -> BOOL {
+        if IsWindowVisible(hwnd) != 0 {
+            *(param as *mut usize) += 1;
+        }
+        TRUE
+    }
+    let w = wide(name);
+    // SAFETY: open the desktop for enumeration, count its visible windows, close it.
+    unsafe {
+        let h = OpenDesktopW(w.as_ptr(), 0, 0, DESKTOP_ACCESS);
+        if h == 0 {
+            return Err(format!("desktop {name} is not open ({})", last_error()));
+        }
+        let mut n = 0usize;
+        EnumDesktopWindows(h, Some(cb), &mut n as *mut usize as LPARAM);
+        CloseDesktop(h);
+        Ok(n)
     }
 }
 
@@ -305,6 +687,49 @@ mod tests {
         assert_eq!(desktop_name(""), "seagent-default");
         let d = WinDesktop::new(Path::new("C:\\h"), "work", "1440x900");
         assert_eq!(d.qualified(), "WinSta0\\seagent-work");
+    }
+
+    #[test]
+    fn arguments_are_quoted_for_the_msvc_runtime() {
+        assert_eq!(quote_arg("--headless=new"), "--headless=new");
+        assert_eq!(quote_arg("C:\\Program Files\\Edge\\msedge.exe"), "\"C:\\Program Files\\Edge\\msedge.exe\"");
+        assert_eq!(quote_arg(""), "\"\"");
+        assert_eq!(quote_arg("a\"b"), "\"a\\\"b\"");
+        assert_eq!(quote_arg("dir with space\\"), "\"dir with space\\\\\"", "a trailing backslash is doubled before the closing quote");
+    }
+
+    /// The Bot Desktop browser really opens on the isolated desktop (not the user's), through
+    /// `launch::launch` with `SEAGENT_BD_DESKTOP` (not run by default):
+    /// `SEAGENT_REAL_TESTS=1 cargo test -p seagent-browser real_bot_desktop_browser -- --ignored`.
+    #[test]
+    #[ignore]
+    fn real_bot_desktop_browser_opens_on_the_isolated_desktop() {
+        let Some(exe) = crate::tests_real::real_gate() else { return };
+        let root = seagent_core::tmp::TempDir::new("seagent-bd-launch");
+        let d = WinDesktop::new(root.path(), &format!("launch{}", std::process::id()), "1280x800");
+        d.start().expect("an interactive window station");
+        let env: Vec<(String, String)> = std::fs::read_to_string(d.state_dir().join("env")).unwrap().lines().filter_map(|l| l.split_once('=')).map(|(k, v)| (k.to_string(), v.to_string())).collect();
+        let before = visible_windows(&d.name()).unwrap();
+        let udd = root.path().join("profile");
+        let extra = vec!["--inprivate".to_string()];
+        let o = crate::launch::LaunchOpts { exe: &exe, user_data_dir: &udd, headless: false, no_sandbox: false, extra_args: &extra, port: 0, managed: true, env };
+        let l = crate::launch::launch(&o, Duration::from_secs(30)).expect("the browser starts on the Bot Desktop");
+        let v = crate::cdp::get_json(&l.http, "/json/version", None, Duration::from_secs(5)).expect("its DevTools answers");
+        assert!(v["Browser"].is_string(), "{v}");
+        let mut after = 0;
+        for _ in 0..50 {
+            after = visible_windows(&d.name()).unwrap();
+            if after > before {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(200));
+        }
+        eprintln!("Bot Desktop {}: {before} visible windows before the launch, {after} after", d.name());
+        assert!(after > before, "the browser's window is on the isolated desktop");
+        let shot = d.screenshot().expect("a picture of the desktop");
+        assert!(!is_black(&shot.bgra), "the composed picture shows the browser");
+        crate::util::kill_group(l.pid, Duration::from_secs(3));
+        d.stop();
     }
 
     /// The real window-station API on this host: start creates the desktop and a keep-alive

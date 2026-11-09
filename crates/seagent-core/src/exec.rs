@@ -85,6 +85,11 @@ pub trait ExecBackend: Send + Sync {
     /// One line for the system prompt / `seagent sandbox explain`.
     fn describe(&self) -> String;
     fn spawn(&self, req: &ExecRequest) -> io::Result<Box<dyn ExecChild>>;
+    /// The backend the operator asked for could not run and a weaker one runs instead (a
+    /// microVM that cannot boot here → the OS sandbox): what to tell the user, once per session.
+    fn fallback_note(&self) -> Option<String> {
+        None
+    }
     /// The path a host workspace path has inside the backend.
     fn map_path(&self, host: &Path) -> String {
         host.display().to_string()

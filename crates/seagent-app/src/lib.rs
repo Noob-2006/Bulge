@@ -35,6 +35,7 @@ pub mod device_auth;
 pub mod devices;
 pub mod lan;
 pub mod netguard;
+pub mod live_view;
 pub mod node;
 pub mod openai;
 pub mod qr;

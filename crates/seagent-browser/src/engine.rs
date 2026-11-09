@@ -133,6 +133,9 @@ pub struct State {
     pub dialog_timeout: f64,
     /// Screencast recordings: page session → (frame dir, frames written).
     pub recording: HashMap<String, (PathBuf, u64)>,
+    /// Live console streams: page session → its screencast ([`crate::live`]). Empty unless
+    /// someone is watching.
+    pub live: HashMap<String, Arc<crate::live::Cast>>,
 }
 
 pub struct Browser {
@@ -256,6 +259,19 @@ pub fn handle_event(st: &Mutex<State>, conn: &Conn, method: &str, p: &Value, sid
                 if let Some(b) = p["data"].as_str().and_then(seagent_net::crypto::b64_decode) {
                     *n += 1;
                     let _ = std::fs::write(dir.join(format!("frame_{:06}.jpg", n)), b);
+                }
+            }
+            // A watched page. While a recording runs it keeps its own pace (every frame is acked
+            // here) and viewers take the newest frame at their fps; otherwise the viewers ack.
+            let recording = sid.is_some_and(|x| s.recording.contains_key(x));
+            if let Some(cast) = sid.and_then(|x| s.live.get(x)) {
+                if recording {
+                    cast.offer_unpaced(p);
+                } else {
+                    if let (Some(stale), Some(x)) = (cast.offer(p), sid) {
+                        conn.send_nowait("Page.screencastFrameAck", json!({"sessionId": stale}), Some(x));
+                    }
+                    return;
                 }
             }
             conn.send_nowait("Page.screencastFrameAck", json!({"sessionId": p["sessionId"]}), sid);

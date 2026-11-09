@@ -370,6 +370,9 @@ impl ExecBackend for VmBackend {
         let sess = self.mgr.spawn(&e).map_err(|err| io::Error::other(format!("seagent vm: {err}")))?;
         Ok(Box::new(VmChild { mgr: self.mgr.clone(), sess, pending: VecDeque::new(), exit: None, component: current_component(), session: self.session.clone() }))
     }
+    fn fallback_note(&self) -> Option<String> {
+        self.fallback.as_ref().map(|_| format!("{} Fix: run `seagent sandbox vm image build` (or set exec.vm.kernel / initramfs), then `seagent doctor`.", self.describe()))
+    }
     fn map_path(&self, host: &Path) -> String {
         match host.strip_prefix(&self.workspace) {
             Ok(rel) if !rel.as_os_str().is_empty() => format!("{}/{}", seagent_vm::proto::GUEST_WORKSPACE, rel.display()),
@@ -600,6 +603,28 @@ mod tests {
         assert!(b.isolation() <= seagent_vm::IsolationLevel::UserNamespace);
         assert!(b.describe().contains(if cfg!(any(target_os = "linux", target_os = "android")) { "namespace sandbox" } else { "OS policy sandbox" }), "{}", b.describe());
         assert!(b.shares_host_fs(), "bwrap shares the host file system (bind mounts)");
+        // Never silent: the first command of a session says it, later ones do not.
+        let note = b.fallback_note().expect("a fallback announces itself");
+        assert!(note.contains("microVM unavailable") && note.contains("seagent sandbox vm image build"), "{note}");
+        let session = format!("fallback-notice-{}", std::process::id());
+        let first = crate::exec::session_notice(&session, &b).expect("once per session");
+        assert!(first.starts_with("[seagent warning]"), "{first}");
+        assert_eq!(crate::exec::session_notice(&session, &b), None, "said once");
+        assert!(crate::exec::session_notice(&format!("{session}-other"), &b).is_some(), "another session hears it too");
+        // The script is written for the shell that really runs it: PowerShell in the Windows
+        // AppContainer, POSIX for bwrap and Seatbelt.
+        let kind = crate::exec::session::script_shell(&b);
+        assert_eq!(kind.is_posix(), !cfg!(windows), "{kind:?} for {}", b.id());
+        let _ = std::fs::remove_dir_all(c.home.parent().unwrap());
+    }
+
+    #[test]
+    fn doctor_reports_a_configured_microvm_that_cannot_boot() {
+        let c = ctx("doctor");
+        let mut cfg = ExecConfig::parse(&serde_json::json!({"backend": "vm", "vm": {"provider": "bwrap", "allow_fallback": true}})).unwrap();
+        cfg.backend_set = true;
+        let r = crate::exec::doctor_line(&cfg, &c.home);
+        assert!(r.as_ref().is_err_and(|e| e.contains("no microVM can boot here")), "{r:?}");
         let _ = std::fs::remove_dir_all(c.home.parent().unwrap());
     }
 

@@ -107,7 +107,7 @@ pub fn resolve(m: &Manager, sid: Option<&str>, key: Option<&str>, target: Option
 }
 
 /// The page session for `target` (attaching once if nothing has yet).
-fn page_session(b: &Browser, target: &str) -> Result<String, String> {
+pub(crate) fn page_session(b: &Browser, target: &str) -> Result<String, String> {
     if let Some(sid) = b.state.lock().unwrap().pages.get(target).and_then(|p| p.session.clone()) {
         return Ok(sid);
     }

@@ -9,6 +9,7 @@ pub mod container;
 pub mod daytona;
 pub mod process;
 pub mod hints;
+pub mod live;
 pub mod local;
 #[cfg(unix)]
 mod local_unix;
@@ -259,6 +260,35 @@ fn warn_once(tag: &str, msg: &str) {
         // `print`-with-`ln` macro and this file's allowance is 0.
         let _ = std::io::Write::write_all(&mut std::io::stderr(), format!("seagent: warning: {msg}\n").as_bytes());
     }
+}
+
+/// The fallback notice for `session`, the first time it runs something in a backend that is
+/// not the one configured (a microVM that cannot boot → the OS sandbox); `None` afterwards. The
+/// shell tool puts it at the top of its result, so it is in the transcript; the daemon's
+/// stderr gets it once per process too.
+pub fn session_notice(session: &str, backend: &dyn ExecBackend) -> Option<String> {
+    static SHOWN: OnceLock<Mutex<std::collections::HashSet<String>>> = OnceLock::new();
+    let note = backend.fallback_note()?;
+    warn_once(&format!("fallback|{}", backend.id()), &note);
+    SHOWN.get_or_init(Default::default).lock().unwrap().insert(format!("{session}|{}", backend.id())).then(|| format!("[seagent warning] {note}"))
+}
+
+/// `seagent doctor`'s exec line: where an unsandboxed command runs on this machine, and a
+/// failure when the configured microVM cannot boot and a weaker sandbox runs instead.
+pub fn doctor_line(cfg: &ExecConfig, data: &Path) -> Result<String, String> {
+    let requested = if cfg.backend_set { cfg.backend.as_str() } else { "auto" };
+    let plan = os_plan(seagent_vm::policy::resolve(&seagent_vm::policy::Query { requested, cfg: &cfg.vm, data, sandboxed: false }), false);
+    if plan.backend == "vm" {
+        let (kind, why) = vm::manager_for(&cfg.vm, data).selection();
+        if !kind.is_vm() {
+            return Err(format!("exec.backend = vm, but no microVM can boot here: commands run in the OS sandbox ({}) instead — {}", kind.name(), why.unwrap_or_default()));
+        }
+        return Ok(format!("vm ({}, {} isolation)", kind.name(), kind.isolation().label()));
+    }
+    Ok(match (&plan.warning, plan.uses_microvm()) {
+        (Some(w), false) => format!("{} — {w}", plan.backend),
+        _ => plan.backend.clone(),
+    })
 }
 
 pub fn build_backend(name: &str, cfg: &ExecConfig, extra: &Value, ctx: &BackendCtx) -> Result<Arc<dyn ExecBackend>, String> {
@@ -669,6 +699,8 @@ pub fn spawn_tool(ctx: &seagent_core::ToolCtx, req: &ExecRequest, elevated: bool
     let backend = backend_tool(ctx, elevated)?;
     backend.before_exec()?;
     let child = backend.spawn(req).map_err(|e| format!("{}: {e}", backend.id()))?;
+    // The console's live terminal (a no-op unless someone watches).
+    let child = live::tee(child, &ctx.session_id, backend.id(), &req.script);
     Ok((backend, child))
 }
 

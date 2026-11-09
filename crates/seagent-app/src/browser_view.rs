@@ -41,6 +41,10 @@
 //! - `view.novnc {key, open?}` / `POST /view/novnc`: a one-time 60 s ticket for the sandbox
 //!   browser's noVNC (`GET /view/novnc?ticket=` serves the bootstrap page); `open: true`
 //!   redeems it at once and returns the loopback noVNC URL for the UI to open.
+//!
+//! The console does not poll these frames any more: `GET /view/live` (WebSocket,
+//! [`crate::live_view`]) pushes the browser screencast, desktop frames and the agent's live
+//! terminal as they happen; the frame methods stay for other clients and as the fallback.
 
 use crate::server::App;
 use seagent_browser::manager::{self, Manager};
@@ -112,7 +116,7 @@ impl Target {
     }
 }
 
-fn target(c: &Ctx, p: &Value) -> Result<Target, (i64, String)> {
+pub(crate) fn target(c: &Ctx, p: &Value) -> Result<Target, (i64, String)> {
     match s(p, "target") {
         None | Some("host") => Ok(Target::Host),
         Some(t) => {
@@ -292,7 +296,7 @@ pub fn call(c: &Ctx, method: &str, p: &Value) -> R {
     }
 }
 
-fn with_app<T>(app: &App, f: impl FnOnce(&Ctx) -> T) -> T {
+pub(crate) fn with_app<T>(app: &App, f: impl FnOnce(&Ctx) -> T) -> T {
     let home = app.d.k.paths.data.clone();
     let k = &app.d.k.cfg;
     let cfg = BrowserConfig::parse(&crate::computer::browser_table(&k.browser, &k.computer_use, &k.desktop_vm)).unwrap_or_default();
@@ -331,8 +335,10 @@ fn err(code: i64, msg: &str) -> Response {
 /// the browser frame + input, the desktop frame + lease, and the sandbox noVNC button.
 const PANEL_HTML: &str = include_str!("browser_view_panel.html");
 
-/// `GET /view/` and `GET /view/ui`: the panel page, with a per-response script nonce.
-fn panel() -> Response {
+/// `GET /view/` and `GET /view/ui`: the panel page, with a per-response script nonce. Served
+/// without a credential (server.rs): it is static and holds no data — a browser navigation
+/// cannot send a Bearer header, and every request the page then makes carries its token in one.
+pub(crate) fn panel() -> Response {
     let nonce = seagent_net::crypto::random_token(16);
     let csp = format!("default-src 'none'; img-src 'self' data: blob:; style-src 'unsafe-inline'; script-src 'nonce-{nonce}'; connect-src 'self'; base-uri 'none'; frame-ancestors 'none'");
     no_store(Response::html(&PANEL_HTML.replace("{{NONCE}}", &nonce))).with_header("content-security-policy", &csp)
@@ -530,12 +536,22 @@ mod tests {
             ] {
                 assert!(body.contains(needle), "{p} is missing {needle}");
             }
+            // Silent, endless renewal of device access tokens (the devauth.js contract, which the
+            // page also loads by nonce when the host serves it), and no token left in the URL.
+            for needle in ["/ui/devauth.js", "/pair/refresh", "/pair/info", "seagent-device-refresh|v1|", "seagent-devkey", "* 0.8", "60000", "history.replaceState", "sessionStorage", "seagent.token", "seagent.deviceId", "r.status === 401"] {
+                assert!(body.contains(needle), "{p}: the token renewal lacks {needle}");
+            }
+            assert!(!body.contains("?token=\" +") && !body.contains("&token="), "{p}: no request carries the token in its URL");
             // Self-contained: every fetch is a relative /view/… path, no remote scripts or images.
             assert!(!body.contains("http://") && !body.contains("https://"), "{p} references an external resource");
             assert!(!body.contains("onclick=") && !body.contains("onload="), "{p} uses inline event handler attributes");
         }
-        assert_eq!(get(&base, "/view/", None, None).0, 401, "no token");
-        assert_eq!(get(&base, "/view/ui", Some("wrong"), None).0, 401, "wrong token");
+        // The page shell opens without a credential (a browser navigation has no header to send);
+        // everything it shows comes from routes that still need one.
+        let (st, _, body) = get(&base, "/view/", None, None);
+        assert!(st == 200 && body.contains("/pair/refresh"), "the static page itself: {st}");
+        assert_eq!(get(&base, "/view/browser", None, None).0, 401, "its data still needs the token");
+        assert_eq!(get(&base, "/view/desktop/frame", Some("wrong"), None).0, 401);
         let _ = std::fs::remove_dir_all(&home);
     }
 

@@ -12,6 +12,8 @@ const FILES: &[(&str, &str, &str, &str)] = &[
     ("/ui/devsec.js", JS, "web/devsec.js", include_str!("../../../ui/web/devsec.js")),
     ("/ui/ops.js", JS, "web/ops.js", include_str!("../../../ui/web/ops.js")),
     ("/ui/work.js", JS, "web/work.js", include_str!("../../../ui/web/work.js")),
+    ("/ui/live_view.js", JS, "web/live_view.js", include_str!("../../../ui/web/live_view.js")),
+    ("/ui/live_view.css", CSS, "web/live_view.css", include_str!("../../../ui/web/live_view.css")),
     ("/ui/surfaces.js", JS, "web/surfaces.js", include_str!("../../../ui/web/surfaces.js")),
     ("/ui/pages.js", JS, "web/pages.js", include_str!("../../../ui/web/pages.js")),
     ("/ui/chat_menu.js", JS, "web/chat_menu.js", include_str!("../../../ui/web/chat_menu.js")),
@@ -55,7 +57,7 @@ fn from_disk(rel: &str) -> Option<String> {
 }
 
 /// Strict CSP: only our own scripts/styles, WebSocket back to the same origin.
-const CSP: &str = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self' ws: wss:; frame-src 'self' https:; frame-ancestors 'none'; base-uri 'none'; form-action 'self'";
+const CSP: &str = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self' ws: wss:; frame-src 'self' https:; frame-ancestors 'none'; base-uri 'none'; form-action 'self'";
 
 /// The page itself also allows scripts carrying a per-response nonce: MCP App views
 /// render in `srcdoc` iframes, which inherit this policy, so their inline scripts are
