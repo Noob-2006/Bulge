@@ -25,7 +25,27 @@ use seagent_vm::provider::{VmProvider, VmSpec, Workspace};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-const BOOT_WAIT: Duration = Duration::from_secs(120);
+const BOOT_WAIT: Duration = Duration::from_secs(60);
+/// The kernel must have started (the agent logs on COM1) within this: a firmware that hangs
+/// (VirtualBox NEM + SMP, `EFI: debug point DXE_AP`) fails here, fast, not after a long wait.
+const KERNEL_WAIT: Duration = Duration::from_secs(45);
+
+/// Wait until the guest agent wrote to the console, else fail with the VirtualBox log tail.
+fn wait_for_kernel(spec: &VmSpec, t0: Instant) -> Result<(), String> {
+    while t0.elapsed() < KERNEL_WAIT {
+        if std::fs::read_to_string(spec.console_log()).is_ok_and(|c| c.contains("seagent-vm-guest:")) {
+            return Ok(());
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    let vbox_log = spec.run_dir.join(seagent_vm::provider::vbox::vm_name(spec)).join("Logs").join("VBox.log");
+    let tail: Vec<String> = std::fs::read_to_string(&vbox_log).unwrap_or_default().lines().rev().take(8).map(str::to_string).collect();
+    Err(format!(
+        "the guest kernel did not start within {KERNEL_WAIT:?} (console {} has no agent line): the firmware never handed over. VBox.log tail:\n{}",
+        spec.console_log().display(),
+        tail.into_iter().rev().collect::<Vec<_>>().join("\n")
+    ))
+}
 const FRAME_WAIT: Duration = Duration::from_secs(30);
 
 fn until_exit(ch: &Channel, id: u64) -> (String, Option<i32>) {
@@ -71,9 +91,16 @@ fn boots_virtualbox_from_the_guest_disk_and_runs_a_command() {
         extra_args: vec![],
         guest_cid: 3,
     };
+    println!("VirtualBox on NEM (Windows hypervisor running): {}", seagent_vm::provider::vbox::nem_host());
     let t0 = Instant::now();
     let mut inst = VboxProvider::new(&cfg).start(&spec).unwrap_or_else(|e| panic!("{e}"));
     let started = t0.elapsed();
+    // Whatever happens below, the VM is powered off and unregistered before the test ends.
+    let body = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+    if let Err(e) = wait_for_kernel(&spec, t0) {
+        panic!("{e}");
+    }
+    println!("VirtualBox: kernel running after {} ms", t0.elapsed().as_millis());
     // Windows: COM2 is a named pipe any local process can open, so the guest holds a per-boot
     // key (its SMBIOS serial). Play the squatter first: it sees the challenge, its command is
     // refused, a forged proof fails — then the real host authenticates.
@@ -115,11 +142,7 @@ fn boots_virtualbox_from_the_guest_disk_and_runs_a_command() {
         drop(rogue);
         std::thread::sleep(Duration::from_millis(500));
     }
-    let ch = inst.connect(BOOT_WAIT).unwrap_or_else(|e| {
-        let console = std::fs::read_to_string(spec.console_log()).unwrap_or_default();
-        inst.stop();
-        panic!("{e}\n--- console ---\n{console}")
-    });
+    let ch = inst.connect(BOOT_WAIT).unwrap_or_else(|e| panic!("{e}\n--- console ---\n{}", std::fs::read_to_string(spec.console_log()).unwrap_or_default()));
     let hello = ch.expect(BOOT_WAIT, "Hello").unwrap();
     let boot = t0.elapsed();
     match &hello {
@@ -151,8 +174,20 @@ fn boots_virtualbox_from_the_guest_disk_and_runs_a_command() {
         std::thread::sleep(Duration::from_millis(100));
     }
     let clean = !inst.is_running();
+    if !clean {
+        let c = std::fs::read_to_string(spec.console_log()).unwrap_or_default();
+        let lines: Vec<&str> = c.lines().filter(|l| !l.trim().is_empty()).collect();
+        println!("--- console tail ---\n{}", lines[lines.len().saturating_sub(12)..].join("\n"));
+    }
     println!("VirtualBox shutdown: {} in {} ms", if clean { "guest powered off" } else { "NOT stopped" }, t.elapsed().as_millis());
+    clean
+    }));
+    let t = Instant::now();
     inst.stop();
+    println!("VirtualBox: poweroff + unregistervm --delete took {} ms", t.elapsed().as_millis());
     let _ = std::fs::remove_dir_all(&run);
-    assert!(clean, "Shutdown must end the VM");
+    match body {
+        Ok(clean) => assert!(clean, "Shutdown must end the VM"),
+        Err(p) => std::panic::resume_unwind(p),
+    }
 }

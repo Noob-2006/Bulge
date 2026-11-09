@@ -119,8 +119,12 @@ fn powershell_env(script: &str, env: &[(&str, &str)]) -> Result<String, String> 
 /// The VHDX next to `raw`, converted once with `qemu-img` (Hyper-V cannot read raw disks).
 fn ensure_vhdx(raw: &Path) -> Result<PathBuf, String> {
     let vhdx = raw.with_extension("vhdx");
-    if vhdx.is_file() {
+    if vhdx.is_file() && !super::vbox::is_stale(&vhdx, raw) {
         return Ok(vhdx);
+    }
+    if vhdx.is_file() {
+        // disk.raw is newer than the conversion: convert again rather than boot the old guest.
+        std::fs::remove_file(&vhdx).map_err(|e| format!("remove the stale {}: {e}", vhdx.display()))?;
     }
     if !raw.is_file() {
         return Err(format!("Hyper-V needs a bootable UEFI guest disk ({} not found): it cannot boot the kernel + initramfs directly; build a raw UEFI disk of the image and set exec.vm.disk_image", raw.display()));

@@ -1299,6 +1299,7 @@ fn run_init() -> i32 {
     };
 
     apply_guest_limits(&cfg.limits());
+    let _ = firmware_can_power_off(); // read the FADT while still root
     for dir in [&cfg.workspace, &PathBuf::from(AGENT_HOME), &PathBuf::from("/run/seagent")] {
         if let Err(e) = chown_agent(dir) {
             log(&e);
@@ -1536,7 +1537,17 @@ fn serve(conn: &mut Conn, agent: Arc<Agent>, mut auth: Option<(Vec<u8>, String, 
 /// 0x56; when it is zero there is no power-management block, so
 /// `reboot(RB_POWER_OFF)` only halts this kernel and the VMM keeps running.
 /// Firecracker's FADT has exactly that (`00 00 00 00`); QEMU's q35 has `0x620`.
+/// Decided once, as root, before the privilege drop: `/sys/firmware/acpi/tables/FACP` is mode
+/// 0400, so a check made at `Shutdown` time (as uid 1000) always failed and the agent always
+/// reset the VM — harmless where the VMM exits on a reset (QEMU `-no-reboot`, Firecracker), a
+/// fresh reboot under VirtualBox (found there: the guest came straight back up).
+static CAN_POWER_OFF: OnceLock<bool> = OnceLock::new();
+
 fn firmware_can_power_off() -> bool {
+    *CAN_POWER_OFF.get_or_init(read_fadt_power_off)
+}
+
+fn read_fadt_power_off() -> bool {
     match std::fs::read("/sys/firmware/acpi/tables/FACP") {
         Ok(t) if t.len() >= 0x5a => u32::from_le_bytes([t[0x56], t[0x57], t[0x58], t[0x59]]) != 0,
         _ => false,

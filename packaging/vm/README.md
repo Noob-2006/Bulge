@@ -228,6 +228,13 @@ guest says `Hello` after ≈1 s. Things that matter there:
   type=1,serial=…`, COM2 as a named pipe): authenticated Hello ≈1.5 s, ≈7 ms per command
   over the UART. Unix-socket / vsock channels (Linux, macOS) carry no key and their frames
   are byte-for-byte unchanged;
+* VirtualBox 7.2.22 on the same host runs on the Windows Hypervisor Platform ("NEM": the
+  Windows hypervisor that WSL2 starts holds VT-x). Measured: an SMP guest hangs in the UEFI
+  firmware's AP start-up (`EFI: debug point DXE_AP`, the kernel never runs), so under NEM the
+  provider creates a 1-vCPU VM; it reaches the kernel ≈5-6 s after `startvm`, the agent's
+  Hello ≈7 s (including VM creation), ≈9 ms per command over COM2 (a named pipe), and
+  powers off in ≈0.2 s. `VBoxInternal/PowerOffInsteadOfReset` makes a guest reset end the
+  VM (QEMU's `-no-reboot`), and a `disk.vdi` older than `disk.raw` is converted again;
 * WHPX is the optional feature "Windows Hypervisor Platform" (`dism /online
   /enable-feature /featurename:HypervisorPlatform`, then reboot); seagent probes it
   unelevated through `WinHvPlatform.dll`. Windows **Home** has no Hyper-V role at all, so the

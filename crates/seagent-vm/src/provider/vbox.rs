@@ -69,7 +69,34 @@ pub fn channel_endpoint(spec: &VmSpec, windows: bool) -> Endpoint {
 /// The guest architecture follows the host's: VirtualBox runs arm64 VMs only on Apple
 /// Silicon (7.1+) and x86_64 VMs only on x86_64 hosts.
 pub fn create_commands(spec: &VmSpec, vdi: &Path, chan: &Endpoint, key: Option<&str>) -> Vec<Vec<String>> {
+    create_commands_on(spec, vdi, chan, key, nem_host())
+}
+
+/// VirtualBox will run on Hyper-V's NEM backend here: Windows with its hypervisor running
+/// (the same probe as WHPX — VirtualBox logs "Attempting fall back to NEM: VT-x is not
+/// available" exactly then).
+pub fn nem_host() -> bool {
+    cfg!(windows) && crate::host::whpx_available()
+}
+
+/// [`create_commands`] with the NEM decision explicit (pure; tested on any host). Under NEM the
+/// VM gets one vCPU: VirtualBox 7.2's NEM backend hangs an SMP guest in the UEFI firmware's
+/// AP start-up (`EFI: debug point DXE_AP`, the kernel never runs; measured on Windows 11 Home,
+/// 1 vCPU boots to Hello in ~5 s, 2 vCPUs never do, with or without `--paravirt-provider none`).
+pub fn create_commands_on(spec: &VmSpec, vdi: &Path, chan: &Endpoint, key: Option<&str>, nem: bool) -> Vec<Vec<String>> {
     let mut v = create_commands_for(spec, vdi, chan, cfg!(target_arch = "aarch64"));
+    // A guest reset ends the VM, as QEMU's `-no-reboot` does: `Shutdown` falls back to a reset
+    // where the firmware has no ACPI power-off, and a VM that silently boots again would be a
+    // fresh guest behind a channel that believes the old one is gone.
+    // (Windows, i.e. a keyed pipe, or NEM; the unix-socket shape on Linux/macOS is unchanged.)
+    if key.is_some() || nem {
+        v.insert(2, ["setextradata", &vm_name(spec), "VBoxInternal/PowerOffInsteadOfReset", "1"].iter().map(|s| s.to_string()).collect());
+    }
+    if nem {
+        if let Some(i) = v[1].iter().position(|a| a == "--cpus") {
+            v[1][i + 1] = "1".into();
+        }
+    }
     if let Some(k) = key {
         v.insert(2, key_command(spec, k));
     }
@@ -140,11 +167,24 @@ fn run(bin: &Path, args: &[String]) -> Result<String, String> {
     Ok(String::from_utf8_lossy(&o.stdout).into_owned())
 }
 
-/// The VDI next to `raw`, converted on first use (`VBoxManage convertfromraw`).
+/// `converted` is older than the raw disk it was made from.
+pub fn is_stale(converted: &Path, raw: &Path) -> bool {
+    let m = |p: &Path| std::fs::metadata(p).and_then(|m| m.modified()).ok();
+    matches!((m(converted), m(raw)), (Some(c), Some(r)) if r > c)
+}
+
+/// The VDI next to `raw`, converted on first use (`VBoxManage convertfromraw`) and again
+/// whenever `raw` is newer than it.
 fn ensure_vdi(bin: &Path, raw: &Path) -> Result<PathBuf, String> {
     let vdi = raw.with_extension("vdi");
-    if vdi.is_file() {
+    if vdi.is_file() && !is_stale(&vdi, raw) {
         return Ok(vdi);
+    }
+    if vdi.is_file() {
+        // disk.raw was rebuilt (or copied in) after the conversion: booting the old VDI would
+        // run the previous guest. Forget it in VirtualBox's media registry, then convert again.
+        let _ = run(bin, &["closemedium".into(), "disk".into(), vdi.display().to_string()]);
+        std::fs::remove_file(&vdi).map_err(|e| format!("remove the stale {}: {e}", vdi.display()))?;
     }
     if !raw.is_file() {
         return Err(format!(
@@ -238,8 +278,9 @@ impl VmInstance for VboxInstance {
         if self.registered {
             let name = vm_name(&self.spec);
             let _ = self.manage(&["controlvm", &name, "poweroff"]);
-            // VBoxSVC releases the session asynchronously; unregister once it has.
-            for _ in 0..50 {
+            // VBoxSVC releases the session asynchronously (seconds under NEM); unregister once
+            // it has, or the VM stays registered and its name blocks the next boot.
+            for _ in 0..150 {
                 if self.manage(&["unregistervm", &name, "--delete"]).is_ok() {
                     break;
                 }
@@ -331,6 +372,22 @@ mod tests {
 
     // Unix host paths / Linux VMM probing (KVM, Firecracker): not meaningful on a Windows host.
 
+    #[test]
+    fn a_conversion_older_than_its_raw_disk_is_stale() {
+        let d = std::env::temp_dir().join(format!("seagent-vbox-stale-{}", std::process::id()));
+        std::fs::create_dir_all(&d).unwrap();
+        let (vdi, raw) = (d.join("disk.vdi"), d.join("disk.raw"));
+        std::fs::write(&vdi, b"old").unwrap();
+        std::thread::sleep(Duration::from_millis(50));
+        std::fs::write(&raw, b"new").unwrap();
+        assert!(is_stale(&vdi, &raw), "a rebuilt disk.raw is converted again");
+        std::thread::sleep(Duration::from_millis(50));
+        std::fs::write(&vdi, b"fresh").unwrap();
+        assert!(!is_stale(&vdi, &raw));
+        assert!(!is_stale(&d.join("missing.vdi"), &raw));
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
     /// Windows counterpart of the shape test above: a named-pipe COM2 gets a per-boot key as
     /// the SMBIOS system serial, set before the VM starts; a unix-socket VM gets none.
     #[test]
@@ -340,11 +397,17 @@ mod tests {
         let pipe = channel_endpoint(&s, true);
         let cmds = create_commands(&s, Path::new(r"C:\img\disk.vdi"), &pipe, Some("00112233445566778899aabbccddeeff"));
         let names: Vec<&str> = cmds.iter().map(|c| c[0].as_str()).collect();
-        assert_eq!(names, ["createvm", "modifyvm", "setextradata", "storagectl", "storageattach", "startvm"]);
+        assert_eq!(names, ["createvm", "modifyvm", "setextradata", "setextradata", "storagectl", "storageattach", "startvm"]);
         assert_eq!(cmds[2], ["setextradata", "seagent-v-1", "VBoxInternal/Devices/efi/0/Config/DmiSystemSerial", "sgk-00112233445566778899aabbccddeeff"]);
+        assert_eq!(cmds[3], ["setextradata", "seagent-v-1", "VBoxInternal/PowerOffInsteadOfReset", "1"], "a guest reset ends the VM (QEMU's -no-reboot)");
         assert!(cmds[1].join(" ").contains(r"--uartmode2 server \\.\pipe\seagent-v-1"), "{:?}", cmds[1]);
         let plain = create_commands(&s, Path::new("disk.vdi"), &channel_endpoint(&s, false), None);
-        assert!(!plain.iter().any(|c| c[0] == "setextradata"), "no key without a pipe: {plain:?}");
+        assert!(!plain.iter().any(|c| c.iter().any(|a| a.contains("DmiSystemSerial"))), "no key without a pipe: {plain:?}");
+        assert!(!create_commands_on(&s, Path::new("d.vdi"), &channel_endpoint(&s, false), None, false).iter().any(|c| c[0] == "setextradata"), "the unix-socket shape is unchanged");
+        // Under NEM (Windows hypervisor running) the VM is single-vCPU; otherwise as asked.
+        let cpus = |c: &Vec<Vec<String>>| c[1][c[1].iter().position(|a| a == "--cpus").unwrap() + 1].clone();
+        assert_eq!(cpus(&create_commands_on(&s, Path::new("d.vdi"), &pipe, None, true)), "1");
+        assert_eq!(cpus(&create_commands_on(&s, Path::new("d.vdi"), &pipe, None, false)), "2");
     }
 
     #[cfg(unix)]

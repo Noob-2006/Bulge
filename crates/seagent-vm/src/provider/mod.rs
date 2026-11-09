@@ -162,7 +162,7 @@ pub fn select(cfg: &VmConfig, caps: &Capabilities) -> (ProviderKind, Option<Stri
     if let Some(want) = ProviderKind::parse(&cfg.provider) {
         if want.is_vm() {
             if let Some(accel) = caps.usable(want) {
-                return (want, accel_note(want, accel, caps.os));
+                return (want, accel_note(want, accel, caps.os).or_else(|| nem_note(want, caps)));
             }
             if !cfg.allow_fallback {
                 return (want, Some(format!("exec.vm.provider = `{}` is not usable here ({}) and exec.vm.allow_fallback = false", want.name(), blockers(want, caps))));
@@ -183,7 +183,7 @@ pub fn select(cfg: &VmConfig, caps: &Capabilities) -> (ProviderKind, Option<Stri
         return (best, Some("firecracker is not installed; using QEMU (needs a PCI-capable guest kernel for the guest channel — see docs)".into()));
     }
     if let Some((kind, accel)) = caps.best_vm() {
-        if let Some(note) = accel_note(kind, accel, caps.os) {
+        if let Some(note) = accel_note(kind, accel, caps.os).or_else(|| nem_note(kind, caps)) {
             return (kind, Some(note));
         }
     }
@@ -204,6 +204,16 @@ pub fn accel_of(kind: ProviderKind, caps: &Capabilities) -> Option<Accel> {
 fn with_article(label: &str) -> String {
     let an = label.starts_with("os-") || label.starts_with("app-");
     format!("{} {label}", if an { "an" } else { "a" })
+}
+
+/// VirtualBox on a Windows host whose hypervisor is running (WSL2, Hyper-V, VBS — what makes
+/// WHPX available) cannot use VT-x itself and runs on the Windows Hypervisor Platform ("NEM").
+/// Measured with VirtualBox 7.2.22: there an SMP guest hangs in the UEFI firmware's AP
+/// start-up (`EFI: debug point DXE_AP`), so the provider boots it with one vCPU.
+pub fn nem_note(kind: ProviderKind, caps: &Capabilities) -> Option<String> {
+    (kind == ProviderKind::VirtualBox && caps.os == HostOs::Windows && caps.whpx).then(|| {
+        "virtualbox runs on the Windows Hypervisor Platform (NEM: the Windows hypervisor holds VT-x) — slower than native VirtualBox, and the VM gets 1 vCPU because SMP guests hang in the UEFI AP start-up under NEM".to_string()
+    })
 }
 
 /// What the operator must be told about a VM that *does* boot but is weaker than the design
@@ -346,6 +356,14 @@ mod tests {
         assert_eq!(k, ProviderKind::HyperV, "asked for and refused, never silently swapped");
         assert!(why.unwrap().contains("Windows Home"));
         assert!(w.report().iter().any(|l| l.starts_with("hyper-v: unavailable on Windows Home")), "{:?}", w.report());
+        // VirtualBox with the Windows hypervisor running is on NEM, and says so (1 vCPU).
+        let mut v = caps_on(HostOs::Windows);
+        (v.qemu, v.hyperv) = (None, None);
+        let (k, note) = select(&VmConfig::default(), &v);
+        assert_eq!(k, ProviderKind::VirtualBox);
+        assert!(note.as_deref().is_some_and(|n| n.contains("NEM") && n.contains("1 vCPU")), "{note:?}");
+        v.whpx = false;
+        assert_eq!(select(&VmConfig::default(), &v), (ProviderKind::VirtualBox, None), "native VirtualBox: nothing to say");
     }
 
     /// Capabilities of a machine running `os`, with every ingredient there (pure: no probing).
@@ -381,7 +399,8 @@ mod tests {
         // macOS: Virtualization.framework (vfkit) > QEMU+HVF > VirtualBox.
         assert_eq!(order(&caps_on(HostOs::Macos)), vec![(Vfkit, Hvf), (Qemu, Hvf), (VirtualBox, Vbox)]);
         // Windows: QEMU+WHPX > Hyper-V > VirtualBox.
-        assert_eq!(order(&caps_on(HostOs::Windows)), vec![(Qemu, Whpx), (HyperV, Hyperv), (VirtualBox, Vbox)]);
+        // (VirtualBox on a Windows host with its hypervisor running is on NEM, i.e. WHPX.)
+        assert_eq!(order(&caps_on(HostOs::Windows)), vec![(Qemu, Whpx), (HyperV, Hyperv), (VirtualBox, Whpx)]);
         // Android: AVF only; iOS: nothing at all, ever.
         assert_eq!(order(&caps_on(HostOs::Android)), vec![(Avf, Kvm)]);
         assert!(order(&caps_on(HostOs::Ios)).is_empty());

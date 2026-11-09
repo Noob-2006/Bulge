@@ -309,7 +309,9 @@ impl Capabilities {
                 }
             }
             ProviderKind::Vfkit => (os == HostOs::Macos && self.hvf && self.vfkit.is_some() && image).then_some(Accel::Hvf),
-            ProviderKind::VirtualBox => (matches!(os, HostOs::Linux | HostOs::Macos | HostOs::Windows) && self.vbox.is_some() && self.disk_image.is_some() && image).then_some(Accel::Vbox),
+            // With the Windows hypervisor running (what WHPX reports), VirtualBox cannot own
+            // VT-x and runs on the Windows Hypervisor Platform (its "NEM" backend).
+            ProviderKind::VirtualBox => (matches!(os, HostOs::Linux | HostOs::Macos | HostOs::Windows) && self.vbox.is_some() && self.disk_image.is_some() && image).then_some(if os == HostOs::Windows && self.whpx { Accel::Whpx } else { Accel::Vbox }),
             ProviderKind::HyperV => (os == HostOs::Windows && self.hyperv.is_some() && self.disk_image.is_some() && image).then_some(Accel::Hyperv),
             ProviderKind::Avf => (os == HostOs::Android && self.avf.is_some() && self.kvm && image).then_some(Accel::Kvm),
             ProviderKind::Gvisor | ProviderKind::Bwrap | ProviderKind::AppContainer | ProviderKind::Seatbelt => None,
