@@ -434,7 +434,7 @@ mod tests {
             std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
         }
         let agents = out.join("agents.toml");
-        std::fs::write(&agents, format!("[[agent]]\nid = \"stub\"\nbin = \"{}\"\nargs = [\"-p\", \"{{prompt}}\"]\noutput = \"json\"\n", bin.display())).unwrap();
+        std::fs::write(&agents, format!("[[agent]]\nid = \"stub\"\nbin = '{}'\nargs = [\"-p\", \"{{prompt}}\"]\noutput = \"json\"\n", bin.display())).unwrap();
         let run = out.join("run");
         let a = p(&["bench", "--suite", &share.join("evals/smoke").display().to_string(), "--model", "fake/oracle", "--model", "fake/blank", "--agents", "stub", "--agents-file", &agents.display().to_string(), "--judge", "fake/judge", "--repeat", "2", "--out", &run.display().to_string(), "--price", "fake/oracle=3,15", "--quiet"]);
         assert_eq!(dispatch_sub(&a).unwrap().unwrap(), 0);

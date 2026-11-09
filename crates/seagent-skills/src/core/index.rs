@@ -323,7 +323,7 @@ mod tests {
         std::fs::write(plug.join("run.sh"), "#!/bin/sh").unwrap();
         std::fs::write(plug.join("skills/lint/SKILL.md"), "---\nname: lint\ndescription: Lint stuff\n---\nlint body").unwrap();
         let mut cfg = Config::default();
-        cfg.plugins.insert("myplug".into(), toml::from_str(&format!("command = \"{}\"", plug.join("run.sh").display())).unwrap());
+        cfg.plugins.insert("myplug".into(), toml::from_str(&format!("command = '{}'", plug.join("run.sh").display())).unwrap());
         let ix = SkillsIndex::new(&cfg, &paths);
         let wss = ws.to_string_lossy().to_string();
         let seg = ix.system_segment(&wss).unwrap();

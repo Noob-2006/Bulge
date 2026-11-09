@@ -533,6 +533,10 @@ mod tests {
         }
     }
 
+    // Unix host paths / Linux VMM probing (KVM, Firecracker): not meaningful on a Windows host.
+
+    #[cfg(unix)]
+
     #[test]
     fn cmdline_is_the_api_socket_and_an_id() {
         let cfg = VmConfig { extra_args: vec!["--no-seccomp".into()], ..Default::default() };
@@ -542,6 +546,10 @@ mod tests {
         assert!(a.ends_with("--no-seccomp"), "extra args are honoured");
         assert!(!a.contains("--no-api"), "the API must stay enabled: it is how we configure the VM");
     }
+
+    // Unix host paths / Linux VMM probing (KVM, Firecracker): not meaningful on a Windows host.
+
+    #[cfg(unix)]
 
     #[test]
     fn boot_requests_boot_from_the_initramfs_with_no_drive() {

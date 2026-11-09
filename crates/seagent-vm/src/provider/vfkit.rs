@@ -179,6 +179,10 @@ mod tests {
     use super::*;
     use crate::limits::Limits;
 
+    // Unix host paths / Linux VMM probing (KVM, Firecracker): not meaningful on a Windows host.
+
+    #[cfg(unix)]
+
     #[test]
     fn vfkit_boots_the_kernel_directly_with_vsock_and_no_network() {
         let spec = VmSpec {

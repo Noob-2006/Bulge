@@ -319,6 +319,10 @@ mod tests {
         }
     }
 
+    // Unix host paths / Linux VMM probing (KVM, Firecracker): not meaningful on a Windows host.
+
+    #[cfg(unix)]
+
     #[test]
     fn auto_prefers_a_real_microvm_when_the_image_and_a_vmm_are_there() {
         let cfg = vm_cfg();
@@ -337,6 +341,10 @@ mod tests {
         assert!(!p.uses_microvm() && p.warning.as_deref().unwrap_or("").contains("/dev/kvm"), "{p:?}");
     }
 
+    // Unix host paths / Linux VMM probing (KVM, Firecracker): not meaningful on a Windows host.
+
+    #[cfg(unix)]
+
     #[test]
     fn the_blocker_names_the_first_thing_missing() {
         let caps = Capabilities::default();
@@ -346,6 +354,10 @@ mod tests {
         let caps = Capabilities { kvm: true, kernel: Some("/k".into()), ..Default::default() };
         assert!(blockers(&caps).contains("initramfs"));
     }
+
+    // Unix host paths / Linux VMM probing (KVM, Firecracker): not meaningful on a Windows host.
+
+    #[cfg(unix)]
 
     #[test]
     fn an_unprovisioned_host_still_isolates_the_main_session() {
@@ -395,6 +407,8 @@ mod tests {
 
     /// ent-023/026: the fallback is decided from what the kernel can do, read from fake
     /// `/proc` + `/sys` trees for the distributions enterprises run.
+    // Unix host paths / Linux VMM probing (KVM, Firecracker): not meaningful on a Windows host.
+    #[cfg(unix)]
     #[test]
     fn old_kernels_degrade_step_by_step_and_say_why() {
         use crate::hostcaps::{fake, HostKernel};

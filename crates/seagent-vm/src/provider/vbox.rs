@@ -277,6 +277,10 @@ mod tests {
         }
     }
 
+    // Unix host paths / Linux VMM probing (KVM, Firecracker): not meaningful on a Windows host.
+
+    #[cfg(unix)]
+
     #[test]
     fn virtualbox_boots_an_immutable_disk_with_no_nic_and_a_private_channel() {
         let s = spec();
@@ -298,6 +302,10 @@ mod tests {
         assert!(modify.contains("--firmware efi") && modify.contains("--uart1 0x3F8 4") && modify.contains("--uart2 0x2F8 3"), "{modify}");
         assert_eq!(cmds[2].join(" "), "storagectl seagent-v-1 --name SATA --add sata --controller IntelAhci --portcount 1");
     }
+
+    // Unix host paths / Linux VMM probing (KVM, Firecracker): not meaningful on a Windows host.
+
+    #[cfg(unix)]
 
     #[test]
     fn virtualbox_on_arm64_creates_an_arm_platform_vm() {
