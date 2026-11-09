@@ -1106,13 +1106,11 @@ mod tests {
             let env = seagent_browser::control::screen::Desktop::new(&data).published_env();
             std::process::Command::new(&exe).args(&args).envs(env).spawn().unwrap().id()
         };
+        // The browser this test started, with its process tree, on every exit path.
         struct Kill(u32);
         impl Drop for Kill {
             fn drop(&mut self) {
-                #[cfg(windows)]
-                let _ = std::process::Command::new("taskkill").args(["/T", "/F", "/PID", &self.0.to_string()]).output();
-                #[cfg(not(windows))]
-                let _ = std::process::Command::new("kill").arg(self.0.to_string()).output();
+                seagent_core::proc::kill_group(self.0 as i32, Duration::from_secs(2));
             }
         }
         let _child = Kill(pid);
