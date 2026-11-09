@@ -267,25 +267,54 @@ impl Desktop {
         (avail < need).then(|| format!("Not enough free memory for a desktop: {avail} MB available, {need} MB needed (bot_desktop.min_free_memory_mb)"))
     }
 
+    /// The isolated desktop for this home on Windows / macOS (`None` on Linux, which uses the
+    /// Xvnc launcher instead).
+    #[cfg(windows)]
+    fn win(&self) -> super::screen_windows::WinDesktop {
+        super::screen_windows::WinDesktop::new(&self.home, &self.profile, &self.geometry)
+    }
+    #[cfg(target_os = "macos")]
+    fn mac(&self) -> super::screen_macos::MacDesktop {
+        super::screen_macos::MacDesktop::new(&self.home, &self.profile, &self.geometry)
+    }
+
     pub fn status(&self) -> Status {
         let missing = self.missing_binaries();
-        let pid = self.launcher_pid();
+        #[cfg_attr(target_os = "linux", allow(unused_mut))]
+        let mut pid = self.launcher_pid();
         let env = self.published_env();
-        let display = env
+        #[allow(unused_mut, unused_assignments)]
+        let mut display = env
             .iter()
             .find(|(k, _)| k == "DISPLAY")
             .map(|(_, v)| v.clone());
-        let running = pid.is_some() && display.is_some();
+        #[allow(unused_mut, unused_assignments)]
+        let mut running = pid.is_some() && display.is_some();
+        // Windows / macOS: the platform substitute decides supported / running / display.
+        #[cfg(windows)]
+        {
+            let wd = self.win();
+            running = wd.running();
+            display = running.then(|| wd.qualified());
+            pid = wd.launcher_pid();
+        }
+        #[cfg(target_os = "macos")]
+        {
+            let md = self.mac();
+            running = md.running();
+            display = Some(md.session_name());
+        }
         Status {
             profile: self.profile.clone(),
-            supported: cfg!(target_os = "linux"),
-            installed: missing.is_empty(),
-            install_command: if missing.is_empty() {
+            supported: cfg!(any(target_os = "linux", windows, target_os = "macos")),
+            installed: missing.is_empty() || cfg!(any(windows, target_os = "macos")),
+            // Windows / macOS install nothing (no packages); Linux lists what is missing.
+            install_command: if missing.is_empty() || cfg!(any(windows, target_os = "macos")) {
                 None
             } else {
                 self.install_command()
             },
-            missing: missing.clone(),
+            missing: if cfg!(any(windows, target_os = "macos")) { vec![] } else { missing.clone() },
             running,
             pid,
             display,
@@ -311,8 +340,24 @@ impl Desktop {
         }
     }
 
-    /// Start this home's desktop (idempotent); blocks until the launcher publishes its env.
-    #[cfg(not(target_os = "linux"))]
+    /// Start this home's isolated desktop (Windows: a separate window-station desktop the headed
+    /// browser is launched onto; idempotent).
+    #[cfg(windows)]
+    pub fn start(&self) -> Result<Status, String> {
+        self.win().start()?;
+        Ok(self.status())
+    }
+
+    /// macOS has no separate desktop object: the browser runs on the login session, so there is
+    /// nothing to start (reported as already running).
+    #[cfg(target_os = "macos")]
+    pub fn start(&self) -> Result<Status, String> {
+        self.mac().start()?;
+        Ok(self.status())
+    }
+
+    /// Other targets (iOS / Android) have no desktop.
+    #[cfg(not(any(target_os = "linux", windows, target_os = "macos")))]
     pub fn start(&self) -> Result<Status, String> {
         Err(NOT_HERE.into())
     }
@@ -452,6 +497,19 @@ impl Desktop {
     }
 
     /// Stop this home's desktop; true when a running launcher was signalled.
+    #[cfg(windows)]
+    pub fn stop(&self) -> bool {
+        self.win().stop()
+    }
+
+    /// macOS: nothing to stop (the login session is not torn down).
+    #[cfg(target_os = "macos")]
+    pub fn stop(&self) -> bool {
+        self.mac().stop()
+    }
+
+    /// Stop this home's desktop; true when a running launcher was signalled.
+    #[cfg(not(any(windows, target_os = "macos")))]
     pub fn stop(&self) -> bool {
         let sd = self.state_dir();
         if !sd.exists() {
@@ -584,9 +642,12 @@ fn mem_limit_mb() -> Option<u64> {
     mem_info().1
 }
 
-/// An exclusive lock on a file until dropped (std: flock on Unix, LockFileEx on Windows).
+/// An exclusive lock on a file until dropped (used by the Linux launcher's start/stop; Windows
+/// and macOS manage their desktop through [`super::screen_windows`] / [`super::screen_macos`]).
+#[cfg(not(any(windows, target_os = "macos")))]
 struct Flock(Option<std::fs::File>);
 
+#[cfg(not(any(windows, target_os = "macos")))]
 impl Flock {
     fn new(p: &Path) -> Flock {
         let f = std::fs::OpenOptions::new()
@@ -601,6 +662,7 @@ impl Flock {
     }
 }
 
+#[cfg(not(any(windows, target_os = "macos")))]
 impl Drop for Flock {
     fn drop(&mut self) {
         if let Some(f) = &self.0 {
@@ -610,7 +672,7 @@ impl Drop for Flock {
 }
 
 /// Why `seagent screen` does nothing here, and what replaces it.
-pub const NOT_HERE: &str = "Bot Desktop screens (TigerVNC Xvnc + Xfce) run on Linux gateway hosts only. On Windows and macOS this computer keeps its real desktop: computer_use acts on it directly and the agent's browser runs headed there or headless. For an isolated desktop, start a VM desktop from seagent-vm (the UI's Desktop → VM targets) instead.";
+pub const NOT_HERE: &str = "A Bot Desktop needs a desktop OS. Linux uses TigerVNC Xvnc + Xfce; Windows a separate window-station desktop; macOS the login session. This target (iOS / Android) has no desktop — for an isolated one, start a VM desktop from seagent-vm (the UI's Desktop → VM targets) instead.";
 
 /// Interaction for `screen install` (confirmation and the sudo password come from the terminal).
 pub trait Io {
@@ -751,7 +813,18 @@ pub fn screen_cli(d: &Desktop, args: &[String], io: &mut dyn Io) -> i32 {
 /// Exit code for "no sudo on this host" (Hermes `install.NO_SUDO`).
 pub const NO_SUDO: i32 = -2;
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(all(not(target_os = "linux"), any(windows, target_os = "macos")))]
+fn install(_d: &Desktop, _yes: bool, io: &mut dyn Io) -> i32 {
+    // Windows / macOS install no packages: the desktop is a window-station object / the login session.
+    io.line(if cfg!(windows) {
+        "Bot Desktop: nothing to install on Windows. Start the isolated desktop with `seagent screen start`."
+    } else {
+        "Bot Desktop: nothing to install on macOS. The agent's browser runs on the login session (start a virtual display for a headless Mac; see docs/cross-platform.md)."
+    });
+    0
+}
+
+#[cfg(not(any(target_os = "linux", windows, target_os = "macos")))]
 fn install(_d: &Desktop, _yes: bool, io: &mut dyn Io) -> i32 {
     io.line(NOT_HERE);
     1
@@ -1111,8 +1184,9 @@ mod tests {
         assert_eq!(screen_cli(&d, &["start".into()], &mut io), 1);
     }
 
-    // The embedded Xvfb + Xfce desktop is X11-only; Windows / macOS show the browser on the
-    // real desktop (no virtual-desktop substitute yet — see docs/cross-platform.md).
+    // The embedded Xvfb + Xfce desktop is X11-only; the Windows counterpart is an isolated
+    // window-station desktop (`super::screen_windows`, tested there) and the macOS counterpart is
+    // the login session (`super::screen_macos`). This test covers the Linux launcher's seed mode.
     #[cfg(unix)]
     #[test]
     fn embedded_launcher_seeds_config_only() {

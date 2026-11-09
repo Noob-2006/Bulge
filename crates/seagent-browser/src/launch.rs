@@ -461,6 +461,16 @@ pub fn launch(o: &LaunchOpts, timeout: Duration) -> Result<Launched, String> {
     }
     // Own session (one `kill(-pgid)` reaches the renderers) and tied to seagent: when seagent dies —
     // crash, SIGKILL, an interrupted test run — the kernel sends Chrome SIGTERM (new-001).
+    // Windows Bot Desktop: with `SEAGENT_BD_DESKTOP` set, bind the spawning thread to that
+    // isolated desktop so the browser (std leaves lpDesktop = inherit) lands on it.
+    #[cfg(windows)]
+    let mut child = match o.env.iter().find(|(k, _)| k == "SEAGENT_BD_DESKTOP").map(|(_, v)| v.clone()) {
+        Some(d) => crate::control::screen_windows::on_desktop(&d, || seagent_core::proc::spawn_tied(cmd, true))
+            .map_err(|e| format!("failed to start {} on the Bot Desktop: {e}", o.exe.display()))?
+            .map_err(|e| format!("failed to start {}: {e}", o.exe.display()))?,
+        None => seagent_core::proc::spawn_tied(cmd, true).map_err(|e| format!("failed to start {}: {e}", o.exe.display()))?,
+    };
+    #[cfg(not(windows))]
     let mut child = seagent_core::proc::spawn_tied(cmd, true).map_err(|e| format!("failed to start {}: {e}", o.exe.display()))?;
     let pid = child.id() as i32;
     let until = Instant::now() + timeout;

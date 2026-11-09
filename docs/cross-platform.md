@@ -159,3 +159,14 @@ iOS 不允許 App 開虛擬機、執行子程序或 JIT，因此 iOS 版是**純
 2. **逐 crate 移植**（平行）：kernel、tools、vm、binary+app+browser+channel、其餘輕量 crate。
 3. **LAN 互聯、Tauri 外殼、安裝檔、CI 矩陣、手機 App**。
 4. **驗證**：Linux 測試全過且效能不變；Windows / macOS / Android / iOS 目標 `cargo check` 通過；Windows 原生實機跑通。
+
+## Bot Desktop（隔离桌面 / isolated desktop）
+
+seagent screen 的平台替身（control/screen.rs 按 OS 分支）：
+
+- **Linux**：TigerVNC Xvnc + Xfce（launcher.sh），无头渲染，VNC 可接入。
+- **Windows**（control/screen_windows.rs）：交互 window station 上以 CreateDesktopW 建一个独立 desktop 对象，headed 浏览器经 STARTUPINFOW.lpDesktop 启动到该 desktop（launch.rs 读 SEAGENT_BD_DESKTOP，用 SetThreadDesktop 绑定派生线程，std 继承父线程 desktop）。桌面对象由本进程持有的 handle 保活（控制台进程无法在后台 desktop 初始化控制台会立即退出，故用 handle 而非常驻进程；浏览器挂在 seagent 的 Job Object 上，随 seagent 退出而退出，与其它浏览器一致）。Windows 仅渲染当前活动 desktop：agent 以 SwitchDesktop（take_over）把它变为活动 desktop 后用同一套 computer_use 工具（截图/输入）操作，switch_to_default 交还人类；浏览器的 CDP 截图不受活动与否限制，screenshot() 另经 GDI 抓该 desktop 帧缓冲（未曾活动过时为黑）。
+- **macOS**（control/screen_macos.rs）：无进程级 desktop 对象；agent 浏览器跑在登录会话（其 CDP 截图与 computer_use 驱动在此可用），隔离由该会话提供，报告为「supported、already running」，不发布 SEAGENT_BD_DESKTOP。完全无头的 Mac 需虚拟显示器（私有 CGVirtualDisplay、HDMI 模拟器）或第二个 launchd GUI 会话——属主机置备，seagent 不代为安装。
+- **iOS / Android**：无桌面。
+
+虚拟音频（Meet 说话）：不安装任何驱动。可选方案见下节「虚拟音频」。

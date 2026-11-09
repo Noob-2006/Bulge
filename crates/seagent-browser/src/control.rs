@@ -13,6 +13,10 @@
 
 pub mod cua;
 pub mod screen;
+#[cfg(target_os = "macos")]
+pub mod screen_macos;
+#[cfg(windows)]
+pub mod screen_windows;
 
 use crate::{launch, manager, util, BrowserConfig};
 use std::path::{Path, PathBuf};
