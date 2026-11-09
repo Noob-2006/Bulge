@@ -69,6 +69,8 @@ idle_timeout_secs = 0     # 0 = 不自動停
 - `view.desktop.input {viewer, target, event}`（`POST /view/desktop/input`）：事件為螢幕像素座標 `{type: move|click|dblclick|down|up|scroll|key|type|drag, x, y, button, dx, dy, key, text, toX, toY}`；只接受持有該目標租約（lease）的 viewer。
 - `view.vm.start {name?}` / `view.vm.stop {name}`（`POST /view/vm/start|stop`）：admin 權限。
 
+- **即時串流** `GET /view/live`（WebSocket，`crates/seagent-app/src/live_view.rs` 為規格）：主控台不再輪詢截圖。`kind=browser` 是分頁的 CDP `Page.startScreencast`（JPEG，ack 節流：有 viewer 取走上一張且未超過 fps 上限才 ack，慢的連線只會讓 Chrome 變慢、不會堆積）；`kind=desktop` 是 Bot Desktop／桌面 VM 的畫面（QMP `screendump`，畫面變了才送，速率自適應，不刷新 VM 的閒置計時）；`kind=terminal` 是代理正在執行的指令與輸出（所有 exec 後端，包括 microVM；以 vault 遮蔽秘密）。沒有畫面的目標回 `nodisplay`，主控台改顯示終端機。沒人看時什麼都不擷取。輸入沿用 `view.*.input` 與租約規則，且需要可 POST 的憑證（read scope 只能看）。
+
 每個目標有自己的接手租約：`host` 是原本的 Bot Desktop 租約，`vm:<name>` 在 `<data>/vm/desktop/<name>/bot-desktop/lease.json`。人接手某台 VM 時，代理對那台 VM 的所有動作（含截圖）都會被拒絕，主機與其他 VM 不受影響。
 
 ## 代理的 computer use

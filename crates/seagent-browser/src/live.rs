@@ -14,8 +14,13 @@
 
 use crate::engine::{Browser, BLOCKED_BY_DIALOG};
 use serde_json::{json, Value};
+use std::collections::VecDeque;
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
+
+/// Chrome keeps up to two screencast frames in flight; more than this unacked means something
+/// is off, and the oldest is acked at once rather than stalling the page.
+pub const MAX_IN_FLIGHT: usize = 4;
 
 /// Stream limits a viewer asks for (clamped by [`Opts::clamped`]).
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -91,8 +96,9 @@ pub enum Release {
 pub struct CastState {
     pub seq: u64,
     pub latest: Option<Arc<LiveFrame>>,
-    /// The frame Chrome waits on an ack for: (seq, screencast session id).
-    pub unacked: Option<(u64, i64)>,
+    /// Frames Chrome waits on an ack for, oldest first: (seq, screencast session id). Acks
+    /// go out one per fps interval, so the in-flight window cannot raise the rate.
+    pub unacked: VecDeque<(u64, i64)>,
     pub last_ack: Option<Instant>,
     pub viewers: usize,
     /// Frames received / acked (stats and tests).
@@ -101,31 +107,32 @@ pub struct CastState {
 }
 
 impl CastState {
-    /// A frame arrived. Returns an ack to send at once when it supersedes a frame that was
-    /// still unacked (never leave Chrome waiting on a frame nobody will release).
+    /// A frame arrived (it replaces the newest one: viewers only ever get the latest). Returns
+    /// an ack to send at once only when more than [`MAX_IN_FLIGHT`] frames wait.
     pub fn offer(&mut self, mut f: LiveFrame, ack_id: i64) -> Option<i64> {
         self.seq += 1;
         self.frames_in += 1;
         f.seq = self.seq;
         self.latest = Some(Arc::new(f));
-        let stale = self.unacked.replace((self.seq, ack_id)).map(|(_, id)| id);
-        if stale.is_some() {
+        self.unacked.push_back((self.seq, ack_id));
+        if self.unacked.len() > MAX_IN_FLIGHT {
             self.acks += 1;
+            return self.unacked.pop_front().map(|(_, id)| id);
         }
-        stale
+        None
     }
 
     /// A viewer has delivered every frame up to `seen`: may the pending frame be acked yet?
     pub fn release(&mut self, seen: u64, now: Instant, min_gap: Duration) -> Release {
-        match self.unacked {
-            Some((s, id)) if s <= seen => {
+        match self.unacked.front() {
+            Some(&(s, id)) if s <= seen => {
                 if let Some(t) = self.last_ack {
                     let due = t + min_gap;
                     if due > now {
                         return Release::Wait(due - now);
                     }
                 }
-                self.unacked = None;
+                self.unacked.pop_front();
                 self.last_ack = Some(now);
                 self.acks += 1;
                 Release::Ack(id)
@@ -214,27 +221,24 @@ impl Viewer {
         let mut g = self.cast.state.lock().unwrap();
         loop {
             let now = Instant::now();
+            let mut wake = deadline;
             match g.release(self.seen, now, gap) {
-                Release::Ack(id) => ack(&self.b, &self.cast.page_session, id),
-                Release::Wait(d) => {
-                    let d = d.min(deadline.saturating_duration_since(now));
-                    if d.is_zero() {
-                        return None;
-                    }
-                    g = self.cast.cv.wait_timeout(g, d).unwrap().0;
+                Release::Ack(id) => {
+                    ack(&self.b, &self.cast.page_session, id);
                     continue;
                 }
+                Release::Wait(d) => wake = wake.min(now + d),
                 Release::Nothing => {}
             }
             if g.seq > self.seen {
                 self.seen = g.seq;
                 return g.latest.clone();
             }
-            let left = deadline.saturating_duration_since(Instant::now());
-            if left.is_zero() || self.b.conn.is_closed() {
+            if now >= deadline || self.b.conn.is_closed() {
                 return None;
             }
-            g = self.cast.cv.wait_timeout(g, left).unwrap().0;
+            // A new frame, or the next ack falling due, whichever comes first.
+            g = self.cast.cv.wait_timeout(g, wake.saturating_duration_since(now).max(Duration::from_millis(1))).unwrap().0;
         }
     }
 
@@ -269,7 +273,7 @@ impl Drop for Viewer {
             s.live.remove(&self.cast.page_session);
         }
         // Never strand Chrome on an unacked frame (a recording keeps running on its own acks).
-        if let Some((_, id)) = g.unacked.take() {
+        for (_, id) in g.unacked.drain(..) {
             ack(&self.b, &self.cast.page_session, id);
         }
         drop(g);
@@ -307,7 +311,7 @@ mod tests {
         assert_eq!(s.offer(frame(1), 11), None);
         // Backpressure: nobody took frame 1, so it is not acked (Chrome sends nothing more).
         assert_eq!(s.release(0, t0, gap), Release::Nothing);
-        assert_eq!(s.unacked, Some((1, 11)));
+        assert_eq!(s.unacked, [(1, 11)]);
         // A viewer delivered it: first ack goes out at once.
         assert_eq!(s.release(1, t0, gap), Release::Ack(11));
         assert_eq!(s.release(1, t0, gap), Release::Nothing, "acked once");
@@ -334,9 +338,20 @@ mod tests {
         // One slot, newest wins: memory stays one frame whatever a viewer's speed.
         assert_eq!(s.latest.as_ref().unwrap().seq, 3);
         assert_eq!(s.latest.as_ref().unwrap().data, vec![0xff, 0xd8, 3]);
-        // A superseding frame while one is unacked: the stale ack goes out immediately.
-        assert_eq!(s.offer(frame(4), 4), Some(3));
-        assert_eq!(s.unacked, Some((4, 4)));
+        // Chrome's in-flight window (two frames) does not raise the rate: the second waits its turn.
+        assert_eq!(s.offer(frame(4), 4), None);
+        assert_eq!(s.unacked, [(3, 3), (4, 4)]);
+        let gap = Duration::from_millis(100);
+        let t = t + Duration::from_secs(1);
+        assert_eq!(s.release(4, t, gap), Release::Ack(3));
+        assert_eq!(s.release(4, t, gap), Release::Wait(gap), "one ack per interval");
+        assert_eq!(s.release(4, t + gap, gap), Release::Ack(4));
+        // A runaway window is cut at MAX_IN_FLIGHT: the oldest is acked at once.
+        for i in 5..5 + MAX_IN_FLIGHT as i64 {
+            assert_eq!(s.offer(frame(i as u8), i), None);
+        }
+        assert_eq!(s.offer(frame(99), 99), Some(5));
+        assert_eq!(s.unacked.len(), MAX_IN_FLIGHT);
     }
 
     #[test]

@@ -41,6 +41,10 @@
 //! - `view.novnc {key, open?}` / `POST /view/novnc`: a one-time 60 s ticket for the sandbox
 //!   browser's noVNC (`GET /view/novnc?ticket=` serves the bootstrap page); `open: true`
 //!   redeems it at once and returns the loopback noVNC URL for the UI to open.
+//!
+//! The console does not poll these frames any more: `GET /view/live` (WebSocket,
+//! [`crate::live_view`]) pushes the browser screencast, desktop frames and the agent's live
+//! terminal as they happen; the frame methods stay for other clients and as the fallback.
 
 use crate::server::App;
 use seagent_browser::manager::{self, Manager};

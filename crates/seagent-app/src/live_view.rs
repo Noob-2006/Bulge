@@ -651,7 +651,7 @@ mod tests {
             let mut src = move || {
                 n += 1;
                 match n {
-                    1 | 2 | 3 => Ok(px(10)),
+                    1..=3 => Ok(px(10)),
                     4 => Ok(px(200)),
                     5 => Err("no display: the Bot Desktop is not running".to_string()),
                     6 => Err("still none".to_string()),
@@ -802,6 +802,25 @@ mod tests {
         std::thread::sleep(Duration::from_millis(300));
         assert!(b.state.lock().unwrap().live.is_empty(), "no viewer, no screencast");
         let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn console_streams_with_the_token_in_a_subprotocol_never_the_url() {
+        let body = |path: &str| match crate::ui::serve(path).body {
+            seagent_net::httpd::Body::Bytes(b) => String::from_utf8(b).unwrap(),
+            _ => panic!("bytes"),
+        };
+        let js = body("/ui/live_view.js");
+        for needle in ["/view/live?", "seagent.live", "seagent.token.", "kind: 'terminal'", "kind: 'browser'", "kind: 'desktop'", "lvPollFrame"] {
+            assert!(js.contains(needle), "live_view.js lacks {needle}");
+        }
+        assert!(!js.contains("token="), "a token in a URL leaks into history and logs");
+        let index = body("/");
+        let (w, l) = (index.find("src=\"/ui/work.js\"").unwrap(), index.find("src=\"/ui/live_view.js\"").unwrap());
+        assert!(w < l, "live_view.js loads after work.js (it wraps its functions)");
+        assert!(index.contains("/ui/live_view.css"));
+        let csp = crate::ui::serve("/").headers.into_iter().find(|(k, _)| k == "content-security-policy").unwrap().1;
+        assert!(csp.contains("img-src 'self' data: blob:"), "frames are shown from blob: URLs: {csp}");
     }
 
     struct Chunks(Vec<Vec<u8>>);
