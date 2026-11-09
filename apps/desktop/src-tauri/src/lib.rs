@@ -184,6 +184,10 @@ pub fn run() {
                 if background {
                     boot::start(app.handle().clone());
                 }
+                #[cfg(target_os = "linux")]
+                if !background {
+                    desktop::cjk_font_check(app.handle());
+                }
             }
             Ok(())
         })
