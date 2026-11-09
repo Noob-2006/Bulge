@@ -252,9 +252,10 @@ pub struct Viewer {
     pub target: String,
     /// (url, title, when read): refreshed from the browser at most once a second.
     info: Option<(String, String, Instant)>,
-    /// When this viewer last got a frame: its fps cap also holds while a recording, not the
-    /// acks, paces the screencast.
-    delivered: Option<Instant>,
+    /// When this viewer may get its next frame: its fps cap also holds while a recording, not
+    /// the acks, paces the screencast. Slots follow the previous slot (not the late wake-up),
+    /// so coarse OS timers (Windows: 15.6 ms) do not drag the average below the cap.
+    next_slot: Option<Instant>,
 }
 
 /// Start (or join) the live stream of `target`.
@@ -285,7 +286,7 @@ pub fn watch(b: &Arc<Browser>, target: &str, opts: Opts) -> Result<Viewer, Strin
         drop(g);
         (cast, id, start)
     };
-    let v = Viewer { b: b.clone(), cast, id, opts, seen: 0, target: target.to_string(), info: None, delivered: None };
+    let v = Viewer { b: b.clone(), cast, id, opts, seen: 0, target: target.to_string(), info: None, next_slot: None };
     if let Some(e) = start {
         // Dropping `v` on failure undoes the registration.
         b.conn.call_with("Page.startScreencast", screencast_params(e), Some(&sid), Duration::from_secs(5), &|| None)?;
@@ -331,11 +332,15 @@ impl Viewer {
                 Release::Nothing => {}
             }
             if g.seq > self.seen {
-                match self.delivered.map(|t| t + gap).filter(|due| *due > now) {
+                match self.next_slot.filter(|due| *due > now + Duration::from_millis(1)) {
                     Some(due) => wake = wake.min(due),
                     None => {
                         self.seen = g.seq;
-                        self.delivered = Some(now);
+                        // Late by less than an interval: keep the cadence; later: start afresh.
+                        self.next_slot = Some(match self.next_slot {
+                            Some(due) if now < due + gap => due + gap,
+                            _ => now + gap,
+                        });
                         return g.latest.clone();
                     }
                 }

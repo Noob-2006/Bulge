@@ -327,6 +327,31 @@ pub fn on_desktop<T>(qualified: &str, f: impl FnOnce() -> T) -> Result<T, String
     }
 }
 
+/// Start `cmdline` (a full Windows command line) with its windows on the desktop `qualified`
+/// (`WinSta0\name`), naming the desktop in `STARTUPINFOW.lpDesktop` explicitly. Returns the
+/// pid. (A child spawned with a std `Command` from a thread bound with [`on_desktop`] was seen to
+/// open its windows elsewhere on Windows 11, so callers that must land on the desktop use this.)
+pub fn spawn_on_desktop(qualified: &str, cmdline: &str) -> Result<u32, String> {
+    use windows_sys::Win32::Foundation::CloseHandle;
+    use windows_sys::Win32::System::Threading::{CreateProcessW, PROCESS_INFORMATION, STARTUPINFOW};
+    let mut desk = wide(qualified);
+    let mut cmd = wide(cmdline);
+    // SAFETY: plain CreateProcessW with owned, NUL-terminated buffers that outlive the call;
+    // both returned handles are closed.
+    unsafe {
+        let mut si: STARTUPINFOW = std::mem::zeroed();
+        si.cb = std::mem::size_of::<STARTUPINFOW>() as u32;
+        si.lpDesktop = desk.as_mut_ptr();
+        let mut pi: PROCESS_INFORMATION = std::mem::zeroed();
+        if CreateProcessW(std::ptr::null(), cmd.as_mut_ptr(), std::ptr::null(), std::ptr::null(), 0, 0, std::ptr::null(), std::ptr::null(), &si, &mut pi) == 0 {
+            return Err(format!("CreateProcessW on {qualified} failed ({})", last_error()));
+        }
+        CloseHandle(pi.hThread);
+        CloseHandle(pi.hProcess);
+        Ok(pi.dwProcessId)
+    }
+}
+
 /// Switch back to the default interactive desktop (end a `take_over`).
 pub fn switch_to_default() -> Result<(), String> {
     let name = wide("Default");

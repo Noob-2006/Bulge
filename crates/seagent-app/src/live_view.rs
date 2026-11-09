@@ -1093,26 +1093,29 @@ mod tests {
         let html = format!("<!doctype html><body style='margin:10px;background:#fff;color:#111'><h2 id=c style='font:600 22px monospace'>desktop</h2>{rows}<script>let n=0;setInterval(()=>{{c.textContent='Bot Desktop live · frame '+(++n)+' · '+new Date().toISOString()}},33)</script>");
         let url = format!("data:text/html;charset=utf-8,{}", seagent_net::urlencode(&html));
         let profile = home.path().join("edge-profile");
-        let args = [format!("--user-data-dir={}", profile.display()), "--no-first-run".into(), "--no-default-browser-check".into(), "--window-position=0,0".into(), "--window-size=1400,900".into(), format!("--app={url}")];
+        // InPrivate / incognito: never a signed-in profile (no account details in a frame).
+        let args = [format!("--user-data-dir={}", profile.display()), "--inprivate".into(), "--incognito".into(), "--no-first-run".into(), "--no-default-browser-check".into(), "--window-position=0,0".into(), "--window-size=1400,900".into(), format!("--app={url}")];
         #[cfg(windows)]
-        let child = {
+        let pid = {
             let q = seagent_browser::control::screen_windows::WinDesktop::new(&data, "default", "1440x900").qualified();
-            seagent_browser::control::screen_windows::on_desktop(&q, || std::process::Command::new(&exe).args(&args).spawn()).unwrap().unwrap()
+            let line = std::iter::once(format!("\"{}\"", exe.display())).chain(args.iter().map(|a| format!("\"{a}\""))).collect::<Vec<_>>().join(" ");
+            seagent_browser::control::screen_windows::spawn_on_desktop(&q, &line).unwrap()
         };
         #[cfg(not(windows))]
-        let child = {
+        let pid = {
             let env = seagent_browser::control::screen::Desktop::new(&data).published_env();
-            std::process::Command::new(&exe).args(&args).envs(env).spawn().unwrap()
+            std::process::Command::new(&exe).args(&args).envs(env).spawn().unwrap().id()
         };
-        struct Kill(std::process::Child);
+        struct Kill(u32);
         impl Drop for Kill {
             fn drop(&mut self) {
                 #[cfg(windows)]
-                let _ = std::process::Command::new("taskkill").args(["/T", "/F", "/PID", &self.0.id().to_string()]).output();
-                let _ = self.0.kill();
+                let _ = std::process::Command::new("taskkill").args(["/T", "/F", "/PID", &self.0.to_string()]).output();
+                #[cfg(not(windows))]
+                let _ = std::process::Command::new("kill").arg(self.0.to_string()).output();
             }
         }
-        let _child = Kill(child);
+        let _child = Kill(pid);
         std::thread::sleep(Duration::from_secs(4));
         let srv = crate::server::start(a.clone()).unwrap();
         let mut ws = connect(srv.local_addr(), "kind=desktop&target=host&fps=30&quality=85&maxWidth=3840", "live-admin-token");
