@@ -327,10 +327,33 @@ fn read_events(file: &mut File, repair: bool) -> Result<Vec<Event>, StoreError> 
         }
     }
     if repair && file.metadata()?.len() != good_len {
-        file.set_len(good_len)?;
-        file.sync_all()?;
+        truncate_to(file, good_len)?;
     }
     Ok(events)
+}
+
+#[cfg(not(windows))]
+fn truncate_to(file: &File, len: u64) -> std::io::Result<()> {
+    file.set_len(len)?;
+    file.sync_all()
+}
+
+/// Windows: an append-only handle lacks `FILE_WRITE_DATA`, which `SetEndOfFile` needs, so the
+/// torn tail is cut through a second handle to the same file (`ReOpenFile`, write access). The
+/// writer lock sits at the far end of the range, so it does not get in the way.
+#[cfg(windows)]
+fn truncate_to(file: &File, len: u64) -> std::io::Result<()> {
+    use std::os::windows::io::{AsRawHandle, FromRawHandle};
+    use windows_sys::Win32::Foundation::{GENERIC_WRITE, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::Storage::FileSystem::{ReOpenFile, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE};
+    // SAFETY: `file` is a valid open handle; a returned handle is owned by the new `File`.
+    let h = unsafe { ReOpenFile(file.as_raw_handle() as _, GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, 0) };
+    if h == INVALID_HANDLE_VALUE || h == 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    let w = unsafe { File::from_raw_handle(h as _) };
+    w.set_len(len)?;
+    w.sync_all()
 }
 
 pub struct SessionLog {

@@ -126,6 +126,23 @@ pub fn detach(cmd: &mut Command) {
         // No console inherited, none created (CREATE_NO_WINDOW also covers a console-subsystem
         // grandchild), and Ctrl-C in the caller's console never reaches it.
         cmd.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW);
+        // CreateProcess inherits *every* inheritable handle, not only the three it is given. When
+        // our own stdout/stderr are pipes (the desktop app capturing `seagent daemon start`), the
+        // long-lived helper would keep their write ends open and the reader would never see EOF.
+        // std re-duplicates a std handle as inheritable whenever a later child inherits it, so
+        // clearing the flag on the originals is safe.
+        use windows_sys::Win32::Foundation::{SetHandleInformation, HANDLE_FLAG_INHERIT, INVALID_HANDLE_VALUE};
+        use windows_sys::Win32::System::Console::{GetStdHandle, STD_ERROR_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE};
+        for which in [STD_INPUT_HANDLE, STD_OUTPUT_HANDLE, STD_ERROR_HANDLE] {
+            // SAFETY: GetStdHandle has no preconditions; SetHandleInformation only changes the
+            // inherit flag of a handle we own (null / invalid handles are skipped).
+            unsafe {
+                let h = GetStdHandle(which);
+                if h != 0 && h != INVALID_HANDLE_VALUE {
+                    SetHandleInformation(h, HANDLE_FLAG_INHERIT, 0);
+                }
+            }
+        }
     }
 }
 

@@ -119,6 +119,33 @@ pub fn which(name: &str) -> Option<PathBuf> {
     crate::layout::which(name)
 }
 
+/// `std::fs::canonicalize` without Windows' verbatim prefix: `\\?\C:\x` → `C:\x`,
+/// `\\?\UNC\srv\share` → `\\srv\share` (cmd.exe, Task Scheduler and many tools reject the
+/// verbatim form as a working directory or argument). Unix: `std::fs::canonicalize` unchanged.
+pub fn canonicalize(p: &Path) -> std::io::Result<PathBuf> {
+    let c = std::fs::canonicalize(p)?;
+    #[cfg(windows)]
+    let c = simplify_verbatim(&c);
+    Ok(c)
+}
+
+/// The ordinary spelling of a verbatim Windows path, when it has one (drive or UNC path short
+/// enough for the classic APIs); anything else is returned unchanged.
+pub fn simplify_verbatim(p: &Path) -> PathBuf {
+    let s = p.to_string_lossy();
+    let plain = if let Some(rest) = s.strip_prefix(r"\\?\UNC\") {
+        format!(r"\\{rest}")
+    } else if let Some(rest) = s.strip_prefix(r"\\?\").filter(|r| r.len() >= 2 && r.as_bytes()[1] == b':' && r.as_bytes()[0].is_ascii_alphabetic()) {
+        rest.to_string()
+    } else {
+        return p.to_path_buf();
+    };
+    if plain.len() >= 260 {
+        return p.to_path_buf();
+    }
+    PathBuf::from(plain)
+}
+
 /// Windows executable search: `name` in each `;`-separated directory of `path`, trying the
 /// `PATHEXT` extensions (`pathext`, default `.COM;.EXE;.BAT;.CMD`). A `name` that already ends
 /// in one of them is tried as is first; a `name` with a path separator is not searched for.
@@ -146,6 +173,14 @@ mod tests {
     fn env(pairs: &[(&str, &str)]) -> impl Fn(&str) -> Option<String> {
         let m: HashMap<String, String> = pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
         move |k: &str| m.get(k).cloned()
+    }
+
+    #[test]
+    fn verbatim_prefix_is_dropped() {
+        assert_eq!(simplify_verbatim(Path::new(r"\\?\C:\Users\u\ws")), PathBuf::from(r"C:\Users\u\ws"));
+        assert_eq!(simplify_verbatim(Path::new(r"\\?\UNC\srv\share\x")), PathBuf::from(r"\\srv\share\x"));
+        assert_eq!(simplify_verbatim(Path::new(r"\\?\Volume{abc}\x")), PathBuf::from(r"\\?\Volume{abc}\x"));
+        assert_eq!(simplify_verbatim(Path::new("/home/u")), PathBuf::from("/home/u"));
     }
 
     #[test]

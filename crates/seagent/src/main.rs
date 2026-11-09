@@ -360,7 +360,7 @@ struct Ctx {
 
 fn workspace(a: &Args) -> Result<PathBuf, Fail> {
     let w = a.val("workspace").map(PathBuf::from).unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
-    w.canonicalize().map_err(|e| Fail::Msg(format!("workspace {}: {e}", w.display())))
+    seagent_core::platform::layout::canonicalize(&w).map_err(|e| Fail::Msg(format!("workspace {}: {e}", w.display())))
 }
 
 fn load_config(a: &Args, ws: &Path, paths: &Paths) -> Result<Config, Fail> {
@@ -1336,7 +1336,29 @@ fn cmd_daemon(a: &Args) -> R {
             }
             // App server: web/desktop UI, WebSocket ARP, OpenAI-compatible API, A2A, nodes.
             // LAN mode: native TLS with the generated identity (seagent_app::lan), paired devices.
-            let app_cfg = seagent_app::lan::effective(&seagent_app::AppConfig::parse(&c.k.cfg.app)?, &paths.data)?;
+            let mut app_cfg = seagent_app::lan::effective(&seagent_app::AppConfig::parse(&c.k.cfg.app)?, &paths.data)?;
+            // Default loopback port busy (another app, a second SE Agent, WSL's forwarded Linux
+            // agent): when the port came from the default — never one the user set — move to the
+            // next free one of 8640–8659 and persist it, so `setup status|link` and the desktop app
+            // report the port really served.
+            if app_cfg.enabled && setup_web::listen_is_auto(&paths, &app_cfg.listen) {
+                if let Some(port) = app_cfg.listen.rsplit_once(':').and_then(|(_, p)| p.parse::<u16>().ok()) {
+                    if !setup_web::port_free(setup_web::DEFAULT_HOST, port) {
+                        let why = setup_web::who_listens(&app_cfg.listen).unwrap_or_else(|| "in use".into());
+                        match setup_web::pick_free_port(setup_web::DEFAULT_HOST) {
+                            Some(p) => {
+                                let new = format!("{}:{p}", setup_web::DEFAULT_HOST);
+                                eprintln!("seagentd: warning: app server port {port} is busy ({why}); moving to {new}");
+                                if let Err(e) = setup_web::persist_listen(&paths, &new) {
+                                    eprintln!("seagentd: warning: could not save [app] listen = {new:?}: {e}");
+                                }
+                                app_cfg.listen = new;
+                            }
+                            None => eprintln!("seagentd: warning: app server port {port} is busy ({why}) and every port of 8640-8659 is taken"),
+                        }
+                    }
+                }
+            }
             d.add_methods(ops::lan::methods(&paths, c.k.clone(), app_cfg.clone()));
             let _server = if app_cfg.enabled {
                 let token = app_cfg.token.as_deref().map(|t| (c.k.vault_substitute())(t)).unwrap_or_default();
@@ -1366,7 +1388,11 @@ fn cmd_daemon(a: &Args) -> R {
                 routes.extend(setup_web::routes(Arc::new(setup_web::Env { paths: paths.clone(), allow_origins: app_cfg.allow_origins.clone() })));
                 host.extend(setup_web::METHODS.iter().map(|s| s.to_string()));
                 let app = Arc::new(seagent_app::App { d: d.clone(), cfg: app_cfg.clone(), token, host_methods: host, routes });
-                let srv = seagent_app::start(app)?;
+                let listen = app_cfg.listen.clone();
+                let srv = seagent_app::start(app).map_err(|e| match setup_web::who_listens(&listen).filter(|_| e.contains("cannot listen")) {
+                    Some(w) => format!("{e} — {w}. Stop it, or choose another port: seagent config set app.listen 127.0.0.1:<port>"),
+                    None => e,
+                })?;
                 eprintln!("seagentd: app server on {}://{} (UI, /arp, /v1, {})", if srv.is_tls() { "https" } else { "http" }, srv.local_addr(), if app_cfg.a2a.enabled { "/a2a" } else { "no a2a" });
                 Some((srv, seagent_app::lan::advertise(&app_cfg, &paths.data).map_err(|e| eprintln!("seagentd: warning: {e}")).ok().flatten()))
             } else {
@@ -1391,6 +1417,7 @@ fn cmd_daemon(a: &Args) -> R {
             }
             std::fs::create_dir_all(&paths.data).map_err(|e| e.to_string())?;
             let log = std::fs::OpenOptions::new().create(true).append(true).open(paths.daemon_log()).map_err(|e| e.to_string())?;
+            let log_start = log.metadata().map(|m| m.len()).unwrap_or(0);
             let exe = std::env::current_exe().map_err(|e| e.to_string())?;
             let mut cmd = std::process::Command::new(exe);
             cmd.arg("daemon").arg("run").stdin(std::process::Stdio::null()).stdout(log.try_clone().map_err(|e| e.to_string())?).stderr(log);
@@ -1414,7 +1441,10 @@ fn cmd_daemon(a: &Args) -> R {
                     return Ok(0);
                 }
                 if let Ok(Some(st)) = child.try_wait() {
-                    return Err(format!("seagentd exited during startup ({st}); see {}", paths.daemon_log().display()).into());
+                    // What it said on the way out (the desktop app shows this in its splash).
+                    let said = std::fs::read(paths.daemon_log()).ok().map(|b| String::from_utf8_lossy(&b[(log_start as usize).min(b.len())..]).lines().filter(|l| !l.trim().is_empty()).map(str::to_string).collect::<Vec<_>>()).unwrap_or_default();
+                    let tail = said[said.len().saturating_sub(3)..].join("\n");
+                    return Err(format!("seagentd exited during startup ({st}); see {}{}", paths.daemon_log().display(), if tail.is_empty() { String::new() } else { format!("\n{tail}") }).into());
                 }
                 std::thread::sleep(Duration::from_millis(100));
             }
@@ -2320,7 +2350,19 @@ fn cmd_doctor(a: &Args) -> R {
             }
         }
     }
+    #[cfg(not(windows))]
     let tool = |bin: &str| std::process::Command::new(bin).arg("--version").output().map(|o| String::from_utf8_lossy(&o.stdout).lines().next().unwrap_or("").to_string()).map_err(|e| e.to_string());
+    // Windows: the `WindowsApps\python3.exe` Store alias runs, prints nothing useful and exits
+    // 9009, so only a successful `--version` counts as installed.
+    #[cfg(windows)]
+    let tool = |bin: &str| match std::process::Command::new(bin).arg("--version").output() {
+        Ok(o) if o.status.success() => Ok(String::from_utf8_lossy(if o.stdout.is_empty() { &o.stderr } else { &o.stdout }).lines().next().unwrap_or("").trim().to_string()),
+        Ok(o) => Err(format!("not usable (`{bin} --version` exited {})", o.status.code().unwrap_or(-1))),
+        Err(e) => Err(e.to_string()),
+    };
+    // Windows: `bash` on PATH is usually System32\bash.exe (the WSL launcher), which the shell
+    // detection deliberately skips; the `shell` line below says what tool calls really use.
+    #[cfg(not(windows))]
     check("bash", tool("bash"));
     #[cfg(not(target_os = "linux"))] // shell, control endpoint, autostart, VM providers of this OS
     ops::service_os::doctor_checks(&paths).into_iter().for_each(|(n, r)| check(&n, r));
@@ -2362,6 +2404,7 @@ fn cmd_doctor(a: &Args) -> R {
         }
     }
     let sock = paths.socket();
+    #[cfg(unix)]
     check("socket path length", if sock.as_os_str().len() < 100 { Ok(format!("{} bytes", sock.as_os_str().len())) } else { Err("too long for a unix socket; set XDG_RUNTIME_DIR".into()) });
     match daemon::call(&sock, "ping", json!({})) {
         Ok(r) => println!("✓ seagentd: running (pid {})", r["pid"]),

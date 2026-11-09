@@ -130,6 +130,72 @@ pub fn listen_of(root: &toml::Table) -> String {
     root.get("app").and_then(|a| a.get("listen")).and_then(|v| v.as_str()).map(String::from).unwrap_or_else(|| "127.0.0.1:8640".into())
 }
 
+pub const DEFAULT_HOST: &str = "127.0.0.1";
+pub const DEFAULT_PORT: u16 = 8640;
+/// Ports the default loopback listener may move to when 8640 is busy.
+pub const AUTO_PORTS: std::ops::RangeInclusive<u16> = 8640..=8659;
+
+/// Holds the `[app] listen` value we chose (bootstrap / seagentd); a different configured value is the user's.
+fn auto_marker(paths: &Paths) -> PathBuf {
+    paths.data.join("app-listen.auto")
+}
+
+/// Can we bind `host:port` right now? (The probe socket is closed immediately.)
+pub fn port_free(host: &str, port: u16) -> bool {
+    std::net::TcpListener::bind((host, port)).is_ok()
+}
+
+/// The first free port of [`AUTO_PORTS`] on `host`.
+pub fn pick_free_port(host: &str) -> Option<u16> {
+    AUTO_PORTS.clone().find(|p| port_free(host, *p))
+}
+
+/// May the daemon move `[app] listen` (`listen`, as configured) to another port? Only a loopback
+/// address on the default range whose value came from the default: no `[app] listen` in the user
+/// config at all, or one written by `setup bootstrap` (marker file). A port the user set is never
+/// changed.
+pub fn listen_is_auto(paths: &Paths, listen: &str) -> bool {
+    let Some((host, port)) = listen.rsplit_once(':') else { return false };
+    if host != DEFAULT_HOST || !port.parse::<u16>().is_ok_and(|p| AUTO_PORTS.contains(&p)) {
+        return false;
+    }
+    let configured = read_root(paths).ok().is_some_and(|(root, _)| root.get("app").and_then(|a| a.get("listen")).is_some());
+    !configured || std::fs::read_to_string(auto_marker(paths)).is_ok_and(|m| m.trim() == listen)
+}
+
+/// Write `[app] listen = listen` into the user config (comments kept) and keep the auto marker.
+pub fn persist_listen(paths: &Paths, listen: &str) -> Result<(), String> {
+    let (mut root, existing) = read_root(paths)?;
+    table(&mut root, "app").insert("listen".into(), listen.into());
+    crate::setup::save_config(&paths.user_config(), &root, existing.as_deref())?;
+    let _ = std::fs::write(auto_marker(paths), format!("{listen}\n"));
+    Ok(())
+}
+
+/// Who answers on `addr` (`host:port`): "another SE Agent (version …)" when its `GET /health`
+/// looks like ours, else "another program". `None` when nothing accepts the connection.
+pub fn who_listens(addr: &str) -> Option<String> {
+    use std::io::{Read, Write};
+    let sa: std::net::SocketAddr = addr.parse().ok()?;
+    let t = std::time::Duration::from_millis(800);
+    let mut s = std::net::TcpStream::connect_timeout(&sa, t).ok()?;
+    let _ = s.set_read_timeout(Some(t));
+    let _ = s.set_write_timeout(Some(t));
+    let _ = write!(s, "GET /health HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n\r\n");
+    let mut buf = Vec::new();
+    let _ = s.take(64 * 1024).read_to_end(&mut buf);
+    let text = String::from_utf8_lossy(&buf);
+    let body = text.split_once("\r\n\r\n").map(|(_, b)| b).unwrap_or("");
+    let v: Option<Value> = body.find('{').and_then(|i| serde_json::from_str(body[i..].trim_end_matches(|c: char| c != '}')).ok());
+    Some(match v {
+        Some(v) if v["ok"] == true && v["version"].is_string() => {
+            let wsl = if cfg!(windows) { "; on Windows this can be the Linux SE Agent inside WSL, whose localhost ports are forwarded here" } else { "" };
+            format!("another SE Agent (version {}) is already listening there{wsl}", v["version"].as_str().unwrap_or("?"))
+        }
+        _ => "another program is listening there".into(),
+    })
+}
+
 /// The URL a browser on this machine opens for `listen` (a wildcard bind is reached on loopback).
 pub fn base_url(listen: &str) -> String {
     let l = listen.replacen("0.0.0.0:", "127.0.0.1:", 1).replacen("[::]:", "[::1]:", 1);
@@ -158,7 +224,19 @@ pub fn bootstrap(paths: &Paths, listen: Option<&str>) -> Result<Vec<String>, Str
             app.insert("listen".into(), l.into());
         }
         None => {
-            app.entry("listen").or_insert_with(|| "127.0.0.1:8640".into());
+            if !app.contains_key("listen") {
+                // The default port may be taken (another app, a second SE Agent, or a Linux one
+                // in WSL whose localhost ports Windows forwards): take the first free port of
+                // the small default range and remember that it was our choice, so the daemon
+                // may move it again later (`listen_is_auto`).
+                let port = pick_free_port(DEFAULT_HOST).unwrap_or(DEFAULT_PORT);
+                if port != DEFAULT_PORT {
+                    said.push(format!("port {DEFAULT_PORT} is in use{}; using {port}", who_listens(&format!("{DEFAULT_HOST}:{DEFAULT_PORT}")).map(|w| format!(" ({w})")).unwrap_or_default()));
+                }
+                app.insert("listen".into(), format!("{DEFAULT_HOST}:{port}").into());
+                let _ = std::fs::create_dir_all(&paths.data);
+                let _ = std::fs::write(auto_marker(paths), format!("{DEFAULT_HOST}:{port}\n"));
+            }
         }
     }
     if root != before || existing.is_none() {
@@ -678,6 +756,57 @@ mod tests {
         std::fs::create_dir_all(&p.config_dir).unwrap();
         std::fs::create_dir_all(&p.data).unwrap();
         (root, p)
+    }
+
+    #[test]
+    fn bootstrap_skips_a_busy_default_port_and_only_moves_ports_it_chose() {
+        let (_r, p) = scratch("autoport");
+        // Hold the default port (if something else already does, that is the same situation).
+        let _hold = std::net::TcpListener::bind((DEFAULT_HOST, DEFAULT_PORT));
+        bootstrap(&p, None).unwrap();
+        let (root, _) = read_root(&p).unwrap();
+        let listen = listen_of(&root);
+        let port: u16 = listen.rsplit_once(':').unwrap().1.parse().unwrap();
+        assert!(AUTO_PORTS.contains(&port), "{listen}");
+        assert!(port != DEFAULT_PORT || pick_free_port(DEFAULT_HOST).is_none(), "the busy default port is skipped: {listen}");
+        assert!(listen_is_auto(&p, &listen), "bootstrap's own choice may move");
+        persist_listen(&p, "127.0.0.1:8645").unwrap();
+        assert_eq!(listen_of(&read_root(&p).unwrap().0), "127.0.0.1:8645");
+        assert!(listen_is_auto(&p, "127.0.0.1:8645"));
+        // The user sets another port afterwards: theirs from now on.
+        let (mut root, existing) = read_root(&p).unwrap();
+        table(&mut root, "app").insert("listen".into(), "127.0.0.1:8650".into());
+        crate::setup::save_config(&p.user_config(), &root, existing.as_deref()).unwrap();
+        assert!(!listen_is_auto(&p, "127.0.0.1:8650"));
+        // An explicit port is the user's: never moved.
+        let (_r2, q) = scratch("autoport-explicit");
+        bootstrap(&q, Some("127.0.0.1:8641")).unwrap();
+        assert!(!listen_is_auto(&q, "127.0.0.1:8641"));
+        // No `[app] listen` at all: the default, movable; other hosts / ports never.
+        let (_r3, e) = scratch("autoport-none");
+        assert!(listen_is_auto(&e, "127.0.0.1:8640"));
+        assert!(!listen_is_auto(&e, "0.0.0.0:8640") && !listen_is_auto(&e, "127.0.0.1:9000") && !listen_is_auto(&e, "192.168.1.2:8640"));
+    }
+
+    #[test]
+    fn who_listens_recognises_another_se_agent() {
+        use std::io::{Read, Write};
+        let serve = |body: &'static str| {
+            let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let addr = l.local_addr().unwrap().to_string();
+            std::thread::spawn(move || {
+                if let Ok((mut s, _)) = l.accept() {
+                    let mut b = [0u8; 1024];
+                    let _ = s.read(&mut b);
+                    let _ = write!(s, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+                }
+            });
+            addr
+        };
+        assert!(who_listens(&serve(r#"{"ok":true,"version":"0.1.0"}"#)).unwrap().contains("another SE Agent (version 0.1.0)"));
+        assert_eq!(who_listens(&serve("hello")).unwrap(), "another program is listening there");
+        let free = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().to_string();
+        assert_eq!(who_listens(&free), None, "nothing listening");
     }
 
     #[test]
