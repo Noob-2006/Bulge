@@ -265,7 +265,7 @@ unsafe fn compose(hdesk: HDESK, dc: HDC, w: i32, h: i32) -> Result<Shot, String>
     let mem = CreateCompatibleDC(dc);
     let bmp = CreateCompatibleBitmap(dc, w, h);
     let old = SelectObject(mem, bmp as _);
-    let mut drawn = 0;
+    let (mut drawn, mut visible) = (0, 0);
     // EnumDesktopWindows lists top-first: paint from the bottom up.
     for &hwnd in wins.iter().rev() {
         let mut r: RECT = std::mem::zeroed();
@@ -276,6 +276,7 @@ unsafe fn compose(hdesk: HDESK, dc: HDC, w: i32, h: i32) -> Result<Shot, String>
         if ww <= 1 || wh <= 1 || r.right <= 0 || r.bottom <= 0 || r.left >= w || r.top >= h {
             continue;
         }
+        visible += 1;
         let wdc = CreateCompatibleDC(dc);
         let wbmp = CreateCompatibleBitmap(dc, ww, wh);
         let wold = SelectObject(wdc, wbmp as _);
@@ -295,7 +296,7 @@ unsafe fn compose(hdesk: HDESK, dc: HDC, w: i32, h: i32) -> Result<Shot, String>
     DeleteObject(bmp as _);
     DeleteDC(mem);
     if rows == 0 || drawn == 0 {
-        return Err("no window on the desktop could be rendered".into());
+        return Err(format!("no window on the desktop could be rendered ({} top-level windows, {visible} visible on screen, {drawn} rendered)", wins.len()));
     }
     Ok(Shot { width: w, height: h, bgra })
 }

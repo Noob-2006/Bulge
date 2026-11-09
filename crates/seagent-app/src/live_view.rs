@@ -222,7 +222,8 @@ pub fn upgrade(app: &Arc<App>, r: &Request, p: Principal) -> Response {
     crate::metrics::inc("view_live_streams", &format!("kind=\"{kind:?}\""));
     let app = app.clone();
     Response::upgrade(Box::new(move |sock, head, rest| {
-        let _ = sock.set_read_timeout(Some(Duration::from_millis(15)));
+        // Short: checking for viewer messages between frames must not delay the next frame.
+        let _ = sock.set_read_timeout(Some(Duration::from_millis(2)));
         let _ = sock.set_write_timeout(Some(Duration::from_secs(10)));
         let ws = match &proto {
             Some(pr) => crate::server::accept_with_protocol(sock, &head, rest, pr),
@@ -342,8 +343,13 @@ fn browser(l: &mut Link) -> Flow {
     }
     let mut v = live::watch(&b, &target, o).map_err(Some)?;
     let mut st = Stats::default();
+    let mut polled = Instant::now();
     loop {
-        l.poll()?;
+        // Viewer messages (input, tune) at most every 20 ms while frames flow.
+        if polled.elapsed() >= Duration::from_millis(20) {
+            l.poll()?;
+            polled = Instant::now();
+        }
         if let Some((q, f)) = l.tune.take() {
             adapt.choose(q, f);
             o = live::Opts { quality: q, fps: f, ..o };
