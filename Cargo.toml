@@ -39,6 +39,26 @@ windows-sys = { version = "0.52", default-features = false, features = [
     "Win32_System_SystemInformation",
     "Win32_System_Threading",
 ] }
+# Windows only — the Bot Desktop live view (crates/seagent-browser/src/control/wgc.rs):
+# Windows.Graphics.Capture is the one API that hands out frames of GPU-composited windows on a
+# desktop that is not displayed (PrintWindow refreshes them only a few times a second there), and
+# it is WinRT, which windows-sys does not project. Target dependency of seagent-browser on
+# cfg(windows) only; just the capture / D3D11 / DXGI interop families are enabled.
+windows = { version = "0.62", default-features = false, features = [
+    "Foundation",
+    "Graphics",
+    "Graphics_Capture",
+    "Graphics_DirectX",
+    "Graphics_DirectX_Direct3D11",
+    "Win32_Foundation",
+    "Win32_Graphics_Direct3D",
+    "Win32_Graphics_Direct3D11",
+    "Win32_Graphics_Dxgi",
+    "Win32_Graphics_Dxgi_Common",
+    "Win32_System_WinRT",
+    "Win32_System_WinRT_Direct3D11",
+    "Win32_System_WinRT_Graphics_Capture",
+] }
 # iOS shell substitute (`exec.backend = "wasm"`, docs/cross-platform.md): a pure-Rust WebAssembly
 # *interpreter* (MIT/Apache-2.0, no JIT — App Store policy forbids one — no C code, no unsafe
 # platform calls). `std` + validation + `auto-dispatch` (tail-call dispatch only where the

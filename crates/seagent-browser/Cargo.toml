@@ -39,3 +39,5 @@ windows-sys = { workspace = true, features = [
     "Win32_UI_WindowsAndMessaging",
     "Win32_Security",
 ] }
+# Windows.Graphics.Capture for GPU windows of the Bot Desktop's live view (control/wgc.rs).
+windows.workspace = true

@@ -540,6 +540,21 @@ impl Tracker {
     }
 }
 
+/// The largest visible top-level window on the desktop `name` (tests and diagnostics).
+pub fn largest_window(name: &str) -> Option<isize> {
+    let w = wide(name);
+    // SAFETY: open the desktop for enumeration and close it again.
+    unsafe {
+        let h = OpenDesktopW(w.as_ptr(), 0, 0, DESKTOP_ACCESS);
+        if h == 0 {
+            return None;
+        }
+        let best = visible_top_windows(h).into_iter().max_by_key(|(_, r)| i64::from(r.2 - r.0) * i64::from(r.3 - r.1)).map(|(hw, _)| hw);
+        CloseDesktop(h);
+        best
+    }
+}
+
 /// `SEAGENT_TRACK_DEBUG=1`: one stderr line per tracker call (what was rendered, how long).
 fn debug() -> bool {
     static D: OnceLock<bool> = OnceLock::new();

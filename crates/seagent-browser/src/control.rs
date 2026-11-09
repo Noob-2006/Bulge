@@ -17,6 +17,8 @@ pub mod screen;
 pub mod screen_macos;
 #[cfg(windows)]
 pub mod screen_windows;
+#[cfg(windows)]
+pub mod wgc;
 
 use crate::{launch, manager, util, BrowserConfig};
 use std::path::{Path, PathBuf};
