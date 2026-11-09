@@ -241,31 +241,13 @@ pub fn msys_args<S: AsRef<OsStr>>(c: &mut std::process::Command, args: &[S]) {
     c.args(args);
 }
 
-/// One argument for an MSYS2 program's command line: always inside double quotes (so the
-/// runtime neither globs nor brace-expands it), with the MSVCRT escaping the runtime's own
-/// parser undoes — `\"` for a quote, backslashes doubled only before a quote or the end.
+/// One argument for an MSYS2 / Cygwin program's command line: always inside double quotes (so
+/// the runtime neither globs nor brace-expands it), escaped for the Cygwin runtime's own parser,
+/// which inside double quotes reads `\\` as one backslash and `\"` as a quote *anywhere* — not
+/// only before a quote, as MSVCRT does. Escaping the MSVCRT way halved every `\\` in a Git Bash
+/// script (`\\.\pipe\…`, UNC paths, replayed exports), so every backslash is doubled.
 pub fn msys_quote(arg: &str) -> String {
-    let mut out = String::with_capacity(arg.len() + 2);
-    out.push('"');
-    let mut slashes = 0usize;
-    for ch in arg.chars() {
-        match ch {
-            '\\' => slashes += 1,
-            '"' => {
-                out.extend(std::iter::repeat_n('\\', slashes * 2 + 1));
-                out.push('"');
-                slashes = 0;
-            }
-            c => {
-                out.extend(std::iter::repeat_n('\\', slashes));
-                out.push(c);
-                slashes = 0;
-            }
-        }
-    }
-    out.extend(std::iter::repeat_n('\\', slashes * 2));
-    out.push('"');
-    out
+    format!("\"{}\"", arg.replace('\\', "\\\\").replace('"', "\\\""))
 }
 
 /// Is `program` an MSYS2 / Cygwin executable (its directory carries the runtime DLL, or it is
@@ -461,12 +443,14 @@ mod tests {
     }
 
     #[test]
-    fn msys_quote_always_quotes_with_msvcrt_escapes() {
+    fn msys_quote_always_quotes_with_cygwin_escapes() {
         assert_eq!(msys_quote("*"), "\"*\"");
         assert_eq!(msys_quote(""), "\"\"");
         assert_eq!(msys_quote(r#"[{"n":3}]"#), r#""[{\"n\":3}]""#);
-        assert_eq!(msys_quote(r"C:\dir\"), r#""C:\dir\\""#);
+        assert_eq!(msys_quote(r"C:\dir\"), r#""C:\\dir\\""#);
         assert_eq!(msys_quote(r#"a\"b"#), r#""a\\\"b""#);
+        // Every backslash is doubled: the runtime reads `\\` as one even mid-word.
+        assert_eq!(msys_quote(r"\\.\pipe\x"), r#""\\\\.\\pipe\\x""#);
         assert!(!is_msys_program(Path::new("/usr/bin/printf")) || cfg!(windows));
     }
 
@@ -475,7 +459,7 @@ mod tests {
     /// plainly quoted command line).
     #[test]
     fn program_command_args_survive_an_msys_runtime() {
-        let args = [r#"[{"n":3,"t":"c"},{"n":1}]"#, "*", "{a,b}", "a b", r#"say "hi""#, r"trail\", "", "~"];
+        let args = [r#"[{"n":3,"t":"c"},{"n":1}]"#, "*", "{a,b}", "a b", r#"say "hi""#, r"trail\", "", "~", r"\\srv\share\x", r"a\\b"];
         let mut c = program_command_args("printf", &["%s|".to_string()].into_iter().chain(args.iter().map(|s| s.to_string())).collect::<Vec<_>>());
         if cfg!(windows) && !is_msys_program(Path::new(c.get_program())) {
             eprintln!("skipped: no Git Bash / MSYS2 printf.exe on this machine");

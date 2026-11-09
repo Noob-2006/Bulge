@@ -143,6 +143,10 @@ pub(crate) fn run(a: &Args, embedded: Option<&Embedded>) -> R {
     d.add_methods(slash::methods(c.k.clone(), ext_arc.clone(), c.workspace.clone()));
     ops::logs::install(&c.k);
     d.add_methods(ops::logs::methods(paths.clone()));
+    d.add_methods(ops::toollog::methods(paths.clone(), &c.k.cfg));
+    d.add_maintenance(Arc::new(|| {
+        ops::toollog::prune_all();
+    }));
     d.add_methods(host_methods(&paths, ext_arc.as_deref()));
     d.add_methods(seagent_memory::host::methods(&c.k.cfg, &paths)); // srv-037: kb.search / kb.status
     // Work surfaces: dashboards / cards / workflow ARP, hosted documents, report schedule.
@@ -229,7 +233,7 @@ pub(crate) fn run(a: &Args, embedded: Option<&Embedded>) -> R {
         routes.extend(ops::miniapp::routes(Arc::new(ops::miniapp::env(&paths, &c.workspace, &token))));
         // The setup wizard's RPC authenticates with its own one-time token (setup_web.rs).
         routes.extend(setup_web::routes(Arc::new(setup_web::Env { paths: paths.clone(), allow_origins: app_cfg.allow_origins.clone() })));
-        host.extend(setup_web::METHODS.iter().map(|s| s.to_string()));
+        host.extend(setup_web::METHODS.iter().chain(ops::toollog::METHODS).map(|s| s.to_string()));
         let app = Arc::new(seagent_app::App { d: d.clone(), cfg: app_cfg.clone(), token, host_methods: host, routes });
         let listen = app_cfg.listen.clone();
         let srv = seagent_app::start(app).map_err(|e| match setup_web::who_listens(&listen).filter(|_| e.contains("cannot listen")) {
@@ -253,6 +257,9 @@ pub(crate) fn run(a: &Args, embedded: Option<&Embedded>) -> R {
         None
     };
     let r = d.clone().run_with(if embedded.is_some() { Ipc::Off } else { Ipc::On });
+    // State kept in memory while running goes out once, at the end (not on every change).
+    ops::toollog::flush();
+    seagent_skills::core::review::flush();
     c.k.emit(seagent_kernel::hooks::HookEvent::DaemonStop, json!({"session_id": "", "cwd": c.workspace, "reason": "shutdown"}), "");
     stop.cancel();
     if let Some(t) = services {

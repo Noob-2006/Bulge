@@ -39,11 +39,23 @@ pub fn local_of_remote(p: &str) -> PathBuf {
     }
 }
 
+/// `HOME` is process-global. A test that points it at a scratch tree (under `$TMPDIR`) makes
+/// every *other* test that reads it — the bind-mount floor refuses any source that contains
+/// `~/.aws`, `~/.ssh` … — see a home inside `/tmp` for that moment, so `/tmp` binds were
+/// refused at random in full runs. Changing `HOME` and depending on it both take this lock.
+static HOME_LOCK: Mutex<()> = Mutex::new(());
+
+/// Hold while a test depends on the ambient `HOME` (no [`test_home`] can swap it meanwhile).
+pub fn home_lock() -> std::sync::MutexGuard<'static, ()> {
+    HOME_LOCK.lock().unwrap_or_else(|p| p.into_inner())
+}
+
 /// Point `HOME` at a test tree for the duration, restoring it on drop. Tests that exercise
 /// `~` expansion / credential upload must not read or write the real home directory.
-pub struct HomeGuard(Option<std::ffi::OsString>);
+pub struct HomeGuard(Option<std::ffi::OsString>, #[allow(dead_code)] std::sync::MutexGuard<'static, ()>);
 impl Drop for HomeGuard {
     fn drop(&mut self) {
+        // Runs before the fields drop: `HOME` is restored while the lock is still held.
         match &self.0 {
             Some(v) => std::env::set_var("HOME", v),
             None => std::env::remove_var("HOME"),
@@ -51,9 +63,10 @@ impl Drop for HomeGuard {
     }
 }
 pub fn test_home(home: &std::path::Path) -> HomeGuard {
+    let lock = home_lock();
     let old = std::env::vars_os().find(|(k, _)| k == "HOME").map(|(_, v)| v);
     std::env::set_var("HOME", home);
-    HomeGuard(old)
+    HomeGuard(old, lock)
 }
 
 #[derive(Default)]

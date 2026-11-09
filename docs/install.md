@@ -218,6 +218,8 @@ cargo build --release -p seagent                # Rust 1.80 以上
 | 終端機設定精靈 | `seagent setup` |
 | 換模型／金鑰 | `seagent model`、`seagent secrets set <名稱>`（從標準輸入讀，貼上後 Enter、Ctrl+D） |
 | 看日誌 | `seagent logs`；系統服務：`journalctl -u seagentd` |
+| 看工具呼叫（成功／失敗） | `seagent logs tools`（`--failures`、`--session`、`--tool`、`--since 1h`）；主控台「日誌」頁 |
+| 匯出工具呼叫 | `seagent logs export --format jsonl|csv|html --out 檔案或目錄`（篩選同上） |
 | 背景服務 | `seagent daemon start|stop|status` |
 | 升級 | 重跑安裝指令；或 `seagent update`；套件安裝則用套件管理員 |
 

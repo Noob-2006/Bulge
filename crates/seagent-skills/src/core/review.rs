@@ -13,13 +13,26 @@
 //! Everything here is per-workspace state in `<data>/skills/.review_state.json`: loaded skills
 //! and the last steps per session (bounded), plus the candidate queue. `/refine` reads the same
 //! state for the session it is typed in.
+//!
+//! Write policy: the per-session working state — which tools ran, which skill was loaded —
+//! changes on *every tool call*, and a new candidate is queued after almost every multi-step
+//! turn. Rewriting the whole file (~100 KB when the queue is full) with two fsyncs each time was
+//! the daemon's single largest disk writer (≈27 MB/min on a busy daemon). Both are therefore
+//! kept in memory and written behind, at most once per [`PERSIST_EVERY`], at turn end when due,
+//! and by [`flush`] when the daemon stops. A review verdict (`mark`) is still written at once.
+//! Readers in this process see the pending entries; another process (`seagent curator review`)
+//! sees them at most `PERSIST_EVERY` late, and a crash loses at most that much — heuristic input
+//! to skill review, not recovery state. A write merges with the file: a candidate another
+//! process already reviewed keeps that verdict.
 
 use super::settings::{Settings, Store};
 use super::{invoke, manage, workshop};
 use seagent_kernel::config::{Config, Paths};
 use serde_json::{json, Value};
-use std::path::Path;
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 /// One aux-model completion: prompt → reply (the kernel supplies the system prompt).
 pub type Sampler = Arc<dyn Fn(&str) -> Result<String, String> + Send + Sync>;
@@ -28,18 +41,38 @@ pub type Sampler = Arc<dyn Fn(&str) -> Result<String, String> + Send + Sync>;
 const MAX_STEPS: usize = 40;
 const MAX_SESSIONS: usize = 20;
 const MAX_CANDIDATES: usize = 200;
+/// Write-behind interval for the per-session working state (see the module docs).
+pub const PERSIST_EVERY: Duration = Duration::from_secs(30);
 
 fn now() -> i64 {
     seagent_kernel::util::unix_now()
 }
 
-fn lock() -> std::sync::MutexGuard<'static, ()> {
-    static L: Mutex<()> = Mutex::new(());
-    L.lock().unwrap_or_else(|p| p.into_inner())
+/// Session entries and candidates changed since the last write, per state file, and when each
+/// file was last written. The mutex is also this process's read-modify-write lock of the file.
+#[derive(Default)]
+struct Pending {
+    sessions: HashMap<PathBuf, Vec<Value>>,
+    candidates: HashMap<PathBuf, Vec<Value>>,
+    saved: HashMap<PathBuf, Instant>,
 }
 
-pub fn load(st: &Store) -> Value {
-    let v: Value = std::fs::read_to_string(st.review_state()).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or(json!({}));
+impl Pending {
+    fn has(&self, path: &Path) -> bool {
+        self.sessions.contains_key(path) || self.candidates.contains_key(path)
+    }
+    fn due(&self, path: &Path) -> bool {
+        self.saved.get(path).is_none_or(|t| t.elapsed() >= PERSIST_EVERY)
+    }
+}
+
+fn pending() -> std::sync::MutexGuard<'static, Pending> {
+    static P: std::sync::OnceLock<Mutex<Pending>> = std::sync::OnceLock::new();
+    P.get_or_init(Default::default).lock().unwrap_or_else(|p| p.into_inner())
+}
+
+fn load_file(path: &Path) -> Value {
+    let v: Value = std::fs::read_to_string(path).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or(json!({}));
     if v.is_object() {
         v
     } else {
@@ -47,33 +80,144 @@ pub fn load(st: &Store) -> Value {
     }
 }
 
-fn save(st: &Store, v: &Value) {
-    let _ = std::fs::create_dir_all(&st.skills);
-    let _ = seagent_kernel::util::atomic_write(&st.review_state(), serde_json::to_string_pretty(v).unwrap_or_default().as_bytes());
+/// Put `fresh` session entries over the file's (same id = replaced), oldest first, bounded.
+fn overlay(state: &mut Value, fresh: &[Value]) {
+    if fresh.is_empty() {
+        return;
+    }
+    let mut list: Vec<Value> = state.get("sessions").and_then(Value::as_array).cloned().unwrap_or_default();
+    for e in fresh {
+        list.retain(|v| v.get("id") != e.get("id"));
+        list.push(e.clone());
+    }
+    // Stable: entries stamped in the same second keep their update order.
+    list.sort_by_key(|v| v.get("at").and_then(Value::as_i64).unwrap_or(0));
+    if list.len() > MAX_SESSIONS {
+        list.drain(..list.len() - MAX_SESSIONS);
+    }
+    state["sessions"] = json!(list);
+}
+
+/// Put `fresh` candidates over the file's by id, bounded. A candidate the file already holds
+/// with a verdict (another process reviewed it) keeps that verdict over our pending copy.
+fn overlay_candidates(state: &mut Value, fresh: &[Value]) {
+    if fresh.is_empty() {
+        return;
+    }
+    let status = |v: &Value| v.get("status").and_then(Value::as_str).unwrap_or("pending").to_string();
+    let mut list: Vec<Value> = state.get("candidates").and_then(Value::as_array).cloned().unwrap_or_default();
+    for c in fresh {
+        match list.iter().position(|v| v.get("id") == c.get("id")) {
+            Some(i) if status(&list[i]) != "pending" && status(c) == "pending" => {}
+            Some(i) => list[i] = c.clone(),
+            None => list.push(c.clone()),
+        }
+    }
+    if list.len() > MAX_CANDIDATES {
+        list.drain(..list.len() - MAX_CANDIDATES);
+    }
+    state["candidates"] = json!(list);
+}
+
+fn view(path: &Path, p: &Pending) -> Value {
+    let mut state = load_file(path);
+    overlay(&mut state, p.sessions.get(path).map(Vec::as_slice).unwrap_or(&[]));
+    overlay_candidates(&mut state, p.candidates.get(path).map(Vec::as_slice).unwrap_or(&[]));
+    state
+}
+
+/// The state as this process sees it: the file plus the session entries not yet written.
+pub fn load(st: &Store) -> Value {
+    view(&st.review_state(), &pending())
+}
+
+fn write_state(path: &Path, v: &Value) {
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let _ = seagent_kernel::util::atomic_write(path, serde_json::to_string(v).unwrap_or_default().as_bytes());
+}
+
+/// Write `state` (which already carries the pending entries) and mark the file clean.
+fn save_locked(path: &Path, p: &mut Pending, state: &Value) {
+    write_state(path, state);
+    p.sessions.remove(path);
+    p.candidates.remove(path);
+    p.saved.insert(path.to_path_buf(), Instant::now());
+}
+
+/// Write every pending session entry now (daemon shutdown, tests). Returns the files written.
+pub fn flush() -> usize {
+    let mut p = pending();
+    let mut paths: Vec<PathBuf> = p.sessions.keys().chain(p.candidates.keys()).cloned().collect();
+    paths.sort();
+    paths.dedup();
+    let mut n = 0;
+    for path in &paths {
+        // A data directory removed meanwhile (a test's scratch tree) is not re-created.
+        if !path.parent().is_some_and(Path::is_dir) {
+            p.sessions.remove(path);
+            p.candidates.remove(path);
+            continue;
+        }
+        let state = view(path, &p);
+        save_locked(path, &mut p, &state);
+        n += 1;
+    }
+    n
+}
+
+/// Write `st`'s pending entries now (whatever the interval). Returns whether it wrote.
+pub fn flush_store(st: &Store) -> bool {
+    let path = st.review_state();
+    let mut p = pending();
+    if !p.has(&path) || !path.parent().is_some_and(Path::is_dir) {
+        return false;
+    }
+    let state = view(&path, &p);
+    save_locked(&path, &mut p, &state);
+    true
+}
+
+/// Whether `st` has session entries or candidates that are not on disk yet.
+pub fn dirty(st: &Store) -> bool {
+    pending().has(&st.review_state())
+}
+
+/// Write `st`'s pending entries when the last write is older than [`PERSIST_EVERY`].
+pub fn flush_due(st: &Store) {
+    let path = st.review_state();
+    let mut p = pending();
+    if p.has(&path) && p.due(&path) {
+        let state = view(&path, &p);
+        save_locked(&path, &mut p, &state);
+    }
 }
 
 fn session_of<'a>(state: &'a Value, session: &str) -> Option<&'a Value> {
     state.get("sessions")?.as_array()?.iter().find(|v| v.get("id").and_then(Value::as_str) == Some(session))
 }
 
-/// Load-modify-store one session entry; the entry moves to the end (most recent) and the list
-/// is trimmed from the front, so the state file stays bounded without relying on map ordering.
+/// Modify one session entry; it moves to the end (most recent) and the list stays bounded.
+/// Written behind (see the module docs): the first change after a quiet period is written at
+/// once, later ones at most every [`PERSIST_EVERY`].
 fn with_session(st: &Store, session: &str, f: impl FnOnce(&mut Value)) {
     if session.is_empty() {
         return;
     }
-    let _g = lock();
-    let mut state = load(st);
-    let mut list: Vec<Value> = state.get("sessions").and_then(Value::as_array).cloned().unwrap_or_default();
-    let mut entry = list.iter().position(|v| v.get("id").and_then(Value::as_str) == Some(session)).map(|i| list.remove(i)).unwrap_or_else(|| json!({"id": session}));
+    let path = st.review_state();
+    let mut p = pending();
+    let state = view(&path, &p);
+    let mut entry = session_of(&state, session).cloned().unwrap_or_else(|| json!({"id": session}));
     f(&mut entry);
     entry["at"] = json!(now());
+    let list = p.sessions.entry(path.clone()).or_default();
+    list.retain(|v| v.get("id").and_then(Value::as_str) != Some(session));
     list.push(entry);
-    if list.len() > MAX_SESSIONS {
-        list.drain(..list.len() - MAX_SESSIONS);
+    if p.due(&path) {
+        let state = view(&path, &p);
+        save_locked(&path, &mut p, &state);
     }
-    state["sessions"] = json!(list);
-    save(st, &state);
 }
 
 /// One recorded tool call of a turn.
@@ -248,10 +392,11 @@ pub fn record_candidate(s: &Settings, st: &Store, session: &str, ws: &str, user:
         return None;
     }
     let sig = signature(&goal, &target);
-    let _g = lock();
-    let mut state = load(st);
-    let mut list: Vec<Value> = state.get("candidates").and_then(Value::as_array).cloned().unwrap_or_default();
-    if list.iter().filter_map(|v| v.get("sig").and_then(Value::as_str)).any(|x| x == sig) {
+    let path = st.review_state();
+    let mut p = pending();
+    let state = view(&path, &p);
+    let queued = state.get("candidates").and_then(Value::as_array).cloned().unwrap_or_default();
+    if queued.iter().filter_map(|v| v.get("sig").and_then(Value::as_str)).any(|x| x == sig) {
         return None;
     }
     let cand = json!({
@@ -261,16 +406,19 @@ pub fn record_candidate(s: &Settings, st: &Store, session: &str, ws: &str, user:
         "at": now(), "status": "pending", "sig": sig,
     });
     let out = Candidate::from_value(&cand)?;
-    list.push(cand);
-    if list.len() > MAX_CANDIDATES {
-        list.drain(..list.len() - MAX_CANDIDATES);
-    }
-    state["candidates"] = json!(list);
+    p.candidates.entry(path.clone()).or_default().push(cand);
     // One candidate is one turn's procedure: the next turn records its own steps.
-    if let Some(sess) = state.get_mut("sessions").and_then(Value::as_array_mut).and_then(|a| a.iter_mut().find(|v| v.get("id").and_then(Value::as_str) == Some(session))) {
+    if let Some(mut sess) = session_of(&state, session).cloned() {
         sess["steps"] = json!([]);
+        let list = p.sessions.entry(path.clone()).or_default();
+        list.retain(|v| v.get("id").and_then(Value::as_str) != Some(session));
+        list.push(sess);
     }
-    save(st, &state);
+    // Written behind like the steps (module docs); the first change after a quiet period at once.
+    if p.due(&path) {
+        let state = view(&path, &p);
+        save_locked(&path, &mut p, &state);
+    }
     Some(out)
 }
 
@@ -278,8 +426,9 @@ fn mark(st: &Store, ids: &[String], status: &str) {
     if ids.is_empty() {
         return;
     }
-    let _g = lock();
-    let mut state = load(st);
+    let path = st.review_state();
+    let mut p = pending();
+    let mut state = view(&path, &p);
     if let Some(list) = state.get_mut("candidates").and_then(Value::as_array_mut) {
         for v in list.iter_mut() {
             if v.get("id").and_then(Value::as_str).is_some_and(|i| ids.iter().any(|x| x == i)) {
@@ -288,7 +437,7 @@ fn mark(st: &Store, ids: &[String], status: &str) {
             }
         }
     }
-    save(st, &state);
+    save_locked(&path, &mut p, &state);
 }
 
 /// A procedure's steps as imperative lines, successes only.
@@ -561,7 +710,11 @@ impl seagent_kernel::lifecycle::Lifecycle for ReviewTick {
         }
     }
     fn turn_end(&self, session: &str, workspace: &str, user: &str, _assistant: &str, ok: bool) {
-        let Some(cand) = record_candidate(&self.settings, &self.store, session, workspace, user, ok) else { return };
+        let Some(cand) = record_candidate(&self.settings, &self.store, session, workspace, user, ok) else {
+            // No candidate (which writes everything): the turn's steps go out if a write is due.
+            flush_due(&self.store);
+            return;
+        };
         let workshop = self.settings.workshop.mode != "off";
         // Today's `[skills.review] auto_apply` stays the deterministic writer; the workshop's
         // propose/auto modes go through the experience review (and propose stages the draft).
@@ -574,6 +727,13 @@ impl seagent_kernel::lifecycle::Lifecycle for ReviewTick {
                 mark(&store, &[cand.id], status);
             }
         });
+    }
+}
+
+/// A host that drops its kernel (a one-shot `seagent run`) also writes the pending steps.
+impl Drop for ReviewTick {
+    fn drop(&mut self) {
+        flush_store(&self.store);
     }
 }
 
@@ -770,6 +930,60 @@ mod tests {
         let fallback = prep("auto", "s3", "Re-verify the release checklist from the dashboard", Some("run-the-release-checklist"));
         let out = review_with(&cfg, &paths, &fallback, true, Some(&bad));
         assert_eq!(out.written, ["run-the-release-checklist"], "deterministic fallback: {out:?}");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// Per-tool-call working state is written behind: twenty tool calls are one write, readers
+    /// in this process still see every step, and `flush` (daemon shutdown) or a recorded
+    /// candidate puts them on disk. Portable: only mtimes and file contents are checked.
+    #[test]
+    fn tool_calls_are_written_behind_not_once_per_call() {
+        let (d, paths, ws) = fixture("w");
+        let st = Store::new(&paths);
+        let path = st.review_state();
+        note_step(&st, "s1", "shell", &json!({"command": "step 0"}), false);
+        let old = std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000_000);
+        std::fs::OpenOptions::new().write(true).open(&path).unwrap().set_modified(old).unwrap();
+        for i in 1..=20 {
+            note_step(&st, "s1", "shell", &json!({"command": format!("step {i}")}), false);
+        }
+        assert_eq!(std::fs::metadata(&path).unwrap().modified().unwrap(), old, "no write per tool call");
+        assert_eq!(steps(&st, "s1").len(), 21, "this process sees the pending steps");
+        assert_eq!(load_file(&path)["sessions"][0]["steps"].as_array().unwrap().len(), 1, "disk has the first write only");
+        assert!(dirty(&st));
+        assert!(flush_store(&st));
+        assert!(!dirty(&st));
+        assert_eq!(load_file(&path)["sessions"][0]["steps"].as_array().unwrap().len(), 21, "flushed");
+        // A queued candidate is written behind too; this process sees it at once.
+        let mut s = Settings::from_table(&toml::Table::new());
+        s.review.min_steps = 2;
+        note_step(&st, "s2", "shell", &json!({"command": "seagent index rebuild"}), false);
+        note_step(&st, "s2", "shell", &json!({"command": "seagent index verify"}), false);
+        let c = record_candidate(&s, &st, "s2", &ws.display().to_string(), "Rebuild the session index", true).unwrap();
+        assert_eq!(candidates(&st).len(), 1);
+        assert!(steps(&st, "s2").is_empty(), "the next turn records its own steps");
+        assert!(load_file(&path)["candidates"].as_array().is_none_or(|a| a.is_empty()), "not on disk yet");
+        assert!(record_candidate(&s, &st, "s2", &ws.display().to_string(), "Rebuild the session index", true).is_none(), "a pending duplicate is still a duplicate");
+        // Another process reviews the candidate meanwhile: its verdict survives our write.
+        flush_store(&st);
+        let mut other = load_file(&path);
+        other["candidates"][0]["status"] = json!("written");
+        write_state(&path, &other);
+        note_step(&st, "s3", "shell", &json!({"command": "seagent index bench"}), false);
+        note_step(&st, "s3", "shell", &json!({"command": "seagent index status"}), false);
+        record_candidate(&s, &st, "s3", &ws.display().to_string(), "Benchmark the session index", true).unwrap();
+        {
+            // Our stale pending copy of the first candidate (still "pending") must not win.
+            let mut p = pending();
+            let mut stale = load_file(&path)["candidates"][0].clone();
+            stale["status"] = json!("pending");
+            p.candidates.entry(path.clone()).or_default().push(stale);
+        }
+        flush_store(&st);
+        let disk = load_file(&path);
+        let list = disk["candidates"].as_array().unwrap();
+        assert_eq!(list.len(), 2, "{disk}");
+        assert_eq!(list.iter().find(|v| v["id"] == c.id.as_str()).unwrap()["status"], "written", "the other process's verdict is kept");
         let _ = std::fs::remove_dir_all(&d);
     }
 

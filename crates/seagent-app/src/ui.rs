@@ -17,6 +17,7 @@ const FILES: &[(&str, &str, &str, &str)] = &[
     ("/ui/chat_menu.js", JS, "web/chat_menu.js", include_str!("../../../ui/web/chat_menu.js")),
     ("/ui/keys.js", JS, "web/keys.js", include_str!("../../../ui/web/keys.js")),
     ("/ui/split.js", JS, "web/split.js", include_str!("../../../ui/web/split.js")),
+    ("/ui/logs.js", JS, "web/logs.js", include_str!("../../../ui/web/logs.js")),
     ("/ui/app.css", CSS, "web/app.css", include_str!("../../../ui/web/app.css")),
     ("/ui/pages.css", CSS, "web/pages.css", include_str!("../../../ui/web/pages.css")),
     ("/ui/chat_menu.css", CSS, "web/chat_menu.css", include_str!("../../../ui/web/chat_menu.css")),

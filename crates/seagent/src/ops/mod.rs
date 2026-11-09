@@ -74,6 +74,7 @@ pub mod connectors_live;
 pub mod connectors_extra;
 pub mod channels_setup;
 pub mod toolcfg;
+pub mod toollog;
 pub mod docker;
 
 pub use slashops::SLASH;
