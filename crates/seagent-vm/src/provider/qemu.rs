@@ -59,7 +59,16 @@ impl QemuProvider {
         };
         let arch = if cfg.qemu.contains("aarch64") { "aarch64" } else { "x86_64" };
         let firmware = if arch == "aarch64" { crate::host::find_tool(&cfg.qemu).and_then(|q| crate::host::edk2_aarch64(&q)) } else { None };
-        QemuProvider { bin: cfg.qemu.clone(), extra_args: cfg.extra_args.clone(), os, accel, arch, firmware }
+        // Windows / macOS: the installers put QEMU outside PATH (`C:\Program Files\qemu`,
+        // Homebrew's prefix for GUI-launched apps), and capability detection already looks
+        // there (`host::find_tool`) — so the VMM must be started from the same place, or a
+        // provider that was selected as usable fails with "program not found". Linux keeps
+        // its PATH lookup by name.
+        let bin = match os {
+            HostOs::Linux | HostOs::Android => cfg.qemu.clone(),
+            _ => crate::host::find_tool(&cfg.qemu).map(|p| p.display().to_string()).unwrap_or_else(|| cfg.qemu.clone()),
+        };
+        QemuProvider { bin, extra_args: cfg.extra_args.clone(), os, accel, arch, firmware }
     }
 
     /// The provider as it would be shaped on `os` with `accel` (tests, `seagent sandbox explain`).
@@ -177,9 +186,20 @@ impl QemuProvider {
             "-monitor".into(),
             mon.qemu_monitor(),
         ]);
+        // A loopback TCP channel is reachable by every local process: the guest gets a
+        // per-boot key through fw_cfg (a file in the private run dir, never a command-line
+        // value) and both ends prove it before any frame counts (`Channel::authenticate`).
+        if matches!(chan, Endpoint::Tcp(_)) {
+            a.extend(["-fw_cfg".into(), format!("name={},file={}", crate::proto::FW_CFG_KEY_NAME, channel_key_path(spec).display())]);
+        }
         a.extend(self.extra_args.iter().cloned());
         a
     }
+}
+
+/// The per-boot channel key file QEMU reads into fw_cfg (TCP channels only).
+pub fn channel_key_path(spec: &VmSpec) -> PathBuf {
+    spec.run_dir.join("chan.key")
 }
 
 /// Kernel command line: init = the guest agent, which mounts /proc, /dev and
@@ -221,6 +241,14 @@ impl VmProvider for QemuProvider {
         // unix: the socket paths themselves (what Linux always passed); Windows: loopback
         // ports recorded in those paths.
         let (chan, mon) = if cfg!(unix) { (Endpoint::Unix(spec.channel_path()), Endpoint::Unix(qmp.clone())) } else { (Endpoint::allocate(&spec.channel_path())?, Endpoint::allocate(&qmp)?) };
+        let key = match chan {
+            Endpoint::Tcp(_) => {
+                let k = crate::proto::random_hex(32);
+                std::fs::write(channel_key_path(spec), &k).map_err(|e| format!("write the channel key: {e}"))?;
+                Some(k.into_bytes())
+            }
+            _ => None,
+        };
         let mut child = crate::host::spawn_vmm(Command::new(&self.bin).args(self.cmdline_with(spec, &chan, &mon)).stdin(Stdio::null()).stdout(Stdio::from(log)).stderr(Stdio::from(err)))
             .map_err(|e| format!("start {}: {e}", self.bin))?;
         let job = match VmmJob::confine(&child, spec.mem_mb, spec.vcpu) {
@@ -243,7 +271,7 @@ impl VmProvider for QemuProvider {
             }
             std::thread::sleep(Duration::from_millis(20));
         }
-        Ok(Box::new(QemuInstance { spec: spec.clone(), child: Some(child), chan: None, qmp, _job: job }))
+        Ok(Box::new(QemuInstance { spec: spec.clone(), child: Some(child), chan: None, qmp, key, _job: job }))
     }
 }
 
@@ -257,6 +285,8 @@ pub struct QemuInstance {
     child: Option<Child>,
     chan: Option<Arc<Channel>>,
     qmp: PathBuf,
+    /// The per-boot channel key (TCP channels): the guest must prove it, and so must we.
+    key: Option<Vec<u8>>,
     /// Windows: the Job Object holding the VMM (dropped = VMM killed).
     _job: VmmJob,
 }
@@ -305,6 +335,11 @@ impl VmInstance for QemuInstance {
             return Ok(c.clone());
         }
         let ch = Channel::connect(&self.spec.channel_path(), Transport::Serial, wait)?;
+        if let Some(key) = &self.key {
+            ch.authenticate(key, wait)?;
+            // QEMU read it at start-up; nothing needs the file any more.
+            let _ = std::fs::remove_file(channel_key_path(&self.spec));
+        }
         let ch = Arc::new(ch);
         self.chan = Some(ch.clone());
         Ok(ch)
@@ -321,7 +356,7 @@ impl VmInstance for QemuInstance {
             // -sandbox spawn=deny, but be thorough), then reap.
             crate::host::stop_vmm(&mut c);
         }
-        for f in [self.spec.channel_path(), self.spec.run_dir.join("mon.sock"), self.spec.run_dir.join("vm.pid")] {
+        for f in [self.spec.channel_path(), self.spec.run_dir.join("mon.sock"), self.spec.run_dir.join("vm.pid"), channel_key_path(&self.spec)] {
             let _ = std::fs::remove_file(f);
         }
     }
@@ -414,6 +449,64 @@ mod tests {
         assert!(mac.contains("console=ttyAMA0") && mac.contains("path=/run/vm/s-1/chan.sock"), "PL011 console, unix sockets on macOS: {mac}");
         let intel = QemuProvider::for_host(&cfg, HostOs::Macos, Accel::Hvf, "x86_64", None).cmdline(&spec()).join(" ");
         assert!(intel.contains("-M q35 -accel hvf -cpu host") && intel.contains("console=ttyS0") && !intel.contains("-bios"), "{intel}");
+    }
+
+    /// Windows counterpart of `cmdline_is_isolating_by_construction` (whose Linux shape returns
+    /// early elsewhere): the QEMU+WHPX VM the Windows provider actually boots, argument by
+    /// argument, with the Windows paths (drive letters, spaces) it really gets.
+    #[test]
+    fn the_windows_whpx_cmdline_is_isolating_by_construction() {
+        let mut s = spec();
+        s.kernel = r"C:\Users\a b\seagent\vm\image\vmlinux".into();
+        s.initramfs = r"C:\Users\a b\seagent\vm\image\initramfs.cpio.gz".into();
+        s.run_dir = r"C:\Users\a b\seagent\vm\run\s-1".into();
+        let chan = Endpoint::Tcp("127.0.0.1:40001".parse().unwrap());
+        let mon = Endpoint::Tcp("127.0.0.1:40002".parse().unwrap());
+        let a = QemuProvider::for_host(&VmConfig::default(), HostOs::Windows, Accel::Whpx, "x86_64", None).cmdline_with(&s, &chan, &mon);
+        let after = |flag: &str| a.iter().position(|x| x == flag).and_then(|i| a.get(i + 1)).cloned().unwrap_or_default();
+        // WHPX's in-kernel irqchip hangs a Linux guest ("WHPX: Unexpected VP exit code 4",
+        // measured with QEMU 11.1 on Windows 11): QEMU's own irqchip is required.
+        assert_eq!(after("-accel"), "whpx,kernel-irqchip=off");
+        assert_eq!((after("-M"), after("-cpu")), ("q35".to_string(), "max".to_string()));
+        // Paths are single argv entries (no shell, no re-quoting), spaces and all.
+        assert_eq!(after("-kernel"), r"C:\Users\a b\seagent\vm\image\vmlinux");
+        assert_eq!(after("-initrd"), r"C:\Users\a b\seagent\vm\image\initramfs.cpio.gz");
+        // (`join` uses the separator of the OS running the test; on Windows this is
+        // `file:C:\Users\a b\seagent\vm\run\s-1\console.log`.)
+        assert_eq!(after("-serial"), format!("file:{}", s.console_log().display()));
+        assert!(after("-serial").starts_with(r"file:C:\Users\a b\seagent\vm\run\s-1"));
+        // The channel: loopback TCP, no Nagle delay; the monitor: loopback too.
+        assert_eq!(after("-chardev"), "socket,id=seagent0,host=127.0.0.1,port=40001,server=on,wait=off,nodelay=on");
+        assert_eq!(after("-monitor"), "tcp:127.0.0.1:40002,server=on,wait=off");
+        assert!(after("-append").contains("console=ttyS0") && after("-append").contains("seagent.channel=virtio-serial"), "{a:?}");
+        // The per-boot channel key travels by fw_cfg from a run-dir file, never as a value on
+        // a command line (other processes can read QEMU's).
+        assert_eq!(after("-fw_cfg"), format!("name=opt/seagent/key,file={}", channel_key_path(&s).display()));
+        assert!(!after("-append").contains("key"), "{a:?}");
+        let unix = QemuProvider::for_host(&VmConfig::default(), HostOs::Windows, Accel::Whpx, "x86_64", None).cmdline_with(&s, &Endpoint::Unix("/r/chan.sock".into()), &mon);
+        assert!(!unix.iter().any(|x| x == "-fw_cfg"), "a unix socket channel needs no key: {unix:?}");
+        // The same walls as on Linux, minus the Linux-only seccomp flag.
+        assert_eq!(after("-net"), "none", "no NIC: egress only through the broker");
+        assert!(a.iter().any(|x| x == "-no-reboot") && a.iter().any(|x| x == "-nodefaults"));
+        assert!(!a.iter().any(|x| x == "-drive" || x == "-hda" || x == "-sandbox" || x.contains("unix:") || x.contains("path=")), "{a:?}");
+        // Without WHPX: the same VM under TCG (the selection layer carries the warning).
+        let tcg = QemuProvider::for_host(&VmConfig::default(), HostOs::Windows, Accel::Tcg, "x86_64", None).cmdline_with(&s, &chan, &mon);
+        assert_eq!(tcg.iter().position(|x| x == "-accel").map(|i| tcg[i + 1].as_str()), Some("tcg"));
+    }
+
+    /// Windows: the VMM is started from where capability detection found it (the QEMU
+    /// installer does not touch PATH), not by bare name.
+    #[cfg(windows)]
+    #[test]
+    fn on_windows_the_vmm_is_started_from_where_detection_found_it() {
+        let cfg = VmConfig::default();
+        let p = QemuProvider::new(&cfg);
+        match crate::host::find_tool(&cfg.qemu) {
+            Some(found) => assert_eq!(PathBuf::from(&p.bin), found),
+            None => assert_eq!(p.bin, cfg.qemu, "nothing found: the name is kept for the error message"),
+        }
+        assert!(matches!(p.accel(), Accel::Whpx | Accel::Tcg), "Windows QEMU runs under WHPX or, without it, TCG");
+        assert_eq!(p.accel() == Accel::Whpx, crate::host::whpx_available());
     }
 
     #[test]

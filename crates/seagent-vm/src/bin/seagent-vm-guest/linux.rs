@@ -438,7 +438,8 @@ fn kernel_release() -> String {
 /// How the guest reaches the host: the virtio-serial port (QEMU) or a vsock
 /// listener (Firecracker). Both carry the same frames.
 enum TransportSetup {
-    Serial(File),
+    /// The port and the channel name it is (`virtio-serial`, or `uart` for COM2).
+    Serial(File, &'static str),
     VsockListener(RawFd),
 }
 
@@ -465,25 +466,42 @@ fn uart_device_in(exists: impl Fn(&str) -> bool) -> &'static str {
     }
 }
 
+/// Raw 8N1 at 115200 baud, through the kernel's own `TCGETS2`/`TCSETS2` ioctls rather than
+/// libc's termios wrappers: glibc 2.42 gave `cfsetspeed` & co. new symbol versions, and a
+/// `+crt-static` GNU build of the agent (the fallback when no musl toolchain exists) then
+/// failed to link (`undefined symbol: cfsetspeed@GLIBC_2.2.5`). The ioctl is the same on
+/// musl and glibc, so both builds configure the port identically (what `cfmakeraw` did).
+fn uart_raw_115200(f: &File) -> Result<(), String> {
+    // SAFETY: TCGETS2 fills a `termios2` we own; TCSETS2 reads it back.
+    unsafe {
+        let mut t: libc::termios2 = std::mem::zeroed();
+        if libc::ioctl(f.as_raw_fd(), libc::TCGETS2 as _, &mut t) != 0 {
+            return Err(format!("TCGETS2: {}", std::io::Error::last_os_error()));
+        }
+        t.c_iflag &= !(libc::IGNBRK | libc::BRKINT | libc::PARMRK | libc::ISTRIP | libc::INLCR | libc::IGNCR | libc::ICRNL | libc::IXON);
+        t.c_oflag &= !libc::OPOST;
+        t.c_lflag &= !(libc::ECHO | libc::ECHONL | libc::ICANON | libc::ISIG | libc::IEXTEN);
+        t.c_cflag &= !(libc::CSIZE | libc::PARENB | libc::CBAUD);
+        t.c_cflag |= libc::CS8 | libc::B115200;
+        t.c_ispeed = 115_200;
+        t.c_ospeed = 115_200;
+        t.c_cc[libc::VMIN] = 1;
+        t.c_cc[libc::VTIME] = 0;
+        if libc::ioctl(f.as_raw_fd(), libc::TCSETS2 as _, &t) != 0 {
+            return Err(format!("TCSETS2: {}", std::io::Error::last_os_error()));
+        }
+    }
+    Ok(())
+}
+
 fn prepare_transport(cfg: &GuestCfg) -> Result<TransportSetup, String> {
     if cfg.channel == "uart" {
         // VirtualBox / Hyper-V: the host end of COM2 is a socket or named pipe; the guest
         // side is a plain 16550, put in raw 8N1 so no byte of a frame is reinterpreted.
         let dev = uart_device();
         let f = OpenOptions::new().read(true).write(true).open(dev).map_err(|e| format!("cannot open {dev}: {e}"))?;
-        // SAFETY: termios calls on an fd we own; `t` is fully initialised by tcgetattr.
-        unsafe {
-            let mut t: libc::termios = std::mem::zeroed();
-            if libc::tcgetattr(f.as_raw_fd(), &mut t) != 0 {
-                return Err(format!("tcgetattr {dev}: {}", std::io::Error::last_os_error()));
-            }
-            libc::cfmakeraw(&mut t);
-            libc::cfsetspeed(&mut t, libc::B115200);
-            if libc::tcsetattr(f.as_raw_fd(), libc::TCSANOW, &t) != 0 {
-                return Err(format!("tcsetattr {dev}: {}", std::io::Error::last_os_error()));
-            }
-        }
-        return Ok(TransportSetup::Serial(f));
+        uart_raw_115200(&f).map_err(|e| format!("{dev}: {e}"))?;
+        return Ok(TransportSetup::Serial(f, "uart"));
     }
     if cfg.channel != "vsock" {
         // The virtio-serial port shows up during kernel boot; give it a moment.
@@ -492,7 +510,7 @@ fn prepare_transport(cfg: &GuestCfg) -> Result<TransportSetup, String> {
             std::thread::sleep(Duration::from_millis(20));
         }
         match OpenOptions::new().read(true).write(true).open(SERIAL_DEVICE) {
-            Ok(f) => return Ok(TransportSetup::Serial(f)),
+            Ok(f) => return Ok(TransportSetup::Serial(f, "virtio-serial")),
             Err(e) => {
                 if cfg.channel == "virtio-serial" {
                     return Err(format!("cannot open {SERIAL_DEVICE}: {e}"));
@@ -569,9 +587,9 @@ impl Conn {
     }
 }
 
-fn serial_conn(f: File) -> Result<Conn, String> {
+fn serial_conn(f: File, transport: &'static str) -> Result<Conn, String> {
     let w = f.try_clone().map_err(|e| format!("clone channel fd: {e}"))?;
-    Ok(Conn { r: f, w: Arc::new(Mutex::new(w)), buf: Vec::new(), pending: Default::default(), transport: "virtio-serial", cid: None })
+    Ok(Conn { r: f, w: Arc::new(Mutex::new(w)), buf: Vec::new(), pending: Default::default(), transport, cid: None })
 }
 
 fn vsock_conn(listener: RawFd) -> Result<Conn, String> {
@@ -608,13 +626,18 @@ fn vsock_local_cid(fd: RawFd) -> Option<u32> {
 struct Reaper {
     done: Mutex<HashMap<i32, i32>>,
     cv: Condvar,
+    /// Commands spawned so far, and the signal that one was: with no child to wait for,
+    /// the reaper sleeps until the next spawn instead of polling.
+    spawns: Mutex<u64>,
+    spawned: Condvar,
 }
 
 impl Reaper {
     fn start() -> Arc<Reaper> {
-        let r = Arc::new(Reaper { done: Mutex::new(HashMap::new()), cv: Condvar::new() });
+        let r = Arc::new(Reaper { done: Mutex::new(HashMap::new()), cv: Condvar::new(), spawns: Mutex::new(0), spawned: Condvar::new() });
         let for_thread = r.clone();
         std::thread::spawn(move || loop {
+            let seen = *lock(&for_thread.spawns);
             let mut status: libc::c_int = 0;
             // SAFETY: plain waitpid on any child.
             let pid = unsafe { libc::waitpid(-1, &mut status, 0) };
@@ -628,10 +651,24 @@ impl Reaper {
             if err.kind() == ErrorKind::Interrupted {
                 continue;
             }
-            // ECHILD: nothing to reap right now. Poll slowly instead of spinning.
-            std::thread::sleep(Duration::from_millis(100));
+            // ECHILD: nothing to reap right now. Wait for the next spawn (bounded, for
+            // orphans reparented to PID 1) instead of a blind 100 ms sleep: that sleep was
+            // paid by every command started while the VM was idle — and the pool runs two per
+            // tool call (the command, then `find` for the sync back) — a flat ~100-200 ms per
+            // call, measured under QEMU+WHPX. A spawn after `seen` was read is never missed:
+            // the counter has moved, so there is no wait at all.
+            let g = lock(&for_thread.spawns);
+            if *g == seen {
+                let _ = for_thread.spawned.wait_timeout(g, Duration::from_millis(100));
+            }
         });
         r
+    }
+
+    /// A command was just spawned: wake the reaper if it is idle.
+    fn spawned(&self) {
+        *lock(&self.spawns) += 1;
+        self.spawned.notify_all();
     }
 
     fn wait(&self, pid: i32, timeout: Duration) -> Option<i32> {
@@ -861,6 +898,7 @@ fn start_exec(agent: &Arc<Agent>, req: ExecReq) -> Result<(), String> {
     let pid = child.id() as i32;
     // The reaper thread owns waitpid from here on.
     drop(child);
+    agent.reaper.spawned();
     let pgid = pid;
     lock(&agent.execs).insert(req.id, ExecHandle { pgid, stdin: stdin_file, pty: pty_file });
 
@@ -1238,6 +1276,18 @@ fn run_init() -> i32 {
         log(&format!("hostname: {e}"));
     }
 
+    // A per-boot channel key, when the host gave one: fw_cfg (Windows QEMU's loopback TCP
+    // channel) or the SMBIOS serial (VirtualBox / Hyper-V named-pipe COM2 on Windows). Read
+    // while still root: both sysfs files are 0400, so no command run later as the agent user
+    // can learn it.
+    let key = seagent_vm::proto::channel_key_from(
+        std::fs::read(seagent_vm::proto::FW_CFG_KEY).ok().as_deref(),
+        std::fs::read_to_string(seagent_vm::proto::DMI_KEY_FILE).ok().as_deref(),
+    );
+    if key.is_some() {
+        log("channel key present: the host must authenticate before any frame is served");
+    }
+
     // The virtio-serial port has to be opened while we are still root: devtmpfs
     // gives it mode 0600 root:root and there is no udev in the VM.
     let transport = match prepare_transport(&cfg) {
@@ -1249,6 +1299,7 @@ fn run_init() -> i32 {
     };
 
     apply_guest_limits(&cfg.limits());
+    let _ = firmware_can_power_off(); // read the FADT while still root
     for dir in [&cfg.workspace, &PathBuf::from(AGENT_HOME), &PathBuf::from("/run/seagent")] {
         if let Err(e) = chown_agent(dir) {
             log(&e);
@@ -1261,7 +1312,7 @@ fn run_init() -> i32 {
     log(&format!("running as uid {} gid {}", unsafe { libc::getuid() }, unsafe { libc::getgid() }));
 
     let mut conn = match transport {
-        TransportSetup::Serial(f) => match serial_conn(f) {
+        TransportSetup::Serial(f, name) => match serial_conn(f, name) {
             Ok(c) => c,
             Err(e) => {
                 log(&format!("channel: {e}"));
@@ -1301,14 +1352,22 @@ fn run_init() -> i32 {
         cid: conn.cid,
         transport: conn.transport.to_string(),
         uid: unsafe { libc::getuid() },
+        nonce: key.as_ref().map(|_| seagent_vm::proto::random_hex(16)),
     };
+    let auth = key.map(|k| {
+        let challenge = match &hello {
+            GuestMsg::Hello { nonce, .. } => nonce.clone().unwrap_or_default(),
+            _ => String::new(),
+        };
+        (k, challenge, hello.clone())
+    });
     if let Err(e) = agent.send(&hello) {
         log(&format!("hello: {e}"));
         return 1;
     }
     log("hello sent; serving frames");
 
-    serve(&mut conn, agent.clone());
+    serve(&mut conn, agent.clone(), auth);
 
     // Shutdown: kill whatever still runs, then power the VM off.
     let pids: Vec<i32> = lock(&agent.execs).values().map(|h| h.pgid).collect();
@@ -1320,20 +1379,64 @@ fn run_init() -> i32 {
     power_off()
 }
 
-fn serve(conn: &mut Conn, agent: Arc<Agent>) {
+/// `auth`: the channel key and our Hello nonce when the host must authenticate first
+/// (`HostMsg::Auth`); until it has, every other frame is refused, so a local process that
+/// reached the channel can neither run commands nor shut the VM down.
+fn serve(conn: &mut Conn, agent: Arc<Agent>, mut auth: Option<(Vec<u8>, String, GuestMsg)>) {
     loop {
         let msg = match conn.read_frame() {
             Ok(Some(m)) => m,
+            Ok(None) if auth.is_some() => {
+                // An unauthenticated peer hung up (a local process that grabbed the loopback
+                // port first): that is not our host leaving, so do not power off — wait for
+                // the next connection (the virtio-serial port reads EOF until one exists).
+                conn.buf.clear();
+                conn.pending.clear();
+                std::thread::sleep(Duration::from_millis(50));
+                continue;
+            }
             Ok(None) => {
                 log("host closed the channel");
                 return;
+            }
+            Err(e) if auth.is_some() => {
+                // Garbage from an unauthenticated peer is dropped, not a reason to shut down.
+                log(&format!("channel (unauthenticated peer): {e}"));
+                conn.buf.clear();
+                conn.pending.clear();
+                std::thread::sleep(Duration::from_millis(50));
+                continue;
             }
             Err(e) => {
                 log(&format!("channel: {e}"));
                 return;
             }
         };
+        if let Some((key, challenge, hello)) = &auth {
+            match &msg {
+                HostMsg::Auth { nonce, mac } => match seagent_vm::proto::guest_auth_answer(key, challenge, nonce, mac) {
+                    Ok(answer) => {
+                        let _ = agent.send(&answer);
+                        log("channel authenticated");
+                        auth = None;
+                    }
+                    Err(e) => {
+                        log(&e);
+                        let _ = agent.send(&GuestMsg::Err { id: 0, message: e });
+                    }
+                },
+                other => {
+                    let _ = agent.send(&GuestMsg::Err { id: other.id().unwrap_or(0), message: "the channel is not authenticated (HostMsg::Auth first)".into() });
+                    // Whoever is connected now may not have seen our Hello (a process that
+                    // grabbed the port first took it): repeat the challenge, same nonce.
+                    let _ = agent.send(hello);
+                }
+            }
+            continue;
+        }
         match msg {
+            // Already authenticated, or a channel without a key: nothing to do.
+            HostMsg::Auth { .. } => {}
             HostMsg::Exec { id, script, cwd, env, login, stdin, pty, timeout_secs } => {
                 let req = ExecReq { id, script, cwd, env, login, stdin, pty, timeout_secs };
                 if let Err(e) = start_exec(&agent, req) {
@@ -1434,7 +1537,17 @@ fn serve(conn: &mut Conn, agent: Arc<Agent>) {
 /// 0x56; when it is zero there is no power-management block, so
 /// `reboot(RB_POWER_OFF)` only halts this kernel and the VMM keeps running.
 /// Firecracker's FADT has exactly that (`00 00 00 00`); QEMU's q35 has `0x620`.
+/// Decided once, as root, before the privilege drop: `/sys/firmware/acpi/tables/FACP` is mode
+/// 0400, so a check made at `Shutdown` time (as uid 1000) always failed and the agent always
+/// reset the VM — harmless where the VMM exits on a reset (QEMU `-no-reboot`, Firecracker), a
+/// fresh reboot under VirtualBox (found there: the guest came straight back up).
+static CAN_POWER_OFF: OnceLock<bool> = OnceLock::new();
+
 fn firmware_can_power_off() -> bool {
+    *CAN_POWER_OFF.get_or_init(read_fadt_power_off)
+}
+
+fn read_fadt_power_off() -> bool {
     match std::fs::read("/sys/firmware/acpi/tables/FACP") {
         Ok(t) if t.len() >= 0x5a => u32::from_le_bytes([t[0x56], t[0x57], t[0x58], t[0x59]]) != 0,
         _ => false,

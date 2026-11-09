@@ -536,7 +536,11 @@ impl VmManager {
     pub fn snapshot(&self, session: &str, tier: TrustTier, workspace: &Path, reason: &str) -> Result<SnapshotMeta, String> {
         let stack = SnapshotStack::new(self.cfg.snapshot_root(&self.data).join(self.key_for(session, tier, workspace)), self.cfg.snapshot_keep);
         let m = stack.create(workspace, reason)?;
-        if let Ok(slot) = self.slot(session, tier, workspace) {
+        // Only a VM that is already running has RAM worth imaging. (This used `slot()`, which
+        // *booted* a VM when none ran — `seagent sandbox vm snapshot` started a guest just to
+        // image its fresh memory and killed it again on exit.)
+        let running = self.slots.lock().unwrap().get(&self.key_for(session, tier, workspace)).cloned();
+        if let Some(slot) = running {
             if let Ok(Some(_)) = slot.inst.lock().unwrap().ram_snapshot(&self.cfg.snapshot_root(&self.data).join(&slot.key).join(&m.name)) {
                 // RAM image written next to the workspace tree; the meta stays
                 // the source of truth for what exists.
@@ -589,6 +593,28 @@ impl VmManager {
         for (_, s) in slots.drain() {
             s.inst.lock().unwrap().stop();
         }
+    }
+
+    /// Orderly end of every VM: ask each guest agent to power off (`Shutdown`), give the VMMs
+    /// up to `wait` to exit on their own, then stop whatever is left. Returns, per VM, whether
+    /// it went away by itself. (`stop_all` is the immediate kill.)
+    pub fn shutdown_all(&self, wait: Duration) -> Vec<(String, bool)> {
+        let slots: Vec<(String, Arc<Slot>)> = self.slots.lock().unwrap().drain().collect();
+        for (_, s) in &slots {
+            s.chan.shutdown();
+        }
+        let deadline = Instant::now() + wait;
+        let mut out = Vec::with_capacity(slots.len());
+        for (key, s) in slots {
+            let mut inst = s.inst.lock().unwrap();
+            while inst.is_running() && Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(25));
+            }
+            let clean = !inst.is_running();
+            inst.stop();
+            out.push((key, clean));
+        }
+        out
     }
 
     pub fn stop(&self, key: &str) -> bool {

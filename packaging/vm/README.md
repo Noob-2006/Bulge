@@ -147,7 +147,11 @@ export CC_x86_64_unknown_linux_musl=clang AR_x86_64_unknown_linux_musl=llvm-ar
 
 The script falls back to a `+crt-static` GNU build (same static binary, just
 linked against glibc) only if the musl build fails, and says so loudly; the
-manifest records which target was used.
+manifest records which target was used. The agent configures its UART with the
+kernel's `TCGETS2`/`TCSETS2` ioctls rather than libc's `cfsetspeed`, whose new
+glibc 2.42 symbol versions broke that static link (verified with glibc 2.43).
+With only a glibc gcc installed, `CC_x86_64_unknown_linux_musl=gcc` also builds
+the musl agent.
 
 ## manifest.json
 
@@ -197,6 +201,47 @@ The guest is always Linux; each host OS boots it with its own hypervisor
 | Android | AVF `vm run` (crosvm, pKVM) | arm64 kernel + initramfs | `vsock` (host AF_VSOCK to the CID) |
 | iOS | none (platform policy) | — | — |
 
+**Windows, measured** (Windows 11 Home, QEMU 11.1.0 from `winget install
+SoftwareFreedomConservancy.QEMU`, image built with `--build-kernel --format disk`):
+`seagent sandbox vm exec -- <cmd>` picks QEMU + WHPX, boots to the agent's `Hello` in
+≈0.5 s, runs the command and powers the guest off in ≈0.1 s; under `-accel tcg` the same
+guest says `Hello` after ≈1 s. Things that matter there:
+
+* the image must have a PCI kernel (`--build-kernel`): the default Firecracker CI `vmlinux`
+  never probes QEMU's virtio-serial-pci;
+* WHPX needs `kernel-irqchip=off` (with the in-kernel irqchip the guest hangs:
+  `WHPX: Unexpected VP exit code 4`) — the provider always passes it;
+* the channel is a `127.0.0.1` TCP chardev with `nodelay=on`. Any local process can
+  connect to it, so the provider writes a per-boot random key into the private run dir and
+  hands it to the guest as fw_cfg `opt/seagent/key` (`CONFIG_FW_CFG_SYSFS`, x86_64 config;
+  the agent reads it as root, mode 0400, before dropping to uid 1000). The guest's `Hello`
+  carries a nonce, the host answers `Auth` (HMAC-SHA256 over both nonces, role-bound), the
+  guest answers `Auth`; until then the agent refuses every frame and does not power off
+  when an unauthenticated peer disconnects. A squatter can delay the VM, but cannot drive
+  or impersonate either side. VirtualBox / Hyper-V on Windows serve COM2 as a named pipe,
+  just as reachable, so they get the same handshake; their disk boots with a baked command
+  line and no fw_cfg, so the key is the VM's SMBIOS system serial `sgk-<hex>`
+  (`VBoxManage setextradata … DmiSystemSerial`; Hyper-V `BIOSSerialNumber` via WMI, the value
+  passed in the environment), read root-only from `/sys/class/dmi/id/product_serial`
+  (`CONFIG_DMIID`). On a UART the host skips the firmware's terminal noise up to the first
+  frame. Verified with QEMU standing in for VirtualBox (UEFI + `disk.raw`, `-smbios
+  type=1,serial=…`, COM2 as a named pipe): authenticated Hello ≈1.5 s, ≈7 ms per command
+  over the UART. Unix-socket / vsock channels (Linux, macOS) carry no key and their frames
+  are byte-for-byte unchanged;
+* VirtualBox 7.2.22 on the same host runs on the Windows Hypervisor Platform ("NEM": the
+  Windows hypervisor that WSL2 starts holds VT-x). Measured: an SMP guest hangs in the UEFI
+  firmware's AP start-up (`EFI: debug point DXE_AP`, the kernel never runs), so under NEM the
+  provider creates a 1-vCPU VM; it reaches the kernel ≈5-6 s after `startvm`, the agent's
+  Hello ≈7 s (including VM creation), ≈9 ms per command over COM2 (a named pipe), and
+  powers off in ≈0.2 s. `VBoxInternal/PowerOffInsteadOfReset` makes a guest reset end the
+  VM (QEMU's `-no-reboot`), and a `disk.vdi` older than `disk.raw` is converted again;
+* WHPX is the optional feature "Windows Hypervisor Platform" (`dism /online
+  /enable-feature /featurename:HypervisorPlatform`, then reboot); seagent probes it
+  unelevated through `WinHvPlatform.dll`. Windows **Home** has no Hyper-V role at all, so the
+  Hyper-V provider reports that and `auto` goes on to QEMU;
+* copy `vmlinux`, `initramfs.cpio.gz`, `manifest.json` (and `disk.raw`) into
+  `<data>\vm\image\` (`seagent doctor` prints `<data>`).
+
 Which build feeds which row:
 
 ```sh
@@ -239,7 +284,10 @@ Partition, 1 MiB tail for the backup GPT) whose ESP holds exactly one file:
 That is the removable-media path every UEFI firmware boots without a boot entry,
 so there is **no boot loader**: the kernel is the EFI application, the initramfs
 is built into it (`CONFIG_INITRAMFS_SOURCE` = the very `initramfs.cpio.gz` shipped
-next to it, used as-is) and so is the command line, forced so that whatever load
+next to it, used as-is, followed by one extra gzip member holding only `/dev/console` —
+direct boot gets that node from the kernel's default built-in archive, which a configured
+`INITRAMFS_SOURCE` replaces; without it PID 1 starts with no fds 0-2 and the kernel panics
+with `Attempted to kill init! exitcode=0x0000000b`) and so is the command line, forced so that whatever load
 options the firmware passes are ignored (`CONFIG_CMDLINE_OVERRIDE` on x86_64,
 `CONFIG_CMDLINE_FORCE` on arm64):
 

@@ -423,8 +423,8 @@ pub fn doctor_checks(paths: &seagent_kernel::config::Paths) -> Vec<(String, Resu
                 Err("not installed: `seagent service install` (Task Scheduler, no admin) or `seagent service install --system` (Windows Service, elevated)".into())
             },
         ));
-        let vms: Vec<&str> = [("qemu-system-x86_64", "QEMU"), ("vboxmanage", "VirtualBox"), ("hcsdiag", "Hyper-V (HCS)"), ("wsl", "WSL2")].iter().filter(|(b, _)| have(b).is_some()).map(|(_, n)| *n).collect();
-        v.push(("VM providers".into(), if vms.is_empty() { Err("none found (Hyper-V, QEMU+WHPX or VirtualBox give microVM isolation)".into()) } else { Ok(vms.join(", ")) }));
+        let _ = &have;
+        v.extend(windows_vm_checks(paths));
     }
     #[cfg(target_os = "macos")]
     {
@@ -438,6 +438,59 @@ pub fn doctor_checks(paths: &seagent_kernel::config::Paths) -> Vec<(String, Resu
         let _ = (paths, &have);
         v.push(("autostart".into(), Ok(MOBILE.into())));
     }
+    v
+}
+
+/// The microVM side of `seagent doctor` on Windows, from the same selection the VM backend
+/// makes (`seagent_vm::provider::select` over `seagent_vm::policy::capabilities`): the provider
+/// `exec.vm` picks and its accelerator, then each substitute's own state — WHPX probed through
+/// `WinHvPlatform.dll`, Hyper-V by edition / service / module, VirtualBox and QEMU by binary.
+/// (Before, this was a PATH lookup that missed `C:\Program Files\qemu` and took the
+/// container tool `hcsdiag` for Hyper-V.)
+#[cfg(windows)]
+fn windows_vm_checks(paths: &Paths) -> Vec<(String, Result<String, String>)> {
+    use seagent_vm::host::Accel;
+    let cfg = crate::exec_cli::exec_config(paths).map(|c| c.vm).unwrap_or_default();
+    let caps = seagent_vm::policy::capabilities(&cfg, &paths.data);
+    let (kind, warning) = seagent_vm::provider::select(&cfg, &caps);
+    let accel = seagent_vm::provider::accel_of(kind, &caps);
+    let mut v: Vec<(String, Result<String, String>)> = vec![];
+    v.push((
+        "VM provider".into(),
+        match accel {
+            Some(Accel::Tcg) => Err(format!("{} (accelerator: {}) — {}", kind.name(), Accel::Tcg.label(), warning.unwrap_or_default())),
+            Some(a) => Ok(format!("{} (accelerator: {})", kind.name(), a.label())),
+            None => Err(format!("no microVM ({}): {}", kind.name(), seagent_vm::policy::blockers(&caps))),
+        },
+    ));
+    let hw = accel.is_some_and(|a| a.is_hardware());
+    v.push((
+        "  WHPX (Windows Hypervisor Platform)".into(),
+        if caps.whpx {
+            Ok("available (WHvGetCapability: hypervisor present) → qemu -accel whpx".into())
+        } else {
+            Err("unavailable: turn on the optional feature \"Windows Hypervisor Platform\" (Settings → System → Optional features → More Windows features, or elevated `dism /online /enable-feature /featurename:HypervisorPlatform`), then reboot".into())
+        },
+    ));
+    v.push((
+        "  Hyper-V".into(),
+        match (&caps.hyperv, &caps.hyperv_blocker) {
+            (Some(_), _) => Ok("installed (VM creation needs an elevated session or Hyper-V Administrators)".into()),
+            (None, Some(why)) if hw => Ok(why.clone()),
+            (None, why) => Err(why.clone().unwrap_or_else(|| "not installed".into())),
+        },
+    ));
+    let bin = |p: &Option<std::path::PathBuf>, missing: &str| p.as_ref().map(|p| p.display().to_string()).ok_or_else(|| missing.to_string());
+    v.push(("  QEMU".into(), bin(&caps.qemu, "qemu-system-x86_64 not found (winget install SoftwareFreedomConservancy.QEMU)")));
+    let vbox = bin(&caps.vbox, "VBoxManage not found");
+    v.push(("  VirtualBox".into(), if hw { Ok(vbox.unwrap_or_else(|e| e)) } else { vbox }));
+    v.push((
+        "  guest image".into(),
+        match (&caps.kernel, &caps.initramfs) {
+            (Some(k), Some(_)) => Ok(format!("{} (+ initramfs{})", k.display(), if caps.disk_image.is_some() { ", disk.raw" } else { "" })),
+            _ => Err("not built: `seagent sandbox vm image build`, or copy vmlinux + initramfs.cpio.gz (+ manifest.json) into <data>\\vm\\image".into()),
+        },
+    ));
     v
 }
 

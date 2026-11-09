@@ -89,6 +89,12 @@ pub enum HostMsg {
     Ping { id: u64 },
     /// Guest agent exits (VM shutdown).
     Shutdown,
+    /// Channel authentication (only where the host issued a per-boot key, i.e. a TCP channel
+    /// other local processes could reach): the host proves it knows the key —
+    /// `mac` = [`auth_mac`]`(key, "host", hello nonce, nonce)` — and challenges the guest with
+    /// its own `nonce`. The guest answers [`GuestMsg::Auth`] and refuses every other frame
+    /// until this one verified.
+    Auth { nonce: String, mac: String },
 }
 
 /// guest → host
@@ -96,7 +102,20 @@ pub enum HostMsg {
 #[serde(tag = "t", rename_all = "snake_case")]
 pub enum GuestMsg {
     /// First frame after connect. `uid` proves the agent dropped privileges.
-    Hello { version: u32, agent: String, kernel: String, #[serde(default)] cid: Option<u32>, transport: String, uid: u32 },
+    Hello {
+        version: u32,
+        agent: String,
+        kernel: String,
+        #[serde(default)]
+        cid: Option<u32>,
+        transport: String,
+        uid: u32,
+        /// Present iff the guest was given a channel key (fw_cfg `opt/seagent/key`): the
+        /// challenge for [`HostMsg::Auth`]. Absent on Linux / vsock / unix socket channels,
+        /// whose frames are byte-for-byte what they always were.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        nonce: Option<String>,
+    },
     /// base64 output chunk (stdout+stderr merged, or the pty).
     Out { id: u64, data: String },
     Exit { id: u64, #[serde(default)] code: Option<i32>, #[serde(default)] signal: Option<i32> },
@@ -109,6 +128,9 @@ pub enum GuestMsg {
     Ok { id: u64, #[serde(default)] detail: Value },
     Err { id: u64, message: String },
     Pong { id: u64 },
+    /// The guest's half of the channel authentication: `mac` = [`auth_mac`]`(key, "guest",
+    /// host nonce, hello nonce)`.
+    Auth { mac: String },
 }
 
 /// One file crossing the channel. `path` is relative to the guest workspace and
@@ -146,7 +168,7 @@ impl HostMsg {
             | HostMsg::Pull { id, .. }
             | HostMsg::Push { id, .. }
             | HostMsg::Ping { id } => *id,
-            HostMsg::Limits { .. } | HostMsg::Shutdown => return None,
+            HostMsg::Limits { .. } | HostMsg::Shutdown | HostMsg::Auth { .. } => return None,
         })
     }
 }
@@ -154,7 +176,7 @@ impl HostMsg {
 impl GuestMsg {
     pub fn id(&self) -> Option<u64> {
         Some(match self {
-            GuestMsg::Hello { .. } => return None,
+            GuestMsg::Hello { .. } | GuestMsg::Auth { .. } => return None,
             GuestMsg::Out { id, .. }
             | GuestMsg::Exit { id, .. }
             | GuestMsg::Broker { id, .. }
@@ -164,6 +186,60 @@ impl GuestMsg {
             | GuestMsg::Pong { id } => *id,
         })
     }
+}
+
+// ── channel authentication ──────────────────────────────────────────────────
+
+/// Where QEMU hands the guest its per-boot channel key (`-fw_cfg name=opt/seagent/key,file=…`);
+/// the agent reads it as root before dropping privileges (mode 0400), so no command in the
+/// guest ever sees it, and it never appears on a command line on the host.
+pub const FW_CFG_KEY: &str = "/sys/firmware/qemu_fw_cfg/by_name/opt/seagent/key/raw";
+/// The fw_cfg item name for [`FW_CFG_KEY`].
+pub const FW_CFG_KEY_NAME: &str = "opt/seagent/key";
+/// Where VirtualBox / Hyper-V (named-pipe COM2 on Windows) hand the key instead: the SMBIOS
+/// system serial number, `sgk-<hex>`, which the kernel exposes root-only (0400)
+/// (`CONFIG_DMIID`). Their disk boots with a baked command line and no fw_cfg, and the image
+/// has no Guest Additions; a serial without the prefix (every ordinary VM) means "no key".
+pub const DMI_KEY_FILE: &str = "/sys/class/dmi/id/product_serial";
+pub const DMI_KEY_PREFIX: &str = "sgk-";
+
+/// The channel key in what the guest read from [`FW_CFG_KEY`] (`fw_cfg`) or
+/// [`DMI_KEY_FILE`] (`dmi`): fw_cfg is the raw key; the DMI serial counts only with
+/// [`DMI_KEY_PREFIX`] (trailing whitespace trimmed).
+pub fn channel_key_from(fw_cfg: Option<&[u8]>, dmi: Option<&str>) -> Option<Vec<u8>> {
+    if let Some(k) = fw_cfg.filter(|k| !k.is_empty()) {
+        return Some(k.to_vec());
+    }
+    let k = dmi?.trim().strip_prefix(DMI_KEY_PREFIX)?;
+    (k.len() >= 32 && k.bytes().all(|b| b.is_ascii_hexdigit())).then(|| k.as_bytes().to_vec())
+}
+
+/// HMAC-SHA256 (hex) proving knowledge of `key` for `role` (`host` / `guest`) over the
+/// peer's challenge and the sender's own nonce. Distinct roles make a reflected answer
+/// useless; fresh nonces on both sides make a replayed one useless.
+pub fn auth_mac(key: &[u8], role: &str, challenge: &str, nonce: &str) -> String {
+    let msg = format!("seagent-vm-channel-v1\0{role}\0{challenge}\0{nonce}");
+    seagent_net::crypto::hmac_sha256(key, msg.as_bytes()).iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// Constant-time check of an [`auth_mac`] answer.
+pub fn auth_ok(key: &[u8], role: &str, challenge: &str, nonce: &str, mac: &str) -> bool {
+    let want = auth_mac(key, role, challenge, nonce);
+    want.len() == mac.len() && want.bytes().zip(mac.bytes()).fold(0u8, |acc, (a, b)| acc | (a ^ b)) == 0
+}
+
+/// The guest's side of [`HostMsg::Auth`]: the [`GuestMsg::Auth`] answer when the host's
+/// proof over our Hello `challenge` checks, else why the frame is refused.
+pub fn guest_auth_answer(key: &[u8], challenge: &str, host_nonce: &str, host_mac: &str) -> Result<GuestMsg, String> {
+    if !auth_ok(key, "host", challenge, host_nonce, host_mac) {
+        return Err("channel authentication failed: the peer does not hold this VM's key".into());
+    }
+    Ok(GuestMsg::Auth { mac: auth_mac(key, "guest", host_nonce, challenge) })
+}
+
+/// A fresh random nonce / key (hex).
+pub fn random_hex(bytes: usize) -> String {
+    seagent_net::crypto::random_bytes(bytes).iter().map(|b| format!("{b:02x}")).collect()
 }
 
 // ── framing ─────────────────────────────────────────────────────────────────
@@ -227,6 +303,33 @@ mod tests {
         assert!(decode::<HostMsg>(&bad).is_err());
         let huge = HostMsg::Exec { id: 1, script: "x".repeat(MAX_FRAME + 16), cwd: None, env: vec![], login: false, stdin: false, pty: None, timeout_secs: 0 };
         assert!(encode(&huge).unwrap_err().contains("too large"));
+    }
+
+    #[test]
+    fn channel_auth_binds_key_role_and_both_nonces() {
+        let key = b"k3y";
+        let m = auth_mac(key, "host", "gnonce", "hnonce");
+        assert_eq!(m.len(), 64);
+        assert!(auth_ok(key, "host", "gnonce", "hnonce", &m));
+        assert!(!auth_ok(b"other", "host", "gnonce", "hnonce", &m), "wrong key");
+        assert!(!auth_ok(key, "guest", "gnonce", "hnonce", &m), "a host proof is not a guest proof (no reflection)");
+        assert!(!auth_ok(key, "host", "gnonce2", "hnonce", &m), "bound to the challenge (no replay)");
+        assert!(!auth_ok(key, "host", "gnonce", "hnonce", &m[..63]));
+        assert_ne!(random_hex(16), random_hex(16));
+        // Key delivery: fw_cfg (QEMU) first, else a prefixed DMI serial (VirtualBox / Hyper-V).
+        let hex = "00112233445566778899aabbccddeeff";
+        assert_eq!(channel_key_from(Some(b"qemu-key"), Some(&format!("sgk-{hex}"))), Some(b"qemu-key".to_vec()));
+        assert_eq!(channel_key_from(None, Some(&format!("sgk-{hex}\n"))), Some(hex.as_bytes().to_vec()));
+        for ordinary in ["0", "VMware-56 4d", "1234-5678-9012-3456-7890-12", "sgk-short", "sgk-zz112233445566778899aabbccddeeff", ""] {
+            assert_eq!(channel_key_from(None, Some(ordinary)), None, "{ordinary:?} is not a key");
+        }
+        assert_eq!(channel_key_from(Some(b""), None), None);
+        // Without a key nothing changes on the wire: no `nonce` key in Hello.
+        let h = GuestMsg::Hello { version: 1, agent: "a".into(), kernel: "k".into(), cid: None, transport: "vsock".into(), uid: 1000, nonce: None };
+        let bytes = String::from_utf8(encode(&h).unwrap()[4..].to_vec()).unwrap();
+        assert!(!bytes.contains("nonce"), "{bytes}");
+        let (back, _) = decode::<GuestMsg>(&encode(&h).unwrap()).unwrap();
+        assert_eq!(back[0], h);
     }
 
     #[test]

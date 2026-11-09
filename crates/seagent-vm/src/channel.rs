@@ -287,7 +287,11 @@ impl Endpoint {
     pub fn qemu_chardev(&self, id: &str) -> String {
         match self {
             Endpoint::Unix(p) => format!("socket,id={id},path={},server=on,wait=off", p.display()),
-            Endpoint::Tcp(a) => format!("socket,id={id},host={},port={},server=on,wait=off", a.ip(), a.port()),
+            // `nodelay=on`: QEMU leaves Nagle on for a TCP chardev unless asked, so a small
+            // guest frame sent right behind another (`Exit` after the last `Out`) could wait for
+            // the host's delayed ACK (up to 200 ms on Windows). The host end sets TCP_NODELAY
+            // too (`Stream::connect_tcp`); a unix socket has no such thing.
+            Endpoint::Tcp(a) => format!("socket,id={id},host={},port={},server=on,wait=off,nodelay=on", a.ip(), a.port()),
             Endpoint::Pipe(n) => format!("pipe,id={id},path={}", n.trim_start_matches(r"\\.\pipe\")),
         }
     }
@@ -435,6 +439,22 @@ pub struct Channel {
     /// while the caller writes stdin from another thread.
     rbuf: std::sync::Mutex<(Vec<u8>, std::collections::VecDeque<GuestMsg>)>,
     transport: Transport,
+    /// A UART channel (COM2) also carries whatever the firmware printed before the agent took
+    /// the port (UEFI writes terminal escapes to every serial port): until the first frame
+    /// decodes, bytes that cannot start a frame are skipped ([`resync_skip`]). Every other
+    /// transport is strict from its first byte, as it always was.
+    synced: std::sync::atomic::AtomicBool,
+}
+
+/// How many leading bytes of `buf` to drop so it starts at something that can be a frame
+/// (a length within [`crate::proto::MAX_FRAME`] followed by `{`); keeps a possible partial
+/// header at the end.
+pub fn resync_skip(buf: &[u8]) -> usize {
+    let plausible = |i: usize| {
+        let len = u32::from_be_bytes([buf[i], buf[i + 1], buf[i + 2], buf[i + 3]]) as usize;
+        len <= crate::proto::MAX_FRAME && buf[i + 4] == b'{'
+    };
+    (1..buf.len()).find(|&i| i + 5 <= buf.len() && plausible(i)).unwrap_or(buf.len().saturating_sub(4).max(1).min(buf.len()))
 }
 
 impl std::fmt::Debug for Channel {
@@ -478,7 +498,7 @@ impl Channel {
             }
         }
         let w = stream.try_clone().map_err(|e| format!("clone channel: {e}"))?;
-        Ok(Channel { w, r: stream, rbuf: Default::default(), transport })
+        Ok(Channel { w, r: stream, rbuf: Default::default(), transport, synced: std::sync::atomic::AtomicBool::new(transport != Transport::Uart) })
     }
 
     /// Connect to `<run>/chan.sock` (QEMU) or `<run>/vsock.sock` (Firecracker),
@@ -498,7 +518,9 @@ impl Channel {
                     }
                     Err(e) => return Err(e),
                 },
-                Err(e) if Instant::now() < deadline && matches!(e.kind(), ErrorKind::NotFound | ErrorKind::ConnectionRefused) => {
+                // ERROR_PIPE_BUSY (231): a hypervisor's named-pipe server between two clients
+                // (e.g. right after another process let go of it) — retry like a refused socket.
+                Err(e) if Instant::now() < deadline && (matches!(e.kind(), ErrorKind::NotFound | ErrorKind::ConnectionRefused) || (cfg!(windows) && e.raw_os_error() == Some(231))) => {
                     std::thread::sleep(Duration::from_millis(20));
                 }
                 Err(e) => return Err(format!("connect {}: {e}", path.display())),
@@ -508,6 +530,47 @@ impl Channel {
 
     pub fn transport(&self) -> Transport {
         self.transport
+    }
+
+    /// Mutual authentication on a channel other local processes can reach (Windows QEMU's
+    /// loopback TCP chardev), with the per-boot `key` the provider gave the guest through
+    /// fw_cfg. The guest's `Hello` carries a nonce; the host answers [`HostMsg::Auth`] with its
+    /// proof and its own nonce; the guest answers [`GuestMsg::Auth`]. Nothing else is trusted
+    /// before both proofs check: a process that grabbed the port first cannot pass for the
+    /// guest (it has no key), and one that reaches the guest cannot drive it (the agent refuses
+    /// every frame until `Auth` verified). The `Hello` is put back in front of the queue, so the
+    /// caller reads it exactly as on an unauthenticated channel.
+    pub fn authenticate(&self, key: &[u8], wait: Duration) -> Result<(), String> {
+        // Wait for the Hello; after a second of silence, poke the guest (an unauthenticated
+        // guest answers any frame with its Hello again) — the Hello may have gone to a process
+        // that held the port before us.
+        let deadline = Instant::now() + wait;
+        let hello = loop {
+            match self.recv(Duration::from_secs(1).min(wait))? {
+                Some(h @ GuestMsg::Hello { .. }) => break h,
+                Some(_) => continue,
+                None if Instant::now() >= deadline => return Err(format!("timed out waiting for Hello ({wait:?})")),
+                None => self.send(&HostMsg::Ping { id: 0 })?,
+            }
+        };
+        let challenge = match &hello {
+            GuestMsg::Hello { nonce: Some(n), .. } => n.clone(),
+            _ => return Err("the guest agent did not authenticate the channel (no nonce in Hello): rebuild the guest image (`seagent sandbox vm image build --force`) — this channel is reachable by other local processes, so seagent refuses an unauthenticated guest".into()),
+        };
+        let mine = crate::proto::random_hex(16);
+        self.send(&HostMsg::Auth { nonce: mine.clone(), mac: crate::proto::auth_mac(key, "host", &challenge, &mine) })?;
+        loop {
+            match self.expect(wait, "the guest's Auth")? {
+                GuestMsg::Auth { mac } if crate::proto::auth_ok(key, "guest", &mine, &challenge, &mac) => break,
+                GuestMsg::Auth { .. } => return Err("the peer on the guest channel failed authentication (wrong key): not the VM seagent started — refusing it".into()),
+                GuestMsg::Err { message, .. } if message.contains("authentication failed") => return Err(format!("the guest refused the channel authentication: {message}")),
+                // The guest's answers to our pokes ("not authenticated" + Hello) may still be
+                // in flight ahead of its Auth.
+                _ => continue,
+            }
+        }
+        self.rbuf.lock().unwrap().1.push_front(hello);
+        Ok(())
     }
 
     pub fn send(&self, m: &HostMsg) -> Result<(), String> {
@@ -542,7 +605,27 @@ impl Channel {
                 }
                 Ok(n) => {
                     st.0.extend_from_slice(&chunk[..n]);
-                    let (frames, used) = decode::<GuestMsg>(&st.0)?;
+                    let (frames, used) = if self.synced.load(std::sync::atomic::Ordering::SeqCst) {
+                        decode::<GuestMsg>(&st.0)?
+                    } else {
+                        // Firmware noise ahead of the agent's first frame (UART only).
+                        loop {
+                            let header_ok = st.0.len() < 5 || (u32::from_be_bytes([st.0[0], st.0[1], st.0[2], st.0[3]]) as usize <= crate::proto::MAX_FRAME && st.0[4] == b'{');
+                            match decode::<GuestMsg>(&st.0) {
+                                Ok((f, u)) if header_ok => {
+                                    if !f.is_empty() {
+                                        self.synced.store(true, std::sync::atomic::Ordering::SeqCst);
+                                    }
+                                    break (f, u);
+                                }
+                                _ if st.0.is_empty() => break (vec![], 0),
+                                _ => {
+                                    let skip = resync_skip(&st.0);
+                                    st.0.drain(..skip);
+                                }
+                            }
+                        }
+                    };
                     if used > 0 {
                         st.0.drain(..used);
                         st.1.extend(frames);
@@ -641,6 +724,85 @@ mod tests {
         assert_eq!(seen.len(), 2, "both buffered frames survive the close: {seen:?}");
     }
 
+    /// A fake guest on the other end of a pair (TCP loopback on Windows, a unix pair elsewhere):
+    /// sends Hello with `nonce`, answers the host's Auth with `guest_key`'s proof.
+    fn auth_peer(guest_key: Option<&'static [u8]>, nonce: Option<&str>) -> (Channel, std::thread::JoinHandle<Option<String>>) {
+        let (a, b) = Stream::pair().unwrap();
+        let ch = Channel::from_stream(a, Transport::Serial).unwrap();
+        let nonce = nonce.map(str::to_string);
+        let t = std::thread::spawn(move || {
+            let guest = Channel::from_stream(b, Transport::Serial).unwrap();
+            let hello = GuestMsg::Hello { version: 1, agent: "fake".into(), kernel: "k".into(), cid: None, transport: "virtio-serial".into(), uid: 1000, nonce: nonce.clone() };
+            let mut w = &guest.w;
+            w.write_all(&encode(&hello).unwrap()).unwrap();
+            // Read the host's Auth with the host-side decoder's twin.
+            let mut buf = Vec::new();
+            let mut chunk = [0u8; 4096];
+            let auth = loop {
+                let n = (&guest.r).read(&mut chunk).unwrap_or(0);
+                if n == 0 {
+                    return None;
+                }
+                buf.extend_from_slice(&chunk[..n]);
+                if let Some(m) = decode::<HostMsg>(&buf).unwrap().0.into_iter().next() {
+                    break m;
+                }
+            };
+            let HostMsg::Auth { nonce: hn, mac } = auth else { return Some("not auth".into()) };
+            let answer = match crate::proto::guest_auth_answer(guest_key.unwrap_or(b"none"), nonce.as_deref().unwrap_or(""), &hn, &mac) {
+                Ok(a) => a,
+                Err(e) => GuestMsg::Err { id: 0, message: e },
+            };
+            w.write_all(&encode(&answer).unwrap()).unwrap();
+            Some(hn)
+        });
+        (ch, t)
+    }
+
+    #[test]
+    fn a_keyed_channel_authenticates_both_ways_and_keeps_the_hello() {
+        let key: &'static [u8] = b"0123456789abcdef";
+        // The real guest: both proofs check, and the Hello is still the first frame read.
+        let (ch, t) = auth_peer(Some(key), Some("g-nonce"));
+        ch.authenticate(key, Duration::from_secs(5)).unwrap();
+        assert!(matches!(ch.expect(Duration::from_secs(1), "hello").unwrap(), GuestMsg::Hello { nonce: Some(_), .. }));
+        assert!(t.join().unwrap().is_some_and(|n| n.len() == 32), "the host sent a fresh 16-byte nonce");
+        // A squatter without the key: its answer (or its refusal of our proof) is rejected.
+        let (ch, _t) = auth_peer(Some(b"wrong-key-wrong!"), Some("g-nonce"));
+        let e = ch.authenticate(key, Duration::from_secs(5)).unwrap_err();
+        assert!(e.contains("refused") || e.contains("failed authentication"), "{e}");
+        // An old guest that never offers a challenge is refused on a keyed channel.
+        let (ch, _t) = auth_peer(None, None);
+        assert!(ch.authenticate(key, Duration::from_secs(5)).unwrap_err().contains("no nonce"));
+        // And the guest side refuses a host proof made with another key.
+        assert!(crate::proto::guest_auth_answer(key, "c", "n", &crate::proto::auth_mac(b"other", "host", "c", "n")).is_err());
+        assert!(matches!(crate::proto::guest_auth_answer(key, "c", "n", &crate::proto::auth_mac(key, "host", "c", "n")), Ok(GuestMsg::Auth { .. })));
+    }
+
+    /// UEFI prints terminal escapes on every serial port before the agent owns COM2 (seen on
+    /// a real UEFI boot): a UART channel skips that noise up to the first frame; every other
+    /// transport stays strict.
+    #[test]
+    fn a_uart_channel_skips_firmware_noise_before_the_first_frame() {
+        let first = GuestMsg::Pong { id: 9 };
+        let mut bytes = b"\x1b[=3h\x1b[2J\x1b[01;01HBdsDxe: loading Boot0001 {x}\r\n".to_vec();
+        bytes.extend(encode(&first).unwrap());
+        bytes.extend(encode(&GuestMsg::Pong { id: 10 }).unwrap());
+        let (a, mut b) = Stream::pair().unwrap();
+        let ch = Channel::from_stream(a, Transport::Uart).unwrap();
+        b.write_all(&bytes).unwrap();
+        assert_eq!(ch.expect(Duration::from_secs(2), "pong").unwrap(), first);
+        assert_eq!(ch.expect(Duration::from_secs(2), "pong").unwrap(), GuestMsg::Pong { id: 10 });
+        // Once in sync, the UART is strict too.
+        b.write_all(b"\x1b[2Jgarbage-after-sync").unwrap();
+        assert!(ch.recv(Duration::from_millis(300)).is_err());
+        let (a, mut b) = Stream::pair().unwrap();
+        let strict = Channel::from_stream(a, Transport::Serial).unwrap();
+        b.write_all(&bytes).unwrap();
+        assert!(strict.recv(Duration::from_millis(300)).is_err(), "virtio-serial / unix / vsock keep their exact framing");
+        assert_eq!(resync_skip(b"\x1b"), 1);
+    }
+
     #[test]
     fn vsock_handshake_rejects_garbage() {
         let (a, mut b) = Stream::pair().unwrap();
@@ -672,7 +834,7 @@ mod tests {
         assert_eq!(Endpoint::Unix(p.clone()).qemu_chardev("seagent0"), format!("socket,id=seagent0,path={},server=on,wait=off", p.display()), "Linux keeps its exact chardev");
         assert_eq!(Endpoint::Unix(p.clone()).qemu_monitor(), format!("unix:{},server=on,wait=off", p.display()));
         let tcp = Endpoint::Tcp("127.0.0.1:4555".parse().unwrap());
-        assert_eq!(tcp.qemu_chardev("c"), "socket,id=c,host=127.0.0.1,port=4555,server=on,wait=off", "Windows QEMU: loopback only");
+        assert_eq!(tcp.qemu_chardev("c"), "socket,id=c,host=127.0.0.1,port=4555,server=on,wait=off,nodelay=on", "Windows QEMU: loopback only, no Nagle delay");
         assert_eq!(tcp.qemu_monitor(), "tcp:127.0.0.1:4555,server=on,wait=off");
         if cfg!(unix) {
             assert_eq!(Endpoint::locate(&p).unwrap(), Endpoint::Unix(p));

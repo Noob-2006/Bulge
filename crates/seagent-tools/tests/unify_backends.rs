@@ -308,6 +308,40 @@ fn vm_config() -> Option<seagent_vm::VmConfig> {
     })
 }
 
+/// Windows counterpart of `a_real_microvm_passes_the_conformance_suite`: the same suite against
+/// the Windows substitute, QEMU + WHPX (TCG when the platform feature is off), from
+/// `SEAGENT_VM_IMAGE_DIR` (a `--build-kernel` image: QEMU needs the PCI kernel).
+#[cfg(windows)]
+#[test]
+#[ignore = "boots a real VM (needs QEMU for Windows and SEAGENT_VM_IMAGE_DIR)"]
+fn a_real_qemu_whpx_vm_passes_the_conformance_suite() {
+    let Some(img) = image_dir() else {
+        eprintln!("SKIP: set SEAGENT_VM_IMAGE_DIR to a built image");
+        return;
+    };
+    if seagent_vm::host::find_tool(seagent_vm::host::native_qemu()).is_none() {
+        eprintln!("SKIP: qemu-system-x86_64 not found");
+        return;
+    }
+    let vm = seagent_vm::VmConfig {
+        provider: "qemu".into(),
+        allow_fallback: false,
+        kernel: img.join("vmlinux").display().to_string(),
+        initramfs: img.join("initramfs.cpio.gz").display().to_string(),
+        memory_mb: 512,
+        vcpu: 2,
+        ..Default::default()
+    };
+    let (_d, ctx) = scratch("winvm", false);
+    let cfg = ExecConfig { vm, ..ExecConfig::default() };
+    let env = open("vm", &cfg, &ctx).unwrap_or_else(|e| panic!("open(vm): {e}"));
+    let caps = env.caps();
+    assert_eq!((caps.level, caps.uid), (IsolationLevel::MicroVm, Some(1000)), "{caps:?}");
+    assert!(caps.workspace_copy && caps.snapshots && caps.broker, "{caps:?}");
+    eprintln!("ran the QEMU+WHPX conformance: {}", caps.line());
+    conformance(env.as_ref(), &ctx.workspace);
+}
+
 #[test]
 #[ignore = "boots a real microVM (needs /dev/kvm, firecracker and a guest image)"]
 fn a_real_microvm_passes_the_conformance_suite() {

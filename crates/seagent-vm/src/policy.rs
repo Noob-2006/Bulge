@@ -217,7 +217,8 @@ pub fn host_plan(why: &str, fix: &str) -> Plan {
 /// Capabilities with the same "unpacked into the data dir" rules the pool uses
 /// (a Firecracker tarball under `<data>/vm/bin` counts).
 pub fn capabilities(cfg: &VmConfig, data: &Path) -> Capabilities {
-    let mut caps = Capabilities::detect(Some(&cfg.kernel_path(data)), Some(&cfg.initramfs_path(data)));
+    let (kernel, initramfs) = image_paths(cfg, data);
+    let mut caps = Capabilities::detect(Some(&kernel), Some(&initramfs));
     let local_fc = data.join("vm").join("bin").join("firecracker");
     if caps.os == HostOs::Linux {
         if let Some(p) = crate::isolation::which(&cfg.firecracker).or(local_fc.is_file().then_some(local_fc)) {
@@ -235,9 +236,29 @@ pub fn capabilities(cfg: &VmConfig, data: &Path) -> Capabilities {
             caps.vfkit = Some(p);
         }
     }
-    let disk = cfg.disk_image_path(data);
+    // VirtualBox / Hyper-V take `disk.raw` from the image's own directory unless configured
+    // (`provider::vbox::raw_disk`), so the check looks exactly there.
+    let disk = if cfg.disk_image.is_empty() { kernel.parent().unwrap_or(Path::new(".")).join("disk.raw") } else { cfg.disk_image_path(data) };
     caps.disk_image = disk.is_file().then_some(disk);
     caps
+}
+
+/// The kernel + initramfs [`crate::image::GuestImage::find`] boots, by the same rule
+/// (configured pair, else `<root>/image/` with a manifest, else the legacy `<root>/kernel/`),
+/// but without hashing them: this runs on every provider selection. Before, only the legacy
+/// pair was looked at, so an image built by `seagent sandbox vm image build` (which writes
+/// `<root>/image/`) booted but was reported as "guest kernel missing".
+pub fn image_paths(cfg: &VmConfig, data: &Path) -> (PathBuf, PathBuf) {
+    if cfg.kernel.is_empty() && cfg.initramfs.is_empty() {
+        let dir = cfg.root(data).join("image");
+        let manifest = std::fs::read_to_string(dir.join(crate::image::MANIFEST_FILE)).ok().and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok());
+        if let Some(m) = manifest {
+            if let (Some(k), Some(i)) = (m["kernel"]["path"].as_str(), m["initramfs"]["path"].as_str()) {
+                return (dir.join(k), dir.join(i));
+            }
+        }
+    }
+    (cfg.kernel_path(data), cfg.initramfs_path(data))
 }
 
 /// Why no microVM: one short phrase, the first real blocker.
@@ -275,11 +296,6 @@ pub fn blockers(caps: &Capabilities) -> String {
     "no usable VMM".into()
 }
 
-/// Guest image paths that `auto` needs, for error messages.
-pub fn image_paths(cfg: &VmConfig, data: &Path) -> (PathBuf, PathBuf) {
-    (cfg.kernel_path(data), cfg.initramfs_path(data))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -292,6 +308,29 @@ mod tests {
     #[cfg_attr(not(unix), allow(dead_code))] // its users are unix-only tests
     fn bootable_caps() -> Capabilities {
         Capabilities { kvm: true, firecracker: Some(PathBuf::from("/bin/true")), kernel: Some(PathBuf::from("/img/vmlinux")), initramfs: Some(PathBuf::from("/img/initramfs.cpio.gz")), ..Default::default() }
+    }
+
+    /// An image built into `<root>/image/` (what `seagent sandbox vm image build` writes, and
+    /// how the Windows host got its image) is what detection reports, with the disk next to it.
+    #[test]
+    fn detection_sees_the_image_dir_the_pool_boots_from() {
+        let d = seagent_core::tmp::scratch_path(format!("seagent-policy-imgdir-{}", std::process::id()));
+        let img = d.join("vm").join("image");
+        std::fs::create_dir_all(&img).unwrap();
+        let cfg = VmConfig::default();
+        assert_eq!(image_paths(&cfg, &d), (cfg.kernel_path(&d), cfg.initramfs_path(&d)), "no manifest: the legacy pair");
+        std::fs::write(img.join("manifest.json"), r#"{"image_version":1,"kernel":{"path":"vmlinux"},"initramfs":{"path":"initramfs.cpio.gz"}}"#).unwrap();
+        for f in ["vmlinux", "initramfs.cpio.gz", "disk.raw"] {
+            std::fs::write(img.join(f), b"x").unwrap();
+        }
+        assert_eq!(image_paths(&cfg, &d), (img.join("vmlinux"), img.join("initramfs.cpio.gz")));
+        let caps = capabilities(&cfg, &d);
+        assert_eq!((caps.kernel.as_deref(), caps.initramfs.as_deref()), (Some(img.join("vmlinux").as_path()), Some(img.join("initramfs.cpio.gz").as_path())));
+        assert_eq!(caps.disk_image, Some(img.join("disk.raw")), "VirtualBox / Hyper-V take the disk from the image's directory");
+        // A configured pair still wins, exactly as `GuestImage::find` decides.
+        let pinned = VmConfig { kernel: "/k/vmlinux".into(), initramfs: "/k/initrd".into(), ..Default::default() };
+        assert_eq!(image_paths(&pinned, &d), (PathBuf::from("/k/vmlinux"), PathBuf::from("/k/initrd")));
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     #[test]

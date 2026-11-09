@@ -109,6 +109,10 @@ pub enum ProviderKind {
     Gvisor,
     /// Fallback: bubblewrap namespaces, the level seagent already had.
     Bwrap,
+    /// Fallback on Windows: AppContainer / restricted token (`exec.backend = "appcontainer"`).
+    AppContainer,
+    /// Fallback on macOS: Seatbelt (`sandbox-exec`, `exec.backend = "seatbelt"`).
+    Seatbelt,
 }
 
 impl ProviderKind {
@@ -122,6 +126,8 @@ impl ProviderKind {
             ProviderKind::Avf => "avf",
             ProviderKind::Gvisor => "gvisor",
             ProviderKind::Bwrap => "bwrap",
+            ProviderKind::AppContainer => "appcontainer",
+            ProviderKind::Seatbelt => "seatbelt",
         }
     }
     pub fn parse(s: &str) -> Option<ProviderKind> {
@@ -138,13 +144,25 @@ impl ProviderKind {
         })
     }
     pub fn is_vm(self) -> bool {
-        !matches!(self, ProviderKind::Gvisor | ProviderKind::Bwrap)
+        !matches!(self, ProviderKind::Gvisor | ProviderKind::Bwrap | ProviderKind::AppContainer | ProviderKind::Seatbelt)
     }
     pub fn isolation(self) -> IsolationLevel {
         match self {
             ProviderKind::Gvisor => IsolationLevel::AppKernel,
             ProviderKind::Bwrap => IsolationLevel::UserNamespace,
+            ProviderKind::AppContainer | ProviderKind::Seatbelt => IsolationLevel::OsSandbox,
             _ => IsolationLevel::MicroVm,
+        }
+    }
+    /// The non-VM sandbox the VM backend falls back to on `os` when no microVM can boot (what
+    /// `seagent_tools::exec::vm::VmBackend` actually runs): bwrap on Linux / Android,
+    /// AppContainer on Windows, Seatbelt on macOS. Reported by name, so Windows no longer
+    /// claims a bwrap it does not have.
+    pub fn sandbox_fallback(os: HostOs) -> ProviderKind {
+        match os {
+            HostOs::Windows => ProviderKind::AppContainer,
+            HostOs::Macos => ProviderKind::Seatbelt,
+            _ => ProviderKind::Bwrap,
         }
     }
     /// The VM providers `auto` tries on `os`, strongest first (an explicit
@@ -192,6 +210,9 @@ pub struct Capabilities {
     pub hvf: bool,
     /// Hyper-V is installed: the PowerShell that drives it.
     pub hyperv: Option<PathBuf>,
+    /// Why Hyper-V is unusable on this Windows machine (Home edition, feature off), so the
+    /// report and the fallback message name the real reason. `None` elsewhere / when installed.
+    pub hyperv_blocker: Option<String>,
     /// `VBoxManage`.
     pub vbox: Option<PathBuf>,
     /// `vfkit` (Apple Virtualization.framework CLI).
@@ -246,6 +267,7 @@ impl Capabilities {
             whpx: crate::host::whpx_available(),
             hvf: crate::host::hvf_available(),
             hyperv: if crate::host::hyperv_available() { tool("powershell") } else { None },
+            hyperv_blocker: if os == HostOs::Windows { crate::host::hyperv_unavailable() } else { None },
             vbox: if matches!(os, HostOs::Windows | HostOs::Macos) { tool("VBoxManage") } else { None },
             vfkit: if os == HostOs::Macos { tool("vfkit") } else { None },
             avf: crate::host::avf_tool(),
@@ -287,10 +309,12 @@ impl Capabilities {
                 }
             }
             ProviderKind::Vfkit => (os == HostOs::Macos && self.hvf && self.vfkit.is_some() && image).then_some(Accel::Hvf),
-            ProviderKind::VirtualBox => (matches!(os, HostOs::Linux | HostOs::Macos | HostOs::Windows) && self.vbox.is_some() && self.disk_image.is_some() && image).then_some(Accel::Vbox),
+            // With the Windows hypervisor running (what WHPX reports), VirtualBox cannot own
+            // VT-x and runs on the Windows Hypervisor Platform (its "NEM" backend).
+            ProviderKind::VirtualBox => (matches!(os, HostOs::Linux | HostOs::Macos | HostOs::Windows) && self.vbox.is_some() && self.disk_image.is_some() && image).then_some(if os == HostOs::Windows && self.whpx { Accel::Whpx } else { Accel::Vbox }),
             ProviderKind::HyperV => (os == HostOs::Windows && self.hyperv.is_some() && self.disk_image.is_some() && image).then_some(Accel::Hyperv),
             ProviderKind::Avf => (os == HostOs::Android && self.avf.is_some() && self.kvm && image).then_some(Accel::Kvm),
-            ProviderKind::Gvisor | ProviderKind::Bwrap => None,
+            ProviderKind::Gvisor | ProviderKind::Bwrap | ProviderKind::AppContainer | ProviderKind::Seatbelt => None,
         }
     }
 
@@ -355,7 +379,7 @@ impl Capabilities {
         match self.os {
             HostOs::Windows => {
                 v.push(format!("windows hypervisor platform (whpx): {}", yes(self.whpx, "enable the optional feature `HypervisorPlatform` and VT-x/AMD-V in firmware")));
-                v.push(format!("hyper-v: {}", self.hyperv.as_ref().map(|_| "installed (VM creation needs an elevated session or Hyper-V Administrators)".to_string()).unwrap_or_else(|| "not installed".into())));
+                v.push(format!("hyper-v: {}", self.hyperv.as_ref().map(|_| "installed (VM creation needs an elevated session or Hyper-V Administrators)".to_string()).unwrap_or_else(|| self.hyperv_blocker.clone().unwrap_or_else(|| "not installed".into()))));
                 v.push(format!("virtualbox (VBoxManage): {}", p(&self.vbox)));
             }
             HostOs::Macos => {
@@ -461,6 +485,21 @@ mod tests {
         assert!(caps.warning().unwrap().contains("namespace sandbox"));
         let caps = Capabilities { kernel: Some("/bin/true".into()), initramfs: Some("/bin/true".into()), ..caps };
         assert_eq!(caps.best(), Some(ProviderKind::Firecracker), "firecracker wins when everything is there");
+    }
+
+    /// Windows counterpart of `a_machine_without_a_kernel_image_is_not_called_a_microvm`:
+    /// QEMU and WHPX alone are not a microVM either; with the image it is QEMU+WHPX.
+    #[test]
+    fn a_windows_machine_without_a_kernel_image_is_not_called_a_microvm() {
+        let caps = Capabilities { os: HostOs::Windows, whpx: true, qemu: Some(r"C:\Program Files\qemu\qemu-system-x86_64.exe".into()), ..Default::default() };
+        assert!(!caps.can_boot_vm(), "no image, no VM");
+        let caps = Capabilities { kernel: Some(r"C:\img\vmlinux".into()), initramfs: Some(r"C:\img\initramfs.cpio.gz".into()), ..caps };
+        assert_eq!(caps.best_vm(), Some((ProviderKind::Qemu, Accel::Whpx)));
+        assert!(caps.warning().is_none(), "QEMU+WHPX is hardware-accelerated: {:?}", caps.warning());
+        assert!(caps.report().iter().any(|l| l == "best provider: qemu (accelerator: Windows Hypervisor Platform)"), "{:?}", caps.report());
+        let tcg = Capabilities { whpx: false, ..caps };
+        assert_eq!(tcg.best_vm(), Some((ProviderKind::Qemu, Accel::Tcg)));
+        assert!(tcg.warning().unwrap().contains("TCG"));
     }
 
     #[test]

@@ -170,10 +170,72 @@ pub fn hvf_available() -> bool {
     false
 }
 
-/// Hyper-V is installed (its management service is on disk). Whether *this* user may create
-/// VMs (an elevated session or `Hyper-V Administrators`) only shows when `New-VM` runs.
+/// Hyper-V is installed: its management service *and* the `Hyper-V` PowerShell module the
+/// provider drives (`New-VM` …) are on disk. Whether *this* user may create VMs (an elevated
+/// session or `Hyper-V Administrators`) only shows when `New-VM` runs.
 pub fn hyperv_available() -> bool {
-    cfg!(windows) && system_root().join("System32").join("vmms.exe").is_file()
+    cfg!(windows) && hyperv_files().0 && hyperv_files().1
+}
+
+/// (`vmms.exe`, the `Hyper-V` PowerShell module) present.
+fn hyperv_files() -> (bool, bool) {
+    let sys = system_root().join("System32");
+    (sys.join("vmms.exe").is_file(), sys.join("WindowsPowerShell").join("v1.0").join("Modules").join("Hyper-V").is_dir())
+}
+
+/// Why the Hyper-V provider cannot run on this machine, or `None` when it is installed.
+/// Windows Home editions (`EditionID` `Core*`) have no Hyper-V role at all — only the
+/// hypervisor that WSL2 and the Windows Hypervisor Platform use — so the fix there is a
+/// different provider (QEMU+WHPX), not a feature to enable.
+pub fn hyperv_unavailable() -> Option<String> {
+    if !cfg!(windows) {
+        return Some("Hyper-V exists on Windows only".into());
+    }
+    let (vmms, module) = hyperv_files();
+    hyperv_reason(windows_edition().as_deref(), vmms, module)
+}
+
+/// [`hyperv_unavailable`] as a pure function of what was probed (tests run it on any OS).
+pub fn hyperv_reason(edition: Option<&str>, vmms: bool, module: bool) -> Option<String> {
+    if vmms && module {
+        return None;
+    }
+    if let Some(ed) = edition.filter(|e| is_home_edition(e)) {
+        return Some(format!(
+            "unavailable on Windows Home (EditionID `{ed}`): Home has no Hyper-V role or Hyper-V PowerShell module (Pro, Enterprise or Education do); QEMU+WHPX or VirtualBox are used instead"
+        ));
+    }
+    Some(match (vmms, module) {
+        (false, false) => "not installed (no vmms service, no Hyper-V PowerShell module): Enable-WindowsOptionalFeature -Online -FeatureName Microsoft-Hyper-V-All (elevated), then reboot".into(),
+        (true, false) => "the Hyper-V PowerShell module is missing: Enable-WindowsOptionalFeature -Online -FeatureName Microsoft-Hyper-V-Management-PowerShell (elevated)".into(),
+        _ => "the Hyper-V management service (vmms) is missing: Enable-WindowsOptionalFeature -Online -FeatureName Microsoft-Hyper-V-All (elevated), then reboot".into(),
+    })
+}
+
+/// `Core`, `CoreN`, `CoreSingleLanguage`, `CoreCountrySpecific`: the Home editions.
+pub fn is_home_edition(edition_id: &str) -> bool {
+    edition_id.starts_with("Core")
+}
+
+/// `HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\EditionID` (`Core`, `Professional`, …).
+#[cfg(windows)]
+pub fn windows_edition() -> Option<String> {
+    use windows_sys::Win32::System::Registry::{RegGetValueW, HKEY_LOCAL_MACHINE, RRF_RT_REG_SZ};
+    let key: Vec<u16> = "SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\0".encode_utf16().collect();
+    let value: Vec<u16> = "EditionID\0".encode_utf16().collect();
+    let mut buf = [0u16; 128];
+    let mut len = (buf.len() * 2) as u32;
+    // SAFETY: NUL-terminated key/value names; `len` is the buffer size in bytes.
+    let rc = unsafe { RegGetValueW(HKEY_LOCAL_MACHINE, key.as_ptr(), value.as_ptr(), RRF_RT_REG_SZ, std::ptr::null_mut(), buf.as_mut_ptr().cast(), &mut len) };
+    if rc != 0 {
+        return None;
+    }
+    let n = (len as usize / 2).min(buf.len());
+    Some(String::from_utf16_lossy(&buf[..n]).trim_end_matches('\0').to_string())
+}
+#[cfg(not(windows))]
+pub fn windows_edition() -> Option<String> {
+    None
 }
 
 /// The AVF `vm` tool (Android Virtualization Framework, pKVM devices).
@@ -593,6 +655,31 @@ mod tests {
         if cfg!(target_os = "linux") {
             assert!(!whpx_available() && !hvf_available() && !hyperv_available() && avf_tool().is_none(), "no foreign accelerator is ever reported on Linux");
             assert_eq!(native_qemu(), "qemu-system-x86_64", "Linux keeps its QEMU binary");
+        }
+    }
+
+    #[test]
+    fn hyperv_is_explained_per_edition_and_missing_part() {
+        assert_eq!(hyperv_reason(Some("Professional"), true, true), None, "installed = usable");
+        for home in ["Core", "CoreN", "CoreSingleLanguage", "CoreCountrySpecific"] {
+            assert!(is_home_edition(home));
+            let r = hyperv_reason(Some(home), false, false).unwrap();
+            assert!(r.contains("Windows Home") && r.contains(home) && !r.contains("Enable-WindowsOptionalFeature"), "Home cannot enable Hyper-V: {r}");
+        }
+        for pro in ["Professional", "Enterprise", "Education", "ServerStandard"] {
+            assert!(!is_home_edition(pro));
+            assert!(hyperv_reason(Some(pro), false, false).unwrap().contains("Microsoft-Hyper-V-All"), "Pro: name the feature to enable");
+        }
+        assert!(hyperv_reason(Some("Professional"), true, false).unwrap().contains("PowerShell module"));
+        assert!(hyperv_reason(None, false, false).unwrap().contains("not installed"));
+        if cfg!(windows) {
+            let ed = windows_edition().expect("every Windows has an EditionID");
+            assert_eq!(hyperv_unavailable().is_some(), !hyperv_available());
+            if is_home_edition(&ed) {
+                assert!(!hyperv_available() && hyperv_unavailable().unwrap().contains("Windows Home"), "{ed}");
+            }
+        } else {
+            assert!(windows_edition().is_none() && hyperv_unavailable().is_some());
         }
     }
 

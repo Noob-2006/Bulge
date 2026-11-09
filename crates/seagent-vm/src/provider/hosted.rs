@@ -58,9 +58,28 @@ fn pipe_name(spec: &VmSpec) -> String {
     format!(r"\\.\pipe\seagent-{}", spec.id)
 }
 
+/// The environment variable the create script reads the channel serial from (never a value
+/// in the script text, which is a command-line argument of `powershell.exe`).
+pub const HYPERV_KEY_ENV: &str = "SEAGENT_CHANNEL_SERIAL";
+
 /// The PowerShell that creates and starts `spec` on a differencing disk over `base_vhdx`.
-pub fn hyperv_create_script(spec: &VmSpec, base_vhdx: &Path) -> String {
+/// With `keyed`, the VM's SMBIOS system serial is set (WMI `Msvm_VirtualSystemSettingData.
+/// BIOSSerialNumber`, before `Start-VM`) to the channel key from [`HYPERV_KEY_ENV`]: COM2 is a
+/// named pipe other local processes can open, so the guest must prove the key (and the host
+/// too) before any frame counts — see [`crate::proto::DMI_KEY_FILE`].
+pub fn hyperv_create_script(spec: &VmSpec, base_vhdx: &Path, keyed: bool) -> String {
     let n = ps_quote(&hyperv_name(spec));
+    let serial = if keyed {
+        format!(
+            "$vssd = Get-WmiObject -Namespace root\\virtualization\\v2 -Class Msvm_VirtualSystemSettingData -Filter \"ElementName='{name}' AND VirtualSystemType='Microsoft:Hyper-V:System:Realized'\"\n\
+             $vssd.BIOSSerialNumber = $env:{HYPERV_KEY_ENV}\n\
+             $svc = Get-WmiObject -Namespace root\\virtualization\\v2 -Class Msvm_VirtualSystemManagementService\n\
+             $r = $svc.ModifySystemSettings($vssd.GetText(1)); if ($r.ReturnValue -ne 0) {{ throw \"ModifySystemSettings (BIOS serial) returned $($r.ReturnValue)\" }}\n",
+            name = hyperv_name(spec).replace('\'', "")
+        )
+    } else {
+        String::new()
+    };
     let child = ps_quote(&spec.run_dir.join("disk.vhdx").display().to_string());
     format!(
         "$ErrorActionPreference = 'Stop'\n\
@@ -72,6 +91,7 @@ pub fn hyperv_create_script(spec: &VmSpec, base_vhdx: &Path) -> String {
          Set-VMFirmware -VMName {n} -EnableSecureBoot Off\n\
          Set-VMComPort -VMName {n} -Number 2 -Path {pipe}\n\
          Set-VM -Name {n} -AutomaticCheckpointsEnabled $false -AutomaticStartAction Nothing -AutomaticStopAction TurnOff\n\
+         {serial}\
          Start-VM -Name {n}\n",
         base = ps_quote(&base_vhdx.display().to_string()),
         mem = spec.mem_mb,
@@ -82,8 +102,12 @@ pub fn hyperv_create_script(spec: &VmSpec, base_vhdx: &Path) -> String {
 }
 
 fn powershell(script: &str) -> Result<String, String> {
+    powershell_env(script, &[])
+}
+
+fn powershell_env(script: &str, env: &[(&str, &str)]) -> Result<String, String> {
     let ps = crate::host::find_tool("powershell").ok_or("powershell not found")?;
-    let o = Command::new(ps).args(["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", script]).stdin(Stdio::null()).output().map_err(|e| format!("powershell: {e}"))?;
+    let o = Command::new(ps).args(["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", script]).envs(env.iter().copied()).stdin(Stdio::null()).output().map_err(|e| format!("powershell: {e}"))?;
     if !o.status.success() {
         let err = String::from_utf8_lossy(&o.stderr).trim().to_string();
         let hint = if err.contains("permission") || err.contains("authorization") || err.contains("Administrator") { " (Hyper-V needs an elevated session or membership in the `Hyper-V Administrators` group)" } else { "" };
@@ -95,8 +119,12 @@ fn powershell(script: &str) -> Result<String, String> {
 /// The VHDX next to `raw`, converted once with `qemu-img` (Hyper-V cannot read raw disks).
 fn ensure_vhdx(raw: &Path) -> Result<PathBuf, String> {
     let vhdx = raw.with_extension("vhdx");
-    if vhdx.is_file() {
+    if vhdx.is_file() && !super::vbox::is_stale(&vhdx, raw) {
         return Ok(vhdx);
+    }
+    if vhdx.is_file() {
+        // disk.raw is newer than the conversion: convert again rather than boot the old guest.
+        std::fs::remove_file(&vhdx).map_err(|e| format!("remove the stale {}: {e}", vhdx.display()))?;
     }
     if !raw.is_file() {
         return Err(format!("Hyper-V needs a bootable UEFI guest disk ({} not found): it cannot boot the kernel + initramfs directly; build a raw UEFI disk of the image and set exec.vm.disk_image", raw.display()));
@@ -120,8 +148,10 @@ impl VmProvider for HyperVProvider {
         std::fs::create_dir_all(&spec.run_dir).map_err(|e| format!("create {}: {e}", spec.run_dir.display()))?;
         let base = ensure_vhdx(&super::vbox::raw_disk(&self.disk, spec))?;
         Endpoint::allocate_pipe(&spec.channel_path(), &format!("seagent-{}", spec.id))?;
-        let mut inst = HyperVInstance { spec: spec.clone(), chan: None, created: true };
-        if let Err(e) = powershell(&hyperv_create_script(spec, &base)) {
+        let key = crate::proto::random_hex(16);
+        let serial = format!("{}{key}", crate::proto::DMI_KEY_PREFIX);
+        let mut inst = HyperVInstance { spec: spec.clone(), chan: None, created: true, key: key.into_bytes() };
+        if let Err(e) = powershell_env(&hyperv_create_script(spec, &base, true), &[(HYPERV_KEY_ENV, &serial)]) {
             inst.stop();
             return Err(e);
         }
@@ -133,6 +163,8 @@ pub struct HyperVInstance {
     spec: VmSpec,
     chan: Option<Arc<Channel>>,
     created: bool,
+    /// The per-boot channel key (the VM's SMBIOS serial), proven both ways on connect.
+    key: Vec<u8>,
 }
 
 impl HyperVInstance {
@@ -155,7 +187,9 @@ impl VmInstance for HyperVInstance {
         if let Some(c) = &self.chan {
             return Ok(c.clone());
         }
-        let ch = Arc::new(Channel::connect(&self.spec.channel_path(), Transport::Uart, wait)?);
+        let ch = Channel::connect(&self.spec.channel_path(), Transport::Uart, wait)?;
+        ch.authenticate(&self.key, wait)?;
+        let ch = Arc::new(ch);
         self.chan = Some(ch.clone());
         Ok(ch)
     }
@@ -340,7 +374,12 @@ mod tests {
 
     #[test]
     fn hyperv_vm_has_no_nic_a_throwaway_disk_and_a_pipe_channel() {
-        let s = hyperv_create_script(&spec(), Path::new(r"C:\img\disk.vhdx"));
+        let s = hyperv_create_script(&spec(), Path::new(r"C:\img\disk.vhdx"), true);
+        // The named-pipe channel is keyed: the SMBIOS serial is set from the environment
+        // (never a literal in the script, which is powershell.exe's command line) before start.
+        let serial_at = s.find("BIOSSerialNumber = $env:SEAGENT_CHANNEL_SERIAL").expect("the key is set");
+        assert!(serial_at < s.find("Start-VM").unwrap() && s.contains("ModifySystemSettings($vssd.GetText(1))") && s.contains("ElementName='seagent-h-1'"), "{s}");
+        assert!(!hyperv_create_script(&spec(), Path::new(r"C:\img\disk.vhdx"), false).contains("BIOSSerialNumber"));
         assert!(s.contains("-Differencing") && s.contains(r"-ParentPath 'C:\img\disk.vhdx'"), "{s}");
         assert!(s.contains("Remove-VMNetworkAdapter"), "no NIC: {s}");
         assert!(s.contains("-MemoryStartupBytes 2048MB") && s.contains("-Count 4") && s.contains("-DynamicMemoryEnabled $false"), "{s}");
