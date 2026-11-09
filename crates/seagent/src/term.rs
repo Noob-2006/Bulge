@@ -339,6 +339,7 @@ fn kind_name(kind: &EventKind) -> &'static str {
         EventKind::Discard { .. } => "discard",
         EventKind::Workspace { .. } => "workspace",
         EventKind::Fast { .. } => "fast",
+        EventKind::Skills { .. } => "skills",
         EventKind::AuxUsage { .. } => "aux_usage",
         EventKind::Step { .. } => "step",
         EventKind::SystemDelta { .. } => "system_delta",

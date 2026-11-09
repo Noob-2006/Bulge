@@ -15,6 +15,7 @@
 <link rel="stylesheet" href="/ui/theme.css">
 <link rel="stylesheet" href="/ui/app.css">
 <link rel="stylesheet" href="/ui/pages.css">
+<link rel="stylesheet" href="/ui/chat_menu.css">
 </head>
 <body>
 <div class="starfield" id="starfield" aria-hidden="true"></div>
@@ -99,7 +100,7 @@
           <div class="composer-bar">
             <button type="button" class="btn ghost small" id="attach" data-i18n="attach" title="Attach a file (or paste / drop one)">附加</button>
             <input type="file" id="file" multiple hidden>
-            <span class="chip" id="modelChip" title="模型"></span>
+            <button type="button" class="chip model-pick" id="modelChip" title="模型" aria-haspopup="dialog"></button>
             <span class="chip faint" id="usageChip"></span>
             <span class="spacer"></span>
             <span class="hint faint" data-i18n="send_hint">Enter 送出 · Shift+Enter 換行</span>
@@ -193,5 +194,8 @@
 <script src="/ui/ops.js"></script>
 <script src="/ui/devsec.js"></script>
 <script src="/ui/work.js"></script>
+<script src="/ui/chat_menu.js"></script>
+<script src="/ui/keys.js"></script>
+<script src="/ui/split.js"></script>
 </body>
 </html>

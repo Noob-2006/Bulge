@@ -8,10 +8,14 @@
 
 use crate::secretstore::{Backend, Options, Status, Store};
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::RwLock;
 
 pub struct Vault {
     store: RwLock<Store>,
+    /// Bumped by every `set` / `remove`: holders of values read earlier (the provider cache)
+    /// compare it to know a key was replaced from the web UI without a restart.
+    generation: AtomicU64,
 }
 
 impl std::fmt::Debug for Vault {
@@ -26,7 +30,7 @@ const MIN_REDACT_LEN: usize = 6;
 
 impl Vault {
     pub fn empty() -> Self {
-        Vault { store: RwLock::new(Store::in_memory()) }
+        Vault { store: RwLock::new(Store::in_memory()), generation: AtomicU64::new(0) }
     }
 
     /// Load the store that belongs to `secrets.toml`. An encrypted `secrets.enc` next to it is
@@ -38,7 +42,7 @@ impl Vault {
 
     /// Same, with explicit key material: tests and daemons that pass a credential in memory.
     pub fn load_with(path: &Path, opts: &Options) -> Result<Self, String> {
-        Ok(Vault { store: RwLock::new(Store::open(path, opts)?) })
+        Ok(Vault { store: RwLock::new(Store::open(path, opts)?), generation: AtomicU64::new(0) })
     }
 
     pub fn names(&self) -> Vec<String> {
@@ -56,11 +60,30 @@ impl Vault {
     }
 
     pub fn set(&self, name: &str, value: &str) -> Result<(), String> {
-        self.store.write().map_err(|_| "the vault lock is poisoned".to_string())?.set(name, value)
+        let r = self.store.write().map_err(|_| "the vault lock is poisoned".to_string())?.set(name, value);
+        self.generation.fetch_add(1, Ordering::SeqCst);
+        r
     }
 
     pub fn remove(&self, name: &str) -> Result<bool, String> {
-        self.store.write().map_err(|_| "the vault lock is poisoned".to_string())?.remove(name)
+        let r = self.store.write().map_err(|_| "the vault lock is poisoned".to_string())?.remove(name);
+        self.generation.fetch_add(1, Ordering::SeqCst);
+        r
+    }
+
+    /// Take over `other`'s store (a vault just re-read from disk after another handle wrote
+    /// it): the daemon's long-lived vault picks up a key the web UI stored without a restart,
+    /// and its holders see the generation move.
+    pub fn adopt(&self, other: Vault) -> Result<(), String> {
+        let store = other.store.into_inner().map_err(|_| "the vault lock is poisoned".to_string())?;
+        *self.store.write().map_err(|_| "the vault lock is poisoned".to_string())? = store;
+        self.generation.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+
+    /// Changes so far (see the field): equal values mean nothing was set or removed since.
+    pub fn generation(&self) -> u64 {
+        self.generation.load(Ordering::SeqCst)
     }
 
     /// Replace `{{secret:NAME}}` with values. Unknown names are left as-is.

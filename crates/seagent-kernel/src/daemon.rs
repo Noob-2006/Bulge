@@ -682,7 +682,7 @@ impl Daemon {
             "ping" => Ok(json!({"protocol": PROTOCOL_VERSION, "version": env!("CARGO_PKG_VERSION"), "running": k.running_ids(), "pid": std::process::id(), "role": match self.ha.get() { Some(h) if h.is_leader() => "leader", Some(_) => "standby", None => "single" }, "node": self.ha.get().map(|h| h.node.clone())})),
             "session.list" => {
                 let lim = p.get("limit").and_then(|v| v.as_u64()).unwrap_or(50) as usize;
-                let mut rows: Vec<Value> = k.store.list().into_iter().take(lim).map(|s| json!({"id":s.id,"title":s.title,"model":s.model,"workspace":s.workspace,"updated_ms":s.updated_ms,"messages":s.messages,"parent":s.parent,"running":k.is_running(&s.id) || on_worker(&s.id)})).collect();
+                let mut rows: Vec<Value> = k.store.list().into_iter().take(lim).map(|s| json!({"id":s.id,"title":s.title,"model":s.current_model,"workspace":s.workspace,"updated_ms":s.updated_ms,"messages":s.messages,"parent":s.parent,"pinned":s.pinned,"archived":s.archived,"group":s.group,"running":k.is_running(&s.id) || on_worker(&s.id)})).collect();
                 if read_only {
                     // A read-scoped token gets status, not the host's disk layout.
                     for r in &mut rows {

@@ -153,6 +153,21 @@ pub fn tool_guarded(view: &View, name: &str) -> bool {
     view.tool_guard_allow.as_ref().is_none_or(|a| a.iter().any(|p| name_matches(p, name)))
 }
 
+/// A skill switched off for this conversation cannot be loaded by name either (the index no
+/// longer lists it, but the model may remember or guess the name). `None` = the call may run.
+pub fn skill_refused(view: &View, tool: &str, input: &serde_json::Value) -> Option<String> {
+    if view.skills_disabled.is_empty() || !matches!(tool, "skill" | "skill_view" | "skills_read") {
+        return None;
+    }
+    let action = input.get("action").and_then(|v| v.as_str()).unwrap_or("view");
+    if !matches!(action, "view" | "read" | "run" | "invoke") {
+        return None;
+    }
+    let name = input.get("name").and_then(|v| v.as_str())?.trim();
+    let bare = name.rsplit(':').next().unwrap_or(name);
+    view.skills_disabled.iter().any(|d| d == name || d == bare).then(|| format!("skill `{name}` is turned off for this conversation"))
+}
+
 /// Ledger + list status of one child.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

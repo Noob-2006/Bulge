@@ -371,41 +371,17 @@ fn models_check(c: &WebCtx, p: &Value) -> Res {
     Ok(json!({"ok": all_ok, "checks": checks}))
 }
 
-/// Store (or remove) the API key of a provider. The key goes to the secret vault under the
-/// name the provider config reads (`api_key_env` / `key_envs`), which is the only place the
-/// runtime looks for it; a provider without such a name but with a key field gets it written
-/// to `[providers.<id>] api_key` (source `config`). The value is never echoed back.
+/// Store (or remove) the API key of a provider: always the secret vault, under the name the
+/// provider config reads (`api_key_env` / `key_envs`; one is named for a provider without it).
+/// The same code as the API keys page (`ops::model_keys`); the value is never echoed back.
 fn models_key(c: &WebCtx, provider: &str, key: &str) -> Res {
     if provider.is_empty() {
         return Err(bad("provider is required"));
     }
-    let cfg = fresh(c)?;
-    let ps = providers_for(&cfg, &c.paths)?;
-    let canon = ps.canonical(provider).ok_or_else(|| bad(format!("unknown provider `{provider}`")))?;
-    let pc = ps.config(&canon).expect("canonical() resolves to a config").clone();
-    let name = pc.key_env_names().into_iter().next();
-    match name {
-        Some(name) => {
-            let v = Vault::load(&c.paths.secrets()).map_err(fail)?;
-            if key.is_empty() {
-                let removed = v.remove(&name).map_err(fail)?;
-                Ok(json!({"removed": removed, "name": name}))
-            } else {
-                v.set(&name, key).map_err(fail)?;
-                Ok(json!({"ok": true, "source": "vault", "name": name}))
-            }
-        }
-        None if pc.keyless() => Err(bad(format!("provider `{canon}` needs no key"))),
-        None => {
-            let conf = format!("providers.{canon}.api_key");
-            if key.is_empty() {
-                let removed = crate::ops::confcli::unset(&c.paths, &conf).is_ok();
-                Ok(json!({"removed": removed, "source": "config"}))
-            } else {
-                crate::ops::confcli::set(&c.paths, &conf, &format!("{key:?}")).map_err(fail)?;
-                Ok(json!({"ok": true, "source": "config", "name": conf}))
-            }
-        }
+    if key.is_empty() {
+        crate::ops::model_keys::delete_key_for(&c.paths, &c.k, &c.ws, provider)
+    } else {
+        crate::ops::model_keys::set_key_for(&c.paths, &c.k, &c.ws, provider, key)
     }
 }
 

@@ -44,6 +44,8 @@ pub struct View {
     /// Execution-time-only restrictions (fork children); they leave the request tool list alone.
     pub tool_guard_allow: Option<Vec<String>>,
     pub tool_guard_deny: Vec<String>,
+    /// Skills switched off for this conversation ([`EventKind::Skills`]).
+    pub skills_disabled: Vec<String>,
     pub pinned: bool,
     pub archived: bool,
     pub group: Option<String>,
@@ -99,6 +101,7 @@ pub fn project(events: &[Event]) -> View {
             EventKind::Thinking { level } => v.thinking = Some(level.clone()).filter(|l| !l.is_empty()),
             EventKind::Title { title } => v.title = Some(title.clone()).filter(|t| !t.is_empty()),
             EventKind::Fast { tier } => v.fast = Some(tier.clone()).filter(|t| !t.is_empty()),
+            EventKind::Skills { disabled } => v.skills_disabled = disabled.clone(),
             EventKind::AuxUsage { usage, .. } => v.aux_usage.add(usage),
             EventKind::Message { usage, inbox, .. } => {
                 if let Some(u) = usage {

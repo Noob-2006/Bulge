@@ -58,6 +58,13 @@ pub struct SessionInfo {
     pub created_ms: u64,
     pub updated_ms: u64,
     pub messages: usize,
+    /// The model in use now: the header's, or the last `Model` event's (`/model`, the web UI's
+    /// model switch). `model` stays the one the session was created with.
+    pub current_model: String,
+    /// Sidebar state from the session's `Meta` events (`seagent session pin|archive|group`).
+    pub pinned: bool,
+    pub archived: bool,
+    pub group: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -141,6 +148,21 @@ impl Store {
             let Some(first) = events.first() else { continue };
             if let EventKind::Header { workspace, model, parent, title, .. } = &first.kind {
                 let title = events.iter().rev().find_map(|e| if let EventKind::Title { title } = &e.kind { Some(title.clone()) } else { None }).or_else(|| title.clone());
+                // Same pass: the model in use now and the pin / archive / group state.
+                let (mut current_model, mut pinned, mut archived, mut group) = (model.clone(), false, false, None);
+                for e in &events {
+                    match &e.kind {
+                        EventKind::Model { model: m } => current_model = m.clone(),
+                        EventKind::Meta { pinned: p, archived: a, group: g, .. } => {
+                            pinned = p.unwrap_or(pinned);
+                            archived = a.unwrap_or(archived);
+                            if let Some(g) = g {
+                                group = Some(g.clone()).filter(|g| !g.is_empty());
+                            }
+                        }
+                        _ => {}
+                    }
+                }
                 out.push(SessionInfo {
                     id,
                     workspace: workspace.clone(),
@@ -150,6 +172,10 @@ impl Store {
                     created_ms: first.ts,
                     updated_ms: events.last().map(|e| e.ts).unwrap_or(first.ts),
                     messages: events.iter().filter(|e| e.is_message()).count(),
+                    current_model,
+                    pinned,
+                    archived,
+                    group,
                 });
             }
         }

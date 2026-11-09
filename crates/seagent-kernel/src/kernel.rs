@@ -171,6 +171,26 @@ pub struct Runtime {
 
 pub type Kernel = Arc<Runtime>;
 
+/// System-prompt segment id of a per-conversation persona / extra instructions (set from the
+/// web UI's conversation settings). Appended after the config's segments, kept on compaction.
+pub const PERSONA_SEGMENT: &str = "persona";
+
+/// Drop switched-off skills from a `skills` segment (its `- name: …` lines).
+pub fn filter_skills(segs: &mut [SystemSegment], disabled: &[String]) {
+    if disabled.is_empty() {
+        return;
+    }
+    for s in segs.iter_mut().filter(|s| s.id == "skills") {
+        s.text = s
+            .text
+            .lines()
+            .filter(|l| !disabled.iter().any(|d| l.trim_start().starts_with(&format!("- {d}:"))))
+            .collect::<Vec<_>>()
+            .join("
+");
+    }
+}
+
 /// Observer for busy-arrival telemetry: `(session, outcome)` with outcome one of
 /// `queued`, `steered`, `dropped`. Installed by the host (`seagent/src/wire.rs`) so the kernel
 /// itself stays free of the metrics crate; a later install replaces the previous one.
@@ -752,6 +772,52 @@ impl Runtime {
         }
         Ledger::charge_current(&usage, self.cfg.price(model));
         let _ = self.append(log, EventKind::AuxUsage { task: task.into(), model: model.into(), usage });
+    }
+
+    /// The skills the session's workspace offers, as the system prompt's index lists them
+    /// (`- name: description` lines of a freshly built `skills` segment): (name, description).
+    pub fn skill_catalog(&self, workspace: &Path) -> Vec<(String, String)> {
+        let segs = self.system_segments(workspace);
+        let Some(seg) = segs.iter().find(|s| s.id == "skills") else { return vec![] };
+        seg.text
+            .lines()
+            .filter_map(|l| l.trim_start().strip_prefix("- ")?.split_once(": "))
+            .map(|(n, d)| (n.trim().to_string(), d.trim().to_string()))
+            .filter(|(n, _)| !n.is_empty() && !n.contains(' '))
+            .collect()
+    }
+
+    /// Switch skills off (or back on) for one conversation: an [`EventKind::Skills`] record, and
+    /// the system prompt's skill index rebuilt without them (re-enabled ones come back from a
+    /// fresh index, so the list is never stale).
+    pub fn set_skills_disabled(&self, id: &str, disabled: Vec<String>) -> Result<(), KernelError> {
+        let view = project(&self.store.read(id)?);
+        let mut disabled: Vec<String> = disabled.into_iter().map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
+        disabled.sort();
+        disabled.dedup();
+        if disabled == view.skills_disabled {
+            return Ok(());
+        }
+        self.record(id, EventKind::Skills { disabled: disabled.clone() })?;
+        let mut fresh: Vec<SystemSegment> = self.system_segments(Path::new(&view.workspace)).into_iter().filter(|s| s.id == "skills").collect();
+        filter_skills(&mut fresh, &disabled);
+        let mut segs = view.system.clone();
+        match (segs.iter().position(|s| s.id == "skills"), fresh.pop()) {
+            (Some(i), Some(f)) => segs[i] = f,
+            (Some(i), None) => {
+                segs.remove(i);
+            }
+            (None, Some(f)) => {
+                // Before the persona (kept last), otherwise at the end.
+                let at = segs.iter().position(|s| s.id == PERSONA_SEGMENT).unwrap_or(segs.len());
+                segs.insert(at, f);
+            }
+            (None, None) => {}
+        }
+        if segs != view.system {
+            self.record(id, EventKind::System { segments: segs })?;
+        }
+        Ok(())
     }
 
     pub fn set_title(&self, id: &str, title: &str) -> Result<(), KernelError> {
@@ -1789,7 +1855,11 @@ impl Runtime {
         }
         // The cache breaks here anyway: refresh memory / project segments.
         let ws = PathBuf::from(&view.workspace);
-        let segs = self.system_segments(&ws);
+        let mut segs = self.system_segments(&ws);
+        // A per-conversation persona (the web UI's conversation settings) belongs to the
+        // session, not to the config, so the refresh keeps it.
+        segs.extend(view.system.iter().filter(|s| s.id == PERSONA_SEGMENT).cloned());
+        filter_skills(&mut segs, &view.skills_disabled);
         if segs != view.system {
             self.append(log, EventKind::System { segments: segs })?;
         }
@@ -1879,6 +1949,10 @@ impl Runtime {
             };
             if !crate::subagents::tool_guarded(view, &tname) {
                 results[i] = Some(ToolOutput::err(format!("tool `{tname}` is not available in this session")));
+                continue;
+            }
+            if let Some(why) = crate::subagents::skill_refused(view, &tname, &tinput) {
+                results[i] = Some(ToolOutput::err(why));
                 continue;
             }
             match tname.as_str() {
@@ -2229,6 +2303,9 @@ impl Runtime {
             let nid = format!("{parent_id}.{n}");
             if !crate::subagents::tool_guarded(view, &nested.tool) {
                 return ToolOutput::err(format!("tool `{}` is not available in this session", nested.tool));
+            }
+            if let Some(why) = crate::subagents::skill_refused(view, &nested.tool, &nested.input) {
+                return ToolOutput::err(why);
             }
             let Some(tool) = self.tool(&log.id, &nested.tool) else {
                 return ToolOutput::err(format!("unknown tool `{}`", nested.tool));

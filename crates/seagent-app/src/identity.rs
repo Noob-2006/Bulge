@@ -67,7 +67,7 @@ impl Role {
 
 /// Methods that return what was said, typed or shown.
 pub fn is_content_method(m: &str) -> bool {
-    const EXACT: &[&str] = &["session.history", "session.view", "session.attach", "events.subscribe", "subscribe", "logbook.list", "session.export", "session.transcript", "chat.send", "message.send"];
+    const EXACT: &[&str] = &["session.history", "session.view", "session.attach", "events.subscribe", "subscribe", "logbook.list", "session.export", "session.transcript", "chat.send", "message.send", "ui.chat.export"];
     EXACT.contains(&m) || m.ends_with(".search") || m.ends_with(".transcript") || m.ends_with(".history") || m.starts_with("view.") || m.starts_with("memory.") || m.starts_with("ediscovery.")
 }
 
