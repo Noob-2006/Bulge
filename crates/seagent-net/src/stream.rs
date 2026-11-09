@@ -86,6 +86,35 @@ pub(crate) fn pinned_config(want: Option<String>) -> Arc<rustls::ClientConfig> {
     Arc::new(rustls::ClientConfig::builder_with_provider(provider).with_safe_default_protocol_versions().expect("rustls protocol versions").dangerous().with_custom_certificate_verifier(pin).with_no_client_auth())
 }
 
+/// RFC 6874: inside a URL's brackets a zone is written `%25<zone>`; turn it back into
+/// `%<zone>` (a bare `%<zone>` is accepted as is).
+pub fn decode_zone(bracketed: &str) -> String {
+    match bracketed.split_once("%25") {
+        Some((ip, zone)) if !zone.is_empty() && ip.parse::<std::net::Ipv6Addr>().is_ok() => format!("{ip}%{zone}"),
+        _ => bracketed.to_string(),
+    }
+}
+
+/// `host` without brackets or an IPv6 zone: what SNI and a `Host` header carry.
+pub fn unzoned(host: &str) -> String {
+    let h = host.trim().trim_start_matches('[').trim_end_matches(']');
+    if h.contains(':') { h.split('%').next().unwrap_or(h).to_string() } else { h.to_string() }
+}
+
+/// `host:port` → a socket address. An IPv6 literal may carry a zone — `fe80::1%eth0` or
+/// `fe80::1%12` (a Windows zone index; a URL's `%25` is decoded by [`Url::parse`]) — which
+/// becomes the scope id, so a link-local LAN peer found by mDNS can be dialled.
+pub fn resolve(host: &str, port: u16) -> io::Result<std::net::SocketAddr> {
+    let h = host.trim().trim_start_matches('[').trim_end_matches(']');
+    if let Some((ip, zone)) = h.split_once('%') {
+        if let Ok(ip) = ip.parse::<std::net::Ipv6Addr>() {
+            let scope = crate::mdns::iface::zone_index(zone).ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, format!("no network interface `{zone}` for {h}")))?;
+            return Ok(std::net::SocketAddr::V6(std::net::SocketAddrV6::new(ip, port, 0, scope)));
+        }
+    }
+    (h, port).to_socket_addrs()?.next().ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, format!("cannot resolve {h}")))
+}
+
 /// Open a TCP connection to `host:port`, through the configured HTTP proxy (`CONNECT`) unless
 /// NO_PROXY says direct (ent-036: gateways and IRC follow the same proxy as HTTP).
 fn open_tcp(host: &str, port: u16, timeout: Duration) -> io::Result<TcpStream> {
@@ -96,7 +125,7 @@ fn open_tcp(host: &str, port: u16, timeout: Duration) -> io::Result<TcpStream> {
         return Err(io::Error::new(io::ErrorKind::PermissionDenied, format!("offline mode: connection to {host} refused")));
     }
     let connect = |h: &str, p: u16| -> io::Result<TcpStream> {
-        let addr = (h, p).to_socket_addrs()?.next().ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, format!("cannot resolve {h}")))?;
+        let addr = resolve(h, p)?;
         let tcp = TcpStream::connect_timeout(&addr, timeout)?;
         tcp.set_nodelay(true)?;
         tcp.set_read_timeout(Some(timeout))?;
@@ -177,14 +206,15 @@ impl Stream {
 
     /// TLS to a LAN peer pinned by certificate fingerprint (`None`: probe and report it via
     /// [`Stream::peer_fingerprint`]). Direct TCP: a LAN peer is never reached through the proxy.
+    /// `host` may be an IPv6 literal with a zone (`fe80::1%eth0`, `fe80::1%12`, `%25`-encoded).
     pub fn connect_pinned(host: &str, port: u16, fingerprint: Option<&str>, timeout: Duration) -> io::Result<Stream> {
-        let addr = (host, port).to_socket_addrs()?.next().ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, format!("cannot resolve {host}")))?;
+        let addr = resolve(host, port)?;
         let tcp = TcpStream::connect_timeout(&addr, timeout)?;
         tcp.set_nodelay(true)?;
         tcp.set_read_timeout(Some(timeout))?;
         tcp.set_write_timeout(Some(timeout))?;
-        // The name only feeds SNI; an IP literal is fine.
-        let name = rustls::pki_types::ServerName::try_from(host.trim_matches(['[', ']']).to_string()).map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e.to_string()))?;
+        // The name only feeds SNI; an IP literal (without its zone) is fine.
+        let name = rustls::pki_types::ServerName::try_from(unzoned(host)).map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e.to_string()))?;
         let conn = rustls::ClientConnection::new(pinned_config(fingerprint.map(str::to_string)), name).map_err(|e| io::Error::other(e.to_string()))?;
         let mut s = rustls::StreamOwned::new(conn, tcp);
         while s.conn.is_handshaking() {
@@ -290,7 +320,7 @@ pub fn pinned_request(url: &str, fingerprint: &str, method: &str, headers: &[(&s
         return Err(format!("{url}: a pinned request needs https://"));
     }
     let mut s = Stream::connect_pinned(&u.host, u.port, Some(fingerprint), timeout).map_err(|e| format!("{}:{}: {e}", u.host, u.port))?;
-    let host = if u.host.contains(':') { format!("[{}]:{}", u.host, u.port) } else { format!("{}:{}", u.host, u.port) };
+    let host = if u.host.contains(':') { format!("[{}]:{}", unzoned(&u.host), u.port) } else { format!("{}:{}", u.host, u.port) };
     let mut req = format!("{method} {} HTTP/1.1\r\nHost: {host}\r\nUser-Agent: seagent\r\nContent-Length: {}\r\nConnection: close\r\n", u.path, body.len());
     for (k, v) in headers {
         if k.contains(['\r', '\n']) || v.contains(['\r', '\n']) {
@@ -351,7 +381,7 @@ impl Url {
         let authority = authority.rsplit('@').next().unwrap_or(authority);
         let (host, port) = if let Some(h) = authority.strip_prefix('[') {
             let (h, p) = h.split_once(']').ok_or("bad IPv6 host")?;
-            (h.to_string(), p.strip_prefix(':').map(|p| p.parse().map_err(|_| "bad port")).transpose()?.unwrap_or(default))
+            (decode_zone(h), p.strip_prefix(':').map(|p| p.parse().map_err(|_| "bad port")).transpose()?.unwrap_or(default))
         } else {
             match authority.rsplit_once(':') {
                 Some((h, p)) => (h.to_string(), p.parse().map_err(|_| format!("bad port in {s}"))?),
@@ -369,12 +399,14 @@ impl Url {
     }
 
     /// Host header value (port only when non-default).
+    /// An IPv6 literal is bracketed and loses its zone (`[fe80::1]:8640`).
     pub fn host_header(&self) -> String {
         let default = if self.tls() { 443 } else { 80 };
+        let host = if self.host.contains(':') { format!("[{}]", unzoned(&self.host)) } else { self.host.clone() };
         if self.port == default {
-            self.host.clone()
+            host
         } else {
-            format!("{}:{}", self.host, self.port)
+            format!("{host}:{}", self.port)
         }
     }
 }
@@ -445,6 +477,22 @@ mod tests {
         assert_eq!(Url::parse("https://h?q=1").unwrap().path, "/?q=1");
         assert_eq!(Url::parse("ircs://irc.libera.chat").unwrap().port, 6697);
         assert!(Url::parse("ftp://x").is_err() && Url::parse("nourl").is_err() && Url::parse("http://:80").is_err());
+    }
+
+    #[test]
+    fn ipv6_zones_survive_urls_and_resolve_to_scope_ids() {
+        // RFC 6874 URL form and the raw CLI form both reach the same host.
+        let u = Url::parse("https://[fe80::1%2512]:8640/pair/client").unwrap();
+        assert_eq!((u.host.as_str(), u.port, u.host_header()), ("fe80::1%12", 8640, "[fe80::1]:8640".to_string()));
+        assert_eq!(Url::parse("https://[fe80::1%12]:8640").unwrap().host, "fe80::1%12");
+        assert_eq!(Url::parse("https://[fd00::2]").unwrap().host_header(), "[fd00::2]");
+        assert_eq!(unzoned("[fe80::1%eth0]"), "fe80::1");
+        assert_eq!(unzoned("studio.local"), "studio.local");
+        let a = resolve("fe80::1%12", 8640).unwrap();
+        assert_eq!(a, "[fe80::1%12]:8640".parse::<std::net::SocketAddr>().unwrap());
+        assert!(resolve("fe80::1%no-such-interface-xyz", 8640).is_err());
+        assert_eq!(resolve("[fd00::2]", 1).unwrap(), "[fd00::2]:1".parse::<std::net::SocketAddr>().unwrap());
+        assert_eq!(resolve("192.168.1.20", 8640).unwrap(), "192.168.1.20:8640".parse::<std::net::SocketAddr>().unwrap());
     }
 
     #[test]

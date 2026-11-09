@@ -9,8 +9,10 @@
 //!   its first 16 hex digits, both screens show the short form (four groups of four). It is
 //!   replaced only by `seagent tls rotate` — every paired client then has to pair again.
 //! - **Host id**: a random 16-hex id in `<data>/tls/host-id`, stable across renames.
-//! - **Discovery**: [`advertise`] starts the `_seagent._tcp.local` responder; TXT carries only
-//!   `v`, `id`, `fp` and `name`.
+//! - **Discovery**: [`advertise`] starts the `_seagent._tcp.local` responder (IPv4 and IPv6,
+//!   every interface; which addresses it advertises follows the listen address:
+//!   [`advertised_families`]); TXT carries only `v`, `id`, `fp` and `name`. [`discover`]
+//!   lists hosts with every address (`addresses`) and the best one to dial (`address`/`url`).
 
 use crate::AppConfig;
 use seagent_net::{mdns, x509};
@@ -164,18 +166,54 @@ pub fn lan_host(cfg: &AppConfig) -> Option<String> {
     }
 }
 
+/// Which addresses mDNS advertises for a listen address: `(fixed, auto_v4, auto_v6)`. A
+/// specific private address is advertised alone. `0.0.0.0` (IPv4 only): every interface's
+/// IPv4 addresses. `[::]`: IPv6 (global, ULA, link-local) and — where `[::]` is dual-stack
+/// (Linux, macOS, Android, iOS; not Windows, where std leaves `IPV6_V6ONLY` on) — IPv4 too.
+pub fn advertised_families(listen: &str) -> (Vec<std::net::IpAddr>, bool, bool) {
+    let h = seagent_security::exposure::host_of(listen);
+    match seagent_security::exposure::classify_host(h) {
+        seagent_security::exposure::AddrClass::Private => match h.parse() {
+            Ok(ip) => (vec![ip], false, false),
+            Err(_) => (vec![], true, false), // `<name>.local`
+        },
+        seagent_security::exposure::AddrClass::Unspecified if h.contains(':') => (vec![], cfg!(not(windows)), true),
+        _ => (vec![], true, false),
+    }
+}
+
 /// The service record we advertise. Never carries a token: only protocol, id, fingerprint
 /// prefix and the display name.
 pub fn service(cfg: &AppConfig, data: &Path, fingerprint: &str) -> mdns::Service {
     let name = display_name();
     let host = x509::dns_label(&name);
-    let addrs = lan_host(cfg).and_then(|h| h.parse().ok()).into_iter().collect();
+    let (addrs, auto_v4, auto_v6) = advertised_families(&cfg.listen);
     mdns::Service {
         instance: format!("SE Agent on {name}").chars().filter(|c| *c != '.').take(60).collect(),
         host: format!("{}.local", if host.is_empty() { "seagent" } else { &host }),
         port: port_of(&cfg.listen),
         txt: vec![("v".into(), PROTOCOL.into()), ("id".into(), host_id(data)), ("fp".into(), fingerprint.chars().take(16).collect()), ("name".into(), name.chars().take(60).collect())],
         addrs,
+        auto_v4,
+        auto_v6,
+    }
+}
+
+/// What discovery is doing on this host, for `lan.status`: `off`, `advertising` (with the
+/// interfaces and addresses), `limited` (UDP 5353 could not be shared: announce-only, or
+/// one family missing — `detail` says which) or `idle` (on, but the responder runs in the
+/// daemon's app server and none runs in this process).
+pub fn discovery_state(cfg: &AppConfig) -> Value {
+    if !discovery_enabled(cfg) || !cfg.enabled {
+        return json!({"state": "off"});
+    }
+    match mdns::responder_status() {
+        // IPv4 is the baseline every peer speaks: without its 5353 socket discovery is limited.
+        Some(s) => json!({"state": if s.limited || !s.ipv4 { "limited" } else { "advertising" }, "detail": s.detail, "ipv4": s.ipv4, "ipv6": s.ipv6, "interfaces": s.interfaces, "addresses": s.addrs}),
+        None => match mdns::port_shareable() {
+            Ok(()) => json!({"state": "idle", "detail": "advertised by the daemon's app server while it runs"}),
+            Err(e) => json!({"state": "limited", "detail": e}),
+        },
     }
 }
 
@@ -198,15 +236,23 @@ pub fn discover(data: &Path, timeout: std::time::Duration) -> Result<Vec<Value>,
         .into_iter()
         .filter(|f| f.txt.get("v").is_some_and(|v| v.starts_with("seagent/")))
         .map(|f| {
-            let addr = f.addrs.iter().find(|a| a.is_ipv4()).or(f.addrs.first()).map(|a| a.to_string()).unwrap_or_else(|| f.host.trim_end_matches('.').to_string());
-            let authority = if addr.contains(':') { format!("[{addr}]:{}", f.port) } else { format!("{addr}:{}", f.port) };
+            // The best-ranked address (private IPv4, then routable IPv6, then link-local with
+            // its zone); the `.local` name when no address came back.
+            let (authority, url) = match f.best() {
+                Some(a) => (a.authority(f.port), a.url("https", f.port)),
+                None => {
+                    let a = format!("{}:{}", f.host.trim_end_matches('.'), f.port);
+                    (a.clone(), format!("https://{a}"))
+                }
+            };
             json!({
                 "id": f.txt.get("id").cloned().unwrap_or_default(),
                 "name": f.txt.get("name").cloned().unwrap_or_else(|| f.instance.clone()),
                 "instance": f.instance,
                 "host": f.host,
                 "address": authority,
-                "url": format!("https://{authority}"),
+                "addresses": f.addrs.iter().map(|a| a.to_string()).collect::<Vec<_>>(),
+                "url": url,
                 "fpPrefix": f.txt.get("fp").cloned().unwrap_or_default(),
                 "sas": x509::short_fingerprint(f.txt.get("fp").map(String::as_str).unwrap_or("")),
                 "protocol": f.txt.get("v").cloned().unwrap_or_default(),
@@ -253,6 +299,7 @@ pub fn status(cfg: &AppConfig, data: &Path) -> Value {
         "lanOnly": crate::exposure::lan_only(cfg),
         "listen": cfg.listen,
         "discovery": discovery_enabled(cfg),
+        "discoveryState": discovery_state(cfg),
         "hostId": host_id(data),
         "name": display_name(),
         "address": lan_host(cfg),
@@ -329,5 +376,16 @@ mod tests {
             assert!(!wire.contains(secret), "{secret}");
         }
         assert_eq!(s.port, 8640);
+        assert_eq!(s.addrs, vec!["192.168.7.9".parse::<std::net::IpAddr>().unwrap()]);
+    }
+
+    #[test]
+    fn advertised_addresses_follow_the_listen_address() {
+        assert_eq!(advertised_families("0.0.0.0:8640"), (vec![], true, false), "IPv4-only server: no AAAA");
+        assert_eq!(advertised_families("[::]:8640"), (vec![], cfg!(not(windows)), true));
+        assert_eq!(advertised_families("[fd00::5]:8640"), (vec!["fd00::5".parse().unwrap()], false, false));
+        assert_eq!(advertised_families("studio.local:8640"), (vec![], true, false));
+        // Discovery off: the state says so without touching the network.
+        assert_eq!(discovery_state(&AppConfig::default())["state"], "off");
     }
 }
