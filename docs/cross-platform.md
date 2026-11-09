@@ -57,7 +57,8 @@
   （`0xC0000022`），所以主機 shell 是 Git Bash 時，沙盒命令改用 Windows PowerShell，並在 backend 說明、
   shell 工具的提示（`exec::local::shell_note`）與腳本外殼中照實反映：PowerShell 腳本沒有 `eval`/`unset`，
   缺少的命令照 bash 的格式回報（`x: command not found`、exit 127，失敗提示照常適用）；
-  `SEAGENT_APPCONTAINER_SHELL` 可指定其他 shell。真實測試：`SEAGENT_REAL_TESTS=1 cargo test -p seagent-tools real_backend_appcontainer -- --ignored`。
+  `SEAGENT_APPCONTAINER_SHELL` 可指定其他 shell。AppContainer 讀不到工作區的上層目錄，PowerShell 因此停在 `C:\`
+  且 `Set-Location` 會被拒，所以腳本先把工作區掛成 `SeagentWs:` PSDrive 再切過去。真實測試：`SEAGENT_REAL_TESTS=1 cargo test -p seagent-tools real_backend_appcontainer -- --ignored`。
 - **已知限制（MSYS 的命令列展開）**：MSYS / Cygwin 程式會自己對 Windows 命令列中「沒加引號」的參數做 glob 與
   大括號展開（不含空白的 `[{"a":1,"b":2}]` 會被拆開）。`MSYS=noglob` 不能用——它連引號處理也關掉，`bash -c '…'`
   的腳本會被拆成單字。要把這類 JSON 字面值交給 `echo` / `cat` 等 MSYS 工具，請放進 shell 腳本（`exec --shell`）。
