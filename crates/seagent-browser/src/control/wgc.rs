@@ -137,13 +137,13 @@ mod tests {
         let root = seagent_core::tmp::TempDir::new("seagent-wgc");
         let d = super::super::screen_windows::WinDesktop::new(root.path(), &format!("wgc{}", std::process::id()), "1280x800");
         d.start().expect("an interactive window station");
-        let html = "<body style='margin:0;font:40px monospace'><div id=c></div><script>let n=0;function f(){c.textContent='frame '+(++n)+' '+performance.now().toFixed(1);document.body.style.background='hsl('+(n%360)+',60%,70%)';requestAnimationFrame(f)}f()</script>";
+        let html = "<title>wgcprobe</title><body style='margin:0;font:40px monospace'><div id=c></div><script>let n=0;function f(){c.textContent='frame '+(++n)+' '+performance.now().toFixed(1);document.body.style.background='hsl('+(n%360)+',60%,70%)';requestAnimationFrame(f)}f()</script>";
         let url = format!("data:text/html,{}", seagent_net::urlencode(html));
         let line = format!("\"{}\" --user-data-dir=\"{}\" --inprivate --no-first-run --no-default-browser-check --window-position=0,0 --window-size=1200,800 --app=\"{url}\"", exe.display(), root.path().join("p").display());
         let pid = super::super::screen_windows::spawn_on_desktop(&d.qualified(), &line).unwrap();
         std::thread::sleep(Duration::from_secs(4));
         let hwnd = super::super::screen_windows::largest_window(&d.name()).expect("the browser window on the Bot Desktop");
-        let r = (|| -> Result<(u64, u32, f64), String> {
+        fn measure(hwnd: isize) -> Result<(u64, u32, f64), String> {
             let mut c = WgcWindow::start(hwnd)?;
             let (t0, mut distinct, mut last) = (Instant::now(), 0u32, 0u64);
             while t0.elapsed() < Duration::from_secs(5) {
@@ -157,12 +157,30 @@ mod tests {
                 std::thread::sleep(Duration::from_millis(5));
             }
             Ok((c.frames, distinct, t0.elapsed().as_secs_f64()))
-        })();
+        }
+        let say = |what: &str, r: Result<(u64, u32, f64), String>, hwnd: isize| match r {
+            Ok((frames, distinct, s)) => eprintln!("WGC {what}: {frames} frames delivered, {distinct} distinct pictures in {s:.1} s = {:.1} fps", f64::from(distinct) / s),
+            Err(e) => eprintln!("WGC {what}: {e} (item size there: {:?})", WgcWindow::item_size(hwnd)),
+        };
+        say("on a non-displayed Bot Desktop, from the service thread", measure(hwnd), hwnd);
+        // The same from a fresh thread bound to the Bot Desktop (the capture item's owner desktop).
+        let q = d.qualified();
+        let bound = std::thread::spawn(move || super::super::screen_windows::on_desktop(&q, || measure(hwnd)).and_then(|r| r)).join().unwrap();
+        say("on a non-displayed Bot Desktop, from a thread bound to it", bound, hwnd);
         let _ = std::process::Command::new("taskkill").args(["/T", "/F", "/PID", &pid.to_string()]).output();
         d.stop();
-        match r {
-            Ok((frames, distinct, s)) => eprintln!("WGC on a non-displayed Bot Desktop: {frames} frames delivered, {distinct} distinct pictures in {s:.1} s = {:.1} fps", f64::from(distinct) / s),
-            Err(e) => eprintln!("WGC on a non-displayed Bot Desktop: {e} (item size there: {:?})", WgcWindow::item_size(hwnd)),
+        // Control: the same page on the displayed desktop (proves the capture code itself works).
+        if std::env::var_os("SEAGENT_WGC_CONTROL").is_some() {
+            let shown = format!("\"{}\" --user-data-dir=\"{}\" --inprivate --no-first-run --no-default-browser-check --window-position=0,0 --window-size=1200,800 --app=\"{url}\"", exe.display(), root.path().join("q").display());
+            let pid = super::super::screen_windows::spawn_on_desktop("WinSta0\\Default", &shown).unwrap();
+            std::thread::sleep(Duration::from_secs(4));
+            // SAFETY: a lookup by window title.
+            let found = unsafe { windows::Win32::UI::WindowsAndMessaging::FindWindowW(None, windows::core::w!("wgcprobe")) }.ok().map(|h| h.0 as isize);
+            match found {
+                Some(h) => say("on the displayed desktop (control)", measure(h), h),
+                None => eprintln!("WGC control: no window for pid {pid}"),
+            }
+            let _ = std::process::Command::new("taskkill").args(["/T", "/F", "/PID", &pid.to_string()]).output();
         }
     }
 }
