@@ -29,7 +29,9 @@ const MAX_PROLOGUE: usize = 96 * 1024;
 /// own (PowerShell instead of MSYS bash) for `appcontainer`, POSIX for every remote or
 /// container backend.
 pub fn script_shell(backend: &dyn ExecBackend) -> seagent_core::platform::shell::ShellKind {
-    match backend.id() {
+    // `vm:<sandbox>`: the microVM could not boot and that sandbox really runs the script.
+    let id = backend.id();
+    match id.strip_prefix("vm:").unwrap_or(id) {
         "local" => seagent_core::platform::shell::active().kind,
         "appcontainer" => super::appcontainer::sandbox_shell().kind,
         _ => seagent_core::platform::shell::ShellKind::Bash,

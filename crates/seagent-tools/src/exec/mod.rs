@@ -262,6 +262,35 @@ fn warn_once(tag: &str, msg: &str) {
     }
 }
 
+/// The fallback notice for `session`, the first time it runs something in a backend that is
+/// not the one configured (a microVM that cannot boot → the OS sandbox); `None` afterwards. The
+/// shell tool puts it at the top of its result, so it is in the transcript; the daemon's
+/// stderr gets it once per process too.
+pub fn session_notice(session: &str, backend: &dyn ExecBackend) -> Option<String> {
+    static SHOWN: OnceLock<Mutex<std::collections::HashSet<String>>> = OnceLock::new();
+    let note = backend.fallback_note()?;
+    warn_once(&format!("fallback|{}", backend.id()), &note);
+    SHOWN.get_or_init(Default::default).lock().unwrap().insert(format!("{session}|{}", backend.id())).then(|| format!("[seagent warning] {note}"))
+}
+
+/// `seagent doctor`'s exec line: where an unsandboxed command runs on this machine, and a
+/// failure when the configured microVM cannot boot and a weaker sandbox runs instead.
+pub fn doctor_line(cfg: &ExecConfig, data: &Path) -> Result<String, String> {
+    let requested = if cfg.backend_set { cfg.backend.as_str() } else { "auto" };
+    let plan = os_plan(seagent_vm::policy::resolve(&seagent_vm::policy::Query { requested, cfg: &cfg.vm, data, sandboxed: false }), false);
+    if plan.backend == "vm" {
+        let (kind, why) = vm::manager_for(&cfg.vm, data).selection();
+        if !kind.is_vm() {
+            return Err(format!("exec.backend = vm, but no microVM can boot here: commands run in the OS sandbox ({}) instead — {}", kind.name(), why.unwrap_or_default()));
+        }
+        return Ok(format!("vm ({}, {} isolation)", kind.name(), kind.isolation().label()));
+    }
+    Ok(match (&plan.warning, plan.uses_microvm()) {
+        (Some(w), false) => format!("{} — {w}", plan.backend),
+        _ => plan.backend.clone(),
+    })
+}
+
 pub fn build_backend(name: &str, cfg: &ExecConfig, extra: &Value, ctx: &BackendCtx) -> Result<Arc<dyn ExecBackend>, String> {
     Ok(match name {
         // `auto`: the policy table, not this function, decides (A1/B1). `ExecEnv::backend`

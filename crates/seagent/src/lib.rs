@@ -2112,6 +2112,8 @@ fn cmd_doctor(a: &Args) -> R {
         }
     }
     check("bash", ops::hostos::doctor_bash());
+    // Where commands run, and a configured microVM that cannot boot (never a silent fallback).
+    check("exec backend", exec_cli::exec_config(&paths).and_then(|ec| seagent_tools::exec::doctor_line(&ec, &paths.data)));
     #[cfg(not(target_os = "linux"))] // shell, control endpoint, autostart, VM providers of this OS
     ops::service_os::doctor_checks(&paths).into_iter().for_each(|(n, r)| check(&n, r));
     check("git (checkpoints)", ops::hostos::tool_version("git"));

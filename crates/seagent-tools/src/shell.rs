@@ -210,6 +210,8 @@ impl Tool for Shell {
             Ok(b) => b,
             Err(e) => return ToolOutput::err(format!("cannot run command: {e}")),
         };
+        // Never a silent downgrade: the first command of a session in a fallback says so.
+        let notice = crate::exec::session_notice(&ctx.session_id, &*backend);
 
         // ── script: unset credentials, session snapshot, command, snapshot dump ──
         let mut script = String::new();
@@ -340,7 +342,11 @@ impl Tool for Shell {
             // Hand the live child to the process registry: it keeps running (nothing calls
             // kill and the child is moved, not dropped) and the model gets a handle.
             let waited = yield_at.map(|y| y.saturating_duration_since(started).as_millis() as u64);
-            return hand_off(ctx, &env_cfg, backend, child, cap, command, pty, (rows, cols), started, waited, background);
+            let mut o = hand_off(ctx, &env_cfg, backend, child, cap, command, pty, (rows, cols), started, waited, background);
+            if let Some(n) = notice {
+                o.content = format!("{n}\n{}", o.content);
+            }
+            return o;
         }
 
         if stopped.is_some() {
@@ -433,6 +439,9 @@ impl Tool for Shell {
         // tokenjuice: compact big results (hints and sudo notes above see the raw text).
         if let Some(compact) = crate::tokenjuice::reduce_command_output(command, &out, crate::tokenjuice::DEFAULT_BUDGET) {
             out = compact;
+        }
+        if let Some(n) = &notice {
+            out = format!("{n}\n{out}");
         }
         if pty {
             let stripped = if env_cfg.cfg.strip_ansi { "ANSI escapes removed" } else { "ANSI escapes kept" };
