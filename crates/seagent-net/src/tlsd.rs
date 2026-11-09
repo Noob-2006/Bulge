@@ -191,7 +191,8 @@ pub const H_CLIENT: &str = "x-seagent-tls-client";
 /// Serve one TLS connection: handshake, forward the (rewritten) request to the plain server at
 /// `inner`, then pump bytes both ways until either side closes.
 pub(crate) fn terminate(tcp: TcpStream, cfg: Arc<rustls::ServerConfig>, inner: SocketAddr, secret: &str, timeout: Duration, loopback_plain: bool) -> io::Result<()> {
-    let peer = tcp.peer_addr()?;
+    // `::ffff:a.b.c.d` from a dual-stack listener → `a.b.c.d` for every check downstream.
+    let peer = crate::listen::canonical(tcp.peer_addr()?);
     tcp.set_read_timeout(Some(timeout))?;
     tcp.set_write_timeout(Some(timeout))?;
     let local = peer.ip().is_loopback() || matches!(peer.ip(), std::net::IpAddr::V6(v6) if v6.to_ipv4_mapped().is_some_and(|v| v.is_loopback()));

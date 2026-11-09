@@ -1368,6 +1368,27 @@ mod tests {
         assert!(audit.iter().any(|e| e["outcome"] == "ok") && audit.iter().any(|e| e["outcome"] == "deny"), "{audit:?}");
     }
 
+    /// On the dual-stack LAN listener IPv4 peers may arrive as `::ffff:a.b.c.d`: they are judged
+    /// by the embedded IPv4 address; ULA and link-local IPv6 peers are LAN peers; global IPv6
+    /// peers are refused like public IPv4 ones.
+    #[test]
+    fn dual_stack_and_ipv6_lan_peers_are_classified_by_address() {
+        let a = lan_app();
+        let at = |peer: &str| {
+            let mut r = json_req("/arp", &[("authorization", "Bearer admin-token")], &rpc("session.list"));
+            r.peer = Some(peer.parse().unwrap());
+            a.clone().handle(r).status
+        };
+        for public in ["[2001:db8::5]:50000", "[2606:4700::1111]:50000", "[::ffff:8.8.8.8]:50000"] {
+            assert_eq!(at(public), 403, "{public}: not a LAN peer");
+        }
+        for lan in ["[::ffff:192.168.1.50]:50000", "[::ffff:10.0.0.9]:50000", "[fd00::5]:50000", "[fe80::5%2]:50000"] {
+            assert_eq!(at(lan), 401, "{lan}: a LAN peer, so the shared app token is refused");
+        }
+        assert_eq!(at("[::ffff:127.0.0.1]:50000"), 200, "mapped loopback is this machine");
+        assert_eq!(at("[::1]:50000"), 200);
+    }
+
     /// LAN peers: private addresses only, paired-device tokens only (the shared app token is
     /// refused from the network), the 8-character code flow with admin approval, expired
     /// bootstrap tokens, and the loopback Host/Origin the desktop app's tunnel sends.

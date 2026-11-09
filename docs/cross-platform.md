@@ -53,10 +53,19 @@ iOS 不允許 App 開虛擬機、執行子程序或 JIT，因此 iOS 版是**純
 
 ## 區域網路互聯
 
-開法：設定精靈勾「允許這個網路上的裝置連線」，或 `[app.exposure] lan = true`（listen 改 `0.0.0.0:8640` 或某個私有位址）。
+開法：設定精靈勾「允許這個網路上的裝置連線」，或 `[app.exposure] lan = true`（精靈把 listen 改成 `[::]:8640`；也可指定某個私有位址）。
+
+- **IPv4＋IPv6 預設都收**（`seagent_net::listen`）：`[::]:<port>` 綁成**一個雙堆疊 socket**——手動建立
+  （`libc::socket`／`WSASocketW`，不繼承、unix 加 `SO_REUSEADDR`），清掉 `IPV6_V6ONLY` 後再讀回確認，Windows 也一樣
+  （std 預設在 Windows 是只收 IPv6）。系統不肯清（OpenBSD 類、`net.ipv6.bindv6only = 1`）就退成兩個 listener：
+  `[::]`（只收 IPv6）＋`0.0.0.0`；完全沒有 IPv6 就只綁 `0.0.0.0`。LAN 模式下舊精靈寫的 `0.0.0.0:<port>` 也當成「所有
+  介面、兩種位址族」改綁 `[::]:<port>`（`seagent_app::lan::dual_stack_listen`）；指定的位址（`192.168.1.5:8640`、
+  `[fd00::5]:8640`）照寫的綁，LAN 模式關閉時任何 listen 都不變（預設 `127.0.0.1:8640` 照舊）。雙堆疊 socket 收到的
+  IPv4 來源是 `::ffff:a.b.c.d`，伺服器一進來就換回 `a.b.c.d`，所以私有網段判斷、loopback 明文、稽核看到的都是 IPv4。
 
 - **綁定規則**（`seagent_security::exposure`，位址分類的唯一來源，配對 URL 與探索共用）：LAN 模式允許私有網段
-  （RFC1918、169.254/16、fe80::/10、fc00::/7、100.64/10）或 `0.0.0.0`／`::`，不需要 `allow_public`；但必須原生 TLS
+  （RFC1918、169.254/16、fe80::/10、fc00::/7、100.64/10；`::ffff:` 對應位址依內含的 IPv4 判斷）或 `0.0.0.0`／`::`，
+  不需要 `allow_public`；全球 IPv6 來源與公網 IPv4 一樣被拒。但必須原生 TLS
   （反向代理不算——客戶端釘選的是我們的憑證）、有速率限制、origin 不得為 `*`。公網位址或主機名稱仍走完整防線
   （錯誤訊息會說明 LAN 模式只涵蓋私有位址）。
 - **執行時防線**（`seagent_app::server`）：非私有網段的來源一律 403；網路上的連線**只接受已配對裝置的 token**
@@ -75,9 +84,8 @@ iOS 不允許 App 開虛擬機、執行子程序或 JIT，因此 iOS 版是**純
     `IPV6_V6ONLY`），宣告／查詢逐介面送出（`IP_MULTICAST_IF`／`IPV6_MULTICAST_IF`，TTL／hop limit 255）。回應帶
     「查詢進來的那個介面」的位址：IPv4 依查詢者所在子網、IPv6 依 link-local 來源的 scope id（否則同 /64）；判斷不出來
     就帶全部介面。每 30 秒重新列舉一次（Wi-Fi 切換、DHCP 換位址），有變就重新加入群組並再宣告。
-  - **廣播哪些位址跟著 listen 走**：指定私有位址就只廣播它；`0.0.0.0:8640`（只收 IPv4）只發 A；`[::]:8640` 發 AAAA
-    （global／ULA／link-local，從不發 loopback），在 `[::]` 為雙堆疊的 Linux／macOS／Android／iOS 也發 A（Windows 的
-    `[::]` 只收 IPv6，所以不發 A——要兩者都通就用 `0.0.0.0` 或分別設定）。要讓裝置走 IPv6 連進來，listen 設 `[::]:8640`。
+  - **廣播哪些位址跟著 listen 走**：LAN 模式預設（`[::]:8640`，雙堆疊）發 A＋AAAA（AAAA 為 global／ULA／link-local，
+    從不發 loopback）；指定私有位址就只廣播它；LAN 模式以外手寫的 `0.0.0.0:8640`（只收 IPv4）只發 A。
   - **與系統共用 5353**：socket 以 `libc::socket`／WinSock `socket` 建立，在 bind 前設 `SO_REUSEADDR`（unix 另加
     `SO_REUSEPORT`），再交給 std（`from_raw_fd`／`from_raw_socket`），所以能和 Avahi／systemd-resolved／
     mDNSResponder（Bonjour）／Windows DNS client 並存。若 5353 被獨佔：回應端改為「受限」模式——從臨時 port 每 30 秒

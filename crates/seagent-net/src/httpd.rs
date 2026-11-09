@@ -129,19 +129,32 @@ impl Default for Opts {
 
 pub struct Server {
     addr: SocketAddr,
+    /// Every listener's address (two when `[::]` fell back to `[::]` + `0.0.0.0`).
+    addrs: Vec<SocketAddr>,
     stop: Arc<AtomicBool>,
     /// TLS mode: the plain server behind the terminator (`bind_tls`).
     inner: Option<Box<Server>>,
 }
 
+/// Bind `addr` ([`crate::listen::tcp`]: `[::]:<port>` is dual-stack) and run `each` on every
+/// listener in its own thread. Returns (first address, all addresses).
+fn spawn_listeners(addr: &str, name: &str, each: impl Fn(TcpListener) + Send + Sync + 'static) -> io::Result<(SocketAddr, Vec<SocketAddr>)> {
+    let ls = crate::listen::tcp(addr)?;
+    let addrs = ls.iter().map(|l| l.local_addr()).collect::<io::Result<Vec<_>>>()?;
+    let each = Arc::new(each);
+    for l in ls {
+        let e = each.clone();
+        std::thread::Builder::new().name(format!("{name} {}", l.local_addr()?)).spawn(move || e(l))?;
+    }
+    Ok((addrs[0], addrs))
+}
+
 impl Server {
     pub fn bind(addr: &str, opts: Opts, handler: Handler) -> io::Result<Server> {
-        let l = TcpListener::bind(addr)?;
-        let addr = l.local_addr()?;
         let stop = Arc::new(AtomicBool::new(false));
-        let st = stop.clone();
-        std::thread::Builder::new().name(format!("httpd {addr}")).spawn(move || accept_loop(l, st, opts, handler))?;
-        Ok(Server { addr, stop, inner: None })
+        let (st, live) = (stop.clone(), Arc::new(AtomicUsize::new(0)));
+        let (addr, addrs) = spawn_listeners(addr, "httpd", move |l| accept_loop(l, st.clone(), opts.clone(), handler.clone(), live.clone()))?;
+        Ok(Server { addr, addrs, stop, inner: None })
     }
 
     /// Like [`Server::bind`], but speaking TLS (and mutual TLS when `tls.client_auth` asks for
@@ -169,12 +182,10 @@ impl Server {
         });
         let inner = Server::bind("127.0.0.1:0", opts.clone(), wrapped)?;
         let inner_addr = inner.local_addr();
-        let l = TcpListener::bind(addr)?;
-        let addr = l.local_addr()?;
         let stop = Arc::new(AtomicBool::new(false));
         let st = stop.clone();
-        std::thread::Builder::new().name(format!("httpsd {addr}")).spawn(move || {
-            let live = Arc::new(AtomicUsize::new(0));
+        let live = Arc::new(AtomicUsize::new(0));
+        let (addr, addrs) = spawn_listeners(addr, "httpsd", move |l| {
             for conn in l.incoming() {
                 if st.load(Ordering::SeqCst) {
                     break;
@@ -194,7 +205,7 @@ impl Server {
                 }
             }
         })?;
-        Ok(Server { addr, stop, inner: Some(Box::new(inner)) })
+        Ok(Server { addr, addrs, stop, inner: Some(Box::new(inner)) })
     }
 
     /// Whether this server speaks TLS.
@@ -209,13 +220,20 @@ impl Server {
 impl Drop for Server {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::SeqCst);
-        // Wake the blocking accept.
-        let _ = TcpStream::connect_timeout(&self.addr, Duration::from_millis(200));
+        // Wake each blocking accept (a wildcard listener through loopback: Windows will not
+        // connect to `0.0.0.0` / `::`; a dual-stack one also through 127.0.0.1).
+        for a in &self.addrs {
+            let mut tries = vec![*a];
+            if a.ip().is_unspecified() {
+                let lo: std::net::IpAddr = if a.is_ipv4() { std::net::Ipv4Addr::LOCALHOST.into() } else { std::net::Ipv6Addr::LOCALHOST.into() };
+                tries = vec![SocketAddr::new(lo, a.port()), SocketAddr::new(std::net::Ipv4Addr::LOCALHOST.into(), a.port())];
+            }
+            let _ = tries.iter().find(|t| TcpStream::connect_timeout(t, Duration::from_millis(200)).is_ok());
+        }
     }
 }
 
-fn accept_loop(l: TcpListener, stop: Arc<AtomicBool>, opts: Opts, handler: Handler) {
-    let live = Arc::new(AtomicUsize::new(0));
+fn accept_loop(l: TcpListener, stop: Arc<AtomicBool>, opts: Opts, handler: Handler, live: Arc<AtomicUsize>) {
     for conn in l.incoming() {
         if stop.load(Ordering::SeqCst) {
             break;
@@ -356,7 +374,8 @@ fn fill(s: &mut TcpStream, buf: &mut Vec<u8>, max: usize) -> Result<(), u16> {
 fn serve(mut s: TcpStream, opts: &Opts, handler: &Handler) {
     let _ = s.set_read_timeout(Some(opts.read_timeout));
     let _ = s.set_write_timeout(Some(opts.read_timeout));
-    let peer = s.peer_addr().ok();
+    // A dual-stack listener reports IPv4 peers as `::ffff:a.b.c.d`; policy sees `a.b.c.d`.
+    let peer = s.peer_addr().ok().map(crate::listen::canonical);
     let Ok((head, rest)) = read_head(&mut s, 32 * 1024) else {
         let _ = write_simple(&mut s, 400, "bad request");
         return;
@@ -540,5 +559,33 @@ mod tests {
         let url = format!("https://localhost:{}/x", srv.local_addr().port());
         let body = crate::http::with_config(trust, || crate::http::agent().get(&url).call().map(|mut r| r.body_mut().read_to_string().unwrap()).map_err(|e| e.to_string()));
         assert_eq!(body.unwrap(), "peer=127.0.0.1 client=-");
+    }
+
+    /// LAN mode listens on `[::]`: one TLS port reached over 127.0.0.1 and ::1, the IPv4
+    /// peer reported as `127.0.0.1` (not `::ffff:127.0.0.1`), the pinned client happy with both.
+    #[test]
+    fn dual_stack_tls_listener_takes_ipv4_and_ipv6_clients() {
+        let td = |f: &str| format!("{}/src/testdata/{f}", env!("CARGO_MANIFEST_DIR"));
+        let tls = crate::tlsd::ServerTls { cert: td("server.pem"), key: td("server.key"), loopback_plain: true, ..Default::default() };
+        let fp = crate::tlsd::identity_of_pem(&td("server.pem")).unwrap().fingerprint;
+        let h: Handler = Arc::new(|r: Request| Response::text(200, &format!("peer={}", r.peer.map(|p| p.ip().to_string()).unwrap_or_default())));
+        let srv = Server::bind_tls("[::]:0", Opts::default(), h, &tls).unwrap();
+        let port = srv.local_addr().port();
+        let get = |host: &str| crate::stream::pinned_request(&format!("https://{host}:{port}/x"), &fp, "GET", &[], b"", Duration::from_secs(5));
+        assert_eq!(get("127.0.0.1").unwrap(), (200, "peer=127.0.0.1".to_string()));
+        if srv.local_addr().is_ipv4() {
+            eprintln!("skipping the IPv6 half: no IPv6 on this machine");
+            return;
+        }
+        assert_eq!(get("[::1]").unwrap(), (200, "peer=::1".to_string()));
+        // Plain HTTP from loopback still shares the port over both families.
+        for a in ["127.0.0.1", "::1"] {
+            let mut s = TcpStream::connect((a, port)).unwrap();
+            s.write_all(b"GET /x HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n").unwrap();
+            let mut out = String::new();
+            let _ = s.read_to_string(&mut out);
+            assert!(out.ends_with(&format!("peer={a}")), "{out}");
+        }
+        drop(srv);
     }
 }

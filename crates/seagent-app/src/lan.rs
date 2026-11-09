@@ -120,14 +120,27 @@ pub fn ensure_identity(data: &Path) -> Result<Identity, String> {
     }
 }
 
-/// The config the server really runs with: LAN mode turns native TLS on and, unless the
-/// operator gave `cert`/`key`, points it at the generated identity (created now if missing).
+/// LAN mode on "every interface" means both address families: `0.0.0.0:<port>` (what older
+/// wizards wrote) becomes `[::]:<port>`, which `seagent_net::listen` binds as one dual-stack
+/// socket (or `[::]` + `0.0.0.0` where the system has no dual-stack). Any specific address —
+/// and every listen outside LAN mode — is left exactly as written.
+pub fn dual_stack_listen(listen: &str) -> String {
+    match listen.trim().strip_prefix("0.0.0.0:") {
+        Some(port) if port.parse::<u16>().is_ok() => format!("[::]:{port}"),
+        _ => listen.to_string(),
+    }
+}
+
+/// The config the server really runs with: LAN mode turns native TLS on, listens on both
+/// address families ([`dual_stack_listen`]) and, unless the operator gave `cert`/`key`, points
+/// TLS at the generated identity (created now if missing).
 pub fn effective(cfg: &AppConfig, data: &Path) -> Result<AppConfig, String> {
     let mut c = cfg.clone();
     if !c.exposure.lan {
         return Ok(c);
     }
     c.exposure.tls = true;
+    c.listen = dual_stack_listen(&c.listen);
     if c.exposure.cert.is_none() && c.exposure.key.is_none() {
         let id = ensure_identity(data)?;
         c.exposure.cert = Some(id.cert.display().to_string());
@@ -167,9 +180,9 @@ pub fn lan_host(cfg: &AppConfig) -> Option<String> {
 }
 
 /// Which addresses mDNS advertises for a listen address: `(fixed, auto_v4, auto_v6)`. A
-/// specific private address is advertised alone. `0.0.0.0` (IPv4 only): every interface's
-/// IPv4 addresses. `[::]`: IPv6 (global, ULA, link-local) and — where `[::]` is dual-stack
-/// (Linux, macOS, Android, iOS; not Windows, where std leaves `IPV6_V6ONLY` on) — IPv4 too.
+/// specific private address is advertised alone. `0.0.0.0` (an IPv4-only listener; LAN mode
+/// turns it into `[::]`, see [`dual_stack_listen`]): every interface's IPv4 addresses.
+/// `[::]` (dual-stack, or `[::]` + `0.0.0.0`): IPv4 and IPv6 (global, ULA, link-local).
 pub fn advertised_families(listen: &str) -> (Vec<std::net::IpAddr>, bool, bool) {
     let h = seagent_security::exposure::host_of(listen);
     match seagent_security::exposure::classify_host(h) {
@@ -177,7 +190,7 @@ pub fn advertised_families(listen: &str) -> (Vec<std::net::IpAddr>, bool, bool) 
             Ok(ip) => (vec![ip], false, false),
             Err(_) => (vec![], true, false), // `<name>.local`
         },
-        seagent_security::exposure::AddrClass::Unspecified if h.contains(':') => (vec![], cfg!(not(windows)), true),
+        seagent_security::exposure::AddrClass::Unspecified if h.contains(':') => (vec![], true, true),
         _ => (vec![], true, false),
     }
 }
@@ -382,7 +395,18 @@ mod tests {
     #[test]
     fn advertised_addresses_follow_the_listen_address() {
         assert_eq!(advertised_families("0.0.0.0:8640"), (vec![], true, false), "IPv4-only server: no AAAA");
-        assert_eq!(advertised_families("[::]:8640"), (vec![], cfg!(not(windows)), true));
+        assert_eq!(advertised_families("[::]:8640"), (vec![], true, true), "dual-stack: A + AAAA");
+        // LAN mode reads the old wizard's 0.0.0.0 as both families; explicit addresses stay.
+        assert_eq!(dual_stack_listen("0.0.0.0:8640"), "[::]:8640");
+        for keep in ["127.0.0.1:8640", "192.168.1.5:9000", "[fd00::5]:8640", "[::]:8640", "0.0.0.0:x"] {
+            assert_eq!(dual_stack_listen(keep), keep);
+        }
+        let home = seagent_core::tmp::TempDir::new("seagent-lan-ds");
+        assert_eq!(effective(&lan_cfg("0.0.0.0:8640"), home.path()).unwrap().listen, "[::]:8640");
+        assert_eq!(effective(&lan_cfg("192.168.1.5:8640"), home.path()).unwrap().listen, "192.168.1.5:8640");
+        let off = AppConfig { listen: "0.0.0.0:8640".into(), ..AppConfig::default() };
+        assert_eq!(effective(&off, home.path()).unwrap().listen, "0.0.0.0:8640", "outside LAN mode nothing changes");
+        assert_eq!(effective(&AppConfig::default(), home.path()).unwrap().listen, AppConfig::default().listen);
         assert_eq!(advertised_families("[fd00::5]:8640"), (vec!["fd00::5".parse().unwrap()], false, false));
         assert_eq!(advertised_families("studio.local:8640"), (vec![], true, false));
         // Discovery off: the state says so without touching the network.
