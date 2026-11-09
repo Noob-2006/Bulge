@@ -53,6 +53,12 @@ Installers (`bundle.targets`): Windows NSIS `.exe` (per-user, `installMode: curr
 per-machine, for admins/GPO); macOS `.app` + `.dmg`; Linux `.AppImage`, `.deb`, `.rpm`. The agent's
 `share/` is bundled as a resource and passed to the sidecar as `SEAGENT_SHARE_DIR`.
 
+**Chinese fonts on Linux.** The UI is largely Chinese; `ui/theme.css` falls back to the native CJK
+face of each OS (Microsoft JhengHei, PingFang, Noto Sans CJK, …). The `.deb` recommends
+`fonts-noto-cjk` and the `.rpm` `google-noto-sans-cjk-ttc-fonts`. The AppImage does **not** bundle a
+CJK font (known limitation): on a system without one (fresh minimal distro, WSLg) Chinese text shows
+as boxes — the app then shows a one-time warning with the install command (`fc-list :lang=zh` empty).
+
 Icons are committed (`src-tauri/icons/`), rendered from `ui/icon.svg` by `scripts/icons.sh`
 (pure Python). `scripts/icons.sh --tauri` uses `cargo tauri icon` instead and also fills the
 Android/iOS projects.

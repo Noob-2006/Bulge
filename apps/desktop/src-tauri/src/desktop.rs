@@ -57,6 +57,39 @@ fn agent_bg<R: Runtime>(app: &AppHandle<R>, f: impl FnOnce(&AppHandle<R>, &crate
     });
 }
 
+/// Linux: the UI is mostly Chinese, and a minimal desktop (WSLg, server installs, the AppImage on a
+/// fresh distro) may have no CJK font at all — then every Chinese character is a box. The .deb /
+/// .rpm recommend Noto CJK; the AppImage cannot pull it in, so say so once per install (in English:
+/// a Chinese message would be unreadable for the same reason).
+#[cfg(target_os = "linux")]
+pub fn cjk_font_check<R: Runtime>(app: &AppHandle<R>) {
+    let app = app.clone();
+    std::thread::spawn(move || {
+        let out = match std::process::Command::new("fc-list").args([":lang=zh", "family"]).output() {
+            Ok(o) if o.status.success() => o,
+            _ => return, // no fontconfig tools: nothing reliable to say
+        };
+        if !String::from_utf8_lossy(&out.stdout).trim().is_empty() {
+            return;
+        }
+        eprintln!("seagent-desktop: no Chinese (CJK) font installed; Chinese text will show as boxes. Install fonts-noto-cjk (Debian/Ubuntu) or google-noto-sans-cjk-ttc-fonts (Fedora).");
+        let stamp = app.state::<AppState>().data_dir.join("cjk-font-warned");
+        if stamp.exists() {
+            return;
+        }
+        let _ = std::fs::write(&stamp, b"");
+        app.dialog()
+            .message(
+                "No Chinese (CJK) font is installed, so Chinese text in SE Agent will show as boxes.\n\n\
+                 Install one and restart the app:\n  Debian/Ubuntu: sudo apt install fonts-noto-cjk\n  \
+                 Fedora: sudo dnf install google-noto-sans-cjk-ttc-fonts\n  Arch: sudo pacman -S noto-fonts-cjk",
+            )
+            .title("SE Agent")
+            .kind(MessageDialogKind::Warning)
+            .show(|_| {});
+    });
+}
+
 fn error<R: Runtime>(app: &AppHandle<R>, msg: &str) {
     app.dialog().message(msg).title("SE Agent").kind(MessageDialogKind::Error).show(|_| {});
 }

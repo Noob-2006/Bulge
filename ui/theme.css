@@ -39,8 +39,13 @@
   --info: #9fb9ff;
   --radius: 3px;
   --shadow: 0 18px 50px rgba(0, 0, 0, .55);
-  --font: "Inter", "Helvetica Neue", Helvetica, Arial, "Noto Sans TC", "PingFang TC", "Microsoft JhengHei", sans-serif;
-  --mono: "JetBrains Mono", "SFMono-Regular", Menlo, Consolas, "Noto Sans Mono CJK TC", monospace;
+  /* Latin face first (unchanged look), then the native CJK face of each OS: Windows (JhengHei/YaHei),
+     macOS/iOS (PingFang), Linux/Android (Noto CJK / Noto Sans TC / Source Han / WenQuanYi). */
+  --font: "Inter", "Helvetica Neue", Helvetica, Arial, system-ui, -apple-system, "Segoe UI",
+    "Microsoft JhengHei", "Microsoft YaHei", "PingFang TC", "PingFang SC", "Noto Sans CJK TC", "Noto Sans TC",
+    "Source Han Sans TC", "Noto Sans CJK SC", "WenQuanYi Micro Hei", sans-serif;
+  --mono: "JetBrains Mono", "SFMono-Regular", Menlo, Consolas, "Noto Sans Mono CJK TC", "Microsoft JhengHei",
+    "PingFang TC", "Noto Sans CJK TC", "Noto Sans TC", monospace;
 
   /* 舊名稱（pages.js / surfaces.js 與外掛面板仍在用） */
   --border: var(--thread-2);
