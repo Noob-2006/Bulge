@@ -514,6 +514,47 @@ impl Channel {
         self.transport
     }
 
+    /// Mutual authentication on a channel other local processes can reach (Windows QEMU's
+    /// loopback TCP chardev), with the per-boot `key` the provider gave the guest through
+    /// fw_cfg. The guest's `Hello` carries a nonce; the host answers [`HostMsg::Auth`] with its
+    /// proof and its own nonce; the guest answers [`GuestMsg::Auth`]. Nothing else is trusted
+    /// before both proofs check: a process that grabbed the port first cannot pass for the
+    /// guest (it has no key), and one that reaches the guest cannot drive it (the agent refuses
+    /// every frame until `Auth` verified). The `Hello` is put back in front of the queue, so the
+    /// caller reads it exactly as on an unauthenticated channel.
+    pub fn authenticate(&self, key: &[u8], wait: Duration) -> Result<(), String> {
+        // Wait for the Hello; after a second of silence, poke the guest (an unauthenticated
+        // guest answers any frame with its Hello again) — the Hello may have gone to a process
+        // that held the port before us.
+        let deadline = Instant::now() + wait;
+        let hello = loop {
+            match self.recv(Duration::from_secs(1).min(wait))? {
+                Some(h @ GuestMsg::Hello { .. }) => break h,
+                Some(_) => continue,
+                None if Instant::now() >= deadline => return Err(format!("timed out waiting for Hello ({wait:?})")),
+                None => self.send(&HostMsg::Ping { id: 0 })?,
+            }
+        };
+        let challenge = match &hello {
+            GuestMsg::Hello { nonce: Some(n), .. } => n.clone(),
+            _ => return Err("the guest agent did not authenticate the channel (no nonce in Hello): rebuild the guest image (`seagent sandbox vm image build --force`) — this channel is reachable by other local processes, so seagent refuses an unauthenticated guest".into()),
+        };
+        let mine = crate::proto::random_hex(16);
+        self.send(&HostMsg::Auth { nonce: mine.clone(), mac: crate::proto::auth_mac(key, "host", &challenge, &mine) })?;
+        loop {
+            match self.expect(wait, "the guest's Auth")? {
+                GuestMsg::Auth { mac } if crate::proto::auth_ok(key, "guest", &mine, &challenge, &mac) => break,
+                GuestMsg::Auth { .. } => return Err("the peer on the guest channel failed authentication (wrong key): not the VM seagent started — refusing it".into()),
+                GuestMsg::Err { message, .. } if message.contains("authentication failed") => return Err(format!("the guest refused the channel authentication: {message}")),
+                // The guest's answers to our pokes ("not authenticated" + Hello) may still be
+                // in flight ahead of its Auth.
+                _ => continue,
+            }
+        }
+        self.rbuf.lock().unwrap().1.push_front(hello);
+        Ok(())
+    }
+
     pub fn send(&self, m: &HostMsg) -> Result<(), String> {
         let bytes = encode(m)?;
         let mut w = &self.w;
@@ -643,6 +684,61 @@ mod tests {
             }
         }
         assert_eq!(seen.len(), 2, "both buffered frames survive the close: {seen:?}");
+    }
+
+    /// A fake guest on the other end of a pair (TCP loopback on Windows, a unix pair elsewhere):
+    /// sends Hello with `nonce`, answers the host's Auth with `guest_key`'s proof.
+    fn auth_peer(guest_key: Option<&'static [u8]>, nonce: Option<&str>) -> (Channel, std::thread::JoinHandle<Option<String>>) {
+        let (a, b) = Stream::pair().unwrap();
+        let ch = Channel::from_stream(a, Transport::Serial).unwrap();
+        let nonce = nonce.map(str::to_string);
+        let t = std::thread::spawn(move || {
+            let guest = Channel::from_stream(b, Transport::Serial).unwrap();
+            let hello = GuestMsg::Hello { version: 1, agent: "fake".into(), kernel: "k".into(), cid: None, transport: "virtio-serial".into(), uid: 1000, nonce: nonce.clone() };
+            let mut w = &guest.w;
+            w.write_all(&encode(&hello).unwrap()).unwrap();
+            // Read the host's Auth with the host-side decoder's twin.
+            let mut buf = Vec::new();
+            let mut chunk = [0u8; 4096];
+            let auth = loop {
+                let n = (&guest.r).read(&mut chunk).unwrap_or(0);
+                if n == 0 {
+                    return None;
+                }
+                buf.extend_from_slice(&chunk[..n]);
+                if let Some(m) = decode::<HostMsg>(&buf).unwrap().0.into_iter().next() {
+                    break m;
+                }
+            };
+            let HostMsg::Auth { nonce: hn, mac } = auth else { return Some("not auth".into()) };
+            let answer = match crate::proto::guest_auth_answer(guest_key.unwrap_or(b"none"), nonce.as_deref().unwrap_or(""), &hn, &mac) {
+                Ok(a) => a,
+                Err(e) => GuestMsg::Err { id: 0, message: e },
+            };
+            w.write_all(&encode(&answer).unwrap()).unwrap();
+            Some(hn)
+        });
+        (ch, t)
+    }
+
+    #[test]
+    fn a_keyed_channel_authenticates_both_ways_and_keeps_the_hello() {
+        let key: &'static [u8] = b"0123456789abcdef";
+        // The real guest: both proofs check, and the Hello is still the first frame read.
+        let (ch, t) = auth_peer(Some(key), Some("g-nonce"));
+        ch.authenticate(key, Duration::from_secs(5)).unwrap();
+        assert!(matches!(ch.expect(Duration::from_secs(1), "hello").unwrap(), GuestMsg::Hello { nonce: Some(_), .. }));
+        assert!(t.join().unwrap().is_some_and(|n| n.len() == 32), "the host sent a fresh 16-byte nonce");
+        // A squatter without the key: its answer (or its refusal of our proof) is rejected.
+        let (ch, _t) = auth_peer(Some(b"wrong-key-wrong!"), Some("g-nonce"));
+        let e = ch.authenticate(key, Duration::from_secs(5)).unwrap_err();
+        assert!(e.contains("refused") || e.contains("failed authentication"), "{e}");
+        // An old guest that never offers a challenge is refused on a keyed channel.
+        let (ch, _t) = auth_peer(None, None);
+        assert!(ch.authenticate(key, Duration::from_secs(5)).unwrap_err().contains("no nonce"));
+        // And the guest side refuses a host proof made with another key.
+        assert!(crate::proto::guest_auth_answer(key, "c", "n", &crate::proto::auth_mac(b"other", "host", "c", "n")).is_err());
+        assert!(matches!(crate::proto::guest_auth_answer(key, "c", "n", &crate::proto::auth_mac(key, "host", "c", "n")), Ok(GuestMsg::Auth { .. })));
     }
 
     #[test]

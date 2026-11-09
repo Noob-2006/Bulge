@@ -69,7 +69,7 @@ impl AgentThread {
     fn serve(self, listener: Listener) {
         let Ok(stream) = listener.accept() else { return };
         let (mut r, mut w) = (stream.try_clone().unwrap(), stream);
-        let _ = w.write_all(&encode(&GuestMsg::Hello { version: VERSION, agent: "fake-agent".into(), kernel: "fake".into(), cid: None, transport: self.spec.transport.name().into(), uid: 1000 }).unwrap());
+        let _ = w.write_all(&encode(&GuestMsg::Hello { version: VERSION, agent: "fake-agent".into(), kernel: "fake".into(), cid: None, transport: self.spec.transport.name().into(), uid: 1000, nonce: None }).unwrap());
         let mut buf = Vec::new();
         let mut chunk = [0u8; 8192];
         while self.running.load(Ordering::SeqCst) {
@@ -93,6 +93,8 @@ impl AgentThread {
                         return;
                     }
                     HostMsg::Limits { .. } => send(&mut w, GuestMsg::Ok { id: 0, detail: serde_json::Value::Null }),
+                    // The fake never offers a challenge, so no host authenticates to it.
+                    HostMsg::Auth { .. } => send(&mut w, GuestMsg::Err { id: 0, message: "no channel key".into() }),
                     HostMsg::Push { id, files } => {
                         let mut n = 0;
                         for f in files {

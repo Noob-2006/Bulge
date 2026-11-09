@@ -186,9 +186,20 @@ impl QemuProvider {
             "-monitor".into(),
             mon.qemu_monitor(),
         ]);
+        // A loopback TCP channel is reachable by every local process: the guest gets a
+        // per-boot key through fw_cfg (a file in the private run dir, never a command-line
+        // value) and both ends prove it before any frame counts (`Channel::authenticate`).
+        if matches!(chan, Endpoint::Tcp(_)) {
+            a.extend(["-fw_cfg".into(), format!("name={},file={}", crate::proto::FW_CFG_KEY_NAME, channel_key_path(spec).display())]);
+        }
         a.extend(self.extra_args.iter().cloned());
         a
     }
+}
+
+/// The per-boot channel key file QEMU reads into fw_cfg (TCP channels only).
+pub fn channel_key_path(spec: &VmSpec) -> PathBuf {
+    spec.run_dir.join("chan.key")
 }
 
 /// Kernel command line: init = the guest agent, which mounts /proc, /dev and
@@ -230,6 +241,14 @@ impl VmProvider for QemuProvider {
         // unix: the socket paths themselves (what Linux always passed); Windows: loopback
         // ports recorded in those paths.
         let (chan, mon) = if cfg!(unix) { (Endpoint::Unix(spec.channel_path()), Endpoint::Unix(qmp.clone())) } else { (Endpoint::allocate(&spec.channel_path())?, Endpoint::allocate(&qmp)?) };
+        let key = match chan {
+            Endpoint::Tcp(_) => {
+                let k = crate::proto::random_hex(32);
+                std::fs::write(channel_key_path(spec), &k).map_err(|e| format!("write the channel key: {e}"))?;
+                Some(k.into_bytes())
+            }
+            _ => None,
+        };
         let mut child = crate::host::spawn_vmm(Command::new(&self.bin).args(self.cmdline_with(spec, &chan, &mon)).stdin(Stdio::null()).stdout(Stdio::from(log)).stderr(Stdio::from(err)))
             .map_err(|e| format!("start {}: {e}", self.bin))?;
         let job = match VmmJob::confine(&child, spec.mem_mb, spec.vcpu) {
@@ -252,7 +271,7 @@ impl VmProvider for QemuProvider {
             }
             std::thread::sleep(Duration::from_millis(20));
         }
-        Ok(Box::new(QemuInstance { spec: spec.clone(), child: Some(child), chan: None, qmp, _job: job }))
+        Ok(Box::new(QemuInstance { spec: spec.clone(), child: Some(child), chan: None, qmp, key, _job: job }))
     }
 }
 
@@ -266,6 +285,8 @@ pub struct QemuInstance {
     child: Option<Child>,
     chan: Option<Arc<Channel>>,
     qmp: PathBuf,
+    /// The per-boot channel key (TCP channels): the guest must prove it, and so must we.
+    key: Option<Vec<u8>>,
     /// Windows: the Job Object holding the VMM (dropped = VMM killed).
     _job: VmmJob,
 }
@@ -314,6 +335,11 @@ impl VmInstance for QemuInstance {
             return Ok(c.clone());
         }
         let ch = Channel::connect(&self.spec.channel_path(), Transport::Serial, wait)?;
+        if let Some(key) = &self.key {
+            ch.authenticate(key, wait)?;
+            // QEMU read it at start-up; nothing needs the file any more.
+            let _ = std::fs::remove_file(channel_key_path(&self.spec));
+        }
         let ch = Arc::new(ch);
         self.chan = Some(ch.clone());
         Ok(ch)
@@ -330,7 +356,7 @@ impl VmInstance for QemuInstance {
             // -sandbox spawn=deny, but be thorough), then reap.
             crate::host::stop_vmm(&mut c);
         }
-        for f in [self.spec.channel_path(), self.spec.run_dir.join("mon.sock"), self.spec.run_dir.join("vm.pid")] {
+        for f in [self.spec.channel_path(), self.spec.run_dir.join("mon.sock"), self.spec.run_dir.join("vm.pid"), channel_key_path(&self.spec)] {
             let _ = std::fs::remove_file(f);
         }
     }
@@ -453,6 +479,12 @@ mod tests {
         assert_eq!(after("-chardev"), "socket,id=seagent0,host=127.0.0.1,port=40001,server=on,wait=off,nodelay=on");
         assert_eq!(after("-monitor"), "tcp:127.0.0.1:40002,server=on,wait=off");
         assert!(after("-append").contains("console=ttyS0") && after("-append").contains("seagent.channel=virtio-serial"), "{a:?}");
+        // The per-boot channel key travels by fw_cfg from a run-dir file, never as a value on
+        // a command line (other processes can read QEMU's).
+        assert_eq!(after("-fw_cfg"), format!("name=opt/seagent/key,file={}", channel_key_path(&s).display()));
+        assert!(!after("-append").contains("key"), "{a:?}");
+        let unix = QemuProvider::for_host(&VmConfig::default(), HostOs::Windows, Accel::Whpx, "x86_64", None).cmdline_with(&s, &Endpoint::Unix("/r/chan.sock".into()), &mon);
+        assert!(!unix.iter().any(|x| x == "-fw_cfg"), "a unix socket channel needs no key: {unix:?}");
         // The same walls as on Linux, minus the Linux-only seccomp flag.
         assert_eq!(after("-net"), "none", "no NIC: egress only through the broker");
         assert!(a.iter().any(|x| x == "-no-reboot") && a.iter().any(|x| x == "-nodefaults"));

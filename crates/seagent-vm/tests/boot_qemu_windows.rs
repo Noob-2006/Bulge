@@ -149,9 +149,40 @@ fn boots_qemu_whpx_and_runs_a_command() {
     // The endpoint record names a loopback port, never a unix socket.
     let rec = std::fs::read_to_string(sp.channel_path()).unwrap();
     assert!(rec.starts_with("tcp:127.0.0.1:"), "{rec}");
+
+    // A squatter: another local process reaches the loopback port first. It gets the guest's
+    // challenge, but the agent refuses to run anything for it, and a forged proof fails.
+    let boot;
+    {
+        let rogue = Channel::connect(&sp.channel_path(), Transport::Serial, BOOT_WAIT).unwrap();
+        match rogue.expect(BOOT_WAIT, "Hello").unwrap_or_else(|e| panic!("{e}\n{}", std::fs::read_to_string(sp.console_log()).unwrap_or_default())) {
+            GuestMsg::Hello { nonce, .. } => assert!(nonce.is_some_and(|n| n.len() == 32), "a keyed guest offers a challenge"),
+            other => panic!("{other:?}"),
+        }
+        boot = t0.elapsed();
+        rogue.send(&exec(77, "echo pwned > /tmp/pwned", 10)).unwrap();
+        match rogue.expect(FRAME_WAIT, "refusal").unwrap() {
+            GuestMsg::Err { id: 77, message } => assert!(message.contains("not authenticated"), "{message}"),
+            other => panic!("an unauthenticated Exec was answered with {other:?}"),
+        }
+        rogue.send(&HostMsg::Auth { nonce: "00".repeat(16), mac: "11".repeat(32) }).unwrap();
+        let refused = loop {
+            match rogue.expect(FRAME_WAIT, "auth refusal").unwrap() {
+                GuestMsg::Err { message, .. } if message.contains("authentication failed") => break message,
+                GuestMsg::Auth { .. } => panic!("the guest accepted a forged proof"),
+                _ => continue,
+            }
+        };
+        println!("squatter refused: {refused}");
+        rogue.shutdown();
+    }
+    std::thread::sleep(Duration::from_millis(200));
+    // The real host: authenticates (the guest repeats its challenge for the new peer).
+    let t = Instant::now();
     let ch = inst.connect(BOOT_WAIT).unwrap_or_else(|e| panic!("{e}\n{}", std::fs::read_to_string(sp.console_log()).unwrap_or_default()));
+    println!("authenticated after the squatter left in {} ms", t.elapsed().as_millis());
     let hello = ch.expect(BOOT_WAIT, "Hello").unwrap_or_else(|e| panic!("{e}\n{}", std::fs::read_to_string(sp.console_log()).unwrap_or_default()));
-    let boot = t0.elapsed();
+    assert!(!proto::FW_CFG_KEY.is_empty() && !seagent_vm::provider::qemu::channel_key_path(&sp).exists(), "the key file is gone once the channel is authenticated");
     match &hello {
         GuestMsg::Hello { version, uid, transport, kernel, .. } => {
             assert_eq!((*version, *uid, transport.as_str()), (proto::VERSION, proto::AGENT_UID, "virtio-serial"), "{kernel}");
@@ -166,6 +197,10 @@ fn boots_qemu_whpx_and_runs_a_command() {
     assert_eq!(&lines[..4], &["SEAGENT_GUEST_OK", "1000", "winvm-1", proto::GUEST_WORKSPACE], "{out}");
     assert!(out.contains("No such file"), "no /dev/kvm in the guest: {out}");
     assert_eq!(code, Some(3), "the guest command's exit code comes back");
+    ch.send(&exec(70, &format!("test -e /tmp/pwned; echo rc=$?; cat {} 2>&1 | head -c 300; echo", proto::FW_CFG_KEY), 10)).unwrap();
+    let (out, _, _) = until_exit(&ch, 70);
+    assert!(out.contains("rc=1"), "the squatter's command never ran: {out}");
+    assert!(out.contains("Permission denied"), "the agent user cannot read the channel key: {out}");
 
     ch.send(&HostMsg::Push { id: 2, files: vec![FileBlob { path: "src/a.txt".into(), data: B64.encode(b"from windows\r\n"), mode: 0o644 }] }).unwrap();
     assert!(matches!(ch.expect(FRAME_WAIT, "push ack").unwrap(), GuestMsg::Ok { id: 2, .. }));
