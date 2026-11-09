@@ -64,15 +64,15 @@ const PAGES = {
     const [c, pair] = await Promise.all([call('ui.channels'), call('pairing.list').catch(() => ({ pending: [], approved: [] }))]);
     let h = '<table class="kv"><tr><th>啟用</th><th>名稱</th><th>類型</th><th>狀態</th><th>私訊政策</th><th>允許</th><th>管理員</th><th>憑證</th></tr>';
     for (const ch of c.channels) {
-      h += row([`<input type="checkbox" data-enable="${v(ch.name)}"${ch.enabled === false ? '' : ' checked'}${ch.plugin ? ' disabled' : ''}>`, v(ch.name), v(ch.kind), ch.running ? '執行中' : ch.enabled === false ? '停用' : '未執行',
+      h += row([`<input type="checkbox" data-enable="${v(ch.name)}"${ch.enabled === false ? '' : ' checked'}${ch.plugin ? ' disabled' : ''}>`, v(ch.name), v(ch.kind), ch.error ? `<span class="bad">錯誤：${v(ch.error)}</span>` : ch.running ? '執行中' : ch.enabled === false ? '停用' : '未執行',
         `<select data-ch="${v(ch.name)}">${['pairing', 'allowlist', 'open', 'disabled'].map((p) => `<option${p === ch.dm_policy ? ' selected' : ''}>${p}</option>`).join('')}</select>`,
         v((ch.allow || []).join(', ') || '—'), v((ch.admins || []).join(', ') || '—'), v((ch.credentials || []).join(', ') || '—')]);
     }
     h += '</table>';
-    if (!c.channels.length) h = '<p class="dim">尚未設定頻道。執行 <code>seagent channels add</code> 或 <code>seagent setup</code>。</p>';
+    if (!c.channels.length) h = '<p class="dim">尚未設定頻道。到「設定 → 連線 → 聊天頻道」新增（逐步表單、測試訊息與狀態）。</p>';
     const pend = pair.pending || [];
     if (pend.length) h += '<h3>等待配對的使用者</h3><p class="dim">配對碼 1 小時內有效；輸入對方收到的配對碼以核准。</p><table class="kv">' + pend.map((p, i) => row([v(p.channel), v(p.sender_name || p.sender), `<span class="dim">${when(p.created)}</span>`, `<input type="text" data-code="${i}" placeholder="配對碼" size="8">`, `<button class="btn small" data-approve="${v(p.channel)}" data-idx="${i}">核准</button>`])).join('') + '</table>';
-    return h + NOTE + '<p class="dim">變更頻道設定後需重新啟動 daemon（/restart）。憑證請在「秘密」頁或 <code>seagent channels</code> 設定。</p>';
+    return h + NOTE + '<p class="dim">變更頻道設定後需重新啟動 daemon（/restart）。新增頻道與憑證：「設定 → 連線」。</p>';
   }, after() {
     for (const s of qa('[data-ch]')) s.onchange = () => act(() => call('ui.channels.set', { name: s.dataset.ch, key: 'dm_policy', value: JSON.stringify(s.value) }), '已儲存；重新啟動後生效');
     for (const b of qa('[data-enable]')) b.onchange = () => act(() => call('ui.channels.set', { name: b.dataset.enable, key: 'enabled', value: String(b.checked) }), '已儲存；重新啟動後生效');
@@ -689,7 +689,7 @@ const PAGES = {
       `<strong>${v(x.name)}</strong>`,
       x.running ? '執行中' : '<span class="dim">停止</span>',
       `${x.tools || 0}`,
-    ])).join('') + '</table>' : '<p class="dim">沒有 MCP 伺服器（<code>[mcp.*]</code>）。</p>';
+    ])).join('') + '</table>' : '<p class="dim">沒有 MCP 伺服器。到「設定 → 連線」新增、測試或匯入。</p>';
     return h + NOTE + '<p class="dim">勾選只會寫入設定：外掛與 MCP 伺服器在重新啟動 daemon 之後（以及新開的對話）才會套用變更。</p>';
   }, after() {
     for (const c of qa('[data-plugin]')) c.onchange = () => act(() => call('ui.plugins.set', { name: c.dataset.plugin, enabled: c.checked }), (r) => r.message || (c.checked ? '已啟用；重新啟動 daemon 後生效' : '已停用；重新啟動 daemon 後生效'));

@@ -42,6 +42,7 @@ USAGE
                                        commands, CLI, routes, UI, providers, services…)
   seagent <plugin-command> [args…]         a CLI command a plugin adds (listed by `seagent help`)
   seagent channel list | send <channel> <chat> <text…>
+  seagent channel kinds | add <name> --kind K [--set key=value]… | rm <name> | test <name> [--chat C]   (or Settings → Connections in the console)
   seagent message send|edit|delete|react|poll|pin|thread|read --channel <n> --chat <id> [--thread T]
               [--text …] [--message-id …] [--poll 'question=… options=a,b'] [--json]
                                        message actions (same dispatcher as the `message` tool)

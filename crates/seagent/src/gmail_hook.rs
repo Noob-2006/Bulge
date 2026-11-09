@@ -565,8 +565,7 @@ impl Watcher {
 }
 
 /// Daemon side: watch registration + renewal thread and the push endpoint.
-pub fn start(k: Kernel, cfg: GmailCfg, stop: seagent_core::Cancel) -> Result<Vec<std::thread::JoinHandle<()>>, String> {
-    let vault = k.vault.clone();
+pub fn start(k: Kernel, cfg: GmailCfg, vault: Arc<seagent_kernel::vault::Vault>, stop: seagent_core::Cancel) -> Result<Vec<std::thread::JoinHandle<()>>, String> {
     let cfg = cfg.resolve(&|s: &str| vault.substitute(s))?;
     let ws = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let kd = k.clone();
@@ -658,8 +657,25 @@ fn gmail_cfg(cfg: &seagent_kernel::config::Config) -> Result<Option<GmailCfg>, S
     Ok(extra.gmail)
 }
 
+/// One report line into `out` (`run` collects what `cli` prints).
+macro_rules! say {
+    ($out:expr, $($t:tt)*) => {{
+        $out.push_str(&format!($($t)*));
+        $out.push('\n');
+    }};
+}
+
 /// `seagent webhook gmail …`; `argv` starts at the subcommand. Returns the exit code.
 pub fn cli(argv: &[String], paths: &seagent_kernel::config::Paths, cfg: &seagent_kernel::config::Config, secrets: &dyn Fn(&str) -> String) -> Result<i32, String> {
+    let mut out = String::new();
+    let r = run(argv, paths, cfg, secrets, &mut out);
+    print!("{out}");
+    r
+}
+
+/// `seagent webhook gmail …` with its report collected in `out` instead of printed: the CLI
+/// prints it, the Connections page (`ops::connectors_extra`) shows it.
+pub fn run(argv: &[String], paths: &seagent_kernel::config::Paths, cfg: &seagent_kernel::config::Config, secrets: &dyn Fn(&str) -> String, out: &mut String) -> Result<i32, String> {
     let json_out = gflag(argv, "--json");
     let state = paths.data.join("gmail").join("state.json");
     let sub = argv.first().map(String::as_str).unwrap_or("");
@@ -744,33 +760,33 @@ pub fn cli(argv: &[String], paths: &seagent_kernel::config::Paths, cfg: &seagent
             write_table(&p, &root)?;
             let url = format!("http://{}{}", if resolved.serve.bind == "0.0.0.0" { "127.0.0.1".into() } else { resolved.serve.bind.clone() }, if resolved.serve.port == 80 { resolved.serve.path.clone() } else { format!(":{}{}", resolved.serve.port, resolved.serve.path) });
             if json_out {
-                println!("{}", json!({"ok": true, "config": p.display().to_string(), "account": resolved.account, "topic": resolved.topic, "label": resolved.label, "subscription": resolved.subscription, "pushEndpoint": url}));
+                say!(out, "{}", json!({"ok": true, "config": p.display().to_string(), "account": resolved.account, "topic": resolved.topic, "label": resolved.label, "subscription": resolved.subscription, "pushEndpoint": url}));
             } else {
-                println!("Gmail hook configured for {}", resolved.account);
-                println!("  config: {}", p.display());
-                println!("  topic:  {}", resolved.topic);
-                println!("  push:   {url}  (Pub/Sub push endpoint; `token` query = push token)");
-                println!("next: start `seagent daemon start` (the watcher renews the watch every {} min)", resolved.renew_every_minutes);
+                say!(out, "Gmail hook configured for {}", resolved.account);
+                say!(out, "  config: {}", p.display());
+                say!(out, "  topic:  {}", resolved.topic);
+                say!(out, "  push:   {url}  (Pub/Sub push endpoint; `token` query = push token)");
+                say!(out, "next: start `seagent daemon start` (the watcher renews the watch every {} min)", resolved.renew_every_minutes);
             }
             Ok(0)
         }
         "status" => {
             let Some(g) = gmail_cfg(cfg)? else {
-                println!("no [hooks_extra.gmail] configured — run `seagent webhook gmail setup --account <email> --topic projects/<p>/topics/<t>`");
+                say!(out, "no [hooks_extra.gmail] configured — run `seagent webhook gmail setup --account <email> --topic projects/<p>/topics/<t>`");
                 return Ok(1);
             };
             let resolved = g.clone().resolve(secrets);
             let cursor = std::fs::read_to_string(&state).ok().and_then(|s| serde_json::from_str::<Value>(&s).ok()).and_then(|v| v["history_id"].as_u64());
             if json_out {
-                println!("{}", json!({"enabled": g.enabled, "account": g.account, "label": g.label, "topic": g.topic, "subscription": g.subscription, "serve": {"bind": g.serve.bind, "port": g.serve.port, "path": g.serve.path}, "historyId": cursor, "state": state.display().to_string(), "error": resolved.err()}));
+                say!(out, "{}", json!({"enabled": g.enabled, "account": g.account, "label": g.label, "topic": g.topic, "subscription": g.subscription, "serve": {"bind": g.serve.bind, "port": g.serve.port, "path": g.serve.path}, "historyId": cursor, "state": state.display().to_string(), "error": resolved.err()}));
             } else if let Err(e) = resolved {
-                println!("gmail hook is misconfigured: {e}");
+                say!(out, "gmail hook is misconfigured: {e}");
                 return Ok(1);
             } else {
-                println!("gmail hook: {}", if g.enabled { "enabled" } else { "disabled" });
-                println!("  account: {}  label: {}  topic: {}", g.account, g.label, g.topic);
-                println!("  push:    http://{}:{}{}", g.serve.bind, g.serve.port, g.serve.path);
-                println!("  cursor:  {}", cursor.map(|c| format!("history {c}")).unwrap_or_else(|| "not seeded yet (the next watch seeds it)".into()));
+                say!(out, "gmail hook: {}", if g.enabled { "enabled" } else { "disabled" });
+                say!(out, "  account: {}  label: {}  topic: {}", g.account, g.label, g.topic);
+                say!(out, "  push:    http://{}:{}{}", g.serve.bind, g.serve.port, g.serve.path);
+                say!(out, "  cursor:  {}", cursor.map(|c| format!("history {c}")).unwrap_or_else(|| "not seeded yet (the next watch seeds it)".into()));
             }
             Ok(0)
         }
@@ -788,15 +804,15 @@ pub fn cli(argv: &[String], paths: &seagent_kernel::config::Paths, cfg: &seagent
                 let _ = crate::hooks_ext::write_private(&state, &st.to_string());
             }
             if json_out {
-                println!("{}", json!({"ok": true, "historyId": hid, "expirationMs": exp}));
+                say!(out, "{}", json!({"ok": true, "historyId": hid, "expirationMs": exp}));
             } else {
-                println!("watching {} ({}) — history {} until {}", resolved.account, resolved.label, hid, seagent_kernel::util::fmt_time((exp / 1000) as i64, 0));
+                say!(out, "watching {} ({}) — history {} until {}", resolved.account, resolved.label, hid, seagent_kernel::util::fmt_time((exp / 1000) as i64, 0));
             }
             Ok(0)
         }
         "reset" => {
             let removed = std::fs::remove_file(&state).map(|_| true).or_else(|e| if e.kind() == std::io::ErrorKind::NotFound { Ok(false) } else { Err(e) }).map_err(|e| format!("{}: {e}", state.display()))?;
-            println!("{}", if removed { format!("cleared the Gmail history cursor ({}) — the next event re-seeds it", state.display()) } else { "no Gmail history cursor to clear".into() });
+            say!(out, "{}", if removed { format!("cleared the Gmail history cursor ({}) — the next event re-seeds it", state.display()) } else { "no Gmail history cursor to clear".into() });
             Ok(0)
         }
         "disable" | "enable" => {
@@ -806,7 +822,7 @@ pub fn cli(argv: &[String], paths: &seagent_kernel::config::Paths, cfg: &seagent
             let g = he.get_mut("gmail").and_then(|v| v.as_table_mut()).ok_or("no [hooks_extra.gmail] configured")?;
             g.insert("enabled".into(), (sub == "enable").into());
             write_table(&p, &root)?;
-            println!("gmail hook {}d", sub.trim_end_matches('e'));
+            say!(out, "gmail hook {}d", sub.trim_end_matches('e'));
             Ok(0)
         }
         _ => Err(CLI_USAGE.into()),

@@ -235,7 +235,8 @@ fn valid_name(n: &str) -> String {
 }
 
 /// An MCP server entry (Claude/OpenClaw/Hermes/Codex share the command/args/env/url shape).
-fn mcp(acts: &mut Vec<Act>, name: &str, s: &Value) {
+/// Also the importer behind the Connections page's "Import mcp.json" (`ops::connectors`).
+pub fn mcp(acts: &mut Vec<Act>, name: &str, s: &Value) {
     let n = valid_name(name);
     let mut t = toml::Table::new();
     for (from, to) in [("command", "command"), ("args", "args"), ("cwd", "cwd"), ("url", "url"), ("headers", "headers"), ("timeout", "timeout_secs")] {

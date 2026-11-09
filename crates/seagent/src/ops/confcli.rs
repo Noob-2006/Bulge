@@ -385,6 +385,72 @@ pub fn unset(paths: &Paths, key: &str) -> Result<String, String> {
     Ok(format!("removed {key} from {}", paths.user_config().display()))
 }
 
+/// Replace (`Some`) or remove (`None`) one whole table — `[mcp.<name>]`, `[channels.<name>]`,
+/// `[acp.agents.<name>]` — as a block. Every `[key]` / `[key.*]` section of the file is cut out
+/// and the new block appended, so the rest of the file (comments included) stays as written;
+/// when the table lives where a section cut cannot reach it (an inline table under `[mcp]`,
+/// dotted keys), the file is rewritten from the parsed table instead, like `patch`. Validated,
+/// backed up and atomic like every other write here. Returns whether the table existed.
+/// Shared by `seagent mcp add|rm`, `seagent channel add|rm` and the Connections page.
+pub fn put_table(paths: &Paths, key: &str, table: Option<&toml::Table>) -> Result<bool, String> {
+    refuse_locked(key)?;
+    let parts = split_key(key)?;
+    let text = read_user(paths)?;
+    let mut want: toml::Table = text.parse().map_err(|e| format!("current config does not parse: {e}"))?;
+    let existed = get_in(&want, key).is_some();
+    if let Some(t) = table {
+        if text_has_redaction_placeholder(&toml::to_string(t).unwrap_or_default()) {
+            return Err(format!("refusing to write a redaction placeholder into [{key}]; set the real value or use {{{{secret:NAME}}}}"));
+        }
+        set_in(&mut want, &parts, toml::Value::Table(t.clone()))?;
+    } else if !unset_in(&mut want, &parts) {
+        return Ok(false);
+    }
+    let mut out = cut_sections(&text, key);
+    if let Some(t) = table {
+        // The block under its full header: nest the table back under every key part.
+        let mut block = toml::Table::new();
+        let mut cur = &mut block;
+        for p in &parts[..parts.len() - 1] {
+            cur = cur.entry(p.clone()).or_insert_with(|| toml::Value::Table(toml::Table::new())).as_table_mut().expect("fresh table");
+        }
+        cur.insert(parts[parts.len() - 1].clone(), toml::Value::Table(t.clone()));
+        let body = toml::to_string(&block).map_err(|e| e.to_string())?;
+        if !out.is_empty() && !out.ends_with("\n\n") {
+            out.push('\n');
+        }
+        out.push_str(&body);
+    }
+    let new = if out.parse::<toml::Table>().ok().as_ref() == Some(&want) { out } else { toml::to_string_pretty(&want).map_err(|e| e.to_string())? };
+    write_validated(paths, &new, true)?;
+    audit_change(paths, key, if table.is_some() { "put" } else { "remove" });
+    Ok(existed)
+}
+
+/// `text` without the `[key]` section and its `[key.*]` sub-sections (`[[key.*]]` arrays too).
+fn cut_sections(text: &str, key: &str) -> String {
+    let mut out = Vec::new();
+    let mut skipping = false;
+    for l in text.lines() {
+        let t = l.trim();
+        if t.starts_with('[') {
+            let h = t.trim_start_matches('[').split(']').next().unwrap_or("").trim();
+            skipping = h == key || h.starts_with(&format!("{key}."));
+        }
+        if !skipping {
+            out.push(l);
+        }
+    }
+    while out.last().is_some_and(|l| l.trim().is_empty()) {
+        out.pop();
+    }
+    if out.is_empty() {
+        String::new()
+    } else {
+        out.join("\n") + "\n"
+    }
+}
+
 /// `seagent config managed`: the system layer, its locked keys and what it overrides here.
 pub fn managed(paths: &Paths, ws: &Path, json: bool) -> Result<String, String> {
     let cfg = Config::load(Some(&paths.user_config()), Some(&project_config(ws)), &[])?;
@@ -844,5 +910,37 @@ mod tests {
         let mut v = json!({"a": {"b": 1, "c": 2}});
         merge_patch(&mut v, &json!({"a": {"b": null, "d": 3}}));
         assert_eq!(v, json!({"a": {"c": 2, "d": 3}}));
+    }
+
+    /// `put_table`: the one write path for whole connector tables (`seagent mcp add|rm`,
+    /// `seagent channel add|rm`, the Connections page) keeps the rest of the file, replaces
+    /// sub-sections with the table, refuses placeholders and leaves a backup to restore.
+    #[test]
+    fn put_table_replaces_one_table_and_keeps_the_rest() {
+        let p = paths();
+        std::fs::create_dir_all(&p.config_dir).unwrap();
+        std::fs::write(p.user_config(), "# mine\n[model]\ndefault = \"a/b\" # keep\n\n[mcp.fs]\ncommand = \"old\"\n\n[mcp.fs.env]\nA = \"1\"\n\n[mcp.other]\nurl = \"https://x/mcp\"\n").unwrap();
+        let t: toml::Table = "command = \"npx\"\nargs = [\"-y\", \"fs\"]\n[env]\nB = \"2\"\n".parse().unwrap();
+        assert!(put_table(&p, "mcp.fs", Some(&t)).unwrap(), "it existed");
+        let text = std::fs::read_to_string(p.user_config()).unwrap();
+        assert!(text.starts_with("# mine\n[model]\ndefault = \"a/b\" # keep\n"), "{text}");
+        assert!(!text.contains("old") && !text.contains("A = ") && text.contains("[mcp.other]"), "{text}");
+        let c = Config::load(Some(&p.user_config()), None, &[]).unwrap();
+        assert_eq!(c.mcp["fs"]["command"].as_str(), Some("npx"));
+        assert_eq!(c.mcp["fs"]["env"]["B"].as_str(), Some("2"));
+        assert!(!backups(&p).is_empty(), "the previous version is kept for `config restore`");
+        // Removal, then removing again is a no-op that reports it.
+        assert!(put_table(&p, "mcp.fs", None).unwrap());
+        assert!(!put_table(&p, "mcp.fs", None).unwrap());
+        assert!(!Config::load(Some(&p.user_config()), None, &[]).unwrap().mcp.contains_key("fs"));
+        // An inline table a section cut cannot see still gets replaced (full rewrite).
+        std::fs::write(p.user_config(), "[channels]\ntg = { kind = \"telegram\", token = \"x\" }\n").unwrap();
+        let t: toml::Table = "kind = \"telegram\"\ntoken = \"{{secret:TG}}\"\n".parse().unwrap();
+        put_table(&p, "channels.tg", Some(&t)).unwrap();
+        let c = Config::load(Some(&p.user_config()), None, &[]).unwrap();
+        assert_eq!(c.channels["tg"]["token"].as_str(), Some("{{secret:TG}}"));
+        let bad: toml::Table = "kind = \"telegram\"\ntoken = \"***\"\n".parse().unwrap();
+        assert!(put_table(&p, "channels.tg", Some(&bad)).unwrap_err().contains("placeholder"));
+        assert!(put_table(&p, "channels.bad name", Some(&t)).is_err(), "keys are validated");
     }
 }

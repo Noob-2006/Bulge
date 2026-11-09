@@ -20,6 +20,8 @@ const FILES: &[(&str, &str, &str, &str)] = &[
     ("/ui/app.css", CSS, "web/app.css", include_str!("../../../ui/web/app.css")),
     ("/ui/pages.css", CSS, "web/pages.css", include_str!("../../../ui/web/pages.css")),
     ("/ui/chat_menu.css", CSS, "web/chat_menu.css", include_str!("../../../ui/web/chat_menu.css")),
+    ("/ui/connectors.js", JS, "web/connectors.js", include_str!("../../../ui/web/connectors.js")),
+    ("/ui/connectors.css", CSS, "web/connectors.css", include_str!("../../../ui/web/connectors.css")),
     ("/ui/theme.css", CSS, "theme.css", include_str!("../../../ui/theme.css")),
     ("/ui/star.svg", SVG, "star.svg", include_str!("../../../ui/star.svg")),
     ("/ui/icon.svg", SVG, "icon.svg", include_str!("../../../ui/icon.svg")),

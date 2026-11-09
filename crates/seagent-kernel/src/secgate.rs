@@ -489,6 +489,15 @@ impl Runtime {
         self.cfg.security.sandboxed.unwrap_or_else(risk::sandboxed)
     }
 
+    /// [`configured_dests`] of the startup config with the hot-applied groups laid over it
+    /// (`Runtime::set_live_dests`: an ACP agent added in the console is configured from then on).
+    pub fn configured_dests_now(&self) -> Vec<String> {
+        let live = self.live_dests.read().unwrap();
+        let mut v: Vec<String> = configured_dests(&self.cfg).into_iter().filter(|d| !live.keys().any(|p| d.starts_with(p.as_str()))).collect();
+        v.extend(live.values().flatten().cloned());
+        v
+    }
+
     /// The neutral effects description the tier classifier reads (GAPS-next §0-1).
     fn risk_candidate(&self, log: &SessionLog, tool: &str, effects: &[Effect], input: &Value) -> risk::Candidate {
         let ws = workspace_of(log);
@@ -501,7 +510,7 @@ impl Runtime {
         // The same for configured *services* that declare a pseudo-destination instead of a
         // host (`mcp:<server>`, `acp://<agent>`): the operator named the command, so this is
         // a tier-1 conversation with our own tool, not a new outbound destination.
-        let services = configured_dests(&self.cfg);
+        let services = self.configured_dests_now();
         let mut c = risk::Candidate {
             tool: tool.to_string(),
             workspace: ws,

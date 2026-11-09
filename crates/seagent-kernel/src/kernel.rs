@@ -142,6 +142,13 @@ pub struct Runtime {
     no_reasoning: Mutex<std::collections::HashSet<String>>,
     hooks: std::sync::RwLock<Vec<Arc<dyn Hook>>>,
     session_tools: std::sync::RwLock<HashMap<String, Vec<Arc<dyn Tool>>>>,
+    /// Hot-applied tool groups by name prefix (`mcp__<server>__`): a group replaces every
+    /// startup tool with that prefix, so an MCP server added, edited or removed in the console
+    /// takes effect without a restart. An empty group hides the startup tools.
+    live_tools: std::sync::RwLock<std::collections::BTreeMap<String, Vec<Arc<dyn Tool>>>>,
+    /// Hot-applied configured service destinations by scheme prefix (`acp://`): they replace the
+    /// startup config's entries with that prefix in the security gate (`set_live_dests`).
+    pub(crate) live_dests: std::sync::RwLock<std::collections::BTreeMap<String, Vec<String>>>,
     taps: std::sync::RwLock<Vec<Tap>>,
     /// `context_engine = "<plugin>"`: shapes requests and may own compaction.
     engine: std::sync::RwLock<Option<Arc<dyn ContextEngine>>>,
@@ -186,8 +193,16 @@ pub fn filter_skills(segs: &mut [SystemSegment], disabled: &[String]) {
             .lines()
             .filter(|l| !disabled.iter().any(|d| l.trim_start().starts_with(&format!("- {d}:"))))
             .collect::<Vec<_>>()
-            .join("
-");
+            .join("\n");
+    }
+}
+
+/// Whether a live tool group key (`Runtime::set_live_tools`) covers tool `name`.
+fn live_key_covers(key: &str, name: &str) -> bool {
+    if key.ends_with("__") {
+        name.starts_with(key)
+    } else {
+        name == key
     }
 }
 
@@ -244,7 +259,7 @@ pub fn new_kernel(cfg: Config, paths: Paths, resolver: Arc<dyn Resolver>, tools:
         crate::sqlindex::relocate(&paths.data, Path::new(cfg.ha.index_dir.trim()));
     }
     cfg.security.activate_at(Some(&paths.config_dir));
-    Arc::new(Runtime { cfg, paths, store, resolver, tools, vault, approver, remembered: Remembered::default(), bus: Bus::default(), running: Mutex::new(HashMap::new()), benched: Mutex::new(HashMap::new()), no_reasoning: Mutex::new(std::collections::HashSet::new()), hooks: Default::default(), session_tools: Default::default(), taps: Default::default(), engine: Default::default(), lifecycles: Default::default(), slash: Default::default(), retry_sleep: None, subagents: Default::default(), end_turn: Default::default(), auto_resume: Default::default(), queue_settings: Default::default(), runtime_cfg: Default::default(), ctx: Default::default(), provenance: Mutex::new(HashMap::new()) })
+    Arc::new(Runtime { cfg, paths, store, resolver, tools, vault, approver, remembered: Remembered::default(), bus: Bus::default(), running: Mutex::new(HashMap::new()), benched: Mutex::new(HashMap::new()), no_reasoning: Mutex::new(std::collections::HashSet::new()), hooks: Default::default(), session_tools: Default::default(), live_tools: Default::default(), live_dests: Default::default(), taps: Default::default(), engine: Default::default(), lifecycles: Default::default(), slash: Default::default(), retry_sleep: None, subagents: Default::default(), end_turn: Default::default(), auto_resume: Default::default(), queue_settings: Default::default(), runtime_cfg: Default::default(), ctx: Default::default(), provenance: Mutex::new(HashMap::new()) })
 }
 
 #[derive(Debug)]
@@ -298,9 +313,38 @@ impl Runtime {
             return vec![];
         }
         let cfg = self.cfg_now();
-        let mut v: Vec<ToolSpec> = self.tools.iter().map(|t| t.spec()).filter(|s| !cfg.tools.disabled.contains(&s.name)).collect();
+        let mut v: Vec<ToolSpec> = self.tools_now().iter().map(|t| t.spec()).filter(|s| !cfg.tools.disabled.contains(&s.name)).collect();
         v.extend(self.engine_tools().iter().map(|t| t.spec()).filter(|s| !cfg.tools.disabled.contains(&s.name)));
         v
+    }
+    /// The startup tools with the hot-applied groups laid over them (`set_live_tools`).
+    pub fn tools_now(&self) -> Vec<Arc<dyn Tool>> {
+        let live = self.live_tools.read().unwrap();
+        if live.is_empty() {
+            return self.tools.clone();
+        }
+        let mut v: Vec<Arc<dyn Tool>> = self.tools.iter().filter(|t| { let n = t.spec().name; !live.keys().any(|k| live_key_covers(k, &n)) }).cloned().collect();
+        v.extend(live.values().flatten().cloned());
+        v
+    }
+    /// One startup-or-live tool by name, without copying the list when nothing is hot-applied.
+    fn find_tool(&self, name: &str) -> Option<Arc<dyn Tool>> {
+        let live = self.live_tools.read().unwrap();
+        if let Some(group) = live.iter().find(|(k, _)| live_key_covers(k, name)).map(|(_, g)| g) {
+            return group.iter().find(|t| t.spec().name == name).cloned();
+        }
+        self.tools.iter().find(|t| t.spec().name == name).cloned()
+    }
+    /// Replace the configured service destinations starting with `prefix` (`acp://`) — an ACP
+    /// agent added or removed in the console — so the gate treats them as configured at once.
+    pub fn set_live_dests(&self, prefix: &str, dests: Vec<String>) {
+        self.live_dests.write().unwrap().insert(prefix.to_string(), dests);
+    }
+    /// Replace the tools `key` covers — every name starting with it when it ends in `__` (an MCP
+    /// server's `mcp__<name>__`), otherwise the one tool of that name (`channel_send`) — with
+    /// `tools`, for turns that start from now on. An empty list removes them.
+    pub fn set_live_tools(&self, prefix: &str, tools: Vec<Arc<dyn Tool>>) {
+        self.live_tools.write().unwrap().insert(prefix.to_string(), tools);
     }
     /// Tools the active context engine brings (Hermes `ContextEngine.get_tool_schemas`).
     fn engine_tools(&self) -> Vec<Arc<dyn Tool>> {
@@ -313,7 +357,7 @@ impl Runtime {
         if !self.tool_permitted(session, "", name) {
             return None;
         }
-        self.tools.iter().find(|t| t.spec().name == name).cloned().or_else(|| self.engine_tools().into_iter().find(|t| t.spec().name == name)).or_else(|| self.session_tools.read().unwrap().get(session)?.iter().find(|t| t.spec().name == name).cloned())
+        self.find_tool(name).or_else(|| self.engine_tools().into_iter().find(|t| t.spec().name == name)).or_else(|| self.session_tools.read().unwrap().get(session)?.iter().find(|t| t.spec().name == name).cloned())
     }
 
     /// Short, token-cheap error: closest names instead of the whole catalog.
@@ -385,6 +429,13 @@ impl Runtime {
 
     pub fn add_hooks(&self, hooks: Vec<Arc<dyn Hook>>) {
         self.hooks.write().unwrap().extend(hooks);
+    }
+    /// Swap the hooks named `old` for `new` (the Connections page reloading shell hooks, packs,
+    /// bundled and outbound hooks); every other hook stays where it is.
+    pub fn replace_hooks(&self, old: &[String], new: Vec<Arc<dyn Hook>>) {
+        let mut h = self.hooks.write().unwrap();
+        h.retain(|x| !old.contains(&x.name()));
+        h.extend(new);
     }
     /// Names of the installed hooks, in install order (`seagent doctor`, tests).
     pub fn hook_names(&self) -> Vec<String> {

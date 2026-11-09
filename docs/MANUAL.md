@@ -171,6 +171,17 @@ seagent migrate from hermes --migrate-secrets    # 連同來源的金鑰／token
 
 ## 3. 聊天平台（channels）
 
+**不用編輯設定檔**：網頁主控台「設定 → 連線 → 聊天頻道」有逐平台的表單（Telegram、Discord、Slack、Matrix、Mattermost、Teams、Email、WhatsApp、Signal、LINE、IRC、ntfy、Home Assistant、Webhook；其他平台用 key = value 表單），儲存前用平台模組本身驗證，憑證存進金庫、設定檔只放 `{{secret:…}}`；還有「傳送測試訊息」、「檢查憑證」（Telegram／Discord／Slack 線上確認）、狀態燈與私訊配對的核准／撤銷。同一套程式也是 CLI：
+
+```bash
+seagent channel kinds                                   # 平台與欄位（* = 必填）
+seagent channel add tg --kind telegram --set token={{secret:TELEGRAM_TOKEN}} --allow 123456789
+seagent channel test tg --chat 123456789 [--text "…"]   # 送一則測試訊息
+seagent channel rm tg
+```
+
+CLI 上的憑證只接受 `{{secret:NAME}}` 參照（先 `seagent secrets set NAME`），不接受明文。
+
 一個平台就是一個 `[channels.<名稱>]` 段：
 
 ```toml
@@ -187,6 +198,7 @@ ai_label = "— 由 AI 生成"
 ```
 
 - 秘密一律用 `{{secret:NAME}}` 引用，值放在 `seagent secrets set NAME`；`config.toml` 裡沒有明文。
+- 執行中被平台拒絕的頻道（例如 Telegram 401）在連線頁、`ui.channels` 與 `/ready` 都顯示為錯誤並附上原因，不會顯示「執行中」。
 - **陌生人的預設待遇是拒絕**。`dm_policy = "pairing"` 時，未列在白名單的人會收到一組配對碼，你用 `seagent pairing approve <channel> <code>` 放行（`seagent pairing list|revoke`；8 碼、1 小時過期、只存加鹽雜湊、失敗 5 次鎖 1 小時）。
 - 群組預設要 `@` 提及才回應；`require_mention = false` 可關。
 - `privacy_notice`／`ai_label` 與 `[compliance] retention_days` 是法遵欄位：`dm_policy = open|pairing` 或 `group_policy = open` 卻沒設 `privacy_notice`，載入時會警告。
@@ -558,7 +570,11 @@ requires:
 
 > 實作：`crates/seagent-skills/src/skill.rs`、`core/{index,invoke,skilltool,slash,usage,review,workshop,cli}.rs`、`hub/cli.rs`。
 
+**在主控台安裝**（技能的「設定需求」把 `required_environment_variables` 的值存進金庫，等同 `seagent skills setup`）：「設定 → 連線 → 技能」可以搜尋登錄、以識別碼／GitHub 路徑／網址安裝、從這台裝置選資料夾、`SKILL.md` 或 `.zip`（一樣經過隔離、簽章與掃描）、安裝內建但未安裝的技能、檢查與更新、管理 taps、啟用／停用、檢視與移除。
+
 ### 7.2 外掛
+
+主控台「設定 → 連線 → 外掛」：搜尋目錄與 ClawHub、瀏覽市集、安裝／更新／解除安裝、啟用停用，以及新增 `[plugins.<名稱>]` 程序外掛（含啟動測試，列出它宣告的能力）。ACP 外部代理（`[acp.agents.*]`）、A2A 遠端代理與 peers、Webhook 訂閱也各有一頁；「Hooks／Gmail」頁做 `seagent hooks approve|revoke|enable|install` 與 `seagent webhook gmail setup|status|enable|reset|watch`，外掛頁有 `plugins mcps|mcp-install` 的目錄，裝置頁可產生 `seagent nodes setup-code` 的設定碼與 QR 碼。
 
 外掛可以貢獻工具、hooks、channel、指令、CLI 子指令、HTTP 路由、UI、provider、service。安裝時要**宣告能力並經你同意**（`seagent plugin list` 看它提供什麼、`seagent security plugins` 看能力與同意狀態）。`seagent plugins update` 遇到掃描結果為 `caution` 的新版不會再默默接受；無人值守更新見 2.2 的 `plugin_auto_update_hours`（pinned 的 checkout 與沒有來源的外掛會跳過）。
 
@@ -580,6 +596,8 @@ command = "~/.config/seagent/hooks/check-shell.sh"
 ---
 
 ## 8. MCP
+
+主控台「設定 → 連線 → MCP 伺服器」做得到下面每一件事：新增 stdio（指令、參數、環境變數、工作目錄）與 HTTP／SSE 伺服器（網址、標頭、OAuth 登入：瀏覽器或裝置代碼）、儲存前先測試、列出工具並逐一停用（寫入 `exclude_tools`）、工具定義變動後重新核准、預設清單，以及從 Claude Desktop／Claude Code、Cursor、VS Code、Windsurf 的 `mcp.json` 匯入（看起來像金鑰的環境變數移進金庫）。stdio 伺服器儲存前顯示和 `seagent mcp add` 相同的 `mcp consent:` 行。寫入走同一個 `mcp_cli::save_server` → `confcli::put_table`：先驗證、留備份（「設定檔」頁可還原）。**不必重新啟動**：伺服器在執行中的 daemon 裡停掉再以新設定載入，工具從下一輪起就換掉；聊天頻道同樣即時套用（沒變的轉接器原樣保留，改過的重建）。技能開關、hooks（shell hook、套件、內建與外送）、Gmail watcher、ACP 代理與只提供工具的程序外掛也都即時套用；只有帶 hooks／頻道／路由／provider／服務／UI 的外掛、外掛套件與 A2A 要在啟動時載入，頁面上方會列出並提供「重新啟動 daemon」按鈕（與 `/restart` 同一個助手）。測試 stdio 草稿前也先顯示 `mcp consent:` 行，確認後才執行。工具定義的釘選可以比對（`pins diff`）、重新核准或忘記。
 
 ```bash
 seagent mcp add files -- npx -y @modelcontextprotocol/server-filesystem ~/docs
@@ -792,7 +810,7 @@ dm_policy = "pairing"
 seagent setup | run | chat | session …(stats [--session id]) | daemon … | send/attach/interrupt | gate
 seagent schedule … | goal … | system event | suggestions | kanban | fleet | rooms … | migrate …
 seagent sandbox list|recreate|explain | sandbox vm status|image|snapshot|snapshots|undo|gc
-seagent channel list|send | message … | webhook … | pairing
+seagent channel list|send|kinds|add|rm|test | message … | webhook … | pairing
 seagent approvals mode|status|list|allow|revoke|suggest|queue|test | exec-policy | gate | pause
 seagent security audit|scan|plugins|check-url|creds | secrets | auth | login | models | usage
 seagent mcp … | plugin list | hooks … | commands | skills …(lock|unlock|drafts) | curator …(diet)

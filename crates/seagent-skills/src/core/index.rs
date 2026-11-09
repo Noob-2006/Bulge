@@ -95,17 +95,24 @@ struct State {
 pub struct SkillsIndex {
     pub cfg: Config,
     pub paths: Paths,
-    pub settings: Settings,
+    /// `[skills]` settings (disabled list…); refreshed when the console switches a skill.
+    settings: std::sync::RwLock<Settings>,
     state: Mutex<State>,
 }
 
 impl SkillsIndex {
     pub fn new(cfg: &Config, paths: &Paths) -> SkillsIndex {
-        SkillsIndex { settings: Settings::load(cfg), cfg: cfg.clone(), paths: paths.clone(), state: Mutex::new(State::default()) }
+        SkillsIndex { settings: std::sync::RwLock::new(Settings::load(cfg)), cfg: cfg.clone(), paths: paths.clone(), state: Mutex::new(State::default()) }
     }
 
     fn current(&self, ws: &str) -> BTreeMap<String, String> {
-        rows(&invoke::catalog(&self.cfg, &self.paths, Path::new(ws), &self.settings))
+        rows(&invoke::catalog(&self.cfg, &self.paths, Path::new(ws), &self.settings.read().unwrap_or_else(|e| e.into_inner())))
+    }
+
+    /// New `[skills]` settings (a skill switched on or off in the console): the per-turn delta
+    /// announces the difference to running sessions, so the prompt prefix stays cached.
+    pub fn set_settings(&self, s: Settings) {
+        *self.settings.write().unwrap_or_else(|e| e.into_inner()) = s;
     }
 
     /// The per-turn delta note for `session`, if the model has not been told yet.
@@ -215,7 +222,7 @@ impl seagent_kernel::lifecycle::Lifecycle for SkillsIndex {
         "skills-index".into()
     }
     fn system_segment(&self, ws: &str) -> Option<seagent_core::SystemSegment> {
-        let cat = invoke::catalog(&self.cfg, &self.paths, Path::new(ws), &self.settings);
+        let cat = invoke::catalog(&self.cfg, &self.paths, Path::new(ws), &self.settings.read().unwrap_or_else(|e| e.into_inner()));
         let text = render(&cat);
         let mut st = self.state.lock().unwrap();
         if text.trim().is_empty() {

@@ -260,7 +260,7 @@ fn read_json(r: ureq::http::Response<ureq::Body>) -> (u16, Value) {
 }
 
 /// Check a channel token against the platform; returns the bot's display name.
-fn check_channel(kind: &str, token: &str, app_token: Option<&str>) -> Result<String, String> {
+pub(crate) fn check_channel(kind: &str, token: &str, app_token: Option<&str>) -> Result<String, String> {
     let a = agent();
     let net = |e: ureq::Error| e.to_string();
     match kind {

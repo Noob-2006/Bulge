@@ -647,7 +647,29 @@ pub fn skill_changes(before: &BTreeMap<PathBuf, Value>, after: &BTreeMap<PathBuf
     out
 }
 
-/// Daemon services owned by `[hooks_extra]`: the skill watcher and the Gmail watcher.
+/// The Gmail watcher of `cfg` (`[hooks_extra.gmail]`), if enabled. Separate from the other
+/// leader services so the Connections page can stop and start it with a new setup.
+pub fn start_gmail(k: &Kernel, cfg: &Config, vault: Arc<seagent_kernel::vault::Vault>, stop: seagent_core::Cancel) -> Vec<std::thread::JoinHandle<()>> {
+    let g = match HooksExtra::parse(cfg) {
+        Ok(x) => x.gmail.filter(|g| g.enabled),
+        Err(e) => {
+            eprintln!("seagentd: {e}");
+            return vec![];
+        }
+    };
+    match g.map(|g| crate::gmail_hook::start(k.clone(), g, vault, stop)) {
+        Some(Ok(h)) => h,
+        Some(Err(e)) => {
+            eprintln!("seagentd: gmail watcher not started: {e}");
+            vec![]
+        }
+        None => vec![],
+    }
+}
+
+/// Daemon services owned by `[hooks_extra]`: the skill watcher. The Gmail watcher
+/// ([`start_gmail`]) is started by the daemon through `ops::connectors_live`, which can stop
+/// and start it again when the console changes the Gmail setup.
 pub fn start_daemon_services(k: &Kernel, ws: &Path, stop: seagent_core::Cancel) -> Vec<std::thread::JoinHandle<()>> {
     let x = match HooksExtra::parse(&k.cfg) {
         Ok(x) => x,
@@ -677,12 +699,6 @@ pub fn start_daemon_services(k: &Kernel, ws: &Path, stop: seagent_core::Cancel) 
                 prev = next;
             }
         }));
-    }
-    if let Some(g) = x.gmail.filter(|g| g.enabled) {
-        match crate::gmail_hook::start(k.clone(), g, stop) {
-            Ok(h) => hs.extend(h),
-            Err(e) => eprintln!("seagentd: gmail watcher not started: {e}"),
-        }
     }
     hs
 }
