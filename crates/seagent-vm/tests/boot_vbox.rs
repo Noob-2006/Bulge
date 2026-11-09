@@ -73,8 +73,8 @@ fn boots_virtualbox_from_the_guest_disk_and_runs_a_command() {
         eprintln!("SKIP: VBoxManage not found (install Oracle VirtualBox)");
         return;
     }
-    let run = std::env::temp_dir().join(format!("seagent-vbox-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&run);
+    let scratch = seagent_core::tmp::TempDir::new("seagent-vbox");
+    let run = scratch.path().to_path_buf();
     let spec = VmSpec {
         id: format!("vbox-{}", std::process::id()),
         tier: "owner".into(),

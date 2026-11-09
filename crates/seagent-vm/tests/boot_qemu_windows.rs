@@ -89,11 +89,11 @@ fn ready() -> Option<PathBuf> {
     Some(img)
 }
 
-fn scratch(tag: &str) -> PathBuf {
-    let d = std::env::temp_dir().join(format!("seagent-winvm-{tag}-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&d);
-    std::fs::create_dir_all(&d).unwrap();
-    d
+/// A self-cleaning run dir; keep the guard alive for the whole test.
+fn scratch(tag: &str) -> (seagent_core::tmp::TempDir, PathBuf) {
+    let g = seagent_core::tmp::TempDir::new(&format!("seagent-winvm-{tag}"));
+    let d = g.path().to_path_buf();
+    (g, d)
 }
 
 fn spec(id: &str, image: &Path, run_dir: PathBuf) -> VmSpec {
@@ -141,7 +141,7 @@ fn boots_qemu_whpx_and_runs_a_command() {
     let cfg = VmConfig::default();
     let p = QemuProvider::new(&cfg);
     println!("accelerator: {} ({})", p.accel().name(), p.accel().label());
-    let run = scratch("provider");
+    let (_scratch, run) = scratch("provider");
     let sp = spec("winvm-1", &image, run.clone());
     let t0 = Instant::now();
     let mut inst = p.start(&sp).unwrap_or_else(|e| panic!("{e}"));
@@ -250,7 +250,7 @@ fn boots_qemu_whpx_and_runs_a_command() {
 #[ignore = "boots real VMs: needs QEMU for Windows and SEAGENT_VM_IMAGE_DIR"]
 fn the_pool_syncs_snapshots_and_separates_tiers_under_qemu_whpx() {
     let Some(image) = ready() else { return };
-    let root = scratch("pool");
+    let (_scratch, root) = scratch("pool");
     let (data, ws) = (root.join("data"), root.join("ws"));
     std::fs::create_dir_all(&data).unwrap();
     std::fs::create_dir_all(&ws).unwrap();
@@ -312,7 +312,7 @@ fn a_named_pipe_uart_channel_is_keyed_through_the_dmi_serial() {
     // One VM per phase: QEMU's Windows pipe chardev accepts a single client per boot (after a
     // squatter lets go the pipe stays busy — a denial of service, never an impersonation).
     let boot = |tag: &str| {
-        let run = scratch(tag);
+        let (_scratch, run) = scratch(tag);
         let vars = run.join("vars.fd");
         std::fs::copy(qemu.parent().unwrap().join("share").join("edk2-i386-vars.fd"), &vars).unwrap();
         let pipe = format!("seagent-dmitest-{tag}-{}", std::process::id());

@@ -713,11 +713,11 @@ mod tests {
     #[ignore = "boots a real VM (QEMU for Windows + guest image)"]
     fn the_exec_backend_streams_a_command_from_a_real_qemu_whpx_vm() {
         let Ok(img) = std::env::var("SEAGENT_VM_IMAGE_DIR") else {
-            println!("skipping: set SEAGENT_VM_IMAGE_DIR");
+            eprintln!("skipping: set SEAGENT_VM_IMAGE_DIR");
             return;
         };
         if seagent_vm::host::find_tool(seagent_vm::host::native_qemu()).is_none() {
-            println!("skipping: qemu-system-x86_64 not found");
+            eprintln!("skipping: qemu-system-x86_64 not found");
             return;
         }
         let c = ctx("realwinvm");

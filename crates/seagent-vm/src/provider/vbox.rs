@@ -374,8 +374,8 @@ mod tests {
 
     #[test]
     fn a_conversion_older_than_its_raw_disk_is_stale() {
-        let d = std::env::temp_dir().join(format!("seagent-vbox-stale-{}", std::process::id()));
-        std::fs::create_dir_all(&d).unwrap();
+        let guard = seagent_core::tmp::TempDir::new("seagent-vbox-stale");
+        let d = guard.path().to_path_buf();
         let (vdi, raw) = (d.join("disk.vdi"), d.join("disk.raw"));
         std::fs::write(&vdi, b"old").unwrap();
         std::thread::sleep(Duration::from_millis(50));
@@ -385,7 +385,6 @@ mod tests {
         std::fs::write(&vdi, b"fresh").unwrap();
         assert!(!is_stale(&vdi, &raw));
         assert!(!is_stale(&d.join("missing.vdi"), &raw));
-        let _ = std::fs::remove_dir_all(&d);
     }
 
     /// Windows counterpart of the shape test above: a named-pipe COM2 gets a per-boot key as

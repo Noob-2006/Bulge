@@ -27,7 +27,7 @@ struct Opts {
     pos: Vec<String>,
     flags: Vec<String>,
     vals: Vec<(String, String)>,
-    /// Everything after a bare `--`, verbatim (`seagent sandbox vm exec -- <command??`).
+    /// Everything after a bare `--`, verbatim (`seagent sandbox vm exec -- <command…>`).
     rest: Vec<String>,
 }
 
@@ -71,7 +71,7 @@ pub fn exec_config(paths: &Paths) -> Result<ExecConfig, String> {
     let t: toml::Table = toml::from_str(&text).map_err(|e| format!("{}: {e}", paths.user_config().display()))?;
     match t.get("exec") {
         Some(v) => ExecConfig::parse(&serde_json::to_value(v).map_err(|e| e.to_string())?),
-        // No `[exec]` table: every name is unstated, so `auto` decides (A1 ??the microVM when
+        // No `[exec]` table: every name is unstated, so `auto` decides (A1 — the microVM when
         // this machine can boot one, else the strongest fallback with a warning).
         None => ExecConfig::parse(&Value::Null),
     }
@@ -270,7 +270,7 @@ pub fn explain(cfg: &ExecConfig, paths: &Paths, session: &str, workspace: &Path,
             denied.push(t.clone());
         }
     }
-    // A1: what the session's commands *will* run in ??the same resolution the executor uses,
+    // A1: what the session's commands *will* run in — the same resolution the executor uses,
     // `auto` (microVM first) included, with the warning that goes with a weaker level.
     let plan = env.plan(session, workspace, &paths.data);
     // A3/A5: the VM's only way out, and what it will let through.
@@ -342,7 +342,7 @@ fn render_explain(v: &Value) -> String {
     let s = |k: &str| v[k].as_str().map(String::from).unwrap_or_else(|| v[k].to_string());
     let mut out = vec![
         format!("session {}: {}", s("session"), if v["sandboxed"].as_bool() == Some(true) { format!("SANDBOXED in {}", s("runs_in")) } else { format!("runs in {} (host backend)", s("runs_in")) }),
-        format!("mode {} 繚 scope {} (key {}) 繚 workspace access {} 繚 network {} 繚 elevated {}", s("mode"), s("scope"), s("scope_key"), s("workspace_access"), s("network"), s("elevated")),
+        format!("mode {} · scope {} (key {}) · workspace access {} · network {} · elevated {}", s("mode"), s("scope"), s("scope_key"), s("workspace_access"), s("network"), s("elevated")),
         format!("workspace: {}", s("workspace")),
     ];
     if !s("sandboxed_note").is_empty() {
@@ -350,7 +350,7 @@ fn render_explain(v: &Value) -> String {
     }
     if !v["plan"].is_null() {
         let p = &v["plan"];
-        out.push(format!("execution plan: {} ({}) via {} ??{}", p["backend"].as_str().unwrap_or("?"), p["level"].as_str().unwrap_or("?"), p["provider"].as_str().unwrap_or("in-process"), p["origin"].as_str().unwrap_or("?")));
+        out.push(format!("execution plan: {} ({}) via {} — {}", p["backend"].as_str().unwrap_or("?"), p["level"].as_str().unwrap_or("?"), p["provider"].as_str().unwrap_or("in-process"), p["origin"].as_str().unwrap_or("?")));
         if let Some(w) = p["warning"].as_str() {
             out.push(format!("WARNING: {w}"));
         }
@@ -364,7 +364,7 @@ fn render_explain(v: &Value) -> String {
     }
     if !v["capabilities"].is_null() {
         let c = &v["capabilities"];
-        out.push(format!("capabilities: enforced={} 繚 {} declarations 繚 network declared by {}", c["enforced"].as_bool().unwrap_or(false), c["declared"].as_u64().unwrap_or(0), c["network"].as_array().map(|a| a.len()).unwrap_or(0)));
+        out.push(format!("capabilities: enforced={} · {} declarations · network declared by {}", c["enforced"].as_bool().unwrap_or(false), c["declared"].as_u64().unwrap_or(0), c["network"].as_array().map(|a| a.len()).unwrap_or(0)));
     }
     if !v["isolation"].is_null() {
         let i = &v["isolation"];
@@ -377,7 +377,7 @@ fn render_explain(v: &Value) -> String {
             out.push(format!("warning: {w}"));
         }
         if let Some(r) = i["host_kernel"]["report"].as_array() {
-            out.push(format!("host: {}", r.iter().filter_map(|x| x.as_str()).collect::<Vec<_>>().join(" 繚 ")));
+            out.push(format!("host: {}", r.iter().filter_map(|x| x.as_str()).collect::<Vec<_>>().join(" · ")));
         }
         if !i["namespace_fallback"].is_null() {
             let nf = &i["namespace_fallback"];
@@ -424,7 +424,7 @@ fn isolation_report(cfg: &ExecConfig, plan: &seagent_vm::policy::Plan, sandbox_p
         "warning": host.warning().or_else(|| sandbox.warning()),
     });
     // ent-023/024/026: what this kernel gives a namespace sandbox, and the steps down the
-    // fallback took on this machine (no Landlock, no user namespaces, cgroup v1 ??.
+    // fallback took on this machine (no Landlock, no user namespaces, cgroup v1 …).
     let caps = seagent_vm::isolation::Capabilities::detect(None, None);
     let (fallback, degraded) = seagent_vm::policy::namespace_choice(&caps);
     v["host_kernel"] = json!({"report": caps.host.report(), "landlock_abi": caps.host.landlock_abi, "userns": caps.host.userns, "seccomp": caps.host.seccomp, "cgroup": caps.host.cgroup});
@@ -443,7 +443,7 @@ fn isolation_report(cfg: &ExecConfig, plan: &seagent_vm::policy::Plan, sandbox_p
     v
 }
 
-/// `seagent sandbox vm ?圳: the microVM itself ??status, image, undo points.
+/// `seagent sandbox vm …`: the microVM itself — status, image, undo points.
 fn sandbox_vm(cfg: &ExecConfig, paths: &Paths, o: &Opts) -> Result<String, String> {
     let session = o.val("session").unwrap_or("main");
     let workspace = o.val("workspace").or(o.val("w")).map(PathBuf::from).unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
@@ -531,9 +531,9 @@ fn sandbox_vm(cfg: &ExecConfig, paths: &Paths, o: &Opts) -> Result<String, Strin
     }
 }
 
-const VM_EXEC_USAGE: &str = "usage: seagent sandbox vm exec [--session S] [--workspace DIR] [--repeat N] [--json] -- <command??";
+const VM_EXEC_USAGE: &str = "usage: seagent sandbox vm exec [--session S] [--workspace DIR] [--repeat N] [--json] -- <command…>";
 
-/// The guest script for `vm exec -- <argv??`: one argument is taken as a shell script
+/// The guest script for `vm exec -- <argv…>`: one argument is taken as a shell script
 /// (`-- 'echo a; id -u'`), several are an argv and are quoted for the guest's `/bin/sh`.
 fn vm_exec_script(rest: &[String]) -> Option<String> {
     match rest {
@@ -543,9 +543,9 @@ fn vm_exec_script(rest: &[String]) -> Option<String> {
     }
 }
 
-/// `seagent sandbox vm exec -- <command??`: boot the configured microVM (whatever
+/// `seagent sandbox vm exec -- <command…>`: boot the configured microVM (whatever
 /// `exec.vm.provider` / `auto` picks on this host), run one command in it through the pool
-/// ??workspace copy in, output back, changes synced out ??and shut the VM down. The
+/// — workspace copy in, output back, changes synced out — and shut the VM down. The
 /// debugging path for the VM backend that needs no model provider; prints the guest's output
 /// on stdout, timings on stderr, and exits with the guest command's exit code.
 fn sandbox_vm_exec(cfg: &ExecConfig, paths: &Paths, o: &Opts) -> Result<i32, String> {
@@ -670,12 +670,12 @@ pub fn tools(paths: &Paths) -> Vec<Arc<dyn seagent_core::Tool>> {
     vec![Arc::new(seagent_tools::web::code_execution::CodeExecution { cfg: Arc::new(seagent_tools::web::WebConfig::default()), env: seagent_tools::web::http::process_env() })]
 }
 
-/// Install the process-wide execution environment from the user's `[exec]`, and ??only when
-/// that selects a non-local backend ??the code-mode selector, so `run` happens where `shell`
+/// Install the process-wide execution environment from the user's `[exec]`, and — only when
+/// that selects a non-local backend — the code-mode selector, so `run` happens where `shell`
 /// runs (Hermes `terminal.backend`, OpenClaw sandbox backends). `seagent_kernel::coderun` asks
 /// `seagent_core::exec::backend_for`; it stays `None` unless a selector is installed, which is what
 /// keeps local mode on the plain host path. (The `ExecBackend` abstraction itself is g5's row;
-/// this is the single install call it needs ??see audit/round4/g4-wiring.md 禮C-2.)
+/// this is the single install call it needs — see audit/round4/g4-wiring.md §C-2.)
 pub fn install(paths: &Paths) -> Arc<ExecEnv> {
     let cfg = match exec_config(paths) {
         Ok(c) => c,
@@ -790,13 +790,13 @@ pub fn attach(k: &seagent_kernel::kernel::Kernel) {
 }
 
 /// The daemon-side broker of the VM (A1/A3/A4). A VM has no network and no key of its own:
-/// every privileged command and every outbound request goes guest ??host broker ??back. So
+/// every privileged command and every outbound request goes guest → host broker → back. So
 /// when the resolved execution plan is a microVM, this starts the socket the VM adapter talks
 /// to (`seagent_tools::exec::vm::install_socket_broker`) and installs it for every VM manager.
 ///
 /// It is *not* an extra gate on ordinary work: `[security.broker]` ships the common reversible
 /// commands (package installs, service reloads) as pre-authorised, the built-in dev hosts are
-/// on the egress list, and only tier 2/3 work queues for the operator (禮0). The one socket
+/// on the egress list, and only tier 2/3 work queues for the operator (§0). The one socket
 /// handle is kept for the life of the process.
 fn start_vm_broker(k: &seagent_kernel::kernel::Kernel) {
     static DAEMON: std::sync::OnceLock<std::sync::Mutex<Option<seagent_security::broker::Broker>>> = std::sync::OnceLock::new();
@@ -820,7 +820,7 @@ fn start_vm_broker(k: &seagent_kernel::kernel::Kernel) {
         }
     });
     let mut allow = k.cfg.gate.egress_allow.clone();
-    // The built-in development hosts are pre-authorised (禮0-3 A3): package registries, docs,
+    // The built-in development hosts are pre-authorised (§0-3 A3): package registries, docs,
     // source hosts. `dev_hosts = false` in `[security.egress_proxy]` turns that off.
     if k.cfg.security.egress_proxy.dev_hosts {
         allow.extend(seagent_security::risk::dev_hosts());
@@ -842,7 +842,7 @@ fn start_vm_broker(k: &seagent_kernel::kernel::Kernel) {
             eprintln!("seagent: vm broker listening on {}", path.display());
         }
         Ok(None) => {}
-        Err(e) => eprintln!("seagent: warning: the VM broker could not start: {e} ??a VM will refuse every privileged command and outbound request (fail closed)"),
+        Err(e) => eprintln!("seagent: warning: the VM broker could not start: {e} — a VM will refuse every privileged command and outbound request (fail closed)"),
     }
 }
 
@@ -937,7 +937,7 @@ mod tests {
         assert!(render_explain(&v).contains("SANDBOXED in bwrap"));
         let host = explain(&ExecConfig::default(), &paths, "main", Path::new("/w"), &tools);
         assert_eq!(host["sandboxed"], false);
-        // A hand-built `ExecConfig` names its backend, so the plan is that name ??the line says
+        // A hand-built `ExecConfig` names its backend, so the plan is that name — the line says
         // where commands run, not which field was set.
         assert!(render_explain(&host).contains("runs in local (host backend)"), "{}", render_explain(&host));
         std::fs::write(paths.user_config(), "[exec]\nbackend = \"nope\"\n").unwrap();
@@ -982,7 +982,7 @@ mod tests {
 
     /// `[exec]` reaches the shell tool and code mode: nothing is installed for local mode
     /// (`backend_for` stays `None`, code mode keeps running on the host), and a configured
-    /// backend ??`exec.backend` or the sandbox backend of a sandboxed session ??is what
+    /// backend — `exec.backend` or the sandbox backend of a sandboxed session — is what
     /// `seagent_kernel::coderun` then runs in.
     #[test]
     fn install_wires_the_exec_env_and_the_code_mode_selector() {
@@ -1007,6 +1007,8 @@ mod tests {
         std::fs::create_dir_all(&ws).unwrap();
 
         // Nothing configured: local stays local, and code mode is not redirected anywhere.
+        // (The selector is process-global; start from none whatever ran before.)
+        seagent_core::exec::clear_selector();
         assert!(seagent_core::exec::backend_for("main", &ws).is_none());
         let env = install(&paths);
         assert_eq!((env.cfg.backend.as_str(), env.cfg.failure_hints), ("local", true));
@@ -1161,7 +1163,7 @@ mod tests {
     }
 
     /// The same values, but set the way a chat sets them (`secgate::chat_command`, i.e.
-    /// `/exec host=?圳 and `/elevated ?圳 from a channel sender): the route lookup installed by
+    /// `/exec host=…` and `/elevated …` from a channel sender): the route lookup installed by
     /// `install()` must read the chat's writes, not only direct `update_session` calls.
     #[test]
     fn chat_exec_and_elevated_commands_reach_the_route() {
@@ -1184,24 +1186,25 @@ mod tests {
         assert!(chat("/exec host=sandbox").contains("exec defaults updated"));
         std::thread::sleep(std::time::Duration::from_millis(2));
         assert_eq!(route("s1").host, Some("sandbox".into()));
-        assert!(chat("/elevated on").contains("elevated ??on"));
+        assert!(chat("/elevated on").contains("elevated → on"));
         std::thread::sleep(std::time::Duration::from_millis(2));
         assert_eq!(route("s1").elevated, Some("on".into()), "a chat's `/elevated on` escapes the sandbox");
-        assert!(chat("/elevated ask").contains("elevated ??ask"));
+        assert!(chat("/elevated ask").contains("elevated → ask"));
         std::thread::sleep(std::time::Duration::from_millis(2));
         assert_eq!(route("s1").elevated, Some("ask".into()));
-        assert!(chat("/elevated off").contains("elevated ??off"));
+        assert!(chat("/elevated off").contains("elevated → off"));
         std::thread::sleep(std::time::Duration::from_millis(2));
         assert_eq!(route("s1").elevated, Some("off".into()));
         assert_eq!(route("other").elevated, None, "another session is untouched");
         seagent_tools::exec::install(Arc::new(ExecEnv::default()));
+        seagent_core::exec::clear_selector();
     }
 
     #[cfg(unix)]
     /// A1/A3/A5 in the daemon, without booting a VM: when the broker is on, `attach()` starts
     /// the socket the VM adapter talks to, hands it to every VM manager, and installs the
     /// capability gate on the egress proxy. The real-VM half of this is
-    /// `crates/seagent-tools/tests/vm_broker.rs` (guest ??broker ??daemon, `#[ignore]`).
+    /// `crates/seagent-tools/tests/vm_broker.rs` (guest → broker → daemon, `#[ignore]`).
     #[test]
     fn the_daemon_starts_the_vm_broker_and_installs_the_capability_gate() {
         use std::io::{BufRead, BufReader, Write};
