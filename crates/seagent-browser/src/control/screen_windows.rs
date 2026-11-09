@@ -224,7 +224,7 @@ unsafe fn grab(dc: HDC) -> Result<Shot, String> {
     let old = SelectObject(mem, bmp as _);
     let ok = BitBlt(mem, 0, 0, w, h, dc, 0, 0, SRCCOPY);
     let mut bi: BITMAPINFO = std::mem::zeroed();
-    bi.bmiHeader = BITMAPINFOHEADER { biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32, biWidth: w, biHeight: -h, biPlanes: 1, biBitCount: 32, biCompression: BI_RGB as u32, ..std::mem::zeroed() };
+    bi.bmiHeader = BITMAPINFOHEADER { biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32, biWidth: w, biHeight: -h, biPlanes: 1, biBitCount: 32, biCompression: BI_RGB, ..std::mem::zeroed() };
     let mut bgra = vec![0u8; (w * h * 4) as usize];
     let rows = GetDIBits(mem, bmp, 0, h as u32, bgra.as_mut_ptr() as _, &mut bi, DIB_RGB_COLORS);
     SelectObject(mem, old);

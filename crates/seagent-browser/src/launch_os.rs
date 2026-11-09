@@ -88,7 +88,7 @@ pub fn install_paths() -> Vec<(&'static str, PathBuf)> {
         ("edge", r"Microsoft\Edge\Application\msedge.exe"),
         ("chromium", r"Chromium\Application\chrome.exe"),
     ];
-    let bases: Vec<PathBuf> = ["ProgramFiles", "ProgramFiles(x86)", "LOCALAPPDATA"].iter().filter_map(|k| std::env::var_os(k)).map(PathBuf::from).collect();
+    let bases: Vec<PathBuf> = ["ProgramFiles", "ProgramFiles(x86)", "LOCALAPPDATA"].iter().filter_map(std::env::var_os).map(PathBuf::from).collect();
     REL.iter().flat_map(|(kind, rel)| bases.iter().map(move |b| (*kind, b.join(rel)))).collect()
 }
 

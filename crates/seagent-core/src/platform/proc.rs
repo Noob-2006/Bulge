@@ -88,7 +88,7 @@ pub fn open_child_log(p: &std::path::Path) -> io::Result<std::fs::File> {
     #[cfg(windows)]
     {
         use std::io::Seek;
-        let mut f = std::fs::OpenOptions::new().create(true).write(true).open(p)?;
+        let mut f = std::fs::OpenOptions::new().create(true).write(true).truncate(false).open(p)?;
         f.seek(std::io::SeekFrom::End(0))?;
         Ok(f)
     }
@@ -949,7 +949,7 @@ pub(crate) mod win {
         let (mut c, mut e, mut k, mut u) = (z, z, z, z);
         // SAFETY: valid process handle and out-parameters.
         let ok = unsafe { GetProcessTimes(p.0, &mut c, &mut e, &mut k, &mut u) };
-        (ok != 0).then(|| ((c.dwHighDateTime as u64) << 32) | c.dwLowDateTime as u64)
+        (ok != 0).then_some(((c.dwHighDateTime as u64) << 32) | c.dwLowDateTime as u64)
     }
 }
 

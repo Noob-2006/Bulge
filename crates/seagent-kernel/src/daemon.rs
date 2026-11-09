@@ -1044,6 +1044,89 @@ pub fn stream(sock: &Path, method: &str, params: Value, mut on: impl FnMut(&Valu
     Ok(())
 }
 
+/// `SEAGENT_DAEMON_WATCH_PID`: the daemon shuts down when this process is gone (new-002). Test
+/// harnesses (tests/e2e/run.py) and supervisors that start `seagent daemon start` set it to their own
+/// pid, so a harness that is interrupted or crashes cannot leave an `seagentd` running for days.
+pub fn watch_pid_from_env() -> Option<i32> {
+    std::env::var("SEAGENT_DAEMON_WATCH_PID").ok().and_then(|v| v.trim().parse::<i32>().ok()).filter(|p| *p > 1)
+}
+
+/// Why the watchdog should stop the daemon now, if it should.
+pub fn watchdog_reason(sock: &Path, data: Option<&Path>, watch: Option<i32>) -> Option<String> {
+    if let Some(pid) = watch {
+        // ESRCH only: EPERM means it exists (another user), which never happens for our parent.
+        #[cfg(unix)]
+        let gone = unsafe { libc::kill(pid, 0) } != 0 && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH);
+        // Windows: a process we may not open counts as alive (the EPERM case).
+        #[cfg(not(unix))]
+        let gone = !seagent_core::platform::proc::alive(pid);
+        if gone {
+            return Some(format!("watched process {pid} exited (SEAGENT_DAEMON_WATCH_PID)"));
+        }
+    }
+    // The control socket was removed (its SEAGENT_HOME/runtime dir deleted): nobody can reach or
+    // stop this daemon any more, so it stops itself instead of lingering unreachable.
+    #[cfg(unix)]
+    if !sock.exists() {
+        return Some(format!("control socket {} was removed", sock.display()));
+    }
+    // Windows: the endpoint is a named pipe with no file at `sock`; the runtime directory
+    // that names it is what a deleted SEAGENT_HOME takes away.
+    #[cfg(not(unix))]
+    if let Some(rt) = sock.parent().filter(|p| !p.as_os_str().is_empty() && !p.exists()) {
+        return Some(format!("runtime directory {} of control endpoint {} was removed", rt.display(), seagent_core::platform::ipc::endpoint_display(sock)));
+    }
+    // Same for the data directory (SEAGENT_HOME deleted while the socket lives elsewhere, e.g. a
+    // long SEAGENT_HOME whose socket moved to $XDG_RUNTIME_DIR).
+    if let Some(d) = data.filter(|d| !d.exists()) {
+        return Some(format!("data directory {} was removed", d.display()));
+    }
+    None
+}
+
+fn spawn_watchdog(sock: std::path::PathBuf, data: std::path::PathBuf, watch: Option<i32>) {
+    // Only watch the data directory if it exists now (it always does once seagentd.log is open).
+    let data = data.exists().then_some(data);
+    let _ = std::thread::Builder::new().name("seagentd-watchdog".into()).spawn(move || {
+        while !STOP.load(Ordering::SeqCst) {
+            std::thread::sleep(Duration::from_secs(1));
+            if STOP.load(Ordering::SeqCst) {
+                break;
+            }
+            if let Some(why) = watchdog_reason(&sock, data.as_deref(), watch) {
+                eprintln!("seagentd: shutting down: {why}");
+                STOP.store(true, Ordering::SeqCst);
+                break;
+            }
+        }
+    });
+}
+
+#[cfg(test)]
+#[cfg(unix)]
+mod watchdog_tests {
+    use super::*;
+
+    #[test]
+    fn watchdog_stops_for_a_dead_watched_pid_or_a_removed_home() {
+        let d = seagent_core::tmp::TempDir::new("seagent-daemon-watchdog");
+        let sock = d.path().join("seagentd.sock");
+        let data = d.path().join("data");
+        std::fs::write(&sock, "").unwrap();
+        std::fs::create_dir_all(&data).unwrap();
+        let me = std::process::id() as i32;
+        assert_eq!(watchdog_reason(&sock, Some(&data), Some(me)), None, "we are alive");
+        let mut c = std::process::Command::new("true").spawn().unwrap();
+        let dead = c.id() as i32;
+        c.wait().unwrap();
+        assert!(watchdog_reason(&sock, Some(&data), Some(dead)).unwrap().contains("SEAGENT_DAEMON_WATCH_PID"));
+        std::fs::remove_dir_all(&data).unwrap();
+        assert!(watchdog_reason(&sock, Some(&data), None).unwrap().contains("data directory"));
+        std::fs::remove_file(&sock).unwrap();
+        assert!(watchdog_reason(&sock, None, None).unwrap().contains("control socket"));
+    }
+}
+
 #[cfg(test)]
 mod session_command_tests {
     use super::*;
@@ -1220,88 +1303,5 @@ mod session_command_tests {
         assert_eq!(p.len(), 1, "{p:?}");
         assert_eq!((p[0]["source"].as_str(), p[0]["actor"].as_str()), (Some("client"), Some("token:ops-bot")));
         assert_eq!(p[0]["sessions"][0]["sessionKey"], id);
-    }
-}
-
-/// `SEAGENT_DAEMON_WATCH_PID`: the daemon shuts down when this process is gone (new-002). Test
-/// harnesses (tests/e2e/run.py) and supervisors that start `seagent daemon start` set it to their own
-/// pid, so a harness that is interrupted or crashes cannot leave an `seagentd` running for days.
-pub fn watch_pid_from_env() -> Option<i32> {
-    std::env::var("SEAGENT_DAEMON_WATCH_PID").ok().and_then(|v| v.trim().parse::<i32>().ok()).filter(|p| *p > 1)
-}
-
-/// Why the watchdog should stop the daemon now, if it should.
-pub fn watchdog_reason(sock: &Path, data: Option<&Path>, watch: Option<i32>) -> Option<String> {
-    if let Some(pid) = watch {
-        // ESRCH only: EPERM means it exists (another user), which never happens for our parent.
-        #[cfg(unix)]
-        let gone = unsafe { libc::kill(pid, 0) } != 0 && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH);
-        // Windows: a process we may not open counts as alive (the EPERM case).
-        #[cfg(not(unix))]
-        let gone = !seagent_core::platform::proc::alive(pid);
-        if gone {
-            return Some(format!("watched process {pid} exited (SEAGENT_DAEMON_WATCH_PID)"));
-        }
-    }
-    // The control socket was removed (its SEAGENT_HOME/runtime dir deleted): nobody can reach or
-    // stop this daemon any more, so it stops itself instead of lingering unreachable.
-    #[cfg(unix)]
-    if !sock.exists() {
-        return Some(format!("control socket {} was removed", sock.display()));
-    }
-    // Windows: the endpoint is a named pipe with no file at `sock`; the runtime directory
-    // that names it is what a deleted SEAGENT_HOME takes away.
-    #[cfg(not(unix))]
-    if let Some(rt) = sock.parent().filter(|p| !p.as_os_str().is_empty() && !p.exists()) {
-        return Some(format!("runtime directory {} of control endpoint {} was removed", rt.display(), seagent_core::platform::ipc::endpoint_display(sock)));
-    }
-    // Same for the data directory (SEAGENT_HOME deleted while the socket lives elsewhere, e.g. a
-    // long SEAGENT_HOME whose socket moved to $XDG_RUNTIME_DIR).
-    if let Some(d) = data.filter(|d| !d.exists()) {
-        return Some(format!("data directory {} was removed", d.display()));
-    }
-    None
-}
-
-fn spawn_watchdog(sock: std::path::PathBuf, data: std::path::PathBuf, watch: Option<i32>) {
-    // Only watch the data directory if it exists now (it always does once seagentd.log is open).
-    let data = data.exists().then_some(data);
-    let _ = std::thread::Builder::new().name("seagentd-watchdog".into()).spawn(move || {
-        while !STOP.load(Ordering::SeqCst) {
-            std::thread::sleep(Duration::from_secs(1));
-            if STOP.load(Ordering::SeqCst) {
-                break;
-            }
-            if let Some(why) = watchdog_reason(&sock, data.as_deref(), watch) {
-                eprintln!("seagentd: shutting down: {why}");
-                STOP.store(true, Ordering::SeqCst);
-                break;
-            }
-        }
-    });
-}
-
-#[cfg(test)]
-#[cfg(unix)]
-mod watchdog_tests {
-    use super::*;
-
-    #[test]
-    fn watchdog_stops_for_a_dead_watched_pid_or_a_removed_home() {
-        let d = seagent_core::tmp::TempDir::new("seagent-daemon-watchdog");
-        let sock = d.path().join("seagentd.sock");
-        let data = d.path().join("data");
-        std::fs::write(&sock, "").unwrap();
-        std::fs::create_dir_all(&data).unwrap();
-        let me = std::process::id() as i32;
-        assert_eq!(watchdog_reason(&sock, Some(&data), Some(me)), None, "we are alive");
-        let mut c = std::process::Command::new("true").spawn().unwrap();
-        let dead = c.id() as i32;
-        c.wait().unwrap();
-        assert!(watchdog_reason(&sock, Some(&data), Some(dead)).unwrap().contains("SEAGENT_DAEMON_WATCH_PID"));
-        std::fs::remove_dir_all(&data).unwrap();
-        assert!(watchdog_reason(&sock, Some(&data), None).unwrap().contains("data directory"));
-        std::fs::remove_file(&sock).unwrap();
-        assert!(watchdog_reason(&sock, None, None).unwrap().contains("control socket"));
     }
 }

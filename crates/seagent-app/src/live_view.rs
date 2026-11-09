@@ -395,7 +395,7 @@ fn grab_for(app: &App, t: &crate::browser_view::Target, g: &mut Grabber, max_w: 
             let shot = cap.grab(max_w)?;
             let (w, h) = (shot.width.max(0) as u32, shot.height.max(0) as u32);
             let mut rgba = shot.bgra;
-            for px in rgba.chunks_exact_mut(4) {
+            for px in rgba.as_chunks_mut::<4>().0 {
                 px.swap(0, 2);
                 px[3] = 255;
             }
@@ -422,7 +422,7 @@ fn grab(app: &App, t: &crate::browser_view::Target) -> Result<image::DynamicImag
                     let shot = wd.screenshot()?;
                     let (w, h) = (shot.width.max(0) as u32, shot.height.max(0) as u32);
                     let mut rgba = shot.bgra;
-                    for px in rgba.chunks_exact_mut(4) {
+                    for px in rgba.as_chunks_mut::<4>().0 {
                         px.swap(0, 2);
                         px[3] = 255;
                     }

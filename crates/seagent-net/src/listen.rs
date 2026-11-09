@@ -138,7 +138,7 @@ fn v6_socket(port: u16, only: bool) -> Result<TcpListener, DualErr> {
     drop(std::net::UdpSocket::bind("127.0.0.1:0"));
     // SAFETY: Winsock calls on a socket we own; it goes to TcpListener or is closed on error.
     unsafe {
-        let s = ws::WSASocketW(ws::AF_INET6 as i32, ws::SOCK_STREAM as i32, ws::IPPROTO_TCP, std::ptr::null(), 0, ws::WSA_FLAG_OVERLAPPED | ws::WSA_FLAG_NO_HANDLE_INHERIT);
+        let s = ws::WSASocketW(ws::AF_INET6 as i32, ws::SOCK_STREAM, ws::IPPROTO_TCP, std::ptr::null(), 0, ws::WSA_FLAG_OVERLAPPED | ws::WSA_FLAG_NO_HANDLE_INHERIT);
         if s == ws::INVALID_SOCKET {
             return Err(DualErr::Unsupported);
         }

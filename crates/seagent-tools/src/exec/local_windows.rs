@@ -181,7 +181,7 @@ fn msys_requoted(cmd: Command) -> Command {
     if let Some(d) = cmd.get_current_dir() {
         c.current_dir(d);
     }
-    c.env_clear().envs(full_env(&cmd).into_iter());
+    c.env_clear().envs(full_env(&cmd));
     c
 }
 
