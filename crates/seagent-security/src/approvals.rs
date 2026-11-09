@@ -852,9 +852,23 @@ pub fn safe_bin_ok(argv: &[String], safe_bins: &[String]) -> bool {
     (p.min_positional..=p.max_positional).contains(&positional)
 }
 
+/// Does `s` name a path (not a bare command)? Windows paths use `\` too.
+fn pathy(s: &str) -> bool {
+    s.contains('/') || (cfg!(windows) && s.contains('\\'))
+}
+
+/// [`path_glob`] with the host's path rules: Unix as is; Windows compares `\` and `/` alike and
+/// ignores case (`C:\Tools\x.exe` is `c:/tools/x.exe`).
+fn os_path_glob(pattern: &str, target: &str) -> bool {
+    #[cfg(windows)]
+    return path_glob(&pattern.replace('\\', "/").to_lowercase(), &target.replace('\\', "/").to_lowercase());
+    #[cfg(not(windows))]
+    return path_glob(pattern, target);
+}
+
 /// Resolve a command name on PATH (absolute / relative paths pass through).
 pub fn resolve_executable(name: &str, cwd: &Path) -> Option<PathBuf> {
-    if name.contains('/') {
+    if pathy(name) {
         let p = if Path::new(name).is_absolute() { PathBuf::from(name) } else { cwd.join(name) };
         return Some(crate::paths::realpath(&p));
     }
@@ -867,7 +881,10 @@ pub fn resolve_executable(name: &str, cwd: &Path) -> Option<PathBuf> {
 /// safe-builtin exemption for dynamic predicate operands.
 pub fn exec_allowlisted(argv: &[String], raw: Option<&str>, cfg: &ApprovalsConfig, data: &Path, cwd: &Path) -> Option<String> {
     let first = argv.first()?;
+    #[cfg(not(windows))]
     let name = first.rsplit('/').next().unwrap_or(first);
+    #[cfg(windows)]
+    let name = first.rsplit(['/', '\\']).next().unwrap_or(first);
     if safe_builtin_ok(argv, raw) {
         return Some(format!("safe builtin `{name}`"));
     }
@@ -879,11 +896,11 @@ pub fn exec_allowlisted(argv: &[String], raw: Option<&str>, cfg: &ApprovalsConfi
     pats.extend(grants(data).into_iter().filter(|g| g.kind == GrantKind::Exec).map(|g| (Some(g.id), g.pattern)));
     for (id, p) in pats {
         let p = p.trim().to_string();
-        let hit = if !p.contains('/') && !p.starts_with('~') {
+        let hit = if !pathy(&p) && !p.starts_with('~') {
             // Bare names match the command name (OpenClaw matches the resolved name too).
             crate::glob::fnmatch(&p, name)
         } else {
-            resolved.as_ref().is_some_and(|r| path_glob(&p, &r.to_string_lossy())) || path_glob(&expand_home(&p), first)
+            resolved.as_ref().is_some_and(|r| os_path_glob(&p, &r.to_string_lossy())) || os_path_glob(&expand_home(&p), first)
         };
         if hit {
             if let Some(id) = id {

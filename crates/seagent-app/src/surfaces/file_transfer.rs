@@ -121,7 +121,10 @@ impl Transfer {
 
     fn path(p: &Value) -> Result<String, String> {
         let s = p["path"].as_str().map(str::trim).filter(|s| !s.is_empty()).ok_or("path required")?;
-        if !s.starts_with('/') {
+        // Absolute on the node, whichever OS it runs: `/x` or a Windows `C:\x` / `\\srv\share`.
+        let b = s.as_bytes();
+        let windows_abs = (b.len() >= 3 && b[0].is_ascii_alphabetic() && b[1] == b':' && (b[2] == b'\\' || b[2] == b'/')) || s.starts_with("\\\\");
+        if !s.starts_with('/') && !windows_abs {
             return Err("path must be absolute on the node".into());
         }
         Ok(s.to_string())

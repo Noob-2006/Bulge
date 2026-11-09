@@ -115,6 +115,19 @@ pub fn resolve(host: &str, port: u16) -> io::Result<std::net::SocketAddr> {
     (h, port).to_socket_addrs()?.next().ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, format!("cannot resolve {h}")))
 }
 
+/// Every socket address of `host:port` ([`resolve`] for a zoned IPv6 literal).
+pub fn resolve_all(host: &str, port: u16) -> io::Result<Vec<std::net::SocketAddr>> {
+    let h = host.trim().trim_start_matches('[').trim_end_matches(']');
+    if h.contains('%') {
+        return resolve(host, port).map(|a| vec![a]);
+    }
+    let v: Vec<_> = (h, port).to_socket_addrs()?.collect();
+    if v.is_empty() {
+        return Err(io::Error::new(io::ErrorKind::NotFound, format!("cannot resolve {h}")));
+    }
+    Ok(v)
+}
+
 /// Open a TCP connection to `host:port`, through the configured HTTP proxy (`CONNECT`) unless
 /// NO_PROXY says direct (ent-036: gateways and IRC follow the same proxy as HTTP).
 fn open_tcp(host: &str, port: u16, timeout: Duration) -> io::Result<TcpStream> {
@@ -125,12 +138,21 @@ fn open_tcp(host: &str, port: u16, timeout: Duration) -> io::Result<TcpStream> {
         return Err(io::Error::new(io::ErrorKind::PermissionDenied, format!("offline mode: connection to {host} refused")));
     }
     let connect = |h: &str, p: u16| -> io::Result<TcpStream> {
-        let addr = resolve(h, p)?;
-        let tcp = TcpStream::connect_timeout(&addr, timeout)?;
-        tcp.set_nodelay(true)?;
-        tcp.set_read_timeout(Some(timeout))?;
-        tcp.set_write_timeout(Some(timeout))?;
-        Ok(tcp)
+        // Every address the name has, in order: `localhost` is `::1` first on Windows (and on
+        // some Linux hosts) while many servers listen on 127.0.0.1 only.
+        let mut last = io::Error::new(io::ErrorKind::NotFound, format!("cannot resolve {h}"));
+        for addr in resolve_all(h, p)? {
+            match TcpStream::connect_timeout(&addr, timeout) {
+                Ok(tcp) => {
+                    tcp.set_nodelay(true)?;
+                    tcp.set_read_timeout(Some(timeout))?;
+                    tcp.set_write_timeout(Some(timeout))?;
+                    return Ok(tcp);
+                }
+                Err(e) => last = e,
+            }
+        }
+        Err(last)
     };
     let Some(proxy) = proxy else { return connect(host, port) };
     let proxy = if proxy.contains("://") { proxy } else { format!("http://{proxy}") };
