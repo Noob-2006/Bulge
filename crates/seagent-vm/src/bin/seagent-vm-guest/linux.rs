@@ -608,13 +608,18 @@ fn vsock_local_cid(fd: RawFd) -> Option<u32> {
 struct Reaper {
     done: Mutex<HashMap<i32, i32>>,
     cv: Condvar,
+    /// Commands spawned so far, and the signal that one was: with no child to wait for,
+    /// the reaper sleeps until the next spawn instead of polling.
+    spawns: Mutex<u64>,
+    spawned: Condvar,
 }
 
 impl Reaper {
     fn start() -> Arc<Reaper> {
-        let r = Arc::new(Reaper { done: Mutex::new(HashMap::new()), cv: Condvar::new() });
+        let r = Arc::new(Reaper { done: Mutex::new(HashMap::new()), cv: Condvar::new(), spawns: Mutex::new(0), spawned: Condvar::new() });
         let for_thread = r.clone();
         std::thread::spawn(move || loop {
+            let seen = *lock(&for_thread.spawns);
             let mut status: libc::c_int = 0;
             // SAFETY: plain waitpid on any child.
             let pid = unsafe { libc::waitpid(-1, &mut status, 0) };
@@ -628,10 +633,24 @@ impl Reaper {
             if err.kind() == ErrorKind::Interrupted {
                 continue;
             }
-            // ECHILD: nothing to reap right now. Poll slowly instead of spinning.
-            std::thread::sleep(Duration::from_millis(100));
+            // ECHILD: nothing to reap right now. Wait for the next spawn (bounded, for
+            // orphans reparented to PID 1) instead of a blind 100 ms sleep: that sleep was
+            // paid by every command started while the VM was idle — and the pool runs two per
+            // tool call (the command, then `find` for the sync back) — a flat ~100-200 ms per
+            // call, measured under QEMU+WHPX. A spawn after `seen` was read is never missed:
+            // the counter has moved, so there is no wait at all.
+            let g = lock(&for_thread.spawns);
+            if *g == seen {
+                let _ = for_thread.spawned.wait_timeout(g, Duration::from_millis(100));
+            }
         });
         r
+    }
+
+    /// A command was just spawned: wake the reaper if it is idle.
+    fn spawned(&self) {
+        *lock(&self.spawns) += 1;
+        self.spawned.notify_all();
     }
 
     fn wait(&self, pid: i32, timeout: Duration) -> Option<i32> {
@@ -861,6 +880,7 @@ fn start_exec(agent: &Arc<Agent>, req: ExecReq) -> Result<(), String> {
     let pid = child.id() as i32;
     // The reaper thread owns waitpid from here on.
     drop(child);
+    agent.reaper.spawned();
     let pgid = pid;
     lock(&agent.execs).insert(req.id, ExecHandle { pgid, stdin: stdin_file, pty: pty_file });
 
