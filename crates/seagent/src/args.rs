@@ -22,6 +22,8 @@ fn long(short: &str) -> Option<&'static str> {
         "h" => "help",
         "s" => "session",
         "f" => "follow",
+        // `seagent logs -n 50` (docs/faq.md, docs/install.md): the line count.
+        "n" => "lines",
         _ => return None,
     })
 }
@@ -114,6 +116,8 @@ mod tests {
         assert_eq!(a.vals("set"), ["x=1", "y=2"]);
         assert!(a.flag("yes") && !a.flag("json"));
         assert_eq!(a.rest(1), "the bug --not-a-flag");
+        let n = p(&["logs", "tools", "-n", "5"]).unwrap();
+        assert_eq!((n.pos(1), n.num::<usize>("lines").unwrap()), (Some("tools"), Some(5)), "-n is --lines");
     }
 
     #[test]
