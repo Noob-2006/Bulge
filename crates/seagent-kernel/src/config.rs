@@ -158,6 +158,9 @@ pub struct Config {
     pub workers: crate::workers::WorkersConfig,
     /// `[cluster]`: node registry and central-console policy pull (ent-062).
     pub cluster: crate::cluster::ClusterConfig,
+    /// `[tool_log]`: the per-tool-call log (rotation, retention, audit fsync): parsed by the
+    /// binary (`crates/seagent/src/ops/toollog.rs`).
+    pub tool_log: toml::Table,
 }
 
 /// `[gateway]`: gateway-wide agent-to-agent loop guard. Its `max_hops` wins over

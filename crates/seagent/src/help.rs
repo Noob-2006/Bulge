@@ -23,6 +23,8 @@ USAGE
   seagent suggestions [accept N | dismiss N | catalog | clear]   suggested automations
   seagent web providers [--json] | test <query> [--count N] [--json] | fetch <url> [--text] [--json]   web search providers, route, one fetch
   seagent memory show | add <text…> [--user] | review | accept <n|all> | reject <n|all>
+  seagent logs [tools | export] [--failures --session S --tool T --since 1h --format jsonl|csv|html --out F]
+                                       daemon log; tool calls (success/failure); export the tool-call log
   seagent index status | sync | rebuild | bench <session>   SQLite index (session FTS, memories, retrieval); rebuildable from the logs
   seagent checkpoint list | restore <id> | status | prune [--retention-days N] [--max-size-mb N] [--keep-orphans] [--force] | clear [--force]
   seagent sandbox list [--json] | recreate (--all|--session ID|--agent DIR) [--force] | explain [--session ID] [--json]

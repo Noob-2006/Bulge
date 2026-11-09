@@ -3,6 +3,12 @@
 //! kernel tap; `seagent daemon start` also keeps its stderr in `<data>/seagentd.log`.
 //! `seagent logs` merges both with filters (`--level`, `--since`, `--grep`, `--session`,
 //! `-n`, `--follow`, `--json`); a running daemon serves the same through `logs.tail`.
+//!
+//! Tool calls have their own log (`ops::toollog`, `tools.jsonl`): `seagent logs tools` lists them
+//! and `seagent logs export` writes them as JSONL / CSV / HTML. This file therefore records only
+//! what an operator acts on — notices, errors, gate verdicts, abnormal turn ends, model changes,
+//! compactions — not the per-turn and per-tool state transitions that every busy minute
+//! produces hundreds of.
 
 use crate::args::Args;
 use crate::R;
@@ -14,8 +20,8 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 pub const COMMANDS: &[&str] = &["logs", "log"];
-pub const VALUE_FLAGS: &[&str] = &["level", "since", "grep"];
-pub const BOOL_FLAGS: &[&str] = &[];
+pub const VALUE_FLAGS: &[&str] = &["level", "since", "grep", "tool", "status"];
+pub const BOOL_FLAGS: &[&str] = &["failures"];
 
 pub const MAX_BYTES: u64 = 5 * 1024 * 1024;
 pub const KEEP: usize = 5;
@@ -38,10 +44,8 @@ pub fn record(session: &str, e: &Event) -> Option<Value> {
     let (level, kind, msg) = match &e.kind {
         EventKind::Notice { level, text } => (if level == "warn" { "warn" } else { "info" }.to_string(), "notice", text.clone()),
         EventKind::Error { message } => ("error".into(), "error", message.clone()),
-        EventKind::TurnStart { turn } => ("info".into(), "turn_start", format!("turn {turn} started")),
-        EventKind::TurnEnd { reason, usage, .. } => (if reason == "done" || reason == "idle" { "info" } else { "warn" }.into(), "turn_end", format!("turn ended: {reason} · {} tokens", usage.total())),
-        EventKind::ToolCalled { name, .. } => ("debug".into(), "tool", format!("tool {name}")),
-        EventKind::ToolSettled { is_error: true, tool_use_id, .. } => ("warn".into(), "tool_error", format!("tool call {tool_use_id} failed")),
+        // A normal turn end is state, not news; an abnormal one (budget, error, interrupt) is.
+        EventKind::TurnEnd { reason, usage, .. } if reason != "done" && reason != "idle" => ("warn".into(), "turn_end", format!("turn ended: {reason} · {} tokens", usage.total())),
         EventKind::Gate { gate, verdict, reason, .. } => ("warn".into(), "gate", format!("{gate} gate: {verdict} — {reason}")),
         EventKind::Model { model } => ("info".into(), "model", format!("model → {model}")),
         EventKind::Compaction { tokens_before, .. } => ("info".into(), "compaction", format!("compacted ({tokens_before} tokens before)")),
@@ -173,7 +177,10 @@ fn filter(a: &Args) -> Filter {
 }
 
 pub fn dispatch(cmd: &str, a: &Args, _raw: &[String]) -> Option<R> {
-    COMMANDS.contains(&cmd).then(|| show(a))
+    COMMANDS.contains(&cmd).then(|| match a.pos(0) {
+        Some(sub @ ("tools" | "export")) => crate::ops::toollog::cli(sub, a),
+        _ => show(a),
+    })
 }
 
 pub fn show(a: &Args) -> R {
@@ -236,5 +243,11 @@ mod tests {
         let m = methods(paths.clone());
         assert!(m("logs.tail", &json!({"lines": 3})).unwrap().unwrap().as_array().unwrap().len() == 3);
         assert!(record("s", &Event { seq: 0, ts: 0, kind: EventKind::Title { title: "x".into() } }).is_none());
+        // Per-turn / per-tool state transitions stay out (the tool log has the calls).
+        for kind in [EventKind::TurnStart { turn: 1 }, EventKind::TurnEnd { turn: 1, reason: "done".into(), usage: Default::default() }, EventKind::ToolCalled { tool_use_id: "t".into(), name: "shell".into(), input: json!({}), idempotency_key: String::new() }, EventKind::ToolSettled { tool_use_id: "t".into(), is_error: true, bytes: 0, artifact: None, ui_resource: None }] {
+            assert!(record("s", &Event { seq: 1, ts: 1, kind }).is_none());
+        }
+        let r = record("s", &Event { seq: 2, ts: 2, kind: EventKind::TurnEnd { turn: 1, reason: "budget".into(), usage: Default::default() } }).unwrap();
+        assert_eq!(r["level"], "warn", "an abnormal end is still logged");
     }
 }

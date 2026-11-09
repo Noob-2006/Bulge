@@ -68,6 +68,7 @@ pub mod partial;
 pub mod recap;
 pub mod webui;
 pub mod toolcfg;
+pub mod toollog;
 pub mod docker;
 
 pub use slashops::SLASH;

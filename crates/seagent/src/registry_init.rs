@@ -48,6 +48,7 @@ pub fn register() {
 /// OSV, SIEM alerts and compliance checklists. Query and ticket tools appear only for the
 /// sections that name an endpoint.
 fn register_ops() {
+    crate::ops::toollog::register();
     seagent_core::registry::register_tool_provider("ops", 320, |env| {
         let cfg = env.config::<seagent_kernel::config::Config>()?;
         Ok(seagent_tools::ops::tools_from_value(serde_json::to_value(&cfg.integrations).unwrap_or(serde_json::Value::Null)))

@@ -37,7 +37,7 @@ pub const SUBS: &[(&str, &[&str])] = &[
     ("claw", &["migrate", "cleanup"]),
     ("completion", &["bash", "zsh", "fish"]),
     ("slack", &["manifest"]),
-    ("logs", &["tail"]),
+    ("logs", &["tail", "tools", "export"]),
     ("telemetry", &["status", "test"]),
     ("monitoring", &["status"]),
     ("worktree", &["list", "add", "rm", "prune", "restore"]),

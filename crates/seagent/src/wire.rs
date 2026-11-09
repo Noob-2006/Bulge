@@ -46,6 +46,8 @@ pub fn attach(k: &Kernel, ws: &Path) {
     seagent_skills::host::attach(k, ws);
     seagent_memory::host::attach(k, ws);
     crate::exec_cli::attach(k);
+    // Every host records its tool calls (CLI runs, chat, workers, the daemon): `ops::toollog`.
+    crate::ops::toollog::install(k);
     // `/loop`, `/subgoal`, `/suggestions`; the chronos cron provider's fire endpoint when selected.
     k.add_slash(Arc::new(seagent_kernel::cronjob::slash::AutomationSlash));
     seagent_app::cron_fire::install(k);

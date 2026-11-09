@@ -331,3 +331,14 @@ command = "~/.config/seagent/hooks/check-shell.sh"
 # kind = "gitlab"                      # github | gitlab（自架填 api_base；寫入一律第 2 級核准）
 # api_base = "https://gitlab.example.com/api/v4"
 # token = "{{secret:GITLAB_TOKEN}}"
+
+# ───────────── 工具呼叫日誌（主控台「日誌」頁、`seagent logs tools`、`seagent logs export`）─────────────
+# 每次工具呼叫一行 JSONL，寫在 <日誌目錄>/tools.jsonl：時間、對話、工具、參數摘要（祕密已遮蔽、
+# 大段內容只記長度）、耗時、成功／失敗、錯誤摘要。緩衝寫入，回合結束才交給作業系統，不會每行 fsync。
+# 狀態（排程、技能檢討、心跳）只在真的改變時才寫檔；這個檔是唯一隨工具呼叫成長的日誌。
+# [tool_log]
+# enabled = true
+# max_mb = 5               # 超過就輪替成 tools.1.jsonl、tools.2.jsonl…
+# keep = 5                 # 保留幾個輪替檔
+# retention_days = 30      # 讀取時略過更舊的記錄、刪掉更舊的輪替檔；0 = 只靠輪替
+# audit = false            # true：每筆都 write + fsync（當作稽核證據時用，較慢）
