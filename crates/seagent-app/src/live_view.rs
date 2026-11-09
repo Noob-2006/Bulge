@@ -67,14 +67,88 @@ pub struct Pace {
 
 impl Pace {
     pub fn new(fps: u32) -> Pace {
-        let min = Duration::from_millis(1000 / u64::from(fps.clamp(1, 15)));
+        let min = Duration::from_millis(1000 / u64::from(fps.clamp(1, seagent_browser::live::MAX_FPS)));
         Pace { min, max: Duration::from_secs(1).max(min), interval: min }
+    }
+    pub fn set_fps(&mut self, fps: u32) {
+        let p = Pace::new(fps);
+        (self.min, self.max) = (p.min, p.max);
     }
     /// The wait before the next capture, given how long this one took and whether it changed.
     pub fn after(&mut self, took: Duration, changed: bool) -> Duration {
         let floor = self.min.max(took * 2);
         self.interval = if changed { floor } else { (self.interval.max(floor) * 3 / 2).min(self.max.max(floor)) };
         self.interval.saturating_sub(took)
+    }
+}
+
+/// Lowest JPEG quality the stream adapts down to before it gives up frame rate instead.
+pub const FLOOR_QUALITY: u8 = 50;
+const FPS_STEPS: [u32; 9] = [60, 45, 30, 24, 20, 15, 10, 5, 2];
+
+/// Keeps a stream at the quality and fps the viewer chose while the link keeps up. When it
+/// does not — sending a frame takes most of the frame interval (the socket is full: a slow
+/// link or a viewer that cannot decode fast enough) — it lowers JPEG quality first (down to
+/// [`FLOOR_QUALITY`]), then the frame rate; after 3 s of an idle link it climbs back, frame
+/// rate first, never above the choice. Nothing changes while the bandwidth is there.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Adapt {
+    pub chosen: (u8, u32),
+    pub quality: u8,
+    pub fps: u32,
+    busy: f64,
+    calm: Option<Instant>,
+    settle: Option<Instant>,
+}
+
+impl Adapt {
+    pub fn new(quality: u8, fps: u32) -> Adapt {
+        Adapt { chosen: (quality, fps), quality, fps, busy: 0.0, calm: None, settle: None }
+    }
+
+    /// The viewer picked another level: go there at once.
+    pub fn choose(&mut self, quality: u8, fps: u32) {
+        *self = Adapt::new(quality, fps);
+    }
+
+    /// After one frame was sent (`send` = how long writing it took): `true` when the quality
+    /// or fps changed.
+    pub fn sent(&mut self, send: Duration, now: Instant) -> bool {
+        let interval = 1.0 / f64::from(self.fps.max(1));
+        self.busy = 0.7 * self.busy + 0.3 * (send.as_secs_f64() / interval).min(4.0);
+        if self.settle.is_some_and(|t| now < t) {
+            return false;
+        }
+        if self.busy > 0.8 {
+            if self.quality > FLOOR_QUALITY {
+                self.quality = self.quality.saturating_sub(10).max(FLOOR_QUALITY);
+            } else if let Some(f) = FPS_STEPS.iter().find(|f| **f < self.fps) {
+                self.fps = *f;
+            } else {
+                return false;
+            }
+            (self.busy, self.calm, self.settle) = (0.5, None, Some(now + Duration::from_secs(1)));
+            return true;
+        }
+        if self.busy >= 0.3 || (self.quality, self.fps) == self.chosen {
+            self.calm = None;
+            return false;
+        }
+        let since = *self.calm.get_or_insert(now);
+        if now.duration_since(since) < Duration::from_secs(3) {
+            return false;
+        }
+        if self.fps < self.chosen.1 {
+            self.fps = FPS_STEPS.iter().rev().find(|f| **f > self.fps).map_or(self.chosen.1, |f| (*f).min(self.chosen.1));
+        } else {
+            self.quality = (self.quality + 10).min(self.chosen.0);
+        }
+        (self.calm, self.settle) = (Some(now), Some(now + Duration::from_secs(1)));
+        true
+    }
+
+    pub fn json(&self) -> Value {
+        json!({"quality": self.quality, "fpsTarget": self.fps, "chosen": {"quality": self.chosen.0, "fps": self.chosen.1}})
     }
 }
 
@@ -105,7 +179,7 @@ impl Stats {
         if dt < 2.0 {
             return None;
         }
-        let v = json!({"t": "stats", "fps": (f64::from(self.frames) / dt * 10.0).round() / 10.0, "kbps": (self.bytes as f64 * 8.0 / 1000.0 / dt).round(), "latencyMs": (self.latency_n > 0).then(|| self.latency_ms / u64::from(self.latency_n))});
+        let v = json!({"t": "stats", "fps": (f64::from(self.frames) / dt * 10.0).round() / 10.0, "kbps": (self.bytes as f64 * 8.0 / 1000.0 / dt).round(), "bytesPerSec": (self.bytes as f64 / dt).round(), "latencyMs": (self.latency_n > 0).then(|| self.latency_ms / u64::from(self.latency_n))});
         *self = Stats { since: Some(Instant::now()), ..Default::default() };
         Some(v)
     }
@@ -156,7 +230,7 @@ pub fn upgrade(app: &Arc<App>, r: &Request, p: Principal) -> Response {
         };
         let Ok(mut ws) = ws else { return };
         ws.set_max_message(64 * 1024);
-        let mut link = Link { ws, app, p, checked: Instant::now(), may_input, kind, params, input_to: Value::Null };
+        let mut link = Link { ws, app, p, checked: Instant::now(), may_input, kind, params, input_to: Value::Null, tune: None };
         let r = match kind {
             Kind::Browser => browser(&mut link),
             Kind::Desktop => desktop(&mut link),
@@ -182,6 +256,13 @@ struct Link {
     params: Value,
     /// Where viewer input goes: the stream's `{key, targetId}` / `{target}`.
     input_to: Value,
+    /// A new quality / fps choice from the viewer (`{"t":"tune", quality, fps}`).
+    tune: Option<(u8, u32)>,
+}
+
+/// The viewer's quality / fps choice from the query or a `tune` message (defaults: 85, 30).
+fn choice(q: Option<u64>, fps: Option<u64>) -> (u8, u32) {
+    (q.map_or(85, |q| q.clamp(20, 95) as u8), fps.map_or(30, |f| f.clamp(1, u64::from(seagent_browser::live::MAX_FPS)) as u32))
 }
 
 impl Link {
@@ -211,6 +292,9 @@ impl Link {
                 Ok(Some(_)) => continue,
             };
             let v: Value = serde_json::from_str(&m).unwrap_or_default();
+            if v["t"] == "tune" {
+                self.tune = Some(choice(v["quality"].as_u64(), v["fps"].as_u64()));
+            }
             if v["t"] == "input" {
                 let r = self.input(&v);
                 let reply = match r {
@@ -246,8 +330,11 @@ fn browser(l: &mut Link) -> Flow {
     let m = seagent_browser::manager::global();
     let (b, target) = view::resolve(m, s(&l.params, "session"), s(&l.params, "key"), s(&l.params, "targetId")).map_err(Some)?;
     l.input_to = json!({"key": b.key, "targetId": target});
-    let o = live::Opts { max_width: num(&l.params, "maxWidth", 1280), max_height: num(&l.params, "maxHeight", 1280), quality: num(&l.params, "quality", 60).min(100) as u8, fps: num(&l.params, "fps", 15) }.clamped();
-    l.text(&json!({"t": "hello", "kind": "browser", "key": b.key, "targetId": target, "input": l.may_input, "fps": o.fps, "quality": o.quality}))?;
+    let (quality, fps) = choice(l.params["quality"].as_str().and_then(|x| x.parse().ok()), l.params["fps"].as_str().and_then(|x| x.parse().ok()));
+    // Full device-pixel resolution: the console sends its stage size × devicePixelRatio.
+    let mut o = live::Opts { max_width: num(&l.params, "maxWidth", 1920), max_height: num(&l.params, "maxHeight", 1080), quality, fps }.clamped();
+    let mut adapt = Adapt::new(o.quality, o.fps);
+    l.text(&json!({"t": "hello", "kind": "browser", "key": b.key, "targetId": target, "input": l.may_input, "fps": o.fps, "quality": o.quality, "maxWidth": o.max_width, "maxHeight": o.max_height}))?;
     // First paint at once (a still page may not repaint for a long time).
     if let Ok(f) = view::capture(&b, &target, o.max_width, o.quality) {
         let meta = json!({"t": "frame", "seq": 0, "mime": f.mime, "bytes": f.data.len(), "cssWidth": f.css_width, "cssHeight": f.css_height, "url": f.url, "title": f.title, "sentMs": now_ms()});
@@ -257,6 +344,11 @@ fn browser(l: &mut Link) -> Flow {
     let mut st = Stats::default();
     loop {
         l.poll()?;
+        if let Some((q, f)) = l.tune.take() {
+            adapt.choose(q, f);
+            o = live::Opts { quality: q, fps: f, ..o };
+            v.retune(o);
+        }
         if let Some(f) = v.next(Duration::from_millis(60)) {
             let (url, title) = v.page_info();
             let sent = now_ms();
@@ -265,12 +357,18 @@ fn browser(l: &mut Link) -> Flow {
             meta["title"] = title.into();
             meta["sentMs"] = sent.into();
             let lat = (f.captured_ms > 0).then(|| sent.saturating_sub(f.captured_ms));
+            let t0 = Instant::now();
             l.frame(&meta, &f.data)?;
             st.sent(f.data.len(), lat);
+            if adapt.sent(t0.elapsed(), Instant::now()) {
+                o = live::Opts { quality: adapt.quality, fps: adapt.fps, ..o };
+                v.retune(o);
+            }
         } else if v.ended() {
             return l.text(&json!({"t": "end", "reason": "the tab closed or the browser stopped"}));
         }
-        if let Some(r) = st.report() {
+        if let Some(mut r) = st.report() {
+            r["adapt"] = adapt.json();
             l.text(&r)?;
         }
     }
@@ -326,8 +424,9 @@ fn grab(app: &App, t: &crate::browser_view::Target) -> Result<image::DynamicImag
 fn desktop(l: &mut Link) -> Flow {
     let t = crate::browser_view::with_app(&l.app, |c| crate::browser_view::target(c, &l.params)).map_err(|(_, e)| Some(e))?;
     l.input_to = json!({"target": t.id()});
-    let (max_w, quality, fps) = (num(&l.params, "maxWidth", 1600).clamp(320, 2560), num(&l.params, "quality", 60).clamp(20, 90) as u8, num(&l.params, "fps", 5));
-    l.text(&json!({"t": "hello", "kind": "desktop", "target": t.id(), "input": l.may_input, "fps": fps.clamp(1, 15)}))?;
+    let (quality, fps) = choice(l.params["quality"].as_str().and_then(|x| x.parse().ok()), l.params["fps"].as_str().and_then(|x| x.parse().ok()));
+    let max_w = num(&l.params, "maxWidth", 1920).clamp(320, 3840);
+    l.text(&json!({"t": "hello", "kind": "desktop", "target": t.id(), "input": l.may_input, "fps": fps, "quality": quality, "maxWidth": max_w}))?;
     let app = l.app.clone();
     desktop_loop(l, &t.id(), (max_w, quality, fps), &mut || grab(&app, &t))
 }
@@ -336,12 +435,17 @@ fn desktop(l: &mut Link) -> Flow {
 /// source without a picture sends `nodisplay` once and is retried every 2 s.
 fn desktop_loop(l: &mut Link, id: &str, (max_w, quality, fps): (u32, u8, u32), grab: &mut dyn FnMut() -> Result<image::DynamicImage, String>) -> Flow {
     let mut pace = Pace::new(fps);
+    let mut adapt = Adapt::new(quality, fps);
     let mut last = 0u64;
     let mut seq = 0u64;
     let mut dark = false;
     let mut st = Stats::default();
     loop {
         l.poll()?;
+        if let Some((q, f)) = l.tune.take() {
+            adapt.choose(q, f);
+            pace.set_fps(f);
+        }
         let t0 = Instant::now();
         let wait = match grab() {
             Ok(img) => {
@@ -352,12 +456,16 @@ fn desktop_loop(l: &mut Link, id: &str, (max_w, quality, fps): (u32, u8, u32), g
                 } else {
                     last = h;
                     let (w0, h0) = (img.width(), img.height());
-                    let (jpeg, w, hh) = to_jpeg(img, max_w, quality).map_err(Some)?;
+                    let (jpeg, w, hh) = to_jpeg(img, max_w, adapt.quality).map_err(Some)?;
                     seq += 1;
-                    let meta = json!({"t": "frame", "seq": seq, "mime": "image/jpeg", "bytes": jpeg.len(), "width": w0, "height": h0, "frameWidth": w, "frameHeight": hh, "sentMs": now_ms()});
+                    let meta = json!({"t": "frame", "seq": seq, "mime": "image/jpeg", "bytes": jpeg.len(), "width": w0, "height": h0, "frameWidth": w, "frameHeight": hh, "quality": adapt.quality, "sentMs": now_ms()});
                     let took = t0.elapsed();
+                    let s0 = Instant::now();
                     l.frame(&meta, &jpeg)?;
                     st.sent(jpeg.len(), Some(took.as_millis() as u64));
+                    if adapt.sent(s0.elapsed(), Instant::now()) {
+                        pace.set_fps(adapt.fps);
+                    }
                     pace.after(took, true)
                 }
             }
@@ -371,7 +479,8 @@ fn desktop_loop(l: &mut Link, id: &str, (max_w, quality, fps): (u32, u8, u32), g
                 Duration::from_secs(2)
             }
         };
-        if let Some(r) = st.report() {
+        if let Some(mut r) = st.report() {
+            r["adapt"] = adapt.json();
             l.text(&r)?;
         }
         let until = Instant::now() + wait;
@@ -558,7 +667,49 @@ mod tests {
         assert_eq!(p.after(Duration::ZERO, true), Duration::from_millis(200), "a change resets the rate");
         // A capture that takes 400 ms: at most every 800 ms (≤ 50 % of the time capturing).
         assert_eq!(p.after(Duration::from_millis(400), true), Duration::from_millis(400));
-        assert_eq!(Pace::new(1000).min, Duration::from_millis(66), "capped at 15 fps");
+        assert_eq!(Pace::new(1000).min, Duration::from_millis(16), "capped at 60 fps");
+        assert_eq!(Pace::new(30).min, Duration::from_millis(33));
+    }
+
+    #[test]
+    fn adapt_keeps_the_choice_drops_quality_then_fps_and_climbs_back() {
+        let t = Instant::now();
+        let ms = Duration::from_millis;
+        let mut a = Adapt::new(85, 30);
+        // A link that keeps up: the chosen level holds, however long.
+        for i in 0..300 {
+            assert!(!a.sent(ms(4), t + ms(33 * i)), "no change while the bandwidth is there");
+        }
+        assert_eq!((a.quality, a.fps), (85, 30));
+        // Sending takes longer than a frame interval: quality first, one step per second...
+        let mut now = t + ms(10_000);
+        let mut path = vec![];
+        for _ in 0..400 {
+            now += ms(50);
+            if a.sent(ms(45), now) {
+                path.push((a.quality, a.fps));
+            }
+        }
+        assert_eq!(&path[..4], &[(75, 30), (65, 30), (55, 30), (50, 30)], "quality first: {path:?}");
+        assert_eq!(path[4], (50, 24), "then frame rate: {path:?}");
+        assert!(path.iter().all(|(q, _)| *q >= FLOOR_QUALITY));
+        // ...and back once the link is idle: frame rate first, never above the choice.
+        let mut up = vec![];
+        for _ in 0..1000 {
+            now += ms(40);
+            if a.sent(ms(1), now) {
+                up.push((a.quality, a.fps));
+            }
+        }
+        assert_eq!(up.last(), Some(&(85, 30)), "{up:?}");
+        let first_q = up.iter().position(|(q, _)| *q > FLOOR_QUALITY).unwrap();
+        assert!(up[..first_q].iter().all(|(q, _)| *q == FLOOR_QUALITY) && up[first_q - 1].1 == 30, "fps recovers before quality: {up:?}");
+        assert!(up.iter().all(|(q, f)| *q <= 85 && *f <= 30));
+        // A new choice applies at once (60 fps picked by the viewer).
+        a.choose(85, 60);
+        assert_eq!((a.quality, a.fps, a.chosen), (85, 60, (85, 60)));
+        assert_eq!(choice(None, None), (85, 30), "defaults: crisp, 30 fps");
+        assert_eq!(choice(Some(500), Some(500)), (95, 60), "capped at 95 and 60 fps");
     }
 
     #[test]
@@ -688,7 +839,7 @@ mod tests {
             sock.set_read_timeout(Some(Duration::from_millis(15))).unwrap();
             let ws = WebSocket::accept(sock, &head, rest).unwrap();
             let p = Principal { kind: "token".into(), name: "t".into(), access: crate::identity::Access::Scope(crate::exposure::Scope::Read), ip: String::new(), tenant: Default::default() };
-            let mut link = Link { ws, app: a, p, checked: Instant::now(), may_input: false, kind: Kind::Desktop, params: json!({}), input_to: json!({"target": "host"}) };
+            let mut link = Link { ws, app: a, p, checked: Instant::now(), may_input: false, kind: Kind::Desktop, params: json!({}), input_to: json!({"target": "host"}), tune: None };
             let px = |c: u8| image::DynamicImage::ImageRgba8(image::RgbaImage::from_pixel(1280, 800, image::Rgba([c, c, c, 255])));
             let mut n = 0;
             let mut src = move || {
@@ -733,8 +884,9 @@ mod tests {
 
     /// Real headless Chromium, end to end through the console route (not run by default):
     /// `SEAGENT_REAL_TESTS=1 [SEAGENT_LIVE_OUT=<dir>] cargo test -p seagent-app real_live_browser -- --ignored --nocapture`.
-    /// An animated page streams at the fps cap, frames are real JPEGs, a viewer holding the
-    /// lease clicks through the stream, and a few frames are saved to `SEAGENT_LIVE_OUT`.
+    /// A page of small text streams at 30 and 60 fps (fps, latency, bytes/s and CPU printed),
+    /// frames are full-resolution JPEGs, a viewer holding the lease clicks through the stream,
+    /// and frames are saved to `SEAGENT_LIVE_OUT`.
     #[test]
     #[ignore]
     fn real_live_browser_stream() {
@@ -760,46 +912,67 @@ mod tests {
             }
         }
         let _stop = Stop(key.clone());
-        let page = "data:text/html,<body style='margin:0;background:%23222'><canvas id=c width=1000 height=600></canvas><script>let n=0;const x=c.getContext('2d');function f(){n++;x.fillStyle='hsl('+(n*3%25360)+',70%25,45%25)';x.fillRect(0,0,1000,600);x.fillStyle='%23fff';x.font='bold 72px sans-serif';x.fillText('seagent live '+n,40,140);x.fillText(document.title,40,260);requestAnimationFrame(f)}f();onclick=e=>{document.title='clicked at '+e.clientX+','+e.clientY}</script>";
-        let t = b.new_tab(page, None).unwrap();
+        // A page full of small text (11–13 px) that repaints every animation frame (a clock and
+        // a moving bar), so the stream always has a new picture to send.
+        let lorem = "The quick brown fox jumps over the lazy dog; 0123456789 — pack my box with five dozen liquor jugs. ".repeat(3);
+        let rows: String = (1..=48).map(|i| format!("<p style='margin:0;font:{}px/1.35 Segoe UI,Arial,sans-serif'>{i:02}. {lorem}</p>", 11 + i % 3)).collect();
+        let html = format!("<!doctype html><body style='margin:8px;background:#fff;color:#111'><div id=bar style='height:6px;background:#c0362c;width:0'></div><h3 id=clk style='font:600 15px monospace;margin:4px 0'>t</h3>{rows}<script>let n=0;function f(){{n++;clk.textContent='frame '+n+' · '+new Date().toISOString()+' · '+document.title;bar.style.width=(n%600)/6+'%';requestAnimationFrame(f)}}f();onclick=e=>{{document.title='clicked at '+e.clientX+','+e.clientY}}</script>");
+        let page = format!("data:text/html;charset=utf-8,{}", seagent_net::urlencode(&html));
+        let t = b.new_tab(&page, None).unwrap();
+        // The agent's tab: 1280×800 CSS px at DPR 1 (frames come at its device pixels).
+        b.page_call(&t, "Emulation.setDeviceMetricsOverride", json!({"width": 1280, "height": 800, "deviceScaleFactor": 1, "mobile": false})).unwrap();
         let srv = crate::server::start(a.clone()).unwrap();
         let addr = srv.local_addr();
-        let q = |fps: u32| format!("kind=browser&key={}&targetId={t}&fps={fps}&quality=60&maxWidth=1000", seagent_net::urlencode(&key));
-        // ① 15 fps cap over 4 s, frame dump, capture-to-receive latency.
-        let mut ws = connect(addr, &q(15), "live-admin-token");
-        assert_eq!(next_text(&mut ws)["t"], "hello");
-        let (mut frames, mut lat, mut meta, mut first) = (0u32, vec![], Value::Null, None::<Instant>);
-        let t0 = Instant::now();
-        while t0.elapsed() < Duration::from_secs(4) {
-            match ws.recv() {
-                Ok(Some(Message::Text(x))) => meta = serde_json::from_str(&x).unwrap(),
-                Ok(Some(Message::Binary(jpg))) if meta["t"] == "frame" => {
-                    assert_eq!(&jpg[..2], &[0xff, 0xd8], "a JPEG");
-                    assert_eq!(meta["bytes"].as_u64(), Some(jpg.len() as u64));
-                    if meta["seq"].as_u64() == Some(0) {
-                        std::fs::write(out.join("live-00-first-paint.jpg"), &jpg).unwrap();
-                        continue;
-                    }
-                    first.get_or_insert_with(Instant::now);
-                    frames += 1;
-                    if let Some(c) = meta["capturedMs"].as_u64().filter(|c| *c > 0) {
-                        lat.push(now_ms().saturating_sub(c));
-                    }
-                    if [1, 10, 30].contains(&frames) {
-                        std::fs::write(out.join(format!("live-{frames:02}.jpg")), &jpg).unwrap();
-                    }
-                }
-                _ => {}
+        // The console asks for its stage size × devicePixelRatio (a 1280×800 stage at DPR 2).
+        let q = |fps: u32| format!("kind=browser&key={}&targetId={t}&fps={fps}&quality=85&maxWidth=2560&maxHeight=1600", seagent_net::urlencode(&key));
+        let browser_filter = env.cfg.default_profile.clone();
+        let mut meta = Value::Null;
+        // ① 30 and 60 fps on small text: real fps, latency, bytes/s, CPU of this process (the
+        // daemon side: CDP + WebSocket) and of the browser.
+        for want in [30u32, 60] {
+            let mut ws = connect(addr, &q(want), "live-admin-token");
+            assert_eq!(next_text(&mut ws)["t"], "hello");
+            // Let the screencast settle, then measure 5 s.
+            let warm = Instant::now();
+            while warm.elapsed() < Duration::from_millis(800) {
+                let _ = ws.recv();
             }
+            let (cpu_me0, cpu_br0) = (cpu_seconds_self(), cpu_seconds_matching(&browser_filter));
+            let (mut frames, mut bytes, mut lat, mut last) = (0u32, 0usize, vec![], vec![]);
+            let t0 = Instant::now();
+            while t0.elapsed() < Duration::from_secs(5) {
+                match ws.recv() {
+                    Ok(Some(Message::Text(x))) => meta = serde_json::from_str(&x).unwrap(),
+                    Ok(Some(Message::Binary(jpg))) if meta["t"] == "frame" => {
+                        assert_eq!(&jpg[..2], &[0xff, 0xd8], "a JPEG");
+                        frames += 1;
+                        bytes += jpg.len();
+                        if let Some(c) = meta["capturedMs"].as_u64().filter(|c| *c > 0) {
+                            lat.push(now_ms().saturating_sub(c));
+                        }
+                        last = jpg;
+                    }
+                    _ => {}
+                }
+            }
+            let secs = t0.elapsed().as_secs_f64();
+            let (cpu_me, cpu_br) = (cpu_seconds_self() - cpu_me0, cpu_seconds_matching(&browser_filter) - cpu_br0);
+            lat.sort_unstable();
+            let pct = |p: usize| lat.get((lat.len() * p / 100).min(lat.len().saturating_sub(1))).copied().unwrap_or(0);
+            let fps = f64::from(frames) / secs;
+            let (w, h) = jpeg_size(&last).unwrap_or((0, 0));
+            eprintln!(
+                "LIVE browser {want} fps (quality 85, small text): {frames} frames / {secs:.2} s = {fps:.1} fps; latency p50 {} ms, p95 {} ms; {:.0} KB/s ({:.1} KB/frame, {w}x{h}); CPU server {:.0}%, browser {:.0}% (of one core)",
+                pct(50), pct(95), bytes as f64 / 1024.0 / secs, bytes as f64 / 1024.0 / f64::from(frames.max(1)), cpu_me / secs * 100.0, cpu_br / secs * 100.0
+            );
+            std::fs::write(out.join(format!("live-text-{want}fps.jpg")), &last).unwrap();
+            assert!(fps >= f64::from(want) * 0.5 && fps <= f64::from(want) * 1.1, "{want} fps asked, {fps:.1} delivered");
+            assert_eq!(w, 1280, "frames at the tab's full device-pixel width, not capped");
+            drop(ws);
+            std::thread::sleep(Duration::from_millis(300));
         }
-        let secs = first.map_or(1.0, |f| f.elapsed().as_secs_f64());
-        let fps = f64::from(frames) / secs;
-        lat.sort_unstable();
-        let p50 = lat.get(lat.len() / 2).copied().unwrap_or(0);
-        let p95 = lat.get(lat.len() * 95 / 100).copied().unwrap_or(0);
-        eprintln!("LIVE browser: {frames} frames in {secs:.2}s = {fps:.1} fps (cap 15); capture→receive latency p50 {p50} ms, p95 {p95} ms; frames in {}", out.display());
-        assert!(frames >= 20, "an animated page streams: {frames} frames");
-        assert!(fps <= 17.0, "the 15 fps cap holds: {fps:.1}");
+        let mut ws = connect(addr, &q(30), "live-admin-token");
+        assert_eq!(next_text(&mut ws)["t"], "hello");
         // ② input through the stream, gated by the lease.
         ws.send_text(&json!({"t": "input", "viewer": "viewer-live-1", "event": {"type": "click", "x": 0.5, "y": 0.5}}).to_string()).unwrap();
         let r = loop {
@@ -832,8 +1005,13 @@ mod tests {
         std::fs::write(out.join("live-99-after-click.jpg"), &last_jpg).unwrap();
         crate::browser_view::rpc(&a, "view.desktop.handback", &json!({"viewer": "viewer-live-1"})).unwrap();
         drop(ws);
-        // ③ a lower cap is honoured by the ack pacing.
-        let mut ws = connect(addr, &q(5), "live-admin-token");
+        // ③ the viewer picks a lower rate over the open stream (the console's selector).
+        let mut ws = connect(addr, &q(30), "live-admin-token");
+        ws.send_text(&json!({"t": "tune", "fps": 5, "quality": 70}).to_string()).unwrap();
+        let settle = Instant::now();
+        while settle.elapsed() < Duration::from_millis(500) {
+            let _ = ws.recv();
+        }
         let (mut n, t2) = (0u32, Instant::now());
         while t2.elapsed() < Duration::from_secs(3) {
             if let Ok(Some(Message::Binary(_))) = ws.recv() {
@@ -856,7 +1034,7 @@ mod tests {
             _ => panic!("bytes"),
         };
         let js = body("/ui/live_view.js");
-        for needle in ["/view/live?", "seagent.live", "seagent.token.", "kind: 'terminal'", "kind: 'browser'", "kind: 'desktop'", "lvPollFrame"] {
+        for needle in ["/view/live?", "seagent.live", "seagent.token.", "kind: 'terminal'", "kind: 'browser'", "kind: 'desktop'", "lvPollFrame", "devicePixelRatio", "t: 'tune'", "fps: 60", "q: 85, fps: 30"] {
             assert!(js.contains(needle), "live_view.js lacks {needle}");
         }
         assert!(!js.contains("token="), "a token in a URL leaks into history and logs");
@@ -866,6 +1044,58 @@ mod tests {
         assert!(index.contains("/ui/live_view.css"));
         let csp = crate::ui::serve("/").headers.into_iter().find(|(k, _)| k == "content-security-policy").unwrap().1;
         assert!(csp.contains("img-src 'self' data: blob:"), "frames are shown from blob: URLs: {csp}");
+    }
+
+    /// Width × height of a baseline/progressive JPEG (its SOF marker).
+    fn jpeg_size(j: &[u8]) -> Option<(u32, u32)> {
+        let mut i = 2;
+        while i + 9 < j.len() {
+            if j[i] != 0xff {
+                return None;
+            }
+            let (m, len) = (j[i + 1], usize::from(u16::from_be_bytes([j[i + 2], j[i + 3]])));
+            if matches!(m, 0xc0..=0xc3) {
+                return Some((u32::from(u16::from_be_bytes([j[i + 7], j[i + 8]])), u32::from(u16::from_be_bytes([j[i + 5], j[i + 6]]))));
+            }
+            i += 2 + len;
+        }
+        None
+    }
+
+    /// CPU seconds this process has used (test-only measurement; shells out to the OS tool).
+    fn cpu_seconds_self() -> f64 {
+        cpu_query(&format!("pid:{}", std::process::id()))
+    }
+
+    /// CPU seconds of every browser process whose command line names `needle` (the profile).
+    fn cpu_seconds_matching(needle: &str) -> f64 {
+        cpu_query(needle)
+    }
+
+    #[cfg(windows)]
+    fn cpu_query(what: &str) -> f64 {
+        let ps = match what.strip_prefix("pid:") {
+            Some(pid) => format!("(Get-Process -Id {pid}).TotalProcessorTime.TotalSeconds"),
+            None => format!("$t=0; Get-CimInstance Win32_Process | Where-Object {{ $_.CommandLine -like '*{what}*' -and $_.ProcessId -ne $PID }} | ForEach-Object {{ $t += ($_.KernelModeTime + $_.UserModeTime) / 1e7 }}; $t"),
+        };
+        let o = std::process::Command::new("powershell").args(["-NoProfile", "-Command", &ps]).output().unwrap();
+        String::from_utf8_lossy(&o.stdout).trim().replace(',', ".").parse().unwrap_or(0.0)
+    }
+
+    #[cfg(not(windows))]
+    fn cpu_query(what: &str) -> f64 {
+        // `ps` cputime is [[dd-]hh:]mm:ss; sum it over the matching processes.
+        let args: Vec<String> = match what.strip_prefix("pid:") {
+            Some(pid) => vec!["-o".into(), "time=".into(), "-p".into(), pid.into()],
+            None => vec!["-eo".into(), "time=,args=".into()],
+        };
+        let o = std::process::Command::new("ps").args(&args).output().unwrap();
+        String::from_utf8_lossy(&o.stdout)
+            .lines()
+            .filter(|l| what.starts_with("pid:") || (l.contains(what) && !l.contains(" ps ")))
+            .filter_map(|l| l.split_whitespace().next())
+            .map(|t| t.replace('-', ":").split(':').fold(0.0, |acc, x| acc * 60.0 + x.parse::<f64>().unwrap_or(0.0)))
+            .sum()
     }
 
     struct Chunks(Vec<Vec<u8>>);

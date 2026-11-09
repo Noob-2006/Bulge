@@ -8,3 +8,6 @@
 .work-term .faint { opacity: .6; }
 :root[data-theme="daylight"] .work-term { background: #f6f3ee; color: #1d1a17; }
 #workTermBtn.on { box-shadow: inset 0 0 0 1px var(--gold-400); }
+.work-live.low { background: #a76b12; }
+.work-level { font: 11.5px var(--sans, inherit); padding: 3px 6px; border-radius: 6px; border: 1px solid var(--thread-2, #444); background: transparent; color: inherit; max-width: 150px; }
+@media (max-width: 640px) { .work-level { max-width: 110px; } .work-last { display: none; } }

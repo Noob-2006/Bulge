@@ -16,7 +16,7 @@
 
 use crate::engine::{Browser, BLOCKED_BY_DIALOG};
 use serde_json::{json, Value};
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
@@ -36,15 +36,20 @@ pub struct Opts {
 }
 
 impl Default for Opts {
+    /// Crisp by default: 30 fps, JPEG 85, up to 1920×1080 device pixels (the console asks for
+    /// its real stage size × devicePixelRatio).
     fn default() -> Self {
-        Opts { max_width: 1280, max_height: 1280, quality: 60, fps: 15 }
+        Opts { max_width: 1920, max_height: 1080, quality: 85, fps: 30 }
     }
 }
 
+/// The highest frame rate a viewer may pick.
+pub const MAX_FPS: u32 = 60;
+
 impl Opts {
-    /// Caps: 160–1920 px, quality 20–90, 1–30 fps.
+    /// Caps: 160–3840 px, quality 20–95, 1–[`MAX_FPS`] fps.
     pub fn clamped(self) -> Opts {
-        Opts { max_width: self.max_width.clamp(160, 1920), max_height: self.max_height.clamp(160, 1920), quality: self.quality.clamp(20, 90), fps: self.fps.clamp(1, 30) }
+        Opts { max_width: self.max_width.clamp(160, 3840), max_height: self.max_height.clamp(160, 3840), quality: self.quality.clamp(20, 95), fps: self.fps.clamp(1, MAX_FPS) }
     }
     /// Shortest gap between two acks.
     pub fn min_gap(&self) -> Duration {
@@ -102,7 +107,12 @@ pub struct CastState {
     /// go out one per fps interval, so the in-flight window cannot raise the rate.
     pub unacked: VecDeque<(u64, i64)>,
     pub last_ack: Option<Instant>,
-    pub viewers: usize,
+    /// What each viewer asks for (by viewer id); the screencast runs at the best of them.
+    pub wants: BTreeMap<u64, Opts>,
+    next_viewer: u64,
+    /// (quality, max width, max height) the running screencast was started with (`None` =
+    /// not started by viewers, e.g. a recording's).
+    pub running: Option<(u8, u32, u32)>,
     /// Frames received / acked (stats and tests).
     pub frames_in: u64,
     pub acks: u64,
@@ -133,6 +143,24 @@ impl CastState {
         self.latest = Some(Arc::new(f));
     }
 
+    /// The screencast parameters the viewers need: the highest quality and size any asks for
+    /// (each viewer's own fps is applied on delivery).
+    pub fn effective(&self) -> Option<(u8, u32, u32)> {
+        self.wants.values().fold(None, |acc, o| {
+            let (q, w, h) = acc.unwrap_or((0, 0, 0));
+            Some((q.max(o.quality), w.max(o.max_width), h.max(o.max_height)))
+        })
+    }
+
+    /// The parameters to (re)start the screencast with, if they differ from what runs.
+    pub fn retune(&mut self) -> Option<(u8, u32, u32)> {
+        let e = self.effective()?;
+        (self.running != Some(e)).then(|| {
+            self.running = Some(e);
+            e
+        })
+    }
+
     /// A viewer has delivered every frame up to `seen`: may the pending frame be acked yet?
     pub fn release(&mut self, seen: u64, now: Instant, min_gap: Duration) -> Release {
         match self.unacked.front() {
@@ -156,14 +184,13 @@ impl CastState {
 /// One page session's screencast, shared by its viewers.
 pub struct Cast {
     pub page_session: String,
-    pub opts: Opts,
     pub state: Mutex<CastState>,
     cv: Condvar,
 }
 
 impl Cast {
-    pub fn new(page_session: &str, opts: Opts) -> Cast {
-        Cast { page_session: page_session.to_string(), opts: opts.clamped(), state: Mutex::new(CastState::default()), cv: Condvar::new() }
+    pub fn new(page_session: &str) -> Cast {
+        Cast { page_session: page_session.to_string(), state: Mutex::new(CastState::default()), cv: Condvar::new() }
     }
 
     /// From the CDP I/O thread: store the frame, wake viewers; `Some(id)` = ack that now (a
@@ -193,10 +220,16 @@ fn ack(b: &Browser, page_session: &str, id: i64) {
     b.conn.send_nowait("Page.screencastFrameAck", json!({"sessionId": id}), Some(page_session));
 }
 
+fn screencast_params((q, w, h): (u8, u32, u32)) -> Value {
+    json!({"format": "jpeg", "quality": q, "maxWidth": w, "maxHeight": h, "everyNthFrame": 1})
+}
+
 /// A viewer of one tab. Dropping the last viewer stops the screencast.
 pub struct Viewer {
     b: Arc<Browser>,
     cast: Arc<Cast>,
+    id: u64,
+    opts: Opts,
     seen: u64,
     pub target: String,
     /// (url, title, when read): refreshed from the browser at most once a second.
@@ -213,40 +246,52 @@ pub fn watch(b: &Arc<Browser>, target: &str, opts: Opts) -> Result<Viewer, Strin
     }
     let sid = crate::view::page_session(b, target)?;
     let opts = opts.clamped();
-    let (cast, fresh, recording) = {
+    let (cast, id, start) = {
         let mut s = b.state.lock().unwrap();
-        let recording = s.recording.contains_key(&sid);
-        let (cast, fresh) = match s.live.get(&sid) {
-            Some(c) => (c.clone(), false),
-            None => {
-                let c = Arc::new(Cast::new(&sid, opts));
-                s.live.insert(sid.clone(), c.clone());
-                (c, true)
-            }
-        };
-        cast.state.lock().unwrap().viewers += 1;
-        (cast, fresh, recording)
+        let cast = s.live.entry(sid.clone()).or_insert_with(|| Arc::new(Cast::new(&sid))).clone();
+        let mut g = cast.state.lock().unwrap();
+        g.next_viewer += 1;
+        let id = g.next_viewer;
+        g.wants.insert(id, opts);
+        // A new or a more demanding viewer (re)starts the screencast with what it needs; a
+        // running one (the recording's, or other viewers') is re-tuned, never stopped.
+        let start = g.retune();
+        drop(g);
+        (cast, id, start)
     };
-    let v = Viewer { b: b.clone(), cast, seen: 0, target: target.to_string(), info: None, delivered: None };
-    if fresh && !recording {
-        let o = v.cast.opts;
-        let p = json!({"format": "jpeg", "quality": o.quality, "maxWidth": o.max_width, "maxHeight": o.max_height, "everyNthFrame": 1});
+    let v = Viewer { b: b.clone(), cast, id, opts, seen: 0, target: target.to_string(), info: None, delivered: None };
+    if let Some(e) = start {
         // Dropping `v` on failure undoes the registration.
-        b.conn.call_with("Page.startScreencast", p, Some(&sid), Duration::from_secs(5), &|| None)?;
+        b.conn.call_with("Page.startScreencast", screencast_params(e), Some(&sid), Duration::from_secs(5), &|| None)?;
     }
     Ok(v)
 }
 
 impl Viewer {
     pub fn opts(&self) -> Opts {
-        self.cast.opts
+        self.opts
+    }
+
+    /// Change what this viewer asks for (the console's quality / fps choice, or the stream
+    /// adapting to a slow link). The screencast is re-tuned in place when the best request
+    /// changes; it never stops.
+    pub fn retune(&mut self, opts: Opts) {
+        self.opts = opts.clamped();
+        let start = {
+            let mut g = self.cast.state.lock().unwrap();
+            g.wants.insert(self.id, self.opts);
+            g.retune()
+        };
+        if let Some(e) = start {
+            self.b.conn.send_nowait("Page.startScreencast", screencast_params(e), Some(&self.cast.page_session));
+        }
     }
 
     /// The newest frame this viewer has not seen, waiting at most `timeout`. Taking a frame
     /// releases the one before it (ack-paced at the fps cap); `None` = nothing new in time.
     pub fn next(&mut self, timeout: Duration) -> Option<Arc<LiveFrame>> {
         let deadline = Instant::now() + timeout;
-        let gap = self.cast.opts.min_gap();
+        let gap = self.opts.min_gap();
         let mut g = self.cast.state.lock().unwrap();
         loop {
             let now = Instant::now();
@@ -312,8 +357,12 @@ impl Drop for Viewer {
         let mut s = self.b.state.lock().unwrap();
         let recording = s.recording.contains_key(&self.cast.page_session);
         let mut g = self.cast.state.lock().unwrap();
-        g.viewers = g.viewers.saturating_sub(1);
-        if g.viewers > 0 {
+        g.wants.remove(&self.id);
+        if !g.wants.is_empty() {
+            // The others may need less: re-tune down to what they ask for.
+            if let Some(e) = g.retune() {
+                self.b.conn.send_nowait("Page.startScreencast", screencast_params(e), Some(&self.cast.page_session));
+            }
             return;
         }
         if s.live.get(&self.cast.page_session).is_some_and(|c| Arc::ptr_eq(c, &self.cast)) {
@@ -344,9 +393,10 @@ mod tests {
     #[test]
     fn opts_are_capped() {
         let o = Opts { max_width: 99_999, max_height: 1, quality: 200, fps: 0 }.clamped();
-        assert_eq!(o, Opts { max_width: 1920, max_height: 160, quality: 90, fps: 1 });
+        assert_eq!(o, Opts { max_width: 3840, max_height: 160, quality: 95, fps: 1 });
+        assert_eq!(Opts::default(), Opts { max_width: 1920, max_height: 1080, quality: 85, fps: 30 }, "crisp by default");
         assert_eq!(Opts { fps: 10, ..Default::default() }.min_gap(), Duration::from_millis(100));
-        assert_eq!(Opts { fps: 500, ..Default::default() }.clamped().min_gap(), Duration::from_millis(33));
+        assert_eq!(Opts { fps: 500, ..Default::default() }.clamped().min_gap(), Duration::from_millis(16), "up to 60 fps");
     }
 
     #[test]
@@ -415,11 +465,13 @@ mod tests {
     #[test]
     fn viewers_share_one_screencast_and_the_last_one_stops_it() {
         let frames: Vec<Value> = (1..=3).map(|i| json!({"method": "Page.screencastFrame", "sessionId": "SP1", "params": {"data": seagent_net::crypto::b64(&[0xff, 0xd8, i]), "sessionId": i, "metadata": {"deviceWidth": 640, "deviceHeight": 480}}})).collect();
+        let started = std::sync::atomic::AtomicBool::new(false);
         let f = crate::cdp::fake::start(Arc::new(move |m, p, _| match m {
             "Target.getTargets" => (json!({"targetInfos": [{"targetId": "P1", "type": "page", "url": "https://example.com/", "title": "Example"}]}), vec![]),
             "Target.attachToTarget" => (json!({"sessionId": format!("S{}", p["targetId"].as_str().unwrap())}), vec![]),
-            // One frame per start and per ack: exactly Chrome's ack-paced behaviour.
-            "Page.startScreencast" => (json!({}), vec![frames[0].clone()]),
+            // One frame on the first start and one per ack: Chrome's ack-paced behaviour (a
+            // re-tune while running just changes the parameters).
+            "Page.startScreencast" if !started.swap(true, std::sync::atomic::Ordering::SeqCst) => (json!({}), vec![frames[0].clone()]),
             "Page.screencastFrameAck" => {
                 let n = p["sessionId"].as_i64().unwrap_or(9) as usize;
                 (json!({}), frames.get(n).cloned().into_iter().collect())
@@ -431,9 +483,9 @@ mod tests {
         let m = Manager::default();
         let b = m.browser(&env, "cdp").unwrap();
         let idle = Instant::now();
-        let mut v = watch(&b, "P1", Opts { fps: 30, ..Default::default() }).unwrap();
-        let mut w = watch(&b, "P1", Opts::default()).unwrap();
-        assert_eq!(w.opts().fps, 30, "the second viewer joins the running cast");
+        let mut v = watch(&b, "P1", Opts { fps: 30, quality: 60, ..Default::default() }).unwrap();
+        let mut w = watch(&b, "P1", Opts { fps: 60, quality: 85, ..Default::default() }).unwrap();
+        assert_eq!((v.opts().fps, w.opts().fps), (30, 60), "each viewer keeps its own fps");
         let mut got = vec![];
         while let Some(fr) = v.next(Duration::from_secs(3)) {
             got.push(fr.data[2]);
@@ -444,7 +496,12 @@ mod tests {
         assert_eq!(got, [1, 2, 3], "every frame, in order");
         assert_eq!(w.next(Duration::from_secs(1)).unwrap().data[2], 3, "a viewer that was away gets the newest frame only");
         let sent = |m: &str| f.seen.lock().unwrap().iter().filter(|x| x["method"] == m).count();
-        assert_eq!(sent("Page.startScreencast"), 1, "one screencast for both viewers");
+        let starts: Vec<Value> = f.seen.lock().unwrap().iter().filter(|x| x["method"] == "Page.startScreencast").map(|x| x["params"].clone()).collect();
+        assert_eq!(starts.iter().map(|p| p["quality"].as_u64().unwrap()).collect::<Vec<_>>(), [60, 85], "the sharper viewer re-tunes the one screencast");
+        assert_eq!(sent("Page.stopScreencast"), 0);
+        w.retune(Opts { quality: 85, fps: 60, max_width: 2560, max_height: 1440 });
+        std::thread::sleep(Duration::from_millis(50));
+        assert_eq!(f.seen.lock().unwrap().iter().rfind(|x| x["method"] == "Page.startScreencast").unwrap()["params"]["maxWidth"], 2560, "a bigger viewer re-tunes in place");
         drop(v);
         assert_eq!(sent("Page.stopScreencast"), 0, "another viewer still watches");
         drop(w);
@@ -506,7 +563,7 @@ mod tests {
         crate::manager::start_recording(&env, &b, "P1", "s2");
         assert_eq!(sent("Page.startScreencast"), 2);
         let mut v = watch(&b, "P1", Opts::default()).unwrap();
-        assert_eq!(sent("Page.startScreencast"), 2, "the viewer joins the recording's screencast");
+        assert_eq!((sent("Page.startScreencast"), sent("Page.stopScreencast")), (3, 1), "the viewer re-tunes the recording's screencast to its quality, without stopping it");
         assert_eq!(take(&mut v, 3), 3);
         let before = rec_frames(&b);
         drop(v);

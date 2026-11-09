@@ -8,18 +8,38 @@
 // Uses app.js / work.js globals: S, W, $, esc, LANG, toast, workRenderTabs.
 'use strict';
 
-const LV = { ws: null, key: '', url: null, meta: null, fails: 0, live: false, stats: null, term: null, termOpen: false, termSession: null, cmds: new Map(), nodisplay: false };
+const LV = { ws: null, key: '', url: null, meta: null, fails: 0, live: false, stats: null, term: null, termOpen: false, termSession: null, cmds: new Map(), nodisplay: false, size: null };
+// The viewer's choice (quality, fps). Crisp by default; the server lowers quality, then fps,
+// only while the link cannot keep up, and climbs back to this choice.
+const LV_LEVELS = [
+  { id: 'sharp30', q: 85, fps: 30, zh: '清晰 · 30 fps', en: 'Sharp · 30 fps' },
+  { id: 'sharp60', q: 85, fps: 60, zh: '清晰 · 60 fps', en: 'Sharp · 60 fps' },
+  { id: 'max30', q: 95, fps: 30, zh: '最高畫質 · 30 fps', en: 'Best · 30 fps' },
+  { id: 'max60', q: 95, fps: 60, zh: '最高畫質 · 60 fps', en: 'Best · 60 fps' },
+  { id: 'saver', q: 60, fps: 15, zh: '省流量 · 15 fps', en: 'Data saver · 15 fps' },
+];
+let lvLevel = LV_LEVELS[0];
+try { lvLevel = LV_LEVELS.find((l) => l.id === localStorage.getItem('seagent.live.level')) || lvLevel; } catch {}
 const LVL = (zh, en) => (LANG === 'en' ? en : zh);
 const lvPollFrame = workFrame; // work.js polling, kept as the fallback
 
 function lvKey(cur) { return !cur ? '' : cur.kind === 'tab' ? `browser:${cur.key}:${cur.targetId}` : `desktop:${cur.id}`; }
 
+// Full device-pixel resolution: the stage's real size × devicePixelRatio, so text is crisp.
+function lvStageSize() {
+  const dpr = devicePixelRatio || 1;
+  const st = $('workStage');
+  return { w: Math.max(320, Math.round(st.clientWidth * dpr)), h: Math.max(240, Math.round(st.clientHeight * dpr)) };
+}
+
 function lvUrl(cur) {
   const proto = location.protocol === 'https:' ? 'wss' : 'ws';
-  const w = Math.min(1920, Math.round($('workStage').clientWidth * (devicePixelRatio || 1)));
+  const sz = lvStageSize();
+  LV.size = sz;
+  const lv = { maxWidth: sz.w, maxHeight: sz.h, quality: lvLevel.q, fps: lvLevel.fps };
   const p = new URLSearchParams(cur.kind === 'tab'
-    ? { kind: 'browser', key: cur.key, targetId: cur.targetId, maxWidth: Math.max(320, w), quality: 62, fps: 15 }
-    : { kind: 'desktop', target: cur.id, maxWidth: Math.max(320, w), quality: 60, fps: 5 });
+    ? { kind: 'browser', key: cur.key, targetId: cur.targetId, ...lv }
+    : { kind: 'desktop', target: cur.id, ...lv });
   return `${proto}://${location.host}/view/live?${p}`;
 }
 
@@ -40,8 +60,12 @@ function lvBadge() {
   const b = $('workLive');
   if (!b) return;
   b.hidden = !LV.live;
-  b.textContent = LV.stats && LV.stats.fps != null ? `LIVE ${LV.stats.fps} fps` : 'LIVE';
-  b.title = LV.stats ? `${LV.stats.kbps} kbit/s${LV.stats.latencyMs != null ? ` · ${LV.stats.latencyMs} ms` : ''}` : '';
+  const st = LV.stats;
+  b.textContent = st && st.fps != null ? `LIVE ${Math.round(st.fps)} fps` : 'LIVE';
+  const a = st && st.adapt;
+  const lowered = a && (a.quality < a.chosen.quality || a.fpsTarget < a.chosen.fps);
+  b.classList.toggle('low', !!lowered);
+  b.title = st ? `${st.kbps} kbit/s${st.latencyMs != null ? ` · ${st.latencyMs} ms` : ''}${a ? ` · JPEG ${a.quality} · ${a.fpsTarget} fps${lowered ? LVL('（連線跟不上，暫時降低）', ' (lowered: the link cannot keep up)') : ''}` : ''}` : '';
 }
 
 function lvOpen(cur) {
@@ -131,10 +155,37 @@ function lvTermEls() {
   btn.onclick = () => lvTerm(!LV.termOpen);
   const live = document.createElement('span');
   live.id = 'workLive'; live.className = 'work-live'; live.hidden = true; live.textContent = 'LIVE';
+  const sel = document.createElement('select');
+  sel.id = 'workLevel'; sel.className = 'work-level';
+  sel.title = LVL('即時畫面的畫質與畫面更新率', 'Live stream quality and frame rate');
+  sel.setAttribute('aria-label', sel.title);
+  for (const l of LV_LEVELS) { const o = document.createElement('option'); o.value = l.id; o.textContent = LVL(l.zh, l.en); sel.append(o); }
+  sel.value = lvLevel.id;
+  sel.onchange = () => lvChoose(sel.value);
   const foot = $('workTake').parentElement;
   foot.insertBefore(btn, $('workTake'));
+  foot.insertBefore(sel, btn);
   foot.insertBefore(live, foot.firstChild);
 }
+
+function lvChoose(id) {
+  lvLevel = LV_LEVELS.find((l) => l.id === id) || LV_LEVELS[0];
+  try { localStorage.setItem('seagent.live.level', lvLevel.id); } catch {}
+  // The open stream switches in place (no reconnect).
+  if (LV.ws && LV.ws.readyState === 1) LV.ws.send(JSON.stringify({ t: 'tune', quality: lvLevel.q, fps: lvLevel.fps }));
+}
+
+// The stage changed size (pane widened, window resized, moved to a HiDPI screen): ask for
+// frames at the new device-pixel size.
+let lvResizeTimer = null;
+new ResizeObserver(() => {
+  clearTimeout(lvResizeTimer);
+  lvResizeTimer = setTimeout(() => {
+    if (!LV.ws || !LV.size || !W.cur) return;
+    const sz = lvStageSize();
+    if (Math.abs(sz.w - LV.size.w) / LV.size.w > 0.2 || Math.abs(sz.h - LV.size.h) / LV.size.h > 0.2) lvOpen(W.cur);
+  }, 500);
+}).observe($('workStage'));
 
 function lvTerm(on) {
   lvTermEls();
