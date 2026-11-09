@@ -370,9 +370,10 @@ mod tests {
         let c = ctx(&ws, &paths);
         let out = tool.call(&c, json!({"action": "view", "name": "deploy"}));
         assert!(!out.is_error, "{}", out.content);
-        let dir = ws.join(".seagent/skills/deploy");
+        // Joined per component (native separators); the shell-facing directory is `path_str`.
+        let dir = ws.join(".seagent").join("skills").join("deploy");
         assert!(out.content.starts_with(&format!("{}", dir.join("SKILL.md").display())), "path first: {}", out.content);
-        assert!(out.content.contains(&format!("Run {}/scripts/go.sh today inline-ok", dir.display())), "templates + inline shell: {}", out.content);
+        assert!(out.content.contains(&format!("Run {}/scripts/go.sh today inline-ok", seagent_core::platform::shell::path_str(&dir))), "templates + inline shell: {}", out.content);
         assert!(out.content.contains("[Skill directory:") && out.content.contains("- scripts/go.sh"));
         assert!(out.content.contains("[Skill config ([skills.config.deploy]):\n  region = eu-west-1\n  account = acme\n  roster = (not set)\n]"), "{}", out.content);
         assert!(out.content.contains("[Skill setup note: Setup needed before using this skill: missing env $SEAGENT_T_DEPLOY_TOKEN."), "{}", out.content);

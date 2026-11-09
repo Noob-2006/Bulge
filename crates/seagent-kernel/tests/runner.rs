@@ -178,7 +178,8 @@ fn env_with(cfg_mut: impl FnOnce(&mut Config), approver: Arc<dyn Approver>) -> E
     add("sh", tool("sh", false, false, true, |_, i| ToolOutput::ok(format!("ran {}", i["cmd"].as_str().unwrap_or("")))));
     add("big", tool("big", false, true, true, |_, _| ToolOutput::ok("x".repeat(100_000))));
     add("shell", tool("shell", false, false, true, |_, i| {
-        let out = std::process::Command::new("bash").arg("-c").arg(i["command"].as_str().unwrap_or("")).output().unwrap();
+        // Unix: `bash` from PATH; Windows: Git Bash (`System32\bash.exe` is WSL, without this env).
+        let out = std::process::Command::new(seagent_core::platform::layout::bash().unwrap_or_else(|| "bash".into())).arg("-c").arg(i["command"].as_str().unwrap_or("")).output().unwrap();
         ToolOutput::ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
     }));
     add("leak", tool("leak", false, true, true, |_, _| ToolOutput::ok("token is supersecret-value-123")));
@@ -1419,7 +1420,8 @@ fn sub_agent_and_session_worktree_isolation() {
     assert_eq!(o.text, "parent done");
     let child = e.k.store.list().into_iter().find(|s| s.parent.as_deref() == Some(id.as_str())).expect("child session");
     let cws = seagent_kernel::projection::project(&e.k.store.read(&child.id).unwrap()).workspace;
-    assert!(cws.contains("/.worktrees/subagent-"), "child ran in its own worktree: {cws}");
+    // A native host path: `\.worktrees\…` on Windows.
+    assert!(cws.replace('\\', "/").contains("/.worktrees/subagent-"), "child ran in its own worktree: {cws}");
     assert!(!e.ws.join("child.txt").exists(), "the parent's tree is untouched");
     assert!(!std::path::Path::new(&cws).exists(), "finished worktree removed");
     let archived = git_in(&e.ws, &["for-each-ref", "--format=%(refname)", "refs/seagent/archive/"]);
@@ -1431,7 +1433,7 @@ fn sub_agent_and_session_worktree_isolation() {
     let info = seagent_kernel::worktree::enter_session(&e.k, &id, Some("feat")).unwrap();
     let ws = seagent_kernel::projection::project(&e.k.store.read(&id).unwrap()).workspace;
     assert_eq!(ws, info.path);
-    assert!(ws.ends_with(".worktrees/feat"), "{ws}");
+    assert!(std::path::Path::new(&ws).ends_with(".worktrees/feat"), "{ws}");
     e.p.call("wsfile", json!({"name":"in-wt.txt"}));
     e.p.text("ok");
     e.k.submit(&id, "write it", "cli").unwrap();

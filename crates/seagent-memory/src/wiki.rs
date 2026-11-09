@@ -171,7 +171,8 @@ pub fn pages(h: &Host, store: &str) -> Vec<Page> {
         for f in files {
             let Ok(t) = fs::read_to_string(&f) else { continue };
             let (fm, body) = parse(&t);
-            let rel = f.strip_prefix(&r).unwrap_or(&f).display().to_string();
+            // Page ids are `syntheses/x.md` on every OS (`layout::model_path`).
+            let rel = seagent_core::platform::layout::model_path(f.strip_prefix(&r).unwrap_or(&f));
             let title = fm.get("title").and_then(Value::as_str).map(str::to_string).or_else(|| body.lines().find(|l| l.starts_with("# ")).map(|l| l[2..].trim().to_string())).unwrap_or_default();
             let id = fm.get("id").and_then(Value::as_str).unwrap_or("").to_string();
             out.push(Page { rel, kind: kind.to_string(), fm, body, title, id });

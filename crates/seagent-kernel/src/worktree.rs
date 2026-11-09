@@ -55,7 +55,16 @@ fn git(args: &[&str], cwd: &Path) -> Result<String, String> {
 
 /// The git toplevel containing `path`, or None outside a work tree.
 pub fn repo_root(path: &Path) -> Option<PathBuf> {
-    git(&["rev-parse", "--show-toplevel"], path).ok().filter(|s| !s.is_empty()).map(PathBuf::from)
+    git(&["rev-parse", "--show-toplevel"], path).ok().filter(|s| !s.is_empty()).map(|s| git_path(&s))
+}
+
+/// A path git printed: Git for Windows says `C:/x/y`; spelled natively (`C:\x\y`) so it joins
+/// and compares like every other host path. Unix: as printed.
+fn git_path(s: &str) -> PathBuf {
+    #[cfg(windows)]
+    return PathBuf::from(s.replace('/', "\\"));
+    #[cfg(not(windows))]
+    return PathBuf::from(s);
 }
 
 fn valid_name(n: &str) -> bool {
@@ -165,7 +174,8 @@ pub fn list(workspace: &Path) -> Result<Vec<Entry>, String> {
     let mut cur: Option<Entry> = None;
     for line in out.lines().chain(std::iter::once("")) {
         if let Some(p) = line.strip_prefix("worktree ") {
-            cur = Some(Entry { path: p.into(), branch: String::new(), head: String::new(), seagent: Path::new(p).starts_with(root.join(DIR)) });
+            let p = git_path(p);
+            cur = Some(Entry { path: p.to_string_lossy().into(), branch: String::new(), head: String::new(), seagent: p.starts_with(root.join(DIR)) });
         } else if let Some(h) = line.strip_prefix("HEAD ") {
             if let Some(c) = cur.as_mut() {
                 c.head = h.chars().take(12).collect();

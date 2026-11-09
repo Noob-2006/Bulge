@@ -296,7 +296,8 @@ impl Tracker {
             if !self.loaded_digests.insert(digest(s)) {
                 return None;
             }
-            let rel = path.strip_prefix(&self.working_dir).map(|r| r.display().to_string()).unwrap_or_else(|_| path.display().to_string());
+            // Model-facing: `backend/AGENTS.md` on Windows too (`layout::model_path`).
+            let rel = path.strip_prefix(&self.working_dir).map(seagent_core::platform::layout::model_path).unwrap_or_else(|_| path.display().to_string());
             let s = crate::threats::screen(s, f, false);
             return Some(format!("[Subdirectory context discovered: {rel}]\n{}", truncate(&s, f, MAX_HINT_CHARS, &rel)));
         }

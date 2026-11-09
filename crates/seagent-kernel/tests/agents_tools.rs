@@ -482,14 +482,15 @@ mod agents_tools {
         let r = &tool_json(&e, &id, 0)["results"][0];
         let wt = &r["worktree"];
         let path = wt["path"].as_str().unwrap_or_else(|| panic!("no worktree report: {r}"));
-        assert!(path.contains(".worktrees/subagent-"), "{path}");
+        // A native host path (`\.worktrees\…` on Windows); git prints it with `/` there.
+        assert!(path.replace('\\', "/").contains(".worktrees/subagent-"), "{path}");
         assert!(wt["branch"].as_str().unwrap_or_default().starts_with("seagent/subagent-"), "{wt}");
         // The child really was started in that worktree…
         let prompt = seen_ws.lock().unwrap().join("\n");
         assert!(prompt.contains(path), "child workspace was not the worktree: {prompt}");
         // …and git knew about it while it ran.
         let list = listing.lock().unwrap().clone();
-        assert!(list.contains(path), "git worktree list did not show {path}:\n{list}");
+        assert!(list.contains(path) || list.contains(&path.replace('\\', "/")), "git worktree list did not show {path}:\n{list}");
         // Finalized: a clean worktree is pruned and its branch removed with it.
         assert_eq!(wt["pruned"], true, "{wt}");
         assert!(!Path::new(path).exists(), "clean worktree left behind at {path}");

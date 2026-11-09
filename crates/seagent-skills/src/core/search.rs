@@ -250,7 +250,7 @@ mod tests {
         let (hits, more) = search(&cat, "deploy aws", None).unwrap();
         assert_eq!(hits[0].name, "deploy-aws", "{hits:?}");
         assert!(hits.iter().any(|h| h.name == "review-code") && !more, "body text is searched: {hits:?}");
-        assert_eq!(hits[0].location, d.join("deploy-aws/SKILL.md").display().to_string());
+        assert_eq!(hits[0].location, d.join("deploy-aws").join("SKILL.md").display().to_string());
         // Exact name first even when another document scores higher.
         let (hits, _) = search(&cat, "terraform", Some(2)).unwrap();
         assert_eq!(hits[0].name, "terraform", "{hits:?}");

@@ -214,7 +214,7 @@ pub fn scan_path(p: &Path) -> Vec<Finding> {
     }
     walk(p, &mut files);
     files.sort();
-    files.iter().flat_map(|f| scan_source(&String::from_utf8_lossy(&std::fs::read(f).unwrap_or_default()), &f.strip_prefix(p).unwrap().to_string_lossy())).collect()
+    files.iter().flat_map(|f| scan_source(&String::from_utf8_lossy(&std::fs::read(f).unwrap_or_default()), &seagent_core::platform::layout::model_path(f.strip_prefix(p).unwrap()))).collect()
 }
 
 pub fn format(f: &[Finding], name: &str) -> String {

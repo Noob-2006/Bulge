@@ -186,8 +186,10 @@ mod tests {
             assert_eq!(find_mutation(cmd, &root, &root), None, "{cmd}");
         }
         assert_eq!(find_mutation("git checkout main", &other, &root), None, "other repo");
-        assert_eq!(find_mutation(&format!("git -C {} checkout x", root.display()), &other, &root).as_deref(), Some("git checkout"));
-        assert_eq!(find_mutation(&format!("git worktree remove {}", root.display()), &other, &root).as_deref(), Some("git worktree remove"));
+        // A shell line: on Windows the path is spelled `C:/…` (unquoted `\` is an escape there).
+        let r = seagent_core::platform::shell::path_str(&root);
+        assert_eq!(find_mutation(&format!("git -C {r} checkout x"), &other, &root).as_deref(), Some("git checkout"));
+        assert_eq!(find_mutation(&format!("git worktree remove {r}"), &other, &root).as_deref(), Some("git worktree remove"));
         assert!(block_message("git checkout", &root).contains("separate worktree"));
     }
 }

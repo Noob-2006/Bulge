@@ -41,7 +41,8 @@ fn walk(root: &Path, dir: &Path, depth: u32, out: &mut Vec<CommandDef>) {
             walk(root, &p, depth + 1, out);
         } else if p.extension().is_some_and(|x| x == "md") {
             let rel = p.strip_prefix(root).unwrap_or(&p).with_extension("");
-            let name = rel.to_string_lossy().replace('/', ":");
+            // `git/commit.md` → `git:commit` (Windows: `git\commit.md` too).
+            let name = seagent_core::platform::layout::model_path(&rel).replace('/', ":");
             if out.iter().any(|c| c.name == name) {
                 continue;
             }

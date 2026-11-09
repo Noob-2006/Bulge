@@ -1112,7 +1112,8 @@ mod tests {
         let counter = dir.join("n");
         let k = KeyCmd::new(&format!(
             "echo x >> {0}; echo minted-$(wc -l < {0})",
-            counter.display()
+            // A shell line: Git Bash on Windows needs `C:/…` (it eats `\`).
+            seagent_core::platform::shell::path_str(&counter)
         ));
         assert_eq!(k.get().unwrap().token.unwrap(), "minted-1");
         assert_eq!(k.get().unwrap().token.unwrap(), "minted-1", "cached");

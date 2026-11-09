@@ -716,7 +716,11 @@ impl<'a> Plugins<'a> {
                     })
                 }
             };
+            // A local source on Windows is `C:\…\pkg`: its last component is the name too.
+            #[cfg(not(windows))]
             let name = url.trim_end_matches('/').trim_end_matches(".git").rsplit('/').next().unwrap_or("plugin").to_string();
+            #[cfg(windows)]
+            let name = url.trim_end_matches(['/', '\\']).trim_end_matches(".git").rsplit(['/', '\\']).next().unwrap_or("plugin").to_string();
             let st = self.stage(&name)?;
             self.clone_into(&url, rev.as_deref(), &st)?;
             (name, st, json!({"source": "git", "url": url, "ref": rev}))

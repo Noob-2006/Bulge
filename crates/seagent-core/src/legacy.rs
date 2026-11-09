@@ -89,12 +89,14 @@ mod tests {
 
     #[test]
     fn pre_rename_user_directories_move_once() {
-        let home = Path::new("/h");
-        let env = |k: &str| (k == "XDG_CACHE_HOME").then(|| "/xc".to_string());
-        let have = ["/h/.config/ark", "/h/.local/share/ark", "/h/.local/share/seagent", "/xc/ark"];
-        let exists = |p: &Path| have.iter().any(|h| Path::new(h) == p);
-        let m = user_dir_moves(home, &env, &exists);
-        assert_eq!(m, vec![(PathBuf::from("/h/.config/ark"), PathBuf::from("/h/.config/seagent")), (PathBuf::from("/xc/ark"), PathBuf::from("/xc/seagent"))], "data already moved stays put");
+        // Absolute fixture paths: `/h` on Unix, `C:\h` on Windows (where `/h` is not absolute).
+        let fx = |s: &str| if cfg!(windows) { PathBuf::from(format!("C:{s}")) } else { PathBuf::from(s) };
+        let home = fx("/h");
+        let env = |k: &str| (k == "XDG_CACHE_HOME").then(|| fx("/xc").to_string_lossy().into_owned());
+        let have = ["/h/.config/ark", "/h/.local/share/ark", "/h/.local/share/seagent", "/xc/ark"].map(fx);
+        let exists = |p: &Path| have.iter().any(|h| h.as_path() == p);
+        let m = user_dir_moves(&home, &env, &exists);
+        assert_eq!(m, vec![(fx("/h/.config/ark"), fx("/h/.config/seagent")), (fx("/xc/ark"), fx("/xc/seagent"))], "data already moved stays put");
     }
 
     #[test]
