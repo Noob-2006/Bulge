@@ -150,6 +150,14 @@ pub fn parse_link_json(stdout: &str) -> Option<String> {
     (u.starts_with("http") && u.contains("/setup#token=")).then(|| u.to_string())
 }
 
+/// `{"console_url": "http://127.0.0.1:8641/", …}` from `seagent setup status --json` → the base
+/// URL without the trailing slash (the address the daemon really serves).
+pub fn parse_status_json(stdout: &str) -> Option<String> {
+    let v: serde_json::Value = stdout.lines().rev().find_map(|l| serde_json::from_str(l.trim()).ok())?;
+    let u = v["console_url"].as_str()?.trim_end_matches('/');
+    (u.starts_with("http://") || u.starts_with("https://")).then(|| u.to_string())
+}
+
 /// `seagent app token` prints the token, or (exit 0!) a multi-line how-to when there is none.
 pub fn parse_token(stdout: &str) -> Option<String> {
     if let Ok(v) = serde_json::from_str::<serde_json::Value>(stdout.trim()) {
@@ -199,6 +207,8 @@ mod tests {
         assert_eq!(parse_app_status("[app] enabled on http://127.0.0.1:9000 · ui true · openai api false").as_deref(), Some("http://127.0.0.1:9000"));
         assert_eq!(parse_link_json("{\"url\":\"http://127.0.0.1:8640/setup#token=abc\",\"expires_ms\":1}\n").as_deref(), Some("http://127.0.0.1:8640/setup#token=abc"));
         assert_eq!(parse_link_json("setup is already complete"), None);
+        assert_eq!(parse_status_json("{\"console_url\":\"http://127.0.0.1:8641/\",\"done\":false,\"listen\":\"127.0.0.1:8641\"}\n").as_deref(), Some("http://127.0.0.1:8641"));
+        assert_eq!(parse_status_json("{\"error\":\"x\"}"), None);
         assert_eq!(parse_token("Zq3_abcdefghijklmnopqrstuv\n").as_deref(), Some("Zq3_abcdefghijklmnopqrstuv"));
         assert_eq!(parse_token("尚未設定 token。最簡單是執行 `seagent setup`；或手動：\n  echo x | seagent secrets set APP_TOKEN"), None);
         assert_eq!(parse_token("{\"token\":\"abcdefghijklmnopqrstuvwxyz\",\"url\":\"http://x\"}").as_deref(), Some("abcdefghijklmnopqrstuvwxyz"));

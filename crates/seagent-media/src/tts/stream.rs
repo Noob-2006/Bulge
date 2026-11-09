@@ -253,7 +253,7 @@ mod tests {
 
     fn media(tag: &str, extra: &str) -> (Media, PathBuf) {
         let dir = temp_dir(tag);
-        let cfg = format!("output_dir = \"{}\"\n[tts]\nprefs_path = \"{}\"\n{extra}", dir.join("media").display(), dir.join("p.json").display());
+        let cfg = format!("output_dir = '{}'\n[tts]\nprefs_path = '{}'\n{extra}", dir.join("media").display(), dir.join("p.json").display());
         (Media { cfg: crate::MediaConfig::from_toml(&cfg), http: Default::default() }, dir)
     }
 

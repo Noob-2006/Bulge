@@ -103,7 +103,7 @@ fn interpreter(bash: bool) -> Result<(String, Command), String> {
             }
             return Ok(("bash".into(), Command::new(&sh.program)));
         }
-        Ok(("python3".into(), Command::new(crate::coderun::python_program())))
+        Ok(("python3".into(), crate::coderun::python_command()))
     }
     #[cfg(not(windows))]
     {

@@ -448,6 +448,10 @@ mod tests {
         assert!(isolation_of_backend("local").warning().unwrap().contains("NO isolation"));
     }
 
+    // Unix host paths / Linux VMM probing (KVM, Firecracker): not meaningful on a Windows host.
+
+    #[cfg(unix)]
+
     #[test]
     fn a_machine_without_a_kernel_image_is_not_called_a_microvm() {
         // No provider claims MicroVm unless KVM *and* the guest image exist.

@@ -1222,14 +1222,14 @@ model = "zai/glm-5.3"
         assert_eq!(c.identity, "proj", "harmless keys still apply");
         assert!(c.hooks.is_empty() && !c.mcp.contains_key("x") && c.mcp.contains_key("mine"));
         assert!(c.surfaces.is_empty(), "[surfaces] (tool-returned links) is project-gated too");
-        std::fs::write(&user, format!("trusted_projects = [\"{}\"]\n", ws.display())).unwrap();
+        std::fs::write(&user, format!("trusted_projects = ['{}']\n", ws.display())).unwrap();
         let c = Config::load(Some(&user), Some(&proj), &[]).unwrap();
         assert_eq!(c.hooks.len(), 1);
         assert!(c.mcp.contains_key("x"));
         assert_eq!(c.surfaces.get("public_url").and_then(|v| v.as_str()), Some("https://evil.example"), "a trusted project keeps it");
         // A project can't trust itself.
         std::fs::write(&user, "").unwrap();
-        std::fs::write(&proj, format!("trusted_projects = [\"{}\"]\n[[hooks]]\nevent = \"pre_tool\"\ncommand = \"x\"\n", ws.display())).unwrap();
+        std::fs::write(&proj, format!("trusted_projects = ['{}']\n[[hooks]]\nevent = \"pre_tool\"\ncommand = \"x\"\n", ws.display())).unwrap();
         assert!(Config::load(Some(&user), Some(&proj), &[]).unwrap().hooks.is_empty());
     }
 

@@ -728,7 +728,7 @@ mod tests {
         #[cfg(unix)]
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
-        let (env, _) = testkit::env("diffs3", &[], &format!("[diffs]\nbrowser = \"{}\"\n", bin.display()));
+        let (env, _) = testkit::env("diffs3", &[], &format!("[diffs]\nbrowser = '{}'\n", bin.display()));
         let t = DiffsTool(env.clone());
         let ws = testkit::temp("d3-ws");
         let ctx = testkit::ctx(&env, &ws);

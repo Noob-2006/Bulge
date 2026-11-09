@@ -295,7 +295,7 @@ mod tests {
         // Fake piper: echo argv to a log, copy stdin into the WAV data chunk.
         let log = d.join("args.txt");
         let cmd = fake_engine(&d, "piper", &format!("echo \"$@\" > {}\nwhile [ \"$1\" != \"--output_file\" ]; do shift; done\nprintf 'RIFF\\0\\0\\0\\0WAVE' > \"$2\"\ncat >> \"$2\"", log.display()));
-        let m = Media { cfg: crate::MediaConfig::from_toml(&format!("[tts.piper]\ncommand = \"{cmd}\"\nvoice = \"{}\"\nspeaker_id = 2\n[tts]\nspeed = 2.0", model.display())), http: Default::default() };
+        let m = Media { cfg: crate::MediaConfig::from_toml(&format!("[tts.piper]\ncommand = \"{cmd}\"\nvoice = '{}'\nspeaker_id = 2\n[tts]\nspeed = 2.0", model.display())), http: Default::default() };
         let s = Local::piper().synthesize(&m, &TtsRequest::new("hello"), &Cancel::new()).unwrap();
         assert!(s.audio.bytes.ends_with(b"hello"));
         assert_eq!(s.audio.mime, "audio/wav");

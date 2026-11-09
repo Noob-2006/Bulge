@@ -579,7 +579,7 @@ mod tests {
         let store_path = dir.join("store.json");
         let cfg = Config {
             meetings: meetings_table(&format!(
-                "[meetings.teams]\ntenant_id = \"contoso\"\nclient_id = \"app\"\nclient_secret = \"s3cret\"\nbase_url = \"{}/v1.0\"\nauthority_url = \"{}/oauth2/v2.0/token\"\nstore_path = \"{}\"\n[meetings.teams.pipeline]\ntranscript_min_chars = 0\n[meetings.teams.pipeline.teams_delivery]\nenabled = true\nincoming_webhook_url = \"{}\"\n",
+                "[meetings.teams]\ntenant_id = \"contoso\"\nclient_id = \"app\"\nclient_secret = \"s3cret\"\nbase_url = \"{}/v1.0\"\nauthority_url = \"{}/oauth2/v2.0/token\"\nstore_path = '{}'\n[meetings.teams.pipeline]\ntranscript_min_chars = 0\n[meetings.teams.pipeline.teams_delivery]\nenabled = true\nincoming_webhook_url = \"{}\"\n",
                 fake.url, fake.url, store_path.display(), teams.url
             )),
             ..Default::default()
@@ -635,7 +635,7 @@ mod tests {
         std::fs::create_dir_all(&paths.config_dir).unwrap();
         let mut cfg = Config {
             meetings: meetings_table(&format!(
-                "[meetings.teams]\ntenant_id = \"contoso\"\nclient_id = \"app\"\nclient_secret = \"s3cret\"\nbase_url = \"{}/v1.0\"\nauthority_url = \"{}/oauth2/v2.0/token\"\nstore_path = \"{}\"\n[meetings.teams.pipeline]\ntranscript_min_chars = 0\n[meetings.teams.pipeline.teams_delivery]\nenabled = true\nchat_id = \"19:weekly@thread.tacv2\"\n",
+                "[meetings.teams]\ntenant_id = \"contoso\"\nclient_id = \"app\"\nclient_secret = \"s3cret\"\nbase_url = \"{}/v1.0\"\nauthority_url = \"{}/oauth2/v2.0/token\"\nstore_path = '{}'\n[meetings.teams.pipeline]\ntranscript_min_chars = 0\n[meetings.teams.pipeline.teams_delivery]\nenabled = true\nchat_id = \"19:weekly@thread.tacv2\"\n",
                 fake.url, fake.url, dir.join("store.json").display()
             )),
             ..Default::default()
@@ -702,7 +702,7 @@ mod tests {
         assert_eq!(install_at(&paths, &cfg), Installed::default());
         assert!(!seagent_channel::msgraph_webhook::notification_scheduler_installed());
         // A store path that is a directory cannot be read: also just a warning.
-        cfg.meetings = meetings_table(&format!("[meetings.teams]\ntenant_id = \"contoso\"\nclient_id = \"app\"\nclient_secret = \"s3cret\"\nstore_path = \"{}\"\n", dir.display()));
+        cfg.meetings = meetings_table(&format!("[meetings.teams]\ntenant_id = \"contoso\"\nclient_id = \"app\"\nclient_secret = \"s3cret\"\nstore_path = '{}'\n", dir.display()));
         assert_eq!(install_at(&paths, &cfg), Installed::default());
         let _ = std::fs::remove_dir_all(&dir);
     }

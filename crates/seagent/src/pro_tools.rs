@@ -261,7 +261,7 @@ mod tests {
     }
 
     fn cfg_with_db(db: &std::path::Path) -> String {
-        format!("[integrations.data.sources.sales]\nkind = \"sqlite\"\npath = \"{}\"\ndescription = \"test\"\n[integrations.data]\nmax_rows = 2\n", db.display())
+        format!("[integrations.data.sources.sales]\nkind = \"sqlite\"\npath = '{}'\ndescription = \"test\"\n[integrations.data]\nmax_rows = 2\n", db.display())
     }
 
     #[test]

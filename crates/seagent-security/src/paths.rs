@@ -220,8 +220,22 @@ fn glob_hit(globs: &[String], p: &Path) -> Option<String> {
     let s = p.to_string_lossy();
     globs.iter().find(|g| {
         let g = expand_home(g.trim());
-        !g.is_empty() && (fnmatch(&g, &s) || Path::new(&g) == p || (!g.contains(['*', '?', '[']) && p.starts_with(&g)))
+        !g.is_empty() && (fnmatch(&g, &s) || Path::new(&g) == p || (!g.contains(['*', '?', '[']) && p.starts_with(&g)) || folded_glob_hit(&g, &s))
     }).cloned()
+}
+
+/// Windows: rules are written as `C:\Users\me\private\*` or `C:/Users/me/private/*` and the
+/// file system is case-insensitive, so both sides are folded (`/`, lower case, no `\\?\`)
+/// before matching (a `\` in a Windows rule is a separator, never a glob escape).
+#[cfg(windows)]
+fn folded_glob_hit(g: &str, s: &str) -> bool {
+    let (g, s) = (fold(g), fold(s));
+    fnmatch(&g, &s) || (!g.contains(['*', '?', '[']) && (s == g || s.starts_with(&format!("{g}/"))))
+}
+
+#[cfg(not(windows))]
+fn folded_glob_hit(_g: &str, _s: &str) -> bool {
+    false
 }
 
 /// Error when a read of `path` is denied (credential stores, `.env` files, user rules).

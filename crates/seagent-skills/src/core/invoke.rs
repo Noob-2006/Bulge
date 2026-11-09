@@ -413,7 +413,7 @@ mod tests {
         std::fs::create_dir_all(paths.data.join("plugins/portable/skills/fmt")).unwrap();
         std::fs::write(paths.data.join("plugins/portable/skills/fmt/SKILL.md"), "---\nname: fmt\ndescription: Format\n---\nfmt body").unwrap();
         let mut cfg = Config::default();
-        cfg.plugins.insert("myplug".into(), toml::from_str(&format!("command = \"{}\"", pdir.join("plugin.sh").display())).unwrap());
+        cfg.plugins.insert("myplug".into(), toml::from_str(&format!("command = '{}'", pdir.join("plugin.sh").display())).unwrap());
         let s = Settings::from_table(&toml::Table::new());
         let names: Vec<String> = plugin_skills(&cfg, &paths).into_iter().map(|s| s.name).collect();
         assert_eq!(names, ["myplug:lint", "portable:fmt"]);

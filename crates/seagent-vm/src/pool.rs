@@ -953,6 +953,10 @@ mod tests {
         assert!(a.starts_with("s-s1-"));
     }
 
+    // Unix host paths / Linux VMM probing (KVM, Firecracker): not meaningful on a Windows host.
+
+    #[cfg(unix)]
+
     #[test]
     fn fake_provider_runs_a_command_and_syncs_both_ways() {
         let (m, d) = mgr("fakeexec");
@@ -966,6 +970,10 @@ mod tests {
         assert_eq!(out.synced.0, 1, "one file synced back");
         m.stop_all();
     }
+
+    // Unix host paths / Linux VMM probing (KVM, Firecracker): not meaningful on a Windows host.
+
+    #[cfg(unix)]
 
     #[test]
     fn a_destructive_command_is_snapshotted_and_still_runs() {
@@ -1006,6 +1014,10 @@ mod tests {
         sess.release();
         m.stop_all();
     }
+
+    // Unix host paths / Linux VMM probing (KVM, Firecracker): not meaningful on a Windows host.
+
+    #[cfg(unix)]
 
     #[test]
     fn idle_vms_are_reaped_and_status_reports_them() {

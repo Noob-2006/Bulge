@@ -284,7 +284,8 @@ pub fn audit_sub(paths: &Paths, a: &Args) -> Option<R> {
             }
             crate::ops::hostos::create_private(&p, format!("{seed}\n").as_bytes()).map_err(|e| format!("{}: {e}", p.display()))?;
             audit::record(d, audit::Event::new("audit.seal_key", Actor::local(), "audit", "ok").detail(json!({"public_key": public})));
-            out(format!("seal key written to {} (mode 0600)\n[audit]\nseal_key = \"{}\"\nseal_pubkey = \"{public}\"   # give this to the auditor", p.display(), p.display()))
+            // TOML-quoted: a Windows path's backslashes would otherwise be read as escapes.
+            out(format!("seal key written to {} (mode 0600)\n[audit]\nseal_key = {}\nseal_pubkey = \"{public}\"   # give this to the auditor", p.display(), toml::Value::String(p.display().to_string())))
         })(),
         // `seagent audit seal`: sign (and timestamp) the seals of rotated segments now.
         "seal" => (|| -> R {

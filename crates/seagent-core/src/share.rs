@@ -33,7 +33,7 @@ pub fn share_dir_with(env: Option<PathBuf>, exe: Option<&Path>, system: &[&str])
     if let Some(bin) = exe.and_then(Path::parent) {
         for c in [bin.join("../share/seagent"), bin.join("../lib/seagent/share"), bin.join("share")] {
             if is_share(&c) {
-                return c.canonicalize().ok();
+                return crate::platform::layout::canonicalize(&c).ok();
             }
         }
     }
@@ -43,7 +43,7 @@ pub fn share_dir_with(env: Option<PathBuf>, exe: Option<&Path>, system: &[&str])
         }
     }
     let root = exe.and_then(|e| e.canonicalize().ok().or_else(|| Some(e.to_path_buf()))).and_then(|e| source_root_of(&e))?;
-    root.join("share").canonicalize().ok()
+    crate::platform::layout::canonicalize(&root.join("share")).ok()
 }
 
 /// seagent's shared data dir. See the module docs for the search order.
@@ -82,11 +82,11 @@ mod tests {
         tree(r, &["prefix/bin", "prefix/share/seagent/skills"]);
         let exe = r.join("prefix/bin/seagent");
         let got = share_dir_with(None, Some(&exe), &[]).unwrap();
-        assert_eq!(got, r.join("prefix/share/seagent").canonicalize().unwrap());
+        assert_eq!(got, crate::platform::layout::canonicalize(&r.join("prefix/share/seagent")).unwrap());
         // `SEAGENT_SHARE_DIR` wins; a missing one is ignored.
         tree(r, &["custom"]);
         assert_eq!(share_dir_with(Some(r.join("custom")), Some(&exe), &[]).unwrap(), r.join("custom"));
-        assert_eq!(share_dir_with(Some(r.join("nope")), Some(&exe), &[]).unwrap(), r.join("prefix/share/seagent").canonicalize().unwrap());
+        assert_eq!(share_dir_with(Some(r.join("nope")), Some(&exe), &[]).unwrap(), crate::platform::layout::canonicalize(&r.join("prefix/share/seagent")).unwrap());
     }
 
     #[test]
@@ -100,7 +100,7 @@ mod tests {
         assert_eq!(share_dir_with(None, Some(&lone), &[sys.to_str().unwrap()]).unwrap(), sys);
         assert!(share_dir_with(None, Some(&lone), &[]).is_none(), "nothing found: no guessing");
         let dev = r.join("repo/target/debug/deps/seagent-abc");
-        assert_eq!(share_dir_with(None, Some(&dev), &[]).unwrap(), r.join("repo/share").canonicalize().unwrap());
+        assert_eq!(share_dir_with(None, Some(&dev), &[]).unwrap(), crate::platform::layout::canonicalize(&r.join("repo/share")).unwrap());
         assert_eq!(source_root_of(&dev).unwrap(), r.join("repo"));
     }
 

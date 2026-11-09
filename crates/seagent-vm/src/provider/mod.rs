@@ -258,6 +258,10 @@ mod tests {
         Capabilities { kvm: true, firecracker: Some("/bin/true".into()), qemu: Some("/bin/true".into()), bwrap: Some("/bin/true".into()), runsc: None, kernel: Some("/bin/true".into()), initramfs: Some("/bin/true".into()), arch: "x86_64".into(), ..Default::default() }
     }
 
+    // Unix host paths / Linux VMM probing (KVM, Firecracker): not meaningful on a Windows host.
+
+    #[cfg(unix)]
+
     #[test]
     fn auto_prefers_firecracker_then_qemu_then_warns() {
         let cfg = VmConfig::default();

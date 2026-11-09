@@ -340,7 +340,18 @@ mod tests {
     /// directories too on Unix (the fd is opened read-only, `futimens` needs ownership only).
     fn backdate(path: &Path, secs_ago: u64) {
         let t = std::time::SystemTime::now() - std::time::Duration::from_secs(secs_ago);
-        let f = std::fs::File::open(path).expect("open for set_times");
+        let f = {
+        #[cfg(not(windows))]
+        let f = std::fs::File::open(path);
+        // Windows: FILE_WRITE_ATTRIBUTES, and FILE_FLAG_BACKUP_SEMANTICS so directories open too.
+        #[cfg(windows)]
+        let f = {
+            use std::os::windows::fs::OpenOptionsExt;
+            std::fs::OpenOptions::new().access_mode(0x100).custom_flags(0x0200_0000).open(path)
+        };
+        f
+    }
+    .expect("open for set_times");
         f.set_times(std::fs::FileTimes::new().set_accessed(t).set_modified(t)).expect("set_times");
     }
 

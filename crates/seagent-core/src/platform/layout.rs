@@ -119,6 +119,97 @@ pub fn which(name: &str) -> Option<PathBuf> {
     crate::layout::which(name)
 }
 
+/// `%LOCALAPPDATA%\Microsoft\WindowsApps\python3.exe` / `python.exe` / `bash.exe` are App
+/// Execution Aliases: they open the Store (or start WSL) instead of being the program.
+pub fn is_windows_apps_alias(p: &Path) -> bool {
+    p.to_string_lossy().replace('/', "\\").to_ascii_lowercase().contains("\\microsoft\\windowsapps\\")
+}
+
+/// The Python 3 interpreter as `(program, leading args)`, `None` when there is none.
+/// Unix: `python3` from `PATH`, as always. Windows: the `py -3` launcher first, then a real
+/// `python3.exe` / `python.exe` on `PATH`, never the WindowsApps Store alias (it exits 9009).
+pub fn python3() -> Option<(PathBuf, Vec<String>)> {
+    #[cfg(windows)]
+    {
+        static PY: std::sync::OnceLock<Option<(PathBuf, Vec<String>)>> = std::sync::OnceLock::new();
+        PY.get_or_init(|| python3_windows_with(&which)).clone()
+    }
+    #[cfg(not(windows))]
+    {
+        which("python3").map(|_| (PathBuf::from("python3"), vec![]))
+    }
+}
+
+/// The Windows choice of [`python3`] as a pure function (testable on any host).
+pub fn python3_windows_with(which: &dyn Fn(&str) -> Option<PathBuf>) -> Option<(PathBuf, Vec<String>)> {
+    if let Some(py) = which("py").filter(|p| !is_windows_apps_alias(p)) {
+        return Some((py, vec!["-3".into()]));
+    }
+    ["python3", "python"].iter().find_map(|n| which(n).filter(|p| !is_windows_apps_alias(p))).map(|p| (p, vec![]))
+}
+
+/// A `Command` for Python 3 (see [`python3`]). Unix: exactly `python3`. Windows: falls back to
+/// the bare name `python` so the spawn error names what is missing.
+pub fn python3_command() -> std::process::Command {
+    #[cfg(windows)]
+    {
+        match python3() {
+            Some((p, args)) => {
+                let mut c = std::process::Command::new(p);
+                c.args(args);
+                c
+            }
+            None => std::process::Command::new("python"),
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        std::process::Command::new("python3")
+    }
+}
+
+/// A bash that really is bash: Unix `bash` from `PATH`; Windows the platform shell's bash (Git
+/// Bash / MSYS2 / `SEAGENT_SHELL`), never `System32\bash.exe` (the WSL launcher) or a
+/// WindowsApps alias. `None` when there is none.
+pub fn bash() -> Option<PathBuf> {
+    #[cfg(windows)]
+    {
+        let sh = super::shell::active();
+        (sh.kind == super::shell::ShellKind::Bash).then(|| sh.program.clone())
+    }
+    #[cfg(not(windows))]
+    {
+        which("bash")
+    }
+}
+
+/// `std::fs::canonicalize` without Windows' verbatim prefix: `\\?\C:\x` → `C:\x`,
+/// `\\?\UNC\srv\share` → `\\srv\share` (cmd.exe, Task Scheduler and many tools reject the
+/// verbatim form as a working directory or argument). Unix: `std::fs::canonicalize` unchanged.
+pub fn canonicalize(p: &Path) -> std::io::Result<PathBuf> {
+    let c = std::fs::canonicalize(p)?;
+    #[cfg(windows)]
+    let c = simplify_verbatim(&c);
+    Ok(c)
+}
+
+/// The ordinary spelling of a verbatim Windows path, when it has one (drive or UNC path short
+/// enough for the classic APIs); anything else is returned unchanged.
+pub fn simplify_verbatim(p: &Path) -> PathBuf {
+    let s = p.to_string_lossy();
+    let plain = if let Some(rest) = s.strip_prefix(r"\\?\UNC\") {
+        format!(r"\\{rest}")
+    } else if let Some(rest) = s.strip_prefix(r"\\?\").filter(|r| r.len() >= 2 && r.as_bytes()[1] == b':' && r.as_bytes()[0].is_ascii_alphabetic()) {
+        rest.to_string()
+    } else {
+        return p.to_path_buf();
+    };
+    if plain.len() >= 260 {
+        return p.to_path_buf();
+    }
+    PathBuf::from(plain)
+}
+
 /// Windows executable search: `name` in each `;`-separated directory of `path`, trying the
 /// `PATHEXT` extensions (`pathext`, default `.COM;.EXE;.BAT;.CMD`). A `name` that already ends
 /// in one of them is tried as is first; a `name` with a path separator is not searched for.
@@ -146,6 +237,31 @@ mod tests {
     fn env(pairs: &[(&str, &str)]) -> impl Fn(&str) -> Option<String> {
         let m: HashMap<String, String> = pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
         move |k: &str| m.get(k).cloned()
+    }
+
+    #[test]
+    fn windows_python_skips_the_store_alias_and_prefers_py() {
+        let alias = PathBuf::from(r"C:\Users\u\AppData\Local\Microsoft\WindowsApps\python3.exe");
+        let only_alias = |n: &str| (n == "python3" || n == "python").then(|| alias.clone());
+        assert_eq!(python3_windows_with(&only_alias), None, "the Store alias is not a Python");
+        let real = |n: &str| match n {
+            "py" => Some(PathBuf::from(r"C:\Windows\py.exe")),
+            "python3" => Some(alias.clone()),
+            "python" => Some(PathBuf::from(r"C:\Python312\python.exe")),
+            _ => None,
+        };
+        assert_eq!(python3_windows_with(&real), Some((PathBuf::from(r"C:\Windows\py.exe"), vec!["-3".to_string()])));
+        let no_py = |n: &str| if n == "py" { None } else { real(n) };
+        assert_eq!(python3_windows_with(&no_py), Some((PathBuf::from(r"C:\Python312\python.exe"), vec![])));
+        assert!(is_windows_apps_alias(&alias) && !is_windows_apps_alias(Path::new("/usr/bin/python3")));
+    }
+
+    #[test]
+    fn verbatim_prefix_is_dropped() {
+        assert_eq!(simplify_verbatim(Path::new(r"\\?\C:\Users\u\ws")), PathBuf::from(r"C:\Users\u\ws"));
+        assert_eq!(simplify_verbatim(Path::new(r"\\?\UNC\srv\share\x")), PathBuf::from(r"\\srv\share\x"));
+        assert_eq!(simplify_verbatim(Path::new(r"\\?\Volume{abc}\x")), PathBuf::from(r"\\?\Volume{abc}\x"));
+        assert_eq!(simplify_verbatim(Path::new("/home/u")), PathBuf::from("/home/u"));
     }
 
     #[test]

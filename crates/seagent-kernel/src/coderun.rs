@@ -303,18 +303,10 @@ fn prepend_path(bin_dir: &Path) -> String {
     format!("{}{sep}{}", bin_dir.display(), std::env::var("PATH").unwrap_or_default())
 }
 
-/// The python interpreter: `python3` on Unix (as always). Windows installs usually have no
-/// `python3.exe` (or only the Store alias), so `python`, then the `py` launcher, are tried.
-pub(crate) fn python_program() -> PathBuf {
-    #[cfg(windows)]
-    {
-        use seagent_core::platform::layout::which;
-        which("python3").filter(|p| !p.to_string_lossy().to_ascii_lowercase().contains("\\windowsapps\\")).or_else(|| which("python")).or_else(|| which("py")).unwrap_or_else(|| PathBuf::from("python"))
-    }
-    #[cfg(not(windows))]
-    {
-        PathBuf::from("python3")
-    }
+/// The python interpreter: `python3` on Unix (as always). Windows: `py -3`, else a real
+/// `python3` / `python` (never the WindowsApps Store alias) — `platform::layout::python3`.
+pub(crate) fn python_command() -> Command {
+    seagent_core::platform::layout::python3_command()
 }
 
 /// `interp -c script`. Unix: exactly `bash -c` / `python3 -c`. Windows: `bash` is the
@@ -324,7 +316,7 @@ fn interp_command(interp: &str, script: &str) -> Result<Command, String> {
     if interp == "bash" {
         return crate::childproc::bash(script).map_err(|e| format!("lang=bash: {e} — use lang=python3"));
     }
-    let mut c = if cfg!(windows) { Command::new(python_program()) } else { Command::new(interp) };
+    let mut c = if cfg!(windows) { python_command() } else { Command::new(interp) };
     c.arg("-c").arg(script);
     Ok(c)
 }

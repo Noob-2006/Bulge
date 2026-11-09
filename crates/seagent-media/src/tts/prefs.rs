@@ -362,7 +362,7 @@ mod tests {
     fn media(tag: &str) -> (Media, PathBuf) {
         let dir = crate::testutil::temp_dir(tag);
         let prefs = dir.join("nested").join("tts-prefs.json");
-        let m = Media { cfg: crate::MediaConfig::from_toml(&format!("[tts]\nprefs_path = \"{}\"\n", prefs.display())), http: Default::default() };
+        let m = Media { cfg: crate::MediaConfig::from_toml(&format!("[tts]\nprefs_path = '{}'\n", prefs.display())), http: Default::default() };
         (m, prefs)
     }
 

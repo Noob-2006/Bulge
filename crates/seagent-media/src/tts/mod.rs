@@ -494,7 +494,7 @@ pub(crate) mod testkit {
     /// A config pointing `id` at a fake server plus extra TOML.
     pub fn media(id: &str, base: &str, extra: &str) -> Media {
         let dir = crate::testutil::temp_dir("tts-prefs");
-        let extra = format!("[tts]\nprefs_path = \"{}\"\n{extra}", dir.join("p.json").display());
+        let extra = format!("[tts]\nprefs_path = '{}'\n{extra}", dir.join("p.json").display());
         Media { cfg: crate::testutil::cfg_for(id, base, &extra), http: crate::http::Http::default() }
     }
 }

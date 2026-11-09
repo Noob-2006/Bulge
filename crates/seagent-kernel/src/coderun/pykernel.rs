@@ -17,7 +17,7 @@ use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::path::Path;
-use std::process::{Child, ChildStdin, Command, Stdio};
+use std::process::{Child, ChildStdin, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -137,7 +137,7 @@ fn spawn(runtime_dir: &Path, ws: &Path, path_env: &str) -> Result<Kernel, String
         let tok = tok.clone();
         std::thread::spawn(move || serve(conn, &tok, tx));
     });
-    let mut cmd = Command::new(super::python_program());
+    let mut cmd = super::python_command();
     cmd.env_clear().envs(super::env::child_env()).arg("-u").arg("-c").arg(RUNNER).current_dir(ws).env("PATH", path_env).env("SEAGENT_CALL_SOCK", &sock).env("SEAGENT_CALL_TOKEN", &token).env("SEAGENT_KERNEL_SENTINEL", &sentinel);
     cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
     // Unix: setpgid only (the runner watches its parent pid itself: PDEATHSIG is bound to the

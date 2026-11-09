@@ -393,6 +393,10 @@ mod tests {
         assert!(!joined.contains("/home"), "{joined}");
     }
 
+    // Unix host paths / Linux VMM probing (KVM, Firecracker): not meaningful on a Windows host.
+
+    #[cfg(unix)]
+
     #[test]
     fn windows_and_macos_get_their_accelerator_and_keep_the_isolation_shape() {
         let cfg = VmConfig::default();

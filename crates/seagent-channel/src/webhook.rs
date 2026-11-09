@@ -1024,11 +1024,10 @@ fn run_script(dir: Option<&Path>, script: &str, payload: &Value, timeout: Durati
     #[cfg(not(unix))]
     let mut cmd = match path.extension().and_then(|e| e.to_str()).map(str::to_ascii_lowercase).as_deref() {
         Some("py") => {
-            use seagent_core::platform::layout::which;
-            match which("python3").or_else(|| which("python")).or_else(|| which("py")) {
-                Some(p) => Command::new(p),
-                None => return fail("python script but no python3 / python / py on PATH".into()),
+            if seagent_core::platform::layout::python3().is_none() {
+                return fail("python script but no Python 3 (py -3 / python3 / python; the WindowsApps Store alias does not count)".into());
             }
+            seagent_core::platform::layout::python3_command()
         }
         Some("sh" | "bash") => {
             let sh = seagent_core::platform::shell::active();

@@ -111,7 +111,7 @@ fn workspace(argv: &[String]) -> Result<PathBuf, String> {
         }
     }
     let w = w.unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
-    w.canonicalize().map_err(|e| format!("workspace {}: {e}", w.display()))
+    seagent_core::platform::layout::canonicalize(&w).map_err(|e| format!("workspace {}: {e}", w.display()))
 }
 
 #[cfg(test)]

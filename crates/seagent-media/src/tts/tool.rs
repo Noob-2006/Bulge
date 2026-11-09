@@ -447,7 +447,7 @@ mod tests {
     fn speaks_normalizes_and_writes_media_tags() {
         let srv = audio_server();
         let out = temp_dir("tool-speech-out");
-        let m = super::super::testkit::media("openai", &srv.url, &format!("provider = \"openai\"\noutput_dir = \"{}\"", out.display()));
+        let m = super::super::testkit::media("openai", &srv.url, &format!("provider = \"openai\"\noutput_dir = '{}'", out.display()));
         let c = ctx("tool-speech");
         let r = tool(m).call(&c, json!({"text": "# Heading\n\nHello **world**, see https://example.com/x\n\n```rs\nfn main() {}\n```"}));
         assert!(!r.is_error, "{}", r.content);
@@ -477,7 +477,7 @@ mod tests {
     fn voice_instructions_and_format_reach_the_provider() {
         let srv = audio_server();
         let out = temp_dir("tool-speech-voice");
-        let m = super::super::testkit::media("openai", &srv.url, &format!("provider = \"openai\"\noutput_dir = \"{}\"\n[talk]\nprovider = \"openai\"\nvoice = \"nova\"", out.display()));
+        let m = super::super::testkit::media("openai", &srv.url, &format!("provider = \"openai\"\noutput_dir = '{}'\n[talk]\nprovider = \"openai\"\nvoice = \"nova\"", out.display()));
         let c = ctx("tool-speech-voice");
         let r = tool(m).call(&c, json!({"text": "One short line.", "voice": "onyx", "instructions": "Speak in a cheerful whisper", "speed": 1.5, "format": "wav", "channel": "telegram"}));
         assert!(!r.is_error, "{}", r.content);
@@ -493,7 +493,7 @@ mod tests {
     fn long_text_is_chunked_without_losing_words() {
         let srv = audio_server();
         let out = temp_dir("tool-speech-chunks");
-        let m = super::super::testkit::media("openai", &srv.url, &format!("provider = \"openai\"\noutput_dir = \"{}\"\n[tts.openai]\nmax_text_length = 40", out.display()));
+        let m = super::super::testkit::media("openai", &srv.url, &format!("provider = \"openai\"\noutput_dir = '{}'\n[tts.openai]\nmax_text_length = 40", out.display()));
         let c = ctx("tool-speech-chunks");
         let text = "First sentence here. Second sentence follows. Third one closes the paragraph.";
         let r = tool(m).call(&c, json!({"text": text}));
@@ -539,10 +539,10 @@ mod tests {
     #[test]
     fn missing_text_and_unknown_provider_are_json_errors() {
         let out = temp_dir("tool-speech-errors");
-        let m = super::super::testkit::media("openai", "http://127.0.0.1:1", &format!("provider = \"openai\"\noutput_dir = \"{}\"", out.display()));
+        let m = super::super::testkit::media("openai", "http://127.0.0.1:1", &format!("provider = \"openai\"\noutput_dir = '{}'", out.display()));
         let c = ctx("tool-speech-errors");
         let empty = tool(m).call(&c, json!({"text": "   "}));
-        let m = super::super::testkit::media("openai", "http://127.0.0.1:1", &format!("provider = \"openai\"\noutput_dir = \"{}\"", out.display()));
+        let m = super::super::testkit::media("openai", "http://127.0.0.1:1", &format!("provider = \"openai\"\noutput_dir = '{}'", out.display()));
         assert!(empty.is_error);
         let env: Value = serde_json::from_str(&empty.content).unwrap();
         assert_eq!(env["success"], false);
@@ -556,7 +556,7 @@ mod tests {
     #[test]
     fn effects_net_only_for_network_providers() {
         let out = temp_dir("tool-speech-effects");
-        let m = super::super::testkit::media("openai", "https://api.example.test", &format!("provider = \"openai\"\noutput_dir = \"{}\"", out.display()));
+        let m = super::super::testkit::media("openai", "https://api.example.test", &format!("provider = \"openai\"\noutput_dir = '{}'", out.display()));
         let c = ctx("tool-speech-effects");
         let fx = TextToSpeech { m: Arc::new(m) }.effects(&c, &json!({"text": "say this"}));
         assert!(fx.iter().any(|e| matches!(e, Effect::Net { dest, payload } if dest.as_str() == "api.example.test" && payload == "say this")), "{fx:?}");
@@ -581,7 +581,7 @@ mod tests {
     fn talk_voice_lists_and_sets() {
         let srv = catalog_server();
         let out = temp_dir("tool-talkvoice");
-        let m = Arc::new(super::super::testkit::media("elevenlabs", &srv.url, &format!("provider = \"elevenlabs\"\noutput_dir = \"{}\"\n[talk]\nprovider = \"elevenlabs\"\nvoice = \"v1\"", out.display())));
+        let m = Arc::new(super::super::testkit::media("elevenlabs", &srv.url, &format!("provider = \"elevenlabs\"\noutput_dir = '{}'\n[talk]\nprovider = \"elevenlabs\"\nvoice = \"v1\"", out.display())));
         let c = ctx("tool-talkvoice");
         let t = TalkVoice { m: m.clone() };
 

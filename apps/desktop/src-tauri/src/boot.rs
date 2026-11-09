@@ -181,6 +181,19 @@ fn run<R: Runtime>(app: &AppHandle<R>) -> Result<String, String> {
         start_daemon(app, &a)?;
     }
 
+    // The daemon may have moved off a busy default port (and saved the one it serves): ask for
+    // the address it really uses instead of trusting bootstrap's answer or assuming 8640 —
+    // otherwise another program, or another SE Agent (e.g. the Linux one in WSL, whose localhost
+    // ports Windows forwards), would answer the health check below.
+    let base = match call(app, &a, &["setup", "status", "--json"], 20).ok().filter(|o| o.ok()).and_then(|o| agent::parse_status_json(&o.stdout)) {
+        Some(b) if b != base => {
+            log(app, format!("console address: {b} (was {base})"));
+            *st.base.lock().unwrap() = Some(b.clone());
+            b
+        }
+        _ => base,
+    };
+
     step(app, "health", 60, t("等待 SE Agent 回應…", "Waiting for SE Agent to answer…"));
     if !wait_healthy(&base, Duration::from_secs(90)) {
         let _ = call(app, &a, &["daemon", "status"], 15);
