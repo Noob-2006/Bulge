@@ -509,8 +509,12 @@ pub fn app_kind(exe: &Path) -> Option<&'static str> {
         return Some("chromium");
     }
     let dir = exe.parent()?;
-    let res = [dir.join("resources"), dir.parent().map(|c| c.join("Resources")).unwrap_or_default()];
-    res.iter().any(|r| r.join("app.asar").is_file() || r.join("app").join("package.json").is_file() || r.join("default_app.asar").is_file()).then_some("electron")
+    let electron = |r: &Path| r.join("app.asar").is_file() || r.join("app").join("package.json").is_file() || r.join("default_app.asar").is_file();
+    if electron(&dir.join("resources")) || dir.parent().is_some_and(|c| electron(&c.join("Resources"))) {
+        return Some("electron");
+    }
+    // A versioned payload folder beside the binary (VS Code since 1.9x: `<hash>/resources/app`).
+    std::fs::read_dir(dir).ok()?.flatten().filter(|e| e.path().is_dir()).any(|e| electron(&e.path().join("resources"))).then_some("electron")
 }
 
 /// The browser endpoint an app announced: `DevToolsActivePort` in its user-data-dir, or the
@@ -917,6 +921,10 @@ mod tests {
         std::fs::create_dir_all(mac.join("Resources")).unwrap();
         std::fs::write(mac.join("Resources").join("app.asar"), b"asar").unwrap();
         assert_eq!(app_kind(&mac.join("MacOS").join("Obsidian")), Some("electron"));
+        let versioned = d.path().join("Microsoft VS Code");
+        std::fs::create_dir_all(versioned.join("c4453f8ea4").join("resources").join("app")).unwrap();
+        std::fs::write(versioned.join("c4453f8ea4").join("resources").join("app").join("package.json"), b"{}").unwrap();
+        assert_eq!(app_kind(&versioned.join("Code.exe")), Some("electron"));
         let plain = d.path().join("notepad");
         std::fs::create_dir_all(&plain).unwrap();
         assert_eq!(app_kind(&plain.join("notepad.exe")), None);
