@@ -11,3 +11,5 @@
 /plugins/seagent-mobile/permissions/
 /dist/
 __pycache__/
+# Downloaded by scripts/fetch-cjk-font.sh (AppImage CJK font, pinned + sha256)
+/src-tauri/fonts/*.ttf

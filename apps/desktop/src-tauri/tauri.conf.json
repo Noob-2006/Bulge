@@ -69,7 +69,12 @@
         "recommends": ["google-noto-sans-cjk-ttc-fonts"]
       },
       "appimage": {
-        "bundleMediaFramework": false
+        "bundleMediaFramework": false,
+        "files": {
+          "/usr/share/seagent-desktop/fonts/NotoSansTC-VF.ttf": "fonts/NotoSansTC-VF.ttf",
+          "/usr/share/seagent-desktop/fonts/OFL.txt": "fonts/OFL.txt",
+          "/usr/share/seagent-desktop/fonts/fonts.conf": "fonts/fonts.conf"
+        }
       }
     }
   },
