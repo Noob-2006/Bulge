@@ -373,6 +373,46 @@ unsafe fn compose_scaled(hdesk: HDESK, dc: HDC, w: i32, h: i32, scale: f64) -> R
     Ok(Shot { width: tw, height: th, bgra })
 }
 
+/// Is the process `pid`'s window the top visible window over every corner and the centre of
+/// `rect` (x, y, w, h) on the desktop `name`? (The live view may then paint that browser's
+/// page over the picture without covering another window.)
+pub fn on_top(name: &str, pid: u32, rect: (i32, i32, i32, i32)) -> bool {
+    use windows_sys::Win32::Foundation::{HWND, RECT};
+    use windows_sys::Win32::System::StationsAndDesktops::EnumDesktopWindows;
+    use windows_sys::Win32::UI::WindowsAndMessaging::{GetWindowRect, GetWindowThreadProcessId, IsIconic, IsWindowVisible};
+    unsafe extern "system" fn cb(hwnd: HWND, param: LPARAM) -> BOOL {
+        (*(param as *mut Vec<HWND>)).push(hwnd);
+        TRUE
+    }
+    let (x, y, w, h) = rect;
+    let points = [(x + 2, y + 2), (x + w - 3, y + 2), (x + 2, y + h - 3), (x + w - 3, y + h - 3), (x + w / 2, y + h / 2)];
+    let wn = wide(name);
+    // SAFETY: enumerate the desktop's windows (top first) and read their rects and owners.
+    unsafe {
+        let hd = OpenDesktopW(wn.as_ptr(), 0, 0, DESKTOP_ACCESS);
+        if hd == 0 {
+            return false;
+        }
+        let mut wins: Vec<HWND> = Vec::new();
+        EnumDesktopWindows(hd, Some(cb), &mut wins as *mut _ as LPARAM);
+        CloseDesktop(hd);
+        points.iter().all(|&(px, py)| {
+            for &hwnd in &wins {
+                let mut r: RECT = std::mem::zeroed();
+                if IsWindowVisible(hwnd) == 0 || IsIconic(hwnd) != 0 || GetWindowRect(hwnd, &mut r) == 0 {
+                    continue;
+                }
+                if px >= r.left && px < r.right && py >= r.top && py < r.bottom {
+                    let mut owner = 0u32;
+                    GetWindowThreadProcessId(hwnd, &mut owner);
+                    return owner == pid;
+                }
+            }
+            false
+        })
+    }
+}
+
 /// Every pixel black (sampled): an inactive desktop's framebuffer.
 fn is_black(bgra: &[u8]) -> bool {
     (0..bgra.len() / 4).step_by(97).all(|i| bgra[i * 4] == 0 && bgra[i * 4 + 1] == 0 && bgra[i * 4 + 2] == 0)

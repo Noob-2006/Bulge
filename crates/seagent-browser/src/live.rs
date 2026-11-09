@@ -234,6 +234,45 @@ impl Cast {
     }
 }
 
+/// Where a tab's page (its viewport, without the browser's own toolbars) is on the screen, in
+/// device pixels, and whether it is the tab the window shows. From the page's own
+/// `screenX` / `outer*` / `inner*` (the window frame is symmetric left / right / bottom), so it
+/// works the same on every OS; it never touches the idle clock.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct OnScreen {
+    pub x: i32,
+    pub y: i32,
+    pub width: u32,
+    pub height: u32,
+    pub visible: bool,
+}
+
+const GEOMETRY_JS: &str = "JSON.stringify([screenX, screenY, outerWidth, outerHeight, innerWidth, innerHeight, devicePixelRatio, document.visibilityState === 'visible'])";
+
+/// [`OnScreen`] of `target`.
+pub fn page_on_screen(b: &Browser, target: &str) -> Result<OnScreen, String> {
+    let sid = crate::view::page_session(b, target)?;
+    let r = b.conn.call_with("Runtime.evaluate", json!({"expression": GEOMETRY_JS, "returnByValue": true}), Some(&sid), Duration::from_secs(3), &|| None)?;
+    let v: Vec<Value> = serde_json::from_str(r["result"]["value"].as_str().ok_or("no page geometry")?).map_err(|e| e.to_string())?;
+    on_screen_from(&v).ok_or_else(|| "bad page geometry".into())
+}
+
+/// The arithmetic of [`page_on_screen`]: `[screenX, screenY, outerW, outerH, innerW, innerH,
+/// dpr, visible]` (CSS px) → device pixels.
+pub fn on_screen_from(v: &[Value]) -> Option<OnScreen> {
+    let f = |i: usize| v.get(i).and_then(Value::as_f64);
+    let (sx, sy, ow, oh, iw, ih, dpr) = (f(0)?, f(1)?, f(2)?, f(3)?, f(4)?, f(5)?, f(6).filter(|d| *d > 0.0).unwrap_or(1.0));
+    let border = ((ow - iw) / 2.0).max(0.0);
+    let (x, y) = (sx + border, sy + (oh - ih - border).max(0.0));
+    Some(OnScreen { x: (x * dpr).round() as i32, y: (y * dpr).round() as i32, width: (iw * dpr).round().max(1.0) as u32, height: (ih * dpr).round().max(1.0) as u32, visible: v.get(7).and_then(Value::as_bool).unwrap_or(false) })
+}
+
+/// The tab of `b` its window shows (the visible document), if any.
+pub fn visible_page(b: &Browser) -> Option<(String, OnScreen)> {
+    let tabs = b.tabs(None).ok()?;
+    tabs.iter().filter_map(|t| t["targetId"].as_str()).find_map(|t| page_on_screen(b, t).ok().filter(|g| g.visible).map(|g| (t.to_string(), g)))
+}
+
 fn ack(b: &Browser, page_session: &str, id: i64) {
     b.conn.send_nowait("Page.screencastFrameAck", json!({"sessionId": id}), Some(page_session));
 }
@@ -420,6 +459,17 @@ mod tests {
 
     fn frame(n: u8) -> LiveFrame {
         LiveFrame { seq: 0, data: vec![0xff, 0xd8, n], device_width: 800.0, device_height: 600.0, offset_top: 0.0, page_scale: 1.0, captured_ms: 0 }
+    }
+
+    #[test]
+    fn page_geometry_maps_to_device_pixels() {
+        // A Windows window at (100, 50): 8 px invisible borders, 87 px of tab strip + toolbar.
+        let g = on_screen_from(&serde_json::from_str::<Vec<Value>>("[100, 50, 1416, 908, 1400, 813, 1, true]").unwrap()).unwrap();
+        assert_eq!(g, OnScreen { x: 108, y: 137, width: 1400, height: 813, visible: true });
+        // A frameless, maximized window on a 2x screen.
+        let g = on_screen_from(&serde_json::from_str::<Vec<Value>>("[0, 0, 1280, 800, 1280, 720, 2, false]").unwrap()).unwrap();
+        assert_eq!(g, OnScreen { x: 0, y: 160, width: 2560, height: 1440, visible: false });
+        assert!(on_screen_from(&[]).is_none());
     }
 
     #[test]
