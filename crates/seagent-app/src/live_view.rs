@@ -1520,17 +1520,20 @@ mod tests {
         b.page_call(&tab, "Page.navigate", json!({"url": url(&busy)})).unwrap();
         std::thread::sleep(Duration::from_secs(3));
         let srv = crate::server::start(a.clone()).unwrap();
-        let measure = |fps: u32, secs: u64, label: &str| -> (f64, Vec<u8>, Vec<u8>) {
+        // Returns (fps, the base picture, the last patch and its header).
+        let measure = |fps: u32, secs: u64, label: &str| -> (f64, Vec<u8>, (Value, Vec<u8>)) {
             let mut ws = connect(srv.local_addr(), &format!("kind=desktop&target=host&fps={fps}&quality=85&maxWidth=1920"), "live-admin-token");
             let h = next_text(&mut ws);
             assert_eq!(h["t"], "hello", "{h}");
-            let warm = Instant::now();
-            while warm.elapsed() < Duration::from_millis(1500) {
-                let _ = ws.recv();
-            }
-            let (cpu0, br0, t0) = (cpu_seconds_self(), cpu_seconds_matching(&profile), Instant::now());
-            let (mut patches, mut bases, mut bytes, mut lat, mut meta, mut base, mut patch, mut mode) = (0u32, 0u32, 0usize, vec![], Value::Null, vec![], vec![], String::new());
-            while t0.elapsed() < Duration::from_secs(secs) {
+            // Every header is paired with the binary after it, warm-up included.
+            let (warm, total) = (Duration::from_millis(1500), Duration::from_millis(1500 + secs * 1000));
+            let start = Instant::now();
+            let (mut t0, mut cpu0, mut br0) = (None::<Instant>, 0.0, 0.0);
+            let (mut patches, mut bases, mut bytes, mut lat, mut meta, mut base, mut patch, mut mode) = (0u32, 0u32, 0usize, vec![], Value::Null, vec![], (Value::Null, vec![]), String::new());
+            while start.elapsed() < total {
+                if t0.is_none() && start.elapsed() >= warm {
+                    (t0, cpu0, br0) = (Some(Instant::now()), cpu_seconds_self(), cpu_seconds_matching(&profile));
+                }
                 match ws.recv() {
                     Ok(Some(Message::Text(x))) => {
                         let v: Value = serde_json::from_str(&x).unwrap();
@@ -1541,22 +1544,29 @@ mod tests {
                         }
                     }
                     Ok(Some(Message::Binary(j))) => {
-                        bytes += j.len();
+                        let counting = t0.is_some();
                         if meta["t"] == "patch" {
-                            patches += 1;
-                            if let Some(c) = meta["capturedMs"].as_u64().filter(|c| *c > 0) {
-                                lat.push(now_ms().saturating_sub(c));
+                            if counting {
+                                patches += 1;
+                                bytes += j.len();
+                                if let Some(c) = meta["capturedMs"].as_u64().filter(|c| *c > 0) {
+                                    lat.push(now_ms().saturating_sub(c));
+                                }
                             }
-                            patch = j;
-                        } else {
-                            bases += 1;
+                            patch = (meta.clone(), j);
+                        } else if meta["t"] == "frame" {
+                            if counting {
+                                bases += 1;
+                                bytes += j.len();
+                            }
                             base = j;
                         }
+                        meta = Value::Null;
                     }
                     _ => {}
                 }
             }
-            let s = t0.elapsed().as_secs_f64();
+            let s = t0.map_or(1.0, |t| t.elapsed().as_secs_f64());
             let (cpu, br) = ((cpu_seconds_self() - cpu0) / s * 100.0, (cpu_seconds_matching(&profile) - br0) / s * 100.0);
             lat.sort_unstable();
             let pct = |p: usize| lat.get((lat.len() * p / 100).min(lat.len().saturating_sub(1))).copied().unwrap_or(0);
@@ -1564,9 +1574,15 @@ mod tests {
             eprintln!("LIVE Bot Desktop patch mode ({label}, cap {fps}): {patches} page patches + {bases} base pictures in {s:.1} s = {fps_real:.1} fps; latency p50 {} ms, p95 {} ms; {:.2} MB/s; CPU server {cpu:.0}%, browser {br:.0}%; stats mode {mode}", pct(50), pct(95), bytes as f64 / 1e6 / s);
             (fps_real, base, patch)
         };
-        let (f30, base, patch) = measure(30, 6, "busy page");
+        let (f30, base, (pm, patch)) = measure(30, 6, "busy page");
+        // What the console shows: the base picture with the page patch drawn at its place.
+        let mut comp = image::load_from_memory(&base).expect("a base picture").to_rgba8();
+        let page = image::load_from_memory(&patch).expect("a page patch").to_rgba8();
+        let (px, py) = (pm["x"].as_i64().unwrap(), pm["y"].as_i64().unwrap());
+        eprintln!("LIVE Bot Desktop composition: base {}x{}, page patch {}x{} at ({px}, {py})", comp.width(), comp.height(), page.width(), page.height());
+        image::imageops::overlay(&mut comp, &page, px, py);
+        image::DynamicImage::ImageRgba8(comp).to_rgb8().save(out.join("bot-desktop-patch-composed.jpg")).unwrap();
         std::fs::write(out.join("bot-desktop-patch-base.jpg"), &base).unwrap();
-        std::fs::write(out.join("bot-desktop-patch-page.jpg"), &patch).unwrap();
         let (f60, _, _) = measure(60, 6, "busy page");
         b.page_call(&tab, "Page.navigate", json!({"url": url(&idle)})).unwrap();
         std::thread::sleep(Duration::from_secs(2));
