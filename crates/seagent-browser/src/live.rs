@@ -276,6 +276,12 @@ pub fn on_screen_from(v: &[Value]) -> Option<OnScreen> {
     Some(OnScreen { x: (x * dpr).round() as i32, y: (y * dpr).round() as i32, width: (iw * dpr).round().max(1.0) as u32, height: (ih * dpr).round().max(1.0) as u32, visible: v.get(7).and_then(Value::as_bool).unwrap_or(false) })
 }
 
+/// Does the page `target` hold the input focus (its window is the active one)?
+pub fn page_has_focus(b: &Browser, target: &str) -> bool {
+    let Ok(sid) = crate::view::page_session(b, target) else { return false };
+    b.conn.call_with("Runtime.evaluate", json!({"expression": "document.hasFocus()", "returnByValue": true}), Some(&sid), Duration::from_secs(3), &|| None).is_ok_and(|r| r["result"]["value"] == true)
+}
+
 /// The tab of `b` its window shows (the visible document), if any.
 pub fn visible_page(b: &Browser) -> Option<(String, OnScreen)> {
     let tabs = b.tabs(None).ok()?;

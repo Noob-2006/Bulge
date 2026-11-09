@@ -74,7 +74,8 @@ pub fn schema(actions: &[&str]) -> Value {
         "depth": {"type": "integer", "minimum": 0, "maximum": 64, "description": "get_window_state with windowRef: maximum tree depth."},
         "maxElements": {"type": "integer", "minimum": 1, "maximum": 2000, "description": "get_window_state with windowRef: maximum returned elements."},
         "includeScreenshot": {"type": "boolean"},
-        "app": {"type": "string"},
+        "app": s("launch_app / kill_app: a desktop entry id (Linux), or for launch_app the full path of a Chromium-family browser or an Electron app, which starts on the Bot Desktop as a headed CDP target."),
+        "args": {"type": "array", "items": {"type": "string", "maxLength": 4096}, "maxItems": 32, "description": "launch_app by path: the app's arguments (e.g. --app=<url> for a browser)."},
         "value": {"type": "string"},
         "path": {"type": "array", "items": {"type": "string", "minLength": 1, "maxLength": 200}, "minItems": 1, "maxItems": 16},
         "x1": {"type": "number", "minimum": 0}, "y1": {"type": "number", "minimum": 0}, "x2": {"type": "number", "minimum": 0}, "y2": {"type": "number", "minimum": 0},
@@ -202,6 +203,11 @@ fn wire_params(action: &str, input: &Value, frame: Option<&Frame>) -> Result<Val
     for k in required_strings {
         let v = input[*k].as_str().filter(|s| !s.trim().is_empty()).ok_or_else(|| format!("{k} required for {action}"))?;
         w[*k] = json!(v);
+    }
+    if action == "launch_app" {
+        if let Some(a) = input["args"].as_array() {
+            w["args"] = json!(a.iter().filter_map(Value::as_str).collect::<Vec<_>>());
+        }
     }
     for k in ["windowRef", "elementRef", "observationId", "query", "resourceHandle"] {
         if let Some(v) = input[k].as_str().filter(|s| !s.is_empty()) {
@@ -502,6 +508,23 @@ impl NativeDesk {
     }
 }
 
+/// `launch_app` with `app` = the path of a Chromium-family browser or an Electron app (`args`:
+/// its arguments): started on the Bot Desktop as a headed CDP target (`Manager::launch_app`),
+/// so the live view streams it in patch mode and the browser tools can drive it as `app:<name>`.
+fn launch_cdp_app(p: &Value) -> Result<Value, String> {
+    let exe = std::path::PathBuf::from(p["app"].as_str().unwrap_or(""));
+    if !exe.is_file() {
+        return Err(format!("COMPUTER_INVALID_REQUEST: launch_app: {} is not a file", exe.display()));
+    }
+    let kind = seagent_browser::launch::app_kind(&exe).ok_or_else(|| format!("COMPUTER_UNSUPPORTED_ACTION: launch_app by path starts Chromium-family browsers and Electron apps only ({} is neither)", exe.display()))?;
+    let name: String = exe.file_stem().map(|n| n.to_string_lossy().to_lowercase()).unwrap_or_default().chars().filter(|c| c.is_ascii_alphanumeric() || "._-".contains(*c)).take(64).collect();
+    let args: Vec<String> = p["args"].as_array().into_iter().flatten().filter_map(Value::as_str).map(String::from).collect();
+    let paths = seagent_kernel::config::Paths::from_env();
+    let env = seagent_browser::manager::Env { cfg: Default::default(), home: paths.data.clone(), secrets: std::sync::Arc::new(|s: &str| s.to_string()) };
+    let b = seagent_browser::manager::global().launch_app(&env, &name, &exe, &args)?;
+    Ok(json!({"ok": true, "effect": "confirmed", "details": {"app": exe.display().to_string(), "kind": kind, "browserKey": b.key, "pid": b.pid}}))
+}
+
 impl Desk for NativeDesk {
     fn name(&self) -> &'static str {
         "native"
@@ -546,6 +569,7 @@ impl Desk for NativeDesk {
                 let (w, h) = super::backend::image_size(&b).unwrap_or(((x2 - x1) as u32, (y2 - y1) as u32));
                 return Ok(json!({"ok": true, "observation": {"kind": "screen", "base64": seagent_net::crypto::b64(&b), "format": "png", "width": w, "height": h}, "details": {"region": [x1, y1, x2, y2], "coordinateSpace": "screen-pixels"}}));
             }
+            "launch_app" if p["app"].as_str().is_some_and(|a| a.contains(['/', '\\'])) => return launch_cdp_app(p),
             "launch_app" => {
                 let app = p["app"].as_str().filter(|a| !a.is_empty() && !a.starts_with('-') && a.chars().all(|c| c.is_ascii_alphanumeric() || "._-".contains(c))).ok_or("launch_app needs `app`: a desktop entry id such as org.gnome.TextEditor")?;
                 native::which_in(&self.env, "gtk-launch").ok_or("launch_app needs gtk-launch (GTK 3)")?;
