@@ -196,6 +196,23 @@ impl GuestMsg {
 pub const FW_CFG_KEY: &str = "/sys/firmware/qemu_fw_cfg/by_name/opt/seagent/key/raw";
 /// The fw_cfg item name for [`FW_CFG_KEY`].
 pub const FW_CFG_KEY_NAME: &str = "opt/seagent/key";
+/// Where VirtualBox / Hyper-V (named-pipe COM2 on Windows) hand the key instead: the SMBIOS
+/// system serial number, `sgk-<hex>`, which the kernel exposes root-only (0400)
+/// (`CONFIG_DMIID`). Their disk boots with a baked command line and no fw_cfg, and the image
+/// has no Guest Additions; a serial without the prefix (every ordinary VM) means "no key".
+pub const DMI_KEY_FILE: &str = "/sys/class/dmi/id/product_serial";
+pub const DMI_KEY_PREFIX: &str = "sgk-";
+
+/// The channel key in what the guest read from [`FW_CFG_KEY`] (`fw_cfg`) or
+/// [`DMI_KEY_FILE`] (`dmi`): fw_cfg is the raw key; the DMI serial counts only with
+/// [`DMI_KEY_PREFIX`] (trailing whitespace trimmed).
+pub fn channel_key_from(fw_cfg: Option<&[u8]>, dmi: Option<&str>) -> Option<Vec<u8>> {
+    if let Some(k) = fw_cfg.filter(|k| !k.is_empty()) {
+        return Some(k.to_vec());
+    }
+    let k = dmi?.trim().strip_prefix(DMI_KEY_PREFIX)?;
+    (k.len() >= 32 && k.bytes().all(|b| b.is_ascii_hexdigit())).then(|| k.as_bytes().to_vec())
+}
 
 /// HMAC-SHA256 (hex) proving knowledge of `key` for `role` (`host` / `guest`) over the
 /// peer's challenge and the sender's own nonce. Distinct roles make a reflected answer
@@ -299,6 +316,14 @@ mod tests {
         assert!(!auth_ok(key, "host", "gnonce2", "hnonce", &m), "bound to the challenge (no replay)");
         assert!(!auth_ok(key, "host", "gnonce", "hnonce", &m[..63]));
         assert_ne!(random_hex(16), random_hex(16));
+        // Key delivery: fw_cfg (QEMU) first, else a prefixed DMI serial (VirtualBox / Hyper-V).
+        let hex = "00112233445566778899aabbccddeeff";
+        assert_eq!(channel_key_from(Some(b"qemu-key"), Some(&format!("sgk-{hex}"))), Some(b"qemu-key".to_vec()));
+        assert_eq!(channel_key_from(None, Some(&format!("sgk-{hex}\n"))), Some(hex.as_bytes().to_vec()));
+        for ordinary in ["0", "VMware-56 4d", "1234-5678-9012-3456-7890-12", "sgk-short", "sgk-zz112233445566778899aabbccddeeff", ""] {
+            assert_eq!(channel_key_from(None, Some(ordinary)), None, "{ordinary:?} is not a key");
+        }
+        assert_eq!(channel_key_from(Some(b""), None), None);
         // Without a key nothing changes on the wire: no `nonce` key in Hello.
         let h = GuestMsg::Hello { version: 1, agent: "a".into(), kernel: "k".into(), cid: None, transport: "vsock".into(), uid: 1000, nonce: None };
         let bytes = String::from_utf8(encode(&h).unwrap()[4..].to_vec()).unwrap();

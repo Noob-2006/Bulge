@@ -218,8 +218,16 @@ guest says `Hello` after ≈1 s. Things that matter there:
   carries a nonce, the host answers `Auth` (HMAC-SHA256 over both nonces, role-bound), the
   guest answers `Auth`; until then the agent refuses every frame and does not power off
   when an unauthenticated peer disconnects. A squatter can delay the VM, but cannot drive
-  or impersonate either side. Unix-socket / vsock channels (Linux, macOS) carry no key and
-  their frames are byte-for-byte unchanged;
+  or impersonate either side. VirtualBox / Hyper-V on Windows serve COM2 as a named pipe,
+  just as reachable, so they get the same handshake; their disk boots with a baked command
+  line and no fw_cfg, so the key is the VM's SMBIOS system serial `sgk-<hex>`
+  (`VBoxManage setextradata … DmiSystemSerial`; Hyper-V `BIOSSerialNumber` via WMI, the value
+  passed in the environment), read root-only from `/sys/class/dmi/id/product_serial`
+  (`CONFIG_DMIID`). On a UART the host skips the firmware's terminal noise up to the first
+  frame. Verified with QEMU standing in for VirtualBox (UEFI + `disk.raw`, `-smbios
+  type=1,serial=…`, COM2 as a named pipe): authenticated Hello ≈1.5 s, ≈7 ms per command
+  over the UART. Unix-socket / vsock channels (Linux, macOS) carry no key and their frames
+  are byte-for-byte unchanged;
 * WHPX is the optional feature "Windows Hypervisor Platform" (`dism /online
   /enable-feature /featurename:HypervisorPlatform`, then reboot); seagent probes it
   unelevated through `WinHvPlatform.dll`. Windows **Home** has no Hyper-V role at all, so the

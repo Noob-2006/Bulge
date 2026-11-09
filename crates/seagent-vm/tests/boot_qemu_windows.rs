@@ -291,3 +291,133 @@ fn the_pool_syncs_snapshots_and_separates_tiers_under_qemu_whpx() {
     assert!(m.status().is_empty());
     let _ = std::fs::remove_dir_all(&root);
 }
+
+/// The VirtualBox / Hyper-V channel shape, reproduced with QEMU so it runs on any Windows host
+/// with QEMU (VirtualBox is not needed): UEFI boots `disk.raw` (baked command line,
+/// `seagent.channel=uart`), COM2 is a **named pipe** served by the VMM, and the per-boot key
+/// arrives as the SMBIOS system serial (`sgk-<hex>`, what `provider::vbox::key_command` /
+/// the Hyper-V script set). A squatter on the pipe is refused; the real host authenticates.
+#[test]
+#[ignore = "boots a real VM: needs QEMU for Windows (with its edk2 firmware) and SEAGENT_VM_IMAGE_DIR with disk.raw"]
+fn a_named_pipe_uart_channel_is_keyed_through_the_dmi_serial() {
+    let Some(image) = ready() else { return };
+    let Some(qemu) = host::find_tool(host::native_qemu()) else { return };
+    let code = qemu.parent().unwrap().join("share").join("edk2-x86_64-code.fd");
+    if !image.join("disk.raw").is_file() || !code.is_file() {
+        eprintln!("SKIP: needs disk.raw and {}", code.display());
+        return;
+    }
+    let accel = if host::whpx_available() { "whpx,kernel-irqchip=off" } else { "tcg" };
+    let key = proto::random_hex(16);
+    // One VM per phase: QEMU's Windows pipe chardev accepts a single client per boot (after a
+    // squatter lets go the pipe stays busy — a denial of service, never an impersonation).
+    let boot = |tag: &str| {
+        let run = scratch(tag);
+        let vars = run.join("vars.fd");
+        std::fs::copy(qemu.parent().unwrap().join("share").join("edk2-i386-vars.fd"), &vars).unwrap();
+        let pipe = format!("seagent-dmitest-{tag}-{}", std::process::id());
+        let rec = run.join("chan.sock");
+        seagent_vm::channel::Endpoint::allocate_pipe(&rec, &pipe).unwrap();
+        let child = std::process::Command::new(&qemu)
+            .args(["-M", "q35", "-accel", accel, "-cpu", "max", "-smp", "2", "-m", "512", "-display", "none", "-nodefaults", "-no-reboot", "-net", "none"])
+            .arg("-drive")
+            .arg(format!("if=pflash,format=raw,readonly=on,file={}", code.display()))
+            .arg("-drive")
+            .arg(format!("if=pflash,format=raw,file={}", vars.display()))
+            .arg("-drive")
+            .arg(format!("file={},format=raw,if=virtio,readonly=on", image.join("disk.raw").display()))
+            .arg("-smbios")
+            .arg(format!("type=1,serial={}{key}", proto::DMI_KEY_PREFIX))
+            .arg("-serial")
+            .arg(format!("file:{}", run.join("console.log").display()))
+            .args(["-chardev", &format!("pipe,id=com2,path={pipe}"), "-serial", "chardev:com2"])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        (child, rec, run)
+    };
+    let hello_on = |ch: &Channel, run: &Path| {
+        let deadline = Instant::now() + BOOT_WAIT;
+        loop {
+            match ch.recv(Duration::from_secs(1)).unwrap() {
+                Some(m @ GuestMsg::Hello { .. }) => return m,
+                Some(_) => {}
+                None => {
+                    assert!(Instant::now() < deadline, "no Hello on the pipe\n{}", std::fs::read_to_string(run.join("console.log")).unwrap_or_default());
+                    ch.send(&HostMsg::Ping { id: 0 }).unwrap();
+                }
+            }
+        }
+    };
+    let finish = |mut child: std::process::Child, run: PathBuf, result: std::thread::Result<()>, wait_exit: bool| {
+        let t = Instant::now();
+        while wait_exit && matches!(child.try_wait(), Ok(None)) && t.elapsed() < Duration::from_secs(15) {
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        let exited = matches!(child.try_wait(), Ok(Some(_)));
+        let _ = child.kill();
+        let _ = child.wait();
+        let _ = std::fs::remove_dir_all(&run);
+        if let Err(p) = result {
+            std::panic::resume_unwind(p);
+        }
+        exited
+    };
+
+    // Phase 1: a squatter holds the pipe. It sees the challenge; its command and its forged
+    // proof are refused, and its leaving does not power the VM off.
+    let (child, rec, run) = boot("dmisquat");
+    let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let rogue = Channel::connect(&rec, Transport::Uart, BOOT_WAIT).unwrap_or_else(|e| panic!("{e}"));
+        match hello_on(&rogue, &run) {
+            GuestMsg::Hello { nonce, transport, .. } => assert!(transport == "uart" && nonce.is_some(), "the DMI serial made the guest keyed"),
+            _ => unreachable!(),
+        }
+        rogue.send(&exec(77, "echo pwned > /tmp/pwned", 10)).unwrap();
+        loop {
+            match rogue.expect(FRAME_WAIT, "refusal").unwrap() {
+                GuestMsg::Err { id: 77, message } => break assert!(message.contains("not authenticated"), "{message}"),
+                GuestMsg::Exit { id: 77, .. } => panic!("an unauthenticated Exec ran"),
+                _ => continue,
+            }
+        }
+        rogue.send(&HostMsg::Auth { nonce: "00".repeat(16), mac: "11".repeat(32) }).unwrap();
+        loop {
+            match rogue.expect(FRAME_WAIT, "auth refusal").unwrap() {
+                GuestMsg::Err { message, .. } if message.contains("authentication failed") => break,
+                GuestMsg::Auth { .. } => panic!("the guest accepted a forged proof"),
+                _ => continue,
+            }
+        }
+        drop(rogue);
+        std::thread::sleep(Duration::from_secs(1));
+    }));
+    let exited = finish(child, run, r, false);
+    assert!(!exited, "an unauthenticated peer leaving must not power the VM off");
+
+    // Phase 2: the real host, with the key the provider set as the serial.
+    let t0 = Instant::now();
+    let (child, rec, run) = boot("dmihost");
+    let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let ch = Channel::connect(&rec, Transport::Uart, BOOT_WAIT).unwrap_or_else(|e| panic!("{e}"));
+        ch.authenticate(key.as_bytes(), BOOT_WAIT).unwrap_or_else(|e| panic!("{e}\n{}", std::fs::read_to_string(run.join("console.log")).unwrap_or_default()));
+        println!("UEFI disk + named-pipe COM2 ({accel}): authenticated Hello after {} ms", t0.elapsed().as_millis());
+        assert!(matches!(ch.expect(FRAME_WAIT, "Hello").unwrap(), GuestMsg::Hello { .. }));
+        ch.send(&exec(1, &format!("id -u; cat {} 2>&1 | head -c 200; echo; exit 5", proto::DMI_KEY_FILE), 10)).unwrap();
+        let (out, code, _) = until_exit(&ch, 1);
+        assert!(out.contains("1000") && out.contains("Permission denied"), "uid 1000 cannot read the key: {out}");
+        assert_eq!(code, Some(5));
+        let mut rt = Vec::new();
+        for i in 0..10 {
+            let t = Instant::now();
+            ch.send(&exec(10 + i, "true", 10)).unwrap();
+            until_exit(&ch, 10 + i);
+            rt.push(t.elapsed());
+        }
+        rt.sort();
+        println!("uart-over-pipe exec round trip: median {:?}", rt[rt.len() / 2]);
+        ch.shutdown();
+    }));
+    assert!(finish(child, run, r, true), "Shutdown powers the guest off");
+}

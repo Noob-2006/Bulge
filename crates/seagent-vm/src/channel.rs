@@ -439,6 +439,22 @@ pub struct Channel {
     /// while the caller writes stdin from another thread.
     rbuf: std::sync::Mutex<(Vec<u8>, std::collections::VecDeque<GuestMsg>)>,
     transport: Transport,
+    /// A UART channel (COM2) also carries whatever the firmware printed before the agent took
+    /// the port (UEFI writes terminal escapes to every serial port): until the first frame
+    /// decodes, bytes that cannot start a frame are skipped ([`resync_skip`]). Every other
+    /// transport is strict from its first byte, as it always was.
+    synced: std::sync::atomic::AtomicBool,
+}
+
+/// How many leading bytes of `buf` to drop so it starts at something that can be a frame
+/// (a length within [`crate::proto::MAX_FRAME`] followed by `{`); keeps a possible partial
+/// header at the end.
+pub fn resync_skip(buf: &[u8]) -> usize {
+    let plausible = |i: usize| {
+        let len = u32::from_be_bytes([buf[i], buf[i + 1], buf[i + 2], buf[i + 3]]) as usize;
+        len <= crate::proto::MAX_FRAME && buf[i + 4] == b'{'
+    };
+    (1..buf.len()).find(|&i| i + 5 <= buf.len() && plausible(i)).unwrap_or(buf.len().saturating_sub(4).max(1).min(buf.len()))
 }
 
 impl std::fmt::Debug for Channel {
@@ -482,7 +498,7 @@ impl Channel {
             }
         }
         let w = stream.try_clone().map_err(|e| format!("clone channel: {e}"))?;
-        Ok(Channel { w, r: stream, rbuf: Default::default(), transport })
+        Ok(Channel { w, r: stream, rbuf: Default::default(), transport, synced: std::sync::atomic::AtomicBool::new(transport != Transport::Uart) })
     }
 
     /// Connect to `<run>/chan.sock` (QEMU) or `<run>/vsock.sock` (Firecracker),
@@ -502,7 +518,9 @@ impl Channel {
                     }
                     Err(e) => return Err(e),
                 },
-                Err(e) if Instant::now() < deadline && matches!(e.kind(), ErrorKind::NotFound | ErrorKind::ConnectionRefused) => {
+                // ERROR_PIPE_BUSY (231): a hypervisor's named-pipe server between two clients
+                // (e.g. right after another process let go of it) — retry like a refused socket.
+                Err(e) if Instant::now() < deadline && (matches!(e.kind(), ErrorKind::NotFound | ErrorKind::ConnectionRefused) || (cfg!(windows) && e.raw_os_error() == Some(231))) => {
                     std::thread::sleep(Duration::from_millis(20));
                 }
                 Err(e) => return Err(format!("connect {}: {e}", path.display())),
@@ -587,7 +605,27 @@ impl Channel {
                 }
                 Ok(n) => {
                     st.0.extend_from_slice(&chunk[..n]);
-                    let (frames, used) = decode::<GuestMsg>(&st.0)?;
+                    let (frames, used) = if self.synced.load(std::sync::atomic::Ordering::SeqCst) {
+                        decode::<GuestMsg>(&st.0)?
+                    } else {
+                        // Firmware noise ahead of the agent's first frame (UART only).
+                        loop {
+                            let header_ok = st.0.len() < 5 || (u32::from_be_bytes([st.0[0], st.0[1], st.0[2], st.0[3]]) as usize <= crate::proto::MAX_FRAME && st.0[4] == b'{');
+                            match decode::<GuestMsg>(&st.0) {
+                                Ok((f, u)) if header_ok => {
+                                    if !f.is_empty() {
+                                        self.synced.store(true, std::sync::atomic::Ordering::SeqCst);
+                                    }
+                                    break (f, u);
+                                }
+                                _ if st.0.is_empty() => break (vec![], 0),
+                                _ => {
+                                    let skip = resync_skip(&st.0);
+                                    st.0.drain(..skip);
+                                }
+                            }
+                        }
+                    };
                     if used > 0 {
                         st.0.drain(..used);
                         st.1.extend(frames);
@@ -739,6 +777,30 @@ mod tests {
         // And the guest side refuses a host proof made with another key.
         assert!(crate::proto::guest_auth_answer(key, "c", "n", &crate::proto::auth_mac(b"other", "host", "c", "n")).is_err());
         assert!(matches!(crate::proto::guest_auth_answer(key, "c", "n", &crate::proto::auth_mac(key, "host", "c", "n")), Ok(GuestMsg::Auth { .. })));
+    }
+
+    /// UEFI prints terminal escapes on every serial port before the agent owns COM2 (seen on
+    /// a real UEFI boot): a UART channel skips that noise up to the first frame; every other
+    /// transport stays strict.
+    #[test]
+    fn a_uart_channel_skips_firmware_noise_before_the_first_frame() {
+        let first = GuestMsg::Pong { id: 9 };
+        let mut bytes = b"\x1b[=3h\x1b[2J\x1b[01;01HBdsDxe: loading Boot0001 {x}\r\n".to_vec();
+        bytes.extend(encode(&first).unwrap());
+        bytes.extend(encode(&GuestMsg::Pong { id: 10 }).unwrap());
+        let (a, mut b) = Stream::pair().unwrap();
+        let ch = Channel::from_stream(a, Transport::Uart).unwrap();
+        b.write_all(&bytes).unwrap();
+        assert_eq!(ch.expect(Duration::from_secs(2), "pong").unwrap(), first);
+        assert_eq!(ch.expect(Duration::from_secs(2), "pong").unwrap(), GuestMsg::Pong { id: 10 });
+        // Once in sync, the UART is strict too.
+        b.write_all(b"\x1b[2Jgarbage-after-sync").unwrap();
+        assert!(ch.recv(Duration::from_millis(300)).is_err());
+        let (a, mut b) = Stream::pair().unwrap();
+        let strict = Channel::from_stream(a, Transport::Serial).unwrap();
+        b.write_all(&bytes).unwrap();
+        assert!(strict.recv(Duration::from_millis(300)).is_err(), "virtio-serial / unix / vsock keep their exact framing");
+        assert_eq!(resync_skip(b"\x1b"), 1);
     }
 
     #[test]

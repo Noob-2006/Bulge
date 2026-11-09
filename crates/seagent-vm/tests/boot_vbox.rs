@@ -74,6 +74,47 @@ fn boots_virtualbox_from_the_guest_disk_and_runs_a_command() {
     let t0 = Instant::now();
     let mut inst = VboxProvider::new(&cfg).start(&spec).unwrap_or_else(|e| panic!("{e}"));
     let started = t0.elapsed();
+    // Windows: COM2 is a named pipe any local process can open, so the guest holds a per-boot
+    // key (its SMBIOS serial). Play the squatter first: it sees the challenge, its command is
+    // refused, a forged proof fails — then the real host authenticates.
+    if cfg!(windows) {
+        let rogue = Channel::connect(&spec.channel_path(), Transport::Uart, BOOT_WAIT).unwrap_or_else(|e| panic!("squatter connect: {e}"));
+        let deadline = Instant::now() + BOOT_WAIT;
+        loop {
+            match rogue.recv(Duration::from_secs(1)).unwrap() {
+                Some(GuestMsg::Hello { nonce, .. }) => {
+                    assert!(nonce.is_some_and(|n| n.len() == 32), "a keyed guest offers a challenge");
+                    break;
+                }
+                Some(_) => {}
+                None => {
+                    assert!(Instant::now() < deadline, "no Hello on the pipe");
+                    rogue.send(&HostMsg::Ping { id: 0 }).unwrap();
+                }
+            }
+        }
+        println!("VirtualBox: Hello (to the squatter) after {} ms", t0.elapsed().as_millis());
+        rogue.send(&HostMsg::Exec { id: 77, script: "echo pwned > /tmp/pwned".into(), cwd: None, env: vec![], login: false, stdin: false, pty: None, timeout_secs: 10 }).unwrap();
+        let refused = loop {
+            match rogue.expect(FRAME_WAIT, "refusal").unwrap() {
+                GuestMsg::Err { id: 77, message } => break message,
+                GuestMsg::Exit { id: 77, .. } | GuestMsg::Out { id: 77, .. } => panic!("an unauthenticated Exec ran"),
+                _ => continue,
+            }
+        };
+        assert!(refused.contains("not authenticated"), "{refused}");
+        rogue.send(&HostMsg::Auth { nonce: "00".repeat(16), mac: "11".repeat(32) }).unwrap();
+        loop {
+            match rogue.expect(FRAME_WAIT, "auth refusal").unwrap() {
+                GuestMsg::Err { message, .. } if message.contains("authentication failed") => break,
+                GuestMsg::Auth { .. } => panic!("the guest accepted a forged proof"),
+                _ => continue,
+            }
+        }
+        rogue.shutdown();
+        drop(rogue);
+        std::thread::sleep(Duration::from_millis(500));
+    }
     let ch = inst.connect(BOOT_WAIT).unwrap_or_else(|e| {
         let console = std::fs::read_to_string(spec.console_log()).unwrap_or_default();
         inst.stop();
@@ -90,6 +131,11 @@ fn boots_virtualbox_from_the_guest_disk_and_runs_a_command() {
     let (out, code) = until_exit(&ch, 1);
     assert!(out.contains("1000"), "{out}");
     assert_eq!(code, Some(4), "the exit code comes back over COM2");
+    if cfg!(windows) {
+        ch.send(&HostMsg::Exec { id: 2, script: format!("test -e /tmp/pwned; echo rc=$?; cat {} 2>&1 | head -c 300; echo", proto::DMI_KEY_FILE), cwd: None, env: vec![], login: false, stdin: false, pty: None, timeout_secs: 10 }).unwrap();
+        let (out, _) = until_exit(&ch, 2);
+        assert!(out.contains("rc=1") && out.contains("Permission denied"), "the squatter's command never ran, and uid 1000 cannot read the key: {out}");
+    }
     let mut rt = Vec::new();
     for i in 0..10 {
         let t = Instant::now();

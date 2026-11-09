@@ -1276,10 +1276,14 @@ fn run_init() -> i32 {
         log(&format!("hostname: {e}"));
     }
 
-    // A per-boot channel key, when the host gave one (Windows QEMU's loopback TCP channel,
-    // fw_cfg). Read while still root: the sysfs file is 0400, so no command run later as the
-    // agent user can learn it.
-    let key: Option<Vec<u8>> = std::fs::read(seagent_vm::proto::FW_CFG_KEY).ok().filter(|k| !k.is_empty());
+    // A per-boot channel key, when the host gave one: fw_cfg (Windows QEMU's loopback TCP
+    // channel) or the SMBIOS serial (VirtualBox / Hyper-V named-pipe COM2 on Windows). Read
+    // while still root: both sysfs files are 0400, so no command run later as the agent user
+    // can learn it.
+    let key = seagent_vm::proto::channel_key_from(
+        std::fs::read(seagent_vm::proto::FW_CFG_KEY).ok().as_deref(),
+        std::fs::read_to_string(seagent_vm::proto::DMI_KEY_FILE).ok().as_deref(),
+    );
     if key.is_some() {
         log("channel key present: the host must authenticate before any frame is served");
     }

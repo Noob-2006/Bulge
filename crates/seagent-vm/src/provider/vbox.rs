@@ -68,8 +68,24 @@ pub fn channel_endpoint(spec: &VmSpec, windows: bool) -> Endpoint {
 /// Every `VBoxManage` invocation that creates and boots `spec` on this host, in order.
 /// The guest architecture follows the host's: VirtualBox runs arm64 VMs only on Apple
 /// Silicon (7.1+) and x86_64 VMs only on x86_64 hosts.
-pub fn create_commands(spec: &VmSpec, vdi: &Path, chan: &Endpoint) -> Vec<Vec<String>> {
-    create_commands_for(spec, vdi, chan, cfg!(target_arch = "aarch64"))
+pub fn create_commands(spec: &VmSpec, vdi: &Path, chan: &Endpoint, key: Option<&str>) -> Vec<Vec<String>> {
+    let mut v = create_commands_for(spec, vdi, chan, cfg!(target_arch = "aarch64"));
+    if let Some(k) = key {
+        v.insert(2, key_command(spec, k));
+    }
+    v
+}
+
+/// Windows: the per-boot channel key for a named-pipe COM2 (other local processes can open
+/// `\\.\pipe\…` too), delivered as the VM's SMBIOS system serial number
+/// ([`crate::proto::DMI_KEY_PREFIX`] + key). The guest reads it as root from
+/// [`crate::proto::DMI_KEY_FILE`] (mode 0400) before it drops to uid 1000. Guest Additions —
+/// what guest properties need — are not in the image, and the disk's command line is baked in,
+/// so DMI is the one per-VM channel VirtualBox offers an unmodified EFI guest. (The value is on
+/// one short-lived `VBoxManage` command line and in the VM's settings file in the private run
+/// dir: readable by this user, which already holds the key, not by other users.)
+pub fn key_command(spec: &VmSpec, key: &str) -> Vec<String> {
+    ["setextradata", &vm_name(spec), "VBoxInternal/Devices/efi/0/Config/DmiSystemSerial", &format!("{}{key}", crate::proto::DMI_KEY_PREFIX)].iter().map(|s| s.to_string()).collect()
 }
 
 /// [`create_commands`] for an explicit guest architecture (pure: the shape is tested without
@@ -155,8 +171,11 @@ impl VmProvider for VboxProvider {
         } else {
             let _ = std::fs::remove_file(spec.channel_path());
         }
-        let mut inst = VboxInstance { spec: spec.clone(), bin, chan: None, registered: false };
-        for (i, args) in create_commands(spec, &vdi, &chan).into_iter().enumerate() {
+        // A named pipe is reachable by other local processes: authenticate it (unix sockets in
+        // the private run dir are not, and stay exactly as they were).
+        let key = windows.then(|| crate::proto::random_hex(16));
+        let mut inst = VboxInstance { spec: spec.clone(), bin, chan: None, registered: false, key: key.clone().map(String::into_bytes) };
+        for (i, args) in create_commands(spec, &vdi, &chan, key.as_deref()).into_iter().enumerate() {
             if let Err(e) = run(&inst.bin, &args) {
                 inst.stop();
                 return Err(e);
@@ -174,6 +193,8 @@ pub struct VboxInstance {
     bin: PathBuf,
     chan: Option<Arc<Channel>>,
     registered: bool,
+    /// The per-boot channel key (Windows named pipe), proven both ways on connect.
+    key: Option<Vec<u8>>,
 }
 
 impl VboxInstance {
@@ -201,7 +222,11 @@ impl VmInstance for VboxInstance {
         if let Some(c) = &self.chan {
             return Ok(c.clone());
         }
-        let ch = Arc::new(Channel::connect(&self.spec.channel_path(), Transport::Uart, wait)?);
+        let ch = Channel::connect(&self.spec.channel_path(), Transport::Uart, wait)?;
+        if let Some(key) = &self.key {
+            ch.authenticate(key, wait)?;
+        }
+        let ch = Arc::new(ch);
         self.chan = Some(ch.clone());
         Ok(ch)
     }
@@ -305,6 +330,22 @@ mod tests {
     }
 
     // Unix host paths / Linux VMM probing (KVM, Firecracker): not meaningful on a Windows host.
+
+    /// Windows counterpart of the shape test above: a named-pipe COM2 gets a per-boot key as
+    /// the SMBIOS system serial, set before the VM starts; a unix-socket VM gets none.
+    #[test]
+    fn a_windows_named_pipe_vm_gets_its_channel_key_as_the_dmi_serial_before_start() {
+        let mut s = spec();
+        s.run_dir = r"C:\r\v-1".into();
+        let pipe = channel_endpoint(&s, true);
+        let cmds = create_commands(&s, Path::new(r"C:\img\disk.vdi"), &pipe, Some("00112233445566778899aabbccddeeff"));
+        let names: Vec<&str> = cmds.iter().map(|c| c[0].as_str()).collect();
+        assert_eq!(names, ["createvm", "modifyvm", "setextradata", "storagectl", "storageattach", "startvm"]);
+        assert_eq!(cmds[2], ["setextradata", "seagent-v-1", "VBoxInternal/Devices/efi/0/Config/DmiSystemSerial", "sgk-00112233445566778899aabbccddeeff"]);
+        assert!(cmds[1].join(" ").contains(r"--uartmode2 server \\.\pipe\seagent-v-1"), "{:?}", cmds[1]);
+        let plain = create_commands(&s, Path::new("disk.vdi"), &channel_endpoint(&s, false), None);
+        assert!(!plain.iter().any(|c| c[0] == "setextradata"), "no key without a pipe: {plain:?}");
+    }
 
     #[cfg(unix)]
 
