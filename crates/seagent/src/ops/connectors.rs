@@ -35,7 +35,7 @@ pub const METHODS: &[&str] = &[
     "ui.connectors.overview",
     "ui.connectors.mcp.list", "ui.connectors.mcp.get", "ui.connectors.mcp.save", "ui.connectors.mcp.remove", "ui.connectors.mcp.test", "ui.connectors.mcp.tool",
     "ui.connectors.mcp.presets", "ui.connectors.mcp.preset.add", "ui.connectors.mcp.import", "ui.connectors.mcp.login", "ui.connectors.mcp.login.status", "ui.connectors.mcp.logout",
-    "ui.connectors.mcp.pins.accept",
+    "ui.connectors.mcp.pins.accept", "ui.connectors.mcp.enable",
     "ui.connectors.skills.search", "ui.connectors.skills.install", "ui.connectors.skills.upload", "ui.connectors.skills.uninstall", "ui.connectors.skills.check",
     "ui.connectors.skills.update", "ui.connectors.skills.bundled", "ui.connectors.skills.taps", "ui.connectors.skills.tap",
     "ui.connectors.plugins.search", "ui.connectors.plugins.install", "ui.connectors.plugins.uninstall", "ui.connectors.plugins.update", "ui.connectors.plugins.inspect",
@@ -104,6 +104,49 @@ pub fn methods(paths: &Paths, k: &seagent_kernel::kernel::Kernel, ext: Option<&c
 }
 
 pub fn call(c: &ConnCtx, m: &str, p: &Value) -> Option<Res> {
+    let r = dispatch(c, m, p)?;
+    Some(r.map(|v| apply_live(m, p, v)))
+}
+
+/// After a successful write, apply it to the running daemon (`connectors_live`) and say so:
+/// `{"applied": true}` when it took effect now, `{"restart": true, "why"}` when only a
+/// restart applies it.
+fn apply_live(m: &str, p: &Value, mut v: Value) -> Value {
+    if v["ok"] == false || v.get("consent_required").is_some() || (m == "ui.connectors.mcp.import" && v["applied"] != true) {
+        return v;
+    }
+    let name = |k: &str| p[k].as_str().unwrap_or("").trim().to_string();
+    let live = crate::ops::connectors_live::applied;
+    let r = match m {
+        "ui.connectors.mcp.save" => {
+            if let Some(o) = p["original"].as_str().filter(|o| !o.trim().is_empty() && o.trim() != name("name")) {
+                live("mcp", o.trim());
+            }
+            live("mcp", &name("name"))
+        }
+        "ui.connectors.mcp.remove" | "ui.connectors.mcp.tool" | "ui.connectors.mcp.logout" | "ui.connectors.mcp.pins.accept" | "ui.connectors.mcp.enable" => live("mcp", &name("name")),
+        "ui.connectors.mcp.preset.add" => live("mcp", v["name"].as_str().unwrap_or("")),
+        "ui.connectors.mcp.import" => {
+            let names: Vec<String> = v["servers"].as_array().into_iter().flatten().filter(|r| r["imported"] == true).filter_map(|r| r["name"].as_str().map(String::from)).collect();
+            let all: Vec<Value> = names.iter().map(|n| live("mcp", n)).collect();
+            json!({"applied": all.iter().all(|a| a["applied"] == true), "restart": all.iter().any(|a| a["restart"] == true), "each": all})
+        }
+        "ui.connectors.plugins.install" | "ui.connectors.plugins.uninstall" | "ui.connectors.plugins.update" | "ui.connectors.plugins.process.save" | "ui.connectors.plugins.process.remove" => live("plugins", ""),
+        "ui.connectors.acp.save" | "ui.connectors.acp.remove" => live("acp", ""),
+        // A listener that had no token or subscription starts once it has one.
+        "ui.connectors.webhooks.subscribe" | "ui.connectors.webhooks.remove" => live("channels", ""),
+        "ui.connectors.a2a.enable" | "ui.connectors.a2a.agent.save" | "ui.connectors.a2a.agent.remove" | "ui.connectors.a2a.peer.save" | "ui.connectors.a2a.peer.remove" => live("a2a", ""),
+        _ => return v,
+    };
+    if let Some(o) = v.as_object_mut() {
+        o.insert("applied".into(), r["applied"].clone());
+        o.insert("restart".into(), r["restart"].clone());
+        o.insert("live".into(), r);
+    }
+    v
+}
+
+fn dispatch(c: &ConnCtx, m: &str, p: &Value) -> Option<Res> {
     let s = |k: &str| p[k].as_str().unwrap_or("").trim().to_string();
     let b = |k: &str| p[k].as_bool().unwrap_or(false);
     Some(match m {
@@ -127,6 +170,13 @@ pub fn call(c: &ConnCtx, m: &str, p: &Value) -> Option<Res> {
             json!({"ok": true, "had_tokens": had})
         }),
         "ui.connectors.mcp.pins.accept" => mcp_pins_accept(c, &s("name")),
+        // The list's on/off switch, applied live (the Plugins page's `ui.mcp.set` only writes).
+        "ui.connectors.mcp.enable" => need(&s("name"), "name").and_then(|n| {
+            valid_name(&n)?;
+            user_table(c, &format!("mcp.{n}")).ok_or_else(|| bad(format!("no [mcp.{n}] in the user config")))?;
+            crate::ops::confcli::set(&c.paths, &format!("mcp.{n}.enabled"), if b("enabled") { "true" } else { "false" }).map_err(fail)?;
+            Ok(json!({"ok": true, "name": n, "enabled": b("enabled")}))
+        }),
         // ── skills (`seagent skills …`, the same `hub::cli::run`) ──
         "ui.connectors.skills.search" => skills_search(c, &s("q"), &s("source"), p["limit"].as_u64().unwrap_or(25)),
         "ui.connectors.skills.install" => need(&s("id"), "id").and_then(|id| {
@@ -197,7 +247,7 @@ pub fn call(c: &ConnCtx, m: &str, p: &Value) -> Option<Res> {
         "ui.connectors.webhooks.subscribe" => webhooks_subscribe(c, &s("channel"), &s("route"), p),
         "ui.connectors.webhooks.remove" => webhook_file(c, &s("channel")).and_then(|f| need(&s("route"), "route").and_then(|r| seagent_channel::webhook::unsubscribe(&f, &r).map_err(fail))).map(|removed| json!({"ok": true, "removed": removed})),
         "ui.connectors.webhooks.test" => webhooks_test(c, &s("channel"), &s("route"), p["payload"].as_str()),
-        _ => return None,
+        _ => return crate::ops::connectors_extra::call(c, m, p),
     })
 }
 
@@ -378,6 +428,8 @@ fn overview(c: &ConnCtx) -> Res {
         "webhooks": {"channels": webhooks},
         "acp": {"configured": acp},
         "a2a": {"enabled": a2a.0, "agents": a2a.1, "peers": a2a.2},
+        "live": crate::ops::connectors_live::get().is_some(),
+        "pending_restart": crate::ops::connectors_live::get().map(|l| l.pending_restart()).unwrap_or_default(),
     }))
 }
 
@@ -410,7 +462,8 @@ fn mcp_list(c: &ConnCtx) -> Res {
                 crate::mcp_cli::server_config(name, t).map(|cfg| crate::mcp_cli::stdio_consent(name, &cfg)).ok().and_then(|line| line.split(" · argv=[").nth(1).and_then(|r| r.split("] · ").next()).map(|a| a.replace(", ", " "))).unwrap_or_else(|| format!("{cmd} {}", args.join(" ")))
             }
         };
-        let live = c.live_mcp.get(name);
+        let hot = crate::ops::connectors_live::get().filter(|l| l.mcp_touched(name)).and_then(|l| l.mcp_status(name));
+        let live = hot.as_ref().or_else(|| c.live_mcp.get(name));
         out.push(json!({
             "name": name,
             "transport": transport_of(t),
@@ -572,9 +625,7 @@ fn mcp_save(c: &ConnCtx, section: &str, p: &Value) -> Res {
     let t = spec_table(&name, &p["spec"], base.as_ref(), section, &mut pend)?;
     let cfg = crate::mcp_cli::server_config(&name, &t).map_err(bad)?;
     if cfg.url.is_none() && p["consent"].as_bool() != Some(true) {
-        let cmd = cfg.command.as_deref().unwrap_or("");
-        let resolved = resolve_program(cmd);
-        return Ok(json!({"ok": false, "consent_required": true, "consent": crate::mcp_cli::stdio_consent(&name, &cfg), "warning": resolved.is_none().then(|| not_found(cmd)), "resolved": resolved.map(|p| p.display().to_string())}));
+        return Ok(consent_needed(&name, &cfg));
     }
     let renamed = original.as_deref().is_some_and(|o| o != name);
     crate::mcp_cli::save_server(&c.paths, section, &name, &t, original.is_some() && !renamed).map_err(bad)?;
@@ -583,6 +634,14 @@ fn mcp_save(c: &ConnCtx, section: &str, p: &Value) -> Res {
         crate::mcp_cli::remove_server(&c.paths, section, original.as_deref().unwrap_or("")).map_err(fail)?;
     }
     Ok(json!({"ok": true, "name": name, "restart": true, "secrets": stored, "message": format!("saved [{section}.{name}] in {}", c.paths.user_config().display())}))
+}
+
+/// The stdio consent answer: the exact line `seagent mcp add` prints, plus where the program
+/// resolves (or that it does not).
+fn consent_needed(name: &str, cfg: &seagent_plugin::McpServerConfig) -> Value {
+    let cmd = cfg.command.as_deref().unwrap_or("");
+    let resolved = resolve_program(cmd);
+    json!({"ok": false, "consent_required": true, "consent": crate::mcp_cli::stdio_consent(name, cfg), "warning": resolved.is_none().then(|| not_found(cmd)), "resolved": resolved.map(|p| p.display().to_string())})
 }
 
 /// `seagent mcp test <name>` for a saved server, or a draft from the form (`spec`) before it is
@@ -610,6 +669,11 @@ fn mcp_test(c: &ConnCtx, p: &Value) -> Res {
         }
     };
     cfg.enabled = true;
+    // A draft stdio server runs a program the person typed: show the same consent line
+    // `seagent mcp add` prints and start it only once they confirmed.
+    if draft && cfg.url.is_none() && p["consent"].as_bool() != Some(true) {
+        return Ok(consent_needed(&name, &cfg));
+    }
     let mut resolved = None;
     if let Some(cmd) = cfg.command.clone() {
         match resolve_program(&cmd) {
@@ -845,20 +909,28 @@ fn mcp_login(c: &ConnCtx, name: &str, mode: &str) -> Res {
         l.insert(name.to_string(), Login { state: "waiting", ..Default::default() });
     }
     let (logins, data, n, device) = (c.logins.clone(), c.paths.data.clone(), name.to_string(), mode == "device");
+    let name_done = n.clone();
     std::thread::spawn(move || {
         let show = ShowLogin { name: n.clone(), logins: logins.clone() };
         let challenge = seagent_plugin::oauth::probe_challenge(&url);
         let wait = Duration::from_secs(600);
         let r = if device { seagent_plugin::oauth::login_device(&url, challenge.as_deref(), &sc.oauth, &show, wait) } else { seagent_plugin::oauth::login_browser(&url, challenge.as_deref(), &sc.oauth, &show, wait) };
         let r = r.and_then(|t| seagent_plugin::oauth::Store::new(&data, &n).save(t));
-        let mut l = logins.lock().unwrap_or_else(|e| e.into_inner());
-        let e = l.entry(n).or_default();
-        match r {
-            Ok(()) => e.state = "done",
-            Err(err) => {
-                e.state = "error";
-                e.error = Some(format!("login failed: {err}"));
+        let ok = r.is_ok();
+        {
+            let mut l = logins.lock().unwrap_or_else(|e| e.into_inner());
+            let e = l.entry(n).or_default();
+            match r {
+                Ok(()) => e.state = "done",
+                Err(err) => {
+                    e.state = "error";
+                    e.error = Some(format!("login failed: {err}"));
+                }
             }
+        }
+        // Signed in: restart the server with its new token.
+        if ok {
+            crate::ops::connectors_live::applied("mcp", &name_done);
         }
     });
     // Give the flow a moment to produce its URL or device code, so one round trip usually does.
@@ -990,6 +1062,9 @@ fn process_test(c: &ConnCtx, p: &Value) -> Res {
         let t = fresh(c)?.plugins.get(&name).cloned().ok_or_else(|| bad(format!("no [plugins.{name}]")))?;
         crate::mcp_cli::server_config(&name, &t).map_err(bad)?
     };
+    if p["spec"].is_object() && p["consent"].as_bool() != Some(true) {
+        return Ok(consent_needed(&name, &cfg));
+    }
     if let Some(cmd) = cfg.command.as_deref() {
         if resolve_program(cmd).is_none() {
             return Ok(json!({"ok": false, "stage": "command", "error": not_found(cmd)}));

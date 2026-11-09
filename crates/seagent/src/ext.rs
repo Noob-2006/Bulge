@@ -27,7 +27,7 @@ pub type Loaded = (Ext, Vec<Arc<dyn Tool>>, Vec<Arc<dyn Hook>>);
 pub struct Ext {
     /// Set once the kernel exists; MCP sampling and elicitation go through it.
     pub kernel: Arc<std::sync::OnceLock<Kernel>>,
-    pub registry: Registry,
+    pub registry: Arc<Registry>,
     pub plugins: Vec<Arc<PluginHost>>,
     pub channels: BTreeMap<String, (Arc<dyn Channel>, seagent_channel::config::ChannelConfig)>,
     pub commands: Vec<CommandDef>,
@@ -109,6 +109,26 @@ pub fn load(cfg: &Config, paths: &Paths, vault: &Arc<Vault>, ws: &Path, with_cha
         }
     }
 
+    let channels = build_channels(cfg, paths, &secrets, &plugins, with_channels, &mut warnings);
+    if !channels.is_empty() {
+        let targets = channels.iter().map(|(n, (ch, c))| (n.clone(), seagent_channel::tool::Target { channel: ch.clone(), default_chat: c.default_chat().map(String::from) })).collect();
+        tools.push(Arc::new(seagent_channel::tool::ChannelSend::new(targets)));
+        let msg: seagent_channel::message_tool::Targets = channels.iter().map(|(n, (ch, c))| (n.clone(), (ch.clone(), c.default_chat().map(String::from)))).collect();
+        tools.push(Arc::new(seagent_channel::message_tool::MessageTool::new(msg)));
+        tools.extend(channels.values().flat_map(|(ch, _)| ch.tools()));
+    }
+    // `whatsapp_call` speaks a synthesized message: install the `[media.tts]` chain here, where
+    // the channels are built (no `[media.tts]` = no hook, and the tool says so).
+    crate::telephony::install(cfg, vault);
+    let commands = commands::discover(&commands::dirs(&paths.data, ws));
+    (Ext { kernel, registry: Arc::new(registry), plugins, channels, commands, warnings }, tools, hooks)
+}
+
+/// Every `[channels.<name>]` adapter of `cfg`, built the way the daemon starts them (plugin
+/// channels from their plugin host, listeners only when `with_channels`); failures become
+/// warnings. Also what the Connections page rebuilds when a channel is saved
+/// (`ops::connectors_live`).
+pub(crate) fn build_channels(cfg: &Config, paths: &Paths, secrets: &seagent_plugin::Secrets, plugins: &[Arc<PluginHost>], with_channels: bool, warnings: &mut Vec<String>) -> BTreeMap<String, (Arc<dyn Channel>, seagent_channel::config::ChannelConfig)> {
     let mut channels = BTreeMap::new();
     if with_channels || !cfg.channels.is_empty() {
         let state = paths.data.join("channels");
@@ -127,7 +147,7 @@ pub fn load(cfg: &Config, paths: &Paths, vault: &Arc<Vault>, ws: &Path, with_cha
                     // Building a listening channel binds its port: only the daemon listens.
                     Err(String::new())
                 } else {
-                    seagent_channel::config::build(n, &c, &state, &secrets)
+                    seagent_channel::config::build(n, &c, &state, secrets)
                 };
                 ch.map(|ch| (ch, c))
             });
@@ -149,25 +169,14 @@ pub fn load(cfg: &Config, paths: &Paths, vault: &Arc<Vault>, ws: &Path, with_cha
             }
         }
     }
-    if !channels.is_empty() {
-        let targets = channels.iter().map(|(n, (ch, c))| (n.clone(), seagent_channel::tool::Target { channel: ch.clone(), default_chat: c.default_chat().map(String::from) })).collect();
-        tools.push(Arc::new(seagent_channel::tool::ChannelSend::new(targets)));
-        let msg: seagent_channel::message_tool::Targets = channels.iter().map(|(n, (ch, c))| (n.clone(), (ch.clone(), c.default_chat().map(String::from)))).collect();
-        tools.push(Arc::new(seagent_channel::message_tool::MessageTool::new(msg)));
-        tools.extend(channels.values().flat_map(|(ch, _)| ch.tools()));
-    }
-    // `whatsapp_call` speaks a synthesized message: install the `[media.tts]` chain here, where
-    // the channels are built (no `[media.tts]` = no hook, and the tool says so).
-    crate::telephony::install(cfg, vault);
-    let commands = commands::discover(&commands::dirs(&paths.data, ws));
-    (Ext { kernel, registry, plugins, channels, commands, warnings }, tools, hooks)
+    channels
 }
 
 /// MCP server instructions, appended (capped) to the identity segment.
 /// MCP `sampling/createMessage` → one completion with seagent's model (aux model by default).
 /// With `tools`, the model may answer with `tool_use` blocks (stopReason `toolUse`);
 /// the server runs them and sends the results back in the next request.
-fn mcp_sampler(slot: Arc<std::sync::OnceLock<Kernel>>) -> seagent_plugin::mcp::Sampler {
+pub(crate) fn mcp_sampler(slot: Arc<std::sync::OnceLock<Kernel>>) -> seagent_plugin::mcp::Sampler {
     Arc::new(move |p: &Value| {
         let k = slot.get().ok_or("agent not ready")?;
         let (msgs, tools, system, max, model) = sampling_request(p)?;
@@ -246,7 +255,7 @@ pub fn sampling_result(reply: &seagent_core::Message, model: &str, stop: seagent
 /// collects `field: value` lines; URL mode shows the full URL for the user to open
 /// themselves (never opened automatically) and accepts once they confirm. Headless
 /// sessions decline, as the spec allows.
-fn mcp_elicitor(slot: Arc<std::sync::OnceLock<Kernel>>) -> seagent_plugin::mcp::Elicitor {
+pub(crate) fn mcp_elicitor(slot: Arc<std::sync::OnceLock<Kernel>>) -> seagent_plugin::mcp::Elicitor {
     Arc::new(move |server: &str, p: &Value| {
         let k = slot.get().ok_or("agent not ready")?;
         if p["mode"].as_str() == Some("url") {
@@ -1347,7 +1356,7 @@ impl seagent_kernel::kernel::HostRoutes for ChannelRoutes {
 }
 
 /// Connection state per channel for `/ready` (ent-098): `(ok, detail)`.
-fn channel_states() -> &'static std::sync::Mutex<HashMap<String, (bool, String)>> {
+pub(crate) fn channel_states() -> &'static std::sync::Mutex<HashMap<String, (bool, String)>> {
     static S: std::sync::OnceLock<std::sync::Mutex<HashMap<String, (bool, String)>>> = std::sync::OnceLock::new();
     S.get_or_init(Default::default)
 }

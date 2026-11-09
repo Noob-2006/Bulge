@@ -293,7 +293,7 @@ fn test_hub_any(kit: &crate::testkit::Kit, channels: &[(&str, Arc<dyn Channel>)]
         .collect();
     let ext = Arc::new(Ext {
         kernel: Arc::default(),
-        registry: Registry::load_with(&BTreeMap::new(), &kit.paths.data.join("mcp-cache"), secrets_fn(&kit.k.vault), &seagent_plugin::LoadOpts::default()),
+        registry: Arc::new(Registry::load_with(&BTreeMap::new(), &kit.paths.data.join("mcp-cache"), secrets_fn(&kit.k.vault), &seagent_plugin::LoadOpts::default())),
         plugins: vec![],
         channels: chans,
         commands: vec![],
@@ -314,7 +314,7 @@ fn test_hub_admin(kit: &crate::testkit::Kit, ch: &Arc<Recorder>, admins: &[&str]
     chans.insert("test".to_string(), (ch.clone() as Arc<dyn Channel>, cc));
     let ext = Arc::new(Ext {
         kernel: Arc::default(),
-        registry: Registry::load_with(&BTreeMap::new(), &kit.paths.data.join("mcp-cache"), secrets_fn(&kit.k.vault), &seagent_plugin::LoadOpts::default()),
+        registry: Arc::new(Registry::load_with(&BTreeMap::new(), &kit.paths.data.join("mcp-cache"), secrets_fn(&kit.k.vault), &seagent_plugin::LoadOpts::default())),
         plugins: vec![],
         channels: chans,
         commands: vec![],

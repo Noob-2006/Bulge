@@ -23,7 +23,7 @@ use std::sync::Arc;
 
 pub const METHODS: &[&str] = &[
     "ui.connectors.channels.kinds", "ui.connectors.channels.list", "ui.connectors.channels.get", "ui.connectors.channels.save", "ui.connectors.channels.remove",
-    "ui.connectors.channels.test", "ui.connectors.channels.verify",
+    "ui.connectors.channels.test", "ui.connectors.channels.verify", "ui.connectors.channels.enable",
 ];
 pub const COMMANDS: &[&str] = &[];
 pub const VALUE_FLAGS: &[&str] = &["kind", "dm-policy", "allow", "chat", "text"];
@@ -199,12 +199,38 @@ pub fn call(c: &ChanCtx, m: &str, p: &Value) -> Option<Res> {
         "ui.connectors.channels.kinds" => Ok(json!({"kinds": KINDS.iter().map(kind_json).collect::<Vec<_>>(), "all": registry_kinds()})),
         "ui.connectors.channels.list" => list(c),
         "ui.connectors.channels.get" => get(&c.conn, &s("name")),
-        "ui.connectors.channels.save" => save(&c.conn, p, true),
-        "ui.connectors.channels.remove" => need(&s("name"), "name").and_then(|n| super::connectors::remove_table(&c.conn, &format!("channels.{n}"))),
-        "ui.connectors.channels.test" => test(&c.conn, Some(&c.live), &s("name"), &s("chat"), &s("text")),
+        "ui.connectors.channels.save" => save(&c.conn, p, true).map(applied),
+        "ui.connectors.channels.remove" => need(&s("name"), "name").and_then(|n| super::connectors::remove_table(&c.conn, &format!("channels.{n}"))).map(applied),
+        "ui.connectors.channels.enable" => need(&s("name"), "name").and_then(|n| {
+            valid_name(&n)?;
+            user_table(&c.conn, &format!("channels.{n}")).ok_or_else(|| bad(format!("no [channels.{n}] in the user config")))?;
+            let on = p["enabled"].as_bool().unwrap_or(true);
+            crate::ops::confcli::set(&c.conn.paths, &format!("channels.{n}.enabled"), if on { "true" } else { "false" }).map_err(fail)?;
+            Ok(applied(json!({"ok": true, "name": n, "enabled": on})))
+        }),
+        "ui.connectors.channels.test" => test(&c.conn, Some(&live_channels(c)), &s("name"), &s("chat"), &s("text")),
         "ui.connectors.channels.verify" => verify(&c.conn, &s("name")),
         _ => return None,
     })
+}
+
+/// A saved channel change, applied to the running daemon's channel loops when there is one.
+fn applied(mut v: Value) -> Value {
+    let r = crate::ops::connectors_live::applied("channels", "");
+    if let Some(o) = v.as_object_mut() {
+        o.insert("applied".into(), r["applied"].clone());
+        o.insert("restart".into(), r["restart"].clone());
+        o.insert("live".into(), r);
+    }
+    v
+}
+
+/// The adapters running now: the hot-apply hub's set, else the startup set.
+fn live_channels(c: &ChanCtx) -> BTreeMap<String, Arc<dyn Channel>> {
+    match crate::ops::connectors_live::get() {
+        Some(l) => l.channels(),
+        None => c.live.clone(),
+    }
 }
 
 /// `{{secret:NAME}}` references in a table whose vault entry is missing.
@@ -224,6 +250,7 @@ fn missing_secrets(t: &toml::Table, names: &[String]) -> Vec<String> {
 fn list(c: &ChanCtx) -> Res {
     let cfg = fresh(&c.conn)?;
     let names = vault(&c.conn).map(|v| v.names()).unwrap_or_default();
+    let live = live_channels(c);
     let mut out = vec![];
     for (n, t) in &cfg.channels {
         let kind = t.get("kind").and_then(|v| v.as_str()).unwrap_or("").to_string();
@@ -231,14 +258,23 @@ fn list(c: &ChanCtx) -> Res {
         let missing = missing_secrets(t, &names);
         let enabled = t.get("enabled").and_then(|v| v.as_bool()).unwrap_or(true);
         let warn: Vec<&String> = c.warnings.iter().filter(|w| w.contains(&format!("[channels.{n}]")) || w.contains(&format!("channel {n}:"))).collect();
-        let (status, detail) = if c.live.contains_key(n) {
-            ("running", String::new())
+        // A running adapter reports what its poll loop last saw: a platform that rejected the
+        // token (`stopped: … 401`) or keeps failing is an error, not "running".
+        let polled = crate::ext::channel_states().lock().unwrap_or_else(|e| e.into_inner()).get(n).cloned();
+        let (status, detail) = if live.contains_key(n) {
+            match polled {
+                Some((false, msg)) => ("error", msg),
+                Some((true, msg)) => ("running", msg),
+                None => ("running", "starting".to_string()),
+            }
         } else if !enabled {
             ("disabled", String::new())
         } else if let Err(e) = &parsed {
             ("error", e.clone())
         } else if !missing.is_empty() {
             ("error", format!("secret(s) not set: {}", missing.join(", ")))
+        } else if let Some(e) = crate::ops::connectors_live::get().and_then(|l| l.channel_error(n)) {
+            ("error", e)
         } else if let Some(w) = warn.first() {
             ("error", w.to_string())
         } else {
@@ -430,15 +466,26 @@ pub fn save(c: &ConnCtx, p: &Value, literal_secrets: bool) -> Res {
 /// parsed: building it would bind the port the running daemon may hold.
 fn validate(c: &ConnCtx, name: &str, t: &toml::Table, pend: &Pending) -> Result<&'static str, (i32, String)> {
     let enabled = t.get("enabled").and_then(|v| v.as_bool()).unwrap_or(true);
-    let cfg = seagent_channel::config::parse_config(name, &serde_json::to_value(t).map_err(|e| fail(e.to_string()))?).map_err(bad)?;
-    if cfg.is_plugin() || cfg.listens() || !enabled {
+    let mut cfg = seagent_channel::config::parse_config(name, &serde_json::to_value(t).map_err(|e| fail(e.to_string()))?).map_err(bad)?;
+    if cfg.is_plugin() || !enabled {
         return Ok("parsed");
+    }
+    // A listener is built on a throwaway port: its real one may belong to the running daemon.
+    let listens = cfg.listens();
+    if listens {
+        cfg.settings.insert("listen".into(), "127.0.0.1:0".into());
     }
     let state = seagent_core::tmp::TempDir::new_in(&c.paths.data, "channel-check");
     let secrets = pend.secrets(Arc::new(vault(c)?));
-    let ch = seagent_channel::config::build(name, &cfg, state.path(), &secrets).map_err(bad)?;
-    ch.stop();
-    Ok("built")
+    match seagent_channel::config::build(name, &cfg, state.path(), &secrets) {
+        Ok(ch) => {
+            ch.stop();
+            Ok("built")
+        }
+        // A webhook listener may be saved first and secured by a subscription afterwards.
+        Err(e) if listens && e.contains("seagent webhook subscribe") => Ok("needs a token or a subscription before it listens"),
+        Err(e) => Err(bad(e)),
+    }
 }
 
 /// Build a configured channel the way the daemon does (`ext::load` without the plugin hosts).
@@ -572,6 +619,14 @@ fn cli(sub: &str, a: &Args) -> R {
                 Err(Fail::Msg(format!("{name}: {}", r["error"].as_str().unwrap_or("send failed"))))
             }
         }
+    }
+}
+
+#[cfg(test)]
+impl ChanCtx {
+    /// Tests: pretend the daemon runs `name`.
+    pub fn set_live_for_test(&mut self, name: &str, ch: Arc<dyn Channel>) {
+        self.live.insert(name.to_string(), ch);
     }
 }
 

@@ -110,7 +110,11 @@ fn stdio_server_lifecycle_through_the_console() {
     let Some(fx) = fixture() else { return };
     let spec = json!({"transport": "stdio", "command": "python3", "args": ["-I", fx], "env": [{"key": "FX_TOKEN", "value": "tok-123", "secret": true}, {"key": "REGION", "value": "eu"}], "timeout_secs": 10});
     // A draft is tested before it is saved: tools come back, nothing is written.
-    let d = ok(&c, "ui.connectors.mcp.test", json!({"name": "fx", "spec": spec}));
+    // A draft stdio server runs nothing before consent: the answer is the consent line.
+    let pre = ok(&c, "ui.connectors.mcp.test", json!({"name": "fx", "spec": spec}));
+    assert_eq!(pre["consent_required"], true, "{pre}");
+    assert!(pre["consent"].as_str().unwrap().contains("command=python3") && pre.get("tools").is_none(), "{pre}");
+    let d = ok(&c, "ui.connectors.mcp.test", json!({"name": "fx", "spec": spec, "consent": true}));
     assert_eq!(d["ok"], true, "{d}");
     let names: Vec<&str> = d["tools"].as_array().unwrap().iter().map(|x| x["name"].as_str().unwrap()).collect();
     assert!(names.contains(&"echo") && names.contains(&"add"), "{names:?}");
@@ -168,7 +172,7 @@ fn http_server_with_a_secret_header_and_clear_failures() {
     assert_eq!((r["ok"].as_bool(), r["stage"].as_str()), (Some(false), Some("connect")), "{r}");
     assert!(!r["error"].as_str().unwrap_or("").is_empty());
     // A program that does not exist is caught before anything is spawned.
-    let r = ok(&c, "ui.connectors.mcp.test", json!({"name": "nope", "spec": {"transport": "stdio", "command": "seagent-no-such-program-4711"}}));
+    let r = ok(&c, "ui.connectors.mcp.test", json!({"name": "nope", "spec": {"transport": "stdio", "command": "seagent-no-such-program-4711"}, "consent": true}));
     assert_eq!(r["stage"], "command", "{r}");
     assert!(r["error"].as_str().unwrap().contains("not found"), "{r}");
     // Form validation errors say what is wrong.
@@ -338,9 +342,10 @@ fn channel_setup_validates_stores_secrets_and_sends_a_test_message() {
     let req = got.recv_timeout(Duration::from_secs(10)).unwrap();
     assert!(req.contains("hello from the console"), "{req}");
     assert!(chan(&t, "ui.connectors.channels.test", json!({"name": "tg"})).unwrap_err().1.contains("numeric chat id"), "no chat: the platform's hint");
-    // A listening channel is only parsed (the daemon owns its port), and cannot be tested fresh.
+    // A listening channel is built on a throwaway port (the daemon owns its real one), and is
+    // not tested fresh.
     let r = chan(&t, "ui.connectors.channels.save", json!({"name": "in", "kind": "webhook", "fields": {"listen": "127.0.0.1:0", "token": "hook-token"}})).unwrap();
-    assert_eq!(r["checked"], "parsed");
+    assert_eq!(r["checked"], "built");
     assert!(chan(&t, "ui.connectors.channels.test", json!({"name": "in", "chat": "x"})).unwrap_err().1.contains("daemon"));
     // Verify reports a non-online kind by building it.
     assert_eq!(chan(&t, "ui.connectors.channels.verify", json!({"name": "hook"})).unwrap()["ok"], true);
@@ -440,17 +445,17 @@ fn connectors_js_calls_only_served_methods() {
     let c = ctx(&t);
     let cc = channels_setup::ctx_for(&t.paths, &t.ws);
     for m in &called {
-        let mine = METHODS.contains(&m.as_str()) || channels_setup::METHODS.contains(&m.as_str());
+        let mine = METHODS.contains(&m.as_str()) || channels_setup::METHODS.contains(&m.as_str()) || crate::ops::connectors_extra::METHODS.contains(&m.as_str());
         let sibling = crate::ops::ui_methods::METHODS.contains(&m.as_str()) || crate::ops::webui::METHODS.contains(&m.as_str()) || crate::HOST_METHODS.contains(&m.as_str());
         assert!(mine || sibling, "connectors.js calls `{m}`, which nothing serves");
-        if METHODS.contains(&m.as_str()) {
+        if METHODS.contains(&m.as_str()) || crate::ops::connectors_extra::METHODS.contains(&m.as_str()) {
             assert!(call(&c, m, &json!({})).is_some(), "`{m}` is listed but not dispatched");
         }
         if channels_setup::METHODS.contains(&m.as_str()) {
             assert!(channels_setup::call(&cc, m, &json!({})).is_some(), "`{m}` is listed but not dispatched");
         }
     }
-    for m in METHODS.iter().chain(channels_setup::METHODS) {
+    for m in METHODS.iter().chain(channels_setup::METHODS).chain(crate::ops::connectors_extra::METHODS) {
         assert!(called.iter().any(|x| x == m), "`{m}` is served but the page never calls it");
         assert!(!crate::ops::ui_methods::METHODS.contains(m) && !crate::ops::webui::METHODS.contains(m), "`{m}` registered twice");
     }
@@ -469,4 +474,180 @@ fn channel_cli_claims_only_its_subcommands() {
     // `--kind`, `--chat`, `--dm-policy`, `--allow` parse as value flags.
     let parsed = a(&["add", "tg", "--kind", "telegram", "--chat", "1", "--dm-policy", "open", "--allow", "1,2", "--set", "token={{secret:T}}"]);
     assert_eq!((parsed.val("kind"), parsed.val("chat"), parsed.val("allow")), (Some("telegram"), Some("1"), Some("1,2")));
+}
+
+/// An `Ext` with no MCP servers, plugins or channels, for the hot-apply hub.
+fn empty_ext(t: &Kit) -> Arc<crate::ext::Ext> {
+    Arc::new(crate::ext::Ext {
+        kernel: Arc::default(),
+        registry: Arc::new(seagent_plugin::Registry::load(&BTreeMap::new(), &t.paths.data.join("mcp-cache"), crate::ext::secrets_fn(&t.k.vault))),
+        plugins: vec![],
+        channels: BTreeMap::new(),
+        commands: vec![],
+        warnings: vec![],
+    })
+}
+
+/// No restart: an MCP server saved in the console is started in the running daemon and its
+/// tools reach the kernel; removing it takes them away again.
+#[test]
+fn mcp_changes_apply_live_to_the_kernel() {
+    let t = kit();
+    let c = ctx(&t);
+    // Without a running daemon the page is told the change applies on the next start.
+    let preset = crate::mcp_presets::catalog().iter().find(|p| p.auth == "none" && p.env.is_empty()).unwrap().name.clone();
+    let r = ok(&c, "ui.connectors.mcp.preset.add", json!({"preset": preset}));
+    assert_eq!(r["restart"], true, "{r}");
+    let Some(fx) = fixture() else { return };
+    let live = crate::ops::connectors_live::Live::new(t.k.clone(), t.paths.clone(), t.ws.clone(), Some(empty_ext(&t)));
+    let names = |k: &seagent_kernel::kernel::Kernel| k.specs().into_iter().map(|s| s.name).collect::<Vec<_>>();
+    assert!(!names(&t.k).iter().any(|n| n.starts_with("mcp__fx__")));
+    ok(&c, "ui.connectors.mcp.save", json!({"name": "fx", "spec": {"transport": "stdio", "command": "python3", "args": ["-I", fx]}, "consent": true}));
+    let r = live.reload_mcp("fx").unwrap();
+    assert_eq!((r["applied"].as_bool(), r["tools"].as_u64().map(|n| n >= 5)), (Some(true), Some(true)), "{r}");
+    assert!(names(&t.k).contains(&"mcp__fx__echo".to_string()), "the kernel sees the new tools without a restart");
+    assert!(live.mcp_touched("fx"));
+    // Switching one tool off hot-applies too.
+    ok(&c, "ui.connectors.mcp.tool", json!({"name": "fx", "tool": "add", "enabled": false}));
+    live.reload_mcp("fx").unwrap();
+    assert!(!names(&t.k).contains(&"mcp__fx__add".to_string()) && names(&t.k).contains(&"mcp__fx__echo".to_string()));
+    ok(&c, "ui.connectors.mcp.remove", json!({"name": "fx"}));
+    assert_eq!(live.reload_mcp("fx").unwrap()["state"], "removed");
+    assert!(!names(&t.k).iter().any(|n| n.starts_with("mcp__fx__")), "removed tools are gone at once");
+}
+
+/// No restart for channels either: a saved channel joins the running set (the test message
+/// goes through the daemon's adapter), and a platform that rejects the channel at runtime is
+/// reported as an error with its message instead of "running".
+#[test]
+fn channel_changes_apply_live_and_runtime_failures_show_as_errors() {
+    let t = kit();
+    let live = crate::ops::connectors_live::Live::new(t.k.clone(), t.paths.clone(), t.ws.clone(), Some(empty_ext(&t)));
+    let (url, got) = http_peer("{}");
+    chan(&t, "ui.connectors.channels.save", json!({"name": "hook", "kind": "webhook", "fields": {"outbound_url": url}, "policy": {"default_chat": "room-9"}})).unwrap();
+    let r = live.reload_channels().unwrap();
+    assert_eq!((r["applied"].as_bool(), r["started"][0].as_str()), (Some(true), Some("hook")), "{r}");
+    let running = live.channels();
+    assert!(running.contains_key("hook"));
+    let c = ConnCtx::new(&t.paths, &t.ws);
+    let sent = channels_setup::test(&c, Some(&running), "hook", "", "live hello").unwrap();
+    assert_eq!((sent["ok"].as_bool(), sent["via"].as_str()), (Some(true), Some("daemon")), "{sent}");
+    assert!(got.recv_timeout(Duration::from_secs(10)).unwrap().contains("live hello"));
+    assert!(t.k.specs().iter().any(|s| s.name == "channel_send"), "channel_send follows the live set");
+    // Loops start under the leader token; a reload keeps an unchanged adapter as it is.
+    let leader = seagent_core::Cancel::new();
+    assert_eq!(live.start_channels(leader.clone()), 1);
+    let before = Arc::as_ptr(&live.channels()["hook"]) as *const () as usize;
+    let r = live.reload_channels().unwrap();
+    assert_eq!(r["kept"][0], "hook", "{r}");
+    assert_eq!(Arc::as_ptr(&live.channels()["hook"]) as *const () as usize, before, "the same adapter keeps running");
+    // Removing it stops it.
+    chan(&t, "ui.connectors.channels.remove", json!({"name": "hook"})).unwrap();
+    live.reload_channels().unwrap();
+    assert!(live.channels().is_empty());
+    leader.cancel();
+    // A rejected token at runtime: the poll loop's state is the status.
+    chan(&t, "ui.connectors.channels.save", json!({"name": "tgx", "kind": "telegram", "fields": {"token": "1:rejected"}})).unwrap();
+    crate::ext::channel_states().lock().unwrap().insert("tgx".into(), (false, "stopped: telegram rejected the bot token (401 Unauthorized)".into()));
+    let mut cc = channels_setup::ctx_for(&t.paths, &t.ws);
+    cc.set_live_for_test("tgx", live_adapter(&t));
+    let l = channels_setup::call(&cc, "ui.connectors.channels.list", &json!({})).unwrap().unwrap();
+    let row = l["channels"].as_array().unwrap().iter().find(|x| x["name"] == "tgx").unwrap().clone();
+    crate::ext::channel_states().lock().unwrap().remove("tgx");
+    assert_eq!(row["status"], "error", "{row}");
+    assert!(row["detail"].as_str().unwrap().contains("401"), "{row}");
+}
+
+/// Any adapter will do as "running" for the status test.
+fn live_adapter(t: &Kit) -> Arc<dyn seagent_channel::Channel> {
+    let cfg = seagent_channel::config::parse_config("tgx", &json!({"kind": "telegram", "token": "1:x"})).unwrap();
+    let secrets: seagent_plugin::Secrets = Arc::new(|s: &str| s.to_string());
+    seagent_channel::config::build("tgx", &cfg, &t.paths.data, &secrets).unwrap()
+}
+
+/// The rest of the CLI-only flows: pins diff/forget, skill setup into the vault, the plugin
+/// MCP catalog (with consent for stdio entries), hooks, Gmail setup and a node setup code.
+#[test]
+fn remaining_setup_flows_work_from_the_console() {
+    let t = kit();
+    let c = ctx(&t);
+    // Skill setup: what it needs, then values into the vault through `setup::capture`.
+    let dir = t.ws.join(".seagent/skills/gif-finder");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("SKILL.md"), "---\nname: gif-finder\ndescription: Finds gifs.\nrequired_environment_variables:\n  - GIF_DEMO_API_KEY\n---\nbody\n").unwrap();
+    let s = ok(&c, "ui.connectors.skills.setup", json!({"name": "gif-finder"}));
+    assert_eq!((s["env"][0]["name"].as_str(), s["env"][0]["set"].as_bool()), (Some("GIF_DEMO_API_KEY"), Some(false)), "{s}");
+    let s = ok(&c, "ui.connectors.skills.setup.save", json!({"name": "gif-finder", "values": {"GIF_DEMO_API_KEY": "gk-1"}}));
+    assert_eq!((s["env"][0]["set"].as_bool(), s["remaining"].as_array().map(|a| a.len())), (Some(true), Some(0)), "{s}");
+    assert_eq!(Vault::load(&t.paths.secrets()).unwrap().substitute("{{secret:GIF_DEMO_API_KEY}}"), "gk-1");
+    assert!(!s.to_string().contains("gk-1"));
+    assert_eq!(ok(&c, "ui.connectors.skills.enable", json!({"name": "gif-finder", "enabled": false}))["restart"], true, "a skill switch is restart-only");
+    // Plugin MCP catalog: listed; a stdio entry asks for consent and writes nothing before it.
+    let cat = ok(&c, "ui.connectors.plugins.mcps", json!({}));
+    let list = cat.as_array().unwrap().clone();
+    assert!(!list.is_empty());
+    if let Some(stdio) = list.iter().find(|m| m["transport"] == "stdio") {
+        let r = ok(&c, "ui.connectors.plugins.mcp.install", json!({"name": stdio["name"]}));
+        assert_eq!(r["consent_required"], true, "{r}");
+        assert!(!user_config(&t).contains(&format!("[mcp.{}]", stdio["name"].as_str().unwrap())));
+    }
+    if let Some(http) = list.iter().find(|m| m["transport"] == "http" || m["transport"] == "sse") {
+        let r = ok(&c, "ui.connectors.plugins.mcp.install", json!({"name": http["name"]}));
+        assert_eq!(r["ok"], true, "{r}");
+    }
+    // Hooks: approve / revoke a shell hook, switch a bundled one.
+    std::fs::write(t.paths.user_config(), format!("{}\n[[hooks]]\nevent = \"pre_tool\"\ncommand = \"echo hi\"\n", user_config(&t))).unwrap();
+    let h = ok(&c, "ui.connectors.hooks.list", json!({}));
+    assert_eq!(h["shell"][0]["consent"], "not approved", "{h}");
+    assert_eq!(ok(&c, "ui.connectors.hooks.approve", json!({"command": "echo hi"}))["restart"], true);
+    assert_eq!(ok(&c, "ui.connectors.hooks.list", json!({}))["shell"][0]["consent"], "approved");
+    assert_eq!(ok(&c, "ui.connectors.hooks.revoke", json!({"command": "echo hi"}))["removed"], 1);
+    let bundled = h["bundled"][0]["name"].as_str().unwrap().to_string();
+    assert_eq!(ok(&c, "ui.connectors.hooks.enable", json!({"name": bundled, "enabled": true}))["enabled"], true);
+    assert!(err(&c, "ui.connectors.hooks.enable", json!({"name": "nope"})).contains("no hook"));
+    assert!(err(&c, "ui.connectors.hooks.install", json!({"files": [{"path": "README.md", "data": seagent_net::crypto::b64(b"x")}]})).contains("HOOK.md"));
+    // Gmail: the CLI's setup with literal credentials (moved to the vault), then its status.
+    assert_eq!(ok(&c, "ui.connectors.gmail.status", json!({}))["configured"], false);
+    let g = ok(&c, "ui.connectors.gmail.setup", json!({"account": "me@example.com", "topic": "projects/p1/topics/t1", "push_token": "pt-literal", "client_id": "cid", "client_secret": "cs-literal", "refresh_token": "rt-literal", "port": 9099}));
+    assert_eq!((g["ok"].as_bool(), g["account"].as_str()), (Some(true), Some("me@example.com")), "{g}");
+    assert!(!user_config(&t).contains("cs-literal"), "credentials went to the vault");
+    let st = ok(&c, "ui.connectors.gmail.status", json!({}));
+    assert_eq!((st["account"].as_str(), st["serve"]["port"].as_u64()), (Some("me@example.com"), Some(9099)), "{st}");
+    assert!(err(&c, "ui.connectors.gmail.setup", json!({"account": "me@example.com", "topic": "bad"})).contains("topic"));
+    // Node setup code: the code, the command and a QR code.
+    let n = ok(&c, "ui.connectors.nodes.setup_code", json!({"url": "ws://127.0.0.1:8640/node", "ttl_min": 5}));
+    let code = n["code"].as_str().unwrap();
+    assert!(!code.is_empty() && n["command"].as_str().unwrap().ends_with(code), "{n}");
+    assert!(n["qr_svg"].as_str().is_some_and(|q| q.starts_with("<svg")), "{n}");
+    assert!(err(&c, "ui.connectors.nodes.setup_code", json!({"url": "http://x"})).contains("ws://"));
+    // MCP pins: diff and forget against the fixture.
+    let Some(fx) = fixture() else { return };
+    ok(&c, "ui.connectors.mcp.save", json!({"name": "pinned", "spec": {"transport": "stdio", "command": "python3", "args": ["-I", fx]}, "consent": true}));
+    ok(&c, "ui.connectors.mcp.test", json!({"name": "pinned"}));
+    let d = ok(&c, "ui.connectors.mcp.pins.diff", json!({"name": "pinned"}));
+    assert!(d["pinned"].as_u64().unwrap() >= 5 && d["changes"].as_array().unwrap().is_empty(), "{d}");
+    assert_eq!(ok(&c, "ui.connectors.mcp.pins.forget", json!({"name": "pinned"}))["had_pins"], true);
+    assert!(seagent_plugin::pins::load(&t.paths.data).servers.get("pinned").is_none_or(|p| p.is_empty()), "forgotten; the next load pins afresh");
+}
+
+/// A webhook listener saved without a token starts once a subscription secures it; until
+/// then the reload says why it is not listening.
+#[test]
+fn a_live_listener_starts_after_its_subscription() {
+    let t = kit();
+    let c = ctx(&t);
+    let live = crate::ops::connectors_live::Live::new(t.k.clone(), t.paths.clone(), t.ws.clone(), Some(empty_ext(&t)));
+    let port = free_port();
+    let r = chan(&t, "ui.connectors.channels.save", json!({"name": "hooks", "kind": "webhook", "fields": {"listen": format!("127.0.0.1:{port}")}})).unwrap();
+    assert!(r["checked"].as_str().unwrap().contains("subscription"), "{r}");
+    let r = live.reload_channels().unwrap();
+    assert_eq!(r["applied"], false, "{r}");
+    assert!(live.channel_error("hooks").unwrap().contains("token"), "{r}");
+    ok(&c, "ui.connectors.webhooks.subscribe", json!({"channel": "hooks", "route": "deploys"}));
+    let r = live.reload_channels().unwrap();
+    assert_eq!(r["applied"], true, "{r}");
+    assert!(std::net::TcpStream::connect(("127.0.0.1", port)).is_ok(), "the listener is up without a restart");
+    // A typo in a listener is caught at save, on a throwaway port.
+    let e = chan(&t, "ui.connectors.channels.save", json!({"name": "bad", "kind": "webhook", "fields": {"listen": format!("127.0.0.1:{port}"), "token": "tok"}, "extra": [{"key": "lisen", "value": "x"}]})).unwrap_err().1;
+    assert!(e.contains("lisen"), "{e}");
 }

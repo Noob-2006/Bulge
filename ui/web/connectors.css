@@ -33,3 +33,7 @@
 @media (max-width: 720px) {
   .cn-body table.kv { display: block; overflow-x: auto; max-width: 100%; }
 }
+.cn-banner { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 6px 0 10px; }
+.cn-qr { display: flex; flex-wrap: wrap; gap: 14px; align-items: flex-start; }
+.cn-qrimg { background: #fff; padding: 8px; border-radius: 6px; width: 220px; max-width: 100%; }
+.cn-qrimg svg { width: 100%; height: auto; display: block; }

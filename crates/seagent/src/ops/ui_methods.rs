@@ -151,7 +151,7 @@ pub fn call(c: &UiCtx, m: &str, p: &Value) -> Option<Res> {
         // ── skills ──
         "ui.skills.list" => Ok(skills_list(c, &ws)),
         "ui.skills.get" => skill_get(c, &ws, &s("name")),
-        "ui.skills.toggle" => skill_toggle(c, &s("name"), p["enabled"].as_bool().unwrap_or(true)),
+        "ui.skills.toggle" => skill_toggle(&c.paths, &s("name"), p["enabled"].as_bool().unwrap_or(true)),
         "ui.skills.workshop.list" => Ok(workshop_list(c)),
         "ui.skills.workshop.save" => workshop_save(c, &ws, &s("name"), &s("description"), p["body"].as_str().unwrap_or("")),
         "ui.skills.workshop.delete" => workshop_delete(c, &s("name")),
@@ -511,7 +511,9 @@ fn channels(c: &UiCtx, ws: &Path) -> Res {
             "name": name,
             "kind": kind,
             "enabled": t.get("enabled").and_then(|v| v.as_bool()).unwrap_or(true),
-            "running": c.live.channels.contains_key(name),
+            "running": c.live.channels.contains_key(name) && crate::ext::channel_states().lock().unwrap_or_else(|e| e.into_inner()).get(name).is_none_or(|st| st.0),
+            // What the poll loop last reported when it failed (a rejected token, a dead socket).
+            "error": crate::ext::channel_states().lock().unwrap_or_else(|e| e.into_inner()).get(name).filter(|st| !st.0).map(|st| st.1.clone()),
             "dm_policy": t.get("dm_policy").and_then(|v| v.as_str()).unwrap_or("pairing"),
             "group_policy": t.get("group_policy").and_then(|v| v.as_str()).unwrap_or(""),
             "allow": str_list(t, "allow"),
@@ -568,11 +570,11 @@ fn skill_get(c: &UiCtx, ws: &Path, name: &str) -> Res {
 }
 
 /// `[skills] disabled` add/remove.
-fn skill_toggle(c: &UiCtx, name: &str, enabled: bool) -> Res {
+pub(crate) fn skill_toggle(paths: &Paths, name: &str, enabled: bool) -> Res {
     if !seagent_skills::skill::valid_name(name.rsplit('/').next().unwrap_or(name)) && !name.contains(':') {
         return Err(bad(format!("`{name}` is not a skill name")));
     }
-    let text = std::fs::read_to_string(c.paths.user_config()).unwrap_or_default();
+    let text = std::fs::read_to_string(paths.user_config()).unwrap_or_default();
     let t: toml::Table = text.parse().map_err(|e| fail(format!("config does not parse: {e}")))?;
     let mut list = t.get("skills").and_then(|s| s.get("disabled")).and_then(|v| v.as_array()).cloned().unwrap_or_default();
     list.retain(|v| v.as_str() != Some(name));
@@ -580,7 +582,7 @@ fn skill_toggle(c: &UiCtx, name: &str, enabled: bool) -> Res {
         list.push(toml::Value::String(name.into()));
     }
     let new = crate::ops::confcli::edited_text(&text, "skills.disabled", Some(toml::Value::Array(list))).map_err(fail)?;
-    crate::ops::confcli::write_validated(&c.paths, &new, true).map_err(fail)?;
+    crate::ops::confcli::write_validated(paths, &new, true).map_err(fail)?;
     Ok(json!({"name": name, "enabled": enabled}))
 }
 

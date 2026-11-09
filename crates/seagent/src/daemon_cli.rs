@@ -155,8 +155,10 @@ pub(crate) fn run(a: &Args, embedded: Option<&Embedded>) -> R {
     // scheduled backups and report schedules. Without `[ha]` the daemon leads at once;
     // with it they start on every lease win and stop when the lease is lost, so two
     // nodes never both answer a chat message or send the same report.
+    // Settings → Connections applies channel and MCP changes to this daemon live.
+    let live = ops::connectors_live::install(c.k.clone(), paths.clone(), c.workspace.clone(), ext_arc.clone());
     {
-        let (k, ext, ws, paths2, surf, stop) = (c.k.clone(), ext_arc.clone(), c.workspace.clone(), paths.clone(), surfaces.clone(), stop.clone());
+        let (k, ws, paths2, surf, stop) = (c.k.clone(), c.workspace.clone(), paths.clone(), surfaces.clone(), stop.clone());
         let term: std::sync::Mutex<Option<seagent_core::Cancel>> = std::sync::Mutex::new(None);
         d.on_leadership(Box::new(move |leader| {
             if let Some(t) = term.lock().unwrap().take() {
@@ -166,12 +168,9 @@ pub(crate) fn run(a: &Args, embedded: Option<&Embedded>) -> R {
                 return;
             }
             let t = stop.child();
-            let loops = match &ext {
-                Some(e) => ext::spawn_channel_loops(k.clone(), e, ws.clone(), t.clone()),
-                None => vec![],
-            };
-            if !loops.is_empty() {
-                eprintln!("seagentd: {} channel(s) active", loops.len());
+            let n = live.start_channels(t.clone());
+            if n > 0 {
+                eprintln!("seagentd: {n} channel(s) active");
             }
             crate::hooks_ext::start_daemon_services(&k, &ws, t.clone());
             ops::backup::spawn_scheduler(paths2.clone(), k.cfg.backup.clone(), t.clone());
@@ -207,7 +206,7 @@ pub(crate) fn run(a: &Args, embedded: Option<&Embedded>) -> R {
             return Err("[app] token references a secret that is not set (seagent secrets set APP_TOKEN …)".into());
         }
         let mut host: Vec<String> = seagent_app::node::METHODS.iter().map(|s| s.to_string()).collect();
-        host.extend(HOST_METHODS.iter().chain(ops::ui_methods::METHODS).chain(ops::webui::METHODS).chain(ops::dock::METHODS).chain(ops::connectors::METHODS).chain(ops::channels_setup::METHODS).map(|s| s.to_string()));
+        host.extend(HOST_METHODS.iter().chain(ops::ui_methods::METHODS).chain(ops::webui::METHODS).chain(ops::dock::METHODS).chain(ops::connectors::METHODS).chain(ops::connectors_extra::METHODS).chain(ops::channels_setup::METHODS).map(|s| s.to_string()));
         host.extend(seagent_app::surfaces::METHODS.iter().map(|s| s.to_string()));
         host.extend(seagent_kernel::cluster::METHODS.iter().chain(seagent_app::devices::METHODS).chain(ops::lan::METHODS).map(|s| s.to_string()));
         // MCP event deliveries arrive as signed webhooks and are queued into the subscribing session.

@@ -68,6 +68,8 @@ pub mod partial;
 pub mod recap;
 pub mod webui;
 pub mod connectors;
+pub mod connectors_live;
+pub mod connectors_extra;
 pub mod channels_setup;
 pub mod toolcfg;
 pub mod docker;

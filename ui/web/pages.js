@@ -64,7 +64,7 @@ const PAGES = {
     const [c, pair] = await Promise.all([call('ui.channels'), call('pairing.list').catch(() => ({ pending: [], approved: [] }))]);
     let h = '<table class="kv"><tr><th>啟用</th><th>名稱</th><th>類型</th><th>狀態</th><th>私訊政策</th><th>允許</th><th>管理員</th><th>憑證</th></tr>';
     for (const ch of c.channels) {
-      h += row([`<input type="checkbox" data-enable="${v(ch.name)}"${ch.enabled === false ? '' : ' checked'}${ch.plugin ? ' disabled' : ''}>`, v(ch.name), v(ch.kind), ch.running ? '執行中' : ch.enabled === false ? '停用' : '未執行',
+      h += row([`<input type="checkbox" data-enable="${v(ch.name)}"${ch.enabled === false ? '' : ' checked'}${ch.plugin ? ' disabled' : ''}>`, v(ch.name), v(ch.kind), ch.error ? `<span class="bad">錯誤：${v(ch.error)}</span>` : ch.running ? '執行中' : ch.enabled === false ? '停用' : '未執行',
         `<select data-ch="${v(ch.name)}">${['pairing', 'allowlist', 'open', 'disabled'].map((p) => `<option${p === ch.dm_policy ? ' selected' : ''}>${p}</option>`).join('')}</select>`,
         v((ch.allow || []).join(', ') || '—'), v((ch.admins || []).join(', ') || '—'), v((ch.credentials || []).join(', ') || '—')]);
     }

@@ -340,18 +340,27 @@ fn doctor(c: &Ctx) -> i32 {
 /// the built-in scan and `before_install` hooks. Installed packs start disabled.
 fn install(a: &Args, c: &Ctx) -> Result<i32, String> {
     let src = PathBuf::from(a.need(1, "dir")?).canonicalize().map_err(|e| format!("source: {e}"))?;
-    let pack: Pack = hx::read_pack(&src, "managed")?;
-    let scan = hx::builtin_scan(&src);
-    if scan["critical"].as_u64().unwrap_or(0) > 0 && !a.flag("yes") {
-        for f in scan["findings"].as_array().into_iter().flatten().filter(|f| f["severity"] == "critical") {
-            println!("✗ {}:{} {} ({})", f["file"].as_str().unwrap_or(""), f["line"], f["message"].as_str().unwrap_or(""), f["rule_id"].as_str().unwrap_or(""));
-        }
-        return Err("built-in scan found critical issues; re-run with --yes to install anyway".into());
+    let msg = install_pack(c, &src, a.flag("link"), a.flag("yes"), &|| crate::build_agent_for_hooks(a))?;
+    println!("{msg}");
+    Ok(0)
+}
+
+/// `seagent hooks install <dir>` and the Connections page's upload: built-in scan, then the
+/// `before_install` hooks of `kernel()` (the CLI builds one, the daemon passes its own), then
+/// copy (or link) into the hooks dir, disabled until enabled.
+fn install_pack(c: &Ctx, src: &Path, link: bool, yes: bool, kernel: &dyn Fn() -> Result<seagent_kernel::kernel::Kernel, String>) -> Result<String, String> {
+    let pack: Pack = hx::read_pack(src, "managed")?;
+    let scan = hx::builtin_scan(src);
+    if scan["critical"].as_u64().unwrap_or(0) > 0 && !yes {
+        let found: Vec<String> = scan["findings"].as_array().into_iter().flatten().filter(|f| f["severity"] == "critical").map(|f| format!("✗ {}:{} {} ({})", f["file"].as_str().unwrap_or(""), f["line"], f["message"].as_str().unwrap_or(""), f["rule_id"].as_str().unwrap_or(""))).collect();
+        return Err(format!("{}
+built-in scan found critical issues; re-run with --yes to install anyway", found.join("
+")));
     }
     // before_install hooks (shell, packs, plugins) get the final say.
-    let built = crate::build_agent_for_hooks(a)?;
+    let built = kernel()?;
     let dest = hx::hooks_dir(&c.paths).join(&pack.name);
-    hx::before_install(&built, "hook", &pack.name, &src, if dest.exists() { "update" } else { "install" }, &scan).map_err(|e| format!("install blocked by {e}"))?;
+    hx::before_install(&built, "hook", &pack.name, src, if dest.exists() { "update" } else { "install" }, &scan).map_err(|e| format!("install blocked by {e}"))?;
     if dest.exists() || std::fs::symlink_metadata(&dest).is_ok() {
         if std::fs::symlink_metadata(&dest).is_ok_and(|m| m.file_type().is_symlink()) {
             std::fs::remove_file(&dest).map_err(|e| e.to_string())?;
@@ -360,13 +369,52 @@ fn install(a: &Args, c: &Ctx) -> Result<i32, String> {
         }
     }
     std::fs::create_dir_all(hx::hooks_dir(&c.paths)).map_err(|e| e.to_string())?;
-    if a.flag("link") {
-        crate::ops::hostos::symlink(&src, &dest).map_err(|e| format!("link: {e}"))?;
+    if link {
+        crate::ops::hostos::symlink(src, &dest).map_err(|e| format!("link: {e}"))?;
     } else {
-        copy_dir(&src, &dest)?;
+        copy_dir(src, &dest)?;
     }
-    println!("installed hook pack {} → {} (disabled; enable with `seagent hooks enable {}`)", pack.name, dest.display(), pack.name);
-    Ok(0)
+    Ok(format!("installed hook pack {} → {} (disabled; enable with `seagent hooks enable {}`)", pack.name, dest.display(), pack.name))
+}
+
+/// The Connections page's hooks tab: the same operations as `seagent hooks list | approve |
+/// revoke | enable | disable | install`, on `paths` / `ws` instead of the process environment.
+pub fn gui(paths: &Paths, ws: &Path, op: &str, p: &Value, kernel: &dyn Fn() -> Result<seagent_kernel::kernel::Kernel, String>) -> Result<Value, String> {
+    let cfg = Config::load(Some(&paths.user_config()), Some(&project_config(ws)), &[])?;
+    let x = HooksExtra::parse(&cfg)?;
+    let c = Ctx { cfg, x, paths: paths.clone(), ws: ws.to_path_buf() };
+    let s = |k: &str| p[k].as_str().unwrap_or("").trim().to_string();
+    match op {
+        "list" => Ok(listing(&c)),
+        "approve" => {
+            let (all, target) = (p["all"].as_bool() == Some(true), s("command"));
+            let mut n = vec![];
+            for h in c.cfg.hooks.iter().filter(|h| all || h.command == target) {
+                hx::record_approval(&c.paths, &h.event.name(), &h.command)?;
+                n.push(format!("{} → {}", h.event.name(), h.command));
+            }
+            if n.is_empty() {
+                return Err(format!("no configured [[hooks]] command matches `{target}`"));
+            }
+            Ok(json!({"ok": true, "approved": n}))
+        }
+        "revoke" => Ok(json!({"ok": true, "removed": hx::revoke(&c.paths, &s("command"))?})),
+        "enable" => {
+            let name = s("name");
+            let known = BUNDLED.iter().any(|b| b.0 == name) || hx::discover_packs(&c.paths, &c.ws).0.iter().any(|p| p.name == name);
+            if !known {
+                return Err(format!("no hook named `{name}`"));
+            }
+            let on = p["enabled"].as_bool().unwrap_or(true);
+            hx::set_enabled(&c.paths, &name, on)?;
+            Ok(json!({"ok": true, "name": name, "enabled": on}))
+        }
+        "install" => {
+            let src = PathBuf::from(s("dir"));
+            Ok(json!({"ok": true, "text": install_pack(&c, &src, false, p["yes"].as_bool() == Some(true), kernel)?}))
+        }
+        other => Err(format!("unknown hooks operation `{other}`")),
+    }
 }
 
 fn copy_dir(src: &Path, dst: &Path) -> Result<(), String> {

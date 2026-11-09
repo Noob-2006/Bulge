@@ -3,7 +3,8 @@
 // plugins (`seagent plugins …`), chat channels (`seagent channel add|test`), webhooks
 // (`seagent webhook …`), ACP agents and A2A peers — set up from forms.
 // Backed by `ui.connectors.*` (crates/seagent/src/ops/connectors.rs, ops/channels_setup.rs)
-// plus the existing ui.skills.* / ui.plugins* / ui.mcp.set / ui.channels.set / pairing.* methods.
+// plus the existing ui.skills.* / ui.plugins* / pairing.* / ui.devices methods. Writes apply to the running
+// daemon where they can (`applied`), otherwise the page offers the one-click restart.
 // Uses app.js globals (S, $, esc, LANG, showView) and pages.js ones (PAGES, EXTRA_PAGES,
 // openPage, note, act, NOTE). Wrapped in a function so its names never collide with theirs.
 'use strict';
@@ -20,11 +21,22 @@
   const CN = { tab: 'mcp', form: null, view: null, results: {}, importRows: null, importSrc: null, presetQ: '', skillQ: '', skillHits: null, pluginHits: null, market: null, chanKind: '' };
   const TABS = [
     ['mcp', 'MCP 伺服器', 'MCP servers'], ['skills', '技能', 'Skills'], ['plugins', '外掛', 'Plugins'], ['channels', '聊天頻道', 'Chat channels'],
-    ['webhooks', 'Webhook', 'Webhooks'], ['agents', '代理（ACP／A2A）', 'Agents (ACP / A2A)'], ['devices', '裝置', 'Devices'],
+    ['webhooks', 'Webhook', 'Webhooks'], ['hooks', 'Hooks／Gmail', 'Hooks / Gmail'], ['agents', '代理（ACP／A2A）', 'Agents (ACP / A2A)'], ['devices', '裝置', 'Devices'],
   ];
   const reopen = () => openPage('connections');
   const light = (st) => `<span class="light ${st === 'running' || st === true ? 'ok' : st === 'error' ? 'crit' : st === 'restart' || st === 'lazy' ? 'warn' : ''}" title="${E(st)}"></span>`;
-  const RESTART = () => L('已儲存。重新啟動 daemon 後生效（或新開的對話）。', 'Saved. Applies when the daemon restarts (and in new conversations).');
+  // What happened to the last write: applied to the running daemon now, or waiting for a restart.
+  let LAST = null;
+  const RESTART = (r) => {
+    r = r && typeof r === 'object' ? r : LAST;
+    if (r && r.applied === true) return L('已儲存並套用到執行中的 daemon。', 'Saved and applied to the running daemon.');
+    const why = r && (r.why || (r.live && r.live.why));
+    if (r && r.restart) return L('已儲存；這項變更要重新啟動 daemon 才生效', 'Saved; this change applies after a daemon restart') + (why ? ` (${why})` : '') + L('。按上方的「重新啟動 daemon」。', '. Use “Restart daemon” above.');
+    if (r && r.applied === false && why) return L('已儲存，但還沒啟動：', 'Saved, but not running yet: ') + why;
+    return L('已儲存。', 'Saved.');
+  };
+  // Stdio consent: the exact line `seagent mcp add` prints, confirmed before anything runs.
+  const consentOk = (r, verb) => confirm(L('這會讓 SE Agent 在這台電腦執行以下程式：', 'This lets SE Agent run this program on this machine:') + '\n\n' + r.consent + (r.warning ? '\n\n⚠ ' + r.warning : '') + '\n\n' + verb);
   const btn = (label, data, cls) => `<button class="btn ${cls || 'ghost'} small" ${data}>${E(label)}</button>`;
   const field = (label, input, hint) => `<label class="cn-field"><span>${E(label)}</span>${input}${hint ? `<small class="dim">${E(hint)}</small>` : ''}</label>`;
   const text = (id, val, ph, type) => `<input type="${type || 'text'}" id="${id}" value="${E(val)}" placeholder="${E(ph || '')}" autocomplete="off" spellcheck="false">`;
@@ -40,6 +52,7 @@
     try {
       const r = await fn();
       if (r && r.ok === false && r.error) { note(r.error, true); return r; }
+      if (r && (r.applied !== undefined || r.restart !== undefined)) LAST = r;
       if (okMsg) note(typeof okMsg === 'function' ? okMsg(r) : okMsg);
       return r;
     } catch (e) { note(e.message, true); return null; }
@@ -91,12 +104,13 @@
       const r = CN.results['mcp:' + s.name];
       return `<tr><td>${light(st)}</td><td><input type="checkbox" data-mcpon="${E(s.name)}"${s.enabled ? ' checked' : ''}${s.editable ? '' : ' disabled'}></td><td><strong>${E(s.name)}</strong>${s.auth === 'oauth' ? ` <span class="chip">${s.logged_in ? L('已登入', 'signed in') : L('需登入', 'sign-in needed')}</span>` : ''}${s.error ? `<div class="bad small">${E(s.error)}</div>` : ''}</td>
         <td>${E(s.transport)}</td><td class="mono cn-target" title="${E(s.target)}">${E(s.target)}</td><td>${s.live ? s.tools : '—'}</td>
-        <td class="cn-actions">${btn(L('測試並列出工具', 'Test & list tools'), `data-mcptest="${E(s.name)}"`)} ${s.editable ? btn(L('編輯', 'Edit'), `data-mcpedit="${E(s.name)}"`) : ''} ${s.auth === 'oauth' ? btn(s.logged_in ? L('重新登入', 'Sign in again') : L('登入', 'Sign in'), `data-mcplogin="${E(s.name)}"`) + (s.logged_in ? ' ' + btn(L('登出', 'Sign out'), `data-mcplogout="${E(s.name)}"`) : '') : ''} ${s.editable ? btn(L('移除', 'Remove'), `data-mcprm="${E(s.name)}"`) : ''}</td></tr>` + (r ? `<tr><td></td><td colspan="6">${mcpResult(s.name, r)}</td></tr>` : '');
+        <td class="cn-actions">${btn(L('測試並列出工具', 'Test & list tools'), `data-mcptest="${E(s.name)}"`)} ${s.editable ? btn(L('編輯', 'Edit'), `data-mcpedit="${E(s.name)}"`) : ''} ${btn(L('工具定義', 'Tool pins'), `data-mcppindiff="${E(s.name)}"`)} ${s.auth === 'oauth' ? btn(s.logged_in ? L('重新登入', 'Sign in again') : L('登入', 'Sign in'), `data-mcplogin="${E(s.name)}"`) + (s.logged_in ? ' ' + btn(L('登出', 'Sign out'), `data-mcplogout="${E(s.name)}"`) : '') : ''} ${s.editable ? btn(L('移除', 'Remove'), `data-mcprm="${E(s.name)}"`) : ''}</td></tr>` + (r ? `<tr><td></td><td colspan="6">${mcpResult(s.name, r)}</td></tr>` : '');
     }).join('') + '</table>' : `<p class="dim">${E(L('還沒有 MCP 伺服器。新增一個、從預設清單挑，或匯入其他工具的 mcp.json。', 'No MCP servers yet. Add one, pick a preset, or import another tool\'s mcp.json.'))}</p>`;
     for (const w of l.warnings || []) h += `<p class="bad small">${E(w)}</p>`;
     return h;
   }
   function mcpResult(name, r) {
+    if (r.pins) return `<div class="cn-res"><strong>${E(L('工具定義（rug-pull 防護）', 'Tool pins (rug-pull guard)'))}</strong> <span class="dim">${r.pins.pinned} ${E(L('個已釘選', 'pinned'))}</span>${r.pins.changes.length ? `<table class="kv">${r.pins.changes.map((c) => `<tr><td class="mono">${E(c.tool)}</td><td><span class="chip">${E(c.state)}</span></td><td><pre class="cp-pre">${E(JSON.stringify(c.now, null, 2))}</pre></td></tr>`).join('')}</table>` : `<p class="dim">${E(L('每個工具都和核准時一樣。', 'Every tool matches what was approved.'))}</p>`}<p>${btn(L('重新核准目前的定義', 'Re-approve current definitions'), `data-mcppins="${E(name)}"`)} ${btn(L('忘記釘選（下次載入重新釘選）', 'Forget pins (re-pinned on next load)'), `data-mcpforget="${E(name)}"`)}</p></div>`;
     if (r.login) return `<div class="cn-res"><p>${r.login.url ? `${E(L('在瀏覽器完成授權：', 'Finish signing in in the browser:'))} <a href="${E(r.login.url)}" target="_blank" rel="noopener">${E(L('開啟授權頁', 'Open the sign-in page'))}</a> <span class="dim">${E(L('（瀏覽器模式要在執行 SE Agent 的這台電腦上開啟）', '(browser mode: open it on the machine running SE Agent)'))}</span>` : ''}${r.login.user_code ? `${E(L('到', 'Go to'))} <a href="${E(r.login.verification_uri)}" target="_blank" rel="noopener">${E(r.login.verification_uri)}</a> ${E(L('輸入代碼', 'and enter'))} <strong class="mono">${E(r.login.user_code)}</strong>` : ''}</p><p class="dim">${E(L('狀態', 'State'))}: ${E(r.login.state)}${r.login.error ? ' · ' + E(r.login.error) : ''}</p>${btn(L('檢查狀態', 'Check status'), `data-mcploginpoll="${E(name)}"`)} ${btn(L('改用裝置代碼', 'Use a device code'), `data-mcplogindev="${E(name)}"`)}</div>`;
     if (r.ok === false) return resultBox(r);
     const tools = r.tools || [];
@@ -151,9 +165,20 @@
     one('[data-fcancel]').onclick = () => { CN.form = null; CN.formResult = null; reopen(); };
     one('[data-ftest]').onclick = async () => {
       const name = val('fName') || 'draft';
-      one('#fResult').innerHTML = `<span class="star spin"></span> ${E(L('連線中…（第一次執行 npx／uvx 可能要下載套件）', 'Connecting… (a first npx / uvx run may download the package)'))}`;
       const m = f.section === 'plugins' ? 'ui.connectors.plugins.process.test' : 'ui.connectors.mcp.test';
-      const r = await run(() => (f.section === 'plugins' ? rpc('ui.connectors.plugins.process.test', { name, spec: readSpec(f.section) }) : rpc('ui.connectors.mcp.test', { name, spec: readSpec(f.section) })));
+      const test = (q) => (f.section === 'plugins' ? rpc('ui.connectors.plugins.process.test', q) : rpc('ui.connectors.mcp.test', q));
+      const q = { name, spec: readSpec(f.section) };
+      // A stdio draft starts a program: the consent line first, the test only after "OK".
+      if (q.spec.transport === 'stdio') {
+        const c = await run(() => test(q));
+        if (c && c.consent_required) {
+          if (!consentOk(c, L('現在啟動它來測試？', 'Start it now to test?'))) { note(L('沒有執行任何程式', 'Nothing was run')); return; }
+          f.consented = c.consent;
+          q.consent = true;
+        } else if (c) { CN.formResult = c; one('#fResult').innerHTML = mcpResult(name, c); return; }
+      }
+      one('#fResult').innerHTML = `<span class="star spin"></span> ${E(L('連線中…', 'Connecting…'))}`;
+      const r = await run(() => test(q));
       CN.formResult = r || { ok: false, error: m + ' failed' };
       one('#fResult').innerHTML = f.section === 'plugins' ? resultBox(CN.formResult) + (CN.formResult.declares ? `<pre class="cp-pre">${E(JSON.stringify(CN.formResult.declares, null, 2))}</pre>` : '') : mcpResult(name, CN.formResult);
     };
@@ -163,11 +188,11 @@
       const save = (q) => (f.section === 'plugins' ? rpc('ui.connectors.plugins.process.save', q) : rpc('ui.connectors.mcp.save', q));
       let r = await run(() => save(p));
       if (r && r.consent_required) {
-        const msg = L('這會讓 SE Agent 在這台電腦執行以下程式：', 'This lets SE Agent run this program on this machine:') + '\n\n' + r.consent + (r.warning ? '\n\n⚠ ' + r.warning : '') + '\n\n' + L('確定要儲存？', 'Save it?');
-        if (!confirm(msg)) { note(L('未儲存', 'Not saved')); return; }
+        // Already confirmed for the test with the very same line: no second prompt.
+        if (f.consented !== r.consent && !consentOk(r, L('確定要儲存並啟動？', 'Save and start it?'))) { note(L('未儲存', 'Not saved')); return; }
         r = await run(() => save({ ...p, consent: true }));
       }
-      if (r && r.ok) { CN.form = null; CN.formResult = null; await reopen(); note(RESTART()); }
+      if (r && r.ok) { CN.form = null; CN.formResult = null; await reopen(); note(RESTART(r)); }
     };
   }
   async function presetsView() {
@@ -191,7 +216,7 @@
     bindForm();
     one('[data-mcpnew]').onclick = () => { CN.form = { section: 'mcp' }; CN.formResult = null; reopen(); };
     for (const b of all('[data-view]')) b.onclick = () => { CN.view = b.dataset.view || null; CN.importRows = null; reopen(); };
-    for (const c of all('[data-mcpon]')) c.onchange = () => run(() => rpc('ui.mcp.set', { name: c.dataset.mcpon, enabled: c.checked }), RESTART);
+    for (const c of all('[data-mcpon]')) c.onchange = () => run(() => rpc('ui.connectors.mcp.enable', { name: c.dataset.mcpon, enabled: c.checked }), RESTART);
     for (const b of all('[data-mcptest]')) b.onclick = async () => {
       b.disabled = true; b.textContent = L('連線中…', 'Connecting…');
       CN.results['mcp:' + b.dataset.mcptest] = (await run(() => rpc('ui.connectors.mcp.test', { name: b.dataset.mcptest }))) || { ok: false, error: L('呼叫失敗', 'call failed') };
@@ -203,6 +228,8 @@
     for (const b of all('[data-mcplogin]')) b.onclick = () => login(b.dataset.mcplogin, 'browser');
     for (const b of all('[data-mcplogindev]')) b.onclick = () => login(b.dataset.mcplogindev, 'device');
     for (const b of all('[data-mcploginpoll]')) b.onclick = async () => { const r = await run(() => rpc('ui.connectors.mcp.login.status', { name: b.dataset.mcploginpoll })); if (r) { CN.results['mcp:' + b.dataset.mcploginpoll] = r.state === 'done' ? null : { login: r }; await reopen(); if (r.state === 'done') note(L('已登入', 'Signed in')); } };
+    for (const b of all('[data-mcppindiff]')) b.onclick = async () => { const r = await run(() => rpc('ui.connectors.mcp.pins.diff', { name: b.dataset.mcppindiff })); if (r) { CN.results['mcp:' + b.dataset.mcppindiff] = { pins: r }; reopen(); } };
+    for (const b of all('[data-mcpforget]')) b.onclick = async () => { if (confirm(L('忘記這個伺服器的工具釘選？下次載入時會把當時的定義當成已核准。', 'Forget this server\'s tool pins? Whatever it serves on the next load becomes the approved version.')) && await run(() => rpc('ui.connectors.mcp.pins.forget', { name: b.dataset.mcpforget }), RESTART)) { CN.results['mcp:' + b.dataset.mcpforget] = null; reopen(); } };
     for (const b of all('[data-mcplogout]')) b.onclick = async () => { if (await run(() => rpc('ui.connectors.mcp.logout', { name: b.dataset.mcplogout }), L('已登出', 'Signed out'))) reopen(); };
     for (const b of all('[data-mcppins]')) b.onclick = async () => { if (await run(() => rpc('ui.connectors.mcp.pins.accept', { name: b.dataset.mcppins }), L('已重新核准', 'Re-approved'))) { CN.results['mcp:' + b.dataset.mcppins] = null; reopen(); } };
     for (const c of all('[data-mcptool]')) c.onchange = () => run(() => rpc('ui.connectors.mcp.tool', { name: c.dataset.mcptool, tool: c.dataset.tool, enabled: c.checked }), (r) => (r.enabled ? L('已啟用 ', 'Turned on ') : L('已停用 ', 'Turned off ')) + c.dataset.tool + ' — ' + RESTART());
@@ -244,11 +271,23 @@
       <div id="skResult">${resultBox(CN.skillResult)}</div></section>`;
     if (notInstalled.length) h += `<h3>${E(L('內建但尚未安裝', 'Bundled, not installed'))}</h3><table class="kv">${notInstalled.map((s) => `<tr><td><strong>${E(s.name)}</strong></td><td class="dim">${E(s.category || '')}</td><td>${E(s.description)}</td><td>${btn(L('安裝', 'Install'), `data-skid="${E(s.name)}"`, '')}</td></tr>`).join('')}</table>`;
     h += `<h3>${E(L('已安裝', 'Installed'))} <span class="dim">${list.length}</span></h3><input type="text" class="cp-filter" id="skFilter" placeholder="${E(L('篩選…', 'Filter…'))}">
-      <table class="kv cp-list"><tr><th>${E(L('啟用', 'On'))}</th><th>${E(L('名稱', 'Name'))}</th><th>${E(L('來源', 'Source'))}</th><th>${E(L('說明', 'Description'))}</th><th></th></tr>${list.map((s) => `<tr data-row="${E(s.name)}"><td><input type="checkbox" data-sktoggle="${E(s.name)}"${s.enabled ? ' checked' : ''}></td><td><strong>${E(s.name)}</strong></td><td class="dim">${E(s.source)}</td><td>${E(s.description)}</td><td class="cn-actions">${btn(L('檢視', 'View'), `data-skview="${E(s.name)}"`)} ${s.source === 'bundled' ? '' : btn(L('移除', 'Remove'), `data-skrm="${E(s.name)}" data-src="${E(s.source)}"`)}</td></tr>`).join('')}</table>
+      <table class="kv cp-list"><tr><th>${E(L('啟用', 'On'))}</th><th>${E(L('名稱', 'Name'))}</th><th>${E(L('來源', 'Source'))}</th><th>${E(L('說明', 'Description'))}</th><th></th></tr>${list.map((s) => `<tr data-row="${E(s.name)}"><td><input type="checkbox" data-sktoggle="${E(s.name)}"${s.enabled ? ' checked' : ''}></td><td><strong>${E(s.name)}</strong></td><td class="dim">${E(s.source)}</td><td>${E(s.description)}</td><td class="cn-actions">${btn(L('檢視', 'View'), `data-skview="${E(s.name)}"`)} ${btn(L('設定需求', 'Setup'), `data-sksetup="${E(s.name)}"`)} ${s.source === 'bundled' ? '' : btn(L('移除', 'Remove'), `data-skrm="${E(s.name)}" data-src="${E(s.source)}"`)}</td></tr>`).join('')}</table>
+      ${CN.skillSetup ? skillSetupBox(CN.skillSetup) : ''}
       <div class="cp-detail" id="skDetail">${CN.skillView ? `<h3>${E(CN.skillView.name)} <span class="dim">${E(CN.skillView.source)}</span></h3><pre class="cp-pre">${E(CN.skillView.body)}</pre>${CN.skillView.files.length ? `<p class="dim">${E(CN.skillView.files.join(', '))}</p>` : ''}` : ''}</div>`;
     return h;
   }
+  function skillSetupBox(s) {
+    return `<section class="cn-form" id="skSetup"><h3>${E(L('設定', 'Setup'))} ${E(s.name)} <span class="chip">${E(s.ready)}</span></h3>${s.env.length ? s.env.map((e) => field(`${e.name}${e.optional ? L('（選填）', ' (optional)') : ''}`, `<input type="password" data-skenv="${E(e.name)}" placeholder="${E(e.set ? L('已在金庫（留空＝不變）', 'in the vault (leave empty to keep)') : e.prompt)}" autocomplete="new-password">`, [e.help, e.required_for].filter(Boolean).join(' · '))).join('') + `<p class="dim">${E(L('值存進金庫，技能執行時才以環境變數提供。', 'Values go to the vault and reach the skill as environment variables when it runs.'))}</p><p>${btn(L('儲存到金庫', 'Save to the vault'), 'data-sksetupsave', '')} ${btn(L('關閉', 'Close'), 'data-sksetupclose')}</p>` : `<p class="dim">${E(L('這個技能不需要設定環境變數。', 'This skill needs no environment setup.'))}</p><p>${btn(L('關閉', 'Close'), 'data-sksetupclose')}</p>`}${s.remaining && s.remaining.length ? `<p class="bad">${E(L('仍缺：', 'Still missing: '))}${E(s.remaining.join(', '))}</p>` : ''}</section>`;
+  }
   function bindSkills() {
+    for (const b of all('[data-sksetup]')) b.onclick = async () => { const r = await run(() => rpc('ui.connectors.skills.setup', { name: b.dataset.sksetup })); if (r) { CN.skillSetup = r; reopen(); } };
+    if (one('[data-sksetupclose]')) one('[data-sksetupclose]').onclick = () => { CN.skillSetup = null; reopen(); };
+    if (one('[data-sksetupsave]')) one('[data-sksetupsave]').onclick = async () => {
+      const values = {};
+      for (const i of all('[data-skenv]')) if (i.value) values[i.dataset.skenv] = i.value;
+      const r = await run(() => rpc('ui.connectors.skills.setup.save', { name: CN.skillSetup.name, values }));
+      if (r) { CN.skillSetup = r; await reopen(); note(r.remaining.length ? L('仍缺：', 'Still missing: ') + r.remaining.join(', ') : L('已存進金庫；技能可以用了。', 'Stored in the vault; the skill is ready.'), r.remaining.length > 0); }
+    };
     // A failed call already put its error in the note; re-rendering would wipe it.
     const done = async (r) => { if (!r) { const x = one('#skResult'); if (x) x.innerHTML = ''; return; } CN.skillResult = r; await reopen(); if (r && r.ok) note(L('完成；新的對話會用到它。', 'Done; new conversations will use it.')); };
     const install = async (id) => { if (!id) { note(L('請填識別碼', 'Give an identifier'), true); return; } one('#skResult').innerHTML = '<span class="star spin"></span>'; const r = await run(() => rpc('ui.connectors.skills.install', { id, name: val('skName'), category: val('skCat'), force: checked('skForce') })); await done(r || null); };
@@ -273,7 +312,7 @@
     one('#skDir').onchange = (e) => upload([...e.target.files]);
     one('#skFile').onchange = (e) => upload([...e.target.files]);
     one('#skFilter').oninput = (e) => { const f = e.target.value.toLowerCase(); for (const r of all('tr[data-row]')) r.hidden = !r.textContent.toLowerCase().includes(f); };
-    for (const c of all('[data-sktoggle]')) c.onchange = () => run(() => rpc('ui.skills.toggle', { name: c.dataset.sktoggle, enabled: c.checked }), c.checked ? L('已啟用', 'Enabled') : L('已停用', 'Disabled'));
+    for (const c of all('[data-sktoggle]')) c.onchange = () => run(() => rpc('ui.connectors.skills.enable', { name: c.dataset.sktoggle, enabled: c.checked }), RESTART);
     for (const b of all('[data-skview]')) b.onclick = async () => { const s = await run(() => rpc('ui.skills.get', { name: b.dataset.skview })); if (s) { CN.skillView = s; reopen(); } };
     for (const b of all('[data-skrm]')) b.onclick = async () => {
       const n = b.dataset.skrm;
@@ -295,7 +334,8 @@
       <p>${text('plQ', '', L('搜尋目錄與 ClawHub', 'Search the catalog and ClawHub'))} ${btn(L('搜尋', 'Search'), 'data-plsearch')} ${text('plMkt', '', L('市集：路徑、網址或 owner/repo', 'Marketplace: path, URL or owner/repo'))} ${btn(L('瀏覽市集', 'Browse marketplace'), 'data-plmkt')}</p>
       ${CN.pluginHits ? `<table class="kv">${CN.pluginHits.map((x) => `<tr><td class="mono">${E(x.name)}</td><td><span class="chip">${E(x.source || x.family || '')}</span></td><td class="dim">${E(x.description)}</td><td>${btn(L('安裝', 'Install'), `data-plid="${E(x.install || x.name)}"`, '')}</td></tr>`).join('') || `<tr><td class="dim">${E(L('沒有結果', 'No results'))}</td></tr>`}</table>` : ''}
       <div id="plResult">${resultBox(CN.pluginResult)}</div></section>
-      <p class="cn-bar">${btn(L('＋ 新增程序外掛（[plugins.*]）', '+ Add a process plugin ([plugins.*])'), 'data-plnew', '')}</p>`;
+      <p class="cn-bar">${btn(L('＋ 新增程序外掛（[plugins.*]）', '+ Add a process plugin ([plugins.*])'), 'data-plnew', '')} ${btn(L('外掛的 MCP 目錄', 'Plugin MCP catalog'), 'data-plmcps')}</p>`;
+    if (CN.pluginMcps) h += `<section class="cn-form"><h3>${E(L('可選的 MCP 伺服器（plugins mcps）', 'Optional MCP servers (plugins mcps)'))}</h3><p>${text('plMcpQ', CN.pluginMcpQ || '', L('篩選', 'Filter'))} ${btn(L('關閉', 'Close'), 'data-plmcpsclose')}</p><table class="kv">${CN.pluginMcps.map((m) => `<tr><td><strong>${E(m.name)}</strong></td><td><span class="chip">${E(m.transport)}</span>${m.auth ? ` <span class="chip">${E(m.auth)}</span>` : ''}</td><td class="dim">${E(m.description)}</td><td class="mono small">${E(m.url || [m.command].concat(m.args || []).join(' '))}</td><td>${btn(L('加入', 'Add'), `data-plmcpadd="${E(m.name)}"`, '')}</td></tr>`).join('') || `<tr><td class="dim">${E(L('沒有符合的項目', 'Nothing matches'))}</td></tr>`}</table></section>`;
     if (CN.form && CN.form.section === 'plugins') h += mcpForm(CN.form);
     h += list.length ? `<table class="kv cn-table"><tr><th>${E(L('啟用', 'On'))}</th><th>${E(L('外掛', 'Plugin'))}</th><th>${E(L('版本', 'Version'))}</th><th>${E(L('來源', 'Source'))}</th><th>${E(L('工具', 'Tools'))}</th><th>${E(L('說明', 'Description'))}</th><th></th></tr>${list.map((x) => `<tr><td><input type="checkbox" data-plon="${E(x.name)}"${x.enabled ? ' checked' : ''}></td><td><strong>${E(x.name)}</strong></td><td>${E(x.version || '—')}</td><td class="dim">${E(x.source)}</td><td>${x.tools || 0}</td><td class="dim">${E(x.description)}</td>
       <td class="cn-actions">${btn(L('詳情', 'Details'), `data-plinspect="${E(x.name)}"`)} ${x.source === 'process' ? btn(L('測試', 'Test'), `data-pltest="${E(x.name)}"`) + ' ' + btn(L('編輯', 'Edit'), `data-pledit="${E(x.name)}"`) + ' ' + btn(L('移除', 'Remove'), `data-plprm="${E(x.name)}"`) : x.source === 'builtin' ? '' : btn(L('更新', 'Update'), `data-plup="${E(x.name)}"`) + ' ' + btn(L('解除安裝', 'Uninstall'), `data-plrm="${E(x.name)}"`)}</td></tr>${CN.results['pl:' + x.name] ? `<tr><td></td><td colspan="6">${resultBox(CN.results['pl:' + x.name])}${CN.results['pl:' + x.name].declares || CN.results['pl:' + x.name].detail ? `<pre class="cp-pre">${E(JSON.stringify(CN.results['pl:' + x.name].declares || CN.results['pl:' + x.name].detail, null, 2))}</pre>` : ''}</td></tr>` : ''}`).join('')}</table>` : `<p class="dim">${E(L('沒有外掛。', 'No plugins.'))}</p>`;
@@ -310,10 +350,18 @@
     one('[data-plsearch]').onclick = async () => { const r = await run(() => rpc('ui.connectors.plugins.search', { q: val('plQ') })); CN.pluginHits = r || []; reopen(); };
     one('[data-plmkt]').onclick = async () => { const r = await run(() => rpc('ui.connectors.plugins.marketplace', { source: val('plMkt') })); if (r) { CN.pluginHits = (r.plugins || []).map((x) => ({ ...x, source: r.name, install: `${x.name}@${r.name}` })); reopen(); } };
     for (const b of all('[data-plid]')) b.onclick = () => install(b.dataset.plid);
-    for (const c of all('[data-plon]')) c.onchange = () => run(() => rpc('ui.plugins.set', { name: c.dataset.plon, enabled: c.checked }), (r) => r.message || RESTART());
+    for (const c of all('[data-plon]')) c.onchange = () => run(() => rpc('ui.plugins.set', { name: c.dataset.plon, enabled: c.checked }), () => RESTART({ restart: true, why: L('外掛在 daemon 啟動時載入', 'plugins load when the daemon starts') }));
     for (const b of all('[data-plinspect]')) b.onclick = async () => { const r = await run(() => rpc('ui.connectors.plugins.inspect', { name: b.dataset.plinspect })); if (r) { CN.results['pl:' + b.dataset.plinspect] = { ok: true, detail: r }; reopen(); } };
     for (const b of all('[data-plup]')) b.onclick = async () => done(await run(() => rpc('ui.connectors.plugins.update', { name: b.dataset.plup })));
     for (const b of all('[data-plrm]')) b.onclick = async () => { if (confirm(L(`解除安裝 ${b.dataset.plrm}？`, `Uninstall ${b.dataset.plrm}?`))) done(await run(() => rpc('ui.connectors.plugins.uninstall', { name: b.dataset.plrm }))); };
+    one('[data-plmcps]').onclick = async () => { CN.pluginMcps = (await run(() => rpc('ui.connectors.plugins.mcps', { q: CN.pluginMcpQ || '' }))) || []; reopen(); };
+    if (one('[data-plmcpsclose]')) one('[data-plmcpsclose]').onclick = () => { CN.pluginMcps = null; reopen(); };
+    if (one('#plMcpQ')) one('#plMcpQ').onkeydown = async (e) => { if (e.key === 'Enter') { CN.pluginMcpQ = e.target.value.trim(); CN.pluginMcps = (await run(() => rpc('ui.connectors.plugins.mcps', { q: CN.pluginMcpQ }))) || []; reopen(); } };
+    for (const b of all('[data-plmcpadd]')) b.onclick = async () => {
+      let r = await run(() => rpc('ui.connectors.plugins.mcp.install', { name: b.dataset.plmcpadd }));
+      if (r && r.consent_required) { if (!consentOk(r, L('加入並啟動？', 'Add and start it?'))) { note(L('未加入', 'Not added')); return; } r = await run(() => rpc('ui.connectors.plugins.mcp.install', { name: b.dataset.plmcpadd, consent: true })); }
+      if (r && r.ok) { CN.pluginMcps = null; CN.tab = 'mcp'; await reopen(); note((r.text || '') + ' — ' + RESTART(r)); }
+    };
     one('[data-plnew]').onclick = () => { CN.form = { section: 'plugins' }; CN.formResult = null; reopen(); };
     for (const b of all('[data-pltest]')) b.onclick = async () => { b.textContent = L('啟動中…', 'Starting…'); CN.results['pl:' + b.dataset.pltest] = (await run(() => rpc('ui.connectors.plugins.process.test', { name: b.dataset.pltest }))) || { ok: false, error: 'failed' }; reopen(); };
     for (const b of all('[data-pledit]')) b.onclick = async () => { const s = await run(() => rpc('ui.connectors.plugins.process.get', { name: b.dataset.pledit })); if (s) { CN.form = { section: 'plugins', name: s.name, original: s.name, spec: s }; CN.formResult = null; reopen(); } };
@@ -379,7 +427,7 @@
       const r = await run(() => rpc('ui.connectors.channels.save', p));
       if (r && r.ok) { CN.chanForm = null; await reopen(); note((r.checked === 'built' ? L('設定已通過平台模組驗證。', 'The platform module accepted the settings. ') : '') + RESTART()); }
     };
-    for (const c of all('[data-chon]')) c.onchange = () => run(() => rpc('ui.channels.set', { name: c.dataset.chon, key: 'enabled', value: String(c.checked) }), RESTART);
+    for (const c of all('[data-chon]')) c.onchange = () => run(() => rpc('ui.connectors.channels.enable', { name: c.dataset.chon, enabled: c.checked }), RESTART);
     for (const b of all('[data-chtest]')) b.onclick = async () => {
       let chat = b.dataset.chat;
       if (!chat) { chat = (prompt(L('傳到哪個聊天？', 'Send to which chat?') + (b.dataset.hint ? `\n(${b.dataset.hint})` : '')) || '').trim(); if (!chat) return; }
@@ -460,17 +508,69 @@
     for (const b of all('[data-peerrm]')) b.onclick = async () => { if (confirm(L(`移除 peer ${b.dataset.peerrm}？`, `Remove peer ${b.dataset.peerrm}?`)) && await run(() => rpc('ui.connectors.a2a.peer.remove', { name: b.dataset.peerrm }))) reopen(); };
   }
 
+  // ───────────────────────── hooks / Gmail ─────────────────────────
+  async function hooksTab() {
+    const [h, g] = await Promise.all([rpc('ui.connectors.hooks.list'), rpc('ui.connectors.gmail.status').catch((e) => ({ error: e.message }))]);
+    const sw = (data, on) => `<input type="checkbox" ${data}${on ? ' checked' : ''}>`;
+    let out = `<h3>${E(L('Shell hooks（[[hooks]]，第一次使用要同意）', 'Shell hooks ([[hooks]], first use needs consent)'))}</h3>`;
+    out += (h.shell || []).length ? `<table class="kv"><tr><th>${E(L('事件', 'Event'))}</th><th>${E(L('指令', 'Command'))}</th><th>${E(L('同意', 'Consent'))}</th><th></th></tr>${h.shell.map((x) => `<tr><td>${E(x.event)}</td><td class="mono small">${E(x.command)}</td><td>${E(x.consent)}</td><td class="cn-actions">${x.consent === 'approved' ? btn(L('撤銷', 'Revoke'), `data-hkrevoke="${E(x.command)}"`) : btn(L('同意', 'Approve'), `data-hkapprove="${E(x.command)}"`, '')}</td></tr>`).join('')}</table>` : `<p class="dim">${E(L('沒有 shell hook。', 'No shell hooks.'))}</p>`;
+    out += `<h3>${E(L('內建 hooks', 'Bundled hooks'))}</h3><table class="kv">${(h.bundled || []).map((x) => `<tr><td>${sw(`data-hkon="${E(x.name)}"`, x.enabled)}</td><td><strong>${E(x.name)}</strong></td><td class="dim">${E(x.events)}</td><td>${E(x.description)}</td></tr>`).join('')}</table>`;
+    out += `<h3>${E(L('Hook 套件', 'Hook packs'))}</h3>${(h.packs || []).length ? `<table class="kv">${h.packs.map((x) => `<tr><td>${sw(`data-hkon="${E(x.name)}"`, x.enabled)}</td><td><strong>${E(x.name)}</strong> <span class="chip">${E(x.source)}</span></td><td class="dim">${E((x.events || []).join(', '))}</td><td>${E(x.description)}</td></tr>`).join('')}</table>` : `<p class="dim">${E(L('沒有安裝 hook 套件。', 'No hook packs installed.'))}</p>`}
+      <p>${E(L('安裝套件（含 HOOK.md 的資料夾）：', 'Install a pack (a folder with HOOK.md):'))} <label class="btn ghost small">${E(L('選資料夾…', 'Folder…'))}<input type="file" id="hkDir" webkitdirectory multiple hidden></label> <span class="dim">${E(L('先經內建掃描與 before_install hooks；裝好後預設停用。', 'Goes through the built-in scan and before_install hooks; installed disabled.'))}</span></p>`;
+    out += `<h3>Gmail</h3>`;
+    if (g && g.account) out += `<p>${light(g.error ? 'error' : g.enabled ? 'running' : '')} ${E(g.account)} · ${E(g.label || '')} · <span class="mono small">${E(g.topic || '')}</span>${g.error ? ` <span class="bad">${E(g.error)}</span>` : ''}</p><p class="dim">push: http://${E((g.serve || {}).bind)}:${E((g.serve || {}).port)}${E((g.serve || {}).path)} · ${E(g.historyId ? 'history ' + g.historyId : L('尚未開始', 'not seeded yet'))}</p><p><label class="cn-inline">${sw('id="gmOn"', g.enabled)} ${E(L('啟用', 'Enabled'))}</label> ${btn(L('立即建立 watch', 'Watch now'), 'data-gmwatch')} ${btn(L('清除游標', 'Reset cursor'), 'data-gmreset')}</p>`;
+    else out += `<p class="dim">${E(L('收到新郵件時讓 SE Agent 處理：Gmail watch 經 Google Pub/Sub 推送到這台機器。', 'Let SE Agent handle new mail: a Gmail watch pushes through Google Pub/Sub to this machine.'))}</p>`;
+    out += `<details${g && g.account ? '' : ' open'}><summary>${E(g && g.account ? L('修改 Gmail 設定', 'Change the Gmail setup') : L('設定 Gmail', 'Set up Gmail'))}</summary>
+      ${field(L('Gmail 帳號', 'Gmail account'), text('gmAccount', (g && g.account) || '', 'me@gmail.com'))}
+      ${field(L('Pub/Sub 主題', 'Pub/Sub topic'), text('gmTopic', (g && g.topic) || '', 'projects/<project>/topics/<topic>'))}
+      <div class="cn-row">${field(L('標籤', 'Label'), text('gmLabel', (g && g.label) || 'INBOX', 'INBOX'))}${field(L('訂閱名稱（選填）', 'Subscription (optional)'), text('gmSub', (g && g.subscription) || '', ''))}</div>
+      <div class="cn-row">${field(L('聽取位址', 'Bind'), text('gmBind', ((g && g.serve) || {}).bind || '127.0.0.1', ''))}${field(L('埠', 'Port'), text('gmPort', ((g && g.serve) || {}).port || '8788', '', 'number'))}${field(L('路徑', 'Path'), text('gmPath', ((g && g.serve) || {}).path || '/gmail-pubsub', ''))}</div>
+      <h4>${E(L('憑證（存進金庫）', 'Credentials (stored in the vault)'))}</h4>
+      ${['push_token', 'client_id', 'client_secret', 'refresh_token', 'access_token'].map((k) => field(k, `<input type="password" data-gm="${k}" placeholder="${E(g && g.account ? L('留空＝不變', 'leave empty to keep') : '')}" autocomplete="new-password">`)).join('')}
+      <p class="dim">${E(L('OAuth：client_id + client_secret + refresh_token，或一個 access_token。', 'OAuth: client_id + client_secret + refresh_token, or one access_token.'))}</p>
+      <p>${btn(L('儲存 Gmail 設定', 'Save the Gmail setup'), 'data-gmsave', '')}</p></details>`;
+    return out;
+  }
+  function bindHooks() {
+    for (const b of all('[data-hkapprove]')) b.onclick = async () => { if (await run(() => rpc('ui.connectors.hooks.approve', { command: b.dataset.hkapprove }), RESTART)) reopen(); };
+    for (const b of all('[data-hkrevoke]')) b.onclick = async () => { if (confirm(L('撤銷這個 hook 的同意？', 'Revoke consent for this hook?')) && await run(() => rpc('ui.connectors.hooks.revoke', { command: b.dataset.hkrevoke }), RESTART)) reopen(); };
+    for (const c of all('[data-hkon]')) c.onchange = () => run(() => rpc('ui.connectors.hooks.enable', { name: c.dataset.hkon, enabled: c.checked }), RESTART);
+    one('#hkDir').onchange = async (e) => {
+      const files = [...e.target.files];
+      if (!files.length) return;
+      try {
+        const list = [];
+        for (const f of files) list.push({ path: f.webkitRelativePath || f.name, data: await fileB64(f) });
+        const r = await run(() => rpc('ui.connectors.hooks.install', { files: list }));
+        if (r) { await reopen(); note(r.text + ' — ' + RESTART(r)); }
+      } catch (err) { note(err.message, true); }
+    };
+    if (one('#gmOn')) one('#gmOn').onchange = (e) => run(() => rpc('ui.connectors.gmail.enable', { enabled: e.target.checked }), RESTART);
+    if (one('[data-gmwatch]')) one('[data-gmwatch]').onclick = () => run(() => rpc('ui.connectors.gmail.watch'), (r) => (r.historyId ? 'history ' + r.historyId : r.text || 'ok'));
+    if (one('[data-gmreset]')) one('[data-gmreset]').onclick = () => run(() => rpc('ui.connectors.gmail.reset'), (r) => r.text);
+    one('[data-gmsave]').onclick = async () => {
+      const p = { account: val('gmAccount'), topic: val('gmTopic'), label: val('gmLabel'), subscription: val('gmSub'), bind: val('gmBind'), port: val('gmPort'), path: val('gmPath') };
+      for (const i of all('[data-gm]')) if (i.value) p[i.dataset.gm] = i.value;
+      const r = await run(() => rpc('ui.connectors.gmail.setup', p));
+      if (r) { await reopen(); note(L('Gmail 已設定：', 'Gmail set up: ') + (r.pushEndpoint || '') + ' — ' + RESTART(r)); }
+    };
+  }
+
   // ───────────────────────── devices ─────────────────────────
   async function devicesTab() {
     return `<p>${E(L('手機、平板與其他電腦用 QR 碼或配對碼加入：區域網路配對、指紋比對與撤銷都在「裝置」頁。節點（seagent node）的核准也在那裡。', 'Phones, tablets and other computers join with a QR code or pairing code: LAN pairing, fingerprint checks and revoking live on the Devices view, as do node approvals (seagent node).'))}</p>
-      <p>${btn(L('開啟裝置頁（配對裝置）', 'Open Devices (pair a device)'), 'data-godev', '')} ${btn(L('節點與配對請求', 'Nodes and pairing requests'), 'data-gonodes')}</p>`;
+      <p>${btn(L('開啟裝置頁（配對裝置）', 'Open Devices (pair a device)'), 'data-godev', '')} ${btn(L('節點與配對請求', 'Nodes and pairing requests'), 'data-gonodes')}</p>
+      <h3>${E(L('節點設定碼（seagent node）', 'Node setup code (seagent node)'))}</h3><p class="dim">${E(L('讓另一台電腦以節點身分加入：產生一次性設定碼，在那台電腦執行顯示的指令或掃 QR 碼。', 'Let another computer join as a node: make a one-time code, then run the shown command on it or scan the QR code.'))}</p>
+      <div class="cn-row">${text('ncUrl', '', L('網址（選填；預設用區域網路位址）', 'URL (optional; LAN address by default)'))} ${text('ncTtl', '10', L('有效分鐘', 'valid minutes'), 'number')} ${btn(L('產生設定碼', 'Make a setup code'), 'data-ncmake', '')}</div>
+      ${CN.setupCode ? `<div class="cn-res ok cn-qr">${CN.setupCode.qr_svg ? `<div class="cn-qrimg">${CN.setupCode.qr_svg}</div>` : ''}<div><p>${E(L('在那台電腦上執行：', 'On the other computer run:'))}</p><pre class="cp-pre">${E(CN.setupCode.command)}</pre><p class="dim">${E(L('單次使用，', 'Single use, valid '))}${CN.setupCode.ttl_min} ${E(L('分鐘內有效。', 'minutes.'))} ${E(CN.setupCode.url || '')}</p>${CN.setupCode.nodes_enabled ? '' : `<p class="bad">${E(L('[app] nodes = false：App Server 目前不接受節點。', '[app] nodes = false: the app server does not accept nodes yet.'))}</p>`}</div></div>` : ''}`;
   }
   function bindDevices() {
     one('[data-godev]').onclick = () => showView('devices');
     one('[data-gonodes]').onclick = () => openPage('devices');
+    one('[data-ncmake]').onclick = async () => { const r = await run(() => rpc('ui.connectors.nodes.setup_code', { url: val('ncUrl'), ttl_min: +val('ncTtl') || 10 })); if (r) { CN.setupCode = r; reopen(); } };
   }
 
-  const RENDER = { mcp: [mcpTab, bindMcp], skills: [skillsTab, bindSkills], plugins: [pluginsTab, bindPlugins], channels: [channelsTab, bindChannels], webhooks: [webhooksTab, bindWebhooks], agents: [agentsTab, bindAgents], devices: [devicesTab, bindDevices] };
+  const RENDER = { mcp: [mcpTab, bindMcp], skills: [skillsTab, bindSkills], plugins: [pluginsTab, bindPlugins], channels: [channelsTab, bindChannels], webhooks: [webhooksTab, bindWebhooks], hooks: [hooksTab, bindHooks], agents: [agentsTab, bindAgents], devices: [devicesTab, bindDevices] };
 
   PAGES.connections = {
     get title() { return L('連線', 'Connections'); },
@@ -479,12 +579,21 @@
       const tab = RENDER[CN.tab] ? CN.tab : 'mcp';
       let body;
       try { body = await RENDER[tab][0](); } catch (e) { body = `<p class="bad">${E(e.message)}</p>`; }
+      const ov = await rpc('ui.connectors.overview').catch(() => null);
+      const pend = (ov && ov.pending_restart) || [];
+      const banner = pend.length ? `<div class="cn-res bad cn-banner"><strong>${E(L('需要重新啟動 daemon 才生效：', 'A daemon restart applies: '))}</strong> ${pend.map((x) => `${E(x.kind)} <span class="dim">(${E(x.why)})</span>`).join(' · ')} ${btn(L('重新啟動 daemon', 'Restart daemon'), 'data-cnrestart', '')}</div>` : '';
       return `<p class="dim">${E(L('技能、MCP、外掛、聊天頻道與其他連線都在這裡設定，不需要終端機。每次寫入都會先驗證並備份設定檔（「設定檔」頁可還原）。', 'Skills, MCP, plugins, chat channels and every other connection are set up here — no terminal needed. Every write is validated and the config is backed up first (restore it on the Config page).'))}</p>
         <nav class="cn-tabs" role="tablist">${TABS.map(([id, zh, en]) => `<button class="btn ${id === tab ? '' : 'ghost'} small" role="tab" aria-selected="${id === tab}" data-cntab="${id}">${E(L(zh, en))}</button>`).join('')}</nav>
-        ${NOTE}<div class="cn-body" data-tab="${tab}">${body}</div>`;
+        ${banner}${NOTE}<div class="cn-body" data-tab="${tab}">${body}</div>`;
     },
     after() {
       for (const b of all('[data-cntab]')) b.onclick = () => { CN.tab = b.dataset.cntab; CN.form = null; CN.view = null; reopen(); };
+      const rb = one('[data-cnrestart]');
+      if (rb) rb.onclick = async () => {
+        if (!confirm(L('重新啟動 daemon？執行中的對話先跑完（最多 30 秒），之後自動恢復。', 'Restart the daemon? Running turns get up to 30 s to finish, then resume after the restart.'))) return;
+        const r = await run(() => rpc('ui.connectors.restart', { drain_secs: 30 }));
+        if (r) { note(r.text); rb.disabled = true; setTimeout(() => reopen(), 8000); }
+      };
       const tab = RENDER[CN.tab] ? CN.tab : 'mcp';
       try { RENDER[tab][1](); } catch (e) { note(e.message, true); }
     },
