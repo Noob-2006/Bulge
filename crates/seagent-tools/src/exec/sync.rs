@@ -193,14 +193,14 @@ impl WorkspaceSync {
             }
             if m.file_type().is_symlink() {
                 let target = fs::read_link(path).map_err(|e| format!("readlink {}: {e}", path.display()))?;
-                tar.symlink(rel, &target.to_string_lossy(), mtime_of(&m).0);
+                tar.symlink(rel, &target.to_string_lossy(), mtime_of(m).0);
             } else {
                 rep.bytes += m.len();
                 if rep.bytes > self.opts.max_push_bytes {
                     return Err(format!("workspace sync: more than {} bytes changed; refusing to upload (exclude large dirs or raise the limit)", self.opts.max_push_bytes));
                 }
                 let data = fs::read(path).map_err(|e| format!("read {}: {e}", path.display()))?;
-                tar.file(rel, &data, mode_of(&m) & 0o7777, mtime_of(&m).0);
+                tar.file(rel, &data, mode_of(m) & 0o7777, mtime_of(m).0);
             }
             rep.uploaded += 1;
         }

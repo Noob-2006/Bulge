@@ -582,6 +582,8 @@ impl Broker {
                 let Ok(stream) = conn else { continue };
                 let _ = stream.set_read_timeout(Some(Duration::from_secs(300)));
                 let ctx = ctx.clone();
+                // `()` on Unix (the socket's 0600 mode is the check), a token on Windows.
+                #[allow(clippy::let_unit_value)]
                 let listener_auth = listener.auth();
                 std::thread::spawn(move || {
                     let mut writer = match stream.try_clone() {

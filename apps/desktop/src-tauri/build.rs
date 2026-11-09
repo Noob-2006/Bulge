@@ -23,7 +23,8 @@ fn main() {
     let target = std::env::var("TARGET").unwrap_or_default();
     if target.contains("apple-ios") {
         let _ = std::fs::create_dir_all("wasi-tools");
-        if !Path::new("wasi-tools/tools.json").is_file() {
+        // Only a real app build (on a Mac) needs them; a cross type-check elsewhere skips quietly.
+        if cfg!(target_os = "macos") && !Path::new("wasi-tools/tools.json").is_file() {
             println!("cargo:warning=src-tauri/wasi-tools has no tools.json: the app would have no shell commands; run scripts/prepare-ios.sh");
         }
     }

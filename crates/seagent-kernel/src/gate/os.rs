@@ -235,10 +235,8 @@ pub fn windows_privileged(c: &Simple) -> Option<String> {
             let ops = win_operands(c);
             // copy-style commands only write their destination (the last operand).
             let writes = |p: &&str| !matches!(n.as_str(), "copy-item" | "cpi" | "copy" | "xcopy" | "robocopy" | "move-item" | "mi" | "move") || ops.last() == Some(p);
-            match ops.iter().find(|a| windows_system_path(a) && writes(a)) {
-                Some(p) => format!("`{}` modifies system path {p}", shown),
-                None => return None,
-            }
+            let p = ops.iter().find(|a| windows_system_path(a) && writes(a))?;
+            format!("`{}` modifies system path {p}", shown)
         }
         _ => return None,
     };
@@ -263,11 +261,11 @@ pub fn macos_privileged(c: &Simple) -> Option<String> {
         "dscl" if args.iter().any(|a| matches!(*a, "-create" | "-delete" | "-passwd" | "-append" | "-merge" | "-change")) => "`dscl` changes system accounts".into(),
         "sysadminctl" | "dseditgroup" | "createhomedir" if !args.is_empty() => format!("`{n}` changes system accounts"),
         "softwareupdate" if args.iter().any(|a| matches!(*a, "-i" | "--install" | "-a" | "--all" | "--schedule" | "--install-rosetta" | "--background")) => "`softwareupdate` installs system updates".into(),
-        "installer" if args.iter().any(|a| *a == "-pkg") => "`installer` modifies system packages".into(),
+        "installer" if args.contains(&"-pkg") => "`installer` modifies system packages".into(),
         "tmutil" if matches!(sub, "disable" | "delete" | "deletelocalsnapshots" | "thinlocalsnapshots" | "setdestination" | "removedestination" | "disablelocal") => format!("`tmutil {sub}` changes Time Machine backups"),
         "pfctl" if args.iter().any(|a| a.starts_with("-e") || a.starts_with("-d") || a.starts_with("-f") || a.starts_with("-F")) => "`pfctl` changes the firewall".into(),
         "socketfilterfw" if args.iter().any(|a| a.starts_with("--set") || a.starts_with("--add") || a.starts_with("--remove")) => "`socketfilterfw` changes the firewall".into(),
-        "scutil" if args.iter().any(|a| *a == "--set") => "`scutil --set` changes system names".into(),
+        "scutil" if args.contains(&"--set") => "`scutil --set` changes system names".into(),
         "networksetup" if args.iter().any(|a| a.starts_with("-set") || a.starts_with("-add") || a.starts_with("-remove") || a.starts_with("-create") || a.starts_with("-delete")) => "`networksetup` changes network configuration".into(),
         "defaults" if matches!(sub, "write" | "delete") && args.iter().any(|a| a.starts_with("/Library/")) => "`defaults` changes machine-wide preferences".into(),
         _ => return None,

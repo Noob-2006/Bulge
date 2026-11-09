@@ -20,7 +20,8 @@
 //! (on Linux nothing else here is used, and the Windows builders only on Windows: the `allow`).
 
 #![cfg_attr(not(any(target_os = "macos", windows, target_os = "android", target_os = "ios")), allow(dead_code, unused_imports))]
-#![cfg_attr(not(windows), allow(dead_code))]
+// (the Linux case is covered by the line above; one `allow` per target keeps clippy quiet)
+#![cfg_attr(any(target_os = "macos", target_os = "android", target_os = "ios"), allow(dead_code))]
 
 use crate::ops::service::Issue;
 #[cfg(any(target_os = "macos", windows, target_os = "android", target_os = "ios"))]
