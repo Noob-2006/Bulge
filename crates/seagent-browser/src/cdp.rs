@@ -110,7 +110,14 @@ impl Conn {
         if on {
             self.0.fast.fetch_add(1, Ordering::SeqCst);
         } else {
-            let _ = self.0.fast.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1));
+            // Never below zero (an unbalanced call must not wrap around).
+            let mut n = self.0.fast.load(Ordering::SeqCst);
+            while n > 0 {
+                match self.0.fast.compare_exchange(n, n - 1, Ordering::SeqCst, Ordering::SeqCst) {
+                    Ok(_) => break,
+                    Err(cur) => n = cur,
+                }
+            }
         }
     }
 
