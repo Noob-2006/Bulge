@@ -1220,7 +1220,8 @@ mod tests {
         let home = seagent_core::tmp::TempDir::new("seagent-live-desk");
         let a = app(home.path());
         let data = home.path().join("data");
-        let desk = seagent_browser::control::screen::Desktop::new(&data);
+        let mut desk = seagent_browser::control::screen::Desktop::new(&data);
+        desk.geometry = "1920x1080".into();
         #[cfg(windows)]
         if seagent_browser::control::screen_windows::desktop_names().iter().any(|n| n == "seagent-default") {
             eprintln!("skipping: a seagent Bot Desktop (seagent-default) already runs on this window station");
@@ -1244,12 +1245,12 @@ mod tests {
         let url = format!("data:text/html;charset=utf-8,{}", seagent_net::urlencode(&html));
         let profile = home.path().join("edge-profile");
         // InPrivate / incognito: never a signed-in profile (no account details in a frame).
-        let args = [format!("--user-data-dir={}", profile.display()), "--inprivate".into(), "--incognito".into(), "--no-first-run".into(), "--no-default-browser-check".into(), "--window-position=0,0".into(), "--window-size=1400,900".into(), format!("--app={url}")];
+        let args = [format!("--user-data-dir={}", profile.display()), "--inprivate".into(), "--incognito".into(), "--no-first-run".into(), "--no-default-browser-check".into(), "--window-position=0,0".into(), "--window-size=1900,1040".into(), format!("--app={url}")];
         // SEAGENT_LIVE_EXTRA_ARGS: extra browser flags (space separated), e.g. software compositing.
         let args: Vec<String> = std::env::var("SEAGENT_LIVE_EXTRA_ARGS").unwrap_or_default().split_whitespace().map(String::from).chain(args).collect();
         #[cfg(windows)]
         let pid = {
-            let q = seagent_browser::control::screen_windows::WinDesktop::new(&data, "default", "1440x900").qualified();
+            let q = seagent_browser::control::screen_windows::WinDesktop::new(&data, "default", "1920x1080").qualified();
             let line = std::iter::once(format!("\"{}\"", exe.display())).chain(args.iter().map(|a| format!("\"{a}\""))).collect::<Vec<_>>().join(" ");
             seagent_browser::control::screen_windows::spawn_on_desktop(&q, &line).unwrap()
         };
@@ -1524,7 +1525,7 @@ mod tests {
         #[cfg(windows)]
         let pid = {
             let ps = "Add-Type -AssemblyName System.Windows.Forms,System.Drawing; $f=New-Object Windows.Forms.Form; $f.Text='seagent editor'; $f.StartPosition='Manual'; $f.Left=40; $f.Top=30; $f.Width=1600; $f.Height=980; $t=New-Object Windows.Forms.TextBox; $t.Multiline=$true; $t.ScrollBars='Vertical'; $t.Dock='Fill'; $t.Font=New-Object Drawing.Font('Consolas',11); $f.Controls.Add($t); $script:n=0; $tm=New-Object Windows.Forms.Timer; $tm.Interval=15; $tm.Add_Tick({ $script:n++; $t.AppendText(('{0:D6}  the quick brown fox jumps over the lazy dog 0123456789 - pack my box with five dozen liquor jugs  {1}' -f $script:n, [DateTime]::Now.ToString('HH:mm:ss.fff')) + [Environment]::NewLine) }); $tm.Start(); [Windows.Forms.Application]::Run($f)";
-            let q = seagent_browser::control::screen_windows::WinDesktop::new(&data, "default", "1440x900").qualified();
+            let q = seagent_browser::control::screen_windows::WinDesktop::new(&data, "default", "1920x1080").qualified();
             let line = format!("powershell.exe -NoProfile -NonInteractive -Command \"{}\"", ps.replace('"', "\\\""));
             seagent_browser::control::screen_windows::spawn_on_desktop_flags(&q, &line, 0x0800_0000).unwrap()
         };
