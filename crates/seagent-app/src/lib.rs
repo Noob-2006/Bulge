@@ -32,6 +32,7 @@ pub mod cron_fire;
 pub mod dashboard_auth;
 pub mod devices;
 pub mod lan;
+pub mod live_view;
 pub mod node;
 pub mod openai;
 pub mod qr;

@@ -112,7 +112,7 @@ impl Target {
     }
 }
 
-fn target(c: &Ctx, p: &Value) -> Result<Target, (i64, String)> {
+pub(crate) fn target(c: &Ctx, p: &Value) -> Result<Target, (i64, String)> {
     match s(p, "target") {
         None | Some("host") => Ok(Target::Host),
         Some(t) => {
@@ -292,7 +292,7 @@ pub fn call(c: &Ctx, method: &str, p: &Value) -> R {
     }
 }
 
-fn with_app<T>(app: &App, f: impl FnOnce(&Ctx) -> T) -> T {
+pub(crate) fn with_app<T>(app: &App, f: impl FnOnce(&Ctx) -> T) -> T {
     let home = app.d.k.paths.data.clone();
     let k = &app.d.k.cfg;
     let cfg = BrowserConfig::parse(&crate::computer::browser_table(&k.browser, &k.computer_use, &k.desktop_vm)).unwrap_or_default();

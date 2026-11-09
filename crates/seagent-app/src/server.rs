@@ -244,7 +244,7 @@ impl App {
     }
 
     /// Browsers send Origin on WebSocket upgrades: only our own page (or listed origins) may connect.
-    fn origin_ok(&self, r: &Request) -> bool {
+    pub(crate) fn origin_ok(&self, r: &Request) -> bool {
         match r.header("origin") {
             None => true,
             Some(o) => exposure::origin_allowed(o, r.header("host").unwrap_or(""), &self.cfg.allow_origins),
@@ -293,7 +293,7 @@ impl App {
             return Response::json(429, &json!({"error": "too many requests"}).to_string()).with_header("retry-after", "60");
         }
         // A page on another site must not even learn whether a credential is present.
-        if r.path == "/arp" && r.is_upgrade() && !self.origin_ok(&r) {
+        if (r.path == "/arp" || r.path == crate::live_view::ROUTE) && r.is_upgrade() && !self.origin_ok(&r) {
             return Response::text(403, "origin not allowed");
         }
         match (r.method.as_str(), path.as_str()) {
@@ -384,6 +384,9 @@ impl App {
                     return forbidden_msg(&e);
                 }
                 self.audit_request(&p, "view.http", "allow", json!({"http": r.method, "path": r.path}));
+                if r.path == crate::live_view::ROUTE {
+                    return crate::live_view::upgrade(self, &r, p);
+                }
                 crate::browser_view::handle(self, &r)
             }
             ("POST", "/arp") => {
@@ -695,7 +698,7 @@ fn forbidden_msg(msg: &str) -> Response {
     Response::json(403, &json!({"error": msg}).to_string())
 }
 
-fn accept_with_protocol(mut s: TcpStream, head: &str, rest: Vec<u8>, proto: &str) -> std::io::Result<WebSocket<TcpStream>> {
+pub(crate) fn accept_with_protocol(mut s: TcpStream, head: &str, rest: Vec<u8>, proto: &str) -> std::io::Result<WebSocket<TcpStream>> {
     use std::io::Write;
     let key = seagent_net::ws::header(head, "sec-websocket-key").ok_or_else(|| std::io::Error::other("missing key"))?;
     write!(s, "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: {}\r\nSec-WebSocket-Protocol: {proto}\r\n\r\n", seagent_net::ws::accept_key(key))?;

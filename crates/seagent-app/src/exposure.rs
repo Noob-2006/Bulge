@@ -392,7 +392,7 @@ pub fn required_scope_http(method: &str, path: &str) -> Scope {
     if let Some(rest) = path.strip_prefix("/view/") {
         return match rest {
             _ if rest.starts_with("vm/") => Scope::Admin,
-            _ if get && (rest.starts_with("browser/frame") || rest.starts_with("browser/list") || rest.starts_with("desktop/state") || rest.starts_with("desktop/list")) => Scope::Read,
+            _ if get && (rest == "live" || rest.starts_with("browser/frame") || rest.starts_with("browser/list") || rest.starts_with("desktop/state") || rest.starts_with("desktop/list")) => Scope::Read,
             _ => Scope::Write,
         };
     }

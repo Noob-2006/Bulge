@@ -23,6 +23,7 @@ pub mod keys;
 pub mod launch;
 pub mod launch_os;
 pub mod lease;
+pub mod live;
 pub mod manager;
 pub mod openclaw;
 pub mod policy;

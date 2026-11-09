@@ -520,21 +520,41 @@ impl DesktopVms {
 
     fn with_qmp<T>(&self, name: &str, f: impl FnOnce(&mut qmp::Qmp) -> Result<T, String>) -> Result<T, String> {
         valid_name(name)?;
+        let r = self.with_qmp_quiet(name, f);
+        if self.is_running(name) {
+            self.touch(name);
+        }
+        r
+    }
+
+    /// [`Self::with_qmp`] without touching the idle clock (a console watching the screen must
+    /// not keep an otherwise idle VM alive).
+    fn with_qmp_quiet<T>(&self, name: &str, f: impl FnOnce(&mut qmp::Qmp) -> Result<T, String>) -> Result<T, String> {
+        valid_name(name)?;
         if !self.is_running(name) {
             return Err(format!("desktop VM `{name}` is not running (start it with `seagent vm desktop start {name}` or view.vm.start)"));
         }
         let l = qmp_lock(&self.qmp_path(name));
         let _g = l.lock().unwrap();
         let mut q = qmp::Qmp::connect(&self.qmp_path(name), Duration::from_secs(10))?;
-        let r = f(&mut q);
-        self.touch(name);
-        r
+        f(&mut q)
     }
 
     /// The VM's screen as PNG bytes.
     pub fn screenshot(&self, name: &str) -> Result<Vec<u8>, String> {
+        valid_name(name)?;
+        let png = self.peek(name);
+        if self.is_running(name) {
+            self.touch(name);
+        }
+        png
+    }
+
+    /// [`Self::screenshot`] for the console's live stream: does not count as use, so watching
+    /// never keeps an idle VM from being stopped.
+    pub fn peek(&self, name: &str) -> Result<Vec<u8>, String> {
         let tmp = self.run_dir(name).join(format!("frame-{}.png", seagent_net::crypto::hex(&seagent_net::crypto::sha256(format!("{:?}{}", std::thread::current().id(), now_s()).as_bytes()))[..10].to_owned()));
-        let png = self.with_qmp(name, |q| q.screendump_png(&tmp))?;
+        let png = self.with_qmp_quiet(name, |q| q.screendump_png(&tmp))?;
         if let Some((w, h)) = qmp::png_size(&png) {
             let _ = std::fs::write(self.run_dir(name).join("screen"), format!("{w}x{h}"));
         }

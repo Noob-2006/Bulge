@@ -9,6 +9,7 @@ pub mod container;
 pub mod daytona;
 pub mod process;
 pub mod hints;
+pub mod live;
 pub mod local;
 #[cfg(unix)]
 mod local_unix;
@@ -669,6 +670,8 @@ pub fn spawn_tool(ctx: &seagent_core::ToolCtx, req: &ExecRequest, elevated: bool
     let backend = backend_tool(ctx, elevated)?;
     backend.before_exec()?;
     let child = backend.spawn(req).map_err(|e| format!("{}: {e}", backend.id()))?;
+    // The console's live terminal (a no-op unless someone watches).
+    let child = live::tee(child, &ctx.session_id, backend.id(), &req.script);
     Ok((backend, child))
 }
 
