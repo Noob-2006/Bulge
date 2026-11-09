@@ -6,6 +6,8 @@
     }
   },
   "bundle": {
+    "externalBin": [],
+    "resources": [],
     "iOS": {
       "minimumSystemVersion": "14.0"
     }
