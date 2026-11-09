@@ -53,8 +53,15 @@ impl Opts {
     }
     /// Shortest gap between two acks.
     pub fn min_gap(&self) -> Duration {
-        Duration::from_millis(1000 / u64::from(self.fps.max(1)))
+        frame_gap(self.fps)
     }
+}
+
+/// The interval between frames for a chosen rate. The choice is a floor ("at least 30 fps"),
+/// so streams are paced 10 % faster than it: timer jitter and a busy machine then still land
+/// on or above the number the viewer picked instead of just below it.
+pub fn frame_gap(fps: u32) -> Duration {
+    Duration::from_micros(10_000_000 / (u64::from(fps.max(1)) * 11))
 }
 
 /// One screencast frame.
@@ -477,8 +484,9 @@ mod tests {
         let o = Opts { max_width: 99_999, max_height: 1, quality: 200, fps: 0 }.clamped();
         assert_eq!(o, Opts { max_width: 3840, max_height: 160, quality: 95, fps: 1 });
         assert_eq!(Opts::default(), Opts { max_width: 1920, max_height: 1080, quality: 85, fps: 30 }, "crisp by default");
-        assert_eq!(Opts { fps: 10, ..Default::default() }.min_gap(), Duration::from_millis(100));
-        assert_eq!(Opts { fps: 500, ..Default::default() }.clamped().min_gap(), Duration::from_millis(16), "up to 60 fps");
+        assert_eq!(Opts { fps: 10, ..Default::default() }.min_gap(), Duration::from_micros(90_909), "10 % headroom over the chosen rate");
+        assert_eq!(Opts { fps: 500, ..Default::default() }.clamped().min_gap(), frame_gap(60), "up to 60 fps");
+        assert_eq!(frame_gap(30).as_micros(), 30_303, "30 fps chosen: paced at 33");
     }
 
     #[test]

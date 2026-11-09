@@ -67,7 +67,7 @@ pub struct Pace {
 
 impl Pace {
     pub fn new(fps: u32) -> Pace {
-        let min = Duration::from_millis(1000 / u64::from(fps.clamp(1, seagent_browser::live::MAX_FPS)));
+        let min = seagent_browser::live::frame_gap(fps.clamp(1, seagent_browser::live::MAX_FPS));
         Pace { min, max: Duration::from_secs(1).max(min), interval: min }
     }
     pub fn set_fps(&mut self, fps: u32) {
@@ -928,16 +928,16 @@ mod tests {
     #[test]
     fn pace_caps_fps_and_backs_off_when_still() {
         let mut p = Pace::new(5);
-        assert_eq!(p.min, Duration::from_millis(200));
-        assert_eq!(p.after(Duration::from_millis(50), true), Duration::from_millis(150), "fps cap: 200 ms per frame");
+        let m = seagent_browser::live::frame_gap(5);
+        assert_eq!(p.min, m, "5 fps chosen: paced with the 10 % headroom");
+        assert_eq!(p.after(Duration::from_millis(50), true), m - Duration::from_millis(50), "fps cap");
         // Nothing changes: back off ×1.5 up to 1 s.
-        let waits: Vec<u128> = (0..6).map(|_| p.after(Duration::ZERO, false).as_millis()).collect();
-        assert_eq!(waits, [300, 450, 675, 1000, 1000, 1000]);
-        assert_eq!(p.after(Duration::ZERO, true), Duration::from_millis(200), "a change resets the rate");
+        let waits: Vec<Duration> = (0..6).map(|_| p.after(Duration::ZERO, false)).collect();
+        assert_eq!(waits, [m * 3 / 2, m * 9 / 4, m * 27 / 8, m * 81 / 16, Duration::from_secs(1), Duration::from_secs(1)]);
+        assert_eq!(p.after(Duration::ZERO, true), m, "a change resets the rate");
         // A capture that takes 400 ms: back to back, no extra rest.
         assert_eq!(p.after(Duration::from_millis(400), true), Duration::ZERO);
-        assert_eq!(Pace::new(1000).min, Duration::from_millis(16), "capped at 60 fps");
-        assert_eq!(Pace::new(30).min, Duration::from_millis(33));
+        assert_eq!(Pace::new(1000).min, seagent_browser::live::frame_gap(60), "capped at 60 fps");
     }
 
     #[test]
@@ -1252,7 +1252,7 @@ mod tests {
                 pct(50), pct(95), bytes as f64 / 1024.0 / secs, bytes as f64 / 1024.0 / f64::from(frames.max(1)), cpu_me / secs * 100.0, cpu_br / secs * 100.0
             );
             std::fs::write(out.join(format!("live-text-{want}fps.jpg")), &last).unwrap();
-            assert!(fps >= f64::from(want) * 0.5 && fps <= f64::from(want) * 1.1, "{want} fps asked, {fps:.1} delivered");
+            assert!(fps >= f64::from(want) * 0.5 && fps <= f64::from(want) * 1.2, "{want} fps asked, {fps:.1} delivered");
             assert_eq!(w, 1280, "frames at the tab's full device-pixel width, not capped");
             drop(ws);
             std::thread::sleep(Duration::from_millis(300));
