@@ -9,7 +9,10 @@
 //! control by switching to the default desktop; the browser keeps running on the isolated
 //! desktop throughout, and its CDP screenshots work whether or not it is the active desktop.
 //! [`WinDesktop::screenshot`] additionally grabs the desktop's framebuffer through GDI for the
-//! full-desktop computer_use path (black until the desktop has been active at least once).
+//! full-desktop computer_use path and the console's live view. While the desktop is not the
+//! active one its framebuffer is black, so the picture is then composed from its windows
+//! instead: each visible top-level window renders itself (`PrintWindow`, full content) and is
+//! placed bottom-to-top at its position — the visible desktop is never switched.
 //!
 //! A keep-alive process (an idle Windows PowerShell pinned to the desktop with `lpDesktop`)
 //! holds the desktop object open independently of any daemon, the way the Linux launcher
@@ -152,10 +155,10 @@ impl WinDesktop {
         Ok(())
     }
 
-    /// A BGRA framebuffer grab of the desktop (`width`, `height`, `bgra`), taken by binding a
-    /// throwaway thread to it — the visible desktop is never changed. The pixels are black until
-    /// the desktop has been the active desktop at least once (Windows renders only the active
-    /// one); the browser's own CDP screenshots do not have that limitation.
+    /// A BGRA picture of the desktop (`width`, `height`, `bgra`), taken by binding a throwaway
+    /// thread to it — the visible desktop is never changed. Windows renders only the active
+    /// desktop, so while this one is not active the picture is composed from its windows
+    /// (`PrintWindow`) instead of read from the (black) framebuffer.
     pub fn screenshot(&self) -> Result<Shot, String> {
         let name = self.name();
         // The capture runs on its own thread: SetThreadDesktop only takes effect on a thread with
@@ -188,7 +191,11 @@ fn capture(name: &str) -> Result<Shot, String> {
         let out = if dc == 0 {
             Err(format!("no display DC for {name} ({})", last_error()))
         } else {
-            grab(dc)
+            match grab(dc) {
+                // Not the active desktop: nothing was rendered to the framebuffer.
+                Ok(s) if is_black(&s.bgra) => compose(hdesk, dc, s.width, s.height).or(Ok(s)),
+                other => other,
+            }
         };
         if dc != 0 {
             DeleteDC(dc);
@@ -221,6 +228,70 @@ unsafe fn grab(dc: HDC) -> Result<Shot, String> {
     DeleteDC(mem);
     if ok == 0 || rows == 0 {
         return Err("the desktop framebuffer could not be read".into());
+    }
+    Ok(Shot { width: w, height: h, bgra })
+}
+
+/// Every pixel black (sampled): an inactive desktop's framebuffer.
+fn is_black(bgra: &[u8]) -> bool {
+    (0..bgra.len() / 4).step_by(97).all(|i| bgra[i * 4] == 0 && bgra[i * 4 + 1] == 0 && bgra[i * 4 + 2] == 0)
+}
+
+#[link(name = "user32")]
+extern "system" {
+    // windows-sys files this under `Win32_Storage_Xps`; one import is not worth the feature.
+    fn PrintWindow(hwnd: windows_sys::Win32::Foundation::HWND, hdc: HDC, flags: u32) -> BOOL;
+}
+const PW_RENDERFULLCONTENT: u32 = 2;
+
+/// The desktop's picture composed from its windows (`w`×`h`, the display's size): each
+/// visible, non-minimised top-level window renders itself into a bitmap (`PrintWindow`, which
+/// works on a desktop that is not being displayed) and is drawn bottom-to-top at its place.
+/// SAFETY: `hdesk` is an open desktop handle and `dc` a display DC bound to it.
+unsafe fn compose(hdesk: HDESK, dc: HDC, w: i32, h: i32) -> Result<Shot, String> {
+    use windows_sys::Win32::Foundation::{HWND, RECT};
+    use windows_sys::Win32::System::StationsAndDesktops::EnumDesktopWindows;
+    use windows_sys::Win32::UI::WindowsAndMessaging::{GetWindowRect, IsIconic, IsWindowVisible};
+    unsafe extern "system" fn cb(hwnd: HWND, param: LPARAM) -> BOOL {
+        (*(param as *mut Vec<HWND>)).push(hwnd);
+        TRUE
+    }
+    let mut wins: Vec<HWND> = Vec::new();
+    EnumDesktopWindows(hdesk, Some(cb), &mut wins as *mut _ as LPARAM);
+    let mem = CreateCompatibleDC(dc);
+    let bmp = CreateCompatibleBitmap(dc, w, h);
+    let old = SelectObject(mem, bmp as _);
+    let mut drawn = 0;
+    // EnumDesktopWindows lists top-first: paint from the bottom up.
+    for &hwnd in wins.iter().rev() {
+        let mut r: RECT = std::mem::zeroed();
+        if IsWindowVisible(hwnd) == 0 || IsIconic(hwnd) != 0 || GetWindowRect(hwnd, &mut r) == 0 {
+            continue;
+        }
+        let (ww, wh) = (r.right - r.left, r.bottom - r.top);
+        if ww <= 1 || wh <= 1 || r.right <= 0 || r.bottom <= 0 || r.left >= w || r.top >= h {
+            continue;
+        }
+        let wdc = CreateCompatibleDC(dc);
+        let wbmp = CreateCompatibleBitmap(dc, ww, wh);
+        let wold = SelectObject(wdc, wbmp as _);
+        if PrintWindow(hwnd, wdc, PW_RENDERFULLCONTENT) != 0 {
+            BitBlt(mem, r.left, r.top, ww, wh, wdc, 0, 0, SRCCOPY);
+            drawn += 1;
+        }
+        SelectObject(wdc, wold);
+        DeleteObject(wbmp as _);
+        DeleteDC(wdc);
+    }
+    let mut bi: BITMAPINFO = std::mem::zeroed();
+    bi.bmiHeader = BITMAPINFOHEADER { biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32, biWidth: w, biHeight: -h, biPlanes: 1, biBitCount: 32, biCompression: BI_RGB, ..std::mem::zeroed() };
+    let mut bgra = vec![0u8; (w * h * 4) as usize];
+    let rows = GetDIBits(mem, bmp, 0, h as u32, bgra.as_mut_ptr() as _, &mut bi, DIB_RGB_COLORS);
+    SelectObject(mem, old);
+    DeleteObject(bmp as _);
+    DeleteDC(mem);
+    if rows == 0 || drawn == 0 {
+        return Err("no window on the desktop could be rendered".into());
     }
     Ok(Shot { width: w, height: h, bgra })
 }

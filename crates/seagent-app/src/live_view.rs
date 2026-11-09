@@ -1046,6 +1046,111 @@ mod tests {
         assert!(csp.contains("img-src 'self' data: blob:"), "frames are shown from blob: URLs: {csp}");
     }
 
+    /// The real Bot Desktop streamed through the console route (not run by default):
+    /// `SEAGENT_REAL_TESTS=1 [SEAGENT_LIVE_OUT=<dir>] cargo test -p seagent-app real_live_bot_desktop -- --ignored --nocapture`.
+    /// Starts this OS's Bot Desktop (Windows: the isolated CreateDesktopW desktop, never made
+    /// active; Linux: Xvnc + Xfce; macOS: the login session), puts a browser window with an
+    /// animated page of small text on it, and measures the desktop stream at 30 fps.
+    #[test]
+    #[ignore]
+    fn real_live_bot_desktop() {
+        if std::env::var("SEAGENT_REAL_TESTS").ok().as_deref() != Some("1") {
+            eprintln!("skipping: set SEAGENT_REAL_TESTS=1 to run real-desktop cases");
+            return;
+        }
+        let scratch = seagent_core::tmp::TempDir::new("seagent-live-desk-frames");
+        let out = std::env::var_os("SEAGENT_LIVE_OUT").map(std::path::PathBuf::from).unwrap_or_else(|| scratch.path().to_path_buf());
+        std::fs::create_dir_all(&out).unwrap();
+        let home = seagent_core::tmp::TempDir::new("seagent-live-desk");
+        let a = app(home.path());
+        let data = home.path().join("data");
+        let desk = seagent_browser::control::screen::Desktop::new(&data);
+        #[cfg(windows)]
+        if seagent_browser::control::screen_windows::desktop_names().iter().any(|n| n == "seagent-default") {
+            eprintln!("skipping: a seagent Bot Desktop (seagent-default) already runs on this window station");
+            return;
+        }
+        if let Err(e) = desk.start() {
+            eprintln!("skipping: no Bot Desktop on this host: {e}");
+            return;
+        }
+        struct StopDesk(seagent_browser::control::screen::Desktop);
+        impl Drop for StopDesk {
+            fn drop(&mut self) {
+                self.0.stop();
+            }
+        }
+        let _desk = StopDesk(desk);
+        let exe = seagent_browser::launch::find_executable("").expect("a Chromium-family browser");
+        let lorem = "The quick brown fox jumps over the lazy dog 0123456789. ".repeat(4);
+        let rows: String = (1..=40).map(|i| format!("<p style='margin:0;font:12px/1.4 Segoe UI,Arial,sans-serif'>{i:02}. {lorem}</p>")).collect();
+        let html = format!("<!doctype html><body style='margin:10px;background:#fff;color:#111'><h2 id=c style='font:600 22px monospace'>desktop</h2>{rows}<script>let n=0;setInterval(()=>{{c.textContent='Bot Desktop live · frame '+(++n)+' · '+new Date().toISOString()}},33)</script>");
+        let url = format!("data:text/html;charset=utf-8,{}", seagent_net::urlencode(&html));
+        let profile = home.path().join("edge-profile");
+        let args = [format!("--user-data-dir={}", profile.display()), "--no-first-run".into(), "--no-default-browser-check".into(), "--window-position=0,0".into(), "--window-size=1400,900".into(), format!("--app={url}")];
+        #[cfg(windows)]
+        let child = {
+            let q = seagent_browser::control::screen_windows::WinDesktop::new(&data, "default", "1440x900").qualified();
+            seagent_browser::control::screen_windows::on_desktop(&q, || std::process::Command::new(&exe).args(&args).spawn()).unwrap().unwrap()
+        };
+        #[cfg(not(windows))]
+        let child = {
+            let env = seagent_browser::control::screen::Desktop::new(&data).published_env();
+            std::process::Command::new(&exe).args(&args).envs(env).spawn().unwrap()
+        };
+        struct Kill(std::process::Child);
+        impl Drop for Kill {
+            fn drop(&mut self) {
+                #[cfg(windows)]
+                let _ = std::process::Command::new("taskkill").args(["/T", "/F", "/PID", &self.0.id().to_string()]).output();
+                let _ = self.0.kill();
+            }
+        }
+        let _child = Kill(child);
+        std::thread::sleep(Duration::from_secs(4));
+        let srv = crate::server::start(a.clone()).unwrap();
+        let mut ws = connect(srv.local_addr(), "kind=desktop&target=host&fps=30&quality=85&maxWidth=3840", "live-admin-token");
+        let h = next_text(&mut ws);
+        assert_eq!(h["t"], "hello", "{h}");
+        let (cpu0, t0) = (cpu_seconds_self(), Instant::now());
+        let (mut frames, mut bytes, mut caps, mut last, mut meta, mut stats) = (0u32, 0usize, vec![], vec![], Value::Null, Value::Null);
+        while t0.elapsed() < Duration::from_secs(6) {
+            match ws.recv() {
+                Ok(Some(Message::Text(x))) => {
+                    let v: Value = serde_json::from_str(&x).unwrap();
+                    assert_ne!(v["t"], "nodisplay", "{v}");
+                    if v["t"] == "stats" {
+                        stats = v;
+                    } else {
+                        meta = v;
+                    }
+                }
+                Ok(Some(Message::Binary(j))) => {
+                    frames += 1;
+                    bytes += j.len();
+                    caps.push(now_ms().saturating_sub(meta["sentMs"].as_u64().unwrap_or(0)));
+                    last = j;
+                }
+                _ => {}
+            }
+        }
+        let secs = t0.elapsed().as_secs_f64();
+        let cpu = (cpu_seconds_self() - cpu0) / secs * 100.0;
+        caps.sort_unstable();
+        eprintln!(
+            "LIVE Bot Desktop ({}): {frames} frames / {secs:.1} s = {:.1} fps; capture+encode {} ms (server stats); send→receive p50 {} ms, p95 {} ms; {:.0} KB/s; frame {}x{} → {}x{}; server CPU {cpu:.0}%",
+            std::env::consts::OS,
+            f64::from(frames) / secs,
+            stats["latencyMs"],
+            caps.get(caps.len() / 2).copied().unwrap_or(0),
+            caps.get(caps.len() * 95 / 100).copied().unwrap_or(0),
+            bytes as f64 / 1024.0 / secs,
+            meta["width"], meta["height"], meta["frameWidth"], meta["frameHeight"]
+        );
+        std::fs::write(out.join(format!("live-bot-desktop-{}.jpg", std::env::consts::OS)), &last).unwrap();
+        assert!(frames >= 10, "the desktop streamed: {frames} frames");
+    }
+
     /// Width × height of a baseline/progressive JPEG (its SOF marker).
     fn jpeg_size(j: &[u8]) -> Option<(u32, u32)> {
         let mut i = 2;
