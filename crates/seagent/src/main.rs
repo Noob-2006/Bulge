@@ -1337,27 +1337,8 @@ fn cmd_daemon(a: &Args) -> R {
             // App server: web/desktop UI, WebSocket ARP, OpenAI-compatible API, A2A, nodes.
             // LAN mode: native TLS with the generated identity (seagent_app::lan), paired devices.
             let mut app_cfg = seagent_app::lan::effective(&seagent_app::AppConfig::parse(&c.k.cfg.app)?, &paths.data)?;
-            // Default loopback port busy (another app, a second SE Agent, WSL's forwarded Linux
-            // agent): when the port came from the default — never one the user set — move to the
-            // next free one of 8640–8659 and persist it, so `setup status|link` and the desktop app
-            // report the port really served.
-            if app_cfg.enabled && setup_web::listen_is_auto(&paths, &app_cfg.listen) {
-                if let Some(port) = app_cfg.listen.rsplit_once(':').and_then(|(_, p)| p.parse::<u16>().ok()) {
-                    if !setup_web::port_free(setup_web::DEFAULT_HOST, port) {
-                        let why = setup_web::who_listens(&app_cfg.listen).unwrap_or_else(|| "in use".into());
-                        match setup_web::pick_free_port(setup_web::DEFAULT_HOST) {
-                            Some(p) => {
-                                let new = format!("{}:{p}", setup_web::DEFAULT_HOST);
-                                eprintln!("seagentd: warning: app server port {port} is busy ({why}); moving to {new}");
-                                if let Err(e) = setup_web::persist_listen(&paths, &new) {
-                                    eprintln!("seagentd: warning: could not save [app] listen = {new:?}: {e}");
-                                }
-                                app_cfg.listen = new;
-                            }
-                            None => eprintln!("seagentd: warning: app server port {port} is busy ({why}) and every port of 8640-8659 is taken"),
-                        }
-                    }
-                }
+            if app_cfg.enabled {
+                setup_web::move_off_busy_default_port(&paths, &mut app_cfg.listen);
             }
             d.add_methods(ops::lan::methods(&paths, c.k.clone(), app_cfg.clone()));
             let _server = if app_cfg.enabled {
@@ -2354,43 +2335,11 @@ fn cmd_doctor(a: &Args) -> R {
             }
         }
     }
-    #[cfg(not(windows))]
-    let tool = |bin: &str| std::process::Command::new(bin).arg("--version").output().map(|o| String::from_utf8_lossy(&o.stdout).lines().next().unwrap_or("").to_string()).map_err(|e| e.to_string());
-    // Windows: the `WindowsApps\python3.exe` Store alias runs, prints nothing useful and exits
-    // 9009, so only a successful `--version` counts as installed.
-    #[cfg(windows)]
-    let tool = |bin: &str| match std::process::Command::new(bin).arg("--version").output() {
-        Ok(o) if o.status.success() && !(o.stdout.is_empty() && o.stderr.is_empty()) => Ok(String::from_utf8_lossy(if o.stdout.is_empty() { &o.stderr } else { &o.stdout }).lines().next().unwrap_or("").trim().to_string()),
-        Ok(o) => Err(format!("not usable (`{bin} --version` exited {})", o.status.code().unwrap_or(-1))),
-        Err(e) => Err(e.to_string()),
-    };
-    #[cfg(not(windows))]
-    check("bash", tool("bash"));
-    // Windows: `bash` on PATH is usually System32\bash.exe (the WSL launcher): only the bash the
-    // shell detection picked (Git Bash / MSYS2 / SEAGENT_SHELL) counts.
-    #[cfg(windows)]
-    check("bash", match seagent_core::platform::layout::bash() {
-        Some(p) => tool(&p.to_string_lossy()),
-        None => Err("not found (Git for Windows / MSYS2; System32\\bash.exe is the WSL launcher and does not count): bash scripts and lang=bash are unavailable, tool calls use PowerShell".into()),
-    });
+    check("bash", ops::hostos::doctor_bash());
     #[cfg(not(target_os = "linux"))] // shell, control endpoint, autostart, VM providers of this OS
     ops::service_os::doctor_checks(&paths).into_iter().for_each(|(n, r)| check(&n, r));
-    check("git (checkpoints)", tool("git"));
-    #[cfg(not(windows))]
-    check("python3 (code mode)", tool("python3"));
-    // Windows: `py -3` or a real python (never the WindowsApps Store alias), as code mode runs it.
-    #[cfg(windows)]
-    check("python3 (code mode)", match seagent_core::platform::layout::python3() {
-        Some((p, args)) => {
-            let shown = std::iter::once(p.display().to_string()).chain(args.iter().cloned()).collect::<Vec<_>>().join(" ");
-            match std::process::Command::new(&p).args(&args).arg("--version").output() {
-                Ok(o) if o.status.success() && !(o.stdout.is_empty() && o.stderr.is_empty()) => Ok(format!("{} ({shown})", String::from_utf8_lossy(if o.stdout.is_empty() { &o.stderr } else { &o.stdout }).trim())),
-                Ok(o) => Err(format!("{shown} is not usable (--version exited {})", o.status.code().unwrap_or(-1))),
-                Err(e) => Err(format!("{shown}: {e}")),
-            }
-        }
-        None => Err("not found (py -3 / python3 / python; the WindowsApps Store alias does not count)".into()),
-    });
+    check("git (checkpoints)", ops::hostos::tool_version("git"));
+    check("python3 (code mode)", ops::hostos::doctor_python3());
     // The bundled skills / roles / catalogs: a binary copied without its share/ has none of them.
     check("bundled share/", seagent_core::share::share_dir().filter(|d| d.join("skills").is_dir() && d.join("plugin-catalog").is_dir()).map(|d| d.display().to_string()).ok_or_else(|| "not found (bundled skills and catalogs are unavailable): install with install.sh / the release tarball, or set SEAGENT_SHARE_DIR".to_string()));
     check("data dir", std::fs::create_dir_all(&paths.data).map(|_| paths.data.display().to_string()).map_err(|e| e.to_string()));

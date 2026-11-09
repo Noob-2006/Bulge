@@ -289,6 +289,7 @@ mod tests {
     }
 
     /// Every ingredient for a boot: KVM, both image files, a VMM.
+    #[cfg_attr(not(unix), allow(dead_code))] // its users are unix-only tests
     fn bootable_caps() -> Capabilities {
         Capabilities { kvm: true, firecracker: Some(PathBuf::from("/bin/true")), kernel: Some(PathBuf::from("/img/vmlinux")), initramfs: Some(PathBuf::from("/img/initramfs.cpio.gz")), ..Default::default() }
     }

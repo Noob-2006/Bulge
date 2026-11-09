@@ -172,6 +172,32 @@ pub fn persist_listen(paths: &Paths, listen: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// seagentd start: the default loopback port is busy (another app, a second SE Agent, WSL's
+/// forwarded Linux agent). When the port came from the default — never one the user set — move
+/// `listen` to the next free one of [`AUTO_PORTS`] and persist it, so `setup status|link` and the
+/// desktop app report the port really served. Otherwise leave it; the bind error explains.
+pub fn move_off_busy_default_port(paths: &Paths, listen: &mut String) {
+    if !listen_is_auto(paths, listen) {
+        return;
+    }
+    let Some(port) = listen.rsplit_once(':').and_then(|(_, p)| p.parse::<u16>().ok()) else { return };
+    if port_free(DEFAULT_HOST, port) {
+        return;
+    }
+    let why = who_listens(listen).unwrap_or_else(|| "in use".into());
+    match pick_free_port(DEFAULT_HOST) {
+        Some(p) => {
+            let new = format!("{DEFAULT_HOST}:{p}");
+            eprintln!("seagentd: warning: app server port {port} is busy ({why}); moving to {new}");
+            if let Err(e) = persist_listen(paths, &new) {
+                eprintln!("seagentd: warning: could not save [app] listen = {new:?}: {e}");
+            }
+            *listen = new;
+        }
+        None => eprintln!("seagentd: warning: app server port {port} is busy ({why}) and every port of 8640-8659 is taken"),
+    }
+}
+
 /// Who answers on `addr` (`host:port`): "another SE Agent (version …)" when its `GET /health`
 /// looks like ours, else "another program". `None` when nothing accepts the connection.
 pub fn who_listens(addr: &str) -> Option<String> {

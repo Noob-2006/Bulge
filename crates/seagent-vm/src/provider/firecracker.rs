@@ -514,6 +514,7 @@ mod tests {
     use crate::limits::Limits;
     use crate::provider::Workspace;
 
+    #[cfg_attr(not(unix), allow(dead_code))] // its users are unix-only tests
     fn spec() -> VmSpec {
         VmSpec {
             id: "fc-1".into(),

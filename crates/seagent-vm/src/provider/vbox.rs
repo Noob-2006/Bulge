@@ -258,6 +258,7 @@ mod tests {
     use super::*;
     use crate::limits::Limits;
 
+    #[cfg_attr(not(unix), allow(dead_code))] // its users are unix-only tests
     fn spec() -> VmSpec {
         VmSpec {
             id: "v-1".into(),

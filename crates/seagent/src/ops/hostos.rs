@@ -568,6 +568,60 @@ pub fn local_ips() -> Vec<std::net::IpAddr> {
     vec![]
 }
 
+/// `doctor`: first line of `<bin> --version`.
+#[cfg(not(windows))]
+pub fn tool_version(bin: &str) -> Result<String, String> {
+    std::process::Command::new(bin).arg("--version").output().map(|o| String::from_utf8_lossy(&o.stdout).lines().next().unwrap_or("").to_string()).map_err(|e| e.to_string())
+}
+
+/// `doctor`: first line of `<bin> --version`. On Windows the `WindowsApps\python3.exe` Store alias
+/// runs, prints nothing useful and exits 9009, so only a successful `--version` counts as installed.
+#[cfg(windows)]
+pub fn tool_version(bin: &str) -> Result<String, String> {
+    match std::process::Command::new(bin).arg("--version").output() {
+        Ok(o) if o.status.success() && !(o.stdout.is_empty() && o.stderr.is_empty()) => Ok(String::from_utf8_lossy(if o.stdout.is_empty() { &o.stderr } else { &o.stdout }).lines().next().unwrap_or("").trim().to_string()),
+        Ok(o) => Err(format!("not usable (`{bin} --version` exited {})", o.status.code().unwrap_or(-1))),
+        Err(e) => Err(e.to_string()),
+    }
+}
+
+/// `doctor`'s bash check.
+#[cfg(not(windows))]
+pub fn doctor_bash() -> Result<String, String> {
+    tool_version("bash")
+}
+
+/// `doctor`'s bash check. `bash` on PATH is usually System32\bash.exe (the WSL launcher): only the
+/// bash the shell detection picked (Git Bash / MSYS2 / SEAGENT_SHELL) counts.
+#[cfg(windows)]
+pub fn doctor_bash() -> Result<String, String> {
+    match seagent_core::platform::layout::bash() {
+        Some(p) => tool_version(&p.to_string_lossy()),
+        None => Err("not found (Git for Windows / MSYS2; System32\\bash.exe is the WSL launcher and does not count): bash scripts and lang=bash are unavailable, tool calls use PowerShell".into()),
+    }
+}
+
+/// `doctor`'s python3 (code mode) check.
+#[cfg(not(windows))]
+pub fn doctor_python3() -> Result<String, String> {
+    tool_version("python3")
+}
+
+/// `doctor`'s python3 (code mode) check: `py -3` or a real python (never the WindowsApps Store
+/// alias), as code mode runs it.
+#[cfg(windows)]
+pub fn doctor_python3() -> Result<String, String> {
+    let Some((p, args)) = seagent_core::platform::layout::python3() else {
+        return Err("not found (py -3 / python3 / python; the WindowsApps Store alias does not count)".into());
+    };
+    let shown = std::iter::once(p.display().to_string()).chain(args.iter().cloned()).collect::<Vec<_>>().join(" ");
+    match std::process::Command::new(&p).args(&args).arg("--version").output() {
+        Ok(o) if o.status.success() && !(o.stdout.is_empty() && o.stderr.is_empty()) => Ok(format!("{} ({shown})", String::from_utf8_lossy(if o.stdout.is_empty() { &o.stderr } else { &o.stdout }).trim())),
+        Ok(o) => Err(format!("{shown} is not usable (--version exited {})", o.status.code().unwrap_or(-1))),
+        Err(e) => Err(format!("{shown}: {e}")),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

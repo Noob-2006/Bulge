@@ -176,7 +176,9 @@ impl VmInstance for VfkitInstance {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
     use super::*;
+    #[cfg(unix)]
     use crate::limits::Limits;
 
     // Unix host paths / Linux VMM probing (KVM, Firecracker): not meaningful on a Windows host.
