@@ -248,7 +248,15 @@ pub fn watch(b: &Arc<Browser>, target: &str, opts: Opts) -> Result<Viewer, Strin
     let opts = opts.clamped();
     let (cast, id, start) = {
         let mut s = b.state.lock().unwrap();
-        let cast = s.live.entry(sid.clone()).or_insert_with(|| Arc::new(Cast::new(&sid))).clone();
+        let cast = s
+            .live
+            .entry(sid.clone())
+            .or_insert_with(|| {
+                // Acks must go out the moment a viewer releases them (see `Conn::low_latency`).
+                b.conn.low_latency(true);
+                Arc::new(Cast::new(&sid))
+            })
+            .clone();
         let mut g = cast.state.lock().unwrap();
         g.next_viewer += 1;
         let id = g.next_viewer;
@@ -367,6 +375,7 @@ impl Drop for Viewer {
         }
         if s.live.get(&self.cast.page_session).is_some_and(|c| Arc::ptr_eq(c, &self.cast)) {
             s.live.remove(&self.cast.page_session);
+            self.b.conn.low_latency(false);
         }
         // Never strand Chrome on an unacked frame (a recording keeps running on its own acks).
         for (_, id) in g.unacked.drain(..) {
@@ -486,6 +495,7 @@ mod tests {
         let mut v = watch(&b, "P1", Opts { fps: 30, quality: 60, ..Default::default() }).unwrap();
         let mut w = watch(&b, "P1", Opts { fps: 60, quality: 85, ..Default::default() }).unwrap();
         assert_eq!((v.opts().fps, w.opts().fps), (30, 60), "each viewer keeps its own fps");
+        assert!(b.conn.is_low_latency(), "acks go out at once while someone watches");
         let mut got = vec![];
         while let Some(fr) = v.next(Duration::from_secs(3)) {
             got.push(fr.data[2]);
@@ -508,6 +518,7 @@ mod tests {
         std::thread::sleep(Duration::from_millis(150));
         assert_eq!(sent("Page.stopScreencast"), 1, "the last viewer stops it");
         assert!(b.state.lock().unwrap().live.is_empty());
+        assert!(!b.conn.is_low_latency(), "no viewer: the connection polls at its idle rate again");
         assert!(b.idle_for() + Duration::from_millis(20) >= idle.elapsed(), "watching does not touch the idle clock");
         let _ = std::fs::remove_dir_all(&env.home);
     }

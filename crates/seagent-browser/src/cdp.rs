@@ -7,7 +7,7 @@
 use seagent_net::ws::{Message, WebSocket};
 use serde_json::{json, Value};
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::time::{Duration, Instant};
@@ -22,7 +22,14 @@ struct Inner {
     closed: AtomicBool,
     handler: OnceLock<EventFn>,
     url: String,
+    /// Live console streams on this connection: while any runs, the I/O thread polls the socket
+    /// every [`FAST_POLL`] instead of [`IDLE_POLL`], so a queued frame ack goes out at once.
+    fast: AtomicUsize,
 }
+
+/// How long the I/O thread waits on the socket before sending what callers queued.
+const IDLE_POLL: Duration = Duration::from_millis(15);
+const FAST_POLL: Duration = Duration::from_millis(2);
 
 /// A live CDP connection (cheap to clone).
 #[derive(Clone)]
@@ -84,9 +91,9 @@ impl Conn {
     pub fn connect(ws_url: &str, headers: &[(&str, &str)], timeout: Duration) -> Result<Conn, String> {
         let (mut ws, _) = WebSocket::connect(ws_url, headers, timeout).map_err(|e| format!("CDP connect {}: {e}", redact_url(ws_url)))?;
         ws.set_max_message(256 << 20);
-        ws.set_read_timeout(Some(Duration::from_millis(15))).map_err(|e| e.to_string())?;
+        ws.set_read_timeout(Some(IDLE_POLL)).map_err(|e| e.to_string())?;
         let (tx, rx) = mpsc::channel::<String>();
-        let inner = Arc::new(Inner { out: Mutex::new(tx), pending: Mutex::new(HashMap::new()), next: AtomicU64::new(1), closed: AtomicBool::new(false), handler: OnceLock::new(), url: ws_url.to_string() });
+        let inner = Arc::new(Inner { out: Mutex::new(tx), pending: Mutex::new(HashMap::new()), next: AtomicU64::new(1), closed: AtomicBool::new(false), handler: OnceLock::new(), url: ws_url.to_string(), fast: AtomicUsize::new(0) });
         let weak = Arc::downgrade(&inner);
         std::thread::Builder::new().name("seagent-cdp".into()).spawn(move || io_loop(ws, rx, weak)).map_err(|e| e.to_string())?;
         Ok(Conn(inner))
@@ -95,6 +102,20 @@ impl Conn {
     /// Install the event handler (once).
     pub fn on_event(&self, f: EventFn) {
         let _ = self.0.handler.set(f);
+    }
+
+    /// A live stream starts (`true`) or ends (`false`) on this connection: low-latency polling
+    /// runs only while at least one does (it costs nothing otherwise).
+    pub fn low_latency(&self, on: bool) {
+        if on {
+            self.0.fast.fetch_add(1, Ordering::SeqCst);
+        } else {
+            let _ = self.0.fast.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1));
+        }
+    }
+
+    pub fn is_low_latency(&self) -> bool {
+        self.0.fast.load(Ordering::SeqCst) > 0
     }
 
     pub fn url(&self) -> &str {
@@ -169,7 +190,15 @@ fn io_loop(mut ws: WebSocket<seagent_net::Stream>, rx: Receiver<String>, weak: W
             }
         }
     };
+    let mut fast = false;
     loop {
+        if let Some(i) = weak.upgrade() {
+            let want = i.fast.load(Ordering::Relaxed) > 0;
+            if want != fast {
+                fast = want;
+                let _ = ws.set_read_timeout(Some(if fast { FAST_POLL } else { IDLE_POLL }));
+            }
+        }
         loop {
             match rx.try_recv() {
                 Ok(m) if m.is_empty() => {
