@@ -141,21 +141,30 @@ therefore runs in `exec.backend = "wasm"` (`crates/seagent-tools/src/exec/wasm/`
   workspace (read-only when the sandbox says so), a private `/tmp` and configured binds; `..` and
   symlinks cannot leave them; there are no sockets; a fuel budget makes timeouts and interrupts
   take effect, and linear memory is capped (`[exec.wasm] memory_mb`, default 512);
-- the tools: `scripts/build-wasi-tools.sh` builds **uutils coreutils 0.12.0** (`feat_wasm`: 78
-  commands — ls, cat, cp, mv, rm, mkdir, head, tail, sort, uniq, wc, cut, tr, tee, seq, date,
-  sha256sum, base64, …) from crates.io with `--locked` and writes `tools.json`, which pins the
-  module's SHA-256 (a mismatch is refused at run time). `prepare-ios.sh` puts it in
-  `src-tauri/wasi-tools`, which `tauri.ios.conf.json` bundles as `share/wasi`. No grep/sed/find in
-  that set yet: the agent's own `grep`, `glob` and file tools cover them, and more WASI modules
-  can be added to the directory (`<name>.wasm`, or a `tools.json` entry).
+- the tools (`scripts/build-wasi-tools.sh`, everything from pinned sources with `--locked`):
+  **uutils coreutils 0.12.0** (`feat_wasm`: 78 commands — ls, cat, cp, mv, rm, mkdir, head, tail,
+  sort, uniq, wc, cut, tr, tee, seq, date, sha256sum, base64, …), **uutils sed 0.3.0**, **uutils
+  findutils 0.11.0** `find` (its Oniguruma regex engine is C, compiled with the pinned wasi-sdk),
+  and **grep** from `tools/wasi-grep` (POSIX `-E/-F/-G -i -v -n -c -l -L -o -q -s -w -x -r -e -f`,
+  `-A/-B/-C`, `-m`, `--include/--exclude`; `egrep`/`fgrep` too). `xargs` is a shell builtin (a
+  WASI xargs could not start the command); `find -exec` cannot work for the same reason — use
+  `find … | xargs …`. `tools.json` pins every module's SHA-256; a mismatch, or a module the
+  manifest does not pin, is refused at run time. `prepare-ios.sh` puts the set (≈47 MB with
+  Python) in `src-tauri/wasi-tools`, which `tauri.ios.conf.json` bundles as `share/wasi`.
 - isolation is reported honestly (`seagent sandbox explain`): OS-sandbox tier, "wasm interpreter
   sandbox" — the wall is enforced by the interpreter in the app's own process.
 
-**Python** — python.org does not publish a pinned CPython build for WASI, and no unvetted binary is
-downloaded. The backend is ready for one (`tools.json`: `{"python3": {"module": "python.wasm",
-"dirs": {"/usr/local/lib/python3.13": "python/lib"}, "env": {"PYTHONHOME": "/usr/local"}}}`); the
-next step is to build CPython's `wasm32-wasip1` target from a pinned source release with the
-WASI SDK (CPython's `Tools/wasm/wasi.py`, needs the wasi-sdk toolchain) in CI and pin its digest.
+**Python** — `scripts/build-wasi-python.sh` builds **CPython 3.14.10** for `wasm32-wasip1` from the
+python.org source tarball with **wasi-sdk 24** (the version CPython's `Tools/wasm/wasi` supports)
+from the official WebAssembly/wasi-sdk release; both downloads are pinned by SHA-256
+(`scripts/wasi-sdk.sh`, the script header) and refused on a mismatch. It runs CPython's own cross
+build (no wasmtime needed), strips the module (7.4 MB), ships a trimmed, precompiled standard
+library (no tests, tkinter, idlelib, ensurepip, venv) and adds `python3` / `python` to
+`tools.json` with the module digest and the stdlib mounted read-only at
+`/usr/local/lib/python3.14`. Scripts run with the same walls as every tool: the workspace and
+`/tmp` only, no sockets (so no `pip install` from the network, no `urllib` downloads), no
+threads or subprocesses (WASI preview 1). `crates/seagent-tools/tests/wasm_backend.rs` runs real
+scripts through it (stdlib imports, file I/O in the workspace, exit codes, escape attempts).
 
 ### Background on iOS
 

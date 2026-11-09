@@ -104,6 +104,9 @@ struct ToolInfo {
     /// (the CPython standard library, for instance).
     #[serde(default)]
     dirs: BTreeMap<String, String>,
+    /// Arguments put before the user's (`egrep` = `grep -E`).
+    #[serde(default)]
+    args: Vec<String>,
 }
 
 /// One resolved command.
@@ -111,7 +114,10 @@ struct ToolInfo {
 pub struct Tool {
     pub module: PathBuf,
     pub sha256: Option<String>,
+    /// The tools directory pins its modules (`tools.json` lists any): an unpinned one is refused.
+    pub must_pin: bool,
     pub argv0: String,
+    pub args: Vec<String>,
     pub env: Vec<(String, String)>,
     pub dirs: Vec<(String, PathBuf)>,
 }
@@ -160,6 +166,7 @@ impl Toolbox {
             return None;
         }
         let sha = |file: &str| self.manifest.modules.get(file).map(|m| m.sha256.to_ascii_lowercase()).filter(|s| !s.is_empty());
+        let must_pin = !self.manifest.modules.is_empty();
         if let Some(t) = self.manifest.tools.get(name) {
             if !safe_name(&t.module) {
                 return None;
@@ -167,14 +174,16 @@ impl Toolbox {
             return Some(Tool {
                 module: dir.join(&t.module),
                 sha256: sha(&t.module),
+                must_pin,
                 argv0: t.argv0.clone().unwrap_or_else(|| name.to_string()),
+                args: t.args.clone(),
                 env: t.env.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
                 dirs: t.dirs.iter().filter(|(_, rel)| !rel.split('/').any(|c| c == "..")).map(|(g, rel)| (g.clone(), dir.join(rel))).collect(),
             });
         }
         let file = format!("{name}.wasm");
         let p = dir.join(&file);
-        p.is_file().then(|| Tool { module: p, sha256: sha(&file), argv0: name.to_string(), env: vec![], dirs: vec![] })
+        p.is_file().then(|| Tool { module: p, sha256: sha(&file), must_pin, argv0: name.to_string(), args: vec![], env: vec![], dirs: vec![] })
     }
 }
 
@@ -185,6 +194,10 @@ fn engine() -> &'static Engine {
     E.get_or_init(|| {
         let mut c = Config::default();
         c.consume_fuel(true);
+        // Fuel is our kill / timeout clock, not a cost model: lazy translation of a large
+        // function (CPython's eval loop) must not run out of fuel, because that is reported as
+        // a non-resumable error. Charge only for execution and bulk copies.
+        c.fuel_cost(wasmi::CustomFuelCosts { bytes_copied_per_fuel: 64, fuel_per_bytes_translated: 0, fuel_per_bytes_validated: 0 });
         Engine::new(&c)
     })
 }
@@ -279,7 +292,7 @@ impl Runner {
             // A module in the sandbox itself (`./build/app.wasm`), run like any other tool.
             let g = policy::join(cwd, name);
             let (host, _) = self.policy.host(&g, false, true).ok()?;
-            return (host.is_file() && host.extension().is_some_and(|x| x == "wasm")).then(|| Tool { module: host, sha256: None, argv0: name.to_string(), env: vec![], dirs: vec![] });
+            return (host.is_file() && host.extension().is_some_and(|x| x == "wasm")).then(|| Tool { module: host, sha256: None, must_pin: false, argv0: name.to_string(), args: vec![], env: vec![], dirs: vec![] });
         }
         self.toolbox.resolve(name)
     }
@@ -292,6 +305,10 @@ impl Tools for Runner {
 
     fn run(&self, argv: &[String], env: &[(String, String)], cwd: &str, io: &Io) -> Option<i32> {
         let tool = self.tool_for(&argv[0], cwd)?;
+        if tool.must_pin && tool.sha256.is_none() {
+            io.stderr.put(format!("sh: {}: {} has no SHA-256 in tools.json; refusing to run an unpinned tool\n", argv[0], tool.module.display()).as_bytes());
+            return Some(126);
+        }
         let module = match load_module(&tool.module, tool.sha256.as_deref()) {
             Ok(m) => m,
             Err(e) => {
@@ -313,6 +330,7 @@ impl Tools for Runner {
         // wasi-libc resolves a relative path through the `.` preopen, and an absolute path no
         // other root claims lands there too (`/x` → `<cwd>/x`): odd, but never outside a root.
         let mut args = vec![tool.argv0.clone()];
+        args.extend(tool.args.iter().cloned());
         args.extend(argv[1..].iter().cloned());
         let mut e: Vec<(String, String)> = env.to_vec();
         e.extend(tool.env.iter().cloned());
@@ -406,8 +424,10 @@ impl ExecBackend for WasmBackend {
         let pid = PIDS.fetch_add(1, Ordering::Relaxed);
         std::thread::Builder::new()
             .name("seagent-wasm".into())
-            // The interpreter and the shell recurse; iOS gives secondary threads 512 KiB.
-            .stack_size(16 << 20)
+            // The interpreter and the shell recurse; iOS gives secondary threads 512 KiB. 64 MiB:
+            // wasmi translates CPython's largest functions on this stack (16 MiB overflowed).
+            // Reserved address space, not resident memory.
+            .stack_size(64 << 20)
             .spawn(move || {
                 let runner = Runner { toolbox, policy: policy.clone(), kill: k2.clone(), memory, fuel };
                 let io = Io { stdin, stdout: Out::Sink(sink.clone()), stderr: Out::Sink(sink) };

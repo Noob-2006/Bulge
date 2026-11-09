@@ -27,7 +27,7 @@ const MAX_BUFFER: usize = 64 << 20;
 /// Builtins (run in the interpreter; everything else is a WASI tool).
 pub const BUILTINS: &[&str] = &[
     ":", ".", "[", "alias", "break", "builtin", "cd", "command", "continue", "echo", "eval", "exec", "exit", "export", "false", "hash", "local", "printf", "pwd", "read", "readonly", "return", "set", "shift", "sleep", "source",
-    "test", "trap", "true", "type", "ulimit", "umask", "unalias", "unset", "wait", "mv", "rm",
+    "test", "trap", "true", "type", "ulimit", "umask", "unalias", "unset", "wait", "mv", "rm", "xargs",
 ];
 
 // ───────────── streams ─────────────
@@ -2063,6 +2063,7 @@ impl<'a> Shell<'a> {
                 return Err(Flow::Exit(n));
             }
             "read" => self.read(args, io),
+            "xargs" => self.xargs(args, io)?,
             "sleep" => {
                 let secs: f64 = args.iter().map(|a| parse_duration(a)).sum();
                 let until = std::time::Instant::now() + Duration::from_secs_f64(secs.clamp(0.0, 86_400.0));
@@ -2131,6 +2132,92 @@ impl<'a> Shell<'a> {
             return Some(name.to_string());
         }
         self.tools.find(name, &self.cwd)
+    }
+
+    /// `xargs [-0] [-r] [-n N] [-I REPL] [-d DELIM] [cmd args…]`: a builtin, because the WASI
+    /// findutils `xargs` would have to start processes. Runs each batch like any command here.
+    fn xargs(&mut self, args: &[String], io: &Io) -> Result<i32, Flow> {
+        let (mut nul, mut max, mut repl, mut delim, mut no_empty) = (false, usize::MAX, None::<String>, None::<char>, false);
+        let mut i = 0;
+        while let Some(a) = args.get(i) {
+            match a.as_str() {
+                "-0" | "--null" => nul = true,
+                "-r" | "--no-run-if-empty" => no_empty = true,
+                "-t" | "-p" => {}
+                "-n" | "-L" => {
+                    i += 1;
+                    max = args.get(i).and_then(|n| n.parse().ok()).unwrap_or(1).max(1);
+                }
+                "-I" | "-i" => {
+                    i += 1;
+                    repl = Some(args.get(i).cloned().unwrap_or_else(|| "{}".into()));
+                }
+                "-d" => {
+                    i += 1;
+                    delim = args.get(i).and_then(|d| escapes(d).0.chars().next());
+                }
+                a if a.starts_with("-n") && a.len() > 2 => max = a[2..].parse().unwrap_or(1).max(1),
+                a if a.starts_with("-I") && a.len() > 2 => repl = Some(a[2..].to_string()),
+                "--" => {
+                    i += 1;
+                    break;
+                }
+                _ => break,
+            }
+            i += 1;
+        }
+        let mut cmd: Vec<String> = args[i.min(args.len())..].to_vec();
+        if cmd.is_empty() {
+            cmd.push("echo".into());
+        }
+        let mut input = Vec::new();
+        let _ = io.stdin.reader().read_to_end(&mut input);
+        let text = String::from_utf8_lossy(&input).into_owned();
+        let items: Vec<String> = if nul {
+            text.split('\0').filter(|s| !s.is_empty()).map(String::from).collect()
+        } else if let Some(d) = delim {
+            text.split(d).filter(|s| !s.is_empty()).map(String::from).collect()
+        } else if repl.is_some() {
+            text.lines().filter(|l| !l.trim().is_empty()).map(|l| l.trim().to_string()).collect()
+        } else {
+            split_xargs(&text)
+        };
+        let sub = Io { stdin: In::Null, stdout: io.stdout.clone(), stderr: io.stderr.clone() };
+        let mut batches: Vec<Vec<String>> = vec![];
+        if let Some(r) = &repl {
+            for it in &items {
+                batches.push(cmd.iter().map(|a| a.replace(r.as_str(), it)).collect());
+            }
+        } else if items.is_empty() {
+            if !no_empty {
+                batches.push(cmd.clone());
+            }
+        } else {
+            for chunk in items.chunks(max.min(items.len())) {
+                let mut b = cmd.clone();
+                b.extend(chunk.iter().cloned());
+                batches.push(b);
+            }
+        }
+        let mut worst = 0;
+        for b in batches {
+            if self.killed() {
+                return Err(Flow::Exit(137));
+            }
+            let n = match self.exec(&b, &sub) {
+                Ok(n) => n,
+                Err(Flow::Exit(137)) => return Err(Flow::Exit(137)),
+                Err(Flow::Exit(n) | Flow::Return(n)) => n,
+                Err(_) => 1,
+            };
+            if n == 127 || n == 126 {
+                return Ok(n);
+            }
+            if n != 0 {
+                worst = 123;
+            }
+        }
+        Ok(worst)
     }
 
     fn read(&mut self, args: &[String], io: &Io) -> i32 {
@@ -2502,6 +2589,47 @@ fn arith_tokens(s: &str) -> Result<Vec<String>, String> {
         return Err(format!("unexpected `{ch}`"));
     }
     Ok(out)
+}
+
+/// xargs' default input splitting: blanks and newlines separate, `'…'` `"…"` and `\` quote.
+fn split_xargs(s: &str) -> Vec<String> {
+    let mut out = vec![];
+    let mut cur = String::new();
+    let mut any = false;
+    let mut it = s.chars();
+    while let Some(c) = it.next() {
+        match c {
+            ' ' | '\t' | '\n' => {
+                if any {
+                    out.push(std::mem::take(&mut cur));
+                    any = false;
+                }
+            }
+            '\'' | '"' => {
+                any = true;
+                for q in it.by_ref() {
+                    if q == c {
+                        break;
+                    }
+                    cur.push(q);
+                }
+            }
+            '\\' => {
+                any = true;
+                if let Some(n) = it.next() {
+                    cur.push(n);
+                }
+            }
+            c => {
+                any = true;
+                cur.push(c);
+            }
+        }
+    }
+    if any {
+        out.push(cur);
+    }
+    out
 }
 
 fn parse_duration(a: &str) -> f64 {

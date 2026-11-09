@@ -64,8 +64,9 @@ jobs:
         run: python3 -I share/roles/check.py --self-test
   wasm:
     # The iOS exec backend (WASI tools in the wasmi interpreter, crates/seagent-tools/src/exec/wasm)
-    # run for real on Linux: the wasm32-wasip1 fixtures, then the pinned uutils coreutils build the
-    # iOS app bundles (apps/desktop/scripts/build-wasi-tools.sh).
+    # run for real on Linux: the wasm32-wasip1 fixtures, then the pinned tool set the iOS app
+    # bundles — coreutils, sed, find, grep (build-wasi-tools.sh) and CPython (build-wasi-python.sh,
+    # pinned python.org source + wasi-sdk, both SHA-256 checked).
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
@@ -73,8 +74,10 @@ jobs:
         with:
           targets: wasm32-wasip1
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
-      - name: WASI tools (uutils coreutils, pinned, sha256 in tools.json)
-        run: apps/desktop/scripts/build-wasi-tools.sh "$RUNNER_TEMP/wasi-tools"
+      - name: WASI tools (pinned, sha256 in tools.json)
+        run: |
+          apps/desktop/scripts/build-wasi-tools.sh "$RUNNER_TEMP/wasi-tools"
+          apps/desktop/scripts/build-wasi-python.sh "$RUNNER_TEMP/wasi-tools"
       - name: wasm backend
         env:
           SEAGENT_TEST_WASI_TOOLS: ${{ runner.temp }}/wasi-tools

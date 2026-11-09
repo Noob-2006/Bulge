@@ -141,10 +141,14 @@ repository and are reviewed as code.
   can only reach the host through the WASI functions in `exec/wasm/wasi.rs`, which bounds-check
   every guest buffer and confine every path. Fuel metering (resumable on exhaustion) gives the
   kill/timeout path; `StoreLimits` caps linear memory.
-* **Payload**: the iOS app bundles WASI *modules* as data (uutils coreutils 0.12.0, built from
-  crates.io with `--locked` by `apps/desktop/scripts/build-wasi-tools.sh`; each module's SHA-256
-  is pinned in `tools.json` and the backend refuses a mismatch). They are code for the
-  interpreter, never for the CPU, and are reviewed like any other bundled tool set.
+* **Payload**: the iOS app bundles WASI *modules* as data — uutils coreutils 0.12.0, uutils sed
+  0.3.0, uutils findutils 0.11.0 (`find`), `tools/wasi-grep` (its own `Cargo.lock`), all built
+  with `--locked` by `apps/desktop/scripts/build-wasi-tools.sh`, and CPython 3.14.10 built by
+  `build-wasi-python.sh` from the python.org tarball (SHA-256 pinned in the script). The C parts
+  (Oniguruma in findutils, CPython) are compiled with wasi-sdk 24 from the official
+  WebAssembly/wasi-sdk release, SHA-256 pinned per host in `scripts/wasi-sdk.sh`. Each module's
+  SHA-256 is pinned in `tools.json`; the backend refuses a mismatch or an unpinned module. They
+  are code for the interpreter, never for the CPU, and are reviewed like any other bundled tool set.
 
 **Gaps (reviewer action, not yet fixed):** `webpki-roots`, `ring` and `base64` are declared without
 a reason comment, which the budget rule above requires. They are load-bearing (TLS trust, crypto,

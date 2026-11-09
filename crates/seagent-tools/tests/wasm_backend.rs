@@ -213,6 +213,84 @@ fn uutils_coreutils_when_built() {
     assert!(out.contains("rc=") && !out.contains("root:"), "{out}");
 }
 
+/// A tools directory that pins its modules refuses one it does not pin.
+#[test]
+fn an_unpinned_module_next_to_pinned_ones_is_refused() {
+    let e = env("unpinned");
+    std::fs::copy(e.tools.join("wbox.wasm"), e.tools.join("say2.wasm")).unwrap();
+    let b = backend(&e, true, 256);
+    let (st, out) = run(&b, "say2 hi");
+    assert_eq!(st, ExitInfo::code(126), "{out}");
+    assert!(out.contains("unpinned"), "{out}");
+}
+
+fn tool_set() -> Option<(Env, WasmBackend)> {
+    let dir = std::env::var_os("SEAGENT_TEST_WASI_TOOLS").map(PathBuf::from)?;
+    let e = env("toolset");
+    let cfg = WasmConfig { tools_dir: dir.display().to_string(), ..Default::default() };
+    let b = WasmBackend::with_layout(cfg, &e.ws, true, &e.tmp, &[], &e.home).unwrap();
+    Some((e, b))
+}
+
+/// grep (tools/wasi-grep), sed (uutils sed), find (uutils findutils) and the xargs builtin.
+#[test]
+fn grep_sed_find_xargs_when_built() {
+    let Some((e, b)) = tool_set() else {
+        eprintln!("SEAGENT_TEST_WASI_TOOLS not set: build the tools with apps/desktop/scripts/build-wasi-tools.sh to run this");
+        return;
+    };
+    let setup = "mkdir -p src/deep; printf 'fn main() {}\\nlet x = 1;\\n// TODO fix\\n' > src/a.rs; printf 'hello\\nTODO: later\\n' > src/deep/b.txt; printf 'x\\n' > notes.md; ";
+    let (st, out) = run(&b, &format!("{setup}grep -rn TODO src | sort; grep -c . src/a.rs; grep -E 'fn|let' src/a.rs | wc -l; grep -i -l hello -r .; grep -q nope src/a.rs; echo \"q=$?\"; grep -w 'x' src/a.rs; grep -o '[0-9]' src/a.rs; grep 'm\\(ai\\)n' src/a.rs; echo abc | egrep 'a|z'; echo 'a.b' | fgrep '.'"));
+    assert_eq!(st, ExitInfo::code(0), "{out}");
+    assert_eq!(out, "src/a.rs:3:// TODO fix\nsrc/deep/b.txt:2:TODO: later\n3\n2\n./src/deep/b.txt\nq=1\nlet x = 1;\n1\nfn main() {}\nabc\na.b\n");
+    let (st, out) = run(&b, "printf 'one two\\nthree\\n' | sed 's/o/0/g'; printf 'a\\nb\\nc\\n' | sed -n '2p'; printf 'k=v\\n' > c.ini; sed -i 's/v/w/' c.ini; cat c.ini");
+    assert_eq!((st, out.as_str()), (ExitInfo::code(0), "0ne tw0\nthree\nb\nk=w\n"));
+    assert_eq!(std::fs::read_to_string(e.ws.join("c.ini")).unwrap(), "k=w\n");
+    let (st, out) = run(&b, &format!("{setup}find src -name '*.rs'; find . -type d | sort; find src -type f | sort | xargs grep -l TODO; find src -name '*.txt' | xargs -I{{}} echo got {{}}; echo a b c | xargs -n 1 echo; find /etc -name passwd; echo \"etc=$?\""));
+    assert_eq!(st, ExitInfo::code(0), "{out}");
+    assert!(out.starts_with("src/a.rs\n.\n./src\n./src/deep\nsrc/a.rs\nsrc/deep/b.txt\ngot src/deep/b.txt\na\nb\nc\n"), "{out}");
+    assert!(out.ends_with("etc=1\n") && !out.contains("passwd\n"), "find cannot see outside the roots: {out}");
+}
+
+/// CPython for WASI (build-wasi-python.sh): stdlib imports, file I/O in the workspace, exit
+/// codes, and the sandbox walls as Python sees them.
+#[test]
+fn python_when_built() {
+    let Some((e, b)) = tool_set() else {
+        eprintln!("SEAGENT_TEST_WASI_TOOLS not set: build the tools with apps/desktop/scripts/build-wasi-tools.sh + build-wasi-python.sh to run this");
+        return;
+    };
+    let script = r#"cat > job.py <<'EOF'
+import json, os, pathlib, re, sys
+p = pathlib.Path("data")
+p.mkdir(exist_ok=True)
+(p / "out.json").write_text(json.dumps({"n": sum(range(10)), "m": bool(re.match(r"a+b", "aab"))}))
+print(open("data/out.json").read())
+print(sorted(os.listdir(".")))
+for path in ["/etc/passwd", "../outside.txt"]:
+    try:
+        open(path).read()
+        print("READ", path)
+    except OSError as e:
+        print("denied", path, type(e).__name__)
+try:
+    open("../escape.txt", "w").write("x")
+    print("WROTE")
+except OSError:
+    print("denied write")
+sys.exit(3)
+EOF
+python3 job.py; echo "rc=$?"; python3 -c 'import sys; print(sys.version_info[:2], sys.platform)'"#;
+    let (st, out) = run(&b, script);
+    assert_eq!(st, ExitInfo::code(0), "{out}");
+    assert!(out.starts_with("{\"n\": 45, \"m\": true}\n['data', 'job.py']\n"), "{out}");
+    assert!(out.contains("denied /etc/passwd") && out.contains("denied ../outside.txt") && out.contains("denied write"), "{out}");
+    assert!(!out.contains("READ") && !out.contains("WROTE"), "{out}");
+    assert!(out.contains("rc=3\n") && out.contains("(3, 14) wasi"), "{out}");
+    assert_eq!(std::fs::read_to_string(e.ws.join("data/out.json")).unwrap(), "{\"n\": 45, \"m\": true}");
+    assert!(!e.outside.with_file_name("escape.txt").exists());
+}
+
 #[test]
 fn live_stdin_pinned_digests_and_the_shell_snapshot() {
     let e = env("misc");

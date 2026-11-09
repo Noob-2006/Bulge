@@ -64,11 +64,12 @@ iOS 版因此**不是純用戶端**，而是在 App 自己的行程裡跑完整�
   沒有開 socket 的方法）；fuel 分段執行，逾時／中斷在一個分段內生效；記憶體上限可設。shell 本身由 App 內建的
   POSIX 式直譯器執行（dash／busybox ash 需要 `fork`/`exec`，WASI 沒有）：管線、`&&`/`||`、子 shell、
   `if`/`for`/`while`/`case`、函式、重新導向與 here-doc、`$(…)`、`$((…))`、glob。指令集是釘選版本的
-  uutils coreutils（`feat_wasm`，78 個指令，`apps/desktop/scripts/build-wasi-tools.sh` 以 `--locked` 建置，
-  SHA-256 寫進 `tools.json`，不符就拒絕執行），打包成 App 的 `share/wasi`。iOS 上 `auto` 自動選它；
+  uutils coreutils（`feat_wasm`，78 個指令）、uutils sed、uutils findutils 的 `find`、`tools/wasi-grep` 的 POSIX grep
+  （`apps/desktop/scripts/build-wasi-tools.sh` 以 `--locked` 建置；`xargs` 是 shell 內建，因為 WASI 版 xargs 無法啟動指令），
+  以及 CPython 3.14（`build-wasi-python.sh`：python.org 原始碼＋官方 wasi-sdk 24，兩者都釘 SHA-256）。
+  每個模組的 SHA-256 寫進 `tools.json`，不符或未釘選就拒絕執行；打包成 App 的 `share/wasi`。iOS 上 `auto` 自動選它；
   隔離等級如實回報為 OS 沙盒層級的「wasm interpreter sandbox」（政策由直譯器在 App 行程內執行，不是核心或 hypervisor）。
-  Python：python.org 沒有釘選的 WASI 正式版；後端已支援 `tools.json` 的 `dirs`／`env`（標準庫目錄），取得可信的
-  CPython WASI 建置後即可加入（見 MOBILE.md）。
+  Python 腳本與其他工具同樣只看得到工作區與 `/tmp`、沒有 socket、沒有執行緒與子程序。
 - **背景**：App 在前景時 agent 照常執行；進背景時 plugin 以 BGTaskScheduler 預約 `BGProcessingTask`
   （時間 = 下一個到期的排程，至少 15 分鐘後），喚醒時 `seagent::embed::background_pass` 讓排程器補跑到期工作、
   等它們做完（最多約 4 分鐘）；回到前景時若 App Server 的 socket 已被 iOS 回收就重啟 agent。iOS 決定實際執行時間
