@@ -335,8 +335,10 @@ fn err(code: i64, msg: &str) -> Response {
 /// the browser frame + input, the desktop frame + lease, and the sandbox noVNC button.
 const PANEL_HTML: &str = include_str!("browser_view_panel.html");
 
-/// `GET /view/` and `GET /view/ui`: the panel page, with a per-response script nonce.
-fn panel() -> Response {
+/// `GET /view/` and `GET /view/ui`: the panel page, with a per-response script nonce. Served
+/// without a credential (server.rs): it is static and holds no data — a browser navigation
+/// cannot send a Bearer header, and every request the page then makes carries its token in one.
+pub(crate) fn panel() -> Response {
     let nonce = seagent_net::crypto::random_token(16);
     let csp = format!("default-src 'none'; img-src 'self' data: blob:; style-src 'unsafe-inline'; script-src 'nonce-{nonce}'; connect-src 'self'; base-uri 'none'; frame-ancestors 'none'");
     no_store(Response::html(&PANEL_HTML.replace("{{NONCE}}", &nonce))).with_header("content-security-policy", &csp)
@@ -544,8 +546,12 @@ mod tests {
             assert!(!body.contains("http://") && !body.contains("https://"), "{p} references an external resource");
             assert!(!body.contains("onclick=") && !body.contains("onload="), "{p} uses inline event handler attributes");
         }
-        assert_eq!(get(&base, "/view/", None, None).0, 401, "no token");
-        assert_eq!(get(&base, "/view/ui", Some("wrong"), None).0, 401, "wrong token");
+        // The page shell opens without a credential (a browser navigation has no header to send);
+        // everything it shows comes from routes that still need one.
+        let (st, _, body) = get(&base, "/view/", None, None);
+        assert!(st == 200 && body.contains("/pair/refresh"), "the static page itself: {st}");
+        assert_eq!(get(&base, "/view/browser", None, None).0, 401, "its data still needs the token");
+        assert_eq!(get(&base, "/view/desktop/frame", Some("wrong"), None).0, 401);
         let _ = std::fs::remove_dir_all(&home);
     }
 

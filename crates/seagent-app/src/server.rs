@@ -312,6 +312,8 @@ impl App {
                 }
                 Response::text(200, &crate::metrics::render(&self.d)).with_header("content-type", "text/plain; version=0.0.4").with_header("cache-control", "no-store")
             }
+            // The standalone live view page: a static shell whose every request carries a token.
+            ("GET", "/view/") | ("GET", "/view/ui") => crate::browser_view::panel(),
             ("GET", p) if self.cfg.ui && (p == "/" || p.starts_with("/ui/") || p == "/manifest.webmanifest" || p == "/sw.js" || p == "/setup" || p == "/apple-touch-icon.png") => ui::serve(p),
             // Phones, tablets, browsers and other PCs pair here (LAN mode; see `devices`).
             ("POST", "/pair/client") if self.cfg.exposure.lan => crate::devices::handle_pair_client(self, &r),
