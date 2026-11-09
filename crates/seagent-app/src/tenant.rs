@@ -91,12 +91,12 @@ pub fn guard(app: &App, p: &Principal, method: &str, params: &mut Value) -> Resu
     if !bound(app, p) {
         return Ok(());
     }
-    if !TENANT_METHODS.contains(&method) {
+    if !TENANT_METHODS.contains(&method) && !crate::chat_scope::TENANT_METHODS.contains(&method) {
         return Err((-32003, format!("forbidden: `{method}` is installation-wide and not available to an organization-scoped principal ({})", p.tenant.label())));
     }
     let reg = tenancy::registry(&app.d.k.paths.data);
     let v = &p.tenant;
-    if SESSION_METHODS.contains(&method) {
+    if SESSION_METHODS.contains(&method) || crate::chat_scope::SESSION_METHODS.contains(&method) {
         if let Some(sid) = params["id"].as_str() {
             if !sees_session(app, &reg, v, sid) {
                 return Err(not_found());

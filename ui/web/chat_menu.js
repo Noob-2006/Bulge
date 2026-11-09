@@ -15,7 +15,7 @@
 
 const tt = (zh, en) => (LANG === 'en' ? en : zh);
 const CM = {
-  state: { sections: [], read_ms: {}, unread: [], folded: [], trash: [] },
+  state: { sections: [], read_ms: {}, unread: [], folded: [], trash: [], manage: 'all' },
   menu: null, // {levels: [{el, items, idx}], row, focus}
   renaming: null,
   open: { archived: false, trash: false },
@@ -32,6 +32,12 @@ const cmErr = (e) => toast((e && e.message) || String(e), true);
 })();
 
 // ── rail state ──
+// May this caller manage the conversation? Admin / tenant callers: all; a write token or a
+// paired device: the ones it created (the server enforces it; this only hides dead buttons).
+function canManage(id) {
+  const m = CM.state.manage;
+  return m === 'all' || m === undefined || m === null || (Array.isArray(m) && m.includes(id));
+}
 function isUnread(s) {
   if (!s) return false;
   if ((CM.state.unread || []).includes(s.id)) return true;
@@ -51,6 +57,7 @@ function markRead(id) {
   cmCall('ui.chat.read', { id }).catch(() => {});
 }
 function chatOpened(id) {
+  if (typeof SPLIT === 'object' && SPLIT.id === id) splitClose(); // now in the main pane
   if (!document.body.classList.contains('ro')) markRead(id);
   const s = (S.sessions || []).find((x) => x.id === id);
   setModelChip((s && s.model) || (S.models && S.models.default) || '');
@@ -193,8 +200,9 @@ function railRow(s, child, nkids) {
   b.title = s.id;
   b.innerHTML = `${s.running ? '<span class="star pulse" style="--size:10px"></span>' : '<span class="dot"></span>'}<span class="t">${esc(s.title || s.id)}</span><span class="m">${ago(s.updated_ms)}</span>`;
   b.onclick = () => openSession(s.id);
-  b.oncontextmenu = (e) => { if (document.body.classList.contains('ro')) return; e.preventDefault(); cmMenu(chatItems(s), { x: e.clientX, y: e.clientY }, { row, focus: b }); };
+  b.oncontextmenu = (e) => { if (document.body.classList.contains('ro') || !canManage(s.id)) return; e.preventDefault(); cmMenu(chatItems(s), { x: e.clientX, y: e.clientY }, { row, focus: b }); };
   row.appendChild(b);
+  if (!canManage(s.id)) { row.classList.add('foreign'); return row; }
   if (nkids) {
     const folded = (CM.state.folded || []).includes(s.id);
     const fb = document.createElement('button');
@@ -379,7 +387,7 @@ function chatItems(s) {
   };
   return [
     { head: s.title || s.id },
-    { label: tt('開啟於', 'Open in'), icon: '↗', sub: [{ label: tt('新分頁', 'New tab'), icon: '⧉', run: () => openIn(s, 'tab') }, { label: tt('新視窗', 'New window'), icon: '▢', run: () => openIn(s, 'window') }] },
+    { label: tt('開啟於', 'Open in'), icon: '↗', sub: [{ label: tt('分割檢視', 'Split view'), icon: '◫', key: 'V', disabled: s.id === S.current || typeof splitOpen !== 'function', run: () => splitOpen(s.id) }, { label: tt('新分頁', 'New tab'), icon: '⧉', run: () => openIn(s, 'tab') }, { label: tt('新視窗', 'New window'), icon: '▢', run: () => openIn(s, 'window') }] },
     { label: tt('對話設定…', 'Settings…'), icon: '⚙', key: 'S', run: () => openChatSettings(s.id) },
     { sep: true },
     { label: s.pinned ? tt('取消釘選', 'Unpin') : tt('釘選', 'Pin'), icon: '⊼', key: 'P', run: () => setMeta(s, { pinned: !s.pinned }) },
@@ -631,6 +639,7 @@ async function openChatSettings(id) {
   const fasts = ['', 'normal', 'fast', 'flex', 'auto'];
   if (st.fast && !fasts.includes(st.fast)) fasts.push(st.fast);
   const tools = st.tools || [];
+  const skills = st.skills || [];
   d.innerHTML = `<form method="dialog">
     <div class="modal-head"><h2>${esc(tt('對話設定', 'Conversation settings'))}</h2></div>
     <div class="row"><label for="csTitle">${esc(tt('名稱', 'Name'))}</label><input type="text" id="csTitle" maxlength="80" value="${esc(st.title || '')}"></div>
@@ -640,6 +649,7 @@ async function openChatSettings(id) {
     <div class="row"><label>${esc(tt('執行環境', 'Exec backend'))}</label>${seg('csExec', EXEC, st.exec_host || 'auto')}<div class="hint faint">${esc(tt('shell / job / process 工具在哪裡執行（同 /exec host=）', 'Where shell / job / process tools run (same as /exec host=)'))}</div></div>
     <div class="row"><label>${esc(tt('核准模式', 'Approval mode'))}</label>${seg('csApproval', APPROVAL, st.approval || 'ask', (v) => v === 'elevated' && !st.elevated_enabled)}<div class="hint faint" id="csApprovalHint"></div></div>
     <div class="row top"><label>${esc(tt("工具", "Tools"))} <span class="faint" id="csToolCount"></span></label><div><div class="cm-tools-bar"><input type="search" id="csToolFilter" placeholder="${esc(tt('篩選工具…', 'Filter tools…'))}" autocomplete="off"><button type="button" class="btn ghost small" data-tools="all">${esc(tt('全選', 'All'))}</button><button type="button" class="btn ghost small" data-tools="none">${esc(tt('全不選', 'None'))}</button></div><div class="cm-tools" id="csTools">${tools.map((x) => `<label data-name="${esc(x.name)}"><input type="checkbox" value="${esc(x.name)}"${x.enabled ? ' checked' : ''}><code>${esc(x.name)}</code><span class="d" title="${esc(x.description)}">${esc(x.description)}</span></label>`).join('')}</div></div></div>
+    <div class="row top"><label>${esc(tt('技能', 'Skills'))} <span class="faint" id="csSkillCount"></span></label><div>${skills.length ? `<div class="cm-tools-bar"><input type="search" id="csSkillFilter" placeholder="${esc(tt('篩選技能…', 'Filter skills…'))}" autocomplete="off"><button type="button" class="btn ghost small" data-skills="all">${esc(tt('全選', 'All'))}</button><button type="button" class="btn ghost small" data-skills="none">${esc(tt('全不選', 'None'))}</button></div><div class="cm-tools" id="csSkills">${skills.map((x) => `<label data-name="${esc(x.name)}"><input type="checkbox" value="${esc(x.name)}"${x.enabled ? ' checked' : ''}><code>${esc(x.name)}</code><span class="d" title="${esc(x.description)}">${esc(x.description)}</span></label>`).join('')}</div><div class="hint faint">${esc(tt('關掉的技能不會出現在系統提示的技能清單，也不能載入', 'A switched-off skill leaves the system prompt’s skill index and cannot be loaded'))}</div>` : `<div class="faint">${esc(tt('這個工作目錄沒有可用的技能', 'No skills are installed for this workspace'))}</div>`}</div></div>
     <div class="row top"><label for="csPersona">${esc(tt('角色／系統提示', 'Persona / system prompt'))}</label><textarea id="csPersona" rows="4" maxlength="20000" placeholder="${esc(tt('這個對話專用的額外指示（附加在系統提示之後）', 'Extra instructions for this conversation only (added after the system prompt)'))}">${esc(st.persona || '')}</textarea></div>
     <menu><span class="left"><button type="button" class="btn ghost small" data-export="md">${esc(tt('匯出 .md', 'Export .md'))}</button><button type="button" class="btn ghost small" data-export="json">${esc(tt('匯出 .json', 'Export .json'))}</button></span><button class="btn ghost" value="cancel">${esc(tt('取消', 'Cancel'))}</button><button class="btn" value="save" id="csSave">${esc(tt('儲存', 'Save'))}</button></menu>
   </form>`;
@@ -656,6 +666,13 @@ async function openChatSettings(id) {
   const countTools = () => { const all = d.querySelectorAll('#csTools input'); q('#csToolCount').textContent = `${[...all].filter((x) => x.checked).length}/${all.length}`; };
   countTools();
   q('#csTools').onchange = countTools;
+  const countSkills = () => { const all = d.querySelectorAll('#csSkills input'); if (q('#csSkillCount')) q('#csSkillCount').textContent = all.length ? `${[...all].filter((x) => x.checked).length}/${all.length}` : ''; };
+  countSkills();
+  if (q('#csSkills')) {
+    q('#csSkills').onchange = countSkills;
+    q('#csSkillFilter').oninput = (e) => { const f = e.target.value.trim().toLowerCase(); for (const l of d.querySelectorAll('#csSkills label')) l.hidden = !!f && !l.textContent.toLowerCase().includes(f); };
+    for (const b of d.querySelectorAll('[data-skills]')) b.onclick = () => { for (const l of d.querySelectorAll('#csSkills label')) if (!l.hidden) l.querySelector('input').checked = b.dataset.skills === 'all'; countSkills(); };
+  }
   q('#csToolFilter').oninput = (e) => { const f = e.target.value.trim().toLowerCase(); for (const l of d.querySelectorAll('#csTools label')) l.hidden = !!f && !l.textContent.toLowerCase().includes(f); };
   for (const b of d.querySelectorAll('[data-tools]')) b.onclick = () => { for (const l of d.querySelectorAll('#csTools label')) if (!l.hidden) l.querySelector('input').checked = b.dataset.tools === 'all'; countTools(); };
   for (const b of d.querySelectorAll('[data-export]')) b.onclick = () => exportChat(id, b.dataset.export).catch(cmErr);
@@ -700,6 +717,9 @@ async function openChatSettings(id) {
     const off = [...d.querySelectorAll('#csTools input')].filter((x) => !x.checked).map((x) => x.value).sort();
     const offBefore = tools.filter((x) => !x.enabled).map((x) => x.name).sort();
     if (off.join('\n') !== offBefore.join('\n')) p.tools_disabled = off;
+    // Skills switched off earlier but not installed now stay off (they are not in the list).
+    const skillsOff = [...d.querySelectorAll("#csSkills input")].filter((x) => !x.checked).map((x) => x.value).concat((st.skills_disabled || []).filter((n) => !skills.some((x) => x.name === n))).sort();
+    if (skillsOff.join(',') !== (st.skills_disabled || []).slice().sort().join(',')) p.skills_disabled = skillsOff;
     const persona = q('#csPersona').value.trim();
     if (persona !== (st.persona || '')) p.persona = persona;
     if (Object.keys(p).length === 1) { d.close(); return; }

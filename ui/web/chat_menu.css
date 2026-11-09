@@ -132,3 +132,25 @@ dialog.modal.cm-confirm { max-width: 400px; }
   .cm-keys td { border: 0 !important; padding: 2px 0 !important; }
   .cm-keys .acts { justify-content: flex-start; }
 }
+
+/* ── split view (split.js): a second conversation beside the main one ── */
+.view.chat.split .chat-main { flex: 1 1 50%; }
+.split-pane { flex: 1 1 50%; min-width: 0; min-height: 0; display: flex; flex-direction: column; border-left: 1px solid var(--thread-2); background: var(--bg); }
+.split-pane[hidden] { display: none; }
+.split-head { display: flex; align-items: center; gap: 8px; height: 42px; padding: 0 10px 0 14px; border-bottom: 1px solid var(--thread); flex: none; }
+.split-title { font: 600 13px var(--font); color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.split-st { font-size: 11.5px; white-space: nowrap; }
+.split-head .spacer { flex: 1; }
+.split-scroll { flex: 1; min-height: 0; overflow-y: auto; }
+.split-log { padding: 16px 18px; }
+.split-composer { margin: 0 12px 12px; }
+.split-tool { font: 12px var(--mono); color: var(--text-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.split-tool .nm { color: var(--accent); }
+@media (max-width: 900px) {
+  .view.chat.split { flex-direction: column; }
+  .view.chat.split .chat-main { flex: 1 1 55%; min-height: 0; }
+  .split-pane { flex: 1 1 45%; border-left: 0; border-top: 1px solid var(--thread-2); }
+}
+/* a conversation this caller may not manage: no "⋯" (chat_menu.js canManage) */
+.sess-row.foreign .sess { padding-right: 10px; }
+.cm-settings .cm-tools + .hint { margin-top: 4px; }

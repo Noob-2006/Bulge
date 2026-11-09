@@ -155,6 +155,10 @@ pub enum EventKind {
     /// Fast mode / service tier for later requests ("" = config default, "normal", "fast",
     /// "ultrafast", "flex", "auto", "cold").
     Fast { tier: String },
+    /// Skills switched off for this conversation (the web console's conversation settings):
+    /// they leave the system prompt's skill index and loading one by name is refused. A later
+    /// event replaces an earlier one; an empty list turns every skill back on.
+    Skills { disabled: Vec<String> },
     /// Usage of an auxiliary call made for this session (compaction, review, sampling…).
     AuxUsage { task: String, model: String, usage: Usage },
     /// The exact envelope sent to a provider (after send-time trimming, image handling, thinking

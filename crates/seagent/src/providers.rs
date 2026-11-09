@@ -17,6 +17,36 @@ use std::time::Duration;
 
 pub type Labeled = (String, String, Arc<dyn CredSource>);
 
+/// Key variable names learned after start-up: the web UI's API keys page names one
+/// (`api_key_env = "<ID>_API_KEY"`) for a provider whose config had none, and the running
+/// daemon's providers must use it at once instead of after a restart. Process-wide, because the
+/// running resolver is not reachable from the ARP handler; it only ever fills a gap (a config
+/// that names its own key variable wins).
+static LIVE_KEY_ENV: std::sync::RwLock<BTreeMap<String, String>> = std::sync::RwLock::new(BTreeMap::new());
+/// Bumped by [`reload_key_env`]: providers built before it are dropped from every cache.
+static CONFIG_GEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Reload provider `id`'s key variable from the config just written (see [`LIVE_KEY_ENV`]).
+pub fn reload_key_env(id: &str, name: &str) {
+    LIVE_KEY_ENV.write().unwrap_or_else(|e| e.into_inner()).insert(id.to_string(), name.to_string());
+    CONFIG_GEN.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+}
+
+/// The key variable [`reload_key_env`] set for `id`, if any.
+pub fn live_key_env(id: &str) -> Option<String> {
+    LIVE_KEY_ENV.read().unwrap_or_else(|e| e.into_inner()).get(id).cloned()
+}
+
+/// `cfg` with a key variable learned at run time filled in (only when the config names none).
+fn with_live_key_env(mut cfg: ProviderConfig) -> ProviderConfig {
+    if cfg.key_env_names().is_empty() && cfg.api_key.is_none() && cfg.api_keys.is_empty() {
+        if let Some(n) = live_key_env(&cfg.id) {
+            cfg.api_key_env = Some(n);
+        }
+    }
+    cfg
+}
+
 pub struct Providers {
     configs: BTreeMap<String, ProviderConfig>,
     vault: Arc<Vault>,
@@ -70,7 +100,7 @@ impl Providers {
                 replay.insert(id.clone(), Arc::new(seagent_model::replay::ReplayProvider::from_exchanges(&id, entries)?));
             }
         }
-        let cache_gen = std::sync::atomic::AtomicU64::new(vault.generation());
+        let cache_gen = std::sync::atomic::AtomicU64::new(vault.generation() ^ (CONFIG_GEN.load(std::sync::atomic::Ordering::SeqCst) << 32));
         Ok(Providers { configs, vault, store: seagent_model::store::default_store(), cache: Mutex::new(HashMap::new()), cache_gen, plugins: Mutex::default(), replay, record_path })
     }
 
@@ -260,7 +290,9 @@ impl Providers {
 
 impl Resolver for Providers {
     fn provider(&self, id: &str) -> Result<Arc<dyn Provider>, String> {
-        let generation = self.vault.generation();
+        // Vault changes and config reloads both invalidate (the two counters never collide: the
+        // config one is shifted into the high half).
+        let generation = self.vault.generation() ^ (CONFIG_GEN.load(std::sync::atomic::Ordering::SeqCst) << 32);
         if self.cache_gen.swap(generation, std::sync::atomic::Ordering::SeqCst) != generation {
             self.cache.lock().unwrap().clear();
         }
@@ -295,7 +327,7 @@ impl Resolver for Providers {
         if let Some(p) = self.cache.lock().unwrap().get(id) {
             return Ok(p.clone());
         }
-        let cfg = self.config(id).cloned().ok_or_else(|| format!("unknown provider `{id}` (see `seagent providers list`)"))?;
+        let cfg = self.config(id).cloned().map(with_live_key_env).ok_or_else(|| format!("unknown provider `{id}` (see `seagent providers list`)"))?;
         let p = self.build(&cfg)?;
         let p = self.maybe_record(&cfg.id, p);
         self.cache.lock().unwrap().insert(id.to_string(), p.clone());
@@ -541,5 +573,26 @@ api_key_env = \"SEAGENT_CACHE_PROBE_KEY\"".parse().unwrap();
         let b = ps.provider("cacheprobe").unwrap();
         assert!(!Arc::ptr_eq(&a, &b), "a vault change rebuilds");
         assert!(Arc::ptr_eq(&b, &ps.provider("cacheprobe").unwrap()));
+    }
+
+    #[test]
+    fn a_key_variable_named_at_run_time_is_used_without_a_restart() {
+        let mut o = BTreeMap::new();
+        let t: toml::Table = "format = \"openai_chat\"
+base_url = \"http://127.0.0.1:9/v1\"
+auth = \"bearer\"".parse().unwrap();
+        o.insert("runtimekeyprobe".to_string(), t);
+        let vault = Arc::new(Vault::empty());
+        let ps = Providers::new(&o, vault.clone()).unwrap();
+        let before = ps.provider("runtimekeyprobe").ok();
+        // The web UI stores the key under a new name and writes `api_key_env` to the config.
+        vault.set("RUNTIMEKEYPROBE_API_KEY", "sk-runtime-0001").unwrap();
+        reload_key_env("runtimekeyprobe", "RUNTIMEKEYPROBE_API_KEY");
+        let cfg = with_live_key_env(ps.config("runtimekeyprobe").unwrap().clone());
+        assert_eq!(cfg.api_key_env.as_deref(), Some("RUNTIMEKEYPROBE_API_KEY"));
+        let cred = ps.credentials(&cfg).unwrap().into_iter().next().unwrap().2;
+        assert_eq!(cred.get().unwrap().token.as_deref(), Some("sk-runtime-0001"), "the running providers read the new name");
+        let after = ps.provider("runtimekeyprobe").unwrap();
+        assert!(before.is_none_or(|b| !Arc::ptr_eq(&b, &after)), "rebuilt, not served from the cache");
     }
 }

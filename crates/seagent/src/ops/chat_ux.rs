@@ -68,6 +68,10 @@ pub fn methods(k: Kernel) -> MethodExt {
 }
 
 pub fn call(c: &ChatCtx, m: &str, p: &Value) -> Option<Res> {
+    if !m.starts_with("ui.chat.") {
+        return None;
+    }
+    RAIL.with(|r| *r.borrow_mut() = p["_rail"].as_str().map(str::to_string));
     let id = || session_id(c, p);
     Some(match m {
         "ui.chat.list" => list(c),
@@ -146,8 +150,25 @@ struct RailState {
 
 static STATE_LOCK: Mutex<()> = Mutex::new(());
 
+/// The rail state of one scope. The app server sets `_rail` from the authenticated principal
+/// (a tenant-bound or non-admin caller gets its own sections / unread markers); the owner of
+/// the installation (no `_rail`) uses `chats.json`.
 fn state_path(c: &ChatCtx) -> PathBuf {
-    c.k.paths.data.join("ui").join("chats.json")
+    let ui = c.k.paths.data.join("ui");
+    RAIL.with(|r| match r.borrow().as_deref() {
+        Some(k) if !k.is_empty() => ui.join("chats").join(format!("{}.json", rail_file(k))),
+        _ => ui.join("chats.json"),
+    })
+}
+
+/// A scope key as a file name: hex of its bytes (no path characters can survive).
+fn rail_file(k: &str) -> String {
+    k.bytes().take(96).map(|b| format!("{b:02x}")).collect()
+}
+
+thread_local! {
+    /// The `_rail` scope of the call being served (one ARP call runs on one thread).
+    static RAIL: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
 }
 
 fn load_state(path: &Path) -> RailState {
@@ -330,6 +351,14 @@ fn fork(c: &ChatCtx, id: &str) -> Res {
         segs.push(seg.clone());
         c.k.record(&new, EventKind::System { segments: segs }).map_err(kerr)?;
     }
+    if !v.skills_disabled.is_empty() {
+        c.k.set_skills_disabled(&new, v.skills_disabled.clone()).map_err(kerr)?;
+    }
+    // The fork belongs to the same organization / team as the original (ent-050 stamps).
+    let tenant = seagent_kernel::tenancy::session_tenant(&c.k.paths.data, id);
+    if tenant != seagent_kernel::tenancy::Tenant::default() {
+        seagent_kernel::tenancy::stamp(&c.k.paths.data, &new, &tenant);
+    }
     let base = v.title.clone().filter(|t| !t.trim().is_empty()).unwrap_or_else(|| id.chars().take(8).collect());
     c.k.set_title(&new, &format!("{base} (fork)")).map_err(kerr)?;
     ap::transfer_session(&c.k.paths.data, id, &new).map_err(fail)?;
@@ -489,6 +518,11 @@ fn settings_get(c: &ChatCtx, id: &str, read_only: bool) -> Res {
         "tools": tools,
         "tool_allow": v.tool_allow,
         "persona": persona_of(&v),
+        "skills": c.k.skill_catalog(Path::new(&v.workspace)).into_iter().map(|(name, description)| {
+            let enabled = !v.skills_disabled.contains(&name);
+            json!({"name": name, "description": description.chars().take(160).collect::<String>(), "enabled": enabled})
+        }).collect::<Vec<_>>(),
+        "skills_disabled": v.skills_disabled,
         "parent": v.parent,
         "running": c.k.is_running(id),
     });
@@ -539,6 +573,11 @@ fn settings_set(c: &ChatCtx, id: &str, p: &Value) -> Res {
         }
         Some(_) => return Err(bad("tools_disabled must be an array of tool names")),
     };
+    let skills_off = match p.get("skills_disabled") {
+        None => None,
+        Some(Value::Array(a)) => Some(a.iter().filter_map(Value::as_str).map(str::to_string).collect::<Vec<_>>()),
+        Some(_) => return Err(bad("skills_disabled must be an array of skill names")),
+    };
     let persona = p.get("persona").and_then(Value::as_str).map(str::trim);
     if persona.is_some_and(|t| t.chars().count() > 20_000) {
         return Err(bad("the persona is limited to 20,000 characters"));
@@ -582,6 +621,10 @@ fn settings_set(c: &ChatCtx, id: &str, p: &Value) -> Res {
     if let Some(d) = deny.filter(|d| *d != v.tool_deny) {
         c.k.record(id, EventKind::Tools { allow: v.tool_allow.clone(), deny: d }).map_err(kerr)?;
     }
+    if let Some(off) = skills_off {
+        c.k.set_skills_disabled(id, off).map_err(kerr)?;
+    }
+    let v = if persona.is_some() { view(c, id)? } else { v };
     if let Some(text) = persona.filter(|t| *t != persona_of(&v)) {
         // Written as the system head (not a delta) so the persona is read back from the session
         // itself; it sits after the config's segments, so their cached prefix is unchanged.
@@ -779,6 +822,62 @@ mod tests {
         // Clearing the persona removes the segment.
         ok(&c, "ui.chat.settings.set", json!({"id": id, "persona": ""}));
         assert!(!view(&c, &id).unwrap().system.iter().any(|s| s.id == PERSONA_SEGMENT));
+    }
+
+    #[test]
+    fn skills_can_be_switched_off_per_conversation() {
+        let t = kit();
+        let c = ctx(&t);
+        for n in ["alpha-skill", "beta-skill"] {
+            let d = t.ws.join(".seagent/skills").join(n);
+            std::fs::create_dir_all(&d).unwrap();
+            std::fs::write(d.join("SKILL.md"), format!("---
+name: {n}
+description: Does {n} things
+---
+body
+")).unwrap();
+        }
+        let id = t.k.create_session(&t.ws, None, None, None).unwrap();
+        let other = t.k.create_session(&t.ws, None, None, None).unwrap();
+        let s = ok(&c, "ui.chat.settings.get", json!({"id": id}));
+        let names: Vec<&str> = s["skills"].as_array().unwrap().iter().map(|x| x["name"].as_str().unwrap()).collect();
+        assert!(names.contains(&"alpha-skill") && names.contains(&"beta-skill"), "{names:?}");
+        assert!(s["skills"].as_array().unwrap().iter().all(|x| x["enabled"] == true));
+        let s = ok(&c, "ui.chat.settings.set", json!({"id": id, "skills_disabled": ["alpha-skill"]}));
+        assert_eq!(s["skills_disabled"], json!(["alpha-skill"]));
+        assert!(s["skills"].as_array().unwrap().iter().any(|x| x["name"] == "alpha-skill" && x["enabled"] == false));
+        let skills_text = |sid: &str| view(&c, sid).unwrap().system.iter().find(|x| x.id == "skills").map(|x| x.text.clone()).unwrap_or_default();
+        assert!(!skills_text(&id).contains("alpha-skill") && skills_text(&id).contains("beta-skill"), "{}", skills_text(&id));
+        assert!(skills_text(&other).contains("alpha-skill"), "other conversations keep every skill");
+        // The model cannot load it by name either.
+        let v = view(&c, &id).unwrap();
+        assert!(seagent_kernel::subagents::skill_refused(&v, "skill", &json!({"action": "view", "name": "alpha-skill"})).is_some());
+        assert!(seagent_kernel::subagents::skill_refused(&v, "skill", &json!({"action": "view", "name": "beta-skill"})).is_none());
+        assert!(seagent_kernel::subagents::skill_refused(&v, "skill", &json!({"action": "list"})).is_none());
+        // A fork keeps the switch; turning it back on restores the index line.
+        let f = ok(&c, "ui.chat.fork", json!({"id": id}))["id"].as_str().unwrap().to_string();
+        assert_eq!(view(&c, &f).unwrap().skills_disabled, ["alpha-skill"]);
+        ok(&c, "ui.chat.settings.set", json!({"id": id, "skills_disabled": []}));
+        assert!(skills_text(&id).contains("alpha-skill"));
+        assert!(err(&c, "ui.chat.settings.set", json!({"id": id, "skills_disabled": "alpha-skill"})).1.contains("array"));
+    }
+
+    #[test]
+    fn rail_state_is_kept_per_scope() {
+        let t = kit();
+        let c = ctx(&t);
+        let id = t.k.create_session(&t.ws, None, None, None).unwrap();
+        ok(&c, "ui.chat.section", json!({"op": "add", "name": "Owner's"}));
+        ok(&c, "ui.chat.section", json!({"op": "add", "name": "Device's", "_rail": "device:phone-1"}));
+        ok(&c, "ui.chat.meta.set", json!({"id": id, "unread": true, "_rail": "device:phone-1"}));
+        let owner = ok(&c, "ui.chat.list", json!({}));
+        let dev = ok(&c, "ui.chat.list", json!({"_rail": "device:phone-1"}));
+        assert_eq!(owner["sections"].as_array().unwrap().len(), 1);
+        assert_eq!(owner["sections"][0]["name"], "Owner's");
+        assert_eq!(dev["sections"][0]["name"], "Device's");
+        assert_eq!((owner["unread"].as_array().unwrap().len(), dev["unread"].as_array().unwrap().len()), (0, 1));
+        assert!(std::fs::read_dir(t.paths.data.join("ui/chats")).unwrap().all(|e| e.unwrap().file_name().to_string_lossy().chars().all(|ch| ch.is_ascii_hexdigit() || ch == '.' || ch.is_ascii_lowercase())));
     }
 
     #[test]

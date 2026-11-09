@@ -490,6 +490,19 @@ impl App {
                 return json!({"jsonrpc": "2.0", "id": id, "error": {"code": code, "message": message}});
             }
         }
+        // The console's conversation menu: own conversations only for non-admin callers.
+        match who {
+            Some(p) => {
+                if let Err((code, message)) = crate::chat_scope::guard(self, p, method, &mut params) {
+                    return json!({"jsonrpc": "2.0", "id": id, "error": {"code": code, "message": message}});
+                }
+            }
+            None => {
+                if let Some(o) = params.as_object_mut() {
+                    o.remove("_rail");
+                }
+            }
+        }
         if let Some(r) = self.identity_rpc(method, &params, who) {
             return match r {
                 Ok(v) => json!({"jsonrpc": "2.0", "id": id, "result": v}),
@@ -509,6 +522,7 @@ impl App {
         let mut r = r;
         if let (Some(p), Ok(v)) = (who, r.as_mut()) {
             crate::tenant::after(self, p, method, &params, v);
+            crate::chat_scope::after(self, p, method, v);
         }
         if let (Some(p), Ok(v)) = (who, &r) {
             let sid = match method {

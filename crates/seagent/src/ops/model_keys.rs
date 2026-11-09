@@ -223,6 +223,10 @@ fn set_key(c: &KeyCtx, provider: &str, key: &str) -> Res {
     }
     vault.set(&name, key).map_err(fail)?;
     sync_daemon_vault(c)?;
+    if pc.key_env_names().is_empty() {
+        // The running providers learn the new variable now, not at the next start.
+        crate::providers::reload_key_env(&pc.id, &name);
+    }
     // A plaintext key in the config would keep winning over the vault: move it out.
     let migrated = cfg.providers.get(&pc.id).is_some_and(|t| t.contains_key("api_key"));
     if migrated {
@@ -542,6 +546,7 @@ mod tests {
         let cfg = fresh(&c).unwrap();
         let ps = providers(&cfg, &disk_vault(&c).unwrap()).unwrap();
         assert_eq!(ps.key_source("probe").unwrap(), "vault", "the runtime now reads it from the vault");
+        assert_eq!(crate::providers::live_key_env("probe").as_deref(), Some("PROBE_API_KEY"), "and the running daemon's providers without a restart");
     }
 
     #[test]
