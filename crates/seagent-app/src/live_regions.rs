@@ -189,20 +189,27 @@ pub fn stream(sink: &mut dyn Sink, id: &str, src: &mut dyn RegionSource, quality
     let (res_tx, res_rx) = sync_channel::<(u64, Result<Encoded, String>)>(n * 2);
     std::thread::scope(|sc| {
         let (stop_r, gap_r) = (&stop, &gap_us);
-        // Capture: at most one update per frame interval, backing off to 250 ms while still.
+        // Capture: at most one update per frame interval, backing off to 250 ms once the screen
+        // has been still for three captures in a row (one unchanged capture between busy frames
+        // is normal and must not slow the stream).
         sc.spawn(move || {
-            let (mut upd, mut idle) = (0u64, Duration::ZERO);
+            let (mut upd, mut idle, mut still) = (0u64, Duration::ZERO, 0u32);
             while !stop_r.load(Ordering::SeqCst) {
                 let t0 = Instant::now();
                 let r = src.next();
                 let gap = Duration::from_micros(gap_r.load(Ordering::SeqCst));
                 let rest = match &r {
                     Ok(Update::Same) => {
-                        idle = (idle * 3 / 2).max(gap).min(Duration::from_millis(250));
-                        idle
+                        still += 1;
+                        if still < 3 {
+                            gap
+                        } else {
+                            idle = (idle * 3 / 2).max(gap).min(Duration::from_millis(250));
+                            idle
+                        }
                     }
                     _ => {
-                        idle = Duration::ZERO;
+                        (idle, still) = (Duration::ZERO, 0);
                         upd += 1;
                         if job_tx.send((upd, r, crate::live_view::now_ms())).is_err() {
                             break;

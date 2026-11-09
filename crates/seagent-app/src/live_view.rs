@@ -1292,7 +1292,7 @@ mod tests {
         let h = next_text(&mut ws);
         assert_eq!(h["t"], "hello", "{h}");
         let (cpu0, t0) = (cpu_seconds_self(), Instant::now());
-        let (mut upds, mut bytes, mut caps, mut meta, mut last_upd, mut comp) = (0u32, 0usize, vec![], Value::Null, 0u64, None::<image::RgbaImage>);
+        let (mut upds, mut bytes, mut caps, mut meta, mut last_upd, mut base, mut patches) = (0u32, 0usize, vec![], Value::Null, 0u64, None::<Vec<u8>>, Vec::<(i64, i64, Vec<u8>)>::new());
         while t0.elapsed() < Duration::from_secs(6) {
             match ws.recv() {
                 Ok(Some(Message::Text(x))) => {
@@ -1304,11 +1304,10 @@ mod tests {
                 }
                 Ok(Some(Message::Binary(j))) => {
                     bytes += j.len();
-                    let pic = image::load_from_memory(&j).unwrap().to_rgba8();
                     if meta["t"] == "frame" {
-                        comp = Some(pic);
-                    } else if let Some(c) = comp.as_mut() {
-                        image::imageops::replace(c, &pic, meta["x"].as_i64().unwrap_or(0), meta["y"].as_i64().unwrap_or(0));
+                        (base, patches) = (Some(j.clone()), vec![]);
+                    } else if patches.len() < 600 {
+                        patches.push((meta["x"].as_i64().unwrap_or(0), meta["y"].as_i64().unwrap_or(0), j.clone()));
                     }
                     let upd = meta["upd"].as_u64().unwrap_or(0);
                     if upd != last_upd {
@@ -1333,7 +1332,11 @@ mod tests {
             caps.get(caps.len() * 95 / 100).copied().unwrap_or(0),
             bytes as f64 / 1e6 / secs,
         );
-        if let Some(c) = comp {
+        if let Some(b) = base {
+            let mut c = image::load_from_memory(&b).unwrap().to_rgba8();
+            for (x, y, p) in &patches {
+                image::imageops::replace(&mut c, &image::load_from_memory(p).unwrap().to_rgba8(), *x, *y);
+            }
             image::DynamicImage::ImageRgba8(c).to_rgb8().save(out.join(format!("live-bot-desktop-{}.jpg", std::env::consts::OS))).unwrap();
         }
         assert!(upds >= 10, "the desktop streamed: {upds} updates");
@@ -1535,7 +1538,9 @@ mod tests {
         let (warm, total) = (Duration::from_millis(1500), Duration::from_millis(11_500));
         let start = Instant::now();
         let (mut t0, mut cpu0) = (None::<Instant>, 0.0);
-        let (mut meta, mut comp, mut upds, mut bytes, mut lat, mut last_upd) = (Value::Null, None::<image::RgbaImage>, 0u32, 0usize, vec![], 0u64);
+        // The JPEGs are kept and composed only at the end: decoding each one here would make
+        // this client the bottleneck (the console decodes in the browser, off the stream).
+        let (mut meta, mut base, mut patches, mut upds, mut bytes, mut lat, mut last_upd) = (Value::Null, None::<Vec<u8>>, Vec::<(i64, i64, Vec<u8>)>::new(), 0u32, 0usize, vec![], 0u64);
         while start.elapsed() < total {
             if t0.is_none() && start.elapsed() >= warm {
                 (t0, cpu0) = (Some(Instant::now()), cpu_seconds_self());
@@ -1549,13 +1554,12 @@ mod tests {
                     }
                 }
                 Ok(Some(Message::Binary(j))) => {
-                    let pic = image::load_from_memory(&j).unwrap().to_rgba8();
-                    if meta["t"] == "frame" {
-                        comp = Some(pic);
-                    } else if let Some(c) = comp.as_mut() {
-                        image::imageops::replace(c, &pic, meta["x"].as_i64().unwrap(), meta["y"].as_i64().unwrap());
-                    }
                     let upd = meta["upd"].as_u64().unwrap_or(0);
+                    if meta["t"] == "frame" {
+                        (base, patches) = (Some(j.clone()), vec![]);
+                    } else if patches.len() < 600 {
+                        patches.push((meta["x"].as_i64().unwrap_or(0), meta["y"].as_i64().unwrap_or(0), j.clone()));
+                    }
                     if t0.is_some() {
                         bytes += j.len();
                         if upd != last_upd {
@@ -1576,6 +1580,13 @@ mod tests {
         lat.sort_unstable();
         let pct = |p: usize| lat.get((lat.len() * p / 100).min(lat.len().saturating_sub(1))).copied().unwrap_or(0);
         let fps = f64::from(upds) / s;
+        let comp = base.map(|b| {
+            let mut c = image::load_from_memory(&b).unwrap().to_rgba8();
+            for (x, y, p) in &patches {
+                image::imageops::replace(&mut c, &image::load_from_memory(p).unwrap().to_rgba8(), *x, *y);
+            }
+            c
+        });
         let size = comp.as_ref().map(|c| c.dimensions()).unwrap_or_default();
         eprintln!("LIVE Bot Desktop full-frame, busy editor ({}): {upds} screen updates in {s:.1} s = {fps:.1} fps; capture→receive p50 {} ms, p95 {} ms; {:.2} MB/s; server CPU {cpu:.0}%; screen {}x{}; {} encoders", std::env::consts::OS, pct(50), pct(95), bytes as f64 / 1e6 / s, size.0, size.1, crate::live_regions::encoders());
         if let Some(c) = comp {
