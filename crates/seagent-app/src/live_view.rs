@@ -56,8 +56,8 @@ impl Kind {
     }
 }
 
-/// Adaptive pacing of polled frame sources (desktops): never faster than the fps cap, never
-/// more than half the time spent capturing, and backing off (to 1 s) while nothing changes.
+/// Adaptive pacing of polled frame sources (desktops): never faster than the fps cap, captures
+/// back to back at most, and backing off (to 1 s) while nothing changes.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Pace {
     pub min: Duration,
@@ -76,8 +76,9 @@ impl Pace {
     }
     /// The wait before the next capture, given how long this one took and whether it changed.
     pub fn after(&mut self, took: Duration, changed: bool) -> Duration {
-        // At most ~2/3 of the time capturing (capture runs beside the encoder, see desktop_loop).
-        let floor = self.min.max(took * 3 / 2);
+        // Capture runs beside the encoder (desktop_loop) and only while someone watches: it may
+        // run back to back, never faster than the fps cap.
+        let floor = self.min.max(took);
         self.interval = if changed { floor } else { (self.interval.max(floor) * 3 / 2).min(self.max.max(floor)) };
         self.interval.saturating_sub(took)
     }
@@ -733,7 +734,7 @@ mod tests {
     }
 
     #[test]
-    fn pace_caps_fps_backs_off_when_still_and_bounds_the_capture_duty() {
+    fn pace_caps_fps_and_backs_off_when_still() {
         let mut p = Pace::new(5);
         assert_eq!(p.min, Duration::from_millis(200));
         assert_eq!(p.after(Duration::from_millis(50), true), Duration::from_millis(150), "fps cap: 200 ms per frame");
@@ -741,8 +742,8 @@ mod tests {
         let waits: Vec<u128> = (0..6).map(|_| p.after(Duration::ZERO, false).as_millis()).collect();
         assert_eq!(waits, [300, 450, 675, 1000, 1000, 1000]);
         assert_eq!(p.after(Duration::ZERO, true), Duration::from_millis(200), "a change resets the rate");
-        // A capture that takes 400 ms: at most every 600 ms (≤ 2/3 of the time capturing).
-        assert_eq!(p.after(Duration::from_millis(400), true), Duration::from_millis(200));
+        // A capture that takes 400 ms: back to back, no extra rest.
+        assert_eq!(p.after(Duration::from_millis(400), true), Duration::ZERO);
         assert_eq!(Pace::new(1000).min, Duration::from_millis(16), "capped at 60 fps");
         assert_eq!(Pace::new(30).min, Duration::from_millis(33));
     }
@@ -1187,10 +1188,11 @@ mod tests {
         std::thread::sleep(Duration::from_secs(4));
         // Where the time goes: one grab (capture + compose), then JPEG encoding at two widths.
         let t = crate::browser_view::Target::Host;
+        let mut gr = Grabber::default();
         let (mut g_ms, mut e_full, mut e_1280) = (vec![], vec![], vec![]);
         for _ in 0..8 {
             let t0 = Instant::now();
-            let img = grab(&a, &t).unwrap();
+            let img = grab_for(&a, &t, &mut gr, 1920).unwrap();
             g_ms.push(t0.elapsed().as_millis());
             let t1 = Instant::now();
             let _ = to_jpeg(img.clone(), 3840, 85).unwrap();
@@ -1205,7 +1207,8 @@ mod tests {
         };
         eprintln!("LIVE Bot Desktop stages (median of 8): grab {} ms, JPEG full size {} ms, JPEG at 1280 wide {} ms", med(&mut g_ms), med(&mut e_full), med(&mut e_1280));
         let srv = crate::server::start(a.clone()).unwrap();
-        let mut ws = connect(srv.local_addr(), "kind=desktop&target=host&fps=30&quality=85&maxWidth=3840", "live-admin-token");
+        drop(gr);
+        let mut ws = connect(srv.local_addr(), "kind=desktop&target=host&fps=30&quality=85&maxWidth=1920", "live-admin-token");
         let h = next_text(&mut ws);
         assert_eq!(h["t"], "hello", "{h}");
         let (cpu0, t0) = (cpu_seconds_self(), Instant::now());
