@@ -4,7 +4,8 @@
 //!   terminal, the link a phone camera opens (`https://<ip>:<port>/#setup=…`), the
 //!   `seagent-pair://` setup code (single use, pins the certificate), the 8-character code for
 //!   typing in, and the short fingerprint both screens show.
-//! - `seagent devices list|pending|approve CODE|reject CODE|revoke ID [--json]`.
+//! - `seagent devices list|pending|approve CODE|reject CODE|revoke ID|revoke --all --yes|scope ID
+//!   read|write|approve [--json]` (docs/SECURITY.md §8: key binding, last address, sign out all).
 //! - `seagent tls show|rotate --yes [--json]` — the LAN identity certificate.
 //! - `seagent nodes discover [--json] [--timeout SECS]` — SE Agent hosts on the LAN (mDNS).
 //! - `seagent lan status|probe ADDRESS|connect ADDRESS (--code CODE | --setup-code CODE)` — pair
@@ -22,7 +23,7 @@ use std::time::{Duration, Instant};
 
 pub const COMMANDS: &[&str] = &["devices", "tls", "lan"];
 pub const VALUE_FLAGS: &[&str] = &["scope", "code", "setup-code", "fingerprint", "ttl", "timeout", "name"];
-pub const BOOL_FLAGS: &[&str] = &["yes"];
+pub const BOOL_FLAGS: &[&str] = &["yes", "all"];
 
 /// `pair code` and `nodes discover` are sub-commands of existing commands (`seagent pair …` is
 /// also DM pairing, `seagent nodes …` node management).
@@ -88,8 +89,16 @@ fn devices(a: &Args) -> R {
         "pending" => daemon("devices.pending", json!({}))?,
         "approve" => daemon("devices.approve", json!({"code": a.need(1, "code")?}))?,
         "reject" | "deny" => daemon("devices.reject", json!({"code": a.need(1, "code")?}))?,
+        // "Sign out all devices": every paired device pairs again (`--all --yes`).
+        "revoke" | "rm" | "remove" if a.flag("all") => {
+            if !a.flag("yes") {
+                return Err("`seagent devices revoke --all` signs out every paired device (they have to pair again); add --yes".to_string().into());
+            }
+            daemon("devices.revoke_all", json!({}))?
+        }
         "revoke" | "rm" | "remove" => daemon("devices.revoke", json!({"id": a.need(1, "device id")?}))?,
-        o => return Err(format!("unknown `devices {o}` (list, pending, approve CODE, reject CODE, revoke ID)").into()),
+        "scope" => daemon("devices.scope", json!({"id": a.need(1, "device id")?, "scope": a.need(2, "scope (read = view only, write = full control, approve)")?}))?,
+        o => return Err(format!("unknown `devices {o}` (list, pending, approve CODE, reject CODE, revoke ID|--all --yes, scope ID read|write|approve)").into()),
     };
     if json_out(a, &v) {
         return Ok(0);
@@ -101,14 +110,16 @@ fn devices(a: &Args) -> R {
                 println!("No paired devices. Pair one with `seagent pair code`.");
             }
             for d in list {
-                println!("{:<34} {:<24} {:<9} {:<6} paired {} · seen {}", d["id"].as_str().unwrap_or(""), d["name"].as_str().unwrap_or(""), d["platform"].as_str().unwrap_or(""), d["scope"].as_str().unwrap_or(""), when(&d["pairedAtMs"]), when(&d["lastSeenMs"]));
+                println!("{:<34} {:<24} {:<9} {:<7} {:<9} paired {} · seen {} from {}", d["id"].as_str().unwrap_or(""), d["name"].as_str().unwrap_or(""), d["platform"].as_str().unwrap_or(""), d["scope"].as_str().unwrap_or(""), if d["keyBound"] == true { "key" } else { "no-key" }, when(&d["pairedAtMs"]), when(&d["lastSeenMs"]), d["lastIp"].as_str().filter(|s| !s.is_empty()).unwrap_or("—"));
             }
             for p in v["pending"].as_array().into_iter().flatten() {
                 println!("pending  {}  {} ({}) from {} — seagent devices approve {}", grouped(p["code"].as_str().unwrap_or("")), p["name"].as_str().unwrap_or(""), p["platform"].as_str().unwrap_or(""), p["ip"].as_str().unwrap_or(""), p["code"].as_str().unwrap_or(""));
             }
         }
         "approve" => println!("Approved {} ({}).", v["name"].as_str().unwrap_or(""), v["approved"].as_str().unwrap_or("")),
+        "revoke" | "rm" | "remove" if a.flag("all") => println!("Signed out {} device(s): they have to pair again; open connections are closed.", v["revoked"]),
         "revoke" | "rm" | "remove" => println!("{}", if v["revoked"] == true { "Revoked: its token no longer works and open connections are closed." } else { "No such device." }),
+        "scope" => println!("{}", if v["updated"] == true { format!("Scope is now {} (from the device's next request).", v["scope"].as_str().unwrap_or("")) } else { "No such device.".to_string() }),
         "reject" | "deny" => println!("{}", if v["rejected"] == true { "Rejected." } else { "No such pairing code." }),
         _ => println!("{}", serde_json::to_string_pretty(&v).unwrap_or_default()),
     }

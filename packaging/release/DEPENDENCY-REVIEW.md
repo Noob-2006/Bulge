@@ -177,6 +177,9 @@ Rules for `apps/desktop`:
   instance, autostart, updater, dialog, opener, barcode scanner), `serde`/`serde_json`, `base64`,
   `tokio` (already in Tauri's tree), `rustls` + `tokio-rustls` + `ring` (pinned TLS to a paired
   host — `ring` provider, no `aws-lc`/cmake for mobile cross builds), `sys-locale`.
+  `apps/desktop/devkey` (the device key, docs/SECURITY.md §8) adds no crate to the lockfile: `ring`,
+  `base64`, and per target `windows-sys` (CNG key storage) and `security-framework` (Keychain /
+  Secure Enclave), both already in Tauri's tree.
   Anything else follows the budget rule above.
 * **iOS links the agent itself** (`plugins/seagent-mobile`: `seagent` as a path dependency under
   `cfg(target_os = "ios")`): iOS allows no child process, so the agent cannot ship as a sidecar

@@ -667,9 +667,20 @@ pub(crate) fn lan_findings(cfg: &Config, data: &Path) -> Vec<Finding> {
             out.push(f("lan.discovery_limited", "warn", "mDNS discovery is limited on this host", e, Some("stop the program holding UDP 5353 exclusively, or pair by address / QR code")));
         }
     }
-    let n = seagent_app::devices::list(data).len();
+    let devs = seagent_app::devices::list(data);
+    let n = devs.len();
     if n > 0 {
         out.push(f("lan.paired_devices", "info", format!("{n} paired device(s) hold console tokens"), "seagent devices list", Some("seagent devices revoke ID")));
+        // docs/SECURITY.md §8: where each device keeps its key. A file (or no key yet) is the
+        // weaker case: whoever copies the app's data folder has the device.
+        let mut stores: std::collections::BTreeMap<String, usize> = Default::default();
+        for d in &devs {
+            let s = if d["keyBound"] != true { "unbound".to_string() } else { d["keyStore"].as_str().filter(|s| !s.is_empty()).unwrap_or("unknown").to_string() };
+            *stores.entry(s).or_default() += 1;
+        }
+        let summary = stores.iter().map(|(k, v)| format!("{k}: {v}")).collect::<Vec<_>>().join(", ");
+        let weak = stores.keys().any(|k| matches!(k.as_str(), "file" | "unbound"));
+        out.push(f("lan.device_keys", if weak { "warn" } else { "info" }, format!("device key stores — {summary}"), "tpm / cng / secure-enclave / keychain / android-keystore / webcrypto keep the key non-exportable; file = the app's data folder; unbound = an older app (binds on its next start)", weak.then_some("update the app on those devices; [app.exposure] require_device_key = true refuses unbound ones")));
     }
     if let Some(id) = seagent_app::lan::load_identity(data) {
         let now = seagent_kernel::event::now_ms();

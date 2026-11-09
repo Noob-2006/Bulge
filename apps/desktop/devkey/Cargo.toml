@@ -1,0 +1,21 @@
+[package]
+name = "seagent-devkey"
+description = "SE Agent app: the device key in the platform key store (TPM / CNG, Secure Enclave / Keychain, Android Keystore via the app, systemd-creds TPM), file only as a fallback"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+
+# No Tauri types: unit-testable on its own (`cargo test -p seagent-devkey`, also natively on
+# Windows). packaging/release/DEPENDENCY-REVIEW.md ("App shell budget"): every crate here was
+# already in apps/desktop/Cargo.lock.
+[dependencies]
+ring = "0.17"                             # P-256 for the file / sealed fallback, SHA-256 for CNG signing
+base64 = "0.22"                           # the public key and signatures on the wire
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security_Cryptography"] } # CNG: Platform Crypto Provider (TPM) / Software KSP; already in Tauri's tree
+
+[target.'cfg(any(target_os = "macos", target_os = "ios"))'.dependencies]
+security-framework = { version = "3", features = ["OSX_10_15"] } # Keychain + Secure Enclave keys; already in Tauri's tree

@@ -17,6 +17,7 @@ mod boot;
 mod commands;
 #[cfg(desktop)]
 mod desktop;
+mod devkey;
 mod pair;
 mod tls;
 
@@ -222,6 +223,7 @@ pub fn run() {
             commands::host_open,
             commands::host_forget,
             commands::show_local,
+            commands::console_access_token,
         ])
         .setup(move |app| {
             let data_dir = app.path().app_data_dir().unwrap_or_else(|_| std::env::temp_dir().join("seagent-app"));

@@ -2,8 +2,8 @@ use std::path::Path;
 
 /// Commands the app's own pages may call. Declaring them makes Tauri check every app command
 /// against the capabilities in `capabilities/` (local pages: `main.json`; the agent's console and
-/// setup wizard served from 127.0.0.1: `console.json`, autostart only).
-const COMMANDS: &[&str] = &["app_info", "boot_start", "boot_state", "set_mode", "autostart_get", "autostart_set", "discover_hosts", "parse_setup_code", "probe_host", "pair_host", "hosts_list", "host_open", "host_forget", "show_local"];
+/// setup wizard served from 127.0.0.1: `console.json`, autostart plus `console_access_token`).
+const COMMANDS: &[&str] = &["app_info", "boot_start", "boot_state", "set_mode", "autostart_get", "autostart_set", "discover_hosts", "parse_setup_code", "probe_host", "pair_host", "hosts_list", "host_open", "host_forget", "show_local", "console_access_token"];
 
 fn main() {
     // The splash pages use the project's shared theme (ui/theme.css + the star mask); copy it in

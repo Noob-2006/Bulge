@@ -110,6 +110,32 @@ struct Book {
     tasks: HashMap<String, Task>,
     contexts: HashMap<String, String>,
     rate: HashMap<String, VecDeque<Instant>>,
+    /// Replay window: `peer␟messageId` → (task id, when). A message seen again inside
+    /// [`REPLAY_WINDOW`] answers with its task instead of starting another turn.
+    seen: HashMap<String, (String, Instant)>,
+}
+
+/// How long a peer's `messageId` is remembered (A2A message ids are unique per message, so a
+/// repeat is a retry or a replay; either way it must not run the turn twice).
+pub const REPLAY_WINDOW: Duration = Duration::from_secs(15 * 60);
+
+/// The task an earlier message with this id started, if it is inside the replay window.
+fn replayed(b: &mut Book, peer: &str, message_id: &str) -> Option<String> {
+    if message_id.is_empty() {
+        return None;
+    }
+    b.seen.retain(|_, (_, at)| at.elapsed() < REPLAY_WINDOW);
+    b.seen.get(&format!("{peer}\u{1f}{message_id}")).map(|(t, _)| t.clone())
+}
+
+fn remember_message(b: &mut Book, peer: &str, message_id: &str, task: &str) {
+    if message_id.is_empty() {
+        return;
+    }
+    if b.seen.len() > 50_000 {
+        b.seen.clear();
+    }
+    b.seen.insert(format!("{peer}\u{1f}{message_id}"), (task.to_string(), Instant::now()));
 }
 
 fn book() -> &'static Mutex<Book> {
@@ -195,8 +221,18 @@ pub fn handle(app: &Arc<App>, r: Request) -> Response {
             return Response::json(400, &rpc_err(&Value::Null, -32600, &format!("unsupported A2A-Version {v}")).to_string());
         }
     }
+    // Peer tokens are guessable only by brute force: a locked-out address gets nothing (also
+    // no "was that one right?" signal). Behind a declared proxy each client is its own bucket.
+    if let Some(wait) = crate::netguard::locked(app, &r) {
+        return crate::netguard::locked_reply(wait);
+    }
     let secrets = &*app.d.k.vault_substitute();
-    let Some(peer) = peer_of(app, &r, secrets) else { return Response::json(401, &rpc_err(&Value::Null, -32050, "unauthorized").to_string()) };
+    let Some(peer) = peer_of(app, &r, secrets) else {
+        if r.bearer().is_some() {
+            crate::netguard::auth_failed(app, &r, "a2a");
+        }
+        return Response::json(401, &rpc_err(&Value::Null, -32050, "unauthorized").to_string());
+    };
     let limit = app.cfg.a2a.rate_per_min.unwrap_or(30) as usize;
     {
         let mut b = book().lock().unwrap();
@@ -309,6 +345,16 @@ fn send_message(app: &Arc<App>, peer: &str, id: &Value, p: &Value, v1: bool, blo
     if text.trim().is_empty() {
         return rpc_err(id, -32602, "message has no text parts");
     }
+    let message_id = m["messageId"].as_str().unwrap_or("").to_string();
+    {
+        let mut b = book().lock().unwrap();
+        if let Some(tid) = replayed(&mut b, peer, &message_id) {
+            if let Some(t) = b.tasks.get(&tid) {
+                let result = if v1 { json!({"task": task_json(t, true)}) } else { task_json(t, false) };
+                return json!({"jsonrpc": "2.0", "id": id, "result": result});
+            }
+        }
+    }
     let k = app.d.k.clone();
     let ctx = m["contextId"].as_str().map(str::to_string).unwrap_or_else(|| seagent_net::crypto::random_token(12));
     let existing_task = m["taskId"].as_str().map(str::to_string);
@@ -340,6 +386,7 @@ fn send_message(app: &Arc<App>, peer: &str, id: &Value, p: &Value, v1: bool, blo
     let tid = existing_task.unwrap_or_else(|| seagent_net::crypto::random_token(12));
     {
         let mut b = book().lock().unwrap();
+        remember_message(&mut b, peer, &message_id, &tid);
         let t = b.tasks.entry(tid.clone()).or_insert(Task { id: tid.clone(), context_id: ctx.clone(), session: session.clone(), state: State::Submitted, updated: now_ms(), history: vec![], output: String::new(), peer: peer.into(), push: vec![] });
         t.history.push(("user".into(), text.clone()));
         t.state = State::Working;
@@ -763,6 +810,21 @@ mod tests {
             Response::new(200, "application/json", body.to_string())
         }))
         .unwrap()
+    }
+
+    #[test]
+    fn a_replayed_message_id_maps_to_its_task_per_peer() {
+        let mut b = Book::default();
+        assert_eq!(replayed(&mut b, "alice", "m-1"), None);
+        remember_message(&mut b, "alice", "m-1", "task-1");
+        assert_eq!(replayed(&mut b, "alice", "m-1").as_deref(), Some("task-1"), "the same message again is the same task");
+        assert_eq!(replayed(&mut b, "bob", "m-1"), None, "ids are per peer");
+        remember_message(&mut b, "alice", "", "task-x");
+        assert_eq!(replayed(&mut b, "alice", ""), None, "no id, no dedupe");
+        if let Some(old) = Instant::now().checked_sub(REPLAY_WINDOW + Duration::from_secs(1)) {
+            b.seen.get_mut("alice\u{1f}m-1").unwrap().1 = old;
+            assert_eq!(replayed(&mut b, "alice", "m-1"), None, "outside the window it is forgotten");
+        }
     }
 
     #[test]

@@ -34,6 +34,8 @@ pub fn app_info(st: State<'_, AppState>) -> Value {
         "canRunLocal": true,
         "mode": st.mode(),
         "hosts": hosts,
+        // docs/SECURITY.md §8: tpm / cng / secure-enclave / keychain / android-keystore / file.
+        "keyStore": seagent_devkey::describe(&st.data_dir),
         "zh": crate::zh(),
     })
 }
@@ -162,7 +164,7 @@ fn device_id(st: &AppState) -> String {
 /// Pair with a host: `POST /pair/client` over pinned TLS (see apps/desktop/MOBILE.md and
 /// `crates/seagent-app/src/devices.rs`) → a per-device console token, stored with the pin.
 #[tauri::command]
-pub async fn pair_host(st: State<'_, AppState>, args: PairArgs) -> R<Value> {
+pub async fn pair_host<Rt: Runtime>(app: AppHandle<Rt>, st: State<'_, AppState>, args: PairArgs) -> R<Value> {
     let (addr, bootstrap, code, pin) = match &args.setup_code {
         Some(text) => {
             let sc = SetupCode::decode(text, now_ms())?;
@@ -189,7 +191,11 @@ pub async fn pair_host(st: State<'_, AppState>, args: PairArgs) -> R<Value> {
     }
     let name = args.device_name.clone().unwrap_or_else(|| format!("SE Agent ({})", platform()));
     let id = device_id(&st);
-    let body = pair::claim_body(bootstrap.as_deref(), code.as_deref(), &id, &name, platform());
+    let mut body = pair::claim_body(bootstrap.as_deref(), code.as_deref(), &id, &name, platform());
+    // Bind the pairing to this install's key: the console token alone will not open the host.
+    let key = crate::devkey::load(&app, &st.data_dir)?;
+    body["device"]["publicKey"] = key.public_b64()?.into();
+    body["device"]["keyStore"] = key.kind().as_str().into();
     // A typed code waits for the host's approval: 202 + requestId, poll (the host long-polls
     // up to 15 s per request) until 200, a refusal, or 15 minutes.
     let (mut status, mut v) = tls::post_json(&addr, &pin, "/pair/client", &body).await?;
@@ -251,7 +257,51 @@ pub async fn host_open<Rt: Runtime>(app: AppHandle<Rt>, id: String) -> R<()> {
     }
     let port = slot.as_ref().map(|t| t.port).unwrap_or(h.local_port);
     drop(slot);
-    crate::open_url(&app, &format!("http://127.0.0.1:{port}/#token={}", h.token), true)
+    let (token, _) = access_token(&app, &st, &h).await?;
+    crate::open_url(&app, &format!("http://127.0.0.1:{port}/#token={token}"), true)
+}
+
+/// A short-lived access token for host `h`: `GET /pair/info` (host id + clock), then
+/// `POST /pair/refresh` with the console token and a signature by this install's key (which
+/// also binds the key the first time: hosts paired by an older version migrate here). A host
+/// without `/pair/info` predates device keys: the console token is used as before. Transient
+/// failures (network, host restarting, a refresh signed just before a restart) are retried.
+pub async fn access_token<Rt: Runtime>(app: &AppHandle<Rt>, st: &AppState, h: &Host) -> R<(String, u64)> {
+    use crate::devkey::{with_retry, Transient};
+    let key = crate::devkey::load(app, &st.data_dir)?;
+    let dev = device_id(st);
+    let (key, dev) = (&key, &dev);
+    with_retry(|| async move {
+        let (status, info) = tls::request_json(&h.address, &h.fingerprint, "GET", "/pair/info", None, None).await.map_err(Transient::Again)?;
+        if status >= 500 {
+            return Err(Transient::Again(format!("the host answered HTTP {status}")));
+        }
+        if status == 404 || info["hostId"].as_str().is_none() {
+            return Ok((h.token.clone(), 0));
+        }
+        let ts = info["nowMs"].as_u64().unwrap_or_else(now_ms);
+        let body: Value = serde_json::from_str(&key.refresh_body(info["hostId"].as_str().unwrap_or(""), dev, ts).map_err(Transient::Final)?).map_err(|e| Transient::Final(e.to_string()))?;
+        let (status, v) = tls::request_json(&h.address, &h.fingerprint, "POST", "/pair/refresh", Some(&body), Some(&h.token)).await.map_err(Transient::Again)?;
+        let err = v["error"].as_str().unwrap_or("").to_string();
+        match (status, v["accessToken"].as_str()) {
+            (200, Some(t)) => Ok((t.to_string(), v["expiresAtMs"].as_u64().unwrap_or(0))),
+            (404, _) => Ok((h.token.clone(), 0)),
+            (s, _) if s >= 500 || s == 429 || err.contains("before this host started") || err.contains("replay window") => Err(Transient::Again(err)),
+            _ => Err(Transient::Final(format!("{} — if this device was revoked or reinstalled, forget the host and pair it again", if err.is_empty() { "the host refused this device" } else { &err }))),
+        }
+    })
+    .await
+}
+
+/// The console page (served by the paired host through the tunnel) asks for a new access token
+/// when its own expired: `{token, expiresAtMs}` for the tunnel's host, nothing else.
+#[tauri::command]
+pub async fn console_access_token<Rt: Runtime>(app: AppHandle<Rt>) -> R<Value> {
+    let st = app.state::<AppState>();
+    let id = st.tunnel.lock().await.as_ref().map(|t| t.host_id.clone()).ok_or("no paired host is open")?;
+    let h = st.hosts().get(&id).ok_or("unknown host")?;
+    let (token, exp) = access_token(&app, &st, &h).await?;
+    Ok(json!({"token": token, "expiresAtMs": exp}))
 }
 
 /// Android "this phone" mode / desktop: the local console (via the boot sequence).

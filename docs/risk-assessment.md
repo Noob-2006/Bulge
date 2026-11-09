@@ -121,6 +121,7 @@
 | 出口 | egress proxy ＋ broker（A3） | 主機允許清單、SSRF／私有位址、網站黑名單；憑證只在 daemon 注入，不外流；外送內容掃秘密（vault 值與金鑰樣式） |
 | 秘密 | vault（A4） | 金鑰只在 daemon；子行程環境 scrub；`payload_exfil`／`vault.leaks` 擋外送 |
 | 對外暴露 | app server（A8–A12） | 預設 loopback；非 loopback 需 TLS（或 `behind_proxy`）＋強認證＋Origin 限制＋速率限制，缺一層就拒絕啟動 |
+| 周界（每個請求） | `seagent_app::netguard`、`device_auth`（SECURITY.md §8） | 來源分類（tunnel 不算本機）、公網來源需明確開啟、`allow_sources`、Host／DNS rebinding、cookie CSRF、CORS、安全標頭、失敗鎖定；裝置金鑰＋短效 access token。webhook／A2A／本機 owner 不受影響 |
 | 模型上下文 | 注入防線（A7、H8） | 外部內容加邊界標記；偵測到不可信內容後 tier 2/3 需人，tier 0/1 照常（降權不是停擺） |
 
 ## 5. 已知事故對照（H 段）

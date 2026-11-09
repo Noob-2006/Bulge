@@ -91,6 +91,32 @@ pub fn ed25519_sign(seed: &[u8; 32], msg: &[u8]) -> [u8; 64] {
     signature::Ed25519KeyPair::from_seed_unchecked(seed).expect("ed25519 seed").sign(msg).as_ref().try_into().expect("64 bytes")
 }
 
+/// ECDSA P-256 / SHA-256 verification of a device signature: `public_key` is the 65-byte
+/// uncompressed point (WebCrypto `exportKey("raw")`, ring `public_key()`), `sig` the 64-byte
+/// `r ‖ s` form both produce (IEEE P1363). Paired devices prove possession of their key with it.
+pub fn p256_verify(public_key: &[u8], msg: &[u8], sig: &[u8]) -> bool {
+    public_key.len() == 65 && public_key[0] == 4 && sig.len() == 64 && signature::UnparsedPublicKey::new(&signature::ECDSA_P256_SHA256_FIXED, public_key).verify(msg, sig).is_ok()
+}
+
+/// A new P-256 key as PKCS#8 (device keys of native clients and tests).
+pub fn p256_generate() -> Option<Vec<u8>> {
+    signature::EcdsaKeyPair::generate_pkcs8(&signature::ECDSA_P256_SHA256_FIXED_SIGNING, &ring::rand::SystemRandom::new()).ok().map(|d| d.as_ref().to_vec())
+}
+
+/// The uncompressed public point of a PKCS#8 P-256 key.
+pub fn p256_public(pkcs8: &[u8]) -> Option<Vec<u8>> {
+    use signature::KeyPair;
+    let k = signature::EcdsaKeyPair::from_pkcs8(&signature::ECDSA_P256_SHA256_FIXED_SIGNING, pkcs8, &ring::rand::SystemRandom::new()).ok()?;
+    Some(k.public_key().as_ref().to_vec())
+}
+
+/// `r ‖ s` signature over `msg` with a PKCS#8 P-256 key.
+pub fn p256_sign(pkcs8: &[u8], msg: &[u8]) -> Option<Vec<u8>> {
+    let rng = ring::rand::SystemRandom::new();
+    let k = signature::EcdsaKeyPair::from_pkcs8(&signature::ECDSA_P256_SHA256_FIXED_SIGNING, pkcs8, &rng).ok()?;
+    k.sign(&rng, msg).ok().map(|s| s.as_ref().to_vec())
+}
+
 pub fn random_bytes(n: usize) -> Vec<u8> {
     let mut v = vec![0u8; n];
     ring::rand::SystemRandom::new().fill(&mut v).expect("system randomness unavailable");
@@ -541,6 +567,20 @@ fn inv_mix_columns(b: &mut [u8; 16]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn p256_device_signatures_verify_and_tampering_fails() {
+        let k = p256_generate().unwrap();
+        let pk = p256_public(&k).unwrap();
+        assert_eq!((pk.len(), pk[0]), (65, 4));
+        let sig = p256_sign(&k, b"seagent-device-refresh|v1|h|d|1|n").unwrap();
+        assert_eq!(sig.len(), 64);
+        assert!(p256_verify(&pk, b"seagent-device-refresh|v1|h|d|1|n", &sig));
+        assert!(!p256_verify(&pk, b"seagent-device-refresh|v1|h|d|2|n", &sig), "another message");
+        let other = p256_public(&p256_generate().unwrap()).unwrap();
+        assert!(!p256_verify(&other, b"seagent-device-refresh|v1|h|d|1|n", &sig), "another key");
+        assert!(!p256_verify(&pk[1..], b"x", &sig) && !p256_verify(&pk, b"x", &sig[..63]));
+    }
 
     #[test]
     fn digests_and_macs_match_known_vectors() {

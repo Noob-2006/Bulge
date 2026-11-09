@@ -137,6 +137,17 @@ impl<R: Runtime> SeagentMobile<R> {
         Err("the in-process agent exists on iOS only".into())
     }
 
+    /// Android: the device key in the Android Keystore (StrongBox when the phone has one),
+    /// created under `alias` on first use. Returns the base64 X.509 SubjectPublicKeyInfo and
+    /// whether it is hardware-backed. (docs/SECURITY.md §8; iOS uses the Keychain from Rust.)
+    pub fn device_key_public(&self, alias: &str) -> Result<serde_json::Value, String> {
+        self.call("deviceKeyPublic", serde_json::json!({"alias": alias}))
+    }
+    /// Android: ECDSA P-256 / SHA-256 over `message_b64` with the Keystore key; base64 DER.
+    pub fn device_key_sign(&self, alias: &str, message_b64: &str) -> Result<String, String> {
+        self.call::<serde_json::Value>("deviceKeySign", serde_json::json!({"alias": alias, "message": message_b64})).and_then(|v| v["signature"].as_str().map(String::from).ok_or_else(|| "no signature".to_string()))
+    }
+
     /// iOS: ask BGTaskScheduler for a processing slot at (or after) `earliest_unix`.
     pub fn schedule_background(&self, earliest_unix: Option<i64>) -> Result<(), String> {
         self.call::<serde_json::Value>("scheduleBackground", serde_json::json!({"earliestUnix": earliest_unix})).map(|_| ())

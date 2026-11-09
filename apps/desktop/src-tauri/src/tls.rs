@@ -93,9 +93,17 @@ pub async fn probe(addr: &Address) -> Result<String, String> {
 
 /// `POST <path>` with a JSON body over pinned TLS (HTTP/1.1, `Connection: close`).
 pub async fn post_json(addr: &Address, pin: &str, path: &str, body: &Value) -> Result<(u16, Value), String> {
+    request_json(addr, pin, "POST", path, Some(body), None).await
+}
+
+/// One HTTP/1.1 request over pinned TLS: `GET` without a body, `POST` with JSON, an optional
+/// bearer (the console token, only ever for `/pair/refresh`).
+pub async fn request_json(addr: &Address, pin: &str, method: &str, path: &str, body: Option<&Value>, bearer: Option<&str>) -> Result<(u16, Value), String> {
     let (mut s, _) = connect(addr, Some(pin.to_string())).await?;
-    let b = body.to_string();
-    let req = format!("POST {path} HTTP/1.1\r\nHost: {}\r\nContent-Type: application/json\r\nAccept: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{b}", addr.authority(), b.len());
+    let b = body.map(|v| v.to_string()).unwrap_or_default();
+    let auth = bearer.map(|t| format!("Authorization: Bearer {t}\r\n")).unwrap_or_default();
+    let ctype = if body.is_some() { "Content-Type: application/json\r\n" } else { "" };
+    let req = format!("{method} {path} HTTP/1.1\r\nHost: {}\r\n{ctype}{auth}Accept: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{b}", addr.authority(), b.len());
     s.write_all(req.as_bytes()).await.map_err(|e| e.to_string())?;
     let mut raw = Vec::new();
     let _ = tokio::time::timeout(Duration::from_secs(20), (&mut s).take(4 << 20).read_to_end(&mut raw)).await.map_err(|_| "the host did not answer".to_string())?;

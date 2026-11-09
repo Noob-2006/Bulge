@@ -696,6 +696,12 @@ pub fn login_from(app: &App, r: &Request) -> Option<Login> {
 
 fn audit_login(app: &App, r: &Request, kind: &str, who: &str, outcome: &str, detail: Value) {
     let ip = app.client_ip(r).map(|i| i.to_string()).unwrap_or_default();
+    // A wrong password counts toward the address's lockout (crate::netguard); a good one resets it.
+    match outcome {
+        "fail" => crate::netguard::auth_failed(app, r, "login"),
+        "ok" => crate::netguard::auth_ok(app, r),
+        _ => {}
+    }
     seagent_security::audit::record(&app.d.k.paths.data, seagent_security::audit::Event::new("auth.login", seagent_security::audit::Actor::new(kind, who).with_ip(&ip), "/auth/login", outcome).detail(detail));
 }
 

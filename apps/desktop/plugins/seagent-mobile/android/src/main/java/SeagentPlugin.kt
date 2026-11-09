@@ -30,6 +30,12 @@ class AutostartArgs {
     var enabled: Boolean = false
 }
 
+@InvokeArg
+class DeviceKeyArgs {
+    var alias: String = "seagent-device"
+    var message: String = ""
+}
+
 /** Called from the app's Rust code (`tauri-plugin-seagent-mobile`), never from page JS. */
 @TauriPlugin
 class SeagentPlugin(private val activity: Activity) : Plugin(activity) {
@@ -68,6 +74,29 @@ class SeagentPlugin(private val activity: Activity) : Plugin(activity) {
         val args = invoke.parseArgs(AutostartArgs::class.java)
         AgentRuntime.prefs(ctx).edit().putBoolean("autostart", args.enabled).apply()
         invoke.resolve()
+    }
+
+    /** Device key in the Android Keystore (DeviceKeystore.kt): public half + hardware flag. */
+    @Command
+    fun deviceKeyPublic(invoke: Invoke) {
+        val args = invoke.parseArgs(DeviceKeyArgs::class.java)
+        try {
+            val (pk, hw) = DeviceKeystore.publicKey(args.alias)
+            val ret = JSObject()
+            ret.put("spki", pk)
+            ret.put("hardware", hw)
+            invoke.resolve(ret)
+        } catch (e: Exception) { invoke.reject(e.message ?: "Android Keystore unavailable") }
+    }
+
+    @Command
+    fun deviceKeySign(invoke: Invoke) {
+        val args = invoke.parseArgs(DeviceKeyArgs::class.java)
+        try {
+            val ret = JSObject()
+            ret.put("signature", DeviceKeystore.sign(args.alias, args.message))
+            invoke.resolve(ret)
+        } catch (e: Exception) { invoke.reject(e.message ?: "Android Keystore signing failed") }
     }
 
     @Command

@@ -19,6 +19,11 @@
 //! errors: 4xx {"error": "…"}  (400 bad request, 403 unknown/used/expired, 409 code taken, 429)
 //! ```
 //!
+//! `device.publicKey` (optional, base64url P-256 point) makes the record **key-bound**: the 200
+//! answer then also carries `accessToken` / `accessExpiresAtMs`, and the console token only
+//! works at `POST /pair/refresh` with a fresh signature (`crate::device_auth`). Records also keep
+//! `lastIp`; `devices.scope` changes what a device may do, `devices.revoke_all` signs out all.
+//!
 //! The 8-character code comes from `seagent pair code` / the console's "Pair a device" card and
 //! is short-lived (10 min by default); typing it in only *requests* pairing — an admin approves
 //! the request on the host (`seagent devices approve CODE`, the console's Approve button) after
@@ -49,13 +54,101 @@ pub struct Device {
     /// `bootstrap` (QR / link) or `code` (approved 8-character code).
     #[serde(default)]
     pub via: String,
+    /// The device key (base64url of the uncompressed P-256 point) once bound. From then on the
+    /// console token alone is not accepted: it only mints short-lived access tokens together
+    /// with a fresh signature by this key (`crate::device_auth`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub public_key: Option<String>,
+    #[serde(default)]
+    pub bound_at_ms: u64,
+    /// Address of the last authenticated request (informational, like `last_seen_ms`).
+    #[serde(default)]
+    pub last_ip: String,
+    /// Networks (`/24` for IPv4, `/64` for IPv6) this device has authenticated from, newest last,
+    /// at most [`MAX_NETWORKS`]. A new one tells the owner; it is never blocked.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub networks: Vec<String>,
+    /// Where the device keeps its key, as the client reports it: `tpm`, `cng`, `secure-enclave`,
+    /// `keychain`, `android-keystore`, `webcrypto`, `file` (for `seagent doctor`).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub key_store: String,
+}
+
+/// How many networks per device are remembered.
+pub const MAX_NETWORKS: usize = 16;
+
+/// The network an address belongs to for "new network" alerts: `a.b.c.0/24`, the IPv6 `/64`.
+/// `None` for loopback (this machine) and unparsable input.
+pub fn network_of(ip: &str) -> Option<String> {
+    let ip: IpAddr = ip.trim().trim_matches(['[', ']']).split('%').next()?.parse().ok()?;
+    let ip = match ip {
+        IpAddr::V6(v6) => v6.to_ipv4_mapped().map(IpAddr::V4).unwrap_or(IpAddr::V6(v6)),
+        v4 => v4,
+    };
+    if ip.is_loopback() || ip.is_unspecified() {
+        return None;
+    }
+    Some(match ip {
+        IpAddr::V4(v4) => {
+            let [a, b, c, _] = v4.octets();
+            format!("{a}.{b}.{c}.0/24")
+        }
+        IpAddr::V6(v6) => {
+            let s = v6.segments();
+            format!("{:x}:{:x}:{:x}:{:x}::/64", s[0], s[1], s[2], s[3])
+        }
+    })
+}
+
+/// Remember the network `ip` is in for device `id`. Returns it when it is new for a device that
+/// already had one (the first network — where it paired — is recorded quietly). Writes only
+/// when something new is recorded.
+pub fn note_network(data: &Path, id: &str, ip: &str) -> Option<String> {
+    let net = network_of(ip)?;
+    with(data, |st| {
+        let d = st.devices.iter_mut().find(|d| d.id == id)?;
+        if d.networks.contains(&net) {
+            return None;
+        }
+        let first = d.networks.is_empty();
+        d.networks.push(net.clone());
+        if d.networks.len() > MAX_NETWORKS {
+            d.networks.remove(0);
+        }
+        let _ = save(data, st);
+        (!first).then_some(net)
+    })
+}
+
+/// Record where a device keeps its key (only a short lower-case label is kept).
+pub fn note_key_store(data: &Path, id: &str, store: &str) {
+    let store: String = store.trim().chars().filter(|c| c.is_ascii_lowercase() || *c == '-').take(24).collect();
+    if store.is_empty() {
+        return;
+    }
+    with(data, |st| {
+        if let Some(d) = st.devices.iter_mut().find(|d| d.id == id && d.key_store != store) {
+            d.key_store = store;
+            let _ = save(data, st);
+        }
+    });
 }
 
 impl Device {
     /// Everything but the credential.
     pub fn public(&self) -> Value {
-        json!({"id": self.id, "name": self.name, "platform": self.platform, "scope": self.scope.as_str(), "pairedAtMs": self.paired_at_ms, "lastSeenMs": self.last_seen_ms, "via": self.via})
+        json!({"id": self.id, "name": self.name, "platform": self.platform, "scope": self.scope.as_str(), "pairedAtMs": self.paired_at_ms, "lastSeenMs": self.last_seen_ms, "lastIp": self.last_ip, "via": self.via, "keyBound": self.public_key.is_some(), "boundAtMs": self.bound_at_ms, "keyStore": self.key_store, "networks": self.networks})
     }
+}
+
+/// A device public key as sent by a client: base64url (no padding) of the 65-byte uncompressed
+/// P-256 point. Returns the normalised text.
+pub fn parse_public_key(s: &str) -> Result<String, String> {
+    let raw = seagent_net::crypto::b64url_decode(s.trim().trim_end_matches('=')).ok_or("device.publicKey is not base64url")?;
+    if raw.len() != 65 || raw[0] != 4 {
+        return Err("device.publicKey must be an uncompressed P-256 point (65 bytes)".into());
+    }
+    Ok(seagent_net::crypto::b64url(&raw))
 }
 
 /// What a device says about itself when pairing.
@@ -64,6 +157,8 @@ pub struct DeviceInfo {
     pub id: String,
     pub name: String,
     pub platform: String,
+    /// Optional device key: the record is key-bound from the start.
+    pub public_key: Option<String>,
 }
 
 impl DeviceInfo {
@@ -75,7 +170,11 @@ impl DeviceInfo {
         }
         let clean = |t: String, max: usize| t.chars().filter(|c| !c.is_control()).take(max).collect::<String>();
         let name = clean(s("name"), 80);
-        Ok(DeviceInfo { name: if name.is_empty() { id.clone() } else { name }, platform: clean(s("platform"), 24), id })
+        let public_key = match v["publicKey"].as_str().filter(|k| !k.trim().is_empty()) {
+            Some(k) => Some(parse_public_key(k)?),
+            None => None,
+        };
+        Ok(DeviceInfo { name: if name.is_empty() { id.clone() } else { name }, platform: clean(s("platform"), 24), id, public_key })
     }
 }
 
@@ -110,6 +209,13 @@ struct State {
     offers: Vec<Offer>,
     saved_ms: u64,
     hits: HashMap<IpAddr, (Vec<Instant>, Vec<Instant>)>,
+    /// Failed code claims from every address (distributed guessing of the 8-character code).
+    global_fails: Vec<Instant>,
+    /// Short-lived access tokens (hash → device id, expiry ms). Memory only: a restart makes
+    /// every device refresh once, silently.
+    access: HashMap<String, (String, u64)>,
+    /// Refresh nonces seen inside the replay window (device|nonce → expiry ms).
+    nonces: HashMap<String, u64>,
 }
 
 fn reg() -> &'static Mutex<HashMap<PathBuf, State>> {
@@ -172,18 +278,21 @@ pub fn issue(data: &Path, info: &DeviceInfo, scope: Scope, via: &str) -> Result<
             return Err("too many paired devices (200); revoke some first (seagent devices revoke ID)".to_string());
         }
         st.devices.retain(|d| d.id != info.id);
+        st.access.retain(|_, (dev, _)| *dev != info.id);
         let t = now_ms();
-        st.devices.push(Device { id: info.id.clone(), name: info.name.clone(), platform: info.platform.clone(), scope, token_hash: hash(&salt, &token), salt, paired_at_ms: t, last_seen_ms: t, via: via.into() });
+        let bound_at_ms = if info.public_key.is_some() { t } else { 0 };
+        st.devices.push(Device { id: info.id.clone(), name: info.name.clone(), platform: info.platform.clone(), scope, token_hash: hash(&salt, &token), salt, paired_at_ms: t, last_seen_ms: t, via: via.into(), public_key: info.public_key.clone(), bound_at_ms, last_ip: String::new(), networks: vec![], key_store: String::new() });
         save(data, st)
     })?;
     Ok(token)
 }
 
-/// Remove a device; its token stops working at once.
+/// Remove a device; its token and access tokens stop working at once.
 pub fn revoke(data: &Path, id: &str) -> Result<bool, String> {
     with(data, |st| {
         let n = st.devices.len();
         st.devices.retain(|d| d.id != id);
+        st.access.retain(|_, (dev, _)| dev != id);
         if st.devices.len() == n {
             return Ok(false);
         }
@@ -191,27 +300,173 @@ pub fn revoke(data: &Path, id: &str) -> Result<bool, String> {
     })
 }
 
+/// "Sign out all devices": every paired device has to pair again; open sockets close within
+/// a second (`App::still_valid`). Returns how many were removed.
+pub fn revoke_all(data: &Path) -> Result<usize, String> {
+    with(data, |st| {
+        let n = st.devices.len();
+        st.devices.clear();
+        st.access.clear();
+        st.nonces.clear();
+        save(data, st).map(|_| n)
+    })
+}
+
+/// Change what a device may do (`read` = view only, `write` = full control, `approve` = may
+/// also answer approvals). Takes effect on its next request, access tokens included.
+pub fn set_scope(data: &Path, id: &str, scope: Scope) -> Result<bool, String> {
+    with(data, |st| match st.devices.iter_mut().find(|d| d.id == id) {
+        Some(d) => {
+            d.scope = scope;
+            save(data, st).map(|_| true)
+        }
+        None => Ok(false),
+    })
+}
+
+/// The current scope of device `id` (open sockets follow changes).
+pub fn scope_of(data: &Path, id: &str) -> Option<Scope> {
+    with(data, |st| st.devices.iter().find(|d| d.id == id).map(|d| d.scope))
+}
+
 /// Is `id` still paired?
 pub fn is_active(data: &Path, id: &str) -> bool {
     with(data, |st| st.devices.iter().any(|d| d.id == id))
 }
 
+/// Why a device credential was not accepted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AuthError {
+    /// Matches no paired device (or an expired / revoked access token).
+    Unknown,
+    /// A key-bound device's console token used as a bearer: it only works at `/pair/refresh`.
+    NeedsSignature,
+    /// `[app.exposure] require_device_key` and this device has not bound a key yet.
+    KeyRequired,
+}
+
+impl AuthError {
+    pub fn message(self) -> &'static str {
+        match self {
+            AuthError::Unknown => "unknown, expired or revoked device credential",
+            AuthError::NeedsSignature => "this device is key-bound: get an access token from POST /pair/refresh (the app does this by itself)",
+            AuthError::KeyRequired => "this host requires device keys: update the app or browser and pair again",
+        }
+    }
+}
+
+fn access_hash(token: &str) -> String {
+    hash("access", token)
+}
+
 /// The device a console token belongs to: `(id, scope)`. Constant-time per record.
 pub fn authenticate(data: &Path, token: &str) -> Option<(String, Scope)> {
-    if !token.starts_with("sed1_") {
-        return None;
-    }
+    authenticate_at(data, token, "", false).ok()
+}
+
+/// [`authenticate`] for a request from `ip`: short-lived access tokens (`sea1_…`) of
+/// key-bound devices, or the console token (`sed1_…`) of a device that has no key yet.
+pub fn authenticate_at(data: &Path, token: &str, ip: &str, require_key: bool) -> Result<(String, Scope), AuthError> {
+    let t = now_ms();
     with(data, |st| {
-        let t = now_ms();
-        let i = st.devices.iter().position(|d| seagent_net::crypto::ct_eq(hash(&d.salt, token).as_bytes(), d.token_hash.as_bytes()))?;
+        let i = if token.starts_with("sea1_") {
+            let h = access_hash(token);
+            let (dev, exp) = st.access.get(&h).cloned().ok_or(AuthError::Unknown)?;
+            if exp <= t {
+                st.access.remove(&h);
+                return Err(AuthError::Unknown);
+            }
+            st.devices.iter().position(|d| d.id == dev).ok_or(AuthError::Unknown)?
+        } else if token.starts_with("sed1_") {
+            let i = st.devices.iter().position(|d| seagent_net::crypto::ct_eq(hash(&d.salt, token).as_bytes(), d.token_hash.as_bytes())).ok_or(AuthError::Unknown)?;
+            if st.devices[i].public_key.is_some() {
+                return Err(AuthError::NeedsSignature);
+            }
+            if require_key {
+                return Err(AuthError::KeyRequired);
+            }
+            i
+        } else {
+            return Err(AuthError::Unknown);
+        };
         let d = &mut st.devices[i];
         d.last_seen_ms = t;
+        if !ip.is_empty() {
+            d.last_ip = ip.to_string();
+        }
         let out = (d.id.clone(), d.scope);
-        // `lastSeen` is informational: persist it at most every ten minutes.
+        // `lastSeen` / `lastIp` are informational: persist them at most every ten minutes.
         if t.saturating_sub(st.saved_ms) > 600_000 {
             let _ = save(data, st);
         }
-        Some(out)
+        Ok(out)
+    })
+}
+
+/// The record a console token belongs to (for `/pair/refresh`), whatever its binding.
+pub fn by_console_token(data: &Path, token: &str) -> Option<Device> {
+    if !token.starts_with("sed1_") {
+        return None;
+    }
+    with(data, |st| st.devices.iter().find(|d| seagent_net::crypto::ct_eq(hash(&d.salt, token).as_bytes(), d.token_hash.as_bytes())).cloned())
+}
+
+/// Bind `public_key` to a device that has none (the automatic migration of devices paired
+/// before device keys existed). Refuses to replace an existing key.
+pub fn bind_key(data: &Path, id: &str, public_key: &str) -> Result<(), String> {
+    with(data, |st| {
+        let d = st.devices.iter_mut().find(|d| d.id == id).ok_or("no such device")?;
+        if d.public_key.as_deref().is_some_and(|k| k != public_key) {
+            return Err("this device is already bound to another key; pair it again".into());
+        }
+        d.public_key = Some(public_key.to_string());
+        d.bound_at_ms = now_ms();
+        save(data, st)
+    })
+}
+
+/// A new short-lived access token for device `id` (at most 16 live ones per device).
+pub fn mint_access(data: &Path, id: &str, ttl: Duration) -> Result<(String, u64), String> {
+    let token = format!("sea1_{}", seagent_net::crypto::random_token(32));
+    let t = now_ms();
+    let exp = t + ttl.as_millis() as u64;
+    with(data, |st| {
+        if !st.devices.iter().any(|d| d.id == id) {
+            return Err("no such device".to_string());
+        }
+        st.access.retain(|_, (_, e)| *e > t);
+        let mut mine: Vec<(String, u64)> = st.access.iter().filter(|(_, (d, _))| d == id).map(|(h, (_, e))| (h.clone(), *e)).collect();
+        if mine.len() >= 16 {
+            mine.sort_by_key(|(_, e)| *e);
+            for (h, _) in mine.iter().take(mine.len() + 1 - 16) {
+                st.access.remove(h);
+            }
+        }
+        st.access.insert(access_hash(&token), (id.to_string(), exp));
+        Ok((token, exp))
+    })
+}
+
+/// Tests: drop every access token, as a daemon restart does.
+#[cfg(test)]
+pub(crate) fn forget_access_tokens(data: &Path) {
+    with(data, |st| st.access.clear());
+}
+
+/// Spend a refresh nonce: `true` the first time inside `window`, `false` for a replay.
+pub fn take_nonce(data: &Path, device: &str, nonce: &str, window: Duration) -> bool {
+    let t = now_ms();
+    with(data, |st| {
+        st.nonces.retain(|_, e| *e > t);
+        if st.nonces.len() > 20_000 {
+            return false; // a flood: refuse rather than forget what was seen
+        }
+        let key = format!("{device}\u{1f}{nonce}");
+        if st.nonces.contains_key(&key) {
+            return false;
+        }
+        st.nonces.insert(key, t + window.as_millis() as u64);
+        true
     })
 }
 
@@ -344,6 +599,23 @@ fn limited(data: &Path, ip: Option<IpAddr>, failed: bool) -> bool {
     })
 }
 
+/// Failed code claims allowed from all addresses together in ten minutes. Past it, code
+/// claims pause for everyone until the window drains (setup codes / QR keep working: their
+/// bootstrap tokens are not guessable) and the owner is told.
+pub const GLOBAL_CODE_FAILS: usize = 60;
+
+/// `true` while the network as a whole has used up [`GLOBAL_CODE_FAILS`]; `failed` records one.
+fn code_claims_paused(data: &Path, failed: bool) -> bool {
+    with(data, |st| {
+        let now = Instant::now();
+        st.global_fails.retain(|t| now.duration_since(*t) < Duration::from_secs(600));
+        if failed {
+            st.global_fails.push(now);
+        }
+        st.global_fails.len() >= GLOBAL_CODE_FAILS
+    })
+}
+
 fn reply(status: u16, v: Value) -> seagent_net::httpd::Response {
     seagent_net::httpd::Response::json(status, &v.to_string()).with_header("cache-control", "no-store")
 }
@@ -364,6 +636,9 @@ pub fn handle_pair_client_with(app: &crate::App, r: &seagent_net::httpd::Request
     if limited(data, ip, false) {
         return reply(429, json!({"error": "too many pairing attempts from this address; wait a few minutes"})).with_header("retry-after", "60");
     }
+    if let Some(wait) = crate::netguard::locked(app, r) {
+        return crate::netguard::locked_reply(wait);
+    }
     if !crate::exposure::is_json_content_type(r.header("content-type")) {
         return reply(415, json!({"error": "send JSON (content-type: application/json)"}));
     }
@@ -373,12 +648,27 @@ pub fn handle_pair_client_with(app: &crate::App, r: &seagent_net::httpd::Request
         Err(e) => return reply(400, json!({"error": e})),
     };
     let ok = |token: String, scope: Scope, via: &str| {
-        audit(data, "device.pair", seagent_security::audit::Actor::new("device", &device.name).with_ip(&ip_s), &device.id, "ok", json!({"platform": device.platform, "via": via, "scope": scope.as_str()}));
-        reply(200, json!({"consoleToken": token, "hostId": crate::lan::host_id(data), "name": crate::lan::display_name(), "deviceId": device.id, "scope": scope.as_str()}))
+        let bound = by_console_token(data, &token).is_some_and(|d| d.public_key.is_some());
+        note_network(data, &device.id, &ip_s);
+        if let Some(ks) = body["device"]["keyStore"].as_str() {
+            note_key_store(data, &device.id, ks);
+        }
+        audit(data, "device.pair", seagent_security::audit::Actor::new("device", &device.name).with_ip(&ip_s), &device.id, "ok", json!({"platform": device.platform, "via": via, "scope": scope.as_str(), "keyBound": bound}));
+        crate::netguard::alert_owner(app, &format!("device:{}:{}", device.id, now_ms() / 60_000), &format!("new device paired: {} ({}) from {ip_s}, scope {}{}", device.name, if device.platform.is_empty() { "?" } else { &device.platform }, scope.as_str(), if bound { "" } else { ", no device key" }));
+        let mut v = json!({"consoleToken": token, "hostId": crate::lan::host_id(data), "name": crate::lan::display_name(), "deviceId": device.id, "scope": scope.as_str(), "keyBound": bound});
+        // A key-bound device gets its first access token right away (no extra round trip).
+        if bound {
+            if let Ok((at, exp)) = mint_access(data, &device.id, crate::device_auth::access_ttl(app)) {
+                v["accessToken"] = at.into();
+                v["accessExpiresAtMs"] = exp.into();
+            }
+        }
+        reply(200, v)
     };
     let fail = |status: u16, msg: String| {
         if status == 403 {
             limited(data, ip, true);
+            crate::netguard::auth_failed(app, r, "pair");
         }
         audit(data, "device.pair", actor(), &device.id, "deny", json!({"reason": msg, "name": device.name}));
         reply(status, json!({"error": msg}))
@@ -395,13 +685,21 @@ pub fn handle_pair_client_with(app: &crate::App, r: &seagent_net::httpd::Request
     let Some(code) = body["code"].as_str().map(normalize_code).filter(|c| c.len() == 8 && c.bytes().all(|b| ALPHABET.contains(&b))) else {
         return reply(400, json!({"error": "send bootstrapToken (from a setup code) or code (the 8 characters shown on the host)"}));
     };
+    if code_claims_paused(data, false) {
+        return reply(429, json!({"error": "too many wrong pairing codes on this network; code pairing is paused for a few minutes (a QR / setup code still works)"})).with_header("retry-after", "120");
+    }
     let sas = crate::lan::served_fingerprint(&app.cfg).map(|f| seagent_net::x509::short_fingerprint(&f)).unwrap_or_default();
     let mut rid = body["requestId"].as_str().map(str::to_string);
     let until = Instant::now() + wait;
     loop {
         match claim_code(data, &code, rid.as_deref(), &device, &ip_s) {
             ClaimResult::Paired(t, scope) => return ok(t, scope, "code"),
-            ClaimResult::Refused(s, m) => return fail(s, m),
+            ClaimResult::Refused(s, m) => {
+                if s == 403 && rid.is_none() && !code_claims_paused(data, false) && code_claims_paused(data, true) {
+                    crate::netguard::alert_owner(app, &format!("pair-flood:{}", now_ms() / 600_000), &format!("{GLOBAL_CODE_FAILS} wrong pairing codes within 10 minutes; code pairing is paused (last from {ip_s})"));
+                }
+                return fail(s, m);
+            }
             ClaimResult::Pending { request_id, expires_ms } => {
                 if rid.is_none() {
                     audit(data, "device.pair.request", actor(), &device.id, "pending", json!({"name": device.name, "platform": device.platform}));
@@ -464,6 +762,27 @@ pub fn methods(data: PathBuf, cfg: crate::AppConfig, public_url: Option<String>)
                     Err(e) => Err((-32000, e)),
                 }
             }
+            "devices.revoke_all" => match revoke_all(&data) {
+                Ok(n) => {
+                    audit(&data, "device.revoke_all", seagent_security::audit::Actor::local(), "devices", "ok", json!({"revoked": n}));
+                    Ok(json!({"revoked": n}))
+                }
+                Err(e) => Err((-32000, e)),
+            },
+            "devices.scope" => {
+                let id = s("id");
+                let scope = match Scope::parse(&s("scope")) {
+                    Ok(sc) => sc,
+                    Err(e) => return Some(Err((-32602, e))),
+                };
+                match set_scope(&data, &id, scope) {
+                    Ok(had) => {
+                        audit(&data, "device.scope", seagent_security::audit::Actor::local(), &id, if had { "ok" } else { "noop" }, json!({"scope": scope.as_str()}));
+                        Ok(json!({"updated": had, "scope": scope.as_str()}))
+                    }
+                    Err(e) => Err((-32000, e)),
+                }
+            }
             "devices.pair.create" => {
                 let ttl = Duration::from_secs(p["ttlMin"].as_u64().unwrap_or(10).clamp(1, 24 * 60) * 60);
                 let scope = match Scope::parse(p["scope"].as_str().unwrap_or("write")) {
@@ -483,14 +802,85 @@ pub fn methods(data: PathBuf, cfg: crate::AppConfig, public_url: Option<String>)
     })
 }
 
-pub const METHODS: &[&str] = &["devices.list", "devices.pending", "devices.approve", "devices.reject", "devices.revoke", "devices.pair.create", "discovery.list", "lan.status"];
+pub const METHODS: &[&str] = &["devices.list", "devices.pending", "devices.approve", "devices.reject", "devices.revoke", "devices.revoke_all", "devices.scope", "devices.pair.create", "discovery.list", "lan.status"];
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn info(id: &str) -> DeviceInfo {
-        DeviceInfo { id: id.into(), name: format!("phone {id}"), platform: "ios".into() }
+        DeviceInfo { id: id.into(), name: format!("phone {id}"), platform: "ios".into(), public_key: None }
+    }
+
+    #[test]
+    fn key_bound_devices_need_a_signature_and_access_tokens_expire() {
+        let home = seagent_core::tmp::TempDir::new("seagent-devices-key");
+        let data = home.path();
+        let pk = seagent_net::crypto::b64url(&seagent_net::crypto::p256_public(&seagent_net::crypto::p256_generate().unwrap()).unwrap());
+        let console = issue(data, &DeviceInfo { public_key: Some(pk.clone()), ..info("k1") }, Scope::Write, "code").unwrap();
+        // The stolen console token alone is refused everywhere but /pair/refresh.
+        assert_eq!(authenticate_at(data, &console, "192.168.1.9", false), Err(AuthError::NeedsSignature));
+        assert_eq!(by_console_token(data, &console).unwrap().public_key.as_deref(), Some(pk.as_str()));
+        let (at, exp) = mint_access(data, "k1", Duration::from_secs(60)).unwrap();
+        assert!(at.starts_with("sea1_") && exp > now_ms());
+        assert_eq!(authenticate_at(data, &at, "192.168.1.9", true), Ok(("k1".into(), Scope::Write)));
+        assert_eq!(list(data)[0]["lastIp"], "192.168.1.9");
+        assert_eq!(list(data)[0]["keyBound"], true);
+        // Scope changes reach live access tokens.
+        assert!(set_scope(data, "k1", Scope::Read).unwrap());
+        assert_eq!(authenticate_at(data, &at, "", false).unwrap().1, Scope::Read);
+        let (short, _) = mint_access(data, "k1", Duration::from_millis(1)).unwrap();
+        std::thread::sleep(Duration::from_millis(5));
+        assert_eq!(authenticate_at(data, &short, "", false), Err(AuthError::Unknown), "expired");
+        assert!(take_nonce(data, "k1", "n-1", Duration::from_secs(60)) && !take_nonce(data, "k1", "n-1", Duration::from_secs(60)), "a nonce works once");
+        // Legacy (unbound) devices keep working unless keys are required; binding is one-way.
+        let legacy = issue(data, &info("old"), Scope::Write, "bootstrap").unwrap();
+        assert!(authenticate_at(data, &legacy, "", false).is_ok());
+        assert_eq!(authenticate_at(data, &legacy, "", true), Err(AuthError::KeyRequired));
+        bind_key(data, "old", &pk).unwrap();
+        assert_eq!(authenticate_at(data, &legacy, "", false), Err(AuthError::NeedsSignature));
+        let other = seagent_net::crypto::b64url(&seagent_net::crypto::p256_public(&seagent_net::crypto::p256_generate().unwrap()).unwrap());
+        assert!(bind_key(data, "old", &other).is_err(), "a bound key is never replaced");
+        // Sign out everything: access tokens die with the records.
+        assert_eq!(revoke_all(data).unwrap(), 2);
+        assert_eq!(authenticate_at(data, &at, "", false), Err(AuthError::Unknown));
+        assert!(list(data).is_empty());
+        assert!(parse_public_key("AAAA").is_err() && parse_public_key(&pk).is_ok());
+    }
+
+    #[test]
+    fn a_new_network_is_reported_once_and_never_blocks() {
+        let home = seagent_core::tmp::TempDir::new("seagent-devices-net");
+        let data = home.path();
+        let t = issue(data, &info("roam"), Scope::Write, "code").unwrap();
+        assert_eq!(network_of("192.168.1.77").as_deref(), Some("192.168.1.0/24"));
+        assert_eq!(network_of("::ffff:10.1.2.3").as_deref(), Some("10.1.2.0/24"));
+        assert_eq!(network_of("[fd00:1:2:3:4::9]").as_deref(), Some("fd00:1:2:3::/64"));
+        assert_eq!(network_of("127.0.0.1"), None);
+        assert_eq!(note_network(data, "roam", "192.168.1.20"), None, "the pairing network is recorded quietly");
+        assert_eq!(note_network(data, "roam", "192.168.1.99"), None, "same /24");
+        assert_eq!(note_network(data, "roam", "10.8.0.4").as_deref(), Some("10.8.0.0/24"), "a new network is reported");
+        assert_eq!(note_network(data, "roam", "10.8.0.5"), None, "once");
+        assert!(authenticate_at(data, &t, "10.8.0.5", false).is_ok(), "and never blocked");
+        assert_eq!(note_network(data, "nobody", "10.9.9.9"), None);
+        note_key_store(data, "roam", "secure-enclave");
+        assert_eq!(list(data)[0]["keyStore"], "secure-enclave");
+        assert_eq!(list(data)[0]["networks"], json!(["192.168.1.0/24", "10.8.0.0/24"]));
+        for i in 0..40 {
+            note_network(data, "roam", &format!("172.16.{i}.1"));
+        }
+        assert_eq!(list(data)[0]["networks"].as_array().unwrap().len(), MAX_NETWORKS, "bounded");
+    }
+
+    #[test]
+    fn distributed_code_guessing_pauses_code_pairing() {
+        let home = seagent_core::tmp::TempDir::new("seagent-devices-flood");
+        let data = home.path();
+        for _ in 0..GLOBAL_CODE_FAILS - 1 {
+            assert!(!code_claims_paused(data, true));
+        }
+        assert!(code_claims_paused(data, true), "the last failure crosses the budget");
+        assert!(code_claims_paused(data, false), "and it stays paused for everyone");
     }
 
     #[test]

@@ -6,7 +6,7 @@
 # See README.md here and packaging/release/DEPENDENCY-REVIEW.md ("App shell budget").
 [workspace]
 resolver = "2"
-members = ["src-tauri", "plugins/seagent-mobile"]
+members = ["src-tauri", "plugins/seagent-mobile", "devkey"]
 
 [workspace.package]
 version = "0.1.0"

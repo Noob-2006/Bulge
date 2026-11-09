@@ -30,8 +30,10 @@ pub mod logbook;
 pub mod conversations;
 pub mod cron_fire;
 pub mod dashboard_auth;
+pub mod device_auth;
 pub mod devices;
 pub mod lan;
+pub mod netguard;
 pub mod node;
 pub mod openai;
 pub mod qr;
@@ -151,6 +153,12 @@ impl AppConfig {
             rb.validate()?;
         }
         c.exposure.proxy_auth.validate()?;
+        if let Some(bad) = c.exposure.allow_sources.iter().find(|r| !exposure::valid_rule(r)) {
+            return Err(format!("[app.exposure] allow_sources: `{bad}` is not an IP address or CIDR"));
+        }
+        if !(2..=86_400).contains(&c.exposure.device_access_ttl_secs) {
+            return Err("[app.exposure] device_access_ttl_secs must be 2–86400".into());
+        }
         if !matches!(c.discovery.trim(), "" | "auto" | "mdns" | "off") {
             return Err(format!("[app] discovery = `{}`: use \"mdns\" or \"off\" (empty = on in LAN mode)", c.discovery));
         }

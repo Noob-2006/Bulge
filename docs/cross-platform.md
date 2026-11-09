@@ -164,6 +164,10 @@ iOS 版因此**不是純用戶端**，而是在 App 自己的行程裡跑完整�
   每台裝置拿到專屬、可撤銷、預設 `write` 的 console token（只存加鹽雜湊）；`seagent devices list|approve|reject|revoke`。
   配對、核准、拒絕、撤銷、憑證輪替都寫入稽核流；`/pair/client` 每個位址每分鐘 30 次、10 分鐘內失敗 10 次即暫停。
   手機瀏覽器會先看到自簽憑證警告（接受一次即可；它是用 QR 裡的 bootstrap token 證明自己）。
+- **裝置金鑰與周界**（[SECURITY.md §8](SECURITY.md)）：App（Windows／macOS／Linux／Android／iOS 同一份 Rust，
+  `apps/desktop/src-tauri/src/devkey.rs`）與瀏覽器（WebCrypto，`ui/web/devauth.js`）配對時送出 P-256 公鑰；console
+  token 之後只能在 `POST /pair/refresh` 配合新簽章換 60 分鐘的 access token。舊裝置下次啟動自動綁定。另有失敗鎖定、
+  Host／DNS rebinding 檢查、tunnel 偵測、`allow_sources`、CORS 與安全標頭、`seagent devices revoke --all --yes`。
 - **電腦對電腦**：`seagent nodes discover` 列出主機與可直接貼上的 `seagent lan connect <位址> --code <碼>`；配對後
   token 存入 vault（`LAN_<名稱>_TOKEN`），對方登記為叢集節點（`https://`＋釘選指紋，`seagent cluster status` 可見）。
   主控台「掃描網路 → 連線」做同樣的事。`seagent node --setup-code` 也以握手時釘選的方式連自簽主機。

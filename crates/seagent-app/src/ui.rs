@@ -8,6 +8,8 @@ const INDEX: &str = include_str!("../../../ui/web/index.html");
 /// Every other file of the UI: (URL path, content type, source path under `ui/`, contents).
 const FILES: &[(&str, &str, &str, &str)] = &[
     ("/ui/app.js", JS, "web/app.js", include_str!("../../../ui/web/app.js")),
+    ("/ui/devauth.js", JS, "web/devauth.js", include_str!("../../../ui/web/devauth.js")),
+    ("/ui/devsec.js", JS, "web/devsec.js", include_str!("../../../ui/web/devsec.js")),
     ("/ui/ops.js", JS, "web/ops.js", include_str!("../../../ui/web/ops.js")),
     ("/ui/work.js", JS, "web/work.js", include_str!("../../../ui/web/work.js")),
     ("/ui/surfaces.js", JS, "web/surfaces.js", include_str!("../../../ui/web/surfaces.js")),
