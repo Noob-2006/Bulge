@@ -231,17 +231,14 @@ source: {}", p.name, p.description, p.url, p.auth, p.source);
                     block.push_str(&format!("args = {}\n", toml::Value::Array(args)));
                 }
             }
-            // Validate before writing.
+            // Validated before writing (`save_server`, shared with the Connections page).
             let t: toml::Table = block.parse().map_err(|e| format!("{e}"))?;
-            let c: seagent_plugin::McpServerConfig = toml::Value::Table(t["mcp"][name].as_table().cloned().unwrap_or_default()).try_into().map_err(|e: toml::de::Error| e.message().to_string())?;
-            c.validate(name)?;
+            let table = t["mcp"][name].as_table().cloned().unwrap_or_default();
+            let c = server_config(name, &table)?;
             if c.url.is_none() {
                 println!("{}", stdio_consent(name, &c));
             }
-            if let Some(d) = user.parent() {
-                std::fs::create_dir_all(d).map_err(|e| e.to_string())?;
-            }
-            std::fs::write(&user, format!("{}{block}", text)).map_err(|e| e.to_string())?;
+            save_server(&paths, "mcp", name, &table, false)?;
             println!("added [mcp.{name}] to {} — check it with `seagent mcp test {name}`", user.display());
             if let Some(p) = preset {
                 for e in p.env.iter().filter(|e| e.secret) {
@@ -258,26 +255,7 @@ source: {}", p.name, p.description, p.url, p.auth, p.source);
         }
         "rm" | "remove" => {
             let name = a.need(1, "name")?;
-            let user = paths.user_config();
-            let text = std::fs::read_to_string(&user).map_err(|e| e.to_string())?;
-            let header = format!("[mcp.{name}]");
-            let mut out = Vec::new();
-            let mut skipping = false;
-            let mut found = false;
-            for l in text.lines() {
-                let t = l.trim();
-                if t.starts_with('[') {
-                    skipping = t == header || t.starts_with(&format!("[mcp.{name}."));
-                    found |= skipping;
-                }
-                if !skipping {
-                    out.push(l);
-                }
-            }
-            if !found {
-                return Err(format!("no [mcp.{name}] in {}", user.display()).into());
-            }
-            std::fs::write(&user, out.join("\n") + "\n").map_err(|e| e.to_string())?;
+            remove_server(&paths, "mcp", name)?;
             println!("removed [mcp.{name}]");
             Ok(0)
         }
@@ -335,7 +313,7 @@ source: {}", p.name, p.description, p.url, p.auth, p.source);
 }
 
 /// Env/flag names whose values are secret and must not be echoed back to the terminal.
-fn secret_name(name: &str) -> bool {
+pub fn secret_name(name: &str) -> bool {
     let n = name.to_ascii_lowercase();
     ["secret", "token", "password", "passwd", "passphrase", "credential", "api_key", "apikey", "access_key", "private_key", "auth"]
         .iter()
@@ -401,6 +379,40 @@ pub fn stdio_consent(name: &str, c: &seagent_plugin::McpServerConfig) -> String 
         env.join(", "),
         cwd
     )
+}
+
+/// A `[mcp.<name>]` / `[plugins.<name>]` table as the config the host would start, validated
+/// the way `ext::mcp_configs` checks it at startup.
+pub fn server_config(name: &str, table: &toml::Table) -> Result<seagent_plugin::McpServerConfig, String> {
+    let c: seagent_plugin::McpServerConfig = toml::Value::Table(table.clone()).try_into().map_err(|e: toml::de::Error| format!("[mcp.{name}]: {}", e.message()))?;
+    c.validate(name)?;
+    Ok(c)
+}
+
+/// Write one MCP server (`section = "mcp"`) or process plugin (`"plugins"`, the same MCP
+/// superset) to the user config: validated first, then `confcli::put_table` (backup, atomic,
+/// audited). `replace = false` refuses an existing table. `seagent mcp add` and the
+/// Connections page both write through here.
+pub fn save_server(paths: &Paths, section: &str, name: &str, table: &toml::Table, replace: bool) -> Result<seagent_plugin::McpServerConfig, String> {
+    if !valid_ext_name(name) {
+        return Err(format!("name `{name}`: letters, digits, _ and - only (at most 40)"));
+    }
+    let c = server_config(name, table)?;
+    let cur = Config::load(Some(&paths.user_config()), None, &[]).unwrap_or_default();
+    let exists = if section == "plugins" { cur.plugins.contains_key(name) } else { cur.mcp.contains_key(name) };
+    if exists && !replace {
+        return Err(format!("[{section}.{name}] already exists in {}", paths.user_config().display()));
+    }
+    crate::ops::confcli::put_table(paths, &format!("{section}.{name}"), Some(table))?;
+    Ok(c)
+}
+
+/// Remove `[mcp.<name>]` (or `[plugins.<name>]`) and its sub-tables from the user config.
+pub fn remove_server(paths: &Paths, section: &str, name: &str) -> Result<(), String> {
+    if !crate::ops::confcli::put_table(paths, &format!("{section}.{name}"), None)? {
+        return Err(format!("no [{section}.{name}] in {}", paths.user_config().display()));
+    }
+    Ok(())
 }
 
 struct NoHost;

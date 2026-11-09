@@ -1118,12 +1118,14 @@ $('showSettings').onclick = () => showPanel(t('settings'), async () => {
   const m = await S.arp.call('models.list');
   const tools = await S.arp.call('tools.list');
   return `<h3>模型</h3><table class="kv">${row(['預設模型', `<code>${esc(m.default)}</code>`])}${row(['備援', esc((m.fallback || []).join(', ') || '—')])}${row(['輔助模型', `<code>${esc(m.aux || '—')}</code>`])}${row(['工具', String(tools.length)])}</table>
+    <h3>連線</h3><p class="dim">技能、MCP、外掛、聊天頻道、Webhook 與代理都在這裡設定。</p><p><button class="btn small" id="openConnections">開啟連線設定</button></p>
     <h3>這台裝置</h3>
     <p><label class="dim">新對話的工作目錄</label><input type="text" id="wsInput" value="${esc(store.get('seagent.workspace') || '')}" placeholder="（伺服器預設）"></p>
     ${(S.settingsPanels || []).length ? '<h3>外掛設定</h3>' : ''}${(S.settingsPanels || []).map(([p, u], i) => `<p><button class="btn ghost small" data-panel="${i}">${esc(u.title || u.id)}（${esc(p)}）</button></p>`).join('')}
     <p><button class="btn ghost small" id="logout" data-read>登出這台裝置</button></p>`;
 }, () => {
   for (const b of $('panelBody').querySelectorAll('[data-panel]')) { const [p, u] = S.settingsPanels[+b.dataset.panel]; b.onclick = () => openPluginPanel(p, u); }
+  if ($('openConnections')) $('openConnections').onclick = () => window.openConnections && window.openConnections();
   // CSP forbids inline handlers: bind after rendering.
   $('wsInput').onchange = (e) => store.set('seagent.workspace', e.target.value);
   $('logout').onclick = () => { store.del('seagent.token'); location.reload(); };

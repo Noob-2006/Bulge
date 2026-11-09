@@ -67,6 +67,8 @@ pub mod hatchgen;
 pub mod partial;
 pub mod recap;
 pub mod webui;
+pub mod connectors;
+pub mod channels_setup;
 pub mod toolcfg;
 pub mod docker;
 
@@ -119,6 +121,7 @@ const MODULES: &[Module] = &[
     (partial::COMMANDS, partial::VALUE_FLAGS, partial::BOOL_FLAGS, partial::dispatch),
     (toolcfg::COMMANDS, toolcfg::VALUE_FLAGS, toolcfg::BOOL_FLAGS, toolcfg::dispatch),
     (docker::COMMANDS, docker::VALUE_FLAGS, docker::BOOL_FLAGS, docker::dispatch),
+    (channels_setup::COMMANDS, channels_setup::VALUE_FLAGS, channels_setup::BOOL_FLAGS, channels_setup::dispatch),
     (crate::slash::COMMANDS, crate::slash::VALUE_FLAGS, crate::slash::BOOL_FLAGS, crate::slash::dispatch),
 ];
 

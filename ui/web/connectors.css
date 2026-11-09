@@ -1,0 +1,31 @@
+/* Settings → Connections (connectors.js). Builds on pages.css (.kv, .cp-*, .light). */
+.cn-tabs { display: flex; flex-wrap: wrap; gap: 6px; margin: 4px 0 10px; border-bottom: 1px solid var(--thread); padding-bottom: 8px; }
+.cn-bar { display: flex; flex-wrap: wrap; gap: 6px; }
+.cn-form { background: var(--surface); border: 1px solid var(--thread); border-top-color: var(--thread-strong); border-radius: var(--radius); padding: 10px 12px; margin: 10px 0 14px; }
+.cn-form h3 { margin-top: 2px; }
+.cn-field { display: grid; gap: 3px; margin: 8px 0; max-width: 640px; }
+.cn-field > span { font-size: 12px; color: var(--text-2); }
+.cn-field input[type=text], .cn-field input[type=password], .cn-field input[type=number], .cn-field select { width: 100%; }
+.cn-row { display: flex; flex-wrap: wrap; gap: 8px; align-items: end; }
+.cn-row .cn-field { flex: 1 1 200px; }
+.cn-row > input { flex: 1 1 140px; min-width: 0; }
+.cn-inline { display: inline-flex; align-items: center; gap: 5px; font-size: 12.5px; }
+.cn-kvs { display: grid; gap: 4px; }
+.cn-kv { display: grid; grid-template-columns: minmax(90px, 1fr) minmax(120px, 2fr) auto auto auto; gap: 6px; align-items: center; }
+.cn-kv input[type=text], .cn-kv input[type=password] { min-width: 0; }
+.cn-table td { vertical-align: top; }
+.cn-target { max-width: 320px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cn-actions { white-space: nowrap; }
+.cn-actions .btn { margin: 1px 0; }
+.cn-res { border-left: 3px solid var(--thread-strong); padding: 6px 10px; margin: 6px 0; background: var(--surface-2); border-radius: 0 var(--radius) var(--radius) 0; }
+.cn-res.ok { border-left-color: var(--ok); }
+.cn-res.bad { border-left-color: var(--crit); }
+.cn-res.bad strong { color: var(--crit); }
+.cn-res pre { max-height: 220px; }
+.small { font-size: 12px; }
+.chip.bad { color: var(--crit); border-color: var(--crit); }
+@media (max-width: 720px) {
+  .cn-kv { grid-template-columns: 1fr 1fr; }
+  .cn-actions { white-space: normal; }
+  .cn-target { max-width: 160px; }
+}
