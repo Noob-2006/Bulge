@@ -482,9 +482,15 @@ fn desktop(l: &mut Link) -> Flow {
     desktop_loop(l, &t.id(), (max_w, quality, fps), &mut || grab_for(&app, &t, &mut g, max_w))
 }
 
-/// The agent's browser running on the Bot Desktop (`seagent screen`), if any.
+/// The agent's browser on the desktop the host target shows, if any: launched onto the Bot
+/// Desktop (`seagent screen`), or — Linux / macOS, where the host target is the display the
+/// headed browser opens on (Xvnc, the login session) — any headed managed browser. (On Windows
+/// a headed browser without the Bot Desktop is on the user's own screen, not this target.)
 fn bot_browser() -> Option<Arc<seagent_browser::engine::Browser>> {
-    seagent_browser::manager::global().browsers().into_iter().find(|b| !b.conn.is_closed() && b.info.lock().unwrap().get("bot_desktop") == Some(&Value::Bool(true)))
+    seagent_browser::manager::global().browsers().into_iter().find(|b| {
+        let i = b.info.lock().unwrap();
+        !b.conn.is_closed() && (i.get("bot_desktop") == Some(&Value::Bool(true)) || (cfg!(not(windows)) && i.get("headless") == Some(&Value::Bool(false))))
+    })
 }
 
 /// May the page at `g` be painted over the desktop picture (no other window covers it)?
