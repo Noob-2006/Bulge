@@ -147,7 +147,11 @@ export CC_x86_64_unknown_linux_musl=clang AR_x86_64_unknown_linux_musl=llvm-ar
 
 The script falls back to a `+crt-static` GNU build (same static binary, just
 linked against glibc) only if the musl build fails, and says so loudly; the
-manifest records which target was used.
+manifest records which target was used. The agent configures its UART with the
+kernel's `TCGETS2`/`TCSETS2` ioctls rather than libc's `cfsetspeed`, whose new
+glibc 2.42 symbol versions broke that static link (verified with glibc 2.43).
+With only a glibc gcc installed, `CC_x86_64_unknown_linux_musl=gcc` also builds
+the musl agent.
 
 ## manifest.json
 
@@ -207,8 +211,15 @@ guest says `Hello` after ≈1 s. Things that matter there:
   never probes QEMU's virtio-serial-pci;
 * WHPX needs `kernel-irqchip=off` (with the in-kernel irqchip the guest hangs:
   `WHPX: Unexpected VP exit code 4`) — the provider always passes it;
-* the channel is a `127.0.0.1` TCP chardev with `nodelay=on` (without it every command
-  round trip waits ≈200 ms for a delayed ACK);
+* the channel is a `127.0.0.1` TCP chardev with `nodelay=on`. Any local process can
+  connect to it, so the provider writes a per-boot random key into the private run dir and
+  hands it to the guest as fw_cfg `opt/seagent/key` (`CONFIG_FW_CFG_SYSFS`, x86_64 config;
+  the agent reads it as root, mode 0400, before dropping to uid 1000). The guest's `Hello`
+  carries a nonce, the host answers `Auth` (HMAC-SHA256 over both nonces, role-bound), the
+  guest answers `Auth`; until then the agent refuses every frame and does not power off
+  when an unauthenticated peer disconnects. A squatter can delay the VM, but cannot drive
+  or impersonate either side. Unix-socket / vsock channels (Linux, macOS) carry no key and
+  their frames are byte-for-byte unchanged;
 * WHPX is the optional feature "Windows Hypervisor Platform" (`dism /online
   /enable-feature /featurename:HypervisorPlatform`, then reboot); seagent probes it
   unelevated through `WinHvPlatform.dll`. Windows **Home** has no Hyper-V role at all, so the
