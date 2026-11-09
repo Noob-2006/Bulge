@@ -66,7 +66,12 @@ pub mod random {
         while done < buf.len() {
             let rest = &mut buf[done..];
             // SAFETY: `rest` is a valid writable buffer of `rest.len()` bytes.
+            #[cfg(target_os = "linux")]
             let n = unsafe { libc::getrandom(rest.as_mut_ptr().cast(), rest.len(), 0) };
+            // Bionic only exports getrandom(3) from API 28; the app's minSdk is 26, so use the
+            // syscall (Linux 3.17+, every Android 8 kernel has it).
+            #[cfg(target_os = "android")]
+            let n = unsafe { libc::syscall(libc::SYS_getrandom, rest.as_mut_ptr(), rest.len(), 0 as libc::c_uint) } as isize;
             if n < 0 {
                 let e = io::Error::last_os_error();
                 match e.raw_os_error() {
