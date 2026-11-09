@@ -200,7 +200,7 @@ impl LeaseStore for FsLease {
         let same_term = expect.is_some_and(|e| e.epoch == new.epoch && e.node == new.node);
         let r = if same_term {
             // Renewal / release by the holder of this term: only it writes this file.
-            fs::rename(&tmp, self.term(new.epoch)).map(|_| true).map_err(|e| format!("term-{}: {e}", new.epoch))
+            replace_file(&tmp, &self.term(new.epoch)).map(|_| true).map_err(|e| format!("term-{}: {e}", new.epoch))
         } else if new.epoch > expect.map(|e| e.epoch).unwrap_or(0) {
             // A new term: exclusive create. EEXIST = another node won this epoch.
             let r = match fs::hard_link(&tmp, self.term(new.epoch)) {
@@ -261,6 +261,23 @@ pub struct Ha {
     /// The epoch this node leads under; 0 = not leader. Read lock-free by the fence.
     epoch: AtomicU64,
     state: Mutex<State>,
+}
+
+/// `rename` over an existing file. On Windows a replace is refused with "access denied" while
+/// another process (a reader of the same term, a virus scanner) briefly holds the target open
+/// without delete sharing; that clears within milliseconds, so retry for up to ~0.5 s. Other
+/// errors, and every error elsewhere, are returned at once.
+fn replace_file(from: &Path, to: &Path) -> std::io::Result<()> {
+    let mut tries = 0;
+    loop {
+        match fs::rename(from, to) {
+            Err(e) if cfg!(windows) && e.kind() == std::io::ErrorKind::PermissionDenied && tries < 50 => {
+                tries += 1;
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            r => return r,
+        }
+    }
 }
 
 fn pid_alive(pid: u32) -> bool {
@@ -560,6 +577,30 @@ mod tests {
         age_renewal(&a, Duration::from_secs(6));
         assert!(a.fence().unwrap_err().contains("expired locally"), "the fence does not wait for the next tick");
         assert!(matches!(a.tick(), Transition::Lost { reason } if reason.contains("not renewed")));
+    }
+
+    /// A replace that the OS refuses for a moment (Windows: the target held open without delete
+    /// sharing) goes through once the holder lets go; elsewhere it is a plain rename.
+    #[test]
+    fn a_briefly_held_term_file_is_still_replaced() {
+        let d = seagent_core::tmp::TempDir::new("seagent-ha-replace");
+        let (tmp, term) = (d.path().join("tmp"), d.path().join("term-1"));
+        fs::write(&term, b"old").unwrap();
+        fs::write(&tmp, b"new").unwrap();
+        #[cfg(windows)]
+        let holder = {
+            use std::os::windows::fs::OpenOptionsExt;
+            let f = fs::OpenOptions::new().read(true).share_mode(1).open(&term).unwrap(); // FILE_SHARE_READ only
+            std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(60));
+                drop(f);
+            })
+        };
+        replace_file(&tmp, &term).unwrap();
+        #[cfg(windows)]
+        holder.join().unwrap();
+        assert_eq!(fs::read(&term).unwrap(), b"new");
+        assert!(!tmp.exists());
     }
 
     #[test]
