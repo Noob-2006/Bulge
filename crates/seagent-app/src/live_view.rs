@@ -1207,7 +1207,8 @@ mod tests {
         };
         eprintln!("LIVE Bot Desktop stages (median of 8): grab {} ms, JPEG full size {} ms, JPEG at 1280 wide {} ms", med(&mut g_ms), med(&mut e_full), med(&mut e_1280));
         let srv = crate::server::start(a.clone()).unwrap();
-        drop(gr);
+        // End the timing run's capture worker before the stream starts its own.
+        let _ = std::mem::take(&mut gr);
         let mut ws = connect(srv.local_addr(), "kind=desktop&target=host&fps=30&quality=85&maxWidth=1920", "live-admin-token");
         let h = next_text(&mut ws);
         assert_eq!(h["t"], "hello", "{h}");
