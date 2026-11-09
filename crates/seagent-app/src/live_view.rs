@@ -1432,7 +1432,7 @@ mod tests {
             eprintln!("skipping: a seagent Bot Desktop (seagent-default) already runs on this window station");
             return;
         }
-        #[cfg(unix)]
+        #[cfg(target_os = "linux")]
         let _bare = match desk.start() {
             Ok(_) => None,
             Err(e) => match bare_xvnc(&data) {
@@ -1443,7 +1443,7 @@ mod tests {
                 }
             },
         };
-        #[cfg(not(unix))]
+        #[cfg(not(target_os = "linux"))]
         if let Err(e) = desk.start() {
             eprintln!("skipping: no Bot Desktop on this host: {e}");
             return;
