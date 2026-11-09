@@ -14,14 +14,16 @@
 //! and the last steps per session (bounded), plus the candidate queue. `/refine` reads the same
 //! state for the session it is typed in.
 //!
-//! Write policy: the candidate queue is persisted the moment it changes (a recorded candidate,
-//! a review verdict). The per-session working state — which tools ran, which skill was loaded —
-//! changes on *every tool call*, and rewriting the whole file (candidates included, ~100 KB
-//! when the queue is full) with two fsyncs per call was the daemon's single largest disk writer.
-//! Those entries are therefore kept in memory and written behind, at most once per
-//! [`PERSIST_EVERY`] (and by [`flush`] when the daemon stops). Readers in this process see the
-//! pending entries; another process sees them at most `PERSIST_EVERY` late, and a crash loses at
-//! most that much step history — a heuristic input to skill review, not recovery state.
+//! Write policy: the per-session working state — which tools ran, which skill was loaded —
+//! changes on *every tool call*, and a new candidate is queued after almost every multi-step
+//! turn. Rewriting the whole file (~100 KB when the queue is full) with two fsyncs each time was
+//! the daemon's single largest disk writer (≈27 MB/min on a busy daemon). Both are therefore
+//! kept in memory and written behind, at most once per [`PERSIST_EVERY`], at turn end when due,
+//! and by [`flush`] when the daemon stops. A review verdict (`mark`) is still written at once.
+//! Readers in this process see the pending entries; another process (`seagent curator review`)
+//! sees them at most `PERSIST_EVERY` late, and a crash loses at most that much — heuristic input
+//! to skill review, not recovery state. A write merges with the file: a candidate another
+//! process already reviewed keeps that verdict.
 
 use super::settings::{Settings, Store};
 use super::{invoke, manage, workshop};
@@ -46,12 +48,22 @@ fn now() -> i64 {
     seagent_kernel::util::unix_now()
 }
 
-/// Session entries changed since the last write, per state file, and when each file was last
-/// written. The mutex is also the read-modify-write lock of the state file.
+/// Session entries and candidates changed since the last write, per state file, and when each
+/// file was last written. The mutex is also this process's read-modify-write lock of the file.
 #[derive(Default)]
 struct Pending {
     sessions: HashMap<PathBuf, Vec<Value>>,
+    candidates: HashMap<PathBuf, Vec<Value>>,
     saved: HashMap<PathBuf, Instant>,
+}
+
+impl Pending {
+    fn has(&self, path: &Path) -> bool {
+        self.sessions.contains_key(path) || self.candidates.contains_key(path)
+    }
+    fn due(&self, path: &Path) -> bool {
+        self.saved.get(path).is_none_or(|t| t.elapsed() >= PERSIST_EVERY)
+    }
 }
 
 fn pending() -> std::sync::MutexGuard<'static, Pending> {
@@ -86,9 +98,31 @@ fn overlay(state: &mut Value, fresh: &[Value]) {
     state["sessions"] = json!(list);
 }
 
+/// Put `fresh` candidates over the file's by id, bounded. A candidate the file already holds
+/// with a verdict (another process reviewed it) keeps that verdict over our pending copy.
+fn overlay_candidates(state: &mut Value, fresh: &[Value]) {
+    if fresh.is_empty() {
+        return;
+    }
+    let status = |v: &Value| v.get("status").and_then(Value::as_str).unwrap_or("pending").to_string();
+    let mut list: Vec<Value> = state.get("candidates").and_then(Value::as_array).cloned().unwrap_or_default();
+    for c in fresh {
+        match list.iter().position(|v| v.get("id") == c.get("id")) {
+            Some(i) if status(&list[i]) != "pending" && status(c) == "pending" => {}
+            Some(i) => list[i] = c.clone(),
+            None => list.push(c.clone()),
+        }
+    }
+    if list.len() > MAX_CANDIDATES {
+        list.drain(..list.len() - MAX_CANDIDATES);
+    }
+    state["candidates"] = json!(list);
+}
+
 fn view(path: &Path, p: &Pending) -> Value {
     let mut state = load_file(path);
     overlay(&mut state, p.sessions.get(path).map(Vec::as_slice).unwrap_or(&[]));
+    overlay_candidates(&mut state, p.candidates.get(path).map(Vec::as_slice).unwrap_or(&[]));
     state
 }
 
@@ -108,18 +142,22 @@ fn write_state(path: &Path, v: &Value) {
 fn save_locked(path: &Path, p: &mut Pending, state: &Value) {
     write_state(path, state);
     p.sessions.remove(path);
+    p.candidates.remove(path);
     p.saved.insert(path.to_path_buf(), Instant::now());
 }
 
 /// Write every pending session entry now (daemon shutdown, tests). Returns the files written.
 pub fn flush() -> usize {
     let mut p = pending();
-    let paths: Vec<PathBuf> = p.sessions.keys().cloned().collect();
+    let mut paths: Vec<PathBuf> = p.sessions.keys().chain(p.candidates.keys()).cloned().collect();
+    paths.sort();
+    paths.dedup();
     let mut n = 0;
     for path in &paths {
         // A data directory removed meanwhile (a test's scratch tree) is not re-created.
         if !path.parent().is_some_and(Path::is_dir) {
             p.sessions.remove(path);
+            p.candidates.remove(path);
             continue;
         }
         let state = view(path, &p);
@@ -129,16 +167,16 @@ pub fn flush() -> usize {
     n
 }
 
-/// Whether `st` has session entries that are not on disk yet.
+/// Whether `st` has session entries or candidates that are not on disk yet.
 pub fn dirty(st: &Store) -> bool {
-    pending().sessions.contains_key(&st.review_state())
+    pending().has(&st.review_state())
 }
 
 /// Write `st`'s pending entries when the last write is older than [`PERSIST_EVERY`].
 pub fn flush_due(st: &Store) {
     let path = st.review_state();
     let mut p = pending();
-    if p.sessions.contains_key(&path) && p.saved.get(&path).is_none_or(|t| t.elapsed() >= PERSIST_EVERY) {
+    if p.has(&path) && p.due(&path) {
         let state = view(&path, &p);
         save_locked(&path, &mut p, &state);
     }
@@ -164,7 +202,7 @@ fn with_session(st: &Store, session: &str, f: impl FnOnce(&mut Value)) {
     let list = p.sessions.entry(path.clone()).or_default();
     list.retain(|v| v.get("id").and_then(Value::as_str) != Some(session));
     list.push(entry);
-    if p.saved.get(&path).is_none_or(|t| t.elapsed() >= PERSIST_EVERY) {
+    if p.due(&path) {
         let state = view(&path, &p);
         save_locked(&path, &mut p, &state);
     }
@@ -344,9 +382,9 @@ pub fn record_candidate(s: &Settings, st: &Store, session: &str, ws: &str, user:
     let sig = signature(&goal, &target);
     let path = st.review_state();
     let mut p = pending();
-    let mut state = view(&path, &p);
-    let mut list: Vec<Value> = state.get("candidates").and_then(Value::as_array).cloned().unwrap_or_default();
-    if list.iter().filter_map(|v| v.get("sig").and_then(Value::as_str)).any(|x| x == sig) {
+    let state = view(&path, &p);
+    let queued = state.get("candidates").and_then(Value::as_array).cloned().unwrap_or_default();
+    if queued.iter().filter_map(|v| v.get("sig").and_then(Value::as_str)).any(|x| x == sig) {
         return None;
     }
     let cand = json!({
@@ -356,17 +394,19 @@ pub fn record_candidate(s: &Settings, st: &Store, session: &str, ws: &str, user:
         "at": now(), "status": "pending", "sig": sig,
     });
     let out = Candidate::from_value(&cand)?;
-    list.push(cand);
-    if list.len() > MAX_CANDIDATES {
-        list.drain(..list.len() - MAX_CANDIDATES);
-    }
-    state["candidates"] = json!(list);
+    p.candidates.entry(path.clone()).or_default().push(cand);
     // One candidate is one turn's procedure: the next turn records its own steps.
-    if let Some(sess) = state.get_mut("sessions").and_then(Value::as_array_mut).and_then(|a| a.iter_mut().find(|v| v.get("id").and_then(Value::as_str) == Some(session))) {
+    if let Some(mut sess) = session_of(&state, session).cloned() {
         sess["steps"] = json!([]);
+        let list = p.sessions.entry(path.clone()).or_default();
+        list.retain(|v| v.get("id").and_then(Value::as_str) != Some(session));
+        list.push(sess);
     }
-    // A new candidate is a real change: written now, together with the pending session entries.
-    save_locked(&path, &mut p, &state);
+    // Written behind like the steps (module docs); the first change after a quiet period at once.
+    if p.due(&path) {
+        let state = view(&path, &p);
+        save_locked(&path, &mut p, &state);
+    }
     Some(out)
 }
 
@@ -904,14 +944,36 @@ mod tests {
         assert!(flush() >= 1);
         assert!(!dirty(&st));
         assert_eq!(load_file(&path)["sessions"][0]["steps"].as_array().unwrap().len(), 21, "flushed");
-        // A candidate is a real change and is written at once, with the steps that led to it.
+        // A queued candidate is written behind too; this process sees it at once.
         let mut s = Settings::from_table(&toml::Table::new());
         s.review.min_steps = 2;
         note_step(&st, "s2", "shell", &json!({"command": "seagent index rebuild"}), false);
         note_step(&st, "s2", "shell", &json!({"command": "seagent index verify"}), false);
-        assert!(record_candidate(&s, &st, "s2", &ws.display().to_string(), "Rebuild the session index", true).is_some());
-        assert!(!dirty(&st), "the candidate write carried the pending entries");
-        assert_eq!(load_file(&path)["candidates"].as_array().unwrap().len(), 1);
+        let c = record_candidate(&s, &st, "s2", &ws.display().to_string(), "Rebuild the session index", true).unwrap();
+        assert_eq!(candidates(&st).len(), 1);
+        assert!(steps(&st, "s2").is_empty(), "the next turn records its own steps");
+        assert!(load_file(&path)["candidates"].as_array().is_none_or(|a| a.is_empty()), "not on disk yet");
+        assert!(record_candidate(&s, &st, "s2", &ws.display().to_string(), "Rebuild the session index", true).is_none(), "a pending duplicate is still a duplicate");
+        // Another process reviews the candidate meanwhile: its verdict survives our write.
+        flush();
+        let mut other = load_file(&path);
+        other["candidates"][0]["status"] = json!("written");
+        write_state(&path, &other);
+        note_step(&st, "s3", "shell", &json!({"command": "seagent index bench"}), false);
+        note_step(&st, "s3", "shell", &json!({"command": "seagent index status"}), false);
+        record_candidate(&s, &st, "s3", &ws.display().to_string(), "Benchmark the session index", true).unwrap();
+        {
+            // Our stale pending copy of the first candidate (still "pending") must not win.
+            let mut p = pending();
+            let mut stale = load_file(&path)["candidates"][0].clone();
+            stale["status"] = json!("pending");
+            p.candidates.entry(path.clone()).or_default().push(stale);
+        }
+        flush();
+        let disk = load_file(&path);
+        let list = disk["candidates"].as_array().unwrap();
+        assert_eq!(list.len(), 2, "{disk}");
+        assert_eq!(list.iter().find(|v| v["id"] == c.id.as_str()).unwrap()["status"], "written", "the other process's verdict is kept");
         let _ = std::fs::remove_dir_all(&d);
     }
 
