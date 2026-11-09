@@ -229,10 +229,12 @@ function lanSection(d, lan) {
   if (pend.length) h += '<div class="slist">' + pend.map((p) => `<div class="srow"><span class="light warn"></span><span><strong>${ov(p.name)}</strong> <span class="faint">${ov(p.platform)}</span><span class="sub">${L('配對碼', 'code')} ${ov(p.code)} · ${ov(p.ip)} · ${L('確認對方畫面顯示的指紋與本機相同再核准', 'approve only if the device shows the same fingerprint as this host')}</span></span><span class="r"><button class="btn small" data-lanapprove="${ov(p.code)}" data-write>${L('核准', 'Approve')}</button> <button class="btn ghost small" data-lanreject="${ov(p.code)}" data-write>${L('拒絕', 'Reject')}</button></span></div>`).join('') + '</div>';
   h += '<div class="slist">' + (devs.length ? devs.map((x) => `<div class="srow"><span class="light ok"></span><span><strong>${ov(x.name)}</strong> <span class="faint mono">${ov(x.id).slice(0, 12)}</span><span class="sub">${ov(x.platform || '—')} · ${ov(x.scope)} · ${L('最近使用', 'seen')} ${ago(x.lastSeenMs)}</span></span><span class="r"><button class="btn ghost small" data-lanrevoke="${ov(x.id)}" data-write>${L('撤銷', 'Revoke')}</button></span></div>`).join('') : `<div class="none">${L('還沒有配對的裝置。', 'No paired devices yet.')}</div>`) + '</div>';
   h += '<div id="lanFound"></div></section>';
+  if (typeof devSecSection === 'function') h += devSecSection(d, lan); // devsec.js
   return h;
 }
 function bindLan(el) {
   const rerender = () => VIEWS.devices.render(el);
+  if (typeof devSecBind === 'function') devSecBind(el, rerender); // devsec.js
   const act = async (fn, ok) => { try { await fn(); if (ok) toast(ok); rerender(); } catch (e) { toast(e.message, true); } };
   for (const b of el.querySelectorAll('[data-lanapprove]')) b.onclick = () => act(() => S.arp.call('devices.approve', { code: b.dataset.lanapprove }), L('已核准', 'Approved'));
   for (const b of el.querySelectorAll('[data-lanreject]')) b.onclick = () => act(() => S.arp.call('devices.reject', { code: b.dataset.lanreject }), L('已拒絕', 'Rejected'));

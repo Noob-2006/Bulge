@@ -959,11 +959,14 @@ document.addEventListener('keydown', (e) => {
 });
 
 async function start(token) {
-  S.arp = new Arp(token);
+  // Paired devices connect with a short-lived access token minted by the device key (devauth.js).
+  S.arp = new Arp(window.DevAuth ? await DevAuth.access(token, deviceId()) : token);
+  S.arp.login = token;
   setConn('conn.connecting');
   // A failed connect is usually the daemon restarting: keep the saved token and retry. Only
   // when it has never worked in this page (likely a wrong token) ask for one, pre-filled.
   try { await S.arp.connect(); } catch (e) {
+    if (window.DevAuth) DevAuth.forget();
     setConn('conn.failed', null, 'down');
     S.fails = (S.fails || 0) + 1;
     if (S.connected || S.fails < 3) { setTimeout(() => start(token), Math.min(10000, 1500 * S.fails)); return; }
@@ -985,7 +988,7 @@ async function start(token) {
   });
   S.arp.on('delta', (p) => { if (p.subscription !== S.globalSub) onDelta(p); });
   S.arp.on('pending', (p) => { if (p.subscription === S.globalSub) onPending(p); });
-  S.arp.on('close', () => { if (S.arp && S.arp.token !== token) return; setConn('conn.down', null, 'down'); setTimeout(() => start(token), 3000); });
+  S.arp.on('close', () => { if (S.arp && S.arp.login !== token) return; setConn('conn.down', null, 'down'); setTimeout(() => start(token), 3000); });
   // After the handlers: the server's `ready` notification must not arrive unobserved.
   try { S.me = await S.arp.call('whoami'); } catch { S.me = null; }
   applyAccess(S.me);
@@ -1043,7 +1046,7 @@ function deviceName() {
 }
 // One claim, polling while the host has not approved an 8-character code yet.
 async function pairDevice(claim) {
-  const body = { ...claim, device: { id: deviceId(), name: deviceName(), platform: 'web' } };
+  const body = { ...claim, device: { id: deviceId(), name: deviceName(), platform: 'web', publicKey: window.DevAuth ? await DevAuth.publicKey() : undefined } };
   for (let i = 0; i < 600; i++) {
     const r = await fetch('/pair/client', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
     const v = await r.json().catch(() => ({}));
@@ -1058,6 +1061,7 @@ async function pairDevice(claim) {
 }
 function finishPairing(v) {
   store.set('seagent.token', v.consoleToken);
+  if (window.DevAuth) DevAuth.seed(v.accessToken, v.accessExpiresAtMs, v.consoleToken);
   try { $('login').close(); } catch {}
   history.replaceState(null, '', location.pathname);
   start(v.consoleToken);
