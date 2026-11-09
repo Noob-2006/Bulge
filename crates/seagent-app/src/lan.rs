@@ -319,6 +319,11 @@ pub fn status(cfg: &AppConfig, data: &Path) -> Value {
         "identity": id.as_ref().map(Identity::json),
         "pairingUrl": pairing_url(cfg, None).ok().map(|(u, _)| u),
         "devices": crate::devices::list(data).len(),
+        // Perimeter (docs/SECURITY.md §8): what the console shows next to the device list.
+        "publicExposure": cfg.exposure.allow_public,
+        "warning": crate::netguard::public_warning(cfg),
+        "requireDeviceKey": cfg.exposure.require_device_key,
+        "allowSources": cfg.exposure.allow_sources,
     })
 }
 

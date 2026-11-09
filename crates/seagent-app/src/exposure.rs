@@ -88,6 +88,19 @@ pub struct ExposureConfig {
     /// mTLS-terminating proxy, a web access manager): the user arrives in a header.
     #[serde(skip_serializing_if = "ProxyAuthConfig::is_default")]
     pub proxy_auth: ProxyAuthConfig,
+    /// Source allowlist (IPs / CIDRs) for everyone but this machine: a console request from any
+    /// other address is refused (`crate::netguard`). Empty = no extra restriction (LAN mode
+    /// still admits only private ranges). Signed webhooks and A2A are not affected.
+    pub allow_sources: Vec<String>,
+    /// Host names (besides IP literals, `localhost`, this machine's name, `[surfaces]
+    /// public_url` and `allow_origins`) a browser may use to reach the console. Anything else is
+    /// refused as DNS rebinding.
+    pub allowed_hosts: Vec<String>,
+    /// Refuse paired devices that have not bound a device key yet (old apps / browsers without
+    /// WebCrypto). Off by default: they keep working and migrate on their next start.
+    pub require_device_key: bool,
+    /// Lifetime of the short-lived access tokens a key-bound device mints (`POST /pair/refresh`).
+    pub device_access_ttl_min: u32,
 }
 
 /// `[app.exposure.proxy_auth]` — trusted reverse-proxy identity headers.
@@ -205,7 +218,7 @@ impl ClientIdentity {
 
 impl Default for ExposureConfig {
     fn default() -> Self {
-        ExposureConfig { allow_public: false, lan: false, behind_proxy: false, tls: false, cert: None, key: None, client_auth: "off".into(), client_ca: None, client_identities: vec![], node_identities: vec![], rate_limit_per_min: 1200, trusted_proxies: vec![], proxy_auth: ProxyAuthConfig::default() }
+        ExposureConfig { allow_public: false, lan: false, behind_proxy: false, tls: false, cert: None, key: None, client_auth: "off".into(), client_ca: None, client_identities: vec![], node_identities: vec![], rate_limit_per_min: 1200, trusted_proxies: vec![], proxy_auth: ProxyAuthConfig::default(), allow_sources: vec![], allowed_hosts: vec![], require_device_key: false, device_access_ttl_min: 60 }
     }
 }
 
@@ -232,7 +245,19 @@ impl ExposureConfig {
     }
 }
 
-fn ip_in(ip: IpAddr, rule: &str) -> bool {
+/// Is `rule` an IP or CIDR [`ip_in`] understands?
+pub fn valid_rule(rule: &str) -> bool {
+    let rule = rule.trim();
+    let (net, bits) = match rule.split_once('/') {
+        Some((n, b)) => (n, Some(b)),
+        None => (rule, None),
+    };
+    let Ok(ip) = net.parse::<IpAddr>() else { return false };
+    let max = if ip.is_ipv4() { 32 } else { 128 };
+    bits.is_none_or(|b| b.parse::<u32>().is_ok_and(|b| b <= max))
+}
+
+pub(crate) fn ip_in(ip: IpAddr, rule: &str) -> bool {
     let rule = rule.trim();
     let (net, bits) = match rule.split_once('/') {
         Some((n, b)) => (n, b.parse::<u32>().ok()),

@@ -152,7 +152,7 @@ impl App {
             let tenant = crate::tenant::credential_viewer(self, &a.org, &a.team, access.has(identity::Role::Admin) || access == Access::Scope(Scope::Admin), &a.name);
             return Some(Principal { kind: "service".into(), name: a.name, access, ip, tenant });
         }
-        if given.starts_with("sed1_") {
+        if given.starts_with("sed1_") || given.starts_with("sea1_") {
             return self.device_principal(r, ip);
         }
         let (access, name, org, team) = self.scope_of(&given)?;
@@ -160,15 +160,17 @@ impl App {
         Some(Principal { kind: "token".into(), name, access, ip, tenant })
     }
 
-    /// LAN mode is on and the request comes from another machine (any non-loopback peer).
+    /// LAN mode is on and the request comes from another machine (any non-loopback peer, or a
+    /// loopback connection that a tunnel / proxy forwarded: `crate::netguard::source`).
     pub fn lan_peer(&self, r: &Request) -> bool {
-        exposure::lan_only(&self.cfg) && r.peer.is_some_and(|p| seagent_security::exposure::classify_ip(p.ip()) != seagent_security::exposure::AddrClass::Loopback)
+        exposure::lan_only(&self.cfg) && crate::netguard::source(self, r) != crate::netguard::Source::Local
     }
 
-    /// A paired device (`crate::devices`), from the token the request presents.
+    /// A paired device (`crate::devices`), from the token the request presents: an access token
+    /// of a key-bound device, or the console token of one that has not bound a key yet.
     fn device_principal(&self, r: &Request, ip: String) -> Option<Principal> {
         let given = self.presented(r)?;
-        let (id, scope) = crate::devices::authenticate(&self.d.k.paths.data, &given)?;
+        let (id, scope) = crate::devices::authenticate_at(&self.d.k.paths.data, &given, &ip, self.cfg.exposure.require_device_key).ok()?;
         let tenant = crate::tenant::credential_viewer(self, "", "", scope == Scope::Admin, &id);
         Some(Principal { kind: "device".into(), name: id, access: Access::Scope(scope), ip, tenant })
     }
@@ -265,14 +267,31 @@ impl App {
         })
     }
 
+    /// One request: the perimeter (`crate::netguard`: source, Host, CSRF, lockout), CORS
+    /// preflights, the routes, then the security headers on whatever they answered.
     pub(crate) fn handle(self: &Arc<Self>, r: Request) -> Response {
+        let meta = crate::netguard::Meta::of(self, &r);
+        let resp = if let Some(refusal) = crate::netguard::check(self, &r) {
+            refusal
+        } else if r.method == "OPTIONS" {
+            crate::netguard::preflight(self, &r)
+        } else {
+            self.dispatch(r)
+        };
+        crate::netguard::finish(self, &meta, resp)
+    }
+
+    fn dispatch(self: &Arc<Self>, r: Request) -> Response {
         let path = r.path.clone();
         // LAN mode (docs/cross-platform.md): only peers in private ranges, whatever the bind.
         if exposure::lan_only(&self.cfg) && r.peer.is_some_and(|p| !seagent_security::exposure::is_local_network(p.ip())) {
             crate::metrics::inc("http_lan_refused", "");
             return Response::json(403, &json!({"error": "forbidden: LAN mode only admits devices on the local network"}).to_string());
         }
-        let lan_peer = self.lan_peer(&r);
+        // Another machine on the LAN, connected directly. (A tunnel to loopback is judged by
+        // `netguard` and, for credentials, by `lan_peer`; its signed webhooks, A2A and plugin
+        // routes keep working, they verify themselves.)
+        let lan_peer = exposure::lan_only(&self.cfg) && r.peer.is_some_and(|p| seagent_security::exposure::classify_ip(p.ip()) != seagent_security::exposure::AddrClass::Loopback);
         if let Some((_, h)) = self.routes.iter().find(|(pre, _)| path.starts_with(pre.as_str())) {
             // Host routes authenticate themselves with their own secrets; in LAN mode the
             // network only gets paired-device credentials, so they stay local.
@@ -315,6 +334,9 @@ impl App {
             ("GET", p) if self.cfg.ui && (p == "/" || p.starts_with("/ui/") || p == "/manifest.webmanifest" || p == "/sw.js" || p == "/setup" || p == "/apple-touch-icon.png") => ui::serve(p),
             // Phones, tablets, browsers and other PCs pair here (LAN mode; see `devices`).
             ("POST", "/pair/client") if self.cfg.exposure.lan => crate::devices::handle_pair_client(self, &r),
+            // Key-bound devices trade their console token + a fresh signature for an access token.
+            ("POST", "/pair/refresh") => crate::device_auth::handle_refresh(self, &r),
+            ("GET", "/pair/info") => crate::device_auth::info(self),
             ("GET", "/.well-known/agent-card.json") | ("GET", "/.well-known/agent.json") if self.cfg.a2a.enabled && !lan_peer => a2a::card(self, &r),
             // Devices prove themselves with an Ed25519 key and operator-approved pairing.
             (_, p) if p.starts_with("/node") && self.cfg.nodes && r.is_upgrade() => {
@@ -345,16 +367,31 @@ impl App {
     /// The credential check in front of [`App::routed`].
     fn credentialed(self: &Arc<Self>, r: Request) -> Response {
         match self.principal(&r) {
-            Some(p) => self.routed(r, p),
+            Some(p) => {
+                crate::netguard::auth_ok(self, &r);
+                self.routed(r, p)
+            }
             None => {
                 crate::metrics::inc("http_unauthorized", "");
                 // A credential that matches nothing is worth a record (guessing, a revoked
                 // or expired token); a bare request without one is not.
-                if self.presented(&r).is_some() {
+                let given = self.presented(&r);
+                if let Some(g) = &given {
                     let ip = self.client_ip(&r).map(|i| i.to_string()).unwrap_or_default();
-                    seagent_security::audit::record(&self.d.k.paths.data, seagent_security::audit::Event::new("auth.failed", seagent_security::audit::Actor::new("anonymous", "").with_ip(&ip), &r.path, "deny"));
+                    // An expired access token is routine (the device refreshes): no strike.
+                    let stale = g.starts_with("sea1_") || crate::devices::authenticate_at(&self.d.k.paths.data, g, "", false) == Err(crate::devices::AuthError::NeedsSignature);
+                    if !stale {
+                        crate::netguard::auth_failed(self, &r, "credential");
+                        seagent_security::audit::record(&self.d.k.paths.data, seagent_security::audit::Event::new("auth.failed", seagent_security::audit::Actor::new("anonymous", "").with_ip(&ip), &r.path, "deny"));
+                    }
                 }
-                let msg = if self.lan_peer(&r) { "unauthorized: pair this device first (seagent pair code on the host)" } else { "unauthorized: send the app token (Authorization: Bearer …)" };
+                let msg = if given.as_deref().is_some_and(|g| g.starts_with("sea1_") || g.starts_with("sed1_")) {
+                    "unauthorized: device credential expired or not accepted; refresh it (POST /pair/refresh) or pair again"
+                } else if self.lan_peer(&r) {
+                    "unauthorized: pair this device first (seagent pair code on the host)"
+                } else {
+                    "unauthorized: send the app token (Authorization: Bearer …)"
+                };
                 Response::json(401, &json!({"error": msg}).to_string()).with_header("www-authenticate", "Bearer")
             }
         }
@@ -711,6 +748,11 @@ pub fn start(app: Arc<App>) -> Result<httpd::Server, String> {
     }
     // A8/A9: refusing here means a misconfigured public bind never listens, not even briefly.
     crate::exposure::check_start(&app.cfg).map_err(|e| format!("app server: {e}"))?;
+    if let Some(w) = crate::netguard::public_warning(&app.cfg) {
+        let bar = "!".repeat(78);
+        eprintln!("seagentd: {bar}\nseagentd: WARNING: {w}\nseagentd: {bar}");
+        seagent_security::audit::record(&app.d.k.paths.data, seagent_security::audit::Event::new("exposure.public", seagent_security::audit::Actor::system(), &app.cfg.listen, "warn").detail(json!({"tls": app.cfg.exposure.tls, "behindProxy": app.cfg.exposure.behind_proxy, "allowSources": app.cfg.exposure.allow_sources})));
+    }
     crate::metrics::started();
     let a = app.clone();
     let h: httpd::Handler = Arc::new(move |r| a.handle(r));
@@ -1445,5 +1487,254 @@ mod tests {
         assert_eq!(crate::exposure::auth_strength(&eff), seagent_security::exposure::AuthStrength::Token);
         let ok = AppConfig { listen: "192.168.1.5:8640".into(), ..eff };
         assert!(crate::exposure::check_start(&ok).is_ok(), "{:?}", crate::exposure::check_start(&ok));
+    }
+
+    // ───────────── perimeter (crate::netguard, crate::device_auth; docs/SECURITY.md §8) ─────────────
+
+    fn from(ip: &str, mut r: Request) -> Request {
+        r.peer = Some(if ip.contains(':') { format!("[{ip}]:50000") } else { format!("{ip}:50000") }.parse().unwrap());
+        r
+    }
+
+    fn header_of<'a>(r: &'a Response, name: &str) -> Option<&'a str> {
+        r.headers.iter().find(|(k, _)| k.eq_ignore_ascii_case(name)).map(|(_, v)| v.as_str())
+    }
+
+    fn audit_kinds(a: &App, kind: &str) -> Vec<Value> {
+        seagent_security::audit::query(&a.d.k.paths.data, &seagent_security::audit::Query { kind: Some(kind.into()), limit: 100, ..Default::default() })
+    }
+
+    /// Brute force: ten bad credentials from one address lock it out (429, Retry-After), the
+    /// next lockout is twice as long, pairing is locked too, other addresses are unaffected and
+    /// this machine is never locked out.
+    #[test]
+    fn brute_force_locks_an_address_out_with_backoff() {
+        let a = lan_app();
+        let bad = |ip: &str, i: usize| a.clone().handle(from(ip, json_req("/arp", &[("authorization", &format!("Bearer sed1_guess{i}"))], &rpc("session.list")))).status;
+        for i in 0..crate::netguard::FAIL_LIMIT {
+            assert_eq!(bad("192.168.77.10", i), 401, "attempt {i}");
+        }
+        let locked = a.clone().handle(from("192.168.77.10", json_req("/arp", &[("authorization", "Bearer sed1_guess-next")], &rpc("session.list"))));
+        assert_eq!(locked.status, 429, "{}", body_text(&locked));
+        assert_eq!(header_of(&locked, "retry-after"), Some("60"));
+        // Pairing from the locked address is refused before the code is even looked at.
+        let pair = a.clone().handle(from("192.168.77.10", json_req("/pair/client", &[], &device_body(json!({"code": "ABCD2345"})))));
+        assert_eq!(pair.status, 429);
+        assert_eq!(bad("192.168.77.11", 0), 401, "another address is not affected");
+        for i in 0..3 * crate::netguard::FAIL_LIMIT {
+            assert_eq!(a.clone().handle(from("127.0.0.1", json_req("/arp", &[("authorization", &format!("Bearer wrong{i}"))], &rpc("session.list")))).status, 401, "the owner on loopback is never locked out");
+        }
+        assert_eq!(a.clone().handle(from("127.0.0.1", json_req("/arp", &[("authorization", "Bearer admin-token")], &rpc("session.list")))).status, 200);
+        // The lockout runs out; ten more failures lock it again for twice as long.
+        crate::netguard::expire_lock(&a, "192.168.77.10".parse().unwrap());
+        for i in 0..crate::netguard::FAIL_LIMIT {
+            assert_eq!(bad("192.168.77.10", 100 + i), 401);
+        }
+        let again = a.clone().handle(from("192.168.77.10", json_req("/arp", &[], &rpc("session.list"))));
+        assert_eq!((again.status, header_of(&again, "retry-after")), (429, Some("120")));
+        let locks = audit_kinds(&a, "auth.lockout");
+        assert_eq!(locks.len(), 2, "{locks:?}");
+        assert!(locks.iter().any(|e| e["detail"]["seconds"] == 120), "{locks:?}");
+        assert!(locks.iter().all(|e| e["actor"]["ip"] == "192.168.77.10"), "{locks:?}");
+    }
+
+    /// DNS rebinding: a browser request whose Host is a public name (an attacker's domain that
+    /// now resolves to us) is refused even though its Origin matches that Host; IP literals,
+    /// localhost, this network's own names and listed names pass, and non-browser clients
+    /// (webhooks, curl) are not judged by Host.
+    #[test]
+    fn a_rebinding_host_header_is_refused() {
+        let hook: httpd::Handler = Arc::new(|_| Response::text(200, "hooked"));
+        let base = default_app();
+        let mut cfg = base.cfg.clone();
+        cfg.exposure.allowed_hosts = vec!["seagent.corp.example".into(), "*.vpn.example".into()];
+        let a = Arc::new(App { d: base.d.clone(), cfg, token: "admin-token".into(), host_methods: vec![], routes: vec![("/hook/".into(), hook)] });
+        let browser = |host: &str| {
+            let origin = format!("http://{host}");
+            a.clone().handle(from("127.0.0.1", json_req("/arp", &[("host", host), ("origin", &origin), ("authorization", "Bearer admin-token")], &rpc("session.list"))))
+        };
+        let r = browser("attacker.example:8640");
+        assert_eq!(r.status, 403);
+        assert!(body_text(&r).contains("DNS rebinding"), "{}", body_text(&r));
+        let ws = a.clone().handle(from("127.0.0.1", upgrade_req("/arp?token=admin-token", &[("host", "attacker.example:8640"), ("origin", "http://attacker.example:8640")])));
+        assert_eq!(ws.status, 403, "the WebSocket too");
+        for ok in ["127.0.0.1:8640", "localhost:8640", "[::1]:8640", "192.168.1.5:8640", "studio:8640", "box.lan:8640", "studio.local:8640", "seagent.corp.example", "pc.vpn.example:8640"] {
+            assert_eq!(browser(ok).status, 200, "{ok}");
+        }
+        // Not a browser: no Origin / Sec-Fetch headers, so no rebinding and no Host rule.
+        let curl = a.clone().handle(from("127.0.0.1", json_req("/arp", &[("host", "attacker.example"), ("authorization", "Bearer admin-token")], &rpc("session.list"))));
+        assert_eq!(curl.status, 200);
+        let webhook = a.clone().handle(from("127.0.0.1", req("POST", "/hook/telegram", &[("host", "bot.public.example")], "{}")));
+        assert_eq!((webhook.status, body_text(&webhook).as_str()), (200, "hooked"));
+        assert!(audit_kinds(&a, "net.refused").iter().any(|e| e["detail"]["reason"] == "host"));
+    }
+
+    /// A stolen console token (from a backup, `hosts.json`, a phone's storage) is not enough for a
+    /// key-bound device: it only buys access tokens together with a fresh signature by the
+    /// device's private key, and captured refreshes cannot be replayed.
+    #[test]
+    fn a_stolen_device_token_without_the_device_key_is_refused() {
+        use seagent_net::crypto;
+        let a = lan_app();
+        let data = a.d.k.paths.data.clone();
+        let key = crypto::p256_generate().unwrap();
+        let pk = crypto::b64url(&crypto::p256_public(&key).unwrap());
+        let (bt, _) = crate::node::bootstrap_token(Duration::from_secs(60));
+        let mut body: Value = serde_json::from_str(&device_body(json!({"bootstrapToken": bt}))).unwrap();
+        body["device"]["publicKey"] = pk.clone().into();
+        let paired = a.clone().handle(from("192.168.1.50", json_req("/pair/client", &[], &body.to_string())));
+        assert_eq!(paired.status, 200, "{}", body_text(&paired));
+        let v: Value = serde_json::from_str(&body_text(&paired)).unwrap();
+        let (console, access) = (v["consoleToken"].as_str().unwrap().to_string(), v["accessToken"].as_str().unwrap().to_string());
+        assert_eq!(v["keyBound"], true);
+        let arp = |tok: &str| a.clone().handle(from("192.168.1.50", json_req("/arp", &[("authorization", &format!("Bearer {tok}"))], &rpc("session.list"))));
+        assert_eq!(arp(&access).status, 200, "the access token works");
+        let stolen = arp(&console);
+        assert_eq!(stolen.status, 401, "the console token alone does not");
+        assert!(body_text(&stolen).contains("refresh"), "{}", body_text(&stolen));
+        let dev = "0123456789abcdef0123456789abcdef";
+        let refresh = |signer: &[u8], nonce: &str, ts: u64| {
+            let sig = crypto::p256_sign(signer, crate::device_auth::refresh_message(&crate::lan::host_id(&data), dev, ts, nonce).as_bytes()).unwrap();
+            json!({"deviceId": dev, "ts": ts, "nonce": nonce, "sig": crypto::b64url(&sig)}).to_string()
+        };
+        let now = seagent_security::audit::now_ms();
+        let post = |b: &str| a.clone().handle(from("192.168.1.50", json_req("/pair/refresh", &[("authorization", &format!("Bearer {console}"))], b)));
+        let thief = crypto::p256_generate().unwrap();
+        assert_eq!(post(&refresh(&thief, "thief-nonce-0000001", now)).status, 401, "token + someone else's key");
+        let good = refresh(&key, "good-nonce-00000001", now);
+        let r = post(&good);
+        assert_eq!(r.status, 200, "{}", body_text(&r));
+        let fresh = serde_json::from_str::<Value>(&body_text(&r)).unwrap()["accessToken"].as_str().unwrap().to_string();
+        assert_eq!(arp(&fresh).status, 200);
+        assert_eq!(post(&good).status, 401, "a captured refresh cannot be replayed");
+        assert_eq!(post(&refresh(&key, "late-nonce-00000001", now - 3_600_000)).status, 401, "nor an old one re-signed with a stale clock");
+        // Revoking the device ends every token at once.
+        assert!(crate::devices::revoke(&data, dev).unwrap());
+        assert_eq!(arp(&fresh).status, 401);
+        assert!(audit_kinds(&a, "device.refresh").iter().all(|e| e["outcome"] == "deny"));
+    }
+
+    /// Migration: a device paired before device keys existed keeps working with its token, binds
+    /// a key on its next start (the app / web console do this by themselves) and from then on
+    /// is key-bound; `require_device_key` refuses unbound devices.
+    #[test]
+    fn existing_paired_devices_keep_working_and_migrate() {
+        use seagent_net::crypto;
+        let a = lan_app();
+        let data = a.d.k.paths.data.clone();
+        let info = crate::devices::DeviceInfo { id: "legacy-app".into(), name: "old phone".into(), platform: "android".into(), public_key: None };
+        let token = crate::devices::issue(&data, &info, Scope::Write, "code").unwrap();
+        let arp = |app: &Arc<App>, tok: &str| app.clone().handle(from("192.168.1.60", json_req("/arp", &[("authorization", &format!("Bearer {tok}"))], &rpc("session.list")))).status;
+        assert_eq!(arp(&a, &token), 200, "an unbound device keeps working");
+        let mut strict_cfg = a.cfg.clone();
+        strict_cfg.exposure.require_device_key = true;
+        let strict = Arc::new(App { d: a.d.clone(), cfg: strict_cfg, token: "admin-token".into(), host_methods: vec![], routes: vec![] });
+        assert_eq!(arp(&strict, &token), 401, "unless the host requires device keys");
+        let key = crypto::p256_generate().unwrap();
+        let now = seagent_security::audit::now_ms();
+        let sig = crypto::p256_sign(&key, crate::device_auth::refresh_message(&crate::lan::host_id(&data), "legacy-app", now, "migrate-nonce-000001").as_bytes()).unwrap();
+        let body = json!({"deviceId": "legacy-app", "ts": now, "nonce": "migrate-nonce-000001", "sig": crypto::b64url(&sig), "publicKey": crypto::b64url(&crypto::p256_public(&key).unwrap())});
+        let r = a.clone().handle(from("192.168.1.60", json_req("/pair/refresh", &[("authorization", &format!("Bearer {token}"))], &body.to_string())));
+        assert_eq!(r.status, 200, "{}", body_text(&r));
+        let access = serde_json::from_str::<Value>(&body_text(&r)).unwrap()["accessToken"].as_str().unwrap().to_string();
+        assert_eq!(arp(&a, &access), 200);
+        assert_eq!(arp(&strict, &access), 200, "bound: fine for a strict host too");
+        assert_eq!(arp(&a, &token), 401, "after binding the bare token is no longer a bearer");
+        assert_eq!(audit_kinds(&a, "device.bind").len(), 1);
+        assert_eq!(crate::devices::list(&data)[0]["keyBound"], true);
+    }
+
+    /// Network scope: a console request that arrives through a tunnel from a public address (or
+    /// with no usable address) is refused unless public exposure is on; LAN and tailnet
+    /// addresses pass; signed webhooks keep flowing through the same tunnel.
+    #[test]
+    fn a_public_source_is_refused_unless_exposure_is_on() {
+        let hook: httpd::Handler = Arc::new(|_| Response::text(200, "hooked"));
+        let base = default_app();
+        let a = Arc::new(App { d: base.d.clone(), cfg: base.cfg.clone(), token: "admin-token".into(), host_methods: vec![], routes: vec![("/hook/".into(), hook.clone())] });
+        let tunneled = |app: &Arc<App>, hs: &[(&str, &str)]| {
+            let mut h = hs.to_vec();
+            h.push(("authorization", "Bearer admin-token"));
+            app.clone().handle(from("127.0.0.1", json_req("/arp", &h, &rpc("session.list"))))
+        };
+        let r = tunneled(&a, &[("x-forwarded-for", "203.0.113.9")]);
+        assert_eq!(r.status, 403);
+        assert!(body_text(&r).contains("allow_public"), "{}", body_text(&r));
+        assert_eq!(tunneled(&a, &[("x-forwarded-for", "10.0.0.5, 198.51.100.7")]).status, 403, "any public hop counts");
+        assert_eq!(tunneled(&a, &[("cf-ray", "8f00-AMS")]).status, 403, "a tunnel that names no client is public");
+        assert_eq!(tunneled(&a, &[("x-forwarded-for", "192.168.1.9")]).status, 200, "a LAN proxy");
+        assert_eq!(tunneled(&a, &[("x-forwarded-for", "100.101.1.2"), ("tailscale-user-login", "me@example.com")]).status, 200, "Tailscale Serve (tailnet)");
+        assert_eq!(tunneled(&a, &[]).status, 200, "this machine");
+        let webhook = a.clone().handle(from("127.0.0.1", req("POST", "/hook/slack", &[("x-forwarded-for", "203.0.113.9")], "{}")));
+        assert_eq!(webhook.status, 200, "channel automation through the tunnel is untouched");
+        let mut open_cfg = a.cfg.clone();
+        open_cfg.exposure.allow_public = true;
+        let open = Arc::new(App { d: a.d.clone(), cfg: open_cfg.clone(), token: "admin-token".into(), host_methods: vec![], routes: vec![] });
+        assert_eq!(tunneled(&open, &[("x-forwarded-for", "203.0.113.9")]).status, 200, "public exposure on purpose");
+        let mut proxy_cfg = a.cfg.clone();
+        proxy_cfg.exposure.behind_proxy = true;
+        let proxied = Arc::new(App { d: a.d.clone(), cfg: proxy_cfg, token: "admin-token".into(), host_methods: vec![], routes: vec![] });
+        assert_eq!(tunneled(&proxied, &[("x-forwarded-for", "203.0.113.9")]).status, 200, "a reverse proxy the operator declared");
+        assert!(crate::netguard::public_warning(&open_cfg).unwrap().contains("PUBLIC EXPOSURE"));
+        assert!(crate::netguard::public_warning(&a.cfg).is_none());
+        // LAN mode: a tunneled private address is a network peer, so the shared app token is refused.
+        let lan = lan_app();
+        assert_eq!(tunneled(&lan, &[("x-forwarded-for", "192.168.1.9")]).status, 401);
+        assert_eq!(tunneled(&lan, &[]).status, 200);
+    }
+
+    /// `[app.exposure] allow_sources`: only the listed networks reach the console; this machine
+    /// always does.
+    #[test]
+    fn the_source_allowlist_limits_network_peers() {
+        let base = lan_app();
+        let mut cfg = base.cfg.clone();
+        cfg.exposure.allow_sources = vec!["192.168.1.0/24".into(), "fd00::/8".into()];
+        let a = Arc::new(App { d: base.d.clone(), cfg, token: "admin-token".into(), host_methods: vec![], routes: vec![] });
+        let at = |ip: &str| a.clone().handle(from(ip, json_req("/arp", &[("authorization", "Bearer admin-token")], &rpc("session.list")))).status;
+        assert_eq!(at("192.168.2.5"), 403, "outside the allowlist");
+        assert_eq!(at("192.168.1.5"), 401, "inside: on to the credential check");
+        assert_eq!(at("fd00::7"), 401);
+        assert_eq!(at("127.0.0.1"), 200);
+        assert!(AppConfig::parse(&toml::from_str("[exposure]\nallow_sources = [\"not-an-ip\"]").unwrap()).is_err());
+    }
+
+    /// CSRF for cookie sessions, strict CORS (no private-network grant, only listed origins) and
+    /// the security headers on every answer.
+    #[test]
+    fn cookie_csrf_cors_and_security_headers() {
+        let mut cfg = AppConfig { enabled: true, listen: "127.0.0.1:0".into(), allow_origins: vec!["https://ops.example".into()], ..AppConfig::default() };
+        cfg.auth = AuthConfig { enabled: true, provider: "basic".into(), secret: "0123456789abcdef0123".into(), ..AuthConfig::default() };
+        let a = app(cfg);
+        let cookie = format!("{}=forged", a.cfg.auth.cookie_name());
+        let cross = a.clone().handle(json_req("/arp", &[("cookie", &cookie), ("sec-fetch-site", "cross-site")], &rpc("session.list")));
+        assert_eq!(cross.status, 403);
+        assert!(body_text(&cross).contains("session cookie"), "{}", body_text(&cross));
+        let same = a.clone().handle(json_req("/arp", &[("cookie", &cookie), ("sec-fetch-site", "same-origin")], &rpc("session.list")));
+        assert_eq!(same.status, 401, "our own page: on to the (forged) cookie check");
+        // CORS: a listed origin gets a preflight answer, nobody gets a private-network grant.
+        let pre = |origin: &str| a.clone().handle(req("OPTIONS", "/arp", &[("origin", origin), ("access-control-request-method", "POST"), ("access-control-request-private-network", "true")], ""));
+        let ok = pre("https://ops.example");
+        assert_eq!(ok.status, 204);
+        assert_eq!(header_of(&ok, "access-control-allow-origin"), Some("https://ops.example"));
+        assert!(header_of(&ok, "access-control-allow-private-network").is_none() && header_of(&ok, "access-control-allow-credentials").is_none());
+        let evil = pre("https://evil.example");
+        assert_eq!(evil.status, 403);
+        assert!(header_of(&evil, "access-control-allow-origin").is_none());
+        // Headers: API answers get nosniff, framing and a deny-all CSP; the UI keeps its own CSP.
+        let h = a.clone().handle(req("GET", "/pair/info", &[], ""));
+        assert_eq!(h.status, 200);
+        for (k, v) in [("x-content-type-options", "nosniff"), ("x-frame-options", "SAMEORIGIN"), ("referrer-policy", "no-referrer"), ("cross-origin-resource-policy", "same-origin")] {
+            assert_eq!(header_of(&h, k), Some(v), "{k}");
+        }
+        assert!(header_of(&h, "content-security-policy").unwrap().contains("default-src 'none'"));
+        assert!(header_of(&h, "strict-transport-security").is_none(), "no HSTS without a public TLS listener");
+        let ui = a.clone().handle(req("GET", "/", &[], ""));
+        assert!(header_of(&ui, "content-security-policy").unwrap().contains("frame-ancestors 'none'"));
+        assert_eq!(ui.headers.iter().filter(|(k, _)| k.eq_ignore_ascii_case("content-security-policy")).count(), 1);
+        // Automation routes (health, webhooks, A2A, plugins) keep their own framing / CSP.
+        let health = a.clone().handle(req("GET", "/health", &[], ""));
+        assert_eq!(header_of(&health, "x-content-type-options"), Some("nosniff"));
+        assert!(header_of(&health, "x-frame-options").is_none());
     }
 }

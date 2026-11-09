@@ -447,6 +447,11 @@ fn alerts_state(data: &Path) -> PathBuf {
 /// Push an alert to every `[alerts] targets` entry once per `key` (e.g. `quota:alice:2026-11:warn`).
 /// Always recorded in the audit stream. Returns the delivery receipts (empty when deduplicated).
 pub fn alert(rt: &Runtime, key: &str, text: &str) -> Vec<String> {
+    alert_as(rt, "budget.alert", key, text)
+}
+
+/// [`alert`] with its own event kind (`security.alert` for new devices and lockouts).
+pub fn alert_as(rt: &Runtime, kind: &str, key: &str, text: &str) -> Vec<String> {
     let data = &rt.paths.data;
     let mut sent: BTreeMap<String, u64> = std::fs::read_to_string(alerts_state(data)).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default();
     if sent.contains_key(key) {
@@ -474,13 +479,13 @@ pub fn alert(rt: &Runtime, key: &str, text: &str) -> Vec<String> {
                 continue;
             }
         };
-        let payload = crate::outbound::Payload::new("budget.alert", format!("⚠ seagent: {text}")).with_data(json!({"key": key}));
+        let payload = crate::outbound::Payload::new(kind, format!("⚠ seagent: {text}")).with_data(json!({"key": key}));
         receipts.push(match crate::outbound::deliver(&target, &payload) {
             Ok(r) => r,
             Err(e) => format!("{t}: {e}"),
         });
     }
-    seagent_security::audit::record(data, seagent_security::audit::Event::new("budget.alert", seagent_security::audit::Actor::system(), key, "ok").detail(json!({"text": text, "delivered": receipts})));
+    seagent_security::audit::record(data, seagent_security::audit::Event::new(kind, seagent_security::audit::Actor::system(), key, "ok").detail(json!({"text": text, "delivered": receipts})));
     receipts
 }
 
