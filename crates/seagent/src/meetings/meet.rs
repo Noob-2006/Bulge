@@ -115,7 +115,8 @@ impl Manager {
         };
         // Unix: `Command::new(bot[0])`; Windows: `sh` = Git Bash, `python3` = `py -3`, PATHEXT.
         let mut cmd = seagent_core::platform::layout::program_command(&self.bot[0]);
-        cmd.args(&self.bot[1..]).stdin(std::process::Stdio::null()).stdout(log.try_clone().map(std::process::Stdio::from).unwrap_or(std::process::Stdio::null())).stderr(std::process::Stdio::from(log));
+        seagent_core::platform::layout::msys_args(&mut cmd, &self.bot[1..]);
+        cmd.stdin(std::process::Stdio::null()).stdout(log.try_clone().map(std::process::Stdio::from).unwrap_or(std::process::Stdio::null())).stderr(std::process::Stdio::from(log));
         cmd.env("SEAGENT_MEET_URL", &o.url).env("SEAGENT_MEET_OUT_DIR", &out).env("SEAGENT_MEET_GUEST_NAME", &o.guest_name).env("SEAGENT_MEET_MODE", &o.mode);
         if o.headed {
             cmd.env("SEAGENT_MEET_HEADED", "1");

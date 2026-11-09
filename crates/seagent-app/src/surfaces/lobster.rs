@@ -433,7 +433,8 @@ impl Rt<'_> {
         use std::process::Stdio;
         let t = timeout.map(|t| t.min(self.left().unwrap_or_default())).unwrap_or(self.left()?);
         let mut cmd = seagent_core::platform::layout::program_command(&argv[0]);
-        cmd.args(&argv[1..]).current_dir(&self.cwd).stdin(if stdin.is_some() { Stdio::piped() } else { Stdio::null() }).stdout(Stdio::piped()).stderr(Stdio::piped());
+        seagent_core::platform::layout::msys_args(&mut cmd, &argv[1..]);
+        cmd.current_dir(&self.cwd).stdin(if stdin.is_some() { Stdio::piped() } else { Stdio::null() }).stdout(Stdio::piped()).stderr(Stdio::piped());
         for (k, v) in &self.vars {
             cmd.env(k, v);
         }
@@ -1600,21 +1601,19 @@ mod tests {
     #[test]
     fn typed_pipeline_stages() {
         let (t, ctx) = tool("lob1", &[]);
-        // Windows: `echo` is Git's MSYS echo, which globs / brace-expands an argument the
-        // command line leaves unquoted (one without spaces); JSON with spaces is passed quoted.
-        let j = |s: &str| if cfg!(windows) { s.replace(',', ", ").replace(':', ": ") } else { s.to_string() };
-        let v = out(&t, &ctx, json!({"action": "run", "pipeline": format!("exec --json echo '{}' | dedupe | where n>=2 | sort --key n | pick t,n | json", j("[{\"n\":3,\"t\":\"c\"},{\"n\":1,\"t\":\"a\"},{\"n\":2,\"t\":\"b\"},{\"n\":2,\"t\":\"b\"}]"))}));
+        // Windows: `echo` is Git's MSYS echo; its arguments are quoted the MSYS way (`msys_args`).
+        let v = out(&t, &ctx, json!({"action": "run", "pipeline": "exec --json echo '[{\"n\":3,\"t\":\"c\"},{\"n\":1,\"t\":\"a\"},{\"n\":2,\"t\":\"b\"},{\"n\":2,\"t\":\"b\"}]' | dedupe | where n>=2 | sort --key n | pick t,n | json"}));
         assert_eq!(v["status"], "ok");
         assert_eq!(v["output"], json!([{"t": "b", "n": 2}, {"t": "c", "n": 3}]));
         let v = out(&t, &ctx, json!({"action": "run", "pipeline": "exec --shell 'printf \"x\\ny\\n\"' | map --wrap name id={{.}}! | template --text '{{name | upper}}-{{id}}' | head --n 1"}));
         assert_eq!(v["output"], json!(["X-x!"]));
-        let v = out(&t, &ctx, json!({"action": "run", "pipeline": format!("exec --json echo '{}' | groupBy --key k", j("[{\"k\":\"a\"},{\"k\":\"b\"},{\"k\":\"a\"}]"))}));
+        let v = out(&t, &ctx, json!({"action": "run", "pipeline": "exec --json echo '[{\"k\":\"a\"},{\"k\":\"b\"},{\"k\":\"a\"}]' | groupBy --key k"}));
         assert_eq!(v["output"][0]["count"], 2);
         let v = out(&t, &ctx, json!({"action": "run", "pipeline": "exec --json --shell 'echo 5' | diff.last --key k1"}));
         assert_eq!(v["output"][0]["changed"], true);
         let v = out(&t, &ctx, json!({"action": "run", "pipeline": "exec --json --shell 'echo 5' | diff.last --key k1"}));
         assert_eq!(v["output"][0]["changed"], false);
-        let v = out(&t, &ctx, json!({"action": "run", "pipeline": format!("exec --json echo '{}' | state.set s1 | exec --stdin json --json cat", j("{\"a\":1}"))}));
+        let v = out(&t, &ctx, json!({"action": "run", "pipeline": "exec --json echo '{\"a\":1}' | state.set s1 | exec --stdin json --json cat"}));
         assert_eq!(v["output"], json!([{"a": 1}]));
         let e = t.call(&ctx, json!({"action": "run", "pipeline": "exec --shell 'exit 3'"}));
         assert!(e.is_error && e.content.contains("exec failed (3)"), "{}", e.content);

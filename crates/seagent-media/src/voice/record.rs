@@ -142,7 +142,7 @@ impl Mic {
     }
     pub fn spawn(argv: &[String]) -> Result<Mic, String> {
         let (prog, args) = argv.split_first().ok_or("empty recorder command")?;
-        let mut child = seagent_core::platform::layout::program_command(prog).args(args).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null()).spawn().map_err(|e| format!("cannot start recorder `{prog}`: {e}"))?;
+        let mut child = seagent_core::platform::layout::program_command_args(prog, &args).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null()).spawn().map_err(|e| format!("cannot start recorder `{prog}`: {e}"))?;
         let mut out = child.stdout.take().ok_or("recorder has no stdout")?;
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {

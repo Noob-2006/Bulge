@@ -53,7 +53,8 @@ pub fn run(argv: &[String], cwd: Option<&Path>, timeout: Duration, cancel: &Canc
     let (prog, args) = argv.split_first().ok_or("empty command")?;
     // Unix: `Command::new(prog)`; Windows: `.cmd` shims (az, npm CLIs) through PATHEXT.
     let mut cmd = seagent_core::platform::layout::program_command(prog);
-    cmd.args(args).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    seagent_core::platform::layout::msys_args(&mut cmd, args);
+    cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
     if let Some(d) = cwd {
         cmd.current_dir(d);
     }

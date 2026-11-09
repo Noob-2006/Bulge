@@ -178,7 +178,8 @@ impl StdioConn {
         // through PATHEXT, and `python3` is the Python launcher, not the Store alias.
         let mut cmd = seagent_core::platform::layout::program_command(command);
         seagent_security::envscrub::apply(&mut cmd, seagent_security::envscrub::Surface::Server);
-        cmd.args(args).envs(env.iter().map(|(k, v)| (k, v))).stdin(PStdio::piped()).stdout(PStdio::piped()).stderr(PStdio::piped());
+        seagent_core::platform::layout::msys_args(&mut cmd, args);
+        cmd.envs(env.iter().map(|(k, v)| (k, v))).stdin(PStdio::piped()).stdout(PStdio::piped()).stderr(PStdio::piped());
         if let Some(d) = cwd {
             cmd.current_dir(d);
         }

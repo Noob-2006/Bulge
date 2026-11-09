@@ -852,7 +852,8 @@ impl Rt<'_> {
         let argv: Vec<String> = if n.argv.is_empty() { super::sh_argv(render(n.cmd.as_deref().unwrap_or(""), state)) } else { n.argv.iter().map(|a| render(a, state)).collect() };
         let t = n.timeout_ms.map(Duration::from_millis).unwrap_or_else(|| self.left().unwrap_or_default()).min(self.left()?);
         let mut cmd = seagent_core::platform::layout::program_command(&argv[0]);
-        cmd.args(&argv[1..]).current_dir(self.cwd(n)).stdin(if n.stdin.is_some() { Stdio::piped() } else { Stdio::null() }).stdout(Stdio::piped()).stderr(Stdio::piped());
+        seagent_core::platform::layout::msys_args(&mut cmd, &argv[1..]);
+        cmd.current_dir(self.cwd(n)).stdin(if n.stdin.is_some() { Stdio::piped() } else { Stdio::null() }).stdout(Stdio::piped()).stderr(Stdio::piped());
         if !self.cwd(n).is_dir() {
             return Err(format!("working directory {} does not exist", self.cwd(n).display()));
         }

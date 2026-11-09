@@ -77,7 +77,7 @@ pub fn run_turn(c: &WebCtx, query: &str, timeout: Duration) -> Result<(String, V
         None => vec!["app-server".to_string()],
     };
     // Windows: `codex.cmd` (npm shim) through PATHEXT; Unix: `Command::new(cmd)`.
-    let mut child = seagent_core::platform::layout::program_command(&cmd).args(&args).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null()).spawn().map_err(|e| format!("Codex hosted search could not start `{cmd}`: {e}. Install the Codex CLI and sign in (codex login)."))?;
+    let mut child = seagent_core::platform::layout::program_command_args(&cmd, &args).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null()).spawn().map_err(|e| format!("Codex hosted search could not start `{cmd}`: {e}. Install the Codex CLI and sign in (codex login)."))?;
     let mut stdin = child.stdin.take().unwrap();
     let stdout = child.stdout.take().unwrap();
     let (tx, rx) = mpsc::channel::<Value>();

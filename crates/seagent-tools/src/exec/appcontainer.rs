@@ -1094,7 +1094,11 @@ mod tests {
         assert_eq!(env_block(&[(w("A"), w("1")), (w("B"), w("x y"))]), w("A=1\0B=x y\0\0"));
         assert_eq!(env_block(&[]), vec![0, 0]);
         let line = command_line("C:\\Program Files\\Git\\bin\\bash.exe", &["-c".into(), "echo \"hi\" there".into()]);
-        assert_eq!(line, "\"C:\\Program Files\\Git\\bin\\bash.exe\" -c \"echo \\\"hi\\\" there\"");
+        // An installed Git Bash is an MSYS2 program: every argument quoted, `-c` included.
+        let c = if seagent_core::platform::layout::is_msys_program(Path::new("C:\\Program Files\\Git\\bin\\bash.exe")) { "\"-c\"" } else { "-c" };
+        assert_eq!(line, format!("\"C:\\Program Files\\Git\\bin\\bash.exe\" {c} \"echo \\\"hi\\\" there\""));
+        let line = command_line("C:\\Windows\\System32\\cmd.exe", &["/c".into(), "a*".into()]);
+        assert_eq!(line, "C:\\Windows\\System32\\cmd.exe /c a*");
     }
 
     #[test]

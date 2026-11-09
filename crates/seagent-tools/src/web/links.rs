@@ -430,7 +430,8 @@ pub fn run_cli(argv: &[String], input: &str, timeout: Duration, env: &[(&str, &s
     let (cmd, args) = argv.split_first().ok_or("empty command")?;
     // Unix: `Command::new(cmd)`; Windows: PATHEXT shims, `sh` = Git Bash, `python3` = `py -3`.
     let mut c = seagent_core::platform::layout::program_command(cmd);
-    c.args(args).envs(env.iter().copied()).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null());
+    seagent_core::platform::layout::msys_args(&mut c, args);
+    c.envs(env.iter().copied()).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null());
     // Own process group (Windows: a kill-on-close job), so the whole tree can be killed.
     let mut child = crate::exec::local::spawn_own_group(&mut c).map_err(|e| format!("spawn failed: {e}"))?;
     let pgid = child.id() as i32;

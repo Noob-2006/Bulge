@@ -280,7 +280,8 @@ pub struct Out {
 /// Run a helper CLI (argv, never a shell) with an allowlisted env, stdin = /dev/null.
 fn run_cli(argv: &[String], env: &HashMap<String, String>, timeout: Duration, label: &str) -> Result<Out, String> {
     let mut cmd = seagent_core::platform::layout::program_command(&argv[0]);
-    cmd.args(&argv[1..]).env_clear().envs(env).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    seagent_core::platform::layout::msys_args(&mut cmd, &argv[1..]);
+    cmd.env_clear().envs(env).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
     let mut child = cmd.spawn().map_err(|e| format!("failed to invoke {label}: {e}"))?;
     let (mut so, mut se) = (child.stdout.take().unwrap(), child.stderr.take().unwrap());
     let ho = std::thread::spawn(move || {

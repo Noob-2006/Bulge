@@ -81,7 +81,8 @@ pub fn run(argv: &[&str], timeout: Duration, stdin: Option<&[u8]>, env: &[(&str,
     use std::process::Stdio;
     let (bin, args) = argv.split_first().ok_or("empty command")?;
     let mut cmd = seagent_core::platform::layout::program_command(bin);
-    cmd.args(args).stdin(if stdin.is_some() { Stdio::piped() } else { Stdio::null() }).stdout(Stdio::piped()).stderr(Stdio::piped());
+    seagent_core::platform::layout::msys_args(&mut cmd, args);
+    cmd.stdin(if stdin.is_some() { Stdio::piped() } else { Stdio::null() }).stdout(Stdio::piped()).stderr(Stdio::piped());
     for (k, v) in env {
         cmd.env(k, v);
     }

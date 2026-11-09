@@ -217,6 +217,75 @@ pub fn program_command(name: impl AsRef<OsStr>) -> std::process::Command {
     }
 }
 
+/// [`program_command`] plus its arguments. Unix: `Command::new(name).args(args)`. Windows:
+/// when the program is an MSYS2 / Cygwin one (Git Bash, its `usr\bin` tools), every argument
+/// goes through [`msys_quote`] — the MSYS runtime globs and brace-expands any argument the
+/// command line leaves unquoted, so `[{"a":1,"b":2}]` would otherwise split.
+pub fn program_command_args<S: AsRef<OsStr>>(name: impl AsRef<OsStr>, args: &[S]) -> std::process::Command {
+    let mut c = program_command(name);
+    msys_args(&mut c, args);
+    c
+}
+
+/// Append `args` to `c` (see [`program_command_args`]): plain `args` on Unix and for native
+/// Windows programs, [`msys_quote`]d raw arguments for an MSYS2 program.
+pub fn msys_args<S: AsRef<OsStr>>(c: &mut std::process::Command, args: &[S]) {
+    #[cfg(windows)]
+    if is_msys_program(Path::new(c.get_program())) {
+        use std::os::windows::process::CommandExt;
+        for a in args {
+            c.raw_arg(msys_quote(&a.as_ref().to_string_lossy()));
+        }
+        return;
+    }
+    c.args(args);
+}
+
+/// One argument for an MSYS2 program's command line: always inside double quotes (so the
+/// runtime neither globs nor brace-expands it), with the MSVCRT escaping the runtime's own
+/// parser undoes — `\"` for a quote, backslashes doubled only before a quote or the end.
+pub fn msys_quote(arg: &str) -> String {
+    let mut out = String::with_capacity(arg.len() + 2);
+    out.push('"');
+    let mut slashes = 0usize;
+    for ch in arg.chars() {
+        match ch {
+            '\\' => slashes += 1,
+            '"' => {
+                out.extend(std::iter::repeat_n('\\', slashes * 2 + 1));
+                out.push('"');
+                slashes = 0;
+            }
+            c => {
+                out.extend(std::iter::repeat_n('\\', slashes));
+                out.push(c);
+                slashes = 0;
+            }
+        }
+    }
+    out.extend(std::iter::repeat_n('\\', slashes * 2));
+    out.push('"');
+    out
+}
+
+/// Is `program` an MSYS2 / Cygwin executable (its directory carries the runtime DLL, or it is
+/// the platform bash)? Always false off Windows.
+pub fn is_msys_program(program: &Path) -> bool {
+    #[cfg(windows)]
+    {
+        let Some(dir) = program.parent().filter(|d| !d.as_os_str().is_empty()) else { return false };
+        if dir.join("msys-2.0.dll").is_file() || dir.join("cygwin1.dll").is_file() {
+            return true;
+        }
+        bash().is_some_and(|b| b == program || posix_tools_dir(&b).is_some_and(|d| d == dir))
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = program;
+        false
+    }
+}
+
 /// The `usr\bin` holding the coreutils of a Git for Windows / MSYS2 bash: Git's
 /// `…\Git\bin\bash.exe` → `…\Git\usr\bin`; MSYS2's bash already lives there.
 #[cfg(windows)]
@@ -389,5 +458,31 @@ mod tests {
         assert_eq!(which_in_pathext("tool", None, None), None);
         let direct = b.join("tool").display().to_string();
         assert_eq!(which_in_pathext(&direct, None, None), Some(b.join("tool.exe")));
+    }
+
+    #[test]
+    fn msys_quote_always_quotes_with_msvcrt_escapes() {
+        assert_eq!(msys_quote("*"), "\"*\"");
+        assert_eq!(msys_quote(""), "\"\"");
+        assert_eq!(msys_quote(r#"[{"n":3}]"#), r#""[{\"n\":3}]""#);
+        assert_eq!(msys_quote(r"C:\dir\"), r#""C:\dir\\""#);
+        assert_eq!(msys_quote(r#"a\"b"#), r#""a\\\"b""#);
+        assert!(!is_msys_program(Path::new("/usr/bin/printf")) || cfg!(windows));
+    }
+
+    /// The arguments arrive byte for byte: Unix `printf`; Windows Git Bash's own `printf.exe`
+    /// (an MSYS2 program that would glob `*`, brace-expand `{a,b}` and drop JSON quotes from a
+    /// plainly quoted command line).
+    #[test]
+    fn program_command_args_survive_an_msys_runtime() {
+        let args = [r#"[{"n":3,"t":"c"},{"n":1}]"#, "*", "{a,b}", "a b", r#"say "hi""#, r"trail\", "", "~"];
+        let mut c = program_command_args("printf", &["%s|".to_string()].into_iter().chain(args.iter().map(|s| s.to_string())).collect::<Vec<_>>());
+        if cfg!(windows) && !is_msys_program(Path::new(c.get_program())) {
+            eprintln!("skipped: no Git Bash / MSYS2 printf.exe on this machine");
+            return;
+        }
+        let out = c.output().expect("printf runs");
+        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+        assert_eq!(String::from_utf8_lossy(&out.stdout), args.iter().map(|a| format!("{a}|")).collect::<String>());
     }
 }

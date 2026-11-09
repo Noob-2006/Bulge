@@ -280,7 +280,12 @@ pub fn windows_quote(arg: &str) -> String {
 }
 
 /// `program` and `args` joined into one Windows command line.
+/// An MSYS2 program (Git Bash, its coreutils) globs and brace-expands unquoted arguments, so
+/// its arguments are always [`super::layout::msys_quote`]d.
 pub fn windows_command_line(program: &str, args: &[&str]) -> String {
+    if super::layout::is_msys_program(std::path::Path::new(program)) {
+        return std::iter::once(windows_quote(program)).chain(args.iter().map(|a| super::layout::msys_quote(a))).collect::<Vec<_>>().join(" ");
+    }
     std::iter::once(program).chain(args.iter().copied()).map(windows_quote).collect::<Vec<_>>().join(" ")
 }
 

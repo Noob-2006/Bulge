@@ -60,7 +60,7 @@ pub fn shell_argv(line: &str) -> Vec<String> {
 pub fn shell_command(line: &str) -> Command {
     let argv = shell_argv(line);
     let mut c = seagent_core::platform::layout::program_command(&argv[0]);
-    c.args(&argv[1..]);
+    seagent_core::platform::layout::msys_args(&mut c, &argv[1..]);
     c
 }
 
@@ -136,7 +136,8 @@ pub fn run_env_in(argv: &[String], stdin: Option<&[u8]>, env: &[(String, String)
         }
         (cmd, prog, args)
     };
-    cmd.args(args).stdin(if stdin.is_some() { Stdio::piped() } else { Stdio::null() }).stdout(Stdio::piped()).stderr(Stdio::piped());
+    seagent_core::platform::layout::msys_args(&mut cmd, args);
+    cmd.stdin(if stdin.is_some() { Stdio::piped() } else { Stdio::null() }).stdout(Stdio::piped()).stderr(Stdio::piped());
     for (k, v) in env {
         cmd.env(k, v);
     }

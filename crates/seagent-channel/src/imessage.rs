@@ -324,7 +324,8 @@ fn run(argv: &[String], stdin: Option<&str>, timeout: Duration) -> Result<(i32, 
     use std::io::Read;
     use std::process::Stdio;
     let mut cmd = seagent_core::platform::layout::program_command(&argv[0]);
-    cmd.args(&argv[1..]).stdin(if stdin.is_some() { Stdio::piped() } else { Stdio::null() }).stdout(Stdio::piped()).stderr(Stdio::piped());
+    seagent_core::platform::layout::msys_args(&mut cmd, &argv[1..]);
+    cmd.stdin(if stdin.is_some() { Stdio::piped() } else { Stdio::null() }).stdout(Stdio::piped()).stderr(Stdio::piped());
     let mut child = cmd.spawn().map_err(|e| format!("cannot run {}: {e}", argv[0]))?;
     if let (Some(t), Some(mut si)) = (stdin, child.stdin.take()) {
         let _ = si.write_all(t.as_bytes());

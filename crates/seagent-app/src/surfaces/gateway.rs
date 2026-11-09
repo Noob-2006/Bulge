@@ -408,7 +408,7 @@ impl GatewayTool {
                     return Ok(json!({"ok": false, "code": "owner_required", "reason": "owner_required", "message": format!("No owner authorizes this update: the session came from channel `{ch}`{}. Run it from the machine (seagent chat / web UI) or an operator schedule.", sender.map(|s| format!(" (sender {s})")).unwrap_or_default())}));
                 }
                 let argv = update_argv(env)?;
-                let out = seagent_core::platform::layout::program_command(&argv[0]).args(&argv[1..]).stdin(std::process::Stdio::null()).output().map_err(|e| format!("{}: {e}", argv[0]))?;
+                let out = seagent_core::platform::layout::program_command_args(&argv[0], &argv[1..]).stdin(std::process::Stdio::null()).output().map_err(|e| format!("{}: {e}", argv[0]))?;
                 let tail = |b: &[u8]| String::from_utf8_lossy(b).lines().rev().take(20).collect::<Vec<_>>().into_iter().rev().collect::<Vec<_>>().join("\n");
                 if !out.status.success() {
                     return Ok(json!({"ok": false, "code": "update_failed", "status": out.status.code(), "stdout": tail(&out.stdout), "stderr": tail(&out.stderr)}));

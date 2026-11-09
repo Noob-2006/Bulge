@@ -1114,7 +1114,8 @@ fn run_ctl(argv: &[&str], timeout: Duration, ctl: &Ctl, stdin: bool) -> Result<S
             }
         }
     });
-    let mut child = cmd.args(&argv[1..]).stdin(if stdin { Stdio::piped() } else { Stdio::null() }).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().map_err(|e| format!("{}: {e}", argv[0]))?;
+    seagent_core::platform::layout::msys_args(&mut cmd, &argv[1..]);
+    let mut child = cmd.stdin(if stdin { Stdio::piped() } else { Stdio::null() }).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().map_err(|e| format!("{}: {e}", argv[0]))?;
     let mut pipe = child.stdin.take();
     let deadline = Instant::now() + timeout;
     loop {
