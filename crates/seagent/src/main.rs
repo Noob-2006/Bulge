@@ -1368,7 +1368,11 @@ fn cmd_daemon(a: &Args) -> R {
                 let app = Arc::new(seagent_app::App { d: d.clone(), cfg: app_cfg.clone(), token, host_methods: host, routes });
                 let srv = seagent_app::start(app)?;
                 eprintln!("seagentd: app server on {}://{} (UI, /arp, /v1, {})", if srv.is_tls() { "https" } else { "http" }, srv.local_addr(), if app_cfg.a2a.enabled { "/a2a" } else { "no a2a" });
-                Some((srv, seagent_app::lan::advertise(&app_cfg, &paths.data).map_err(|e| eprintln!("seagentd: warning: {e}")).ok().flatten()))
+                let mdns = seagent_app::lan::advertise(&app_cfg, &paths.data).map_err(|e| eprintln!("seagentd: warning: {e}")).ok().flatten();
+                if let Some(d) = mdns.as_ref().map(|r| r.status().detail.clone()).filter(|d| !d.is_empty()) {
+                    eprintln!("seagentd: warning: mDNS discovery limited: {d}");
+                }
+                Some((srv, mdns))
             } else {
                 None
             };

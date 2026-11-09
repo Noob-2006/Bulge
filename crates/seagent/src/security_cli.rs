@@ -661,6 +661,11 @@ pub(crate) fn lan_findings(cfg: &Config, data: &Path) -> Vec<Finding> {
     }
     if app.enabled && seagent_app::lan::discovery_enabled(&app) {
         out.push(f("lan.discovery_on", "info", "this host advertises itself over mDNS (_seagent._tcp)", "TXT: protocol, host id, fingerprint prefix, name (no tokens)", Some("[app] discovery = \"off\"")));
+        // UDP 5353 held exclusively (Bonjour / another responder without SO_REUSEADDR): the
+        // responder can only announce, not answer. Say so instead of degrading silently.
+        if let Err(e) = seagent_net::mdns::port_shareable() {
+            out.push(f("lan.discovery_limited", "warn", "mDNS discovery is limited on this host", e, Some("stop the program holding UDP 5353 exclusively, or pair by address / QR code")));
+        }
     }
     let n = seagent_app::devices::list(data).len();
     if n > 0 {

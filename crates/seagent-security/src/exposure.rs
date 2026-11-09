@@ -437,6 +437,33 @@ pub fn warning(s: &Surface) -> Option<String> {
 mod tests {
     use super::*;
 
+    /// A dual-stack listener sees IPv4 peers as `::ffff:a.b.c.d`: they classify as the IPv4
+    /// address. ULA and link-local IPv6 are private; global IPv6 is public.
+    #[test]
+    fn mapped_and_ipv6_peers_classify_by_address() {
+        let c = |s: &str| classify_ip(s.parse().unwrap());
+        for (ip, want) in [
+            ("::ffff:192.168.1.5", AddrClass::Private),
+            ("::ffff:10.1.2.3", AddrClass::Private),
+            ("::ffff:172.20.0.1", AddrClass::Private),
+            ("::ffff:127.0.0.1", AddrClass::Loopback),
+            ("::ffff:8.8.8.8", AddrClass::Public),
+            ("fd12:3456::1", AddrClass::Private),
+            ("fc00::1", AddrClass::Private),
+            ("fe80::1", AddrClass::Private),
+            ("febf::1", AddrClass::Private),
+            ("fec0::1", AddrClass::Public),
+            ("2001:db8::1", AddrClass::Public),
+            ("2606:4700::1111", AddrClass::Public),
+            ("::1", AddrClass::Loopback),
+            ("::", AddrClass::Unspecified),
+        ] {
+            assert_eq!(c(ip), want, "{ip}");
+        }
+        assert!(is_local_network("::ffff:192.168.1.5".parse().unwrap()) && !is_local_network("2001:db8::1".parse().unwrap()));
+        assert_eq!(classify_host("[fe80::1%eth0]"), AddrClass::Private);
+    }
+
     fn public<'a>(listen: &'a str) -> Surface<'a> {
         Surface {
             name: "app server",

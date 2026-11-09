@@ -16,11 +16,13 @@ base64.workspace = true
 ureq.workspace = true
 serde.workspace = true
 
-# mDNS (`mdns.rs`): one setsockopt (SO_REUSEADDR / SO_REUSEPORT) before bind so the responder
-# shares UDP 5353 with the system's own (Avahi, mDNSResponder, the Windows DNS client). Both
-# crates are already in the tree (seagent-core); no new crate.
+# mDNS (`mdns/`): setsockopt before bind (SO_REUSEADDR / SO_REUSEPORT, IPV6_V6ONLY) so the
+# responder shares UDP 5353 with the system's own (Avahi, mDNSResponder, the Windows DNS
+# client), IP(V6)_MULTICAST_IF / IPV6_MULTICAST_HOPS per send, and the interface list
+# (getifaddrs / GetAdaptersAddresses; IpHelper + Ndis are already enabled by the seagent
+# binary). Both crates are already in the tree (seagent-core); no new crate.
 [target.'cfg(unix)'.dependencies]
 libc.workspace = true
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { workspace = true, features = ["Win32_Networking_WinSock"] }
+windows-sys = { workspace = true, features = ["Win32_Networking_WinSock", "Win32_NetworkManagement_IpHelper", "Win32_NetworkManagement_Ndis"] }

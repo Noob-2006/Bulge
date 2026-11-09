@@ -53,10 +53,19 @@ iOS 不允許 App 開虛擬機、執行子程序或 JIT，因此 iOS 版是**純
 
 ## 區域網路互聯
 
-開法：設定精靈勾「允許這個網路上的裝置連線」，或 `[app.exposure] lan = true`（listen 改 `0.0.0.0:8640` 或某個私有位址）。
+開法：設定精靈勾「允許這個網路上的裝置連線」，或 `[app.exposure] lan = true`（精靈把 listen 改成 `[::]:8640`；也可指定某個私有位址）。
+
+- **IPv4＋IPv6 預設都收**（`seagent_net::listen`）：`[::]:<port>` 綁成**一個雙堆疊 socket**——手動建立
+  （`libc::socket`／`WSASocketW`，不繼承、unix 加 `SO_REUSEADDR`），清掉 `IPV6_V6ONLY` 後再讀回確認，Windows 也一樣
+  （std 預設在 Windows 是只收 IPv6）。系統不肯清（OpenBSD 類、`net.ipv6.bindv6only = 1`）就退成兩個 listener：
+  `[::]`（只收 IPv6）＋`0.0.0.0`；完全沒有 IPv6 就只綁 `0.0.0.0`。LAN 模式下舊精靈寫的 `0.0.0.0:<port>` 也當成「所有
+  介面、兩種位址族」改綁 `[::]:<port>`（`seagent_app::lan::dual_stack_listen`）；指定的位址（`192.168.1.5:8640`、
+  `[fd00::5]:8640`）照寫的綁，LAN 模式關閉時任何 listen 都不變（預設 `127.0.0.1:8640` 照舊）。雙堆疊 socket 收到的
+  IPv4 來源是 `::ffff:a.b.c.d`，伺服器一進來就換回 `a.b.c.d`，所以私有網段判斷、loopback 明文、稽核看到的都是 IPv4。
 
 - **綁定規則**（`seagent_security::exposure`，位址分類的唯一來源，配對 URL 與探索共用）：LAN 模式允許私有網段
-  （RFC1918、169.254/16、fe80::/10、fc00::/7、100.64/10）或 `0.0.0.0`／`::`，不需要 `allow_public`；但必須原生 TLS
+  （RFC1918、169.254/16、fe80::/10、fc00::/7、100.64/10；`::ffff:` 對應位址依內含的 IPv4 判斷）或 `0.0.0.0`／`::`，
+  不需要 `allow_public`；全球 IPv6 來源與公網 IPv4 一樣被拒。但必須原生 TLS
   （反向代理不算——客戶端釘選的是我們的憑證）、有速率限制、origin 不得為 `*`。公網位址或主機名稱仍走完整防線
   （錯誤訊息會說明 LAN 模式只涵蓋私有位址）。
 - **執行時防線**（`seagent_app::server`）：非私有網段的來源一律 403；網路上的連線**只接受已配對裝置的 token**
@@ -67,12 +76,27 @@ iOS 不允許 App 開虛擬機、執行子程序或 JIT，因此 iOS 版是**純
   `<data>/tls/lan-cert.pem`／`lan-key.pem`（僅擁有者可讀），SAN 含主機名、`<主機>.local`、目前 LAN IP、`localhost`、
   `127.0.0.1`；效期 825 天（瀏覽器的上限；釘選的 App 不看效期）。指紋＝DER 葉憑證的 SHA-256 小寫 hex；只有
   `seagent tls rotate --yes` 會換（所有裝置需重新配對）。
-- **mDNS / DNS-SD**（`seagent_net::mdns`）：廣播 `_seagent._tcp.local` PTR/SRV/TXT/A，TXT 只有 `v=seagent/2`、`id`
+- **mDNS / DNS-SD**（`seagent_net::mdns`）：廣播 `_seagent._tcp.local` PTR/SRV/TXT/A/AAAA，TXT 只有 `v=seagent/2`、`id`
   （`<data>/tls/host-id`）、`fp`（指紋前 16 hex）、`name`，從不帶 token；啟動時宣告兩次、回應查詢（含 legacy unicast）、
-  停止時送 TTL 0 告別。`[app] discovery = "mdns" | "off"`，預設只在 LAN 模式開。UDP 5353 以 `SO_REUSEADDR`
-  （unix 另加 `SO_REUSEPORT`）與系統的 Avahi／mDNSResponder／Windows DNS client 共用；若被獨佔則只是不可被發現
-  （仍可用位址或 QR 配對）。限制：僅 IPv4、只走系統預設的多播介面。瀏覽：`seagent nodes discover [--json]`、
-  ARP `discovery.list`（從臨時 port 發查詢，對方以 unicast 回覆，所以不需要搶 5353）。
+  停止時送 TTL 0 告別。`[app] discovery = "mdns" | "off"`，預設只在 LAN 模式開。
+  - **IPv4＋IPv6、所有介面**：列舉「已啟用、可多播、非 loopback」的介面（Linux／Android／macOS／iOS 用 `getifaddrs`，
+    Windows 用 `GetAdaptersAddresses`），在每個介面加入 `224.0.0.251` 與 `ff02::fb`（UDP 5353；IPv6 socket 設
+    `IPV6_V6ONLY`），宣告／查詢逐介面送出（`IP_MULTICAST_IF`／`IPV6_MULTICAST_IF`，TTL／hop limit 255）。回應帶
+    「查詢進來的那個介面」的位址：IPv4 依查詢者所在子網、IPv6 依 link-local 來源的 scope id（否則同 /64）；判斷不出來
+    就帶全部介面。每 30 秒重新列舉一次（Wi-Fi 切換、DHCP 換位址），有變就重新加入群組並再宣告。
+  - **廣播哪些位址跟著 listen 走**：LAN 模式預設（`[::]:8640`，雙堆疊）發 A＋AAAA（AAAA 為 global／ULA／link-local，
+    從不發 loopback）；指定私有位址就只廣播它；LAN 模式以外手寫的 `0.0.0.0:8640`（只收 IPv4）只發 A。
+  - **與系統共用 5353**：socket 以 `libc::socket`／WinSock `socket` 建立，在 bind 前設 `SO_REUSEADDR`（unix 另加
+    `SO_REUSEPORT`），再交給 std（`from_raw_fd`／`from_raw_socket`），所以能和 Avahi／systemd-resolved／
+    mDNSResponder（Bonjour）／Windows DNS client 並存。若 5353 被獨佔：回應端改為「受限」模式——從臨時 port 每 30 秒
+    宣告一次但無法回答查詢；`seagentd` 啟動時警告、`lan.status` 的 `discoveryState.state = "limited"`（含原因）、
+    `seagent doctor` 出現 `lan.discovery_limited`，不會默默關掉。仍可用位址或 QR 配對。
+  - **瀏覽**：`seagent nodes discover [--json]`、ARP `discovery.list`。每個介面、每個位址族都從臨時 port 送帶 QU 位元的
+    查詢（legacy unicast：對方直接回給我們，所以不需要搶 5353），能共用 5353 時另送一份多播查詢。結果的 `addresses`
+    列出所有位址（含 IPv6），`address`／`url` 取最好的一個：私有 IPv4 → 可路由 IPv6（global／ULA）→ 169.254 →
+    IPv6 link-local。link-local 位址帶收到它的介面作 zone：CLI 寫 `[fe80::1%eth0]:8640`（Windows 為 zone index
+    `%12`），URL 依 RFC 6874 寫 `https://[fe80::1%25eth0]:8640`；`seagent lan connect`、釘選 TLS 客戶端
+    （`Stream::connect_pinned`、`pinned_request`）都接受兩種寫法並轉成 scope id。判斷不出 zone 的 link-local 位址會被丟掉。
 - **配對**（`seagent_app::devices`，協定見 [arp.md](arp.md)）：`seagent pair code` 或主控台「裝置 → 配對裝置」產生
   ① QR／連結 `https://<ip>:8640/#setup=<setup code>`（手機相機開啟即配對；App 也接受）、② `seagent-pair://` setup code
   （`wss://` URL＋一次性 bootstrap token＋憑證指紋）、③ 8 碼配對碼（輸入後要在主機核准，雙方顯示四碼一組的短指紋）。
@@ -85,7 +109,8 @@ iOS 不允許 App 開虛擬機、執行子程序或 JIT，因此 iOS 版是**純
 - **PWA**：manifest 與 `index.html` 帶 192／512／maskable 512 PNG 與 180×180 apple-touch-icon。
 - 被發現的 LAN 裝置**不會**變成 web/fetch 工具的 SSRF 例外（`url_safety` 不變），只有 node / ARP / 叢集客戶端用
   `seagent_net::stream::pinned_request` 連它們。
-- `seagent security audit`／`seagent doctor`：`lan.mode_on`、`lan.discovery_on`、`lan.paired_devices`、`lan.certificate_age`。
+- `seagent security audit`／`seagent doctor`：`lan.mode_on`、`lan.discovery_on`、`lan.discovery_limited`、`lan.paired_devices`、
+  `lan.certificate_age`。
 
 ## 安裝與圖形精靈
 

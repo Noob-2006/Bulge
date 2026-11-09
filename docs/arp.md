@@ -83,8 +83,8 @@ LAN 模式下網路上的連線**只**接受這種 token；撤銷後開著的 We
 | `devices.approve {code}` / `devices.reject {code}` | admin | 核准／拒絕 |
 | `devices.revoke {id}` | admin | 撤銷裝置 |
 | `devices.pair.create {ttlMin?, scope?}` | admin | `{setupCode, pairUri, link, url, address, code, expiresAtMs, fingerprint, sas, qrSvg, qrText}` |
-| `discovery.list {timeoutMs?}` | read | mDNS 找到的 SE Agent 主機 `{hosts: [{id, name, address, url, fpPrefix, sas, self}]}` |
-| `lan.status` | read | LAN 模式、探索、位址、憑證、已配對裝置數 |
+| `discovery.list {timeoutMs?}` | read | mDNS 找到的 SE Agent 主機 `{hosts: [{id, name, address, addresses, url, fpPrefix, sas, self}]}`；`addresses` 含 IPv6（link-local 帶 zone，如 `fe80::1%eth0`），`address`／`url` 是最佳的一個 |
+| `lan.status` | read | LAN 模式、探索（`discoveryState`：`off`／`advertising`／`limited`／`idle`，含介面與位址）、位址、憑證、已配對裝置數 |
 | `lan.probe {address}` | admin | 對方憑證指紋（TOFU 比對用） |
 | `lan.connect {address, code \| setupCode, fingerprint?, fpPrefix?, name?}` | admin | 本機以裝置身分配對對方，token 存入 vault，登記為叢集節點（`https://`＋釘選指紋） |
 

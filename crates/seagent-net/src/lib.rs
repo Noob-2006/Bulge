@@ -5,6 +5,7 @@
 pub mod crypto;
 pub mod http;
 pub mod httpd;
+pub mod listen;
 pub mod mdns;
 pub mod stream;
 pub mod tlsd;

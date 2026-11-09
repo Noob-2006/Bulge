@@ -154,6 +154,10 @@ fn discover_cmd(a: &Args) -> R {
     for h in &hosts {
         let me = if h["self"] == true { "  (this machine)" } else { "" };
         println!("{:<24} {:<22} fingerprint {}{me}", h["name"].as_str().unwrap_or(""), h["address"].as_str().unwrap_or(""), h["sas"].as_str().unwrap_or(""));
+        let all: Vec<&str> = h["addresses"].as_array().into_iter().flatten().filter_map(Value::as_str).collect();
+        if all.len() > 1 {
+            println!("    addresses: {}", all.join(", "));
+        }
         if h["self"] != true {
             println!("    connect: seagent lan connect {} --code <code shown by `seagent pair code` there>", h["address"].as_str().unwrap_or(""));
         }
@@ -168,7 +172,8 @@ fn host_port(address: &str) -> Result<(String, u16), String> {
     let port = |p: &str| p.parse::<u16>().map_err(|_| format!("bad port in `{address}`"));
     let (host, p) = if let Some(v6) = authority.strip_prefix('[') {
         let (h, after) = v6.split_once(']').ok_or("bad IPv6 address")?;
-        (h.to_string(), after.strip_prefix(':').map(port).transpose()?)
+        // `[fe80::1%eth0]` as typed, or `[fe80::1%25eth0]` from a URL (RFC 6874).
+        (seagent_net::stream::decode_zone(h), after.strip_prefix(':').map(port).transpose()?)
     } else if authority.matches(':').count() > 1 {
         (authority.to_string(), None)
     } else {
@@ -247,7 +252,8 @@ pub fn connect(paths: &Paths, vault: &Vault, req: &ConnectReq, note: &dyn Fn(&st
     }
     let (host, port) = host_port(&address)?;
     let authority = if host.contains(':') { format!("[{host}]:{port}") } else { format!("{host}:{port}") };
-    let url = format!("https://{authority}");
+    // A link-local peer keeps its zone in the URL, written `%25<zone>` (RFC 6874).
+    let url = format!("https://{}", authority.replacen('%', "%25", 1));
     let device = json!({"id": seagent_app::lan::host_id(&paths.data), "name": seagent_app::lan::display_name(), "platform": format!("seagent-{}", std::env::consts::OS)});
     let mut body = json!({"device": device});
     match (&bootstrap, &req.code) {
@@ -301,7 +307,14 @@ fn lan(a: &Args) -> R {
             };
             if !json_out(a, &v) {
                 println!("LAN mode     {}{}", if v["lan"] == true { "on" } else { "off" }, if v["lan"] == true { format!(" ({})", v["listen"].as_str().unwrap_or("")) } else { " — turn on with `[app.exposure] lan = true` or the setup wizard".into() });
-                println!("discovery    {}", if v["discovery"] == true { "mDNS (_seagent._tcp)" } else { "off" });
+                let ds = &v["discoveryState"];
+                let detail = ds["detail"].as_str().filter(|d| !d.is_empty()).map(|d| format!(" — {d}")).unwrap_or_default();
+                let on = match ds["state"].as_str() {
+                    Some("advertising") => format!("mDNS (_seagent._tcp) on {}{detail}", ds["interfaces"].as_array().into_iter().flatten().filter_map(Value::as_str).collect::<Vec<_>>().join(", ")),
+                    Some("limited") => format!("mDNS (_seagent._tcp), limited{detail}"),
+                    _ => "mDNS (_seagent._tcp)".into(),
+                };
+                println!("discovery    {}", if v["discovery"] == true { on } else { "off".into() });
                 println!("address      {}", v["address"].as_str().unwrap_or("—"));
                 println!("fingerprint  {}", v["identity"]["sas"].as_str().unwrap_or("— (created on first LAN start)"));
                 println!("devices      {} paired", v["devices"]);
@@ -390,6 +403,8 @@ mod tests {
         assert_eq!(host_port("192.168.1.20:9000").unwrap(), ("192.168.1.20".into(), 9000));
         assert_eq!(host_port("https://studio.local:8641/x").unwrap(), ("studio.local".into(), 8641));
         assert_eq!(host_port("[fd00::2]:8640").unwrap(), ("fd00::2".into(), 8640));
+        assert_eq!(host_port("[fe80::1%eth0]:8640").unwrap(), ("fe80::1%eth0".into(), 8640));
+        assert_eq!(host_port("https://[fe80::1%2512]:8641/").unwrap(), ("fe80::1%12".into(), 8641));
         assert_eq!(node_name("Studio PC (Living room)"), "studio-pc--living-room");
         assert_eq!(node_name("!!!"), "lan-peer");
         assert_eq!(grouped("ABCD2345"), "ABCD-2345");

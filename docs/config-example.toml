@@ -251,7 +251,10 @@ workspace = "/home/me/work"          # API 建立的對話用的工作目錄
 # discovery = ""                     # "mdns" | "off"；空白＝LAN 模式時自動開（廣播 _seagent._tcp.local）
 
 # 區域網路互聯（docs/cross-platform.md）：手機、平板、其他電腦在同一個 LAN 上配對使用。
-# listen 要是私有網段位址或 0.0.0.0；不需要 allow_public。開啟後：
+# listen 用 "[::]:8640"（精靈寫的值：一個雙堆疊 socket，IPv4 與 IPv6 裝置都能連；LAN 模式下 "0.0.0.0:8640"
+# 也會改綁成它），或某個私有網段位址（只綁那個）；不需要 allow_public。開啟後：
+#  - mDNS 廣播 A＋AAAA（_seagent._tcp.local，所有介面）；
+#  - 只接受私有網段的連線（IPv4 經雙堆疊進來時依 ::ffff: 內含的 IPv4 判斷；全球 IPv6 位址拒絕）；
 #  - 自動 TLS（第一次啟動產生 <data>/tls/lan-cert.pem，指紋＝主機身分，`seagent tls show|rotate`）；
 #  - 只接受私有網段（10/8、172.16/12、192.168/16、169.254/16、100.64/10、fc00::/7、fe80::/10）的連線；
 #  - 網路上的連線只認已配對裝置的 token（`seagent pair code` → 掃 QR 或輸入 8 碼並在這裡核准）；

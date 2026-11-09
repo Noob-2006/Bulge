@@ -287,15 +287,16 @@ pub fn apply_security(root: &mut toml::Table, mode: &str) -> Result<&'static str
 }
 
 /// "Allow devices on this network to connect": LAN mode on (`[app.exposure] lan = true`, the
-/// listener on every interface — the server admits only private-range peers with a paired-device
-/// token and speaks TLS to them) or off (back to loopback).
+/// listener on every interface and both address families, `[::]:<port>` — one dual-stack
+/// socket; the server admits only private-range peers with a paired-device token and speaks
+/// TLS to them) or off (back to loopback).
 pub fn apply_lan(root: &mut toml::Table, on: bool) -> String {
     let listen = listen_of(root);
     let port = listen.rsplit_once(':').map(|(_, p)| p.to_string()).filter(|p| !p.is_empty()).unwrap_or_else(|| "8640".into());
     let app = table(root, "app");
     if on {
         if seagent_security::exposure::is_loopback(&listen) {
-            app.insert("listen".into(), format!("0.0.0.0:{port}").into());
+            app.insert("listen".into(), format!("[::]:{port}").into());
         }
         table(app, "exposure").insert("lan".into(), true.into());
         format!("LAN: devices on this network can pair (https://<this computer>:{port}; `seagent pair code` or the console's Devices page)")
@@ -783,7 +784,7 @@ mod tests {
         let mut root: toml::Table = "[app]\nenabled = true\nlisten = \"127.0.0.1:8640\"\n".parse().unwrap();
         assert!(apply_lan(&mut root, true).contains("https://"));
         assert!(lan_of(&root));
-        assert_eq!(listen_of(&root), "0.0.0.0:8640");
+        assert_eq!(listen_of(&root), "[::]:8640", "dual-stack: IPv4 and IPv6 devices");
         // The result is a config the app server accepts (LAN mode + TLS, no allow_public).
         let app = seagent_app::AppConfig::parse(root["app"].as_table().unwrap()).unwrap();
         assert!(app.exposure.lan && !app.exposure.allow_public && seagent_app::exposure::lan_only(&app));
