@@ -21,7 +21,7 @@ use crate::Media;
 use seagent_core::Cancel;
 use std::collections::VecDeque;
 use std::io::Read;
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, Stdio};
 use std::sync::mpsc::{Receiver, RecvTimeoutError};
 use std::time::Duration;
 
@@ -81,7 +81,7 @@ pub fn ffmpeg_input(ffmpeg: &std::path::Path) -> Option<Vec<String>> {
 /// The first DirectShow audio device ffmpeg lists (`"Microphone (…)" (audio)`).
 #[cfg(windows)]
 pub fn windows_default_mic(ffmpeg: &std::path::Path) -> Option<String> {
-    let o = Command::new(ffmpeg).args(["-hide_banner", "-list_devices", "true", "-f", "dshow", "-i", "dummy"]).stdin(Stdio::null()).output().ok()?;
+    let o = std::process::Command::new(ffmpeg).args(["-hide_banner", "-list_devices", "true", "-f", "dshow", "-i", "dummy"]).stdin(Stdio::null()).output().ok()?;
     parse_dshow_audio(&String::from_utf8_lossy(&o.stderr))
 }
 
