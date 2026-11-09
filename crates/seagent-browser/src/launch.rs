@@ -760,7 +760,18 @@ mod tests {
     #[test]
     fn default_browser_install_is_the_pinned_build() {
         let cfg = crate::config::BrowserConfig::default();
+        // The pin is the linux64 build. Windows / macOS resolve the index's stable build of
+        // their own platform (a network call, not made here); a `.zip` base URL is used as is.
+        #[cfg(target_os = "linux")]
         assert_eq!(chromium_download_url(&cfg, None).unwrap(), PINNED_CFT_URL);
+        #[cfg(target_os = "macos")]
+        assert!(crate::launch_os::cft_platform().is_some_and(|p| p.starts_with("mac-")));
+        #[cfg(windows)]
+        {
+            assert_eq!(crate::launch_os::cft_platform(), Some("win64"));
+            let local = crate::config::BrowserConfig { install_base_url: "https://mirror.example/chrome-win64.zip".into(), ..Default::default() };
+            assert_eq!(chromium_download_url(&local, None).unwrap(), "https://mirror.example/chrome-win64.zip");
+        }
         assert_eq!(chromium_download_url(&cfg, Some("https://x/y.zip")).unwrap(), "https://x/y.zip");
         assert!(PINNED_CFT_URL.contains(PINNED_CFT_VERSION) && PINNED_CFT_SHA256.len() == 64);
         for f in ["packaging/install.sh", "packaging/offline/make-offline-bundle.sh"] {

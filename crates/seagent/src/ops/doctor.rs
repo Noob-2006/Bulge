@@ -995,7 +995,11 @@ mod tests {
         assert!(f.iter().any(|x| x.message.contains("no plugin `slack`")));
         assert!(f.iter().any(|x| x.message.contains("privacy_notice") && x.severity == Severity::Warning));
         let n = detect_native(&c).unwrap();
+        #[cfg(not(windows))]
         assert!(n.iter().any(|x| x.message.starts_with("bwrap:")) && n.iter().any(|x| x.message.starts_with("landlock:")));
+        // Windows: the AppContainer probe replaces the bwrap / Landlock findings.
+        #[cfg(windows)]
+        assert!(n.iter().any(|x| x.message.starts_with("appcontainer:")) && !n.iter().any(|x| x.message.starts_with("bwrap:") || x.message.starts_with("landlock:")), "{n:?}");
         assert!(n.iter().all(|x| x.severity != Severity::Error || x.message.starts_with("git")));
     }
 

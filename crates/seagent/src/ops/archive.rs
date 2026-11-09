@@ -375,7 +375,7 @@ mod tests {
         bad[n - 6] ^= 1;
         assert!(gunzip(&bad).unwrap_err().contains("CRC"));
         // Output of the system gzip (dynamic Huffman) decodes too.
-        if let Ok(o) = std::process::Command::new("sh").arg("-c").arg("printf 'system gzip stream system gzip stream' | gzip -9").output() {
+        if let Ok(o) = seagent_core::platform::layout::program_command("sh").arg("-c").arg("printf 'system gzip stream system gzip stream' | gzip -9").output() {
             if o.status.success() && !o.stdout.is_empty() {
                 assert_eq!(gunzip(&o.stdout).unwrap(), b"system gzip stream system gzip stream");
             }

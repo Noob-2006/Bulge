@@ -304,7 +304,9 @@ pub(crate) fn resolve_remote_host(cli: &str, configured: Option<&str>) -> Result
         return normalize_scp_host(c).map(Some).ok_or_else(|| format!("remote_host {c:?} is not a safe [user@]host"));
     }
     let path = expand_home(cli.trim());
-    if !path.to_string_lossy().contains('/') {
+    // A path, not a bare command name (Windows paths use `\` too).
+    let s = path.to_string_lossy();
+    if !(s.contains('/') || (cfg!(windows) && s.contains('\\'))) {
         return Ok(None);
     }
     match std::fs::read(&path) {

@@ -1424,8 +1424,10 @@ mod tests {
                     std::thread::spawn(move || {
                         let Ok((head, rest)) = seagent_net::ws::read_head(&mut stream, 65536) else { return };
                         let tcp: TcpStream = stream.try_clone().unwrap();
+                        // On the stream the WebSocket reads from: a Windows `try_clone` is a
+                        // duplicated socket whose receive timeout is its own.
+                        stream.set_read_timeout(Some(Duration::from_millis(20))).unwrap();
                         let Ok(mut ws) = WebSocket::accept(stream, &head, rest) else { return };
-                        tcp.set_read_timeout(Some(Duration::from_millis(20))).unwrap();
                         let (tx, rx) = mpsc::channel();
                         *ctl.lock().unwrap() = Some(tx);
                         loop {

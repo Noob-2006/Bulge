@@ -70,5 +70,6 @@ pub fn kit_with(f: impl FnOnce(&mut Config)) -> Kit {
     f(&mut cfg);
     let echo = Arc::new(Echo { seen: Mutex::new(vec![]) });
     let k = new_kernel(cfg, paths.clone(), Arc::new(Res(echo.clone())), seagent_tools::builtin_tools(), Arc::new(Vault::empty()), Arc::new(Policy { allow_privilege: false, allow_egress: false }));
-    Kit { k, ws: ws.canonicalize().unwrap(), paths, echo }
+    // As the kernel stores session workspaces (`layout::canonicalize`: no `\\?\` on Windows).
+    Kit { k, ws: seagent_core::platform::layout::canonicalize(&ws).unwrap(), paths, echo }
 }

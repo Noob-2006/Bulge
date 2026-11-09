@@ -1486,6 +1486,13 @@ mod tests {
         std::fs::create_dir_all(&outside).unwrap();
         #[cfg(unix)]
         std::os::unix::fs::symlink(&outside, t.ws.join("escape")).unwrap();
+        // Windows: a directory symlink needs Developer Mode; a junction (what an unprivileged
+        // user can make) is the same escape and must be refused the same way.
+        #[cfg(windows)]
+        if std::os::windows::fs::symlink_dir(&outside, t.ws.join("escape")).is_err() {
+            let st = std::process::Command::new("cmd").arg("/c").arg("mklink").arg("/J").arg(t.ws.join("escape")).arg(&outside).output().unwrap();
+            assert!(st.status.success(), "mklink /J: {}", String::from_utf8_lossy(&st.stderr));
+        }
         let escapes = [
             "/etc".to_string(),
             t.ws.join("..").display().to_string(),

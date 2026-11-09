@@ -39,10 +39,17 @@ fn daemon_pid(h: &Path) -> Option<i32> {
 fn detached_daemon_exits_when_the_watched_harness_dies() {
     let h = home("watch");
     // Stand-in for the harness process (python run.py): a sleep we own.
+    #[cfg(unix)]
     let mut harness = ChildGuard::single(Command::new("sleep").arg("120").spawn().unwrap());
+    // Windows has no `sleep.exe`: PowerShell's Start-Sleep is the same long-lived harness.
+    #[cfg(windows)]
+    let mut harness = ChildGuard::single(Command::new("powershell").args(["-NoProfile", "-Command", "Start-Sleep 120"]).spawn().unwrap());
     let out = seagent(h.path()).args(["daemon", "start"]).env("SEAGENT_DAEMON_WATCH_PID", harness.id().to_string()).output().unwrap();
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
-    let pid = daemon_pid(h.path()).expect("seagentd.pid");
+    // The pid file may land a moment after `daemon start` returns (Windows detaches through
+    // a new process group); wait for it rather than racing.
+    seagent_core::proc::wait_until(Duration::from_secs(15), || daemon_pid(h.path()).is_some());
+    let pid = daemon_pid(h.path()).unwrap_or_else(|| panic!("seagentd.pid: {}", std::fs::read_to_string(h.path().join("h/data/seagentd.log")).unwrap_or_default()));
     let _g = PidGuard(pid); // started by us: never leak it, even if the assertions fail
     assert!(group_alive(pid), "daemon {pid} is up");
     let _ = harness.child().kill();
@@ -63,11 +70,20 @@ fn daemon_exits_when_its_home_is_removed() {
         c.args(["daemon", "run"]).stdout(log.try_clone().unwrap()).stderr(log);
         seagent_core::proc::spawn_tied(c, true).unwrap()
     });
-    assert!(seagent_core::proc::wait_until(Duration::from_secs(25), || h.path().join("h/run/seagentd.sock").exists()), "daemon never came up");
+    // Unix: the control socket file. Windows: the endpoint is a named pipe (no file); the
+    // daemon's pid file in the same runtime directory says it is up.
+    #[cfg(unix)]
+    let marker = h.path().join("h/run/seagentd.sock");
+    #[cfg(windows)]
+    let marker = h.path().join("h/run/seagentd.pid");
+    assert!(seagent_core::proc::wait_until(Duration::from_secs(25), || marker.exists()), "daemon never came up: {}", std::fs::read_to_string(h.path().join("seagentd.log")).unwrap_or_default());
     std::thread::sleep(Duration::from_millis(500));
     std::fs::remove_dir_all(h.path().join("h/run")).unwrap();
     let exited = seagent_core::proc::wait_until(Duration::from_secs(15), || matches!(d.child().try_wait(), Ok(Some(_))));
     let text = std::fs::read_to_string(h.path().join("seagentd.log")).unwrap_or_default();
     assert!(exited, "seagentd kept running with its control socket gone: {text}");
+    #[cfg(unix)]
     assert!(text.contains("control socket"), "{text}");
+    #[cfg(windows)]
+    assert!(text.contains("control endpoint"), "{text}");
 }

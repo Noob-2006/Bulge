@@ -773,7 +773,8 @@ mod tests {
     #[test]
     fn whatsapp_call_bounded_runner_bounds_window_and_honours_cancel() {
         let dir = temp_dir("wa-tools-run");
-        let sh = |c: &str| vec!["/bin/sh".to_string(), "-c".to_string(), c.to_string()];
+        // `/bin/sh -c`; Windows: Git Bash (`sh`, via `layout::program_command`).
+        let sh = |c: &str| vec![if cfg!(windows) { "sh" } else { "/bin/sh" }.to_string(), "-c".to_string(), c.to_string()];
         let free = seagent_core::Cancel::new();
 
         let (ended, out) = run_bounded(&sh("echo out; echo err 1>&2; exit 3"), &dir, Duration::from_secs(10), &free).unwrap();

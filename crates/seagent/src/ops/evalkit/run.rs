@@ -307,7 +307,7 @@ impl Runner {
         }
         for cmd in &t.setup {
             let cmd = cmd.replace("{container}", &self.container_bin);
-            let mut c = std::process::Command::new("bash");
+            let mut c = seagent_core::platform::layout::program_command("bash");
             c.arg("-c").arg(&cmd).current_dir(dir);
             let (o, code) = capture(c, Duration::from_secs(1800))?;
             if code != 0 {
@@ -598,11 +598,11 @@ mod tests {
     #[test]
     fn capture_kills_the_whole_group_on_timeout() {
         let d = seagent_core::tmp::scratch("seagent-cap");
-        let mut c = std::process::Command::new("bash");
+        let mut c = seagent_core::platform::layout::program_command("bash");
         c.arg("-c").arg(format!("(sleep 30; touch {}/late) & sleep 30", d.display()));
         let e = capture(c, Duration::from_millis(300)).unwrap_err();
         assert!(e.contains("timed out"));
-        let mut c = std::process::Command::new("bash");
+        let mut c = seagent_core::platform::layout::program_command("bash");
         c.arg("-c").arg("echo out; echo err >&2; exit 3");
         assert_eq!(capture(c, Duration::from_secs(5)).unwrap(), ("out\nerr\n".into(), 3));
     }

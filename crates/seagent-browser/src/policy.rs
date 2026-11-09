@@ -131,6 +131,11 @@ pub fn is_private(url: &str) -> bool {
     if seagent_security::url_safety::is_local_hostname(host) || [".lan", ".localdomain"].iter().any(|s| host.ends_with(s)) {
         return true;
     }
+    // Cloud-metadata names are private by name, whatever this machine's resolver answers
+    // (`metadata.goog` does not resolve off GCP, and then no address would say so).
+    if seagent_security::url_safety::BLOCKED_HOSTNAMES.contains(&host) {
+        return true;
+    }
     resolve(host).iter().any(ip_private)
 }
 

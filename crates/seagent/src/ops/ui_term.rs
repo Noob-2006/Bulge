@@ -127,6 +127,13 @@ fn resolve_program(name: &str, path: &std::ffi::OsStr) -> Result<std::path::Path
     if !ALLOWED_PROGRAMS.contains(&name) && !ALLOWED_SHELLS.contains(&name) {
         return Err(format!("refusing `{name}`: not an allowed terminal program (allowed: {})", allowed_list()));
     }
+    // Windows: `sh` / `bash` are Git Bash / MSYS2 (PATH's `bash.exe` is WSL's launcher).
+    #[cfg(not(unix))]
+    if matches!(name, "sh" | "bash") {
+        if let Some(b) = seagent_core::platform::layout::bash() {
+            return Ok(seagent_core::platform::layout::simplify_verbatim(&b));
+        }
+    }
     // Windows: `PATHEXT` decides what runs (`pwsh` → pwsh.exe); there are no mode bits to check.
     #[cfg(not(unix))]
     if let Some(p) = seagent_core::platform::layout::which_in_pathext(name, Some(path), std::env::var("PATHEXT").ok().as_deref()) {

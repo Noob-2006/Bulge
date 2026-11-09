@@ -182,7 +182,8 @@ impl TtsProvider for Command {
         let output = dir.join(format!("speech.{fmt}"));
         std::fs::write(&input, &req.text).map_err(|e| e.to_string())?;
         let speed = req.speed.map(|s| s.to_string()).or_else(|| self.s("speed")).or_else(|| m.cfg.get("tts.speed").map(|v| v.to_string())).unwrap_or_default();
-        let (inp, outp) = (input.display().to_string(), output.display().to_string());
+        // Shell-line placeholders: Git Bash spelling on Windows (`C:/…`), as is on Unix.
+        let (inp, outp) = (seagent_core::platform::shell::path_str(&input), seagent_core::platform::shell::path_str(&output));
         let voice = req.voice.clone().or_else(|| self.s("voice")).unwrap_or_default();
         let model = req.model.clone().or_else(|| self.s("model")).unwrap_or_default();
         let line = render(&template, &[("input_path", &inp), ("text_path", &inp), ("output_path", &outp), ("format", &fmt), ("voice", &voice), ("model", &model), ("speed", &speed)]);

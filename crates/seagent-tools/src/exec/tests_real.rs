@@ -153,6 +153,57 @@ fn real_backend_bwrap() {
     assert_eq!(run(&b, "exit 5").0, 5);
 }
 
+/// Windows counterpart of `real_backend_bwrap`: a real AppContainer (or the restricted-token
+/// fallback). The workspace round-trips, the user profile is not readable, the network is off
+/// without `network = "host"`, and exit codes come through — in the sandbox's own shell
+/// (Windows PowerShell; MSYS bash cannot start in an AppContainer).
+#[cfg(windows)]
+#[test]
+#[ignore]
+fn real_backend_appcontainer() {
+    if !real() {
+        return;
+    }
+    assert!(super::appcontainer::available(), "SEAGENT_REAL_TESTS=1 but this machine cannot create AppContainers");
+    let c = ctx("appcontainer", true);
+    std::fs::write(c.workspace.join("f.txt"), "inside\n").unwrap();
+    let sb = SandboxConfig { workspace_access: "rw".into(), backend: "appcontainer".into(), ..Default::default() };
+    let b = super::appcontainer::AppContainerBackend::new(&sb, &c).unwrap_or_else(|e| panic!("{e}"));
+    let profile = std::env::var("USERPROFILE").unwrap();
+    let script = format!("Get-Content f.txt; Set-Content -Path new.txt -Value w; try {{ Get-ChildItem -LiteralPath '{profile}\\Documents' -ErrorAction Stop | Out-Null; 'HOME=readable' }} catch {{ 'HOME=denied' }}; try {{ (New-Object Net.Sockets.TcpClient).Connect('1.1.1.1', 443); 'NET=on' }} catch {{ 'NET=off' }}");
+    let (code, out) = run(&b, &script);
+    assert_eq!(code, 0, "{out}");
+    assert!(out.contains("inside"), "{out}");
+    assert_eq!(std::fs::read_to_string(c.workspace.join("new.txt")).unwrap().trim(), "w");
+    assert!(out.contains("HOME=denied"), "the user profile is readable inside the AppContainer: {out}");
+    assert!(out.contains("NET=off"), "network without internetClient: {out}");
+    assert_eq!(run(&b, "exit 5").0, 5);
+    b.cleanup();
+}
+
+/// macOS counterpart of `real_backend_bwrap`: the Seatbelt (`sandbox-exec`) backend — the
+/// workspace round-trips, the real home is unreadable, the network is off, exit codes pass.
+#[cfg(target_os = "macos")]
+#[test]
+#[ignore]
+fn real_backend_seatbelt() {
+    if !real() {
+        return;
+    }
+    let c = ctx("seatbelt", true);
+    std::fs::write(c.workspace.join("f.txt"), "inside\n").unwrap();
+    let sb = SandboxConfig { workspace_access: "rw".into(), backend: "seatbelt".into(), ..Default::default() };
+    let b = super::seatbelt::SeatbeltBackend::new(&sb, &c).unwrap_or_else(|e| panic!("{e}"));
+    let real_home = super::sandbox::host_home();
+    let (code, out) = run(&b, &format!("cat f.txt; echo w > new.txt; cat {}/.zshrc {}/.bash_history 2>&1 | head -1; curl -s -m 3 https://1.1.1.1 >/dev/null 2>&1 && echo NET=on || echo NET=off", real_home.display(), real_home.display()));
+    assert_eq!(code, 0, "{out}");
+    assert!(out.contains("inside"), "{out}");
+    assert_eq!(std::fs::read_to_string(c.workspace.join("new.txt")).unwrap(), "w\n");
+    assert!(out.contains("Operation not permitted") || out.contains("No such file"), "the real home is readable: {out}");
+    assert!(out.contains("NET=off"), "network without network = \"host\": {out}");
+    assert_eq!(run(&b, "exit 5").0, 5);
+}
+
 #[test]
 #[ignore]
 fn real_backend_ssh() {

@@ -1111,6 +1111,9 @@ mod tests {
         assert_eq!(screen_cli(&d, &["start".into()], &mut io), 1);
     }
 
+    // The embedded Xvfb + Xfce desktop is X11-only; Windows / macOS show the browser on the
+    // real desktop (no virtual-desktop substitute yet — see docs/cross-platform.md).
+    #[cfg(unix)]
     #[test]
     fn embedded_launcher_seeds_config_only() {
         // launcher.sh's seed-only mode builds the xfconf tree without an X server.

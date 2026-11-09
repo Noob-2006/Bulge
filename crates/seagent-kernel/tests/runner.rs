@@ -1457,7 +1457,7 @@ fn sub_agent_and_session_worktree_isolation() {
     let id2 = start(&e2, "go");
     e2.k.run(&id2, RunOpts::default()).unwrap();
     let c2 = e2.k.store.list().into_iter().find(|s| s.parent.as_deref() == Some(id2.as_str())).unwrap();
-    assert!(seagent_kernel::projection::project(&e2.k.store.read(&c2.id).unwrap()).workspace.contains("/.worktrees/subagent-"));
+    assert!(seagent_kernel::projection::project(&e2.k.store.read(&c2.id).unwrap()).workspace.replace('\\', "/").contains("/.worktrees/subagent-"));
     assert!(git_in(&e2.ws, &["branch", "--list", "seagent/subagent-*"]).is_empty(), "a clean child's branch is deleted");
 }
 

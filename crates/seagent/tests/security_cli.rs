@@ -283,7 +283,8 @@ fn exec_policy_show_and_set_persist_to_toml() {
         assert!(v.get(k).is_some(), "`{k}` missing from exec-policy show:\n{}", before.all());
     }
     let config_path = v["configPath"].as_str().unwrap_or_default();
-    assert!(config_path.ends_with("config/config.toml"), "`configPath` must be the user config:\n{}", before.all());
+    // Compared per component (`config\config.toml` on Windows).
+    assert!(std::path::Path::new(config_path).ends_with("config/config.toml"), "`configPath` must be the user config:\n{}", before.all());
     assert!(config_path.starts_with(&h.to_string_lossy().to_string()), "`configPath` must live under SEAGENT_HOME:\n{}", before.all());
 
     let set = seagent(&h, &["exec-policy", "set", "--security", "allowlist", "--ask", "always", "--ask-fallback", "deny"]);

@@ -41,7 +41,11 @@ fn scratch_dir(root: &Path, name: &str) -> PathBuf {
 fn seagent(root: &Path, args: &[&str]) -> (i32, String, String) {
     let home = root.join("seagentcfg-home");
     std::fs::create_dir_all(&home).unwrap();
-    let out = Command::new(env!("CARGO_BIN_EXE_seagent"))
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_seagent"));
+    // Windows' temp dir comes from TMP / TEMP, not TMPDIR.
+    #[cfg(windows)]
+    cmd.env("TMP", root).env("TEMP", root);
+    let out = cmd
         .args(args)
         .env("TMPDIR", root)
         .env("SEAGENT_HOME", &home)

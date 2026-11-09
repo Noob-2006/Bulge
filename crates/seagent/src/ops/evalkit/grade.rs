@@ -225,7 +225,7 @@ pub fn grade(task: &Task, answer: &str, workdir: Option<&Path>, exec: Option<Exe
 /// Host command runner for a working directory.
 pub fn host_exec(dir: &Path, timeout: u64) -> impl Fn(&str) -> (String, i32) + '_ {
     move |cmd: &str| {
-        let mut c = std::process::Command::new("bash");
+        let mut c = seagent_core::platform::layout::program_command("bash");
         c.arg("-c").arg(cmd).current_dir(dir);
         match super::run::capture(c, std::time::Duration::from_secs(timeout)) {
             Ok(x) => x,
