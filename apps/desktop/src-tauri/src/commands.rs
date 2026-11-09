@@ -30,8 +30,8 @@ pub fn app_info(st: State<'_, AppState>) -> Value {
     json!({
         "platform": platform(),
         "version": env!("CARGO_PKG_VERSION"),
-        // iOS cannot run the agent (no subprocesses, VMs or local shell): client only.
-        "canRunLocal": !cfg!(target_os = "ios"),
+        // Everywhere: on iOS in-process (no VMs / native shell there; commands use the WASM sandbox).
+        "canRunLocal": true,
         "mode": st.mode(),
         "hosts": hosts,
         "zh": crate::zh(),
@@ -52,14 +52,11 @@ pub fn boot_state(st: State<'_, AppState>) -> boot::Snapshot {
     st.boot.lock().unwrap().clone()
 }
 
-/// Android: run the agent on this phone (`local`) or use another host (`remote`).
+/// Phones: run the agent on this phone (`local`) or use another host (`remote`).
 #[tauri::command]
 pub fn set_mode(st: State<'_, AppState>, mode: Mode) -> R<()> {
     if cfg!(desktop) && mode != Mode::Local {
         return Err("desktop installs always run the agent locally".into());
-    }
-    if cfg!(target_os = "ios") && mode == Mode::Local {
-        return Err("iOS cannot run SE Agent itself (no VM, no local shell); pair with a host".into());
     }
     st.set_mode(mode)
 }

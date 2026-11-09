@@ -50,7 +50,7 @@ curl --proto '=https' --tlsv1.2 -fsSL https://github.com/se-agent/System-Enginee
 
 從 [Releases](https://github.com/se-agent/System-Engineering-Agent/releases/latest) 下載一個檔、點兩下就裝好：Windows `SE-Agent_*_x64-setup.exe`（個人安裝，不需管理員；另有 `.msi`）、macOS `.dmg`、Linux `.AppImage` / `.deb` / `.rpm`、Android `.apk`。App 第一次開啟會安裝並啟動背景服務，接著在視窗裡開同一個設定精靈；之後常駐系統匣（開啟主控台、暫停、重新啟動服務、登入時啟動、檢查更新）。原始碼與建置方式見 [apps/desktop/README.md](apps/desktop/README.md)。
 
-**iOS 是純用戶端**：iOS 不允許 App 開虛擬機或執行本機 shell，所以 iPhone / iPad 上**沒有 VM 與本機 shell**。iOS App 在區域網路中尋找已安裝 SE Agent 的電腦（Bonjour），掃 QR 或輸入 8 碼配對碼配對、釘選主機的 TLS 指紋，然後開那台主機的主控台；需要 shell / VM 的工作在那台電腦上執行。詳見 [apps/desktop/MOBILE.md](apps/desktop/MOBILE.md)。
+**iOS 在手機上執行完整的 agent**（無伺服器，跟其他平台一樣）：agent 以函式庫形式連進 App、在 App 自己的行程裡跑——核心、session、模型供應商、記憶、技能、web 抓取／搜尋、App 沙盒內的檔案工具、MCP（Streamable HTTP／SSE）、純網路的聊天平台、排程，以及綁在 127.0.0.1 的 App Server（主控台照桌面版的方式載入）。iOS 只禁止兩件事：**虛擬機**與**原生 shell 程式**（不能開子程序、不能 JIT）。指令改在 App 內的 **WebAssembly 沙盒**執行（`exec.backend = "wasm"`：wasmi 直譯器 + 內建 POSIX shell + 釘選 SHA-256 的 uutils coreutils WASI 版，只看得到工作區與私有 `/tmp`、沒有網路）。App 在背景時，排程與心跳工作由 iOS 的 BGProcessingTask 在系統允許時執行。和區域網路中的電腦配對（Bonjour、QR／8 碼、TLS 指紋釘選）變成**選用**。詳見 [apps/desktop/MOBILE.md](apps/desktop/MOBILE.md)。
 
 ## 快速開始
 

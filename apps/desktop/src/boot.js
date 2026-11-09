@@ -70,6 +70,10 @@
     await SE.invoke('set_mode', { mode: 'remote' });
     location.href = 'connect.html';
   });
+  $('pairInstead').addEventListener('click', async () => {
+    await SE.invoke('set_mode', { mode: 'remote' });
+    location.href = 'connect.html';
+  });
 
   async function main() {
     SE.listen('boot', render);
@@ -81,9 +85,14 @@
       return;
     }
     $('version').textContent = 'v' + info.version;
-    if (info.platform === 'ios' || info.mode === 'remote') {
+    if (info.mode === 'remote') {
       location.replace('connect.html');
       return;
+    }
+    // iOS: the agent runs in this app by default; pairing a computer stays one tap away.
+    if (info.platform === 'ios') {
+      $('iosNotice').hidden = false;
+      $('pairInstead').hidden = false;
     }
     if (info.platform === 'android' && !info.mode) {
       $('progress').hidden = true;

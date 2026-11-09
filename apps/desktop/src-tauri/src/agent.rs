@@ -1,5 +1,7 @@
 //! Running the bundled `seagent` binary (desktop: a Tauri sidecar next to the app executable;
 //! Android: `libseagent.so` in nativeLibraryDir). No Tauri types here, so it is unit-testable.
+//! iOS has no binary to run (the agent is linked in-process, `boot::run`), so most of this is
+//! unused there.
 //!
 //! The CLI surface used (all of it exists in the agent today unless marked PROPOSED):
 //! - `seagent setup bootstrap`           → idempotent `[app]` config; stderr has `console: http://…`
@@ -12,6 +14,8 @@
 //! - PROPOSED `seagent setup status --json` → `{"done": bool, "listen": "…", "console_url": "…"}`
 //!   (today `seagent setup status` falls into the interactive wizard, so it is NOT called).
 //! - PROPOSED `seagent app token --json`  → `{"token": "…", "url": "http://…"}`, non-zero when unset.
+
+#![cfg_attr(target_os = "ios", allow(dead_code))]
 
 use std::ffi::OsString;
 use std::io::Read;

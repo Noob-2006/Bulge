@@ -1,6 +1,6 @@
 [package]
 name = "tauri-plugin-seagent-mobile"
-description = "SE Agent mobile glue: Android foreground service for the bundled agent, Bonjour/NSD host discovery"
+description = "SE Agent mobile glue: Android foreground service for the bundled agent, the in-process agent on iOS, Bonjour/NSD host discovery"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -12,6 +12,13 @@ links = "tauri-plugin-seagent-mobile"
 tauri = { version = "2", features = [] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+
+# iOS runs the agent in this process (no child processes allowed): the very same `seagent`
+# library the binary is built from, linked into the app's static library. Only for iOS — the
+# desktop and Android apps keep running the separately built `seagent` binary, so their tree
+# is unchanged. packaging/release/DEPENDENCY-REVIEW.md ("App shell budget").
+[target.'cfg(target_os = "ios")'.dependencies]
+seagent = { path = "../../../../crates/seagent" }
 
 [build-dependencies]
 tauri-plugin = { version = "2", features = ["build"] }

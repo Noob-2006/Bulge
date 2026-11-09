@@ -31,7 +31,7 @@
 | 5 | `seagent-skills` | core, kernel, net, tools, security, plugin | 技能、hub、curator |
 | 5 | `seagent-memory` | core, kernel, net, security, tools | 記憶、wiki、向量回想（召回時以 `seagent_security::threat` 重新掃描，H8） |
 | 6 | `seagent-app` | 上面全部（除了 binary 專屬） | 應用層：TUI、surfaces、computer use、cron、節點 |
-| 7 | `seagent` | 全部 | 執行檔：參數分派、`build`/`build_agent` 組裝、各命令家族模組 |
+| 7 | `seagent` | 全部 | 宿主：參數分派、`build`/`build_agent` 組裝、各命令家族模組。函式庫（`lib.rs`）＋一行的執行檔（`main.rs` = `seagent::main()`）；`seagent::embed` 是 iOS App 在自己行程內跑 agent 的入口（`daemon_cli::run` 的同一套組裝，無控制 socket）。沒有新增 crate、沒有新增依賴邊 |
 
 三條推論，寫下來是為了避免下次又被打破：
 

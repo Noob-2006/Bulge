@@ -20,7 +20,13 @@
       </div>
     </header>
 
-    <!-- Android: where should the agent run? (iOS goes straight to connect.html) -->
+    <!-- Required by platform policy: say plainly what iOS cannot do (and what still runs here). -->
+    <aside class="notice panel" id="iosNotice" hidden>
+      <span class="star warn"></span>
+      <p data-i18n="iosNotice"></p>
+    </aside>
+
+    <!-- Android: where should the agent run? (iOS runs it here unless the user pairs instead) -->
     <section id="choose" hidden>
       <h2 data-i18n="chooseTitle">要怎麼使用 SE Agent？</h2>
       <button class="choice-card" id="chooseLocal">
@@ -50,6 +56,7 @@
       <pre class="details" id="details" hidden></pre>
       <p class="faint small" id="copied" hidden data-i18n="copied">已複製。貼到 issue 或寄給管理員即可。</p>
     </section>
+    <button class="linkish" id="pairInstead" hidden data-i18n="pairInstead">改為連線到另一台電腦</button>
   </main>
   <script src="i18n.js"></script>
   <script src="boot.js"></script>

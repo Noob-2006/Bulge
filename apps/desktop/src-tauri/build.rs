@@ -18,6 +18,15 @@ fn main() {
             std::fs::copy(&from, vendor.join(f)).unwrap_or_else(|e| panic!("copy {}: {e}", from.display()));
         }
     }
-    println!("cargo:rustc-env=SEAGENT_TARGET_TRIPLE={}", std::env::var("TARGET").unwrap_or_default());
+    // iOS bundles the WASI tools (`tauri.ios.conf.json` resources → share/wasi). They are built
+    // by scripts/prepare-ios.sh; the directory must exist for tauri-build even before that.
+    let target = std::env::var("TARGET").unwrap_or_default();
+    if target.contains("apple-ios") {
+        let _ = std::fs::create_dir_all("wasi-tools");
+        if !Path::new("wasi-tools/tools.json").is_file() {
+            println!("cargo:warning=src-tauri/wasi-tools has no tools.json: the app would have no shell commands; run scripts/prepare-ios.sh");
+        }
+    }
+    println!("cargo:rustc-env=SEAGENT_TARGET_TRIPLE={target}");
     tauri_build::try_build(tauri_build::Attributes::new().app_manifest(tauri_build::AppManifest::new().commands(COMMANDS))).expect("tauri build script");
 }

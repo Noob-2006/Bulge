@@ -13,10 +13,22 @@
   <string>Scan the pairing QR code shown by SE Agent on your computer. 掃描電腦上 SE Agent 顯示的配對 QR 碼。</string>
   <key>NSAppTransportSecurity</key>
   <dict>
-    <!-- The console is loaded from the app's own loopback tunnel (http://127.0.0.1), which
-         carries pinned TLS to the paired host. Nothing else may be cleartext. -->
+    <!-- The console is loaded from 127.0.0.1: the agent's own App Server running inside this
+         app, or the loopback tunnel that carries pinned TLS to a paired host. Nothing else may
+         be cleartext. -->
     <key>NSAllowsLocalNetworking</key>
     <true/>
   </dict>
+  <!-- Scheduled (cron / heartbeat) work while the app is not in the foreground: one
+       BGProcessingTask identifier, booked by the seagent-mobile plugin. iOS decides when it runs. -->
+  <key>BGTaskSchedulerPermittedIdentifiers</key>
+  <array>
+    <string>dev.seagent.agent.refresh</string>
+  </array>
+  <key>UIBackgroundModes</key>
+  <array>
+    <string>processing</string>
+    <string>fetch</string>
+  </array>
 </dict>
 </plist>

@@ -1,12 +1,20 @@
 //! Native glue the SE Agent app needs on phones. Called from the app's Rust code only (no JS
 //! commands, so no ACL surface):
 //!
-//! | call | Android (Kotlin, `android/`) | iOS (Swift, `ios/`) | desktop |
+//! | call | Android (Kotlin, `android/`) | iOS (Swift, `ios/` + Rust here) | desktop |
 //! |---|---|---|---|
-//! | `info` | `{exe, env}`: `libseagent.so` in nativeLibraryDir + `SEAGENT_HOME` etc. | unsupported | unsupported |
-//! | `start_agent` / `stop_agent` | Foreground Service running `libseagent.so daemon run` | unsupported (no subprocesses on iOS) | unsupported |
+//! | `info` | `{exe, env}`: `libseagent.so` in nativeLibraryDir + `SEAGENT_HOME` etc. | unsupported (no executables) | unsupported |
+//! | `start_agent` / `stop_agent` | Foreground Service running `libseagent.so daemon run` | — | unsupported |
+//! | `agent_env` | – | `{home, share, vaultKey}`: Application Support dir, bundled `share/`, vault key from the Keychain | – |
+//! | `start_local` / `stop_local` | – | the whole agent **in this process** (`seagent::embed`, linked here) | – |
+//! | `schedule_background` | – | BGProcessingTask request for cron / heartbeat work | – |
 //! | `set_autostart` / `autostart` | start the service after boot | – | – |
 //! | `discover` | NsdManager `_seagent._tcp` (+ multicast lock) | NWBrowser `_seagent._tcp` | empty |
+//!
+//! iOS allows no child processes, so the agent is not a sidecar there: this crate links the
+//! `seagent` library for `target_os = "ios"` only and runs it on background threads of the app
+//! (`seagent::embed`). The Swift side calls back into it through the `extern "C"` functions in
+//! [`ios`] — the BGTaskScheduler handler and the foreground / background notifications.
 
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -22,6 +30,26 @@ pub struct AgentInfo {
     pub exe: String,
     #[serde(default)]
     pub env: BTreeMap<String, String>,
+}
+
+/// Where the in-process agent lives (iOS): `SEAGENT_HOME`, the bundled `share/` and the vault key
+/// the Keychain holds for it.
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentEnv {
+    pub home: String,
+    #[serde(default)]
+    pub share: Option<String>,
+    #[serde(default)]
+    pub vault_key: Option<String>,
+}
+
+/// The local console of the in-process agent.
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct LocalConsole {
+    pub base: String,
+    pub url: String,
+    pub setup: bool,
 }
 
 /// A host found on the LAN (`_seagent._tcp`). TXT carries only `v` (protocol), `id` and `fp`
@@ -80,6 +108,112 @@ impl<R: Runtime> SeagentMobile<R> {
             return Ok(vec![]);
         }
         self.call::<DiscoverReply>("discover", serde_json::json!({"timeoutMs": timeout_ms})).map(|r| r.hosts.into_iter().filter(|h| !h.host.is_empty() && h.port != 0).collect())
+    }
+
+    /// iOS: the agent's home, bundled share dir and Keychain-held vault key.
+    pub fn agent_env(&self) -> Result<AgentEnv, String> {
+        self.call("agentEnv", serde_json::json!({}))
+    }
+
+    /// iOS: start the whole agent in this process (idempotent) and return its console.
+    pub fn start_local(&self) -> Result<LocalConsole, String> {
+        #[cfg(target_os = "ios")]
+        {
+            let env = self.agent_env()?;
+            let c = ios::start(&env)?;
+            // Cron / heartbeat work keeps a background slot booked while the app is away.
+            let _ = self.schedule_background(seagent::embed::next_due());
+            return Ok(c);
+        }
+        #[allow(unreachable_code)]
+        Err("the in-process agent exists on iOS only (Android and desktop run `seagent daemon run`)".into())
+    }
+
+    /// iOS: drain and stop the in-process agent.
+    pub fn stop_local(&self) -> Result<bool, String> {
+        #[cfg(target_os = "ios")]
+        return Ok(seagent::embed::stop(std::time::Duration::from_secs(10)));
+        #[allow(unreachable_code)]
+        Err("the in-process agent exists on iOS only".into())
+    }
+
+    /// iOS: ask BGTaskScheduler for a processing slot at (or after) `earliest_unix`.
+    pub fn schedule_background(&self, earliest_unix: Option<i64>) -> Result<(), String> {
+        self.call::<serde_json::Value>("scheduleBackground", serde_json::json!({"earliestUnix": earliest_unix})).map(|_| ())
+    }
+}
+
+/// The in-process agent on iOS, and the C functions the Swift side calls.
+#[cfg(target_os = "ios")]
+pub mod ios {
+    use super::{AgentEnv, LocalConsole};
+    use std::ffi::{c_char, CStr};
+    use std::path::PathBuf;
+    use std::time::Duration;
+
+    fn options(env: &AgentEnv) -> seagent::embed::Options {
+        seagent::embed::Options {
+            home: PathBuf::from(&env.home),
+            vault_key: env.vault_key.clone().filter(|k| !k.is_empty()),
+            share_dir: env.share.clone().filter(|s| !s.is_empty()).map(PathBuf::from),
+            ..Default::default()
+        }
+    }
+
+    pub fn start(env: &AgentEnv) -> Result<LocalConsole, String> {
+        let c = seagent::embed::start(options(env))?;
+        Ok(LocalConsole { base: c.base, url: c.url, setup: c.setup })
+    }
+
+    fn arg(p: *const c_char) -> Option<String> {
+        if p.is_null() {
+            return None;
+        }
+        // SAFETY: the Swift caller passes NUL-terminated strings that outlive the call.
+        unsafe { CStr::from_ptr(p) }.to_str().ok().map(String::from)
+    }
+
+    /// BGProcessingTask handler: start the agent if the app was launched for the task, let the
+    /// scheduler run what came due, wait up to `budget_secs`. Returns the next due time (unix
+    /// seconds) for the next request, `0` for none, `-1` when the agent could not start.
+    #[no_mangle]
+    pub extern "C" fn seagent_mobile_bg_run(home: *const c_char, share: *const c_char, vault_key: *const c_char, budget_secs: u32) -> i64 {
+        let Some(home) = arg(home) else { return -1 };
+        let env = AgentEnv { home, share: arg(share), vault_key: arg(vault_key) };
+        if !seagent::embed::running() && start(&env).is_err() {
+            return -1;
+        }
+        let p = seagent::embed::background_pass(Duration::from_secs(budget_secs.clamp(5, 1800) as u64));
+        p.next_due.unwrap_or(0)
+    }
+
+    /// The task's expiration handler fired: interrupt and stop (open turns resume next launch).
+    #[no_mangle]
+    pub extern "C" fn seagent_mobile_bg_expired() {
+        seagent::embed::stop(Duration::from_secs(3));
+    }
+
+    /// The app is going to the background: the next due job (unix seconds, `0` = none).
+    #[no_mangle]
+    pub extern "C" fn seagent_mobile_next_due() -> i64 {
+        seagent::embed::next_due().unwrap_or(0)
+    }
+
+    /// Back in the foreground: iOS may have reclaimed the App Server's listening socket while the
+    /// app was suspended. If nothing answers any more, restart the agent. `1` = restarted.
+    #[no_mangle]
+    pub extern "C" fn seagent_mobile_foreground(home: *const c_char, share: *const c_char, vault_key: *const c_char) -> i32 {
+        let Some(home) = arg(home) else { return 0 };
+        if !seagent::embed::running() {
+            return 0;
+        }
+        let alive = seagent::embed::console().ok().and_then(|c| c.base.strip_prefix("http://").and_then(|h| h.parse::<std::net::SocketAddr>().ok())).is_some_and(|a| std::net::TcpStream::connect_timeout(&a, Duration::from_millis(500)).is_ok());
+        if alive {
+            return 0;
+        }
+        seagent::embed::stop(Duration::from_secs(5));
+        let env = AgentEnv { home, share: arg(share), vault_key: arg(vault_key) };
+        start(&env).map(|_| 1).unwrap_or(0)
     }
 }
 

@@ -6,20 +6,36 @@ lives in committed files and is applied by scripts, so `init` can be re-run at a
 
 | | Android | iOS |
 |---|---|---|
-| Runs the agent itself | yes — `libseagent.so daemon run` under a Foreground Service | **no** (no VM, no local shell, no subprocesses: platform policy) |
-| Connect to a host on the LAN | yes ("connect to another computer") | yes — the only mode |
+| Runs the agent itself | yes — `libseagent.so daemon run` under a Foreground Service | **yes — in the app process** (`seagent::embed`, linked into the app; iOS allows no child processes) |
+| Commands (shell tool) | `/system/bin/sh` + toybox, Landlock | **WASM sandbox**: WASI tools in the wasmi interpreter + built-in POSIX shell (`exec.backend = "wasm"`) |
+| VMs | AVF where the device has it | **none** (no hypervisor for apps — platform policy) |
+| In the background | Foreground Service (always on) | foreground only; cron / heartbeat via BGProcessingTask (when iOS allows) |
+| Connect to a host on the LAN | yes ("connect to another computer") | yes — **optional** |
 | Discovery | NsdManager `_seagent._tcp` (+ multicast lock) | NWBrowser `_seagent._tcp` (Bonjour) |
 | Pairing | QR (`seagent-pair://…` setup code) or address + 8-character code | same |
 | Transport to a host | pinned TLS (SHA-256 of the host certificate) through a loopback tunnel | same |
 
-**iOS limitation, stated in the app (connect screen) and the README:** iPhone/iPad builds are a
-client of a paired SE Agent host. There are no VMs and no local shell on iOS; work that needs them
-runs on the paired computer. Chat, notifications and files work whenever that host is reachable.
+**iOS, stated in the app (splash and connect screen), the README and docs/cross-platform.md:** SE
+Agent is serverless and self-hosted, so on iPhone/iPad it runs *on the phone*: kernel, sessions,
+model providers, memory, skills, web fetch/search, file tools in the app sandbox, MCP over
+Streamable HTTP/SSE (no stdio servers — they would be child processes), chat channels (pure network
+clients), schedules and the App Server on 127.0.0.1 whose console the WebView loads. Only two things
+are unavailable: **virtual machines** and **native shell programs**. Commands run in the in-process
+WebAssembly sandbox instead (workspace and a private `/tmp` only, no network, pinned tools). Work
+that truly needs a VM or a native toolchain can go to a paired computer.
 
 ## How the pieces fit
 
 - `src/index.html` (splash) → on Android asks once "run it on this phone" / "connect to another
-  computer" (`set_mode`); iOS goes straight to `src/connect.html`.
+  computer" (`set_mode`). iOS runs the agent on the phone by default (`mode()` = local unless the
+  user picked a computer), shows the iOS notice and a "connect to another computer instead" link.
+- **Local (iOS)**: `boot.rs` asks the plugin to `start_local`: Swift `agentEnv` returns
+  `{home: <Application Support>/seagent, share: <bundle>/share, vaultKey: <Keychain>}`, then
+  `seagent::embed::start` sets `SEAGENT_HOME`, `SEAGENT_VAULT_KEY`, `SEAGENT_SHARE_DIR`, runs
+  `setup bootstrap` in-process and starts the daemon assembly on background threads (no control
+  socket). It returns the App Server's address and the one-time setup link (first run) or the
+  console URL with its token, which the WebView opens — the same pages as on a desktop. After the
+  wizard applies a configuration the embedded daemon restarts itself in-process.
 - **Local (Android)**: `boot.rs` asks the plugin for `{exe, env}` (`info`: nativeLibraryDir +
   `SEAGENT_HOME=files/seagent`, `SEAGENT_SHARE_DIR=files/share`, `TMPDIR`, `XDG_RUNTIME_DIR=""`),
   runs `setup bootstrap`, starts `AgentService` (`startAgent`), waits for
@@ -42,7 +58,7 @@ runs on the paired computer. Chat, notifications and files work whenever that ho
 |---|---|
 | Both | Rust stable, Tauri CLI 2 (`cargo install tauri-cli --version '^2' --locked`) |
 | Android | JDK 17, Android SDK (platform 36, build-tools), NDK r26+ (`ANDROID_HOME`, `NDK_HOME`/`ANDROID_NDK_HOME`), `rustup target add aarch64-linux-android` |
-| iOS | macOS with Xcode 15+, CocoaPods not required, `rustup target add aarch64-apple-ios aarch64-apple-ios-sim`; an Apple Developer team for device / TestFlight builds |
+| iOS | macOS with Xcode 15+, CocoaPods not required, `rustup target add aarch64-apple-ios aarch64-apple-ios-sim wasm32-wasip1` (the last one builds the WASI tools); an Apple Developer team for device / TestFlight builds |
 
 ## Android build
 
@@ -86,19 +102,74 @@ Only arm64-v8a is bundled (the agent binary); 32-bit and x86_64 emulators can st
 cd apps/desktop
 cargo tauri ios init                      # generates src-tauri/gen/apple
 cargo tauri icon ../../ui/icon.svg && git checkout -- src-tauri/icons
+scripts/prepare-ios.sh                    # WASI tools → src-tauri/wasi-tools (bundled as share/wasi)
 cargo tauri ios dev                       # simulator or a connected device
 cargo tauri ios build --target aarch64-sim --debug          # unsigned simulator build (CI does this)
 cargo tauri ios build --export-method app-store-connect     # needs bundle.iOS.developmentTeam or APPLE_DEVELOPMENT_TEAM
 ```
 
-`src-tauri/Info.ios.plist` is merged into the generated Info.plist: `NSLocalNetworkUsageDescription`,
-`NSBonjourServices = [_seagent._tcp]`, `NSCameraUsageDescription` (QR), and ATS
-`NSAllowsLocalNetworking` (the console is loaded from the app's own loopback tunnel). iOS asks for
-local-network permission the first time the app browses; if the user declines, discovery returns
-nothing and the typed-address flow still works after allowing it in Settings › Privacy › Local Network.
+The agent is not a separate build step on iOS: `plugins/seagent-mobile/Cargo.toml` depends on the
+`seagent` library (`crates/seagent`) for `target_os = "ios"` only, so `cargo tauri ios build`
+compiles the whole agent (`aarch64-apple-ios` / `aarch64-apple-ios-sim`) into the app's static
+library. The exec backend `wasm` (wasmi) is always on for iOS.
 
-The Swift side (`plugins/seagent-mobile/ios`) only does discovery; TLS pinning, pairing and the
-tunnel are shared Rust (`src-tauri/src/tls.rs`, `pair.rs`).
+`src-tauri/Info.ios.plist` is merged into the generated Info.plist: `NSLocalNetworkUsageDescription`,
+`NSBonjourServices = [_seagent._tcp]`, `NSCameraUsageDescription` (QR), ATS
+`NSAllowsLocalNetworking` (the console is loaded from 127.0.0.1: the in-app App Server, or the
+loopback tunnel to a paired host), `BGTaskSchedulerPermittedIdentifiers = [dev.seagent.agent.refresh]`
+and `UIBackgroundModes = [processing, fetch]`. iOS asks for local-network permission only the first
+time the app browses for a computer; the local agent itself needs none (loopback).
+
+The Swift side (`plugins/seagent-mobile/ios`): `agentEnv` (home, bundled share/, Keychain vault key
+— created on first use, `kSecAttrAccessibleAfterFirstUnlock` so a background task can open the
+vault), `scheduleBackground`, BGTaskScheduler registration and the foreground / background
+observers, and discovery. It calls the Rust side through four C functions exported by the plugin
+crate (`seagent_mobile_bg_run`, `_bg_expired`, `_next_due`, `_foreground`). TLS pinning, pairing and
+the tunnel are shared Rust (`src-tauri/src/tls.rs`, `pair.rs`).
+
+### Commands on iOS: the WASM sandbox
+
+There is no `fork`/`exec` on iOS, no JIT (so no wasmtime / V8) and no hypervisor. The shell tool
+therefore runs in `exec.backend = "wasm"` (`crates/seagent-tools/src/exec/wasm/`):
+
+- the command line is interpreted by a built-in POSIX-ish shell (pipelines, `&&`/`||`, subshells,
+  `if`/`for`/`while`/`case`, functions, redirections and here-documents, `$(…)`, `$((…))`, globs,
+  `cd`/`export`/`test`/`printf`/`read`/… builtins) — dash or busybox ash cannot work there, they
+  need `fork`;
+- every external command is a `wasm32-wasip1` module from the tools directory, run by wasmi (pure
+  Rust interpreter). WASI preview 1 is implemented in the agent: the module sees only the
+  workspace (read-only when the sandbox says so), a private `/tmp` and configured binds; `..` and
+  symlinks cannot leave them; there are no sockets; a fuel budget makes timeouts and interrupts
+  take effect, and linear memory is capped (`[exec.wasm] memory_mb`, default 512);
+- the tools: `scripts/build-wasi-tools.sh` builds **uutils coreutils 0.12.0** (`feat_wasm`: 78
+  commands — ls, cat, cp, mv, rm, mkdir, head, tail, sort, uniq, wc, cut, tr, tee, seq, date,
+  sha256sum, base64, …) from crates.io with `--locked` and writes `tools.json`, which pins the
+  module's SHA-256 (a mismatch is refused at run time). `prepare-ios.sh` puts it in
+  `src-tauri/wasi-tools`, which `tauri.ios.conf.json` bundles as `share/wasi`. No grep/sed/find in
+  that set yet: the agent's own `grep`, `glob` and file tools cover them, and more WASI modules
+  can be added to the directory (`<name>.wasm`, or a `tools.json` entry).
+- isolation is reported honestly (`seagent sandbox explain`): OS-sandbox tier, "wasm interpreter
+  sandbox" — the wall is enforced by the interpreter in the app's own process.
+
+**Python** — python.org does not publish a pinned CPython build for WASI, and no unvetted binary is
+downloaded. The backend is ready for one (`tools.json`: `{"python3": {"module": "python.wasm",
+"dirs": {"/usr/local/lib/python3.13": "python/lib"}, "env": {"PYTHONHOME": "/usr/local"}}}`); the
+next step is to build CPython's `wasm32-wasip1` target from a pinned source release with the
+WASI SDK (CPython's `Tools/wasm/wasi.py`, needs the wasi-sdk toolchain) in CI and pin its digest.
+
+### Background on iOS
+
+The agent runs while the app is in the foreground (and for the short grace iOS gives after it
+leaves, so a reply in flight can finish). Going to the background books a `BGProcessingTask`
+(`dev.seagent.agent.refresh`) at the next due cron job, at least 15 minutes ahead; when iOS runs
+it, the plugin starts the agent if the app was launched just for the task, lets the scheduler
+claim what came due, and waits up to ~4 minutes for those runs (`seagent::embed::background_pass`).
+iOS decides when the task really runs (typically on power, network, idle), may skip it, and stops
+it at its deadline (the plugin then interrupts; open turns resume on the next start). So on iOS
+schedules are best effort, chat channels only answer while the app is open or a task is running,
+and webhooks/inbound connections need the app in the foreground — a paired always-on computer, or
+Android, is the answer when that matters. Returning to the foreground re-checks the App Server and
+restarts the agent if iOS reclaimed its listening socket.
 
 ## Agent-side contract
 
@@ -135,3 +206,8 @@ Items 1–5 are implemented in the agent (branch `xp/lan`: `crates/seagent-app/s
    wizard's autostart step reporting "handled by the app" on Android (the app syncs its
    `BootReceiver` through `autostart_set`), shell `/system/bin/sh`.
 7. Desktop: `seagent setup status --json` and `seagent app token --json` (see README.md here).
+8. **iOS in-process agent** (`crates/seagent/src/embed.rs`): `start(Options{home, vault_key,
+   share_dir, workspace, set})` → `Console{base, url, setup}` once the App Server accepts
+   connections; `console()`, `stop(limit)`, `running()`, `next_due()`, `background_pass(budget)`.
+   It is `daemon_cli::run` with `Ipc::Off` — tested for real on Linux by
+   `crates/seagent/tests/embed_inprocess.rs`.

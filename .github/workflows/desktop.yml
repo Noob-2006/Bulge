@@ -191,16 +191,20 @@ jobs:
           if-no-files-found: error
 
   ios:
-    # Client only (platform policy: no VM, no subprocess, no local shell), so there is no seagent
-    # binary to build for iOS — the app pairs with a host on the LAN. Unsigned simulator build;
-    # a device/TestFlight build needs an Apple team (see apps/desktop/MOBILE.md).
+    # The agent runs inside the app (no subprocesses on iOS): the `seagent` library is linked into
+    # the app's static library through the seagent-mobile plugin, so there is no sidecar binary.
+    # Commands run as WASI tools in the in-process interpreter: prepare-ios.sh builds the pinned
+    # set into the bundle. Unsigned simulator build; a device/TestFlight build needs an Apple team
+    # (see apps/desktop/MOBILE.md).
     runs-on: macos-latest
     continue-on-error: true
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with:
-          targets: aarch64-apple-ios,aarch64-apple-ios-sim
+          targets: aarch64-apple-ios,aarch64-apple-ios-sim,wasm32-wasip1
+      - name: WASI tools for the bundle
+        run: apps/desktop/scripts/prepare-ios.sh
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           key: ios

@@ -174,6 +174,13 @@ Rules for `apps/desktop`:
   `tokio` (already in Tauri's tree), `rustls` + `tokio-rustls` + `ring` (pinned TLS to a paired
   host — `ring` provider, no `aws-lc`/cmake for mobile cross builds), `sys-locale`.
   Anything else follows the budget rule above.
+* **iOS links the agent itself** (`plugins/seagent-mobile`: `seagent` as a path dependency under
+  `cfg(target_os = "ios")`): iOS allows no child process, so the agent cannot ship as a sidecar
+  there. The agent's crates therefore appear in `apps/desktop/Cargo.lock` (resolved from the root
+  workspace's manifests by the app's own lockfile — a shared crate may sit on another patch
+  release than in the root `Cargo.lock`; `cargo update -p <crate>` in `apps/desktop` aligns it)
+  but are only compiled for iOS; desktop and Android app builds are unchanged. Review an agent
+  dependency in the root workspace as usual — the app picks it up from there.
 * An advisory in the app's tree is triaged like one in the agent's, but ships through an app
   release (the in-app updater), not an agent release.
 * Non-crate payload: the Linux **AppImage** bundles one font, Noto Sans TC (variable TTF, Noto CJK

@@ -23,8 +23,11 @@
     s_route: ['開啟設定精靈或主控台', 'Open the setup wizard or console'],
     // connect page
     connectTitle: ['連線到 SE Agent 主機', 'Connect to an SE Agent host'],
-    iosNotice: ['iPhone / iPad 版是純用戶端：iOS 不允許 App 開虛擬機或執行本機 shell，所以這裡沒有 VM 與本機 shell。需要它們的工作會交給同一區域網路中已配對的電腦執行；只要主機連得到，對話、通知與檔案都照常可用。',
-      'On iPhone and iPad SE Agent is a client only: iOS does not allow apps to run virtual machines or a local shell, so there are no VMs and no local shell here. Work that needs them runs on a paired computer on your network; chat, notifications and files work whenever that host is reachable.'],
+    iosNotice: ['SE Agent 整個在這支 iPhone / iPad 上執行：對話、模型、記憶、技能、排程、MCP、聊天平台與主控台都在手機本機，不需要伺服器。iOS 只不允許兩件事：虛擬機與原生 shell 程式。指令改在 App 內的 WebAssembly 沙箱執行（只看得到工作區與暫存資料夾、沒有網路）。App 在背景時，排程工作由 iOS 的背景任務在系統允許時執行。',
+      'SE Agent runs entirely on this iPhone or iPad: chat, models, memory, skills, schedules, MCP, chat platforms and the console all run on the device — no server needed. iOS rules out only two things: virtual machines and native shell programs. Commands run in a WebAssembly sandbox inside the app instead (it sees only the workspace and a temp folder, and has no network). While the app is in the background, scheduled work runs when iOS grants a background task.'],
+    iosPairNotice: ['配對電腦是選用的：這支手機本身就在執行 SE Agent。配對後可以在這裡開啟那台電腦的主控台，需要虛擬機或原生 shell 的工作可以交給它。',
+      'Pairing a computer is optional: this phone runs SE Agent itself. A paired computer’s console opens here, and work that needs VMs or a native shell can go to it.'],
+    pairInstead: ['改為連線到另一台電腦', 'Connect to another computer instead'],
     paired: ['已配對的主機', 'Paired hosts'],
     none: ['還沒有配對任何主機。', 'No hosts paired yet.'],
     open: ['開啟', 'Open'],

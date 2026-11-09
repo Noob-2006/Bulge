@@ -13,3 +13,5 @@
 __pycache__/
 # Downloaded by scripts/fetch-cjk-font.sh (AppImage CJK font, pinned + sha256)
 /src-tauri/fonts/*.ttf
+# Built by scripts/build-wasi-tools.sh (iOS WASI tools, pinned + sha256 in tools.json)
+/src-tauri/wasi-tools/
