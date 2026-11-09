@@ -14,6 +14,7 @@ pub mod compliance;
 pub mod osvq;
 pub mod report;
 pub mod siem;
+pub mod winprobe;
 
 use crate::ops::Integrations;
 use seagent_core::Tool;

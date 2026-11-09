@@ -22,4 +22,4 @@ ring.workspace = true # RS256 JWT for GitHub App installation tokens (forge)
 libc.workspace = true # process groups, poll, PTY, Landlock / seccomp syscalls (local backend)
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { workspace = true, features = ["Win32_Security_Isolation"] } # local backend: console process groups, creation flags (already in the tree via seagent-core); appcontainer backend: AppContainer profiles
+windows-sys = { workspace = true, features = ["Win32_Security_Isolation", "Win32_NetworkManagement_NetManagement", "Win32_Security_Authentication_Identity", "Win32_System_Registry", "Win32_System_Services"] } # local backend: console process groups, creation flags (already in the tree via seagent-core); appcontainer backend: AppContainer profiles; cis-windows probes: account policy, local users, registry, services, audit policy

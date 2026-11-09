@@ -21,7 +21,7 @@ use std::time::Duration;
 
 #[cfg(not(windows))]
 pub const BUILTIN: &[(&str, &str)] = &[("cis-linux", include_str!("checklists/cis-linux.toml")), ("tw-csma", include_str!("checklists/tw-csma.toml"))];
-/// Windows adds `cis-windows` (registry / `net` / `netsh` / `sc` / `auditpol` reads); it is the
+/// Windows adds `cis-windows` (registry reads and the locale-independent `winprobe` APIs); it is the
 /// default list there.
 #[cfg(windows)]
 pub const BUILTIN: &[(&str, &str)] = &[("cis-linux", include_str!("checklists/cis-linux.toml")), ("tw-csma", include_str!("checklists/tw-csma.toml")), ("cis-windows", include_str!("checklists/cis-windows.toml"))];
@@ -86,6 +86,9 @@ fn allowed(argv: &[String]) -> Result<(), String> {
         // Windows read-only counterparts (cis-windows): only their query / show forms.
         #[cfg(windows)]
         n if windows_allowed(n, args) => true,
+        // In-process locale-independent reads (`winprobe`) for the checks whose commands translate.
+        #[cfg(windows)]
+        _ if super::winprobe::allowed(argv) => true,
         _ => false,
     };
     if ok { Ok(()) } else { Err(format!("`{}` is not an allowed read-only check command", join(argv))) }
@@ -290,7 +293,7 @@ impl Tool for ComplianceCheck {
                     let ok_codes = c.ok_exit.clone().unwrap_or_else(|| vec![0]);
                     let mut last = (None, String::new());
                     for a in &alts {
-                        let r = cache.entry(a.clone()).or_insert_with(|| match run(a, None, timeout, &ctx.cancel) {
+                        let r = cache.entry(a.clone()).or_insert_with(|| match run_check(a, timeout, &ctx.cancel) {
                             Ok(o) => (if o.timed_out { None } else { o.code }, if o.stdout.trim().is_empty() { o.stderr } else { o.stdout }),
                             Err(e) => (None, e),
                         });
@@ -322,6 +325,16 @@ impl Tool for ComplianceCheck {
         }
         ToolOutput::ok(cap_output(ctx, "compliance_check", serde_json::to_string_pretty(&json!({"host": hostname(), "written": written, "reports": reports})).unwrap_or_default(), 40_000))
     }
+}
+
+/// One check command: a `winprobe` read in-process (Windows), else the program itself.
+fn run_check(a: &[String], timeout: Duration, cancel: &seagent_core::Cancel) -> Result<crate::ops::run::RunOut, String> {
+    #[cfg(windows)]
+    if a.first().is_some_and(|p| super::winprobe::PROBES.contains(&p.as_str())) {
+        let (code, out) = super::winprobe::run(a);
+        return Ok(crate::ops::run::RunOut { code, stdout: out, ..Default::default() });
+    }
+    run(a, None, timeout, cancel)
 }
 
 fn hostname() -> String {
@@ -411,6 +424,17 @@ mod tests {
         // The default list on Windows is this host's baseline, and it runs without error.
         let o = t.call(&ctx, json!({"section": "3 Network"}));
         assert!(!o.is_error && o.content.contains("Windows Defender Firewall"), "{}", o.content);
+        // The account-policy, Guest and service checks read the locale-independent probes: each
+        // one reaches a verdict from its evidence (never a translated label it could not parse).
+        let o = t.call(&ctx, json!({}));
+        let v: Value = serde_json::from_str(&o.content).unwrap();
+        let rows = v["reports"][0]["results"].as_array().unwrap().clone();
+        for id in ["1.1.1", "1.1.4", "1.2.1", "2.3.1", "4.3"] {
+            let r = rows.iter().find(|r| r["id"] == id).unwrap_or_else(|| panic!("{id} missing"));
+            assert!(r["status"] == "pass" || r["status"] == "fail", "{r}");
+            assert!(r["evidence"].as_str().unwrap_or("").contains('='), "{id} evidence is the probe's key=value text: {r}");
+        }
+        assert_eq!(rows.iter().find(|r| r["id"] == "4.3").unwrap()["status"], "pass", "the Event Log service runs on every Windows");
     }
 
     // grep / cat / `/etc` fixtures; Windows: `…_writes_a_report_windows`.
