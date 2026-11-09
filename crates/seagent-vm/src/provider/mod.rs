@@ -148,7 +148,7 @@ pub fn build(kind: ProviderKind, cfg: &VmConfig) -> Result<Arc<dyn VmProvider>, 
         ProviderKind::VirtualBox => Ok(Arc::new(vbox::VboxProvider::new(cfg))),
         ProviderKind::HyperV => Ok(Arc::new(hosted::HyperVProvider::new(cfg))),
         ProviderKind::Avf => Ok(Arc::new(hosted::AvfProvider::new(cfg))),
-        ProviderKind::Gvisor | ProviderKind::Bwrap => Err(format!(
+        ProviderKind::Gvisor | ProviderKind::Bwrap | ProviderKind::AppContainer | ProviderKind::Seatbelt => Err(format!(
             "`{}` is not a microVM provider: it runs tools in a namespace sandbox on the host kernel ({})",
             kind.name(),
             kind.isolation().label()
@@ -167,7 +167,7 @@ pub fn select(cfg: &VmConfig, caps: &Capabilities) -> (ProviderKind, Option<Stri
             if !cfg.allow_fallback {
                 return (want, Some(format!("exec.vm.provider = `{}` is not usable here ({}) and exec.vm.allow_fallback = false", want.name(), blockers(want, caps))));
             }
-            let best = caps.best().unwrap_or(ProviderKind::Bwrap);
+            let best = caps.best().unwrap_or(ProviderKind::sandbox_fallback(caps.os));
             return (best, Some(format!("exec.vm.provider = `{}` is not usable here ({}); fell back to `{}` ({}).", want.name(), blockers(want, caps), best.name(), best.isolation().label())));
         }
         // Explicitly asked for a sandbox, no VM.
@@ -177,7 +177,7 @@ pub fn select(cfg: &VmConfig, caps: &Capabilities) -> (ProviderKind, Option<Stri
         return (ProviderKind::Bwrap, Some(format!("`{}` not found; using bwrap", want.name())));
     }
     // "auto"
-    let best = caps.best().unwrap_or(ProviderKind::Bwrap);
+    let best = caps.best().unwrap_or(ProviderKind::sandbox_fallback(caps.os));
     if best == ProviderKind::Qemu && caps.firecracker.is_none() && caps.os == HostOs::Linux {
         // Be explicit: QEMU boots, but the guest channel needs a PCI kernel.
         return (best, Some("firecracker is not installed; using QEMU (needs a PCI-capable guest kernel for the guest channel — see docs)".into()));
@@ -215,7 +215,7 @@ pub fn accel_note(kind: ProviderKind, accel: Accel, os: HostOs) -> Option<String
         ));
     }
     if kind == ProviderKind::Qemu && os == HostOs::Windows {
-        return Some("qemu (whpx): the guest channel is a TCP port on 127.0.0.1 (Windows QEMU has no unix sockets); seagent connects right after boot and checks the agent's Hello, but other local processes can reach that port".into());
+        return Some("qemu (whpx): the guest channel is a TCP port on 127.0.0.1 (Windows QEMU has no unix sockets); other local processes can connect to it, but both ends prove a per-boot key (handed to the guest by fw_cfg, never on a command line) before any frame counts, so they can delay the VM but not impersonate or drive either side".into());
     }
     None
 }
@@ -305,7 +305,18 @@ mod tests {
         w.qemu = None;
         let (k, note) = select(&cfg, &w);
         assert!(!k.is_vm() && accel_of(k, &w).is_none());
-        assert!(note.unwrap().contains("no microVM"), "the downgrade is spelled out");
+        // The fallback is named after what really runs on Windows: AppContainer, not bwrap.
+        assert_eq!(k, ProviderKind::AppContainer);
+        let note = note.unwrap();
+        assert!(note.contains("no microVM") && note.contains("os-sandbox") && !note.contains("bwrap"), "the downgrade is spelled out: {note}");
+        // macOS likewise falls back to Seatbelt; Linux keeps bwrap.
+        let mut m = caps_on(HostOs::Macos);
+        (m.vfkit, m.qemu, m.vbox) = (None, None, None);
+        assert_eq!(select(&VmConfig::default(), &m).0, ProviderKind::Seatbelt);
+        assert_eq!(ProviderKind::Seatbelt.isolation(), IsolationLevel::OsSandbox);
+        let mut l = caps_on(HostOs::Linux);
+        l.kvm = false;
+        assert_eq!(select(&VmConfig::default(), &l).0, ProviderKind::Bwrap);
     }
 
     /// This machine's case: Windows Home, WHPX on, no Hyper-V role. `auto` takes QEMU+WHPX; an

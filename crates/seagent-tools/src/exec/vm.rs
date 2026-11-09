@@ -251,6 +251,9 @@ pub struct VmBackend {
     fallback: Option<Arc<dyn ExecBackend>>,
     isolation: IsolationLevel,
     warning: Option<String>,
+    /// `vm`, or `vm:<fallback>` naming the sandbox that really runs (`vm:bwrap` on Linux,
+    /// `vm:appcontainer` on Windows, `vm:seatbelt` on macOS).
+    id: String,
 }
 
 impl VmBackend {
@@ -262,17 +265,18 @@ impl VmBackend {
         }
         let (kind, warning) = mgr.selection();
         let isolation = kind.isolation();
+        let fallback_name = if cfg!(any(target_os = "linux", target_os = "android")) {
+            "bwrap"
+        } else if cfg!(target_os = "macos") {
+            "seatbelt"
+        } else {
+            "appcontainer"
+        };
         let fallback = if kind.is_vm() {
             None
         } else {
             // Explicit, logged downgrade: the same OS sandbox seagent already had (bwrap).
-            let name = if cfg!(any(target_os = "linux", target_os = "android")) {
-                "bwrap"
-            } else if cfg!(target_os = "macos") {
-                "seatbelt"
-            } else {
-                "appcontainer"
-            };
+            let name = fallback_name;
             let mut cfg = super::global().cfg.clone();
             cfg.sandbox = sb.clone();
             Some(super::os_sandbox(name, &cfg, ctx)?)
@@ -299,6 +303,7 @@ impl VmBackend {
             fallback,
             isolation,
             warning,
+            id: if kind.is_vm() { "vm".into() } else { format!("vm:{fallback_name}") },
         })
     }
     pub fn isolation(&self) -> IsolationLevel {
@@ -343,16 +348,12 @@ impl VmBackend {
 
 impl ExecBackend for VmBackend {
     fn id(&self) -> &str {
-        if self.fallback.is_some() {
-            "vm:bwrap"
-        } else {
-            "vm"
-        }
+        &self.id
     }
     fn describe(&self) -> String {
         match (&self.fallback, &self.warning) {
-            (Some(f), Some(w)) => format!("vm: microVM unavailable, running in a namespace sandbox ({}). {w}", f.id()),
-            (Some(f), None) => format!("vm: microVM unavailable, running in a namespace sandbox ({})", f.id()),
+            (Some(f), Some(w)) => format!("vm: microVM unavailable, running in {} ({}). {w}", sandbox_kind(), f.id()),
+            (Some(f), None) => format!("vm: microVM unavailable, running in {} ({})", sandbox_kind(), f.id()),
             (None, Some(w)) => format!("vm: {} ({} isolation); {w}", self.mgr.status().iter().map(|s| s.provider.clone()).next().unwrap_or_else(|| "microVM".into()), self.isolation.label()),
             (None, None) => format!(
                 "vm: commands run inside a microVM ({} isolation) with a {} copy of the workspace; no host socket, no keys, snapshots on",
@@ -392,6 +393,16 @@ impl ExecBackend for VmBackend {
             self.mgr.stop(&k);
         }
         let _ = &self.scope_key;
+    }
+}
+
+/// What the no-VM fallback is, in words: namespaces (bwrap) on Linux / Android, the OS's
+/// policy sandbox (AppContainer, Seatbelt) elsewhere.
+fn sandbox_kind() -> &'static str {
+    if cfg!(any(target_os = "linux", target_os = "android")) {
+        "a namespace sandbox"
+    } else {
+        "an OS policy sandbox"
     }
 }
 
@@ -582,9 +593,12 @@ mod tests {
         let vm = VmConfig { provider: "bwrap".into(), kernel: String::new(), initramfs: String::new(), allow_fallback: true, ..Default::default() };
         vm.validate().unwrap();
         let b = VmBackend::new(&vm, &SandboxConfig { mode: "all".into(), ..Default::default() }, &c, true).unwrap();
-        assert_eq!(b.id(), "vm:bwrap", "an explicit weaker level is labelled as such");
+        // Named after the sandbox that really runs: bwrap on Linux, AppContainer on Windows,
+        // Seatbelt on macOS (Windows used to call its AppContainer fallback "bwrap").
+        let want = if cfg!(any(target_os = "linux", target_os = "android")) { "vm:bwrap" } else if cfg!(target_os = "macos") { "vm:seatbelt" } else { "vm:appcontainer" };
+        assert_eq!(b.id(), want, "an explicit weaker level is labelled as such");
         assert!(b.isolation() <= seagent_vm::IsolationLevel::UserNamespace);
-        assert!(b.describe().contains("namespace sandbox"));
+        assert!(b.describe().contains(if cfg!(any(target_os = "linux", target_os = "android")) { "namespace sandbox" } else { "OS policy sandbox" }), "{}", b.describe());
         assert!(b.shares_host_fs(), "bwrap shares the host file system (bind mounts)");
         let _ = std::fs::remove_dir_all(c.home.parent().unwrap());
     }
@@ -599,7 +613,7 @@ mod tests {
         if b.id() == "vm" {
             assert_eq!(b.isolation(), seagent_vm::IsolationLevel::MicroVm);
         } else {
-            assert!(b.describe().contains("namespace sandbox"));
+            assert!(b.describe().contains(sandbox_kind()), "{}", b.describe());
         }
         let _ = std::fs::remove_dir_all(c.home.parent().unwrap());
     }

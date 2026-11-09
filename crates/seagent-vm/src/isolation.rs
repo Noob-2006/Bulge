@@ -109,6 +109,10 @@ pub enum ProviderKind {
     Gvisor,
     /// Fallback: bubblewrap namespaces, the level seagent already had.
     Bwrap,
+    /// Fallback on Windows: AppContainer / restricted token (`exec.backend = "appcontainer"`).
+    AppContainer,
+    /// Fallback on macOS: Seatbelt (`sandbox-exec`, `exec.backend = "seatbelt"`).
+    Seatbelt,
 }
 
 impl ProviderKind {
@@ -122,6 +126,8 @@ impl ProviderKind {
             ProviderKind::Avf => "avf",
             ProviderKind::Gvisor => "gvisor",
             ProviderKind::Bwrap => "bwrap",
+            ProviderKind::AppContainer => "appcontainer",
+            ProviderKind::Seatbelt => "seatbelt",
         }
     }
     pub fn parse(s: &str) -> Option<ProviderKind> {
@@ -138,13 +144,25 @@ impl ProviderKind {
         })
     }
     pub fn is_vm(self) -> bool {
-        !matches!(self, ProviderKind::Gvisor | ProviderKind::Bwrap)
+        !matches!(self, ProviderKind::Gvisor | ProviderKind::Bwrap | ProviderKind::AppContainer | ProviderKind::Seatbelt)
     }
     pub fn isolation(self) -> IsolationLevel {
         match self {
             ProviderKind::Gvisor => IsolationLevel::AppKernel,
             ProviderKind::Bwrap => IsolationLevel::UserNamespace,
+            ProviderKind::AppContainer | ProviderKind::Seatbelt => IsolationLevel::OsSandbox,
             _ => IsolationLevel::MicroVm,
+        }
+    }
+    /// The non-VM sandbox the VM backend falls back to on `os` when no microVM can boot (what
+    /// `seagent_tools::exec::vm::VmBackend` actually runs): bwrap on Linux / Android,
+    /// AppContainer on Windows, Seatbelt on macOS. Reported by name, so Windows no longer
+    /// claims a bwrap it does not have.
+    pub fn sandbox_fallback(os: HostOs) -> ProviderKind {
+        match os {
+            HostOs::Windows => ProviderKind::AppContainer,
+            HostOs::Macos => ProviderKind::Seatbelt,
+            _ => ProviderKind::Bwrap,
         }
     }
     /// The VM providers `auto` tries on `os`, strongest first (an explicit
@@ -294,7 +312,7 @@ impl Capabilities {
             ProviderKind::VirtualBox => (matches!(os, HostOs::Linux | HostOs::Macos | HostOs::Windows) && self.vbox.is_some() && self.disk_image.is_some() && image).then_some(Accel::Vbox),
             ProviderKind::HyperV => (os == HostOs::Windows && self.hyperv.is_some() && self.disk_image.is_some() && image).then_some(Accel::Hyperv),
             ProviderKind::Avf => (os == HostOs::Android && self.avf.is_some() && self.kvm && image).then_some(Accel::Kvm),
-            ProviderKind::Gvisor | ProviderKind::Bwrap => None,
+            ProviderKind::Gvisor | ProviderKind::Bwrap | ProviderKind::AppContainer | ProviderKind::Seatbelt => None,
         }
     }
 
