@@ -129,7 +129,10 @@ impl ShellState {
         let dir = quote(&self.dir.to_string_lossy());
         let tmp = format!("{dir}/state.tmp.$$");
         let file = quote(&self.state_file().to_string_lossy());
-        format!("{prefix}( umask 077; {{ pwd -P; export -p; }} > {tmp} ) 2>/dev/null && mv -f {tmp} {file} 2>/dev/null || rm -f {tmp} 2>/dev/null || true\n")
+        // An unchanged snapshot (the common case: most commands neither `cd` nor `export`) is
+        // not republished: the temporary file is dropped before it ever reaches the disk, and
+        // the state file keeps its inode and mtime. Without `cmp` the `mv` runs as before.
+        format!("{prefix}( umask 077; {{ pwd -P; export -p; }} > {tmp} ) 2>/dev/null && {{ cmp -s {tmp} {file} && rm -f {tmp} || mv -f {tmp} {file}; }} 2>/dev/null || rm -f {tmp} 2>/dev/null || true\n")
     }
 
     /// Re-read what the epilogue just wrote; a missing or damaged file keeps the old state.
@@ -396,6 +399,31 @@ mod tests {
         on.dir = PathBuf::from("/state");
         assert!(on.ready());
         assert!(on.epilogue(&[]).contains("state"));
+    }
+
+    /// A command that neither `cd`s nor exports leaves the snapshot untouched (same mtime, no
+    /// leftover temporary file); a real change still republishes it.
+    #[test]
+    fn an_unchanged_snapshot_is_not_rewritten() {
+        let c = ctx("shsame");
+        let o = Shell.call(&c, json!({"command":"export SEAGENT_SAME=1"}));
+        assert!(!o.is_error, "{}", o.content);
+        let dir = c.home.join("shell").join(crate::exec::global().scope_key(&c.session_id, &c.workspace));
+        let f = dir.join("state");
+        // One settling call: the first snapshot can differ from the steady state (OLDPWD).
+        assert!(!Shell.call(&c, json!({"command":"true"})).is_error);
+        let old = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000_000);
+        std::fs::OpenOptions::new().write(true).open(&f).unwrap().set_modified(old).unwrap();
+        for _ in 0..3 {
+            let o = Shell.call(&c, json!({"command":"echo same"}));
+            assert!(!o.is_error && o.content.contains("same"), "{}", o.content);
+        }
+        assert_eq!(std::fs::metadata(&f).unwrap().modified().unwrap(), old, "unchanged state is not rewritten");
+        let leftovers: Vec<_> = std::fs::read_dir(&dir).unwrap().flatten().filter(|e| e.file_name().to_string_lossy().starts_with("state.tmp")).collect();
+        assert!(leftovers.is_empty(), "temporary snapshots are removed");
+        assert!(!Shell.call(&c, json!({"command":"export SEAGENT_SAME=2"})).is_error);
+        assert_ne!(std::fs::metadata(&f).unwrap().modified().unwrap(), old, "a changed export is persisted");
+        assert!(Shell.call(&c, json!({"command":"echo \"v=$SEAGENT_SAME\""})).content.contains("v=2"));
     }
 
     #[cfg(unix)]

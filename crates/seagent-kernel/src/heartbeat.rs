@@ -474,7 +474,7 @@ pub fn presence(data: &Path) -> Vec<Value> {
         .into_iter()
         .map(|mut e| {
             let pid = e["pid"].as_u64().unwrap_or(0) as i32;
-            let fresh = e["ts"].as_i64().is_some_and(|t| now - t < 300);
+            let fresh = e["ts"].as_i64().is_some_and(|t| now - t < PRESENCE_FRESH_SECS);
             #[cfg(unix)]
             let alive = pid > 0 && unsafe { libc::kill(pid, 0) } == 0;
             #[cfg(not(unix))]
@@ -490,6 +490,13 @@ pub fn presence(data: &Path) -> Vec<Value> {
 
 static RUNNING: AtomicBool = AtomicBool::new(false);
 static LAST_PRESENCE: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(0);
+/// A presence entry counts as live while it is younger than this (and its pid runs).
+pub const PRESENCE_FRESH_SECS: i64 = 300;
+/// How often the daemon re-stamps its entry: comfortably inside the freshness window, but
+/// not every minute — each stamp is a whole-file rewrite with two fsyncs, and the pid check
+/// already catches a daemon that died.
+pub const PRESENCE_REFRESH_SECS: i64 = 240;
+const _: () = assert!(PRESENCE_REFRESH_SECS < PRESENCE_FRESH_SECS, "a live daemon must never look stale between stamps");
 
 /// Last `[heartbeat]` error reported (reported once per distinct message, never every tick).
 fn config_error() -> &'static Mutex<Option<String>> {
@@ -517,7 +524,7 @@ pub fn report_config_error(msg: Option<&str>) -> bool {
 /// Called from the daemon's scheduler loop every ~200ms: starts a beat in the background when due.
 pub fn daemon_tick(k: &Kernel) {
     let now = unix_now();
-    if now - LAST_PRESENCE.load(Ordering::Relaxed) >= 60 {
+    if now - LAST_PRESENCE.load(Ordering::Relaxed) >= PRESENCE_REFRESH_SECS {
         LAST_PRESENCE.store(now, Ordering::Relaxed);
         touch_presence(&k.paths.data, "daemon");
     }

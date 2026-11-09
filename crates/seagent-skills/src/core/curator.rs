@@ -18,6 +18,8 @@ use std::fs;
 use std::path::PathBuf;
 
 const DAY: i64 = 86_400;
+/// Resolution of the persisted `last_turn_at` stamp (see `CuratorTick::turn_end`).
+pub const TURN_STAMP_SECS: i64 = 300;
 
 fn now() -> i64 {
     seagent_kernel::util::unix_now()
@@ -441,10 +443,15 @@ impl seagent_kernel::lifecycle::Lifecycle for CuratorTick {
     }
     fn turn_end(&self, _session: &str, _workspace: &str, _user: &str, _assistant: &str, _ok: bool) {
         // The turn that just ended is the latest activity; idle is measured from the previous one.
-        let prev = load_state(&self.store)["last_turn_at"].as_i64();
         let mut state = load_state(&self.store);
-        state["last_turn_at"] = json!(now());
-        save_state(&self.store, &state);
+        let prev = state["last_turn_at"].as_i64();
+        // Idle gates are measured in hours (`min_idle_hours`), so the stamp only needs to be
+        // minutes-accurate: re-writing the state file (two fsyncs) after every single turn was
+        // pure churn. A stamp younger than `TURN_STAMP_SECS` is left as it is.
+        if prev.is_none_or(|p| now() - p >= TURN_STAMP_SECS) {
+            state["last_turn_at"] = json!(now());
+            save_state(&self.store, &state);
+        }
         if should_run_now(&self.settings, &self.store, prev) {
             let (s, st) = (self.settings.clone(), self.store.clone());
             std::thread::spawn(move || {
@@ -462,6 +469,31 @@ mod tests {
         fs::create_dir_all(st.skills.join(n)).unwrap();
         fs::write(st.skills.join(n).join("SKILL.md"), format!("---\nname: {n}\ndescription: about {n}\n---\nbody")).unwrap();
         usage::record_created(st, n, true);
+    }
+
+    /// Back-to-back turns stamp `last_turn_at` once, not once per turn: the idle gate is in
+    /// hours, so a stamp younger than `TURN_STAMP_SECS` is not worth a rewrite.
+    #[test]
+    fn turn_end_stamps_last_turn_at_at_most_every_few_minutes() {
+        use seagent_kernel::lifecycle::Lifecycle;
+        let d = seagent_core::tmp::TempDir::new("seagent-curator-stamp");
+        let st = Store::at(d.path());
+        let tick = CuratorTick { settings: Settings::from_table(&toml::Table::new()), store: st.clone() };
+        tick.turn_end("s", "/w", "u", "a", true);
+        let first = load_state(&st)["last_turn_at"].as_i64().expect("first turn stamps");
+        let old = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000_000);
+        fs::OpenOptions::new().write(true).open(st.curator_state()).unwrap().set_modified(old).unwrap();
+        for _ in 0..5 {
+            tick.turn_end("s", "/w", "u", "a", true);
+        }
+        assert_eq!(fs::metadata(st.curator_state()).unwrap().modified().unwrap(), old, "no rewrite per turn");
+        assert_eq!(load_state(&st)["last_turn_at"].as_i64(), Some(first));
+        // An old stamp is refreshed by the next turn.
+        let mut s8 = load_state(&st);
+        s8["last_turn_at"] = json!(first - TURN_STAMP_SECS - 1);
+        save_state(&st, &s8);
+        tick.turn_end("s", "/w", "u", "a", true);
+        assert!(load_state(&st)["last_turn_at"].as_i64().unwrap() >= first);
     }
 
     /// Snapshots skip `.archive/`, the ledger and hub state, carry the cron job store, and a

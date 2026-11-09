@@ -13,20 +13,29 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 
 /// Read-modify-write a JSON list under an exclusive file lock.
+///
+/// The file is only rewritten when the list actually changed: the scheduler calls this on
+/// every tick (`claim_due`, default every 30 s) and almost every tick claims nothing, so an
+/// unconditional write was a tmp file + two fsyncs + a rename twice a minute on an idle daemon.
 pub fn with_list<T: Serialize + DeserializeOwned, R>(path: &Path, f: impl FnOnce(&mut Vec<T>) -> R) -> Result<R, String> {
     std::fs::create_dir_all(path.parent().unwrap_or(Path::new("."))).map_err(|e| e.to_string())?;
     let lock_path = path.with_extension("lock");
     let lock = OpenOptions::new().create(true).truncate(false).write(true).open(&lock_path).map_err(|e| e.to_string())?;
     let _g = FileLock::new(&lock)?;
-    let mut items: Vec<T> = match std::fs::read_to_string(path) {
-        Ok(s) if !s.trim().is_empty() => serde_json::from_str(&s).map_err(|e| format!("{} is corrupt: {e}", path.display()))?,
-        Ok(_) => vec![],
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => vec![],
+    let before = match std::fs::read_to_string(path) {
+        Ok(s) => Some(s),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
         Err(e) => return Err(e.to_string()),
+    };
+    let mut items: Vec<T> = match before.as_deref() {
+        Some(s) if !s.trim().is_empty() => serde_json::from_str(s).map_err(|e| format!("{} is corrupt: {e}", path.display()))?,
+        _ => vec![],
     };
     let r = f(&mut items);
     let text = serde_json::to_string_pretty(&items).map_err(|e| e.to_string())?;
-    atomic_write(path, text.as_bytes()).map_err(|e| e.to_string())?;
+    if before.as_deref() != Some(text.as_str()) {
+        atomic_write(path, text.as_bytes()).map_err(|e| e.to_string())?;
+    }
     Ok(r)
 }
 
@@ -609,6 +618,28 @@ mod tests {
         std::fs::write(jobs_path(&d), "{not json").unwrap();
         assert!(add_job(&d, "@hourly", "x", &d, None, false, 0).unwrap_err().contains("corrupt"));
         assert_eq!(std::fs::read_to_string(jobs_path(&d)).unwrap(), "{not json", "file left untouched");
+    }
+
+    /// An idle scheduler tick claims nothing and must not touch the disk: the store keeps its
+    /// old modification time until a claim (a real change) rewrites it. Same on every OS:
+    /// `File::set_modified` and the mtime read back are portable.
+    #[test]
+    fn a_tick_that_changes_nothing_does_not_rewrite_the_store() {
+        let d = dir();
+        add_job(&d, "@hourly", "x", &d, None, false, 0).unwrap();
+        let p = jobs_path(&d);
+        let old = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000_000);
+        std::fs::OpenOptions::new().write(true).open(&p).unwrap().set_modified(old).unwrap();
+        for _ in 0..3 {
+            assert!(claim_due(&d, unix_now(), 0, &[]).unwrap().is_empty());
+        }
+        assert_eq!(std::fs::metadata(&p).unwrap().modified().unwrap(), old, "nothing due, nothing written");
+        assert_eq!(claim_due(&d, unix_now() + 7200, 0, &[]).unwrap().len(), 1);
+        assert_ne!(std::fs::metadata(&p).unwrap().modified().unwrap(), old, "a claim is persisted");
+        // A missing store is created once (an empty list), then left alone.
+        let fresh = dir();
+        assert!(claim_due(&fresh, unix_now(), 0, &[]).unwrap().is_empty());
+        assert_eq!(std::fs::read_to_string(jobs_path(&fresh)).unwrap(), "[]");
     }
 
     #[test]
