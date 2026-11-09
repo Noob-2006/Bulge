@@ -167,6 +167,18 @@ pub fn flush() -> usize {
     n
 }
 
+/// Write `st`'s pending entries now (whatever the interval). Returns whether it wrote.
+pub fn flush_store(st: &Store) -> bool {
+    let path = st.review_state();
+    let mut p = pending();
+    if !p.has(&path) || !path.parent().is_some_and(Path::is_dir) {
+        return false;
+    }
+    let state = view(&path, &p);
+    save_locked(&path, &mut p, &state);
+    true
+}
+
 /// Whether `st` has session entries or candidates that are not on disk yet.
 pub fn dirty(st: &Store) -> bool {
     pending().has(&st.review_state())
@@ -721,9 +733,7 @@ impl seagent_kernel::lifecycle::Lifecycle for ReviewTick {
 /// A host that drops its kernel (a one-shot `seagent run`) also writes the pending steps.
 impl Drop for ReviewTick {
     fn drop(&mut self) {
-        if dirty(&self.store) {
-            flush();
-        }
+        flush_store(&self.store);
     }
 }
 
@@ -941,7 +951,7 @@ mod tests {
         assert_eq!(steps(&st, "s1").len(), 21, "this process sees the pending steps");
         assert_eq!(load_file(&path)["sessions"][0]["steps"].as_array().unwrap().len(), 1, "disk has the first write only");
         assert!(dirty(&st));
-        assert!(flush() >= 1);
+        assert!(flush_store(&st));
         assert!(!dirty(&st));
         assert_eq!(load_file(&path)["sessions"][0]["steps"].as_array().unwrap().len(), 21, "flushed");
         // A queued candidate is written behind too; this process sees it at once.
@@ -955,7 +965,7 @@ mod tests {
         assert!(load_file(&path)["candidates"].as_array().is_none_or(|a| a.is_empty()), "not on disk yet");
         assert!(record_candidate(&s, &st, "s2", &ws.display().to_string(), "Rebuild the session index", true).is_none(), "a pending duplicate is still a duplicate");
         // Another process reviews the candidate meanwhile: its verdict survives our write.
-        flush();
+        flush_store(&st);
         let mut other = load_file(&path);
         other["candidates"][0]["status"] = json!("written");
         write_state(&path, &other);
@@ -969,7 +979,7 @@ mod tests {
             stale["status"] = json!("pending");
             p.candidates.entry(path.clone()).or_default().push(stale);
         }
-        flush();
+        flush_store(&st);
         let disk = load_file(&path);
         let list = disk["candidates"].as_array().unwrap();
         assert_eq!(list.len(), 2, "{disk}");

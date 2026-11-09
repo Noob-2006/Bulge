@@ -260,24 +260,32 @@ fn unquote(v: &str) -> String {
     v.to_string()
 }
 
+/// bash's `$'…'` dump: `\NNN` / `\xHH` escapes are *bytes* (a non-ASCII value such as a
+/// `文件` folder in `PSModulePath` comes out as `\346\226\207…`), so the result is assembled as
+/// bytes and decoded as UTF-8 once — decoding each escape as a code point turned every
+/// non-ASCII value into mojibake, which then grew on every replay.
 fn ansi_c(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
+    let mut out: Vec<u8> = Vec::with_capacity(s.len());
     let mut it = s.chars().peekable();
+    let push = |out: &mut Vec<u8>, c: char| {
+        let mut b = [0u8; 4];
+        out.extend_from_slice(c.encode_utf8(&mut b).as_bytes());
+    };
     while let Some(c) = it.next() {
         if c != '\\' {
-            out.push(c);
+            push(&mut out, c);
             continue;
         }
         match it.next() {
-            Some('n') => out.push('\n'),
-            Some('t') => out.push('\t'),
-            Some('r') => out.push('\r'),
-            Some('a') => out.push('\x07'),
-            Some('b') => out.push('\x08'),
-            Some('f') => out.push('\x0c'),
-            Some('v') => out.push('\x0b'),
-            Some('e') => out.push('\x1b'),
-            Some(c @ ('\\' | '\'' | '"' | '?')) => out.push(c),
+            Some('n') => out.push(b'\n'),
+            Some('t') => out.push(b'\t'),
+            Some('r') => out.push(b'\r'),
+            Some('a') => out.push(0x07),
+            Some('b') => out.push(0x08),
+            Some('f') => out.push(0x0c),
+            Some('v') => out.push(0x0b),
+            Some('e') => out.push(0x1b),
+            Some(c @ ('\\' | '\'' | '"' | '?')) => push(&mut out, c),
             Some('x') => {
                 let mut n = 0u32;
                 for _ in 0..2 {
@@ -289,7 +297,7 @@ fn ansi_c(s: &str) -> String {
                         None => break,
                     }
                 }
-                out.push(char::from_u32(n).unwrap_or('\u{fffd}'));
+                out.push(n as u8);
             }
             Some(c @ '0'..='7') => {
                 let mut n = c.to_digit(8).unwrap_or(0);
@@ -302,16 +310,16 @@ fn ansi_c(s: &str) -> String {
                         None => break,
                     }
                 }
-                out.push(char::from_u32(n).unwrap_or('\u{fffd}'));
+                out.push((n & 0xff) as u8);
             }
             Some(c) => {
-                out.push('\\');
-                out.push(c);
+                out.push(b'\\');
+                push(&mut out, c);
             }
-            None => out.push('\\'),
+            None => out.push(b'\\'),
         }
     }
-    out
+    String::from_utf8_lossy(&out).into_owned()
 }
 
 #[cfg(test)]
@@ -348,6 +356,9 @@ mod tests {
         assert_eq!(m["SPACES"], "a b'c");
         assert_eq!(m["QUOTED"], "q\"x\\y$z");
         assert_eq!(m["MULTI"], "l1\nl2");
+        // Octal escapes are UTF-8 bytes: bash prints a `文件` folder as `\346\226\207\344\273\266`.
+        let (_, v) = parse_state("/\ndeclare -x PSMODULEPATH=$'C:\\\\Users\\\\x\\346\\226\\207\\344\\273\\266\\\\M'\n");
+        assert_eq!(v[0].1, "C:\\Users\\x文件\\M");
         assert_eq!(m["LITERAL"], "l1\nl2", "bash 3.2 multi-line quoting");
         assert!(!m.contains_key("UNSET") && !m.contains_key("bad-name"));
     }
@@ -417,8 +428,11 @@ mod tests {
             assert!(!f.exists(), "no snapshot file on a non-POSIX host shell");
             return;
         }
-        // One settling call: the first snapshot can differ from the steady state (OLDPWD).
-        assert!(!Shell.call(&c, json!({"command":"true"})).is_error);
+        // Settling calls: the first snapshot can differ from the steady state (OLDPWD; on Git
+        // Bash an inherited value with a leading `\\` comes back with one backslash once).
+        for _ in 0..3 {
+            assert!(!Shell.call(&c, json!({"command":"true"})).is_error);
+        }
         let old = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000_000);
         std::fs::OpenOptions::new().write(true).open(&f).unwrap().set_modified(old).unwrap();
         for _ in 0..3 {
