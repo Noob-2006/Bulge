@@ -29,7 +29,7 @@
 </head>
 <body>
 <h1>seagent live view</h1>
-<p id="notice" class="msg" hidden>This page needs the app token: open /view/?token=&lt;app token&gt;.</p>
+<p id="notice" class="msg" hidden>Sign in to the console on this browser first (or open /view/?token=&lt;token&gt; once).</p>
 <main>
   <section>
     <h2>Browser</h2>
@@ -56,13 +56,104 @@
     <p id="derr" class="err" hidden></p>
   </section>
 </main>
+<script nonce="{{NONCE}}" src="/ui/devauth.js"></script>
 <script nonce="{{NONCE}}">
 (function () {
   "use strict";
-  var params = new URLSearchParams(location.search);
-  var token = params.get("token") || "", session = params.get("session") || "";
+  // ── credentials: renewed silently, forever, and never left in the URL ──
+  // A token in the URL (?token= / #token=) is read once, kept in sessionStorage and removed from
+  // the address bar; without one the page uses the console's own session on this browser.
+  // Device access tokens are short-lived: a key-bound console token (sed1_) is exchanged for an
+  // access token at POST /pair/refresh with a fresh device-key signature, renewed at ~80 % of its
+  // life and retried with backoff (2 s … 60 s) forever. devauth.js does exactly this when the
+  // host serves it (window.DevAuth); the fallback below follows the same contract and the same
+  // key store, so both share one device key.
+  var params = new URLSearchParams(location.search), hashp = new URLSearchParams(location.hash.slice(1));
+  var session = params.get("session") || "";
+  var TK = "seagent.view.token";
+  var ss = function (k, v) { try { if (v === undefined) return sessionStorage.getItem(k); sessionStorage.setItem(k, v); } catch (e) { return null; } };
+  var ls = function (k) { try { return localStorage.getItem(k); } catch (e) { return null; } };
+  var given = params.get("token") || hashp.get("token");
+  if (given) {
+    ss(TK, given);
+    params.delete("token");
+    var qs = params.toString();
+    history.replaceState(null, "", location.pathname + (qs ? "?" + qs : ""));
+  }
+  var base = given || ss(TK) || ls("seagent.token") || "", deviceId = ls("seagent.deviceId") || "";
   var notice = document.getElementById("notice");
-  if (!token) { notice.hidden = false; return; }
+  if (!base) { notice.hidden = false; return; }
+  var auth = { cur: base, exp: 0, timer: null, renewals: 0 };
+  window.SeagentViewAuth = auth; // diagnostics / tests
+  var b64url = function (buf) { return btoa(String.fromCharCode.apply(null, new Uint8Array(buf))).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, ""); };
+  function keyPair() {
+    if (!window.isSecureContext || !window.crypto || !crypto.subtle || !window.indexedDB) return Promise.resolve(null);
+    return new Promise(function (ok) {
+      var open = indexedDB.open("seagent-devkey", 1);
+      open.onupgradeneeded = function () { open.result.createObjectStore("keys"); };
+      open.onerror = function () { ok(null); };
+      open.onsuccess = function () {
+        var db = open.result, get = db.transaction("keys", "readonly").objectStore("keys").get("device");
+        get.onsuccess = function () {
+          if (get.result) return ok(get.result);
+          crypto.subtle.generateKey({ name: "ECDSA", namedCurve: "P-256" }, false, ["sign", "verify"]).then(function (kp) {
+            var put = db.transaction("keys", "readwrite").objectStore("keys").put(kp, "device");
+            put.onsuccess = function () { ok(kp); };
+            put.onerror = function () { ok(null); };
+          }, function () { ok(null); });
+        };
+        get.onerror = function () { ok(null); };
+      };
+    });
+  }
+  // One exchange of the console token for an access token; resolves false when this host or
+  // browser cannot do it (older host, no WebCrypto, not key-bound), rejects on a transient error.
+  function refreshNow() {
+    if (window.DevAuth) {
+      return window.DevAuth.access(base, deviceId).then(function (t) { auth.cur = window.DevAuth.current() || t || base; return auth.cur !== base; });
+    }
+    if (!/^sed1_/.test(base) || !deviceId) return Promise.resolve(false);
+    return keyPair().then(function (kp) {
+      if (!kp) return false;
+      var t0 = Date.now();
+      return fetch("/pair/info", { cache: "no-store" }).then(function (r) {
+        if (r.status >= 500) throw new Error("HTTP " + r.status);
+        return r.ok ? r.json() : null;
+      }).then(function (info) {
+        if (!info || !info.hostId) return false;
+        var ts = Date.now() + ((info.nowMs || t0) - Math.round((t0 + Date.now()) / 2)), nb = new Uint8Array(18);
+        crypto.getRandomValues(nb);
+        var nonce = b64url(nb), msg = "seagent-device-refresh|v1|" + info.hostId + "|" + deviceId + "|" + ts + "|" + nonce;
+        return Promise.all([crypto.subtle.sign({ name: "ECDSA", hash: "SHA-256" }, kp.privateKey, new TextEncoder().encode(msg)), crypto.subtle.exportKey("raw", kp.publicKey)]).then(function (x) {
+          var body = { deviceId: deviceId, ts: ts, nonce: nonce, sig: b64url(x[0]), publicKey: b64url(x[1]), keyStore: "webcrypto" };
+          return fetch("/pair/refresh", { method: "POST", cache: "no-store", headers: { "content-type": "application/json", "authorization": "Bearer " + base }, body: JSON.stringify(body) });
+        }).then(function (r) {
+          if (r.status === 404) return false;
+          return r.json().catch(function () { return {}; }).then(function (v) {
+            if (r.ok && v.accessToken) { auth.cur = v.accessToken; auth.exp = v.expiresAtMs || 0; return true; }
+            if (r.status >= 500 || r.status === 429 || /before this host started|replay window/.test(v.error || "")) throw new Error(v.error || "HTTP " + r.status);
+            return false;
+          });
+        });
+      });
+    });
+  }
+  // Renew at ~80 % of the access token's life; after a failure retry in 2, 4 … 60 s, forever.
+  function schedule(retryMs) {
+    clearTimeout(auth.timer);
+    var wait = retryMs;
+    if (wait === undefined) {
+      var exp = window.DevAuth ? 0 : auth.exp;
+      if (!exp) return; // devauth.js keeps its own timer; plain tokens need none
+      wait = Math.max(500, Math.round((exp - Date.now()) * 0.8));
+    }
+    auth.timer = setTimeout(function () {
+      refreshNow().then(function (ok) { if (ok) auth.renewals++; schedule(ok ? undefined : Math.min(60000, Math.max(2000, (retryMs || 1000) * 2))); },
+        function () { schedule(Math.min(60000, Math.max(2000, (retryMs || 1000) * 2))); });
+    }, wait);
+  }
+  function token() { return (window.DevAuth && window.DevAuth.current()) || auth.cur; }
+  var ready = (/^se[ad]1_/.test(base) ? refreshNow().catch(function () { schedule(2000); return false; }) : Promise.resolve(false)).then(function (ok) { if (ok) schedule(); });
 
   var $ = function (id) { return document.getElementById(id); };
   var bframe = $("bframe"), dframe = $("dframe"), urlEl = $("url"), textEl = $("text");
@@ -85,13 +176,21 @@
   }
   viewerEl.textContent = "you are " + viewer.slice(0, 16) + "…";
 
-  function api(path, opts) {
-    var o = opts || {}, h = { "authorization": "Bearer " + token }, extra = o.headers || {}, k;
+  function api(path, opts, retried) {
+    var o = opts || {}, h = { "authorization": "Bearer " + token() }, extra = o.headers || {}, k;
     for (k in extra) if (Object.prototype.hasOwnProperty.call(extra, k)) h[k] = extra[k];
     var init = { method: o.method || "GET", headers: h, cache: "no-store" };
     if (o.body !== undefined) init.body = o.body;
-    return fetch(path, init).then(function (r) {
+    return ready.then(function () { h.authorization = "Bearer " + token(); return fetch(path, init); }).then(function (r) {
       if (r.ok) return r;
+      // An expired access token (laptop asleep, host restarted): renew once and retry.
+      if (r.status === 401 && !retried) {
+        if (window.DevAuth) window.DevAuth.forget();
+        return refreshNow().catch(function () { return false; }).then(function (ok) {
+          if (ok) { schedule(); return api(path, opts, true); }
+          return Promise.reject(new Error("401: sign-in expired and could not be renewed"));
+        });
+      }
       return r.text().then(function (t) {
         var msg = r.status + " " + (r.statusText || "");
         try { var j = JSON.parse(t); if (j && j.error) msg = r.status + ": " + j.error; } catch (e) { if (t) msg = r.status + ": " + t.slice(0, 300); }

@@ -11,3 +11,5 @@
 .work-live.low { background: #a76b12; }
 .work-level { font: 11.5px var(--sans, inherit); padding: 3px 6px; border-radius: 6px; border: 1px solid var(--thread-2, #444); background: transparent; color: inherit; max-width: 150px; }
 @media (max-width: 640px) { .work-level { max-width: 110px; } .work-last { display: none; } }
+/* The footer is crowded: buttons keep their words on one line (they never squeeze into a column). */
+#workTermBtn, #workTake { flex: none; white-space: nowrap; }

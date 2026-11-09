@@ -534,6 +534,12 @@ mod tests {
             ] {
                 assert!(body.contains(needle), "{p} is missing {needle}");
             }
+            // Silent, endless renewal of device access tokens (the devauth.js contract, which the
+            // page also loads by nonce when the host serves it), and no token left in the URL.
+            for needle in ["/ui/devauth.js", "/pair/refresh", "/pair/info", "seagent-device-refresh|v1|", "seagent-devkey", "* 0.8", "60000", "history.replaceState", "sessionStorage", "seagent.token", "seagent.deviceId", "r.status === 401"] {
+                assert!(body.contains(needle), "{p}: the token renewal lacks {needle}");
+            }
+            assert!(!body.contains("?token=\" +") && !body.contains("&token="), "{p}: no request carries the token in its URL");
             // Self-contained: every fetch is a relative /view/… path, no remote scripts or images.
             assert!(!body.contains("http://") && !body.contains("https://"), "{p} references an external resource");
             assert!(!body.contains("onclick=") && !body.contains("onload="), "{p} uses inline event handler attributes");
