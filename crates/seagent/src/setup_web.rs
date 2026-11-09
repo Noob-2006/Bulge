@@ -823,14 +823,22 @@ mod tests {
             let addr = l.local_addr().unwrap().to_string();
             std::thread::spawn(move || {
                 if let Ok((mut s, _)) = l.accept() {
-                    let mut b = [0u8; 1024];
-                    let _ = s.read(&mut b);
+                    // The whole request head before answering: closing with unread bytes makes
+                    // Windows reset the connection, and the reply can be lost.
+                    let (mut b, mut head) = ([0u8; 1024], Vec::new());
+                    while !head.windows(4).any(|w| w == b"\r\n\r\n") {
+                        match s.read(&mut b) {
+                            Ok(0) | Err(_) => break,
+                            Ok(n) => head.extend_from_slice(&b[..n]),
+                        }
+                    }
                     let _ = write!(s, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
                 }
             });
             addr
         };
-        assert!(who_listens(&serve(r#"{"ok":true,"version":"0.1.0"}"#)).unwrap().contains("another SE Agent (version 0.1.0)"));
+        let got = who_listens(&serve(r#"{"ok":true,"version":"0.1.0"}"#)).unwrap();
+        assert!(got.contains("another SE Agent (version 0.1.0)"), "{got}");
         assert_eq!(who_listens(&serve("hello")).unwrap(), "another program is listening there");
         let free = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().to_string();
         assert_eq!(who_listens(&free), None, "nothing listening");
