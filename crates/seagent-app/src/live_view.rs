@@ -1245,6 +1245,8 @@ mod tests {
         let profile = home.path().join("edge-profile");
         // InPrivate / incognito: never a signed-in profile (no account details in a frame).
         let args = [format!("--user-data-dir={}", profile.display()), "--inprivate".into(), "--incognito".into(), "--no-first-run".into(), "--no-default-browser-check".into(), "--window-position=0,0".into(), "--window-size=1400,900".into(), format!("--app={url}")];
+        // SEAGENT_LIVE_EXTRA_ARGS: extra browser flags (space separated), e.g. software compositing.
+        let args: Vec<String> = std::env::var("SEAGENT_LIVE_EXTRA_ARGS").unwrap_or_default().split_whitespace().map(String::from).chain(args).collect();
         #[cfg(windows)]
         let pid = {
             let q = seagent_browser::control::screen_windows::WinDesktop::new(&data, "default", "1440x900").qualified();
