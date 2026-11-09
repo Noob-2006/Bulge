@@ -495,8 +495,11 @@ impl Tracker {
         }
         // Same layout: render the windows that changed last time, and the others now and then.
         let due: Vec<usize> = self.wins.iter().enumerate().filter(|(_, t)| t.hot || now.duration_since(t.grabbed) >= STATIC_REGRAB).map(|(i, _)| i).collect();
+        let t_render = std::time::Instant::now();
         render(hdesk, &mut self.wins, &due);
         GdiFlush();
+        let render_ms = t_render.elapsed().as_secs_f64() * 1000.0;
+        let t_hash = std::time::Instant::now();
         let mut dirty = vec![];
         for &i in &due {
             let t = &mut self.wins[i];
@@ -507,6 +510,11 @@ impl Tracker {
                 t.hash = hsh;
                 dirty.push(t.rect);
             }
+        }
+        let hash_ms = t_hash.elapsed().as_secs_f64() * 1000.0;
+        if debug() {
+            let sizes: Vec<String> = due.iter().map(|&i| format!("{}x{}{}", self.wins[i].dib.w, self.wins[i].dib.h, if self.wins[i].hot { "*" } else { "" })).collect();
+            eprintln!("seagent track: {} windows, rendered {} [{}] in {render_ms:.1} ms, hashed in {hash_ms:.1} ms, {} dirty", self.wins.len(), due.len(), sizes.join(" "), dirty.len());
         }
         if dirty.is_empty() {
             return Ok(TrackUpdate::Same);
@@ -530,6 +538,12 @@ impl Tracker {
         }
         Ok(if out.is_empty() { TrackUpdate::Same } else { TrackUpdate::Rects(out) })
     }
+}
+
+/// `SEAGENT_TRACK_DEBUG=1`: one stderr line per tracker call (what was rendered, how long).
+fn debug() -> bool {
+    static D: OnceLock<bool> = OnceLock::new();
+    *D.get_or_init(|| std::env::var_os("SEAGENT_TRACK_DEBUG").is_some_and(|v| v == "1"))
 }
 
 /// Visible, non-minimised top-level windows of the desktop, bottom first: (hwnd, rect).
@@ -567,7 +581,8 @@ unsafe fn render(hdesk: HDESK, wins: &mut [TrackedWin], which: &[usize]) {
             BitBlt(dib, 0, 0, w, h, ddb, 0, 0, SRCCOPY);
         }
     };
-    if jobs.len() <= 1 {
+    // `SEAGENT_TRACK_SERIAL=1`: one window after another (to compare with the parallel path).
+    if jobs.len() <= 1 || std::env::var_os("SEAGENT_TRACK_SERIAL").is_some_and(|v| v == "1") {
         jobs.into_iter().for_each(one);
         return;
     }
