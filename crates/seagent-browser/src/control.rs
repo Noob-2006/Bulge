@@ -13,6 +13,10 @@
 
 pub mod cua;
 pub mod screen;
+#[cfg(target_os = "macos")]
+pub mod screen_macos;
+#[cfg(windows)]
+pub mod screen_windows;
 
 use crate::{launch, manager, util, BrowserConfig};
 use std::path::{Path, PathBuf};
@@ -815,8 +819,15 @@ mod tests {
     fn doctor_reports_browser_readiness_per_backend() {
         let dir = seagent_core::tmp::scratch_path(format!("seagent-ctl-doc-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
+        // Any real executable stands in for the browser: `/bin/sh`; Windows: `where.exe`.
+        #[cfg(unix)]
         let exe = dir.join("chromium");
+        #[cfg(unix)]
         std::fs::copy("/bin/sh", &exe).unwrap();
+        #[cfg(windows)]
+        let exe = dir.join("chromium.exe");
+        #[cfg(windows)]
+        std::fs::copy(std::path::Path::new(&std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".into())).join(r"System32\where.exe"), &exe).unwrap();
         let local = BrowserConfig { executable: exe.display().to_string(), ..Default::default() };
         assert_eq!(doctor_check(&local).unwrap(), format!("local ({})", exe.display()));
         let lp = BrowserConfig { engine: "lightpanda".into(), ..Default::default() };

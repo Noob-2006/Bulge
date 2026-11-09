@@ -340,7 +340,7 @@ mod tests {
         let done = apply(&dir, &zone, "seagent.internal.", v4, None, false).unwrap();
         assert_eq!(done.len(), 3, "{done:?}");
         let core = std::fs::read_to_string(dir.join("Corefile")).unwrap();
-        assert!(core.starts_with(&format!("import {}", dir.join("conf.d/*.server").display())) && core.contains("forward . 1.1.1.1"));
+        assert!(core.starts_with(&format!("import {}", dir.join("conf.d").join("*.server").display())) && core.contains("forward . 1.1.1.1"), "{core}");
         let server = std::fs::read_to_string(dir.join("conf.d/seagent.internal.server")).unwrap();
         assert!(server.starts_with("seagent.internal:53 {\n  bind 100.64.0.9\n") && server.contains("reload 10s"));
         let z = std::fs::read_to_string(&zone).unwrap();

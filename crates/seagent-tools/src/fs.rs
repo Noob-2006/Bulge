@@ -852,9 +852,11 @@ mod tests {
         assert!(!Write.call(&c, json!({"file":"a.txt","text":"one two"})).is_error);
         assert!(!Edit.call(&c, json!({"file_path":"a.txt","old":"two","new":"2"})).is_error);
         assert_eq!(fs::read_to_string(c.workspace.join("a.txt")).unwrap(), "one 2");
-        // Aliased paths are judged by the gate too.
-        assert_eq!(Write.effects(&c, &json!({"file":"/etc/x","text":"y"})), vec![Effect::Write { path: "/etc/x".into() }]);
-        assert_eq!(Patch.effects(&c, &json!({"edits":[{"file":"/etc/y","old":"a","new":"b"}]})), vec![Effect::Write { path: "/etc/y".into() }]);
+        // Aliased paths are judged by the gate too (a system path outside the workspace:
+        // `/etc/…` on Unix, `C:\Windows\…` on Windows).
+        let sys = |n: &str| if cfg!(windows) { format!(r"C:\Windows\{n}") } else { format!("/etc/{n}") };
+        assert_eq!(Write.effects(&c, &json!({"file":sys("x"),"text":"y"})), vec![Effect::Write { path: sys("x").into() }]);
+        assert_eq!(Patch.effects(&c, &json!({"edits":[{"file":sys("y"),"old":"a","new":"b"}]})), vec![Effect::Write { path: sys("y").into() }]);
         let o = Patch.call(&c, json!({"edits":[{"path":"a.txt","old":"one","new":"1"},{"path":"new/dir/b.txt","old_string":"","new_string":"fresh"}]}));
         assert!(!o.is_error, "{}", o.content);
         assert_eq!(fs::read_to_string(c.workspace.join("new/dir/b.txt")).unwrap(), "fresh");
@@ -863,7 +865,7 @@ mod tests {
         assert!(o.is_error && !c.workspace.join("c.txt").exists());
         let o = Patch.call(&c, json!({"patch":"[{\"path\":\"a.txt\",\"old_string\":\"1\",\"new_string\":\"I\"}]"}));
         assert!(!o.is_error, "stringified `patch` accepted: {}", o.content);
-        assert_eq!(Patch.effects(&c, &json!({"changes":[{"path":"/etc/z","old":"a","new":"b"}]})), vec![Effect::Write { path: "/etc/z".into() }]);
+        assert_eq!(Patch.effects(&c, &json!({"changes":[{"path":sys("z"),"old":"a","new":"b"}]})), vec![Effect::Write { path: sys("z").into() }]);
         fs::write(c.workspace.join("m.py"), "def f():\n    return 1\n").unwrap();
         let o = Edit.call(&c, json!({"path":"m.py","old_string":"def f():\\n    return 1","new_string":"def f():\\n    return 2"}));
         assert!(!o.is_error, "double-escaped newlines tolerated: {}", o.content);
@@ -925,7 +927,13 @@ mod tests {
         fs::write(c.workspace.join("config.yaml"), "a: 1\n").unwrap();
         let o = Read.call(&c, json!({"path":"config.yml"}));
         assert!(o.is_error && o.content.contains("Similar files: config.yaml"), "{}", o.content);
+        // A device that would block or never end: `/dev/zero`; Windows: the NUL / `\\.\` devices.
+        #[cfg(unix)]
         assert!(Read.call(&c, json!({"path":"/dev/zero"})).content.contains("device file"));
+        #[cfg(windows)]
+        for dev in ["NUL", r"\\.\PhysicalDrive0", r"C:\x\con.txt"] {
+            assert!(Read.call(&c, json!({"path":dev})).content.contains("device file"), "{dev}");
+        }
         fs::write(c.workspace.join(".env"), "KEY=v").unwrap();
         assert!(Read.call(&c, json!({"path":".env"})).content.contains("secret-bearing"));
         fs::write(c.workspace.join("song.mp3"), "ID3").unwrap();
@@ -1022,7 +1030,13 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(10));
         fs::write(&f, "external change").unwrap();
         assert!(Write.call(&c, json!({"path":"x.txt","content":"mine"})).content.contains("modified since you last read it"));
+        #[cfg(unix)]
         assert!(Write.call(&c, json!({"path":"/etc/seagent-test","content":"x"})).content.contains("sensitive system path"));
+        // Windows counterparts: the system directory, installed programs, ProgramData.
+        #[cfg(windows)]
+        for p in [r"C:\Windows\System32\drivers\etc\seagent-test", r"C:\Program Files\seagent-test", r"C:\ProgramData\seagent-test"] {
+            assert!(Write.call(&c, json!({"path":p,"content":"x"})).content.contains("sensitive system path"), "{p}");
+        }
         assert!(Write.call(&c, json!({"path":"r.docx","content":"x"})).content.contains("binary document"));
         assert!(Write.call(&c, json!({"path":"y.txt","content":"     1\tfoo\n     2\tbar"})).content.contains("line-number"));
         assert!(Write.call(&c, json!({"path":"c.json","content":"{oops"})).content.contains("does not parse as .json"));

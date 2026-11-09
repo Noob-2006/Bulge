@@ -255,7 +255,9 @@ fn exec_allowlist_ask_modes_and_fallback() {
     call(&e, "sh", json!({"cmd": "/opt/tool/bin/thing --y"}));
     let (_, gates, _) = run(&e, "cli");
     assert_eq!(gates, vec![("exec".into(), "allow (permanent)".into())], "allowlisted + safe bin pass; the miss asks once, then the saved pattern covers it");
-    assert_eq!(ap::grants(&e.k.paths.data)[0].pattern, "/opt/tool/bin/thing");
+    // The grant is the resolved host path: `C:\opt\…` on Windows (a rooted path on the cwd's drive).
+    let want = if cfg!(windows) { format!("{}\\opt\\tool\\bin\\thing", &e.k.paths.data.to_string_lossy()[..2]) } else { "/opt/tool/bin/thing".to_string() };
+    assert_eq!(ap::grants(&e.k.paths.data)[0].pattern, want);
     // ask=off: misses are denied; headless approver: ask_fallback applies.
     let e = env(|c| c.approvals.exec.security = ExecSecurity::Allowlist, rec(Approval::Once));
     call(&e, "sh", json!({"cmd": "make"}));

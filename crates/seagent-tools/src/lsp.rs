@@ -14,7 +14,7 @@ use serde_json::{json, Value};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Child, ChildStdin, Command, Stdio};
+use std::process::{Child, ChildStdin, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, OnceLock, RwLock};
 use std::time::{Duration, Instant};
@@ -293,6 +293,16 @@ pub fn command_for(cfg: &LspConfig, srv: &ServerDef) -> Option<Vec<String>> {
         return None;
     }
     if let Some(o) = cfg.servers.get(&srv.id).filter(|o| !o.command.is_empty()) {
+        // Windows: `python3` / `python` is the `py -3` launcher, not the Store alias.
+        #[cfg(windows)]
+        if matches!(o.command[0].trim_end_matches(".exe").to_ascii_lowercase().as_str(), "python3" | "python") {
+            if let Some((py, lead)) = seagent_core::platform::layout::python3() {
+                let mut c = vec![py.to_string_lossy().to_string()];
+                c.extend(lead);
+                c.extend(o.command[1..].iter().cloned());
+                return Some(c);
+            }
+        }
         let bin = which(&o.command[..1])?;
         let mut c = vec![bin.to_string_lossy().to_string()];
         c.extend(o.command[1..].iter().cloned());
@@ -450,7 +460,8 @@ pub struct Client {
 impl Client {
     pub fn spawn(server_id: &str, command: &[String], root: &Path, env: &BTreeMap<String, String>, init: &Value) -> Result<Client, String> {
         let (bin, args) = command.split_first().ok_or("empty server command")?;
-        let mut child = Command::new(bin)
+        // Unix: `Command::new(bin)`; Windows: PATHEXT shims and the Python launcher.
+        let mut child = seagent_core::platform::layout::program_command(bin)
             .args(args)
             .current_dir(root)
             .envs(env)
@@ -1232,7 +1243,9 @@ while True:
     fn broken_server_is_remembered_and_idle_reaped() {
         let ws = git_ws("lsp-broken");
         let mut c = LspConfig::default();
-        c.servers.insert("bad".into(), ServerOverride { command: vec!["false".into()], extensions: vec![".bd".into()], ..Default::default() });
+        // A server binary that exits at once: `false`; Windows has no `false.exe`, so `cmd /c exit 1`.
+        let broken: Vec<String> = if cfg!(windows) { vec!["cmd".into(), "/c".into(), "exit 1".into()] } else { vec!["false".into()] };
+        c.servers.insert("bad".into(), ServerOverride { command: broken, extensions: vec![".bd".into()], ..Default::default() });
         let svc = Service::new(c);
         assert_eq!(svc.check_edit(&ws, &ws.join("a.bd"), None, "x"), "");
         assert!(matches!(svc.plan(&ws, &ws.join("a.bd")), Err(Skip::Broken(_))));

@@ -21,7 +21,11 @@ impl OsvQuery {
 
 /// Components from a lockfile, by file name.
 pub fn lockfile_components(name: &str, text: &str) -> Result<Vec<Component>, String> {
+    #[cfg(unix)]
     let n = name.rsplit('/').next().unwrap_or(name);
+    // Windows paths separate with `\` too.
+    #[cfg(not(unix))]
+    let n = name.rsplit(['/', '\\']).next().unwrap_or(name);
     Ok(match n {
         "Cargo.lock" => osv::components_from_cargo_lock(text, n),
         "package-lock.json" | "npm-shrinkwrap.json" => osv::pins_from_package_lock(text, n),

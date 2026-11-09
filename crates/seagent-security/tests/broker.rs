@@ -94,11 +94,20 @@ fn loopback_component() {
 fn exec_runs_the_allowlist_and_queues_the_rest() {
     let dir = tmp("exec");
     let mut c = ctx(&dir, policy(vec![]));
-    c.cfg = BrokerConfig { exec_allow: vec!["echo *".into()], ..Default::default() };
-    let r = req(json!({"id":"1","op":"exec","argv":["/bin/echo","hello","broker"]}), &c);
+    // An allowlisted read-only program runs: `/bin/echo`; Windows has no `echo.exe` (a cmd
+    // builtin, and shells are refused), so `where where` prints where.exe's own path.
+    #[cfg(unix)]
+    let (allow, argv, want) = ("echo *", json!(["/bin/echo", "hello", "broker"]), "hello broker");
+    #[cfg(windows)]
+    let (allow, argv, want) = ("where *", json!(["where", "where"]), "where.exe");
+    c.cfg = BrokerConfig { exec_allow: vec![allow.into()], ..Default::default() };
+    let r = req(json!({"id":"1","op":"exec","argv":argv}), &c);
     assert_eq!(r["ok"], true, "{r}");
     assert_eq!(r["result"]["status"], "ran");
-    assert_eq!(r["result"]["stdout"].as_str().unwrap().trim(), "hello broker");
+    #[cfg(unix)]
+    assert_eq!(r["result"]["stdout"].as_str().unwrap().trim(), want);
+    #[cfg(windows)]
+    assert!(r["result"]["stdout"].as_str().unwrap().trim().to_ascii_lowercase().contains(want), "{r}");
     assert!(r["result"]["tier"].as_u64().unwrap() <= 2);
 
     // Not on the allowlist: queued for the owner, nothing runs.

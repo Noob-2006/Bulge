@@ -287,6 +287,7 @@ fn references_are_listed_by_path_not_loaded() {
     assert!(c.get(CORE_SLUG).is_some(), "compiled-in core fills in");
     let r = resolve(&Config::default(), &c, "demo-role").unwrap();
     let t = r.segment_text();
-    assert!(t.contains("references/release-checklist.md: Release checklist"), "{t}");
+    // An absolute host path, spelled natively (`references\…` on Windows).
+    assert!(t.contains(&format!("references{}release-checklist.md: Release checklist", std::path::MAIN_SEPARATOR)), "{t}");
     assert!(!t.contains("very long body"), "the reference body is not preloaded");
 }

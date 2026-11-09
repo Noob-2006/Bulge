@@ -1401,7 +1401,7 @@ fn cmd_daemon(a: &Args) -> R {
                 return Ok(0);
             }
             std::fs::create_dir_all(&paths.data).map_err(|e| e.to_string())?;
-            let log = std::fs::OpenOptions::new().create(true).append(true).open(paths.daemon_log()).map_err(|e| e.to_string())?;
+            let log = seagent_core::platform::proc::open_child_log(&paths.daemon_log()).map_err(|e| e.to_string())?;
             let log_start = log.metadata().map(|m| m.len()).unwrap_or(0);
             let exe = std::env::current_exe().map_err(|e| e.to_string())?;
             let mut cmd = std::process::Command::new(exe);

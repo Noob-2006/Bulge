@@ -220,7 +220,8 @@ fn model_calls_image_generate_and_the_picture_is_saved() {
     assert_eq!((call["model"].as_str(), call["prompt"].as_str()), (Some("gpt-image-2"), Some("a red fox")));
 
     // The saved file is real, and its path went back to the model as a MEDIA: line.
-    let dir = h.join("ws/.seagent/media/images");
+    // Joined per component, as the product spells it (`ws\.seagent\media\images` on Windows).
+    let dir = h.join("ws").join(".seagent").join("media").join("images");
     let files: Vec<PathBuf> = std::fs::read_dir(&dir).expect("image dir").map(|e| e.unwrap().path()).collect();
     assert_eq!(files.len(), 1, "{files:?}");
     assert_eq!(std::fs::read(&files[0]).unwrap(), png());
@@ -231,8 +232,15 @@ fn model_calls_image_generate_and_the_picture_is_saved() {
         "the tool is offered to the model (deferred tool index or full schema):\n{}",
         head(&turns[0].body, 600)
     );
+    // The body is JSON and the tool output a JSON string inside it: on Windows the path's
+    // backslashes appear escaped once or twice (`C:\\\\Users…`); on Unix nothing changes.
+    let esc = |s: &str| {
+        let q = serde_json::to_string(s).unwrap();
+        q[1..q.len() - 1].to_string()
+    };
+    let media = esc(&format!("MEDIA:{}", files[0].display()));
     assert!(
-        turns[1].body.contains(&format!("MEDIA:{}", files[0].display())),
+        turns[1].body.contains(&media) || turns[1].body.contains(&esc(&media)),
         "the tool result carries the MEDIA line:\n{}",
         head(&turns[1].body, 600)
     );

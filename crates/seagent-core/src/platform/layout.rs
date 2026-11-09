@@ -168,6 +168,133 @@ pub fn python3_command() -> std::process::Command {
     }
 }
 
+/// A `Command` for a configured program name (MCP servers, LSP servers, agent CLIs, model
+/// runtimes). Unix: exactly `Command::new(name)`. Windows: the name is resolved through
+/// `PATHEXT` (npm CLIs are `.cmd` shims), a bare `python3` / `python` means [`python3`]
+/// (the `py -3` launcher) rather than the WindowsApps Store alias, which only prints
+/// "Python was not found" and exits 9009 — configs written on Linux say `python3` — and a
+/// bare `sh` / `bash` means [`bash`] (Git Bash / MSYS2) when there is one.
+pub fn program_command(name: impl AsRef<OsStr>) -> std::process::Command {
+    #[cfg(windows)]
+    {
+        let raw = name.as_ref();
+        let name = raw.to_string_lossy();
+        let bare = name.trim_end_matches(".exe").to_ascii_lowercase();
+        if bare == "python3" || bare == "python" {
+            if let Some((p, args)) = python3() {
+                let mut c = std::process::Command::new(p);
+                c.args(args);
+                // Pipes speak UTF-8 JSON (MCP, ACP, LSP); Windows Python would decode them in
+                // the ANSI code page. UTF-8 mode (`-X utf8`, which `-I` / `-E` scripts honour
+                // too) unless the user chose otherwise with PYTHONUTF8.
+                if std::env::var_os("PYTHONUTF8").is_none() {
+                    c.args(["-X", "utf8"]);
+                }
+                return c;
+            }
+        }
+        // `sh -c …` / `bash script` in a config: Git Bash / MSYS2, never WSL's `bash.exe`.
+        if bare == "sh" || bare == "bash" {
+            if let Some(b) = bash() {
+                return std::process::Command::new(b);
+            }
+        }
+        if let Some(p) = which(&name) {
+            return std::process::Command::new(p);
+        }
+        // A POSIX tool a Linux config names (`cat`, `grep`, `false`…): Git for Windows / MSYS2
+        // ship them next to their bash, outside PATH.
+        if !name.contains(['/', '\\']) {
+            if let Some(p) = bash().and_then(|b| posix_tools_dir(&b)).map(|d| d.join(format!("{bare}.exe"))).filter(|p| p.is_file()) {
+                return std::process::Command::new(p);
+            }
+        }
+        std::process::Command::new(raw)
+    }
+    #[cfg(not(windows))]
+    {
+        std::process::Command::new(name)
+    }
+}
+
+/// [`program_command`] plus its arguments. Unix: `Command::new(name).args(args)`. Windows:
+/// when the program is an MSYS2 / Cygwin one (Git Bash, its `usr\bin` tools), every argument
+/// goes through [`msys_quote`] — the MSYS runtime globs and brace-expands any argument the
+/// command line leaves unquoted, so `[{"a":1,"b":2}]` would otherwise split.
+pub fn program_command_args<S: AsRef<OsStr>>(name: impl AsRef<OsStr>, args: &[S]) -> std::process::Command {
+    let mut c = program_command(name);
+    msys_args(&mut c, args);
+    c
+}
+
+/// Append `args` to `c` (see [`program_command_args`]): plain `args` on Unix and for native
+/// Windows programs, [`msys_quote`]d raw arguments for an MSYS2 program.
+pub fn msys_args<S: AsRef<OsStr>>(c: &mut std::process::Command, args: &[S]) {
+    #[cfg(windows)]
+    if is_msys_program(Path::new(c.get_program())) {
+        use std::os::windows::process::CommandExt;
+        for a in args {
+            c.raw_arg(msys_quote(&a.as_ref().to_string_lossy()));
+        }
+        return;
+    }
+    c.args(args);
+}
+
+/// One argument for an MSYS2 program's command line: always inside double quotes (so the
+/// runtime neither globs nor brace-expands it), with the MSVCRT escaping the runtime's own
+/// parser undoes — `\"` for a quote, backslashes doubled only before a quote or the end.
+pub fn msys_quote(arg: &str) -> String {
+    let mut out = String::with_capacity(arg.len() + 2);
+    out.push('"');
+    let mut slashes = 0usize;
+    for ch in arg.chars() {
+        match ch {
+            '\\' => slashes += 1,
+            '"' => {
+                out.extend(std::iter::repeat_n('\\', slashes * 2 + 1));
+                out.push('"');
+                slashes = 0;
+            }
+            c => {
+                out.extend(std::iter::repeat_n('\\', slashes));
+                out.push(c);
+                slashes = 0;
+            }
+        }
+    }
+    out.extend(std::iter::repeat_n('\\', slashes * 2));
+    out.push('"');
+    out
+}
+
+/// Is `program` an MSYS2 / Cygwin executable (its directory carries the runtime DLL, or it is
+/// the platform bash)? Always false off Windows.
+pub fn is_msys_program(program: &Path) -> bool {
+    #[cfg(windows)]
+    {
+        let Some(dir) = program.parent().filter(|d| !d.as_os_str().is_empty()) else { return false };
+        if dir.join("msys-2.0.dll").is_file() || dir.join("cygwin1.dll").is_file() {
+            return true;
+        }
+        bash().is_some_and(|b| b == program || posix_tools_dir(&b).is_some_and(|d| d == dir))
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = program;
+        false
+    }
+}
+
+/// The `usr\bin` holding the coreutils of a Git for Windows / MSYS2 bash: Git's
+/// `…\Git\bin\bash.exe` → `…\Git\usr\bin`; MSYS2's bash already lives there.
+#[cfg(windows)]
+fn posix_tools_dir(bash: &Path) -> Option<PathBuf> {
+    let dir = bash.parent()?;
+    let usr_bin = if dir.ends_with("usr\\bin") || dir.ends_with("usr/bin") { dir.to_path_buf() } else { dir.parent()?.join("usr").join("bin") };
+    usr_bin.is_dir().then_some(usr_bin)
+}
+
 /// A bash that really is bash: Unix `bash` from `PATH`; Windows the platform shell's bash (Git
 /// Bash / MSYS2 / `SEAGENT_SHELL`), never `System32\bash.exe` (the WSL launcher) or a
 /// WindowsApps alias. `None` when there is none.
@@ -208,6 +335,18 @@ pub fn simplify_verbatim(p: &Path) -> PathBuf {
         return p.to_path_buf();
     }
     PathBuf::from(plain)
+}
+
+/// A *relative* path as the model sees it (tool output, patch summaries): `/` between components
+/// on every OS, so `src\a.rs` on Windows reads `src/a.rs`, as models and patches expect.
+/// Absolute paths are spelled natively (`C:\Users\…`). Unix: `p.display()` unchanged.
+pub fn model_path(p: &Path) -> String {
+    let s = p.display().to_string();
+    #[cfg(windows)]
+    if p.is_relative() {
+        return s.replace('\\', "/");
+    }
+    s
 }
 
 /// Windows executable search: `name` in each `;`-separated directory of `path`, trying the
@@ -319,5 +458,31 @@ mod tests {
         assert_eq!(which_in_pathext("tool", None, None), None);
         let direct = b.join("tool").display().to_string();
         assert_eq!(which_in_pathext(&direct, None, None), Some(b.join("tool.exe")));
+    }
+
+    #[test]
+    fn msys_quote_always_quotes_with_msvcrt_escapes() {
+        assert_eq!(msys_quote("*"), "\"*\"");
+        assert_eq!(msys_quote(""), "\"\"");
+        assert_eq!(msys_quote(r#"[{"n":3}]"#), r#""[{\"n\":3}]""#);
+        assert_eq!(msys_quote(r"C:\dir\"), r#""C:\dir\\""#);
+        assert_eq!(msys_quote(r#"a\"b"#), r#""a\\\"b""#);
+        assert!(!is_msys_program(Path::new("/usr/bin/printf")) || cfg!(windows));
+    }
+
+    /// The arguments arrive byte for byte: Unix `printf`; Windows Git Bash's own `printf.exe`
+    /// (an MSYS2 program that would glob `*`, brace-expand `{a,b}` and drop JSON quotes from a
+    /// plainly quoted command line).
+    #[test]
+    fn program_command_args_survive_an_msys_runtime() {
+        let args = [r#"[{"n":3,"t":"c"},{"n":1}]"#, "*", "{a,b}", "a b", r#"say "hi""#, r"trail\", "", "~"];
+        let mut c = program_command_args("printf", &["%s|".to_string()].into_iter().chain(args.iter().map(|s| s.to_string())).collect::<Vec<_>>());
+        if cfg!(windows) && !is_msys_program(Path::new(c.get_program())) {
+            eprintln!("skipped: no Git Bash / MSYS2 printf.exe on this machine");
+            return;
+        }
+        let out = c.output().expect("printf runs");
+        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+        assert_eq!(String::from_utf8_lossy(&out.stdout), args.iter().map(|a| format!("{a}|")).collect::<String>());
     }
 }

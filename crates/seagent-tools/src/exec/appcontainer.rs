@@ -267,6 +267,39 @@ pub(super) fn detach_wrapper(kind: ShellKind, program: &Path, script: &str, logi
     }
 }
 
+/// The shell sandboxed commands run in. MSYS2 / Git Bash cannot start inside an AppContainer
+/// or at low integrity: its runtime creates `\BaseNamedObjects\msys-*` with
+/// `NtCreateDirectoryObject`, which is denied there (`fatal error … 0xC0000022`, exit
+/// 0xC0000142). So when the host shell is such a bash, the sandbox uses Windows PowerShell
+/// (in System32, readable by every AppContainer) and says so to the model;
+/// `SEAGENT_APPCONTAINER_SHELL` names another shell (a self-contained `bash.exe`, `pwsh`).
+pub fn sandbox_shell() -> seagent_core::platform::shell::Shell {
+    use seagent_core::platform::shell::{active, detect_windows_with, Shell};
+    if let Some(s) = std::env::var("SEAGENT_APPCONTAINER_SHELL").ok().filter(|s| !s.trim().is_empty()) {
+        let env = |k: &str| (k == "SEAGENT_SHELL").then(|| s.clone());
+        let mut sh = detect_windows_with(&env, &|_| false, &|_| None);
+        sh.reason = "SEAGENT_APPCONTAINER_SHELL".into();
+        return sh;
+    }
+    let sh = active();
+    if !sh.kind.is_posix() {
+        return sh.clone();
+    }
+    let root = std::env::var_os("SystemRoot").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("C:\\Windows"));
+    Shell { kind: ShellKind::WindowsPowerShell, program: root.join("System32\\WindowsPowerShell\\v1.0\\powershell.exe"), reason: format!("{} cannot start inside an AppContainer (MSYS runtime); Windows PowerShell instead", sh.program.display()) }
+}
+
+/// PowerShell inside an AppContainer starts in `C:\` (it cannot traverse the workspace's
+/// parents to adopt the process directory), so its script begins with `Set-Location` there.
+/// POSIX shells keep the process directory as is.
+pub(super) fn in_dir(kind: ShellKind, cwd: &Path, script: &str) -> String {
+    if kind.is_posix() {
+        return script.to_string();
+    }
+    let d = cwd.display().to_string().replace('\'', "''");
+    format!("$null = New-PSDrive -Name SeagentWs -PSProvider FileSystem -Root '{d}' -Scope Global -ErrorAction SilentlyContinue; Set-Location SeagentWs:\\ -ErrorAction SilentlyContinue; [Environment]::CurrentDirectory = '{d}'\n{script}")
+}
+
 /// Can this machine create AppContainers? (Probed once: create + delete a probe profile.)
 /// Always false off Windows.
 pub fn available() -> bool {
@@ -288,7 +321,7 @@ pub use win::AppContainerBackend;
 #[cfg(windows)]
 mod win {
     use super::*;
-    use crate::exec::local::{bash_command, drop_odd_named_secrets, layout, proc_start_time, register_child};
+    use crate::exec::local::{drop_odd_named_secrets, layout, proc_start_time, register_child};
     use crate::exec::local_windows::{creation_flags, full_env, Console, Detached, LocalChild, Output, WinProc};
     use crate::exec::sandbox::SandboxConfig;
     use crate::exec::BackendCtx;
@@ -841,10 +874,14 @@ mod win {
         }
 
         fn spawn_attached(&self, req: &ExecRequest) -> io::Result<Box<dyn ExecChild>> {
-            let mut cmd = bash_command(req);
+            // The sandbox's own shell (PowerShell when the host shell is MSYS bash).
+            let sh = super::sandbox_shell();
+            let cwd = self.cwd(req);
+            let script = super::in_dir(sh.kind, &cwd, &req.script);
+            let mut cmd = Command::new(&sh.program);
+            cmd.args(sh.args(seagent_core::platform::shell::Style::bash(req.login), &script));
             let env = self.env(&mut cmd, req, &[]);
             let line = crate::exec::local_windows::command_line(&cmd);
-            let cwd = self.cwd(req);
             if let Some((rows, cols)) = req.pty {
                 let pty = Pty::open(rows, cols)?;
                 let p = self.launch(&line, &cwd, &env, Stdio::Console(pty.hpc), false)?;
@@ -884,9 +921,11 @@ mod win {
                 Mode::Restricted { .. } => set_label(&exit, "LW"),
             };
             grant.map_err(io::Error::other)?;
-            let out = std::fs::OpenOptions::new().create(true).append(true).open(&log)?;
-            let sh = seagent_core::platform::shell::active();
-            let (args, wrap_env) = detach_wrapper(sh.kind, &sh.program, &req.script, req.login, &exit);
+            // Not append-only: Git Bash exits 1 at startup on one (`open_child_log`).
+            let out = seagent_core::platform::proc::open_child_log(&log)?;
+            let sh = super::sandbox_shell();
+            let script = super::in_dir(sh.kind, &self.cwd(req), &req.script);
+            let (args, wrap_env) = detach_wrapper(sh.kind, &sh.program, &script, req.login, &exit);
             let mut cmd = Command::new(&sh.program);
             let env = self.env(&mut cmd, req, &wrap_env);
             let line = command_line(&sh.program.to_string_lossy(), &args);
@@ -907,7 +946,7 @@ mod win {
         }
         fn describe(&self) -> String {
             let ws = format!("{} {}", self.l.workspace.display(), if self.l.writable { "read-write" } else { "read-only" });
-            let shell = crate::exec::local::shell_note().unwrap_or_default();
+            let shell = super::sandbox_shell().prompt_note();
             match &self.mode {
                 Mode::Container { caps, .. } => format!(
                     "appcontainer: Windows AppContainer sandbox (profile {}); workspace {ws}, private temp {}; network {}; the user profile and other files are not readable (only Windows, Program Files and the granted roots); each command tree runs in a kill-on-close Job Object. Shares the host kernel. {shell}",
@@ -1055,7 +1094,11 @@ mod tests {
         assert_eq!(env_block(&[(w("A"), w("1")), (w("B"), w("x y"))]), w("A=1\0B=x y\0\0"));
         assert_eq!(env_block(&[]), vec![0, 0]);
         let line = command_line("C:\\Program Files\\Git\\bin\\bash.exe", &["-c".into(), "echo \"hi\" there".into()]);
-        assert_eq!(line, "\"C:\\Program Files\\Git\\bin\\bash.exe\" -c \"echo \\\"hi\\\" there\"");
+        // An installed Git Bash is an MSYS2 program: every argument quoted, `-c` included.
+        let c = if seagent_core::platform::layout::is_msys_program(Path::new("C:\\Program Files\\Git\\bin\\bash.exe")) { "\"-c\"" } else { "-c" };
+        assert_eq!(line, format!("\"C:\\Program Files\\Git\\bin\\bash.exe\" {c} \"echo \\\"hi\\\" there\""));
+        let line = command_line("C:\\Windows\\System32\\cmd.exe", &["/c".into(), "a*".into()]);
+        assert_eq!(line, "C:\\Windows\\System32\\cmd.exe /c a*");
     }
 
     #[test]

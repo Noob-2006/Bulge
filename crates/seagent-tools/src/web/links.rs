@@ -10,7 +10,7 @@ use super::config::{LinkScope, LinksConfig, WebConfig};
 use super::ssrf::{self, SsrfPolicy};
 use std::io::{Read, Write};
 use std::path::Path;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::sync::{mpsc, Arc, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -428,8 +428,10 @@ pub fn fetch_link(cfg: &WebConfig, home: &Path, url: &str, timeout_secs: u64) ->
 /// on timeout (also when descendants keep stdout open past the deadline).
 pub fn run_cli(argv: &[String], input: &str, timeout: Duration, env: &[(&str, &str)]) -> Result<String, String> {
     let (cmd, args) = argv.split_first().ok_or("empty command")?;
-    let mut c = Command::new(cmd);
-    c.args(args).envs(env.iter().copied()).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null());
+    // Unix: `Command::new(cmd)`; Windows: PATHEXT shims, `sh` = Git Bash, `python3` = `py -3`.
+    let mut c = seagent_core::platform::layout::program_command(cmd);
+    seagent_core::platform::layout::msys_args(&mut c, args);
+    c.envs(env.iter().copied()).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null());
     // Own process group (Windows: a kill-on-close job), so the whole tree can be killed.
     let mut child = crate::exec::local::spawn_own_group(&mut c).map_err(|e| format!("spawn failed: {e}"))?;
     let pgid = child.id() as i32;

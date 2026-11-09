@@ -304,7 +304,9 @@ pub(crate) fn resolve_remote_host(cli: &str, configured: Option<&str>) -> Result
         return normalize_scp_host(c).map(Some).ok_or_else(|| format!("remote_host {c:?} is not a safe [user@]host"));
     }
     let path = expand_home(cli.trim());
-    if !path.to_string_lossy().contains('/') {
+    // A path, not a bare command name (Windows paths use `\` too).
+    let s = path.to_string_lossy();
+    if !(s.contains('/') || (cfg!(windows) && s.contains('\\'))) {
         return Ok(None);
     }
     match std::fs::read(&path) {
@@ -320,9 +322,10 @@ pub(crate) fn resolve_remote_host(cli: &str, configured: Option<&str>) -> Result
 /// Run argv (never a shell) with optional stdin; `(exit code, stdout, stderr)`.
 fn run(argv: &[String], stdin: Option<&str>, timeout: Duration) -> Result<(i32, String, String), String> {
     use std::io::Read;
-    use std::process::{Command, Stdio};
-    let mut cmd = Command::new(&argv[0]);
-    cmd.args(&argv[1..]).stdin(if stdin.is_some() { Stdio::piped() } else { Stdio::null() }).stdout(Stdio::piped()).stderr(Stdio::piped());
+    use std::process::Stdio;
+    let mut cmd = seagent_core::platform::layout::program_command(&argv[0]);
+    seagent_core::platform::layout::msys_args(&mut cmd, &argv[1..]);
+    cmd.stdin(if stdin.is_some() { Stdio::piped() } else { Stdio::null() }).stdout(Stdio::piped()).stderr(Stdio::piped());
     let mut child = cmd.spawn().map_err(|e| format!("cannot run {}: {e}", argv[0]))?;
     if let (Some(t), Some(mut si)) = (stdin, child.stdin.take()) {
         let _ = si.write_all(t.as_bytes());

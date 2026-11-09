@@ -161,7 +161,9 @@ pub fn pid_alive(pid: i64) -> bool {
 }
 
 /// Ask `pid` to stop: `SIGTERM` on Unix, `SIGKILL` when `force`. Windows has no polite signal
-/// for a process in another console, so both terminate it (its job tree when it has one).
+/// for a process in another console, so both terminate it with its whole process tree: a
+/// detached helper started through a launcher (Git's `bin\sh.exe` → `usr\bin\sh.exe`) would
+/// otherwise outlive the launcher with a dead parent.
 pub fn terminate(pid: i64, force: bool) {
     if pid <= 0 || pid > i32::MAX as i64 {
         return;
@@ -174,6 +176,9 @@ pub fn terminate(pid: i64, force: bool) {
     #[cfg(not(unix))]
     {
         let _ = force;
+        #[cfg(windows)]
+        seagent_core::platform::proc::kill_tree(pid as i32);
+        #[cfg(not(windows))]
         seagent_core::platform::proc::kill_group(pid as i32, std::time::Duration::ZERO);
     }
 }

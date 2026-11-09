@@ -589,7 +589,9 @@ mod tests {
         let t = tool(json!({"alertmanager": {"url": srv.url, "max_output_chars": 2000}}), Kind::Alertmanager);
         let o = t.call(&ctx, json!({"filter": ["severity=\"page\""], "active": true, "limit": 100}));
         assert!(!o.is_error);
-        assert!(o.content.contains("[truncated:") && o.content.contains("/ops/alertmanager_alerts-"), "{}", &o.content[o.content.len() - 300..]);
+        // The spill file is an absolute host path, spelled natively (`\ops\` on Windows).
+        let spill = format!("{0}ops{0}alertmanager_alerts-", std::path::MAIN_SEPARATOR);
+        assert!(o.content.contains("[truncated:") && o.content.contains(&spill), "{}", &o.content[o.content.len() - 300..]);
         let req = srv.last();
         assert_eq!(req.query("filter").as_deref(), Some("severity=\"page\""));
         assert_eq!(req.query("active").as_deref(), Some("true"));

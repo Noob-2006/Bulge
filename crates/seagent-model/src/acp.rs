@@ -14,7 +14,7 @@ use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Component, Path, PathBuf};
-use std::process::{Child, ChildStdin, Command, Stdio};
+use std::process::{Child, ChildStdin, Stdio};
 use std::sync::mpsc::{self, Receiver};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
@@ -88,7 +88,7 @@ impl CopilotAcp {
                 ),
             ));
         }
-        let mut child = Command::new(crate::auth::program(&self.command))
+        let mut child = crate::auth::program(&self.command)
             .args(&self.args)
             .current_dir(&self.cwd)
             .stdin(Stdio::piped())
@@ -144,7 +144,7 @@ impl CopilotAcp {
         if let Some(v) = cache.lock().unwrap().get(&self.command).copied() {
             return Some(v);
         }
-        let mut child = Command::new(crate::auth::program(&self.command))
+        let mut child = crate::auth::program(&self.command)
             .arg("--help")
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
@@ -956,7 +956,9 @@ for line in sys.stdin:
 
     #[test]
     fn answers_file_and_permission_requests() {
-        let (mut cfg, record) = fake("fs", SERVER_REQS);
+        // A file outside the session cwd: `/etc/hostname`; Windows: an absolute `C:/Windows/…`.
+        let script = if cfg!(windows) { SERVER_REQS.replace("/etc/hostname", "C:/Windows/win.ini") } else { SERVER_REQS.to_string() };
+        let (mut cfg, record) = fake("fs", &script);
         let cwd = std::env::current_dir().unwrap();
         cfg.args.push(cwd.to_string_lossy().into_owned());
         cfg.quirks.push("read_only".into());

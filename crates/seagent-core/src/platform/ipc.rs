@@ -48,7 +48,10 @@ pub fn pipe_name_for(path: &Path, user: &str) -> String {
 /// The Windows pipe name of endpoint `path` for the current user.
 pub fn pipe_name(path: &Path) -> String {
     let user = std::env::var("USERNAME").or_else(|_| std::env::var("USER")).unwrap_or_else(|_| "user".into());
-    pipe_name_for(path, &user)
+    // Hash the absolute path: a relative SEAGENT_HOME (`h\run\seagentd.sock`) in two
+    // directories must not name the same pipe.
+    let abs = std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf());
+    pipe_name_for(&abs, &user)
 }
 
 /// What [`IpcListener::bind`] / [`IpcStream::connect`] actually use: the socket path on Unix,

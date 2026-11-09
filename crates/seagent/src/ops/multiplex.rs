@@ -357,8 +357,15 @@ mod tests {
     fn supervisor_restarts_with_a_cap_and_stops_children() {
         let stop = Arc::new(AtomicBool::new(false));
         let mut slots = vec![
+            // A child that crashes and one that stays up (Windows: `cmd /c exit 3`, Start-Sleep).
+            #[cfg(unix)]
             Slot { name: "crashy".into(), spawn: Box::new(|| Command::new("sh").args(["-c", "exit 3"]).spawn()), child: None, restarts: vec![], gave_up: false },
+            #[cfg(unix)]
             Slot { name: "steady".into(), spawn: Box::new(|| Command::new("sleep").arg("30").spawn()), child: None, restarts: vec![], gave_up: false },
+            #[cfg(windows)]
+            Slot { name: "crashy".into(), spawn: Box::new(|| Command::new("cmd").args(["/c", "exit 3"]).spawn()), child: None, restarts: vec![], gave_up: false },
+            #[cfg(windows)]
+            Slot { name: "steady".into(), spawn: Box::new(|| Command::new("powershell").args(["-NoProfile", "-Command", "Start-Sleep 30"]).spawn()), child: None, restarts: vec![], gave_up: false },
         ];
         let s2 = stop.clone();
         std::thread::spawn(move || {

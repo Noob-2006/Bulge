@@ -29,7 +29,9 @@ pub fn substitute_template_vars(content: &str, skill_dir: Option<&Path>, session
     template_re()
         .replace_all(content, |c: &regex::Captures| {
             let v = match &c[2] {
-                "SKILL_DIR" => skill_dir.map(|d| d.display().to_string()),
+                // Spelled for the shell that runs the skill's commands (Unix: as is; Windows
+                // Git Bash: `C:/…`, whose backslashes it would otherwise eat).
+                "SKILL_DIR" => skill_dir.map(seagent_core::platform::shell::path_str),
                 _ => session.filter(|s| !s.is_empty()).map(String::from),
             };
             v.unwrap_or_else(|| c[0].to_string())
@@ -169,12 +171,16 @@ mod tests {
         let d = seagent_core::tmp::scratch_path(format!("seagent-pre-{}", std::process::id()));
         std::fs::create_dir_all(&d).unwrap();
         let t = substitute_template_vars("run ${SEAGENT_SKILL_DIR}/x.sh in ${HERMES_SESSION_ID}", Some(&d), Some("s1"));
-        assert_eq!(t, format!("run {}/x.sh in s1", d.display()));
+        assert_eq!(t, format!("run {}/x.sh in s1", seagent_core::platform::shell::path_str(&d)));
         assert_eq!(substitute_template_vars("${SEAGENT_SESSION_ID}", None, None), "${SEAGENT_SESSION_ID}", "unresolvable stays");
         let mut s = Settings::from_table(&toml::Table::new());
         assert_eq!(preprocess("today !`echo hi`", Some(&d), None, &s), "today !`echo hi`", "inline shell off by default");
         s.inline_shell = true;
+        #[cfg(unix)]
         assert_eq!(preprocess("today !`echo hi` / !`pwd`", Some(&d), None, &s), format!("today hi / {}", d.canonicalize().unwrap().display()));
+        // Windows: Git Bash's `pwd` is `/tmp/…`; `pwd -W` names the same directory as `C:/…`.
+        #[cfg(windows)]
+        assert_eq!(preprocess("today !`echo hi` / !`pwd -W`", Some(&d), None, &s), format!("today hi / {}", seagent_core::platform::shell::path_str(&seagent_core::platform::layout::canonicalize(&d).unwrap())));
         assert_eq!(expand_inline_shell("!`echo err >&2`", None, 5), "err");
         assert!(expand_inline_shell("!`exit 3`", None, 5).contains("[inline-shell exit 3 with no output"));
         assert!(expand_inline_shell("!`sleep 5`", None, 1).contains("timeout after 1s"));

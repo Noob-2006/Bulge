@@ -578,8 +578,7 @@ pub fn run_command(argv: &[&str], dry_run: bool, timeout: Duration) -> Result<St
     if dry_run {
         return Ok(format!("would run: {cmd}"));
     }
-    let mut child = std::process::Command::new(prog)
-        .args(args)
+    let mut child = seagent_core::platform::layout::program_command_args(prog, args)
         .stdin(std::process::Stdio::inherit())
         .stdout(std::process::Stdio::inherit())
         .stderr(std::process::Stdio::inherit())
@@ -900,8 +899,10 @@ mod tests {
             seagent_core::tmp::scratch_path(format!("seagent-hooks-{}", seagent_kernel::util::random_hex(6)));
         std::fs::create_dir_all(&dir).unwrap();
         let marker = dir.join("marker");
-        let touch = format!("touch {}", marker.display());
-        let argv = ["/bin/sh", "-c", touch.as_str()];
+        // A shell line: Windows runs it through Git Bash (`sh`, `C:/…` spelling).
+        let touch = format!("touch {}", seagent_core::platform::shell::path_str(&marker));
+        let sh = if cfg!(windows) { "sh" } else { "/bin/sh" };
+        let argv = [sh, "-c", touch.as_str()];
 
         // an unknown key never executes anything and names the valid ones (exit 2 path)
         let e = post_setup("nope", false, Duration::from_secs(5)).unwrap_err();
@@ -922,7 +923,7 @@ mod tests {
 
         // `--dry-run` prints the command and runs nothing…
         let out = run_command(&argv, true, Duration::from_secs(5)).unwrap();
-        assert!(out.starts_with("would run: /bin/sh -c"), "{out}");
+        assert!(out.starts_with(&format!("would run: {sh} -c")), "{out}");
         assert!(!marker.exists(), "dry run executed the hook");
         // …while a real run of the same argv does create it (proves the assertion above).
         assert!(run_command(&argv, false, Duration::from_secs(5)).is_ok());
@@ -936,19 +937,23 @@ mod tests {
             .contains("seagent login openai-codex"));
 
         // exit statuses: 0 ok, non-zero a failure with the command echoed
-        assert!(run_hook_argv(&["/bin/true"], Duration::from_secs(5))
+        // `/bin/true` / `/bin/false`; Windows: `cmd /c exit 0|1` (no `/bin` there).
+        let (ok, bad): (&[&str], &[&str]) = if cfg!(windows) { (&["cmd", "/c", "exit 0"], &["cmd", "/c", "exit 1"]) } else { (&["/bin/true"], &["/bin/false"]) };
+        assert!(run_hook_argv(ok, Duration::from_secs(5))
             .unwrap()
             .contains("exit 0"));
-        let e = run_hook_argv(&["/bin/false"], Duration::from_secs(5)).unwrap_err();
-        assert!(e.contains("/bin/false"), "{e}");
+        let e = run_hook_argv(bad, Duration::from_secs(5)).unwrap_err();
+        assert!(e.contains(bad[0]), "{e}");
         assert!(e.contains("exit 1"), "{e}");
 
         // bounded timeout: the child is killed and the message says so
         let t0 = Instant::now();
-        let e = run_hook_argv(&["/bin/sleep", "2"], Duration::from_millis(200)).unwrap_err();
+        // `/bin/sleep 2`; Windows: PowerShell's Start-Sleep.
+        let slow: &[&str] = if cfg!(windows) { &["powershell", "-NoProfile", "-Command", "Start-Sleep 2"] } else { &["/bin/sleep", "2"] };
+        let e = run_hook_argv(slow, Duration::from_millis(200)).unwrap_err();
         assert!(e.contains("timed out after 200ms"), "{e}");
         assert!(e.contains("child killed"), "{e}");
-        assert!(e.contains("/bin/sleep"), "{e}");
+        assert!(e.contains(slow[0]), "{e}");
         assert!(
             t0.elapsed() < Duration::from_millis(1500),
             "timeout did not bound the run: {:?}",

@@ -71,8 +71,10 @@ fn gateway_start_and_stop_hooks_fire_around_the_daemon() {
              event = \"gateway_stop\"\n\
              timeout_secs = 5\n\
              command = \"cat > {}\"\n",
-            start.display(),
-            stop.display()
+            // The hook command is a shell line: Windows' Git Bash wants `C:/…` (and the TOML
+            // string then needs no escaping); Unix: the path as is.
+            seagent_core::platform::shell::path_str(&start),
+            seagent_core::platform::shell::path_str(&stop)
         ),
     )
     .unwrap();

@@ -19,7 +19,15 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
 
+#[cfg(not(windows))]
 pub const BUILTIN: &[(&str, &str)] = &[("cis-linux", include_str!("checklists/cis-linux.toml")), ("tw-csma", include_str!("checklists/tw-csma.toml"))];
+/// Windows adds `cis-windows` (registry reads and the locale-independent `winprobe` APIs); it is the
+/// default list there.
+#[cfg(windows)]
+pub const BUILTIN: &[(&str, &str)] = &[("cis-linux", include_str!("checklists/cis-linux.toml")), ("tw-csma", include_str!("checklists/tw-csma.toml")), ("cis-windows", include_str!("checklists/cis-windows.toml"))];
+
+/// The list a call without `checklist` runs: this host's baseline.
+const DEFAULT_LIST: &str = if cfg!(windows) { "cis-windows" } else { "cis-linux" };
 
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -66,15 +74,41 @@ pub struct Checklist {
 /// Programs a check may run, and the argument shapes that keep them read-only.
 fn allowed(argv: &[String]) -> Result<(), String> {
     let (p, args) = argv.split_first().ok_or("empty command")?;
+    #[cfg(unix)]
     let name = p.rsplit('/').next().unwrap_or(p);
+    #[cfg(not(unix))]
+    let name = p.rsplit(['/', '\\']).next().unwrap_or(p);
     let ok = match name {
         "cat" | "grep" | "stat" | "findmnt" | "pgrep" | "getent" | "ls" | "dpkg-query" | "uname" | "id" => true,
         "sysctl" => args.iter().all(|a| a == "-n" || (!a.starts_with('-') && !a.contains('='))),
         "timedatectl" => args.first().is_some_and(|a| a == "show" || a == "status"),
         "rpm" => args.iter().all(|a| a == "-q" || a == "-qa" || !a.starts_with('-')) && args.iter().any(|a| a.starts_with("-q")),
+        // Windows read-only counterparts (cis-windows): only their query / show forms.
+        #[cfg(windows)]
+        n if windows_allowed(n, args) => true,
+        // In-process locale-independent reads (`winprobe`) for the checks whose commands translate.
+        #[cfg(windows)]
+        _ if super::winprobe::allowed(argv) => true,
         _ => false,
     };
     if ok { Ok(()) } else { Err(format!("`{}` is not an allowed read-only check command", join(argv))) }
+}
+
+/// `reg query`, `net accounts` / `net user <name>` / `net localgroup <name>` (no switches),
+/// `netsh … show …`, `sc query|qc`, `auditpol /get`, `findstr`, `whoami`.
+#[cfg(windows)]
+fn windows_allowed(name: &str, args: &[String]) -> bool {
+    let lower: Vec<String> = args.iter().map(|a| a.to_ascii_lowercase()).collect();
+    let first = lower.first().map(String::as_str).unwrap_or("");
+    match name.to_ascii_lowercase().trim_end_matches(".exe") {
+        "findstr" | "whoami" => true,
+        "reg" => first == "query",
+        "net" => (first == "accounts" && lower.len() == 1) || (matches!(first, "user" | "localgroup") && lower.len() == 2 && !lower[1].starts_with('/')),
+        "netsh" => lower.iter().any(|a| a == "show") && !lower.iter().any(|a| matches!(a.as_str(), "set" | "add" | "delete" | "reset" | "import" | "dump")),
+        "sc" => matches!(first, "query" | "qc" | "queryex"),
+        "auditpol" => first == "/get",
+        _ => false,
+    }
 }
 
 pub fn parse_list(text: &str, name: &str) -> Result<Checklist, String> {
@@ -176,7 +210,7 @@ impl ComplianceCheck {
     fn load(&self, ctx: &ToolCtx, input: &Value) -> Result<Vec<Checklist>, String> {
         let mut names = arg_list(input, "checklist");
         if names.is_empty() {
-            names.push("cis-linux".into());
+            names.push(DEFAULT_LIST.into());
         }
         let extra = self.cfg.list("secops", "checklists");
         let mut out = vec![];
@@ -186,7 +220,7 @@ impl ComplianceCheck {
             } else {
                 // A configured list by its meta id or file stem, or a path in the workspace.
                 let path = extra.iter().map(|p| ctx.resolve(p)).find(|p| p.file_stem().is_some_and(|s| s.to_string_lossy() == n)).unwrap_or_else(|| ctx.resolve(&n));
-                let text = std::fs::read_to_string(&path).map_err(|e| format!("checklist `{n}`: not built in (cis-linux, tw-csma) and {}: {e}", path.display()))?;
+                let text = std::fs::read_to_string(&path).map_err(|e| format!("checklist `{n}`: not built in ({}) and {}: {e}", BUILTIN.iter().map(|(b, _)| *b).collect::<Vec<_>>().join(", "), path.display()))?;
                 parse_list(&text, &n)?
             };
             resolve(&mut l)?;
@@ -259,7 +293,7 @@ impl Tool for ComplianceCheck {
                     let ok_codes = c.ok_exit.clone().unwrap_or_else(|| vec![0]);
                     let mut last = (None, String::new());
                     for a in &alts {
-                        let r = cache.entry(a.clone()).or_insert_with(|| match run(a, None, timeout, &ctx.cancel) {
+                        let r = cache.entry(a.clone()).or_insert_with(|| match run_check(a, timeout, &ctx.cancel) {
                             Ok(o) => (if o.timed_out { None } else { o.code }, if o.stdout.trim().is_empty() { o.stderr } else { o.stdout }),
                             Err(e) => (None, e),
                         });
@@ -291,6 +325,16 @@ impl Tool for ComplianceCheck {
         }
         ToolOutput::ok(cap_output(ctx, "compliance_check", serde_json::to_string_pretty(&json!({"host": hostname(), "written": written, "reports": reports})).unwrap_or_default(), 40_000))
     }
+}
+
+/// One check command: a `winprobe` read in-process (Windows), else the program itself.
+fn run_check(a: &[String], timeout: Duration, cancel: &seagent_core::Cancel) -> Result<crate::ops::run::RunOut, String> {
+    #[cfg(windows)]
+    if a.first().is_some_and(|p| super::winprobe::PROBES.contains(&p.as_str())) {
+        let (code, out) = super::winprobe::run(a);
+        return Ok(crate::ops::run::RunOut { code, stdout: out, ..Default::default() });
+    }
+    run(a, None, timeout, cancel)
 }
 
 fn hostname() -> String {
@@ -350,6 +394,51 @@ mod tests {
         assert_eq!(evaluate(&a, Some(0), "rw,nodev").status, "fail");
     }
 
+    /// Windows counterpart of the custom-list test: `findstr` instead of `grep` / `cat`, a
+    /// TOML literal string for the `C:\…` path, and the built-in `cis-windows` list on this host.
+    #[cfg(windows)]
+    #[test]
+    fn the_tool_runs_a_custom_list_declares_one_exec_and_writes_a_report_windows() {
+        let ctx = crate::testutil::ctx("secops-compliance-win");
+        let f = ctx.workspace.join("conf.txt");
+        std::fs::write(&f, "PermitRootLogin no\r\nMaxAuthTries 6\r\n").unwrap();
+        let p = f.display();
+        let list = format!("[meta]\nid=\"mine\"\ntitle=\"Mine\"\n[[check]]\nid=\"a\"\nsection=\"ssh\"\ntitle=\"root\"\ncmd=[\"findstr\",\"/i\",\"PermitRootLogin\",'{p}']\nmatch='no'\nfix=\"set no\"\n[[check]]\nid=\"b\"\nsection=\"ssh\"\ntitle=\"tries\"\ncmd=[\"findstr\",\"MaxAuthTries\",'{p}']\npattern='(\\d+)'\nmax=4\nfix=\"set 4\"\n[[check]]\nid=\"c\"\nsection=\"org\"\ntitle=\"plan\"\nmanual=true\nevidence=\"the plan\"\n[[check]]\nid=\"d\"\nsection=\"ssh\"\ntitle=\"missing\"\ncmd=[\"findstr\",\".\",'{p}.nope']\nfix=\"x\"\n");
+        std::fs::write(ctx.workspace.join("mine.toml"), list).unwrap();
+        let t = ComplianceCheck { cfg: Arc::new(Integrations::new(json!({"secops": {"checklists": ["mine.toml"]}}))) };
+        let input = json!({"checklist": ["mine"], "output": "reports/c.md"});
+        let fx = t.effects(&ctx, &input);
+        assert_eq!(fx.len(), 2, "{fx:?}");
+        assert!(matches!(&fx[0], Effect::Exec { command } if command.starts_with("findstr /i PermitRootLogin") && command.contains(" ; findstr ")), "{fx:?}");
+        let o = t.call(&ctx, input);
+        assert!(!o.is_error, "{}", o.content);
+        let v: Value = serde_json::from_str(&o.content).unwrap();
+        let s = &v["reports"][0]["summary"];
+        assert_eq!((s["pass"].as_u64(), s["fail"].as_u64(), s["manual"].as_u64(), s["skip"].as_u64()), (Some(1), Some(1), Some(1), Some(1)), "{s}");
+        let md = std::fs::read_to_string(ctx.workspace.join("reports/c.md")).unwrap();
+        assert!(md.contains("| b | ssh | tries | fail | MaxAuthTries 6 | set 4 |"), "{md}");
+        // Mutating forms of the Windows tools are refused at parse time.
+        for bad in [r#"["reg","add","HKCU\\x"]"#, r#"["net","user","x","/add"]"#, r#"["netsh","advfirewall","set","allprofiles","state","off"]"#, r#"["sc","stop","x"]"#, r#"["auditpol","/set"]"#] {
+            assert!(parse_list(&format!("[[check]]\nid=\"x\"\ncmd={bad}"), "bad").is_err(), "{bad}");
+        }
+        // The default list on Windows is this host's baseline, and it runs without error.
+        let o = t.call(&ctx, json!({"section": "3 Network"}));
+        assert!(!o.is_error && o.content.contains("Windows Defender Firewall"), "{}", o.content);
+        // The account-policy, Guest and service checks read the locale-independent probes: each
+        // one reaches a verdict from its evidence (never a translated label it could not parse).
+        let o = t.call(&ctx, json!({}));
+        let v: Value = serde_json::from_str(&o.content).unwrap();
+        let rows = v["reports"][0]["results"].as_array().unwrap().clone();
+        for id in ["1.1.1", "1.1.4", "1.2.1", "2.3.1", "4.3"] {
+            let r = rows.iter().find(|r| r["id"] == id).unwrap_or_else(|| panic!("{id} missing"));
+            assert!(r["status"] == "pass" || r["status"] == "fail", "{r}");
+            assert!(r["evidence"].as_str().unwrap_or("").contains('='), "{id} evidence is the probe's key=value text: {r}");
+        }
+        assert_eq!(rows.iter().find(|r| r["id"] == "4.3").unwrap()["status"], "pass", "the Event Log service runs on every Windows");
+    }
+
+    // grep / cat / `/etc` fixtures; Windows: `…_writes_a_report_windows`.
+    #[cfg(unix)]
     #[test]
     fn the_tool_runs_a_custom_list_declares_one_exec_and_writes_a_report() {
         let ctx = crate::testutil::ctx("secops-compliance");

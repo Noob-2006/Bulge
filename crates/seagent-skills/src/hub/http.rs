@@ -282,12 +282,22 @@ pub mod testserver {
                 if r.read_line(&mut first).is_err() {
                     continue;
                 }
+                let mut len = 0usize;
                 loop {
                     let mut h = String::new();
                     if r.read_line(&mut h).is_err() || h == "\r\n" || h.is_empty() {
                         break;
                     }
+                    if let Some((k, v)) = h.split_once(':') {
+                        if k.trim().eq_ignore_ascii_case("content-length") {
+                            len = v.trim().parse().unwrap_or(0);
+                        }
+                    }
                 }
+                // Read the body before answering: closing a socket with unread request bytes
+                // makes Windows reset the connection, and the client sees no response at all.
+                let mut body_in = vec![0u8; len];
+                let _ = std::io::Read::read_exact(&mut r, &mut body_in);
                 let path = first.split_whitespace().nth(1).unwrap_or("/").to_string();
                 lg.lock().unwrap().push(path.clone());
                 let bare = path.split('?').next().unwrap_or("").to_string();

@@ -55,6 +55,7 @@ crates/seagent-kernel/src/gate/os.rs	/var/folders
 crates/seagent-kernel/src/secretstore/keyring.rs	/usr/bin/security
 crates/seagent-kernel/src/subdir.rs	/home
 crates/seagent-kernel/src/subdir.rs	/root
+crates/seagent-media/src/meeting/cdp.rs	/Applications
 crates/seagent-media/src/stt/local.rs	/usr/sbin/sysctl
 crates/seagent-memory/src/byterover.rs	/usr/local/bin/brv
 crates/seagent-plugin/src/builtin/disk_cleanup.rs	/tmp

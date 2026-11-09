@@ -315,6 +315,14 @@ fn native_sandbox() -> Option<&'static str> {
 /// namespace-sandbox tier under its own name).
 pub const OS_SANDBOX_WARNING: &str = "OS sandbox (macOS Seatbelt): shares the host kernel, file access limited to system files, the workspace and a private temp dir; home unreadable. One kernel or sandbox bug from the host; weaker than a microVM.";
 
+/// How to get the microVM tier on macOS / Windows (the Linux fallback says the same).
+#[allow(dead_code)]
+const MICROVM_HINT: &str = if cfg!(windows) {
+    "Build the guest image (`seagent sandbox vm image build`) and enable a VM provider (Hyper-V, or QEMU with WHPX) for a microVM."
+} else {
+    "Build the guest image (`seagent sandbox vm image build`) for a microVM (Virtualization.framework, or QEMU with HVF)."
+};
+
 /// Make an `auto` plan honest on macOS / Windows: the policy table in `seagent-vm` knows
 /// bwrap and Landlock, which these systems lack, so "no microVM, no namespace sandbox" would
 /// otherwise mean the host. Here the OS sandbox takes that place, and an explicitly
@@ -334,7 +342,7 @@ pub fn os_plan(mut plan: seagent_vm::policy::Plan, sandboxed: bool) -> seagent_v
             provider: None,
             level: IsolationLevel::OsSandbox,
             origin: Origin::AutoFallback,
-            warning: Some(format!("no microVM available on this {} machine; {} runs in the {name} sandbox instead (host home and keys not readable) — {os_warning}", std::env::consts::OS, if sandboxed { "this session" } else { "the agent" })),
+            warning: Some(format!("no microVM available on this {} machine; {} runs in the {name} sandbox instead (host home and keys not readable) — {os_warning} {}", std::env::consts::OS, if sandboxed { "this session" } else { "the agent" }, MICROVM_HINT)),
             reason: format!("auto: no microVM, the agent still runs isolated in the {} OS sandbox ({name})", std::env::consts::OS),
         };
     }
@@ -794,7 +802,10 @@ mod tests {
             assert!(w.starts_with("NOT ISOLATED"), "{p:?}");
         } else {
             assert_eq!(p.origin, seagent_vm::policy::Origin::AutoFallback, "{p:?}");
-            assert!(w.contains("host home and keys not mounted") && w.to_lowercase().contains("build the guest image"), "{p:?}");
+            // Linux: the namespace sandbox does not mount them; macOS / Windows: the OS sandbox
+            // (Seatbelt / AppContainer) cannot read them.
+            let hidden = if cfg!(any(windows, target_os = "macos")) { "host home and keys not readable" } else { "host home and keys not mounted" };
+            assert!(w.contains(hidden) && w.to_lowercase().contains("build the guest image"), "{p:?}");
         }
         // The explicit opt-out (test rigs, operators who want the host): never rewritten.
         let env = ExecEnv::new(ExecConfig::parse(&json!({"backend": "local"})).unwrap());

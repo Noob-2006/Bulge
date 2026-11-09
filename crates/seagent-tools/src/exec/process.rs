@@ -286,14 +286,18 @@ fn pump(entry: Arc<Mutex<Entry>>) {
             (e.child.clone(), e.log.clone(), e.buffer_cap, e.detached)
         };
         // A detached child already writes the log through its wrapper shell.
-        let mut file = if detached { None } else { OpenOptions::new().create(true).append(true).open(&log).ok() };
-        let mut buf = [0u8; 16384];
+        let mut file = if detached { None } else { OpenOptions::new().create(true).append(true).open(&log).ok() };        let mut buf = [0u8; 16384];
         loop {
             let n = {
                 let mut c = child.lock().unwrap();
                 match c.read(&mut buf, Duration::from_millis(50)) {
                     Ok(n) => n,
                     Err(_) => {
+                        // Windows ConPTY: the output only ends once the pseudo console is
+                        // closed, which `try_wait` does when the command has exited — without
+                        // this poll a PTY job would never reach EOF.
+                        #[cfg(windows)]
+                        let _ = c.try_wait();
                         // Hands the child back: a tight re-lock loop starves a writer
                         // (and a `process write` must never wait seconds for the pump).
                         drop(c);

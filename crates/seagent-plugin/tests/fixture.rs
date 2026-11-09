@@ -247,7 +247,8 @@ impl Drop for Srv {
 fn http_server(extra: &[&str]) -> Option<(Srv, u16)> {
     let f = fixture()?;
     let port = 20000 + (rand() % 20000) as u16;
-    let mut child = Command::new("python3").arg("-I").arg(f).arg("--http").arg(port.to_string()).args(extra).stdout(Stdio::piped()).stderr(Stdio::null()).spawn().unwrap();
+    // `python3` on Unix; the `py -3` launcher on Windows (not the Store alias).
+    let mut child = seagent_core::platform::layout::python3_command().arg("-I").arg(f).arg("--http").arg(port.to_string()).args(extra).stdout(Stdio::piped()).stderr(Stdio::null()).spawn().unwrap();
     let mut line = String::new();
     BufReader::new(child.stdout.as_mut().unwrap()).read_line(&mut line).unwrap();
     assert_eq!(line.trim(), "ready");

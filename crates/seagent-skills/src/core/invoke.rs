@@ -144,7 +144,8 @@ fn walk_files(d: &Path, base: &Path, out: &mut Vec<String>) {
         if p.is_dir() {
             walk_files(&p, base, out);
         } else if let Ok(r) = p.strip_prefix(base) {
-            out.push(r.to_string_lossy().to_string());
+            // Skill-relative, for the model: `scripts/go.sh` on every OS.
+            out.push(seagent_core::platform::layout::model_path(r));
         }
     }
 }
@@ -191,7 +192,8 @@ pub fn skill_block(sk: &Skill, note: &str, instruction: &str, session: Option<&s
     setup::prepare(&sk.front, &sk.name, cfg, vault);
     let content = preprocess::preprocess(&sk.body()?, Some(&sk.dir), session, s);
     let mut parts = vec![note.to_string(), String::new(), content.trim().to_string()];
-    parts.extend([String::new(), format!("[Skill directory: {}]", sk.dir.display()), SKILL_DIR_NOTE.to_string()]);
+    // The directory the model will use in shell commands: Git Bash spelling (`C:/…`) on Windows.
+    parts.extend([String::new(), format!("[Skill directory: {}]", seagent_core::platform::shell::path_str(&sk.dir)), SKILL_DIR_NOTE.to_string()]);
     if let Some(c) = skill_config_block(sk, cfg) {
         parts.extend([String::new(), c]);
     }
@@ -420,7 +422,7 @@ mod tests {
         let l = Loader { cfg: &cfg, paths: &paths, ws: &ws, settings: &s, vault: Vault::empty() };
         let m = l.invoke("deploy", "to prod", Some("sess1")).unwrap().unwrap();
         assert!(m.starts_with("[IMPORTANT: The user has invoked the \"deploy\" skill"), "{m}");
-        assert!(m.contains(&format!("Run {}/scripts/go.sh for sess1", ws.join(".seagent/skills/deploy").display())));
+        assert!(m.contains(&format!("Run {}/scripts/go.sh for sess1", seagent_core::platform::shell::path_str(&ws.join(".seagent").join("skills").join("deploy")))), "{m}");
         assert!(m.contains("[Skill setup note: Setup needed before using this skill: missing env $DEPLOY_TOKEN_XYZ."), "{m}");
         assert!(m.contains("- scripts/go.sh") && m.ends_with("skill invocation: to prod"));
         // Collected secrets reach the skill's environment (vault → this process → its commands).

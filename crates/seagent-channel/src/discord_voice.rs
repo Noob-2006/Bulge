@@ -2415,7 +2415,8 @@ mod realtime_speech_tests {
         let tts_out = dir.path().join("tts.ogg");
         let cfg = format!(
             "[realtime]\nconnect_timeout_ms = 3000\nclose_timeout_ms = 2000\nreconnect_attempts = 1\n[providers.deepgram]\napi_key = \"k\"\nbase_url = \"{url}\"\n[tts]\nprovider = \"fake\"\n[tts.providers.fake]\ncommand = \"printf OggS-fake-voice > {{output_path}}; cp {{output_path}} {out}\"\nformat = \"opus\"\n",
-            out = tts_out.display()
+            // A shell line inside a TOML string: Git Bash spelling on Windows (`C:/…`).
+            out = seagent_core::platform::shell::path_str(&tts_out)
         );
         seagent_media::set_shared(seagent_media::Media::new(seagent_media::MediaConfig::from_toml(&cfg)));
         // One second of 48 kHz stereo, as the voice socket decodes it.

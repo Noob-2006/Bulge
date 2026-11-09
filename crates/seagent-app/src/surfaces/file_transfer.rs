@@ -121,7 +121,10 @@ impl Transfer {
 
     fn path(p: &Value) -> Result<String, String> {
         let s = p["path"].as_str().map(str::trim).filter(|s| !s.is_empty()).ok_or("path required")?;
-        if !s.starts_with('/') {
+        // Absolute on the node, whichever OS it runs: `/x` or a Windows `C:\x` / `\\srv\share`.
+        let b = s.as_bytes();
+        let windows_abs = (b.len() >= 3 && b[0].is_ascii_alphabetic() && b[1] == b':' && (b[2] == b'\\' || b[2] == b'/')) || s.starts_with("\\\\");
+        if !s.starts_with('/') && !windows_abs {
             return Err("path must be absolute on the node".into());
         }
         Ok(s.to_string())
@@ -283,7 +286,8 @@ fn walk(root: &Path, dir: &Path, out: &mut Vec<(String, u64)>) {
         let p = e.path();
         match e.file_type() {
             Ok(t) if t.is_dir() => walk(root, &p, out),
-            Ok(t) if t.is_file() => out.push((p.strip_prefix(root).unwrap_or(&p).display().to_string(), e.metadata().map(|m| m.len()).unwrap_or(0))),
+            // Archive-relative names use `/` on every node OS (`docs/x.bin`).
+            Ok(t) if t.is_file() => out.push((seagent_core::platform::layout::model_path(p.strip_prefix(root).unwrap_or(&p)), e.metadata().map(|m| m.len()).unwrap_or(0))),
             _ => {}
         }
     }

@@ -423,7 +423,7 @@ Also: the ACP runtime (`crates/seagent-model/src/acp.rs`) is a port of Hermes
 streaming updates, the `fs/read_text_file` / `fs/write_text_file` / `session/request_permission`
 server→client answers and the deprecated `gh copilot` banner check) — MIT.
 
-Also: per-task auxiliary routing (`crates/seagent-model/src/aux.rs`) follows Hermes
+Also: per-task auxiliary routing (`crates/seagent-model/src/aux_models.rs`) follows Hermes
 `agent/auxiliary_task_config.py` (route keys travel as one unit) and `agent/auxiliary_health.py`
 (the `_FALLBACK_REASONS` classes and their quarantine TTLs); the Nous Portal agent-key slots
 (`crates/seagent-model/src/nous.rs`) follow `hermes_cli/auth_nous.py` (`_set_nous_agent_key_from_invoke_jwt`,

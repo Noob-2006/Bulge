@@ -14,7 +14,7 @@ use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::io::{self, BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Child, ChildStdin, Command, Stdio};
+use std::process::{Child, ChildStdin, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Sender};
 use std::sync::{Arc, Mutex};
@@ -188,7 +188,8 @@ struct Bridge {
 
 impl Bridge {
     fn start(python: &str, env: &[(String, String)], dir: &Path) -> Result<Arc<Bridge>, String> {
-        let mut cmd = Command::new(python);
+        // Windows: the default `python3` is the Python launcher, not the Store alias.
+        let mut cmd = seagent_core::platform::layout::program_command(python);
         cmd.arg("-u").arg("-c").arg(BRIDGE).current_dir(dir).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
         for (k, v) in env {
             cmd.env(k, v);
@@ -493,6 +494,7 @@ class _Stdin:
     def write_eof(self): self.p.stdin.close()
 class _Proc:
     def __init__(self, argv):
+        if argv[0] == "bash" and os.environ.get("FAKE_MODAL_BASH"): argv = [os.environ["FAKE_MODAL_BASH"]] + argv[1:]
         self.p = subprocess.Popen(argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         self.stdin = _Stdin(self.p)
         self.stdout = iter(lambda: self.p.stdout.read1(4096), b"")
@@ -536,6 +538,9 @@ class Sandbox:
         BackendCtx { workspace: ws.to_path_buf(), scope_key: "s-m".into(), secrets: Arc::new(sec), home: home.to_path_buf(), sandboxed: true }
     }
 
+    #[cfg(windows)]
+    static MODAL_ENV: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     /// The bridge reads PYTHONPATH / FAKE_MODAL_* from the environment, which is
     /// process-wide: one test drives the whole lifecycle.
     #[test]
@@ -544,11 +549,17 @@ class Sandbox:
             eprintln!("skipping: no python3");
             return;
         }
+        // Windows: the reachable test below shares the process-wide PYTHONPATH; serialise.
+        #[cfg(windows)]
+        let _env = MODAL_ENV.lock().unwrap_or_else(|e| e.into_inner());
         let (d, home, ws, remote) = setup("modal");
         std::env::set_var("PYTHONPATH", d.join("py"));
         std::env::set_var("FAKE_MODAL_LOG", d.join("log"));
         std::fs::write(ws.join("in.txt"), "hi from host").unwrap();
-        let v = json!({"image": "debian:12", "workspace_root": remote.display().to_string(), "timeout_secs": 99});
+        // Windows: Git Bash plays the sandbox (`FAKE_MODAL_BASH`), so the root is `/c/…`.
+        #[cfg(windows)]
+        std::env::set_var("FAKE_MODAL_BASH", seagent_core::platform::layout::bash().expect("Git Bash"));
+        let v = json!({"image": "debian:12", "workspace_root": crate::testutil::remote_path(&remote), "timeout_secs": 99});
         let b = build(&v, &ExecConfig::default(), &ctx(&home, &ws)).unwrap();
         let log = || std::fs::read_to_string(d.join("log")).unwrap_or_default();
         assert!(log().contains("[\"registry\", \"debian:12\"]") && log().contains("\"create\", [\"sleep\", \"infinity\"]"), "{}", log());
@@ -600,6 +611,48 @@ class Sandbox:
         if no_profile && std::env::var_os("MODAL_TOKEN_ID").is_none() {
             assert!(build(&v, &ExecConfig::default(), &c).err().unwrap().contains("no credentials"));
         }
+    }
+
+    /// Windows counterpart of `reachable_through_exec_backend_config`: the wrapper `python` is
+    /// a `.cmd` that sets `PYTHONPATH` and runs the Python launcher; Git Bash plays the sandbox.
+    #[cfg(windows)]
+    #[test]
+    fn reachable_through_exec_backend_config_windows() {
+        let Some((py3, py_args)) = seagent_core::platform::layout::python3() else {
+            eprintln!("skipping: no Python 3");
+            return;
+        };
+        let bash = seagent_core::platform::layout::bash().expect("Git Bash");
+        let d = tmpdir("modalreachwin");
+        let (home, ws, remote) = (d.join("home"), d.join("ws"), d.join("remote"));
+        for p in [&home, &ws, &remote] {
+            std::fs::create_dir_all(p).unwrap();
+        }
+        let _env = MODAL_ENV.lock().unwrap_or_else(|e| e.into_inner());
+        let log = d.join("log");
+        // The unix test wraps `python3` in a script that sets PYTHONPATH; a `.cmd` wrapper cannot
+        // take the bridge's `-c` script (batch quoting), so the interpreter itself is configured
+        // and PYTHONPATH is set while holding the lock the lifecycle test takes too.
+        let pkg = d.join("py/modal");
+        std::fs::create_dir_all(&pkg).unwrap();
+        let fake = FAKE_MODAL.replace("os.environ[\"FAKE_MODAL_LOG\"]", &format!("{log:?}")).replace("os.environ.get(\"FAKE_MODAL_BASH\")", "True").replace("os.environ[\"FAKE_MODAL_BASH\"]", &format!("{:?}", bash.display().to_string()));
+        std::fs::write(pkg.join("__init__.py"), fake).unwrap();
+        std::env::set_var("PYTHONPATH", d.join("py"));
+        let exe = std::process::Command::new(&py3).args(&py_args).arg("-c").arg("import sys; print(sys.executable)").output().unwrap();
+        let py = PathBuf::from(String::from_utf8_lossy(&exe.stdout).trim());
+        let secrets: Arc<dyn Fn(&str) -> String + Send + Sync> = Arc::new(|s: &str| s.replace("{{secret:MODAL_TOKEN_ID}}", "ak-1").replace("{{secret:MODAL_TOKEN_SECRET}}", "as-1"));
+        let env = crate::exec::ExecEnv::new(ExecConfig {
+            backend: "modal".into(),
+            modal: json!({"python": py.display().to_string(), "image": "debian:12", "workspace_root": crate::testutil::remote_path(&remote), "persistent": false}),
+            ..Default::default()
+        });
+        let b = env.backend("m1", &ws, &home, &secrets, false).unwrap();
+        assert_eq!(b.id(), "modal");
+        b.before_exec().unwrap();
+        let (st, out) = crate::exec::run_capture(b.as_ref(), "echo from-modal", None, Duration::from_secs(30)).unwrap();
+        assert!(st.success() && String::from_utf8_lossy(&out).contains("from-modal"), "{}", String::from_utf8_lossy(&out));
+        let log = std::fs::read_to_string(&log).unwrap_or_default();
+        assert!(log.contains("\"create\"") && log.contains("debian:12"), "the SDK bridge really ran: {log}");
     }
 
     #[cfg(unix)]

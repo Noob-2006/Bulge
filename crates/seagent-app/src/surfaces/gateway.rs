@@ -408,7 +408,7 @@ impl GatewayTool {
                     return Ok(json!({"ok": false, "code": "owner_required", "reason": "owner_required", "message": format!("No owner authorizes this update: the session came from channel `{ch}`{}. Run it from the machine (seagent chat / web UI) or an operator schedule.", sender.map(|s| format!(" (sender {s})")).unwrap_or_default())}));
                 }
                 let argv = update_argv(env)?;
-                let out = std::process::Command::new(&argv[0]).args(&argv[1..]).stdin(std::process::Stdio::null()).output().map_err(|e| format!("{}: {e}", argv[0]))?;
+                let out = seagent_core::platform::layout::program_command_args(&argv[0], &argv[1..]).stdin(std::process::Stdio::null()).output().map_err(|e| format!("{}: {e}", argv[0]))?;
                 let tail = |b: &[u8]| String::from_utf8_lossy(b).lines().rev().take(20).collect::<Vec<_>>().into_iter().rev().collect::<Vec<_>>().join("\n");
                 if !out.status.success() {
                     return Ok(json!({"ok": false, "code": "update_failed", "status": out.status.code(), "stdout": tail(&out.stdout), "stderr": tail(&out.stderr)}));
@@ -564,7 +564,9 @@ mod tests {
 
     #[test]
     fn update_requires_an_owner_and_restart_needs_the_daemon() {
-        let (env, _) = testkit::env("gw2", &[], "[gateway]\nupdate_command = [\"/bin/false\"]\n");
+        // A command that fails: `/bin/false`; Windows: `cmd /c exit 1` (no `/bin` there).
+        let fail = if cfg!(windows) { "[\"cmd\", \"/c\", \"exit 1\"]" } else { "[\"/bin/false\"]" };
+        let (env, _) = testkit::env("gw2", &[], &format!("[gateway]\nupdate_command = {fail}\n"));
         let router = seagent_channel::router::Router::open(env.routes.clone(), Default::default());
         router.bind(&seagent_channel::router::RouteKey { channel: "tg".into(), chat: "9".into(), sender: Some("u1".into()) }, "s1");
         let t = GatewayTool(env.clone());

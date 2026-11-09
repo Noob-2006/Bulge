@@ -496,7 +496,9 @@ impl Runtime {
         if !model.contains('/') {
             return Err(KernelError::Invalid(format!("model must be provider/model, got `{model}`")));
         }
-        let ws = workspace.canonicalize().map_err(|e| KernelError::Invalid(format!("workspace {}: {e}", workspace.display())))?;
+        // `layout::canonicalize`: std on Unix; Windows without the `\\?\` prefix, which shells,
+        // git and the UI do not accept as a working directory.
+        let ws = seagent_core::platform::layout::canonicalize(workspace).map_err(|e| KernelError::Invalid(format!("workspace {}: {e}", workspace.display())))?;
         if !ws.is_dir() {
             return Err(KernelError::Invalid(format!("workspace {} is not a directory", ws.display())));
         }

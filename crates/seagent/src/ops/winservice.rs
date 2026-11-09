@@ -106,7 +106,9 @@ mod imp {
         if let Some(d) = log.parent() {
             let _ = std::fs::create_dir_all(d);
         }
-        let Ok(f) = std::fs::OpenOptions::new().create(true).append(true).open(log) else { return };
+        // Inherited by the hooks and tools the service runs: not append-only (Git Bash exits
+        // 1 at startup on such a stdout; `open_child_log`).
+        let Ok(f) = seagent_core::platform::proc::open_child_log(log) else { return };
         let Ok(f2) = f.try_clone() else { return };
         // SAFETY: the handles are leaked on purpose: they stay the std handles for the
         // lifetime of the process.

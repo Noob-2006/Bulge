@@ -179,7 +179,8 @@ fn slash_commands_load_skills_from_the_kernel() {
     let r = k.run_slash("/deploy now please", Some(&id), "cli").unwrap().unwrap();
     let prompt = r.prompt.expect("a /skill invocation sends a prompt");
     assert!(prompt.starts_with("[IMPORTANT: The user has invoked the \"deploy\" skill"), "{prompt}");
-    assert!(prompt.contains(&format!("Deploy with {}/run.sh", f.ws.join(".seagent/skills/deploy").display())), "template var expanded: {prompt}");
+    // `${SEAGENT_SKILL_DIR}` is spelled for the shell (Git Bash: `C:/…`; Unix: as is).
+    assert!(prompt.contains(&format!("Deploy with {}/run.sh", seagent_core::platform::shell::path_str(&f.ws.join(".seagent").join("skills").join("deploy")))), "template var expanded: {prompt}");
     assert!(prompt.contains("[Skill directory:") && prompt.ends_with("skill invocation: now please"), "{prompt}");
 
     // Stacked /<a> /<b> instruction.
@@ -316,7 +317,7 @@ fn skill_slash_command_loads_lists_and_searches() {
     let search = k.run_slash("/skill search deploy", Some(&id), "cli").unwrap().unwrap().text.unwrap();
     assert!(search.contains("match(es) for \"deploy\"") && search.contains("- deploy: deploy things"), "{search}");
     let v = k.run_slash("/skill view deploy", Some(&id), "cli").unwrap().unwrap().text.unwrap();
-    assert!(v.starts_with(&format!("{}", f.ws.join(".seagent/skills/deploy/SKILL.md").display())), "{v}");
+    assert!(v.starts_with(&format!("{}", f.ws.join(".seagent").join("skills").join("deploy").join("SKILL.md").display())), "{v}");
     assert!(k.run_slash("/skill nope", Some(&id), "cli").unwrap().is_err());
     let usage = k.run_slash("/skill", Some(&id), "cli").unwrap().unwrap().text.unwrap();
     assert!(usage.contains("usage: /skill <name>"), "{usage}");

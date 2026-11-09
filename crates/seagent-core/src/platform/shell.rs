@@ -169,7 +169,74 @@ pub fn command(style: Style, script: &str) -> Command {
     let (prog, args) = argv(style, script);
     let mut c = Command::new(prog);
     c.args(args);
+    #[cfg(windows)]
+    if let Some(dir) = python_shims() {
+        // `python3` in a Git Bash script would hit the Store alias; the shim runs `py -3`.
+        let path = std::env::var_os("PATH").unwrap_or_default();
+        let mut p = dir.clone().into_os_string();
+        p.push(";");
+        p.push(path);
+        c.env("PATH", p);
+    }
     c
+}
+
+/// Windows + Git Bash: python.org installs only `py.exe` / `python.exe`, so `python3` on PATH is
+/// the WindowsApps Store alias ("Python was not found", exit 9009 / 49). When that is the case
+/// and a real Python exists, a `python3` (and `python`) shim script in
+/// `%LOCALAPPDATA%\seagent\shims` runs it, and [`command`] puts that directory first on PATH.
+#[cfg(windows)]
+pub fn python_shims() -> Option<&'static PathBuf> {
+    static SHIMS: std::sync::OnceLock<Option<(PathBuf, Vec<&'static str>, String)>> = std::sync::OnceLock::new();
+    let (dir, need, body) = SHIMS
+        .get_or_init(|| {
+            if !active().kind.is_posix() {
+                return None;
+            }
+            let missing = |n: &str| super::layout::which(n).is_none_or(|p| super::layout::is_windows_apps_alias(&p));
+            let need: Vec<&'static str> = ["python3", "python"].into_iter().filter(|n| missing(n)).collect();
+            if need.is_empty() {
+                return None;
+            }
+            let (py, lead) = super::layout::python3()?;
+            let base = std::env::var_os("LOCALAPPDATA").map(PathBuf::from).unwrap_or_else(std::env::temp_dir);
+            let target = py.to_string_lossy().replace('\\', "/");
+            Some((base.join("seagent").join("shims"), need, format!("#!/bin/sh\nexec \"{target}\" {} \"$@\"\n", lead.join(" "))))
+        })
+        .as_ref()?;
+    // (Re)written when missing or stale: a cleaned profile dir must not leave PATH pointing at
+    // nothing.
+    std::fs::create_dir_all(dir).ok()?;
+    for n in need {
+        let f = dir.join(n);
+        if std::fs::read_to_string(&f).ok().as_deref() != Some(body.as_str()) {
+            std::fs::write(&f, body).ok()?;
+        }
+    }
+    Some(dir)
+}
+
+/// A path spelled for the shell that will read it (as a script argument or inside a script).
+/// Unix: unchanged. Windows: without the verbatim `\\?\` prefix, and with `/` separators when
+/// the shell is a bash (MSYS bash reads `C:/x/y.sh`, but eats the backslashes of `C:\x\y.sh`).
+pub fn path_arg(p: &Path) -> OsString {
+    #[cfg(windows)]
+    {
+        let plain = super::layout::simplify_verbatim(p);
+        if active().kind.is_posix() {
+            return plain.to_string_lossy().replace('\\', "/").into();
+        }
+        plain.into_os_string()
+    }
+    #[cfg(not(windows))]
+    {
+        p.as_os_str().to_os_string()
+    }
+}
+
+/// [`path_arg`] as text, for splicing into a script (quote it for the shell yourself).
+pub fn path_str(p: &Path) -> String {
+    path_arg(p).to_string_lossy().into_owned()
 }
 
 /// `bash -c SCRIPT` (or this machine's shell).

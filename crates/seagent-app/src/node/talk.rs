@@ -9,7 +9,7 @@ use super::{tmp_file, which};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::path::PathBuf;
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, Stdio};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
@@ -84,7 +84,7 @@ fn recorder(path: &str, secs: Option<f64>) -> Vec<String> {
 fn spawn(argv: &[String]) -> Result<Child, String> {
     // Windows: stdin stays open so `finish` can send ffmpeg its `q` (there is no SIGINT).
     let stdin = if cfg!(windows) { Stdio::piped() } else { Stdio::null() };
-    Command::new(&argv[0]).args(&argv[1..]).stdin(stdin).stdout(Stdio::null()).stderr(Stdio::null()).spawn().map_err(|e| format!("{}: {e}", argv[0]))
+    seagent_core::platform::layout::program_command_args(&argv[0], &argv[1..]).stdin(stdin).stdout(Stdio::null()).stderr(Stdio::null()).spawn().map_err(|e| format!("{}: {e}", argv[0]))
 }
 
 /// SIGINT lets both recorders finish the WAV header (Windows: ffmpeg's `q` on stdin).

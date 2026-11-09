@@ -105,8 +105,15 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let req = ExecRequest { script: "sleep 30".into(), cwd: Some(kit.ws.clone()), env: vec![], stdin: false, stdin_data: None, pty: None, login: false, detach: false, log_file: None, exit_file: None };
         let child = {
+            #[cfg(unix)]
             let mut cmd = std::process::Command::new("sleep");
+            #[cfg(unix)]
             cmd.arg("30");
+            // Windows has no `sleep.exe`; PowerShell's Start-Sleep is the same long-running job.
+            #[cfg(windows)]
+            let mut cmd = std::process::Command::new("powershell");
+            #[cfg(windows)]
+            cmd.args(["-NoProfile", "-Command", "Start-Sleep 30"]);
             seagent_tools::exec::local::spawn_command(cmd, &req, None).unwrap()
         };
         let backend = std::sync::Arc::new(seagent_tools::exec::local::LocalBackend::new()) as std::sync::Arc<dyn seagent_core::exec::ExecBackend>;

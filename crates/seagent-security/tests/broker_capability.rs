@@ -137,7 +137,9 @@ fn a_tier_three_command_still_queues_even_for_a_destructive_component() {
 fn the_audit_trail_names_the_component_that_asked() {
     let d = data("audit");
     let c = ctx(d.path(), &["example.com"]);
-    let _ = broker::handle_for(&json!({"op": "exec", "argv": ["echo", "hi"]}), &c, "shell");
+    // A program that exists here: `echo`; Windows: `where` (echo is a cmd builtin there).
+    let argv = if cfg!(windows) { json!(["where", "where"]) } else { json!(["echo", "hi"]) };
+    let _ = broker::handle_for(&json!({"op": "exec", "argv": argv}), &c, "shell");
     let _ = broker::handle_for(&json!({"op": "egress", "url": "https://nope.example/", "method": "GET"}), &c, "acme-skill");
     let log = std::fs::read_to_string(d.path().join("audit").join("broker.jsonl")).unwrap_or_default();
     let lines: Vec<Value> = log.lines().filter_map(|l| serde_json::from_str(l).ok()).collect();

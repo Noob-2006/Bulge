@@ -67,6 +67,18 @@ mod tests {
                         Ok(n) => head.extend_from_slice(&b[..n]),
                     }
                 }
+                // Drain the request body first: Windows resets a socket closed with unread bytes.
+                if let Some(end) = head.windows(4).position(|w| w == b"\r\n\r\n") {
+                    let text = String::from_utf8_lossy(&head[..end]).to_ascii_lowercase();
+                    let want: usize = text.lines().find_map(|l| l.strip_prefix("content-length:")).and_then(|v| v.trim().parse().ok()).unwrap_or(0);
+                    let mut have = head.len() - end - 4;
+                    while have < want {
+                        match s.read(&mut b) {
+                            Ok(0) | Err(_) => break,
+                            Ok(n) => have += n,
+                        }
+                    }
+                }
                 let body: Vec<u8> = vec![0, 0, 1, 0, 2, 0, 3, 0];
                 let _ = s.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: audio/pcm\r\nx-audio-sample-rate: 16000\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len()).as_bytes());
                 let _ = s.write_all(&body);

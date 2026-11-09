@@ -339,8 +339,20 @@ fn send_syslog(c: &SyslogConfig, recs: &[Value]) -> Result<(), String> {
         Ok(())
     } else if let Some(hp) = addr.strip_prefix("tcp://") {
         use std::net::ToSocketAddrs;
-        let sa = hp.to_socket_addrs().map_err(|e| format!("syslog {hp}: {e}"))?.next().ok_or("syslog: no address")?;
-        let mut s = std::net::TcpStream::connect_timeout(&sa, Duration::from_secs(10)).map_err(|e| format!("syslog {hp}: {e}"))?;
+        // Every address in turn (`localhost` is `::1` first on Windows).
+        let addrs: Vec<_> = hp.to_socket_addrs().map_err(|e| format!("syslog {hp}: {e}"))?.collect();
+        let mut last = String::from("syslog: no address");
+        let mut conn = None;
+        for sa in &addrs {
+            match std::net::TcpStream::connect_timeout(sa, Duration::from_secs(10)) {
+                Ok(s) => {
+                    conn = Some(s);
+                    break;
+                }
+                Err(e) => last = format!("syslog {hp}: {e}"),
+            }
+        }
+        let mut s = conn.ok_or(last)?;
         let _ = s.set_write_timeout(Some(Duration::from_secs(10)));
         send_framed(&mut s, c, recs, hp)
     } else if let Some(hp) = addr.strip_prefix("tls://") {

@@ -151,7 +151,11 @@ impl WorkspaceSync {
                     continue;
                 }
                 let Ok(rel) = p.strip_prefix(&self.host) else { continue };
+                // The remote is POSIX: `src/a.rs` on every host (Unix: unchanged).
+                #[cfg(unix)]
                 let rel = rel.to_string_lossy().into_owned();
+                #[cfg(not(unix))]
+                let rel = rel.to_string_lossy().replace('\\', "/");
                 if rel.contains('\n') {
                     continue; // cannot travel through line-based remote listings
                 }
@@ -193,7 +197,10 @@ impl WorkspaceSync {
             }
             if m.file_type().is_symlink() {
                 let target = fs::read_link(path).map_err(|e| format!("readlink {}: {e}", path.display()))?;
+                #[cfg(unix)]
                 tar.symlink(rel, &target.to_string_lossy(), mtime_of(&m).0);
+                #[cfg(not(unix))]
+                tar.symlink(rel, &target.to_string_lossy().replace('\\', "/"), mtime_of(&m).0);
             } else {
                 rep.bytes += m.len();
                 if rep.bytes > self.opts.max_push_bytes {
@@ -337,7 +344,20 @@ find . -mindepth 1 -type d \\({prune} -false \\) -o \\( -type f -o -type l \\) -
                         continue;
                     }
                     let _ = fs::remove_file(&dest);
+                    #[cfg(unix)]
                     make_symlink(&e.link, &dest).map_err(|err| format!("symlink {}: {err}", dest.display()))?;
+                    // Windows without Developer Mode cannot create symlinks: fall back to a copy
+                    // of the (in-workspace) target, else report it instead of failing the pull.
+                    #[cfg(not(unix))]
+                    if let Err(err) = make_symlink(&e.link, &dest) {
+                        let target = dest.parent().unwrap_or(&self.host).join(&e.link);
+                        if target.is_file() && fs::copy(&target, &dest).is_ok() {
+                            rep.skipped.push(format!("{rel}: symlink to {} pulled as a copy ({err})", e.link));
+                        } else {
+                            rep.skipped.push(format!("{rel}: symlink to {} not created ({err})", e.link));
+                            continue;
+                        }
+                    }
                 }
                 b'0' => {
                     if cur.as_ref().is_some_and(|m| m.is_file()) && fs::read(&dest).ok().as_deref() == Some(&e.data[..]) {
@@ -374,7 +394,10 @@ find . -mindepth 1 -type d \\({prune} -false \\) -o \\( -type f -o -type l \\) -
 /// expose seagent's own data or private keys of other tools are refused by the caller's
 /// policy; here we refuse non-files. Returns how many were uploaded.
 pub fn upload_files(run: Runner, files: &[String], base64: bool) -> Result<usize, String> {
+    #[cfg(unix)]
     let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default();
+    #[cfg(not(unix))]
+    let home = super::sandbox::host_home();
     let mut home_tar = Tar::default();
     let mut abs_tar = Tar::default();
     let (mut nh, mut na) = (0, 0);
@@ -387,11 +410,18 @@ pub fn upload_files(run: Runner, files: &[String], base64: bool) -> Result<usize
         let data = fs::read(&host).map_err(|e| format!("credential file {f}: {e}"))?;
         match host.strip_prefix(&home) {
             Ok(rel) if !home.as_os_str().is_empty() => {
+                #[cfg(unix)]
                 home_tar.file(&rel.to_string_lossy(), &data, 0o600, mtime_of(&m).0);
+                #[cfg(not(unix))]
+                home_tar.file(&rel.to_string_lossy().replace('\\', "/"), &data, 0o600, mtime_of(&m).0);
                 nh += 1;
             }
             _ => {
+                #[cfg(unix)]
                 abs_tar.file(host.to_string_lossy().trim_start_matches('/'), &data, 0o600, mtime_of(&m).0);
+                // Windows `C:\tools\f` lands at `/c/tools/f` on the POSIX remote.
+                #[cfg(not(unix))]
+                abs_tar.file(&windows_remote_rel(&host), &data, 0o600, mtime_of(&m).0);
                 na += 1;
             }
         }
@@ -409,6 +439,18 @@ pub fn upload_files(run: Runner, files: &[String], base64: bool) -> Result<usize
         }
     }
     Ok(nh + na)
+}
+
+/// A Windows host path as a path under `/` on a POSIX remote: `C:\tools\f` → `c/tools/f`
+/// (the MSYS / WSL drive convention), no verbatim prefix.
+#[cfg(not(unix))]
+pub fn windows_remote_rel(p: &Path) -> String {
+    let s = seagent_core::platform::layout::simplify_verbatim(p).to_string_lossy().replace('\\', "/");
+    let b = s.as_bytes();
+    if b.len() >= 2 && b[1] == b':' && b[0].is_ascii_alphabetic() {
+        return format!("{}{}", (b[0] as char).to_ascii_lowercase(), &s[2..]);
+    }
+    s.trim_start_matches('/').to_string()
 }
 
 /// `rel` as a host path under `root`, refusing absolute paths, `..`, and paths
@@ -621,9 +663,14 @@ mod tests {
     use std::process::{Command, Stdio};
 
     /// "Remote" = real bash on this machine, so tar/find/base64 are the real tools.
+    /// Windows: Git Bash / MSYS2 is the "remote" (its GNU tar, find, base64).
     fn local_runner(script: &str, stdin: Option<&[u8]>) -> Result<(ExitInfo, Vec<u8>), String> {
         use std::io::Write;
-        let mut c = Command::new("bash").arg("-c").arg(script).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().map_err(|e| e.to_string())?;
+        #[cfg(unix)]
+        let bash = PathBuf::from("bash");
+        #[cfg(not(unix))]
+        let bash = seagent_core::platform::layout::bash().ok_or("no Git Bash / MSYS2 bash")?;
+        let mut c = Command::new(bash).arg("-c").arg(script).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().map_err(|e| e.to_string())?;
         let mut si = c.stdin.take().unwrap();
         let data = stdin.unwrap_or_default().to_vec();
         let w = std::thread::spawn(move || {
@@ -652,12 +699,146 @@ mod tests {
         assert_eq!(e[1].path, long);
         assert_eq!((e[2].kind, e[2].link.len()), (b'2', 120));
         // GNU tar reads ours.
-        let d = tmpdir("tarx");
-        std::fs::write(d.join("in.tar"), &raw).unwrap();
-        let ok = Command::new("tar").arg("-xf").arg(d.join("in.tar")).arg("-C").arg(&d).status().unwrap();
-        assert!(ok.success());
-        assert_eq!(std::fs::read_to_string(d.join(&long)).unwrap(), "x");
+        #[cfg(unix)]
+        {
+            let d = tmpdir("tarx");
+            std::fs::write(d.join("in.tar"), &raw).unwrap();
+            let ok = Command::new("tar").arg("-xf").arg(d.join("in.tar")).arg("-C").arg(&d).status().unwrap();
+            assert!(ok.success());
+            assert_eq!(std::fs::read_to_string(d.join(&long)).unwrap(), "x");
+        }
+        // Windows: Git Bash's GNU tar (the remote-side tool) reads ours; its symlinks are
+        // copies, so the archive links to a file that exists (a dangling one cannot be copied).
+        #[cfg(windows)]
+        {
+            let mut t = Tar::default();
+            t.file("a.txt", b"hello", 0o644, 1_700_000_000);
+            t.file(&long, b"x", 0o600, 1);
+            t.symlink("l", "a.txt", 1);
+            let d = tmpdir("tarx");
+            std::fs::write(d.join("in.tar"), t.finish()).unwrap();
+            let root = format!("/{}", windows_remote_rel(&d));
+            let (ex, out) = local_runner(&format!("tar -xf {root}/in.tar -C {root}"), None).unwrap();
+            assert!(ex.success(), "{}", String::from_utf8_lossy(&out));
+            assert_eq!(std::fs::read_to_string(d.join(&long)).unwrap(), "x");
+            assert_eq!(std::fs::read_to_string(d.join("l")).unwrap(), "hello");
+        }
         assert!(read_tar(&raw[..514]).is_err(), "data cut short");
+    }
+
+    /// The remote spelling of a local directory standing in for the sandbox: the path itself
+    /// on Unix, `/c/Users/…` for Git Bash on Windows (GNU tar reads `C:\…` as `host:path`).
+    fn remote_of(p: &Path) -> String {
+        #[cfg(unix)]
+        return p.to_string_lossy().into_owned();
+        #[cfg(not(unix))]
+        return format!("/{}", windows_remote_rel(p));
+    }
+
+    /// Windows counterpart of `push_pull_mirror_*`: the same mirror without host symlinks
+    /// (they need Developer Mode); the symlink fallback is `pulled_symlinks_fall_back_to_a_copy`.
+    #[cfg(windows)]
+    fn mirror_windows(tag: &str, base64: bool) {
+        let host = tmpdir(&format!("{tag}h"));
+        let remote = tmpdir(&format!("{tag}r")).join("ws");
+        std::fs::create_dir_all(host.join("src")).unwrap();
+        std::fs::create_dir_all(host.join("target")).unwrap();
+        std::fs::write(host.join("src/a.txt"), "one").unwrap();
+        std::fs::write(host.join("del.txt"), "bye").unwrap();
+        std::fs::write(host.join("target/big.o"), "skip").unwrap();
+        let s = WorkspaceSync::new(&host, &remote_of(&remote), SyncOptions { base64, ..Default::default() });
+        let r = s.push(&local_runner).unwrap();
+        assert_eq!((r.uploaded, r.deleted), (2, 0));
+        assert_eq!(std::fs::read_to_string(remote.join("src/a.txt")).unwrap(), "one", "nested paths travel with `/`");
+        assert!(!remote.join("target").exists(), "skip dirs");
+        assert_eq!(s.push(&local_runner).unwrap().uploaded, 0, "unchanged → nothing");
+        std::fs::remove_file(host.join("del.txt")).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        std::fs::write(host.join("src/a.txt"), "two").unwrap();
+        let r = s.push(&local_runner).unwrap();
+        assert_eq!((r.uploaded, r.deleted), (1, 1));
+        assert!(!remote.join("del.txt").exists());
+        assert_eq!(std::fs::read_to_string(remote.join("src/a.txt")).unwrap(), "two");
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        std::fs::write(remote.join("new.txt"), "made remotely").unwrap();
+        std::fs::write(remote.join("src/a.txt"), "three").unwrap();
+        std::fs::create_dir_all(remote.join("node_modules")).unwrap();
+        std::fs::write(remote.join("node_modules/x.js"), "skip").unwrap();
+        s.pull(&local_runner).unwrap();
+        assert_eq!(std::fs::read_to_string(host.join("new.txt")).unwrap(), "made remotely");
+        assert_eq!(std::fs::read_to_string(host.join("src/a.txt")).unwrap(), "three");
+        assert!(!host.join("node_modules").exists());
+        assert_eq!(s.push(&local_runner).unwrap().uploaded, 0, "pulled files are not pushed back");
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        std::fs::write(remote.join("new.txt"), "remote edit").unwrap();
+        std::fs::write(host.join("new.txt"), "host edit").unwrap();
+        let r = s.pull(&local_runner).unwrap();
+        assert_eq!(std::fs::read_to_string(host.join("new.txt")).unwrap(), "host edit");
+        assert!(r.skipped.iter().any(|x| x.contains("host copy kept")), "{r:?}");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn push_pull_mirror_raw_windows() {
+        mirror_windows("syncrawwin", false);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn push_pull_mirror_base64_windows() {
+        mirror_windows("sync64win", true);
+    }
+
+    /// Windows: a remote symlink becomes a host symlink when the privilege is there, else a
+    /// copy of its in-workspace target; one that leaves the workspace is still refused.
+    #[cfg(windows)]
+    #[test]
+    fn pulled_symlinks_fall_back_to_a_copy() {
+        let host = tmpdir("synclinkwin");
+        std::fs::write(host.join("a.txt"), "target").unwrap();
+        let s = WorkspaceSync::new(&host, "/srv/ws", SyncOptions::default());
+        let mut t = Tar::default();
+        t.symlink("link", "a.txt", 1);
+        t.symlink("evil", "/etc/passwd", 1);
+        let archive = t.finish();
+        let fake = |script: &str, _: Option<&[u8]>| -> Result<(ExitInfo, Vec<u8>), String> {
+            let ok = ExitInfo { code: Some(0), signal: None };
+            if script.contains("find .") {
+                return Ok((ok, b"O\ta.txt\nN\tlink\nN\tevil\n".to_vec()));
+            }
+            if script.contains("tar -cf") {
+                return Ok((ok, archive.clone()));
+            }
+            Ok((ok, vec![]))
+        };
+        s.push(&fake).unwrap();
+        let r = s.pull(&fake).unwrap();
+        assert_eq!(std::fs::read_to_string(host.join("link")).unwrap(), "target");
+        let is_link = std::fs::symlink_metadata(host.join("link")).unwrap().file_type().is_symlink();
+        assert!(is_link || r.skipped.iter().any(|x| x.contains("pulled as a copy")), "{r:?}");
+        assert!(!host.join("evil").exists() && r.skipped.iter().any(|x| x.contains("leaves the workspace")), "{r:?}");
+    }
+
+    /// Windows: credential files under the profile land under the remote `$HOME`, others at
+    /// their `/c/…` spelling (counterpart of `credential_files_land_under_remote_home`).
+    #[cfg(windows)]
+    #[test]
+    fn credential_files_land_under_remote_home_windows() {
+        let _lock = crate::exec::sync::common::fakecli::lock_path();
+        let fakehome = tmpdir("credhomewin");
+        let hosthome = tmpdir("credrealhomewin");
+        let src = hosthome.join(format!(".seagent-cred-test-{}", std::process::id()));
+        std::fs::write(&src, "token=1").unwrap();
+        let runner = |script: &str, stdin: Option<&[u8]>| local_runner(&format!("export HOME={}\n{script}", remote_of(&fakehome)), stdin);
+        {
+            let _home = crate::testutil::test_home(&hosthome);
+            assert_eq!(upload_files(&runner, &[src.display().to_string()], true).unwrap(), 1);
+            assert!(upload_files(&runner, &[r"C:\nonexistent\x".into()], false).is_err());
+            assert!(upload_files(&runner, &[hosthome.display().to_string()], false).unwrap_err().contains("not a regular file"));
+        }
+        assert_eq!(std::fs::read_to_string(fakehome.join(src.file_name().unwrap())).unwrap(), "token=1");
+        assert_eq!(windows_remote_rel(Path::new(r"C:\tools\f")), "c/tools/f");
+        assert_eq!(windows_remote_rel(Path::new(r"\\?\D:\x\y")), "d/x/y");
     }
 
     #[cfg(unix)]
@@ -744,7 +925,7 @@ mod tests {
             std::fs::write(host.join(format!("f{i}")), "x").unwrap();
         }
         let remote = tmpdir("syncguardr").join("ws");
-        let s = WorkspaceSync::new(&host, &remote.to_string_lossy(), SyncOptions::default());
+        let s = WorkspaceSync::new(&host, &remote_of(&remote), SyncOptions::default());
         s.push(&local_runner).unwrap();
         for i in 0..25 {
             std::fs::remove_file(remote.join(format!("f{i}"))).unwrap();
@@ -755,7 +936,7 @@ mod tests {
         let r = s.pull(&local_runner).unwrap();
         assert!(r.skipped[0].contains("missing"));
         assert_eq!(s.push(&local_runner).unwrap().uploaded, 30, "re-uploads everything after a reset");
-        let small = WorkspaceSync::new(&host, &remote.to_string_lossy(), SyncOptions { max_push_bytes: 5, ..Default::default() });
+        let small = WorkspaceSync::new(&host, &remote_of(&remote), SyncOptions { max_push_bytes: 5, ..Default::default() });
         assert!(small.push(&local_runner).unwrap_err().contains("refusing"));
     }
 

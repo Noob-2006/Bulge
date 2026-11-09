@@ -295,8 +295,10 @@ fn adopt(child: &std::process::Child) {
 impl AcpClient {
     /// Spawn the agent and `initialize` it. `secrets` resolves `{{secret:…}}` in env values.
     pub fn start(name: &str, spec: &AgentSpec, cwd: &Path, mode: PermissionMode, ask: Asker, gate: Option<(GateConfig, Arc<Vault>)>, secrets: &dyn Fn(&str) -> String) -> Result<AcpClient, String> {
-        let mut cmd = Command::new(&spec.command);
-        cmd.args(&spec.args).current_dir(cwd).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
+        // Windows: npm `.cmd` shims and the Python launcher; Unix: `Command::new(command)`.
+        let mut cmd = seagent_core::platform::layout::program_command(&spec.command);
+        seagent_core::platform::layout::msys_args(&mut cmd, &spec.args);
+        cmd.current_dir(cwd).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
         for (k, v) in &spec.env {
             cmd.env(k, secrets(v));
         }

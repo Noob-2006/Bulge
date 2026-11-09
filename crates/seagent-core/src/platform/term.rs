@@ -280,7 +280,12 @@ pub fn windows_quote(arg: &str) -> String {
 }
 
 /// `program` and `args` joined into one Windows command line.
+/// An MSYS2 program (Git Bash, its coreutils) globs and brace-expands unquoted arguments, so
+/// its arguments are always [`super::layout::msys_quote`]d.
 pub fn windows_command_line(program: &str, args: &[&str]) -> String {
+    if super::layout::is_msys_program(std::path::Path::new(program)) {
+        return std::iter::once(windows_quote(program)).chain(args.iter().map(|a| super::layout::msys_quote(a))).collect::<Vec<_>>().join(" ");
+    }
     std::iter::once(program).chain(args.iter().copied()).map(windows_quote).collect::<Vec<_>>().join(" ")
 }
 
@@ -496,7 +501,12 @@ mod tests {
         assert_eq!(windows_quote("say \"hi\""), "\"say \\\"hi\\\"\"");
         assert_eq!(windows_quote("C:\\dir with space\\"), "\"C:\\dir with space\\\\\"");
         assert_eq!(windows_quote("C:\\no\\space"), "C:\\no\\space");
-        assert_eq!(windows_command_line("C:\\Program Files\\Git\\bin\\bash.exe", &["-c", "echo hi"]), "\"C:\\Program Files\\Git\\bin\\bash.exe\" -c \"echo hi\"");
+        // An installed Git Bash is an MSYS2 program: every argument is quoted (no globbing).
+        let bash = "C:\\Program Files\\Git\\bin\\bash.exe";
+        let c = if super::super::layout::is_msys_program(std::path::Path::new(bash)) { "\"-c\"" } else { "-c" };
+        assert_eq!(windows_command_line(bash, &["-c", "echo hi"]), format!("\"{bash}\" {c} \"echo hi\""));
+        // A native program keeps the plain MSVCRT rules.
+        assert_eq!(windows_command_line("C:\\Windows\\System32\\cmd.exe", &["/c", "a*"]), "C:\\Windows\\System32\\cmd.exe /c a*");
     }
 
     #[cfg(unix)]

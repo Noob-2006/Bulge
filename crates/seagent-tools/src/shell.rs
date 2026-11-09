@@ -225,7 +225,12 @@ impl Tool for Shell {
                 .filter(|n| is_env_name(n))
                 .collect();
             if !blocked.is_empty() {
-                script.push_str(&format!("unset {} 2>/dev/null\n", blocked.join(" ")));
+                // PowerShell (Windows without Git Bash, the AppContainer sandbox) has no `unset`.
+                if crate::exec::session::script_shell(&*backend).is_posix() {
+                    script.push_str(&format!("unset {} 2>/dev/null\n", blocked.join(" ")));
+                } else {
+                    script.push_str(&format!("Remove-Item {} -ErrorAction SilentlyContinue\n", blocked.iter().map(|n| format!("Env:{n}")).collect::<Vec<_>>().join(",")));
+                }
             }
         }
         let mut cwd = requested.clone().unwrap_or_else(|| ctx.workspace.clone());
@@ -250,11 +255,20 @@ impl Tool for Shell {
                 snapshot = Some(state.clone());
             }
         }
-        script.push_str(&format!("eval {}\n__seagent_ec=$?\n", sh_quote(&sudo.command)));
-        if let Some(state) = &snapshot {
-            script.push_str(&state.lock().unwrap().epilogue(&skip));
+        if crate::exec::session::script_shell(&*backend).is_posix() {
+            script.push_str(&format!("eval {}\n__seagent_ec=$?\n", sh_quote(&sudo.command)));
+            if let Some(state) = &snapshot {
+                script.push_str(&state.lock().unwrap().epilogue(&skip));
+            }
+            script.push_str("exit $__seagent_ec\n");
+        } else {
+            // PowerShell (Windows without Git Bash, the AppContainer sandbox): the command as
+            // written, a missing command reported the way bash does (`x: command not found`,
+            // exit 127, so the failure hints apply), and the exit status carried out.
+            script.push_str("trap [System.Management.Automation.CommandNotFoundException] { [Console]::Error.WriteLine(\"$($_.TargetObject): command not found\"); exit 127 }\n");
+            script.push_str(&sudo.command);
+            script.push_str("\nif ($LASTEXITCODE) { exit $LASTEXITCODE } elseif (-not $?) { exit 1 } else { exit 0 }\n");
         }
-        script.push_str("exit $__seagent_ec\n");
 
         let req = ExecRequest {
             script,
@@ -695,8 +709,10 @@ mod tests {
         std::fs::create_dir(&bin).unwrap();
         // A fake sudo: with -S it reads one password line from stdin, without it fails like sudo.
         std::fs::write(bin.join("sudo"), "#!/bin/sh\nif [ \"$1\" = -S ]; then read pw; echo \"pw=$pw args=$*\"; else echo 'sudo: a password is required' >&2; exit 1; fi\n").unwrap();
+        // Windows: Git Bash runs a `#!` file without an execute bit; its PATH spells `/c/…`.
+        #[cfg(unix)]
         std::process::Command::new("chmod").arg("+x").arg(bin.join("sudo")).status().unwrap();
-        let cmd = format!("PATH={}:$PATH sudo whoami && echo after", bin.display());
+        let cmd = format!("PATH={}:$PATH sudo whoami && echo after", crate::testutil::remote_path(&bin));
         let o = Shell.call(&c, json!({"command": cmd}));
         assert!(o.is_error && o.content.contains("a password is required") && o.content.contains("seagent secrets set SUDO_PASSWORD"), "{}", o.content);
         crate::exec::sudo::cache_password(&c.session_id, "hunter2");
@@ -791,7 +807,11 @@ mod tests {
         let c = ctx("shpty");
         let o = Shell.call(&c, json!({"command":"tty; stty size; printf '\\033[31mred\\033[0m\\n'","pty":true}));
         assert!(!o.is_error, "{}", o.content);
+        // Windows: ConPTY; Git Bash names the console `/dev/cons<N>` (`/dev/pty<N>` in mintty).
+        #[cfg(unix)]
         assert!(o.content.contains("/dev/pts/"), "a terminal: {}", o.content);
+        #[cfg(windows)]
+        assert!(o.content.contains("/dev/cons") || o.content.contains("/dev/pty"), "a terminal: {}", o.content);
         assert!(o.content.contains("24 80"), "default size: {}", o.content);
         assert!(o.content.contains("red") && !o.content.contains('\x1b'), "ANSI removed: {:?}", o.content);
         assert!(o.content.contains("[pty terminal 24x80, ANSI escapes removed]"), "{}", o.content);

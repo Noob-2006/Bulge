@@ -188,7 +188,9 @@ mod tests {
         let r = tool.call(&c, json!({"text": "here", "media": ["a.png"]}));
         assert!(!r.is_error, "{}", r.content);
         assert_eq!(ch.0 .0.lock().unwrap()[0].media.len(), 1);
-        let r = tool.call(&c, json!({"text": "x", "media": ["/etc/hostname"]}));
+        // A file that exists outside the workspace (`/etc/hostname`; Windows: win.ini).
+        let outside = if cfg!(windows) { r"C:\Windows\win.ini" } else { "/etc/hostname" };
+        let r = tool.call(&c, json!({"text": "x", "media": [outside]}));
         assert!(r.is_error && r.content.contains("outside"), "{}", r.content);
         let _ = std::fs::remove_dir_all(&d);
     }

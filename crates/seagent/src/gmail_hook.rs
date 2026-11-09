@@ -914,7 +914,16 @@ mod tests {
         let raw = std::fs::read_to_string(paths.user_config()).unwrap();
         assert!(!raw.contains("pt-literal"), "a literal token reached config.toml: {raw}");
         assert!(raw.contains("{{secret:gmail_push_token}}") && raw.contains("bundled = [\"boot-md\"]"), "{raw}");
+        // Linux test hosts have no key source, so the vault is the plaintext secrets.toml.
+        #[cfg(unix)]
         assert!(std::fs::read_to_string(paths.secrets()).unwrap().contains("gmail_push_token = \"pt-literal\""));
+        // Windows always has DPAPI: the vault is encrypted (`secrets.enc`); read it back.
+        #[cfg(windows)]
+        {
+            let v = seagent_kernel::vault::Vault::load(&paths.secrets()).unwrap();
+            assert_eq!(v.substitute("{{secret:gmail_push_token}}"), "pt-literal", "{:?}", v.status());
+            assert!(!std::fs::read_to_string(paths.secrets()).unwrap_or_default().contains("pt-literal"), "no plaintext copy");
+        }
         let table: toml::Table = raw.parse().unwrap();
         let cfg: seagent_kernel::config::Config = toml::Value::Table(table.clone()).try_into().unwrap();
         assert_eq!(gmail_cfg(&cfg).unwrap().unwrap().serve.port, 9099);

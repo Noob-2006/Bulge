@@ -44,7 +44,9 @@ fn canonical_best(p: &Path) -> PathBuf {
         rest.push(name.to_os_string());
         cur = parent;
     }
-    let mut out = cur.canonicalize().unwrap_or_else(|_| cur.to_path_buf());
+    // `layout::canonicalize` is std on Unix; on Windows it drops `\\?\`, so the result compares
+    // with workspace paths spelled the ordinary way.
+    let mut out = seagent_core::platform::layout::canonicalize(cur).unwrap_or_else(|_| cur.to_path_buf());
     for name in rest.iter().rev() {
         out.push(name);
     }
@@ -55,6 +57,15 @@ fn canonical_best(p: &Path) -> PathBuf {
 /// checkpoint store: never a project, always huge or recursively self-referential.
 fn too_broad(work: &Path, data: &Path, home: Option<&Path>) -> Option<&'static str> {
     if work == Path::new("/") {
+        return Some("/");
+    }
+    // Windows: a drive root is `/`; `\\?\C:\x` and `C:\x` are the same directory.
+    #[cfg(windows)]
+    let work_owned = seagent_core::platform::layout::simplify_verbatim(work);
+    #[cfg(windows)]
+    let work = work_owned.as_path();
+    #[cfg(windows)]
+    if work.parent().is_none() {
         return Some("/");
     }
     if let Some(home) = home {
@@ -76,7 +87,8 @@ fn too_broad(work: &Path, data: &Path, home: Option<&Path>) -> Option<&'static s
 
 impl Checkpoints {
     pub fn new(data: &Path, workspace: &Path) -> Result<Self, String> {
-        let work = workspace.canonicalize().map_err(|e| format!("{}: {e}", workspace.display()))?;
+        // `layout::canonicalize`: std on Unix, no `\\?\` on Windows (git and `canonical_best` agree).
+        let work = seagent_core::platform::layout::canonicalize(workspace).map_err(|e| format!("{}: {e}", workspace.display()))?;
         let home = std::env::var_os("HOME").map(PathBuf::from);
         if let Some(why) = too_broad(&work, data, home.as_deref()) {
             return Err(format!("refusing to checkpoint {why}; run seagent inside a project folder"));
@@ -751,7 +763,7 @@ mod tests {
         c.snapshot("t", 1000).unwrap();
         assert!(!c.git(&["ls-files"]).unwrap().contains("big.bin"));
         assert!(ws.join("big.bin").exists(), "the file itself is untouched");
-        assert_eq!(fs::read_to_string(c.git_dir().join(WORKDIR_FILE)).unwrap(), ws.canonicalize().unwrap().to_string_lossy());
+        assert_eq!(fs::read_to_string(c.git_dir().join(WORKDIR_FILE)).unwrap(), seagent_core::platform::layout::canonicalize(&ws).unwrap().to_string_lossy());
     }
 
     #[test]

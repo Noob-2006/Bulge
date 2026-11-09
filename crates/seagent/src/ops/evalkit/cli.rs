@@ -252,7 +252,7 @@ fn fetch_cmd(a: &Args) -> R {
     }
     for c in &cmds {
         eprintln!("+ {c}");
-        let st = std::process::Command::new("bash").arg("-c").arg(c).status().map_err(|e| e.to_string())?;
+        let st = seagent_core::platform::layout::program_command("bash").arg("-c").arg(c).status().map_err(|e| e.to_string())?;
         if !st.success() {
             return Err(format!("`{c}` failed ({st})").into());
         }
@@ -450,7 +450,7 @@ mod tests {
         assert_eq!(script.lines().filter(|l| l.contains("fake-agent")).count(), 6);
         // pretend the user ran the script: run each line
         for l in script.lines().filter(|l| l.starts_with('(')) {
-            assert!(std::process::Command::new("sh").arg("-c").arg(l).status().unwrap().success());
+            assert!(seagent_core::platform::layout::program_command("sh").arg("-c").arg(l).status().unwrap().success());
         }
         assert_eq!(dispatch_sub(&p(&["collect", &run.display().to_string(), "--quiet"])).unwrap().unwrap(), 0);
         let doc: Value = serde_json::from_str(&std::fs::read_to_string(run.join("report.json")).unwrap()).unwrap();

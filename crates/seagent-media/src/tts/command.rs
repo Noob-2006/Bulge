@@ -182,7 +182,8 @@ impl TtsProvider for Command {
         let output = dir.join(format!("speech.{fmt}"));
         std::fs::write(&input, &req.text).map_err(|e| e.to_string())?;
         let speed = req.speed.map(|s| s.to_string()).or_else(|| self.s("speed")).or_else(|| m.cfg.get("tts.speed").map(|v| v.to_string())).unwrap_or_default();
-        let (inp, outp) = (input.display().to_string(), output.display().to_string());
+        // Shell-line placeholders: Git Bash spelling on Windows (`C:/…`), as is on Unix.
+        let (inp, outp) = (seagent_core::platform::shell::path_str(&input), seagent_core::platform::shell::path_str(&output));
         let voice = req.voice.clone().or_else(|| self.s("voice")).unwrap_or_default();
         let model = req.model.clone().or_else(|| self.s("model")).unwrap_or_default();
         let line = render(&template, &[("input_path", &inp), ("text_path", &inp), ("output_path", &outp), ("format", &fmt), ("voice", &voice), ("model", &model), ("speed", &speed)]);
@@ -315,7 +316,9 @@ impl TtsProvider for LocalCli {
         // Unique per call and owner-only: this directory holds the spoken text (0700).
         let dir = crate::store::temp_dir("cli-tts")?;
         let out_path = dir.join(format!("speech.{fmt}"));
-        let (op, od) = (out_path.display().to_string(), dir.display().to_string());
+        // The template is often a shell line (`sh -c "… > {{OutputPath}}"`): Git Bash on Windows
+        // needs `C:/…` (Windows programs accept it too). Unix: the path as is.
+        let (op, od) = (seagent_core::platform::shell::path_str(&out_path), seagent_core::platform::shell::path_str(&dir));
         let ctx = [("Text", text.as_str()), ("OutputPath", op.as_str()), ("OutputDir", od.as_str()), ("OutputBase", "speech")];
         let mut base = parse_command(&command);
         if base.is_empty() {

@@ -516,7 +516,11 @@ fn walk(dir: &Path, root: &Path, out: &mut Vec<(String, std::path::PathBuf)>) {
     entries.sort_by_key(|e| e.file_name());
     for e in entries {
         let p = e.path();
+        // Skill-relative paths use `/` (ignore patterns and findings), Windows too.
+        #[cfg(not(windows))]
         let rel = p.strip_prefix(root).map(|r| r.to_string_lossy().into_owned()).unwrap_or_default();
+        #[cfg(windows)]
+        let rel = p.strip_prefix(root).map(|r| r.to_string_lossy().replace('\\', "/")).unwrap_or_default();
         let ft = match e.file_type() {
             Ok(t) => t,
             Err(_) => continue,

@@ -371,7 +371,6 @@ mod tests {
     use crate::exec::sync::common::fake::{self, ok, Req};
     use crate::testutil::tmpdir;
     use std::collections::HashMap;
-    use std::process::Command;
 
     /// Fake Daytona: sandboxes in memory, session commands really run locally.
     /// Session id → (buffered output, exit code) of the fake's running commands.
@@ -418,7 +417,7 @@ mod tests {
                 ("DELETE", p) if p.starts_with("/sandbox/sb-1") && !p.contains("toolbox") => ok(json!({})),
                 ("POST", "/toolbox/sb-1/toolbox/process/execute") => {
                     let cmd = r.json()["command"].as_str().unwrap().to_string();
-                    let o = Command::new("bash").arg("-c").arg(&cmd).env("HOME", &f.home).output().unwrap();
+                    let o = crate::testutil::remote_bash().arg("-c").arg(&cmd).env("HOME", crate::testutil::remote_path(&f.home)).output().unwrap();
                     ok(json!({"exitCode": o.status.code(), "result": String::from_utf8_lossy(&o.stdout)}))
                 }
                 ("POST", p) if p.starts_with("/toolbox/sb-1/toolbox/files/upload?path=") => {
@@ -427,7 +426,7 @@ mod tests {
                     let start = body.windows(4).position(|w| w == b"\r\n\r\n").unwrap() + 4;
                     let data = &body[start..];
                     let tail = data.windows(4).rposition(|w| w == b"\r\n--").unwrap();
-                    std::fs::write(&path, &data[..tail]).unwrap();
+                    std::fs::write(crate::testutil::local_of_remote(&path), &data[..tail]).unwrap();
                     f.files.lock().unwrap().insert(path, data[..tail].to_vec());
                     ok(json!({}))
                 }
@@ -440,7 +439,7 @@ mod tests {
                     f.cmds.lock().unwrap().insert(id.clone(), slot.clone());
                     let (cmd, home) = (b["command"].as_str().unwrap().to_string(), f.home.clone());
                     std::thread::spawn(move || {
-                        let o = Command::new("bash").arg("-c").arg(&cmd).env("HOME", home).output().unwrap();
+                        let o = crate::testutil::remote_bash().arg("-c").arg(&cmd).env("HOME", crate::testutil::remote_path(&home)).output().unwrap();
                         let mut s = slot.lock().unwrap();
                         s.0.extend_from_slice(&o.stdout);
                         s.0.extend_from_slice(&o.stderr);
@@ -481,7 +480,7 @@ mod tests {
         let b = build(&v, &ExecConfig::default(), &ctx(&home, &ws)).unwrap();
         assert!(srv.paths().contains(&"POST /sandbox".to_string()));
         assert_eq!(f.state.lock().unwrap().as_str(), "started");
-        assert_eq!(b.map_path(&ws.join("a/b")), format!("{}/workspace/a/b", rhome.display()));
+        assert_eq!(b.map_path(&ws.join("a/b")), format!("{}/workspace/a/b", crate::testutil::remote_path(&rhome)));
         assert!(!b.shares_host_fs() && !b.supports_pty());
         b.before_exec().unwrap();
         assert_eq!(std::fs::read_to_string(rhome.join("workspace/in.txt")).unwrap(), "from host");

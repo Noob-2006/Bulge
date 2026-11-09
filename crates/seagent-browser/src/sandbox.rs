@@ -217,7 +217,9 @@ mod tests {
         if !entry.exists() {
             return;
         }
-        let out = match std::process::Command::new("bash").arg(&entry).env_clear().env("PATH", "/nonexistent").env("SEAGENT_BROWSER_CDP_AUTH_TOKEN", "").output() {
+        // Unix: `bash` from PATH; Windows: Git Bash (never the WSL launcher), path as `C:/…`.
+        let Some(bash) = seagent_core::platform::layout::bash() else { return };
+        let out = match std::process::Command::new(bash).arg(seagent_core::platform::shell::path_arg(&entry)).env_clear().env("PATH", "/nonexistent").env("SEAGENT_BROWSER_CDP_AUTH_TOKEN", "").output() {
             Ok(o) => o,
             Err(_) => return, // no bash on this host
         };

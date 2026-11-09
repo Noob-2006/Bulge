@@ -323,7 +323,6 @@ mod tests {
     use crate::testutil::tmpdir;
     use std::collections::HashMap;
     use std::sync::atomic::AtomicU64;
-    use std::process::Command;
 
     struct Fake {
         n: AtomicU64,
@@ -347,7 +346,7 @@ mod tests {
             }
         }
         for e in sync::read_tar(&raw).unwrap() {
-            let p = Path::new("/").join(&e.path);
+            let p = crate::testutil::local_of_remote(&format!("/{}", e.path.trim_start_matches('/')));
             std::fs::create_dir_all(p.parent().unwrap()).unwrap();
             std::fs::write(&p, &e.data).unwrap();
         }
@@ -372,7 +371,7 @@ mod tests {
                     }
                     let id = format!("sbx{}", f.n.fetch_add(1, Ordering::SeqCst));
                     f.status.lock().unwrap().insert(id.clone(), "pending".into());
-                    ok(json!({"sandbox": {"id": id, "status": "pending", "cwd": f.root.display().to_string()}}))
+                    ok(json!({"sandbox": {"id": id, "status": "pending", "cwd": crate::testutil::remote_path(&f.root)}}))
                 }
                 ("GET", ["v1", "sandboxes", id]) => {
                     let mut s = f.status.lock().unwrap();
@@ -380,13 +379,13 @@ mod tests {
                     if st == "pending" {
                         *st = "running".into();
                     }
-                    ok(json!({"sandbox": {"id": id, "status": st, "cwd": f.root.display().to_string()}}))
+                    ok(json!({"sandbox": {"id": id, "status": st, "cwd": crate::testutil::remote_path(&f.root)}}))
                 }
                 ("POST", ["v1", "sandboxes", _, "cmd"]) => {
                     let b = r.json();
                     assert_eq!(b["command"], "bash");
                     let args: Vec<String> = b["args"].as_array().unwrap().iter().map(|a| a.as_str().unwrap().to_string()).collect();
-                    let o = Command::new("bash").args(&args).current_dir(b["cwd"].as_str().unwrap()).output().unwrap();
+                    let o = crate::testutil::remote_bash().args(&args).current_dir(crate::testutil::local_of_remote(b["cwd"].as_str().unwrap())).output().unwrap();
                     let id = format!("cmd{}", f.n.fetch_add(1, Ordering::SeqCst));
                     let mut log = String::new();
                     for (stream, data) in [("stdout", &o.stdout), ("stderr", &o.stderr)] {
@@ -436,7 +435,7 @@ mod tests {
         std::fs::write(ws.join("a.txt"), "host").unwrap();
         let v = json!({"api_url": srv.url});
         let b = build(&v, &ExecConfig::default(), &ctx(&home, &ws)).unwrap();
-        assert_eq!(b.map_path(&ws.join("d")), format!("{}/d", root.display()));
+        assert_eq!(b.map_path(&ws.join("d")), format!("{}/d", crate::testutil::remote_path(&root)));
         b.before_exec().unwrap();
         assert_eq!(std::fs::read_to_string(root.join("a.txt")).unwrap(), "host");
         let req = ExecRequest { script: "cat a.txt; echo oops >&2; echo gen > b.txt; exit 2".into(), cwd: Some(ws.clone()), ..Default::default() };

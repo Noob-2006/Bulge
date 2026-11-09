@@ -112,7 +112,7 @@ impl Env {
     pub fn execute(&self, command: &str, timeout: u64) -> Value {
         let mut c = match self {
             Env::Local { cwd } => {
-                let mut c = Command::new("bash");
+                let mut c = seagent_core::platform::layout::program_command("bash");
                 c.arg("-c").arg(command).current_dir(cwd);
                 c
             }

@@ -172,7 +172,7 @@ pub struct Engine {
 impl Engine {
     pub fn spawn(argv: &[String]) -> Result<Engine, String> {
         let (prog, args) = argv.split_first().ok_or("empty wake engine command")?;
-        let mut child = Command::new(prog).args(args).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null()).spawn().map_err(|e| format!("cannot start wake word engine `{prog}`: {e}"))?;
+        let mut child = seagent_core::platform::layout::program_command_args(prog, &args).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null()).spawn().map_err(|e| format!("cannot start wake word engine `{prog}`: {e}"))?;
         let stdin = child.stdin.take();
         let out = child.stdout.take().ok_or("engine has no stdout")?;
         let (tx, rx) = std::sync::mpsc::channel();

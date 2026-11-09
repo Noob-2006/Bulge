@@ -230,13 +230,14 @@ fn shortened_path(path: &str, cwd: &Path) -> String {
     if abs == cwd {
         return ".".to_string();
     }
+    // Relative paths read with `/` on every OS (`layout::model_path`; Unix: unchanged).
     if let Ok(rel) = abs.strip_prefix(&cwd) {
-        return rel.to_string_lossy().to_string();
+        return seagent_core::platform::layout::model_path(rel);
     }
     if let Ok(home) = std::env::var("HOME").map(PathBuf::from) {
         let home = normalize(&home);
         if let Ok(rel) = abs.strip_prefix(&home) {
-            return format!("~/{}", rel.display());
+            return format!("~/{}", seagent_core::platform::layout::model_path(rel));
         }
     }
     abs.display().to_string()
@@ -387,7 +388,11 @@ mod tests {
         assert_eq!(shortened_path("/w/src/a.rs", Path::new("/w")), "src/a.rs");
         assert_eq!(shortened_path("src/./a.rs", Path::new("/w")), "src/a.rs");
         assert_eq!(shortened_path("/w", Path::new("/w")), ".");
+        #[cfg(unix)]
         assert_eq!(shortened_path("/elsewhere/x.rs", Path::new("/w")), "/elsewhere/x.rs");
+        // Windows: an absolute path outside the workspace stays native.
+        #[cfg(windows)]
+        assert_eq!(shortened_path(r"C:\elsewhere\x.rs", Path::new(r"C:\w")), r"C:\elsewhere\x.rs");
     }
 
     #[test]

@@ -214,10 +214,11 @@ mod tests {
         }
         assert!(b.contains(" kanban ") && b.contains("sandbox) subs=\"list recreate explain\"") && b.contains(" web) subs=\"providers test fetch\""), "{b}");
         assert!(fish().contains("__fish_seen_subcommand_from kanban' -a 'init boards create"), "fish: subcommands for kanban");
-        if std::process::Command::new("bash").arg("--version").output().is_ok() {
+        // Unix: `bash` from PATH; Windows: Git Bash (never WSL's launcher), path as `C:/…`.
+        if let Some(bash) = seagent_core::platform::layout::bash() {
             let d = seagent_core::tmp::scratch_path(format!("seagent-comp-{}.sh", seagent_kernel::util::random_hex(4)));
             std::fs::write(&d, &b).unwrap();
-            let o = std::process::Command::new("bash").arg("-n").arg(&d).output().unwrap();
+            let o = std::process::Command::new(&bash).arg("-n").arg(seagent_core::platform::shell::path_arg(&d)).output().unwrap();
             assert!(o.status.success(), "bash syntax: {}", String::from_utf8_lossy(&o.stderr));
         }
     }

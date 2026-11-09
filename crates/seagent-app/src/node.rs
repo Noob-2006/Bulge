@@ -1104,7 +1104,7 @@ fn x11_override() -> bool {
 
 fn run_ctl(argv: &[&str], timeout: Duration, ctl: &Ctl, stdin: bool) -> Result<String, String> {
     use std::process::Stdio;
-    let mut cmd = std::process::Command::new(argv[0]);
+    let mut cmd = seagent_core::platform::layout::program_command(argv[0]);
     ENV.with(|e| {
         for (k, v) in e.borrow().iter() {
             if v.is_empty() {
@@ -1114,7 +1114,8 @@ fn run_ctl(argv: &[&str], timeout: Duration, ctl: &Ctl, stdin: bool) -> Result<S
             }
         }
     });
-    let mut child = cmd.args(&argv[1..]).stdin(if stdin { Stdio::piped() } else { Stdio::null() }).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().map_err(|e| format!("{}: {e}", argv[0]))?;
+    seagent_core::platform::layout::msys_args(&mut cmd, &argv[1..]);
+    let mut child = cmd.stdin(if stdin { Stdio::piped() } else { Stdio::null() }).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().map_err(|e| format!("{}: {e}", argv[0]))?;
     let mut pipe = child.stdin.take();
     let deadline = Instant::now() + timeout;
     loop {
@@ -2077,7 +2078,9 @@ mod tests {
         // Browser actions refuse a non-loopback endpoint before touching the network.
         assert!(host_run(&HostPolicy { cdp_url: "http://192.168.1.5:9222".into(), ..on.clone() }, "computer.act", &json!({"action": "get_browser_state"})).unwrap_err().contains("this machine"));
         assert!(host_run(&on, "computer.act", &json!({"action": "browser_navigate", "pageRef": "P"})).unwrap_err().contains("cdp_url"));
-        assert!(host_run(&on, "computer.act", &json!({"action": "launch_app", "app": "--help"})).unwrap_err().contains("desktop entry"));
+        // Linux launches a desktop entry (gtk-launch); Windows / macOS an application name.
+        let what = if cfg!(any(windows, target_os = "macos")) { "application name" } else { "desktop entry" };
+        assert!(host_run(&on, "computer.act", &json!({"action": "launch_app", "app": "--help"})).unwrap_err().contains(what));
         assert!(host_run(&on, "computer.act", &json!({"action": "kill_app", "app": "x"})).unwrap_err().contains("not available"));
         assert!(host_run(&on, "computer.act", &json!({"action": "set_value", "elementRef": "bad", "value": "x"})).is_err());
         assert!(host_run(&on, "talk.ptt.start", &json!({})).unwrap_err().contains("[stt]"));

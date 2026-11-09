@@ -164,8 +164,9 @@ pub fn attempt(r: &Runner, spec: &AgentSpec, model: Option<&str>, t: &Task, rep:
     if !on_path(&spec.bin) {
         return Outcome { error: Some(format!("`{}` is not installed ({})", spec.bin, spec.install)), ..Default::default() };
     }
-    let mut c = std::process::Command::new(&argv[0]);
-    c.args(&argv[1..]).current_dir(dir);
+    let mut c = seagent_core::platform::layout::program_command(&argv[0]);
+    seagent_core::platform::layout::msys_args(&mut c, &argv[1..]);
+    c.current_dir(dir);
     match super::run::capture(c, Duration::from_secs(t.timeout_secs.unwrap_or(1800))) {
         Ok((stdout, code)) => {
             let _ = std::fs::write(&out, &stdout);

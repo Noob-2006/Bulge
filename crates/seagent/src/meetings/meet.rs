@@ -109,12 +109,14 @@ impl Manager {
             let _ = std::fs::remove_file(out.join(f));
         }
         let log_path = out.join("bot.log");
-        let log = match std::fs::OpenOptions::new().create(true).append(true).open(&log_path) {
+        let log = match seagent_core::platform::proc::open_child_log(&log_path) {
             Ok(f) => f,
             Err(e) => return json!({"ok": false, "error": format!("cannot open {}: {e}", log_path.display())}),
         };
-        let mut cmd = std::process::Command::new(&self.bot[0]);
-        cmd.args(&self.bot[1..]).stdin(std::process::Stdio::null()).stdout(log.try_clone().map(std::process::Stdio::from).unwrap_or(std::process::Stdio::null())).stderr(std::process::Stdio::from(log));
+        // Unix: `Command::new(bot[0])`; Windows: `sh` = Git Bash, `python3` = `py -3`, PATHEXT.
+        let mut cmd = seagent_core::platform::layout::program_command(&self.bot[0]);
+        seagent_core::platform::layout::msys_args(&mut cmd, &self.bot[1..]);
+        cmd.stdin(std::process::Stdio::null()).stdout(log.try_clone().map(std::process::Stdio::from).unwrap_or(std::process::Stdio::null())).stderr(std::process::Stdio::from(log));
         cmd.env("SEAGENT_MEET_URL", &o.url).env("SEAGENT_MEET_OUT_DIR", &out).env("SEAGENT_MEET_GUEST_NAME", &o.guest_name).env("SEAGENT_MEET_MODE", &o.mode);
         if o.headed {
             cmd.env("SEAGENT_MEET_HEADED", "1");
@@ -591,7 +593,7 @@ mod tests {
             "#!/bin/sh\nprintf '{\"inCall\": true, \"joinedAt\": 1, \"transcriptLines\": 2}' > \"$SEAGENT_MEET_OUT_DIR/status.json\"\nprintf '[00:00:01] Alice: hi\\n[00:00:02] Bob: hello\\n' > \"$SEAGENT_MEET_OUT_DIR/transcript.txt\"\nwhile :; do sleep 0.1; done\n",
         )
         .unwrap();
-        vec!["sh".to_string(), script.display().to_string()]
+        vec!["sh".to_string(), seagent_core::platform::shell::path_str(&script)]
     }
 
     fn wait_for(path: &Path) {
@@ -642,6 +644,47 @@ mod tests {
         assert_eq!(mgr.status(), no_active());
         assert_eq!(cli(&mgr, &cfg, &argv(&["stop", "--json"])).unwrap(), 1);
         assert_eq!(cli(&mgr, &cfg, &argv(&["auth", "--json"])).unwrap(), 1, "no saved auth state yet");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Stops the active fake bot even when an assertion unwinds, so a failing test leaks nothing.
+    struct StopOnDrop<'a>(&'a Manager);
+    impl Drop for StopOnDrop<'_> {
+        fn drop(&mut self) {
+            self.0.stop("test cleanup");
+        }
+    }
+
+    /// Regression: `stop` ends the bot's whole process tree. On Windows `sh` is Git's
+    /// `bin\sh.exe` launcher, whose real shell (`usr\bin\sh.exe` running fake-bot.sh) and its
+    /// `sleep` used to survive with a dead parent, holding the test's output pipe open.
+    #[test]
+    fn stop_leaves_no_fake_bot_process_behind() {
+        let dir = temp_root("tree");
+        let mgr = Manager { root: dir.join("meetings"), bot: fake_bot(&dir), env: vec![] };
+        let _guard = StopOnDrop(&mgr);
+        let cfg: toml::Table = "cdp_url = \"http://127.0.0.1:1\"\n".parse().unwrap();
+        assert_eq!(cli(&mgr, &cfg, &["join".to_string(), "https://meet.google.com/abc-defg-hij".to_string()]).unwrap(), 0);
+        let active = read_json(&mgr.root.join(".active.json")).expect("active pointer");
+        wait_for(&PathBuf::from(active["out_dir"].as_str().unwrap()).join("status.json"));
+        let pid = active["pid"].as_i64().unwrap() as i32;
+        // Every process the bot started, collected while they run (the script is mid-loop).
+        let mut tree = vec![pid];
+        for _ in 0..20 {
+            for p in seagent_core::platform::proc::descendants(pid) {
+                if !tree.contains(&p) {
+                    tree.push(p);
+                }
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        if cfg!(windows) {
+            assert!(tree.len() > 1, "Git's sh.exe launcher runs the script in a child shell: {tree:?}");
+        }
+        assert_eq!(mgr.stop("test")["ok"], true);
+        // An orphaned `sleep 0.1` (Unix) ends by itself; nothing else may remain.
+        let left = || tree.iter().copied().filter(|&p| seagent_core::platform::proc::alive(p)).collect::<Vec<_>>();
+        assert!(seagent_core::proc::wait_until(Duration::from_secs(3), || left().is_empty()), "fake-bot processes survived stop: {:?}", left());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

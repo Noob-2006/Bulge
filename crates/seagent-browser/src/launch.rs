@@ -144,6 +144,36 @@ pub const PINNED_CFT_VERSION: &str = "157.0.8103.38";
 pub const PINNED_CFT_URL: &str = "https://storage.googleapis.com/chrome-for-testing-public/157.0.8103.38/linux64/chrome-linux64.zip";
 pub const PINNED_CFT_SHA256: &str = "8cdeb344e9b2cefe59f4aea8d1d93d5d93054c03cde217665c16fc1f62e72a66";
 
+/// The same pinned version for every Chrome for Testing platform: `(platform, sha256 of
+/// chrome-<platform>.zip)`. Each hash was taken from Google's own download, the linux64 one
+/// matching [`PINNED_CFT_SHA256`].
+pub const PINNED_CFT_SHA256S: &[(&str, &str)] = &[
+    ("linux64", PINNED_CFT_SHA256),
+    ("win64", "ae0deef27d449e1d7529df7705d609bab102de48464da13567ed3dd2ee1a0586"),
+    ("win32", "be61f767e50b6d94586710afa138535306084b438d9e30bee600a538e16a278a"),
+    ("mac-arm64", "3406b38b52b7d341d74450eb7b369be038c9fec9894c8b8a9e9e9f97333caf2f"),
+    ("mac-x64", "c6fcc2869b0d5a421e880d7bcdabe96e4261c4100e125fc4e4daf6346474efa6"),
+];
+
+/// The pinned build's `(url, sha256)` for a Chrome for Testing `platform` (linux64:
+/// [`PINNED_CFT_URL`]).
+pub fn pinned_cft(platform: &str) -> Option<(String, &'static str)> {
+    let sha = PINNED_CFT_SHA256S.iter().find(|(p, _)| *p == platform)?.1;
+    let url = if platform == "linux64" { PINNED_CFT_URL.to_string() } else { format!("https://storage.googleapis.com/chrome-for-testing-public/{PINNED_CFT_VERSION}/{platform}/chrome-{platform}.zip") };
+    Some((url, sha))
+}
+
+/// `body` downloaded from `url`: `Ok(true)` when `url` is a pinned build and its sha256
+/// matches, `Ok(false)` for an unpinned URL, an error for a pinned one that does not match.
+pub fn verify_pinned(url: &str, body: &[u8]) -> Result<bool, String> {
+    let Some(pinned) = PINNED_CFT_SHA256S.iter().filter_map(|(p, _)| pinned_cft(p)).find(|(u, _)| u == url).map(|(_, s)| s) else { return Ok(false) };
+    let got = seagent_net::crypto::hex(&seagent_net::crypto::sha256(body));
+    if got != pinned {
+        return Err(format!("{url}: sha256 {got} does not match the pinned {pinned} (refusing to install it)"));
+    }
+    Ok(true)
+}
+
 /// The Chrome for Testing build bundled with seagent: `<share>/browsers/chrome-linux64/chrome`
 /// (install.sh --with-browser, offline bundle), else `<data>/browsers/*/chrome` (`seagent browser
 /// install`), else `<cache>/browsers/chrome-linux64/chrome`. Other OSes: the same places with
@@ -160,7 +190,7 @@ pub fn bundled_chrome() -> Option<PathBuf> {
 pub const CFT_INDEX: &str = "https://googlechromelabs.github.io/chrome-for-testing/last-known-good-versions-with-downloads.json";
 
 /// The zip `install_chromium` downloads: `--url`, a `.zip` in `browser.install_base_url`, else
-/// the pinned Chrome for Testing build ([`PINNED_CFT_URL`], sha256-verified); `--url latest`
+/// this platform's pinned Chrome for Testing build ([`pinned_cft`], sha256-verified); `--url latest`
 /// asks Google's index for the current stable build instead.
 pub fn chromium_download_url(cfg: &crate::config::BrowserConfig, explicit: Option<&str>) -> Result<String, String> {
     let explicit = explicit.map(str::trim).filter(|u| !u.is_empty());
@@ -169,9 +199,14 @@ pub fn chromium_download_url(cfg: &crate::config::BrowserConfig, explicit: Optio
     }
     let base = cfg.install_base_url.trim();
     let platform = crate::launch_os::cft_platform().ok_or_else(|| format!("Chrome for Testing has no build for this OS. {}", crate::launch_os::MOBILE_NOTE))?;
-    // The pinned build is the linux64 one; other OSes take the index's current stable build.
-    if explicit.is_none() && (base.ends_with(".zip") || platform == "linux64") {
-        return Ok(if base.ends_with(".zip") { base.to_string() } else { PINNED_CFT_URL.to_string() });
+    // The pinned build of this platform (linux64, win64 / win32, mac-arm64 / mac-x64).
+    if explicit.is_none() {
+        if base.ends_with(".zip") {
+            return Ok(base.to_string());
+        }
+        if let Some((url, _)) = pinned_cft(platform) {
+            return Ok(url);
+        }
     }
     let body = seagent_net::http::agent().get(CFT_INDEX)
         .call()
@@ -206,11 +241,7 @@ pub fn install_chromium(cfg: &crate::config::BrowserConfig, home: &Path, explici
     if !body.starts_with(b"PK\x03\x04") {
         return Err(format!("{url} did not return a zip archive"));
     }
-    if url == PINNED_CFT_URL {
-        let got = seagent_net::crypto::hex(&seagent_net::crypto::sha256(&body));
-        if got != PINNED_CFT_SHA256 {
-            return Err(format!("{url}: sha256 {got} does not match the pinned {PINNED_CFT_SHA256} (refusing to install it)"));
-        }
+    if verify_pinned(&url, &body)? {
         log(&format!("   sha256 ok (Chrome for Testing {PINNED_CFT_VERSION})"));
     }
     let stage = home.join("pm").join("chrome");
@@ -430,6 +461,16 @@ pub fn launch(o: &LaunchOpts, timeout: Duration) -> Result<Launched, String> {
     }
     // Own session (one `kill(-pgid)` reaches the renderers) and tied to seagent: when seagent dies —
     // crash, SIGKILL, an interrupted test run — the kernel sends Chrome SIGTERM (new-001).
+    // Windows Bot Desktop: with `SEAGENT_BD_DESKTOP` set, bind the spawning thread to that
+    // isolated desktop so the browser (std leaves lpDesktop = inherit) lands on it.
+    #[cfg(windows)]
+    let mut child = match o.env.iter().find(|(k, _)| k == "SEAGENT_BD_DESKTOP").map(|(_, v)| v.clone()) {
+        Some(d) => crate::control::screen_windows::on_desktop(&d, || seagent_core::proc::spawn_tied(cmd, true))
+            .map_err(|e| format!("failed to start {} on the Bot Desktop: {e}", o.exe.display()))?
+            .map_err(|e| format!("failed to start {}: {e}", o.exe.display()))?,
+        None => seagent_core::proc::spawn_tied(cmd, true).map_err(|e| format!("failed to start {}: {e}", o.exe.display()))?,
+    };
+    #[cfg(not(windows))]
     let mut child = seagent_core::proc::spawn_tied(cmd, true).map_err(|e| format!("failed to start {}: {e}", o.exe.display()))?;
     let pid = child.id() as i32;
     let until = Instant::now() + timeout;
@@ -760,7 +801,29 @@ mod tests {
     #[test]
     fn default_browser_install_is_the_pinned_build() {
         let cfg = crate::config::BrowserConfig::default();
+        // Every desktop OS installs its own platform's build of the one pinned version (no
+        // network call); a `.zip` base URL is used as is.
+        #[cfg(target_os = "linux")]
         assert_eq!(chromium_download_url(&cfg, None).unwrap(), PINNED_CFT_URL);
+        #[cfg(target_os = "macos")]
+        {
+            let p = crate::launch_os::cft_platform().unwrap();
+            assert!(p.starts_with("mac-"));
+            assert_eq!(chromium_download_url(&cfg, None).unwrap(), format!("https://storage.googleapis.com/chrome-for-testing-public/{PINNED_CFT_VERSION}/{p}/chrome-{p}.zip"));
+        }
+        #[cfg(windows)]
+        {
+            assert_eq!(crate::launch_os::cft_platform(), Some("win64"));
+            assert_eq!(chromium_download_url(&cfg, None).unwrap(), format!("https://storage.googleapis.com/chrome-for-testing-public/{PINNED_CFT_VERSION}/win64/chrome-win64.zip"));
+            let local = crate::config::BrowserConfig { install_base_url: "https://mirror.example/chrome-win64.zip".into(), ..Default::default() };
+            assert_eq!(chromium_download_url(&local, None).unwrap(), "https://mirror.example/chrome-win64.zip");
+        }
+        for (p, sha) in PINNED_CFT_SHA256S {
+            let (url, s) = pinned_cft(p).unwrap();
+            assert!(url.contains(PINNED_CFT_VERSION) && url.ends_with(&format!("/{p}/chrome-{p}.zip")) && s == *sha && sha.len() == 64 && sha.bytes().all(|b| b.is_ascii_hexdigit()), "{p}");
+        }
+        assert_eq!(pinned_cft("linux64").unwrap(), (PINNED_CFT_URL.to_string(), PINNED_CFT_SHA256));
+        assert!(pinned_cft("android").is_none());
         assert_eq!(chromium_download_url(&cfg, Some("https://x/y.zip")).unwrap(), "https://x/y.zip");
         assert!(PINNED_CFT_URL.contains(PINNED_CFT_VERSION) && PINNED_CFT_SHA256.len() == 64);
         for f in ["packaging/install.sh", "packaging/offline/make-offline-bundle.sh"] {

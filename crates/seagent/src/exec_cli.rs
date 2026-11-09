@@ -806,7 +806,17 @@ mod tests {
         let tools = s(&["read", "shell", "web_fetch", "channel_send", "mcp__x__y"]);
         let v = explain(&cfg, &paths, "main", Path::new("/w"), &tools);
         assert_eq!((v["sandboxed"].as_bool(), v["runs_in"].as_str(), v["scope_key"].as_str()), (Some(true), Some("bwrap"), Some("s-main")));
-        assert!(v["workspace"].as_str().unwrap().ends_with("s-main/workspace"), "private scratch workspace");
+        // Component-wise: `…\s-main\workspace` on Windows.
+        assert!(Path::new(v["workspace"].as_str().unwrap()).ends_with("s-main/workspace"), "private scratch workspace");
+        // Windows: the same session in the AppContainer sandbox (bwrap's counterpart there).
+        #[cfg(windows)]
+        {
+            let mut ac = cfg.clone();
+            ac.sandbox.backend = "appcontainer".into();
+            let v = explain(&ac, &paths, "main", Path::new(r"C:\w"), &tools);
+            assert_eq!((v["sandboxed"].as_bool(), v["runs_in"].as_str()), (Some(true), Some("appcontainer")), "{v}");
+            assert!(render_explain(&v).contains("SANDBOXED in appcontainer"), "{}", render_explain(&v));
+        }
         assert_eq!(v["tools"]["denied"], json!(["web_fetch", "channel_send"]));
         assert!(render_explain(&v).contains("SANDBOXED in bwrap"));
         let host = explain(&ExecConfig::default(), &paths, "main", Path::new("/w"), &tools);

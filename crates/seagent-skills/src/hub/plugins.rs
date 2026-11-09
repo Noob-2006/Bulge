@@ -614,6 +614,11 @@ impl<'a> Plugins<'a> {
         if url.starts_with("http") {
             self.http.check(url)?;
         }
+        // Byte-exact checkout: Git for Windows defaults to `core.autocrlf=true`, which would turn
+        // a plugin's `#!/bin/sh` scripts into CRLF files bash cannot run.
+        #[cfg(windows)]
+        git(&["clone", "--quiet", "--config", "core.autocrlf=false", url, &dest.display().to_string()], None)?;
+        #[cfg(not(windows))]
         git(&["clone", "--quiet", url, &dest.display().to_string()], None)?;
         if let Some(r) = rev.filter(|r| !r.is_empty()) {
             git(&["checkout", "--quiet", r], Some(dest))?;
@@ -716,7 +721,11 @@ impl<'a> Plugins<'a> {
                     })
                 }
             };
+            // A local source on Windows is `C:\…\pkg`: its last component is the name too.
+            #[cfg(not(windows))]
             let name = url.trim_end_matches('/').trim_end_matches(".git").rsplit('/').next().unwrap_or("plugin").to_string();
+            #[cfg(windows)]
+            let name = url.trim_end_matches(['/', '\\']).trim_end_matches(".git").rsplit(['/', '\\']).next().unwrap_or("plugin").to_string();
             let st = self.stage(&name)?;
             self.clone_into(&url, rev.as_deref(), &st)?;
             (name, st, json!({"source": "git", "url": url, "ref": rev}))
@@ -1684,7 +1693,8 @@ mod tests {
         mk_repo(&proc_, &[("seagent-plugin.toml", "command = \"./run.sh\"\nargs = [\"serve\"]\n"), ("run.sh", "#!/bin/sh\necho hi\n")]);
         assert!(pm.install(&proc_.display().to_string(), false).unwrap().contains("[plugins.myproc]"));
         let c = Config::load(Some(&p.user_config()), None, &[]).unwrap();
-        assert!(c.plugins["myproc"]["command"].as_str().unwrap().ends_with("myproc/run.sh"));
+        // An absolute host path, compared per component (`myproc\run.sh` on Windows).
+        assert!(std::path::Path::new(c.plugins["myproc"]["command"].as_str().unwrap()).ends_with("myproc/run.sh"));
         let pm2 = Plugins::new(&c, &p);
         pm2.set_enabled("myproc", false).unwrap();
         assert_eq!(Config::load(Some(&p.user_config()), None, &[]).unwrap().plugins["myproc"]["enabled"].as_bool(), Some(false));

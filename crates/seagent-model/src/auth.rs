@@ -151,16 +151,13 @@ pub fn parse_minted(out: &str, now: u64) -> Result<(String, u64), String> {
     Ok((t.to_string(), now + NO_TTL_MS))
 }
 
-/// The program to spawn for an external CLI named `cmd`. Unix: `cmd` itself (`exec` searches
+/// The `Command` for an external CLI named `cmd`. Unix: `cmd` itself (`exec` searches
 /// `PATH`). Windows: `Command` only finds `.exe` files, but npm-installed CLIs (`claude`,
-/// `gemini`, `codex`, `copilot`) are `.cmd` shims, so the name is resolved through `PATHEXT`.
+/// `gemini`, `codex`, `copilot`) are `.cmd` shims, so the name is resolved through `PATHEXT`;
+/// `python3` is the Python launcher, not the Store alias (`layout::program_command`).
 #[cfg_attr(not(any(feature = "agent-cli", feature = "local")), allow(dead_code))]
-pub(crate) fn program(cmd: &str) -> std::path::PathBuf {
-    #[cfg(windows)]
-    if let Some(p) = seagent_core::platform::layout::which(cmd) {
-        return p;
-    }
-    std::path::PathBuf::from(cmd)
+pub(crate) fn program(cmd: &str) -> std::process::Command {
+    seagent_core::platform::layout::program_command(cmd)
 }
 
 pub fn run_capture(cmd: &str, timeout: Duration) -> Result<String, String> {
@@ -1115,7 +1112,8 @@ mod tests {
         let counter = dir.join("n");
         let k = KeyCmd::new(&format!(
             "echo x >> {0}; echo minted-$(wc -l < {0})",
-            counter.display()
+            // A shell line: Git Bash on Windows needs `C:/…` (it eats `\`).
+            seagent_core::platform::shell::path_str(&counter)
         ));
         assert_eq!(k.get().unwrap().token.unwrap(), "minted-1");
         assert_eq!(k.get().unwrap().token.unwrap(), "minted-1", "cached");

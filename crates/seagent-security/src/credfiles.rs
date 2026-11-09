@@ -23,7 +23,9 @@ pub fn mount_for(rel: &str, home: &Path, container_home: &str, dirs: &SeagentDir
     if rel.is_empty() {
         return Err("empty credential file entry".into());
     }
-    if Path::new(rel).is_absolute() {
+    // `has_root`: on Windows `/etc/passwd` / `\x` is drive-relative, not under the home
+    // (on Unix a rooted path is absolute: same check).
+    if Path::new(rel).is_absolute() || Path::new(rel).has_root() || matches!(Path::new(rel).components().next(), Some(std::path::Component::Prefix(_))) {
         return Err(format!("credential file `{rel}` must be relative to your home directory"));
     }
     if crate::paths::has_traversal_component(rel) || crate::paths::has_unsafe_path_chars(rel) {

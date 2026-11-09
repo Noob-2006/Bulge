@@ -60,7 +60,8 @@ mod tests {
         std::fs::write(d.join("a.txt"), "1").unwrap();
         git(&["add", "."], &d);
         git(&["commit", "-q", "-m", "init"], &d);
-        d.canonicalize().unwrap()
+        // How the kernel and git spell it (`layout::canonicalize`: no `\\?\` on Windows).
+        seagent_core::platform::layout::canonicalize(&d).unwrap()
     }
 
     /// `/worktree new` reaches `worktree::enter_session`: the session's workspace moves into the

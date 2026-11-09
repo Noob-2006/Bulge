@@ -414,7 +414,7 @@ pub fn dispatch(cmd: &str, a: &Args, raw: &[String]) -> Option<R> {
                 }
                 let c = Capture::start(store(), host, port, &argv.join(" "))?;
                 eprintln!("capturing through {} (session {})", c.url, c.session);
-                let st = std::process::Command::new(&argv[0]).args(&argv[1..]).env("HTTP_PROXY", &c.url).env("HTTPS_PROXY", &c.url).env("ALL_PROXY", &c.url).env("http_proxy", &c.url).env("https_proxy", &c.url).env_remove("NO_PROXY").env_remove("no_proxy").status();
+                let st = seagent_core::platform::layout::program_command_args(&argv[0], &argv[1..]).env("HTTP_PROXY", &c.url).env("HTTPS_PROXY", &c.url).env("ALL_PROXY", &c.url).env("http_proxy", &c.url).env("https_proxy", &c.url).env_remove("NO_PROXY").env_remove("no_proxy").status();
                 c.stop();
                 eprintln!("capture session {} saved; inspect with `seagent proxy query --session {} --preset error-bursts`", c.session, c.session);
                 Ok(st.map_err(|e| format!("{}: {e}", argv[0]))?.code().unwrap_or(1))

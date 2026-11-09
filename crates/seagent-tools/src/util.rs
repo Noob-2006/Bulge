@@ -61,9 +61,10 @@ pub fn truncate_str(s: &str, max: usize) -> &str {
     &s[..end]
 }
 
-/// Path shown to the model: relative to the workspace when inside it.
+/// Path shown to the model: relative to the workspace when inside it. Relative paths use `/`
+/// on every OS (Windows too, docs/cross-platform.md); absolute ones stay native.
 pub fn display_path(workspace: &Path, p: &Path) -> String {
-    p.strip_prefix(workspace).map(|r| r.display().to_string()).unwrap_or_else(|_| p.display().to_string())
+    p.strip_prefix(workspace).map(seagent_core::platform::layout::model_path).unwrap_or_else(|_| p.display().to_string())
 }
 
 /// Accept a common alternative name for an argument (models guess `content`

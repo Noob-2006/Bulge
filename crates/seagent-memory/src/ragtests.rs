@@ -177,7 +177,7 @@ fn team_knowledge_bases_and_memories_are_filtered_by_tenant() {
     let h = &g.0;
     use seagent_kernel::tenancy::{self, Tenant, Viewer};
     // Single-tenant: every session sees everything, as before.
-    let names = |o: &crate::SearchOutcome| o.hits.iter().map(|x| x.path.rsplit('/').next().unwrap().to_string()).collect::<Vec<_>>();
+    let names = |o: &crate::SearchOutcome| o.hits.iter().map(|x| std::path::Path::new(&x.path).file_name().unwrap().to_string_lossy().into_owned()).collect::<Vec<_>>();
     assert_eq!(h.session_viewer("s-eng"), None);
     assert_eq!(names(&h.search("failover", 10, 0.0, &["memory"]).unwrap()).len(), 4);
     tenancy::org_add(&h.data, "acme", "").unwrap();
@@ -189,7 +189,7 @@ fn team_knowledge_bases_and_memories_are_filtered_by_tenant() {
     let search = |sid: &str, q: &str| {
         let out = crate::tools::MemorySearch(h.clone()).call(&crate::tools::tests::ctx(&h.data, sid), json!({"query": q, "minScore": 0, "maxResults": 20})).content;
         let v: serde_json::Value = serde_json::from_str(out.split("\n\n").next().unwrap_or(&out)).unwrap_or(json!({"raw": out}));
-        v["results"].as_array().cloned().unwrap_or_default().iter().map(|r| r["path"].as_str().unwrap_or("").rsplit('/').next().unwrap().to_string()).collect::<Vec<_>>()
+        v["results"].as_array().cloned().unwrap_or_default().iter().map(|r| std::path::Path::new(r["path"].as_str().unwrap_or("")).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()).collect::<Vec<_>>()
     };
     let mut e = search("s-eng", "failover");
     e.sort();

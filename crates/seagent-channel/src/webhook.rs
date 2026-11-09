@@ -1039,7 +1039,11 @@ fn run_script(dir: Option<&Path>, script: &str, payload: &Value, timeout: Durati
         _ => Command::new(&path),
     };
     if cmd.get_program() != path.as_os_str() {
+        #[cfg(unix)]
         cmd.arg(&path);
+        // MSYS bash needs `C:/…/t.sh`: it eats the backslashes of `\\?\C:\…\t.sh`.
+        #[cfg(not(unix))]
+        cmd.arg(seagent_core::platform::shell::path_arg(&path));
     }
     cmd.current_dir(path.parent().unwrap_or(&root)).env_clear();
     for k in ["PATH", "HOME", "LANG", "LC_ALL", "TZ"] {

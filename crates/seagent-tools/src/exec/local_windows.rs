@@ -167,6 +167,24 @@ pub(super) fn command_line(cmd: &Command) -> String {
     windows_command_line(&prog, &args.iter().map(String::as_str).collect::<Vec<_>>())
 }
 
+/// `cmd` unchanged, or — for an MSYS2 program (Git Bash), which globs and brace-expands
+/// unquoted arguments — the same command with every argument `msys_quote`d.
+fn msys_requoted(cmd: Command) -> Command {
+    use seagent_core::platform::layout::{is_msys_program, msys_quote};
+    if !is_msys_program(Path::new(cmd.get_program())) {
+        return cmd;
+    }
+    let mut c = Command::new(cmd.get_program());
+    for a in cmd.get_args() {
+        c.raw_arg(msys_quote(&a.to_string_lossy()));
+    }
+    if let Some(d) = cmd.get_current_dir() {
+        c.current_dir(d);
+    }
+    c.env_clear().envs(full_env(&cmd).into_iter());
+    c
+}
+
 /// Is the active shell a POSIX one (EOF on a terminal is `^D`; PowerShell wants `^Z`)?
 fn posix_shell() -> bool {
     seagent_core::platform::shell::active().kind.is_posix()
@@ -196,6 +214,7 @@ pub(super) fn spawn_attached(mut cmd: Command, req: &ExecRequest, extra: Option<
         c.feed(req)?;
         return Ok(Box::new(c));
     }
+    cmd = msys_requoted(cmd);
     let (r, w) = std::io::pipe()?;
     cmd.stdout(Stdio::from(w.try_clone()?)).stderr(Stdio::from(w));
     cmd.stdin(if req.stdin || req.stdin_data.is_some() { Stdio::piped() } else { Stdio::null() });
@@ -243,8 +262,11 @@ pub(super) fn spawn_detached(cmd: Command, req: &ExecRequest, extra: Option<PreE
     let log = req.log_file.clone().ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "detached process needs log_file"))?;
     let exit = req.exit_file.clone().ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "detached process needs exit_file"))?;
     let _ = std::fs::remove_file(&exit);
-    let out = std::fs::OpenOptions::new().create(true).append(true).open(&log)?;
-    let args: Vec<String> = cmd.get_args().map(|a| windows_quote(&a.to_string_lossy())).collect();
+    // Not an append-only handle: Git Bash exits 1 at startup on one (`open_child_log`).
+    let out = seagent_core::platform::proc::open_child_log(&log)?;
+    let msys = seagent_core::platform::layout::is_msys_program(Path::new(cmd.get_program()));
+    let quote = if msys { seagent_core::platform::layout::msys_quote } else { windows_quote };
+    let args: Vec<String> = cmd.get_args().map(|a| quote(&a.to_string_lossy())).collect();
     let mut w = Command::new(windows_powershell());
     w.args(["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", DETACH_WRAPPER]);
     if let Some(d) = cmd.get_current_dir() {
@@ -336,10 +358,19 @@ impl LocalChild {
     fn finish(&mut self, code: i32) -> ExitInfo {
         if self.force_killed {
             ExitInfo { code: None, signal: Some(9) }
+        } else if let Some(sig) = msys_signal(code) {
+            ExitInfo { code: None, signal: Some(sig) }
         } else {
             ExitInfo::code(code)
         }
     }
+}
+
+/// MSYS / Cygwin bash reports "killed by signal N" to Windows as exit code `N << 8` (a bash
+/// `exit` status is always 0–255), so `kill -9 $$` reads as signal 9, as on Unix.
+fn msys_signal(code: i32) -> Option<i32> {
+    let sig = code >> 8;
+    (code & 0xff == 0 && (1..=64).contains(&sig) && seagent_core::platform::shell::active().kind.is_posix()).then_some(sig)
 }
 
 impl ExecChild for LocalChild {

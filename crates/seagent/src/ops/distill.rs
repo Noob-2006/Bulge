@@ -458,7 +458,8 @@ pub fn check_stage(out: &Path, roles_src: &Path, extra_names: &[String]) -> Resu
     let row = if !script.is_file() {
         CheckRow { name: "share/roles/check.py".into(), ok: false, detail: format!("{} missing in the role tree", script.display()) }
     } else {
-        let mut c = std::process::Command::new("python3");
+        // `python3` on Unix; the `py -3` launcher on Windows (not the Store alias).
+        let mut c = seagent_core::platform::layout::program_command("python3");
         c.arg("-I").arg(&script).arg("--quiet").current_dir(&tree).env("SEAGENT_AUDIT_ROOT", &tree);
         match evalkit::run::capture(c, std::time::Duration::from_secs(300)) {
             Ok((o, code)) => {

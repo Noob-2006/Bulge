@@ -217,11 +217,20 @@ fn yaml(rel: &str) -> Value {
     seagent_skills::yaml::parse(&text).unwrap_or_else(|e| panic!("{rel}: {e}"))
 }
 
+/// A POSIX `sh` to syntax-check the CI scripts with: `sh` on Unix; Windows has none on PATH,
+/// so Git Bash (its paths spelled `C:/…`, `shell::path_arg`).
+fn posix_sh() -> Command {
+    #[cfg(unix)]
+    return Command::new("sh");
+    #[cfg(not(unix))]
+    return Command::new(seagent_core::platform::layout::bash().expect("Git Bash / MSYS2 bash"));
+}
+
 fn sh_n(code: &str) {
     let dir = TempDir::new("seagent-run-ci");
     let f = dir.join("snippet.sh");
     std::fs::write(&f, code).unwrap();
-    let o = Command::new("sh").arg("-n").arg(&f).output().unwrap();
+    let o = posix_sh().arg("-n").arg(seagent_core::platform::shell::path_arg(&f)).output().unwrap();
     assert!(o.status.success(), "sh -n failed: {}\n{code}", String::from_utf8_lossy(&o.stderr));
 }
 
@@ -323,10 +332,10 @@ fn the_jenkinsfile_is_a_balanced_pipeline_that_uses_the_script() {
 
 #[test]
 fn the_script_itself_is_valid_posix_sh_and_documented() {
-    let o = Command::new("sh").arg("-n").arg(script()).output().unwrap();
+    let o = posix_sh().arg("-n").arg(seagent_core::platform::shell::path_arg(&script())).output().unwrap();
     assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
     let t = std::fs::read_to_string(script()).unwrap();
     assert!(t.starts_with("#!/bin/sh") && t.contains("set -eu"));
-    let help = Command::new("sh").arg(script()).arg("--help").output().unwrap();
+    let help = posix_sh().arg(seagent_core::platform::shell::path_arg(&script())).arg("--help").output().unwrap();
     assert!(String::from_utf8_lossy(&help.stdout).contains("seagent-ci.sh review"));
 }

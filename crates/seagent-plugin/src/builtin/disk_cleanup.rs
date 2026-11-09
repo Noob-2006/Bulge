@@ -1513,7 +1513,8 @@ mod tests {
 
         // A path named in a shell command is picked up the same way.
         let shelled = paths.data.join("scratch/tmp_from_shell.sh");
-        let p3 = json!({"session_id": "s1", "tool_name": "shell", "tool_input": {"command": format!("touch {}", shelled.display())}});
+        // A shell line: Git Bash spelling on Windows (`C:/…`; `\` would be an escape).
+        let p3 = json!({"session_id": "s1", "tool_name": "shell", "tool_input": {"command": format!("touch {}", seagent_core::platform::shell::path_str(&shelled))}});
         let _ = hook.run(HookEvent::PreTool, &p3).unwrap();
         write(&shelled, "#!/bin/sh\n");
         let _ = hook.run(HookEvent::PostTool, &p3).unwrap();

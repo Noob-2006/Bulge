@@ -245,7 +245,8 @@ mod tests {
         let d = crate::tmp("mig-home");
         let home = d.join("home");
         fs::create_dir_all(home.join(".honcho")).unwrap();
-        let legacy = home.join(".honcho/config.json");
+        // Joined per component, as the product does (`\.honcho\config.json` on Windows).
+        let legacy = home.join(".honcho").join("config.json");
         fs::write(&legacy, r#"{"hosts":{"hermes.work":{"workspace":"w"}}}"#).unwrap();
         let real_home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default();
         let real_legacy = real_home.join(".honcho/config.json");

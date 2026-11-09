@@ -22,7 +22,7 @@ use super::guard::Dialect;
 use seagent_core::Cancel;
 use serde_json::{json, Value};
 use std::io::{BufRead, BufReader, Read, Write};
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -160,8 +160,9 @@ impl Drop for Kill {
 /// when `parse` is done early, on timeout, on cancel and on any error path (drop guard).
 fn run_client(argv: &[String], env: &[(String, String)], script: &str, lim: &Limits, secret: &str, parse: impl FnOnce(&mut dyn BufRead, usize) -> Result<Rows, String>) -> Result<Rows, String> {
     let (prog, args) = argv.split_first().ok_or("empty client command")?;
-    let mut cmd = Command::new(prog);
-    cmd.args(args).envs(env.iter().map(|(k, v)| (k, v))).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    let mut cmd = seagent_core::platform::layout::program_command(prog);
+    seagent_core::platform::layout::msys_args(&mut cmd, args);
+    cmd.envs(env.iter().map(|(k, v)| (k, v))).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
     // ETXTBSY: a freshly written client script can still be open for writing in a sibling
     // thread's fork that has not reached exec yet; it clears within milliseconds.
     let mut tries = 0;

@@ -254,3 +254,70 @@ fn browser_install_downloads_and_unpacks_chrome_for_testing() {
     assert!(e.contains("did not return a zip archive"), "{e}");
     assert!(crate::launch::chromium_download_url(&cfg, Some("http://127.0.0.1:9/none.zip")).unwrap().ends_with("none.zip"), "an explicit --url always wins");
 }
+
+/// Windows counterpart: a `chrome-win64/chrome.exe` zip (built with the product's Python
+/// discovery) is downloaded from a local server, unpacked into `browsers/chrome-win64` and
+/// found again; a non-zip body is refused.
+#[cfg(windows)]
+#[test]
+fn browser_install_downloads_and_unpacks_chrome_for_testing_windows() {
+    let _g = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    let dir = temp_dir("cft-win");
+    let zip = dir.join("chrome-win64.zip");
+    let Some(mut py) = seagent_core::platform::layout::python3().map(|(p, a)| {
+        let mut c = std::process::Command::new(p);
+        c.args(a);
+        c
+    }) else {
+        eprintln!("skipped: no Python for the test zip");
+        return;
+    };
+    let st = py.arg("-c").arg("import sys,zipfile; z=zipfile.ZipFile(sys.argv[1],'w'); z.writestr('chrome-win64/chrome.exe','MZ fake'); z.writestr('chrome-win64/icudtl.dat','x'); z.close()").arg(&zip).status().expect("python");
+    assert!(st.success());
+    let body = std::fs::read(&zip).unwrap();
+    let serve = |payload: Vec<u8>, ctype: &'static str| {
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = l.local_addr().unwrap();
+        std::thread::spawn(move || {
+            for s in l.incoming().take(2) {
+                let Ok(mut s) = s else { continue };
+                // The whole request head first: closing with unread bytes is a reset on Windows.
+                let (mut head, mut b) = (Vec::new(), [0u8; 1024]);
+                while !head.windows(4).any(|w| w == b"\r\n\r\n") {
+                    match std::io::Read::read(&mut s, &mut b) {
+                        Ok(0) | Err(_) => break,
+                        Ok(n) => head.extend_from_slice(&b[..n]),
+                    }
+                }
+                let _ = std::io::Write::write_all(&mut s, format!("HTTP/1.1 200 OK\r\ncontent-type: {ctype}\r\ncontent-length: {}\r\nconnection: close\r\n\r\n", payload.len()).as_bytes());
+                let _ = std::io::Write::write_all(&mut s, &payload);
+            }
+        });
+        addr
+    };
+    let zip_url = format!("http://{}/chrome-win64.zip", serve(body, "application/zip"));
+    let home = dir.join("home");
+    let cfg = BrowserConfig { install_base_url: zip_url.clone(), ..Default::default() };
+    assert_eq!(crate::launch::chromium_download_url(&cfg, None).unwrap(), zip_url);
+    let mut log = vec![];
+    let exe = crate::launch::install_chromium(&cfg, &home, None, &mut |l| log.push(l.to_string())).unwrap();
+    assert_eq!(exe, home.join("browsers").join("chrome-win64").join("chrome.exe"));
+    assert!(exe.is_file() && home.join("browsers/chrome-win64/icudtl.dat").is_file());
+    assert_eq!(crate::launch::installed_chrome_in(&home.join("browsers")).as_deref(), Some(exe.as_path()));
+    assert!(log.iter().any(|l| l.contains("installed")), "{log:?}");
+    assert!(std::fs::read_to_string(home.join("browsers/chrome-win64/.seagent-source")).unwrap().contains("chrome-win64.zip"));
+    let bad_url = format!("http://{}/notazip.zip", serve(b"<html".to_vec(), "text/html"));
+    let e = crate::launch::install_chromium(&cfg, &home, Some(&bad_url), &mut |_| {}).unwrap_err();
+    assert!(e.contains("did not return a zip archive"), "{e}");
+}
+
+/// Every pinned platform build is refused when its bytes do not hash to the pin (all OSes).
+#[test]
+fn pinned_chrome_downloads_must_match_their_sha256() {
+    for (p, sha) in crate::launch::PINNED_CFT_SHA256S {
+        let (url, _) = crate::launch::pinned_cft(p).unwrap();
+        let e = crate::launch::verify_pinned(&url, b"PK\x03\x04 not chrome").unwrap_err();
+        assert!(e.contains("does not match the pinned") && e.contains(sha), "{p}: {e}");
+    }
+    assert_eq!(crate::launch::verify_pinned("https://mirror.example/chrome.zip", b"anything"), Ok(false), "unpinned URLs are not hash-checked");
+}

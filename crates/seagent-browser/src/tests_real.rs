@@ -245,6 +245,34 @@ fn real_browser_dies_with_a_panicking_test() {
     assert!(gone, "Chrome group {pid} outlived the panicking test process");
 }
 
+/// Windows stand-in "browser": a `.cmd` that hands its arguments to a PowerShell script, which
+/// writes `DevToolsActivePort` into the `--user-data-dir` and then sleeps.
+#[cfg(windows)]
+fn fake_browser(dir: &std::path::Path) -> std::path::PathBuf {
+    let ps = dir.join("fake-chrome.ps1");
+    std::fs::write(&ps, "$d = ($args | Where-Object { $_ -like '--user-data-dir=*' } | Select-Object -First 1).Substring(16)\r\nNew-Item -ItemType Directory -Force $d | Out-Null\r\n[IO.File]::WriteAllText((Join-Path $d 'DevToolsActivePort'), \"9`n/devtools/browser/fake`n\")\r\nStart-Sleep 300\r\n").unwrap();
+    let exe = dir.join("fake-chrome.cmd");
+    std::fs::write(&exe, format!("@powershell -NoProfile -ExecutionPolicy Bypass -File \"{}\" %*\r\n", ps.display())).unwrap();
+    exe
+}
+
+/// Windows child half of [`launcher_ties_the_browser_to_a_panicking_process`]: the browser
+/// is in seagent's kill-on-close Job Object, so the panic takes it down (PDEATHSIG's
+/// counterpart).
+#[cfg(windows)]
+#[test]
+fn launcher_panic_helper() {
+    let Ok(out) = std::env::var("SEAGENT_LAUNCH_PANIC_PIDFILE") else { return };
+    let dir = seagent_core::tmp::TempDir::new("seagent-bt-launch-panic");
+    let exe = fake_browser(dir.path());
+    let udd = dir.path().join("profile");
+    let o = crate::launch::LaunchOpts { exe: &exe, user_data_dir: &udd, headless: true, no_sandbox: false, extra_args: &[], port: 0, managed: true, env: vec![] };
+    let l = crate::launch::launch(&o, Duration::from_secs(20)).unwrap();
+    std::fs::write(out, l.pid.to_string()).unwrap();
+    std::mem::forget(dir);
+    panic!("deliberate panic with a launched browser running");
+}
+
 #[cfg(unix)]
 /// A stand-in "browser": writes `DevToolsActivePort` into its `--user-data-dir` (what the
 /// launcher waits for), then becomes a long `sleep`. Lets the launcher's process tying be

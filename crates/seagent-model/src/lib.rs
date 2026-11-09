@@ -10,6 +10,8 @@ pub mod acp;
 pub mod agentsapi;
 mod anthropic;
 pub mod auth;
+// `aux.rs` is a reserved device name on Windows (Git for Windows cannot check it out).
+#[path = "aux_models.rs"]
 pub mod aux;
 pub mod billing;
 #[cfg(feature = "bedrock")]

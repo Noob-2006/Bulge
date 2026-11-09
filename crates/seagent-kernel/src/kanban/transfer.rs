@@ -135,7 +135,8 @@ fn walk(dir: &Path, base: &Path, out: &mut Vec<(String, PathBuf)>) {
         if ft.is_dir() {
             walk(&p, base, out);
         } else if ft.is_file() {
-            out.push((p.strip_prefix(base).unwrap().to_string_lossy().into_owned(), p));
+            // Archive member names use `/` on every OS (`attachments/x` on Windows too).
+            out.push((seagent_core::platform::layout::model_path(p.strip_prefix(base).unwrap()), p));
         }
     }
 }

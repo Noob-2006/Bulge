@@ -33,6 +33,39 @@
 | 錄音 / 通知 | pw-record / dunst | WASAPI / Toast | AVFoundation / UserNotifications | 系統 API | 系統 API |
 | syslog | /dev/log | Windows Event Log | os_log / UDP syslog | logcat | os_log |
 
+### Windows：路徑、shell 與外部程式（原生 Windows 測試後的決定）
+
+- **給模型看的路徑**：工作區內的**相對路徑一律用 `/`**（`src/a.rs`，不是 `src\a.rs`）：glob / grep /
+  read / write / edit / patch 的輸出與 patch 摘要都經 `seagent_tools::util::display_path` →
+  `seagent_core::platform::layout::model_path`。模型與 patch 格式都假設 `/`，Windows 的檔案 API 也接受 `/`。
+  **絕對路徑保持原生寫法**（`C:\Users\…`，例如溢出檔、工作區外的檔案），因為使用者會拿去貼上或開啟。
+  Linux / macOS 上 `model_path` 就是 `p.display()`，輸出逐位元不變。同步到遠端 POSIX 沙盒的 tar 條目也一律 `/`；
+  工作區外的 Windows 絕對路徑在遠端落在 `/c/…`（MSYS / WSL 慣例）。
+- **交給 shell 的路徑**：`shell::path_arg` / `path_str` —— Unix 不變；Windows 去掉 `\\?\`，shell 是 bash 時改成
+  `C:/…`（MSYS bash 會吃掉 `C:\…` 的反斜線）。cron 腳本、webhook 腳本、hook 命令都走它。
+- **設定裡的程式名**：`layout::program_command`（MCP / LSP / ACP / 模型 runtime / link processor / ops run）——
+  Unix 就是 `Command::new(name)`；Windows 走 PATHEXT（npm 的 `.cmd` shim）、`python3`/`python` 指 `py -3`
+  （不是會印「Python was not found」並以 9009 結束的 Store 別名）、`sh`/`bash` 指 Git Bash（不是 WSL 的 `bash.exe`），
+  PATH 上找不到的 POSIX 工具名（`cat`、`grep`、`false`…）改用 Git for Windows / MSYS2 附的 `usr\bin`。
+  Git Bash 腳本裡的 `python3`：PATH 上只有 Store 別名時，`%LOCALAPPDATA%\seagent\shims` 放一個轉給 `py -3` 的
+  `python3`/`python` 腳本，`shell::command` 與 `run` 工具把它放在 PATH 最前面。
+- **連線**：主機名的每個解析位址依序嘗試（Windows 的 `localhost` 先給 `::1`，很多服務只聽 127.0.0.1）；
+  第一個位址仍最先試，原本能連的設定行為不變。
+- **交給子程序的 log 檔**：`proc::open_child_log` —— Windows 不用 append-only handle（缺 `FILE_WRITE_DATA`），
+  否則 Git Bash 一啟動就以 1 結束、沒有任何輸出（detached job、AppContainer detached、seagentd 服務 log、Meet bot）。
+- **AppContainer 內的 shell**：MSYS 執行階段在 AppContainer / 低完整性下無法建立 `\BaseNamedObjects\msys-*`
+  （`0xC0000022`），所以主機 shell 是 Git Bash 時，沙盒命令改用 Windows PowerShell，並在 backend 說明、
+  shell 工具的提示（`exec::local::shell_note`）與腳本外殼中照實反映：PowerShell 腳本沒有 `eval`/`unset`，
+  缺少的命令照 bash 的格式回報（`x: command not found`、exit 127，失敗提示照常適用）；
+  `SEAGENT_APPCONTAINER_SHELL` 可指定其他 shell。AppContainer 讀不到工作區的上層目錄，PowerShell 因此停在 `C:\`
+  且 `Set-Location` 會被拒，所以腳本先把工作區掛成 `SeagentWs:` PSDrive 再切過去。真實測試：`SEAGENT_REAL_TESTS=1 cargo test -p seagent-tools real_backend_appcontainer -- --ignored`。
+- **已知限制（MSYS 的命令列展開）**：MSYS / Cygwin 程式會自己對 Windows 命令列中「沒加引號」的參數做 glob 與
+  大括號展開（不含空白的 `[{"a":1,"b":2}]` 會被拆開）。`MSYS=noglob` 不能用——它連引號處理也關掉，`bash -c '…'`
+  的腳本會被拆成單字。要把這類 JSON 字面值交給 `echo` / `cat` 等 MSYS 工具，請放進 shell 腳本（`exec --shell`）。
+- **MSYS 的訊號**：Git Bash 被訊號 N 結束時對 Windows 回報 `N << 8`，本機 backend 換回「signal N」，與 Unix 同義。
+- **ConPTY**：PTY 的輸出要等 pseudo console 關閉才會 EOF，process registry 讀不到資料時會順便 `try_wait`。
+  ConPTY 會把 bracketed-paste 標記當作輸入解讀，沒要求 bracketed paste 的程式只收到文字。
+
 ### macOS：子程序跟著 seagent 結束（選用）
 
 macOS 沒有 PDEATHSIG。預設情況下，seagent 被 `SIGKILL` 時，綁定的子程序會留下來（正常結束或 `kill_group` 仍會收掉）。
@@ -126,3 +159,14 @@ iOS 不允許 App 開虛擬機、執行子程序或 JIT，因此 iOS 版是**純
 2. **逐 crate 移植**（平行）：kernel、tools、vm、binary+app+browser+channel、其餘輕量 crate。
 3. **LAN 互聯、Tauri 外殼、安裝檔、CI 矩陣、手機 App**。
 4. **驗證**：Linux 測試全過且效能不變；Windows / macOS / Android / iOS 目標 `cargo check` 通過；Windows 原生實機跑通。
+
+## Bot Desktop（隔离桌面 / isolated desktop）
+
+seagent screen 的平台替身（control/screen.rs 按 OS 分支）：
+
+- **Linux**：TigerVNC Xvnc + Xfce（launcher.sh），无头渲染，VNC 可接入。
+- **Windows**（control/screen_windows.rs）：交互 window station 上以 CreateDesktopW 建一个独立 desktop 对象，headed 浏览器经 STARTUPINFOW.lpDesktop 启动到该 desktop（launch.rs 读 SEAGENT_BD_DESKTOP，用 SetThreadDesktop 绑定派生线程，std 继承父线程 desktop）。桌面对象由本进程持有的 handle 保活（控制台进程无法在后台 desktop 初始化控制台会立即退出，故用 handle 而非常驻进程；浏览器挂在 seagent 的 Job Object 上，随 seagent 退出而退出，与其它浏览器一致）。Windows 仅渲染当前活动 desktop：agent 以 SwitchDesktop（take_over）把它变为活动 desktop 后用同一套 computer_use 工具（截图/输入）操作，switch_to_default 交还人类；浏览器的 CDP 截图不受活动与否限制，screenshot() 另经 GDI 抓该 desktop 帧缓冲（未曾活动过时为黑）。
+- **macOS**（control/screen_macos.rs）：无进程级 desktop 对象；agent 浏览器跑在登录会话（其 CDP 截图与 computer_use 驱动在此可用），隔离由该会话提供，报告为「supported、already running」，不发布 SEAGENT_BD_DESKTOP。完全无头的 Mac 需虚拟显示器（私有 CGVirtualDisplay、HDMI 模拟器）或第二个 launchd GUI 会话——属主机置备，seagent 不代为安装。
+- **iOS / Android**：无桌面。
+
+虚拟音频（Meet 说话）：不安装任何驱动。可选方案见下节「虚拟音频」。

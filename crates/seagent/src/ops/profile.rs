@@ -622,6 +622,13 @@ mod tests {
         let root = seagent_core::tmp::TempDir::new("seagent-tmp");
         std::env::set_var("XDG_DATA_HOME", root.path().join("share"));
         std::env::set_var("XDG_CONFIG_HOME", root.path().join("cfg"));
+        // Windows keeps profiles under %LOCALAPPDATA% / %APPDATA%: point those at the sandbox
+        // too, or the tests would read and write the real user's profiles.
+        #[cfg(windows)]
+        {
+            std::env::set_var("LOCALAPPDATA", root.path().join("local"));
+            std::env::set_var("APPDATA", root.path().join("roaming"));
+        }
         (g, root)
     }
 
@@ -685,7 +692,8 @@ mod tests {
         // Aliases are written under the home directory passed in, never the real $HOME.
         let p = make_alias_in(root.path(), "reviewer", "reviewer").unwrap();
         assert!(std::fs::read_to_string(&p).unwrap().contains("-p reviewer"));
-        std::fs::write(bin_dir_in(root.path()).join("other"), "#!/bin/sh\n").unwrap();
+        // A foreign file where the alias would go (`other`; Windows: the `other.cmd` batch file).
+        std::fs::write(alias_path_in(root.path(), "other").unwrap(), "#!/bin/sh\n").unwrap();
         assert!(make_alias_in(root.path(), "other", "reviewer").is_err(), "foreign files are not replaced");
         assert!(remove_alias_in(root.path(), "reviewer").unwrap());
     }

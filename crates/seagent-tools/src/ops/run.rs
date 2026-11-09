@@ -5,7 +5,7 @@
 use seagent_core::Cancel;
 use std::io::Read;
 use std::path::Path;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::time::{Duration, Instant};
 
 pub const OUTPUT_CAP: usize = 256 * 1024;
@@ -51,8 +51,10 @@ fn reader(mut r: impl Read + Send + 'static) -> std::thread::JoinHandle<String> 
 /// Run `argv` (argv[0] looked up on PATH) in `cwd`. `Err` only when it cannot start.
 pub fn run(argv: &[String], cwd: Option<&Path>, timeout: Duration, cancel: &Cancel) -> Result<RunOut, String> {
     let (prog, args) = argv.split_first().ok_or("empty command")?;
-    let mut cmd = Command::new(prog);
-    cmd.args(args).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    // Unix: `Command::new(prog)`; Windows: `.cmd` shims (az, npm CLIs) through PATHEXT.
+    let mut cmd = seagent_core::platform::layout::program_command(prog);
+    seagent_core::platform::layout::msys_args(&mut cmd, args);
+    cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
     if let Some(d) = cwd {
         cmd.current_dir(d);
     }
@@ -107,6 +109,27 @@ pub fn join(argv: &[String]) -> String {
 mod tests {
     use super::*;
 
+    /// Windows counterpart of `runs_times_out_and_quotes`: the same argv runner through
+    /// Windows PowerShell and through Git Bash (the shells the product supports there).
+    #[cfg(windows)]
+    #[test]
+    fn runs_times_out_and_quotes_windows() {
+        let c = Cancel::new();
+        let ps = vec!["powershell".to_string(), "-NoProfile".into(), "-Command".into(), "Write-Output out; [Console]::Error.WriteLine('err'); exit 3".into()];
+        let o = run(&ps, None, Duration::from_secs(30), &c).unwrap();
+        assert_eq!((o.code, o.text().replace('\r', "")), (Some(3), "out\nerr".to_string()));
+        if let Some(bash) = seagent_core::platform::layout::bash() {
+            let o = run(&[bash.display().to_string(), "-c".into(), "echo out; echo err >&2; exit 3".into()], None, Duration::from_secs(30), &c).unwrap();
+            assert_eq!((o.code, o.text()), (Some(3), "out\nerr".to_string()));
+        }
+        let t = run(&["powershell".into(), "-NoProfile".into(), "-Command".into(), "Start-Sleep 5".into()], None, Duration::from_millis(300), &c).unwrap();
+        assert!(t.timed_out && !t.ok());
+        assert!(run(&[r"C:\nonexistent\seagent-x.exe".into()], None, Duration::from_secs(1), &c).is_err());
+        assert_eq!(join(&["kubectl".into(), "apply".into(), "-f".into(), "a b.yaml".into(), "it's".into()]), "kubectl apply -f 'a b.yaml' 'it'\\''s'");
+    }
+
+    // `sh` / `sleep` / `/nonexistent`; Windows: `runs_times_out_and_quotes_windows`.
+    #[cfg(unix)]
     #[test]
     fn runs_times_out_and_quotes() {
         let c = Cancel::new();
