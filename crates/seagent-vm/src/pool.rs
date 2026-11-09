@@ -591,6 +591,28 @@ impl VmManager {
         }
     }
 
+    /// Orderly end of every VM: ask each guest agent to power off (`Shutdown`), give the VMMs
+    /// up to `wait` to exit on their own, then stop whatever is left. Returns, per VM, whether
+    /// it went away by itself. (`stop_all` is the immediate kill.)
+    pub fn shutdown_all(&self, wait: Duration) -> Vec<(String, bool)> {
+        let slots: Vec<(String, Arc<Slot>)> = self.slots.lock().unwrap().drain().collect();
+        for (_, s) in &slots {
+            s.chan.shutdown();
+        }
+        let deadline = Instant::now() + wait;
+        let mut out = Vec::with_capacity(slots.len());
+        for (key, s) in slots {
+            let mut inst = s.inst.lock().unwrap();
+            while inst.is_running() && Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(25));
+            }
+            let clean = !inst.is_running();
+            inst.stop();
+            out.push((key, clean));
+        }
+        out
+    }
+
     pub fn stop(&self, key: &str) -> bool {
         let mut slots = self.slots.lock().unwrap();
         match slots.remove(key) {

@@ -193,6 +193,12 @@ pub fn select(cfg: &VmConfig, caps: &Capabilities) -> (ProviderKind, Option<Stri
     (best, None)
 }
 
+/// The accelerator `kind` runs with on this machine (`None`: it cannot run here). For
+/// `seagent doctor`, `seagent sandbox vm exec` and the boot log.
+pub fn accel_of(kind: ProviderKind, caps: &Capabilities) -> Option<Accel> {
+    caps.usable(kind)
+}
+
 /// What the operator must be told about a VM that *does* boot but is weaker than the design
 /// target: no hardware acceleration (TCG), or a guest channel other local processes can reach.
 /// `None` for KVM/Firecracker and the other hardware-backed providers.
@@ -231,7 +237,10 @@ fn blockers(kind: ProviderKind, caps: &Capabilities) -> String {
         ProviderKind::Vfkit if caps.vfkit.is_none() => b.push("vfkit not found (brew install vfkit)".into()),
         ProviderKind::Vfkit if !caps.hvf => b.push("Hypervisor.framework unavailable (kern.hv_support = 0)".into()),
         ProviderKind::HyperV if caps.os != HostOs::Windows => b.push("Hyper-V exists on Windows only".into()),
-        ProviderKind::HyperV if caps.hyperv.is_none() => b.push("Hyper-V is not installed (Enable-WindowsOptionalFeature -Online -FeatureName Microsoft-Hyper-V-All)".into()),
+        ProviderKind::HyperV if caps.hyperv.is_none() => b.push(match &caps.hyperv_blocker {
+            Some(why) => format!("Hyper-V {why}"),
+            None => "Hyper-V is not installed (Enable-WindowsOptionalFeature -Online -FeatureName Microsoft-Hyper-V-All)".into(),
+        }),
         ProviderKind::VirtualBox if caps.vbox.is_none() => b.push("VBoxManage not found (install Oracle VirtualBox)".into()),
         ProviderKind::Avf if caps.os != HostOs::Android => b.push("AVF exists on Android only".into()),
         ProviderKind::Avf if caps.avf.is_none() => b.push(hosted::AVF_MISSING.into()),
@@ -275,6 +284,49 @@ mod tests {
         let (k, w) = select(&cfg, &caps);
         assert_eq!(k, ProviderKind::Bwrap);
         assert!(w.unwrap().contains("no microVM"), "the downgrade is spelled out");
+    }
+
+    /// Windows counterpart of `auto_prefers_firecracker_then_qemu_then_warns`: QEMU+WHPX, then
+    /// Hyper-V, then VirtualBox, then QEMU under TCG (warned), then no VM at all (warned).
+    #[test]
+    fn auto_on_windows_prefers_qemu_whpx_then_hyperv_then_vbox_then_tcg_then_warns() {
+        let cfg = VmConfig::default();
+        let mut w = caps_on(HostOs::Windows);
+        assert_eq!(select(&cfg, &w).0, ProviderKind::Qemu);
+        assert_eq!(accel_of(ProviderKind::Qemu, &w), Some(Accel::Whpx));
+        w.whpx = false;
+        assert_eq!(select(&cfg, &w).0, ProviderKind::HyperV);
+        w.hyperv = None;
+        assert_eq!(select(&cfg, &w), (ProviderKind::VirtualBox, None), "VirtualBox is hardware-backed: no warning");
+        w.vbox = None;
+        let (k, note) = select(&cfg, &w);
+        assert_eq!((k, accel_of(k, &w)), (ProviderKind::Qemu, Some(Accel::Tcg)));
+        assert!(note.unwrap().contains("WITHOUT hardware acceleration"));
+        w.qemu = None;
+        let (k, note) = select(&cfg, &w);
+        assert!(!k.is_vm() && accel_of(k, &w).is_none());
+        assert!(note.unwrap().contains("no microVM"), "the downgrade is spelled out");
+    }
+
+    /// This machine's case: Windows Home, WHPX on, no Hyper-V role. `auto` takes QEMU+WHPX; an
+    /// explicit `hyperv` falls back to it and says *why* (Home edition), not "enable a feature".
+    #[test]
+    fn hyperv_on_windows_home_is_reported_as_such_and_auto_selects_the_next_provider() {
+        let mut w = caps_on(HostOs::Windows);
+        w.hyperv = None;
+        w.vbox = None;
+        w.hyperv_blocker = crate::host::hyperv_reason(Some("Core"), false, false);
+        assert_eq!(select(&VmConfig::default(), &w).0, ProviderKind::Qemu);
+        let cfg = VmConfig { provider: "hyperv".into(), ..Default::default() };
+        let (k, why) = select(&cfg, &w);
+        let why = why.unwrap();
+        assert_eq!(k, ProviderKind::Qemu, "{why}");
+        assert!(why.contains("Windows Home") && why.contains("fell back to `qemu`") && !why.contains("Enable-WindowsOptionalFeature"), "{why}");
+        let strict = VmConfig { provider: "hyperv".into(), allow_fallback: false, ..Default::default() };
+        let (k, why) = select(&strict, &w);
+        assert_eq!(k, ProviderKind::HyperV, "asked for and refused, never silently swapped");
+        assert!(why.unwrap().contains("Windows Home"));
+        assert!(w.report().iter().any(|l| l.starts_with("hyper-v: unavailable on Windows Home")), "{:?}", w.report());
     }
 
     /// Capabilities of a machine running `os`, with every ingredient there (pure: no probing).

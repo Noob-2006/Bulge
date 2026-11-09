@@ -59,7 +59,16 @@ impl QemuProvider {
         };
         let arch = if cfg.qemu.contains("aarch64") { "aarch64" } else { "x86_64" };
         let firmware = if arch == "aarch64" { crate::host::find_tool(&cfg.qemu).and_then(|q| crate::host::edk2_aarch64(&q)) } else { None };
-        QemuProvider { bin: cfg.qemu.clone(), extra_args: cfg.extra_args.clone(), os, accel, arch, firmware }
+        // Windows / macOS: the installers put QEMU outside PATH (`C:\Program Files\qemu`,
+        // Homebrew's prefix for GUI-launched apps), and capability detection already looks
+        // there (`host::find_tool`) — so the VMM must be started from the same place, or a
+        // provider that was selected as usable fails with "program not found". Linux keeps
+        // its PATH lookup by name.
+        let bin = match os {
+            HostOs::Linux | HostOs::Android => cfg.qemu.clone(),
+            _ => crate::host::find_tool(&cfg.qemu).map(|p| p.display().to_string()).unwrap_or_else(|| cfg.qemu.clone()),
+        };
+        QemuProvider { bin, extra_args: cfg.extra_args.clone(), os, accel, arch, firmware }
     }
 
     /// The provider as it would be shaped on `os` with `accel` (tests, `seagent sandbox explain`).
@@ -414,6 +423,55 @@ mod tests {
         assert!(mac.contains("console=ttyAMA0") && mac.contains("path=/run/vm/s-1/chan.sock"), "PL011 console, unix sockets on macOS: {mac}");
         let intel = QemuProvider::for_host(&cfg, HostOs::Macos, Accel::Hvf, "x86_64", None).cmdline(&spec()).join(" ");
         assert!(intel.contains("-M q35 -accel hvf -cpu host") && intel.contains("console=ttyS0") && !intel.contains("-bios"), "{intel}");
+    }
+
+    /// Windows counterpart of `cmdline_is_isolating_by_construction` (whose Linux shape returns
+    /// early elsewhere): the QEMU+WHPX VM the Windows provider actually boots, argument by
+    /// argument, with the Windows paths (drive letters, spaces) it really gets.
+    #[test]
+    fn the_windows_whpx_cmdline_is_isolating_by_construction() {
+        let mut s = spec();
+        s.kernel = r"C:\Users\a b\seagent\vm\image\vmlinux".into();
+        s.initramfs = r"C:\Users\a b\seagent\vm\image\initramfs.cpio.gz".into();
+        s.run_dir = r"C:\Users\a b\seagent\vm\run\s-1".into();
+        let chan = Endpoint::Tcp("127.0.0.1:40001".parse().unwrap());
+        let mon = Endpoint::Tcp("127.0.0.1:40002".parse().unwrap());
+        let a = QemuProvider::for_host(&VmConfig::default(), HostOs::Windows, Accel::Whpx, "x86_64", None).cmdline_with(&s, &chan, &mon);
+        let after = |flag: &str| a.iter().position(|x| x == flag).and_then(|i| a.get(i + 1)).cloned().unwrap_or_default();
+        // WHPX's in-kernel irqchip hangs a Linux guest ("WHPX: Unexpected VP exit code 4",
+        // measured with QEMU 11.1 on Windows 11): QEMU's own irqchip is required.
+        assert_eq!(after("-accel"), "whpx,kernel-irqchip=off");
+        assert_eq!((after("-M"), after("-cpu")), ("q35".to_string(), "max".to_string()));
+        // Paths are single argv entries (no shell, no re-quoting), spaces and all.
+        assert_eq!(after("-kernel"), r"C:\Users\a b\seagent\vm\image\vmlinux");
+        assert_eq!(after("-initrd"), r"C:\Users\a b\seagent\vm\image\initramfs.cpio.gz");
+        assert_eq!(after("-serial"), r"file:C:\Users\a b\seagent\vm\run\s-1\console.log");
+        // The channel: loopback TCP, no Nagle delay; the monitor: loopback too.
+        assert_eq!(after("-chardev"), "socket,id=seagent0,host=127.0.0.1,port=40001,server=on,wait=off,nodelay=on");
+        assert_eq!(after("-monitor"), "tcp:127.0.0.1:40002,server=on,wait=off");
+        assert!(after("-append").contains("console=ttyS0") && after("-append").contains("seagent.channel=virtio-serial"), "{a:?}");
+        // The same walls as on Linux, minus the Linux-only seccomp flag.
+        assert_eq!(after("-net"), "none", "no NIC: egress only through the broker");
+        assert!(a.iter().any(|x| x == "-no-reboot") && a.iter().any(|x| x == "-nodefaults"));
+        assert!(!a.iter().any(|x| x == "-drive" || x == "-hda" || x == "-sandbox" || x.contains("unix:") || x.contains("path=")), "{a:?}");
+        // Without WHPX: the same VM under TCG (the selection layer carries the warning).
+        let tcg = QemuProvider::for_host(&VmConfig::default(), HostOs::Windows, Accel::Tcg, "x86_64", None).cmdline_with(&s, &chan, &mon);
+        assert_eq!(tcg.iter().position(|x| x == "-accel").map(|i| tcg[i + 1].as_str()), Some("tcg"));
+    }
+
+    /// Windows: the VMM is started from where capability detection found it (the QEMU
+    /// installer does not touch PATH), not by bare name.
+    #[cfg(windows)]
+    #[test]
+    fn on_windows_the_vmm_is_started_from_where_detection_found_it() {
+        let cfg = VmConfig::default();
+        let p = QemuProvider::new(&cfg);
+        match crate::host::find_tool(&cfg.qemu) {
+            Some(found) => assert_eq!(PathBuf::from(&p.bin), found),
+            None => assert_eq!(p.bin, cfg.qemu, "nothing found: the name is kept for the error message"),
+        }
+        assert!(matches!(p.accel(), Accel::Whpx | Accel::Tcg), "Windows QEMU runs under WHPX or, without it, TCG");
+        assert_eq!(p.accel() == Accel::Whpx, crate::host::whpx_available());
     }
 
     #[test]

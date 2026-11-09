@@ -691,6 +691,48 @@ mod tests {
         let _ = std::fs::remove_dir_all(c.home.parent().unwrap());
     }
 
+    /// Windows counterpart of the test above: the same `ExecBackend` glue against the Windows
+    /// substitute, QEMU + WHPX (TCG when the platform feature is off). Run with
+    /// `set SEAGENT_VM_IMAGE_DIR=…` and `cargo test -p seagent-tools --lib exec::vm -- --ignored`.
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "boots a real VM (QEMU for Windows + guest image)"]
+    fn the_exec_backend_streams_a_command_from_a_real_qemu_whpx_vm() {
+        let Ok(img) = std::env::var("SEAGENT_VM_IMAGE_DIR") else {
+            println!("skipping: set SEAGENT_VM_IMAGE_DIR");
+            return;
+        };
+        if seagent_vm::host::find_tool(seagent_vm::host::native_qemu()).is_none() {
+            println!("skipping: qemu-system-x86_64 not found");
+            return;
+        }
+        let c = ctx("realwinvm");
+        let vm = VmConfig { provider: "qemu".into(), allow_fallback: false, kernel: format!("{img}\\vmlinux"), initramfs: format!("{img}\\initramfs.cpio.gz"), memory_mb: 512, vcpu: 2, ..Default::default() };
+        let b = VmBackend::new(&vm, &SandboxConfig { mode: "all".into(), workspace_access: "rw".into(), ..Default::default() }, &c, false).unwrap();
+        assert_eq!((b.id(), b.isolation()), ("vm", seagent_vm::IsolationLevel::MicroVm), "{}", b.describe());
+        assert!(!b.shares_host_fs(), "the VM has a copy, not a mount");
+        std::fs::write(c.workspace.join("hello.txt"), "from the host\n").unwrap();
+        let req = ExecRequest { script: "id -u; cat hello.txt; echo written > back.txt; exit 4".into(), stdin: false, ..Default::default() };
+        let mut child = b.spawn(&req).unwrap();
+        let mut out = Vec::new();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        loop {
+            let mut buf = [0u8; 4096];
+            match child.read(&mut buf, std::time::Duration::from_millis(200)) {
+                Ok(0) => break,
+                Ok(n) => out.extend_from_slice(&buf[..n]),
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => assert!(std::time::Instant::now() < deadline, "still running after 60s"),
+                Err(e) => panic!("{e}"),
+            }
+        }
+        let text = String::from_utf8_lossy(&out).to_string();
+        assert!(text.contains("1000") && text.contains("from the host"), "{text}");
+        assert_eq!(child.try_wait().unwrap().map(|e| e.code), Some(Some(4)), "the guest's exit code reaches the tool");
+        assert_eq!(std::fs::read_to_string(c.workspace.join("back.txt")).unwrap().trim(), "written");
+        b.cleanup();
+        let _ = std::fs::remove_dir_all(c.home.parent().unwrap());
+    }
+
     #[cfg(unix)]
     /// The adapter to A's daemon broker: one JSON line in, one out.
     #[test]

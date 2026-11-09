@@ -287,7 +287,11 @@ impl Endpoint {
     pub fn qemu_chardev(&self, id: &str) -> String {
         match self {
             Endpoint::Unix(p) => format!("socket,id={id},path={},server=on,wait=off", p.display()),
-            Endpoint::Tcp(a) => format!("socket,id={id},host={},port={},server=on,wait=off", a.ip(), a.port()),
+            // `nodelay=on`: QEMU leaves Nagle on for a TCP chardev unless asked, so a small
+            // guest frame sent right behind another (`Exit` after the last `Out`) could wait for
+            // the host's delayed ACK (up to 200 ms on Windows). The host end sets TCP_NODELAY
+            // too (`Stream::connect_tcp`); a unix socket has no such thing.
+            Endpoint::Tcp(a) => format!("socket,id={id},host={},port={},server=on,wait=off,nodelay=on", a.ip(), a.port()),
             Endpoint::Pipe(n) => format!("pipe,id={id},path={}", n.trim_start_matches(r"\\.\pipe\")),
         }
     }
@@ -672,7 +676,7 @@ mod tests {
         assert_eq!(Endpoint::Unix(p.clone()).qemu_chardev("seagent0"), format!("socket,id=seagent0,path={},server=on,wait=off", p.display()), "Linux keeps its exact chardev");
         assert_eq!(Endpoint::Unix(p.clone()).qemu_monitor(), format!("unix:{},server=on,wait=off", p.display()));
         let tcp = Endpoint::Tcp("127.0.0.1:4555".parse().unwrap());
-        assert_eq!(tcp.qemu_chardev("c"), "socket,id=c,host=127.0.0.1,port=4555,server=on,wait=off", "Windows QEMU: loopback only");
+        assert_eq!(tcp.qemu_chardev("c"), "socket,id=c,host=127.0.0.1,port=4555,server=on,wait=off,nodelay=on", "Windows QEMU: loopback only, no Nagle delay");
         assert_eq!(tcp.qemu_monitor(), "tcp:127.0.0.1:4555,server=on,wait=off");
         if cfg!(unix) {
             assert_eq!(Endpoint::locate(&p).unwrap(), Endpoint::Unix(p));
