@@ -1,106 +1,109 @@
-//! This install's device key (docs/SECURITY.md §8; host side `crates/seagent-app/src/device_auth.rs`).
-//!
-//! An ECDSA P-256 key made on first use and kept in `<app data>/device-key.p8` (PKCS#8,
-//! owner-only), apart from `hosts.json`: the console token stored there is only good together
-//! with a fresh signature by this key, so a copied `hosts.json` (backup, sync folder, another
-//! app reading it) does not open the host. The public half goes to the host when pairing
-//! (`device.publicKey`); hosts paired by an older version get it on the next `host_open`
-//! (the host binds it once: automatic migration). Same code on Windows, macOS, Linux, Android
-//! and iOS (ring). No Tauri types here (unit-testable).
+//! This install's device key (docs/SECURITY.md §8): `seagent-devkey` (apps/desktop/devkey)
+//! keeps it in the platform key store — TPM / CNG on Windows, Secure Enclave / Keychain on macOS
+//! and iOS, systemd-creds TPM on Linux (root) — with the Android Keystore handed in from here
+//! through the mobile plugin. A file is only the fallback. Hosts paired by an older version get
+//! the key on the next `host_open` (the host binds it once: automatic migration).
 
-use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-use base64::Engine;
-use ring::rand::SystemRandom;
-use ring::signature::{EcdsaKeyPair, KeyPair, ECDSA_P256_SHA256_FIXED_SIGNING};
-use serde_json::{json, Value};
+pub use seagent_devkey::DeviceKey;
 use std::path::Path;
+use tauri::{AppHandle, Runtime};
 
-pub const FILE: &str = "device-key.p8";
+/// The Android Keystore through `tauri-plugin-seagent-mobile` (DeviceKeystore.kt).
+#[cfg(target_os = "android")]
+struct AndroidKeystore<R: Runtime>(AppHandle<R>);
 
-pub struct DeviceKey {
-    pair: EcdsaKeyPair,
-}
+#[cfg(target_os = "android")]
+const ALIAS: &str = "seagent-device";
 
-/// What the device signs (must match the host's `refresh_message`).
-pub fn refresh_message(host_id: &str, device_id: &str, ts: u64, nonce: &str) -> String {
-    format!("seagent-device-refresh|v1|{host_id}|{device_id}|{ts}|{nonce}")
-}
-
-fn write_private(p: &Path, data: &[u8]) -> Result<(), String> {
-    let tmp = p.with_extension("tmp");
-    std::fs::write(&tmp, data).map_err(|e| format!("{}: {e}", tmp.display()))?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600));
+#[cfg(target_os = "android")]
+impl<R: Runtime> seagent_devkey::Store for AndroidKeystore<R> {
+    fn kind(&self) -> seagent_devkey::Kind {
+        seagent_devkey::Kind::AndroidKeystore
     }
-    std::fs::rename(&tmp, p).map_err(|e| format!("{}: {e}", p.display()))
+    fn public_point(&self) -> Result<Vec<u8>, String> {
+        use base64::Engine;
+        use tauri_plugin_seagent_mobile::SeagentMobileExt;
+        let v = self.0.seagent_mobile().device_key_public(ALIAS)?;
+        let spki = base64::engine::general_purpose::STANDARD.decode(v["spki"].as_str().unwrap_or("")).map_err(|e| e.to_string())?;
+        seagent_devkey::spki_to_point(&spki)
+    }
+    fn sign(&self, msg: &[u8]) -> Result<Vec<u8>, String> {
+        use base64::Engine;
+        use tauri_plugin_seagent_mobile::SeagentMobileExt;
+        let b64 = base64::engine::general_purpose::STANDARD;
+        let der = b64.decode(self.0.seagent_mobile().device_key_sign(ALIAS, &b64.encode(msg))?).map_err(|e| e.to_string())?;
+        seagent_devkey::der_to_p1363(&der)
+    }
 }
 
-impl DeviceKey {
-    /// The key in `dir`, created on first use.
-    pub fn load_or_create(dir: &Path) -> Result<DeviceKey, String> {
-        let rng = SystemRandom::new();
-        let p = dir.join(FILE);
-        if let Ok(der) = std::fs::read(&p) {
-            if let Ok(pair) = EcdsaKeyPair::from_pkcs8(&ECDSA_P256_SHA256_FIXED_SIGNING, &der, &rng) {
-                return Ok(DeviceKey { pair });
+/// The key, opened (or created once) for this install.
+pub fn load<R: Runtime>(app: &AppHandle<R>, dir: &Path) -> Result<DeviceKey, String> {
+    #[cfg(target_os = "android")]
+    let external: Option<Box<dyn seagent_devkey::Store>> = Some(Box::new(AndroidKeystore(app.clone())));
+    #[cfg(not(target_os = "android"))]
+    let external: Option<Box<dyn seagent_devkey::Store>> = {
+        let _ = app;
+        None
+    };
+    seagent_devkey::open(dir, external)
+}
+
+/// Whether a failure is worth retrying.
+#[derive(Debug)]
+pub enum Transient {
+    /// Network down, host restarting, a refresh signed just before a restart.
+    Again(String),
+    /// The host said no (revoked, wrong key): retrying will not help.
+    Final(String),
+}
+
+/// Retry `f` on transient failures: 3 tries, 0.5 s and 1.5 s apart.
+pub async fn with_retry<T, F, Fut>(mut f: F) -> Result<T, String>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<T, Transient>>,
+{
+    let mut last = String::new();
+    for (i, wait) in [500u64, 1500, 0].iter().enumerate() {
+        match f().await {
+            Ok(v) => return Ok(v),
+            Err(Transient::Final(e)) => return Err(e),
+            Err(Transient::Again(e)) => {
+                last = e;
+                if i < 2 {
+                    tokio::time::sleep(std::time::Duration::from_millis(*wait)).await;
+                }
             }
         }
-        let der = EcdsaKeyPair::generate_pkcs8(&ECDSA_P256_SHA256_FIXED_SIGNING, &rng).map_err(|_| "cannot create a device key".to_string())?;
-        std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
-        write_private(&p, der.as_ref())?;
-        let pair = EcdsaKeyPair::from_pkcs8(&ECDSA_P256_SHA256_FIXED_SIGNING, der.as_ref(), &rng).map_err(|_| "bad device key".to_string())?;
-        Ok(DeviceKey { pair })
     }
-
-    /// base64url of the 65-byte uncompressed public point (`device.publicKey`).
-    pub fn public_b64(&self) -> String {
-        URL_SAFE_NO_PAD.encode(self.pair.public_key().as_ref())
-    }
-
-    fn sign(&self, msg: &[u8]) -> Result<String, String> {
-        let sig = self.pair.sign(&SystemRandom::new(), msg).map_err(|_| "signing failed".to_string())?;
-        Ok(URL_SAFE_NO_PAD.encode(sig.as_ref()))
-    }
-
-    /// The `POST /pair/refresh` body. `ts` comes from the host's clock (`GET /pair/info`), so a
-    /// phone with a wrong clock still lands inside the replay window.
-    pub fn refresh_body(&self, host_id: &str, device_id: &str, ts: u64) -> Result<Value, String> {
-        let mut n = [0u8; 18];
-        ring::rand::SecureRandom::fill(&SystemRandom::new(), &mut n).map_err(|_| "no randomness".to_string())?;
-        let nonce = URL_SAFE_NO_PAD.encode(n);
-        let sig = self.sign(refresh_message(host_id, device_id, ts, &nonce).as_bytes())?;
-        Ok(json!({"deviceId": device_id, "ts": ts, "nonce": nonce, "sig": sig, "publicKey": self.public_b64()}))
-    }
+    Err(last)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ring::signature::{UnparsedPublicKey, ECDSA_P256_SHA256_FIXED};
 
     #[test]
-    fn the_key_is_made_once_kept_and_signs_what_the_host_verifies() {
-        let dir = std::env::temp_dir().join(format!("seagent-devkey-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        let k = DeviceKey::load_or_create(&dir).unwrap();
-        let again = DeviceKey::load_or_create(&dir).unwrap();
-        assert_eq!(k.public_b64(), again.public_b64(), "kept across starts");
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            assert_eq!(std::fs::metadata(dir.join(FILE)).unwrap().permissions().mode() & 0o777, 0o600);
-        }
-        let pk = URL_SAFE_NO_PAD.decode(k.public_b64()).unwrap();
-        assert_eq!((pk.len(), pk[0]), (65, 4));
-        let b = k.refresh_body("0123456789abcdef", "dev1", 1_700_000_000_000).unwrap();
-        let msg = refresh_message("0123456789abcdef", "dev1", 1_700_000_000_000, b["nonce"].as_str().unwrap());
-        assert_eq!(msg, format!("seagent-device-refresh|v1|0123456789abcdef|dev1|1700000000000|{}", b["nonce"].as_str().unwrap()), "the host's format");
-        let sig = URL_SAFE_NO_PAD.decode(b["sig"].as_str().unwrap()).unwrap();
-        assert!(UnparsedPublicKey::new(&ECDSA_P256_SHA256_FIXED, &pk).verify(msg.as_bytes(), &sig).is_ok());
-        assert!(UnparsedPublicKey::new(&ECDSA_P256_SHA256_FIXED, &pk).verify(b"something else", &sig).is_err());
-        assert_ne!(b["nonce"], k.refresh_body("h", "d", 1).unwrap()["nonce"], "fresh nonce per refresh");
-        let _ = std::fs::remove_dir_all(dir);
+    fn transient_failures_are_retried_and_final_ones_are_not() {
+        let rt = tokio::runtime::Builder::new_current_thread().enable_time().build().unwrap();
+        let mut n = 0;
+        let r: Result<u32, String> = rt.block_on(with_retry(|| {
+            n += 1;
+            let k = n;
+            async move {
+                if k < 3 {
+                    Err(Transient::Again("host restarting".into()))
+                } else {
+                    Ok(k)
+                }
+            }
+        }));
+        assert_eq!(r.unwrap(), 3, "two transient failures, then success");
+        let mut m = 0;
+        let r: Result<u32, String> = rt.block_on(with_retry(|| {
+            m += 1;
+            async { Err(Transient::Final("revoked".into())) }
+        }));
+        assert_eq!((r.unwrap_err().as_str(), m), ("revoked", 1), "a refusal is not retried");
     }
 }

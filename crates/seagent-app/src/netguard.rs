@@ -265,9 +265,63 @@ struct Strikes {
 
 type Key = (PathBuf, IpAddr);
 
-fn strikes() -> &'static Mutex<HashMap<Key, Strikes>> {
-    static S: OnceLock<Mutex<HashMap<Key, Strikes>>> = OnceLock::new();
-    S.get_or_init(Default::default)
+#[derive(Default)]
+struct Book {
+    map: HashMap<Key, Strikes>,
+    /// Data directories whose saved lockouts were read back already.
+    loaded: std::collections::HashSet<PathBuf>,
+}
+
+/// Active lockouts (and their backoff level) survive a daemon restart: `<data>/security/
+/// lockouts.json`, written only when a lockout starts (rare), at most [`SAVED_MAX`] entries,
+/// owner-only. Failure counts below the limit are not saved.
+pub const SAVED_MAX: usize = 256;
+
+fn lock_file(data: &std::path::Path) -> PathBuf {
+    data.join("security").join("lockouts.json")
+}
+
+fn book(data: &std::path::Path) -> std::sync::MutexGuard<'static, Book> {
+    static S: OnceLock<Mutex<Book>> = OnceLock::new();
+    let mut b = S.get_or_init(Default::default).lock().unwrap_or_else(|e| e.into_inner());
+    if b.loaded.insert(data.to_path_buf()) {
+        let (now, now_i) = (now_ms(), Instant::now());
+        let saved: Vec<serde_json::Value> = std::fs::read(lock_file(data)).ok().and_then(|v| serde_json::from_slice(&v).ok()).unwrap_or_default();
+        for e in saved {
+            let Some(ip) = e["ip"].as_str().and_then(|i| i.parse::<IpAddr>().ok()) else { continue };
+            let until = e["untilMs"].as_u64().filter(|u| *u > now).map(|u| now_i + Duration::from_millis(u - now));
+            let last = e["lastLockMs"].as_u64().and_then(|l| now_i.checked_sub(Duration::from_millis(now.saturating_sub(l))));
+            let level = e["level"].as_u64().unwrap_or(0).min(16) as u32;
+            b.map.entry((data.to_path_buf(), ip)).or_insert(Strikes { fails: vec![], until, level, last_lock: last });
+        }
+    }
+    b
+}
+
+fn save_locks(data: &std::path::Path, b: &Book) {
+    let (now, now_i) = (now_ms(), Instant::now());
+    let ms = |i: Instant| now.saturating_sub(now_i.saturating_duration_since(i).as_millis() as u64);
+    let to_ms = |i: Instant| now + i.saturating_duration_since(now_i).as_millis() as u64;
+    let mut keep: Vec<(u64, serde_json::Value)> = b
+        .map
+        .iter()
+        .filter(|((d, _), s)| d == data && s.last_lock.is_some_and(|t| now_i.duration_since(t) < Duration::from_secs(86_400)))
+        .map(|((_, ip), s)| {
+            let last = s.last_lock.map(ms).unwrap_or(0);
+            (last, json!({"ip": ip.to_string(), "untilMs": s.until.map(to_ms).unwrap_or(0), "level": s.level, "lastLockMs": last}))
+        })
+        .collect();
+    keep.sort_by_key(|(l, _)| std::cmp::Reverse(*l));
+    keep.truncate(SAVED_MAX);
+    let p = lock_file(data);
+    if let Some(dir) = p.parent() {
+        let _ = seagent_core::platform::fs_private::create_dir_private(dir);
+    }
+    let tmp = p.with_extension("json.tmp");
+    let body = serde_json::to_vec(&keep.into_iter().map(|(_, v)| v).collect::<Vec<_>>()).unwrap_or_default();
+    if seagent_core::platform::fs_private::write_private(&tmp, body).is_ok() {
+        let _ = std::fs::rename(&tmp, &p);
+    }
 }
 
 /// The lockout bucket: the client address (a tunnel without `behind_proxy` is one bucket, its
@@ -285,8 +339,8 @@ fn bucket(app: &App, r: &Request) -> Option<Key> {
 /// How long the request's address is still locked out.
 pub fn locked(app: &App, r: &Request) -> Option<Duration> {
     let key = bucket(app, r)?;
-    let all = strikes().lock().unwrap_or_else(|e| e.into_inner());
-    let until = all.get(&key)?.until?;
+    let all = book(&key.0);
+    let until = all.map.get(&key)?.until?;
     until.checked_duration_since(Instant::now()).filter(|d| !d.is_zero())
 }
 
@@ -300,11 +354,11 @@ pub fn auth_failed(app: &App, r: &Request, what: &str) {
     let Some(key) = bucket(app, r) else { return };
     let now = Instant::now();
     let locked_for = {
-        let mut all = strikes().lock().unwrap_or_else(|e| e.into_inner());
-        if all.len() > 8192 {
-            all.retain(|_, s| s.until.is_some_and(|u| u > now) || s.fails.last().is_some_and(|t| now.duration_since(*t) < FAIL_WINDOW));
+        let mut b = book(&key.0);
+        if b.map.len() > 8192 {
+            b.map.retain(|_, s| s.until.is_some_and(|u| u > now) || s.fails.last().is_some_and(|t| now.duration_since(*t) < FAIL_WINDOW));
         }
-        let s = all.entry(key.clone()).or_default();
+        let s = b.map.entry(key.clone()).or_default();
         s.fails.retain(|t| now.duration_since(*t) < FAIL_WINDOW);
         s.fails.push(now);
         if s.fails.len() < FAIL_LIMIT {
@@ -318,7 +372,9 @@ pub fn auth_failed(app: &App, r: &Request, what: &str) {
             s.until = Some(now + d);
             s.last_lock = Some(now);
             s.fails.clear();
-            Some((d, s.level))
+            let level = s.level;
+            save_locks(&key.0, &b);
+            Some((d, level))
         }
     };
     if let Some((d, level)) = locked_for {
@@ -333,7 +389,7 @@ pub fn auth_failed(app: &App, r: &Request, what: &str) {
 /// lockout level is kept, so an attacker cannot reset the backoff with one good login).
 pub fn auth_ok(app: &App, r: &Request) {
     let Some(key) = bucket(app, r) else { return };
-    if let Some(s) = strikes().lock().unwrap_or_else(|e| e.into_inner()).get_mut(&key) {
+    if let Some(s) = book(&key.0).map.get_mut(&key) {
         s.fails.clear();
     }
 }
@@ -341,9 +397,18 @@ pub fn auth_ok(app: &App, r: &Request) {
 /// Tests: let a lockout run out now (the level, and so the next backoff, is kept).
 #[cfg(test)]
 pub(crate) fn expire_lock(app: &App, ip: IpAddr) {
-    if let Some(s) = strikes().lock().unwrap_or_else(|e| e.into_inner()).get_mut(&(app.d.k.paths.data.clone(), ip)) {
+    if let Some(s) = book(&app.d.k.paths.data).map.get_mut(&(app.d.k.paths.data.clone(), ip)) {
         s.until = None;
     }
+}
+
+/// Tests: forget everything in memory for this data directory, as a daemon restart would.
+#[cfg(test)]
+pub(crate) fn simulate_restart(app: &App) {
+    let data = app.d.k.paths.data.clone();
+    let mut b = book(&data);
+    b.map.retain(|(d, _), _| *d != data);
+    b.loaded.remove(&data);
 }
 
 fn now_ms() -> u64 {

@@ -149,7 +149,7 @@ SE Agent 沒有雲端中繼：App Server 直接面對本機、區域網路，必
 |---|---|---|---|
 | **同一個 LAN 的攻擊者** | 掃 8640 埠、猜 8 碼配對碼、猜 token、嗅探 | TLS＋指紋釘選（原有）；`/pair/client` 每址限速（原有）＋**全網失敗預算**（10 分鐘 60 次錯碼即暫停所有 8 碼配對並通知 owner）；**失敗鎖定**；`allow_sources` 子網白名單 | 可以讓 8 碼配對暫停（DoS）；QR／setup code 仍可用 |
 | **被入侵的已配對裝置** | 用它的 token 做它 scope 內的事 | 每台裝置**獨立 scope**（`read` 只能看／`write` 完整操作／`approve` 也能核准，可隨時改，access token 立即生效）；高風險動作仍走原本的核准流程（`write` 裝置不能答覆 gate）；撤銷 1 秒內斷線；**登出所有裝置**；清單顯示最後位址與時間 | 在 scope 內、撤銷前的行為擋不住 |
-| **token 被偷**（備份、`hosts.json`、手機儲存、XSS 讀 localStorage） | 永久冒用這台裝置 | **裝置金鑰綁定**：配對時送 P-256 公鑰；console token 之後**不能當 bearer**，只能在 `POST /pair/refresh` 配合**這把私鑰的新簽章**換 60 分鐘的 access token（`sea1_`，只在記憶體） | 偷到 access token：最多用到過期（預設 60 分鐘）或撤銷；同時偷到私鑰檔（App 的 `device-key.p8`）就等於偷到裝置 |
+| **token 被偷**（備份、`hosts.json`、手機儲存、XSS 讀 localStorage） | 永久冒用這台裝置 | **裝置金鑰綁定**：配對時送 P-256 公鑰（私鑰在平台金鑰庫，見 8.2）；console token 之後**不能當 bearer**，只能在 `POST /pair/refresh` 配合**這把私鑰的新簽章**換短效 access token（`sea1_`，預設 60 分鐘，只在記憶體） | 偷到 access token：最多用到過期或撤銷；只在退回檔案的平台（見 8.2），同時拿到 App 資料夾才等於偷到裝置 |
 | **瀏覽器 CSRF／DNS rebinding** | 惡意網頁把自己的網域重新解析到 127.0.0.1 或 LAN IP，同源地呼叫 API | 瀏覽器請求（有 Origin／`Sec-Fetch-*`／WebSocket）的 `Host` 必須是這台的名字：IP 字面值、`localhost`、本機名稱／`.local`、私有字尾（`.lan`、`.home.arpa`、`.internal`…）、`allowed_hosts`、`public_url`、`allow_origins`；cookie 工作階段的狀態變更需要允許的 Origin 或 `Sec-Fetch-Site: same-origin` | 不送 `Sec-Fetch-*` 的舊瀏覽器做同源 GET 時不檢查 Host——但 GET 都需要 token，攻擊頁拿不到 |
 | **惡意網頁攻擊 localhost** | 跨站 POST、開 WebSocket、Chrome PNA 預檢 | 跨站 Origin 一律拒絕（原有）；POST 只收 JSON（原有）；**CORS 只回應列在 `allow_origins` 的來源**，從不送 `*`＋credentials、從不送 `Access-Control-Allow-Private-Network`；安全標頭 | 本機惡意程式本來就不在這層的範圍 |
 | **暴力破解** | 無限猜 token、密碼、配對碼 | 單一位址 10 分鐘內 10 次失敗（錯 token、錯配對碼、錯簽章、錯密碼、錯 A2A token）→ 鎖 1 分鐘，24 小時內每再犯一次加倍，上限 1 小時；鎖定寫稽核並通知 owner | tunnel 後的所有來源共用一個桶（見 8.3） |
@@ -163,12 +163,12 @@ SE Agent 沒有雲端中繼：App Server 直接面對本機、區域網路，必
 allow_sources = ["192.168.1.0/24", "fd00::/8"]   # 選用：本機以外只收這些來源（webhook／A2A 不受影響）
 allowed_hosts = ["seagent.corp.example", "*.vpn.example"]  # 瀏覽器可用的額外主機名稱
 require_device_key = false   # true：還沒綁金鑰的舊裝置一律拒絕（預設讓它們繼續用、下次啟動自動綁定）
-device_access_ttl_min = 60   # access token 壽命（1–1440）
+device_access_ttl_secs = 3600   # access token 壽命（2–86400 秒）；用戶端在約 80 % 時自動續期
 ```
 
 | 措施 | 行為 | 入口 |
 |---|---|---|
-| 裝置金鑰 | 配對 body 的 `device.publicKey`（65 bytes 未壓縮 P-256，base64url）。App：`apps/desktop/src-tauri/src/devkey.rs`（ring，Windows／macOS／Linux／Android／iOS 同一份），金鑰在 `<app data>/device-key.p8`（0600），與 `hosts.json` 分開；瀏覽器：`ui/web/devauth.js`（WebCrypto，私鑰 non-extractable，存在 IndexedDB） | `GET /pair/info`（主機 id＋時鐘，公開）、`POST /pair/refresh` |
+| 裝置金鑰 | 配對 body 的 `device.publicKey`（65 bytes 未壓縮 P-256，base64url）與 `keyStore`。App：`apps/desktop/devkey`（`seagent-devkey`，Windows／macOS／Linux／Android／iOS 同一份），見下表；瀏覽器：`ui/web/devauth.js`（WebCrypto，私鑰 non-extractable，存在 IndexedDB，`keyStore = webcrypto`）。`seagent doctor`／`seagent security audit` 的 `lan.device_keys` 列出每種金鑰庫的裝置數，有 `file` 或未綁定時是 warn | `GET /pair/info`（主機 id＋時鐘，公開）、`POST /pair/refresh` |
 | 自動續期 | 簽章訊息 `seagent-device-refresh|v1|<hostId>|<deviceId>|<ts>|<nonce>`；App 在 `host_open` 與主控台呼叫 `console_access_token` 時換新，瀏覽器在連線前與斷線重連時換新；daemon 重啟後每台裝置靜默重換一次 | 不需要使用者動作 |
 | 遷移 | 舊版配對的裝置（沒有金鑰）照常可用；新版 App／瀏覽器下次啟動時用舊 token＋新公鑰呼叫 refresh，主機綁定一次（`device.bind` 稽核），之後舊 token 不再能當 bearer。主機太舊（沒有 `/pair/info`）時用舊 token，行為與以前相同。舊版 App 連新主機：App 內的 WebView 不會自己綁金鑰（金鑰屬於 App 的 Rust 端），所以照舊用 console token，App 更新後第一次開啟才綁定 | 自動 |
 | 失敗鎖定 | 見 8.1；`429`＋`Retry-After`；本機（loopback、沒有轉送標頭）永不鎖定 | `auth.lockout` 稽核、`security.alert` 通知 |
@@ -179,6 +179,36 @@ device_access_ttl_min = 60   # access token 壽命（1–1440）
 | 公開暴露警告 | `allow_public = true` 啟動時印出一整排 `!` 的 WARNING 並寫 `exposure.public`；經 `behind_proxy` 第一次看到公網來源時也印一次；`lan.status` 帶 `publicExposure`／`warning`，主控台紅字顯示 | 自動 |
 
 稽核：`auth.failed`、`auth.lockout`、`auth.login`、`device.pair`（含 `keyBound`）、`device.bind`、`device.refresh`（只記拒絕）、`device.scope`、`device.revoke`、`device.revoke_all`、`net.refused`、`exposure.public`、`security.alert`。這些是安全紀錄，持久保存；成功的 refresh 與過期 access token 的 401 不寫（每台裝置每小時都會發生，屬於例行）。
+
+App 端的金鑰庫（`seagent-devkey`；第一次選定後記在 `<app data>/device-key.json`，之後永遠開同一個，不會默默換成別的——換金鑰主機會拒絕）：
+
+| 平台 | 第一選擇 | 其次 | 最後才用 |
+|---|---|---|---|
+| Windows | CNG：**Microsoft Platform Crypto Provider**（TPM 內產生與使用） | **Microsoft Software Key Storage Provider**，export policy 0（不可匯出） | 檔案 |
+| macOS／iOS | **Secure Enclave**（Keychain 項目） | 軟體 **Keychain** 金鑰 | 檔案 |
+| Android | **Android Keystore**（有 StrongBox 就用，否則 TEE），經 mobile plugin（`DeviceKeystore.kt`） | — | 檔案 |
+| Linux | **TPM**：用 `systemd-creds --with-key=tpm2` 封存，與 vault 的 TPM backend 同一條路；只在 root 時自動選（一般使用者每次解封都會跳 polkit） | — | 檔案（0600 PKCS#8） |
+
+`SEAGENT_DEVICE_KEY_STORE=<kind>` 強制指定。前一版留下的 `device-key.p8` 繼續使用（主機可能已綁定它）。
+
+**續期保證（永遠自動、不需使用者動作，直到撤銷）**：
+
+| 用戶端／連線 | 怎麼續 | 證據 |
+|---|---|---|
+| 網頁主控台（瀏覽器） | `devauth.js` 在 access token 壽命約 80 % 時續期；失敗以 2→60 秒退避一直重試；連線被拒（過期、主機重啟）時 `forget()` 後重連並先續期；裝置憑證連不上時安靜重試（只有主機回「已撤銷」才要求重新配對） | `webui_devices.rs`（真瀏覽器，3 秒 TTL，至少 3 次續期，WebSocket 不斷） |
+| App（桌面／手機） | `host_open` 與主控台的 `console_access_token` 由 Rust 端簽章換新（暫時性失敗重試 3 次）；頁面內同上 | `devkey.rs` `transient_failures_are_retried_and_final_ones_are_not` |
+| 開著的 WebSocket（主控台、即時畫面、ARP 訂閱） | 不需要續：主機只在撤銷或停用時關閉；scope 變更在 1 秒內直接套用到已開的連線（不重連） | `device_credentials_renew_silently_over_many_expiry_cycles`、`webui_devices.rs` |
+| 主機重啟（記憶體中的 access token 消失） | 下一次 refresh 立即成功；重啟前簽的 refresh 會被拒（見下），用戶端重試時用新的主機時鐘重簽 | `device_credentials_renew_silently_over_many_expiry_cycles`、`a_refresh_signed_before_a_restart_is_refused_after_it` |
+| 筆電睡了好幾天 | console token 不會過期；醒來後 WebSocket 重連、先 refresh；時間戳用主機時鐘（`/pair/info`），睡眠造成的時鐘差不影響 | 同上 |
+| node（`/node`）、電腦對電腦叢集、CLI | 不使用 access token：node 是 Ed25519 挑戰＋node token；叢集節點用未綁定的裝置 token（`seagent lan connect`）；CLI 走本機 socket | — |
+| 頻道、webhook、A2A、排程 | 完全不經過這套機制 | — |
+
+注意：`require_device_key = true` 會拒絕未綁定的裝置——包括 `seagent lan connect` 建立的叢集節點（它們沒有裝置金鑰），所以預設關閉。
+
+**重啟之後**：鎖定會保存（`<data>/security/lockouts.json`，只在鎖定開始時寫一次、最多 256 筆、0600），所以重啟不會清掉暴力破解的處罰；refresh 的 nonce 不落地，而是要求簽章時間不早於這次 daemon 啟動的時間（用戶端用主機時鐘簽），重啟前截到的 refresh 一律無效——不需要每次 refresh 都寫磁碟。
+
+**新網路通知**：每台裝置記住它用過的網段（IPv4 `/24`、IPv6 `/64`，最多 16 個）。配對時的網段安靜記下；之後從沒見過的網段出現時，經同一條通知路徑（daemon log、`security.alert` 稽核、`[alerts] targets`）告訴 owner，**不阻擋**。
+
 
 ### 8.3 為了自主性刻意不做的事
 
@@ -220,10 +250,11 @@ device_access_ttl_min = 60   # access token 壽命（1–1440）
 
 ### 8.5 到哪裡為止
 
-- App 的私鑰是一個 0600 檔案，不是 Secure Enclave／Android Keystore／TPM：能讀這個 App 資料夾的程式（同使用者的惡意程式、root）同時拿得到 token 和金鑰。換成硬體金鑰庫要各平台原生外掛，尚未做。
+- 平台金鑰庫不可用時（沒有 TPM 又不是 root 的 Linux、沒有 Keychain 存取權的未簽章 macOS 建置、沒有橋接的 Android）退回 0600 檔案，那時能讀 App 資料夾的程式同時拿得到 token 和金鑰；`lan.device_keys` 會標出這種裝置。Linux TPM 模式下金鑰在 App 執行期間仍在記憶體中（與 vault 相同）。Android 與 Apple 的實作只做了型別檢查與單元測試，沒有在實機上跑過。
 - 瀏覽器的私鑰 non-extractable，但同源的 XSS 仍可**當場使用**它（拿不走）。
 - access token 是 bearer：在它過期前（預設 60 分鐘）被偷走仍可用；開著的 WebSocket 只在撤銷時才斷。
-- 鎖定、nonce、access token 都在記憶體：daemon 重啟會清掉鎖定狀態（也讓裝置重新 refresh 一次）。
+- access token 在記憶體：daemon 重啟讓每台裝置重新 refresh 一次（自動）。鎖定會保存；失敗次數（未達上限的）不保存。
 - 全網錯碼預算可以被 LAN 上的攻擊者用來暫停 8 碼配對（QR／setup code 不受影響）。
 - `behind_proxy = true` 之後信任該代理的轉送標頭；代理本身設錯（例如附加而不是覆寫 `X-Forwarded-For` 又把自己列為可信）時，來源判斷就跟著錯。
-- 沒有 GeoIP、沒有異常偵測（例如「同一台裝置忽然從另一個網段出現」只會反映在最後位址欄，不會告警）。
+- 沒有 GeoIP；新網段只通知不阻擋，同一個 /24 內換位址不會通知。
+- 獨立的即時畫面頁 `/view/?token=…`（不是主控台內的即時畫面）用網址裡固定的 token 輪詢；給它裝置的 access token 時，過期後要從主控台重開。主控台內的即時畫面走 WebSocket，不受影響。

@@ -64,12 +64,80 @@ pub struct Device {
     /// Address of the last authenticated request (informational, like `last_seen_ms`).
     #[serde(default)]
     pub last_ip: String,
+    /// Networks (`/24` for IPv4, `/64` for IPv6) this device has authenticated from, newest last,
+    /// at most [`MAX_NETWORKS`]. A new one tells the owner; it is never blocked.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub networks: Vec<String>,
+    /// Where the device keeps its key, as the client reports it: `tpm`, `cng`, `secure-enclave`,
+    /// `keychain`, `android-keystore`, `webcrypto`, `file` (for `seagent doctor`).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub key_store: String,
+}
+
+/// How many networks per device are remembered.
+pub const MAX_NETWORKS: usize = 16;
+
+/// The network an address belongs to for "new network" alerts: `a.b.c.0/24`, the IPv6 `/64`.
+/// `None` for loopback (this machine) and unparsable input.
+pub fn network_of(ip: &str) -> Option<String> {
+    let ip: IpAddr = ip.trim().trim_matches(['[', ']']).split('%').next()?.parse().ok()?;
+    let ip = match ip {
+        IpAddr::V6(v6) => v6.to_ipv4_mapped().map(IpAddr::V4).unwrap_or(IpAddr::V6(v6)),
+        v4 => v4,
+    };
+    if ip.is_loopback() || ip.is_unspecified() {
+        return None;
+    }
+    Some(match ip {
+        IpAddr::V4(v4) => {
+            let [a, b, c, _] = v4.octets();
+            format!("{a}.{b}.{c}.0/24")
+        }
+        IpAddr::V6(v6) => {
+            let s = v6.segments();
+            format!("{:x}:{:x}:{:x}:{:x}::/64", s[0], s[1], s[2], s[3])
+        }
+    })
+}
+
+/// Remember the network `ip` is in for device `id`. Returns it when it is new for a device that
+/// already had one (the first network — where it paired — is recorded quietly). Writes only
+/// when something new is recorded.
+pub fn note_network(data: &Path, id: &str, ip: &str) -> Option<String> {
+    let net = network_of(ip)?;
+    with(data, |st| {
+        let d = st.devices.iter_mut().find(|d| d.id == id)?;
+        if d.networks.contains(&net) {
+            return None;
+        }
+        let first = d.networks.is_empty();
+        d.networks.push(net.clone());
+        if d.networks.len() > MAX_NETWORKS {
+            d.networks.remove(0);
+        }
+        let _ = save(data, st);
+        (!first).then_some(net)
+    })
+}
+
+/// Record where a device keeps its key (only a short lower-case label is kept).
+pub fn note_key_store(data: &Path, id: &str, store: &str) {
+    let store: String = store.trim().chars().filter(|c| c.is_ascii_lowercase() || *c == '-').take(24).collect();
+    if store.is_empty() {
+        return;
+    }
+    with(data, |st| {
+        if let Some(d) = st.devices.iter_mut().find(|d| d.id == id && d.key_store != store) {
+            d.key_store = store;
+            let _ = save(data, st);
+        }
+    });
 }
 
 impl Device {
     /// Everything but the credential.
     pub fn public(&self) -> Value {
-        json!({"id": self.id, "name": self.name, "platform": self.platform, "scope": self.scope.as_str(), "pairedAtMs": self.paired_at_ms, "lastSeenMs": self.last_seen_ms, "lastIp": self.last_ip, "via": self.via, "keyBound": self.public_key.is_some(), "boundAtMs": self.bound_at_ms})
+        json!({"id": self.id, "name": self.name, "platform": self.platform, "scope": self.scope.as_str(), "pairedAtMs": self.paired_at_ms, "lastSeenMs": self.last_seen_ms, "lastIp": self.last_ip, "via": self.via, "keyBound": self.public_key.is_some(), "boundAtMs": self.bound_at_ms, "keyStore": self.key_store, "networks": self.networks})
     }
 }
 
@@ -213,7 +281,7 @@ pub fn issue(data: &Path, info: &DeviceInfo, scope: Scope, via: &str) -> Result<
         st.access.retain(|_, (dev, _)| *dev != info.id);
         let t = now_ms();
         let bound_at_ms = if info.public_key.is_some() { t } else { 0 };
-        st.devices.push(Device { id: info.id.clone(), name: info.name.clone(), platform: info.platform.clone(), scope, token_hash: hash(&salt, &token), salt, paired_at_ms: t, last_seen_ms: t, via: via.into(), public_key: info.public_key.clone(), bound_at_ms, last_ip: String::new() });
+        st.devices.push(Device { id: info.id.clone(), name: info.name.clone(), platform: info.platform.clone(), scope, token_hash: hash(&salt, &token), salt, paired_at_ms: t, last_seen_ms: t, via: via.into(), public_key: info.public_key.clone(), bound_at_ms, last_ip: String::new(), networks: vec![], key_store: String::new() });
         save(data, st)
     })?;
     Ok(token)
@@ -254,6 +322,11 @@ pub fn set_scope(data: &Path, id: &str, scope: Scope) -> Result<bool, String> {
         }
         None => Ok(false),
     })
+}
+
+/// The current scope of device `id` (open sockets follow changes).
+pub fn scope_of(data: &Path, id: &str) -> Option<Scope> {
+    with(data, |st| st.devices.iter().find(|d| d.id == id).map(|d| d.scope))
 }
 
 /// Is `id` still paired?
@@ -372,6 +445,12 @@ pub fn mint_access(data: &Path, id: &str, ttl: Duration) -> Result<(String, u64)
         st.access.insert(access_hash(&token), (id.to_string(), exp));
         Ok((token, exp))
     })
+}
+
+/// Tests: drop every access token, as a daemon restart does.
+#[cfg(test)]
+pub(crate) fn forget_access_tokens(data: &Path) {
+    with(data, |st| st.access.clear());
 }
 
 /// Spend a refresh nonce: `true` the first time inside `window`, `false` for a replay.
@@ -570,6 +649,10 @@ pub fn handle_pair_client_with(app: &crate::App, r: &seagent_net::httpd::Request
     };
     let ok = |token: String, scope: Scope, via: &str| {
         let bound = by_console_token(data, &token).is_some_and(|d| d.public_key.is_some());
+        note_network(data, &device.id, &ip_s);
+        if let Some(ks) = body["device"]["keyStore"].as_str() {
+            note_key_store(data, &device.id, ks);
+        }
         audit(data, "device.pair", seagent_security::audit::Actor::new("device", &device.name).with_ip(&ip_s), &device.id, "ok", json!({"platform": device.platform, "via": via, "scope": scope.as_str(), "keyBound": bound}));
         crate::netguard::alert_owner(app, &format!("device:{}:{}", device.id, now_ms() / 60_000), &format!("new device paired: {} ({}) from {ip_s}, scope {}{}", device.name, if device.platform.is_empty() { "?" } else { &device.platform }, scope.as_str(), if bound { "" } else { ", no device key" }));
         let mut v = json!({"consoleToken": token, "hostId": crate::lan::host_id(data), "name": crate::lan::display_name(), "deviceId": device.id, "scope": scope.as_str(), "keyBound": bound});
@@ -763,6 +846,30 @@ mod tests {
         assert_eq!(authenticate_at(data, &at, "", false), Err(AuthError::Unknown));
         assert!(list(data).is_empty());
         assert!(parse_public_key("AAAA").is_err() && parse_public_key(&pk).is_ok());
+    }
+
+    #[test]
+    fn a_new_network_is_reported_once_and_never_blocks() {
+        let home = seagent_core::tmp::TempDir::new("seagent-devices-net");
+        let data = home.path();
+        let t = issue(data, &info("roam"), Scope::Write, "code").unwrap();
+        assert_eq!(network_of("192.168.1.77").as_deref(), Some("192.168.1.0/24"));
+        assert_eq!(network_of("::ffff:10.1.2.3").as_deref(), Some("10.1.2.0/24"));
+        assert_eq!(network_of("[fd00:1:2:3:4::9]").as_deref(), Some("fd00:1:2:3::/64"));
+        assert_eq!(network_of("127.0.0.1"), None);
+        assert_eq!(note_network(data, "roam", "192.168.1.20"), None, "the pairing network is recorded quietly");
+        assert_eq!(note_network(data, "roam", "192.168.1.99"), None, "same /24");
+        assert_eq!(note_network(data, "roam", "10.8.0.4").as_deref(), Some("10.8.0.0/24"), "a new network is reported");
+        assert_eq!(note_network(data, "roam", "10.8.0.5"), None, "once");
+        assert!(authenticate_at(data, &t, "10.8.0.5", false).is_ok(), "and never blocked");
+        assert_eq!(note_network(data, "nobody", "10.9.9.9"), None);
+        note_key_store(data, "roam", "secure-enclave");
+        assert_eq!(list(data)[0]["keyStore"], "secure-enclave");
+        assert_eq!(list(data)[0]["networks"], json!(["192.168.1.0/24", "10.8.0.0/24"]));
+        for i in 0..40 {
+            note_network(data, "roam", &format!("172.16.{i}.1"));
+        }
+        assert_eq!(list(data)[0]["networks"].as_array().unwrap().len(), MAX_NETWORKS, "bounded");
     }
 
     #[test]

@@ -4,8 +4,8 @@
 //! A device that pairs with `device.publicKey` (WebCrypto / ring ECDSA P-256, the private key
 //! never leaves the device; in browsers it is a non-extractable `CryptoKey`) is **key-bound**.
 //! Its long-lived console token (`sed1_…`) is then refused as a bearer everywhere except here,
-//! where it buys a short-lived access token (`sea1_…`, `[app.exposure] device_access_ttl_min`,
-//! default 60) together with a fresh signature:
+//! where it buys a short-lived access token (`sea1_…`, `[app.exposure] device_access_ttl_secs`,
+//! default 3600) together with a fresh signature:
 //!
 //! ```text
 //! GET  /pair/info   → {"hostId", "nowMs", "protocol"}       (public: what to sign for)
@@ -23,6 +23,11 @@
 //! existed sends its console token plus `publicKey` once (the apps and the web console do it on
 //! their next start); from then on it is key-bound. Access tokens live in memory only, so a
 //! daemon restart costs each device one silent refresh.
+//!
+//! **Across restarts** the nonce memory is not written to disk: a refresh must also be signed
+//! after this process started ([`started_ms`]; clients sign with the host clock from
+//! `/pair/info`), so a refresh captured before a restart cannot be replayed after it, and the
+//! nonces of the current run cover the rest of the window. No disk write per refresh.
 
 use crate::devices;
 use serde_json::{json, Value};
@@ -31,14 +36,20 @@ use std::time::Duration;
 /// Accepted clock difference (and the nonce memory) for refresh signatures.
 pub const SKEW: Duration = Duration::from_secs(300);
 
+/// When this process started serving refreshes (the replay floor across restarts).
+pub fn started_ms() -> u64 {
+    static S: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    *S.get_or_init(now_ms)
+}
+
 /// What the device signs.
 pub fn refresh_message(host_id: &str, device_id: &str, ts: u64, nonce: &str) -> String {
     format!("seagent-device-refresh|v1|{host_id}|{device_id}|{ts}|{nonce}")
 }
 
-/// `[app.exposure] device_access_ttl_min` as a duration.
+/// `[app.exposure] device_access_ttl_secs` as a duration.
 pub fn access_ttl(app: &crate::App) -> Duration {
-    Duration::from_secs(u64::from(app.cfg.exposure.device_access_ttl_min.clamp(1, 24 * 60)) * 60)
+    Duration::from_secs(u64::from(app.cfg.exposure.device_access_ttl_secs.clamp(2, 86_400)))
 }
 
 fn now_ms() -> u64 {
@@ -50,7 +61,8 @@ fn reply(status: u16, v: Value) -> seagent_net::httpd::Response {
 }
 
 /// Check one refresh request. `Ok((device, bind))`: `bind` is the key to bind (migration).
-pub fn verify(data: &std::path::Path, token: &str, body: &Value, now: u64) -> Result<(devices::Device, Option<String>), String> {
+/// `floor`: refreshes signed before it (an earlier run of the daemon) are refused.
+pub fn verify(data: &std::path::Path, token: &str, body: &Value, now: u64, floor: u64) -> Result<(devices::Device, Option<String>), String> {
     let dev = devices::by_console_token(data, token).ok_or("unknown or revoked device token")?;
     if body["deviceId"].as_str() != Some(dev.id.as_str()) {
         return Err("deviceId does not match the token".into());
@@ -58,6 +70,9 @@ pub fn verify(data: &std::path::Path, token: &str, body: &Value, now: u64) -> Re
     let ts = body["ts"].as_u64().ok_or("ts (unix ms) missing")?;
     if ts.abs_diff(now) > SKEW.as_millis() as u64 {
         return Err("ts is outside the replay window; check this device's clock".into());
+    }
+    if ts < floor {
+        return Err("signed before this host started; sign again with GET /pair/info's clock".into());
     }
     let nonce = body["nonce"].as_str().unwrap_or("");
     if !(16..=64).contains(&nonce.len()) || !nonce.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_') {
@@ -104,7 +119,7 @@ pub fn handle_refresh(app: &crate::App, r: &seagent_net::httpd::Request) -> seag
     }
     let Ok(body) = serde_json::from_slice::<Value>(&r.body) else { return reply(400, json!({"error": "the body is not JSON"})) };
     let token = r.bearer().unwrap_or("");
-    match verify(data, token, &body, now_ms()) {
+    match verify(data, token, &body, now_ms(), started_ms()) {
         Ok((dev, bind)) => {
             let actor = seagent_security::audit::Actor::new("device", &dev.name).with_ip(&ip);
             if let Some(k) = bind {
@@ -114,6 +129,12 @@ pub fn handle_refresh(app: &crate::App, r: &seagent_net::httpd::Request) -> seag
                 seagent_security::audit::record(data, seagent_security::audit::Event::new("device.bind", actor, &dev.id, "ok").detail(json!({"platform": dev.platform, "migrated": true})));
             }
             crate::netguard::auth_ok(app, r);
+            if let Some(ks) = body["keyStore"].as_str() {
+                devices::note_key_store(data, &dev.id, ks);
+            }
+            if let Some(net) = devices::note_network(data, &dev.id, &ip) {
+                crate::netguard::alert_owner(app, &format!("net:{}:{net}", dev.id), &format!("paired device {} ({}) appeared from a network it has not used before: {net} ({ip}); not blocked — revoke it if this was not you", dev.name, dev.platform));
+            }
             match devices::mint_access(data, &dev.id, access_ttl(app)) {
                 Ok((t, exp)) => reply(200, json!({"accessToken": t, "expiresAtMs": exp, "scope": dev.scope.as_str(), "keyBound": true})),
                 Err(e) => reply(401, json!({"error": e})),
@@ -155,22 +176,35 @@ mod tests {
         let tok = issue(data, &DeviceInfo { id: "p1".into(), name: "phone".into(), platform: "android".into(), public_key: Some(pk) }, Scope::Write, "code").unwrap();
         let now = now_ms();
         let good = signed(data, &key, "p1", now, "nonce-0123456789ab");
-        assert!(verify(data, &tok, &good, now).is_ok());
-        assert_eq!(verify(data, &tok, &good, now).unwrap_err(), "replayed nonce");
+        assert!(verify(data, &tok, &good, now, 0).is_ok());
+        assert_eq!(verify(data, &tok, &good, now, 0).unwrap_err(), "replayed nonce");
         // A thief with the console token but another key (or none) gets nothing.
         let thief = crypto::p256_generate().unwrap();
-        assert_eq!(verify(data, &tok, &signed(data, &thief, "p1", now, "nonce-thief-000001"), now).unwrap_err(), "bad device signature");
+        assert_eq!(verify(data, &tok, &signed(data, &thief, "p1", now, "nonce-thief-000001"), now, 0).unwrap_err(), "bad device signature");
         let mut forged = signed(data, &thief, "p1", now, "nonce-thief-000002");
         forged["publicKey"] = crypto::b64url(&crypto::p256_public(&thief).unwrap()).into();
-        assert!(verify(data, &tok, &forged, now).unwrap_err().contains("bound to another key"));
+        assert!(verify(data, &tok, &forged, now, 0).unwrap_err().contains("bound to another key"));
         // Stale / future timestamps, wrong device, wrong token.
-        assert!(verify(data, &tok, &signed(data, &key, "p1", now - 600_000, "nonce-old-00000001"), now).unwrap_err().contains("replay window"));
-        assert!(verify(data, &tok, &signed(data, &key, "p1", now + 600_000, "nonce-new-00000001"), now).unwrap_err().contains("replay window"));
-        assert!(verify(data, &tok, &signed(data, &key, "p2", now, "nonce-dev-00000001"), now).unwrap_err().contains("deviceId"));
-        assert!(verify(data, "sed1_nope", &good, now).is_err());
+        assert!(verify(data, &tok, &signed(data, &key, "p1", now - 600_000, "nonce-old-00000001"), now, 0).unwrap_err().contains("replay window"));
+        assert!(verify(data, &tok, &signed(data, &key, "p1", now + 600_000, "nonce-new-00000001"), now, 0).unwrap_err().contains("replay window"));
+        assert!(verify(data, &tok, &signed(data, &key, "p2", now, "nonce-dev-00000001"), now, 0).unwrap_err().contains("deviceId"));
+        assert!(verify(data, "sed1_nope", &good, now, 0).is_err());
         // A signature for another host id is not valid here.
         let elsewhere = crypto::p256_sign(&key, refresh_message("0000000000000000", "p1", now, "nonce-host-0000001").as_bytes()).unwrap();
-        assert_eq!(verify(data, &tok, &json!({"deviceId": "p1", "ts": now, "nonce": "nonce-host-0000001", "sig": crypto::b64url(&elsewhere)}), now).unwrap_err(), "bad device signature");
+        assert_eq!(verify(data, &tok, &json!({"deviceId": "p1", "ts": now, "nonce": "nonce-host-0000001", "sig": crypto::b64url(&elsewhere)}), now, 0).unwrap_err(), "bad device signature");
+    }
+
+    #[test]
+    fn a_refresh_signed_before_a_restart_is_refused_after_it() {
+        let home = seagent_core::tmp::TempDir::new("seagent-devauth-restart");
+        let data = home.path();
+        let key = crypto::p256_generate().unwrap();
+        let tok = issue(data, &DeviceInfo { id: "r1".into(), name: "laptop".into(), platform: "macos".into(), public_key: Some(crypto::b64url(&crypto::p256_public(&key).unwrap())) }, Scope::Write, "code").unwrap();
+        let now = now_ms();
+        let captured = signed(data, &key, "r1", now - 1_000, "nonce-before-restart");
+        // "Restart": the nonce memory is gone, the floor is the new start time.
+        assert!(verify(data, &tok, &captured, now, now - 500).unwrap_err().contains("before this host started"));
+        assert!(verify(data, &tok, &signed(data, &key, "r1", now, "nonce-after-restart0"), now, now - 500).is_ok(), "a fresh one works at once");
     }
 
     #[test]
@@ -181,12 +215,12 @@ mod tests {
         let key = crypto::p256_generate().unwrap();
         let now = now_ms();
         let mut b = signed(data, &key, "old", now, "nonce-bind-000001");
-        assert!(verify(data, &tok, &b, now).unwrap_err().contains("send publicKey"), "no key, no access token");
+        assert!(verify(data, &tok, &b, now, 0).unwrap_err().contains("send publicKey"), "no key, no access token");
         b["publicKey"] = crypto::b64url(&crypto::p256_public(&key).unwrap()).into();
-        let (dev, bind) = verify(data, &tok, &b, now).unwrap();
+        let (dev, bind) = verify(data, &tok, &b, now, 0).unwrap();
         assert_eq!(dev.id, "old");
         crate::devices::bind_key(data, "old", &bind.unwrap()).unwrap();
         assert_eq!(crate::devices::authenticate_at(data, &tok, "", false), Err(crate::devices::AuthError::NeedsSignature));
-        assert!(verify(data, &tok, &signed(data, &key, "old", now, "nonce-after-00001"), now).is_ok(), "bound: no publicKey needed");
+        assert!(verify(data, &tok, &signed(data, &key, "old", now, "nonce-after-00001"), now, 0).is_ok(), "bound: no publicKey needed");
     }
 }

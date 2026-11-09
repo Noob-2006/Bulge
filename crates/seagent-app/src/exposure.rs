@@ -99,8 +99,10 @@ pub struct ExposureConfig {
     /// Refuse paired devices that have not bound a device key yet (old apps / browsers without
     /// WebCrypto). Off by default: they keep working and migrate on their next start.
     pub require_device_key: bool,
-    /// Lifetime of the short-lived access tokens a key-bound device mints (`POST /pair/refresh`).
-    pub device_access_ttl_min: u32,
+    /// Lifetime (seconds) of the short-lived access tokens a key-bound device mints
+    /// (`POST /pair/refresh`). Clients renew at ~80 % of it by themselves and an open
+    /// WebSocket outlives it. 2–86400, default 3600.
+    pub device_access_ttl_secs: u32,
 }
 
 /// `[app.exposure.proxy_auth]` — trusted reverse-proxy identity headers.
@@ -218,7 +220,7 @@ impl ClientIdentity {
 
 impl Default for ExposureConfig {
     fn default() -> Self {
-        ExposureConfig { allow_public: false, lan: false, behind_proxy: false, tls: false, cert: None, key: None, client_auth: "off".into(), client_ca: None, client_identities: vec![], node_identities: vec![], rate_limit_per_min: 1200, trusted_proxies: vec![], proxy_auth: ProxyAuthConfig::default(), allow_sources: vec![], allowed_hosts: vec![], require_device_key: false, device_access_ttl_min: 60 }
+        ExposureConfig { allow_public: false, lan: false, behind_proxy: false, tls: false, cert: None, key: None, client_auth: "off".into(), client_ca: None, client_identities: vec![], node_identities: vec![], rate_limit_per_min: 1200, trusted_proxies: vec![], proxy_auth: ProxyAuthConfig::default(), allow_sources: vec![], allowed_hosts: vec![], require_device_key: false, device_access_ttl_secs: 3600 }
     }
 }
 

@@ -969,7 +969,11 @@ async function start(token) {
     if (window.DevAuth) DevAuth.forget();
     setConn('conn.failed', null, 'down');
     S.fails = (S.fails || 0) + 1;
-    if (S.connected || S.fails < 3) { setTimeout(() => start(token), Math.min(10000, 1500 * S.fails)); return; }
+    // A paired device's credential renews itself: keep retrying quietly (asleep, offline, host
+    // restarting) unless the host said the device was revoked.
+    if (window.DevAuth && DevAuth.revoked) { store.del('seagent.token'); $('token').value = ''; return askToken(); }
+    const device = /^se[ad]1_/.test(token);
+    if (S.connected || S.fails < 3 || device) { setTimeout(() => start(token), Math.min(device ? 30000 : 10000, 1500 * S.fails)); return; }
     $('token').value = token;
     return askToken();
   }
@@ -987,6 +991,8 @@ async function start(token) {
     if (p.session === S.current) renderEvent(p.event);
   });
   S.arp.on('delta', (p) => { if (p.subscription !== S.globalSub) onDelta(p); });
+  // The host changed this device's scope (devices.scope): show what it may do now.
+  S.arp.on('access', async () => { try { S.me = await S.arp.call('whoami'); applyAccess(S.me); } catch {} });
   S.arp.on('pending', (p) => { if (p.subscription === S.globalSub) onPending(p); });
   S.arp.on('close', () => { if (S.arp && S.arp.login !== token) return; setConn('conn.down', null, 'down'); setTimeout(() => start(token), 3000); });
   // After the handlers: the server's `ready` notification must not arrive unobserved.

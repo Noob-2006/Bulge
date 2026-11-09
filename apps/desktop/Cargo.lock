@@ -3476,6 +3476,7 @@ dependencies = [
  "base64 0.22.1",
  "ring",
  "rustls",
+ "seagent-devkey",
  "serde",
  "serde_json",
  "sys-locale",
@@ -3490,6 +3491,16 @@ dependencies = [
  "tauri-plugin-updater",
  "tokio",
  "tokio-rustls",
+]
+
+[[package]]
+name = "seagent-devkey"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "ring",
+ "security-framework",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

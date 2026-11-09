@@ -171,6 +171,10 @@ impl App {
     fn device_principal(&self, r: &Request, ip: String) -> Option<Principal> {
         let given = self.presented(r)?;
         let (id, scope) = crate::devices::authenticate_at(&self.d.k.paths.data, &given, &ip, self.cfg.exposure.require_device_key).ok()?;
+        // A known device on a network it has never used: tell the owner, never block (docs/SECURITY.md §8).
+        if let Some(net) = crate::devices::note_network(&self.d.k.paths.data, &id, &ip) {
+            crate::netguard::alert_owner(self, &format!("net:{id}:{net}"), &format!("paired device {id} appeared from a network it has not used before: {net} ({ip}); not blocked — revoke it if this was not you"));
+        }
         let tenant = crate::tenant::credential_viewer(self, "", "", scope == Scope::Admin, &id);
         Some(Principal { kind: "device".into(), name: id, access: Access::Scope(scope), ip, tenant })
     }
@@ -616,7 +620,7 @@ impl App {
 
     /// ARP over WebSocket: one thread owns the socket; requests run on workers,
     /// subscriptions on their own threads; everything outbound funnels through `out`.
-    fn ws_session(self: Arc<Self>, s: TcpStream, head: &str, rest: Vec<u8>, proto: Option<String>, principal: Principal) {
+    fn ws_session(self: Arc<Self>, s: TcpStream, head: &str, rest: Vec<u8>, proto: Option<String>, mut principal: Principal) {
         let _ = s.set_read_timeout(Some(Duration::from_millis(100)));
         let accepted = match &proto {
             // Echo the chosen subprotocol so browsers accept the upgrade.
@@ -639,6 +643,14 @@ impl App {
                     seagent_security::audit::record(&self.d.k.paths.data, crate::tenant::tag(seagent_security::audit::Event::new("auth.revoked", principal.actor(), "ws", "deny"), &principal));
                     let _ = ws.send_text(&json!({"jsonrpc": "2.0", "method": "revoked", "params": {"reason": "credential disabled or revoked"}}).to_string());
                     break;
+                }
+                // A device whose scope was changed (`devices.scope`) gets it on the open socket
+                // too: view-only takes effect within a second, no reconnect needed.
+                if principal.kind == "device" {
+                    if let Some(sc) = crate::devices::scope_of(&self.d.k.paths.data, &principal.name).filter(|sc| principal.access != Access::Scope(*sc)) {
+                        principal.access = Access::Scope(sc);
+                        let _ = ws.send_text(&json!({"jsonrpc": "2.0", "method": "access", "params": {"access": sc.as_str()}}).to_string());
+                    }
                 }
             }
             for m in out_rx.try_iter() {
@@ -1736,5 +1748,88 @@ mod tests {
         let health = a.clone().handle(req("GET", "/health", &[], ""));
         assert_eq!(header_of(&health, "x-content-type-options"), Some("nosniff"));
         assert!(header_of(&health, "x-frame-options").is_none());
+    }
+
+
+    /// A lockout survives a daemon restart (it is saved when it starts; nothing else is).
+    #[test]
+    fn a_lockout_survives_a_restart() {
+        let a = lan_app();
+        for i in 0..crate::netguard::FAIL_LIMIT {
+            a.clone().handle(from("192.168.78.10", json_req("/arp", &[("authorization", &format!("Bearer sed1_x{i}"))], &rpc("session.list"))));
+        }
+        assert_eq!(a.clone().handle(from("192.168.78.10", json_req("/arp", &[], &rpc("session.list")))).status, 429);
+        crate::netguard::simulate_restart(&a);
+        let after = a.clone().handle(from("192.168.78.10", json_req("/arp", &[], &rpc("session.list"))));
+        assert_eq!(after.status, 429, "still locked after the restart");
+        let saved = std::fs::read_to_string(a.d.k.paths.data.join("security/lockouts.json")).unwrap();
+        assert!(saved.contains("192.168.78.10") && !saved.contains("sed1_"), "{saved}");
+    }
+
+    /// Anything already authenticated renews itself, forever, with no user action: a 2 s access
+    /// TTL over several expiry cycles. An open WebSocket stays up across every expiry; an expired
+    /// token on a new request is refused (the client refreshes and retries); a refresh works no
+    /// matter how long the device slept; a host "restart" (access tokens lost) is recovered by
+    /// the next refresh.
+    #[test]
+    fn device_credentials_renew_silently_over_many_expiry_cycles() {
+        use seagent_net::crypto;
+        let base = default_app();
+        let mut cfg = base.cfg.clone();
+        cfg.exposure.device_access_ttl_secs = 2;
+        let a = Arc::new(App { d: base.d.clone(), cfg, token: "admin-token".into(), host_methods: vec![], routes: vec![] });
+        let data = a.d.k.paths.data.clone();
+        let key = crypto::p256_generate().unwrap();
+        let info = crate::devices::DeviceInfo { id: "renew".into(), name: "laptop".into(), platform: "windows".into(), public_key: Some(crypto::b64url(&crypto::p256_public(&key).unwrap())) };
+        let console = crate::devices::issue(&data, &info, Scope::Write, "code").unwrap();
+        let mut n = 0;
+        let mut refresh = || {
+            n += 1;
+            let info = serde_json::from_str::<Value>(&body_text(&a.clone().handle(from("127.0.0.1", req("GET", "/pair/info", &[], ""))))).unwrap();
+            let ts = info["nowMs"].as_u64().unwrap();
+            let nonce = format!("renew-nonce-{n:08}");
+            let sig = crypto::p256_sign(&key, crate::device_auth::refresh_message(info["hostId"].as_str().unwrap(), "renew", ts, &nonce).as_bytes()).unwrap();
+            let r = a.clone().handle(from("127.0.0.1", json_req("/pair/refresh", &[("authorization", &format!("Bearer {console}"))], &json!({"deviceId": "renew", "ts": ts, "nonce": nonce, "sig": crypto::b64url(&sig)}).to_string())));
+            assert_eq!(r.status, 200, "{}", body_text(&r));
+            let v: Value = serde_json::from_str(&body_text(&r)).unwrap();
+            let exp = v["expiresAtMs"].as_u64().unwrap();
+            assert!(exp > seagent_security::audit::now_ms() + 1_000 && exp <= seagent_security::audit::now_ms() + 2_100, "2 s TTL");
+            v["accessToken"].as_str().unwrap().to_string()
+        };
+        let post = |t: &str| a.clone().handle(from("127.0.0.1", json_req("/arp", &[("authorization", &format!("Bearer {t}"))], &rpc("session.list")))).status;
+        let srv = start(a.clone()).unwrap();
+        let first = refresh();
+        let proto = format!("arp, seagent.token.{first}");
+        let (mut ws, _) = seagent_net::ws::WebSocket::connect(&format!("ws://127.0.0.1:{}/arp", srv.local_addr().port()), &[("sec-websocket-protocol", proto.as_str())], Duration::from_secs(10)).unwrap();
+        let mut ask = |id: u64| -> Value {
+            ws.send_text(&json!({"jsonrpc": "2.0", "id": id, "method": "session.list", "params": {}}).to_string()).unwrap();
+            let until = std::time::Instant::now() + Duration::from_secs(10);
+            while std::time::Instant::now() < until {
+                if let Ok(Some(Message::Text(t))) = ws.recv() {
+                    let v: Value = serde_json::from_str(&t).unwrap();
+                    if v["id"] == id {
+                        return v;
+                    }
+                }
+            }
+            panic!("no answer to {id}");
+        };
+        let mut token = first.clone();
+        for cycle in 0..3u64 {
+            assert_eq!(post(&token), 200, "cycle {cycle}: fresh token works");
+            std::thread::sleep(Duration::from_millis(2_300));
+            assert_eq!(post(&token), 401, "cycle {cycle}: expired on a new request");
+            assert!(ask(10 + cycle).get("result").is_some(), "cycle {cycle}: the open WebSocket outlives the token");
+            token = refresh(); // what every client does at ~80 % of the TTL, or on that 401
+            assert_eq!(post(&token), 200, "cycle {cycle}: renewed with no user action");
+        }
+        // Host restart: every access token is gone; the next refresh recovers.
+        crate::devices::forget_access_tokens(&data);
+        assert_eq!(post(&token), 401);
+        let after = refresh();
+        assert_eq!(post(&after), 200, "recovered after the restart");
+        assert!(ask(99).get("result").is_some(), "and the socket opened before it is still up");
+        // The console token itself never expires: a device that slept for days refreshes the same way.
+        assert!(crate::devices::by_console_token(&data, &console).is_some());
     }
 }
