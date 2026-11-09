@@ -171,6 +171,10 @@ pub struct Runtime {
 
 pub type Kernel = Arc<Runtime>;
 
+/// System-prompt segment id of a per-conversation persona / extra instructions (set from the
+/// web UI's conversation settings). Appended after the config's segments, kept on compaction.
+pub const PERSONA_SEGMENT: &str = "persona";
+
 /// Observer for busy-arrival telemetry: `(session, outcome)` with outcome one of
 /// `queued`, `steered`, `dropped`. Installed by the host (`seagent/src/wire.rs`) so the kernel
 /// itself stays free of the metrics crate; a later install replaces the previous one.
@@ -1789,7 +1793,10 @@ impl Runtime {
         }
         // The cache breaks here anyway: refresh memory / project segments.
         let ws = PathBuf::from(&view.workspace);
-        let segs = self.system_segments(&ws);
+        let mut segs = self.system_segments(&ws);
+        // A per-conversation persona (the web UI's conversation settings) belongs to the
+        // session, not to the config, so the refresh keeps it.
+        segs.extend(view.system.iter().filter(|s| s.id == PERSONA_SEGMENT).cloned());
         if segs != view.system {
             self.append(log, EventKind::System { segments: segs })?;
         }

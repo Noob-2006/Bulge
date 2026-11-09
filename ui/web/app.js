@@ -761,6 +761,7 @@ function ago(ms) {
   return Math.floor(d / 86400) + (LANG === 'en' ? 'd' : ' 天');
 }
 function renderSessions() {
+  if (typeof chatRail === 'function') return chatRail(); // chat_menu.js: sections, ⋯ menu
   const nav = $('sessions');
   const q = ($('sessFilter').value || '').trim().toLowerCase();
   nav.innerHTML = '';
@@ -796,6 +797,7 @@ function renderSessions() {
 }
 async function loadSessions() {
   try { S.sessions = await S.arp.call('session.list', { limit: 200 }); } catch { return; }
+  if (typeof chatRailLoad === 'function') await chatRailLoad();
   renderSessions();
   if (S.current && S.view === 'chat') $('title').textContent = sessTitle(S.current);
 }
@@ -821,6 +823,7 @@ async function openSession(id) {
   $('reviewBtn').hidden = false;
   loadReview();
   if (typeof workSession === 'function') workSession();
+  if (typeof chatOpened === 'function') chatOpened(id);
   $('input').focus();
 }
 // ── session review (reviewer marks a conversation reviewed / flagged; audited server-side) ──

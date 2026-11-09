@@ -22,6 +22,9 @@ pub struct Providers {
     vault: Arc<Vault>,
     store: Option<Store>,
     cache: Mutex<HashMap<String, Arc<dyn Provider>>>,
+    /// The vault generation the cached providers were built under: a key replaced in the vault
+    /// (web UI, `seagent secrets set` through the daemon) drops them, so the next request uses it.
+    cache_gen: std::sync::atomic::AtomicU64,
     /// Providers registered by plugins (`seagent/provider.complete`); they shadow presets.
     plugins: Mutex<BTreeMap<String, Arc<dyn Provider>>>,
     /// `SEAGENT_MODEL_REPLAY`: recorded exchanges per provider (a keyless test run).
@@ -67,7 +70,8 @@ impl Providers {
                 replay.insert(id.clone(), Arc::new(seagent_model::replay::ReplayProvider::from_exchanges(&id, entries)?));
             }
         }
-        Ok(Providers { configs, vault, store: seagent_model::store::default_store(), cache: Mutex::new(HashMap::new()), plugins: Mutex::default(), replay, record_path })
+        let cache_gen = std::sync::atomic::AtomicU64::new(vault.generation());
+        Ok(Providers { configs, vault, store: seagent_model::store::default_store(), cache: Mutex::new(HashMap::new()), cache_gen, plugins: Mutex::default(), replay, record_path })
     }
 
     /// Wrap a built provider when `SEAGENT_MODEL_RECORD` is set. A recording failure must not
@@ -256,6 +260,10 @@ impl Providers {
 
 impl Resolver for Providers {
     fn provider(&self, id: &str) -> Result<Arc<dyn Provider>, String> {
+        let generation = self.vault.generation();
+        if self.cache_gen.swap(generation, std::sync::atomic::Ordering::SeqCst) != generation {
+            self.cache.lock().unwrap().clear();
+        }
         if let Some(p) = self.plugins.lock().unwrap().get(id) {
             return Ok(p.clone());
         }
@@ -514,5 +522,24 @@ mod tests {
         assert!(!Arc::ptr_eq(&shared, &eng), "the team gets its own provider");
         assert!(Arc::ptr_eq(&shared, &sales), "a team without keys uses the shared one");
         assert_eq!(p.team_keys(&["eng-platform".into(), "sales".into()]), vec![("eng-platform".to_string(), "groq".to_string())]);
+    }
+
+    #[test]
+    fn a_vault_change_drops_cached_providers() {
+        let mut o = BTreeMap::new();
+        let t: toml::Table = "format = \"openai_chat\"
+base_url = \"http://127.0.0.1:9/v1\"
+api_key_env = \"SEAGENT_CACHE_PROBE_KEY\"".parse().unwrap();
+        o.insert("cacheprobe".to_string(), t);
+        let vault = Arc::new(Vault::empty());
+        vault.set("SEAGENT_CACHE_PROBE_KEY", "first-key-0001").unwrap();
+        let ps = Providers::new(&o, vault.clone()).unwrap();
+        let a = ps.provider("cacheprobe").unwrap();
+        assert!(Arc::ptr_eq(&a, &ps.provider("cacheprobe").unwrap()), "built once, then cached");
+        // A key replaced from the web UI: the next request builds with the new one.
+        vault.set("SEAGENT_CACHE_PROBE_KEY", "second-key-0002").unwrap();
+        let b = ps.provider("cacheprobe").unwrap();
+        assert!(!Arc::ptr_eq(&a, &b), "a vault change rebuilds");
+        assert!(Arc::ptr_eq(&b, &ps.provider("cacheprobe").unwrap()));
     }
 }

@@ -540,7 +540,17 @@ pub fn list_models_with(
     cfg: &ProviderConfig,
     cred: &dyn CredSource,
 ) -> Result<Vec<String>, String> {
-    use std::io::Read;
+    fetch_models(cfg, cred, false)
+}
+
+/// [`list_models_with`] for a live picker or a key test: an HTTP error (401 bad key, 404,
+/// 5xx) or an empty answer is an error instead of the configured ids, so the caller can tell a
+/// fresh listing from its own fallback.
+pub fn list_models_live(cfg: &ProviderConfig, cred: &dyn CredSource) -> Result<Vec<String>, String> {
+    fetch_models(cfg, cred, true)
+}
+
+fn fetch_models(cfg: &ProviderConfig, cred: &dyn CredSource, strict: bool) -> Result<Vec<String>, String> {
     match cfg.format {
         #[cfg(feature = "bedrock")]
         WireFormat::Bedrock => return bedrock::list_models(cfg),
@@ -595,7 +605,38 @@ pub fn list_models_with(
     } else {
         format!("{}/models", base.trim_end_matches('/'))
     };
-    let mut req = agent.get(&url).header("accept", "application/json");
+    let (status, raw) = models_get(cfg, &c, &agent, &url)?;
+    // Ollama's OpenAI-compatible `/v1/models` is missing on older servers; the native
+    // `/api/tags` (`{"models": [{"name": ..}]}`) lists the same pulled models.
+    let (status, raw) = match base.trim_end_matches('/').strip_suffix("/v1") {
+        Some(root) if status == 404 && (cfg.id == "ollama" || root.ends_with(":11434")) => models_get(cfg, &c, &agent, &format!("{root}/api/tags"))?,
+        _ => (status, raw),
+    };
+    if !(200..300).contains(&status) {
+        if !strict && !cfg.models.is_empty() {
+            return Ok(cfg.models.clone());
+        }
+        let e = classify::from_status(status, None, &raw);
+        return Err(format!("{}: HTTP {status}: {e}", cfg.id));
+    }
+    let v: Value = serde_json::from_str(&raw).map_err(|e| format!("{url}: not JSON ({e})"))?;
+    // Learn the windows this endpoint reports about its own models (production writer for
+    // `contextpin::learned`, which then beats the registry/table guess everywhere).
+    for (m, ctx) in parse_model_contexts(&v) {
+        crate::contextpin::learn_from_endpoint(&m, &base, ctx);
+    }
+    let mut out = parse_model_list(&v);
+    if out.is_empty() && !strict {
+        out = cfg.models.clone();
+    }
+    Ok(out)
+}
+
+/// One authenticated `GET` of a model listing: (status, body). Paginated APIs are asked for
+/// their largest page (Anthropic `limit`, Gemini `pageSize`) so one call sees every model.
+fn models_get(cfg: &ProviderConfig, c: &auth::Cred, agent: &ureq::Agent, url: &str) -> Result<(u16, String), String> {
+    use std::io::Read;
+    let mut req = agent.get(url).header("accept", "application/json");
     let style = match (cfg.auth.as_str(), cfg.format) {
         ("api-key", _) => Style::ApiKey,
         ("x-api-key", _) => Style::XApiKey,
@@ -627,6 +668,13 @@ pub fn list_models_with(
     for (k, v) in &cfg.query {
         req = req.query(k, v);
     }
+    if url.ends_with("/models") {
+        match cfg.format {
+            WireFormat::Anthropic if !cfg.query.contains_key("limit") => req = req.query("limit", "1000"),
+            WireFormat::Gemini if !cfg.query.contains_key("pageSize") => req = req.query("pageSize", "1000"),
+            _ => {}
+        }
+    }
     let resp = req.call().map_err(|e| format!("GET {url}: {e}"))?;
     let status = resp.status().as_u16();
     let mut raw = String::new();
@@ -635,24 +683,7 @@ pub fn list_models_with(
         .take(8 << 20)
         .read_to_string(&mut raw)
         .map_err(|e| format!("reading {url}: {e}"))?;
-    if !(200..300).contains(&status) {
-        if !cfg.models.is_empty() {
-            return Ok(cfg.models.clone());
-        }
-        let e = classify::from_status(status, None, &raw);
-        return Err(format!("{}: {e}", cfg.id));
-    }
-    let v: Value = serde_json::from_str(&raw).map_err(|e| format!("{url}: not JSON ({e})"))?;
-    // Learn the windows this endpoint reports about its own models (production writer for
-    // `contextpin::learned`, which then beats the registry/table guess everywhere).
-    for (m, ctx) in parse_model_contexts(&v) {
-        crate::contextpin::learn_from_endpoint(&m, &base, ctx);
-    }
-    let mut out = parse_model_list(&v);
-    if out.is_empty() {
-        out = cfg.models.clone();
-    }
-    Ok(out)
+    Ok((status, raw))
 }
 
 /// Per-model context windows as the endpoint's own `/models` answer reports them. Local servers
@@ -1112,5 +1143,141 @@ mod feature_wiring {
             doc.contains("cargo build -p seagent --release --no-default-features"),
             "docs/BUILD.md must keep the slim build command"
         );
+    }
+}
+
+/// Live model listings against fake provider servers: every wire format's `/models` shape,
+/// the auth header each one expects, pagination parameters, and the strict vs lenient
+/// handling of an error status (a key test must see a 401; a picker may fall back).
+#[cfg(test)]
+mod live_models_tests {
+    use super::*;
+    use std::io::{BufRead, BufReader, Read, Write};
+    use std::net::TcpListener;
+    use std::sync::Mutex;
+
+    /// Request line + lowercased headers of every request the fake server saw.
+    type Seen = Arc<Mutex<Vec<(String, Vec<(String, String)>)>>>;
+
+    fn fake(respond: impl Fn(&str, &[(String, String)]) -> (u16, String) + Send + 'static) -> (String, Seen) {
+        let l = TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", l.local_addr().unwrap());
+        let seen: Seen = Arc::default();
+        let log = seen.clone();
+        std::thread::spawn(move || {
+            for s in l.incoming() {
+                let Ok(mut s) = s else { continue };
+                let mut r = BufReader::new(s.try_clone().unwrap());
+                let mut line = String::new();
+                if r.read_line(&mut line).is_err() {
+                    continue;
+                }
+                let target = line.split_whitespace().nth(1).unwrap_or("").to_string();
+                let mut headers = vec![];
+                let mut len = 0usize;
+                loop {
+                    let mut h = String::new();
+                    if r.read_line(&mut h).is_err() || h.trim().is_empty() {
+                        break;
+                    }
+                    if let Some((k, v)) = h.trim_end().split_once(':') {
+                        let (k, v) = (k.trim().to_lowercase(), v.trim().to_string());
+                        if k == "content-length" {
+                            len = v.parse().unwrap_or(0);
+                        }
+                        headers.push((k, v));
+                    }
+                }
+                let mut body = vec![0u8; len];
+                let _ = r.read_exact(&mut body);
+                let (status, out) = respond(&target, &headers);
+                log.lock().unwrap().push((target, headers));
+                let _ = write!(s, "HTTP/1.1 {status} X\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{out}", out.len());
+            }
+        });
+        (base, seen)
+    }
+
+    fn preset(id: &str, base: &str) -> ProviderConfig {
+        let mut c = presets().into_iter().find(|p| p.id == id).unwrap_or_else(|| panic!("preset {id}"));
+        c.base_url = base.to_string();
+        c
+    }
+
+    fn header<'a>(h: &'a [(String, String)], k: &str) -> Option<&'a str> {
+        h.iter().find(|(n, _)| n == k).map(|(_, v)| v.as_str())
+    }
+
+    fn key(k: &str) -> auth::Static {
+        auth::Static::new(Some(k.to_string()))
+    }
+
+    #[test]
+    fn openai_compatible_lists_data_ids_with_a_bearer_key() {
+        let (base, seen) = fake(|path, h| match (path, header(h, "authorization")) {
+            ("/v1/models", Some("Bearer sk-good")) => (200, r#"{"object":"list","data":[{"id":"gpt-live-1"},{"id":"gpt-live-2"}]}"#.into()),
+            _ => (401, r#"{"error":{"message":"Incorrect API key provided"}}"#.into()),
+        });
+        let c = preset("openai", &format!("{base}/v1"));
+        assert_eq!(list_models_live(&c, &key("sk-good")).unwrap(), ["gpt-live-1", "gpt-live-2"]);
+        let e = list_models_live(&c, &key("sk-bad")).unwrap_err();
+        assert!(e.contains("401"), "a bad key is an error in strict mode: {e}");
+        assert_eq!(seen.lock().unwrap()[0].0, "/v1/models");
+        // The lenient listing keeps its old contract: configured ids stand in for an error.
+        let mut with_ids = c.clone();
+        with_ids.models = vec!["configured".into()];
+        assert_eq!(list_models_with(&with_ids, &key("sk-bad")).unwrap(), ["configured"]);
+        assert!(list_models_live(&with_ids, &key("sk-bad")).is_err());
+    }
+
+    #[test]
+    fn anthropic_uses_x_api_key_version_header_and_a_full_page() {
+        let (base, seen) = fake(|path, h| match header(h, "x-api-key") {
+            Some("sk-ant-api03-good") if path.starts_with("/v1/models") => (200, r#"{"data":[{"type":"model","id":"claude-live-9","display_name":"Claude Live"}],"has_more":false}"#.into()),
+            _ => (401, r#"{"type":"error","error":{"type":"authentication_error","message":"invalid x-api-key"}}"#.into()),
+        });
+        let c = preset("anthropic", &format!("{base}/v1"));
+        assert_eq!(list_models_live(&c, &key("sk-ant-api03-good")).unwrap(), ["claude-live-9"]);
+        let (path, headers) = seen.lock().unwrap()[0].clone();
+        assert_eq!(path, "/v1/models?limit=1000", "Anthropic pages at 20 by default");
+        assert_eq!(header(&headers, "anthropic-version"), Some("2023-06-01"));
+        assert!(header(&headers, "authorization").is_none());
+        assert!(list_models_live(&c, &key("nope")).unwrap_err().contains("401"));
+    }
+
+    #[test]
+    fn gemini_lists_generate_content_models_with_x_goog_api_key() {
+        let (base, seen) = fake(|_, h| match header(h, "x-goog-api-key") {
+            Some("AIza-good") => (200, r#"{"models":[{"name":"models/gemini-live-pro","supportedGenerationMethods":["generateContent","countTokens"]},{"name":"models/text-embedding-9","supportedGenerationMethods":["embedContent"]}]}"#.into()),
+            _ => (400, r#"{"error":{"code":400,"message":"API key not valid","status":"INVALID_ARGUMENT"}}"#.into()),
+        });
+        let c = preset("gemini", &format!("{base}/v1beta"));
+        assert_eq!(list_models_live(&c, &key("AIza-good")).unwrap(), ["gemini-live-pro"], "embedding-only models are not chat models");
+        assert_eq!(seen.lock().unwrap()[0].0, "/v1beta/models?pageSize=1000");
+        assert!(list_models_live(&c, &key("bad")).is_err());
+    }
+
+    #[test]
+    fn ollama_falls_back_to_api_tags_and_needs_no_key() {
+        let (base, seen) = fake(|path, _| match path {
+            "/api/tags" => (200, r#"{"models":[{"name":"llama3.3:70b","size":1},{"name":"qwen3:8b","size":2}]}"#.into()),
+            _ => (404, "404 page not found".into()),
+        });
+        let c = preset("ollama", &format!("{base}/v1"));
+        let cred = auth::source_for(&c, None).unwrap();
+        assert_eq!(list_models_live(&c, &*cred).unwrap(), ["llama3.3:70b", "qwen3:8b"]);
+        let paths: Vec<String> = seen.lock().unwrap().iter().map(|(p, _)| p.clone()).collect();
+        assert_eq!(paths, ["/v1/models", "/api/tags"]);
+    }
+
+    #[test]
+    fn openrouter_sends_its_attribution_headers() {
+        let (base, seen) = fake(|_, _| (200, r#"{"data":[{"id":"openai/gpt-live","context_length":400000},{"id":"anthropic/claude-live"}]}"#.into()));
+        let c = preset("openrouter", &format!("{base}/api/v1"));
+        assert_eq!(list_models_live(&c, &key("sk-or-x")).unwrap(), ["openai/gpt-live", "anthropic/claude-live"]);
+        let (path, h) = seen.lock().unwrap()[0].clone();
+        assert_eq!(path, "/api/v1/models");
+        assert_eq!(header(&h, "x-title"), Some("seagent"));
+        assert_eq!(header(&h, "authorization"), Some("Bearer sk-or-x"));
     }
 }

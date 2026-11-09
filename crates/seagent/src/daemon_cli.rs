@@ -182,6 +182,8 @@ pub(crate) fn run(a: &Args, embedded: Option<&Embedded>) -> R {
     d.add_methods(ops::ui_methods::methods(&paths, c.k.clone(), ext_arc.as_deref()));
     d.add_methods(ops::webui::methods(&paths, c.k.clone(), ext_arc.as_deref()));
     d.add_methods(ops::dock::methods(c.k.clone()));
+    d.add_methods(ops::chat_ux::methods(c.k.clone()));
+    d.add_methods(ops::model_keys::methods(&paths, c.k.clone()));
     // First-run web wizard over ARP (admin credential); the page itself uses /setup/rpc.
     d.add_methods(setup_web::methods(&paths));
     // ent-098: readiness for `seagent health --ready` (the same checks as GET /ready).
@@ -204,7 +206,7 @@ pub(crate) fn run(a: &Args, embedded: Option<&Embedded>) -> R {
             return Err("[app] token references a secret that is not set (seagent secrets set APP_TOKEN …)".into());
         }
         let mut host: Vec<String> = seagent_app::node::METHODS.iter().map(|s| s.to_string()).collect();
-        host.extend(HOST_METHODS.iter().chain(ops::ui_methods::METHODS).chain(ops::webui::METHODS).chain(ops::dock::METHODS).map(|s| s.to_string()));
+        host.extend(HOST_METHODS.iter().chain(ops::ui_methods::METHODS).chain(ops::webui::METHODS).chain(ops::dock::METHODS).chain(ops::chat_ux::METHODS).chain(ops::model_keys::METHODS).map(|s| s.to_string()));
         host.extend(seagent_app::surfaces::METHODS.iter().map(|s| s.to_string()));
         host.extend(seagent_kernel::cluster::METHODS.iter().chain(seagent_app::devices::METHODS).chain(ops::lan::METHODS).map(|s| s.to_string()));
         // MCP event deliveries arrive as signed webhooks and are queued into the subscribing session.

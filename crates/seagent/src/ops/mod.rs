@@ -67,6 +67,8 @@ pub mod hatchgen;
 pub mod partial;
 pub mod recap;
 pub mod webui;
+pub mod chat_ux;
+pub mod model_keys;
 pub mod toolcfg;
 pub mod docker;
 
