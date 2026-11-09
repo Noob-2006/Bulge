@@ -236,6 +236,143 @@ unsafe fn grab(dc: HDC) -> Result<Shot, String> {
     Ok(Shot { width: w, height: h, bgra })
 }
 
+/// A capture worker for a live stream: one thread bound to the desktop for the stream's
+/// lifetime, holding its desktop handle and display DC, so a frame costs the grab itself (no
+/// thread, desktop open and DC per frame). Frames come at most `max_w` wide: an inactive
+/// desktop is composed straight at that size (each window `StretchBlt`ed, HALFTONE), so less
+/// is copied, hashed and encoded. Dropping it ends the worker.
+/// One frame request to the capture worker: (max width, where to answer).
+type CaptureRequest = (u32, std::sync::mpsc::Sender<Result<Shot, String>>);
+
+pub struct LiveCapture {
+    tx: Option<std::sync::mpsc::Sender<CaptureRequest>>,
+    worker: Option<std::thread::JoinHandle<()>>,
+}
+
+impl LiveCapture {
+    pub fn start(desktop_name: &str) -> LiveCapture {
+        let (tx, rx) = std::sync::mpsc::channel::<CaptureRequest>();
+        let name = desktop_name.to_string();
+        let worker = std::thread::Builder::new()
+            .name("seagent-bd-capture".into())
+            .spawn(move || {
+                let wname = wide(&name);
+                // SAFETY: this window-less thread binds to the desktop once, keeps one display DC
+                // for its lifetime and frees both when the stream ends.
+                unsafe {
+                    let hdesk = CreateDesktopW(wname.as_ptr(), std::ptr::null(), std::ptr::null(), 0, DESKTOP_ACCESS, std::ptr::null());
+                    let ok = hdesk != 0 && SetThreadDesktop(hdesk) != 0;
+                    let display = wide("DISPLAY");
+                    let dc: HDC = if ok { CreateDCW(display.as_ptr(), std::ptr::null(), std::ptr::null(), std::ptr::null()) } else { 0 };
+                    for (max_w, reply) in rx {
+                        let r = if dc == 0 { Err(format!("the Bot Desktop {name} is not available ({})", last_error())) } else { capture_on(hdesk, dc, max_w) };
+                        let _ = reply.send(r);
+                    }
+                    if dc != 0 {
+                        DeleteDC(dc);
+                    }
+                    if hdesk != 0 {
+                        CloseDesktop(hdesk);
+                    }
+                }
+            })
+            .ok();
+        LiveCapture { tx: worker.as_ref().map(|_| tx), worker }
+    }
+
+    /// One frame, at most `max_w` wide.
+    pub fn grab(&self, max_w: u32) -> Result<Shot, String> {
+        let tx = self.tx.as_ref().ok_or("the capture worker did not start")?;
+        let (rtx, rrx) = std::sync::mpsc::channel();
+        tx.send((max_w, rtx)).map_err(|_| "the capture worker stopped".to_string())?;
+        rrx.recv().map_err(|_| "the capture worker stopped".to_string())?
+    }
+}
+
+impl Drop for LiveCapture {
+    fn drop(&mut self) {
+        self.tx = None;
+        if let Some(w) = self.worker.take() {
+            let _ = w.join();
+        }
+    }
+}
+
+/// SAFETY: `hdesk` is an open desktop handle and `dc` a display DC, both of the calling thread.
+unsafe fn capture_on(hdesk: HDESK, dc: HDC, max_w: u32) -> Result<Shot, String> {
+    use windows_sys::Win32::Graphics::Gdi::{GetDeviceCaps, HORZRES, VERTRES};
+    let (w, h) = (GetDeviceCaps(dc, HORZRES as i32), GetDeviceCaps(dc, VERTRES as i32));
+    if w <= 0 || h <= 0 {
+        return Err("the desktop has no size yet".into());
+    }
+    // An active desktop renders to its framebuffer; an inactive one reads black or fails.
+    if let Ok(s) = grab(dc) {
+        if !is_black(&s.bgra) {
+            return Ok(s);
+        }
+    }
+    let scale = (f64::from(max_w.max(160)) / f64::from(w)).min(1.0);
+    compose_scaled(hdesk, dc, w, h, scale)
+}
+
+/// [`compose`] straight into a `scale`d bitmap (HALFTONE `StretchBlt` per window).
+/// SAFETY: as for [`compose`].
+unsafe fn compose_scaled(hdesk: HDESK, dc: HDC, w: i32, h: i32, scale: f64) -> Result<Shot, String> {
+    use windows_sys::Win32::Foundation::{HWND, RECT};
+    use windows_sys::Win32::Graphics::Gdi::{SetBrushOrgEx, SetStretchBltMode, StretchBlt, HALFTONE};
+    use windows_sys::Win32::System::StationsAndDesktops::EnumDesktopWindows;
+    use windows_sys::Win32::UI::WindowsAndMessaging::{GetWindowRect, IsIconic, IsWindowVisible};
+    unsafe extern "system" fn cb(hwnd: HWND, param: LPARAM) -> BOOL {
+        (*(param as *mut Vec<HWND>)).push(hwnd);
+        TRUE
+    }
+    let (tw, th) = (((f64::from(w) * scale).round() as i32).max(1), ((f64::from(h) * scale).round() as i32).max(1));
+    let mut wins: Vec<HWND> = Vec::new();
+    EnumDesktopWindows(hdesk, Some(cb), &mut wins as *mut _ as LPARAM);
+    let mem = CreateCompatibleDC(dc);
+    let bmp = CreateCompatibleBitmap(dc, tw, th);
+    let old = SelectObject(mem, bmp as _);
+    SetStretchBltMode(mem, HALFTONE as _);
+    SetBrushOrgEx(mem, 0, 0, std::ptr::null_mut());
+    let mut drawn = 0;
+    for &hwnd in wins.iter().rev() {
+        let mut r: RECT = std::mem::zeroed();
+        if IsWindowVisible(hwnd) == 0 || IsIconic(hwnd) != 0 || GetWindowRect(hwnd, &mut r) == 0 {
+            continue;
+        }
+        let (ww, wh) = (r.right - r.left, r.bottom - r.top);
+        if ww <= 1 || wh <= 1 || r.right <= 0 || r.bottom <= 0 || r.left >= w || r.top >= h {
+            continue;
+        }
+        let wdc = CreateCompatibleDC(dc);
+        let wbmp = CreateCompatibleBitmap(dc, ww, wh);
+        let wold = SelectObject(wdc, wbmp as _);
+        if PrintWindow(hwnd, wdc, PW_RENDERFULLCONTENT) != 0 {
+            let s = |v: i32| (f64::from(v) * scale).round() as i32;
+            if scale >= 1.0 {
+                BitBlt(mem, r.left, r.top, ww, wh, wdc, 0, 0, SRCCOPY);
+            } else {
+                StretchBlt(mem, s(r.left), s(r.top), s(ww).max(1), s(wh).max(1), wdc, 0, 0, ww, wh, SRCCOPY);
+            }
+            drawn += 1;
+        }
+        SelectObject(wdc, wold);
+        DeleteObject(wbmp as _);
+        DeleteDC(wdc);
+    }
+    let mut bi: BITMAPINFO = std::mem::zeroed();
+    bi.bmiHeader = BITMAPINFOHEADER { biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32, biWidth: tw, biHeight: -th, biPlanes: 1, biBitCount: 32, biCompression: BI_RGB, ..std::mem::zeroed() };
+    let mut bgra = vec![0u8; (tw * th * 4) as usize];
+    let rows = GetDIBits(mem, bmp, 0, th as u32, bgra.as_mut_ptr() as _, &mut bi, DIB_RGB_COLORS);
+    SelectObject(mem, old);
+    DeleteObject(bmp as _);
+    DeleteDC(mem);
+    if rows == 0 || drawn == 0 {
+        return Err(format!("no window on the desktop could be rendered ({} top-level windows)", wins.len()));
+    }
+    Ok(Shot { width: tw, height: th, bgra })
+}
+
 /// Every pixel black (sampled): an inactive desktop's framebuffer.
 fn is_black(bgra: &[u8]) -> bool {
     (0..bgra.len() / 4).step_by(97).all(|i| bgra[i * 4] == 0 && bgra[i * 4 + 1] == 0 && bgra[i * 4 + 2] == 0)

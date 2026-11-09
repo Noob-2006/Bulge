@@ -76,7 +76,8 @@ impl Pace {
     }
     /// The wait before the next capture, given how long this one took and whether it changed.
     pub fn after(&mut self, took: Duration, changed: bool) -> Duration {
-        let floor = self.min.max(took * 2);
+        // At most ~2/3 of the time capturing (capture runs beside the encoder, see desktop_loop).
+        let floor = self.min.max(took * 3 / 2);
         self.interval = if changed { floor } else { (self.interval.max(floor) * 3 / 2).min(self.max.max(floor)) };
         self.interval.saturating_sub(took)
     }
@@ -382,8 +383,10 @@ fn browser(l: &mut Link) -> Flow {
 
 // ── desktop ──
 
-fn fnv(b: &[u8]) -> u64 {
-    b.iter().fold(0xcbf2_9ce4_8422_2325u64, |h, x| (h ^ u64::from(*x)).wrapping_mul(0x0100_0000_01b3))
+/// A cheap change detector for frames: every 7th 8-byte word (a whole 1080p frame in well under a
+/// millisecond; a change that misses every sampled word shows up a frame later).
+fn frame_hash(b: &[u8]) -> u64 {
+    b.as_chunks::<8>().0.iter().step_by(7).fold(0xcbf2_9ce4_8422_2325u64, |h, w| (h ^ u64::from_le_bytes(*w)).wrapping_mul(0x0100_0000_01b3)) ^ b.len() as u64
 }
 
 /// Downscale to `max_w` and encode as JPEG.
@@ -393,6 +396,37 @@ pub fn to_jpeg(img: image::DynamicImage, max_w: u32, quality: u8) -> Result<(Vec
     let mut out = Vec::with_capacity(rgb.len() / 8);
     image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out, quality).encode(rgb.as_raw(), rgb.width(), rgb.height(), image::ExtendedColorType::Rgb8).map_err(|e| e.to_string())?;
     Ok((out, rgb.width(), rgb.height()))
+}
+
+/// The per-stream capture state: on Windows a worker bound to the Bot Desktop
+/// (`LiveCapture`), started with the first frame.
+#[derive(Default)]
+struct Grabber {
+    #[cfg(windows)]
+    cap: Option<seagent_browser::control::screen_windows::LiveCapture>,
+}
+
+/// One frame of a desktop target for a viewer `max_w` wide.
+fn grab_for(app: &App, t: &crate::browser_view::Target, g: &mut Grabber, max_w: u32) -> Result<image::DynamicImage, String> {
+    #[cfg(windows)]
+    if *t == crate::browser_view::Target::Host {
+        let home = app.d.k.paths.data.clone();
+        let d = seagent_browser::control::screen::Desktop::new(&home);
+        let wd = seagent_browser::control::screen_windows::WinDesktop::new(&home, &d.profile, &d.geometry);
+        if wd.running() {
+            let cap = g.cap.get_or_insert_with(|| seagent_browser::control::screen_windows::LiveCapture::start(&wd.name()));
+            let shot = cap.grab(max_w)?;
+            let (w, h) = (shot.width.max(0) as u32, shot.height.max(0) as u32);
+            let mut rgba = shot.bgra;
+            for px in rgba.chunks_exact_mut(4) {
+                px.swap(0, 2);
+                px[3] = 255;
+            }
+            return image::RgbaImage::from_raw(w, h, rgba).map(image::DynamicImage::ImageRgba8).ok_or_else(|| "bad Bot Desktop frame".to_string());
+        }
+    }
+    let _ = (g, max_w);
+    grab(app, t)
 }
 
 /// One picture of a desktop target.
@@ -434,12 +468,48 @@ fn desktop(l: &mut Link) -> Flow {
     let max_w = num(&l.params, "maxWidth", 1920).clamp(320, 3840);
     l.text(&json!({"t": "hello", "kind": "desktop", "target": t.id(), "input": l.may_input, "fps": fps, "quality": quality, "maxWidth": max_w}))?;
     let app = l.app.clone();
-    desktop_loop(l, &t.id(), (max_w, quality, fps), &mut || grab(&app, &t))
+    let mut g = Grabber::default();
+    desktop_loop(l, &t.id(), (max_w, quality, fps), &mut || grab_for(&app, &t, &mut g, max_w))
 }
 
+/// One captured picture and how long the capture took.
+type Captured = (Result<image::DynamicImage, String>, Duration);
+
 /// The desktop stream over any frame source: changed pictures only, paced by [`Pace`]; a
-/// source without a picture sends `nodisplay` once and is retried every 2 s.
-fn desktop_loop(l: &mut Link, id: &str, (max_w, quality, fps): (u32, u8, u32), grab: &mut dyn FnMut() -> Result<image::DynamicImage, String>) -> Flow {
+/// source without a picture sends `nodisplay` once and is retried every 2 s. Capture and
+/// encoding run in parallel: a producer thread grabs frame N+1 while this one encodes and
+/// sends frame N (a one-slot channel, so a slow viewer still slows the capture down).
+fn desktop_loop(l: &mut Link, id: &str, (max_w, quality, fps): (u32, u8, u32), grab: &mut (dyn FnMut() -> Result<image::DynamicImage, String> + Send)) -> Flow {
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+    let stop = AtomicBool::new(false);
+    // How long the producer rests after a capture (set by the pacing below).
+    let rest_ms = AtomicU64::new(0);
+    std::thread::scope(|sc| {
+        let (tx, rx) = std::sync::mpsc::sync_channel::<Captured>(1);
+        let (stop_p, rest_p) = (&stop, &rest_ms);
+        sc.spawn(move || {
+            while !stop_p.load(Ordering::SeqCst) {
+                let t0 = Instant::now();
+                let r = grab();
+                if tx.send((r, t0.elapsed())).is_err() {
+                    break;
+                }
+                let until = Instant::now() + Duration::from_millis(rest_p.load(Ordering::SeqCst));
+                while Instant::now() < until && !stop_p.load(Ordering::SeqCst) {
+                    std::thread::sleep(until.saturating_duration_since(Instant::now()).min(Duration::from_millis(10)));
+                }
+            }
+        });
+        let r = desktop_consume(l, id, (max_w, quality, fps), &rx, &rest_ms);
+        stop.store(true, Ordering::SeqCst);
+        drop(rx);
+        r
+    })
+}
+
+/// The encoding / sending half of [`desktop_loop`].
+fn desktop_consume(l: &mut Link, id: &str, (max_w, quality, fps): (u32, u8, u32), rx: &std::sync::mpsc::Receiver<Captured>, rest_ms: &std::sync::atomic::AtomicU64) -> Flow {
+    use std::sync::atomic::Ordering;
     let mut pace = Pace::new(fps);
     let mut adapt = Adapt::new(quality, fps);
     let mut last = 0u64;
@@ -452,23 +522,27 @@ fn desktop_loop(l: &mut Link, id: &str, (max_w, quality, fps): (u32, u8, u32), g
             adapt.choose(q, f);
             pace.set_fps(f);
         }
-        let t0 = Instant::now();
-        let wait = match grab() {
+        let (r, took) = match rx.recv_timeout(Duration::from_millis(25)) {
+            Ok(x) => x,
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return Err(Some("the desktop capture stopped".into())),
+        };
+        let rest = match r {
             Ok(img) => {
                 dark = false;
-                let h = fnv(img.as_bytes());
+                let h = frame_hash(img.as_bytes());
                 if h == last {
-                    pace.after(t0.elapsed(), false)
+                    pace.after(took, false)
                 } else {
                     last = h;
+                    let t0 = Instant::now();
                     let (w0, h0) = (img.width(), img.height());
                     let (jpeg, w, hh) = to_jpeg(img, max_w, adapt.quality).map_err(Some)?;
                     seq += 1;
-                    let meta = json!({"t": "frame", "seq": seq, "mime": "image/jpeg", "bytes": jpeg.len(), "width": w0, "height": h0, "frameWidth": w, "frameHeight": hh, "quality": adapt.quality, "sentMs": now_ms()});
-                    let took = t0.elapsed();
+                    let meta = json!({"t": "frame", "seq": seq, "mime": "image/jpeg", "bytes": jpeg.len(), "width": w0, "height": h0, "frameWidth": w, "frameHeight": hh, "quality": adapt.quality, "captureMs": took.as_millis() as u64, "encodeMs": t0.elapsed().as_millis() as u64, "sentMs": now_ms()});
                     let s0 = Instant::now();
                     l.frame(&meta, &jpeg)?;
-                    st.sent(jpeg.len(), Some(took.as_millis() as u64));
+                    st.sent(jpeg.len(), Some((took + t0.elapsed()).as_millis() as u64));
                     if adapt.sent(s0.elapsed(), Instant::now()) {
                         pace.set_fps(adapt.fps);
                     }
@@ -485,14 +559,10 @@ fn desktop_loop(l: &mut Link, id: &str, (max_w, quality, fps): (u32, u8, u32), g
                 Duration::from_secs(2)
             }
         };
+        rest_ms.store(rest.as_millis() as u64, Ordering::SeqCst);
         if let Some(mut r) = st.report() {
             r["adapt"] = adapt.json();
             l.text(&r)?;
-        }
-        let until = Instant::now() + wait;
-        while Instant::now() < until {
-            l.poll()?;
-            std::thread::sleep(until.saturating_duration_since(Instant::now()).min(Duration::from_millis(25)));
         }
     }
 }
@@ -663,7 +733,7 @@ mod tests {
     }
 
     #[test]
-    fn pace_caps_fps_backs_off_when_still_and_leaves_half_the_time_idle() {
+    fn pace_caps_fps_backs_off_when_still_and_bounds_the_capture_duty() {
         let mut p = Pace::new(5);
         assert_eq!(p.min, Duration::from_millis(200));
         assert_eq!(p.after(Duration::from_millis(50), true), Duration::from_millis(150), "fps cap: 200 ms per frame");
@@ -671,8 +741,8 @@ mod tests {
         let waits: Vec<u128> = (0..6).map(|_| p.after(Duration::ZERO, false).as_millis()).collect();
         assert_eq!(waits, [300, 450, 675, 1000, 1000, 1000]);
         assert_eq!(p.after(Duration::ZERO, true), Duration::from_millis(200), "a change resets the rate");
-        // A capture that takes 400 ms: at most every 800 ms (≤ 50 % of the time capturing).
-        assert_eq!(p.after(Duration::from_millis(400), true), Duration::from_millis(400));
+        // A capture that takes 400 ms: at most every 600 ms (≤ 2/3 of the time capturing).
+        assert_eq!(p.after(Duration::from_millis(400), true), Duration::from_millis(200));
         assert_eq!(Pace::new(1000).min, Duration::from_millis(16), "capped at 60 fps");
         assert_eq!(Pace::new(30).min, Duration::from_millis(33));
     }
