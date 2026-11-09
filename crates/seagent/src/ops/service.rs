@@ -518,7 +518,7 @@ fn daemon_service(raw: &[String]) -> R {
     }
     let parsed = Args::parse(&run).map_err(crate::Fail::Usage)?;
     let _ = ARGS.set(parsed);
-    let daemon = || match ARGS.get().map(crate::cmd_daemon) {
+    let daemon = || match ARGS.get().map(crate::daemon_cli::cmd_daemon) {
         Some(Ok(code)) => code,
         Some(Err(crate::Fail::Msg(m) | crate::Fail::Usage(m))) => {
             eprintln!("seagentd: {m}");

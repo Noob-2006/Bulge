@@ -579,6 +579,11 @@ pub fn restart_requested() -> bool {
     RESTART.load(Ordering::SeqCst)
 }
 
+/// The in-process agent (`crate::embed`) restarts its own daemon loop: read and clear the flag.
+pub fn take_restart() -> bool {
+    RESTART.swap(false, Ordering::SeqCst)
+}
+
 /// Called by `seagent daemon run` after a requested stop. Under systemd (user or system unit,
 /// `Restart=on-failure`) the exit status 75 brings the daemon back; without a service manager
 /// a detached helper waits for this process to exit and runs `seagent daemon start` with the same

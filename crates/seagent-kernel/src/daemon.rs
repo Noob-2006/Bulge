@@ -19,6 +19,13 @@ use std::time::{Duration, Instant};
 
 pub const PROTOCOL_VERSION: u32 = 1;
 
+/// Does [`Daemon::run_with`] serve the control socket? `Off` = embedded in an app (iOS).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Ipc {
+    On,
+    Off,
+}
+
 static STOP: AtomicBool = AtomicBool::new(false);
 #[cfg(unix)]
 extern "C" fn on_signal(_: libc::c_int) {
@@ -159,25 +166,41 @@ impl Daemon {
         "gate.pending", "gate.answer", "gate.policy.show", "session.review.set", "session.review.list", "session.review.get", "session.command", "goal.start", "goal.list", "schedule.list", "models.list", "tools.list", "tools.call", "shutdown", "session.attach", "events.subscribe",
     ];
 
+    /// Serve until [`Daemon::stop`] / `shutdown`: the control socket plus the scheduler,
+    /// cluster and leader services (`seagent daemon run`).
     pub fn run(self: Arc<Self>) -> Result<(), String> {
+        self.run_with(Ipc::On)
+    }
+
+    /// [`Daemon::run`] with the control socket chosen. `Ipc::Off` is the in-process agent of the
+    /// iOS app (`seagent::embed`): no socket, pid file, signal handlers or socket watchdog —
+    /// the host app owns the process and reaches the daemon through the App Server.
+    pub fn run_with(self: Arc<Self>, ipc: Ipc) -> Result<(), String> {
         let rt = &self.k.paths.runtime;
         std::fs::create_dir_all(rt).map_err(|e| format!("{}: {e}", rt.display()))?;
         // 0700 on Unix; an owner-only DACL on Windows.
         seagent_core::platform::fs_private::set_private(rt).map_err(|e| e.to_string())?;
         let sock = self.k.paths.socket();
-        // Unix: a live socket is refused, a stale one removed, the new one chmod 0600.
-        // Windows: the owner-only named pipe derived from the same path.
-        let listener = match IpcListener::bind(&sock) {
-            Ok(l) => l,
-            Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => return Err(format!("seagentd is already running ({})", seagent_core::platform::ipc::endpoint_display(&sock))),
-            Err(e) => return Err(format!("bind {}: {e}", seagent_core::platform::ipc::endpoint_display(&sock))),
-        };
-        listener.set_nonblocking(true).map_err(|e| e.to_string())?;
         let pid_path = rt.join("seagentd.pid");
-        let _ = std::fs::write(&pid_path, std::process::id().to_string());
-        install_stop_handlers();
+        let listener = if ipc == Ipc::On {
+            // Unix: a live socket is refused, a stale one removed, the new one chmod 0600.
+            // Windows: the owner-only named pipe derived from the same path.
+            let listener = match IpcListener::bind(&sock) {
+                Ok(l) => l,
+                Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => return Err(format!("seagentd is already running ({})", seagent_core::platform::ipc::endpoint_display(&sock))),
+                Err(e) => return Err(format!("bind {}: {e}", seagent_core::platform::ipc::endpoint_display(&sock))),
+            };
+            listener.set_nonblocking(true).map_err(|e| e.to_string())?;
+            let _ = std::fs::write(&pid_path, std::process::id().to_string());
+            install_stop_handlers();
+            Some(listener)
+        } else {
+            None
+        };
         STOP.store(false, Ordering::SeqCst);
-        spawn_watchdog(sock.clone(), self.k.paths.data.clone(), watch_pid_from_env());
+        if listener.is_some() {
+            spawn_watchdog(sock.clone(), self.k.paths.data.clone(), watch_pid_from_env());
+        }
 
         // ent-095: with `[ha]` the leader-only work starts when the lease is won (cluster
         // thread below); without it this daemon leads from the start.
@@ -199,6 +222,10 @@ impl Daemon {
         sd_notify("READY=1\nSTATUS=seagentd listening");
 
         while !STOP.load(Ordering::SeqCst) {
+            let Some(listener) = &listener else {
+                std::thread::sleep(Duration::from_millis(50));
+                continue;
+            };
             match listener.accept() {
                 Ok(conn) => {
                     let me = self.clone();
@@ -231,13 +258,21 @@ impl Daemon {
                 eprintln!("seagentd: released the HA lease");
             }
         }
-        let _ = std::fs::remove_file(&sock);
-        let _ = std::fs::remove_file(&pid_path);
+        if listener.is_some() {
+            let _ = std::fs::remove_file(&sock);
+            let _ = std::fs::remove_file(&pid_path);
+        }
         Ok(())
     }
 
     pub fn stop() {
         STOP.store(true, Ordering::SeqCst);
+    }
+
+    /// Scheduled jobs and goals running right now (claimed by the scheduler, not finished).
+    /// The iOS background task waits for this and [`Kernel::running_ids`] to drain.
+    pub fn busy(&self) -> usize {
+        self.busy_jobs.lock().unwrap().len() + self.busy_goals.lock().unwrap().len()
     }
 
     /// Start acting as leader: worker pool, leader-only services, the reaper, then resume
