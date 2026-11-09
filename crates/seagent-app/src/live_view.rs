@@ -1115,6 +1115,25 @@ mod tests {
         }
         let _child = Kill(pid);
         std::thread::sleep(Duration::from_secs(4));
+        // Where the time goes: one grab (capture + compose), then JPEG encoding at two widths.
+        let t = crate::browser_view::Target::Host;
+        let (mut g_ms, mut e_full, mut e_1280) = (vec![], vec![], vec![]);
+        for _ in 0..8 {
+            let t0 = Instant::now();
+            let img = grab(&a, &t).unwrap();
+            g_ms.push(t0.elapsed().as_millis());
+            let t1 = Instant::now();
+            let _ = to_jpeg(img.clone(), 3840, 85).unwrap();
+            e_full.push(t1.elapsed().as_millis());
+            let t2 = Instant::now();
+            let _ = to_jpeg(img, 1280, 85).unwrap();
+            e_1280.push(t2.elapsed().as_millis());
+        }
+        let med = |v: &mut Vec<u128>| {
+            v.sort_unstable();
+            v[v.len() / 2]
+        };
+        eprintln!("LIVE Bot Desktop stages (median of 8): grab {} ms, JPEG full size {} ms, JPEG at 1280 wide {} ms", med(&mut g_ms), med(&mut e_full), med(&mut e_1280));
         let srv = crate::server::start(a.clone()).unwrap();
         let mut ws = connect(srv.local_addr(), "kind=desktop&target=host&fps=30&quality=85&maxWidth=3840", "live-admin-token");
         let h = next_text(&mut ws);
