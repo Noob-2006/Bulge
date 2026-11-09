@@ -699,7 +699,9 @@ mod tests {
             eprintln!("skipping: set SEAGENT_REAL_TESTS=1 to run real-browser cases");
             return;
         }
-        let out = std::env::var_os("SEAGENT_LIVE_OUT").map(std::path::PathBuf::from).unwrap_or_else(|| std::env::temp_dir().join("seagent-live-frames"));
+        // Frames are kept only where SEAGENT_LIVE_OUT points; otherwise a self-cleaning dir.
+        let scratch = seagent_core::tmp::TempDir::new("seagent-live-frames");
+        let out = std::env::var_os("SEAGENT_LIVE_OUT").map(std::path::PathBuf::from).unwrap_or_else(|| scratch.path().to_path_buf());
         std::fs::create_dir_all(&out).unwrap();
         let home = seagent_core::tmp::scratch_path(format!("seagent-live-real-{}", std::process::id()));
         let a = app(&home);

@@ -175,6 +175,8 @@ pub struct Viewer {
     cast: Arc<Cast>,
     seen: u64,
     pub target: String,
+    /// (url, title, when read): refreshed from the browser at most once a second.
+    info: Option<(String, String, Instant)>,
 }
 
 /// Start (or join) the live stream of `target`.
@@ -198,7 +200,7 @@ pub fn watch(b: &Arc<Browser>, target: &str, opts: Opts) -> Result<Viewer, Strin
         cast.state.lock().unwrap().viewers += 1;
         (cast, fresh, recording)
     };
-    let v = Viewer { b: b.clone(), cast, seen: 0, target: target.to_string() };
+    let v = Viewer { b: b.clone(), cast, seen: 0, target: target.to_string(), info: None };
     if fresh && !recording {
         let o = v.cast.opts;
         let p = json!({"format": "jpeg", "quality": o.quality, "maxWidth": o.max_width, "maxHeight": o.max_height, "everyNthFrame": 1});
@@ -247,10 +249,22 @@ impl Viewer {
         self.b.conn.is_closed() || self.b.state.lock().unwrap().pages.get(&self.target).is_some_and(|p| p.closed)
     }
 
-    /// The tab's URL and title (redacted like everything the view shows).
-    pub fn page_info(&self) -> (String, String) {
-        let s = self.b.state.lock().unwrap();
-        s.pages.get(&self.target).map(|p| (crate::policy::redact(&p.url), crate::policy::redact(&p.title))).unwrap_or_default()
+    /// The tab's URL and title (redacted like everything the view shows), asked of the
+    /// browser at most once a second (the page state does not follow every title change).
+    pub fn page_info(&mut self) -> (String, String) {
+        if let Some((u, t, at)) = &self.info {
+            if at.elapsed() < Duration::from_secs(1) {
+                return (u.clone(), t.clone());
+            }
+        }
+        let i = self.b.conn.call_with("Target.getTargetInfo", json!({"targetId": self.target}), None, Duration::from_secs(2), &|| None).unwrap_or_default();
+        let (u, t) = match i["targetInfo"].as_object() {
+            Some(i) => (i.get("url").and_then(Value::as_str).unwrap_or("").to_string(), i.get("title").and_then(Value::as_str).unwrap_or("").to_string()),
+            None => self.b.state.lock().unwrap().pages.get(&self.target).map(|p| (p.url.clone(), p.title.clone())).unwrap_or_default(),
+        };
+        let (u, t) = (crate::policy::redact(&u), crate::policy::redact(&t));
+        self.info = Some((u.clone(), t.clone(), Instant::now()));
+        (u, t)
     }
 
     /// (frames received, acks sent) of the shared cast.
