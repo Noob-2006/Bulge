@@ -16,12 +16,28 @@ use std::sync::mpsc::{sync_channel, Receiver, RecvTimeoutError};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
+/// Raw pixels as a source has them: RGBA (RFB, image grabs) or BGRA (Windows GDI). The
+/// encoder threads convert them, so the capture thread does no per-pixel work.
+pub struct Frame {
+    pub w: u32,
+    pub h: u32,
+    pub data: Vec<u8>,
+    pub bgra: bool,
+}
+
+impl From<RgbaImage> for Frame {
+    fn from(i: RgbaImage) -> Frame {
+        let (w, h) = i.dimensions();
+        Frame { w, h, data: i.into_raw(), bgra: false }
+    }
+}
+
 /// What changed on the screen since the last call.
 pub enum Update {
     /// A whole new picture (first call, a resize, a new window layout).
-    Full(RgbaImage),
+    Full(Frame),
     /// These rectangles (x, y, pixels) of the screen changed.
-    Rects(Vec<(u32, u32, RgbaImage)>),
+    Rects(Vec<(u32, u32, Frame)>),
     Same,
 }
 
@@ -94,16 +110,16 @@ impl<F: FnMut() -> Result<image::DynamicImage, String> + Send> RegionSource for 
     fn next(&mut self) -> Result<Update, String> {
         let cur = (self.grab)()?.to_rgba8();
         let up = match &self.last {
-            None => Update::Full(cur.clone()),
+            None => Update::Full(cur.clone().into()),
             Some(prev) => {
                 let rects = diff_rects(prev, &cur);
                 let area: u64 = rects.iter().map(|r| u64::from(r.2) * u64::from(r.3)).sum();
                 if rects.is_empty() {
                     Update::Same
                 } else if area * 10 > u64::from(cur.width()) * u64::from(cur.height()) * 7 || prev.dimensions() != cur.dimensions() {
-                    Update::Full(cur.clone())
+                    Update::Full(cur.clone().into())
                 } else {
-                    Update::Rects(rects.into_iter().map(|(x, y, w, h)| (x, y, image::imageops::crop_imm(&cur, x, y, w, h).to_image())).collect())
+                    Update::Rects(rects.into_iter().map(|(x, y, w, h)| (x, y, image::imageops::crop_imm(&cur, x, y, w, h).to_image().into())).collect())
                 }
             }
         };
@@ -115,10 +131,18 @@ impl<F: FnMut() -> Result<image::DynamicImage, String> + Send> RegionSource for 
 /// One encoded update, ready to send: (header, JPEG) pairs.
 type Encoded = Vec<(Value, Vec<u8>)>;
 
-fn jpeg(img: &RgbaImage, quality: u8) -> Result<Vec<u8>, String> {
-    let rgb = image::DynamicImage::ImageRgba8(img.clone()).to_rgb8();
+/// JPEG of a frame: straight from its RGBA / BGRA bytes to RGB in one pass, then encoded.
+fn jpeg(f: &Frame, quality: u8) -> Result<Vec<u8>, String> {
+    let mut rgb = Vec::with_capacity(f.data.len() / 4 * 3);
+    for p in f.data.as_chunks::<4>().0 {
+        if f.bgra {
+            rgb.extend_from_slice(&[p[2], p[1], p[0]]);
+        } else {
+            rgb.extend_from_slice(&p[..3]);
+        }
+    }
     let mut out = Vec::with_capacity(rgb.len() / 8);
-    image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out, quality).encode(rgb.as_raw(), rgb.width(), rgb.height(), image::ExtendedColorType::Rgb8).map_err(|e| e.to_string())?;
+    image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out, quality).encode(&rgb, f.w, f.h, image::ExtendedColorType::Rgb8).map_err(|e| e.to_string())?;
     Ok(out)
 }
 
@@ -127,14 +151,14 @@ fn encode(upd: u64, up: Update, captured_ms: u64, quality: u8) -> Result<Encoded
     match up {
         Update::Full(img) => {
             let j = jpeg(&img, quality)?;
-            let (w, h) = img.dimensions();
+            let (w, h) = (img.w, img.h);
             Ok(vec![(json!({"t": "frame", "mode": "patch", "upd": upd, "mime": "image/jpeg", "bytes": j.len(), "width": w, "height": h, "frameWidth": w, "frameHeight": h, "quality": quality, "capturedMs": captured_ms}), j)])
         }
         Update::Rects(rs) => rs
             .into_iter()
             .map(|(x, y, img)| {
                 let j = jpeg(&img, quality)?;
-                Ok((json!({"t": "patch", "upd": upd, "mime": "image/jpeg", "bytes": j.len(), "x": x, "y": y, "w": img.width(), "h": img.height(), "capturedMs": captured_ms}), j))
+                Ok((json!({"t": "patch", "upd": upd, "mime": "image/jpeg", "bytes": j.len(), "x": x, "y": y, "w": img.w, "h": img.h, "capturedMs": captured_ms}), j))
             })
             .collect(),
         Update::Same => Ok(vec![]),
@@ -293,7 +317,7 @@ mod tests {
         assert!(matches!(s.next().unwrap(), Update::Full(_)), "first: the whole picture");
         assert!(matches!(s.next().unwrap(), Update::Same));
         match s.next().unwrap() {
-            Update::Rects(r) => assert_eq!(r.iter().map(|(x, y, i)| (*x, *y, i.width(), i.height())).collect::<Vec<_>>(), [(0, 0, 64, 64)]),
+            Update::Rects(r) => assert_eq!(r.iter().map(|(x, y, i)| (*x, *y, i.w, i.h)).collect::<Vec<_>>(), [(0, 0, 64, 64)]),
             _ => panic!("a small change is a patch"),
         }
         assert!(matches!(s.next().unwrap(), Update::Full(_)), "most of the screen changed: a full picture");
@@ -308,7 +332,7 @@ mod tests {
         impl RegionSource for Busy {
             fn next(&mut self) -> Result<Update, String> {
                 self.0 = self.0.wrapping_add(1);
-                Ok(if self.0 == 1 { Update::Full(img(320, 200, 0)) } else { Update::Rects(vec![(0, 0, img(64, 64, self.0))]) })
+                Ok(if self.0 == 1 { Update::Full(img(320, 200, 0).into()) } else { Update::Rects(vec![(0, 0, img(64, 64, self.0).into())]) })
             }
         }
         struct Count(u32, Instant, Duration);
@@ -346,8 +370,8 @@ mod tests {
             fn next(&mut self) -> Result<Update, String> {
                 self.0 += 1;
                 Ok(match self.0 {
-                    1 => Update::Full(img(800, 600, 50)),
-                    2..=40 if self.0.is_multiple_of(2) => Update::Rects(vec![(64, 64, img(300, 200, self.0 as u8)), (500, 400, img(64, 64, 7))]),
+                    1 => Update::Full(img(800, 600, 50).into()),
+                    2..=40 if self.0.is_multiple_of(2) => Update::Rects(vec![(64, 64, img(300, 200, self.0 as u8).into()), (500, 400, img(64, 64, 7).into())]),
                     _ => Update::Same,
                 })
             }

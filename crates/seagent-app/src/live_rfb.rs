@@ -160,7 +160,7 @@ impl<S: Read + Write + Send> RegionSource for Rfb<S> {
                 let (mut rects, resized) = self.update()?;
                 if self.first || resized {
                     self.first = false;
-                    return Ok(Update::Full(self.fb.clone()));
+                    return Ok(Update::Full(self.fb.clone().into()));
                 }
                 if rects.is_empty() {
                     return Ok(Update::Same);
@@ -170,7 +170,7 @@ impl<S: Read + Write + Send> RegionSource for Rfb<S> {
                     let (x1, y1) = (rects.iter().map(|r| r.0 + r.2).max().unwrap_or(0), rects.iter().map(|r| r.1 + r.3).max().unwrap_or(0));
                     rects = vec![(x0, y0, x1 - x0, y1 - y0)];
                 }
-                Ok(Update::Rects(rects.into_iter().filter(|r| r.2 > 0 && r.3 > 0).map(|(x, y, w, h)| (x, y, image::imageops::crop_imm(&self.fb, x, y, w, h).to_image())).collect()))
+                Ok(Update::Rects(rects.into_iter().filter(|r| r.2 > 0 && r.3 > 0).map(|(x, y, w, h)| (x, y, image::imageops::crop_imm(&self.fb, x, y, w, h).to_image().into())).collect()))
             }
             1 => {
                 let h = rd(&mut self.s, 5)?;
@@ -339,7 +339,7 @@ mod tests {
             }
         };
         let Update::Full(img) = first else { panic!("first: the whole screen") };
-        assert_eq!((img.dimensions(), img.get_pixel(5, 5).0), ((64, 48), [10, 20, 30, 255]));
+        assert_eq!((img.w, img.h, &img.data[(5 * 64 + 5) * 4..(5 * 64 + 5) * 4 + 4]), (64, 48, &[10u8, 20, 30, 255][..]));
         let Update::Rects(rs) = (loop {
             match r.next().unwrap() {
                 Update::Same => continue,
@@ -348,15 +348,15 @@ mod tests {
         }) else {
             panic!("a rectangle")
         };
-        assert_eq!(rs.iter().map(|(x, y, i)| (*x, *y, i.dimensions())).collect::<Vec<_>>(), [(8, 8, (16, 16))]);
-        assert_eq!(rs[0].2.get_pixel(0, 0).0, [200, 0, 0, 255]);
+        assert_eq!(rs.iter().map(|(x, y, i)| (*x, *y, (i.w, i.h))).collect::<Vec<_>>(), [(8, 8, (16, 16))]);
+        assert_eq!(&rs[0].2.data[..4], &[200, 0, 0, 255]);
         let moved = loop {
             match r.next().unwrap() {
                 Update::Rects(rs) => break rs,
                 _ => continue,
             }
         };
-        assert_eq!((moved[0].0, moved[0].1, moved[0].2.get_pixel(3, 3).0), (32, 24, [200, 0, 0, 255]), "CopyRect copies the framebuffer");
+        assert_eq!((moved[0].0, moved[0].1, &moved[0].2.data[(3 * 16 + 3) * 4..(3 * 16 + 3) * 4 + 4]), (32, 24, &[200u8, 0, 0, 255][..]), "CopyRect copies the framebuffer");
         assert!(matches!(r.next().unwrap(), Update::Same), "a still screen: nothing");
         server.join().unwrap();
     }

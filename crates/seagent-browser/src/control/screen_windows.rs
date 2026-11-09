@@ -393,10 +393,49 @@ impl Drop for Dib {
     }
 }
 
+/// A device-dependent bitmap in its own memory DC: what `PrintWindow` renders into (fast;
+/// rendering straight into a DIB section forces a slow GPU readback inside the render).
+struct Ddb {
+    dc: HDC,
+    bmp: isize,
+    old: isize,
+}
+
+// SAFETY: as for Dib (one thread at a time).
+unsafe impl Send for Ddb {}
+
+impl Ddb {
+    /// SAFETY: `screen` is a live display DC.
+    unsafe fn new(screen: HDC, w: i32, h: i32) -> Option<Ddb> {
+        let dc = CreateCompatibleDC(screen);
+        let bmp = CreateCompatibleBitmap(screen, w, h);
+        if dc == 0 || bmp == 0 {
+            if dc != 0 {
+                DeleteDC(dc);
+            }
+            return None;
+        }
+        let old = SelectObject(dc, bmp as _);
+        Some(Ddb { dc, bmp: bmp as isize, old: old as isize })
+    }
+}
+
+impl Drop for Ddb {
+    fn drop(&mut self) {
+        // SAFETY: we own the DC and the bitmap.
+        unsafe {
+            SelectObject(self.dc, self.old as _);
+            DeleteObject(self.bmp as _);
+            DeleteDC(self.dc);
+        }
+    }
+}
+
 /// One top-level window of the tracked desktop.
 struct TrackedWin {
     hwnd: isize,
     rect: (i32, i32, i32, i32),
+    ddb: Ddb,
     dib: Dib,
     hash: u64,
     hot: bool,
@@ -426,14 +465,17 @@ impl Tracker {
             let mut old: Vec<TrackedWin> = std::mem::take(&mut self.wins);
             for (hwnd, r) in list {
                 let size = (r.2 - r.0, r.3 - r.1);
-                let dib = match old.iter().position(|t| t.hwnd == hwnd && (t.dib.w, t.dib.h) == size) {
-                    Some(i) => old.swap_remove(i).dib,
-                    None => match Dib::new(dc, size.0, size.1) {
-                        Some(d) => d,
-                        None => continue,
+                let (ddb, dib) = match old.iter().position(|t| t.hwnd == hwnd && (t.dib.w, t.dib.h) == size) {
+                    Some(i) => {
+                        let t = old.swap_remove(i);
+                        (t.ddb, t.dib)
+                    }
+                    None => match (Ddb::new(dc, size.0, size.1), Dib::new(dc, size.0, size.1)) {
+                        (Some(a), Some(b)) => (a, b),
+                        _ => continue,
                     },
                 };
-                self.wins.push(TrackedWin { hwnd, rect: r, dib, hash: 0, hot: true, grabbed: now });
+                self.wins.push(TrackedWin { hwnd, rect: r, ddb, dib, hash: 0, hot: true, grabbed: now });
             }
             let all: Vec<usize> = (0..self.wins.len()).collect();
             render(hdesk, &mut self.wins, &all);
@@ -516,26 +558,30 @@ unsafe fn visible_top_windows(hdesk: HDESK) -> Vec<(isize, (i32, i32, i32, i32))
 /// own thread, so different windows render in parallel).
 /// SAFETY: `hdesk` is an open desktop handle; each window's DIB is touched by one thread only.
 unsafe fn render(hdesk: HDESK, wins: &mut [TrackedWin], which: &[usize]) {
-    let jobs: Vec<(isize, HDC)> = which.iter().map(|&i| (wins[i].hwnd, wins[i].dib.dc)).collect();
-    if jobs.len() <= 1 {
-        for (hw, dc) in jobs {
-            PrintWindow(hw as _, dc, PW_RENDERFULLCONTENT);
+    // (window, render DC, readback DC, size)
+    let jobs: Vec<(isize, HDC, HDC, i32, i32)> = which.iter().map(|&i| (wins[i].hwnd, wins[i].ddb.dc, wins[i].dib.dc, wins[i].dib.w, wins[i].dib.h)).collect();
+    let one = |(hw, ddb, dib, w, h): (isize, HDC, HDC, i32, i32)| {
+        // SAFETY: the window's own render / readback DCs, used by this thread only.
+        unsafe {
+            PrintWindow(hw as _, ddb, PW_RENDERFULLCONTENT);
+            BitBlt(dib, 0, 0, w, h, ddb, 0, 0, SRCCOPY);
         }
+    };
+    if jobs.len() <= 1 {
+        jobs.into_iter().for_each(one);
         return;
     }
     let desk = hdesk;
     let threads = jobs.len().min(4);
     std::thread::scope(|sc| {
         for k in 0..threads {
-            let mine: Vec<(isize, isize)> = jobs.iter().skip(k).step_by(threads).map(|(h, d)| (*h, *d)).collect();
+            let mine: Vec<(isize, HDC, HDC, i32, i32)> = jobs.iter().skip(k).step_by(threads).copied().collect();
             sc.spawn(move || {
                 // SAFETY: a fresh window-less thread binds to the desktop, then renders its windows.
                 unsafe {
                     SetThreadDesktop(desk);
-                    for (hw, dc) in mine {
-                        PrintWindow(hw as _, dc, PW_RENDERFULLCONTENT);
-                    }
                 }
+                mine.into_iter().for_each(one);
             });
         }
     });

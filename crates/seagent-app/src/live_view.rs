@@ -494,15 +494,8 @@ impl crate::live_regions::RegionSource for WinTrack {
     fn next(&mut self) -> Result<crate::live_regions::Update, String> {
         use crate::live_regions::Update;
         use seagent_browser::control::screen_windows::{Shot, TrackUpdate};
-        let rgba = |s: Shot| -> Result<image::RgbaImage, String> {
-            let (w, h) = (s.width.max(0) as u32, s.height.max(0) as u32);
-            let mut px = s.bgra;
-            for p in px.chunks_exact_mut(4) {
-                p.swap(0, 2);
-                p[3] = 255;
-            }
-            image::RgbaImage::from_raw(w, h, px).ok_or_else(|| "bad Bot Desktop frame".to_string())
-        };
+        // BGRA as GDI gives it: the encoder threads convert (no per-pixel work here).
+        let rgba = |s: Shot| -> Result<crate::live_regions::Frame, String> { Ok(crate::live_regions::Frame { w: s.width.max(0) as u32, h: s.height.max(0) as u32, data: s.bgra, bgra: true }) };
         Ok(match self.0.track()? {
             TrackUpdate::Full(s) => Update::Full(rgba(s)?),
             TrackUpdate::Rects(rs) => Update::Rects(rs.into_iter().map(|(x, y, s)| Ok((x.max(0) as u32, y.max(0) as u32, rgba(s)?))).collect::<Result<_, String>>()?),
@@ -1299,23 +1292,32 @@ mod tests {
         let h = next_text(&mut ws);
         assert_eq!(h["t"], "hello", "{h}");
         let (cpu0, t0) = (cpu_seconds_self(), Instant::now());
-        let (mut frames, mut bytes, mut caps, mut last, mut meta, mut stats) = (0u32, 0usize, vec![], vec![], Value::Null, Value::Null);
+        let (mut upds, mut bytes, mut caps, mut meta, mut last_upd, mut comp) = (0u32, 0usize, vec![], Value::Null, 0u64, None::<image::RgbaImage>);
         while t0.elapsed() < Duration::from_secs(6) {
             match ws.recv() {
                 Ok(Some(Message::Text(x))) => {
                     let v: Value = serde_json::from_str(&x).unwrap();
                     assert_ne!(v["t"], "nodisplay", "{v}");
-                    if v["t"] == "stats" {
-                        stats = v;
-                    } else {
+                    if v["t"] == "frame" || v["t"] == "patch" {
                         meta = v;
                     }
                 }
                 Ok(Some(Message::Binary(j))) => {
-                    frames += 1;
                     bytes += j.len();
-                    caps.push(now_ms().saturating_sub(meta["sentMs"].as_u64().unwrap_or(0)));
-                    last = j;
+                    let pic = image::load_from_memory(&j).unwrap().to_rgba8();
+                    if meta["t"] == "frame" {
+                        comp = Some(pic);
+                    } else if let Some(c) = comp.as_mut() {
+                        image::imageops::replace(c, &pic, meta["x"].as_i64().unwrap_or(0), meta["y"].as_i64().unwrap_or(0));
+                    }
+                    let upd = meta["upd"].as_u64().unwrap_or(0);
+                    if upd != last_upd {
+                        upds += 1;
+                        if let Some(c) = meta["capturedMs"].as_u64() {
+                            caps.push(now_ms().saturating_sub(c));
+                        }
+                        last_upd = upd;
+                    }
                 }
                 _ => {}
             }
@@ -1324,17 +1326,17 @@ mod tests {
         let cpu = (cpu_seconds_self() - cpu0) / secs * 100.0;
         caps.sort_unstable();
         eprintln!(
-            "LIVE Bot Desktop ({}): {frames} frames / {secs:.1} s = {:.1} fps; capture+encode {} ms (server stats); send→receive p50 {} ms, p95 {} ms; {:.0} KB/s; frame {}x{} → {}x{}; server CPU {cpu:.0}%",
+            "LIVE Bot Desktop full-frame, busy browser window without CDP ({}): {upds} screen updates / {secs:.1} s = {:.1} fps; capture→receive p50 {} ms, p95 {} ms; {:.2} MB/s; server CPU {cpu:.0}%",
             std::env::consts::OS,
-            f64::from(frames) / secs,
-            stats["latencyMs"],
+            f64::from(upds) / secs,
             caps.get(caps.len() / 2).copied().unwrap_or(0),
             caps.get(caps.len() * 95 / 100).copied().unwrap_or(0),
-            bytes as f64 / 1024.0 / secs,
-            meta["width"], meta["height"], meta["frameWidth"], meta["frameHeight"]
+            bytes as f64 / 1e6 / secs,
         );
-        std::fs::write(out.join(format!("live-bot-desktop-{}.jpg", std::env::consts::OS)), &last).unwrap();
-        assert!(frames >= 10, "the desktop streamed: {frames} frames");
+        if let Some(c) = comp {
+            image::DynamicImage::ImageRgba8(c).to_rgb8().save(out.join(format!("live-bot-desktop-{}.jpg", std::env::consts::OS))).unwrap();
+        }
+        assert!(upds >= 10, "the desktop streamed: {upds} updates");
     }
 
     /// The Bot Desktop with the agent's own browser on it, streamed in patch mode (not run by
