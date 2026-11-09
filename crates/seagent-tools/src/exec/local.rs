@@ -295,6 +295,16 @@ pub(super) fn bash_command(req: &ExecRequest) -> Command {
 /// The sentence that tells the model which shell runs its commands, when it is not the
 /// plain Unix bash (Windows, Android). `None` on Linux and macOS.
 pub fn shell_note() -> Option<String> {
+    // Windows: commands run in the AppContainer sandbox when that backend is configured or
+    // `auto` picks it, and there the shell is the sandbox's own (PowerShell instead of MSYS).
+    #[cfg(windows)]
+    {
+        let g = super::global();
+        let b = g.cfg.backend.as_str();
+        if b == "appcontainer" || (b == "auto" && super::appcontainer::available()) {
+            return Some(super::appcontainer::sandbox_shell().prompt_note());
+        }
+    }
     let sh = seagent_core::platform::shell::active();
     (cfg!(windows) || sh.kind != seagent_core::platform::shell::ShellKind::Bash).then(|| sh.prompt_note())
 }

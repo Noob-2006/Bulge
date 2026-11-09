@@ -255,11 +255,20 @@ impl Tool for Shell {
                 snapshot = Some(state.clone());
             }
         }
-        script.push_str(&format!("eval {}\n__seagent_ec=$?\n", sh_quote(&sudo.command)));
-        if let Some(state) = &snapshot {
-            script.push_str(&state.lock().unwrap().epilogue(&skip));
+        if crate::exec::session::script_shell(&*backend).is_posix() {
+            script.push_str(&format!("eval {}\n__seagent_ec=$?\n", sh_quote(&sudo.command)));
+            if let Some(state) = &snapshot {
+                script.push_str(&state.lock().unwrap().epilogue(&skip));
+            }
+            script.push_str("exit $__seagent_ec\n");
+        } else {
+            // PowerShell (Windows without Git Bash, the AppContainer sandbox): the command as
+            // written, a missing command reported the way bash does (`x: command not found`,
+            // exit 127, so the failure hints apply), and the exit status carried out.
+            script.push_str("trap [System.Management.Automation.CommandNotFoundException] { [Console]::Error.WriteLine(\"$($_.TargetObject): command not found\"); exit 127 }\n");
+            script.push_str(&sudo.command);
+            script.push_str("\nif ($LASTEXITCODE) { exit $LASTEXITCODE } elseif (-not $?) { exit 1 } else { exit 0 }\n");
         }
-        script.push_str("exit $__seagent_ec\n");
 
         let req = ExecRequest {
             script,

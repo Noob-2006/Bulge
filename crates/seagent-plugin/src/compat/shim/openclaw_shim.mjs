@@ -77,7 +77,10 @@ async function loadPlugin() {
   const candidates = [...new Set([...extra, "index.mjs", "index.js", "index.cjs"])];
   for (const f of candidates) {
     const rel = f.replace(/^\.\//, "");
-    const url = "file://" + (PLUGIN_DIR.endsWith("/") ? PLUGIN_DIR : PLUGIN_DIR + "/") + rel;
+    // A real file URL: `file:///C:/x/index.js` on Windows (and spaces / `#` escaped anywhere).
+    const { pathToFileURL } = await import("node:url");
+    const { join } = await import("node:path");
+    const url = pathToFileURL(join(PLUGIN_DIR, rel)).href;
     let mod;
     try {
       mod = await import(url);

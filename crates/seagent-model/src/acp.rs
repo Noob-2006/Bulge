@@ -956,7 +956,9 @@ for line in sys.stdin:
 
     #[test]
     fn answers_file_and_permission_requests() {
-        let (mut cfg, record) = fake("fs", SERVER_REQS);
+        // A file outside the session cwd: `/etc/hostname`; Windows: an absolute `C:/Windows/…`.
+        let script = if cfg!(windows) { SERVER_REQS.replace("/etc/hostname", "C:/Windows/win.ini") } else { SERVER_REQS.to_string() };
+        let (mut cfg, record) = fake("fs", &script);
         let cwd = std::env::current_dir().unwrap();
         cfg.args.push(cwd.to_string_lossy().into_owned());
         cfg.quirks.push("read_only".into());

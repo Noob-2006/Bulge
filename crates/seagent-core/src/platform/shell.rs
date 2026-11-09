@@ -187,31 +187,33 @@ pub fn command(style: Style, script: &str) -> Command {
 /// `%LOCALAPPDATA%\seagent\shims` runs it, and [`command`] puts that directory first on PATH.
 #[cfg(windows)]
 pub fn python_shims() -> Option<&'static PathBuf> {
-    static DIR: std::sync::OnceLock<Option<PathBuf>> = std::sync::OnceLock::new();
-    DIR.get_or_init(|| {
-        if !active().kind.is_posix() {
-            return None;
-        }
-        let missing = |n: &str| super::layout::which(n).is_none_or(|p| super::layout::is_windows_apps_alias(&p));
-        let need: Vec<&str> = ["python3", "python"].into_iter().filter(|n| missing(n)).collect();
-        if need.is_empty() {
-            return None;
-        }
-        let (py, lead) = super::layout::python3()?;
-        let base = std::env::var_os("LOCALAPPDATA").map(PathBuf::from).unwrap_or_else(std::env::temp_dir);
-        let dir = base.join("seagent").join("shims");
-        std::fs::create_dir_all(&dir).ok()?;
-        let target = py.to_string_lossy().replace('\\', "/");
-        let body = format!("#!/bin/sh\nexec \"{target}\" {} \"$@\"\n", lead.join(" "));
-        for n in need {
-            let f = dir.join(n);
-            if std::fs::read_to_string(&f).ok().as_deref() != Some(body.as_str()) {
-                std::fs::write(&f, &body).ok()?;
+    static SHIMS: std::sync::OnceLock<Option<(PathBuf, Vec<&'static str>, String)>> = std::sync::OnceLock::new();
+    let (dir, need, body) = SHIMS
+        .get_or_init(|| {
+            if !active().kind.is_posix() {
+                return None;
             }
+            let missing = |n: &str| super::layout::which(n).is_none_or(|p| super::layout::is_windows_apps_alias(&p));
+            let need: Vec<&'static str> = ["python3", "python"].into_iter().filter(|n| missing(n)).collect();
+            if need.is_empty() {
+                return None;
+            }
+            let (py, lead) = super::layout::python3()?;
+            let base = std::env::var_os("LOCALAPPDATA").map(PathBuf::from).unwrap_or_else(std::env::temp_dir);
+            let target = py.to_string_lossy().replace('\\', "/");
+            Some((base.join("seagent").join("shims"), need, format!("#!/bin/sh\nexec \"{target}\" {} \"$@\"\n", lead.join(" "))))
+        })
+        .as_ref()?;
+    // (Re)written when missing or stale: a cleaned profile dir must not leave PATH pointing at
+    // nothing.
+    std::fs::create_dir_all(dir).ok()?;
+    for n in need {
+        let f = dir.join(n);
+        if std::fs::read_to_string(&f).ok().as_deref() != Some(body.as_str()) {
+            std::fs::write(&f, body).ok()?;
         }
-        Some(dir)
-    })
-    .as_ref()
+    }
+    Some(dir)
 }
 
 /// A path spelled for the shell that will read it (as a script argument or inside a script).

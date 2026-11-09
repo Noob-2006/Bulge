@@ -78,7 +78,8 @@ impl Skill {
         let dir_name = dir.file_name().map(|f| f.to_string_lossy().to_string()).unwrap_or_default();
         let name = front.get("name").and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty()).map(String::from).unwrap_or(dir_name);
         let description = front.get("description").and_then(Value::as_str).unwrap_or("").trim().chars().take(MAX_DESCRIPTION).collect();
-        let category = dir.parent().and_then(|p| p.strip_prefix(root).ok()).map(|p| p.to_string_lossy().to_string()).filter(|s| !s.is_empty());
+        // Category ids use `/` on every OS (`devops/k8s`).
+        let category = dir.parent().and_then(|p| p.strip_prefix(root).ok()).map(seagent_core::platform::layout::model_path).filter(|s| !s.is_empty());
         Ok(Skill { name, description, dir: dir.to_path_buf(), file, category, source, front })
     }
 
@@ -340,16 +341,17 @@ pub fn config_satisfied(cfg: &Config, path: &str) -> bool {
 /// `skills/` when seagent ships one (see `share_dir`).
 pub fn roots(paths: &Paths, ws: &Path, extra: &[PathBuf]) -> Vec<(PathBuf, Source)> {
     let mut v: Vec<(PathBuf, Source)> = vec![
-        (ws.join(".seagent/skills"), Source::Project),
-        (ws.join(".claude/skills"), Source::Project),
-        (ws.join(".agents/skills"), Source::Project),
+        // Joined per component: `ws\.seagent\skills` on Windows, not `ws\.seagent/skills`.
+        (ws.join(".seagent").join("skills"), Source::Project),
+        (ws.join(".claude").join("skills"), Source::Project),
+        (ws.join(".agents").join("skills"), Source::Project),
         (user_dir(paths), Source::User),
     ];
     if let Some(s) = share_dir() {
         v.push((s.join("skills"), Source::Bundled));
     }
     if let Some(h) = std::env::var_os("HOME") {
-        v.push((PathBuf::from(h).join(".claude/skills"), Source::Extra));
+        v.push((PathBuf::from(h).join(".claude").join("skills"), Source::Extra));
     }
     v.extend(extra.iter().map(|p| (p.clone(), Source::Extra)));
     v

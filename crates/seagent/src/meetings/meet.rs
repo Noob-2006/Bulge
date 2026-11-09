@@ -113,7 +113,8 @@ impl Manager {
             Ok(f) => f,
             Err(e) => return json!({"ok": false, "error": format!("cannot open {}: {e}", log_path.display())}),
         };
-        let mut cmd = std::process::Command::new(&self.bot[0]);
+        // Unix: `Command::new(bot[0])`; Windows: `sh` = Git Bash, `python3` = `py -3`, PATHEXT.
+        let mut cmd = seagent_core::platform::layout::program_command(&self.bot[0]);
         cmd.args(&self.bot[1..]).stdin(std::process::Stdio::null()).stdout(log.try_clone().map(std::process::Stdio::from).unwrap_or(std::process::Stdio::null())).stderr(std::process::Stdio::from(log));
         cmd.env("SEAGENT_MEET_URL", &o.url).env("SEAGENT_MEET_OUT_DIR", &out).env("SEAGENT_MEET_GUEST_NAME", &o.guest_name).env("SEAGENT_MEET_MODE", &o.mode);
         if o.headed {
@@ -591,7 +592,7 @@ mod tests {
             "#!/bin/sh\nprintf '{\"inCall\": true, \"joinedAt\": 1, \"transcriptLines\": 2}' > \"$SEAGENT_MEET_OUT_DIR/status.json\"\nprintf '[00:00:01] Alice: hi\\n[00:00:02] Bob: hello\\n' > \"$SEAGENT_MEET_OUT_DIR/transcript.txt\"\nwhile :; do sleep 0.1; done\n",
         )
         .unwrap();
-        vec!["sh".to_string(), script.display().to_string()]
+        vec!["sh".to_string(), seagent_core::platform::shell::path_str(&script)]
     }
 
     fn wait_for(path: &Path) {

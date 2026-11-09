@@ -286,7 +286,8 @@ fn walk(root: &Path, dir: &Path, out: &mut Vec<(String, u64)>) {
         let p = e.path();
         match e.file_type() {
             Ok(t) if t.is_dir() => walk(root, &p, out),
-            Ok(t) if t.is_file() => out.push((p.strip_prefix(root).unwrap_or(&p).display().to_string(), e.metadata().map(|m| m.len()).unwrap_or(0))),
+            // Archive-relative names use `/` on every node OS (`docs/x.bin`).
+            Ok(t) if t.is_file() => out.push((seagent_core::platform::layout::model_path(p.strip_prefix(root).unwrap_or(&p)), e.metadata().map(|m| m.len()).unwrap_or(0))),
             _ => {}
         }
     }

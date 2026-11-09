@@ -45,12 +45,22 @@
   `C:/…`（MSYS bash 會吃掉 `C:\…` 的反斜線）。cron 腳本、webhook 腳本、hook 命令都走它。
 - **設定裡的程式名**：`layout::program_command`（MCP / LSP / ACP / 模型 runtime / link processor / ops run）——
   Unix 就是 `Command::new(name)`；Windows 走 PATHEXT（npm 的 `.cmd` shim）、`python3`/`python` 指 `py -3`
-  （不是會印「Python was not found」並以 9009 結束的 Store 別名）、`sh`/`bash` 指 Git Bash（不是 WSL 的 `bash.exe`）。
+  （不是會印「Python was not found」並以 9009 結束的 Store 別名）、`sh`/`bash` 指 Git Bash（不是 WSL 的 `bash.exe`），
+  PATH 上找不到的 POSIX 工具名（`cat`、`grep`、`false`…）改用 Git for Windows / MSYS2 附的 `usr\bin`。
+  Git Bash 腳本裡的 `python3`：PATH 上只有 Store 別名時，`%LOCALAPPDATA%\seagent\shims` 放一個轉給 `py -3` 的
+  `python3`/`python` 腳本，`shell::command` 與 `run` 工具把它放在 PATH 最前面。
+- **連線**：主機名的每個解析位址依序嘗試（Windows 的 `localhost` 先給 `::1`，很多服務只聽 127.0.0.1）；
+  第一個位址仍最先試，原本能連的設定行為不變。
 - **交給子程序的 log 檔**：`proc::open_child_log` —— Windows 不用 append-only handle（缺 `FILE_WRITE_DATA`），
   否則 Git Bash 一啟動就以 1 結束、沒有任何輸出（detached job、AppContainer detached、seagentd 服務 log、Meet bot）。
 - **AppContainer 內的 shell**：MSYS 執行階段在 AppContainer / 低完整性下無法建立 `\BaseNamedObjects\msys-*`
-  （`0xC0000022`），所以主機 shell 是 Git Bash 時，沙盒命令改用 Windows PowerShell，並在 backend 說明與
-  `unset` 前導中照實反映；`SEAGENT_APPCONTAINER_SHELL` 可指定其他 shell。
+  （`0xC0000022`），所以主機 shell 是 Git Bash 時，沙盒命令改用 Windows PowerShell，並在 backend 說明、
+  shell 工具的提示（`exec::local::shell_note`）與腳本外殼中照實反映：PowerShell 腳本沒有 `eval`/`unset`，
+  缺少的命令照 bash 的格式回報（`x: command not found`、exit 127，失敗提示照常適用）；
+  `SEAGENT_APPCONTAINER_SHELL` 可指定其他 shell。真實測試：`SEAGENT_REAL_TESTS=1 cargo test -p seagent-tools real_backend_appcontainer -- --ignored`。
+- **已知限制（MSYS 的命令列展開）**：MSYS / Cygwin 程式會自己對 Windows 命令列中「沒加引號」的參數做 glob 與
+  大括號展開（不含空白的 `[{"a":1,"b":2}]` 會被拆開）。`MSYS=noglob` 不能用——它連引號處理也關掉，`bash -c '…'`
+  的腳本會被拆成單字。要把這類 JSON 字面值交給 `echo` / `cat` 等 MSYS 工具，請放進 shell 腳本（`exec --shell`）。
 - **MSYS 的訊號**：Git Bash 被訊號 N 結束時對 Windows 回報 `N << 8`，本機 backend 換回「signal N」，與 Unix 同義。
 - **ConPTY**：PTY 的輸出要等 pseudo console 關閉才會 EOF，process registry 讀不到資料時會順便 `try_wait`。
   ConPTY 會把 bracketed-paste 標記當作輸入解讀，沒要求 bracketed paste 的程式只收到文字。

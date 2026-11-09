@@ -144,7 +144,8 @@ fn walk_files(d: &Path, base: &Path, out: &mut Vec<String>) {
         if p.is_dir() {
             walk_files(&p, base, out);
         } else if let Ok(r) = p.strip_prefix(base) {
-            out.push(r.to_string_lossy().to_string());
+            // Skill-relative, for the model: `scripts/go.sh` on every OS.
+            out.push(seagent_core::platform::layout::model_path(r));
         }
     }
 }

@@ -184,6 +184,12 @@ pub fn program_command(name: impl AsRef<OsStr>) -> std::process::Command {
             if let Some((p, args)) = python3() {
                 let mut c = std::process::Command::new(p);
                 c.args(args);
+                // Pipes speak UTF-8 JSON (MCP, ACP, LSP); Windows Python would decode them in
+                // the ANSI code page. UTF-8 mode (`-X utf8`, which `-I` / `-E` scripts honour
+                // too) unless the user chose otherwise with PYTHONUTF8.
+                if std::env::var_os("PYTHONUTF8").is_none() {
+                    c.args(["-X", "utf8"]);
+                }
                 return c;
             }
         }

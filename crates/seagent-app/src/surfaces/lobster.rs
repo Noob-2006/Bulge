@@ -746,7 +746,10 @@ pub fn pipeline_effects(env: &Env, ctx: &ToolCtx, stages: &[Stage], start: usize
         match st.name.as_str() {
             "exec" => {
                 if let Ok(argv) = exec_argv(&a) {
-                    let line = if argv[0] == "sh" && argv.len() == 3 { argv[2].clone() } else { argv.iter().map(|x| if x.contains(char::is_whitespace) { format!("'{x}'") } else { x.clone() }).collect::<Vec<_>>().join(" ") };
+                    // The script of a `--shell` stage is what runs (Windows: the shell argv from
+                    // `sh_argv` starts with the platform shell's path, not `sh`).
+                    let shell_stage = argv.len() == 3 && (argv[0] == "sh" || (cfg!(windows) && super::sh_argv(String::new()).first() == Some(&argv[0])));
+                    let line = if shell_stage { argv[2].clone() } else { argv.iter().map(|x| if x.contains(char::is_whitespace) { format!("'{x}'") } else { x.clone() }).collect::<Vec<_>>().join(" ") };
                     e.push(Effect::Exec { command: line });
                 }
             }
@@ -1261,7 +1264,8 @@ impl LobsterTool {
     fn cwd(&self, ctx: &ToolCtx, p: &Value) -> Result<PathBuf, String> {
         match p["cwd"].as_str().map(str::trim).filter(|s| !s.is_empty()) {
             None => Ok(ctx.workspace.clone()),
-            Some(c) if Path::new(c).is_absolute() => Err("cwd must be a relative path".into()),
+            // `has_root` / a prefix: on Windows `/etc` and `C:x` are not relative either.
+            Some(c) if Path::new(c).is_absolute() || Path::new(c).has_root() || matches!(Path::new(c).components().next(), Some(std::path::Component::Prefix(_))) => Err("cwd must be a relative path".into()),
             Some(c) => {
                 let r = ctx.workspace.join(c);
                 let (rc, wc) = (r.canonicalize().map_err(|e| format!("cwd: {e}"))?, ctx.workspace.canonicalize().map_err(|e| e.to_string())?);
@@ -1596,18 +1600,21 @@ mod tests {
     #[test]
     fn typed_pipeline_stages() {
         let (t, ctx) = tool("lob1", &[]);
-        let v = out(&t, &ctx, json!({"action": "run", "pipeline": "exec --json echo '[{\"n\":3,\"t\":\"c\"},{\"n\":1,\"t\":\"a\"},{\"n\":2,\"t\":\"b\"},{\"n\":2,\"t\":\"b\"}]' | dedupe | where n>=2 | sort --key n | pick t,n | json"}));
+        // Windows: `echo` is Git's MSYS echo, which globs / brace-expands an argument the
+        // command line leaves unquoted (one without spaces); JSON with spaces is passed quoted.
+        let j = |s: &str| if cfg!(windows) { s.replace(',', ", ").replace(':', ": ") } else { s.to_string() };
+        let v = out(&t, &ctx, json!({"action": "run", "pipeline": format!("exec --json echo '{}' | dedupe | where n>=2 | sort --key n | pick t,n | json", j("[{\"n\":3,\"t\":\"c\"},{\"n\":1,\"t\":\"a\"},{\"n\":2,\"t\":\"b\"},{\"n\":2,\"t\":\"b\"}]"))}));
         assert_eq!(v["status"], "ok");
         assert_eq!(v["output"], json!([{"t": "b", "n": 2}, {"t": "c", "n": 3}]));
         let v = out(&t, &ctx, json!({"action": "run", "pipeline": "exec --shell 'printf \"x\\ny\\n\"' | map --wrap name id={{.}}! | template --text '{{name | upper}}-{{id}}' | head --n 1"}));
         assert_eq!(v["output"], json!(["X-x!"]));
-        let v = out(&t, &ctx, json!({"action": "run", "pipeline": "exec --json echo '[{\"k\":\"a\"},{\"k\":\"b\"},{\"k\":\"a\"}]' | groupBy --key k"}));
+        let v = out(&t, &ctx, json!({"action": "run", "pipeline": format!("exec --json echo '{}' | groupBy --key k", j("[{\"k\":\"a\"},{\"k\":\"b\"},{\"k\":\"a\"}]"))}));
         assert_eq!(v["output"][0]["count"], 2);
         let v = out(&t, &ctx, json!({"action": "run", "pipeline": "exec --json --shell 'echo 5' | diff.last --key k1"}));
         assert_eq!(v["output"][0]["changed"], true);
         let v = out(&t, &ctx, json!({"action": "run", "pipeline": "exec --json --shell 'echo 5' | diff.last --key k1"}));
         assert_eq!(v["output"][0]["changed"], false);
-        let v = out(&t, &ctx, json!({"action": "run", "pipeline": "exec --json echo '{\"a\":1}' | state.set s1 | exec --stdin json --json cat"}));
+        let v = out(&t, &ctx, json!({"action": "run", "pipeline": format!("exec --json echo '{}' | state.set s1 | exec --stdin json --json cat", j("{\"a\":1}"))}));
         assert_eq!(v["output"], json!([{"a": 1}]));
         let e = t.call(&ctx, json!({"action": "run", "pipeline": "exec --shell 'exit 3'"}));
         assert!(e.is_error && e.content.contains("exec failed (3)"), "{}", e.content);
