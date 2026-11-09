@@ -352,6 +352,150 @@ pub fn spawn_on_desktop(qualified: &str, cmdline: &str) -> Result<u32, String> {
     }
 }
 
+/// Quote one argument the way `CommandLineToArgvW` / the MSVC runtime read it back.
+pub fn quote_arg(a: &str) -> String {
+    if !a.is_empty() && !a.contains([' ', '\t', '\n', '"']) {
+        return a.to_string();
+    }
+    let mut s = String::from('"');
+    let mut bs = 0;
+    for c in a.chars() {
+        match c {
+            '\\' => bs += 1,
+            '"' => {
+                s.push_str(&"\\".repeat(bs * 2 + 1));
+                s.push('"');
+                bs = 0;
+            }
+            _ => {
+                s.push_str(&"\\".repeat(bs));
+                bs = 0;
+                s.push(c);
+            }
+        }
+    }
+    s.push_str(&"\\".repeat(bs * 2));
+    s.push('"');
+    s
+}
+
+/// A process [`spawn_logged_on_desktop`] started (its handle is closed on drop; the process
+/// itself lives on, tied to seagent by its Job Object).
+pub struct DesktopChild {
+    pub pid: u32,
+    handle: windows_sys::Win32::Foundation::HANDLE,
+}
+
+// SAFETY: a process handle is usable from any thread.
+unsafe impl Send for DesktopChild {}
+
+impl DesktopChild {
+    /// The exit code once it has exited.
+    pub fn try_wait(&self) -> Option<u32> {
+        use windows_sys::Win32::System::Threading::GetExitCodeProcess;
+        let mut code = 0u32;
+        // SAFETY: a live process handle we own.
+        let ok = unsafe { GetExitCodeProcess(self.handle, &mut code) };
+        (ok != 0 && code != 259 /* STILL_ACTIVE */).then_some(code)
+    }
+    /// Block until it exits.
+    pub fn wait(&self) {
+        // SAFETY: a live process handle we own.
+        unsafe { windows_sys::Win32::System::Threading::WaitForSingleObject(self.handle, u32::MAX) };
+    }
+}
+
+impl Drop for DesktopChild {
+    fn drop(&mut self) {
+        // SAFETY: we own the handle.
+        unsafe { windows_sys::Win32::Foundation::CloseHandle(self.handle) };
+    }
+}
+
+/// Start `exe args` with its windows on the desktop `qualified` (`WinSta0\name`, named in
+/// `STARTUPINFOW.lpDesktop` — std cannot, and a null lpDesktop means the desktop of *this
+/// process*, not of the calling thread), this process's environment plus `env`, stdout and
+/// stderr appended to `log`, in its own process group and kill-on-close Job Object exactly
+/// like `seagent_core::proc::spawn_tied` (created suspended, put in the job, then resumed).
+pub fn spawn_logged_on_desktop(qualified: &str, exe: &Path, args: &[String], env: &[(String, String)], log: &std::fs::File) -> Result<DesktopChild, String> {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Foundation::{CloseHandle, DuplicateHandle, HANDLE};
+    use windows_sys::Win32::System::Threading::{CreateProcessW, GetCurrentProcess, ResumeThread, TerminateProcess, PROCESS_INFORMATION, STARTUPINFOW};
+    const CREATE_SUSPENDED: u32 = 0x4;
+    const CREATE_NEW_PROCESS_GROUP: u32 = 0x200;
+    const CREATE_UNICODE_ENVIRONMENT: u32 = 0x400;
+    const STARTF_USESTDHANDLES: u32 = 0x100;
+    const DUPLICATE_SAME_ACCESS: u32 = 2;
+    let line = std::iter::once(quote_arg(&exe.display().to_string())).chain(args.iter().map(|a| quote_arg(a))).collect::<Vec<_>>().join(" ");
+    let mut cmd = wide(&line);
+    let mut desk = wide(qualified);
+    // Environment block: this process's variables with `env` on top, sorted, NUL-separated.
+    let mut vars: std::collections::BTreeMap<String, (String, String)> = std::env::vars_os().map(|(k, v)| (k.to_string_lossy().into_owned(), v.to_string_lossy().into_owned())).map(|(k, v)| (k.to_uppercase(), (k, v))).collect();
+    for (k, v) in env {
+        vars.insert(k.to_uppercase(), (k.clone(), v.clone()));
+    }
+    let mut block: Vec<u16> = vars.values().flat_map(|(k, v)| std::ffi::OsStr::new(&format!("{k}={v}")).encode_wide().chain(Some(0)).collect::<Vec<_>>()).collect();
+    block.push(0);
+    // SAFETY: CreateProcessW with owned NUL-terminated buffers that outlive the call; the
+    // inheritable duplicate of the log handle and the thread handle are closed here, the
+    // process handle is owned by the returned DesktopChild.
+    unsafe {
+        let me = GetCurrentProcess();
+        let mut out: HANDLE = 0;
+        if DuplicateHandle(me, log.as_raw_handle() as HANDLE, me, &mut out, 0, 1, DUPLICATE_SAME_ACCESS) == 0 {
+            return Err(format!("cannot hand the log to the child ({})", last_error()));
+        }
+        let mut si: STARTUPINFOW = std::mem::zeroed();
+        si.cb = std::mem::size_of::<STARTUPINFOW>() as u32;
+        si.lpDesktop = desk.as_mut_ptr();
+        si.dwFlags = STARTF_USESTDHANDLES;
+        si.hStdOutput = out;
+        si.hStdError = out;
+        let mut pi: PROCESS_INFORMATION = std::mem::zeroed();
+        let flags = CREATE_SUSPENDED | CREATE_NEW_PROCESS_GROUP | CREATE_UNICODE_ENVIRONMENT | seagent_core::platform::proc::console_flags();
+        let ok = CreateProcessW(std::ptr::null(), cmd.as_mut_ptr(), std::ptr::null(), std::ptr::null(), 1, flags, block.as_ptr().cast(), std::ptr::null(), &si, &mut pi);
+        let err = last_error();
+        CloseHandle(out);
+        if ok == 0 {
+            return Err(format!("CreateProcessW({}) on {qualified} failed ({err})", exe.display()));
+        }
+        if let Err(e) = seagent_core::platform::proc::adopt_raw(pi.hProcess, pi.dwProcessId) {
+            TerminateProcess(pi.hProcess, 1);
+            CloseHandle(pi.hThread);
+            CloseHandle(pi.hProcess);
+            return Err(format!("cannot put pid {} in a job object: {e}", pi.dwProcessId));
+        }
+        ResumeThread(pi.hThread);
+        CloseHandle(pi.hThread);
+        Ok(DesktopChild { pid: pi.dwProcessId, handle: pi.hProcess })
+    }
+}
+
+/// Visible top-level windows on the desktop `name` (diagnostics and tests).
+pub fn visible_windows(name: &str) -> Result<usize, String> {
+    use windows_sys::Win32::Foundation::HWND;
+    use windows_sys::Win32::System::StationsAndDesktops::EnumDesktopWindows;
+    use windows_sys::Win32::UI::WindowsAndMessaging::IsWindowVisible;
+    unsafe extern "system" fn cb(hwnd: HWND, param: LPARAM) -> BOOL {
+        if IsWindowVisible(hwnd) != 0 {
+            *(param as *mut usize) += 1;
+        }
+        TRUE
+    }
+    let w = wide(name);
+    // SAFETY: open the desktop for enumeration, count its visible windows, close it.
+    unsafe {
+        let h = OpenDesktopW(w.as_ptr(), 0, 0, DESKTOP_ACCESS);
+        if h == 0 {
+            return Err(format!("desktop {name} is not open ({})", last_error()));
+        }
+        let mut n = 0usize;
+        EnumDesktopWindows(h, Some(cb), &mut n as *mut usize as LPARAM);
+        CloseDesktop(h);
+        Ok(n)
+    }
+}
+
 /// Switch back to the default interactive desktop (end a `take_over`).
 pub fn switch_to_default() -> Result<(), String> {
     let name = wide("Default");
@@ -406,6 +550,49 @@ mod tests {
         assert_eq!(desktop_name(""), "seagent-default");
         let d = WinDesktop::new(Path::new("C:\\h"), "work", "1440x900");
         assert_eq!(d.qualified(), "WinSta0\\seagent-work");
+    }
+
+    #[test]
+    fn arguments_are_quoted_for_the_msvc_runtime() {
+        assert_eq!(quote_arg("--headless=new"), "--headless=new");
+        assert_eq!(quote_arg("C:\\Program Files\\Edge\\msedge.exe"), "\"C:\\Program Files\\Edge\\msedge.exe\"");
+        assert_eq!(quote_arg(""), "\"\"");
+        assert_eq!(quote_arg("a\"b"), "\"a\\\"b\"");
+        assert_eq!(quote_arg("dir with space\\"), "\"dir with space\\\\\"", "a trailing backslash is doubled before the closing quote");
+    }
+
+    /// The Bot Desktop browser really opens on the isolated desktop (not the user's), through
+    /// `launch::launch` with `SEAGENT_BD_DESKTOP` (not run by default):
+    /// `SEAGENT_REAL_TESTS=1 cargo test -p seagent-browser real_bot_desktop_browser -- --ignored`.
+    #[test]
+    #[ignore]
+    fn real_bot_desktop_browser_opens_on_the_isolated_desktop() {
+        let Some(exe) = crate::tests_real::real_gate() else { return };
+        let root = seagent_core::tmp::TempDir::new("seagent-bd-launch");
+        let d = WinDesktop::new(root.path(), &format!("launch{}", std::process::id()), "1280x800");
+        d.start().expect("an interactive window station");
+        let env: Vec<(String, String)> = std::fs::read_to_string(d.state_dir().join("env")).unwrap().lines().filter_map(|l| l.split_once('=')).map(|(k, v)| (k.to_string(), v.to_string())).collect();
+        let before = visible_windows(&d.name()).unwrap();
+        let udd = root.path().join("profile");
+        let extra = vec!["--inprivate".to_string()];
+        let o = crate::launch::LaunchOpts { exe: &exe, user_data_dir: &udd, headless: false, no_sandbox: false, extra_args: &extra, port: 0, managed: true, env };
+        let l = crate::launch::launch(&o, Duration::from_secs(30)).expect("the browser starts on the Bot Desktop");
+        let v = crate::cdp::get_json(&l.http, "/json/version", None, Duration::from_secs(5)).expect("its DevTools answers");
+        assert!(v["Browser"].is_string(), "{v}");
+        let mut after = 0;
+        for _ in 0..50 {
+            after = visible_windows(&d.name()).unwrap();
+            if after > before {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(200));
+        }
+        eprintln!("Bot Desktop {}: {before} visible windows before the launch, {after} after", d.name());
+        assert!(after > before, "the browser's window is on the isolated desktop");
+        let shot = d.screenshot().expect("a picture of the desktop");
+        assert!(!is_black(&shot.bgra), "the composed picture shows the browser");
+        crate::util::kill_group(l.pid, Duration::from_secs(3));
+        d.stop();
     }
 
     /// The real window-station API on this host: start creates the desktop and a keep-alive

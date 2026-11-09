@@ -200,6 +200,14 @@ pub fn die_with_parent(cmd: &mut Command) {
     let _ = cmd;
 }
 
+/// [`adopt`] for a process created without std (`CreateProcessW` by hand, e.g. onto another
+/// desktop): `process` is its handle (the caller keeps ownership), `pid` its id. Best created
+/// suspended and resumed after this returns, so nothing it starts escapes the job.
+#[cfg(windows)]
+pub fn adopt_raw(process: isize, pid: u32) -> io::Result<()> {
+    win::adopt_handle(process as windows_sys::Win32::Foundation::HANDLE, pid)
+}
+
 /// Put an already spawned child (and everything it starts later) in a kill-on-close Job
 /// Object registered under its pid, so [`kill_group`] / [`group_members`] see the whole tree
 /// and the tree dies with seagent. Unix: no-op (the process group already is the unit), except

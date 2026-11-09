@@ -442,6 +442,41 @@ pub fn running_on(udd: &Path) -> Option<Launched> {
     Some(Launched { pid, http: format!("http://127.0.0.1:{port}"), ws, owned: false })
 }
 
+/// The started browser: a std child, or (Windows Bot Desktop) one created onto that desktop.
+enum Kid {
+    Std(std::process::Child),
+    #[cfg(windows)]
+    Desk(crate::control::screen_windows::DesktopChild),
+}
+
+impl Kid {
+    fn id(&self) -> u32 {
+        match self {
+            Kid::Std(c) => c.id(),
+            #[cfg(windows)]
+            Kid::Desk(c) => c.pid,
+        }
+    }
+    /// How it exited, once it has.
+    fn try_wait(&mut self) -> Option<String> {
+        match self {
+            Kid::Std(c) => c.try_wait().ok().flatten().map(|s| s.to_string()),
+            #[cfg(windows)]
+            Kid::Desk(c) => c.try_wait().map(|code| format!("exit code: {code}")),
+        }
+    }
+    /// Reap it (never a zombie).
+    fn wait(self) {
+        match self {
+            Kid::Std(mut c) => {
+                let _ = c.wait();
+            }
+            #[cfg(windows)]
+            Kid::Desk(c) => c.wait(),
+        }
+    }
+}
+
 /// Launch (or reuse) a Chromium on `user_data_dir` and wait for its DevTools endpoint.
 pub fn launch(o: &LaunchOpts, timeout: Duration) -> Result<Launched, String> {
     util::private_dir(o.user_data_dir).map_err(|e| format!("{}: {e}", o.user_data_dir.display()))?;
@@ -461,30 +496,30 @@ pub fn launch(o: &LaunchOpts, timeout: Duration) -> Result<Launched, String> {
     }
     // Own session (one `kill(-pgid)` reaches the renderers) and tied to seagent: when seagent dies —
     // crash, SIGKILL, an interrupted test run — the kernel sends Chrome SIGTERM (new-001).
-    // Windows Bot Desktop: with `SEAGENT_BD_DESKTOP` set, bind the spawning thread to that
-    // isolated desktop so the browser (std leaves lpDesktop = inherit) lands on it.
+    // Windows Bot Desktop: with `SEAGENT_BD_DESKTOP` set the browser is created with that
+    // isolated desktop in `STARTUPINFOW.lpDesktop` (std cannot set it, and a null lpDesktop
+    // means this process's desktop — binding a thread does not reach the spawner).
     #[cfg(windows)]
     let mut child = match o.env.iter().find(|(k, _)| k == "SEAGENT_BD_DESKTOP").map(|(_, v)| v.clone()) {
-        Some(d) => crate::control::screen_windows::on_desktop(&d, || seagent_core::proc::spawn_tied(cmd, true))
-            .map_err(|e| format!("failed to start {} on the Bot Desktop: {e}", o.exe.display()))?
-            .map_err(|e| format!("failed to start {}: {e}", o.exe.display()))?,
-        None => seagent_core::proc::spawn_tied(cmd, true).map_err(|e| format!("failed to start {}: {e}", o.exe.display()))?,
+        Some(d) => {
+            let log = std::fs::OpenOptions::new().append(true).open(o.user_data_dir.join("seagent-browser.log")).map_err(|e| e.to_string())?;
+            Kid::Desk(crate::control::screen_windows::spawn_logged_on_desktop(&d, o.exe, &chrome_args(o), &o.env, &log).map_err(|e| format!("failed to start {} on the Bot Desktop: {e}", o.exe.display()))?)
+        }
+        None => Kid::Std(seagent_core::proc::spawn_tied(cmd, true).map_err(|e| format!("failed to start {}: {e}", o.exe.display()))?),
     };
     #[cfg(not(windows))]
-    let mut child = seagent_core::proc::spawn_tied(cmd, true).map_err(|e| format!("failed to start {}: {e}", o.exe.display()))?;
+    let mut child = Kid::Std(seagent_core::proc::spawn_tied(cmd, true).map_err(|e| format!("failed to start {}: {e}", o.exe.display()))?);
     let pid = child.id() as i32;
     let until = Instant::now() + timeout;
     loop {
         if let Some((port, path)) = active_port(o.user_data_dir) {
             if !path.is_empty() {
                 // Reap in the background so it never turns into a zombie.
-                std::thread::spawn(move || {
-                    let _ = child.wait();
-                });
+                std::thread::spawn(move || child.wait());
                 return Ok(Launched { pid, http: format!("http://127.0.0.1:{port}"), ws: format!("ws://127.0.0.1:{port}{path}"), owned: true });
             }
         }
-        if let Ok(Some(st)) = child.try_wait() {
+        if let Some(st) = child.try_wait() {
             let tail = std::fs::read_to_string(o.user_data_dir.join("seagent-browser.log")).unwrap_or_default();
             let tail: Vec<&str> = tail.lines().rev().take(6).collect();
             return Err(format!("{} exited ({st}) before DevTools was ready{}", o.exe.display(), if tail.is_empty() { String::new() } else { format!(": {}", tail.into_iter().rev().collect::<Vec<_>>().join(" | ")) }));
