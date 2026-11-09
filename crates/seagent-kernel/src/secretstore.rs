@@ -292,7 +292,7 @@ fn is_executable(p: &Path) -> bool {
 /// `secret-tool` that does not exist means "not usable here", as for the other tools.
 fn keyring_holder(opts: &Options, store: &Path) -> Option<keyring::Holder> {
     match &opts.keyring_tool {
-        Some(_) => tool(opts, KeyringTool::SecretService).map(|t| keyring::Holder::SecretTool(t)),
+        Some(_) => tool(opts, KeyringTool::SecretService).map(keyring::Holder::SecretTool),
         None => keyring::holder(None, which_on_path, store),
     }
 }

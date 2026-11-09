@@ -1,0 +1,18 @@
+# Test programs for the `wasm` exec backend (crates/seagent-tools/tests/wasm_backend.rs),
+# compiled to real `wasm32-wasip1` modules by that test. Its own workspace: never part of the
+# agent build, no dependencies.
+[package]
+name = "seagent-wasi-fixtures"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[workspace]
+
+[[bin]]
+name = "wbox"
+path = "wbox.rs"
+
+[profile.release]
+opt-level = "s"
+debug = false

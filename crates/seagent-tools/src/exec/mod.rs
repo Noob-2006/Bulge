@@ -32,6 +32,8 @@ pub mod sync;
 pub mod unify;
 pub mod vercel;
 pub mod vm;
+#[cfg(any(feature = "wasm", target_os = "ios"))]
+pub mod wasm;
 
 use seagent_core::exec::{ExecBackend, ExecChild, ExecRequest, ExitInfo};
 use serde::Deserialize;
@@ -105,6 +107,8 @@ pub struct ExecConfig {
     pub openshell: openshell::OpenShellConfig,
     /// `[exec.vm]`: the microVM backend (B1–B5). Default provider `auto`.
     pub vm: seagent_vm::VmConfig,
+    /// `[exec.wasm]`: the WASI interpreter backend (`exec::wasm::WasmConfig`; iOS default).
+    pub wasm: Value,
     /// `[exec.cgroups]`: one cgroup per command for cleanup and caps (ent-024).
     pub cgroups: local::CgroupConfig,
 }
@@ -144,6 +148,7 @@ impl Default for ExecConfig {
             vercel: Value::Null,
             openshell: Default::default(),
             vm: Default::default(),
+            wasm: Value::Null,
             cgroups: Default::default(),
         }
     }
@@ -192,7 +197,20 @@ impl ExecConfig {
     }
 }
 
-pub const BACKENDS: &[&str] = &["auto", "local", "vm", "bwrap", "landlock", "seatbelt", "appcontainer", "docker", "podman", "singularity", "apptainer", "ssh", "modal", "daytona", "vercel", "openshell"];
+pub const BACKENDS: &[&str] = &["auto", "local", "vm", "bwrap", "landlock", "seatbelt", "appcontainer", "wasm", "docker", "podman", "singularity", "apptainer", "ssh", "modal", "daytona", "vercel", "openshell"];
+
+/// What the `wasm` backend gives (kept here so `auto` plans can say it on every build).
+pub const WASM_WARNING: &str = "wasm interpreter sandbox: commands run as WASI modules in an in-process WebAssembly interpreter (wasmi, no JIT) behind a built-in POSIX-ish shell; they see only the workspace, a private /tmp and configured paths, have no network (WASI preview 1 has no sockets) and cannot start native programs. The wall is enforced by the interpreter inside the agent's own process, not by a kernel or hypervisor — weaker than a microVM.";
+
+#[cfg(any(feature = "wasm", target_os = "ios"))]
+fn wasm_backend(cfg: &ExecConfig, ctx: &BackendCtx) -> Result<Arc<dyn ExecBackend>, String> {
+    Ok(Arc::new(wasm::WasmBackend::new(cfg, ctx)?))
+}
+
+#[cfg(not(any(feature = "wasm", target_os = "ios")))]
+fn wasm_backend(_cfg: &ExecConfig, _ctx: &BackendCtx) -> Result<Arc<dyn ExecBackend>, String> {
+    Err("exec backend wasm is not built into this binary (cargo feature `seagent-tools/wasm`; always on for iOS)".into())
+}
 
 /// What a backend constructor gets.
 #[derive(Clone)]
@@ -256,6 +274,7 @@ pub fn build_backend(name: &str, cfg: &ExecConfig, extra: &Value, ctx: &BackendC
         // classifier: a sandboxed (non-operator) session is never treated as the owner.
         "vm" => Arc::new(vm::VmBackend::new(&cfg.vm, &cfg.sandbox, ctx, !ctx.sandboxed)?),
         "bwrap" | "landlock" | "seatbelt" | "appcontainer" => os_sandbox(name, cfg, ctx)?,
+        "wasm" => wasm_backend(cfg, ctx)?,
         "docker" => Arc::new(container::ContainerBackend::new(&cfg.docker, &cfg.sandbox, cfg, ctx)?),
         "podman" => Arc::new(container::ContainerBackend::new(&cfg.podman, &cfg.sandbox, cfg, ctx)?),
         "singularity" | "apptainer" => Arc::new(singularity::SingularityBackend::new(&cfg.singularity, name, &cfg.sandbox, ctx)?),
@@ -305,6 +324,9 @@ fn native_sandbox() -> Option<&'static str> {
         Some("seatbelt")
     } else if cfg!(windows) && appcontainer::available() {
         Some("appcontainer")
+    } else if cfg!(target_os = "ios") {
+        // No processes at all on iOS: the WASI interpreter is the only place a command can run.
+        Some("wasm")
     } else {
         None
     }
@@ -331,12 +353,24 @@ const MICROVM_HINT: &str = if cfg!(windows) {
 pub fn os_plan(mut plan: seagent_vm::policy::Plan, sandboxed: bool) -> seagent_vm::policy::Plan {
     use seagent_vm::policy::Origin;
     use seagent_vm::IsolationLevel;
+    // The interpreter sandbox says what it is wherever it was chosen.
+    if plan.backend == "wasm" {
+        plan.level = IsolationLevel::OsSandbox;
+        plan.warning = Some(WASM_WARNING.into());
+        return plan;
+    }
     let Some(name) = native_sandbox() else { return plan };
-    let os_warning = if name == "appcontainer" { appcontainer::WARNING } else { OS_SANDBOX_WARNING };
+    let os_warning = match name {
+        "appcontainer" => appcontainer::WARNING,
+        "wasm" => WASM_WARNING,
+        _ => OS_SANDBOX_WARNING,
+    };
+    // iOS: every automatic choice that would need a native process lands on the interpreter.
+    let ios_auto = name == "wasm" && plan.origin != Origin::Configured && matches!(plan.backend.as_str(), "local" | "bwrap" | "landlock");
     if plan.backend == name && plan.level <= IsolationLevel::OsSandbox {
         plan.level = IsolationLevel::OsSandbox;
         plan.warning = Some(format!("{name}: {os_warning}"));
-    } else if plan.backend == "local" && plan.origin == Origin::AutoHost {
+    } else if (plan.backend == "local" && plan.origin == Origin::AutoHost) || ios_auto {
         plan = seagent_vm::policy::Plan {
             backend: name.into(),
             provider: None,
@@ -363,6 +397,8 @@ pub fn build_planned(plan: &seagent_vm::policy::Plan, cfg: &ExecConfig, extra: &
     owner.sandbox.network = "host".into();
     match build_backend(&plan.backend, &owner, extra, ctx) {
         Ok(b) => Ok(b),
+        // iOS has no host shell to fall back to: the error is the answer.
+        Err(e) if cfg!(target_os = "ios") => Err(e),
         Err(e) => {
             let host = seagent_vm::policy::host_plan(&format!("{} unusable: {e}", plan.backend), "");
             warn_once("host-fallback", host.warning.as_deref().unwrap_or("NOT ISOLATED"));

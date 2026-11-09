@@ -5,8 +5,12 @@
 //!   in the window. Tray: open console, pause, restart service, start at login, updates, quit.
 //! - **Android**: either the same thing with the agent running under a Foreground Service
 //!   ("this phone"), or a client of another host on the LAN.
-//! - **iOS**: client only (no VM, no local shell, no subprocesses — platform policy): discover a
-//!   host via Bonjour, pair by QR or 8-character code, pin its TLS certificate, open its console.
+//! - **iOS**: the whole agent runs **inside this app process** (`seagent::embed`, linked through
+//!   the mobile plugin): kernel, sessions, providers, memory, skills, MCP over HTTP, chat channels
+//!   and the App Server on 127.0.0.1, whose console the WebView loads like on a desktop. iOS
+//!   allows no child processes, JIT or hypervisor, so there are no VMs and no native shell;
+//!   commands run as WASI tools in the in-process WebAssembly sandbox (exec backend `wasm`).
+//!   Pairing with a computer on the LAN (Bonjour, QR / 8-character code, pinned TLS) is optional.
 
 mod agent;
 mod boot;
@@ -40,9 +44,9 @@ pub fn t(zh_s: &'static str, en: &'static str) -> &'static str {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Mode {
-    /// The agent runs on this device (desktop always; Android when chosen).
+    /// The agent runs on this device (desktop always; iOS by default; Android when chosen).
     Local,
-    /// Client of a paired host (iOS always; Android when chosen).
+    /// Client of a paired host (iOS / Android when chosen).
     Remote,
 }
 
@@ -59,13 +63,15 @@ pub struct AppState {
 
 impl AppState {
     pub fn mode(&self) -> Option<Mode> {
-        if cfg!(target_os = "ios") {
-            return Some(Mode::Remote);
-        }
         if cfg!(desktop) {
             return Some(Mode::Local);
         }
-        std::fs::read_to_string(self.data_dir.join("mode.json")).ok().and_then(|s| serde_json::from_str(&s).ok())
+        let chosen = std::fs::read_to_string(self.data_dir.join("mode.json")).ok().and_then(|s| serde_json::from_str(&s).ok());
+        // iOS: the agent on this phone unless the user chose a paired computer instead.
+        if cfg!(target_os = "ios") {
+            return chosen.or(Some(Mode::Local));
+        }
+        chosen
     }
     pub fn set_mode(&self, m: Mode) -> Result<(), String> {
         std::fs::create_dir_all(&self.data_dir).map_err(|e| e.to_string())?;

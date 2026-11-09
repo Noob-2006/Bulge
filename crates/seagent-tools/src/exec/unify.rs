@@ -157,7 +157,7 @@ fn table_caps(name: &str, cfg: &ExecConfig, ctx: &BackendCtx) -> Result<EnvCaps,
     let (copy, uid) = match name {
         // Local work runs as the seagent user; Landlock changes permissions, not identity.
         "local" | "landlock" | "seatbelt" => (false, current_uid()),
-        "bwrap" | "appcontainer" | "docker" | "podman" | "singularity" | "apptainer" => (false, None),
+        "bwrap" | "appcontainer" | "wasm" | "docker" | "podman" | "singularity" | "apptainer" => (false, None),
         "ssh" | "modal" | "daytona" | "vercel" | "openshell" => (true, None),
         other => return Err(format!("unknown exec backend `{other}`: no isolation level in seagent's table")),
     };
@@ -172,7 +172,7 @@ fn table_caps(name: &str, cfg: &ExecConfig, ctx: &BackendCtx) -> Result<EnvCaps,
 /// be the directory the command is in, so `put_file` must not write there.
 fn visible_workspace(name: &str, cfg: &ExecConfig, ctx: &BackendCtx) -> PathBuf {
     match name {
-        "bwrap" | "landlock" | "docker" | "podman" | "singularity" | "apptainer" if ctx.sandboxed && cfg.sandbox.workspace_access == "none" => {
+        "bwrap" | "landlock" | "wasm" | "docker" | "podman" | "singularity" | "apptainer" if ctx.sandboxed && cfg.sandbox.workspace_access == "none" => {
             cfg.sandbox.scratch_workspace(&ctx.home, &ctx.scope_key)
         }
         _ => ctx.workspace.clone(),

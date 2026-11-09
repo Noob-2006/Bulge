@@ -2,6 +2,12 @@
 //! serve the console, start the background service, wait for the App Server, then open the
 //! setup wizard (not set up yet) or the console. Progress goes to the splash page as `boot`
 //! events (and `boot_state` for a page that loads late).
+//!
+//! iOS has no `seagent` program to run (no child processes): there the agent starts inside this
+//! process (`seagent::embed` through the mobile plugin), and the steps are the same from the
+//! splash page's point of view.
+// The sidecar steps below are what desktop and Android run; iOS uses `run` (embedded) only.
+#![cfg_attr(target_os = "ios", allow(dead_code, unused_imports))]
 
 use crate::agent::{self, Agent};
 use crate::{t, AppState};
@@ -102,7 +108,7 @@ pub fn locate<R: Runtime>(app: &AppHandle<R>) -> Result<Agent, String> {
     #[cfg(target_os = "ios")]
     let a: Agent = {
         let _ = &st;
-        Err(t("iOS 不能在本機執行 SE Agent（沒有 VM 與本機 shell），請連線到區域網路中的主機。", "SE Agent cannot run on iOS itself (no VM, no local shell); connect to a host on your network.").to_string())?
+        Err(t("iOS 上的 SE Agent 在 App 內執行，沒有可啟動的 seagent 程式。", "On iOS SE Agent runs inside the app; there is no seagent program to start.").to_string())?
     };
     #[cfg(desktop)]
     let a = {
@@ -157,6 +163,23 @@ pub fn console_url<R: Runtime>(app: &AppHandle<R>, a: &Agent, base: &str) -> Res
     Ok(format!("{base}/#token={tok}"))
 }
 
+/// iOS: the agent in this process — Application Support as `SEAGENT_HOME`, the vault key from
+/// the Keychain, the bundled `share/` (skills, WASI tools); the App Server on 127.0.0.1.
+#[cfg(target_os = "ios")]
+fn run<R: Runtime>(app: &AppHandle<R>) -> Result<String, String> {
+    use tauri_plugin_seagent_mobile::SeagentMobileExt;
+    let st = app.state::<AppState>();
+    step(app, "locate", 10, t("準備 SE Agent…", "Preparing SE Agent…"));
+    log(app, "iOS: the agent runs inside this app; commands use the WebAssembly sandbox (no VMs, no native shell on iOS)".into());
+    step(app, "service", 40, t("在這支手機上啟動 SE Agent…", "Starting SE Agent on this device…"));
+    let c = app.seagent_mobile().start_local()?;
+    log(app, format!("console: {} ({})", c.base, if c.setup { "setup wizard" } else { "console" }));
+    *st.base.lock().unwrap() = Some(c.base.clone());
+    step(app, "route", 90, t("開啟中…", "Opening…"));
+    Ok(c.url)
+}
+
+#[cfg(not(target_os = "ios"))]
 fn run<R: Runtime>(app: &AppHandle<R>) -> Result<String, String> {
     let st = app.state::<AppState>();
     let first = !st.data_dir.join("installed.json").exists();

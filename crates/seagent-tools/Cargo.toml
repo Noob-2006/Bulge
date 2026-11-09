@@ -4,7 +4,13 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[features]
+# `exec.backend = "wasm"`: commands as WASI modules in the wasmi interpreter (exec/wasm). Always
+# on for iOS (the target dependency below), off in the default desktop/server builds.
+wasm = ["dep:wasmi"]
+
 [dependencies]
+wasmi = { workspace = true, optional = true }
 seagent-core.workspace = true
 seagent-security.workspace = true
 serde.workspace = true
@@ -20,6 +26,10 @@ ring.workspace = true # RS256 JWT for GitHub App installation tokens (forge)
 
 [target.'cfg(unix)'.dependencies]
 libc.workspace = true # process groups, poll, PTY, Landlock / seccomp syscalls (local backend)
+
+# iOS has no fork/exec, JIT or hypervisor: the wasm interpreter backend is its shell.
+[target.'cfg(target_os = "ios")'.dependencies]
+wasmi = { workspace = true }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { workspace = true, features = ["Win32_Security_Isolation", "Win32_NetworkManagement_NetManagement", "Win32_Security_Authentication_Identity", "Win32_System_Registry", "Win32_System_Services"] } # local backend: console process groups, creation flags (already in the tree via seagent-core); appcontainer backend: AppContainer profiles; cis-windows probes: account policy, local users, registry, services, audit policy

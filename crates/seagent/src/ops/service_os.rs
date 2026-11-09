@@ -20,7 +20,8 @@
 //! (on Linux nothing else here is used, and the Windows builders only on Windows: the `allow`).
 
 #![cfg_attr(not(any(target_os = "macos", windows, target_os = "android", target_os = "ios")), allow(dead_code, unused_imports))]
-#![cfg_attr(not(windows), allow(dead_code))]
+// (the Linux case is covered by the line above; one `allow` per target keeps clippy quiet)
+#![cfg_attr(any(target_os = "macos", target_os = "android", target_os = "ios"), allow(dead_code))]
 
 use crate::ops::service::Issue;
 #[cfg(any(target_os = "macos", windows, target_os = "android", target_os = "ios"))]
@@ -331,7 +332,7 @@ mod mac {
 #[cfg(target_os = "android")]
 const MOBILE: &str = "on Android the SE Agent daemon is managed by the host app (a foreground service); install and start it from the SE Agent app";
 #[cfg(target_os = "ios")]
-const MOBILE: &str = "not applicable on iOS: SE Agent runs as an app there and has no background daemon to install";
+const MOBILE: &str = "handled by the app on iOS: the agent runs inside the SE Agent app's own process (it starts with the app, and in iOS background tasks for schedules); there is no separate daemon to install";
 
 /// Install the per-user autostart (`start`: also start it now).
 #[cfg(any(target_os = "macos", windows, target_os = "android", target_os = "ios"))]

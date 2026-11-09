@@ -18,15 +18,15 @@
 
 | 功能 | Linux（不動） | Windows | macOS | Android | iOS |
 |---|---|---|---|---|---|
-| microVM 隔離 | Firecracker / QEMU+KVM | Hyper-V（HCS）或 QEMU+WHPX；VirtualBox 備援 | Virtualization.framework；QEMU+HVF 備援 | AVF（pKVM，支援的機型）；否則交給配對主機 | **不支援**（見下） |
-| 程序沙盒 | bwrap / Landlock / seccomp | AppContainer + Job Object + restricted token | Seatbelt（sandbox-exec 設定檔） | App 沙盒 + isolated process | App 沙盒（本身即是） |
+| microVM 隔離 | Firecracker / QEMU+KVM | Hyper-V（HCS）或 QEMU+WHPX；VirtualBox 備援 | Virtualization.framework；QEMU+HVF 備援 | AVF（pKVM，支援的機型）；否則交給配對主機 | **不支援**（見下），以 WASM 直譯器沙盒替代 |
+| 程序沙盒 | bwrap / Landlock / seccomp | AppContainer + Job Object + restricted token | Seatbelt（sandbox-exec 設定檔） | App 沙盒 + isolated process | `wasm`：wasmi 直譯 WASI 工具（App 沙盒內） |
 | gVisor | gVisor | 改跑在上列 VM 內 | 同左 | 同左 | — |
 | 容器 | docker / podman | Docker Desktop / Podman machine | 同左 | — | — |
-| 常駐服務 | systemd / OpenRC | Windows 服務或工作排程器 | launchd（LaunchAgent） | Foreground Service | App 前景 + BGTask |
-| 本機 IPC | unix socket | named pipe（僅擁有者 ACL） | unix socket | unix socket（app 私有目錄） | app 內通道 |
+| 常駐服務 | systemd / OpenRC | Windows 服務或工作排程器 | launchd（LaunchAgent） | Foreground Service | App 行程內（`seagent::embed`）前景 + BGProcessingTask |
+| 本機 IPC | unix socket | named pipe（僅擁有者 ACL） | unix socket | unix socket（app 私有目錄） | 無控制 socket；App Server 綁 127.0.0.1 |
 | 程序群組 / 訊號 | pgid / signal / PDEATHSIG | Job Object（KILL_ON_JOB_CLOSE）+ CtrlHandler | pgid / signal + kqueue 監看父程序 | pgid / signal | — |
 | PTY | posix_openpt | ConPTY | posix_openpt | posix_openpt | — |
-| shell | bash | 有 bash（Git Bash/MSYS）用 bash，否則 PowerShell | bash/zsh | `/system/bin/sh` + 內建 busybox | — |
+| shell | bash | 有 bash（Git Bash/MSYS）用 bash，否則 PowerShell | bash/zsh | `/system/bin/sh` + 內建 busybox | 內建 POSIX 式 shell 直譯器 + uutils coreutils（WASI） |
 | 檔案權限 0600/0700 | chmod | 擁有者 DACL | chmod | chmod | 資料保護等級 |
 | 秘密保管 | systemd-creds(TPM) / libsecret | DPAPI / Credential Manager | Keychain | Android Keystore | Keychain |
 | 鍵鼠 / 螢幕 | xdotool / ydotool / Xvfb | SendInput / DXGI 擷取 | CGEvent / ScreenCaptureKit | AccessibilityService / MediaProjection | — |
@@ -77,12 +77,40 @@ seagent 先結束就對子程序的程序群組送 `SIGTERM`，2 秒後 `SIGKILL
 已知缺口：子程序 spawn 與看門程序就位之間若 seagent 剛好被殺，子程序仍會留下；每個子程序多一個行程。
 尚未在真實 macOS 上驗證，所以預設關閉。iOS 不會 spawn 子程序，不適用。
 
-### iOS 的限制（平台政策，無法繞過）
+### iOS：完整 agent 在 App 行程內執行（無伺服器）
 
-iOS 不允許 App 開虛擬機、執行子程序或 JIT，因此 iOS 版是**純 App**：
-對話、通知、相機、定位、語音、檔案等照常提供；需要 shell、VM、瀏覽器自動化的工作，
-可以交給同一區域網路內已配對的電腦執行（透過既有的 node / ARP 協定），也可以不用。
-**iOS 上沒有 VM 與本機 shell，這點會寫在 App 說明與設定精靈裡。**
+SE Agent 的設計是無伺服器、自架：大部分功能本來就必須在本機。iOS 沒有 VM，不代表其餘部分不做。
+iOS 版因此**不是純用戶端**，而是在 App 自己的行程裡跑完整的 agent：
+
+- **行程內 agent**：`crates/seagent` 是函式庫＋一行的執行檔（`seagent::main()`）；`seagent::embed::start(home)`
+  在 App 的背景執行緒上跑的，正是 `seagent daemon run` 的同一套組裝（`daemon_cli::run`）——核心、session、
+  模型供應商、記憶、技能、web 抓取／搜尋、App 沙盒內的檔案工具、MCP（Streamable HTTP／SSE；沒有 stdio 伺服器，
+  因為不能開子程序）、純網路的聊天平台、排程與心跳，以及綁在 127.0.0.1 的 App Server——WKWebView 照桌面版的方式
+  載入主控台。唯一不同：沒有控制 socket（`Daemon::run_with(Ipc::Off)`，App 只經 App Server 跟它說話），也不用
+  `daemon start`。`SEAGENT_HOME` = App 的 Application Support 目錄；vault 金鑰放在 iOS Keychain，經 plugin 以
+  `SEAGENT_VAULT_KEY` 交給 agent。連結方式：`apps/desktop/plugins/seagent-mobile` 只在 `target_os = "ios"`
+  依賴 `seagent` 函式庫，一起編進 App 的 staticlib；桌面與 Android 的依賴樹不變。
+- **shell／VM 的替代品 = 行程內 WebAssembly 直譯器沙盒**（`exec.backend = "wasm"`，`crates/seagent-tools/src/exec/wasm/`）：
+  每個外部指令是一個 `wasm32-wasip1` 模組，由 wasmi（純 Rust、**不 JIT**，App Store 允許在沙盒內直譯）執行；
+  WASI preview 1 自己實作，路徑一律限制在預開的根目錄（工作區依沙盒設定讀寫或唯讀、私有 `/tmp`、`[exec.sandbox] binds`
+  ——與 bwrap／Landlock／Seatbelt／AppContainer 同一份讀寫根政策），`..` 與 symlink 逃不出去；沒有 socket（preview 1
+  沒有開 socket 的方法）；fuel 分段執行，逾時／中斷在一個分段內生效；記憶體上限可設。shell 本身由 App 內建的
+  POSIX 式直譯器執行（dash／busybox ash 需要 `fork`/`exec`，WASI 沒有）：管線、`&&`/`||`、子 shell、
+  `if`/`for`/`while`/`case`、函式、重新導向與 here-doc、`$(…)`、`$((…))`、glob。指令集是釘選版本的
+  uutils coreutils（`feat_wasm`，78 個指令）、uutils sed、uutils findutils 的 `find`、`tools/wasi-grep` 的 POSIX grep
+  （`apps/desktop/scripts/build-wasi-tools.sh` 以 `--locked` 建置；`xargs` 是 shell 內建，因為 WASI 版 xargs 無法啟動指令），
+  以及 CPython 3.14（`build-wasi-python.sh`：python.org 原始碼＋官方 wasi-sdk 24，兩者都釘 SHA-256）。
+  每個模組的 SHA-256 寫進 `tools.json`，不符或未釘選就拒絕執行；打包成 App 的 `share/wasi`。iOS 上 `auto` 自動選它；
+  隔離等級如實回報為 OS 沙盒層級的「wasm interpreter sandbox」（政策由直譯器在 App 行程內執行，不是核心或 hypervisor）。
+  Python 腳本與其他工具同樣只看得到工作區與 `/tmp`、沒有 socket、沒有執行緒與子程序。
+- **背景**：App 在前景時 agent 照常執行；進背景時 plugin 以 BGTaskScheduler 預約 `BGProcessingTask`
+  （時間 = 下一個到期的排程，至少 15 分鐘後），喚醒時 `seagent::embed::background_pass` 讓排程器補跑到期工作、
+  等它們做完（最多約 4 分鐘）；回到前景時若 App Server 的 socket 已被 iOS 回收就重啟 agent。iOS 決定實際執行時間
+  （通常是充電、連網、閒置時），所以排程在 iOS 上是「盡量準時」，不是保證準時。
+- **配對電腦變成選用**：需要真正的 VM、原生 shell、瀏覽器自動化的工作，可以交給同一區域網路內配對的電腦
+  （既有的 node／ARP 協定），也可以不用。
+
+**iOS 上仍然沒有 VM 與原生 shell 程式（平台政策，無法繞過），這點會寫在 App 的啟動畫面、配對頁與這份文件裡。**
 
 ## 區域網路互聯
 

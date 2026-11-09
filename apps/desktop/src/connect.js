@@ -159,7 +159,7 @@
   (async function main() {
     const info = await SE.invoke('app_info');
     $('iosNotice').hidden = info.platform !== 'ios';
-    $('useLocal').hidden = !info.canRunLocal || info.platform !== 'android';
+    $('useLocal').hidden = !info.canRunLocal || !(info.platform === 'android' || info.platform === 'ios');
     $('scan').hidden = !(info.platform === 'ios' || info.platform === 'android');
     const hosts = await loadPaired();
     // One paired host and we just launched: go straight to it (it may be offline: stay here then).

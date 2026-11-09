@@ -8,12 +8,18 @@
   service…") and errors with **Copy details**. Tray: Open console · Pause agent · Restart service ·
   Start at login · Check for updates · Quit (agent keeps running) · Stop agent and quit.
 - **Android**: the same, with the agent running under a Foreground Service — or "connect to
-  another computer". **iOS**: client only (no VM, no local shell — platform policy). See
-  [MOBILE.md](MOBILE.md).
+  another computer".
+- **iOS**: the whole agent runs **inside the app process** (no child processes on iOS): the
+  `seagent` library is linked through the seagent-mobile plugin (`seagent::embed`), its App Server
+  listens on 127.0.0.1 and the WebView shows its wizard / console like on a desktop. Only VMs and
+  native shell programs are unavailable (platform policy); commands run in the in-process
+  WebAssembly sandbox. Pairing with a computer is optional. See [MOBILE.md](MOBILE.md).
 
 It is its **own Cargo workspace** (`apps/desktop/Cargo.toml`, own `Cargo.lock`): Tauri, tokio,
 wry and the WebView bindings never enter the agent's dependency tree, `cargo deny` or SBOM. See
 "App shell budget" in [packaging/release/DEPENDENCY-REVIEW.md](../../packaging/release/DEPENDENCY-REVIEW.md).
+(The reverse edge exists for iOS only: the app links the agent library, so the app's lockfile
+lists the agent's crates too; desktop and Android builds do not compile them.)
 
 ## Layout
 

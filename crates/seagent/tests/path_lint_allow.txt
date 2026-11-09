@@ -131,6 +131,10 @@ crates/seagent-tools/src/exec/ssh.rs	/root
 crates/seagent-tools/src/exec/ssh.rs	/tmp
 crates/seagent-tools/src/exec/sync.rs	/tmp/.seagent-sync-{tag:08x}.stamp
 crates/seagent-tools/src/exec/vm.rs	/tmp
+crates/seagent-tools/src/exec/wasm/mod.rs	/tmp
+crates/seagent-tools/src/exec/wasm/mod.rs	/usr/bin/{name}
+crates/seagent-tools/src/exec/wasm/mod.rs	/usr/bin:/bin
+crates/seagent-tools/src/exec/wasm/shell.rs	/tmp
 crates/seagent-tools/src/filestate.rs	/boot/
 crates/seagent-tools/src/filestate.rs	/etc/
 crates/seagent-tools/src/filestate.rs	/run/docker.sock

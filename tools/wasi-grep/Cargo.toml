@@ -1,0 +1,25 @@
+# POSIX grep for the iOS WASI tool set (apps/desktop/scripts/build-wasi-tools.sh). Its own
+# workspace: built only for wasm32-wasip1, never part of the agent. One dependency, `regex`
+# (the same crate the agent uses), pinned by Cargo.lock next to this file.
+[package]
+name = "seagent-wasi-grep"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+publish = false
+
+[workspace]
+
+[[bin]]
+name = "grep"
+path = "main.rs"
+
+[dependencies]
+regex = { version = "1", default-features = false, features = ["std", "unicode-perl", "unicode-case"] }
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+strip = true
+panic = "abort"
