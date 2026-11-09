@@ -194,6 +194,10 @@ pub fn stream(sink: &mut dyn Sink, id: &str, src: &mut dyn RegionSource, quality
         // is normal and must not slow the stream).
         sc.spawn(move || {
             let (mut upd, mut idle, mut still) = (0u64, Duration::ZERO, 0u32);
+            // Deadlines follow the previous deadline, not the (late) wake-up, so a coarse OS timer
+            // (Windows: 15.6 ms) does not stretch every interval: late by less than an interval is
+            // caught up on the next one.
+            let mut next_at = Instant::now();
             while !stop_r.load(Ordering::SeqCst) {
                 let t0 = Instant::now();
                 let r = src.next();
@@ -217,7 +221,12 @@ pub fn stream(sink: &mut dyn Sink, id: &str, src: &mut dyn RegionSource, quality
                         gap
                     }
                 };
-                let until = t0 + rest;
+                next_at += rest;
+                let now = Instant::now();
+                if now > next_at + rest {
+                    next_at = now;
+                }
+                let until = next_at.max(t0);
                 while Instant::now() < until && !stop_r.load(Ordering::SeqCst) {
                     std::thread::sleep(until.saturating_duration_since(Instant::now()).min(Duration::from_millis(5)));
                 }
