@@ -76,12 +76,30 @@ App、手機瀏覽器與其他電腦以 `POST /pair/client` 配對（在憑證�
 （`Authorization: Bearer`、`seagent.token.<t>` 子協定、WebSocket 升級的 `?token=`、網頁 `#token=`），預設 `write`。
 LAN 模式下網路上的連線**只**接受這種 token；撤銷後開著的 WebSocket 一秒內斷線。
 
+**裝置金鑰**（[SECURITY.md §8](SECURITY.md)）：`device` 可帶 `"publicKey": "<base64url 65-byte P-256 點>"`。帶了之後 200
+回應另有 `"keyBound": true, "accessToken": "sea1_…", "accessExpiresAtMs"`，而 `consoleToken` **不再能當 bearer**，
+只能換 access token：
+
+```text
+GET  /pair/info                                   → 200 {"hostId", "nowMs", "protocol", "refresh": true}
+POST /pair/refresh   Authorization: Bearer sed1_…
+     {"deviceId", "ts": <主機時鐘 ms>, "nonce": "<16–64 url-safe>", "sig": "<base64url r‖s>", "publicKey"?}
+     sig = ECDSA-P256-SHA256("seagent-device-refresh|v1|<hostId>|<deviceId>|<ts>|<nonce>")
+  → 200 {"accessToken": "sea1_…", "expiresAtMs", "scope", "keyBound": true}
+  → 401 錯 token／錯簽章／ts 超出 ±5 分鐘／nonce 重送；409 綁定衝突；429 鎖定中
+```
+
+沒有金鑰的舊裝置在 refresh 時帶上 `publicKey` 就完成綁定（一次，之後不可換）。access token 只在記憶體，daemon
+重啟後裝置重新 refresh 即可。`devices.list` 的每筆另有 `keyBound`、`boundAtMs`、`lastIp`。
+
 | 方法 | 權限 | 說明 |
 |---|---|---|
 | `devices.list` | admin | `{devices, pending}`（不含 token） |
 | `devices.pending` | admin | 等待核准的配對申請 |
 | `devices.approve {code}` / `devices.reject {code}` | admin | 核准／拒絕 |
 | `devices.revoke {id}` | admin | 撤銷裝置 |
+| `devices.revoke_all` | admin | 登出所有裝置（全部要重新配對）`{revoked}` |
+| `devices.scope {id, scope}` | admin | `read`（只能檢視）／`write`（完整操作）／`approve`（也可核准）；下一個請求就生效 |
 | `devices.pair.create {ttlMin?, scope?}` | admin | `{setupCode, pairUri, link, url, address, code, expiresAtMs, fingerprint, sas, qrSvg, qrText}` |
 | `discovery.list {timeoutMs?}` | read | mDNS 找到的 SE Agent 主機 `{hosts: [{id, name, address, addresses, url, fpPrefix, sas, self}]}`；`addresses` 含 IPv6（link-local 帶 zone，如 `fe80::1%eth0`），`address`／`url` 是最佳的一個 |
 | `lan.status` | read | LAN 模式、探索（`discoveryState`：`off`／`advertising`／`limited`／`idle`，含介面與位址）、位址、憑證、已配對裝置數 |
