@@ -10,13 +10,19 @@
 //!   ones are built with `ext::build_channels`, and the loops start again on the new set;
 //!   `channel_send` / `message` follow the new set.
 //! - **Webhook subscriptions** need nothing: the listener re-reads its subscription file.
-//! - **Skills** installed, uploaded or removed are found on disk by the next skill index.
+//! - **Skills** installed, uploaded or removed are found on disk by the next skill index; a
+//!   skill switched on or off refreshes the index's settings (running sessions get the usual
+//!   per-turn delta) and rebuilds the `skill` tool.
+//! - **Hooks** (shell hooks, packs, bundled, outbound): reloaded from the config and swapped
+//!   in the kernel by name (`Runtime::replace_hooks`).
+//! - **Gmail**: the watcher stops and starts again with the new setup.
+//! - **ACP agents**: `acp_delegate` is rebuilt with the new agent list.
+//! - **Process plugins** that only contribute tools start (or stop) live.
 //!
 //! What cannot be swapped in place is listed by [`RESTART_ONLY`] and reported to the page,
 //! which offers the one-click restart (`ops::service::restart_detached`, the same helper as
-//! `/restart`): plugins (process plugins register hooks, routes, providers and services at
-//! start), skill enable/disable (`[skills] disabled` is read when the skill tools are built),
-//! ACP agents and A2A (read by tools and the app server at start).
+//! `/restart`): plugins that bring hooks, channels, routes, providers, services or UI (or that
+//! were started with the daemon), plugin packages, and A2A (part of the app server).
 
 use crate::ext::{self, Ext};
 use seagent_core::Cancel;
@@ -31,12 +37,8 @@ use std::time::{Duration, Instant};
 
 /// Change kinds that only a daemon restart applies, with the reason shown in the page.
 pub const RESTART_ONLY: &[(&str, &str)] = &[
-    ("plugins", "process plugins register hooks, routes, providers and services when the daemon starts"),
-    ("skills.toggle", "the skill tools read [skills] disabled when they are built"),
-    ("acp", "ACP agents are read by the delegation tools at start"),
+    ("plugins", "this plugin brings hooks, channels, routes, providers, services or UI, which register when the daemon starts"),
     ("a2a", "A2A is part of the app server, which binds at start"),
-    ("hooks", "shell hooks and hook packs are loaded when the daemon starts"),
-    ("gmail", "the Gmail watcher starts with the daemon"),
 ];
 
 struct Loops {
@@ -61,6 +63,12 @@ pub struct Live {
     pending: Mutex<BTreeSet<String>>,
     /// Why channels failed to build on the last reload (shown as their status).
     channel_errors: Mutex<BTreeMap<String, String>>,
+    /// Names of the hooks `hooks_ext::load` contributed (what a hook reload replaces).
+    hook_names: Mutex<Vec<String>>,
+    /// The Gmail watcher: leader token, its own token, its threads.
+    gmail: Mutex<Loops>,
+    /// Process plugins started since the daemon started (tools only).
+    plugins: Mutex<BTreeMap<String, Arc<seagent_plugin::PluginHost>>>,
 }
 
 static LIVE: OnceLock<Arc<Live>> = OnceLock::new();
@@ -78,7 +86,16 @@ pub fn get() -> Option<Arc<Live>> {
 impl Live {
     pub fn new(k: Kernel, paths: Paths, ws: PathBuf, ext: Option<Arc<Ext>>) -> Live {
         let startup_mcp = ext.as_ref().map(|e| e.registry.clone());
-        Live { k, paths, ws, ext: Mutex::new(ext), loops: Mutex::new(Loops { parent: None, child: None, handles: vec![] }), startup_mcp, mcp: Default::default(), pending: Default::default(), channel_errors: Default::default() }
+        // The hooks the daemon started from `[[hooks]]` / `[hooks_extra]` (same loader, same names).
+        let slot = ext.as_ref().map(|e| e.kernel.clone()).unwrap_or_default();
+        let startup_hooks: Vec<String> = crate::hooks_ext::load(&k.cfg, &paths, &ws, &slot, ext::secrets_fn(&k.vault)).0.iter().map(|h| h.name()).collect();
+        let live = Live::with(k, paths, ws, ext, startup_mcp);
+        *live.hook_names.lock().unwrap_or_else(|e| e.into_inner()) = startup_hooks;
+        live
+    }
+
+    fn with(k: Kernel, paths: Paths, ws: PathBuf, ext: Option<Arc<Ext>>, startup_mcp: Option<Arc<Registry>>) -> Live {
+        Live { k, paths, ws, ext: Mutex::new(ext), loops: Mutex::new(Loops { parent: None, child: None, handles: vec![] }), startup_mcp, mcp: Default::default(), pending: Default::default(), channel_errors: Default::default(), hook_names: Mutex::new(vec![]), gmail: Mutex::new(Loops { parent: None, child: None, handles: vec![] }), plugins: Default::default() }
     }
 
     /// The daemon's kernel (hook installs run its `before_install` hooks).
@@ -217,6 +234,115 @@ impl Live {
         self.mcp.lock().unwrap_or_else(|e| e.into_inner()).contains_key(name)
     }
 
+    // ───────────── skills, hooks, Gmail, ACP, plugins ─────────────
+
+    fn vault(&self) -> Result<Arc<seagent_kernel::vault::Vault>, String> {
+        seagent_kernel::vault::Vault::load(&self.paths.secrets()).map(Arc::new)
+    }
+
+    /// `[skills]` changed (a skill switched on or off): new settings for the skills index and a
+    /// rebuilt `skill` tool.
+    pub fn reload_skills(&self) -> Result<Value, String> {
+        let cfg = self.fresh()?;
+        seagent_skills::core::index::shared(&cfg, &self.paths).set_settings(seagent_skills::core::settings::Settings::load(&cfg));
+        self.k.set_live_tools("skill", seagent_skills::core::tools(&cfg, &self.paths, &self.ws));
+        Ok(json!({"applied": true}))
+    }
+
+    /// Shell hooks, packs, bundled and outbound hooks reloaded from the config (consent included).
+    pub fn reload_hooks(&self) -> Result<Value, String> {
+        let cfg = self.fresh()?;
+        let slot = self.ext.lock().unwrap_or_else(|e| e.into_inner()).as_ref().map(|e| e.kernel.clone()).unwrap_or_default();
+        let (hooks, warnings) = crate::hooks_ext::load(&cfg, &self.paths, &self.ws, &slot, ext::secrets_fn(&self.vault()?));
+        let names: Vec<String> = hooks.iter().map(|h| h.name()).collect();
+        let mut old = self.hook_names.lock().unwrap_or_else(|e| e.into_inner());
+        self.k.replace_hooks(&old, hooks);
+        *old = names.clone();
+        Ok(json!({"applied": true, "hooks": names, "warnings": warnings}))
+    }
+
+    /// Start the Gmail watcher under `parent` (the leader's token).
+    pub fn start_gmail(&self, parent: Cancel) -> usize {
+        let mut g = self.gmail.lock().unwrap_or_else(|e| e.into_inner());
+        stop_loops(&mut g);
+        g.parent = Some(parent);
+        self.spawn_gmail(&mut g, &self.k.cfg.clone(), self.k.vault.clone())
+    }
+
+    fn spawn_gmail(&self, g: &mut Loops, cfg: &Config, vault: Arc<seagent_kernel::vault::Vault>) -> usize {
+        let Some(parent) = g.parent.clone().filter(|p| !p.is_cancelled()) else { return 0 };
+        let child = parent.child();
+        g.handles = crate::hooks_ext::start_gmail(&self.k, cfg, vault, child.clone());
+        g.child = Some(child);
+        g.handles.len()
+    }
+
+    /// The Gmail setup changed: stop the watcher (its push listener frees its port) and start
+    /// it again from the config.
+    pub fn reload_gmail(&self) -> Result<Value, String> {
+        let cfg = self.fresh()?;
+        let vault = self.vault()?;
+        let mut g = self.gmail.lock().unwrap_or_else(|e| e.into_inner());
+        stop_loops(&mut g);
+        let n = self.spawn_gmail(&mut g, &cfg, vault);
+        Ok(json!({"applied": true, "running": n > 0, "leader": g.parent.is_some()}))
+    }
+
+    /// `[acp]` changed: `acp_delegate` with the new agent list.
+    pub fn reload_acp(&self) -> Result<Value, String> {
+        let cfg = self.fresh()?;
+        let acp = seagent_app::acp_client::AcpConfig::parse(&cfg.acp)?;
+        let names = acp.names();
+        self.k.set_live_tools("acp_delegate", vec![Arc::new(seagent_app::acp_client::AcpDelegate { cfg: acp, gate: cfg.gate.clone(), vault: self.vault()? })]);
+        Ok(json!({"applied": true, "agents": names}))
+    }
+
+    /// A process plugin saved or removed: one that only contributes tools starts (or stops)
+    /// now; one the daemon started, or that brings more than tools, waits for a restart.
+    pub fn reload_plugin(&self, name: &str) -> Result<Value, String> {
+        if self.ext.lock().unwrap_or_else(|e| e.into_inner()).as_ref().is_some_and(|e| e.plugins.iter().any(|p| p.name == name)) {
+            return Ok(json!({"applied": false, "restart": true, "why": "the daemon started this plugin; a restart replaces it"}));
+        }
+        let prefix = format!("mcp__{name}__");
+        self.plugins.lock().unwrap_or_else(|e| e.into_inner()).remove(name);
+        let cfg = self.fresh()?;
+        let Some(t) = cfg.plugins.get(name) else {
+            self.k.set_live_tools(&prefix, vec![]);
+            return Ok(json!({"applied": true, "state": "removed"}));
+        };
+        let pc = crate::mcp_cli::server_config(name, t)?;
+        if !pc.enabled {
+            self.k.set_live_tools(&prefix, vec![]);
+            return Ok(json!({"applied": true, "state": "disabled"}));
+        }
+        let mut warnings = vec![];
+        let host = ext::start_guarded(&cfg, &self.paths.data, name, &pc, ext::secrets_fn(&self.vault()?), &mut warnings)?;
+        let mut more = vec![];
+        for (what, n) in [("hooks", host.hooks().len()), ("channels", host.channels().len()), ("commands", host.commands.len()), ("routes", host.routes.len()), ("providers", host.providers.len()), ("services", host.services.len()), ("CLI commands", host.cli.len()), ("middleware", host.middleware_kinds().len()), ("node commands", host.node_commands.len()), ("UI panels", host.ui.len()), ("backends", host.backends.len())] {
+            if n > 0 {
+                more.push(what);
+            }
+        }
+        if host.context_engine.is_some() {
+            more.push("a context engine");
+        }
+        if host.memory {
+            more.push("a memory provider");
+        }
+        if host.dashboard_auth.is_some() {
+            more.push("dashboard sign-in");
+        }
+        if !more.is_empty() {
+            return Ok(json!({"applied": false, "restart": true, "why": format!("this plugin also brings {}, which register when the daemon starts", more.join(", "))}));
+        }
+        let mut taken: std::collections::HashSet<String> = self.k.tools_now().iter().map(|t| t.spec().name).filter(|n| !n.starts_with(&prefix)).collect();
+        let tools = host.tools(&mut taken)?;
+        let n = tools.len();
+        self.k.set_live_tools(&prefix, tools);
+        self.plugins.lock().unwrap_or_else(|e| e.into_inner()).insert(name.to_string(), Arc::new(host));
+        Ok(json!({"applied": true, "tools": n, "warnings": warnings}))
+    }
+
     // ───────────── restart-only changes ─────────────
 
     pub fn mark_restart(&self, kind: &str) {
@@ -251,6 +377,17 @@ pub fn applied(kind: &str, name: &str) -> Value {
     let r = match kind {
         "mcp" => live.reload_mcp(name),
         "channels" => live.reload_channels(),
+        "skills.toggle" => live.reload_skills(),
+        "hooks" => live.reload_hooks(),
+        "gmail" => live.reload_gmail(),
+        "acp" => live.reload_acp(),
+        "plugin.process" => match live.reload_plugin(name) {
+            Ok(v) if v["restart"] == true => {
+                live.mark_restart("plugins");
+                return json!({"applied": false, "restart": true, "why": v["why"], "live": v});
+            }
+            r => r,
+        },
         _ => {
             live.mark_restart(kind);
             return json!({"applied": false, "restart": true, "why": RESTART_ONLY.iter().find(|(n, _)| *n == kind).map(|(_, w)| *w).unwrap_or("")});

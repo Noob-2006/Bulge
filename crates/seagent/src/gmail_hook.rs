@@ -565,8 +565,7 @@ impl Watcher {
 }
 
 /// Daemon side: watch registration + renewal thread and the push endpoint.
-pub fn start(k: Kernel, cfg: GmailCfg, stop: seagent_core::Cancel) -> Result<Vec<std::thread::JoinHandle<()>>, String> {
-    let vault = k.vault.clone();
+pub fn start(k: Kernel, cfg: GmailCfg, vault: Arc<seagent_kernel::vault::Vault>, stop: seagent_core::Cancel) -> Result<Vec<std::thread::JoinHandle<()>>, String> {
     let cfg = cfg.resolve(&|s: &str| vault.substitute(s))?;
     let ws = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let kd = k.clone();

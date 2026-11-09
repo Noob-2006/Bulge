@@ -597,7 +597,7 @@ command = "~/.config/seagent/hooks/check-shell.sh"
 
 ## 8. MCP
 
-主控台「設定 → 連線 → MCP 伺服器」做得到下面每一件事：新增 stdio（指令、參數、環境變數、工作目錄）與 HTTP／SSE 伺服器（網址、標頭、OAuth 登入：瀏覽器或裝置代碼）、儲存前先測試、列出工具並逐一停用（寫入 `exclude_tools`）、工具定義變動後重新核准、預設清單，以及從 Claude Desktop／Claude Code、Cursor、VS Code、Windsurf 的 `mcp.json` 匯入（看起來像金鑰的環境變數移進金庫）。stdio 伺服器儲存前顯示和 `seagent mcp add` 相同的 `mcp consent:` 行。寫入走同一個 `mcp_cli::save_server` → `confcli::put_table`：先驗證、留備份（「設定檔」頁可還原）。**不必重新啟動**：伺服器在執行中的 daemon 裡停掉再以新設定載入，工具從下一輪起就換掉；聊天頻道同樣即時套用（沒變的轉接器原樣保留，改過的重建）。外掛、技能開關、hooks、Gmail、ACP 與 A2A 只能在啟動時載入，頁面上方會列出並提供「重新啟動 daemon」按鈕（與 `/restart` 同一個助手）。測試 stdio 草稿前也先顯示 `mcp consent:` 行，確認後才執行。工具定義的釘選可以比對（`pins diff`）、重新核准或忘記。
+主控台「設定 → 連線 → MCP 伺服器」做得到下面每一件事：新增 stdio（指令、參數、環境變數、工作目錄）與 HTTP／SSE 伺服器（網址、標頭、OAuth 登入：瀏覽器或裝置代碼）、儲存前先測試、列出工具並逐一停用（寫入 `exclude_tools`）、工具定義變動後重新核准、預設清單，以及從 Claude Desktop／Claude Code、Cursor、VS Code、Windsurf 的 `mcp.json` 匯入（看起來像金鑰的環境變數移進金庫）。stdio 伺服器儲存前顯示和 `seagent mcp add` 相同的 `mcp consent:` 行。寫入走同一個 `mcp_cli::save_server` → `confcli::put_table`：先驗證、留備份（「設定檔」頁可還原）。**不必重新啟動**：伺服器在執行中的 daemon 裡停掉再以新設定載入，工具從下一輪起就換掉；聊天頻道同樣即時套用（沒變的轉接器原樣保留，改過的重建）。技能開關、hooks（shell hook、套件、內建與外送）、Gmail watcher、ACP 代理與只提供工具的程序外掛也都即時套用；只有帶 hooks／頻道／路由／provider／服務／UI 的外掛、外掛套件與 A2A 要在啟動時載入，頁面上方會列出並提供「重新啟動 daemon」按鈕（與 `/restart` 同一個助手）。測試 stdio 草稿前也先顯示 `mcp consent:` 行，確認後才執行。工具定義的釘選可以比對（`pins diff`）、重新核准或忘記。
 
 ```bash
 seagent mcp add files -- npx -y @modelcontextprotocol/server-filesystem ~/docs

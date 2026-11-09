@@ -173,6 +173,7 @@ pub(crate) fn run(a: &Args, embedded: Option<&Embedded>) -> R {
                 eprintln!("seagentd: {n} channel(s) active");
             }
             crate::hooks_ext::start_daemon_services(&k, &ws, t.clone());
+            live.start_gmail(t.clone());
             ops::backup::spawn_scheduler(paths2.clone(), k.cfg.backup.clone(), t.clone());
             surf.clone().and_then(|s| seagent_app::surfaces::spawn_daemon(s, t.clone()));
             *term.lock().unwrap() = Some(t);

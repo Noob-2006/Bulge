@@ -595,7 +595,7 @@ pub fn plugin_dir(c: &McpServerConfig) -> Option<PathBuf> {
 /// plugin guard): its local directory is scanned first (a `dangerous` verdict refuses it
 /// under `require`), then its declared capabilities must match an accepted record
 /// (`seagent security plugins accept <name>`). `warn` loads it and reports; `off` skips both.
-fn start_guarded(cfg: &Config, data: &Path, n: &str, c: &McpServerConfig, secrets: seagent_plugin::Secrets, warnings: &mut Vec<String>) -> Result<PluginHost, String> {
+pub(crate) fn start_guarded(cfg: &Config, data: &Path, n: &str, c: &McpServerConfig, secrets: seagent_plugin::Secrets, warnings: &mut Vec<String>) -> Result<PluginHost, String> {
     use seagent_security::{plugin_guard, Consent};
     let mode = cfg.security.plugin_consent;
     if mode == Consent::Off {

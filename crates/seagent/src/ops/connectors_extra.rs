@@ -9,7 +9,7 @@
 //!   through `setup::capture`, the function the CLI's prompt feeds);
 //! - the plugin MCP catalog: `seagent plugins mcps | mcp-install`;
 //! - devices: `seagent nodes setup-code` (with the QR code `seagent_app::qr` draws);
-//! - the one-click daemon restart for the changes `connectors_live` cannot hot-apply.
+//! - the one-click daemon restart for the few changes `connectors_live` cannot hot-apply.
 //!
 //! Dispatched from `ops::connectors::call`; writes report `applied` / `restart` the same way.
 
@@ -32,11 +32,11 @@ pub fn call(c: &ConnCtx, m: &str, p: &Value) -> Option<Res> {
     let s = |k: &str| p[k].as_str().unwrap_or("").trim().to_string();
     let live = crate::ops::connectors_live::applied;
     Some(match m {
-        // ── hooks (restart-only: shell hooks and packs load when the daemon starts) ──
+        // ── hooks (applied live: `connectors_live::reload_hooks`) ──
         "ui.connectors.hooks.list" => hooks(c, "list", p),
         "ui.connectors.hooks.approve" | "ui.connectors.hooks.revoke" | "ui.connectors.hooks.enable" => hooks(c, &m["ui.connectors.hooks.".len()..], p).map(|v| merge(v, live("hooks", ""))),
         "ui.connectors.hooks.install" => hooks_install(c, p).map(|v| merge(v, live("hooks", ""))),
-        // ── Gmail (restart-only: the watcher starts with the daemon) ──
+        // ── Gmail (applied live: the watcher restarts) ──
         "ui.connectors.gmail.status" => gmail(c, &["status".into(), "--json".into()]).map(|(_, out)| serde_json::from_str::<Value>(out.trim()).unwrap_or_else(|_| json!({"configured": false, "text": out.trim()}))),
         "ui.connectors.gmail.setup" => gmail_setup(c, p).map(|v| merge(v, live("gmail", ""))),
         "ui.connectors.gmail.enable" => gmail(c, &[if p["enabled"].as_bool().unwrap_or(true) { "enable" } else { "disable" }.into()]).map(|(_, out)| merge(json!({"ok": true, "text": out.trim()}), live("gmail", ""))),

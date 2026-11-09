@@ -651,3 +651,47 @@ fn a_live_listener_starts_after_its_subscription() {
     let e = chan(&t, "ui.connectors.channels.save", json!({"name": "bad", "kind": "webhook", "fields": {"listen": format!("127.0.0.1:{port}"), "token": "tok"}, "extra": [{"key": "lisen", "value": "x"}]})).unwrap_err().1;
     assert!(e.contains("lisen"), "{e}");
 }
+
+/// The former restart-only changes apply live too: the skill switch (index settings + the
+/// `skill` tool), hooks (swapped by name), ACP agents (`acp_delegate`), a tools-only process
+/// plugin, and Gmail (the watcher restarts under the leader token; without one it waits).
+#[test]
+fn skills_hooks_acp_gmail_and_tool_plugins_apply_live() {
+    let t = kit();
+    let c = ctx(&t);
+    let live = crate::ops::connectors_live::Live::new(t.k.clone(), t.paths.clone(), t.ws.clone(), Some(empty_ext(&t)));
+    // Skill switch.
+    let dir = t.ws.join(".seagent/skills/live-skill");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("SKILL.md"), "---\nname: live-skill\ndescription: d\n---\nbody\n").unwrap();
+    ok(&c, "ui.connectors.skills.enable", json!({"name": "live-skill", "enabled": false}));
+    assert_eq!(live.reload_skills().unwrap()["applied"], true);
+    assert!(t.k.specs().iter().any(|s| s.name == "skill"), "the rebuilt skill tool is in place");
+    // Hooks: a newly approved shell hook is installed in the kernel; revoking takes it out.
+    std::fs::write(t.paths.user_config(), format!("{}\n[[hooks]]\nevent = \"pre_tool\"\ncommand = \"echo live\"\n", user_config(&t))).unwrap();
+    assert!(!t.k.hook_names().iter().any(|n| n == "shell:echo live"));
+    ok(&c, "ui.connectors.hooks.approve", json!({"command": "echo live"}));
+    let r = live.reload_hooks().unwrap();
+    assert!(t.k.hook_names().iter().any(|n| n == "shell:echo live"), "{r}");
+    ok(&c, "ui.connectors.hooks.revoke", json!({"command": "echo live"}));
+    live.reload_hooks().unwrap();
+    assert!(!t.k.hook_names().iter().any(|n| n == "shell:echo live"), "revoked without a restart");
+    // ACP: the delegate tool lists the new agent.
+    let me = std::env::current_exe().unwrap().display().to_string();
+    ok(&c, "ui.connectors.acp.save", json!({"name": "liveagent", "command": me}));
+    assert!(live.reload_acp().unwrap()["agents"].as_array().unwrap().iter().any(|a| a == "liveagent"));
+    let spec = t.k.specs().into_iter().find(|s| s.name == "acp_delegate").expect("acp_delegate is live");
+    assert!(spec.description.contains("liveagent"), "{}", spec.description);
+    // Gmail: no leader here, so the reload applies and waits for leadership.
+    let g = live.reload_gmail().unwrap();
+    assert_eq!((g["applied"].as_bool(), g["running"].as_bool()), (Some(true), Some(false)), "{g}");
+    // A process plugin that only brings tools starts live; removing it stops it.
+    let Some(fx) = fixture() else { return };
+    ok(&c, "ui.connectors.plugins.process.save", json!({"name": "toolplug", "spec": {"command": "python3", "args": ["-I", fx]}, "consent": true}));
+    let r = live.reload_plugin("toolplug").unwrap();
+    assert_eq!(r["applied"], true, "{r}");
+    assert!(t.k.specs().iter().any(|s| s.name == "mcp__toolplug__echo"), "{r}");
+    ok(&c, "ui.connectors.plugins.process.remove", json!({"name": "toolplug"}));
+    assert_eq!(live.reload_plugin("toolplug").unwrap()["state"], "removed");
+    assert!(!t.k.specs().iter().any(|s| s.name.starts_with("mcp__toolplug__")));
+}

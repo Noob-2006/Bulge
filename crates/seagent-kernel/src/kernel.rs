@@ -403,6 +403,13 @@ impl Runtime {
     pub fn add_hooks(&self, hooks: Vec<Arc<dyn Hook>>) {
         self.hooks.write().unwrap().extend(hooks);
     }
+    /// Swap the hooks named `old` for `new` (the Connections page reloading shell hooks, packs,
+    /// bundled and outbound hooks); every other hook stays where it is.
+    pub fn replace_hooks(&self, old: &[String], new: Vec<Arc<dyn Hook>>) {
+        let mut h = self.hooks.write().unwrap();
+        h.retain(|x| !old.contains(&x.name()));
+        h.extend(new);
+    }
     /// Names of the installed hooks, in install order (`seagent doctor`, tests).
     pub fn hook_names(&self) -> Vec<String> {
         self.hooks.read().unwrap().iter().map(|h| h.name()).collect()

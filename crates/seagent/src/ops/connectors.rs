@@ -131,7 +131,13 @@ fn apply_live(m: &str, p: &Value, mut v: Value) -> Value {
             let all: Vec<Value> = names.iter().map(|n| live("mcp", n)).collect();
             json!({"applied": all.iter().all(|a| a["applied"] == true), "restart": all.iter().any(|a| a["restart"] == true), "each": all})
         }
-        "ui.connectors.plugins.install" | "ui.connectors.plugins.uninstall" | "ui.connectors.plugins.update" | "ui.connectors.plugins.process.save" | "ui.connectors.plugins.process.remove" => live("plugins", ""),
+        "ui.connectors.plugins.process.save" | "ui.connectors.plugins.process.remove" => {
+            if let Some(o) = p["original"].as_str().filter(|o| !o.trim().is_empty() && o.trim() != name("name")) {
+                live("plugin.process", o.trim());
+            }
+            live("plugin.process", &name("name"))
+        }
+        "ui.connectors.plugins.install" | "ui.connectors.plugins.uninstall" | "ui.connectors.plugins.update" => live("plugins", ""),
         "ui.connectors.acp.save" | "ui.connectors.acp.remove" => live("acp", ""),
         // A listener that had no token or subscription starts once it has one.
         "ui.connectors.webhooks.subscribe" | "ui.connectors.webhooks.remove" => live("channels", ""),
