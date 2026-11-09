@@ -480,9 +480,11 @@ pub(crate) fn start_recording(env: &Env, b: &Browser, target: &str, sid: &str) {
 
 /// Encode recorded frames (`ffmpeg` → webm; without ffmpeg the JPEG frames stay).
 pub fn finish_recordings(b: &Browser) {
-    let (recs, watched): (Vec<(String, (PathBuf, u64))>, Vec<String>) = {
+    let (recs, watched) = {
         let mut s = b.state.lock().unwrap();
-        (s.recording.drain().collect(), s.live.keys().cloned().collect())
+        let recs: Vec<(String, (PathBuf, u64))> = s.recording.drain().collect();
+        let watched: Vec<String> = s.live.keys().cloned().collect();
+        (recs, watched)
     };
     for (sid, (dir, n)) in recs {
         // A console viewer keeps the screencast (its acks pace it again from the next frame).
