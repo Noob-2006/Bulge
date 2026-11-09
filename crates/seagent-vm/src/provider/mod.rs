@@ -188,7 +188,7 @@ pub fn select(cfg: &VmConfig, caps: &Capabilities) -> (ProviderKind, Option<Stri
         }
     }
     if let Some(w) = best.isolation().warning() {
-        return (best, Some(format!("no microVM available on this machine; tools run in a {} ({w})", best.isolation().label())));
+        return (best, Some(format!("no microVM available on this machine; tools run in {} ({w})", with_article(best.isolation().label()))));
     }
     (best, None)
 }
@@ -197,6 +197,13 @@ pub fn select(cfg: &VmConfig, caps: &Capabilities) -> (ProviderKind, Option<Stri
 /// `seagent doctor`, `seagent sandbox vm exec` and the boot log.
 pub fn accel_of(kind: ProviderKind, caps: &Capabilities) -> Option<Accel> {
     caps.usable(kind)
+}
+
+/// `a user-namespace`, `an os-sandbox`, `an app-kernel (gVisor)`: the article the level's
+/// label takes when it is pronounced (Linux's "a user-namespace" text is unchanged).
+fn with_article(label: &str) -> String {
+    let an = label.starts_with("os-") || label.starts_with("app-");
+    format!("{} {label}", if an { "an" } else { "a" })
 }
 
 /// What the operator must be told about a VM that *does* boot but is weaker than the design
@@ -308,7 +315,8 @@ mod tests {
         // The fallback is named after what really runs on Windows: AppContainer, not bwrap.
         assert_eq!(k, ProviderKind::AppContainer);
         let note = note.unwrap();
-        assert!(note.contains("no microVM") && note.contains("os-sandbox") && !note.contains("bwrap"), "the downgrade is spelled out: {note}");
+        assert!(note.contains("no microVM") && note.contains("tools run in an os-sandbox") && !note.contains("bwrap"), "the downgrade is spelled out: {note}");
+        assert_eq!((with_article("user-namespace"), with_article("app-kernel (gVisor)")), ("a user-namespace".to_string(), "an app-kernel (gVisor)".to_string()));
         // macOS likewise falls back to Seatbelt; Linux keeps bwrap.
         let mut m = caps_on(HostOs::Macos);
         (m.vfkit, m.qemu, m.vbox) = (None, None, None);
