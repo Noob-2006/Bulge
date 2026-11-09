@@ -58,6 +58,7 @@ windows = { version = "0.62", default-features = false, features = [
     "Win32_System_WinRT",
     "Win32_System_WinRT_Direct3D11",
     "Win32_System_WinRT_Graphics_Capture",
+    "Win32_UI_WindowsAndMessaging",
 ] }
 # iOS shell substitute (`exec.backend = "wasm"`, docs/cross-platform.md): a pure-Rust WebAssembly
 # *interpreter* (MIT/Apache-2.0, no JIT — App Store policy forbids one — no C code, no unsafe

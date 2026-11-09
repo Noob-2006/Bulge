@@ -46,13 +46,30 @@ impl WgcWindow {
             let d3d: IDirect3DDevice = CreateDirect3D11DeviceFromDXGIDevice(&dxgi).map_err(e("WinRT device"))?.cast().map_err(e("WinRT device"))?;
             let interop = windows::core::factory::<GraphicsCaptureItem, IGraphicsCaptureItemInterop>().map_err(e("interop"))?;
             let item: GraphicsCaptureItem = interop.CreateForWindow(HWND(hwnd as *mut _)).map_err(e("item for the window"))?;
-            let size = item.Size().map_err(e("size"))?;
+            // On a desktop that is not displayed the item can report 0×0: use the window's rect.
+            let mut size = item.Size().map_err(e("size"))?;
+            if size.Width <= 0 || size.Height <= 0 {
+                let mut r = windows::Win32::Foundation::RECT::default();
+                let _ = windows::Win32::UI::WindowsAndMessaging::GetWindowRect(HWND(hwnd as *mut _), &mut r);
+                size = windows::Graphics::SizeInt32 { Width: (r.right - r.left).max(1), Height: (r.bottom - r.top).max(1) };
+            }
             let pool = Direct3D11CaptureFramePool::CreateFreeThreaded(&d3d, DirectXPixelFormat::B8G8R8A8UIntNormalized, 2, size).map_err(e("frame pool"))?;
             let session = pool.CreateCaptureSession(&item).map_err(e("session"))?;
             let _ = session.SetIsCursorCaptureEnabled(false);
             let _ = session.SetIsBorderRequired(false);
             session.StartCapture().map_err(e("start"))?;
             Ok(WgcWindow { device, ctx, pool, session, staging: None, frames: 0 })
+        }
+    }
+
+    /// The size the capture item reports for `hwnd` (diagnostics).
+    pub fn item_size(hwnd: isize) -> Result<(i32, i32), String> {
+        // SAFETY: WinRT factory call; the item is dropped at once.
+        unsafe {
+            let interop = windows::core::factory::<GraphicsCaptureItem, IGraphicsCaptureItemInterop>().map_err(e("interop"))?;
+            let item: GraphicsCaptureItem = interop.CreateForWindow(HWND(hwnd as *mut _)).map_err(e("item for the window"))?;
+            let s = item.Size().map_err(e("size"))?;
+            Ok((s.Width, s.Height))
         }
     }
 
@@ -145,7 +162,7 @@ mod tests {
         d.stop();
         match r {
             Ok((frames, distinct, s)) => eprintln!("WGC on a non-displayed Bot Desktop: {frames} frames delivered, {distinct} distinct pictures in {s:.1} s = {:.1} fps", f64::from(distinct) / s),
-            Err(e) => eprintln!("WGC on a non-displayed Bot Desktop: {e}"),
+            Err(e) => eprintln!("WGC on a non-displayed Bot Desktop: {e} (item size there: {:?})", WgcWindow::item_size(hwnd)),
         }
     }
 }

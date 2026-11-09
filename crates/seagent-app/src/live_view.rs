@@ -1492,10 +1492,25 @@ mod tests {
         let home = seagent_core::tmp::TempDir::new("seagent-live-editor");
         let a = app(home.path());
         let data = home.path().join("data");
-        let desk = seagent_browser::control::screen::Desktop::new(&data);
+        let mut desk = seagent_browser::control::screen::Desktop::new(&data);
+        desk.geometry = "1920x1080".into();
+        #[cfg(target_os = "linux")]
+        let mut _bare = None;
         if let Err(e) = desk.start() {
-            eprintln!("skipping: no Bot Desktop on this host: {e}");
-            return;
+            // Linux with Xvnc but without the Xfce session: the same Xvnc the launcher runs, bare.
+            #[cfg(target_os = "linux")]
+            match bare_xvnc(&data) {
+                Ok(g) => _bare = Some(g),
+                Err(e2) => {
+                    eprintln!("skipping: no Bot Desktop on this host: {e}; bare Xvnc: {e2}");
+                    return;
+                }
+            }
+            #[cfg(not(target_os = "linux"))]
+            {
+                eprintln!("skipping: no Bot Desktop on this host: {e}");
+                return;
+            }
         }
         struct StopDesk(seagent_browser::control::screen::Desktop);
         impl Drop for StopDesk {
@@ -1593,6 +1608,44 @@ mod tests {
             image::DynamicImage::ImageRgba8(c).to_rgb8().save(out.join(format!("bot-desktop-editor-{}.jpg", std::env::consts::OS))).unwrap();
         }
         assert!(fps >= 30.0, "a busy window streams at ≥ 30 fps: {fps:.1}");
+    }
+
+    /// Xvnc as the Bot Desktop launcher runs it (RFB on a 0600 Unix socket only, no TCP,
+    /// SecurityTypes None, -FrameRate 60) at 1920×1080, registered in `<data>/bot-desktop`
+    /// (launcher.pid, env, rfb.sock) so the live view finds it like the launcher's — for hosts
+    /// with Xvnc but without the Xfce session. Killed on drop.
+    #[cfg(target_os = "linux")]
+    fn bare_xvnc(data: &std::path::Path) -> Result<impl Drop, String> {
+        struct Guard(std::process::Child);
+        impl Drop for Guard {
+            fn drop(&mut self) {
+                let _ = self.0.kill();
+                let _ = self.0.wait();
+            }
+        }
+        let state = data.join("bot-desktop");
+        std::fs::create_dir_all(&state).map_err(|e| e.to_string())?;
+        let n = (70..99).find(|n| !std::path::Path::new(&format!("/tmp/.X{n}-lock")).exists()).ok_or("no free X display")?;
+        let sock = state.join("rfb.sock");
+        let child = std::process::Command::new("Xvnc")
+            .args([format!(":{n}"), "-geometry".into(), "1920x1080".into(), "-depth".into(), "24".into(), "-rfbport".into(), "-1".into(), "-rfbunixpath".into(), sock.display().to_string(), "-rfbunixmode".into(), "0600".into(), "-SecurityTypes".into(), "None".into(), "-AlwaysShared".into(), "-FrameRate".into(), "60".into(), "-nolisten".into(), "tcp".into()])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .map_err(|e| format!("Xvnc: {e}"))?;
+        let g = Guard(child);
+        let t0 = Instant::now();
+        while !sock.exists() && t0.elapsed() < Duration::from_secs(10) {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        if !sock.exists() {
+            return Err("Xvnc did not create its RFB socket".into());
+        }
+        let pid = g.0.id() as i32;
+        let born = seagent_browser::control::screen::start_time(pid).ok_or("no start time")?;
+        std::fs::write(state.join("launcher.pid"), format!("{pid} {born}\n")).map_err(|e| e.to_string())?;
+        std::fs::write(state.join("env"), format!("DISPLAY=:{n}\n")).map_err(|e| e.to_string())?;
+        Ok(g)
     }
 
     /// Width × height of a baseline/progressive JPEG (its SOF marker).
