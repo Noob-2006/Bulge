@@ -300,8 +300,10 @@ pub struct Boost {
 }
 
 impl Default for Boost {
+    /// Starts ahead (1.5×), so a new viewer is at its rate from the first second; three good
+    /// seconds bring it down when the page does not need it.
     fn default() -> Self {
-        Boost { factor: 1.0, window: None, good: 0 }
+        Boost { factor: 1.5, window: None, good: 0 }
     }
 }
 
@@ -561,7 +563,8 @@ mod tests {
     #[test]
     fn the_ack_boost_rises_when_short_and_falls_back() {
         let t = Instant::now();
-        let mut b = Boost::default();
+        assert_eq!(Boost::default().factor, 1.5, "a new viewer starts ahead");
+        let mut b = Boost { factor: 1.0, ..Default::default() };
         // 25 frames a second against a choice of 30: short, so acks run ahead.
         for i in 0..=25 {
             b.delivered(t + Duration::from_millis(40 * i), 30);

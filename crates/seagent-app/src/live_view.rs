@@ -1574,7 +1574,7 @@ mod tests {
             eprintln!("LIVE Bot Desktop patch mode ({label}, cap {fps}): {patches} page patches + {bases} base pictures in {s:.1} s = {fps_real:.1} fps; latency p50 {} ms, p95 {} ms; {:.2} MB/s; CPU server {cpu:.0}%, browser {br:.0}%; stats mode {mode}", pct(50), pct(95), bytes as f64 / 1e6 / s);
             (fps_real, base, patch)
         };
-        let (f30, base, (pm, patch)) = measure(30, 6, "busy page");
+        let (f30, base, (pm, patch)) = measure(30, 10, "busy page");
         // What the console shows: the base picture with the page patch drawn at its place.
         let mut comp = image::load_from_memory(&base).expect("a base picture").to_rgba8();
         let page = image::load_from_memory(&patch).expect("a page patch").to_rgba8();
