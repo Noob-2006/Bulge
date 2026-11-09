@@ -638,6 +638,86 @@ pub fn kill_group(pgid: i32, grace: Duration) {
     win::terminate(pgid);
 }
 
+/// Every live descendant of `pid` (children, grandchildren, …), not `pid` itself. Windows: a
+/// Toolhelp snapshot, where a recycled parent pid is told apart by creation time (a real child
+/// starts no earlier than its parent); Linux / Android: `/proc/*/stat` ppid; macOS: `ps`.
+/// Other targets: empty.
+pub fn descendants(pid: i32) -> Vec<i32> {
+    if pid <= 0 {
+        return vec![];
+    }
+    #[cfg(windows)]
+    let pairs = win::process_pairs();
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    let pairs: Vec<(i32, i32, u64)> = std::fs::read_dir("/proc")
+        .map(|rd| {
+            rd.flatten()
+                .filter_map(|e| e.file_name().to_str()?.parse::<i32>().ok())
+                .filter_map(|p| {
+                    let s = std::fs::read_to_string(format!("/proc/{p}/stat")).ok()?;
+                    let mut f = s.rsplit(')').next()?.split_whitespace();
+                    let state = f.next()?;
+                    (state != "Z").then_some(())?;
+                    Some((p, f.next()?.parse().ok()?, 0))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    #[cfg(target_os = "macos")]
+    let pairs: Vec<(i32, i32, u64)> = std::process::Command::new("ps")
+        .args(["-A", "-o", "pid=,ppid="])
+        .output()
+        .map(|o| {
+            String::from_utf8_lossy(&o.stdout)
+                .lines()
+                .filter_map(|l| {
+                    let mut w = l.split_whitespace();
+                    Some((w.next()?.parse().ok()?, w.next()?.parse().ok()?, 0))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    #[cfg(not(any(windows, target_os = "linux", target_os = "android", target_os = "macos")))]
+    let pairs: Vec<(i32, i32, u64)> = vec![];
+    tree_below(pid, &pairs)
+}
+
+/// The descendants of `root` in a `(pid, ppid, creation time)` table (creation time 0 =
+/// unknown, never used to reject). Pure, so the walk is unit-tested on every target.
+pub fn tree_below(root: i32, pairs: &[(i32, i32, u64)]) -> Vec<i32> {
+    let born = |p: i32| pairs.iter().find(|(q, _, _)| *q == p).map(|(_, _, t)| *t).unwrap_or(0);
+    let mut out: Vec<i32> = vec![];
+    let mut frontier = vec![root];
+    while let Some(parent) = frontier.pop() {
+        let pt = born(parent);
+        for &(p, pp, t) in pairs {
+            // A child is never older than its parent: an older "child" names a recycled pid.
+            if pp == parent && p != root && !out.contains(&p) && (pt == 0 || t == 0 || t >= pt) {
+                out.push(p);
+                frontier.push(p);
+            }
+        }
+    }
+    out
+}
+
+/// Windows: end `pid` and every descendant (a launcher such as Git's `bin\sh.exe` hands its
+/// real work to a child, so ending only `pid` would leave that child running). A process with
+/// a registered job goes through [`kill_group`]. Never touches our own process.
+#[cfg(windows)]
+pub fn kill_tree(pid: i32) {
+    if pid <= 0 || pid as u32 == std::process::id() {
+        return;
+    }
+    let below = descendants(pid);
+    kill_group(pid, Duration::ZERO);
+    for p in below {
+        if p as u32 != std::process::id() {
+            win::terminate(p);
+        }
+    }
+}
+
 #[cfg(windows)]
 pub fn start_time(pid: i32) -> Option<u64> {
     if pid <= 0 {
@@ -760,6 +840,30 @@ pub(crate) mod win {
         }
     }
 
+    /// `(pid, parent pid, creation time)` of every process in a Toolhelp snapshot (creation
+    /// time 0 when the process cannot be opened).
+    pub fn process_pairs() -> Vec<(i32, i32, u64)> {
+        use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
+        use windows_sys::Win32::System::Diagnostics::ToolHelp::{CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W, TH32CS_SNAPPROCESS};
+        let mut raw: Vec<(u32, u32)> = vec![];
+        // SAFETY: snapshot handle owned and closed here; `e` is a POD with dwSize set.
+        unsafe {
+            let snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+            if snap == INVALID_HANDLE_VALUE {
+                return vec![];
+            }
+            let mut e: PROCESSENTRY32W = std::mem::zeroed();
+            e.dwSize = std::mem::size_of::<PROCESSENTRY32W>() as u32;
+            let mut ok = Process32FirstW(snap, &mut e);
+            while ok != 0 {
+                raw.push((e.th32ProcessID, e.th32ParentProcessID));
+                ok = Process32NextW(snap, &mut e);
+            }
+            CloseHandle(snap);
+        }
+        raw.into_iter().filter(|(p, _)| *p != 0).map(|(p, pp)| (p as i32, pp as i32, creation_time(p).unwrap_or(0))).collect()
+    }
+
     fn active(job: HANDLE) -> u32 {
         // SAFETY: zeroed POD out-parameter of the size we pass.
         unsafe {
@@ -838,6 +942,39 @@ pub(crate) mod win {
         // SAFETY: valid process handle and out-parameters.
         let ok = unsafe { GetProcessTimes(p.0, &mut c, &mut e, &mut k, &mut u) };
         (ok != 0).then(|| ((c.dwHighDateTime as u64) << 32) | c.dwLowDateTime as u64)
+    }
+}
+
+#[cfg(test)]
+mod tree_tests {
+    use super::*;
+
+    #[test]
+    fn tree_walk_follows_children_and_rejects_recycled_parents() {
+        // 10 → 11 → 12, 10 → 13; 14 claims parent 10 but is older (recycled pid); 20 unrelated.
+        let t = [(10, 1, 100), (11, 10, 110), (12, 11, 120), (13, 10, 105), (14, 10, 50), (20, 1, 90)];
+        let mut d = tree_below(10, &t);
+        d.sort();
+        assert_eq!(d, vec![11, 12, 13]);
+        assert!(tree_below(20, &t).is_empty());
+        // Unknown creation times (0) never reject.
+        assert_eq!(tree_below(1, &[(2, 1, 0), (3, 2, 0)]), vec![2, 3]);
+        assert!(descendants(0).is_empty());
+    }
+
+    /// A real child shows up under this process (all desktop OSes).
+    #[cfg(any(windows, target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn descendants_sees_a_live_child() {
+        #[cfg(windows)]
+        let mut c = std::process::Command::new("cmd").args(["/c", "ping -n 30 127.0.0.1 >nul"]).spawn().unwrap();
+        #[cfg(not(windows))]
+        let mut c = std::process::Command::new("sleep").arg("30").spawn().unwrap();
+        let me = std::process::id() as i32;
+        let seen = crate::proc::wait_until(Duration::from_secs(5), || descendants(me).contains(&(c.id() as i32)));
+        let _ = c.kill();
+        let _ = c.wait();
+        assert!(seen, "child {} not among descendants of {me}", c.id());
     }
 }
 
