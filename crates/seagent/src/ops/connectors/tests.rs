@@ -455,3 +455,18 @@ fn connectors_js_calls_only_served_methods() {
         assert!(!crate::ops::ui_methods::METHODS.contains(m) && !crate::ops::webui::METHODS.contains(m), "`{m}` registered twice");
     }
 }
+
+/// `seagent channel kinds|add|rm|test` belong to `channels_setup`; `list` and `send` stay with
+/// `main.rs`, and other commands are never claimed.
+#[test]
+fn channel_cli_claims_only_its_subcommands() {
+    let a = |v: &[&str]| crate::args::Args::parse(&v.iter().map(|s| s.to_string()).collect::<Vec<_>>()).unwrap();
+    for sub in ["list", "send"] {
+        assert!(channels_setup::dispatch("channel", &a(&[sub]), &[]).is_none(), "{sub}");
+    }
+    assert!(channels_setup::dispatch("mcp", &a(&["add"]), &[]).is_none());
+    assert!(channels_setup::dispatch("channel", &a(&[]), &[]).is_none());
+    // `--kind`, `--chat`, `--dm-policy`, `--allow` parse as value flags.
+    let parsed = a(&["add", "tg", "--kind", "telegram", "--chat", "1", "--dm-policy", "open", "--allow", "1,2", "--set", "token={{secret:T}}"]);
+    assert_eq!((parsed.val("kind"), parsed.val("chat"), parsed.val("allow")), (Some("telegram"), Some("1"), Some("1,2")));
+}

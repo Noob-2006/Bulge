@@ -102,7 +102,7 @@
     const tools = r.tools || [];
     return `<div class="cn-res ok"><strong>${E(L('連線成功', 'Connected'))}</strong> <span class="dim">${r.ms} ms · ${tools.length} ${E(L('個工具', 'tools'))}${r.resolved ? ' · ' + E(r.resolved) : ''}</span>
       ${(r.withheld || []).length ? `<p class="bad">${E(L('工具定義變了，暫停使用：', 'Tools changed since approval and are withheld:'))} ${E(r.withheld.map((w) => w.tool + ' (' + w.why + ')').join(', '))} ${btn(L('重新核准', 'Re-approve'), `data-mcppins="${E(name)}"`)}</p>` : ''}
-      <table class="kv">${tools.map((t) => `<tr><td><input type="checkbox" data-mcptool="${E(name)}" data-tool="${E(t.name)}"${t.exposed ? ' checked' : ''}></td><td class="mono">${E(t.name)}</td><td>${t.read_only ? `<span class="chip">${E(L('唯讀', 'read-only'))}</span>` : ''}${t.destructive ? `<span class="chip bad">${E(L('破壞性', 'destructive'))}</span>` : ''}</td><td class="dim">${E(t.description)}</td></tr>`).join('')}</table>
+      <table class="kv">${tools.map((t) => `<tr><td><input type="checkbox" data-mcptool="${E(name)}" data-tool="${E(t.name)}"${t.exposed ? ' checked' : ''}></td><td class="mono">${E(t.name)}</td><td>${t.read_only ? `<span class="chip">${E(L('唯讀', 'read-only'))}</span>` : ''}</td><td class="dim">${E(t.description)}</td></tr>`).join('')}</table>
       <p class="dim">${E(L('取消勾選即停用該工具（寫入 exclude_tools）。', 'Untick a tool to turn it off (written to exclude_tools).'))}</p></div>`;
   }
   function mcpForm(f) {
@@ -249,7 +249,8 @@
     return h;
   }
   function bindSkills() {
-    const done = async (r) => { CN.skillResult = r; await reopen(); if (r && r.ok) note(L('完成；新的對話會用到它。', 'Done; new conversations will use it.')); };
+    // A failed call already put its error in the note; re-rendering would wipe it.
+    const done = async (r) => { if (!r) { const x = one('#skResult'); if (x) x.innerHTML = ''; return; } CN.skillResult = r; await reopen(); if (r && r.ok) note(L('完成；新的對話會用到它。', 'Done; new conversations will use it.')); };
     const install = async (id) => { if (!id) { note(L('請填識別碼', 'Give an identifier'), true); return; } one('#skResult').innerHTML = '<span class="star spin"></span>'; const r = await run(() => rpc('ui.connectors.skills.install', { id, name: val('skName'), category: val('skCat'), force: checked('skForce') })); await done(r || null); };
     one('[data-skinstall]').onclick = () => install(val('skId'));
     for (const b of all('[data-skid]')) b.onclick = () => install(b.dataset.skid);
@@ -302,7 +303,7 @@
   }
   function bindPlugins() {
     bindForm();
-    const done = async (r) => { CN.pluginResult = r; await reopen(); if (r && r.ok) note(RESTART()); };
+    const done = async (r) => { if (!r) { const x = one('#plResult'); if (x) x.innerHTML = ''; return; } CN.pluginResult = r; await reopen(); if (r && r.ok) note(RESTART()); };
     const install = async (spec) => { if (!spec) { note(L('請填外掛', 'Give a plugin'), true); return; } one('#plResult').innerHTML = '<span class="star spin"></span>'; done(await run(() => rpc('ui.connectors.plugins.install', { spec, force: checked('plForce') }))); };
     one('[data-plinstall]').onclick = () => install(val('plSpec'));
     one('[data-plupdate]').onclick = async () => done(await run(() => rpc('ui.connectors.plugins.update', { force: checked('plForce') })));

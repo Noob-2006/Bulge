@@ -29,3 +29,7 @@
   .cn-actions { white-space: normal; }
   .cn-target { max-width: 160px; }
 }
+/* Phones: wide tables scroll inside the page instead of pushing it sideways. */
+@media (max-width: 720px) {
+  .cn-body table.kv { display: block; overflow-x: auto; max-width: 100%; }
+}
