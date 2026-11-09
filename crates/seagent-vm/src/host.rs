@@ -402,7 +402,7 @@ pub fn process_identity(pid: u32) -> Option<String> {
     }
     #[cfg(windows)]
     {
-        return win::image_path(pid);
+        win::image_path(pid)
     }
     #[cfg(not(windows))]
     {

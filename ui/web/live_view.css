@@ -13,3 +13,7 @@
 @media (max-width: 640px) { .work-level { max-width: 110px; } .work-last { display: none; } }
 /* The footer is crowded: buttons keep their words on one line (they never squeeze into a column). */
 #workTermBtn, #workTake { flex: none; white-space: nowrap; }
+/* Patch mode: the composed canvas over the desktop picture (which stays for click mapping). */
+.work-canvas { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; pointer-events: none; }
+.work-canvas[hidden] { display: none; }
+.work-stage.canvas-on img { opacity: 0; }

@@ -255,11 +255,13 @@ fi
 # only by processes running as this user (the gateway's WebSocket bridge does the real authentication;
 # same-UID processes, the bot's own terminal tool included, are inside that boundary by design).
 # -SendCutText=0: watchers must never receive the holder's clipboard; -AcceptCutText stays on so
-# paste INTO the screen keeps working. -MaxCutText caps a client cut-text at 256 KiB — the same bound
+# paste INTO the screen keeps working. -FrameRate 60 (Xvnc's default): the console's live view
+# streams at least 30 fps, so the server must not cap updates at exactly 30.
+# -MaxCutText caps a client cut-text at 256 KiB — the same bound
 # the bridge enforces (tools/bot_desktop/rfb_filter.py _MAX_CUT_TEXT); keep the two in sync.
 Xvnc "$DISPLAY" -geometry "$GEOM" -depth "$DEPTH" -dpi 96 \
   -rfbport -1 -rfbunixpath "$SEAGENT_BD_SOCKET" -rfbunixmode 0600 \
-  -SecurityTypes None -AlwaysShared -AcceptSetDesktopSize -FrameRate 30 -SendCutText=0 -MaxCutText 262144 \
+  -SecurityTypes None -AlwaysShared -AcceptSetDesktopSize -FrameRate 60 -SendCutText=0 -MaxCutText 262144 \
   -desktop "seagent:$SEAGENT_BD_PROFILE" -auth "$XAUTHORITY" -nolisten tcp \
   -Log '*:stderr:30' 2> >(grep -v --line-buffered 'Could not resolve keysym' >&2) &
 XVNC_PID=$!

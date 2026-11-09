@@ -53,8 +53,15 @@ impl Opts {
     }
     /// Shortest gap between two acks.
     pub fn min_gap(&self) -> Duration {
-        Duration::from_millis(1000 / u64::from(self.fps.max(1)))
+        frame_gap(self.fps)
     }
+}
+
+/// The interval between frames for a chosen rate. The choice is a floor ("at least 30 fps"),
+/// so streams are paced 10 % faster than it: timer jitter and a busy machine then still land
+/// on or above the number the viewer picked instead of just below it.
+pub fn frame_gap(fps: u32) -> Duration {
+    Duration::from_micros(10_000_000 / (u64::from(fps.max(1)) * 11))
 }
 
 /// One screencast frame.
@@ -180,8 +187,10 @@ impl CastState {
         match self.unacked.front() {
             Some(&(s, id)) if s <= seen => {
                 if let Some(t) = self.last_ack {
-                    // Early by Chrome's production time, but never more than half an interval.
-                    let due = t + min_gap - self.lead.min(min_gap / 2);
+                    // Early by Chrome's production time (up to a whole interval: a large frame can
+                    // take Chrome longer to make than the interval; each viewer's delivery slots
+                    // still hold the rate).
+                    let due = t + min_gap - self.lead.min(min_gap);
                     if due > now {
                         return Release::Wait(due - now);
                     }
@@ -234,12 +243,98 @@ impl Cast {
     }
 }
 
+/// Where a tab's page (its viewport, without the browser's own toolbars) is on the screen, in
+/// device pixels, and whether it is the tab the window shows. From the page's own
+/// `screenX` / `outer*` / `inner*` (the window frame is symmetric left / right / bottom), so it
+/// works the same on every OS; it never touches the idle clock.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct OnScreen {
+    pub x: i32,
+    pub y: i32,
+    pub width: u32,
+    pub height: u32,
+    pub visible: bool,
+}
+
+const GEOMETRY_JS: &str = "JSON.stringify([screenX, screenY, outerWidth, outerHeight, innerWidth, innerHeight, devicePixelRatio, document.visibilityState === 'visible'])";
+
+/// [`OnScreen`] of `target`.
+pub fn page_on_screen(b: &Browser, target: &str) -> Result<OnScreen, String> {
+    let sid = crate::view::page_session(b, target)?;
+    let r = b.conn.call_with("Runtime.evaluate", json!({"expression": GEOMETRY_JS, "returnByValue": true}), Some(&sid), Duration::from_secs(3), &|| None)?;
+    let v: Vec<Value> = serde_json::from_str(r["result"]["value"].as_str().ok_or("no page geometry")?).map_err(|e| e.to_string())?;
+    on_screen_from(&v).ok_or_else(|| "bad page geometry".into())
+}
+
+/// The arithmetic of [`page_on_screen`]: `[screenX, screenY, outerW, outerH, innerW, innerH,
+/// dpr, visible]` (CSS px) → device pixels.
+pub fn on_screen_from(v: &[Value]) -> Option<OnScreen> {
+    let f = |i: usize| v.get(i).and_then(Value::as_f64);
+    let (sx, sy, ow, oh, iw, ih, dpr) = (f(0)?, f(1)?, f(2)?, f(3)?, f(4)?, f(5)?, f(6).filter(|d| *d > 0.0).unwrap_or(1.0));
+    let border = ((ow - iw) / 2.0).max(0.0);
+    let (x, y) = (sx + border, sy + (oh - ih - border).max(0.0));
+    Some(OnScreen { x: (x * dpr).round() as i32, y: (y * dpr).round() as i32, width: (iw * dpr).round().max(1.0) as u32, height: (ih * dpr).round().max(1.0) as u32, visible: v.get(7).and_then(Value::as_bool).unwrap_or(false) })
+}
+
+/// Does the page `target` hold the input focus (its window is the active one)?
+pub fn page_has_focus(b: &Browser, target: &str) -> bool {
+    let Ok(sid) = crate::view::page_session(b, target) else { return false };
+    b.conn.call_with("Runtime.evaluate", json!({"expression": "document.hasFocus()", "returnByValue": true}), Some(&sid), Duration::from_secs(3), &|| None).is_ok_and(|r| r["result"]["value"] == true)
+}
+
+/// The tab of `b` its window shows (the visible document), if any.
+pub fn visible_page(b: &Browser) -> Option<(String, OnScreen)> {
+    let tabs = b.tabs(None).ok()?;
+    tabs.iter().filter_map(|t| t["targetId"].as_str()).find_map(|t| page_on_screen(b, t).ok().filter(|g| g.visible).map(|g| (t.to_string(), g)))
+}
+
 fn ack(b: &Browser, page_session: &str, id: i64) {
     b.conn.send_nowait("Page.screencastFrameAck", json!({"sessionId": id}), Some(page_session));
 }
 
 fn screencast_params((q, w, h): (u8, u32, u32)) -> Value {
     json!({"format": "jpeg", "quality": q, "maxWidth": w, "maxHeight": h, "everyNthFrame": 1})
+}
+
+/// The ack boost of one viewer: delivered frames are counted per second against the chosen
+/// rate; short → the boost rises ×1.25 (up to 2×), three good seconds → it falls ÷1.1 (to 1×).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Boost {
+    pub factor: f64,
+    window: Option<(Instant, u32)>,
+    good: u8,
+}
+
+impl Default for Boost {
+    /// Starts ahead (1.5×), so a new viewer is at its rate from the first second; three good
+    /// seconds bring it down when the page does not need it.
+    fn default() -> Self {
+        Boost { factor: 1.5, window: None, good: 0 }
+    }
+}
+
+impl Boost {
+    /// One frame delivered at `now` to a viewer that chose `fps`.
+    pub fn delivered(&mut self, now: Instant, fps: u32) {
+        let (start, n) = self.window.get_or_insert((now, 0));
+        *n += 1;
+        let secs = now.duration_since(*start).as_secs_f64();
+        if secs < 1.0 {
+            return;
+        }
+        let rate = f64::from(*n) / secs;
+        self.window = Some((now, 0));
+        if rate < f64::from(fps) * 1.03 {
+            self.factor = (self.factor * 1.25).min(2.0);
+            self.good = 0;
+        } else {
+            self.good += 1;
+            if self.good >= 3 {
+                self.factor = (self.factor / 1.1).max(1.0);
+                self.good = 0;
+            }
+        }
+    }
 }
 
 /// A viewer of one tab. Dropping the last viewer stops the screencast.
@@ -256,6 +351,11 @@ pub struct Viewer {
     /// the acks, paces the screencast. Slots follow the previous slot (not the late wake-up),
     /// so coarse OS timers (Windows: 15.6 ms) do not drag the average below the cap.
     next_slot: Option<Instant>,
+    /// How much faster than this viewer's rate acks are released (1–2×). A large page on a
+    /// headed browser can take Chrome longer than one interval to produce; running the acks
+    /// ahead lets it work on the next frame meanwhile. Raised while the delivered rate falls
+    /// short of the choice, lowered again after three good seconds ([`Boost`]).
+    boost: Boost,
 }
 
 /// Start (or join) the live stream of `target`.
@@ -286,7 +386,7 @@ pub fn watch(b: &Arc<Browser>, target: &str, opts: Opts) -> Result<Viewer, Strin
         drop(g);
         (cast, id, start)
     };
-    let v = Viewer { b: b.clone(), cast, id, opts, seen: 0, target: target.to_string(), info: None, next_slot: None };
+    let v = Viewer { b: b.clone(), cast, id, opts, seen: 0, target: target.to_string(), info: None, next_slot: None, boost: Boost::default() };
     if let Some(e) = start {
         // Dropping `v` on failure undoes the registration.
         b.conn.call_with("Page.startScreencast", screencast_params(e), Some(&sid), Duration::from_secs(5), &|| None)?;
@@ -319,11 +419,12 @@ impl Viewer {
     pub fn next(&mut self, timeout: Duration) -> Option<Arc<LiveFrame>> {
         let deadline = Instant::now() + timeout;
         let gap = self.opts.min_gap();
+        let ack_gap = gap.div_f64(self.boost.factor);
         let mut g = self.cast.state.lock().unwrap();
         loop {
             let now = Instant::now();
             let mut wake = deadline;
-            match g.release(self.seen, now, gap) {
+            match g.release(self.seen, now, ack_gap) {
                 Release::Ack(id) => {
                     ack(&self.b, &self.cast.page_session, id);
                     continue;
@@ -341,6 +442,7 @@ impl Viewer {
                             Some(due) if now < due + gap => due + gap,
                             _ => now + gap,
                         });
+                        self.boost.delivered(now, self.opts.fps);
                         return g.latest.clone();
                     }
                 }
@@ -423,12 +525,24 @@ mod tests {
     }
 
     #[test]
+    fn page_geometry_maps_to_device_pixels() {
+        // A Windows window at (100, 50): 8 px invisible borders, 87 px of tab strip + toolbar.
+        let g = on_screen_from(&serde_json::from_str::<Vec<Value>>("[100, 50, 1416, 908, 1400, 813, 1, true]").unwrap()).unwrap();
+        assert_eq!(g, OnScreen { x: 108, y: 137, width: 1400, height: 813, visible: true });
+        // A frameless, maximized window on a 2x screen.
+        let g = on_screen_from(&serde_json::from_str::<Vec<Value>>("[0, 0, 1280, 800, 1280, 720, 2, false]").unwrap()).unwrap();
+        assert_eq!(g, OnScreen { x: 0, y: 160, width: 2560, height: 1440, visible: false });
+        assert!(on_screen_from(&[]).is_none());
+    }
+
+    #[test]
     fn opts_are_capped() {
         let o = Opts { max_width: 99_999, max_height: 1, quality: 200, fps: 0 }.clamped();
         assert_eq!(o, Opts { max_width: 3840, max_height: 160, quality: 95, fps: 1 });
         assert_eq!(Opts::default(), Opts { max_width: 1920, max_height: 1080, quality: 85, fps: 30 }, "crisp by default");
-        assert_eq!(Opts { fps: 10, ..Default::default() }.min_gap(), Duration::from_millis(100));
-        assert_eq!(Opts { fps: 500, ..Default::default() }.clamped().min_gap(), Duration::from_millis(16), "up to 60 fps");
+        assert_eq!(Opts { fps: 10, ..Default::default() }.min_gap(), Duration::from_micros(90_909), "10 % headroom over the chosen rate");
+        assert_eq!(Opts { fps: 500, ..Default::default() }.clamped().min_gap(), frame_gap(60), "up to 60 fps");
+        assert_eq!(frame_gap(30).as_micros(), 30_303, "30 fps chosen: paced at 33");
     }
 
     #[test]
@@ -450,6 +564,28 @@ mod tests {
         assert_eq!(s.release(2, t1, gap), Release::Wait(Duration::from_millis(90)));
         assert_eq!(s.release(2, t0 + gap, gap), Release::Ack(12));
         assert_eq!((s.frames_in, s.acks), (2, 2));
+    }
+
+    #[test]
+    fn the_ack_boost_rises_when_short_and_falls_back() {
+        let t = Instant::now();
+        assert_eq!(Boost::default().factor, 1.5, "a new viewer starts ahead");
+        let mut b = Boost { factor: 1.0, ..Default::default() };
+        // 25 frames a second against a choice of 30: short, so acks run ahead.
+        for i in 0..=25 {
+            b.delivered(t + Duration::from_millis(40 * i), 30);
+        }
+        assert_eq!(b.factor, 1.25);
+        for i in 26..=200 {
+            b.delivered(t + Duration::from_millis(40 * i), 30);
+        }
+        assert_eq!(b.factor, 2.0, "capped at twice the rate");
+        // 33 a second (the paced rate): three good seconds take 10 % off each time.
+        let t2 = t + Duration::from_secs(10);
+        for i in 0..=400 {
+            b.delivered(t2 + Duration::from_micros(30_303 * i), 30);
+        }
+        assert!(b.factor < 2.0 && b.factor >= 1.0, "{}", b.factor);
     }
 
     #[test]
@@ -479,12 +615,12 @@ mod tests {
         s.offer_at(frame(99), 99, a);
         let Release::Wait(d) = s.release(99, a, gap) else { panic!() };
         assert!((ms(22)..=ms(24)).contains(&(d + ms(10))), "ack {:?} after the previous", d + ms(10));
-        // The lead never takes more than half an interval off.
+        // A frame that takes Chrome longer than an interval to make: acked as soon as delivered.
         s.lead = ms(500);
         let b = a + d;
         assert_eq!(s.release(99, b, gap), Release::Ack(99));
         s.offer_at(frame(100), 100, b);
-        assert_eq!(s.release(100, b, gap), Release::Wait(gap - gap / 2));
+        assert_eq!(s.release(100, b, gap), Release::Ack(100));
     }
 
     #[test]

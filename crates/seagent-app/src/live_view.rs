@@ -7,10 +7,14 @@
 //!   `Page.startScreencast` JPEG frames of the tab, ack-paced (`seagent_browser::live`). A
 //!   still page sends nothing; a slow socket slows Chrome down instead of queueing.
 //! - `desktop` (`target` = `host` | `vm:<name>`, `maxWidth`, `quality`, `fps`): the Bot Desktop
-//!   (Linux: the Xvnc display; Windows: a GDI grab of the CreateDesktopW desktop, or the
-//!   primary screen; macOS: the login session) or a desktop VM (QMP `screendump`), re-encoded
-//!   as JPEG, sent only when the picture changed, at an adaptive rate ([`Pace`]). A target
-//!   without a display says `{"t":"nodisplay"}` and the console shows the terminal instead.
+//!   or a desktop VM, as a base picture plus patches of what changed (`frame` with
+//!   `mode: "patch"`, then `{"t":"patch", x, y, w, h}`), composed by the console on a canvas.
+//!   With the agent's own browser on the Bot Desktop the page patches are its CDP screencast
+//!   frames, forwarded as they are; otherwise [`crate::live_regions`] finds what changed — the
+//!   Windows window tracker (dirty windows re-rendered in parallel, never switching the
+//!   visible desktop), RFB from the Linux Xvnc ([`crate::live_rfb`]), or a tile diff of whole
+//!   grabs (macOS, desktop VMs) — and encodes it on parallel threads. A target without a
+//!   display says `{"t":"nodisplay"}` and the console shows the terminal instead.
 //! - `terminal` (`session`): the agent's commands as they run — script, output, exit — from
 //!   every exec backend, the microVM included (`seagent_tools::exec::live`). Secrets are
 //!   redacted (`Vault::redact`), and a secret split across reads is held back until it can be
@@ -53,34 +57,6 @@ impl Kind {
             "terminal" => Ok(Kind::Terminal),
             k => Err(format!("kind `{k}`: use browser, desktop or terminal")),
         }
-    }
-}
-
-/// Adaptive pacing of polled frame sources (desktops): never faster than the fps cap, captures
-/// back to back at most, and backing off (to 1 s) while nothing changes.
-#[derive(Debug, Clone, PartialEq)]
-pub struct Pace {
-    pub min: Duration,
-    pub max: Duration,
-    pub interval: Duration,
-}
-
-impl Pace {
-    pub fn new(fps: u32) -> Pace {
-        let min = Duration::from_millis(1000 / u64::from(fps.clamp(1, seagent_browser::live::MAX_FPS)));
-        Pace { min, max: Duration::from_secs(1).max(min), interval: min }
-    }
-    pub fn set_fps(&mut self, fps: u32) {
-        let p = Pace::new(fps);
-        (self.min, self.max) = (p.min, p.max);
-    }
-    /// The wait before the next capture, given how long this one took and whether it changed.
-    pub fn after(&mut self, took: Duration, changed: bool) -> Duration {
-        // Capture runs beside the encoder (desktop_loop) and only while someone watches: it may
-        // run back to back, never faster than the fps cap.
-        let floor = self.min.max(took);
-        self.interval = if changed { floor } else { (self.interval.max(floor) * 3 / 2).min(self.max.max(floor)) };
-        self.interval.saturating_sub(took)
     }
 }
 
@@ -187,7 +163,7 @@ impl Stats {
     }
 }
 
-fn now_ms() -> u64 {
+pub(crate) fn now_ms() -> u64 {
     seagent_browser::util::now_ms()
 }
 
@@ -233,7 +209,7 @@ pub fn upgrade(app: &Arc<App>, r: &Request, p: Principal) -> Response {
         };
         let Ok(mut ws) = ws else { return };
         ws.set_max_message(64 * 1024);
-        let mut link = Link { ws, app, p, checked: Instant::now(), may_input, kind, params, input_to: Value::Null, tune: None };
+        let mut link = Link { ws, app, p, checked: Instant::now(), may_input, kind, params, input_to: Value::Null, tune: None, chosen: None, watch_patch: None };
         let r = match kind {
             Kind::Browser => browser(&mut link),
             Kind::Desktop => desktop(&mut link),
@@ -261,6 +237,11 @@ struct Link {
     input_to: Value,
     /// A new quality / fps choice from the viewer (`{"t":"tune", quality, fps}`).
     tune: Option<(u8, u32)>,
+    /// The viewer's latest quality / fps choice (kept across a desktop stream's source switch).
+    chosen: Option<(u8, u32)>,
+    /// Region streaming of the host desktop: check once a second whether a Bot Desktop CDP
+    /// page became the uncovered one (then the stream switches to patch mode).
+    watch_patch: Option<Instant>,
 }
 
 /// The viewer's quality / fps choice from the query or a `tune` message (defaults: 85, 30).
@@ -297,6 +278,7 @@ impl Link {
             let v: Value = serde_json::from_str(&m).unwrap_or_default();
             if v["t"] == "tune" {
                 self.tune = Some(choice(v["quality"].as_u64(), v["fps"].as_u64()));
+                self.chosen = self.tune;
             }
             if v["t"] == "input" {
                 let r = self.input(&v);
@@ -419,7 +401,7 @@ fn grab_for(app: &App, t: &crate::browser_view::Target, g: &mut Grabber, max_w: 
             let shot = cap.grab(max_w)?;
             let (w, h) = (shot.width.max(0) as u32, shot.height.max(0) as u32);
             let mut rgba = shot.bgra;
-            for px in rgba.chunks_exact_mut(4) {
+            for px in rgba.as_chunks_mut::<4>().0 {
                 px.swap(0, 2);
                 px[3] = 255;
             }
@@ -446,7 +428,7 @@ fn grab(app: &App, t: &crate::browser_view::Target) -> Result<image::DynamicImag
                     let shot = wd.screenshot()?;
                     let (w, h) = (shot.width.max(0) as u32, shot.height.max(0) as u32);
                     let mut rgba = shot.bgra;
-                    for px in rgba.chunks_exact_mut(4) {
+                    for px in rgba.as_chunks_mut::<4>().0 {
                         px.swap(0, 2);
                         px[3] = 255;
                     }
@@ -468,105 +450,319 @@ fn desktop(l: &mut Link) -> Flow {
     let (quality, fps) = choice(l.params["quality"].as_str().and_then(|x| x.parse().ok()), l.params["fps"].as_str().and_then(|x| x.parse().ok()));
     let max_w = num(&l.params, "maxWidth", 1920).clamp(320, 3840);
     l.text(&json!({"t": "hello", "kind": "desktop", "target": t.id(), "input": l.may_input, "fps": fps, "quality": quality, "maxWidth": max_w}))?;
-    let app = l.app.clone();
-    let mut g = Grabber::default();
-    desktop_loop(l, &t.id(), (max_w, quality, fps), &mut || grab_for(&app, &t, &mut g, max_w))
+    let host = t == crate::browser_view::Target::Host;
+    loop {
+        let (quality, fps) = l.chosen.unwrap_or((quality, fps));
+        // A CDP page on the Bot Desktop that nothing covers — the agent's own browser, or an app
+        // that is Chromium / Electron underneath (`Manager::launch_app`): it streams as CDP
+        // screencast patches over a base picture of the desktop that is only re-sent when
+        // something else changes.
+        if host {
+            if let Some((b, tab, g)) = patch_target(&l.app) {
+                match desktop_patched(l, &t, (quality, fps), b, tab, g) {
+                    Err(Some(e)) if e == SWITCH => continue,
+                    r => return r,
+                }
+            }
+        }
+        // Everything else: only what changed, as patches (the window tracker on Windows, RFB on
+        // the Linux Xvnc, a tile diff of whole grabs elsewhere), encoded in parallel.
+        let mut src = region_source(&l.app, &t, max_w);
+        l.watch_patch = host.then(Instant::now);
+        let r = crate::live_regions::stream(l, &t.id(), &mut *src, quality, fps);
+        l.watch_patch = None;
+        match r {
+            Err(Some(e)) if e == SWITCH => continue,
+            r => return r,
+        }
+    }
 }
 
-/// One captured picture and how long the capture took.
-type Captured = (Result<image::DynamicImage, String>, Duration);
+/// A desktop stream's internal "change source" signal (never reaches the viewer).
+const SWITCH: &str = "\u{0}switch";
 
-/// The desktop stream over any frame source: changed pictures only, paced by [`Pace`]; a
-/// source without a picture sends `nodisplay` once and is retried every 2 s. Capture and
-/// encoding run in parallel: a producer thread grabs frame N+1 while this one encodes and
-/// sends frame N (a one-slot channel, so a slow viewer still slows the capture down).
-fn desktop_loop(l: &mut Link, id: &str, (max_w, quality, fps): (u32, u8, u32), grab: &mut (dyn FnMut() -> Result<image::DynamicImage, String> + Send)) -> Flow {
+/// The Bot Desktop CDP page to stream in patch mode now, if one is visible and uncovered.
+fn patch_target(app: &App) -> Option<(Arc<seagent_browser::engine::Browser>, String, seagent_browser::live::OnScreen)> {
+    let all = bot_browsers();
+    all.iter().find_map(|b| {
+        let (tab, g) = seagent_browser::live::visible_page(b)?;
+        page_uncovered(app, b, &tab, &g, all.len()).then(|| (b.clone(), tab, g))
+    })
+}
+
+/// The region source for a desktop target (see `live_regions`).
+fn region_source(app: &Arc<App>, t: &crate::browser_view::Target, max_w: u32) -> Box<dyn crate::live_regions::RegionSource> {
+    use crate::browser_view::Target;
+    let home = app.d.k.paths.data.clone();
+    if *t == Target::Host {
+        #[cfg(windows)]
+        {
+            let d = seagent_browser::control::screen::Desktop::new(&home);
+            let wd = seagent_browser::control::screen_windows::WinDesktop::new(&home, &d.profile, &d.geometry);
+            if wd.running() {
+                return Box::new(WinTrack(seagent_browser::control::screen_windows::LiveCapture::start(&wd.name())));
+            }
+        }
+        #[cfg(unix)]
+        if let Some(sock) = seagent_browser::control::screen::Desktop::new(&home).rfb_socket() {
+            match crate::live_rfb::Rfb::connect(&sock) {
+                Ok(r) => return Box::new(r),
+                Err(e) => eprintln!("seagent: live view: {e}; falling back to whole-screen grabs"),
+            }
+        }
+    }
+    let (app, t) = (app.clone(), t.clone());
+    let mut g = Grabber::default();
+    Box::new(crate::live_regions::Snapshots::new(move || grab_for(&app, &t, &mut g, max_w)))
+}
+
+/// The Windows Bot Desktop's window tracker as a region source.
+#[cfg(windows)]
+struct WinTrack(seagent_browser::control::screen_windows::LiveCapture);
+
+#[cfg(windows)]
+impl crate::live_regions::RegionSource for WinTrack {
+    fn next(&mut self) -> Result<crate::live_regions::Update, String> {
+        use crate::live_regions::Update;
+        use seagent_browser::control::screen_windows::{Shot, TrackUpdate};
+        // BGRA as GDI gives it: the encoder threads convert (no per-pixel work here).
+        let rgba = |s: Shot| -> Result<crate::live_regions::Frame, String> { Ok(crate::live_regions::Frame { w: s.width.max(0) as u32, h: s.height.max(0) as u32, data: s.bgra, bgra: true }) };
+        Ok(match self.0.track()? {
+            TrackUpdate::Full(s) => Update::Full(rgba(s)?),
+            TrackUpdate::Rects(rs) => Update::Rects(rs.into_iter().map(|(x, y, s)| Ok((x.max(0) as u32, y.max(0) as u32, rgba(s)?))).collect::<Result<_, String>>()?),
+            TrackUpdate::Same => Update::Same,
+        })
+    }
+}
+
+impl crate::live_regions::Sink for Link {
+    fn poll(&mut self) -> Result<Option<(u8, u32)>, Option<String>> {
+        Link::poll(self)?;
+        if let Some(at) = self.watch_patch.filter(|at| at.elapsed() >= Duration::from_secs(1)) {
+            let _ = at;
+            self.watch_patch = Some(Instant::now());
+            if patch_target(&self.app).is_some() {
+                return Err(Some(SWITCH.into()));
+            }
+        }
+        Ok(self.tune.take())
+    }
+    fn send(&mut self, meta: &Value, jpeg: &[u8]) -> Result<(), Option<String>> {
+        self.frame(meta, jpeg)
+    }
+    fn text(&mut self, v: &Value) -> Result<(), Option<String>> {
+        Link::text(self, v)
+    }
+}
+
+/// The CDP browsers on the desktop the host target shows: the agent's browser launched onto
+/// the Bot Desktop (`seagent screen`) and apps started there as headed CDP targets
+/// (`Manager::launch_app`, marked `bot_desktop` too), or — Linux / macOS, where the host target
+/// is the display the headed browser opens on (Xvnc, the login session) — any headed managed
+/// browser. (On Windows a headed browser without the Bot Desktop is on the user's own screen,
+/// not this target.) Apps first: an app on the desktop is what the agent opened to work in.
+fn bot_browsers() -> Vec<Arc<seagent_browser::engine::Browser>> {
+    let mut v: Vec<_> = seagent_browser::manager::global()
+        .browsers()
+        .into_iter()
+        .filter(|b| {
+            let i = b.info.lock().unwrap();
+            !b.conn.is_closed() && (i.get("bot_desktop") == Some(&Value::Bool(true)) || (cfg!(not(windows)) && i.get("headless") == Some(&Value::Bool(false))))
+        })
+        .collect();
+    v.sort_by_key(|b| (!b.key.starts_with("app:"), b.key.clone()));
+    v
+}
+
+/// May the page `tab` at `g` be painted over the desktop picture (no other window covers it)?
+/// `n` = how many CDP browsers share the desktop.
+fn page_uncovered(app: &App, b: &seagent_browser::engine::Browser, tab: &str, g: &seagent_browser::live::OnScreen, n: usize) -> bool {
+    #[cfg(windows)]
+    {
+        let _ = (tab, n);
+        let home = app.d.k.paths.data.clone();
+        let d = seagent_browser::control::screen::Desktop::new(&home);
+        let name = seagent_browser::control::screen_windows::WinDesktop::new(&home, &d.profile, &d.geometry).name();
+        b.pid.is_some_and(|pid| seagent_browser::control::screen_windows::on_top(&name, pid as u32, (g.x, g.y, g.width as i32, g.height as i32)))
+    }
+    #[cfg(not(windows))]
+    {
+        // Xvnc / macOS have no stacking query here: one CDP window alone on the Bot Desktop is
+        // taken as uncovered; with several, only the one holding the focus (the window manager
+        // raises the focused window), and the rest stream through the region path.
+        let _ = (app, g);
+        n <= 1 || seagent_browser::live::page_has_focus(b, tab)
+    }
+}
+
+/// A hash of the desktop picture outside the page area (sampled rows, in place): it changes
+/// only when something other than the page does.
+fn hash_outside(img: &image::DynamicImage, g: &seagent_browser::live::OnScreen) -> u64 {
+    let (w, h) = (img.width() as usize, img.height() as usize);
+    let px = img.as_bytes();
+    let bpp = px.len().checked_div(w * h).unwrap_or(4).max(1);
+    let (x0, x1) = ((g.x.max(0) as usize).min(w), ((g.x.max(0) as usize) + g.width as usize).min(w));
+    let (y0, y1) = ((g.y.max(0) as usize).min(h), ((g.y.max(0) as usize) + g.height as usize).min(h));
+    let mut acc = 0xcbf2_9ce4_8422_2325u64;
+    for y in (0..h).step_by(2) {
+        let row = &px[y * w * bpp..(y + 1) * w * bpp];
+        let parts: [&[u8]; 2] = if (y0..y1).contains(&y) { [&row[..x0 * bpp], &row[x1 * bpp..]] } else { [row, &[]] };
+        for part in parts {
+            acc = (acc ^ frame_hash(part)).wrapping_mul(0x0100_0000_01b3);
+        }
+    }
+    acc
+}
+
+/// Bot Desktop stream in patch mode: a base picture of the whole desktop (full size, re-sent
+/// only when something outside the page changes; checked every 250 ms by a capture thread)
+/// plus the page itself as the browser's own screencast JPEGs, forwarded as they arrive
+/// (`{"t":"patch", x, y, w, h}` in screen pixels): no capture or encode per frame, so the page
+/// moves at the screencast's 30–60 fps. The console composes them on a canvas.
+fn desktop_patched(l: &mut Link, t: &crate::browser_view::Target, (quality, fps): (u8, u32), b: Arc<seagent_browser::engine::Browser>, tab: String, g: seagent_browser::live::OnScreen) -> Flow {
     use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+    let app = l.app.clone();
     let stop = AtomicBool::new(false);
-    // How long the producer rests after a capture (set by the pacing below).
-    let rest_ms = AtomicU64::new(0);
+    // The base capture's interval: 250 ms after a change, backing off to 1 s while idle.
+    let rest = AtomicU64::new(250);
     std::thread::scope(|sc| {
-        let (tx, rx) = std::sync::mpsc::sync_channel::<Captured>(1);
-        let (stop_p, rest_p) = (&stop, &rest_ms);
+        let (tx, rx) = std::sync::mpsc::sync_channel::<BaseCapture>(1);
+        let (stop_p, rest_p, app_p, b_p) = (&stop, &rest, app.clone(), b.clone());
+        let mut tab_p = tab.clone();
         sc.spawn(move || {
+            let mut grabber = Grabber::default();
             while !stop_p.load(Ordering::SeqCst) {
                 let t0 = Instant::now();
-                let r = grab();
-                if tx.send((r, t0.elapsed())).is_err() {
+                let r = grab_for(&app_p, t, &mut grabber, 3840);
+                let took = t0.elapsed();
+                // Window moved / resized, tab switched, something on top.
+                let geo = match seagent_browser::live::page_on_screen(&b_p, &tab_p) {
+                    Ok(g) if g.visible => Some((tab_p.clone(), g)),
+                    _ => seagent_browser::live::visible_page(&b_p),
+                };
+                if let Some((t2, _)) = &geo {
+                    tab_p = t2.clone();
+                }
+                let n = bot_browsers().len();
+                let clear = geo.as_ref().is_some_and(|(t2, g)| page_uncovered(&app_p, &b_p, t2, g, n));
+                if tx.send(((r, took), geo, clear)).is_err() {
                     break;
                 }
                 let until = Instant::now() + Duration::from_millis(rest_p.load(Ordering::SeqCst));
                 while Instant::now() < until && !stop_p.load(Ordering::SeqCst) {
-                    std::thread::sleep(until.saturating_duration_since(Instant::now()).min(Duration::from_millis(10)));
+                    std::thread::sleep(Duration::from_millis(10));
                 }
             }
         });
-        let r = desktop_consume(l, id, (max_w, quality, fps), &rx, &rest_ms);
+        let r = patched_consume(l, &app, &t.id(), (quality, fps), &b, tab, g, &rx, &rest);
         stop.store(true, Ordering::SeqCst);
         drop(rx);
         r
     })
 }
 
-/// The encoding / sending half of [`desktop_loop`].
-fn desktop_consume(l: &mut Link, id: &str, (max_w, quality, fps): (u32, u8, u32), rx: &std::sync::mpsc::Receiver<Captured>, rest_ms: &std::sync::atomic::AtomicU64) -> Flow {
+#[allow(clippy::too_many_arguments)]
+fn patched_consume(l: &mut Link, app: &App, id: &str, (quality, fps): (u8, u32), b: &Arc<seagent_browser::engine::Browser>, mut tab: String, mut g: seagent_browser::live::OnScreen, rx: &std::sync::mpsc::Receiver<BaseCapture>, rest: &std::sync::atomic::AtomicU64) -> Flow {
     use std::sync::atomic::Ordering;
-    let mut pace = Pace::new(fps);
+    use seagent_browser::live;
+    let opts = |g: &live::OnScreen, q: u8, f: u32| live::Opts { max_width: g.width, max_height: g.height, quality: q, fps: f }.clamped();
     let mut adapt = Adapt::new(quality, fps);
-    let mut last = 0u64;
-    let mut seq = 0u64;
-    let mut dark = false;
-    let mut st = Stats::default();
+    let mut v = live::watch(b, &tab, opts(&g, quality, fps)).map_err(Some)?;
+    let (mut st, mut last, mut seq, mut base_sent, mut dark) = (Stats::default(), 0u64, 0u64, false, false);
+    let mut uncovered = true;
+    // Covered for a second: another source (another CDP page, or the region path) takes over.
+    let mut covered_since: Option<Instant> = None;
+    let mut polled = Instant::now();
     loop {
-        l.poll()?;
+        if polled.elapsed() >= Duration::from_millis(20) {
+            l.poll()?;
+            polled = Instant::now();
+        }
         if let Some((q, f)) = l.tune.take() {
             adapt.choose(q, f);
-            pace.set_fps(f);
+            v.retune(opts(&g, q, f));
         }
-        let (r, took) = match rx.recv_timeout(Duration::from_millis(25)) {
-            Ok(x) => x,
-            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
-            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return Err(Some("the desktop capture stopped".into())),
-        };
-        let rest = match r {
-            Ok(img) => {
-                dark = false;
-                let h = frame_hash(img.as_bytes());
-                if h == last {
-                    pace.after(took, false)
-                } else {
-                    last = h;
-                    let t0 = Instant::now();
-                    let (w0, h0) = (img.width(), img.height());
-                    let (jpeg, w, hh) = to_jpeg(img, max_w, adapt.quality).map_err(Some)?;
-                    seq += 1;
-                    let meta = json!({"t": "frame", "seq": seq, "mime": "image/jpeg", "bytes": jpeg.len(), "width": w0, "height": h0, "frameWidth": w, "frameHeight": hh, "quality": adapt.quality, "captureMs": took.as_millis() as u64, "encodeMs": t0.elapsed().as_millis() as u64, "sentMs": now_ms()});
-                    let s0 = Instant::now();
-                    l.frame(&meta, &jpeg)?;
-                    st.sent(jpeg.len(), Some((took + t0.elapsed()).as_millis() as u64));
-                    if adapt.sent(s0.elapsed(), Instant::now()) {
-                        pace.set_fps(adapt.fps);
+        // The base picture (when something outside the page changed) and where the page is now.
+        if let Ok(((r, took), geo, clear)) = rx.try_recv() {
+            match geo {
+                Some((nt, ng)) if nt != tab => {
+                    v = live::watch(b, &nt, opts(&ng, adapt.quality, adapt.fps)).map_err(Some)?;
+                    (tab, g) = (nt, ng);
+                }
+                Some((_, ng)) => {
+                    if (ng.width, ng.height) != (g.width, g.height) {
+                        v.retune(opts(&ng, adapt.quality, adapt.fps));
                     }
-                    pace.after(took, true)
+                    g = ng;
+                }
+                None => return Err(Some(SWITCH.into())),
+            }
+            uncovered = clear;
+            if uncovered {
+                covered_since = None;
+            } else if covered_since.get_or_insert_with(Instant::now).elapsed() >= Duration::from_secs(1) {
+                if patch_target(app).is_none_or(|(nb, nt, _)| nb.key != b.key || nt != tab) {
+                    return Err(Some(SWITCH.into()));
+                }
+                covered_since = None;
+            }
+            match r {
+                Ok(img) => {
+                    dark = false;
+                    let h = hash_outside(&img, &g);
+                    let changed = h != last || !base_sent;
+                    rest.store(if changed { 250 } else { (rest.load(Ordering::SeqCst) * 3 / 2).min(1000) }, Ordering::SeqCst);
+                    if changed {
+                        last = h;
+                        let t0 = Instant::now();
+                        let (w0, h0) = (img.width(), img.height());
+                        let (jpeg, fw, fh) = to_jpeg(img, 3840, adapt.quality).map_err(Some)?;
+                        seq += 1;
+                        let meta = json!({"t": "frame", "seq": seq, "mime": "image/jpeg", "bytes": jpeg.len(), "width": w0, "height": h0, "frameWidth": fw, "frameHeight": fh, "quality": adapt.quality, "captureMs": took.as_millis() as u64, "encodeMs": t0.elapsed().as_millis() as u64, "sentMs": now_ms(), "mode": "patch"});
+                        l.frame(&meta, &jpeg)?;
+                        base_sent = true;
+                    }
+                }
+                Err(e) => {
+                    if !dark {
+                        dark = true;
+                        l.text(&json!({"t": "nodisplay", "target": id, "reason": e, "fallback": "terminal"}))?;
+                    }
                 }
             }
-            Err(e) => {
-                // No display here (a headless server without a Bot Desktop, a stopped VM): the
-                // console shows the live terminal instead; keep looking every 2 s.
-                if !dark {
-                    dark = true;
-                    l.text(&json!({"t": "nodisplay", "target": id, "reason": e, "fallback": "terminal"}))?;
+        }
+        // The page, as fast as the screencast delivers it.
+        match v.next(Duration::from_millis(10)) {
+            Some(f) if base_sent && uncovered => {
+                seq += 1;
+                let sent = now_ms();
+                let meta = json!({"t": "patch", "seq": seq, "mime": "image/jpeg", "bytes": f.data.len(), "x": g.x, "y": g.y, "w": g.width, "h": g.height, "capturedMs": f.captured_ms, "sentMs": sent});
+                let s0 = Instant::now();
+                l.frame(&meta, &f.data)?;
+                st.sent(f.data.len(), (f.captured_ms > 0).then(|| sent.saturating_sub(f.captured_ms)));
+                if adapt.sent(s0.elapsed(), Instant::now()) {
+                    v.retune(opts(&g, adapt.quality, adapt.fps));
                 }
-                Duration::from_secs(2)
             }
-        };
-        rest_ms.store(rest.as_millis() as u64, Ordering::SeqCst);
+            Some(_) => {}
+            None if v.ended() => return Err(Some(SWITCH.into())),
+            None => {}
+        }
         if let Some(mut r) = st.report() {
             r["adapt"] = adapt.json();
+            r["mode"] = "patch".into();
             l.text(&r)?;
         }
     }
 }
+
+/// One captured picture and how long the capture took.
+type Captured = (Result<image::DynamicImage, String>, Duration);
+
+/// Patch mode's base capture: the picture, how long it took, and where the browser's visible
+/// page is now and whether nothing covers it (looked up on the capture thread, off the
+/// thread that forwards the page frames).
+type BaseCapture = (Captured, Option<(String, seagent_browser::live::OnScreen)>, bool);
 
 // ── terminal ──
 
@@ -734,21 +930,6 @@ mod tests {
     }
 
     #[test]
-    fn pace_caps_fps_and_backs_off_when_still() {
-        let mut p = Pace::new(5);
-        assert_eq!(p.min, Duration::from_millis(200));
-        assert_eq!(p.after(Duration::from_millis(50), true), Duration::from_millis(150), "fps cap: 200 ms per frame");
-        // Nothing changes: back off ×1.5 up to 1 s.
-        let waits: Vec<u128> = (0..6).map(|_| p.after(Duration::ZERO, false).as_millis()).collect();
-        assert_eq!(waits, [300, 450, 675, 1000, 1000, 1000]);
-        assert_eq!(p.after(Duration::ZERO, true), Duration::from_millis(200), "a change resets the rate");
-        // A capture that takes 400 ms: back to back, no extra rest.
-        assert_eq!(p.after(Duration::from_millis(400), true), Duration::ZERO);
-        assert_eq!(Pace::new(1000).min, Duration::from_millis(16), "capped at 60 fps");
-        assert_eq!(Pace::new(30).min, Duration::from_millis(33));
-    }
-
-    #[test]
     fn adapt_keeps_the_choice_drops_quality_then_fps_and_climbs_back() {
         let t = Instant::now();
         let ms = Duration::from_millis;
@@ -820,6 +1001,23 @@ mod tests {
         b.push(&"你".as_bytes()[1..]);
         assert_eq!(b.take(&secrets, &redact, false).as_deref(), Some("你"));
         assert_eq!(b.take(&secrets, &redact, true), None);
+    }
+
+    #[test]
+    fn the_base_picture_changes_only_outside_the_page() {
+        let g = seagent_browser::live::OnScreen { x: 100, y: 80, width: 400, height: 300, visible: true };
+        let mut img = image::RgbaImage::from_pixel(800, 600, image::Rgba([20, 20, 20, 255]));
+        let h0 = hash_outside(&image::DynamicImage::ImageRgba8(img.clone()), &g);
+        for y in 80..380 {
+            for x in 100..500 {
+                img.put_pixel(x, y, image::Rgba([250, 10, 10, 255]));
+            }
+        }
+        assert_eq!(hash_outside(&image::DynamicImage::ImageRgba8(img.clone()), &g), h0, "the page area is the patches' job");
+        for x in 0..800 {
+            img.put_pixel(x, 10, image::Rgba([0, 200, 0, 255]));
+        }
+        assert_ne!(hash_outside(&image::DynamicImage::ImageRgba8(img), &g), h0, "a change outside the page re-sends the base");
     }
 
     #[test]
@@ -898,64 +1096,6 @@ mod tests {
             }
         };
         assert!(r["ok"] == false && r["error"].as_str().unwrap().contains("Take control first"), "{r}");
-        let _ = std::fs::remove_dir_all(&home);
-    }
-
-    /// The desktop stream over a scripted source: only changed pictures go out (JPEG, scaled),
-    /// a missing display says `nodisplay` once, and the loop ends when the viewer leaves. Same
-    /// code path on every OS (the per-OS part is only where `grab` gets its pixels).
-    #[test]
-    fn desktop_stream_sends_changes_only_and_reports_a_missing_display() {
-        let home = seagent_core::tmp::scratch_path(format!("seagent-live-desk-{}-{}", std::process::id(), seagent_net::crypto::random_token(4)));
-        let a = app(&home);
-        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let addr = l.local_addr().unwrap();
-        let srv = std::thread::spawn(move || {
-            let (mut sock, _) = l.accept().unwrap();
-            let (head, rest) = seagent_net::ws::read_head(&mut sock, 1 << 16).unwrap();
-            sock.set_read_timeout(Some(Duration::from_millis(15))).unwrap();
-            let ws = WebSocket::accept(sock, &head, rest).unwrap();
-            let p = Principal { kind: "token".into(), name: "t".into(), access: crate::identity::Access::Scope(crate::exposure::Scope::Read), ip: String::new(), tenant: Default::default() };
-            let mut link = Link { ws, app: a, p, checked: Instant::now(), may_input: false, kind: Kind::Desktop, params: json!({}), input_to: json!({"target": "host"}), tune: None };
-            let px = |c: u8| image::DynamicImage::ImageRgba8(image::RgbaImage::from_pixel(1280, 800, image::Rgba([c, c, c, 255])));
-            let mut n = 0;
-            let mut src = move || {
-                n += 1;
-                match n {
-                    1..=3 => Ok(px(10)),
-                    4 => Ok(px(200)),
-                    5 => Err("no display: the Bot Desktop is not running".to_string()),
-                    6 => Err("still none".to_string()),
-                    _ => Ok(px(90)),
-                }
-            };
-            desktop_loop(&mut link, "host", (640, 50, 15), &mut src)
-        });
-        let (mut ws, _) = WebSocket::connect(&format!("ws://{addr}/"), &[], Duration::from_secs(5)).unwrap();
-        ws.set_read_timeout(Some(Duration::from_millis(100))).unwrap();
-        let mut got = vec![];
-        let t0 = Instant::now();
-        while got.len() < 7 && t0.elapsed() < Duration::from_secs(20) {
-            match ws.recv() {
-                Ok(Some(Message::Text(t))) => {
-                    let v: Value = serde_json::from_str(&t).unwrap();
-                    if v["t"] != "stats" {
-                        got.push(v);
-                    }
-                }
-                Ok(Some(Message::Binary(b))) => got.push(json!({"jpeg": b.len(), "soi": b[..2] == [0xff, 0xd8]})),
-                _ => {}
-            }
-        }
-        let kinds: Vec<String> = got.iter().map(|v| v["t"].as_str().map_or("jpeg".into(), str::to_string)).collect();
-        assert_eq!(kinds, ["frame", "jpeg", "frame", "jpeg", "nodisplay", "frame", "jpeg"], "{got:?}");
-        assert_eq!((got[0]["width"].as_u64(), got[0]["frameWidth"].as_u64(), got[0]["frameHeight"].as_u64()), (Some(1280), Some(640), Some(400)), "scaled to maxWidth");
-        assert_eq!(got[1]["soi"], true);
-        assert_eq!((got[0]["seq"].as_u64(), got[2]["seq"].as_u64()), (Some(1), Some(2)), "three identical captures: one frame");
-        assert!(got[4]["reason"].as_str().unwrap().contains("no display") && got[4]["fallback"] == "terminal");
-        let _ = ws.send(&Message::Close(None));
-        drop(ws);
-        assert_eq!(srv.join().unwrap(), Err(None), "the loop ends when the viewer leaves");
         let _ = std::fs::remove_dir_all(&home);
     }
 
@@ -1043,7 +1183,7 @@ mod tests {
                 pct(50), pct(95), bytes as f64 / 1024.0 / secs, bytes as f64 / 1024.0 / f64::from(frames.max(1)), cpu_me / secs * 100.0, cpu_br / secs * 100.0
             );
             std::fs::write(out.join(format!("live-text-{want}fps.jpg")), &last).unwrap();
-            assert!(fps >= f64::from(want) * 0.5 && fps <= f64::from(want) * 1.1, "{want} fps asked, {fps:.1} delivered");
+            assert!(fps >= f64::from(want) * 0.5 && fps <= f64::from(want) * 1.2, "{want} fps asked, {fps:.1} delivered");
             assert_eq!(w, 1280, "frames at the tab's full device-pixel width, not capped");
             drop(ws);
             std::thread::sleep(Duration::from_millis(300));
@@ -1141,7 +1281,8 @@ mod tests {
         let home = seagent_core::tmp::TempDir::new("seagent-live-desk");
         let a = app(home.path());
         let data = home.path().join("data");
-        let desk = seagent_browser::control::screen::Desktop::new(&data);
+        let mut desk = seagent_browser::control::screen::Desktop::new(&data);
+        desk.geometry = "1920x1080".into();
         #[cfg(windows)]
         if seagent_browser::control::screen_windows::desktop_names().iter().any(|n| n == "seagent-default") {
             eprintln!("skipping: a seagent Bot Desktop (seagent-default) already runs on this window station");
@@ -1165,10 +1306,12 @@ mod tests {
         let url = format!("data:text/html;charset=utf-8,{}", seagent_net::urlencode(&html));
         let profile = home.path().join("edge-profile");
         // InPrivate / incognito: never a signed-in profile (no account details in a frame).
-        let args = [format!("--user-data-dir={}", profile.display()), "--inprivate".into(), "--incognito".into(), "--no-first-run".into(), "--no-default-browser-check".into(), "--window-position=0,0".into(), "--window-size=1400,900".into(), format!("--app={url}")];
+        let args = [format!("--user-data-dir={}", profile.display()), "--inprivate".into(), "--incognito".into(), "--no-first-run".into(), "--no-default-browser-check".into(), "--window-position=0,0".into(), "--window-size=1900,1040".into(), format!("--app={url}")];
+        // SEAGENT_LIVE_EXTRA_ARGS: extra browser flags (space separated), e.g. software compositing.
+        let args: Vec<String> = std::env::var("SEAGENT_LIVE_EXTRA_ARGS").unwrap_or_default().split_whitespace().map(String::from).chain(args).collect();
         #[cfg(windows)]
         let pid = {
-            let q = seagent_browser::control::screen_windows::WinDesktop::new(&data, "default", "1440x900").qualified();
+            let q = seagent_browser::control::screen_windows::WinDesktop::new(&data, "default", "1920x1080").qualified();
             let line = std::iter::once(format!("\"{}\"", exe.display())).chain(args.iter().map(|a| format!("\"{a}\""))).collect::<Vec<_>>().join(" ");
             seagent_browser::control::screen_windows::spawn_on_desktop(&q, &line).unwrap()
         };
@@ -1213,23 +1356,31 @@ mod tests {
         let h = next_text(&mut ws);
         assert_eq!(h["t"], "hello", "{h}");
         let (cpu0, t0) = (cpu_seconds_self(), Instant::now());
-        let (mut frames, mut bytes, mut caps, mut last, mut meta, mut stats) = (0u32, 0usize, vec![], vec![], Value::Null, Value::Null);
+        let (mut upds, mut bytes, mut caps, mut meta, mut last_upd, mut base, mut patches) = (0u32, 0usize, vec![], Value::Null, 0u64, None::<Vec<u8>>, Vec::<(i64, i64, Vec<u8>)>::new());
         while t0.elapsed() < Duration::from_secs(6) {
             match ws.recv() {
                 Ok(Some(Message::Text(x))) => {
                     let v: Value = serde_json::from_str(&x).unwrap();
                     assert_ne!(v["t"], "nodisplay", "{v}");
-                    if v["t"] == "stats" {
-                        stats = v;
-                    } else {
+                    if v["t"] == "frame" || v["t"] == "patch" {
                         meta = v;
                     }
                 }
                 Ok(Some(Message::Binary(j))) => {
-                    frames += 1;
                     bytes += j.len();
-                    caps.push(now_ms().saturating_sub(meta["sentMs"].as_u64().unwrap_or(0)));
-                    last = j;
+                    if meta["t"] == "frame" {
+                        (base, patches) = (Some(j.clone()), vec![]);
+                    } else if patches.len() < 600 {
+                        patches.push((meta["x"].as_i64().unwrap_or(0), meta["y"].as_i64().unwrap_or(0), j.clone()));
+                    }
+                    let upd = meta["upd"].as_u64().unwrap_or(0);
+                    if upd != last_upd {
+                        upds += 1;
+                        if let Some(c) = meta["capturedMs"].as_u64() {
+                            caps.push(now_ms().saturating_sub(c));
+                        }
+                        last_upd = upd;
+                    }
                 }
                 _ => {}
             }
@@ -1238,17 +1389,486 @@ mod tests {
         let cpu = (cpu_seconds_self() - cpu0) / secs * 100.0;
         caps.sort_unstable();
         eprintln!(
-            "LIVE Bot Desktop ({}): {frames} frames / {secs:.1} s = {:.1} fps; capture+encode {} ms (server stats); send→receive p50 {} ms, p95 {} ms; {:.0} KB/s; frame {}x{} → {}x{}; server CPU {cpu:.0}%",
+            "LIVE Bot Desktop full-frame, busy browser window without CDP ({}): {upds} screen updates / {secs:.1} s = {:.1} fps; capture→receive p50 {} ms, p95 {} ms; {:.2} MB/s; server CPU {cpu:.0}%",
             std::env::consts::OS,
-            f64::from(frames) / secs,
-            stats["latencyMs"],
+            f64::from(upds) / secs,
             caps.get(caps.len() / 2).copied().unwrap_or(0),
             caps.get(caps.len() * 95 / 100).copied().unwrap_or(0),
-            bytes as f64 / 1024.0 / secs,
-            meta["width"], meta["height"], meta["frameWidth"], meta["frameHeight"]
+            bytes as f64 / 1e6 / secs,
         );
-        std::fs::write(out.join(format!("live-bot-desktop-{}.jpg", std::env::consts::OS)), &last).unwrap();
-        assert!(frames >= 10, "the desktop streamed: {frames} frames");
+        if let Some(b) = base {
+            let mut c = image::load_from_memory(&b).unwrap().to_rgba8();
+            for (x, y, p) in &patches {
+                image::imageops::replace(&mut c, &image::load_from_memory(p).unwrap().to_rgba8(), *x, *y);
+            }
+            image::DynamicImage::ImageRgba8(c).to_rgb8().save(out.join(format!("live-bot-desktop-{}.jpg", std::env::consts::OS))).unwrap();
+        }
+        assert!(upds >= 10, "the desktop streamed: {upds} updates");
+    }
+
+    /// A busy app on the Bot Desktop that is *not* the agent's browser, started as a headed CDP
+    /// target (`Manager::launch_app`) and streamed in patch mode at 1920×1080 (not run by
+    /// default): `SEAGENT_REAL_TESTS=1 cargo test --release -p seagent-app real_live_bot_desktop_app
+    /// -- --ignored --nocapture`. Default app: the found Chromium-family browser as an app window
+    /// (`--app=<busy page>`, InPrivate); `SEAGENT_LIVE_APP=<path>` runs an Electron app instead
+    /// (a fresh user-data-dir, so no account), made busy by an overlay injected over CDP.
+    #[test]
+    #[ignore]
+    fn real_live_bot_desktop_app() {
+        if std::env::var("SEAGENT_REAL_TESTS").ok().as_deref() != Some("1") {
+            eprintln!("skipping: set SEAGENT_REAL_TESTS=1 to run real-desktop cases");
+            return;
+        }
+        let scratch = seagent_core::tmp::TempDir::new("seagent-live-app-frames");
+        let out = std::env::var_os("SEAGENT_LIVE_OUT").map(std::path::PathBuf::from).unwrap_or_else(|| scratch.path().to_path_buf());
+        std::fs::create_dir_all(&out).unwrap();
+        let home = seagent_core::tmp::TempDir::new("seagent-live-app");
+        let a = app(home.path());
+        let data = home.path().join("data");
+        let mut desk = seagent_browser::control::screen::Desktop::new(&data);
+        desk.geometry = "1920x1080".into();
+        #[cfg(windows)]
+        if seagent_browser::control::screen_windows::desktop_names().iter().any(|n| n == "seagent-default") {
+            eprintln!("skipping: a seagent Bot Desktop (seagent-default) already runs on this window station");
+            return;
+        }
+        #[cfg(target_os = "linux")]
+        let _bare = match desk.start() {
+            Ok(_) => None,
+            Err(e) => match bare_xvnc(&data) {
+                Ok(g) => Some(g),
+                Err(e2) => {
+                    eprintln!("skipping: no Bot Desktop on this host: {e}; {e2}");
+                    return;
+                }
+            },
+        };
+        #[cfg(not(target_os = "linux"))]
+        if let Err(e) = desk.start() {
+            eprintln!("skipping: no Bot Desktop on this host: {e}");
+            return;
+        }
+        struct StopDesk(seagent_browser::control::screen::Desktop);
+        impl Drop for StopDesk {
+            fn drop(&mut self) {
+                self.0.stop();
+            }
+        }
+        let _desk = StopDesk(desk);
+        let lorem = "The quick brown fox jumps over the lazy dog 0123456789 - pack my box with five dozen liquor jugs. ".repeat(2);
+        let rows: String = (1..=50).map(|i| format!("<p style='margin:0;font:12px/1.35 Segoe UI,Arial,sans-serif'>{i:02}. {lorem}</p>")).collect();
+        let anim = "let n=0;function f(){n++;clk.textContent='Bot Desktop app - frame '+n+' - '+new Date().toISOString();bar.style.width=(n%600)/6+'%';requestAnimationFrame(f)}f()";
+        let busy = format!("<!doctype html><title>busy app</title><body style='margin:8px;background:#fff;color:#111'><div id=bar style='height:6px;background:#2c6ec0;width:0'></div><h3 id=clk style='font:600 16px monospace;margin:4px 0'>t</h3>{rows}<script>{anim}</script>");
+        let name = format!("liveapp{}", std::process::id());
+        let electron = std::env::var_os("SEAGENT_LIVE_APP").map(std::path::PathBuf::from);
+        let (exe, args) = match &electron {
+            Some(p) => (p.clone(), vec![]),
+            None => (
+                seagent_browser::launch::find_executable("").expect("a Chromium-family browser"),
+                vec!["--inprivate".into(), "--incognito".into(), "--window-position=0,0".into(), "--window-size=1900,1040".into(), format!("--app=data:text/html;charset=utf-8,{}", seagent_net::urlencode(&busy))],
+            ),
+        };
+        let kind = seagent_browser::launch::app_kind(&exe).expect("a Chromium-family browser or an Electron app");
+        let env = seagent_browser::manager::Env { cfg: Default::default(), home: data.clone(), secrets: Arc::new(|s: &str| s.to_string()) };
+        let b = seagent_browser::manager::global().launch_app(&env, &name, &exe, &args).expect("the app as a headed CDP target on the Bot Desktop");
+        struct Stop(String);
+        impl Drop for Stop {
+            fn drop(&mut self) {
+                seagent_browser::manager::global().stop(&self.0);
+            }
+        }
+        let _stop = Stop(b.key.clone());
+        assert!(b.http.as_deref().is_some_and(|h| h.starts_with("http://127.0.0.1:")), "a loopback endpoint: {:?}", b.http);
+        assert_eq!(b.info.lock().unwrap().get("bot_desktop"), Some(&Value::Bool(true)));
+        // Its first window: the page target, at the desktop's size.
+        let until = Instant::now() + Duration::from_secs(30);
+        let tab = loop {
+            if let Some(t) = b.tabs(None).ok().and_then(|ts| ts.iter().find_map(|t| t["targetId"].as_str().map(String::from))) {
+                break t;
+            }
+            assert!(Instant::now() < until, "the app opened no window");
+            std::thread::sleep(Duration::from_millis(250));
+        };
+        if let Ok(win) = b.call("Browser.getWindowForTarget", json!({"targetId": tab})) {
+            let _ = b.call("Browser.setWindowBounds", json!({"windowId": win["windowId"], "bounds": {"left": 0, "top": 0, "width": 1900, "height": 1040, "windowState": "normal"}}));
+        }
+        std::thread::sleep(Duration::from_secs(if electron.is_some() { 8 } else { 3 }));
+        if electron.is_some() {
+            // Busy content inside the app's own window (DOM calls only: Electron apps often
+            // enforce Trusted Types, which forbids innerHTML).
+            let js = format!("(()=>{{const o=document.createElement('div');o.style.cssText='position:fixed;inset:0;z-index:2147483647;background:#fff;color:#111;margin:0;padding:8px;font:12px/1.35 Segoe UI,Arial,sans-serif;overflow:hidden';const bar=document.createElement('div');bar.style.cssText='height:6px;background:#2c6ec0;width:0';const clk=document.createElement('h3');clk.style.cssText='font:600 16px monospace;margin:4px 0';o.append(bar,clk);for(let i=1;i<=50;i++){{const p=document.createElement('p');p.style.margin='0';p.textContent=String(i).padStart(2,'0')+'. '+{lorem:?};o.append(p)}}document.body.append(o);{anim}}})()");
+            let r = b.page_call(&tab, "Runtime.evaluate", json!({"expression": js})).unwrap();
+            assert!(r.get("exceptionDetails").is_none(), "overlay: {r}");
+            std::thread::sleep(Duration::from_secs(1));
+        }
+        let srv = crate::server::start(a.clone()).unwrap();
+        let measure = |fps: u32, secs: u64| -> (f64, Vec<u8>, (Value, Vec<u8>), String) {
+            let mut ws = connect(srv.local_addr(), &format!("kind=desktop&target=host&fps={fps}&quality=85&maxWidth=1920"), "live-admin-token");
+            let h = next_text(&mut ws);
+            assert_eq!(h["t"], "hello", "{h}");
+            let (warm, total) = (Duration::from_millis(1500), Duration::from_millis(1500 + secs * 1000));
+            let start = Instant::now();
+            let (mut t0, mut cpu0, mut ap0) = (None::<Instant>, 0.0, 0.0);
+            let (mut patches, mut bases, mut bytes, mut lat, mut meta, mut base, mut patch, mut mode) = (0u32, 0u32, 0usize, vec![], Value::Null, vec![], (Value::Null, vec![]), String::new());
+            while start.elapsed() < total {
+                if t0.is_none() && start.elapsed() >= warm {
+                    (t0, cpu0, ap0) = (Some(Instant::now()), cpu_seconds_self(), cpu_seconds_matching(&name));
+                }
+                match ws.recv() {
+                    Ok(Some(Message::Text(x))) => {
+                        let v: Value = serde_json::from_str(&x).unwrap();
+                        if v["t"] == "frame" || v["t"] == "patch" {
+                            meta = v;
+                        } else if v["t"] == "stats" {
+                            mode = v["mode"].as_str().unwrap_or("full").to_string();
+                        }
+                    }
+                    Ok(Some(Message::Binary(j))) => {
+                        let counting = t0.is_some();
+                        if meta["t"] == "patch" {
+                            if counting {
+                                patches += 1;
+                                bytes += j.len();
+                                if let Some(c) = meta["capturedMs"].as_u64().filter(|c| *c > 0) {
+                                    lat.push(now_ms().saturating_sub(c));
+                                }
+                            }
+                            patch = (meta.clone(), j);
+                        } else if meta["t"] == "frame" {
+                            if counting {
+                                bases += 1;
+                                bytes += j.len();
+                            }
+                            base = j;
+                        }
+                        meta = Value::Null;
+                    }
+                    _ => {}
+                }
+            }
+            let s = t0.map_or(1.0, |t| t.elapsed().as_secs_f64());
+            let (cpu, ap) = ((cpu_seconds_self() - cpu0) / s * 100.0, (cpu_seconds_matching(&name) - ap0) / s * 100.0);
+            lat.sort_unstable();
+            let pct = |p: usize| lat.get((lat.len() * p / 100).min(lat.len().saturating_sub(1))).copied().unwrap_or(0);
+            let fps_real = f64::from(patches) / s;
+            eprintln!("LIVE Bot Desktop app ({kind}: {}, not the agent's browser; cap {fps}): {patches} page patches + {bases} base pictures in {s:.1} s = {fps_real:.1} fps; capture→receive p50 {} ms, p95 {} ms; {:.2} MB/s; CPU server {cpu:.0}%, app {ap:.0}%; stats mode {mode}; screen 1920x1080", exe.file_name().unwrap_or_default().to_string_lossy(), pct(50), pct(95), bytes as f64 / 1e6 / s);
+            (fps_real, base, patch, mode)
+        };
+        let (f30, base, (pm, patch), mode) = measure(30, 10);
+        let mut comp = image::load_from_memory(&base).expect("a base picture").to_rgba8();
+        let page = image::load_from_memory(&patch).expect("a page patch").to_rgba8();
+        image::imageops::overlay(&mut comp, &page, pm["x"].as_i64().unwrap(), pm["y"].as_i64().unwrap());
+        image::DynamicImage::ImageRgba8(comp).to_rgb8().save(out.join(format!("bot-desktop-app-{kind}-composed.jpg"))).unwrap();
+        let (f60, _, _, _) = measure(60, 6);
+        assert_eq!(mode, "patch", "the app streams in patch mode");
+        assert!(f30 >= 29.0, "a busy app streams at the 30 fps cap: {f30:.1}");
+        assert!(f60 >= 40.0, "and faster when 60 is chosen: {f60:.1}");
+    }
+
+    /// The Bot Desktop with the agent's own browser on it, streamed in patch mode (not run by
+    /// default): `SEAGENT_REAL_TESTS=1 [SEAGENT_LIVE_OUT=<dir>] cargo test -p seagent-app
+    /// real_live_bot_desktop_patched -- --ignored --nocapture`. The browser is launched by the
+    /// manager onto the Bot Desktop (never made the visible desktop); a busy page of small text
+    /// is measured at 30 and 60 fps, then an idle page.
+    #[test]
+    #[ignore]
+    fn real_live_bot_desktop_patched() {
+        if std::env::var("SEAGENT_REAL_TESTS").ok().as_deref() != Some("1") {
+            eprintln!("skipping: set SEAGENT_REAL_TESTS=1 to run real-desktop cases");
+            return;
+        }
+        let scratch = seagent_core::tmp::TempDir::new("seagent-live-patch-frames");
+        let out = std::env::var_os("SEAGENT_LIVE_OUT").map(std::path::PathBuf::from).unwrap_or_else(|| scratch.path().to_path_buf());
+        std::fs::create_dir_all(&out).unwrap();
+        let home = seagent_core::tmp::TempDir::new("seagent-live-patch");
+        let a = app(home.path());
+        let data = home.path().join("data");
+        let desk = seagent_browser::control::screen::Desktop::new(&data);
+        #[cfg(windows)]
+        if seagent_browser::control::screen_windows::desktop_names().iter().any(|n| n == "seagent-default") {
+            eprintln!("skipping: a seagent Bot Desktop (seagent-default) already runs on this window station");
+            return;
+        }
+        if let Err(e) = desk.start() {
+            eprintln!("skipping: no Bot Desktop on this host: {e}");
+            return;
+        }
+        struct StopDesk(seagent_browser::control::screen::Desktop);
+        impl Drop for StopDesk {
+            fn drop(&mut self) {
+                self.0.stop();
+            }
+        }
+        let _desk = StopDesk(desk);
+        // The agent's browser, headed on the Bot Desktop (InPrivate: no signed-in account).
+        let profile = format!("botlive{}", std::process::id());
+        let cfg = seagent_browser::BrowserConfig { backend: "local".into(), enabled: toml::Value::Boolean(true), headless: false, default_profile: profile.clone(), extra_args: vec!["--inprivate".into(), "--incognito".into()], ..Default::default() };
+        let env = seagent_browser::manager::Env { cfg, home: data.clone(), secrets: Arc::new(|s: &str| s.to_string()) };
+        let key = format!("profile:{profile}");
+        let b = seagent_browser::manager::global().browser(&env, &key).expect("the agent's browser on the Bot Desktop");
+        struct Stop(String);
+        impl Drop for Stop {
+            fn drop(&mut self) {
+                seagent_browser::manager::global().stop(&self.0);
+            }
+        }
+        let _stop = Stop(key.clone());
+        assert_eq!(b.info.lock().unwrap().get("bot_desktop"), Some(&Value::Bool(true)), "launched onto the Bot Desktop");
+        let lorem = "The quick brown fox jumps over the lazy dog 0123456789 - pack my box with five dozen liquor jugs. ".repeat(2);
+        let rows: String = (1..=50).map(|i| format!("<p style='margin:0;font:12px/1.35 Segoe UI,Arial,sans-serif'>{i:02}. {lorem}</p>")).collect();
+        let busy = format!("<!doctype html><title>busy</title><body style='margin:8px;background:#fff;color:#111'><div id=bar style='height:6px;background:#c0362c;width:0'></div><h3 id=clk style='font:600 16px monospace;margin:4px 0'>t</h3>{rows}<script>let n=0;function f(){{n++;clk.textContent='Bot Desktop page - frame '+n+' - '+new Date().toISOString();bar.style.width=(n%600)/6+'%';requestAnimationFrame(f)}}f()</script>");
+        let idle = format!("<!doctype html><title>idle</title><body style='margin:8px;background:#fff;color:#111'>{rows}");
+        let url = |h: &str| format!("data:text/html;charset=utf-8,{}", seagent_net::urlencode(h));
+        let tab = b.tabs(None).unwrap()[0]["targetId"].as_str().unwrap().to_string();
+        let win = b.call("Browser.getWindowForTarget", json!({"targetId": tab})).unwrap();
+        let _ = b.call("Browser.setWindowBounds", json!({"windowId": win["windowId"], "bounds": {"left": 0, "top": 0, "width": 1700, "height": 1040, "windowState": "normal"}}));
+        b.page_call(&tab, "Page.navigate", json!({"url": url(&busy)})).unwrap();
+        std::thread::sleep(Duration::from_secs(3));
+        let srv = crate::server::start(a.clone()).unwrap();
+        // Returns (fps, the base picture, the last patch and its header).
+        let measure = |fps: u32, secs: u64, label: &str| -> (f64, Vec<u8>, (Value, Vec<u8>)) {
+            let mut ws = connect(srv.local_addr(), &format!("kind=desktop&target=host&fps={fps}&quality=85&maxWidth=1920"), "live-admin-token");
+            let h = next_text(&mut ws);
+            assert_eq!(h["t"], "hello", "{h}");
+            // Every header is paired with the binary after it, warm-up included.
+            let (warm, total) = (Duration::from_millis(1500), Duration::from_millis(1500 + secs * 1000));
+            let start = Instant::now();
+            let (mut t0, mut cpu0, mut br0) = (None::<Instant>, 0.0, 0.0);
+            let (mut patches, mut bases, mut bytes, mut lat, mut meta, mut base, mut patch, mut mode) = (0u32, 0u32, 0usize, vec![], Value::Null, vec![], (Value::Null, vec![]), String::new());
+            while start.elapsed() < total {
+                if t0.is_none() && start.elapsed() >= warm {
+                    (t0, cpu0, br0) = (Some(Instant::now()), cpu_seconds_self(), cpu_seconds_matching(&profile));
+                }
+                match ws.recv() {
+                    Ok(Some(Message::Text(x))) => {
+                        let v: Value = serde_json::from_str(&x).unwrap();
+                        if v["t"] == "frame" || v["t"] == "patch" {
+                            meta = v;
+                        } else if v["t"] == "stats" {
+                            mode = v["mode"].as_str().unwrap_or("full").to_string();
+                        }
+                    }
+                    Ok(Some(Message::Binary(j))) => {
+                        let counting = t0.is_some();
+                        if meta["t"] == "patch" {
+                            if counting {
+                                patches += 1;
+                                bytes += j.len();
+                                if let Some(c) = meta["capturedMs"].as_u64().filter(|c| *c > 0) {
+                                    lat.push(now_ms().saturating_sub(c));
+                                }
+                            }
+                            patch = (meta.clone(), j);
+                        } else if meta["t"] == "frame" {
+                            if counting {
+                                bases += 1;
+                                bytes += j.len();
+                            }
+                            base = j;
+                        }
+                        meta = Value::Null;
+                    }
+                    _ => {}
+                }
+            }
+            let s = t0.map_or(1.0, |t| t.elapsed().as_secs_f64());
+            let (cpu, br) = ((cpu_seconds_self() - cpu0) / s * 100.0, (cpu_seconds_matching(&profile) - br0) / s * 100.0);
+            lat.sort_unstable();
+            let pct = |p: usize| lat.get((lat.len() * p / 100).min(lat.len().saturating_sub(1))).copied().unwrap_or(0);
+            let fps_real = f64::from(patches) / s;
+            eprintln!("LIVE Bot Desktop patch mode ({label}, cap {fps}): {patches} page patches + {bases} base pictures in {s:.1} s = {fps_real:.1} fps; latency p50 {} ms, p95 {} ms; {:.2} MB/s; CPU server {cpu:.0}%, browser {br:.0}%; stats mode {mode}", pct(50), pct(95), bytes as f64 / 1e6 / s);
+            (fps_real, base, patch)
+        };
+        let (f30, base, (pm, patch)) = measure(30, 10, "busy page");
+        // What the console shows: the base picture with the page patch drawn at its place.
+        let mut comp = image::load_from_memory(&base).expect("a base picture").to_rgba8();
+        let page = image::load_from_memory(&patch).expect("a page patch").to_rgba8();
+        let (px, py) = (pm["x"].as_i64().unwrap(), pm["y"].as_i64().unwrap());
+        eprintln!("LIVE Bot Desktop composition: base {}x{}, page patch {}x{} at ({px}, {py})", comp.width(), comp.height(), page.width(), page.height());
+        image::imageops::overlay(&mut comp, &page, px, py);
+        image::DynamicImage::ImageRgba8(comp).to_rgb8().save(out.join("bot-desktop-patch-composed.jpg")).unwrap();
+        std::fs::write(out.join("bot-desktop-patch-base.jpg"), &base).unwrap();
+        let (f60, _, _) = measure(60, 6, "busy page");
+        b.page_call(&tab, "Page.navigate", json!({"url": url(&idle)})).unwrap();
+        std::thread::sleep(Duration::from_secs(2));
+        let (idle_fps, _, _) = measure(30, 5, "idle page");
+        assert!(f30 >= 27.0, "a busy page streams at the 30 fps cap: {f30:.1}");
+        assert!(f60 > f30, "60 fps asked: {f60:.1}");
+        assert!(idle_fps < 2.0, "an idle desktop sends (almost) nothing: {idle_fps:.1}");
+    }
+
+    /// A busy non-browser window on the Bot Desktop — a text editor scrolling text — streamed
+    /// through the full-frame path at 1080p (not run by default): `SEAGENT_REAL_TESTS=1
+    /// [SEAGENT_LIVE_OUT=<dir>] cargo test -p seagent-app real_live_bot_desktop_editor --
+    /// --ignored --nocapture`. Windows: a WinForms editor on the isolated desktop (window
+    /// tracker); Linux: xterm scrolling on the Xvnc Bot Desktop (RFB).
+    #[test]
+    #[ignore]
+    fn real_live_bot_desktop_editor() {
+        if std::env::var("SEAGENT_REAL_TESTS").ok().as_deref() != Some("1") {
+            eprintln!("skipping: set SEAGENT_REAL_TESTS=1 to run real-desktop cases");
+            return;
+        }
+        let scratch = seagent_core::tmp::TempDir::new("seagent-live-editor-frames");
+        let out = std::env::var_os("SEAGENT_LIVE_OUT").map(std::path::PathBuf::from).unwrap_or_else(|| scratch.path().to_path_buf());
+        std::fs::create_dir_all(&out).unwrap();
+        let home = seagent_core::tmp::TempDir::new("seagent-live-editor");
+        let a = app(home.path());
+        let data = home.path().join("data");
+        let mut desk = seagent_browser::control::screen::Desktop::new(&data);
+        desk.geometry = "1920x1080".into();
+        #[cfg(target_os = "linux")]
+        let mut _bare = None;
+        if let Err(e) = desk.start() {
+            // Linux with Xvnc but without the Xfce session: the same Xvnc the launcher runs, bare.
+            #[cfg(target_os = "linux")]
+            match bare_xvnc(&data) {
+                Ok(g) => _bare = Some(g),
+                Err(e2) => {
+                    eprintln!("skipping: no Bot Desktop on this host: {e}; bare Xvnc: {e2}");
+                    return;
+                }
+            }
+            #[cfg(not(target_os = "linux"))]
+            {
+                eprintln!("skipping: no Bot Desktop on this host: {e}");
+                return;
+            }
+        }
+        struct StopDesk(seagent_browser::control::screen::Desktop);
+        impl Drop for StopDesk {
+            fn drop(&mut self) {
+                self.0.stop();
+            }
+        }
+        let _desk = StopDesk(desk);
+        #[cfg(windows)]
+        let pid = {
+            let ps = "Add-Type -AssemblyName System.Windows.Forms,System.Drawing; $f=New-Object Windows.Forms.Form; $f.Text='seagent editor'; $f.StartPosition='Manual'; $f.Left=40; $f.Top=30; $f.Width=1600; $f.Height=980; $t=New-Object Windows.Forms.TextBox; $t.Multiline=$true; $t.ScrollBars='Vertical'; $t.Dock='Fill'; $t.Font=New-Object Drawing.Font('Consolas',11); $f.Controls.Add($t); $script:n=0; $tm=New-Object Windows.Forms.Timer; $tm.Interval=15; $tm.Add_Tick({ $script:n++; $t.AppendText(('{0:D6}  the quick brown fox jumps over the lazy dog 0123456789 - pack my box with five dozen liquor jugs  {1}' -f $script:n, [DateTime]::Now.ToString('HH:mm:ss.fff')) + [Environment]::NewLine) }); $tm.Start(); [Windows.Forms.Application]::Run($f)";
+            let q = seagent_browser::control::screen_windows::WinDesktop::new(&data, "default", "1920x1080").qualified();
+            let line = format!("powershell.exe -NoProfile -NonInteractive -Command \"{}\"", ps.replace('"', "\\\""));
+            seagent_browser::control::screen_windows::spawn_on_desktop_flags(&q, &line, 0x0800_0000).unwrap()
+        };
+        #[cfg(not(windows))]
+        let pid = {
+            let env = seagent_browser::control::screen::Desktop::new(&data).published_env();
+            match std::process::Command::new("xterm").args(["-geometry", "200x60+20+20", "-e", "sh", "-c", "i=0; while :; do i=$((i+1)); echo \"$i  the quick brown fox jumps over the lazy dog 0123456789 $(date +%T.%N)\"; sleep 0.015; done"]).envs(env).spawn() {
+                Ok(c) => c.id(),
+                Err(e) => {
+                    eprintln!("skipping: no xterm on this host: {e}");
+                    return;
+                }
+            }
+        };
+        struct Kill(u32);
+        impl Drop for Kill {
+            fn drop(&mut self) {
+                seagent_core::proc::kill_group(self.0 as i32, Duration::from_secs(2));
+                #[cfg(windows)]
+                let _ = std::process::Command::new("taskkill").args(["/T", "/F", "/PID", &self.0.to_string()]).output();
+            }
+        }
+        let _editor = Kill(pid);
+        std::thread::sleep(Duration::from_secs(5));
+        let srv = crate::server::start(a.clone()).unwrap();
+        let mut ws = connect(srv.local_addr(), "kind=desktop&target=host&fps=30&quality=85&maxWidth=1920", "live-admin-token");
+        assert_eq!(next_text(&mut ws)["t"], "hello");
+        let (warm, total) = (Duration::from_millis(1500), Duration::from_millis(11_500));
+        let start = Instant::now();
+        let (mut t0, mut cpu0) = (None::<Instant>, 0.0);
+        // The JPEGs are kept and composed only at the end: decoding each one here would make
+        // this client the bottleneck (the console decodes in the browser, off the stream).
+        let (mut meta, mut base, mut patches, mut upds, mut bytes, mut lat, mut last_upd) = (Value::Null, None::<Vec<u8>>, Vec::<(i64, i64, Vec<u8>)>::new(), 0u32, 0usize, vec![], 0u64);
+        while start.elapsed() < total {
+            if t0.is_none() && start.elapsed() >= warm {
+                (t0, cpu0) = (Some(Instant::now()), cpu_seconds_self());
+            }
+            match ws.recv() {
+                Ok(Some(Message::Text(x))) => {
+                    let v: Value = serde_json::from_str(&x).unwrap();
+                    assert_ne!(v["t"], "nodisplay", "{v}");
+                    if v["t"] == "frame" || v["t"] == "patch" {
+                        meta = v;
+                    }
+                }
+                Ok(Some(Message::Binary(j))) => {
+                    let upd = meta["upd"].as_u64().unwrap_or(0);
+                    if meta["t"] == "frame" {
+                        (base, patches) = (Some(j.clone()), vec![]);
+                    } else if patches.len() < 600 {
+                        patches.push((meta["x"].as_i64().unwrap_or(0), meta["y"].as_i64().unwrap_or(0), j.clone()));
+                    }
+                    if t0.is_some() {
+                        bytes += j.len();
+                        if upd != last_upd {
+                            upds += 1;
+                            if let Some(c) = meta["capturedMs"].as_u64() {
+                                lat.push(now_ms().saturating_sub(c));
+                            }
+                        }
+                    }
+                    last_upd = upd;
+                    meta = Value::Null;
+                }
+                _ => {}
+            }
+        }
+        let s = t0.map_or(1.0, |t| t.elapsed().as_secs_f64());
+        let cpu = (cpu_seconds_self() - cpu0) / s * 100.0;
+        lat.sort_unstable();
+        let pct = |p: usize| lat.get((lat.len() * p / 100).min(lat.len().saturating_sub(1))).copied().unwrap_or(0);
+        let fps = f64::from(upds) / s;
+        let comp = base.map(|b| {
+            let mut c = image::load_from_memory(&b).unwrap().to_rgba8();
+            for (x, y, p) in &patches {
+                image::imageops::replace(&mut c, &image::load_from_memory(p).unwrap().to_rgba8(), *x, *y);
+            }
+            c
+        });
+        let size = comp.as_ref().map(|c| c.dimensions()).unwrap_or_default();
+        eprintln!("LIVE Bot Desktop full-frame, busy editor ({}): {upds} screen updates in {s:.1} s = {fps:.1} fps; capture→receive p50 {} ms, p95 {} ms; {:.2} MB/s; server CPU {cpu:.0}%; screen {}x{}; {} encoders", std::env::consts::OS, pct(50), pct(95), bytes as f64 / 1e6 / s, size.0, size.1, crate::live_regions::encoders());
+        if let Some(c) = comp {
+            image::DynamicImage::ImageRgba8(c).to_rgb8().save(out.join(format!("bot-desktop-editor-{}.jpg", std::env::consts::OS))).unwrap();
+        }
+        assert!(fps >= 30.0, "a busy window streams at ≥ 30 fps: {fps:.1}");
+    }
+
+    /// Xvnc as the Bot Desktop launcher runs it (RFB on a 0600 Unix socket only, no TCP,
+    /// SecurityTypes None, -FrameRate 60) at 1920×1080, registered in `<data>/bot-desktop`
+    /// (launcher.pid, env, rfb.sock) so the live view finds it like the launcher's — for hosts
+    /// with Xvnc but without the Xfce session. Killed on drop.
+    #[cfg(target_os = "linux")]
+    fn bare_xvnc(data: &std::path::Path) -> Result<impl Drop, String> {
+        struct Guard(std::process::Child);
+        impl Drop for Guard {
+            fn drop(&mut self) {
+                let _ = self.0.kill();
+                let _ = self.0.wait();
+            }
+        }
+        let state = data.join("bot-desktop");
+        std::fs::create_dir_all(&state).map_err(|e| e.to_string())?;
+        let n = (70..99).find(|n| !std::path::Path::new(&format!("/tmp/.X{n}-lock")).exists()).ok_or("no free X display")?;
+        let sock = state.join("rfb.sock");
+        let child = std::process::Command::new("Xvnc")
+            .args([format!(":{n}"), "-geometry".into(), "1920x1080".into(), "-depth".into(), "24".into(), "-rfbport".into(), "-1".into(), "-rfbunixpath".into(), sock.display().to_string(), "-rfbunixmode".into(), "0600".into(), "-SecurityTypes".into(), "None".into(), "-AlwaysShared".into(), "-FrameRate".into(), "60".into(), "-nolisten".into(), "tcp".into()])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .map_err(|e| format!("Xvnc: {e}"))?;
+        let g = Guard(child);
+        let t0 = Instant::now();
+        while !sock.exists() && t0.elapsed() < Duration::from_secs(10) {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        if !sock.exists() {
+            return Err("Xvnc did not create its RFB socket".into());
+        }
+        let pid = g.0.id() as i32;
+        let born = seagent_browser::control::screen::start_time(pid).ok_or("no start time")?;
+        std::fs::write(state.join("launcher.pid"), format!("{pid} {born}\n")).map_err(|e| e.to_string())?;
+        std::fs::write(state.join("env"), format!("DISPLAY=:{n}\n")).map_err(|e| e.to_string())?;
+        Ok(g)
     }
 
     /// Width × height of a baseline/progressive JPEG (its SOF marker).

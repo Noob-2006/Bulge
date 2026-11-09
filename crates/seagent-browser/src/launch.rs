@@ -477,6 +477,98 @@ impl Kid {
     }
 }
 
+/// Start `exe args` (stdout / stderr to `<dir>/seagent-browser.log`) in its own session and tied
+/// to seagent: when seagent dies — crash, SIGKILL, an interrupted test run — the kernel sends it
+/// SIGTERM (new-001), and one `kill(-pgid)` reaches its children. Windows Bot Desktop: with
+/// `SEAGENT_BD_DESKTOP` in `env` it is created with that isolated desktop in
+/// `STARTUPINFOW.lpDesktop` (std cannot set it, and a null lpDesktop means this process's
+/// desktop — binding a thread does not reach the spawner).
+fn spawn_kid(exe: &Path, args: &[String], dir: &Path, env: &[(String, String)]) -> Result<Kid, String> {
+    let log = std::fs::File::create(dir.join("seagent-browser.log")).map_err(|e| e.to_string())?;
+    #[cfg(windows)]
+    if let Some(d) = env.iter().find(|(k, _)| k == "SEAGENT_BD_DESKTOP").map(|(_, v)| v.clone()) {
+        return Ok(Kid::Desk(crate::control::screen_windows::spawn_logged_on_desktop(&d, exe, args, env, &log).map_err(|e| format!("failed to start {} on the Bot Desktop: {e}", exe.display()))?));
+    }
+    let mut cmd = Command::new(exe);
+    cmd.args(args).stdin(Stdio::null()).stdout(log.try_clone().map_err(|e| e.to_string())?).stderr(log);
+    // Chrome's SingletonSocket lives under $TMPDIR; deep dirs overflow AF_UNIX paths.
+    #[cfg(unix)]
+    cmd.env("TMPDIR", "/tmp");
+    for (k, v) in env {
+        cmd.env(k, v);
+    }
+    Ok(Kid::Std(seagent_core::proc::spawn_tied(cmd, true).map_err(|e| format!("failed to start {}: {e}", exe.display()))?))
+}
+
+/// What a Bot Desktop app is underneath, when it can be a headed CDP target: `"chromium"` (a
+/// Chromium-family browser: Chrome, Edge, Chromium, Brave) or `"electron"` (an Electron app:
+/// `resources/app.asar`, `resources/app/` or `resources/default_app.asar` beside the binary;
+/// macOS: in the bundle's `Contents/Resources`).
+pub fn app_kind(exe: &Path) -> Option<&'static str> {
+    if exe.file_stem().is_some_and(|n| chromey(&n.to_string_lossy())) {
+        return Some("chromium");
+    }
+    let dir = exe.parent()?;
+    let electron = |r: &Path| r.join("app.asar").is_file() || r.join("app").join("package.json").is_file() || r.join("default_app.asar").is_file();
+    if electron(&dir.join("resources")) || dir.parent().is_some_and(|c| electron(&c.join("Resources"))) {
+        return Some("electron");
+    }
+    // A versioned payload folder beside the binary (VS Code since 1.9x: `<hash>/resources/app`).
+    std::fs::read_dir(dir).ok()?.flatten().filter(|e| e.path().is_dir()).any(|e| electron(&e.path().join("resources"))).then_some("electron")
+}
+
+/// The browser endpoint an app announced: `DevToolsActivePort` in its user-data-dir, or the
+/// "DevTools listening on ws://…" line it prints (Electron). Only a loopback endpoint counts.
+fn announced(udd: &Path) -> Option<(u16, String)> {
+    if let Some((port, path)) = active_port(udd).filter(|(_, p)| !p.is_empty()) {
+        return Some((port, path));
+    }
+    let log = std::fs::read_to_string(udd.join("seagent-browser.log")).ok()?;
+    let url = log.lines().find_map(|l| l.split("DevTools listening on ").nth(1))?.trim();
+    let rest = url.strip_prefix("ws://")?;
+    let (host, rest) = rest.split_once(':')?;
+    let (port, path) = rest.split_once('/')?;
+    matches!(host, "127.0.0.1" | "localhost").then_some(())?;
+    Some((port.parse().ok()?, format!("/{path}")))
+}
+
+/// Start a Chromium-family or Electron app (see [`app_kind`]) on the Bot Desktop `env` as a
+/// headed CDP target: `--remote-debugging-port=0` (Chromium binds it to 127.0.0.1 only; the
+/// endpoint is refused unless it is loopback) and its own `--user-data-dir` `udd`, so it is a
+/// separate instance and never the user's profile. `args` follow (an Electron app's own
+/// arguments, `--app=<url>` for a browser).
+pub fn launch_app(exe: &Path, udd: &Path, args: &[String], env: &[(String, String)], timeout: Duration) -> Result<Launched, String> {
+    let kind = app_kind(exe).ok_or_else(|| format!("{} is not a Chromium-family browser or an Electron app", exe.display()))?;
+    util::private_dir(udd).map_err(|e| format!("{}: {e}", udd.display()))?;
+    if let Some(l) = running_on(udd) {
+        return Ok(l);
+    }
+    clear_stale_locks(udd);
+    let _ = std::fs::remove_file(udd.join("DevToolsActivePort"));
+    let mut a = vec!["--remote-debugging-port=0".to_string(), format!("--user-data-dir={}", udd.display()), "--no-first-run".into(), "--no-default-browser-check".into()];
+    if kind == "chromium" {
+        a.extend(["--disable-sync", "--disable-background-networking", "--disable-component-update", "--password-store=basic"].map(String::from));
+    }
+    a.extend(args.iter().filter(|x| !x.starts_with("--remote-debugging") && !x.starts_with("--user-data-dir")).cloned());
+    let mut child = spawn_kid(exe, &a, udd, env)?;
+    let pid = child.id() as i32;
+    let until = Instant::now() + timeout;
+    loop {
+        if let Some((port, path)) = announced(udd) {
+            std::thread::spawn(move || child.wait());
+            return Ok(Launched { pid, http: format!("http://127.0.0.1:{port}"), ws: format!("ws://127.0.0.1:{port}{path}"), owned: true });
+        }
+        if let Some(st) = child.try_wait() {
+            return Err(format!("{} exited ({st}) before its DevTools endpoint was up (see {})", exe.display(), udd.join("seagent-browser.log").display()));
+        }
+        if Instant::now() >= until {
+            util::kill_group(pid, Duration::from_secs(2));
+            return Err(format!("{} did not expose DevTools within {}s (see {})", exe.display(), timeout.as_secs(), udd.join("seagent-browser.log").display()));
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
 /// Launch (or reuse) a Chromium on `user_data_dir` and wait for its DevTools endpoint.
 pub fn launch(o: &LaunchOpts, timeout: Duration) -> Result<Launched, String> {
     util::private_dir(o.user_data_dir).map_err(|e| format!("{}: {e}", o.user_data_dir.display()))?;
@@ -485,30 +577,7 @@ pub fn launch(o: &LaunchOpts, timeout: Duration) -> Result<Launched, String> {
     }
     clear_stale_locks(o.user_data_dir);
     let _ = std::fs::remove_file(o.user_data_dir.join("DevToolsActivePort"));
-    let log = std::fs::File::create(o.user_data_dir.join("seagent-browser.log")).map_err(|e| e.to_string())?;
-    let mut cmd = Command::new(o.exe);
-    cmd.args(chrome_args(o)).stdin(Stdio::null()).stdout(log.try_clone().map_err(|e| e.to_string())?).stderr(log);
-    // Chrome's SingletonSocket lives under $TMPDIR; deep dirs overflow AF_UNIX paths.
-    #[cfg(unix)]
-    cmd.env("TMPDIR", "/tmp");
-    for (k, v) in &o.env {
-        cmd.env(k, v);
-    }
-    // Own session (one `kill(-pgid)` reaches the renderers) and tied to seagent: when seagent dies —
-    // crash, SIGKILL, an interrupted test run — the kernel sends Chrome SIGTERM (new-001).
-    // Windows Bot Desktop: with `SEAGENT_BD_DESKTOP` set the browser is created with that
-    // isolated desktop in `STARTUPINFOW.lpDesktop` (std cannot set it, and a null lpDesktop
-    // means this process's desktop — binding a thread does not reach the spawner).
-    #[cfg(windows)]
-    let mut child = match o.env.iter().find(|(k, _)| k == "SEAGENT_BD_DESKTOP").map(|(_, v)| v.clone()) {
-        Some(d) => {
-            let log = std::fs::OpenOptions::new().append(true).open(o.user_data_dir.join("seagent-browser.log")).map_err(|e| e.to_string())?;
-            Kid::Desk(crate::control::screen_windows::spawn_logged_on_desktop(&d, o.exe, &chrome_args(o), &o.env, &log).map_err(|e| format!("failed to start {} on the Bot Desktop: {e}", o.exe.display()))?)
-        }
-        None => Kid::Std(seagent_core::proc::spawn_tied(cmd, true).map_err(|e| format!("failed to start {}: {e}", o.exe.display()))?),
-    };
-    #[cfg(not(windows))]
-    let mut child = Kid::Std(seagent_core::proc::spawn_tied(cmd, true).map_err(|e| format!("failed to start {}: {e}", o.exe.display()))?);
+    let mut child = spawn_kid(o.exe, &chrome_args(o), o.user_data_dir, &o.env)?;
     let pid = child.id() as i32;
     let until = Instant::now() + timeout;
     loop {
@@ -830,6 +899,77 @@ pub fn lightpanda_serve(state_dir: &Path, block_private: bool) -> Result<Launche
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Which Bot Desktop apps can be headed CDP targets: Chromium-family binaries by name,
+    /// Electron apps by their resources layout (Windows / Linux beside the binary, macOS in the
+    /// bundle); anything else is not.
+    #[test]
+    fn app_kind_knows_chromium_and_electron_layouts() {
+        let d = seagent_core::tmp::TempDir::new("seagent-appkind");
+        assert_eq!(app_kind(Path::new("/opt/microsoft/msedge/msedge")), Some("chromium"));
+        assert_eq!(app_kind(Path::new(r"C:\Program Files\Google\Chrome\Application\chrome.exe")), Some("chromium"));
+        let win = d.path().join("Code");
+        std::fs::create_dir_all(win.join("resources")).unwrap();
+        std::fs::write(win.join("resources").join("app.asar"), b"asar").unwrap();
+        assert_eq!(app_kind(&win.join("Code.exe")), Some("electron"));
+        let unpacked = d.path().join("slack");
+        std::fs::create_dir_all(unpacked.join("resources").join("app")).unwrap();
+        std::fs::write(unpacked.join("resources").join("app").join("package.json"), b"{}").unwrap();
+        assert_eq!(app_kind(&unpacked.join("slack")), Some("electron"));
+        let mac = d.path().join("Obsidian.app").join("Contents");
+        std::fs::create_dir_all(mac.join("MacOS")).unwrap();
+        std::fs::create_dir_all(mac.join("Resources")).unwrap();
+        std::fs::write(mac.join("Resources").join("app.asar"), b"asar").unwrap();
+        assert_eq!(app_kind(&mac.join("MacOS").join("Obsidian")), Some("electron"));
+        let versioned = d.path().join("Microsoft VS Code");
+        std::fs::create_dir_all(versioned.join("c4453f8ea4").join("resources").join("app")).unwrap();
+        std::fs::write(versioned.join("c4453f8ea4").join("resources").join("app").join("package.json"), b"{}").unwrap();
+        assert_eq!(app_kind(&versioned.join("Code.exe")), Some("electron"));
+        let plain = d.path().join("notepad");
+        std::fs::create_dir_all(&plain).unwrap();
+        assert_eq!(app_kind(&plain.join("notepad.exe")), None);
+    }
+
+    /// The endpoint an app announces: DevToolsActivePort first, else the stderr line; a
+    /// non-loopback endpoint never counts.
+    #[test]
+    fn announced_endpoint_is_loopback_only() {
+        let d = seagent_core::tmp::TempDir::new("seagent-announced");
+        assert_eq!(announced(d.path()), None);
+        std::fs::write(d.path().join("seagent-browser.log"), "boot\nDevTools listening on ws://0.0.0.0:9229/devtools/browser/x\n").unwrap();
+        assert_eq!(announced(d.path()), None, "a non-loopback endpoint is refused");
+        std::fs::write(d.path().join("seagent-browser.log"), "\nDevTools listening on ws://127.0.0.1:41234/devtools/browser/0b1c\n").unwrap();
+        assert_eq!(announced(d.path()), Some((41234, "/devtools/browser/0b1c".into())));
+        std::fs::write(d.path().join("DevToolsActivePort"), "9333\n/devtools/browser/abc\n").unwrap();
+        assert_eq!(announced(d.path()), Some((9333, "/devtools/browser/abc".into())));
+    }
+
+    /// `launch_app` end to end with a stand-in Electron app (a script beside `resources/app.asar`
+    /// that announces its endpoint the way Electron does): it gets a loopback debugging port and
+    /// its own user-data-dir, keeps its own arguments, and the endpoint is read back. (Windows:
+    /// `seagent-app` `real_live_bot_desktop_app` launches a real app onto the Bot Desktop.)
+    #[cfg(unix)]
+    #[test]
+    fn launch_app_starts_an_electron_stand_in_and_reads_its_endpoint() {
+        use std::os::unix::fs::PermissionsExt;
+        let d = seagent_core::tmp::TempDir::new("seagent-launchapp");
+        let app = d.path().join("fakeapp");
+        std::fs::create_dir_all(app.join("resources")).unwrap();
+        std::fs::write(app.join("resources").join("app.asar"), b"asar").unwrap();
+        let exe = app.join("fakeapp");
+        std::fs::write(&exe, "#!/bin/sh\necho \"$@\" > \"$(dirname \"$0\")/argv\"\necho 'DevTools listening on ws://127.0.0.1:45678/devtools/browser/fake' >&2\nexec sleep 30\n").unwrap();
+        std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let udd = d.path().join("udd");
+        let l = launch_app(&exe, &udd, &["--app-flag".into(), "--remote-debugging-port=9222".into()], &[], Duration::from_secs(10)).unwrap();
+        assert_eq!(l.ws, "ws://127.0.0.1:45678/devtools/browser/fake");
+        assert!(l.owned);
+        let argv = std::fs::read_to_string(app.join("argv")).unwrap();
+        assert!(argv.starts_with("--remote-debugging-port=0 "), "{argv}");
+        assert!(argv.contains(&format!("--user-data-dir={}", udd.display())) && argv.contains("--app-flag"), "{argv}");
+        assert!(!argv.contains("9222"), "the caller cannot pick the debugging port: {argv}");
+        util::kill_group(l.pid, Duration::from_secs(2));
+        assert!(launch_app(Path::new("/bin/sh"), &udd, &[], &[], Duration::from_secs(1)).err().unwrap_or_default().contains("not a Chromium-family browser or an Electron app"));
+    }
 
     /// The default install is the pinned, sha256-checked Chrome for Testing build; the shell
     /// installers carry the same pin.

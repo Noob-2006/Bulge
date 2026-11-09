@@ -52,7 +52,8 @@ function lvSocket(url) {
 
 function lvClose() {
   if (LV.ws) { LV.ws.onclose = null; try { LV.ws.close(); } catch {} }
-  LV.ws = null; LV.key = ''; LV.live = false; LV.meta = null;
+  LV.ws = null; LV.key = ''; LV.live = false; LV.meta = null; LV.base = null;
+  lvPatchMode(false);
   lvBadge();
 }
 
@@ -79,7 +80,7 @@ function lvOpen(cur) {
     if (typeof e.data !== 'string') return lvShow(cur, e.data);
     let m; try { m = JSON.parse(e.data); } catch { return; }
     if (m.t === 'hello') { LV.live = true; LV.fails = 0; lvBadge(); }
-    else if (m.t === 'frame') LV.meta = m;
+    else if (m.t === 'frame' || m.t === 'patch') LV.meta = m;
     else if (m.t === 'stats') { LV.stats = m; lvBadge(); }
     else if (m.t === 'nodisplay') { LV.nodisplay = true; $('workEmpty').textContent = LVL('這個桌面沒有畫面可顯示，下方是代理正在執行的指令。', 'This desktop has no display to show; the agent\'s commands are below.'); lvTerm(true); }
     else if (m.t === 'input' && !m.ok) toast(m.error, true);
@@ -94,11 +95,55 @@ function lvOpen(cur) {
   };
 }
 
+// Patch mode (the Bot Desktop with the agent's browser on it): a base picture of the desktop
+// plus the browser page as its own screencast frames, `{t:'patch', x, y, w, h}` in screen
+// pixels. They are composed on a canvas over the picture; the picture underneath stays the
+// <img> work.js maps clicks with (invisible while the canvas shows).
+function lvCanvas() {
+  let c = $('workCanvas');
+  if (!c) {
+    c = document.createElement('canvas');
+    c.id = 'workCanvas'; c.className = 'work-canvas';
+    $('workFrame').after(c);
+  }
+  return c;
+}
+function lvPatchMode(on) {
+  $('workStage').classList.toggle('canvas-on', on);
+  if (!on && $('workCanvas')) $('workCanvas').hidden = true;
+}
+async function lvPatch(m, blob) {
+  const c = lvCanvas();
+  if (!c.width || !LV.base) return; // a patch before any base picture: wait for one
+  try {
+    const bmp = await createImageBitmap(blob);
+    const s = c.width / LV.base.w;
+    c.getContext('2d').drawImage(bmp, m.x * s, m.y * s, m.w * s, m.h * s);
+    bmp.close();
+    LV.patches = (LV.patches || 0) + 1;
+  } catch {}
+}
+async function lvBase(m, blob) {
+  const c = lvCanvas();
+  try {
+    const bmp = await createImageBitmap(blob);
+    if (c.width !== bmp.width || c.height !== bmp.height) { c.width = bmp.width; c.height = bmp.height; }
+    c.getContext('2d').drawImage(bmp, 0, 0);
+    bmp.close();
+    LV.base = { w: m.width || c.width, h: m.height || c.height };
+    c.hidden = false;
+    lvPatchMode(true);
+  } catch {}
+}
+
 function lvShow(from, blob) {
   // work.js rebuilds its target objects on every refresh: follow the current one.
   const cur = W.cur;
   if (lvKey(cur) !== lvKey(from)) return;
   const m = LV.meta || {};
+  if (m.t === 'patch') return lvPatch(m, blob);
+  if (m.mode === 'patch') lvBase(m, blob);
+  else if ($('workStage').classList.contains('canvas-on')) { lvPatchMode(false); LV.base = null; }
   const img = $('workFrame');
   const url = URL.createObjectURL(blob);
   const old = LV.url;

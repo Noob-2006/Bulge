@@ -323,6 +323,49 @@ impl Manager {
         }
     }
 
+    /// An app on the Bot Desktop that is Chromium or Electron underneath, started as a headed
+    /// CDP target (`launch::launch_app`: loopback DevTools port, its own user-data-dir under
+    /// `<home>/browser/apps/<name>`) and kept as browser `app:<name>`, marked `bot_desktop` and
+    /// `desk_app`. The live view then streams its page in patch mode like the agent's own
+    /// browser, under the same live-view token and Bot Desktop lease; viewer input goes through
+    /// the lease like any other desktop input. Needs a running Bot Desktop (macOS: the login
+    /// session, which is the host target there). Idle reaping skips it: it runs until stopped.
+    pub fn launch_app(&self, env: &Env, name: &str, exe: &Path, args: &[String]) -> Result<Arc<Browser>, String> {
+        if name.is_empty() || name.len() > 64 || !name.chars().all(|c| c.is_ascii_alphanumeric() || "._-".contains(c)) {
+            return Err(format!("app name {name:?}: use letters, digits, '.', '_' or '-'"));
+        }
+        let key = format!("app:{name}");
+        if let Some(b) = self.get(&key) {
+            return Ok(b);
+        }
+        let desk = desktop_env(&env.home);
+        if desk.is_empty() && !cfg!(target_os = "macos") {
+            return Err("no Bot Desktop is running: start it with `seagent screen start`".into());
+        }
+        let _g = self.starting.lock().unwrap();
+        let udd = env.dir().join("apps").join(name);
+        util::private_dir(&env.dir()).map_err(|e| e.to_string())?;
+        let kind = launch::app_kind(exe).unwrap_or("app");
+        let l = launch::launch_app(exe, &udd, args, &desk, Duration::from_secs(60))?;
+        let b = match self.wrap(env, &key, Endpoint { kind: "app", ws: l.ws, http: Some(l.http), auth: None, pid: Some(l.pid), owned: l.owned, bridge: false }) {
+            Ok(b) => b,
+            Err(e) => {
+                util::kill_group(l.pid, Duration::from_secs(2));
+                return Err(e);
+            }
+        };
+        {
+            let mut i = b.info.lock().unwrap();
+            i.insert("executable".into(), exe.display().to_string().into());
+            i.insert("user_data_dir".into(), udd.display().to_string().into());
+            i.insert("headless".into(), false.into());
+            i.insert("bot_desktop".into(), true.into());
+            i.insert("desk_app".into(), kind.into());
+        }
+        self.browsers.lock().unwrap().insert(key, b.clone());
+        Ok(b)
+    }
+
     /// The seagent session's current tab in `b` (created on first use).
     pub fn tab(&self, env: &Env, sid: &str, b: &Browser) -> Result<String, String> {
         let mut s = self.session(sid);
@@ -406,7 +449,7 @@ impl Manager {
     /// Close browsers idle past `inactivity_timeout` (and expired cloud sessions).
     pub fn reap(&self) {
         let idle = Duration::from_secs(self.idle_secs.load(Ordering::Relaxed).max(30));
-        let stale: Vec<String> = self.browsers.lock().unwrap().iter().filter(|(_, b)| b.conn.is_closed() || b.idle_for() > idle).map(|(k, _)| k.clone()).collect();
+        let stale: Vec<String> = self.browsers.lock().unwrap().iter().filter(|(k, b)| b.conn.is_closed() || (b.idle_for() > idle && !k.starts_with("app:"))).map(|(k, _)| k.clone()).collect();
         for k in stale {
             self.stop(&k);
         }

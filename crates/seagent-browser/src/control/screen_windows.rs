@@ -224,7 +224,7 @@ unsafe fn grab(dc: HDC) -> Result<Shot, String> {
     let old = SelectObject(mem, bmp as _);
     let ok = BitBlt(mem, 0, 0, w, h, dc, 0, 0, SRCCOPY);
     let mut bi: BITMAPINFO = std::mem::zeroed();
-    bi.bmiHeader = BITMAPINFOHEADER { biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32, biWidth: w, biHeight: -h, biPlanes: 1, biBitCount: 32, biCompression: BI_RGB as u32, ..std::mem::zeroed() };
+    bi.bmiHeader = BITMAPINFOHEADER { biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32, biWidth: w, biHeight: -h, biPlanes: 1, biBitCount: 32, biCompression: BI_RGB, ..std::mem::zeroed() };
     let mut bgra = vec![0u8; (w * h * 4) as usize];
     let rows = GetDIBits(mem, bmp, 0, h as u32, bgra.as_mut_ptr() as _, &mut bi, DIB_RGB_COLORS);
     SelectObject(mem, old);
@@ -241,8 +241,23 @@ unsafe fn grab(dc: HDC) -> Result<Shot, String> {
 /// thread, desktop open and DC per frame). Frames come at most `max_w` wide: an inactive
 /// desktop is composed straight at that size (each window `StretchBlt`ed, HALFTONE), so less
 /// is copied, hashed and encoded. Dropping it ends the worker.
-/// One frame request to the capture worker: (max width, where to answer).
-type CaptureRequest = (u32, std::sync::mpsc::Sender<Result<Shot, String>>);
+/// A request to the capture worker.
+enum CaptureRequest {
+    /// One whole frame, at most this wide.
+    Grab(u32, std::sync::mpsc::Sender<Result<Shot, String>>),
+    /// What changed since the last `Track` ([`TrackUpdate`]).
+    Track(std::sync::mpsc::Sender<Result<TrackUpdate, String>>),
+}
+
+/// What changed on the desktop since the last [`LiveCapture::track`].
+#[derive(Debug)]
+pub enum TrackUpdate {
+    /// The whole desktop (first call, or the window layout changed).
+    Full(Shot),
+    /// These rectangles changed: (x, y, pixels).
+    Rects(Vec<(i32, i32, Shot)>),
+    Same,
+}
 
 pub struct LiveCapture {
     tx: Option<std::sync::mpsc::Sender<CaptureRequest>>,
@@ -264,10 +279,19 @@ impl LiveCapture {
                     let ok = hdesk != 0 && SetThreadDesktop(hdesk) != 0;
                     let display = wide("DISPLAY");
                     let dc: HDC = if ok { CreateDCW(display.as_ptr(), std::ptr::null(), std::ptr::null(), std::ptr::null()) } else { 0 };
-                    for (max_w, reply) in rx {
-                        let r = if dc == 0 { Err(format!("the Bot Desktop {name} is not available ({})", last_error())) } else { capture_on(hdesk, dc, max_w) };
-                        let _ = reply.send(r);
+                    let mut tracker = Tracker::default();
+                    for req in rx {
+                        let gone = || format!("the Bot Desktop {name} is not available ({})", last_error());
+                        match req {
+                            CaptureRequest::Grab(max_w, reply) => {
+                                let _ = reply.send(if dc == 0 { Err(gone()) } else { capture_on(hdesk, dc, max_w) });
+                            }
+                            CaptureRequest::Track(reply) => {
+                                let _ = reply.send(if dc == 0 { Err(gone()) } else { tracker.track(hdesk, dc) });
+                            }
+                        }
                     }
+                    drop(tracker);
                     if dc != 0 {
                         DeleteDC(dc);
                     }
@@ -284,9 +308,313 @@ impl LiveCapture {
     pub fn grab(&self, max_w: u32) -> Result<Shot, String> {
         let tx = self.tx.as_ref().ok_or("the capture worker did not start")?;
         let (rtx, rrx) = std::sync::mpsc::channel();
-        tx.send((max_w, rtx)).map_err(|_| "the capture worker stopped".to_string())?;
+        tx.send(CaptureRequest::Grab(max_w, rtx)).map_err(|_| "the capture worker stopped".to_string())?;
         rrx.recv().map_err(|_| "the capture worker stopped".to_string())?
     }
+
+    /// What changed on the desktop since the last call (full size): the window tracker keeps
+    /// one bitmap per window and a composite, re-renders windows that changed last time every
+    /// call and the others every [`STATIC_REGRAB`], in parallel, and returns only the
+    /// rectangles of windows whose pixels changed (cut from the composite, so overlapping
+    /// windows stay right). A new window layout returns the whole desktop.
+    pub fn track(&self) -> Result<TrackUpdate, String> {
+        let tx = self.tx.as_ref().ok_or("the capture worker did not start")?;
+        let (rtx, rrx) = std::sync::mpsc::channel();
+        tx.send(CaptureRequest::Track(rtx)).map_err(|_| "the capture worker stopped".to_string())?;
+        rrx.recv().map_err(|_| "the capture worker stopped".to_string())?
+    }
+}
+
+/// How often a window that did not change is rendered again to check (the others: every call).
+pub const STATIC_REGRAB: std::time::Duration = std::time::Duration::from_millis(300);
+
+/// A 32-bit top-down DIB section selected into its own memory DC: GDI draws into it and its
+/// pixels are read in place (no `GetDIBits` copy).
+struct Dib {
+    dc: HDC,
+    bmp: isize,
+    old: isize,
+    bits: *mut u8,
+    w: i32,
+    h: i32,
+}
+
+// SAFETY: a memory DC and its DIB are used by one thread at a time (the tracker hands each to
+// exactly one grabbing thread and waits for them all).
+unsafe impl Send for Dib {}
+
+impl Dib {
+    /// SAFETY: `screen` is a live display DC.
+    unsafe fn new(screen: HDC, w: i32, h: i32) -> Option<Dib> {
+        use windows_sys::Win32::Graphics::Gdi::CreateDIBSection;
+        let dc = CreateCompatibleDC(screen);
+        if dc == 0 {
+            return None;
+        }
+        let mut bi: BITMAPINFO = std::mem::zeroed();
+        bi.bmiHeader = BITMAPINFOHEADER { biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32, biWidth: w, biHeight: -h, biPlanes: 1, biBitCount: 32, biCompression: BI_RGB, ..std::mem::zeroed() };
+        let mut bits: *mut std::ffi::c_void = std::ptr::null_mut();
+        let bmp = CreateDIBSection(dc, &bi, DIB_RGB_COLORS, &mut bits, 0, 0);
+        if bmp == 0 || bits.is_null() {
+            DeleteDC(dc);
+            return None;
+        }
+        let old = SelectObject(dc, bmp as _);
+        Some(Dib { dc, bmp: bmp as isize, old: old as isize, bits: bits.cast(), w, h })
+    }
+    fn pixels(&self) -> &[u8] {
+        // SAFETY: the DIB section holds w*h*4 bytes for its lifetime; callers GdiFlush first.
+        unsafe { std::slice::from_raw_parts(self.bits, (self.w * self.h * 4) as usize) }
+    }
+    fn hash(&self) -> u64 {
+        self.pixels().as_chunks::<8>().0.iter().fold(0xcbf2_9ce4_8422_2325u64, |h, w| (h ^ u64::from_le_bytes(*w)).wrapping_mul(0x0100_0000_01b3))
+    }
+    /// The pixels of (x, y, w, h), clipped by the caller to the bitmap.
+    fn cut(&self, x: i32, y: i32, w: i32, h: i32) -> Shot {
+        let (stride, row) = (self.w as usize * 4, w as usize * 4);
+        let px = self.pixels();
+        let mut bgra = Vec::with_capacity(row * h as usize);
+        for yy in y..y + h {
+            let a = yy as usize * stride + x as usize * 4;
+            bgra.extend_from_slice(&px[a..a + row]);
+        }
+        Shot { width: w, height: h, bgra }
+    }
+}
+
+impl Drop for Dib {
+    fn drop(&mut self) {
+        // SAFETY: we own the DC and the bitmap; deselect before deleting.
+        unsafe {
+            SelectObject(self.dc, self.old as _);
+            DeleteObject(self.bmp as _);
+            DeleteDC(self.dc);
+        }
+    }
+}
+
+/// A device-dependent bitmap in its own memory DC: what `PrintWindow` renders into (fast;
+/// rendering straight into a DIB section forces a slow GPU readback inside the render).
+struct Ddb {
+    dc: HDC,
+    bmp: isize,
+    old: isize,
+}
+
+// SAFETY: as for Dib (one thread at a time).
+unsafe impl Send for Ddb {}
+
+impl Ddb {
+    /// SAFETY: `screen` is a live display DC.
+    unsafe fn new(screen: HDC, w: i32, h: i32) -> Option<Ddb> {
+        let dc = CreateCompatibleDC(screen);
+        let bmp = CreateCompatibleBitmap(screen, w, h);
+        if dc == 0 || bmp == 0 {
+            if dc != 0 {
+                DeleteDC(dc);
+            }
+            return None;
+        }
+        let old = SelectObject(dc, bmp as _);
+        Some(Ddb { dc, bmp: bmp as isize, old: old as isize })
+    }
+}
+
+impl Drop for Ddb {
+    fn drop(&mut self) {
+        // SAFETY: we own the DC and the bitmap.
+        unsafe {
+            SelectObject(self.dc, self.old as _);
+            DeleteObject(self.bmp as _);
+            DeleteDC(self.dc);
+        }
+    }
+}
+
+/// One top-level window of the tracked desktop.
+struct TrackedWin {
+    hwnd: isize,
+    rect: (i32, i32, i32, i32),
+    ddb: Ddb,
+    dib: Dib,
+    hash: u64,
+    hot: bool,
+    grabbed: std::time::Instant,
+}
+
+/// The window tracker behind [`LiveCapture::track`] (lives on the desktop-bound worker).
+#[derive(Default)]
+struct Tracker {
+    comp: Option<Dib>,
+    wins: Vec<TrackedWin>,
+}
+
+impl Tracker {
+    /// SAFETY: `hdesk` / `dc` are this thread's desktop and display DC.
+    unsafe fn track(&mut self, hdesk: HDESK, dc: HDC) -> Result<TrackUpdate, String> {
+        use windows_sys::Win32::Graphics::Gdi::{GdiFlush, GetDeviceCaps, PatBlt, BLACKNESS, HORZRES, VERTRES};
+        let (w, h) = (GetDeviceCaps(dc, HORZRES as i32), GetDeviceCaps(dc, VERTRES as i32));
+        if w <= 0 || h <= 0 {
+            return Err("the desktop has no size yet".into());
+        }
+        let list = visible_top_windows(hdesk);
+        let same_layout = self.comp.as_ref().is_some_and(|c| (c.w, c.h) == (w, h)) && list.len() == self.wins.len() && list.iter().zip(&self.wins).all(|((hw, r), t)| *hw == t.hwnd && *r == t.rect);
+        let now = std::time::Instant::now();
+        if !same_layout {
+            // New layout: (re)build every window bitmap, render all, compose from scratch.
+            let mut old: Vec<TrackedWin> = std::mem::take(&mut self.wins);
+            for (hwnd, r) in list {
+                let size = (r.2 - r.0, r.3 - r.1);
+                let (ddb, dib) = match old.iter().position(|t| t.hwnd == hwnd && (t.dib.w, t.dib.h) == size) {
+                    Some(i) => {
+                        let t = old.swap_remove(i);
+                        (t.ddb, t.dib)
+                    }
+                    None => match (Ddb::new(dc, size.0, size.1), Dib::new(dc, size.0, size.1)) {
+                        (Some(a), Some(b)) => (a, b),
+                        _ => continue,
+                    },
+                };
+                self.wins.push(TrackedWin { hwnd, rect: r, ddb, dib, hash: 0, hot: true, grabbed: now });
+            }
+            let all: Vec<usize> = (0..self.wins.len()).collect();
+            render(hdesk, &mut self.wins, &all);
+            if self.comp.as_ref().is_none_or(|c| (c.w, c.h) != (w, h)) {
+                self.comp = Dib::new(dc, w, h);
+            }
+            let comp = self.comp.as_ref().ok_or("cannot allocate the desktop bitmap")?;
+            PatBlt(comp.dc, 0, 0, w, h, BLACKNESS);
+            for t in &self.wins {
+                BitBlt(comp.dc, t.rect.0, t.rect.1, t.dib.w, t.dib.h, t.dib.dc, 0, 0, SRCCOPY);
+            }
+            GdiFlush();
+            for t in &mut self.wins {
+                t.hash = t.dib.hash();
+            }
+            return Ok(TrackUpdate::Full(comp.cut(0, 0, w, h)));
+        }
+        // Same layout: render the windows that changed last time, and the others now and then.
+        let due: Vec<usize> = self.wins.iter().enumerate().filter(|(_, t)| t.hot || now.duration_since(t.grabbed) >= STATIC_REGRAB).map(|(i, _)| i).collect();
+        let t_render = std::time::Instant::now();
+        render(hdesk, &mut self.wins, &due);
+        GdiFlush();
+        let render_ms = t_render.elapsed().as_secs_f64() * 1000.0;
+        let t_hash = std::time::Instant::now();
+        let mut dirty = vec![];
+        for &i in &due {
+            let t = &mut self.wins[i];
+            let hsh = t.dib.hash();
+            t.hot = hsh != t.hash;
+            t.grabbed = now;
+            if t.hot {
+                t.hash = hsh;
+                dirty.push(t.rect);
+            }
+        }
+        let hash_ms = t_hash.elapsed().as_secs_f64() * 1000.0;
+        if debug() {
+            let sizes: Vec<String> = due.iter().map(|&i| format!("{}x{}{}", self.wins[i].dib.w, self.wins[i].dib.h, if self.wins[i].hot { "*" } else { "" })).collect();
+            eprintln!("seagent track: {} windows, rendered {} [{}] in {render_ms:.1} ms, hashed in {hash_ms:.1} ms, {} dirty", self.wins.len(), due.len(), sizes.join(" "), dirty.len());
+        }
+        if dirty.is_empty() {
+            return Ok(TrackUpdate::Same);
+        }
+        let comp = self.comp.as_ref().ok_or("no desktop bitmap")?;
+        let mut out = vec![];
+        for (l, t, r, b) in dirty {
+            let (x0, y0, x1, y1) = (l.max(0), t.max(0), r.min(w), b.min(h));
+            if x1 <= x0 || y1 <= y0 {
+                continue;
+            }
+            // Re-compose the area bottom-to-top, so windows above stay above.
+            for tw in &self.wins {
+                let (ix0, iy0, ix1, iy1) = (x0.max(tw.rect.0), y0.max(tw.rect.1), x1.min(tw.rect.2), y1.min(tw.rect.3));
+                if ix1 > ix0 && iy1 > iy0 {
+                    BitBlt(comp.dc, ix0, iy0, ix1 - ix0, iy1 - iy0, tw.dib.dc, ix0 - tw.rect.0, iy0 - tw.rect.1, SRCCOPY);
+                }
+            }
+            GdiFlush();
+            out.push((x0, y0, comp.cut(x0, y0, x1 - x0, y1 - y0)));
+        }
+        Ok(if out.is_empty() { TrackUpdate::Same } else { TrackUpdate::Rects(out) })
+    }
+}
+
+/// The largest visible top-level window on the desktop `name` (tests and diagnostics).
+pub fn largest_window(name: &str) -> Option<isize> {
+    let w = wide(name);
+    // SAFETY: open the desktop for enumeration and close it again.
+    unsafe {
+        let h = OpenDesktopW(w.as_ptr(), 0, 0, DESKTOP_ACCESS);
+        if h == 0 {
+            return None;
+        }
+        let best = visible_top_windows(h).into_iter().max_by_key(|(_, r)| i64::from(r.2 - r.0) * i64::from(r.3 - r.1)).map(|(hw, _)| hw);
+        CloseDesktop(h);
+        best
+    }
+}
+
+/// `SEAGENT_TRACK_DEBUG=1`: one stderr line per tracker call (what was rendered, how long).
+fn debug() -> bool {
+    static D: OnceLock<bool> = OnceLock::new();
+    *D.get_or_init(|| std::env::var_os("SEAGENT_TRACK_DEBUG").is_some_and(|v| v == "1"))
+}
+
+/// Visible, non-minimised top-level windows of the desktop, bottom first: (hwnd, rect).
+/// SAFETY: `hdesk` is an open desktop handle.
+unsafe fn visible_top_windows(hdesk: HDESK) -> Vec<(isize, (i32, i32, i32, i32))> {
+    use windows_sys::Win32::Foundation::{HWND, RECT};
+    use windows_sys::Win32::System::StationsAndDesktops::EnumDesktopWindows;
+    use windows_sys::Win32::UI::WindowsAndMessaging::{GetWindowRect, IsIconic, IsWindowVisible};
+    unsafe extern "system" fn cb(hwnd: HWND, param: LPARAM) -> BOOL {
+        (*(param as *mut Vec<HWND>)).push(hwnd);
+        TRUE
+    }
+    let mut wins: Vec<HWND> = Vec::new();
+    EnumDesktopWindows(hdesk, Some(cb), &mut wins as *mut _ as LPARAM);
+    wins.iter()
+        .rev()
+        .filter_map(|&hw| {
+            let mut r: RECT = std::mem::zeroed();
+            (IsWindowVisible(hw) != 0 && IsIconic(hw) == 0 && GetWindowRect(hw, &mut r) != 0 && r.right - r.left > 1 && r.bottom - r.top > 1).then_some((hw, (r.left, r.top, r.right, r.bottom)))
+        })
+        .collect()
+}
+
+/// Render the windows `which` into their bitmaps (`PrintWindow`, full content), several at a
+/// time on threads bound to the desktop (one window each; PrintWindow waits on the window's
+/// own thread, so different windows render in parallel).
+/// SAFETY: `hdesk` is an open desktop handle; each window's DIB is touched by one thread only.
+unsafe fn render(hdesk: HDESK, wins: &mut [TrackedWin], which: &[usize]) {
+    // (window, render DC, readback DC, size)
+    let jobs: Vec<(isize, HDC, HDC, i32, i32)> = which.iter().map(|&i| (wins[i].hwnd, wins[i].ddb.dc, wins[i].dib.dc, wins[i].dib.w, wins[i].dib.h)).collect();
+    let one = |(hw, ddb, dib, w, h): (isize, HDC, HDC, i32, i32)| {
+        // SAFETY: the window's own render / readback DCs, used by this thread only.
+        unsafe {
+            PrintWindow(hw as _, ddb, PW_RENDERFULLCONTENT);
+            BitBlt(dib, 0, 0, w, h, ddb, 0, 0, SRCCOPY);
+        }
+    };
+    // `SEAGENT_TRACK_SERIAL=1`: one window after another (to compare with the parallel path).
+    if jobs.len() <= 1 || std::env::var_os("SEAGENT_TRACK_SERIAL").is_some_and(|v| v == "1") {
+        jobs.into_iter().for_each(one);
+        return;
+    }
+    let desk = hdesk;
+    let threads = jobs.len().min(4);
+    std::thread::scope(|sc| {
+        for k in 0..threads {
+            let mine: Vec<(isize, HDC, HDC, i32, i32)> = jobs.iter().skip(k).step_by(threads).copied().collect();
+            sc.spawn(move || {
+                // SAFETY: a fresh window-less thread binds to the desktop, then renders its windows.
+                unsafe {
+                    SetThreadDesktop(desk);
+                }
+                mine.into_iter().for_each(one);
+            });
+        }
+    });
 }
 
 impl Drop for LiveCapture {
@@ -371,6 +699,46 @@ unsafe fn compose_scaled(hdesk: HDESK, dc: HDC, w: i32, h: i32, scale: f64) -> R
         return Err(format!("no window on the desktop could be rendered ({} top-level windows)", wins.len()));
     }
     Ok(Shot { width: tw, height: th, bgra })
+}
+
+/// Is the process `pid`'s window the top visible window over every corner and the centre of
+/// `rect` (x, y, w, h) on the desktop `name`? (The live view may then paint that browser's
+/// page over the picture without covering another window.)
+pub fn on_top(name: &str, pid: u32, rect: (i32, i32, i32, i32)) -> bool {
+    use windows_sys::Win32::Foundation::{HWND, RECT};
+    use windows_sys::Win32::System::StationsAndDesktops::EnumDesktopWindows;
+    use windows_sys::Win32::UI::WindowsAndMessaging::{GetWindowRect, GetWindowThreadProcessId, IsIconic, IsWindowVisible};
+    unsafe extern "system" fn cb(hwnd: HWND, param: LPARAM) -> BOOL {
+        (*(param as *mut Vec<HWND>)).push(hwnd);
+        TRUE
+    }
+    let (x, y, w, h) = rect;
+    let points = [(x + 2, y + 2), (x + w - 3, y + 2), (x + 2, y + h - 3), (x + w - 3, y + h - 3), (x + w / 2, y + h / 2)];
+    let wn = wide(name);
+    // SAFETY: enumerate the desktop's windows (top first) and read their rects and owners.
+    unsafe {
+        let hd = OpenDesktopW(wn.as_ptr(), 0, 0, DESKTOP_ACCESS);
+        if hd == 0 {
+            return false;
+        }
+        let mut wins: Vec<HWND> = Vec::new();
+        EnumDesktopWindows(hd, Some(cb), &mut wins as *mut _ as LPARAM);
+        CloseDesktop(hd);
+        points.iter().all(|&(px, py)| {
+            for &hwnd in &wins {
+                let mut r: RECT = std::mem::zeroed();
+                if IsWindowVisible(hwnd) == 0 || IsIconic(hwnd) != 0 || GetWindowRect(hwnd, &mut r) == 0 {
+                    continue;
+                }
+                if px >= r.left && px < r.right && py >= r.top && py < r.bottom {
+                    let mut owner = 0u32;
+                    GetWindowThreadProcessId(hwnd, &mut owner);
+                    return owner == pid;
+                }
+            }
+            false
+        })
+    }
 }
 
 /// Every pixel black (sampled): an inactive desktop's framebuffer.
@@ -469,6 +837,12 @@ pub fn on_desktop<T>(qualified: &str, f: impl FnOnce() -> T) -> Result<T, String
 /// pid. (A child spawned with a std `Command` from a thread bound with [`on_desktop`] was seen to
 /// open its windows elsewhere on Windows 11, so callers that must land on the desktop use this.)
 pub fn spawn_on_desktop(qualified: &str, cmdline: &str) -> Result<u32, String> {
+    spawn_on_desktop_flags(qualified, cmdline, 0)
+}
+
+/// [`spawn_on_desktop`] with process creation flags (e.g. `CREATE_NO_WINDOW` for a console
+/// program that opens its own windows: a console cannot start on a background desktop).
+pub fn spawn_on_desktop_flags(qualified: &str, cmdline: &str, flags: u32) -> Result<u32, String> {
     use windows_sys::Win32::Foundation::CloseHandle;
     use windows_sys::Win32::System::Threading::{CreateProcessW, PROCESS_INFORMATION, STARTUPINFOW};
     let mut desk = wide(qualified);
@@ -480,7 +854,7 @@ pub fn spawn_on_desktop(qualified: &str, cmdline: &str) -> Result<u32, String> {
         si.cb = std::mem::size_of::<STARTUPINFOW>() as u32;
         si.lpDesktop = desk.as_mut_ptr();
         let mut pi: PROCESS_INFORMATION = std::mem::zeroed();
-        if CreateProcessW(std::ptr::null(), cmd.as_mut_ptr(), std::ptr::null(), std::ptr::null(), 0, 0, std::ptr::null(), std::ptr::null(), &si, &mut pi) == 0 {
+        if CreateProcessW(std::ptr::null(), cmd.as_mut_ptr(), std::ptr::null(), std::ptr::null(), 0, flags, std::ptr::null(), std::ptr::null(), &si, &mut pi) == 0 {
             return Err(format!("CreateProcessW on {qualified} failed ({})", last_error()));
         }
         CloseHandle(pi.hThread);
