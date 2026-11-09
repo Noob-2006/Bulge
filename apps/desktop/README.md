@@ -55,9 +55,15 @@ per-machine, for admins/GPO); macOS `.app` + `.dmg`; Linux `.AppImage`, `.deb`, 
 
 **Chinese fonts on Linux.** The UI is largely Chinese; `ui/theme.css` falls back to the native CJK
 face of each OS (Microsoft JhengHei, PingFang, Noto Sans CJK, …). The `.deb` recommends
-`fonts-noto-cjk` and the `.rpm` `google-noto-sans-cjk-ttc-fonts`. The AppImage does **not** bundle a
-CJK font (known limitation): on a system without one (fresh minimal distro, WSLg) Chinese text shows
-as boxes — the app then shows a one-time warning with the install command (`fc-list :lang=zh` empty).
+`fonts-noto-cjk` and the `.rpm` `google-noto-sans-cjk-ttc-fonts`. The AppImage, which has no package
+manager behind it, **bundles Noto Sans TC** (variable TTF, 11.4 MiB, SIL OFL 1.1 — `OFL.txt` ships next
+to it) under `usr/share/seagent-desktop/fonts/`. `scripts/fetch-cjk-font.sh` downloads it from a pinned
+commit of googlefonts/noto-cjk and checks its SHA-256 (`prepare-sidecar.sh` runs it for Linux
+triples; it is not committed to git). Only when the system has no CJK font (`fc-list :lang=zh` is
+empty) does the app copy it to `~/.local/share/seagent-desktop/fonts` and set `FONTCONFIG_FILE` to the
+bundled `fonts.conf` (system configuration + that font), so system fonts always win. If neither is
+available (e.g. a .deb install without the recommended package), the app shows a one-time warning
+with the install command.
 
 Icons are committed (`src-tauri/icons/`), rendered from `ui/icon.svg` by `scripts/icons.sh`
 (pure Python). `scripts/icons.sh --tauri` uses `cargo tauri icon` instead and also fills the

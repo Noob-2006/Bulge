@@ -91,6 +91,9 @@ jobs:
         run: cargo install tauri-cli --version "$TAURI_CLI_VERSION" --locked
       - name: Build seagent sidecar (${{ matrix.triple }})
         run: apps/desktop/scripts/prepare-sidecar.sh '${{ matrix.triple }}'
+      - name: CJK font for the AppImage (Noto Sans TC, pinned commit + sha256; no-op if cached)
+        if: runner.os == 'Linux'
+        run: apps/desktop/scripts/fetch-cjk-font.sh
       - name: Windows code signing certificate (optional)
         if: runner.os == 'Windows' && env.WINDOWS_CERTIFICATE != ''
         shell: pwsh

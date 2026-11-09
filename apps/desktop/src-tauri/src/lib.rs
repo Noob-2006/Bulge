@@ -135,8 +135,54 @@ fn build_window<R: Runtime>(app: &tauri::App<R>, visible: bool) -> tauri::Result
     Ok(())
 }
 
+/// AppImage only: nothing pulls in a CJK font for it (the .deb/.rpm Recommend Noto CJK), so it
+/// carries Noto Sans TC (`usr/share/seagent-desktop/fonts`, see `scripts/fetch-cjk-font.sh`). When
+/// the system has no CJK font at all, point fontconfig at the bundled `fonts.conf` (= the system
+/// configuration plus that font). It is copied to `$XDG_DATA_HOME/seagent-desktop/fonts` first: the
+/// AppImage mount disappears when the app quits, while processes that inherit FONTCONFIG_FILE (the
+/// agent daemon, a browser opened from the console) live on — a dangling path would leave them
+/// with no fonts at all. Systems that have a CJK font are left alone (their fonts keep priority).
+#[cfg(target_os = "linux")]
+fn appimage_cjk_font() {
+    use std::path::Path;
+    let Some(appdir) = std::env::var_os("APPDIR") else { return };
+    if std::env::var_os("FONTCONFIG_FILE").is_some() {
+        return;
+    }
+    let src = Path::new(&appdir).join("usr/share/seagent-desktop/fonts");
+    if !src.join("fonts.conf").is_file() {
+        return;
+    }
+    let has_cjk = std::process::Command::new("fc-list")
+        .args([":lang=zh", "family"])
+        .output()
+        .map(|o| o.status.success() && !o.stdout.iter().all(u8::is_ascii_whitespace))
+        .unwrap_or(false);
+    if has_cjk {
+        return;
+    }
+    let data = std::env::var_os("XDG_DATA_HOME")
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/share")));
+    let Some(dst) = data.map(|d| d.join("seagent-desktop/fonts")) else { return };
+    let copied = std::fs::create_dir_all(&dst).is_ok()
+        && ["NotoSansTC-VF.ttf", "OFL.txt", "fonts.conf"].iter().all(|f| {
+            let (s, d) = (src.join(f), dst.join(f));
+            let same = matches!((std::fs::metadata(&s), std::fs::metadata(&d)), (Ok(a), Ok(b)) if a.len() == b.len());
+            same || std::fs::copy(&s, &d).is_ok()
+        });
+    // Fall back to the mount itself rather than showing boxes.
+    let conf = if copied { dst.join("fonts.conf") } else { src.join("fonts.conf") };
+    eprintln!("seagent-desktop: no system CJK font; using the bundled Noto Sans TC ({})", conf.display());
+    std::env::set_var("FONTCONFIG_FILE", conf);
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // Before any thread or GTK/WebKit process starts (they read FONTCONFIG_FILE once).
+    #[cfg(target_os = "linux")]
+    appimage_cjk_font();
     let background = std::env::args().any(|a| a == "--background");
     let mut builder = tauri::Builder::default();
     #[cfg(desktop)]

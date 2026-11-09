@@ -143,3 +143,9 @@ Rules for `apps/desktop`:
   Anything else follows the budget rule above.
 * An advisory in the app's tree is triaged like one in the agent's, but ships through an app
   release (the in-app updater), not an agent release.
+* Non-crate payload: the Linux **AppImage** bundles one font, Noto Sans TC (variable TTF, Noto CJK
+  2.004, SIL OFL 1.1, from googlefonts/noto-cjk at a pinned commit, SHA-256 checked by
+  `apps/desktop/scripts/fetch-cjk-font.sh`; `OFL.txt` shipped next to it, entry in
+  `THIRD_PARTY_NOTICES.md`). Reason: an AppImage cannot pull a distro font package and the UI is
+  mostly Chinese. It is data (no code), used only when the system has no CJK font. Bumping it means
+  changing the commit and hash in that script, nothing else.

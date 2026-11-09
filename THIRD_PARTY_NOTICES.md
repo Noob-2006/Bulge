@@ -256,6 +256,17 @@ wording and the `SECURITY_GUIDANCE_DISABLE` / `SECURITY_GUIDANCE_BLOCK` switches
 > either express or implied. See the License for the specific language governing permissions and
 > limitations under the License.
 
+## Noto Sans TC (Linux AppImage only) — SIL Open Font License 1.1
+
+Copyright 2014-2021 Adobe (http://www.adobe.com/), with Reserved Font Name 'Source'.
+
+The Linux AppImage of the desktop app bundles `NotoSansTC-VF.ttf` (Noto Sans CJK version 2.004,
+`Sans/Variable/TTF/Subset/` of https://github.com/googlefonts/noto-cjk at commit `523d033`, tag
+`Sans2.004`; SHA-256 `ac091cc8cd19e848202afc8fe6d3809b4526c8fdbdb4be82da20c4f785949591`), unmodified,
+as `usr/share/seagent-desktop/fonts/NotoSansTC-VF.ttf`. The full license text ships next to it as
+`OFL.txt` (in the repository: `apps/desktop/src-tauri/fonts/OFL.txt`). The font is fetched at build
+time by `apps/desktop/scripts/fetch-cjk-font.sh`; it is not part of the agent or the other installers.
+
 ## Rust crates
 
 serde, serde_json, toml, ureq, regex, libc, rustls, ring, webpki-roots, base64 and their
