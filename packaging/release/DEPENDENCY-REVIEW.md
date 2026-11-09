@@ -113,6 +113,7 @@ repository and are reviewed as code.
 | `ring` | 0.17 | Ed25519/HMAC primitives for signing and secret sealing — *no reason comment yet* |
 | `base64` | 0.23 | Encoding for tokens, signatures and attachments — *no reason comment yet* |
 
+| `windows` | 0.62 | Windows only: Windows.Graphics.Capture (WinRT) for GPU windows in the live view (see below). Target dependency, minimal features |
 | `wasmi` | 2 | iOS shell substitute: the `wasm` exec backend runs WASI tools in this WebAssembly *interpreter* (see below). Optional; not in the default build |
 
 ### `wasmi` (iOS only, review notes)
@@ -149,6 +150,42 @@ repository and are reviewed as code.
   WebAssembly/wasi-sdk release, SHA-256 pinned per host in `scripts/wasi-sdk.sh`. Each module's
   SHA-256 is pinned in `tools.json`; the backend refuses a mismatch or an unpinned module. They
   are code for the interpreter, never for the CPU, and are reviewed like any other bundled tool set.
+
+### `windows` (Windows only, review notes)
+
+* **Why**: the live view of the Bot Desktop (`docs/desktop-vm.md`) captures windows with GDI
+  `PrintWindow`. That works for GDI apps (the busy-editor benchmark: 32 fps at 1080p), but a
+  GPU-composited window's picture only refreshes about 8 times a second there. The OS API that
+  delivers every presented frame of a window is Windows.Graphics.Capture, a **WinRT** API: it needs
+  activation factories, `IInspectable` vtables, `TypedEventHandler` / `IAsyncOperation`
+  plumbing and HSTRINGs. `windows-sys` (already in the tree) only has the flat C functions and
+  cannot call it. Hand-writing the WinRT ABI for the ~12 interfaces involved is about 1500 lines
+  of unchecked vtable code, which is the code this crate generates from Microsoft's metadata.
+* **Where it is linked**: `seagent-browser` only, `[target.'cfg(windows)'.dependencies]`;
+  one module, `crates/seagent-browser/src/control/wgc.rs`. Linux, macOS, Android and iOS builds
+  do not contain it (`cargo tree --target x86_64-unknown-linux-gnu -i windows` is empty).
+* **Features**: `default-features = false` and only `Foundation`, `Graphics`,
+  `Graphics_Capture`, `Graphics_DirectX`, `Graphics_DirectX_Direct3D11`, `Win32_Foundation`,
+  `Win32_Graphics_Direct3D`, `Win32_Graphics_Direct3D11`, `Win32_Graphics_Dxgi`,
+  `Win32_Graphics_Dxgi_Common`, `Win32_System_WinRT`, `Win32_System_WinRT_Direct3D11`,
+  `Win32_System_WinRT_Graphics_Capture`, `Win32_UI_WindowsAndMessaging`.
+* **Tree**: `windows` 0.62.2, `windows-core`, `-collections`, `-future`, `-numerics`, `-result`,
+  `-strings`, `-threading`, `-link` (all microsoft/windows-rs, same owners as `windows-sys`), and
+  two proc-macros, `windows-implement` / `windows-interface`. Those two need `syn` **2** (2.0.119),
+  a duplicate beside the `syn` 3 the workspace already has; it is build-time only (proc-macro
+  host code, not in the binary). Licenses: MIT OR Apache-2.0 throughout. No C code, no build
+  scripts (`windows-link` uses `raw-dylib`, so there are no import libraries either).
+* **`unsafe`**: the generated bindings are `unsafe` by nature (≈326k occurrences in `windows`,
+  almost all generated FFI signatures; a few hundred hand-written ones in `windows-core` and its
+  helpers for refcounting, HSTRING and the vtable shims). The agent's own `unsafe` is confined to
+  `wgc.rs` (D3D11 device / staging-texture map and the row copy, bounded by `RowPitch`).
+* **Status / measured result**: WGC delivers 53.6 fps for a window on the *displayed* desktop.
+  For a window on the isolated (non-displayed) Bot Desktop, the capture item reports 0×0 and
+  `CreateCaptureSession` fails with `ERROR_INVALID_STATE` (0x8007139F), whether it is called from
+  the service thread or from a thread bound to that desktop (`real_wgc_on_the_bot_desktop`).
+  DWM does not compose a desktop that is not displayed, so WGC has nothing to deliver there. **If
+  the live view does not adopt WGC for a displayed-session mode, remove this crate again**: as it
+  stands, it fails the budget rule's first test.
 
 **Gaps (reviewer action, not yet fixed):** `webpki-roots`, `ring` and `base64` are declared without
 a reason comment, which the budget rule above requires. They are load-bearing (TLS trust, crypto,
