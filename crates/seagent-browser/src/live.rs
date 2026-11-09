@@ -187,8 +187,10 @@ impl CastState {
         match self.unacked.front() {
             Some(&(s, id)) if s <= seen => {
                 if let Some(t) = self.last_ack {
-                    // Early by Chrome's production time, but never more than half an interval.
-                    let due = t + min_gap - self.lead.min(min_gap / 2);
+                    // Early by Chrome's production time (up to a whole interval: a large frame can
+                    // take Chrome longer to make than the interval; each viewer's delivery slots
+                    // still hold the rate).
+                    let due = t + min_gap - self.lead.min(min_gap);
                     if due > now {
                         return Release::Wait(due - now);
                     }
@@ -537,12 +539,12 @@ mod tests {
         s.offer_at(frame(99), 99, a);
         let Release::Wait(d) = s.release(99, a, gap) else { panic!() };
         assert!((ms(22)..=ms(24)).contains(&(d + ms(10))), "ack {:?} after the previous", d + ms(10));
-        // The lead never takes more than half an interval off.
+        // A frame that takes Chrome longer than an interval to make: acked as soon as delivered.
         s.lead = ms(500);
         let b = a + d;
         assert_eq!(s.release(99, b, gap), Release::Ack(99));
         s.offer_at(frame(100), 100, b);
-        assert_eq!(s.release(100, b, gap), Release::Wait(gap - gap / 2));
+        assert_eq!(s.release(100, b, gap), Release::Ack(100));
     }
 
     #[test]
