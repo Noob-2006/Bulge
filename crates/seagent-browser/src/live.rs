@@ -290,6 +290,45 @@ fn screencast_params((q, w, h): (u8, u32, u32)) -> Value {
     json!({"format": "jpeg", "quality": q, "maxWidth": w, "maxHeight": h, "everyNthFrame": 1})
 }
 
+/// The ack boost of one viewer: delivered frames are counted per second against the chosen
+/// rate; short → the boost rises ×1.25 (up to 2×), three good seconds → it falls ÷1.1 (to 1×).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Boost {
+    pub factor: f64,
+    window: Option<(Instant, u32)>,
+    good: u8,
+}
+
+impl Default for Boost {
+    fn default() -> Self {
+        Boost { factor: 1.0, window: None, good: 0 }
+    }
+}
+
+impl Boost {
+    /// One frame delivered at `now` to a viewer that chose `fps`.
+    pub fn delivered(&mut self, now: Instant, fps: u32) {
+        let (start, n) = self.window.get_or_insert((now, 0));
+        *n += 1;
+        let secs = now.duration_since(*start).as_secs_f64();
+        if secs < 1.0 {
+            return;
+        }
+        let rate = f64::from(*n) / secs;
+        self.window = Some((now, 0));
+        if rate < f64::from(fps) * 1.03 {
+            self.factor = (self.factor * 1.25).min(2.0);
+            self.good = 0;
+        } else {
+            self.good += 1;
+            if self.good >= 3 {
+                self.factor = (self.factor / 1.1).max(1.0);
+                self.good = 0;
+            }
+        }
+    }
+}
+
 /// A viewer of one tab. Dropping the last viewer stops the screencast.
 pub struct Viewer {
     b: Arc<Browser>,
@@ -304,6 +343,11 @@ pub struct Viewer {
     /// the acks, paces the screencast. Slots follow the previous slot (not the late wake-up),
     /// so coarse OS timers (Windows: 15.6 ms) do not drag the average below the cap.
     next_slot: Option<Instant>,
+    /// How much faster than this viewer's rate acks are released (1–2×). A large page on a
+    /// headed browser can take Chrome longer than one interval to produce; running the acks
+    /// ahead lets it work on the next frame meanwhile. Raised while the delivered rate falls
+    /// short of the choice, lowered again after three good seconds ([`Boost`]).
+    boost: Boost,
 }
 
 /// Start (or join) the live stream of `target`.
@@ -334,7 +378,7 @@ pub fn watch(b: &Arc<Browser>, target: &str, opts: Opts) -> Result<Viewer, Strin
         drop(g);
         (cast, id, start)
     };
-    let v = Viewer { b: b.clone(), cast, id, opts, seen: 0, target: target.to_string(), info: None, next_slot: None };
+    let v = Viewer { b: b.clone(), cast, id, opts, seen: 0, target: target.to_string(), info: None, next_slot: None, boost: Boost::default() };
     if let Some(e) = start {
         // Dropping `v` on failure undoes the registration.
         b.conn.call_with("Page.startScreencast", screencast_params(e), Some(&sid), Duration::from_secs(5), &|| None)?;
@@ -367,11 +411,12 @@ impl Viewer {
     pub fn next(&mut self, timeout: Duration) -> Option<Arc<LiveFrame>> {
         let deadline = Instant::now() + timeout;
         let gap = self.opts.min_gap();
+        let ack_gap = gap.div_f64(self.boost.factor);
         let mut g = self.cast.state.lock().unwrap();
         loop {
             let now = Instant::now();
             let mut wake = deadline;
-            match g.release(self.seen, now, gap) {
+            match g.release(self.seen, now, ack_gap) {
                 Release::Ack(id) => {
                     ack(&self.b, &self.cast.page_session, id);
                     continue;
@@ -389,6 +434,7 @@ impl Viewer {
                             Some(due) if now < due + gap => due + gap,
                             _ => now + gap,
                         });
+                        self.boost.delivered(now, self.opts.fps);
                         return g.latest.clone();
                     }
                 }
@@ -510,6 +556,27 @@ mod tests {
         assert_eq!(s.release(2, t1, gap), Release::Wait(Duration::from_millis(90)));
         assert_eq!(s.release(2, t0 + gap, gap), Release::Ack(12));
         assert_eq!((s.frames_in, s.acks), (2, 2));
+    }
+
+    #[test]
+    fn the_ack_boost_rises_when_short_and_falls_back() {
+        let t = Instant::now();
+        let mut b = Boost::default();
+        // 25 frames a second against a choice of 30: short, so acks run ahead.
+        for i in 0..=25 {
+            b.delivered(t + Duration::from_millis(40 * i), 30);
+        }
+        assert_eq!(b.factor, 1.25);
+        for i in 26..=200 {
+            b.delivered(t + Duration::from_millis(40 * i), 30);
+        }
+        assert_eq!(b.factor, 2.0, "capped at twice the rate");
+        // 33 a second (the paced rate): three good seconds take 10 % off each time.
+        let t2 = t + Duration::from_secs(10);
+        for i in 0..=400 {
+            b.delivered(t2 + Duration::from_micros(30_303 * i), 30);
+        }
+        assert!(b.factor < 2.0 && b.factor >= 1.0, "{}", b.factor);
     }
 
     #[test]
