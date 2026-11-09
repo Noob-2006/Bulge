@@ -280,7 +280,7 @@ impl Desktop {
 
     pub fn status(&self) -> Status {
         let missing = self.missing_binaries();
-        #[cfg_attr(target_os = "linux", allow(unused_mut))]
+        #[cfg_attr(not(windows), allow(unused_mut))]
         let mut pid = self.launcher_pid();
         let env = self.published_env();
         #[allow(unused_mut, unused_assignments)]
