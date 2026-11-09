@@ -293,6 +293,9 @@ impl Live {
         let cfg = self.fresh()?;
         let acp = seagent_app::acp_client::AcpConfig::parse(&cfg.acp)?;
         let names = acp.names();
+        // The security gate's configured destinations follow (`acp://<agent>`), so the new agent
+        // is as pre-authorised as one configured at start, and a removed one is not.
+        self.k.set_live_dests("acp://", acp.agents.keys().map(|a| format!("acp://{a}")).collect());
         self.k.set_live_tools("acp_delegate", vec![Arc::new(seagent_app::acp_client::AcpDelegate { cfg: acp, gate: cfg.gate.clone(), vault: self.vault()? })]);
         Ok(json!({"applied": true, "agents": names}))
     }

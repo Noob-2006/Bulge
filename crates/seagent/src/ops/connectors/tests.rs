@@ -695,3 +695,20 @@ fn skills_hooks_acp_gmail_and_tool_plugins_apply_live() {
     assert_eq!(live.reload_plugin("toolplug").unwrap()["state"], "removed");
     assert!(!t.k.specs().iter().any(|s| s.name.starts_with("mcp__toolplug__")));
 }
+
+/// An ACP agent added live is a configured destination for the security gate at once (no
+/// extra approval prompt until a restart), and removing it takes the entry away.
+#[test]
+fn live_acp_agents_update_the_gates_configured_destinations() {
+    let t = kit();
+    let c = ctx(&t);
+    let live = crate::ops::connectors_live::Live::new(t.k.clone(), t.paths.clone(), t.ws.clone(), Some(empty_ext(&t)));
+    assert!(!t.k.configured_dests_now().iter().any(|d| d == "acp://gateagent"));
+    let me = std::env::current_exe().unwrap().display().to_string();
+    ok(&c, "ui.connectors.acp.save", json!({"name": "gateagent", "command": me}));
+    live.reload_acp().unwrap();
+    assert!(t.k.configured_dests_now().iter().any(|d| d == "acp://gateagent"), "{:?}", t.k.configured_dests_now());
+    ok(&c, "ui.connectors.acp.remove", json!({"name": "gateagent"}));
+    live.reload_acp().unwrap();
+    assert!(!t.k.configured_dests_now().iter().any(|d| d == "acp://gateagent"), "removed with the agent");
+}

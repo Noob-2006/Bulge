@@ -146,6 +146,9 @@ pub struct Runtime {
     /// startup tool with that prefix, so an MCP server added, edited or removed in the console
     /// takes effect without a restart. An empty group hides the startup tools.
     live_tools: std::sync::RwLock<std::collections::BTreeMap<String, Vec<Arc<dyn Tool>>>>,
+    /// Hot-applied configured service destinations by scheme prefix (`acp://`): they replace the
+    /// startup config's entries with that prefix in the security gate (`set_live_dests`).
+    pub(crate) live_dests: std::sync::RwLock<std::collections::BTreeMap<String, Vec<String>>>,
     taps: std::sync::RwLock<Vec<Tap>>,
     /// `context_engine = "<plugin>"`: shapes requests and may own compaction.
     engine: std::sync::RwLock<Option<Arc<dyn ContextEngine>>>,
@@ -237,7 +240,7 @@ pub fn new_kernel(cfg: Config, paths: Paths, resolver: Arc<dyn Resolver>, tools:
         crate::sqlindex::relocate(&paths.data, Path::new(cfg.ha.index_dir.trim()));
     }
     cfg.security.activate_at(Some(&paths.config_dir));
-    Arc::new(Runtime { cfg, paths, store, resolver, tools, vault, approver, remembered: Remembered::default(), bus: Bus::default(), running: Mutex::new(HashMap::new()), benched: Mutex::new(HashMap::new()), no_reasoning: Mutex::new(std::collections::HashSet::new()), hooks: Default::default(), session_tools: Default::default(), live_tools: Default::default(), taps: Default::default(), engine: Default::default(), lifecycles: Default::default(), slash: Default::default(), retry_sleep: None, subagents: Default::default(), end_turn: Default::default(), auto_resume: Default::default(), queue_settings: Default::default(), runtime_cfg: Default::default(), ctx: Default::default(), provenance: Mutex::new(HashMap::new()) })
+    Arc::new(Runtime { cfg, paths, store, resolver, tools, vault, approver, remembered: Remembered::default(), bus: Bus::default(), running: Mutex::new(HashMap::new()), benched: Mutex::new(HashMap::new()), no_reasoning: Mutex::new(std::collections::HashSet::new()), hooks: Default::default(), session_tools: Default::default(), live_tools: Default::default(), live_dests: Default::default(), taps: Default::default(), engine: Default::default(), lifecycles: Default::default(), slash: Default::default(), retry_sleep: None, subagents: Default::default(), end_turn: Default::default(), auto_resume: Default::default(), queue_settings: Default::default(), runtime_cfg: Default::default(), ctx: Default::default(), provenance: Mutex::new(HashMap::new()) })
 }
 
 #[derive(Debug)]
@@ -312,6 +315,11 @@ impl Runtime {
             return group.iter().find(|t| t.spec().name == name).cloned();
         }
         self.tools.iter().find(|t| t.spec().name == name).cloned()
+    }
+    /// Replace the configured service destinations starting with `prefix` (`acp://`) — an ACP
+    /// agent added or removed in the console — so the gate treats them as configured at once.
+    pub fn set_live_dests(&self, prefix: &str, dests: Vec<String>) {
+        self.live_dests.write().unwrap().insert(prefix.to_string(), dests);
     }
     /// Replace the tools `key` covers — every name starting with it when it ends in `__` (an MCP
     /// server's `mcp__<name>__`), otherwise the one tool of that name (`channel_send`) — with
