@@ -63,6 +63,12 @@ pub fn init(paths: &Paths, cfg: &Config) {
 /// fetched in the foreground (bounded) when missing, in the background when older than a
 /// day. Off with `[pricing] auto_refresh = false`, `SEAGENT_OFFLINE=1`, `[network] offline`, or the government
 /// profile (models.dev is a third-party host).
+/// Set by `seagent daemon run`: the daemon never waits for models.dev before serving. It runs for
+/// hours, so the first fetch can finish in the background — while a foreground wait would hold
+/// up every start (the setup wizard's restart included, behind a "restarting…" screen) by up to
+/// 8 s on a slow network.
+pub static NO_FOREGROUND_FETCH: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 fn auto_refresh_prices(cache: &std::path::Path, cfg: &Config) {
     const STALE: std::time::Duration = std::time::Duration::from_secs(24 * 3600);
     let enabled = cfg.pricing.auto_refresh && !seagent_net::http::no_background_fetch() && cfg.compliance.profile != "government";
@@ -71,6 +77,13 @@ fn auto_refresh_prices(cache: &std::path::Path, cfg: &Config) {
     }
     let age = std::fs::metadata(cache).and_then(|m| m.modified()).ok().and_then(|t| t.elapsed().ok());
     match age {
+        None if NO_FOREGROUND_FETCH.load(std::sync::atomic::Ordering::Relaxed) => {
+            std::thread::spawn(|| {
+                if let Err(e) = modelsdb::refresh(None) {
+                    eprintln!("seagent: warning: price refresh from models.dev failed ({e}); using built-in snapshots");
+                }
+            });
+        }
         None => {
             // First use: wait a little so this run already has live prices.
             let (tx, rx) = std::sync::mpsc::channel();

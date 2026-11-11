@@ -383,8 +383,14 @@ pub fn restart_managed() -> Result<(), String> {
 
 /// Step 7 of the setup wizard ("start at boot") on this OS.
 #[cfg(any(target_os = "macos", windows, target_os = "android", target_os = "ios"))]
-pub fn autostart(_paths: &Paths) -> String {
-    let ws = std::env::current_dir().unwrap_or_else(|_| seagent_core::layout::home());
+pub fn autostart(paths: &Paths) -> String {
+    // The workspace the wizard just saved (`[app] workspace`), else the default one — never the
+    // daemon's working directory, which for the desktop app is its install folder.
+    let ws = std::fs::read_to_string(paths.user_config())
+        .ok()
+        .and_then(|t| t.parse::<toml::Table>().ok())
+        .and_then(|r| r.get("app").and_then(|a| a.get("workspace")).and_then(|v| v.as_str()).map(std::path::PathBuf::from))
+        .unwrap_or_else(|| paths.default_workspace());
     #[cfg(any(target_os = "macos", windows))]
     {
         if managed() {

@@ -19,6 +19,8 @@ mod commands;
 mod desktop;
 mod devkey;
 mod pair;
+#[cfg_attr(not(desktop), allow(dead_code))]
+mod supervise;
 mod tls;
 
 use std::path::PathBuf;
@@ -60,6 +62,10 @@ pub struct AppState {
     pub base: Mutex<Option<String>>,
     pub tunnel: tokio::sync::Mutex<Option<tls::Tunnel>>,
     pub background: bool,
+    /// Desktop: the supervisor of the local daemon runs (started once, after the first boot).
+    pub supervising: AtomicBool,
+    /// The agent is being stopped on purpose (Stop and quit, an update): stop supervising it.
+    pub quitting: AtomicBool,
 }
 
 impl AppState {
@@ -95,6 +101,16 @@ pub fn navigation_allowed(url: &Url) -> bool {
 
 pub fn main_window<R: Runtime>(app: &tauri::AppHandle<R>) -> Option<tauri::WebviewWindow<R>> {
     app.get_webview_window(MAIN)
+}
+
+/// One of the app's own pages (`index.html`, …) as a URL the window can navigate to: Tauri
+/// serves them from `http://tauri.localhost` on Windows / Android, `tauri://localhost` elsewhere.
+pub fn app_page(page: &str) -> String {
+    if cfg!(any(windows, target_os = "android")) {
+        format!("http://tauri.localhost/{page}")
+    } else {
+        format!("tauri://localhost/{page}")
+    }
 }
 
 /// Point the main window at `url` (and show it unless we were started in the background).
@@ -228,7 +244,7 @@ pub fn run() {
         .setup(move |app| {
             let data_dir = app.path().app_data_dir().unwrap_or_else(|_| std::env::temp_dir().join("seagent-app"));
             let _ = std::fs::create_dir_all(&data_dir);
-            app.manage(AppState { data_dir, boot: Mutex::new(boot::Snapshot::default()), booting: AtomicBool::new(false), agent: Mutex::new(None), base: Mutex::new(None), tunnel: tokio::sync::Mutex::new(None), background });
+            app.manage(AppState { data_dir, boot: Mutex::new(boot::Snapshot::default()), booting: AtomicBool::new(false), agent: Mutex::new(None), base: Mutex::new(None), tunnel: tokio::sync::Mutex::new(None), background, supervising: AtomicBool::new(false), quitting: AtomicBool::new(false) });
             build_window(app, !background)?;
             #[cfg(desktop)]
             {

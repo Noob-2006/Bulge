@@ -79,6 +79,8 @@ pub fn start<R: Runtime>(app: AppHandle<R>) {
                 let _ = std::fs::write(st.data_dir.join("installed.json"), "{\"ok\":true}");
                 #[cfg(desktop)]
                 crate::desktop::after_boot(&app);
+                #[cfg(desktop)]
+                supervise(app.clone());
             }
             Err(e) => {
                 update(&app, |s| {
@@ -136,7 +138,8 @@ fn start_daemon<R: Runtime>(app: &AppHandle<R>, a: &Agent) -> Result<(), String>
     }
     #[cfg(not(target_os = "android"))]
     {
-        let out = call(app, a, &["daemon", "start"], 60)?;
+        // `daemon start` itself waits up to a minute for a daemon that is still starting.
+        let out = call(app, a, &["daemon", "start"], 90)?;
         if !out.ok() {
             return Err(format!("{} (seagent daemon start: exit {:?})", t("背景服務無法啟動", "the background service did not start"), out.code));
         }
@@ -224,13 +227,102 @@ fn run<R: Runtime>(app: &AppHandle<R>) -> Result<String, String> {
     }
 
     step(app, "route", 85, t("開啟中…", "Opening…"));
-    // Not set up yet → a fresh one-time wizard link. Once setup is done the command refuses
-    // (the wizard is locked) and we open the console instead.
-    let link = call(app, &a, &["setup", "link", "--json"], 20)?;
+    route(app, &a, &base)
+}
+
+/// Not set up yet → a fresh one-time wizard link. Once setup is done the command refuses (the
+/// wizard is locked) and the console opens instead, with a fresh login.
+pub fn route<R: Runtime>(app: &AppHandle<R>, a: &Agent, base: &str) -> Result<String, String> {
+    let link = call(app, a, &["setup", "link", "--json"], 20)?;
     if link.ok() {
         if let Some(u) = agent::parse_link_json(&link.stdout) {
             return Ok(u);
         }
     }
-    console_url(app, &a, &base)
+    console_url(app, a, base)
+}
+
+/// The address the daemon really serves (it may have moved off a busy default port).
+fn refresh_base<R: Runtime>(app: &AppHandle<R>, a: &Agent) {
+    if let Some(b) = call(app, a, &["setup", "status", "--json"], 20).ok().filter(|o| o.ok()).and_then(|o| agent::parse_status_json(&o.stdout)) {
+        *app.state::<AppState>().base.lock().unwrap() = Some(b);
+    }
+}
+
+/// Desktop: from the first successful boot on, the app watches the daemon it owns
+/// ([`crate::supervise`]): a daemon that stops — the setup wizard's restart, a crash — comes
+/// back, and the window shows "restarting…" instead of a refused connection.
+#[cfg(desktop)]
+pub fn supervise<R: Runtime>(app: AppHandle<R>) {
+    if app.state::<AppState>().supervising.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    std::thread::spawn(move || {
+        let Ok(a) = locate(&app) else { return };
+        let mut h = AppHost { app, a };
+        crate::supervise::run(&mut h, crate::supervise::Policy::default());
+    });
+}
+
+#[cfg(desktop)]
+struct AppHost<R: Runtime> {
+    app: AppHandle<R>,
+    a: Agent,
+}
+
+#[cfg(desktop)]
+impl<R: Runtime> crate::supervise::Host for AppHost<R> {
+    fn healthy(&mut self) -> bool {
+        let base = self.app.state::<AppState>().base.lock().unwrap().clone();
+        base.is_some_and(|b| agent::health(&b, Duration::from_secs(2)))
+    }
+    fn show_restarting(&mut self) {
+        update(&self.app, |s| {
+            s.step = "restarting".into();
+            s.progress = 50;
+            s.title = t("SE Agent 正在重新啟動…", "SE Agent is restarting…").into();
+            s.error = None;
+            s.url = None;
+            s.running = true;
+        });
+        // The app's own page instead of the WebView's "refused to connect"; the window keeps
+        // its visibility (a hidden window stays hidden).
+        let _ = crate::open_url(&self.app, &crate::app_page("index.html#restarting"), false);
+        refresh_base(&self.app, &self.a);
+    }
+    fn start_daemon(&mut self) -> Result<(), String> {
+        start_daemon(&self.app, &self.a)?;
+        refresh_base(&self.app, &self.a);
+        Ok(())
+    }
+    fn reopen(&mut self) {
+        refresh_base(&self.app, &self.a);
+        let base = self.app.state::<AppState>().base.lock().unwrap().clone().unwrap_or_default();
+        match route(&self.app, &self.a, &base) {
+            Ok(url) => {
+                update(&self.app, |s| {
+                    s.step = "done".into();
+                    s.progress = 100;
+                    s.url = Some(url.clone());
+                    s.running = false;
+                    s.error = None;
+                });
+                let _ = crate::open_url(&self.app, &url, false);
+            }
+            Err(e) => self.give_up(e),
+        }
+    }
+    fn give_up(&mut self, why: String) {
+        update(&self.app, |s| {
+            s.error = Some(why);
+            s.running = false;
+        });
+        let _ = crate::open_url(&self.app, &crate::app_page("index.html#restarting"), false);
+    }
+    fn stopped(&self) -> bool {
+        self.app.state::<AppState>().quitting.load(Ordering::SeqCst)
+    }
+    fn log(&mut self, line: String) {
+        log(&self.app, line);
+    }
 }

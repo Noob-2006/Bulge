@@ -24,11 +24,24 @@ pub(crate) fn cmd_daemon(a: &Args) -> R {
     match a.pos(0).unwrap_or("status") {
         "run" => run(a, None),
         "start" => {
+            // The setup wizard's restart helper (Windows): wait for the stopping daemon first.
+            if let Some(pid) = a.val("after-pid") {
+                let pid: i64 = pid.parse().map_err(|_| format!("--after-pid `{pid}`: expected a process id"))?;
+                let until = Instant::now() + Duration::from_secs(120);
+                while ops::hostos::pid_alive(pid) && Instant::now() < until {
+                    std::thread::sleep(Duration::from_millis(100));
+                }
+            }
+            std::fs::create_dir_all(&paths.data).map_err(|e| e.to_string())?;
+            // One start at a time: the wizard's restart helper and the desktop app's supervisor may
+            // both try. The second waits here, then finds the daemon running. (flock on Unix,
+            // LockFileEx on Windows; released when the file closes.)
+            let start_lock = std::fs::OpenOptions::new().create(true).truncate(false).write(true).open(paths.data.join("daemon-start.lock")).map_err(|e| e.to_string())?;
+            let _ = start_lock.lock();
             if daemon::call(&sock, "ping", json!({})).is_ok() {
                 println!("seagentd already running");
                 return Ok(0);
             }
-            std::fs::create_dir_all(&paths.data).map_err(|e| e.to_string())?;
             let log = seagent_core::platform::proc::open_child_log(&paths.daemon_log()).map_err(|e| e.to_string())?;
             let log_start = log.metadata().map(|m| m.len()).unwrap_or(0);
             let exe = std::env::current_exe().map_err(|e| e.to_string())?;
@@ -45,9 +58,10 @@ pub(crate) fn cmd_daemon(a: &Args) -> R {
             if a.flag("yolo") {
                 cmd.arg("--yolo");
             }
-            ops::hostos::detach(&mut cmd);
-            let mut child = cmd.spawn().map_err(|e| e.to_string())?;
-            let until = Instant::now() + Duration::from_secs(8);
+            let mut child = ops::hostos::spawn_detached(&mut cmd).map_err(|e| e.to_string())?;
+            // Normally up within a second; a first start may wait on the models.dev download
+            // (bounded by its own timeout). Give a daemon that is still starting up a minute.
+            let until = Instant::now() + Duration::from_secs(60);
             while Instant::now() < until {
                 if daemon::call(&sock, "ping", json!({})).is_ok() {
                     println!("seagentd started (pid {})", child.id());
@@ -61,7 +75,7 @@ pub(crate) fn cmd_daemon(a: &Args) -> R {
                 }
                 std::thread::sleep(Duration::from_millis(100));
             }
-            Err("seagentd did not come up within 8s".into())
+            Err(format!("seagentd did not come up within 60s; see {}", paths.daemon_log().display()).into())
         }
         "stop" => {
             match daemon::call(&sock, "shutdown", json!({})) {
@@ -100,6 +114,7 @@ pub(crate) fn cmd_daemon(a: &Args) -> R {
 /// methods, leader services and App Server; only the control socket and the process-level
 /// bits (signal handlers, pid file, service bookkeeping, restart helper) are left out.
 pub(crate) fn run(a: &Args, embedded: Option<&Embedded>) -> R {
+    crate::models_cli::NO_FOREGROUND_FETCH.store(true, std::sync::atomic::Ordering::Relaxed);
     let paths = Paths::from_env();
     let (pending, cell) = daemon::pending_approver(Duration::from_secs(600));
     let mut c = build_agent(a, pending.clone(), true)?;

@@ -584,47 +584,109 @@ pub fn take_restart() -> bool {
     RESTART.swap(false, Ordering::SeqCst)
 }
 
-/// Called by `seagent daemon run` after a requested stop. Under systemd (user or system unit,
-/// `Restart=on-failure`) the exit status 75 brings the daemon back; without a service manager
-/// a detached helper waits for this process to exit and runs `seagent daemon start` with the same
-/// arguments.
-pub fn after_stop() -> i32 {
-    // `seagent daemon start` marks the daemons it detaches (and strips a service manager's variables
-    // they could have inherited); anything else with NOTIFY_SOCKET is a systemd service.
-    let detached = std::env::var_os("SEAGENT_DAEMON_DETACHED").is_some();
-    if !detached && (std::env::var_os("NOTIFY_SOCKET").is_some() || std::env::var_os("INVOCATION_ID").is_some()) {
-        eprintln!("seagentd: configuration changed by the setup wizard; exiting for systemd to restart");
-        return 75;
+/// How a daemon stopped by the setup wizard comes back ([`after_stop`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Comeback {
+    /// Under a service manager that restarts a failed daemon — a systemd unit
+    /// (`Restart=on-failure`) or our launchd LaunchAgent (`KeepAlive` / `SuccessfulExit` false):
+    /// exit 75 and let it start us again.
+    ServiceManager(&'static str),
+    /// Nobody restarts us (detached by `seagent daemon start`; on Windows also a daemon without a
+    /// console, e.g. the Task Scheduler logon task, whose restart-on-failure does not fire on an
+    /// exit status): a helper waits for this process to exit, then runs `seagent daemon start`
+    /// with the same arguments (`run` → `start`).
+    Helper(Vec<String>),
+    /// Run by hand in a terminal: the user starts it again.
+    Manual,
+}
+
+/// Pure decision of [`after_stop`]: `env` reads the process environment, `args` are this
+/// daemon's own arguments (without the program), `interactive` = stdin is a terminal.
+pub fn comeback(env: &dyn Fn(&str) -> Option<String>, args: &[String], interactive: bool) -> Comeback {
+    // `seagent daemon start` marks the daemons it detaches (and strips a service manager's
+    // variables they could have inherited); anything else with NOTIFY_SOCKET is a systemd service.
+    let detached = env("SEAGENT_DAEMON_DETACHED").is_some();
+    if !detached && (env("NOTIFY_SOCKET").is_some() || env("INVOCATION_ID").is_some()) {
+        return Comeback::ServiceManager("systemd");
     }
-    if !detached {
-        eprintln!("seagentd: configuration changed by the setup wizard; start the daemon again to use it");
-        return 0;
+    // launchd names the job it runs in XPC_SERVICE_NAME (our label is `ai.seagent.<unit>`).
+    if !detached && env("XPC_SERVICE_NAME").is_some_and(|n| n.starts_with("ai.seagent.")) {
+        return Comeback::ServiceManager("launchd");
     }
-    let Ok(exe) = std::env::current_exe() else { return 0 };
-    let mut args: Vec<String> = std::env::args().skip(1).collect();
-    if let Some(i) = args.iter().position(|a| a == "run") {
-        args[i] = "start".into();
+    if !(detached || (cfg!(windows) && !interactive)) {
+        return Comeback::Manual;
     }
+    let mut args = args.to_vec();
+    match args.iter().position(|a| a == "run") {
+        Some(i) => args[i] = "start".into(),
+        None => return Comeback::Manual,
+    }
+    Comeback::Helper(args)
+}
+
+/// The detached helper that waits for process `pid` to exit and then runs `exe args…`
+/// (`args` = `daemon start …`).
+///
+/// - Unix: `sh` polls `kill -0 pid` and then `exec`s the command.
+/// - Windows: the agent binary itself, `seagent daemon start --after-pid <pid> …`: it waits on the
+///   process handle, then starts the daemon. (It used to be a PowerShell one-liner; Windows
+///   PowerShell started without a console — `DETACHED_PROCESS` — exits without running its
+///   `-Command`, so the daemon never came back.)
+pub fn helper_command(exe: &Path, args: &[String], pid: u32) -> std::process::Command {
     #[cfg(unix)]
     let mut c = {
         let mut c = std::process::Command::new("sh");
-        c.arg("-c").arg("while kill -0 \"$0\" 2>/dev/null; do sleep 0.2; done; exec \"$@\"").arg(std::process::id().to_string()).arg(&exe).args(&args);
+        c.arg("-c").arg("while kill -0 \"$0\" 2>/dev/null; do sleep 0.2; done; exec \"$@\"").arg(pid.to_string()).arg(exe).args(args);
         c
     };
-    // No `sh` on Windows: the waiting helper is PowerShell (Wait-Process, then the same command).
     #[cfg(not(unix))]
     let mut c = {
-        let quote = |s: &str| format!("'{}'", s.replace('\'', "''"));
-        let script = format!("Wait-Process -Id {} -ErrorAction SilentlyContinue; & {} {}", std::process::id(), quote(&exe.to_string_lossy()), args.iter().map(|a| quote(a)).collect::<Vec<_>>().join(" "));
-        let mut c = std::process::Command::new("powershell.exe");
-        c.args(["-NoProfile", "-NonInteractive", "-Command", &script]);
+        let mut a = args.to_vec();
+        let at = a.iter().position(|x| x == "start").map(|i| i + 1).unwrap_or(a.len());
+        a.splice(at..at, ["--after-pid".to_string(), pid.to_string()]);
+        let mut c = std::process::Command::new(exe);
+        c.args(a);
         c
     };
     c.stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null());
-    crate::ops::hostos::detach(&mut c);
-    let _ = c.spawn();
-    eprintln!("seagentd: configuration changed by the setup wizard; restarting");
-    0
+    c
+}
+
+/// Called by `seagent daemon run` after a requested stop. Under systemd (user or system unit,
+/// `Restart=on-failure`) or launchd the exit status 75 brings the daemon back; a daemon detached by
+/// `seagent daemon start` starts a detached helper ([`helper_command`]) that waits for this
+/// process to exit and runs `seagent daemon start` with the same arguments. A failure to start
+/// the helper is logged (seagentd.log), never ignored; the desktop app's supervisor then starts
+/// the daemon itself.
+pub fn after_stop() -> i32 {
+    let env = |k: &str| std::env::var(k).ok();
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    use std::io::IsTerminal;
+    match comeback(&env, &args, std::io::stdin().is_terminal()) {
+        Comeback::ServiceManager(m) => {
+            eprintln!("seagentd: configuration changed by the setup wizard; exiting for {m} to restart");
+            75
+        }
+        Comeback::Manual => {
+            eprintln!("seagentd: configuration changed by the setup wizard; start the daemon again to use it");
+            0
+        }
+        Comeback::Helper(args) => {
+            let exe = match std::env::current_exe() {
+                Ok(e) => e,
+                Err(e) => {
+                    eprintln!("seagentd: configuration changed by the setup wizard, but the restart helper cannot be started (no path to this program: {e}); run `seagent daemon start`");
+                    return 0;
+                }
+            };
+            let mut c = helper_command(&exe, &args, std::process::id());
+            match crate::ops::hostos::spawn_detached(&mut c) {
+                Ok(h) => eprintln!("seagentd: configuration changed by the setup wizard; restarting (helper pid {})", h.id()),
+                Err(e) => eprintln!("seagentd: configuration changed by the setup wizard, but the restart helper failed to start ({}: {e}); run `seagent daemon start`", c.get_program().to_string_lossy()),
+            }
+            0
+        }
+    }
 }
 
 // ───────────── HTTP + ARP ─────────────
@@ -963,6 +1025,79 @@ mod tests {
         let mut r2: toml::Table = "[app]\nlisten = \"192.168.1.5:9000\"\n".parse().unwrap();
         apply_lan(&mut r2, true);
         assert_eq!(listen_of(&r2), "192.168.1.5:9000");
+    }
+
+    #[test]
+    fn a_wizard_restart_comes_back_through_systemd_or_the_helper() {
+        fn env(vars: &'static [(&'static str, &'static str)]) -> impl Fn(&str) -> Option<String> {
+            move |k: &str| vars.iter().find(|(n, _)| *n == k).map(|(_, v)| v.to_string())
+        }
+        let args: Vec<String> = ["daemon", "run", "-w", "/w"].map(String::from).to_vec();
+        let tty = true;
+        // A systemd unit (user or system): exit 75 and `Restart=on-failure` brings it back.
+        assert_eq!(comeback(&env(&[("NOTIFY_SOCKET", "/run/systemd/notify")]), &args, tty), Comeback::ServiceManager("systemd"));
+        assert_eq!(comeback(&env(&[("INVOCATION_ID", "0123")]), &args, false), Comeback::ServiceManager("systemd"));
+        // Our launchd LaunchAgent (KeepAlive on a non-zero exit): the same.
+        assert_eq!(comeback(&env(&[("XPC_SERVICE_NAME", "ai.seagent.seagentd")]), &args, false), Comeback::ServiceManager("launchd"));
+        assert_eq!(comeback(&env(&[("XPC_SERVICE_NAME", "0")]), &args, tty), Comeback::Manual, "a Terminal session is no launchd job of ours");
+        // Foreground `seagent daemon run` in a terminal: the user starts it again.
+        assert_eq!(comeback(&env(&[]), &args, tty), Comeback::Manual);
+        // Detached by `seagent daemon start` (also when a service manager's variables leaked in):
+        // the helper runs `daemon start` with the same arguments.
+        let want = Comeback::Helper(["daemon", "start", "-w", "/w"].map(String::from).to_vec());
+        assert_eq!(comeback(&env(&[("SEAGENT_DAEMON_DETACHED", "1")]), &args, false), want);
+        assert_eq!(comeback(&env(&[("SEAGENT_DAEMON_DETACHED", "1"), ("NOTIFY_SOCKET", "x")]), &args, false), want);
+        // No terminal and no service manager: on Windows that is the Task Scheduler logon task
+        // (its restart-on-failure ignores exit codes), so the helper; on Unix unchanged.
+        assert_eq!(comeback(&env(&[]), &args, false), if cfg!(windows) { want.clone() } else { Comeback::Manual });
+        // The helper's command line: Windows passes the pid to `daemon start --after-pid`.
+        let c = helper_command(Path::new("/opt/seagent"), &["daemon", "start", "-w", "/w"].map(String::from), 4242);
+        let argv: Vec<String> = c.get_args().map(|a| a.to_string_lossy().into_owned()).collect();
+        #[cfg(unix)]
+        {
+            assert_eq!(c.get_program(), "sh");
+            assert_eq!(argv[2..], ["4242", "/opt/seagent", "daemon", "start", "-w", "/w"]);
+        }
+        #[cfg(windows)]
+        {
+            assert_eq!(c.get_program(), "/opt/seagent");
+            assert_eq!(argv, ["daemon", "start", "--after-pid", "4242", "-w", "/w"]);
+        }
+    }
+
+    /// The Unix helper really waits for the stopping daemon and then runs the command. (Windows:
+    /// `daemon start --after-pid`, exercised with the real binary in tests/setup_restart.rs.)
+    #[cfg(unix)]
+    #[test]
+    fn the_sh_helper_waits_for_the_pid_then_runs_the_command() {
+        let (_r, p) = scratch("helper");
+        let marker = p.data.join("ran");
+        let mut stopping = seagent_core::proc::ChildGuard::single(std::process::Command::new("sleep").arg("1").spawn().unwrap());
+        let mut c = helper_command(Path::new("sh"), &["-c".into(), format!("echo ok > '{}'", marker.display())], stopping.id());
+        let mut h = seagent_core::proc::ChildGuard::single(crate::ops::hostos::spawn_detached(&mut c).unwrap());
+        std::thread::sleep(std::time::Duration::from_millis(400));
+        assert!(!marker.exists(), "ran before the process exited");
+        let _ = stopping.child().wait();
+        assert!(seagent_core::proc::wait_until(std::time::Duration::from_secs(10), || marker.exists()), "the helper never ran the command");
+        let _ = h.child().wait();
+    }
+
+    /// Windows: a detached spawn works from inside a Job Object (this test runner's, or the one
+    /// a desktop app / terminal puts us in), with or without permission to break away.
+    #[cfg(windows)]
+    #[test]
+    fn spawn_detached_works_inside_a_job() {
+        let (_r, p) = scratch("helper-win");
+        let marker = p.data.join("ran");
+        // A program that runs without a console, like the helper (the agent binary itself): this
+        // test binary listing its tests. (cmd.exe and Windows PowerShell need a console and do
+        // nothing under DETACHED_PROCESS — the bug the old PowerShell helper had.)
+        let mut c = std::process::Command::new(std::env::current_exe().unwrap());
+        c.arg("--list").stdout(std::fs::File::create(&marker).unwrap());
+        let mut h = seagent_core::proc::ChildGuard::single(crate::ops::hostos::spawn_detached(&mut c).unwrap());
+        let ran = seagent_core::proc::wait_until(std::time::Duration::from_secs(20), || std::fs::read_to_string(&marker).is_ok_and(|t| t.contains("spawn_detached_works_inside_a_job")));
+        assert!(ran, "the detached child never ran");
+        let _ = h.child().wait();
     }
 
     #[test]

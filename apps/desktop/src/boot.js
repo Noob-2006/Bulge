@@ -23,6 +23,8 @@
 
   function render(s) {
     last = s;
+    // The supervisor's "restarting…" screen (src-tauri/src/supervise.rs) has no boot steps.
+    $('steps').hidden = s.step === 'restarting';
     if (s.title) $('title').textContent = s.title;
     $('fill').style.width = Math.max(4, s.progress || 0) + '%';
     $('bar').setAttribute('aria-valuenow', String(s.progress || 0));
@@ -97,6 +99,12 @@
     if (info.platform === 'android' && !info.mode) {
       $('progress').hidden = true;
       $('choose').hidden = false;
+      return;
+    }
+    // The app is bringing a stopped agent back (after the setup wizard, a crash): show that and
+    // wait; the app returns to the console by itself. Retry stays available if it fails.
+    if (location.hash === '#restarting') {
+      render(await SE.invoke('boot_state'));
       return;
     }
     // A boot may already be running (started in the background): show it, else start one.

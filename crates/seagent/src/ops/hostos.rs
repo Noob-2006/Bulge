@@ -125,6 +125,9 @@ pub fn detach(cmd: &mut Command) {
         use windows_sys::Win32::System::Threading::{CREATE_NEW_PROCESS_GROUP, CREATE_NO_WINDOW, DETACHED_PROCESS};
         // No console inherited, none created (CREATE_NO_WINDOW also covers a console-subsystem
         // grandchild), and Ctrl-C in the caller's console never reaches it.
+        // Only for programs that run without a console (ours do): Windows PowerShell 5.1 started
+        // with DETACHED_PROCESS exits at once without running its `-Command` — that is how the
+        // setup wizard's old PowerShell restart helper silently did nothing.
         cmd.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW);
         // CreateProcess inherits *every* inheritable handle, not only the three it is given. When
         // our own stdout/stderr are pipes (the desktop app capturing `seagent daemon start`), the
@@ -144,6 +147,35 @@ pub fn detach(cmd: &mut Command) {
             }
         }
     }
+}
+
+/// Windows `CREATE_BREAKAWAY_FROM_JOB`.
+#[cfg(windows)]
+const BREAKAWAY: u32 = 0x0100_0000;
+
+/// Spawn `cmd` [`detach`]ed so it outlives us and whatever started us. On Windows it also
+/// leaves our Job Object when the job allows it (`CREATE_BREAKAWAY_FROM_JOB`): a desktop app,
+/// an installer or a terminal that runs its children in a kill-on-close job would otherwise
+/// take a detached daemon down with it. A job that forbids breakaway refuses the flag with
+/// `ERROR_ACCESS_DENIED`; the spawn is then retried inside the job (the best that job allows).
+pub fn spawn_detached(cmd: &mut Command) -> io::Result<std::process::Child> {
+    detach(cmd);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        use windows_sys::Win32::System::Threading::{CREATE_NEW_PROCESS_GROUP, CREATE_NO_WINDOW, DETACHED_PROCESS};
+        let base = DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW;
+        cmd.creation_flags(base | BREAKAWAY);
+        match cmd.spawn() {
+            Err(e) if e.raw_os_error() == Some(5) => {
+                cmd.creation_flags(base);
+                cmd.spawn()
+            }
+            r => r,
+        }
+    }
+    #[cfg(not(windows))]
+    cmd.spawn()
 }
 
 /// Is `pid` running? `kill(pid, 0)` on Unix (what the call sites always did); `OpenProcess`

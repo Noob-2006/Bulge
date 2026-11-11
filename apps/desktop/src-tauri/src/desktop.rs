@@ -139,6 +139,7 @@ fn on_menu<R: Runtime>(app: &AppHandle<R>, id: &str) {
                 .buttons(MessageDialogButtons::OkCancelCustom(t("停止並結束", "Stop and quit").into(), t("取消", "Cancel").into()))
                 .show(move |yes| {
                     if yes {
+                        app2.state::<AppState>().quitting.store(true, std::sync::atomic::Ordering::SeqCst);
                         if let Ok(a) = boot::locate(&app2) {
                             let _ = a.run(&["daemon", "stop"], Duration::from_secs(30));
                         }
@@ -159,12 +160,7 @@ pub fn open_console<R: Runtime>(app: &AppHandle<R>) {
         return;
     };
     agent_bg(app, move |app, a| {
-        let link = a.run(&["setup", "link", "--json"], Duration::from_secs(20)).ok().filter(|o| o.ok()).and_then(|o| crate::agent::parse_link_json(&o.stdout));
-        let url = match link {
-            Some(u) => Ok(u),
-            None => boot::console_url(app, a, &base),
-        };
-        match url {
+        match boot::route(app, a, &base) {
             Ok(u) => {
                 let _ = crate::open_url(app, &u, true);
             }
@@ -234,6 +230,7 @@ pub fn check_updates<R: Runtime>(app: AppHandle<R>, interactive: bool) {
                             // The installer replaces the sidecar too: on Windows a running
                             // seagent.exe is locked, so stop the daemon first. The relaunched app
                             // starts it again with the new binary.
+                            app2.state::<AppState>().quitting.store(true, std::sync::atomic::Ordering::SeqCst);
                             if let Ok(a) = boot::locate(&app2) {
                                 let _ = tauri::async_runtime::spawn_blocking(move || a.run(&["daemon", "stop"], Duration::from_secs(30))).await;
                             }
