@@ -178,7 +178,85 @@ pub fn detect_with(p: &Probe) -> Layout {
 }
 
 fn real_env(k: &str) -> Option<String> {
-    std::env::var(k).ok()
+    test_sandbox::env(k, std::env::var(k).ok())
+}
+
+/// Tests can never reach the real user's directories.
+///
+/// A unit test once sandboxed only `XDG_*` and so wrote `identity = "hi"` and a `[channels.tg]`
+/// table into the real `%APPDATA%\seagent\config.toml` on Windows (where XDG means nothing).
+/// So inside a cargo test binary (`target/<profile>/deps/<name>-<hash>`) the variables the
+/// per-user layout is derived from are only believed when they point into the temp directory;
+/// otherwise the layout is built under `<temp>/seagent-tmp-sandbox-<pid>` instead, and the
+/// passwd home is ignored. Tests that set `SEAGENT_HOME` / `HOME` / `APPDATA` … to their own
+/// scratch directories see exactly those; everything else lands in the sandbox, never in the
+/// user's real config. Outside test binaries nothing changes.
+pub mod test_sandbox {
+    use std::path::{Path, PathBuf};
+    use std::sync::OnceLock;
+
+    const HOMES: &[&str] = &["HOME", "USERPROFILE"];
+    const DERIVED: &[&str] = &["XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_CACHE_HOME", "XDG_RUNTIME_DIR", "APPDATA", "LOCALAPPDATA", "ProgramData"];
+
+    /// `target/<profile>/deps/<name>-<16 hex digits>[.exe]`: what cargo builds for `#[test]`s.
+    pub fn is_test_binary_path(exe: &Path) -> bool {
+        let in_deps = exe.parent().and_then(|d| d.file_name()).is_some_and(|n| n == "deps");
+        let stem = exe.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+        let hashed = stem.rsplit_once('-').is_some_and(|(_, h)| h.len() == 16 && h.bytes().all(|b| b.is_ascii_hexdigit()));
+        in_deps && hashed
+    }
+
+    fn active() -> bool {
+        static ON: OnceLock<bool> = OnceLock::new();
+        *ON.get_or_init(|| std::env::current_exe().is_ok_and(|e| is_test_binary_path(&e)))
+    }
+
+    fn temp_roots() -> Vec<PathBuf> {
+        let mut v = vec![crate::tmp::system_temp_root()];
+        if let Some(t) = std::env::var_os("TMPDIR").map(PathBuf::from) {
+            v.push(t);
+        }
+        let canon: Vec<PathBuf> = v.iter().filter_map(|p| std::fs::canonicalize(p).ok()).collect();
+        v.extend(canon);
+        v
+    }
+
+    fn in_temp(v: &str) -> bool {
+        let p = Path::new(v);
+        p.is_absolute() && temp_roots().iter().any(|t| p.starts_with(t))
+    }
+
+    /// The per-process sandbox the layout uses when a test did not choose one.
+    pub fn dir() -> PathBuf {
+        crate::tmp::system_temp_root().join(format!("seagent-tmp-sandbox-{}", std::process::id()))
+    }
+
+    /// Pure form: what the layout believes for variable `k` (value `v`) in a test binary.
+    pub fn filter(k: &str, v: Option<String>, in_temp: &dyn Fn(&str) -> bool, sandbox: &Path) -> Option<String> {
+        if HOMES.contains(&k) {
+            return Some(v.filter(|v| in_temp(v)).unwrap_or_else(|| sandbox.join("home").display().to_string()));
+        }
+        if DERIVED.contains(&k) {
+            return v.filter(|v| in_temp(v));
+        }
+        v
+    }
+
+    pub(super) fn env(k: &str, v: Option<String>) -> Option<String> {
+        if !active() {
+            return v;
+        }
+        filter(k, v, &in_temp, &dir())
+    }
+
+    /// The passwd home is the real one: not in a test binary.
+    pub(super) fn pw_home(h: Option<PathBuf>) -> Option<PathBuf> {
+        if active() {
+            None
+        } else {
+            h
+        }
+    }
 }
 
 #[cfg(not(unix))]
@@ -209,7 +287,7 @@ fn with_probe<T>(f: impl FnOnce(&Probe) -> T) -> T {
     #[cfg(not(unix))]
     let euid = if crate::platform::sysinfo::is_root() { 0 } else { 1 };
     let exists = |p: &Path| p.exists();
-    f(&Probe { env: &real_env, exists: &exists, euid, pw_home: pw_home(euid) })
+    f(&Probe { env: &real_env, exists: &exists, euid, pw_home: test_sandbox::pw_home(pw_home(euid)) })
 }
 
 /// The layout of this process (environment + who we run as).
@@ -332,5 +410,55 @@ mod tests {
         assert_eq!(which_in("tool", Some(&path)), Some(bin));
         assert_eq!(which_in("plain", Some(&path)), None, "not executable");
         assert_eq!(which_in("missing", Some(&path)), None);
+    }
+}
+
+/// The test sandbox (every OS): a test binary never resolves the real user's directories.
+#[cfg(test)]
+mod sandbox_tests {
+    use super::test_sandbox::*;
+    use std::path::Path;
+
+    #[test]
+    fn test_binaries_are_recognised() {
+        assert!(is_test_binary_path(Path::new("/w/target/debug/deps/seagent-0123456789abcdef")));
+        assert!(is_test_binary_path(Path::new(r"C:\w\target\debug\deps\seagent_core-0123456789abcdef.exe")) || !cfg!(windows));
+        assert!(!is_test_binary_path(Path::new("/w/target/debug/seagent")), "the real binary (cargo run, CARGO_BIN_EXE_*)");
+        assert!(!is_test_binary_path(Path::new("/usr/bin/seagent")));
+        assert!(!is_test_binary_path(Path::new("/w/target/debug/deps/libfoo.so")));
+        // This very test runs in one.
+        assert!(is_test_binary_path(&std::env::current_exe().unwrap()));
+    }
+
+    #[test]
+    fn real_user_directories_are_replaced_by_the_sandbox() {
+        let in_temp = |v: &str| v.starts_with("/tmp/");
+        let sb = Path::new("/tmp/seagent-tmp-sandbox-1");
+        let home = sb.join("home").display().to_string();
+        let f = |k: &str, v: Option<&str>| filter(k, v.map(String::from), &in_temp, sb);
+        // The real home / %APPDATA% (what the profile test once wrote to) are never believed.
+        assert_eq!(f("HOME", Some("/home/u")), Some(home.clone()));
+        assert_eq!(f("USERPROFILE", Some(r"C:\Users\u")), Some(home.clone()));
+        assert_eq!(f("HOME", None), Some(home), "nor the passwd fallback");
+        assert_eq!(f("APPDATA", Some(r"C:\Users\u\AppData\Roaming")), None, "derived from the sandboxed home instead");
+        assert_eq!(f("XDG_CONFIG_HOME", Some("/home/u/.config")), None);
+        // A test's own scratch directories are kept.
+        assert_eq!(f("HOME", Some("/tmp/t1/home")).as_deref(), Some("/tmp/t1/home"));
+        assert_eq!(f("APPDATA", Some("/tmp/t1/roaming")).as_deref(), Some("/tmp/t1/roaming"));
+        // Everything else is untouched.
+        assert_eq!(f("SEAGENT_HOME", Some("/srv/x")).as_deref(), Some("/srv/x"));
+        assert_eq!(f("PATH", Some("/bin")).as_deref(), Some("/bin"));
+    }
+
+    #[test]
+    fn the_layout_of_a_test_process_stays_out_of_the_real_home() {
+        // Whatever the developer's environment says, the per-user layout of this test process
+        // lies under the temp directory.
+        let l = crate::layout::user();
+        let roots = [crate::tmp::system_temp_root(), std::fs::canonicalize(crate::tmp::system_temp_root()).unwrap_or_default()];
+        let tmp = std::env::var_os("TMPDIR").map(std::path::PathBuf::from);
+        for p in [&l.config, &l.data, &l.cache] {
+            assert!(roots.iter().chain(tmp.iter()).any(|r| p.starts_with(r)), "{} is outside the temp dir", p.display());
+        }
     }
 }

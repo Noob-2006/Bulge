@@ -629,6 +629,10 @@ mod tests {
 
     #[test]
     fn uninstall_plan_purges_profiles_and_keeps_a_managed_binary() {
+        // `--all-profiles` removes the per-user profiles root, which the layout derives from the
+        // environment: hold the env lock so another test's sandbox (ops::profile) is not
+        // changing under us. (In a test binary that root is never the real one: layout::test_sandbox.)
+        let _g = crate::testkit::env_lock();
         let t = seagent_core::tmp::TempDir::new("seagent-uninst");
         let root = t.path();
         let paths = Paths { data: root.join("data"), config_dir: root.join("config"), runtime: root.join("run"), ..Default::default() };
