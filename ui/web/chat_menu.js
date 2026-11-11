@@ -562,7 +562,7 @@ function openModelPicker(anchor) {
   el.className = 'cm-menu cm-picker';
   el.setAttribute('role', 'dialog');
   el.setAttribute('aria-label', tt('切換模型', 'Switch model'));
-  el.innerHTML = `<div class="cm-picker-head"><input type="search" placeholder="${esc(tt('搜尋或輸入 provider/model…', 'Search or type provider/model…'))}" autocomplete="off" aria-label="${esc(tt('搜尋模型', 'Search models'))}"><button type="button" class="btn ghost small" data-refresh title="${esc(tt('從供應商重新抓取清單', 'Fetch the lists again from the providers'))}">↻</button></div><div class="cm-picker-list" role="listbox"><div class="cm-head"><span class="star spin" style="--size:10px"></span> ${esc(tt('載入模型清單…', 'Loading models…'))}</div></div><div class="cm-picker-foot"><span class="faint" data-status></span><button type="button" class="btn ghost small" data-keys>${esc(tt('管理 API 金鑰', 'Manage API keys'))}</button></div>`;
+  el.innerHTML = `<div class="cm-picker-head"><input type="search" placeholder="${esc(tt('篩選模型…', 'Filter models…'))}" autocomplete="off" aria-label="${esc(tt('搜尋模型', 'Search models'))}"><button type="button" class="btn ghost small" data-refresh title="${esc(tt('從供應商重新抓取清單', 'Fetch the lists again from the providers'))}">↻</button></div><div class="cm-picker-list" role="listbox"><div class="cm-head"><span class="star spin" style="--size:10px"></span> ${esc(tt('載入模型清單…', 'Loading models…'))}</div></div><div class="cm-picker-foot"><span class="faint" data-status></span><button type="button" class="btn ghost small" data-keys>${esc(tt('管理 API 金鑰', 'Manage API keys'))}</button></div>`;
   document.body.appendChild(el);
   const lvl = { el, items: [], idx: -1 };
   CM.menu = { levels: [lvl], row: null, focus: anchor };
@@ -584,13 +584,14 @@ function openModelPicker(anchor) {
       const ms = (p.models || []).filter((m) => !q || m.ref.toLowerCase().includes(q) || String(p.label).toLowerCase().includes(q));
       if (!ms.length) continue;
       html += `<div class="cm-picker-prov"><span>${esc(p.label || p.id)}</span><span class="src ${esc(p.source)}">${esc(srcLabel(p))}</span>${p.error ? `<span class="err" title="${esc(p.error)}">${esc(p.error)}</span>` : ''}</div>`;
-      for (const m of ms.slice(0, q ? 200 : 40)) {
+      // Every model the provider lists (the server caps one provider at 400): scroll and click;
+      // the search box only narrows it.
+      for (const m of ms) {
         const i = lvl.items.length;
         lvl.items.push({ ref: m.ref });
         html += `<button type="button" class="cm-item" role="option" data-i="${i}"><span class="ic">${m.ref === cur() ? '✓' : ''}</span><span class="lb">${esc(m.id)}</span>${m.context ? `<span class="sub">${Math.round(m.context / 1000)}k</span>` : ''}</button>`;
         shown++;
       }
-      if (!q && ms.length > 40) html += `<div class="cm-head">${esc(tt(`還有 ${ms.length - 40} 個，輸入以搜尋`, `${ms.length - 40} more, type to search`))}</div>`;
     }
     const typed = input.value.trim();
     if (/^[\w.-]+\/\S+$/.test(typed) && !lvl.items.some((x) => x.ref.toLowerCase() === typed.toLowerCase())) {

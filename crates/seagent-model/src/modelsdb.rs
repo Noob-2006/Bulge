@@ -502,6 +502,24 @@ fn snapshot_price_exact(id: &str) -> Option<Pricing> {
     None
 }
 
+/// The model ids the built-in price snapshots list for provider `provider` (a seagent preset
+/// id or a models.dev id), newest snapshot first: a provider's offline model list while the
+/// models.dev registry has not been downloaded yet (a fresh install).
+pub fn snapshot_models(provider: &str) -> Vec<String> {
+    let want = models_dev_provider(provider);
+    let mut out: Vec<String> = vec![];
+    for (p, _, rows) in snapshots().into_iter().rev() {
+        if p == want || p == provider {
+            for (m, ..) in rows {
+                if !out.iter().any(|x| x == m) {
+                    out.push(m.to_string());
+                }
+            }
+        }
+    }
+    out
+}
+
 /// Official-docs price for a model id (normalised).
 pub fn snapshot_price(model: &str) -> Option<Pricing> {
     snapshot_price_exact(&model.to_lowercase())
@@ -1203,6 +1221,14 @@ mod tests {
         );
         assert!(snapshot_price("totally-unknown").is_none());
         assert_eq!(fast_pricing("claude-opus-5-5").unwrap().input, 8.0);
+    }
+
+    #[test]
+    fn snapshot_models_are_an_offline_model_list() {
+        let ds = snapshot_models("deepseek");
+        assert!(ds.iter().any(|m| m == "deepseek-chat") && ds.iter().any(|m| m == "deepseek-v4-pro"), "{ds:?}");
+        assert!(snapshot_models("anthropic").iter().any(|m| m.starts_with("claude-")));
+        assert!(snapshot_models("no-such-provider").is_empty());
     }
 
     #[test]

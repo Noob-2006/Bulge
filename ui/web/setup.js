@@ -46,7 +46,60 @@
     $('keyField').hidden = !custom && p && !p.needs_key;
     $('baseUrl').placeholder = p ? p.base_url : 'https://…/v1';
     $('keyHint').textContent = p && p.has_key && p.needs_key ? '保管庫或環境中已有 ' + p.key_env + '；留空即沿用。' : '';
-    $('models').replaceChildren();
+    tested = null;
+    say($('testStatus'), '');
+    // Before a successful test: the provider's built-in list (the console pickers' offline list).
+    setModels(p ? p.models || [] : [], p ? p.recommended : '', p ? 'builtin' : 'none');
+    // Nothing to type for these: fetch the live list right away.
+    if (p && (!p.needs_key || p.has_key)) testProvider(true);
+  }
+
+  // ── the model list: every model the provider offers, one click to choose ──
+  // A scrollable listbox (always open) with type-to-filter above it; "other…" at the end reveals
+  // a text field for a name the list does not have.
+  const OTHER = ' other';
+  let modelList = [];
+  let pickedModel = '';
+  let modelSource = 'none';
+  let tested = null;
+
+  function setModels(list, recommended, source) {
+    const seen = new Set();
+    modelList = (list || []).filter((m) => m && !seen.has(m) && seen.add(m));
+    modelSource = source;
+    const keep = pickedModel && modelList.includes(pickedModel) ? pickedModel : '';
+    pickedModel = keep || (recommended && modelList.includes(recommended) ? recommended : modelList[0] || '');
+    $('modelFilter').value = '';
+    drawModels();
+    $('modelHint').textContent = source === 'live'
+      ? '供應商 API 回傳的全部模型；點一下即可選擇，也可在上方輸入文字篩選。'
+      : source === 'builtin' && modelList.length
+        ? '內建清單。測試連線成功後會換成這把金鑰實際可用的模型。'
+        : '輸入金鑰後會自動測試連線，並在這裡列出可用的模型。';
+  }
+
+  function drawModels() {
+    const q = $('modelFilter').value.trim().toLowerCase();
+    const sel = $('model');
+    const shown = modelList.filter((m) => !q || m.toLowerCase().includes(q));
+    const opts = shown.map((m) => Object.assign(document.createElement('option'), { value: m, textContent: m }));
+    const other = Object.assign(document.createElement('option'), { value: OTHER, textContent: '其他（自行輸入模型名稱）…', className: 'other' });
+    sel.replaceChildren(...opts, other);
+    // Tall enough to show a typical provider's whole list at once; longer lists scroll.
+    sel.size = Math.max(4, Math.min(shown.length + 1, 16));
+    if (pickedModel === OTHER) sel.value = OTHER;
+    else if (shown.includes(pickedModel)) sel.value = pickedModel;
+    else if (q && shown.length) sel.value = shown[0];
+    else sel.selectedIndex = -1;
+    $('modelOtherField').hidden = sel.value !== OTHER;
+    $('modelCount').textContent = modelList.length ? (q ? shown.length + ' / ' : '') + modelList.length + ' 個' + (modelSource === 'live' ? '（即時）' : '（內建）') : '';
+    const cur = sel.selectedOptions[0];
+    if (cur) cur.scrollIntoView({ block: 'nearest' });
+  }
+
+  function chosenModel() {
+    const v = $('model').value;
+    return v === OTHER ? $('modelOther').value.trim() : v;
   }
 
   function providerParams() {
@@ -57,23 +110,30 @@
     return out;
   }
 
-  async function testProvider() {
+  const testKey = () => JSON.stringify(providerParams());
+
+  // `auto`: started by leaving the key field / choosing a provider rather than by the button —
+  // stays quiet about a missing key.
+  async function testProvider(auto) {
     const st = $('testStatus');
+    const p = current();
+    if (auto === true && p && p.needs_key && !p.has_key && !$('apiKey').value) return;
+    const key = testKey();
     say(st, '連線中…');
     $('testProvider').disabled = true;
     try {
       const r = await rpc('setup.test_provider', providerParams());
+      if (key !== testKey()) return; // the provider or key changed meanwhile
+      tested = key;
       if (!r.ok) {
         say(st, '✗ ' + r.error, 'error');
         return;
       }
       say(st, '✓ 連線成功，' + r.count + ' 個模型', 'ok');
-      const dl = $('models');
-      dl.replaceChildren(...r.models.map((m) => Object.assign(document.createElement('option'), { value: m })));
-      if (!$('model').value && r.models.length) {
-        const pref = ['sonnet', 'flash', 'chat', 'plus', 'latest'];
-        $('model').value = pref.map((p) => r.models.find((m) => m.includes(p))).find(Boolean) || r.models[0];
-      }
+      setModels(r.models || [], r.recommended, 'live');
+      // The whole list at once, ready to click.
+      $('stepModel').scrollIntoView({ behavior: 'smooth', block: 'start' });
+      $('model').focus({ preventScroll: true });
     } catch (e) {
       say(st, '✗ ' + e.message, 'error');
     } finally {
@@ -90,9 +150,9 @@
     ev.preventDefault();
     const st = $('applyStatus');
     const params = providerParams();
-    params.model = $('model').value.trim();
+    params.model = chosenModel();
     if (!params.provider || !params.model) {
-      say(st, '請選擇供應商並填入模型名稱', 'error');
+      say(st, '請選擇供應商與模型', 'error');
       return;
     }
     params.security = radio('security');
@@ -173,7 +233,7 @@
     if (cur) {
       const [pid, ...rest] = cur.split('/');
       if (providers.some((p) => p.id === pid)) sel.value = pid;
-      $('model').value = rest.join('/');
+      pickedModel = rest.join('/');
     }
     $('workspace').value = s.workspace || '';
     $('lan').checked = !!s.lan;
@@ -185,7 +245,21 @@
   }
 
   $('provider').addEventListener('change', syncProvider);
-  $('testProvider').addEventListener('click', testProvider);
+  $('testProvider').addEventListener('click', () => testProvider(false));
+  // A key that was not tested yet is tested as soon as the field is left.
+  const autoTest = () => { if ($('apiKey').value && tested !== testKey()) testProvider(true); };
+  $('apiKey').addEventListener('change', autoTest);
+  $('apiKey').addEventListener('blur', autoTest);
+  $('baseUrl').addEventListener('change', () => { if (tested !== null && tested !== testKey()) testProvider(true); });
+  $('modelFilter').addEventListener('input', drawModels);
+  $('modelFilter').addEventListener('keydown', (e) => {
+    if (e.key === 'ArrowDown' || e.key === 'Enter') { e.preventDefault(); $('model').focus(); }
+  });
+  $('model').addEventListener('change', () => {
+    pickedModel = $('model').value;
+    $('modelOtherField').hidden = pickedModel !== OTHER;
+    if (pickedModel === OTHER) $('modelOther').focus();
+  });
   $('wizard').addEventListener('submit', apply);
   for (const el of document.querySelectorAll('input[name="auth"]')) el.addEventListener('change', () => { $('oidcFields').hidden = radio('auth') !== 'oidc'; });
   $('channelKind').addEventListener('change', () => { $('channelFields').hidden = !$('channelKind').value; });

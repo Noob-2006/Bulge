@@ -362,12 +362,54 @@ fn builtin(cfg: &Config, pc: &ProviderConfig) -> Vec<String> {
             }
         }
     }
-    for i in seagent_model::modelsdb::models_of(&pc.id) {
-        if i.tool_call && !out.contains(&i.id) {
-            out.push(i.id);
+    for m in builtin_models(pc) {
+        if !out.contains(&m) {
+            out.push(m);
         }
     }
     out
+}
+
+/// A provider's built-in model list without any config: its configured ids, then the
+/// tool-capable models of the models.dev registry (else the built-in price snapshots' ids). What
+/// the setup wizard offers before a key
+/// has been tested (and the pickers fall back to offline).
+pub fn builtin_models(pc: &ProviderConfig) -> Vec<String> {
+    let mut out: Vec<String> = pc.models.clone();
+    for i in seagent_model::modelsdb::models_of(&pc.id) {
+        if i.tool_call && i.status != "deprecated" && !out.contains(&i.id) {
+            out.push(i.id);
+        }
+    }
+    // A fresh install has no models.dev registry yet: the price snapshots built into the binary
+    // still name the provider's current models.
+    if out.is_empty() {
+        out = seagent_model::modelsdb::snapshot_models(&pc.id);
+    }
+    out
+}
+
+/// A live listing with an explicit key (`None`: what the runtime would use for a preset
+/// without one, e.g. a local server). Errors on an HTTP error or an empty answer.
+pub fn live_models(pc: &ProviderConfig, key: Option<&str>) -> Result<Vec<String>, String> {
+    let cred: Arc<dyn CredSource> = Arc::new(seagent_model::auth::Static::new(key.map(String::from)));
+    seagent_model::list_models_live(pc, &*cred)
+}
+
+/// The model a picker preselects among `models` of provider `pid`: the newest tool-capable,
+/// non-deprecated release models.dev knows for it (ties: the shorter id, usually the plain
+/// "chat" model rather than a variant); for models it does not know, the first whose name
+/// looks like a general chat model; else the first.
+pub fn recommended(pid: &str, models: &[String]) -> Option<String> {
+    let known: Vec<(String, String)> = models
+        .iter()
+        .filter_map(|m| seagent_model::modelsdb::registry_entry(Some(pid), m).filter(|i| i.tool_call && i.status != "deprecated" && !i.release_date.is_empty()).map(|i| (i.release_date.clone(), m.clone())))
+        .collect();
+    if let Some((_, m)) = known.iter().max_by(|a, b| a.0.cmp(&b.0).then(b.1.len().cmp(&a.1.len()))) {
+        return Some(m.clone());
+    }
+    const PREF: &[&str] = &["sonnet", "flash", "chat", "plus", "latest", "pro"];
+    PREF.iter().find_map(|p| models.iter().find(|m| m.to_lowercase().contains(p))).or_else(|| models.first()).cloned()
 }
 
 /// One line of at most 160 characters (provider errors can carry a whole CLI transcript).
@@ -450,7 +492,7 @@ fn models_list(c: &KeyCtx, only: Option<&str>, refresh: bool) -> Res {
                 (None, Some(e)) if !e.models.is_empty() => ("cache", e.models.clone(), Some(e.fetched_ms)),
                 _ => ("builtin", builtin(&cfg, pc), None),
             };
-            json!({"id": pc.id, "label": label, "source": source, "fetched_ms": at, "error": errors.get(&pc.id), "models": model_rows(&pc.id, &models)})
+            json!({"id": pc.id, "label": label, "source": source, "fetched_ms": at, "error": errors.get(&pc.id), "recommended": recommended(&pc.id, &models), "models": model_rows(&pc.id, &models)})
         })
         .collect();
     Ok(json!({"default": cfg.model.default, "providers": rows, "offline": offline}))

@@ -13,7 +13,7 @@
 //! | method | params | result |
 //! |---|---|---|
 //! | `setup.status` | – | `{locked, token_valid, mode, paths, configured, providers[], security_modes[], auth_modes[], channels[], workspace, service, expires_ms}` (only `{locked, token_valid, reason}` without a valid token) |
-//! | `setup.test_provider` | `{provider, api_key?, base_url?}` | `{ok, count, models[]}` or `{ok: false, error}` — the key is never echoed |
+//! | `setup.test_provider` | `{provider, api_key?, base_url?}` | `{ok, count, models[], recommended}` or `{ok: false, error}` — the key is never echoed |
 //! | `setup.apply` | `{provider, model, api_key?, base_url?, security?, workspace?, auth?: {mode: "token"\|"oidc", issuer?, client_id?, client_secret?}, channel?: {kind, token, owner?}, autostart?}` | `{ok, config, lines[], console_url, restart}` |
 //!
 //! The provider / key / model / channel part is `setup_server::apply`, the same code the
@@ -283,7 +283,11 @@ fn provider_list(vault: &Vault) -> Vec<Value> {
                 None => true,
                 Some(env) => std::env::var(env).is_ok_and(|v| !v.trim().is_empty()) || vault.names().contains(env),
             };
-            Some(json!({"id": id, "label": if crate::setup::t("zh", "en") == "zh" { *zh } else { *en }, "needs_key": p.api_key_env.is_some(), "key_env": p.api_key_env, "has_key": has_key, "base_url": p.base_url}))
+            // The picker's list before a key is tested: the same built-in list the console's
+            // model pickers fall back to (ops::model_keys), chat models only.
+            let models = crate::setup::chat_models(crate::ops::model_keys::builtin_models(p));
+            let recommended = crate::ops::model_keys::recommended(id, &models);
+            Some(json!({"id": id, "label": if crate::setup::t("zh", "en") == "zh" { *zh } else { *en }, "needs_key": p.api_key_env.is_some(), "key_env": p.api_key_env, "has_key": has_key, "base_url": p.base_url, "models": models.into_iter().take(MAX_LISTED).collect::<Vec<_>>(), "recommended": recommended}))
         })
         .collect()
 }
@@ -348,20 +352,26 @@ pub fn test_provider(paths: &Paths, p: &Value) -> Value {
     let key = s(p, "api_key").map(String::from).or_else(|| {
         let env = prov.api_key_env.as_ref()?;
         let v = vault.substitute(&format!("{{{{secret:{env}}}}}"));
-        (!v.starts_with("{{secret:")).then_some(v)
+        (!v.starts_with("{{secret:")).then_some(v).or_else(|| std::env::var(env).ok().filter(|v| !v.trim().is_empty()))
     });
     if prov.api_key_env.is_some() && key.is_none() {
         return json!({"ok": false, "error": "this provider needs an API key"});
     }
-    match seagent_model::list_models(&prov, key.as_deref()) {
+    // The console's live listing (API keys page, model pickers): a rejected key or an empty
+    // answer is an error, never a silent fallback to the built-in list.
+    match crate::ops::model_keys::live_models(&prov, key.as_deref()) {
         Ok(m) => {
             let m = crate::setup::chat_models(m);
+            let recommended = crate::ops::model_keys::recommended(&prov.id, &m);
             // Never echo the key: a provider error message could quote it back.
-            json!({"ok": true, "count": m.len(), "models": m.into_iter().take(200).collect::<Vec<_>>()})
+            json!({"ok": true, "count": m.len(), "recommended": recommended, "models": m.into_iter().take(MAX_LISTED).collect::<Vec<_>>()})
         }
         Err(e) => json!({"ok": false, "error": redact(&e, key.as_deref())}),
     }
 }
+
+/// Most models the wizard lists for one provider (OpenRouter has hundreds).
+const MAX_LISTED: usize = 400;
 
 fn redact(msg: &str, key: Option<&str>) -> String {
     match key.filter(|k| k.len() >= 4) {
@@ -998,6 +1008,58 @@ mod tests {
         assert!(apply(&p2, &json!({"provider": "openai", "model": "m", "api_key": "k", "security": "yolo"}), &discover, &auto).is_err());
         assert!(!p2.user_config().exists() && !locked(&p2));
         assert!(apply(&p2, &json!({"provider": "openai"}), &discover, &auto).unwrap_err().contains("model"));
+    }
+
+    /// A DeepSeek-style OpenAI-compatible endpoint: `GET /v1/models` lists two models for the
+    /// right key, 401 otherwise.
+    fn fake_models_endpoint() -> String {
+        use std::io::{BufRead, BufReader, Write};
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}/v1", l.local_addr().unwrap());
+        std::thread::spawn(move || {
+            for s in l.incoming().flatten() {
+                let mut r = BufReader::new(s.try_clone().unwrap());
+                let (mut line, mut auth) = (String::new(), String::new());
+                while r.read_line(&mut line).is_ok_and(|n| n > 0) && line != "\r\n" {
+                    if line.to_ascii_lowercase().starts_with("authorization:") {
+                        auth = line.clone();
+                    }
+                    line.clear();
+                }
+                let (code, body) = if auth.contains("sk-good-key-0001") { ("200 OK", r#"{"object":"list","data":[{"id":"deepseek-chat","object":"model"},{"id":"deepseek-reasoner","object":"model"}]}"#) } else { ("401 Unauthorized", r#"{"error":{"message":"bad key"}}"#) };
+                let mut s = s;
+                let _ = write!(s, "HTTP/1.1 {code}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}", body.len());
+            }
+        });
+        base
+    }
+
+    #[test]
+    fn the_wizard_lists_every_live_model_and_recommends_one() {
+        let (_r, p) = scratch("models");
+        let base = fake_models_endpoint();
+        let v = test_provider(&p, &json!({"provider": "deepseek", "base_url": base, "api_key": "sk-good-key-0001"}));
+        assert_eq!(v["ok"], json!(true), "{v}");
+        assert_eq!(v["count"], json!(2));
+        assert_eq!(v["models"], json!(["deepseek-chat", "deepseek-reasoner"]), "the whole list the API returned");
+        let rec = v["recommended"].as_str().unwrap();
+        assert!(["deepseek-chat", "deepseek-reasoner"].contains(&rec), "{rec}");
+        // A rejected key is an error, not the built-in list.
+        let bad = test_provider(&p, &json!({"provider": "deepseek", "base_url": base, "api_key": "sk-wrong-0002"}));
+        assert_eq!(bad["ok"], json!(false), "{bad}");
+        assert!(!bad.to_string().contains("sk-wrong-0002"));
+        // Before any test: every provider comes with its built-in list and a preselection from it.
+        let st = status(&p, true, None);
+        for prov in st["providers"].as_array().unwrap() {
+            let ms = prov["models"].as_array().unwrap();
+            if let Some(r) = prov["recommended"].as_str() {
+                assert!(ms.iter().any(|m| m == r), "{prov}");
+            }
+        }
+        let names = |ms: &[&str]| ms.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(crate::ops::model_keys::recommended("nobody-knows-this-provider", &names(&["x-embed", "x-chat"])).as_deref(), Some("x-chat"));
+        assert_eq!(crate::ops::model_keys::recommended("nobody-knows-this-provider", &names(&["a", "b"])).as_deref(), Some("a"));
+        assert_eq!(crate::ops::model_keys::recommended("x", &[]), None);
     }
 
     #[test]

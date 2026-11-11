@@ -105,6 +105,19 @@ PAGES.apikeys = { get title() { return tt('API 金鑰', 'API keys'); }, group: '
     $('kpHint').innerHTML = p ? `${esc(tt('會存成', 'Stored as'))} <code>${esc(p.name)}</code>${p.signup ? ` · <a href="${esc(p.signup)}" target="_blank" rel="noopener noreferrer">${esc(tt('取得金鑰', 'Get a key'))}</a>` : ''}${p.optional ? ' · ' + esc(tt('這個供應商可以不用金鑰', 'this provider also works without a key')) : ''}` : '';
   };
   $('kpProv').onchange = hint;
+  // A typed key is tested (and the provider's models listed) as soon as the field is left: no
+  // extra click before Save. The same value is not tested twice.
+  const autoTest = (input, id, slot) => {
+    input.addEventListener('change', () => {
+      const k = input.value.trim();
+      const want = id();
+      if (!k || !want || input.dataset.tested === want + ' ' + k) return;
+      input.dataset.tested = want + ' ' + k;
+      test(want, k, slot);
+    });
+  };
+  autoTest($('kpKey'), () => $('kpProv').value, '__new');
+  for (const i of qa('input[data-key]')) autoTest(i, () => i.dataset.key);
   $('kpTest').onclick = () => { const id = $('kpProv').value, k = $('kpKey').value.trim(); if (!id || !k) return note(tt('請選擇供應商並輸入金鑰', 'Choose a provider and enter a key'), true); test(id, k, '__new'); };
   $('kpSave').onclick = async () => {
     const id = $('kpProv').value, k = $('kpKey').value.trim();

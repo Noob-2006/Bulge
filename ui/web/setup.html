@@ -46,6 +46,13 @@
   .setup button.secondary:hover { border-color: var(--thread-strong); background: var(--surface-2); }
   .setup button:disabled { opacity: .5; cursor: default; }
   .setup .status { min-height: 1.4em; font-size: 13px; }
+  .setup .mpick { border: 1px solid var(--thread-2); border-radius: var(--radius); background: var(--surface); }
+  .setup .mpick input[type=search] { border: 0; border-bottom: 1px solid var(--thread); border-radius: var(--radius) var(--radius) 0 0; font-size: 13px; padding: 7px 11px; background: transparent; }
+  .setup .mpick select { border: 0; border-radius: 0 0 var(--radius) var(--radius); padding: 4px 0; font: 13.5px/1.5 var(--mono); background: transparent; overflow-y: auto; }
+  .setup .mpick select option { padding: 4px 11px; }
+  .setup .mpick select option:checked { background: var(--surface-2); color: var(--text); box-shadow: inset 2px 0 0 var(--gold-400); }
+  .setup .mpick select option.other { font-family: var(--font); color: var(--text-3); font-size: 12.5px; }
+  .setup label .count { color: var(--text-3); font-size: 11.5px; margin-left: 6px; }
   .setup .ok { color: var(--ok); }
   .setup .error { color: var(--crit); }
   .setup [hidden] { display: none !important; }
@@ -108,9 +115,16 @@
 
     <fieldset id="stepModel">
       <legend>02　預設模型</legend>
-      <label for="model">模型名稱</label>
-      <input id="model" name="model" list="models" required autocomplete="off">
-      <datalist id="models"></datalist>
+      <label for="model">選擇模型 <span class="count" id="modelCount"></span></label>
+      <div class="mpick">
+        <input id="modelFilter" type="search" placeholder="篩選模型…" autocomplete="off" spellcheck="false" aria-label="篩選模型" aria-controls="model">
+        <select id="model" name="model" size="10" required></select>
+      </div>
+      <div id="modelOtherField" hidden>
+        <label for="modelOther">模型名稱（清單裡沒有的）</label>
+        <input id="modelOther" name="modelOther" autocomplete="off" spellcheck="false">
+      </div>
+      <p class="hint" id="modelHint"></p>
     </fieldset>
 
     <fieldset id="stepAuth">
