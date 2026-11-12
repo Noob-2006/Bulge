@@ -169,6 +169,21 @@ pub fn console_url<R: Runtime>(app: &AppHandle<R>, a: &Agent, base: &str) -> Res
     Ok(format!("{base}/#token={tok}"))
 }
 
+/// The local agent's console token as it is now (for the console's `console_access_token`: its
+/// own was refused — rotated, a page that lost it). Read fresh from the agent each time; on iOS
+/// (no program to run) the token of the console URL this boot opened.
+pub fn local_token<R: Runtime>(app: &AppHandle<R>) -> Result<String, String> {
+    #[cfg(not(target_os = "ios"))]
+    {
+        let a = locate(app)?;
+        if let Some(tok) = call(app, &a, &["app", "token"], 20).ok().and_then(|o| agent::parse_token(&o.stdout)) {
+            return Ok(tok);
+        }
+    }
+    let url = app.state::<AppState>().boot.lock().unwrap().url.clone();
+    url.as_deref().and_then(agent::token_in_url).ok_or_else(|| t("無法取得主控台權杖", "could not get the console token").to_string())
+}
+
 /// iOS: the agent in this process — Application Support as `SEAGENT_HOME`, the vault key from
 /// the Keychain, the bundled `share/` (skills, WASI tools); the App Server on 127.0.0.1.
 #[cfg(target_os = "ios")]
