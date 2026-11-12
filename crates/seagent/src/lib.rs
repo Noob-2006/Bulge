@@ -1981,7 +1981,7 @@ fn cmd_secrets(a: &Args) -> R {
             }
             let mut val = String::new();
             std::io::stdin().read_line(&mut val).map_err(|e| e.to_string())?;
-            let val = val.trim_end_matches(['\n', '\r']);
+            let val = secret_from_stdin_line(&val);
             if val.is_empty() {
                 return Err("empty value".into());
             }
@@ -2767,5 +2767,23 @@ mod ops_cli_tests {
         assert_eq!(attach_render(&json!({"method":"ready","params":{}}), false), Attach::Skip);
         // `--json` prints every message verbatim, including deltas.
         assert_eq!(attach_render(&delta, true), Attach::Json(delta.clone()));
+    }
+}
+
+/// The value `seagent secrets set` stores from one stdin line: without the line ending and without a
+/// leading byte-order mark. Windows PowerShell pipes strings to native programs with a UTF-8 BOM
+/// (`"…" | seagent secrets set APP_TOKEN`), which used to become part of the secret: the stored app
+/// token then no longer matched what the desktop app reads back ("找不到主控台權杖").
+fn secret_from_stdin_line(line: &str) -> &str {
+    line.trim_end_matches(['\n', '\r']).trim_start_matches('\u{feff}')
+}
+
+#[cfg(test)]
+mod secret_line_tests {
+    #[test]
+    fn a_powershell_bom_and_the_line_ending_are_not_part_of_the_secret() {
+        assert_eq!(super::secret_from_stdin_line("\u{feff}abc123\r\n"), "abc123");
+        assert_eq!(super::secret_from_stdin_line("abc123\n"), "abc123");
+        assert_eq!(super::secret_from_stdin_line("a b\u{feff}"), "a b\u{feff}", "only a leading BOM is dropped");
     }
 }
