@@ -289,9 +289,52 @@ fn provider_list(vault: &Vault) -> Vec<Value> {
             let recommended = crate::ops::model_keys::recommended(id, &models);
             let models: Vec<String> = models.into_iter().take(MAX_LISTED).collect();
             let prices = crate::ops::model_keys::listed_prices(id, &models);
-            Some(json!({"id": id, "label": if crate::setup::t("zh", "en") == "zh" { *zh } else { *en }, "needs_key": p.api_key_env.is_some(), "key_env": p.api_key_env, "has_key": has_key, "base_url": p.base_url, "models": models, "prices": prices, "recommended": recommended}))
+            let contexts = crate::ops::model_keys::listed_contexts(id, &models);
+            Some(json!({"id": id, "label": if crate::setup::t("zh", "en") == "zh" { *zh } else { *en }, "needs_key": p.api_key_env.is_some(), "key_env": p.api_key_env, "has_key": has_key, "base_url": p.base_url, "models": models, "prices": prices, "contexts": contexts, "recommended": recommended}))
         })
         .collect()
+}
+
+/// What the config already says, so the wizard's re-run (an admin, after setup) starts from it:
+/// the default model, the provider's own endpoint when the config sets one, the security mode
+/// the approvals / gates match, the console login, the chat platforms set up. Secrets are only
+/// ever reported as stored or not (`key_stored`, `client_secret_stored`), never as values.
+fn configured_of(root: &toml::Table, vault: &Vault, model: Option<&str>) -> Value {
+    let get = |path: &[&str]| -> Option<&toml::Value> {
+        let mut v = root.get(path[0])?;
+        for k in &path[1..] {
+            v = v.get(*k)?;
+        }
+        Some(v)
+    };
+    let st = |path: &[&str]| get(path).and_then(|v| v.as_str()).map(String::from);
+    let provider = model.and_then(|m| m.split_once('/')).map(|(p, _)| p.to_string());
+    let base_url = provider.as_deref().and_then(|p| st(&["providers", p, "base_url"]));
+    let key_env = provider.as_deref().and_then(|p| st(&["providers", p, "api_key_env"]).or_else(|| seagent_model::presets().into_iter().find(|x| x.id == p).and_then(|x| x.api_key_env)));
+    let key_stored = key_env.as_deref().is_some_and(|v| vault.names().iter().any(|n| n == v) || std::env::var(v).is_ok_and(|x| !x.trim().is_empty()));
+    let security = match (st(&["approvals", "mode"]).as_deref(), st(&["gate", "privilege"]).as_deref(), st(&["gate", "egress"]).as_deref()) {
+        (Some("manual"), Some("deny"), Some("ask")) => Some("strict"),
+        (Some("smart"), Some("ask"), Some("ask")) => Some("balanced"),
+        (Some("auto"), Some("ask"), Some("allow")) => Some("relaxed"),
+        _ => None,
+    };
+    let oidc = get(&["app", "auth", "enabled"]).and_then(|v| v.as_bool()).unwrap_or(false) && st(&["app", "auth", "provider"]).as_deref() == Some("self_hosted");
+    let channels: Vec<String> = get(&["channels"]).and_then(|c| c.as_table()).map(|t| t.iter().filter_map(|(name, v)| v.get("kind").and_then(|k| k.as_str()).map(|k| format!("{name} ({k})")).or_else(|| Some(name.clone()))).collect()).unwrap_or_default();
+    json!({
+        "model": model,
+        "provider": provider,
+        "base_url": base_url,
+        "key_env": key_env,
+        "key_stored": key_stored,
+        "security": security,
+        "auth": {
+            "mode": if oidc { "oidc" } else { "token" },
+            "issuer": oidc.then(|| st(&["app", "auth", "self_hosted", "issuer"])).flatten(),
+            "client_id": oidc.then(|| st(&["app", "auth", "self_hosted", "client_id"])).flatten(),
+            "client_secret_stored": oidc && get(&["app", "auth", "self_hosted", "client_secret"]).is_some(),
+        },
+        "channels": channels,
+    })
 }
 
 pub fn status(paths: &Paths, token_ok: bool, reason: Option<&str>) -> Value {
@@ -302,6 +345,7 @@ pub fn status(paths: &Paths, token_ok: bool, reason: Option<&str>) -> Value {
     let vault = Vault::load(&paths.secrets()).unwrap_or_else(|_| Vault::empty());
     let (root, _) = read_root(paths).unwrap_or_default();
     let model = root.get("model").and_then(|m| m.get("default")).and_then(|v| v.as_str());
+    let configured = configured_of(&root, &vault, model);
     let expires = std::fs::read_to_string(token_file(paths)).ok().and_then(|s| serde_json::from_str::<Value>(&s).ok()).and_then(|v| v["expires_ms"].as_i64());
     let systemd = Path::new("/run/systemd/system").is_dir();
     json!({
@@ -309,7 +353,7 @@ pub fn status(paths: &Paths, token_ok: bool, reason: Option<&str>) -> Value {
         "token_valid": true,
         "mode": paths.mode.as_str(),
         "paths": {"config": paths.user_config(), "data": paths.data, "logs": paths.log_dir()},
-        "configured": {"model": model},
+        "configured": configured,
         "providers": provider_list(&vault),
         "security_modes": SECURITY_MODES,
         "auth_modes": ["token", "oidc"],
@@ -348,10 +392,14 @@ fn provider_of(p: &Value) -> Result<seagent_model::ProviderConfig, String> {
 }
 
 pub fn test_provider(paths: &Paths, p: &Value) -> Value {
-    let prov = match provider_of(p) {
+    let mut prov = match provider_of(p) {
         Ok(x) => x,
         Err(e) => return json!({"ok": false, "error": e}),
     };
+    // A provider the config already sets up reads its key from its own variable (a re-run).
+    if let Some(v) = read_root(paths).ok().and_then(|(r, _)| r.get("providers")?.get(prov.id.as_str())?.get("api_key_env")?.as_str().map(String::from)).filter(|v| !v.trim().is_empty()) {
+        prov.api_key_env = Some(v);
+    }
     let vault = Vault::load(&paths.secrets()).unwrap_or_else(|_| Vault::empty());
     let key = s(p, "api_key").map(String::from).or_else(|| {
         let env = prov.api_key_env.as_ref()?;
@@ -370,7 +418,7 @@ pub fn test_provider(paths: &Paths, p: &Value) -> Value {
             // Never echo the key: a provider error message could quote it back.
             let count = m.len();
             let m: Vec<String> = m.into_iter().take(MAX_LISTED).collect();
-            json!({"ok": true, "count": count, "recommended": recommended, "prices": crate::ops::model_keys::listed_prices(&prov.id, &m), "models": m})
+            json!({"ok": true, "count": count, "recommended": recommended, "prices": crate::ops::model_keys::listed_prices(&prov.id, &m), "contexts": crate::ops::model_keys::listed_contexts(&prov.id, &m), "models": m})
         }
         Err(e) => json!({"ok": false, "error": redact(&e, key.as_deref())}),
     }
@@ -1014,6 +1062,68 @@ mod tests {
         assert!(apply(&p2, &json!({"provider": "openai", "model": "m", "api_key": "k", "security": "yolo"}), &discover, &auto).is_err());
         assert!(!p2.user_config().exists() && !locked(&p2));
         assert!(apply(&p2, &json!({"provider": "openai"}), &discover, &auto).unwrap_err().contains("model"));
+    }
+
+    /// After setup: anonymous / one-time-link callers stay locked out of every method but a bare
+    /// status; an admin (ARP, `methods`) gets the re-run: the status starts from the current config
+    /// without any secret value, a stored key lists the live models, and an apply that only
+    /// changes the model keeps every other setting and secret.
+    #[test]
+    fn rerun_after_setup_is_admin_only_and_keeps_what_it_does_not_change() {
+        let (_r, p) = scratch("rerun");
+        bootstrap(&p, Some("127.0.0.1:18643")).unwrap();
+        let base = fake_models_endpoint();
+        let ws = p.data.join("ws-rerun");
+        std::fs::create_dir_all(&ws).unwrap();
+        let mut text = std::fs::read_to_string(p.user_config()).unwrap();
+        text.push_str(&format!("\n[model]\ndefault = \"deepseek/deepseek-chat\"\n[providers.deepseek]\nbase_url = \"{base}\"\napi_key_env = \"SEAGENT_RERUN_TEST_KEY\"\n[approvals]\nmode = \"manual\"\n[gate]\nprivilege = \"deny\"\negress = \"ask\"\n[exec]\nbackend = \"local\"\n[prices.\"deepseek/deepseek-chat\"]\ninput = 1.0\noutput = 2.0\n"));
+        text = text.replacen("[app]\n", &format!("[app]\nworkspace = \"{}\"\n", ws.display()), 1);
+        std::fs::write(p.user_config(), &text).unwrap();
+        let vault = Vault::load(&p.secrets()).unwrap();
+        vault.set("SEAGENT_RERUN_TEST_KEY", "sk-good-key-0001").unwrap();
+        vault.set("TELEGRAM_TOKEN", "123:keep-me").unwrap();
+        mark_done(&p, "web");
+        // Anonymous: no link, a stale link, a guessed token — locked, status says only that.
+        for presented in [None, Some("stale-or-guessed")] {
+            let why = check(&p, presented, now_ms()).unwrap();
+            assert!(why.contains("locked"), "{why}");
+            assert_eq!(call(&p, "setup.status", &json!({}), Err(why)).unwrap(), json!({"locked": true, "token_valid": false, "reason": why}));
+            for m in ["setup.test_provider", "setup.apply"] {
+                assert_eq!(call(&p, m, &json!({"provider": "deepseek", "model": "x"}), Err(why)).unwrap_err().0, -32001, "{m}");
+            }
+        }
+        // The ARP methods are admin-only (exposure) …
+        for m in METHODS {
+            assert_eq!(seagent_app::exposure::required_scope(m), seagent_app::exposure::Scope::Admin, "{m}");
+        }
+        // … and for an admin the wizard is open again, starting from the current config.
+        let admin = methods(&p);
+        let st = admin("setup.status", &json!({})).unwrap().unwrap();
+        assert_eq!((st["locked"].as_bool(), st["token_valid"].as_bool()), (Some(true), Some(true)));
+        let c = &st["configured"];
+        assert_eq!((c["model"].as_str(), c["provider"].as_str(), c["base_url"].as_str()), (Some("deepseek/deepseek-chat"), Some("deepseek"), Some(base.as_str())));
+        assert_eq!((c["key_env"].as_str(), c["key_stored"].as_bool(), c["security"].as_str(), c["auth"]["mode"].as_str()), (Some("SEAGENT_RERUN_TEST_KEY"), Some(true), Some("strict"), Some("token")));
+        assert!(!st.to_string().contains("sk-good-key-0001") && !st.to_string().contains("keep-me"), "no secret in the status");
+        let models = admin("setup.test_provider", &json!({"provider": "deepseek", "base_url": base})).unwrap().unwrap();
+        assert_eq!(models["ok"], true, "the stored key lists the live models: {models}");
+        assert_eq!(models["count"], 2);
+        // Apply as the page sends it in re-run mode: the model changes, nothing else is given.
+        let discover = |_: &str| -> Result<Value, String> { panic!("no OIDC discovery in this re-run") };
+        let auto = |_: &Paths| "autostart skipped (test)".to_string();
+        let v = apply(&p, &json!({"provider": "deepseek", "model": "deepseek-reasoner", "security": "strict", "workspace": ws.display().to_string(), "lan": false, "autostart": false}), &discover, &auto).unwrap();
+        assert_eq!(v["ok"], true);
+        let after: toml::Table = std::fs::read_to_string(p.user_config()).unwrap().parse().unwrap();
+        assert_eq!(after["model"]["default"].as_str(), Some("deepseek/deepseek-reasoner"));
+        assert_eq!(after["providers"]["deepseek"]["base_url"].as_str(), Some(base.as_str()), "endpoint kept");
+        assert_eq!(after["providers"]["deepseek"]["api_key_env"].as_str(), Some("SEAGENT_RERUN_TEST_KEY"), "key variable kept");
+        assert_eq!(after["exec"]["backend"].as_str(), Some("local"));
+        assert_eq!(after["prices"]["deepseek/deepseek-chat"]["output"].as_float(), Some(2.0));
+        assert_eq!((after["approvals"]["mode"].as_str(), after["gate"]["privilege"].as_str()), (Some("manual"), Some("deny")));
+        assert_eq!(after["app"]["token"].as_str(), Some("{{secret:APP_TOKEN}}"));
+        let vault = Vault::load(&p.secrets()).unwrap();
+        assert_eq!(vault.substitute("{{secret:SEAGENT_RERUN_TEST_KEY}}"), "sk-good-key-0001");
+        assert_eq!(vault.substitute("{{secret:TELEGRAM_TOKEN}}"), "123:keep-me");
+        assert!(locked(&p), "still locked for anonymous callers");
     }
 
     /// A DeepSeek-style OpenAI-compatible endpoint: `GET /v1/models` lists two models for the

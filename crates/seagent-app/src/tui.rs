@@ -1,6 +1,7 @@
-//! Terminal UI: the same ARP client as the web UI, drawn with ANSI truecolor in
-//! the shared crimson-and-gold theme (deep crimson gradients, gold four-pointed
-//! concave stars ✦ that twinkle while the agent works).
+//! Terminal UI: the same ARP client as the web UI, drawn in the shared galaxy theme
+//! (`ui/theme.css`: a near-black → navy night sky, gold accents and gold four-pointed stars ✦
+//! that twinkle while the agent works). 24-bit colour where the terminal has it, else the
+//! nearest 256 / 16 colours ([`colour`]): black sky, yellow gold.
 //!
 //! Keys: Enter send · Alt+Enter newline · Ctrl+N new session · Ctrl+P command palette
 //! (`/palette`) · Ctrl+↑/↓ switch session · PgUp/PgDn scroll · y once / s this session /
@@ -14,6 +15,7 @@
 // Terminal UX pieces (g2: skins, pets, status bar, dock, stash, notifications, tips).
 pub mod actions;
 pub mod battery;
+pub mod colour;
 pub mod display;
 pub mod dock;
 pub mod image;
@@ -40,27 +42,29 @@ use std::time::{Duration, Instant};
 
 use crate::clip;
 
-// Theme (same tokens as ui/theme.css).
-const CRIMSON: [(u8, u8, u8); 4] = [(0x0b, 0x01, 0x05), (0x1f, 0x04, 0x11), (0x3a, 0x08, 0x20), (0x5c, 0x0c, 0x2c)];
-const GOLD: (u8, u8, u8) = (0xff, 0xd6, 0x6b);
-const GOLD_DIM: (u8, u8, u8) = (0xc9, 0x8a, 0x1b);
-const TEXT: (u8, u8, u8) = (0xf7, 0xe9, 0xec);
-const DIM: (u8, u8, u8) = (0xc9, 0xa3, 0xad);
+// Theme: the galaxy tokens of ui/theme.css — the sky from --bg-deep through --navy-850 /
+// --navy-700 to --navy-600, gold --gold-300 (accents, stars) and --gold-500 (dim gold),
+// --text / --text-2.
+const SKY: [(u8, u8, u8); 4] = [(0x03, 0x05, 0x0b), (0x0a, 0x10, 0x20), (0x14, 0x20, 0x36), (0x1c, 0x2c, 0x4a)];
+const GOLD: (u8, u8, u8) = (0xec, 0xd2, 0x8c);
+const GOLD_DIM: (u8, u8, u8) = (0xc1, 0x9a, 0x36);
+const TEXT: (u8, u8, u8) = (0xea, 0xee, 0xf7);
+const DIM: (u8, u8, u8) = (0xae, 0xb8, 0xcf);
 const STARS: [char; 4] = ['✦', '✧', '✶', '✧'];
 
 fn fg(c: (u8, u8, u8)) -> String {
-    format!("\x1b[38;2;{};{};{}m", c.0, c.1, c.2)
+    colour::fg(c)
 }
 fn bg(c: (u8, u8, u8)) -> String {
-    format!("\x1b[48;2;{};{};{}m", c.0, c.1, c.2)
+    colour::bg(c)
 }
 
-/// Linear blend along the crimson stops, t in 0..=1.
-pub fn crimson_at(t: f32) -> (u8, u8, u8) {
-    let t = t.clamp(0.0, 1.0) * (CRIMSON.len() - 1) as f32;
-    let i = (t.floor() as usize).min(CRIMSON.len() - 2);
+/// Linear blend along the night-sky stops (0 = deepest black, 1 = brightest navy), t in 0..=1.
+pub fn sky_at(t: f32) -> (u8, u8, u8) {
+    let t = t.clamp(0.0, 1.0) * (SKY.len() - 1) as f32;
+    let i = (t.floor() as usize).min(SKY.len() - 2);
     let f = t - i as f32;
-    let (a, b) = (CRIMSON[i], CRIMSON[i + 1]);
+    let (a, b) = (SKY[i], SKY[i + 1]);
     let mix = |x: u8, y: u8| (x as f32 + (y as f32 - x as f32) * f).round() as u8;
     (mix(a.0, b.0), mix(a.1, b.1), mix(a.2, b.2))
 }
@@ -453,14 +457,14 @@ fn footer_and_bar(st: &mut State, w: usize, h: usize) -> (Vec<String>, Option<St
 fn palette_rows(st: &State, w: usize) -> Vec<String> {
     let p = &st.palette;
     let sel = p.matches.get(p.cursor).copied();
-    let mut out = vec![format!("{}{}{}\x1b[0m", bg(CRIMSON[2]), fg(GOLD), fit(&format!(" ✦ 指令面板 /{}▏  ↑↓ 選擇 · Enter 執行 · Esc 關閉", p.query), w))];
+    let mut out = vec![format!("{}{}{}\x1b[0m", bg(SKY[2]), fg(GOLD), fit(&format!(" ✦ 指令面板 /{}▏  ↑↓ 選擇 · Enter 執行 · Esc 關閉", p.query), w))];
     for &i in p.window() {
         let item = &p.items[i];
         let (mark, colour) = if Some(i) == sel { ("▸", GOLD) } else { (" ", DIM) };
-        out.push(format!("{} {} {}{}\x1b[0m", bg(if Some(i) == sel { CRIMSON[2] } else { CRIMSON[1] }), fg(colour), fg(if Some(i) == sel { GOLD } else { TEXT }), fit(&format!(" {mark} {}", item.row()), w.saturating_sub(1))));
+        out.push(format!("{} {} {}{}\x1b[0m", bg(if Some(i) == sel { SKY[2] } else { SKY[1] }), fg(colour), fg(if Some(i) == sel { GOLD } else { TEXT }), fit(&format!(" {mark} {}", item.row()), w.saturating_sub(1))));
     }
     if p.matches.is_empty() {
-        out.push(format!("{}{}{}\x1b[0m", bg(CRIMSON[1]), fg(DIM), fit("   沒有符合的指令", w)));
+        out.push(format!("{}{}{}\x1b[0m", bg(SKY[1]), fg(DIM), fit("   沒有符合的指令", w)));
     }
     out
 }
@@ -469,17 +473,17 @@ fn palette_rows(st: &State, w: usize) -> Vec<String> {
 /// prompt's preview and the key hint.
 fn rewind_rows(st: &State, w: usize) -> Vec<String> {
     let p = &st.rewind;
-    let mut out = vec![format!("{}{}{}\x1b[0m", bg(CRIMSON[2]), fg(GOLD), fit(" ✦ 回到先前的提問 · ↑↓ 選擇 · Enter 編輯重送 · f 從此分支 · Esc 關閉", w))];
+    let mut out = vec![format!("{}{}{}\x1b[0m", bg(SKY[2]), fg(GOLD), fit(" ✦ 回到先前的提問 · ↑↓ 選擇 · Enter 編輯重送 · f 從此分支 · Esc 關閉", w))];
     for i in p.window(8) {
         let item = &p.prompts[i];
         let sel = i == p.cursor;
         let mark = if sel { "▸" } else { " " };
         let row = format!(" {mark} {}. {}", item.turn, item.first_line());
-        out.push(format!("{} {}{}\x1b[0m", bg(if sel { CRIMSON[2] } else { CRIMSON[1] }), fg(if sel { GOLD } else { TEXT }), fit(&row, w.saturating_sub(1))));
+        out.push(format!("{} {}{}\x1b[0m", bg(if sel { SKY[2] } else { SKY[1] }), fg(if sel { GOLD } else { TEXT }), fit(&row, w.saturating_sub(1))));
     }
     if let Some(item) = p.selected() {
         for line in item.text.lines().take(3).skip(1) {
-            out.push(format!("{}   {}{}", bg(CRIMSON[1]), fg(DIM), fit(&format!("│ {line}"), w.saturating_sub(2))));
+            out.push(format!("{}   {}{}", bg(SKY[1]), fg(DIM), fit(&format!("│ {line}"), w.saturating_sub(2))));
         }
     }
     out
@@ -495,7 +499,7 @@ fn draw(st: &mut State) -> String {
         st.repaint = false;
     }
     o.push_str("\x1b[H");
-    // Header: crimson gradient left→right with the gold star mark.
+    // Header: night-sky gradient left→right with the gold star mark.
     let star = if st.running { STARS[st.tick % STARS.len()] } else { '✦' };
     let title = st.current.as_ref().and_then(|c| st.sessions.iter().find(|s| s["id"] == c.as_str())).and_then(|s| s["title"].as_str()).unwrap_or("新對話");
     let status = if st.running { st.ux.indicator(st.tick) } else { st.status.clone() };
@@ -504,7 +508,7 @@ fn draw(st: &mut State) -> String {
     for (i, c) in fit(&head_line, w).chars().enumerate() {
         let t = i as f32 / w.max(1) as f32;
         let colour = if c == star || STARS.contains(&c) || i < 8 { GOLD } else { TEXT };
-        o.push_str(&format!("{}{}{c}", bg(crimson_at(0.9 - t * 0.7)), fg(colour)));
+        o.push_str(&format!("{}{}{c}", bg(sky_at(0.9 - t * 0.7)), fg(colour)));
     }
     o.push_str("\x1b[0m\r\n");
     let mode = st.status_mode();
@@ -562,10 +566,10 @@ fn draw(st: &mut State) -> String {
     let start = end.saturating_sub(body_h);
     let visible = &rendered[start..end];
     for row in 0..body_h {
-        // Sidebar with a vertical crimson gradient.
+        // Sidebar with a vertical night-sky gradient.
         if side > 0 {
             let t = row as f32 / body_h.max(1) as f32;
-            o.push_str(&bg(crimson_at(0.55 - t * 0.45)));
+            o.push_str(&bg(sky_at(0.55 - t * 0.45)));
             let text = st.sessions.get(row).map(|s| {
                 let mark = if s["running"] == true { '✦' } else { ' ' };
                 let cur = st.current.as_deref() == s["id"].as_str();
@@ -576,7 +580,7 @@ fn draw(st: &mut State) -> String {
                 None => o.push_str(&" ".repeat(side)),
             }
         }
-        o.push_str(&bg(if st.ux.is_default_skin() { CRIMSON[0] } else { st.ux.pal.bg }));
+        o.push_str(&bg(if st.ux.is_default_skin() { SKY[0] } else { st.ux.pal.bg }));
         let pet_row = pet.get(row).filter(|_| pet_w + 4 < main_w);
         let text_w = if pet_row.is_some() { main_w - 1 - pet_w - 1 } else { main_w - 1 };
         match visible.get(row) {
@@ -598,7 +602,7 @@ fn draw(st: &mut State) -> String {
         o.push_str("\r\n");
     }
     // Composer with gold corner stars.
-    let rule = |l: char, r: char| format!("{}{}{l}{}{r}\x1b[0m", bg(CRIMSON[1]), fg(GOLD), "─".repeat(w.saturating_sub(2)));
+    let rule = |l: char, r: char| format!("{}{}{l}{}{r}\x1b[0m", bg(SKY[1]), fg(GOLD), "─".repeat(w.saturating_sub(2)));
     o.push_str(&rule('✦', '✦'));
     o.push_str("\r\n");
     let shown: String = {
@@ -616,7 +620,7 @@ fn draw(st: &mut State) -> String {
     };
     let shown = if shown.is_empty() { format!("{}{}", fg(DIM), fit(&st.ux.placeholder(), w.saturating_sub(6))) } else { shown };
     let prompt = st.ux.skin.prompt_symbol();
-    o.push_str(&format!("{}{} {}{}{}{}▏\x1b[0m\r\n", bg(CRIMSON[1]), fg(if st.ux.is_default_skin() { GOLD } else { st.ux.pal.accent }), prompt, fg(TEXT), shown, fg(GOLD)));
+    o.push_str(&format!("{}{} {}{}{}{}▏\x1b[0m\r\n", bg(SKY[1]), fg(if st.ux.is_default_skin() { GOLD } else { st.ux.pal.accent }), prompt, fg(TEXT), shown, fg(GOLD)));
     if st.disp.footer {
         let mut hint = String::from(" Enter 送出 · Alt+Enter 換行 · Ctrl+P 指令面板 · Ctrl+S 暫存 · Ctrl+N 新對話 · Ctrl+↑↓ 切換 · Ctrl+C 停止 · Ctrl+Q 離開");
         if !st.attach.is_empty() {
@@ -625,7 +629,7 @@ fn draw(st: &mut State) -> String {
         if let display::Verbose::Off | display::Verbose::New = st.disp.verbose {
             hint = format!("{}  [verbose {}]", hint, st.disp.verbose.as_str());
         }
-        o.push_str(&format!("{}{}{}", bg(CRIMSON[1]), fg(GOLD_DIM), fit(&hint, w)));
+        o.push_str(&format!("{}{}{}", bg(SKY[1]), fg(GOLD_DIM), fit(&hint, w)));
         o.push_str("\x1b[0m\r\n");
     }
     if mode == statusbar::Mode::Bottom {
@@ -1136,10 +1140,10 @@ mod tests {
         }
         assert_eq!(fit("緋紅", 5), "緋紅 ");
         assert_eq!(plain_md("# T\nhi **b** `c`\n- x\n```rs\nfn a(){}\n```"), "T\nhi b c\n• x\n  │ fn a(){}");
-        assert_eq!(crimson_at(0.0), CRIMSON[0]);
-        assert_eq!(crimson_at(1.0), CRIMSON[3]);
-        let mid = crimson_at(0.5);
-        assert!(mid.0 > CRIMSON[1].0 && mid.0 < CRIMSON[2].0);
+        assert_eq!(sky_at(0.0), SKY[0]);
+        assert_eq!(sky_at(1.0), SKY[3]);
+        let mid = sky_at(0.5);
+        assert!(mid.0 > SKY[1].0 && mid.0 < SKY[2].0);
     }
 
     #[test]

@@ -30,7 +30,7 @@ pub const SESSION_METHODS: &[&str] = &[
 /// The `ui.chat.*` methods an organization-bound principal may call (on its own tenant).
 pub const TENANT_METHODS: &[&str] = &[
     "ui.chat.list", "ui.chat.section", "ui.chat.models.list", "ui.chat.meta.set", "ui.chat.read", "ui.chat.fork", "ui.chat.delete", "ui.chat.restore",
-    "ui.chat.settings.get", "ui.chat.settings.set", "ui.chat.export",
+    "ui.chat.settings.get", "ui.chat.settings.set", "ui.chat.export", "ui.chat.models.prefs",
 ];
 
 pub fn is_admin(p: &Principal) -> bool {

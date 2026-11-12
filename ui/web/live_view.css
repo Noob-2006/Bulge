@@ -3,6 +3,7 @@
 .work-live[hidden] { display: none; }
 .work-term { flex: 0 0 34%; min-height: 90px; margin: 0; overflow: auto; padding: 8px 10px; border-top: 1px solid var(--thread); background: var(--bg-deep); color: var(--text); font: 11.5px/1.45 var(--mono); white-space: pre-wrap; word-break: break-word; }
 .work-term[hidden] { display: none; }
+.work-term:empty::before { content: attr(data-empty); color: var(--text-3); font-family: var(--font); }
 .work-term .cmd { color: var(--gold-400); margin-top: 6px; }
 .work-term .err { color: var(--crit); }
 .work-term .faint { opacity: .6; }

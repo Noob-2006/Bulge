@@ -735,6 +735,10 @@ pub fn cmd_models(a: &Args, paths: &Paths, cfg: &Config, vault: Arc<Vault>) -> R
             cmd_auth(&Args::parse(&args).map_err(|e| e.to_string())?, paths, cfg, vault.clone())
         }
         "refresh" => {
+            // models.dev is not an endpoint the user configured; `--url` names one they chose.
+            if a.val("url").is_none() {
+                seagent_net::http::ensure_user_endpoint("the models.dev refresh (give `--url` for your own mirror)")?;
+            }
             let (n, changed) = modelsdb::refresh(a.val("url"))?;
             println!("models.dev: {n} models{}", if changed { " (updated)" } else { " (unchanged)" });
             Ok(0)
@@ -1182,8 +1186,15 @@ pub fn slash_on(k: &Kernel, id: &str, line: &str, surface: &str) -> Option<Strin
             if let Some(s) = seagent_model::ratelimit::get(p) {
                 out.push_str(&format!("\nrate limits ({p}): {}", seagent_model::ratelimit::describe(&s)));
             }
-            for l in account_lines(&k.cfg, k.vault.clone()) {
-                out.push_str(&format!("\naccount {l}"));
+            // A plain `/usage` asks the providers' account endpoints on its own; offline it does
+            // not (`/usage account` is the explicit request, to the configured providers).
+            match seagent_net::http::ensure_automatic_allowed("the account balance") {
+                Err(e) if arg != "account" => out.push_str(&format!("\naccount: {e} (`/usage account` asks now)")),
+                _ => {
+                    for l in account_lines(&k.cfg, k.vault.clone()) {
+                        out.push_str(&format!("\naccount {l}"));
+                    }
+                }
             }
             out
         }
@@ -1411,6 +1422,49 @@ fallback = ["zai/glm-5.3"]
         assert!(cost_warning(&cfg, "anthropic/claude-haiku-4-5").is_none());
         assert!(data_policy_warning("meta-ai/muse-spark-1.3-contributor").is_some());
         assert!(data_policy_warning("meta-ai/muse-spark-1.3").is_none());
+    }
+
+    /// Offline (`SEAGENT_OFFLINE=1`): a plain `/usage` does not ask the provider's balance endpoint
+    /// on its own — a fake one sees no request — while `/usage account` (the user's explicit ask,
+    /// to the configured provider) still does.
+    #[test]
+    fn usage_asks_no_account_endpoint_on_its_own_offline() {
+        use std::io::{BufRead, BufReader, Write};
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let origin = format!("http://{}", l.local_addr().unwrap());
+        let hits = Arc::new(std::sync::Mutex::new(0usize));
+        let h = hits.clone();
+        std::thread::spawn(move || {
+            for s in l.incoming() {
+                let Ok(mut s) = s else { continue };
+                let mut r = BufReader::new(s.try_clone().unwrap());
+                loop {
+                    let mut x = String::new();
+                    if r.read_line(&mut x).is_err() || x.trim().is_empty() {
+                        break;
+                    }
+                }
+                *h.lock().unwrap() += 1;
+                let b = r#"{"code":0,"data":{"available_balance":12.5}}"#;
+                let _ = write!(s, "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{b}", b.len());
+            }
+        });
+        std::env::set_var("SEAGENT_MOONSHOT_ORIGIN", &origin);
+        std::env::set_var("SEAGENT_USAGE_TEST_MS_KEY", "sk-usage-test-0001");
+        let t = crate::testkit::kit_with(|c| {
+            c.model.default = "moonshot/kimi-k2".into();
+            c.providers.insert("moonshot".into(), "api_key_env = \"SEAGENT_USAGE_TEST_MS_KEY\"".parse::<toml::Table>().unwrap());
+        });
+        let a = t.k.create_session(&t.ws, None, None, None).unwrap();
+        seagent_net::http::with_no_background_fetch(|| {
+            let out = slash(&t.k, &a, "/usage").unwrap();
+            assert!(out.contains("not fetched automatically"), "{out}");
+            assert_eq!(*hits.lock().unwrap(), 0, "no request to the balance endpoint");
+            let out = slash(&t.k, &a, "/usage account").unwrap();
+            assert!(out.contains("account") && out.contains("12.5"), "{out}");
+            assert_eq!(*hits.lock().unwrap(), 1, "the explicit ask reached the configured provider");
+        });
+        std::env::remove_var("SEAGENT_USAGE_TEST_MS_KEY");
     }
 
     /// `/reasoning` and the `/usage` footer are per session: what one channel or session

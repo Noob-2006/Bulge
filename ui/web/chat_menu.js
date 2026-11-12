@@ -347,7 +347,7 @@ function cmActivate(lvl, i) {
   const it = lvl.items[i];
   if (!it || it.disabled) return;
   if (it.sub) { const nl = cmOpenSub(lvl, i); if (nl) cmHighlight(nl, cmNext(nl, -1, 1)); return; }
-  cmClose();
+  if (!it.keep) cmClose();
   if (it.run) Promise.resolve(it.run()).catch(cmErr);
 }
 function cmKey(e) {
@@ -556,13 +556,23 @@ async function applyModel(ref) {
   if (id === S.current) setModelChip(ref);
   toast(tt(`模型已切換為 ${ref}（下一則訊息起生效）`, `Model switched to ${ref} (from the next message)`));
 }
+// The composer's model picker. Every usable model is listed and chosen with a click (the filter box
+// only narrows the list): pinned favourites first, then the recently used ones, then each provider
+// with its models grouped by vendor prefix (OpenRouter's `anthropic/…`, `openai/…`; a group folds
+// with a click on its header). Keys: ↑↓ move · Enter choose · * pin / unpin · Home / End · typing
+// goes to the filter. Pins and the recent list are console state of this rail scope
+// (`ui.chat.models.prefs`, next to the sections); folded vendor groups are a per-browser convenience.
+const MP_FOLD_KEY = 'seagent.picker.fold';
+const mpFolded = () => { try { return new Set(JSON.parse(localStorage.getItem(MP_FOLD_KEY) || '[]')); } catch { return new Set(); } };
+const mpSaveFolded = (s) => { try { localStorage.setItem(MP_FOLD_KEY, JSON.stringify([...s])); } catch {} };
+const mpVendor = (id) => (id.includes('/') ? id.slice(0, id.indexOf('/')) : '');
 function openModelPicker(anchor) {
   cmClose();
   const el = document.createElement('div');
   el.className = 'cm-menu cm-picker';
   el.setAttribute('role', 'dialog');
   el.setAttribute('aria-label', tt('切換模型', 'Switch model'));
-  el.innerHTML = `<div class="cm-picker-head"><input type="search" placeholder="${esc(tt('篩選模型…', 'Filter models…'))}" autocomplete="off" aria-label="${esc(tt('搜尋模型', 'Search models'))}"><button type="button" class="btn ghost small" data-refresh title="${esc(tt('從供應商重新抓取清單', 'Fetch the lists again from the providers'))}">↻</button></div><div class="cm-picker-list" role="listbox"><div class="cm-head"><span class="star spin" style="--size:10px"></span> ${esc(tt('載入模型清單…', 'Loading models…'))}</div></div><div class="cm-picker-prices" data-prices></div><div class="cm-picker-foot"><span class="faint" data-status></span><button type="button" class="btn ghost small" data-keys>${esc(tt('管理 API 金鑰', 'Manage API keys'))}</button></div>`;
+  el.innerHTML = `<div class="cm-picker-head"><input type="search" placeholder="${esc(tt('篩選模型…', 'Filter models…'))}" autocomplete="off" aria-label="${esc(tt('篩選模型', 'Filter models'))}"><button type="button" class="btn ghost small" data-refresh title="${esc(tt('從供應商重新抓取清單', 'Fetch the lists again from the providers'))}">↻</button></div><div class="cm-picker-list" role="listbox"><div class="cm-head"><span class="star spin" style="--size:10px"></span> ${esc(tt('載入模型清單…', 'Loading models…'))}</div></div><div class="cm-picker-prices" data-prices></div><div class="cm-picker-foot"><span class="faint" data-status></span><span class="faint mp-keys">${esc(tt('↑↓ 選擇 · Enter 使用 · * 釘選', '↑↓ move · Enter choose · * pin'))}</span><button type="button" class="btn ghost small" data-keys>${esc(tt('管理 API 金鑰', 'Manage API keys'))}</button></div>`;
   document.body.appendChild(el);
   const lvl = { el, items: [], idx: -1 };
   CM.menu = { levels: [lvl], row: null, focus: anchor };
@@ -572,41 +582,89 @@ function openModelPicker(anchor) {
   const input = el.querySelector('input');
   const listEl = el.querySelector('.cm-picker-list');
   const cur = () => { const s = (S.sessions || []).find((x) => x.id === S.current); return (s && s.model) || (S.models && S.models.default) || ''; };
+  const prefs = { pinned: (CM.state.pinned_models || []).slice(), recent: (CM.state.recent_models || []).slice() };
+  const folded = mpFolded();
   let data = null;
-  const draw = () => {
+  const choose = (ref) => {
+    applyModel(ref);
+    prefs.recent = [ref].concat(prefs.recent.filter((x) => x !== ref)).slice(0, 8);
+    CM.state.recent_models = prefs.recent;
+    cmCall('ui.chat.models.prefs', { used: ref }).catch(() => {});
+  };
+  const togglePin = async (ref) => {
+    const on = !prefs.pinned.includes(ref);
+    prefs.pinned = on ? prefs.pinned.concat(ref) : prefs.pinned.filter((x) => x !== ref);
+    const at = listEl.scrollTop, hl = lvl.items[lvl.idx] && lvl.items[lvl.idx].kid;
+    draw(hl);
+    listEl.scrollTop = at;
+    try { const v = await cmCall('ui.chat.models.prefs', { pin: ref, pinned: on }); prefs.pinned = v.pinned; prefs.recent = v.recent; CM.state.pinned_models = v.pinned; CM.state.recent_models = v.recent; } catch (e) { cmErr(e); }
+  };
+  const draw = (keepKey) => {
     if (!data) return;
     const q = input.value.trim().toLowerCase();
-    let html = '';
+    const byRef = new Map();
+    for (const p of data.providers || []) for (const m of p.models || []) byRef.set(m.ref, { m, p });
+    const hit = (ref, label) => !q || ref.toLowerCase().includes(q) || String(label || '').toLowerCase().includes(q);
+    const html = [];
     let shown = 0;
     lvl.items = [];
     lvl.idx = -1;
+    const row = (ref, m, key, name) => {
+      const i = lvl.items.length;
+      lvl.items.push({ ref, kid: key, run: () => choose(ref) });
+      const pinned = prefs.pinned.includes(ref);
+      const price = typeof fmtPrice === 'function' && m && m.price ? `<span class="sub price" title="${esc(priceTitle(m.price))}">${esc(fmtPrice(m.price))}</span>` : '<span class="sub price"></span>';
+      const ctx = m && m.context ? `${Math.round(m.context / 1000)}k` : '';
+      html.push(`<div class="cm-item mp-row${ref === cur() ? ' cur' : ''}" role="option" tabindex="-1" data-i="${i}" title="${esc(ref)}"><button type="button" class="mp-pin${pinned ? ' on' : ''}" data-pin="${i}" tabindex="-1" aria-label="${esc(pinned ? tt('取消釘選', 'Unpin') : tt('釘選', 'Pin'))}" title="${esc(pinned ? tt('取消釘選', 'Unpin') : tt('釘選到最上面', 'Pin to the top'))}">${pinned ? '★' : '☆'}</button><span class="lb">${esc(name || (m ? m.id : ref))}</span><span class="sub ctx">${esc(ctx)}</span>${price}</div>`);
+      shown++;
+    };
+    const head = (cls, inner) => html.push(`<div class="${cls}">${inner}</div>`);
+    // Pinned, then recently used (not pinned): across providers.
+    const pinned = prefs.pinned.filter((ref) => hit(ref, byRef.get(ref) && byRef.get(ref).p.label));
+    if (pinned.length) { head('cm-picker-prov mp-sec', `<span>★ ${esc(tt('已釘選', 'Pinned'))}</span>`); for (const ref of pinned) row(ref, byRef.get(ref) && byRef.get(ref).m, 'pin:' + ref); }
+    const recent = prefs.recent.filter((ref) => !prefs.pinned.includes(ref) && hit(ref, byRef.get(ref) && byRef.get(ref).p.label));
+    if (recent.length) { head('cm-picker-prov mp-sec', `<span>${esc(tt('最近使用', 'Recently used'))}</span>`); for (const ref of recent) row(ref, byRef.get(ref) && byRef.get(ref).m, 'recent:' + ref); }
     for (const p of data.providers || []) {
-      const ms = (p.models || []).filter((m) => !q || m.ref.toLowerCase().includes(q) || String(p.label).toLowerCase().includes(q));
+      const ms = (p.models || []).filter((m) => hit(m.ref, p.label));
       if (!ms.length) continue;
-      html += `<div class="cm-picker-prov"><span>${esc(p.label || p.id)}</span><span class="src ${esc(p.source)}">${esc(srcLabel(p))}</span>${p.error ? `<span class="err" title="${esc(p.error)}">${esc(p.error)}</span>` : ''}</div>`;
-      // Every model the provider lists (the server caps one provider at 400): scroll and click;
-      // the search box only narrows it.
-      for (const m of ms) {
-        const i = lvl.items.length;
-        lvl.items.push({ ref: m.ref });
-        const price = typeof fmtPrice === 'function' && m.price ? `<span class="sub price" title="${esc(priceTitle(m.price))}">${esc(fmtPrice(m.price))}</span>` : '';
-        html += `<button type="button" class="cm-item" role="option" data-i="${i}"><span class="ic">${m.ref === cur() ? '✓' : ''}</span><span class="lb">${esc(m.id)}</span>${price}${m.context ? `<span class="sub">${Math.round(m.context / 1000)}k</span>` : ''}</button>`;
-        shown++;
+      head('cm-picker-prov', `<span>${esc(p.label || p.id)}</span><span class="src ${esc(p.source)}">${esc(srcLabel(p))}</span><span class="faint">${ms.length}</span>${p.error ? `<span class="err" title="${esc(p.error)}">${esc(p.error)}</span>` : ''}`);
+      const groups = new Map();
+      for (const m of ms) { const v = mpVendor(m.id); if (!groups.has(v)) groups.set(v, []); groups.get(v).push(m); }
+      const grouped = groups.size > 1 || (groups.size === 1 && !groups.has(''));
+      for (const [v, gm] of groups) {
+        const fk = p.id + '/' + v;
+        if (grouped) {
+          const isFolded = !q && folded.has(fk);
+          const i = lvl.items.length;
+          lvl.items.push({ kid: 'fold:' + fk, keep: true, run: () => { if (folded.has(fk)) folded.delete(fk); else folded.add(fk); mpSaveFolded(folded); draw('fold:' + fk); } });
+          html.push(`<button type="button" class="cm-item mp-vendor" data-i="${i}" aria-expanded="${!isFolded}"><span class="ic">${isFolded ? '▸' : '▾'}</span><span class="lb">${esc(v || tt('其他', 'other'))}</span><span class="sub">${gm.length}</span></button>`);
+          if (isFolded) continue;
+        }
+        // Under its vendor's header a model is named without the repeated prefix.
+        for (const m of gm) row(m.ref, m, 'm:' + m.ref, grouped && v ? m.id.slice(v.length + 1) : '');
       }
     }
     const typed = input.value.trim();
-    if (/^[\w.-]+\/\S+$/.test(typed) && !lvl.items.some((x) => x.ref.toLowerCase() === typed.toLowerCase())) {
-      lvl.items.push({ ref: typed });
-      html += `<button type="button" class="cm-item" data-i="${lvl.items.length - 1}"><span class="ic">↵</span><span class="lb">${esc(tt('使用', 'Use'))} ${esc(typed)}</span></button>`;
+    if (/^[\w.-]+\/\S+$/.test(typed) && !byRef.has(typed)) {
+      lvl.items.push({ ref: typed, kid: 'typed', run: () => choose(typed) });
+      html.push(`<button type="button" class="cm-item" data-i="${lvl.items.length - 1}"><span class="ic">↵</span><span class="lb">${esc(tt('使用', 'Use'))} ${esc(typed)}</span></button>`);
     }
-    listEl.innerHTML = html || `<div class="cm-head">${esc(tt('沒有符合的模型。到「API 金鑰」加入供應商的金鑰。', 'No matching model. Add a provider key under API keys.'))}</div>`;
+    listEl.innerHTML = html.join('') || `<div class="cm-head">${esc(tt('沒有符合的模型。到「API 金鑰」加入供應商的金鑰。', 'No matching model. Add a provider key under API keys.'))}</div>`;
     for (const b of listEl.querySelectorAll('[data-i]')) {
-      const it = lvl.items[+b.dataset.i];
+      const i = +b.dataset.i;
+      const it = lvl.items[i];
       it.btn = b;
-      b.onclick = () => { cmClose(); applyModel(it.ref); };
+      b.onclick = (e) => { e.stopPropagation(); cmActivate(lvl, i); };
     }
+    for (const b of listEl.querySelectorAll('[data-pin]')) b.onclick = (e) => { e.stopPropagation(); togglePin(lvl.items[+b.dataset.pin].ref); };
+    if (keepKey) { const j = lvl.items.findIndex((x) => x.kid === keepKey); if (j >= 0) cmHighlight(lvl, j); }
     const live = (data.providers || []).filter((p) => p.source === 'live' || p.source === 'cache').length;
-    el.querySelector('[data-status]').textContent = data.offline ? tt('離線：顯示內建清單', 'Offline: built-in lists') : tt(`${live}/${(data.providers || []).length} 個供應商有即時清單 · ${shown} 個模型`, `${live}/${(data.providers || []).length} providers live · ${shown} models`);
+    const fetched = (data.providers || []).some((p) => p.source === 'live');
+    el.querySelector('[data-status]').textContent = data.offline
+      ? (fetched
+        ? tt(`離線模式：不自動連線 · 剛才依你的要求向設定的供應商抓取 · ${shown} 個模型`, `Offline: nothing fetched on its own · just fetched from your configured providers as asked · ${shown} models`)
+        : tt(`離線模式：不自動連線（${shown} 個模型）· ↻ 向你設定的供應商抓取`, `Offline: nothing fetched on its own (${shown} models) · ↻ asks your configured providers`))
+      : tt(`${live}/${(data.providers || []).length} 個供應商有即時清單 · ${shown} 個模型`, `${live}/${(data.providers || []).length} providers live · ${shown} models`);
     const ps = el.querySelector('[data-prices]');
     if (ps && typeof priceSrcHtml === 'function') ps.innerHTML = data.prices ? `${priceSrcHtml(data.prices)}<span class="faint">${esc(tt('　美元／百萬 tokens', '  USD / M tokens'))}</span>` : '';
     place();
@@ -614,11 +672,20 @@ function openModelPicker(anchor) {
   const load = async (refresh) => {
     try { data = await cmModels(refresh); draw(); } catch (e) { listEl.innerHTML = `<div class="cm-head bad">${esc(e.message)}</div>`; }
   };
-  input.oninput = draw;
+  cmCall('ui.chat.models.prefs', {}).then((v) => { prefs.pinned = v.pinned || []; prefs.recent = v.recent || []; CM.state.pinned_models = prefs.pinned; CM.state.recent_models = prefs.recent; draw(); }).catch(() => {});
+  input.oninput = () => draw();
   input.onkeydown = (e) => {
-    if (e.key === 'ArrowDown') { e.preventDefault(); cmHighlight(lvl, cmNext(lvl, lvl.idx, 1)); }
-    else if (e.key === 'Enter') { e.preventDefault(); const it = lvl.items[Math.max(0, lvl.idx)]; if (it) { cmClose(); applyModel(it.ref); } }
+    if (e.key === 'ArrowDown') { e.preventDefault(); cmHighlight(lvl, cmNext(lvl, -1, 1)); }
+    else if (e.key === 'Enter') { e.preventDefault(); const j = lvl.idx >= 0 ? lvl.idx : cmNext(lvl, -1, 1); if (j >= 0) cmActivate(lvl, j); }
   };
+  // On a row: * pins, Home / End jump, any other character goes to the filter.
+  el.addEventListener('keydown', (e) => {
+    if (e.target === input) return;
+    const it = lvl.items[lvl.idx];
+    if (e.key === '*' && it && it.ref) { e.preventDefault(); togglePin(it.ref); }
+    else if (e.key === 'Home' || e.key === 'End') { e.preventDefault(); cmHighlight(lvl, e.key === 'Home' ? cmNext(lvl, -1, 1) : cmNext(lvl, 0, -1)); }
+    else if (e.key.length === 1 && !e.ctrlKey && !e.metaKey && !e.altKey && e.key !== ' ') { e.preventDefault(); input.focus(); input.value += e.key; draw(); }
+  });
   el.querySelector('[data-refresh]').onclick = () => { listEl.innerHTML = `<div class="cm-head"><span class="star spin" style="--size:10px"></span> ${esc(tt('重新抓取…', 'Refreshing…'))}</div>`; load(true); };
   el.querySelector('[data-keys]').onclick = () => { cmClose(); if (typeof openPage === 'function') { S.pageNav = 'showSettings'; openPage('apikeys'); } };
   document.addEventListener('keydown', cmKey, true);

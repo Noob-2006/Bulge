@@ -136,3 +136,4 @@ textarea.cp-area.mono { font-family: var(--mono); font-size: 12.5px; }
 .verify code { font-size: 11.5px; color: var(--text-2); }
 table.kv td.mono, table.kv td code { font: 11.5px var(--mono); }
 .stack { display: grid; gap: 26px; align-content: start; min-width: 0; }
+.kp-envwin { display: inline-block; margin-top: 3px; font: 11px var(--mono); color: var(--warn); cursor: help; white-space: nowrap; }

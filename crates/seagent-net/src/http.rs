@@ -107,9 +107,9 @@ pub const OFFLINE_ENV: &str = "SEAGENT_NETWORK_OFFLINE";
 
 /// The single offline switch: `[network] offline = true` (or `SEAGENT_NETWORK_OFFLINE=1`).
 ///
-/// Not to be confused with `SEAGENT_OFFLINE=1`, the older and narrower test/CI knob that only stops
-/// *automatic background* downloads (the price-table auto-refresh): the whole test suite runs
-/// under it and still talks to its local fake servers.
+/// Not to be confused with `SEAGENT_OFFLINE=1`, the narrower test/CI knob that only stops
+/// *automatic* calls ([`no_background_fetch`] has the whole policy): the test suite runs under
+/// it and still talks to its local fake servers.
 pub fn offline() -> bool {
     offline_source().is_some()
 }
@@ -125,9 +125,70 @@ pub fn offline_source() -> Option<&'static str> {
     }
 }
 
-/// `SEAGENT_OFFLINE=1` (or the full offline switch): skip automatic background downloads.
+/// The test/CI form of offline mode (see [`no_background_fetch`]).
+pub const NO_AUTO_ENV: &str = "SEAGENT_OFFLINE";
+
+thread_local! {
+    /// [`with_no_background_fetch`]'s per-thread override (tests: no process-wide env var).
+    static NO_AUTO: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Offline mode in any form — `SEAGENT_OFFLINE=1`, `SEAGENT_NETWORK_OFFLINE=1` or
+/// `[network] offline = true` — and the rule every caller follows under it:
+///
+/// **No outbound call happens on seagent's own initiative.** Automatic calls are skipped whatever
+/// the host (a local fake server included): the models.dev price auto-refresh, the live model
+/// listing a picker fetches when it opens, the account balances `/usage` would add, the plugin
+/// auto-update pass. Cached or built-in data stands in, labelled offline.
+///
+/// **A call the user explicitly makes goes only to an endpoint they configured:** sending a turn
+/// to the chosen model's provider, Refresh in a model picker, Test key, Check balance — each to
+/// the provider's own configured `base_url` host (the balance endpoint is only ever asked on that
+/// same host). An explicit action against a third-party endpoint the user never configured (the
+/// console's "refresh prices" from models.dev) is refused ([`ensure_user_endpoint`]).
+///
+/// The full switch ([`offline`]) additionally refuses every public host in every client
+/// ([`offline_allows`]), so there an explicit action still reaches only loopback, private ranges
+/// and `offline_allow` hosts. `SEAGENT_OFFLINE=1` alone leaves explicit actions alone: the test
+/// suite runs under it and talks to its local fake providers.
 pub fn no_background_fetch() -> bool {
-    offline() || std::env::var("SEAGENT_OFFLINE").is_ok_and(|v| truthy(&v))
+    offline() || NO_AUTO.with(|c| c.get()) || std::env::var(NO_AUTO_ENV).is_ok_and(|v| truthy(&v))
+}
+
+/// Which switch put seagent offline (any form), for messages.
+pub fn offline_any_source() -> Option<&'static str> {
+    offline_source().or_else(|| no_background_fetch().then_some(NO_AUTO_ENV))
+}
+
+/// `Err` when an automatic (not user-initiated) call named `feature` must be skipped.
+pub fn ensure_automatic_allowed(feature: &str) -> Result<(), String> {
+    match offline_any_source() {
+        Some(src) => Err(format!("offline mode ({src}): {feature} is not fetched automatically")),
+        None => Ok(()),
+    }
+}
+
+/// `Err` when a user-initiated `feature` would go to an endpoint the user never configured
+/// (a third-party service) while seagent is offline in any form.
+pub fn ensure_user_endpoint(feature: &str) -> Result<(), String> {
+    match offline_any_source() {
+        Some(src) => Err(format!("{feature} is disabled: seagent is in offline mode ({src}) and it is not an endpoint you configured")),
+        None => Ok(()),
+    }
+}
+
+/// Run `f` as if `SEAGENT_OFFLINE=1` were set, on this thread only (tests). Restored on return
+/// and on panic.
+pub fn with_no_background_fetch<T>(f: impl FnOnce() -> T) -> T {
+    struct Restore(bool);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            let prev = self.0;
+            NO_AUTO.with(|c| c.set(prev));
+        }
+    }
+    let _r = Restore(NO_AUTO.with(|c| c.replace(true)));
+    f()
 }
 
 /// `Err` with a uniform message when `feature` must not run because seagent is offline.

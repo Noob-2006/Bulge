@@ -213,6 +213,11 @@ pub fn apply(root: &mut toml::Table, vault: &Vault, plan: &Plan, env: Env) -> Re
                     seagent_model::ProviderConfig { id: pid.clone(), format: seagent_model::WireFormat::OpenAiChat, base_url: base, api_key_env: env(&env_name).is_some().then_some(env_name), ..Default::default() }
                 }
             };
+            // A provider table the user already has names its own key variable: a re-run keeps
+            // using it (and the key stored under it) instead of the preset's.
+            if let Some(v) = root.get("providers").and_then(|p| p.get(pid.as_str())).and_then(|t| t.get("api_key_env")).and_then(|v| v.as_str()).filter(|v| !v.trim().is_empty()) {
+                prov.api_key_env = Some(v.to_string());
+            }
             if let Some(b) = &plan.base_url {
                 if !(b.starts_with("http://") || b.starts_with("https://")) {
                     return Err("--base-url must start with http:// or https://".into());
@@ -237,6 +242,9 @@ pub fn apply(root: &mut toml::Table, vault: &Vault, plan: &Plan, env: Env) -> Re
                         key_out = Some(k);
                     }
                     None if vault.names().contains(&var) => said.push(format!("{} {var}", t("沿用保管庫中的金鑰：", "keeping the key already in the vault:"))),
+                    // The web wizard's re-run passes no environment: a key the daemon reads from
+                    // its own environment stays there (never copied into the vault).
+                    None if std::env::var(&var).is_ok_and(|v| !v.trim().is_empty()) => said.push(format!("{} {var}", t("沿用環境變數中的金鑰：", "keeping the key from the environment:"))),
                     None => return Err(format!("no API key for `{pid}`: set SEAGENT_SETUP_API_KEY or {var} in the environment")),
                 }
             }

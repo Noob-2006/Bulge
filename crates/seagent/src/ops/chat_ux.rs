@@ -35,8 +35,13 @@ use std::sync::{Arc, Mutex};
 pub const METHODS: &[&str] = &[
     "ui.chat.list", "ui.chat.meta.set", "ui.chat.read", "ui.chat.section",
     "ui.chat.fork", "ui.chat.delete", "ui.chat.restore", "ui.chat.purge",
-    "ui.chat.settings.get", "ui.chat.settings.set", "ui.chat.export",
+    "ui.chat.settings.get", "ui.chat.settings.set", "ui.chat.export", "ui.chat.models.prefs",
 ];
+
+/// Most "recently used" models the model picker keeps at its top.
+const RECENT_MODELS: usize = 8;
+/// Most pinned (favourite) models.
+const PINNED_MODELS: usize = 100;
 
 /// Trashed conversations older than this are removed for good the next time the rail loads.
 const TRASH_DAYS: u64 = 30;
@@ -85,6 +90,7 @@ pub fn call(c: &ChatCtx, m: &str, p: &Value) -> Option<Res> {
         "ui.chat.settings.get" => id().and_then(|id| settings_get(c, &id, read_only(p))),
         "ui.chat.settings.set" => id().and_then(|id| settings_set(c, &id, p)),
         "ui.chat.export" => id().and_then(|id| export(c, &id, p)),
+        "ui.chat.models.prefs" => model_prefs(c, p),
         _ => return None,
     })
 }
@@ -146,6 +152,10 @@ struct RailState {
     unread: BTreeSet<String>,
     /// Parents whose nested (sub-agent / child) sessions are hidden.
     folded: BTreeSet<String>,
+    /// The model picker's pinned (favourite) `provider/model` refs, in pin order.
+    pinned_models: Vec<String>,
+    /// The models last chosen in the picker, newest first (at most [`RECENT_MODELS`]).
+    recent_models: Vec<String>,
 }
 
 static STATE_LOCK: Mutex<()> = Mutex::new(());
@@ -197,8 +207,45 @@ fn list(c: &ChatCtx) -> Res {
         "read_ms": st.read_ms,
         "unread": st.unread,
         "folded": st.folded,
+        "pinned_models": st.pinned_models,
+        "recent_models": st.recent_models,
         "trash": trash_list(c),
     }))
+}
+
+/// A `provider/model` ref as the picker sends it: one token, at most 200 characters.
+fn model_ref(v: &Value) -> Option<String> {
+    let r = v.as_str()?.trim();
+    (!r.is_empty() && r.len() <= 200 && r.contains('/') && !r.chars().any(|c| c.is_whitespace() || c.is_control())).then(|| r.to_string())
+}
+
+/// `ui.chat.models.prefs {pin?, pinned?, used?}`: the model picker's favourites and recently
+/// used list (console state of this rail scope, next to the sections). `pin` + `pinned: bool`
+/// adds / removes a favourite; `used` moves a ref to the top of the recent list. Answers both.
+fn model_prefs(c: &ChatCtx, p: &Value) -> Res {
+    let pin = p.get("pin").map(|v| model_ref(v).ok_or_else(|| bad("`pin` must be a provider/model ref"))).transpose()?;
+    let used = p.get("used").map(|v| model_ref(v).ok_or_else(|| bad("`used` must be a provider/model ref"))).transpose()?;
+    let st = if pin.is_none() && used.is_none() {
+        load_state(&state_path(c))
+    } else {
+        let on = p.get("pinned").and_then(Value::as_bool).unwrap_or(true);
+        update_state(c, |st| {
+            if let Some(r) = pin {
+                st.pinned_models.retain(|x| *x != r);
+                if on {
+                    st.pinned_models.push(r);
+                    st.pinned_models.truncate(PINNED_MODELS);
+                }
+            }
+            if let Some(r) = used {
+                st.recent_models.retain(|x| *x != r);
+                st.recent_models.insert(0, r);
+                st.recent_models.truncate(RECENT_MODELS);
+            }
+            Ok(st.clone())
+        })?
+    };
+    Ok(json!({"pinned": st.pinned_models, "recent": st.recent_models}))
 }
 
 fn meta_set(c: &ChatCtx, id: &str, p: &Value) -> Res {
@@ -674,6 +721,32 @@ mod tests {
     }
     fn info(t: &Kit, id: &str) -> seagent_kernel::store::SessionInfo {
         t.k.store.list().into_iter().find(|s| s.id == id).expect("listed")
+    }
+
+    #[test]
+    fn model_picker_pins_and_recents_persist_per_rail() {
+        let t = kit();
+        let c = ctx(&t);
+        ok(&c, "ui.chat.models.prefs", json!({"pin": "openrouter/anthropic/claude-x"}));
+        ok(&c, "ui.chat.models.prefs", json!({"pin": "deepseek/deepseek-chat"}));
+        for r in ["a/1", "b/2", "a/1", "c/3", "d/4", "e/5", "f/6", "g/7", "h/8", "i/9"] {
+            ok(&c, "ui.chat.models.prefs", json!({"used": r}));
+        }
+        let v = ok(&c, "ui.chat.models.prefs", json!({"pin": "openrouter/anthropic/claude-x", "pinned": false}));
+        assert_eq!(v["pinned"], json!(["deepseek/deepseek-chat"]));
+        assert_eq!(v["recent"], json!(["i/9", "h/8", "g/7", "f/6", "e/5", "d/4", "c/3", "a/1"]), "newest first, deduplicated, capped");
+        // Persisted with the rail state (survives a reload) and listed with it.
+        let l = ok(&c, "ui.chat.list", json!({}));
+        assert_eq!(l["pinned_models"], json!(["deepseek/deepseek-chat"]));
+        assert_eq!(l["recent_models"][0], "i/9");
+        let on_disk = std::fs::read_to_string(t.paths.data.join("ui/chats.json")).unwrap();
+        assert!(on_disk.contains("deepseek/deepseek-chat"), "{on_disk}");
+        // Another rail scope (a non-admin principal) has its own.
+        let other = ok(&c, "ui.chat.models.prefs", json!({"_rail": "token:someone"}));
+        assert_eq!(other["pinned"], json!([]));
+        for bad in [json!({"pin": "no-slash"}), json!({"used": "two words/x"}), json!({"pin": 7})] {
+            assert_eq!(err(&c, "ui.chat.models.prefs", bad).0, -32602);
+        }
     }
 
     #[test]

@@ -174,7 +174,10 @@ const lvWorkShow = workShow;
 workShow = async function (on) {
   if (!on) { lvClose(); lvTerm(false); }
   await lvWorkShow(on);
-  if (on && !W.cur) lvTerm(true); // nothing to look at yet: show what the agent runs
+  // Nothing to look at yet: follow what the agent runs — the terminal appears with its first
+  // command (an empty one would only leave a dark band under the stage) and stays closed once
+  // the person has closed it.
+  if (on && !W.cur) lvTerm(true, 'auto');
 };
 
 const lvWorkSession = workSession;
@@ -191,13 +194,15 @@ function lvTermEls() {
   if ($('workTerm')) return;
   const pre = document.createElement('pre');
   pre.id = 'workTerm'; pre.className = 'work-term'; pre.hidden = true;
+  pre.dataset.empty = LVL('代理還沒有執行任何指令；開始執行時會即時出現在這裡。', 'The agent has not run a command yet; they appear here live.');
   pre.setAttribute('aria-live', 'polite');
   $('workStage').after(pre);
   const btn = document.createElement('button');
   btn.id = 'workTermBtn'; btn.type = 'button'; btn.className = 'btn ghost small';
   btn.textContent = LVL('終端機', 'Terminal');
   btn.title = LVL('代理正在執行的指令（即時）', 'The agent\'s commands, live');
-  btn.onclick = () => lvTerm(!LV.termOpen);
+  btn.setAttribute('aria-pressed', 'false');
+  btn.onclick = () => lvTerm($('workTerm').hidden, 'user');
   const live = document.createElement('span');
   live.id = 'workLive'; live.className = 'work-live'; live.hidden = true; live.textContent = 'LIVE';
   const sel = document.createElement('select');
@@ -232,13 +237,27 @@ new ResizeObserver(() => {
   }, 500);
 }).observe($('workStage'));
 
-function lvTerm(on) {
+// `how`: 'user' (the Terminal button: remembered), 'auto' (opening the pane with nothing to show:
+// connected, but the band only appears once there is output, and never after the person closed
+// it), or a plain call (no display to show: open now).
+function lvTermPref() { try { return localStorage.getItem('seagent.workTerm'); } catch { return null; } }
+function lvTerm(on, how) {
   lvTermEls();
+  if (how === 'user') { try { localStorage.setItem('seagent.workTerm', on ? 'on' : 'off'); } catch {} }
+  if (on && how === 'auto' && lvTermPref() === 'off') on = false;
   LV.termOpen = on;
-  $('workTerm').hidden = !on;
-  $('workTermBtn').classList.toggle('on', on);
+  LV.termAuto = on && how === 'auto' && lvTermPref() !== 'on';
+  lvTermSync();
   if (on) lvTermConnect();
   else if (LV.term) { LV.term.onclose = null; LV.term.close(); LV.term = null; }
+}
+// Off (or auto with nothing yet): the band is gone and the stage takes the whole height.
+function lvTermSync() {
+  const pre = $('workTerm');
+  const show = LV.termOpen && !(LV.termAuto && !pre.childNodes.length);
+  pre.hidden = !show;
+  $('workTermBtn').classList.toggle('on', show);
+  $('workTermBtn').setAttribute('aria-pressed', String(show));
 }
 
 function lvTermConnect() {
@@ -286,6 +305,7 @@ function lvTermEvent(ev) {
     pre.append(g);
   }
   while (pre.textContent.length > LV_TERM_MAX && pre.firstChild) pre.firstChild.remove();
+  if (LV.termAuto && pre.hidden) lvTermSync();
   if (stick) pre.scrollTop = pre.scrollHeight;
 }
 

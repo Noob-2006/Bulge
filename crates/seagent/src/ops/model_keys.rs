@@ -160,8 +160,9 @@ fn key_state(vault: &Vault, ps: &Providers, pc: &ProviderConfig) -> Value {
         "source": source,
         "masked": masked,
         "in_vault": vault.is_some(),
-        // The environment wins over the vault (`auth::source_for`): say so before a replace.
-        "env_override": env.map(|(n, _)| n),
+        // The environment wins over the vault (`auth::source_for`): said only where it matters —
+        // a variable is set *and* the vault holds a key it hides.
+        "env_override": env.filter(|_| vault.is_some()).map(|(n, _)| n),
         "plaintext_in_config": plaintext.is_some(),
     })
 }
@@ -467,6 +468,11 @@ pub fn listed_prices(provider: &str, models: &[String]) -> Value {
     Value::Object(models.iter().filter_map(|m| Some((m.clone(), listed_price(provider, m)?))).collect())
 }
 
+/// `{model: context window}` for the models of `provider` the registry knows (the wizard's list).
+pub fn listed_contexts(provider: &str, models: &[String]) -> Value {
+    Value::Object(models.iter().filter_map(|m| Some((m.clone(), json!(seagent_model::modelsdb::registry_entry(Some(provider), m).map(|i| i.context).filter(|c| *c > 0)?)))).collect())
+}
+
 /// The price source the whole console shows next to prices and costs (also in `ui.usage`).
 pub fn prices_json(cfg: &Config) -> Value {
     let mut v = prices_json_base();
@@ -490,7 +496,8 @@ fn prices_status(c: &KeyCtx) -> Res {
 
 /// "Refresh prices now": the same models.dev refresh `seagent models refresh` runs.
 fn prices_refresh(c: &KeyCtx) -> Res {
-    let r = seagent_model::modelsdb::refresh(None);
+    // models.dev is a third-party host, not an endpoint the user configured: offline, no request.
+    let r = seagent_net::http::ensure_user_endpoint("the models.dev price refresh").and_then(|_| seagent_model::modelsdb::refresh(None));
     let mut v = prices_status(c)?;
     match r {
         Ok((n, changed)) => {
@@ -551,15 +558,30 @@ fn models_list(c: &KeyCtx, only: Option<&str>, refresh: bool) -> Res {
     }
     let cache = load_cache(&cache_path(c));
     let now = now_ms();
-    let offline = seagent_net::http::current().offline;
+    let offline = seagent_net::http::no_background_fetch();
+    // Offline policy (`seagent_net::http::no_background_fetch`): a picker opening is an automatic
+    // listing — none goes out offline, whatever the host. Refresh is the user's explicit action
+    // against the provider's own configured endpoint; the full switch still only lets it reach a
+    // local / allow-listed host.
+    let may_fetch = |pc: &ProviderConfig| -> Result<(), String> {
+        if !refresh {
+            seagent_net::http::ensure_automatic_allowed("the model list")?;
+        }
+        let host = seagent_net::http::host_port(&pc.base_url).0;
+        match seagent_net::http::offline_source() {
+            Some(src) if !seagent_net::http::offline_allows(&seagent_net::http::current(), &host) => Err(format!("offline mode ({src}): {host} is not reachable")),
+            _ => Ok(()),
+        }
+    };
     let fetched: Vec<(String, Result<Vec<String>, String>)> = std::thread::scope(|s| {
         let jobs: Vec<_> = list
             .iter()
             .filter(|pc| refresh || cache.get(&pc.id).is_none_or(|e| now.saturating_sub(e.fetched_ms) > TTL_MS))
             .map(|pc| {
                 let ps = &ps;
+                let gate = may_fetch(pc);
                 s.spawn(move || {
-                    let r = if offline { Err("offline mode: showing the built-in list".to_string()) } else { cred_for(ps, pc, None).and_then(|cred| seagent_model::list_models_live(pc, &*cred)) };
+                    let r = gate.and_then(|_| cred_for(ps, pc, None).and_then(|cred| seagent_model::list_models_live(pc, &*cred)));
                     (pc.id.clone(), r)
                 })
             })
@@ -748,6 +770,53 @@ mod tests {
         // A replaced key drops the cached list.
         ok(&dead, "ui.keys.set", json!({"provider": "probe", "key": "sk-live-other-9999"}));
         assert_eq!(row(&ok(&dead, "ui.chat.models.list", json!({"provider": "probe"})), "probe")["source"], "builtin");
+    }
+
+    /// Offline in either form makes no automatic call: a picker opening lists from the built-in
+    /// list without a request (the fake provider counts none), "refresh prices" (models.dev, not
+    /// an endpoint the user configured) is refused. Refresh is the user's explicit action against
+    /// the provider they configured and still reaches it — under the full switch only on a local
+    /// host.
+    #[test]
+    fn offline_mode_makes_no_automatic_calls() {
+        let (base, hits) = fake_provider();
+        let (_t, c) = setup(&base, &format!("api_key_env = \"{ENV}\"\n"));
+        ok(&c, "ui.keys.set", json!({"provider": "probe", "key": "sk-live-good-0001"}));
+        let full = seagent_net::http::NetConfig { offline: true, ..Default::default() };
+        let opened = |c: &KeyCtx| (ok(c, "ui.chat.models.list", json!({"provider": "probe"})), ok(c, "ui.prices.refresh", json!({})));
+        for (name, (l, pr)) in [("SEAGENT_OFFLINE", seagent_net::http::with_no_background_fetch(|| opened(&c))), ("[network] offline", seagent_net::http::with_config(full.clone(), || opened(&c)))] {
+            assert_eq!(l["offline"], true, "{name}");
+            let p = row(&l, "probe");
+            assert_eq!(p["source"], "builtin", "{name}: {p}");
+            assert!(p["error"].as_str().is_some_and(|e| e.contains("offline mode")), "{name}: {p}");
+            assert_eq!(*hits.lock().unwrap(), 0, "{name}: opening a picker sent a request");
+            assert_eq!(pr["ok"], false, "{name}");
+            assert!(pr["error"].as_str().is_some_and(|e| e.contains("offline mode")), "{name}: {pr}");
+        }
+        // The explicit refresh goes to the configured (local) endpoint.
+        let l = seagent_net::http::with_no_background_fetch(|| ok(&c, "ui.chat.models.list", json!({"provider": "probe", "refresh": true})));
+        assert_eq!(row(&l, "probe")["source"], "live");
+        assert_eq!(*hits.lock().unwrap(), 1);
+        // Under the full switch a public endpoint is refused before any request.
+        let (_t2, c2) = setup("https://models.probe.example/v1", &format!("api_key_env = \"{ENV}\"\n"));
+        let l = seagent_net::http::with_config(full, || ok(&c2, "ui.chat.models.list", json!({"provider": "probe", "refresh": true})));
+        assert!(row(&l, "probe")["error"].as_str().is_some_and(|e| e.contains("not reachable")), "{l}");
+    }
+
+    /// Only where an environment variable really hides a key stored in the vault is that said.
+    #[test]
+    fn env_override_is_flagged_only_over_a_stored_key() {
+        const VAR: &str = "SEAGENT_KEYS_TEST_ENVWIN_KEY";
+        let (base, _) = fake_provider();
+        let (_t, c) = setup(&base, &format!("api_key_env = \"{VAR}\"\n"));
+        std::env::set_var(VAR, "sk-from-the-env-7777");
+        let p = row(&ok(&c, "ui.keys.list", json!({})), "probe").clone();
+        assert_eq!((p["source"].as_str(), p["env_override"].is_null()), (Some("env"), true), "nothing stored, nothing overridden: {p}");
+        ok(&c, "ui.keys.set", json!({"provider": "probe", "key": "sk-live-good-0001"}));
+        let p = row(&ok(&c, "ui.keys.list", json!({})), "probe").clone();
+        assert_eq!(p["env_override"], VAR, "{p}");
+        std::env::remove_var(VAR);
+        assert!(row(&ok(&c, "ui.keys.list", json!({})), "probe")["env_override"].is_null());
     }
 
     /// A fake DeepSeek balance endpoint: answers `GET /user/balance` for `Bearer sk-live-good-0001`

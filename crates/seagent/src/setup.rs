@@ -312,7 +312,9 @@ pub fn save_config(cfg_path: &std::path::Path, root: &toml::Table, existing: Opt
     if existing.is_some() {
         std::fs::copy(cfg_path, &backup).map_err(|e| e.to_string())?;
     }
-    let text = if existing.is_some_and(|s| s.starts_with("# ")) { body } else { format!("{header}{body}") };
+    // Re-serialising drops comments, the header included: it is written every time (a second
+    // run used to drop it, a third to add it back).
+    let text = format!("{header}{body}");
     std::fs::write(cfg_path, text).map_err(|e| e.to_string())?;
     if let Err(e) = Config::load(Some(cfg_path), None, &[]) {
         if existing.is_some() {

@@ -1,6 +1,6 @@
 /* seagent 視覺系統：瑞士國際主義（網格、無襯線、靠左對齊、層級靠字級與留白）
    × 銀河：近黑到深藍的夜空底 × 金絲線（1px 金色細線）與四角內凹金星。星星一律是金色。
-   Web UI、桌面殼與文件頁共用；TUI 以 ANSI truecolor 對應自己的色票（crates/seagent-app/src/tui/theme.rs）。
+   Web UI、桌面殼與文件頁共用；TUI 以 ANSI truecolor 對應同一組色票（crates/seagent-app/src/tui.rs、tui/skins.json 的 default），256／16 色終端機退回最接近的顏色（tui/colour.rs）。
    主題：galaxy（預設，無 data-theme）、crimson（深緋紅，舊預設）、daylight（日光）。 */
 :root {
   /* 銀河：近黑的夜空，往深藍漸層；層次只差一點點亮度 */

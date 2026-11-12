@@ -1228,6 +1228,7 @@ $('showSettings').onclick = () => showPanel(t('settings'), async () => {
   const m = await S.arp.call('models.list');
   const tools = await S.arp.call('tools.list');
   return `<h3>模型</h3><table class="kv">${row(['預設模型', `<code>${esc(m.default)}</code>`])}${row(['備援', esc((m.fallback || []).join(', ') || '—')])}${row(['輔助模型', `<code>${esc(m.aux || '—')}</code>`])}${row(['工具', String(tools.length)])}</table>
+    <p><a class="btn small" id="rerunSetup" href="/setup#rerun">${esc(TL('重新執行設定精靈', 'Run the setup wizard again'))}</a> <span class="dim">${esc(TL('從目前的設定開始：供應商、模型、工作目錄、安全模式；沒改的設定與已存的金鑰都會保留，套用後自動重新啟動。', 'Starts from the current settings (provider, model, workspace, security); whatever you leave alone, stored keys included, is kept. Applying restarts the agent.'))}</span></p>
     <h3>連線</h3><p class="dim">技能、MCP、外掛、聊天頻道、Webhook 與代理都在這裡設定。</p><p><button class="btn small" id="openConnections">開啟連線設定</button></p>
     <h3>${esc(TL('價格與費用', 'Prices and costs'))}</h3><p id="priceSrc">${priceSrcHtml(await pricesStatus(true))}</p>
     <p class="dim">${esc(PRICE_HOW())} ${esc(TL('畫面上的費用都是估算：供應商 API 回報的 token 數 × 價格。帳戶實際餘額請看「API 金鑰」頁。', 'Every cost shown is an estimate: tokens reported by the provider API × price. For real account balances see the API keys page.'))}</p>
