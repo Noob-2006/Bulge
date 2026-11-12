@@ -501,7 +501,7 @@ pub fn usage(pid: u32) -> Option<(u64, u64)> {
         // SAFETY: fills a plain struct.
         unsafe { libc::mach_timebase_info(&mut tb) };
         let ns = (info.pti_total_user + info.pti_total_system) as u128 * tb.numer.max(1) as u128 / tb.denom.max(1) as u128;
-        (n == size).then(|| ((ns / 10_000_000) as u64, info.pti_resident_size / 1024))
+        (n == size).then_some(((ns / 10_000_000) as u64, info.pti_resident_size / 1024))
     }
     #[cfg(not(any(windows, target_os = "macos")))]
     {

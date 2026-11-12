@@ -505,7 +505,9 @@ fn windows_vm_checks(paths: &Paths) -> Vec<(String, Result<String, String>)> {
 #[cfg(any(target_os = "macos", windows, target_os = "android", target_os = "ios"))]
 pub fn dispatch(sub: &str, a: &Args, paths: &Paths) -> R {
     let system = a.flag("system");
+    // The early `return` ends the function on mobile, where the desktop `match` below is cfg'd out.
     #[cfg(any(target_os = "android", target_os = "ios"))]
+    #[allow(clippy::needless_return)]
     {
         let _ = (system, paths);
         return match sub {

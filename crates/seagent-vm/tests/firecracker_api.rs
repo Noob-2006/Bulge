@@ -238,8 +238,10 @@ fn boot_requests_never_configure_a_drive() {
         assert!(body.get("drive_id").is_none(), "no drive is ever configured: {body}");
     }
     // The kernel cmdline is shared with the QEMU provider rather than forked:
-    // one source of truth for the `seagent.*` facts the guest agent trusts.
-    assert_eq!(reqs[0].2["boot_args"], Value::String(qemu::cmdline_append(&s)));
+    // one source of truth for the `seagent.*` facts the guest agent trusts. Firecracker only
+    // appends `reboot=k` (it exits on the i8042 reset, not on the ACPI one).
+    assert_eq!(reqs[0].2["boot_args"], Value::String(format!("{} reboot=k", qemu::cmdline_append(&s))));
+    assert_eq!(reqs[0].2["boot_args"], Value::String(seagent_vm::provider::firecracker::boot_args(&s)));
 }
 
 #[test]
