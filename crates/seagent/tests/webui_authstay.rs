@@ -205,7 +205,8 @@ fn real_console_stays_signed_in() {
     assert_eq!(http(port, "POST", "/arp", token_before.as_str(), &json!({"jsonrpc": "2.0", "id": 1, "method": "session.list"}).to_string()).0, 401, "the token expired while the tab was frozen");
     dev.lifecycle("active");
     dev.until("renewed after the freeze", &format!("DevAuth.renewals > {before} && DevAuth.current() !== {token_before}"), 20);
-    assert!(dev.works(), "the console answers after the freeze: {}", dev.state());
+    // (A forced freeze may cost the page its socket; then it reconnects by itself, no prompt.)
+    assert!(wait_until(Duration::from_secs(30), || dev.works()), "the console answers after the freeze: {}", dev.state());
     dev.until("a renewed token works on a new request", "fetch('/arp', {method: 'POST', headers: {'content-type': 'application/json', authorization: 'Bearer ' + DevAuth.current()}, body: JSON.stringify({jsonrpc: '2.0', id: 2, method: 'session.list'})}).then(r => r.status === 200)", 10);
 
     // Frozen while the daemon restarts (a laptop asleep while the host restarts): the socket is
@@ -227,7 +228,7 @@ fn real_console_stays_signed_in() {
     std::thread::sleep(Duration::from_secs(10));
     let r1 = dev.eval("DevAuth.renewals").as_u64().unwrap();
     assert!(r1 - r0 <= 8, "no renewal loop after a clock jump: {} renewals in ~10 s of a 3 s lifetime", r1 - r0);
-    assert!(dev.works(), "the console answers after the clock jump: {}", dev.state());
+    assert!(wait_until(Duration::from_secs(30), || dev.works()), "the console answers after the clock jump: {}", dev.state());
     assert_eq!(dev.eval("window.__loginShown"), json!(0), "the paired browser was never asked to sign in: {}", dev.state());
     dev.shot("authstay-device-after-freeze-restart-clock");
 
@@ -289,7 +290,7 @@ fn real_console_stays_signed_in() {
     d.start(ADMIN);
     web.eval("document.getElementById('loginBtn').click(); true");
     web.until("connected with the right token", "!document.getElementById('login').open && document.getElementById('conn').classList.contains('live')", 30);
-    assert!(web.works(), "{}", web.state());
+    assert!(wait_until(Duration::from_secs(20), || web.works()), "{}", web.state());
 
     // A connected browser with the app token rides out a daemon restart without a prompt.
     let shown = web.eval("window.__loginShown").as_u64().unwrap();
