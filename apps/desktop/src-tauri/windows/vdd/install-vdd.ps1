@@ -14,10 +14,12 @@
 param(
     [switch]$Uninstall,
     [switch]$Status,
-    [string]$DriverDir = (Join-Path $PSScriptRoot 'driver'),
+    [string]$DriverDir = '',
     [switch]$Relaunched
 )
 $ErrorActionPreference = 'Stop'
+# Windows PowerShell 5.1 在參數預設值裡讀不到 $PSScriptRoot（是空字串），所以在這裡才決定驅動資料夾。
+if (-not $DriverDir) { $DriverDir = Join-Path (Split-Path -Parent $MyInvocation.MyCommand.Path) 'driver' }
 
 # 重新執行自己時要帶的參數。
 function Self-Args {
