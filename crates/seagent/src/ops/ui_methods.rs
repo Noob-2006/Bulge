@@ -737,7 +737,10 @@ fn usage(c: &UiCtx, days: u64) -> Value {
     let days = days.clamp(1, 366);
     let since = seagent_kernel::event::now_ms().saturating_sub(days * 86_400_000);
     let (rows, n) = crate::models_cli::usage_rows(&c.k.cfg, &c.k.store, since, None);
-    let models: Vec<Value> = rows.iter().map(|(m, r)| json!({"model": m, "calls": r.calls, "input": r.input, "output": r.output, "cache_read": r.cache_read, "cache_write": r.cache_write, "cost_usd": r.priced.then_some(r.cost)})).collect();
+    // Each row says which price its cost used (`[prices]`, models.dev or a built-in snapshot);
+    // aux rows are keyed `provider/model (task)`.
+    let price = |m: &str| m.split(" (").next().and_then(|r| r.split_once('/')).and_then(|(p, id)| crate::ops::model_keys::price_of(&c.k.cfg, p, id));
+    let models: Vec<Value> = rows.iter().map(|(m, r)| json!({"model": m, "calls": r.calls, "input": r.input, "output": r.output, "cache_read": r.cache_read, "cache_write": r.cache_write, "cost_usd": r.priced.then_some(r.cost), "price": price(m)})).collect();
     // Per day and per session (OpenClaw sessions.usage.timeseries / top sessions).
     let mut daily: BTreeMap<String, (u64, u64, u64)> = BTreeMap::new();
     let mut sessions: Vec<(String, String, u64)> = vec![];
@@ -770,7 +773,8 @@ fn usage(c: &UiCtx, days: u64) -> Value {
         "models": models,
         "daily": daily.iter().map(|(d, (i, o, calls))| json!({"day": d, "input": i, "output": o, "calls": calls})).collect::<Vec<_>>(),
         "top_sessions": sessions.iter().map(|(id, t, tok)| json!({"id": id, "title": t, "tokens": tok})).collect::<Vec<_>>(),
-        "total": {"tokens": total_tokens, "cost_usd": total_cost},
+        "total": {"tokens": total_tokens, "cost_usd": total_cost, "unpriced_calls": rows.values().filter(|r| !r.priced).map(|r| r.calls).sum::<u64>()},
+        "prices": crate::ops::model_keys::prices_json(&c.k.cfg),
     })
 }
 

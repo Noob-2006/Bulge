@@ -562,7 +562,7 @@ function openModelPicker(anchor) {
   el.className = 'cm-menu cm-picker';
   el.setAttribute('role', 'dialog');
   el.setAttribute('aria-label', tt('切換模型', 'Switch model'));
-  el.innerHTML = `<div class="cm-picker-head"><input type="search" placeholder="${esc(tt('篩選模型…', 'Filter models…'))}" autocomplete="off" aria-label="${esc(tt('搜尋模型', 'Search models'))}"><button type="button" class="btn ghost small" data-refresh title="${esc(tt('從供應商重新抓取清單', 'Fetch the lists again from the providers'))}">↻</button></div><div class="cm-picker-list" role="listbox"><div class="cm-head"><span class="star spin" style="--size:10px"></span> ${esc(tt('載入模型清單…', 'Loading models…'))}</div></div><div class="cm-picker-foot"><span class="faint" data-status></span><button type="button" class="btn ghost small" data-keys>${esc(tt('管理 API 金鑰', 'Manage API keys'))}</button></div>`;
+  el.innerHTML = `<div class="cm-picker-head"><input type="search" placeholder="${esc(tt('篩選模型…', 'Filter models…'))}" autocomplete="off" aria-label="${esc(tt('搜尋模型', 'Search models'))}"><button type="button" class="btn ghost small" data-refresh title="${esc(tt('從供應商重新抓取清單', 'Fetch the lists again from the providers'))}">↻</button></div><div class="cm-picker-list" role="listbox"><div class="cm-head"><span class="star spin" style="--size:10px"></span> ${esc(tt('載入模型清單…', 'Loading models…'))}</div></div><div class="cm-picker-prices" data-prices></div><div class="cm-picker-foot"><span class="faint" data-status></span><button type="button" class="btn ghost small" data-keys>${esc(tt('管理 API 金鑰', 'Manage API keys'))}</button></div>`;
   document.body.appendChild(el);
   const lvl = { el, items: [], idx: -1 };
   CM.menu = { levels: [lvl], row: null, focus: anchor };
@@ -589,7 +589,8 @@ function openModelPicker(anchor) {
       for (const m of ms) {
         const i = lvl.items.length;
         lvl.items.push({ ref: m.ref });
-        html += `<button type="button" class="cm-item" role="option" data-i="${i}"><span class="ic">${m.ref === cur() ? '✓' : ''}</span><span class="lb">${esc(m.id)}</span>${m.context ? `<span class="sub">${Math.round(m.context / 1000)}k</span>` : ''}</button>`;
+        const price = typeof fmtPrice === 'function' && m.price ? `<span class="sub price" title="${esc(priceTitle(m.price))}">${esc(fmtPrice(m.price))}</span>` : '';
+        html += `<button type="button" class="cm-item" role="option" data-i="${i}"><span class="ic">${m.ref === cur() ? '✓' : ''}</span><span class="lb">${esc(m.id)}</span>${price}${m.context ? `<span class="sub">${Math.round(m.context / 1000)}k</span>` : ''}</button>`;
         shown++;
       }
     }
@@ -606,6 +607,8 @@ function openModelPicker(anchor) {
     }
     const live = (data.providers || []).filter((p) => p.source === 'live' || p.source === 'cache').length;
     el.querySelector('[data-status]').textContent = data.offline ? tt('離線：顯示內建清單', 'Offline: built-in lists') : tt(`${live}/${(data.providers || []).length} 個供應商有即時清單 · ${shown} 個模型`, `${live}/${(data.providers || []).length} providers live · ${shown} models`);
+    const ps = el.querySelector('[data-prices]');
+    if (ps && typeof priceSrcHtml === 'function') ps.innerHTML = data.prices ? `${priceSrcHtml(data.prices)}<span class="faint">${esc(tt('　美元／百萬 tokens', '  USD / M tokens'))}</span>` : '';
     place();
   };
   const load = async (refresh) => {

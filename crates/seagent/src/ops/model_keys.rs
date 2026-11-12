@@ -17,6 +17,12 @@
 //! `<data>/models-live.json` for [`TTL_MS`] and refreshed on demand. Offline, without a key, or
 //! when the endpoint fails, the built-in list stands in: the provider's configured ids, the
 //! model refs the config names, and the models.dev snapshot.
+//!
+//! Prices (`ui.prices.status`, `ui.prices.refresh`, the `price` of every picker row): USD per
+//! million tokens from the user's `[prices]`, else the models.dev registry, else the official-docs
+//! snapshots built into the binary — always looked up locally; costs are the token counts the
+//! provider's API reported × that price. `ui.keys.balance` asks a provider's own balance
+//! endpoint (`seagent_model::accounts`) with the stored key, for the providers that have one.
 
 use crate::providers::Providers;
 use seagent_kernel::config::{project_config, Config, Paths};
@@ -32,7 +38,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-pub const METHODS: &[&str] = &["ui.keys.list", "ui.keys.set", "ui.keys.delete", "ui.keys.test", "ui.chat.models.list"];
+pub const METHODS: &[&str] = &["ui.keys.list", "ui.keys.set", "ui.keys.delete", "ui.keys.test", "ui.keys.balance", "ui.chat.models.list", "ui.prices.status", "ui.prices.refresh"];
 
 /// A live listing is reused this long before the next picker opening fetches it again.
 pub const TTL_MS: u64 = 6 * 3600 * 1000;
@@ -68,6 +74,9 @@ pub fn call(c: &KeyCtx, m: &str, p: &Value) -> Option<Res> {
         "ui.keys.set" => set_key(c, provider, p["key"].as_str().unwrap_or("")),
         "ui.keys.delete" => delete_key(c, provider),
         "ui.keys.test" => test_key(c, provider, p["key"].as_str().map(str::trim).filter(|k| !k.is_empty())),
+        "ui.keys.balance" => balance(c, provider),
+        "ui.prices.status" => prices_status(c),
+        "ui.prices.refresh" => prices_refresh(c),
         "ui.chat.models.list" => models_list(c, Some(provider).filter(|p| !p.is_empty()), p["refresh"].as_bool().unwrap_or(false)),
         _ => return None,
     })
@@ -177,6 +186,7 @@ fn keys_list(c: &KeyCtx) -> Res {
             st["optional"] = json!(pc.keyless());
             st["models_cached"] = json!(cache.get(id).map(|e| e.models.len()).unwrap_or(0));
             st["checked_ms"] = json!(cache.get(id).map(|e| e.fetched_ms));
+            st["balance"] = json!(balance_endpoint(pc));
             st
         })
         .collect();
@@ -422,15 +432,110 @@ fn short(e: &str) -> String {
     }
 }
 
-fn model_rows(pid: &str, models: &[String]) -> Vec<Value> {
+fn model_rows(cfg: &Config, pid: &str, models: &[String]) -> Vec<Value> {
     models
         .iter()
         .take(MAX_MODELS)
         .map(|m| {
             let ctx = seagent_model::modelsdb::registry_entry(Some(pid), m).map(|i| i.context).filter(|c| *c > 0);
-            json!({"id": m, "ref": format!("{pid}/{m}"), "context": ctx})
+            json!({"id": m, "ref": format!("{pid}/{m}"), "context": ctx, "price": price_of(cfg, pid, m)})
         })
         .collect()
+}
+
+// ───────────────────────── prices and balances ─────────────────────────
+
+/// The price `provider/model` is charged at (USD per million tokens) and where it comes from:
+/// `config` (the user's `[prices]`), `models.dev` (the registry) or `snapshot` (an official-docs
+/// snapshot built into the binary; `date` says which). The same lookup the usage ledger uses.
+pub fn price_of(cfg: &Config, provider: &str, model: &str) -> Option<Value> {
+    if let Some(p) = cfg.prices.get(&format!("{provider}/{model}")) {
+        return Some(json!({"in": p.input, "out": p.output, "kind": "config", "source": "config"}));
+    }
+    listed_price(provider, model)
+}
+
+/// [`price_of`] without a config (the setup wizard): models.dev, else a built-in snapshot.
+pub fn listed_price(provider: &str, model: &str) -> Option<Value> {
+    let p = seagent_model::modelsdb::price_for(provider, model)?;
+    let kind = seagent_model::modelsdb::source_kind(&p.source);
+    Some(json!({"in": p.input, "out": p.output, "kind": kind, "source": p.source, "date": seagent_model::modelsdb::snapshot_date(&p.source)}))
+}
+
+/// `{model: price}` for the models of `provider` that have one (the wizard's list).
+pub fn listed_prices(provider: &str, models: &[String]) -> Value {
+    Value::Object(models.iter().filter_map(|m| Some((m.clone(), listed_price(provider, m)?))).collect())
+}
+
+/// The price source the whole console shows next to prices and costs (also in `ui.usage`).
+pub fn prices_json(cfg: &Config) -> Value {
+    let mut v = prices_json_base();
+    v["auto_refresh"] = json!(cfg.pricing.auto_refresh);
+    v["config_prices"] = json!(cfg.prices.len());
+    v["now_ms"] = json!(now_ms());
+    v
+}
+
+/// [`prices_json`] without a config (the setup wizard).
+pub fn prices_json_base() -> Value {
+    let mut v = serde_json::to_value(seagent_model::modelsdb::price_status()).unwrap_or_else(|_| json!({}));
+    v["offline"] = json!(seagent_net::http::current().offline);
+    v["now_ms"] = json!(now_ms());
+    v
+}
+
+fn prices_status(c: &KeyCtx) -> Res {
+    Ok(prices_json(&fresh(c)?))
+}
+
+/// "Refresh prices now": the same models.dev refresh `seagent models refresh` runs.
+fn prices_refresh(c: &KeyCtx) -> Res {
+    let r = seagent_model::modelsdb::refresh(None);
+    let mut v = prices_status(c)?;
+    match r {
+        Ok((n, changed)) => {
+            v["ok"] = json!(true);
+            v["changed"] = json!(changed);
+            v["models"] = json!(n);
+        }
+        Err(e) => {
+            v["ok"] = json!(false);
+            v["error"] = json!(short(&e));
+        }
+    }
+    Ok(v)
+}
+
+/// Whether `ui.keys.balance` can ask this provider: it has a balance endpoint
+/// (`seagent_model::accounts`) and the provider talks to its official host, so a key configured
+/// for a proxy or another server is never sent to the official balance endpoint.
+fn balance_endpoint(pc: &ProviderConfig) -> bool {
+    let host = |u: &str| u.split("://").nth(1).unwrap_or(u).split(['/', ':']).next().unwrap_or("").to_ascii_lowercase();
+    let official = match pc.id.as_str() {
+        "deepseek" => "api.deepseek.com",
+        "openrouter" => "openrouter.ai",
+        "moonshot" => "api.moonshot.ai",
+        "moonshot-cn" => "api.moonshot.cn",
+        _ => return false,
+    };
+    seagent_model::accounts::supported(&pc.id) && host(&pc.base_url) == official
+}
+
+/// `ui.keys.balance {provider}`: the provider's own account balance / key credit, fetched now with
+/// the key the runtime would use.
+fn balance(c: &KeyCtx, provider: &str) -> Res {
+    let cfg = fresh(c)?;
+    let vault = disk_vault(c)?;
+    let ps = providers(&cfg, &vault)?;
+    let pc = canonical(&ps, provider)?;
+    if !balance_endpoint(&pc) {
+        return Ok(json!({"provider": pc.id, "supported": false}));
+    }
+    let r = cred_for(&ps, &pc, None).and_then(|src| src.get().map_err(|e| e.message)).and_then(|cr| seagent_model::accounts::fetch(&pc.id, &cr));
+    Ok(match r {
+        Ok(a) => json!({"provider": pc.id, "supported": true, "ok": true, "credits": a.credits, "windows": a.windows, "note": a.plan, "fetched_ms": now_ms()}),
+        Err(e) => json!({"provider": pc.id, "supported": true, "ok": false, "error": short(&vault.redact(&e)), "fetched_ms": now_ms()}),
+    })
 }
 
 /// `ui.chat.models.list {provider?, refresh?}`: per provider, its live models (fresh, cached or
@@ -492,10 +597,10 @@ fn models_list(c: &KeyCtx, only: Option<&str>, refresh: bool) -> Res {
                 (None, Some(e)) if !e.models.is_empty() => ("cache", e.models.clone(), Some(e.fetched_ms)),
                 _ => ("builtin", builtin(&cfg, pc), None),
             };
-            json!({"id": pc.id, "label": label, "source": source, "fetched_ms": at, "error": errors.get(&pc.id), "recommended": recommended(&pc.id, &models), "models": model_rows(&pc.id, &models)})
+            json!({"id": pc.id, "label": label, "source": source, "fetched_ms": at, "error": errors.get(&pc.id), "recommended": recommended(&pc.id, &models), "models": model_rows(&cfg, &pc.id, &models)})
         })
         .collect();
-    Ok(json!({"default": cfg.model.default, "providers": rows, "offline": offline}))
+    Ok(json!({"default": cfg.model.default, "providers": rows, "offline": offline, "prices": prices_status(c)?}))
 }
 
 #[cfg(test)]
@@ -643,6 +748,91 @@ mod tests {
         // A replaced key drops the cached list.
         ok(&dead, "ui.keys.set", json!({"provider": "probe", "key": "sk-live-other-9999"}));
         assert_eq!(row(&ok(&dead, "ui.chat.models.list", json!({"provider": "probe"})), "probe")["source"], "builtin");
+    }
+
+    /// A fake DeepSeek balance endpoint: answers `GET /user/balance` for `Bearer sk-live-good-0001`
+    /// (401 otherwise) and records each request line.
+    fn fake_balance() -> (String, Arc<Mutex<Vec<String>>>) {
+        let l = TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", l.local_addr().unwrap());
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let log = seen.clone();
+        std::thread::spawn(move || {
+            for s in l.incoming() {
+                let Ok(mut s) = s else { continue };
+                let mut r = BufReader::new(s.try_clone().unwrap());
+                let mut line = String::new();
+                let _ = r.read_line(&mut line);
+                let mut auth = String::new();
+                loop {
+                    let mut x = String::new();
+                    if r.read_line(&mut x).is_err() || x.trim().is_empty() {
+                        break;
+                    }
+                    if let Some(v) = x.to_lowercase().strip_prefix("authorization:") {
+                        auth = v.trim().to_string();
+                    }
+                }
+                log.lock().unwrap().push(line.trim().to_string());
+                let (code, body) = if line.starts_with("GET /user/balance ") && auth == "bearer sk-live-good-0001" { (200, r#"{"is_available":true,"balance_infos":[{"currency":"CNY","total_balance":"110.00","granted_balance":"10.00","topped_up_balance":"100.00"}]}"#) } else { (401, r#"{"error":{"message":"Authentication Fails"}}"#) };
+                let _ = write!(s, "HTTP/1.1 {code} X\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}", body.len());
+            }
+        });
+        (base, seen)
+    }
+
+    #[test]
+    fn balances_come_from_the_providers_own_endpoint_and_only_for_its_official_host() {
+        let (origin, seen) = fake_balance();
+        std::env::set_var("SEAGENT_DEEPSEEK_ORIGIN", &origin);
+        let (base, _) = fake_provider();
+        let (t, c) = setup(&base, &format!("api_key_env = \"{ENV}\"\n"));
+        // A provider without a balance endpoint: said plainly, no request.
+        assert_eq!(ok(&c, "ui.keys.balance", json!({"provider": "probe"}))["supported"], false);
+        assert_eq!(row(&ok(&c, "ui.keys.list", json!({})), "probe")["balance"], false);
+        // DeepSeek on its official host: the stored key asks `GET /user/balance`.
+        std::fs::write(t.paths.user_config(), format!("[model]\ndefault = \"deepseek/deepseek-chat\"\n[providers.deepseek]\napi_key_env = \"{ENV}_DS\"\n")).unwrap();
+        ok(&c, "ui.keys.set", json!({"provider": "deepseek", "key": "sk-live-good-0001"}));
+        assert_eq!(row(&ok(&c, "ui.keys.list", json!({})), "deepseek")["balance"], true);
+        let b = ok(&c, "ui.keys.balance", json!({"provider": "deepseek"}));
+        assert_eq!((b["supported"].as_bool(), b["ok"].as_bool()), (Some(true), Some(true)), "{b}");
+        assert_eq!(b["credits"], json!([{"currency": "CNY", "remaining": 110.0, "used": null, "limit": null}]));
+        assert!(!b.to_string().contains("sk-live-good"), "no key in the answer");
+        // A refused key: the provider's error, redacted.
+        ok(&c, "ui.keys.set", json!({"provider": "deepseek", "key": "sk-live-bad-00002"}));
+        let b = ok(&c, "ui.keys.balance", json!({"provider": "deepseek"}));
+        assert_eq!(b["ok"], false);
+        assert!(b["error"].as_str().is_some_and(|e| !e.contains("sk-live-bad")), "{b}");
+        assert_eq!(seen.lock().unwrap().len(), 2);
+        // The same preset pointed at another server (a proxy): its key never goes to the official host.
+        std::fs::write(t.paths.user_config(), format!("[providers.deepseek]\nbase_url = \"{base}\"\napi_key_env = \"{ENV}_DS\"\n")).unwrap();
+        assert_eq!(ok(&c, "ui.keys.balance", json!({"provider": "deepseek"}))["supported"], false);
+        assert_eq!(seen.lock().unwrap().len(), 2, "no request for a proxied provider");
+    }
+
+    #[test]
+    fn prices_say_where_they_come_from() {
+        let (base, _) = fake_provider();
+        let (_t, c) = setup(&base, &format!("api_key_env = \"{ENV}\"\n[prices.\"probe/probe-config\"]\ninput = 1.5\noutput = 4.0\n"));
+        let cfg = fresh(&c).unwrap();
+        assert_eq!(price_of(&cfg, "probe", "probe-config"), Some(json!({"in": 1.5, "out": 4.0, "kind": "config", "source": "config"})));
+        // A model the built-in official-docs snapshots price (unless a models.dev registry is held).
+        let p = price_of(&cfg, "openai", "gpt-6-sol").expect("snapshot price");
+        match p["kind"].as_str() {
+            Some("snapshot") => assert!(p["date"].as_str().is_some_and(|d| d.starts_with("20")), "{p}"),
+            Some("models.dev") => {}
+            other => panic!("unexpected kind {other:?}: {p}"),
+        }
+        assert_eq!(price_of(&cfg, "probe", "no-such-model-xyz"), None);
+        // Picker rows carry their price; the listing carries the source status.
+        let l = ok(&c, "ui.chat.models.list", json!({"provider": "probe"}));
+        assert_eq!(row(&l, "probe")["models"][0]["price"]["kind"], "config");
+        let st = &l["prices"];
+        assert!(st["snapshot"].as_str().is_some_and(|d| d.starts_with("20")), "{st}");
+        for k in ["registry", "fetched_ms", "offline", "auto_refresh", "url", "now_ms"] {
+            assert!(st.get(k).is_some(), "status lacks {k}: {st}");
+        }
+        assert_eq!(st["config_prices"], 1);
     }
 
     #[test]

@@ -37,7 +37,34 @@
   }
 
   let providers = [];
+  let priceInfo = null;
+  let modelPrices = {};
   const current = () => providers.find((p) => p.id === $('provider').value);
+
+  // Prices are looked up on this machine (models.dev price list or the snapshots built into SE
+  // Agent), USD per million tokens, input / output.
+  const fmtPrice = (p) => {
+    const f = (x) => (x >= 100 ? x.toFixed(0) : x >= 0.1 ? x.toFixed(2) : String(+x.toFixed(4)));
+    return '$' + f(p.in) + ' / $' + f(p.out);
+  };
+  function agoLong(ms) {
+    const d = Math.max(0, (Date.now() - ms) / 1000);
+    if (d < 90) return '剛剛';
+    if (d < 5400) return Math.round(d / 60) + ' 分鐘前';
+    if (d < 129600) return Math.round(d / 3600) + ' 小時前';
+    return Math.round(d / 86400) + ' 天前';
+  }
+  function priceLegend() {
+    const el = $('priceLegend');
+    if (!Object.keys(modelPrices).length || !priceInfo) { el.hidden = true; return; }
+    const src = priceInfo.registry
+      ? '價格：models.dev · ' + (priceInfo.fetched_ms ? agoLong(priceInfo.fetched_ms) + '更新' : '已快取')
+      : '價格：內建快照 ' + priceInfo.snapshot + '（尚未連線更新）';
+    el.textContent = src + '　·　美元／每百萬 tokens，輸入 / 輸出';
+    el.title = '價格在本機查表，不是每次向雲端詢問：SE Agent 使用 models.dev 公開價目表（快取在本機，背景更新），沒有網路時用內建的官方文件價格快照。對話的費用＝供應商 API 回報的 token 數 × 這個價格，是估算，不是帳單。';
+    el.className = 'hint price-legend' + (priceInfo.registry ? '' : ' snap');
+    el.hidden = false;
+  }
 
   function syncProvider() {
     const p = current();
@@ -49,6 +76,7 @@
     tested = null;
     say($('testStatus'), '');
     // Before a successful test: the provider's built-in list (the console pickers' offline list).
+    modelPrices = (p && p.prices) || {};
     setModels(p ? p.models || [] : [], p ? p.recommended : '', p ? 'builtin' : 'none');
     // Nothing to type for these: fetch the live list right away.
     if (p && (!p.needs_key || p.has_key)) testProvider(true);
@@ -82,7 +110,10 @@
     const q = $('modelFilter').value.trim().toLowerCase();
     const sel = $('model');
     const shown = modelList.filter((m) => !q || m.toLowerCase().includes(q));
-    const opts = shown.map((m) => Object.assign(document.createElement('option'), { value: m, textContent: m }));
+    const opts = shown.map((m) => {
+      const pr = modelPrices[m];
+      return Object.assign(document.createElement('option'), { value: m, textContent: pr ? m + '　·　' + fmtPrice(pr) : m, title: pr ? fmtPrice(pr) + ' 每百萬 tokens（輸入 / 輸出）' : '' });
+    });
     const other = Object.assign(document.createElement('option'), { value: OTHER, textContent: '其他（自行輸入模型名稱）…', className: 'other' });
     sel.replaceChildren(...opts, other);
     // Tall enough to show a typical provider's whole list at once; longer lists scroll.
@@ -92,6 +123,7 @@
     else if (q && shown.length) sel.value = shown[0];
     else sel.selectedIndex = -1;
     $('modelOtherField').hidden = sel.value !== OTHER;
+    priceLegend();
     $('modelCount').textContent = modelList.length ? (q ? shown.length + ' / ' : '') + modelList.length + ' 個' + (modelSource === 'live' ? '（即時）' : '（內建）') : '';
     const cur = sel.selectedOptions[0];
     if (cur) cur.scrollIntoView({ block: 'nearest' });
@@ -130,6 +162,7 @@
         return;
       }
       say(st, '✓ 連線成功，' + r.count + ' 個模型', 'ok');
+      modelPrices = r.prices || {};
       setModels(r.models || [], r.recommended, 'live');
       // The whole list at once, ready to click.
       $('stepModel').scrollIntoView({ behavior: 'smooth', block: 'start' });
@@ -226,6 +259,7 @@
       return;
     }
     providers = s.providers || [];
+    priceInfo = s.prices || null;
     const sel = $('provider');
     sel.replaceChildren(...providers.map((p) => Object.assign(document.createElement('option'), { value: p.id, textContent: p.label + (p.has_key && p.needs_key ? '（已有金鑰）' : '') })));
     sel.append(Object.assign(document.createElement('option'), { value: '_custom', textContent: '自訂 OpenAI 相容端點' }));

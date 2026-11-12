@@ -1,44 +1,57 @@
 /* seagent 視覺系統：瑞士國際主義（網格、無襯線、靠左對齊、層級靠字級與留白）
-   × 深緋紅底 × 金絲線（1px 金色細線）與四角內凹金星。
-   Web UI、桌面殼與文件頁共用；TUI 以 ANSI truecolor 對應同一組色票（crates/seagent-app/src/tui/theme.rs）。 */
+   × 銀河：近黑到深藍的夜空底 × 金絲線（1px 金色細線）與四角內凹金星。星星一律是金色。
+   Web UI、桌面殼與文件頁共用；TUI 以 ANSI truecolor 對應自己的色票（crates/seagent-app/src/tui/theme.rs）。
+   主題：galaxy（預設，無 data-theme）、crimson（深緋紅，舊預設）、daylight（日光）。 */
 :root {
-  /* 深緋紅：近黑的血紅底，層次只差一點點亮度 */
-  --crimson-950: #0b0105;
-  --crimson-900: #12020a;
-  --crimson-850: #18030d;
-  --crimson-800: #1f0411;
-  --crimson-700: #2a0617;
-  --crimson-600: #3a0820;
-  --crimson-500: #5c0c2c;
-  --crimson-400: #8e1238;
-  --crimson-300: #c41e4a;
-  /* 金：主色只用在動作、選取與星 */
-  --gold-100: #fff3cf;
-  --gold-300: #f1d488;
-  --gold-400: #e7bd5c;
-  --gold-500: #cf9a35;
-  --gold-600: #a2731b;
+  /* 銀河：近黑的夜空，往深藍漸層；層次只差一點點亮度 */
+  --navy-950: #04060d;
+  --navy-900: #070b17;
+  --navy-850: #0a1020;
+  --navy-800: #0e1629;
+  --navy-700: #142036;
+  --navy-600: #1c2c4a;
+  --navy-500: #2a4170;
+  --navy-400: #3d5c9c;
+  /* 金：動作、選取、細線與星 */
+  --gold-100: #fbf1cf;
+  --gold-300: #ecd28c;
+  --gold-400: #d9b44a;
+  --gold-500: #c19a36;
+  --gold-600: #8f6d22;
 
-  --bg: var(--crimson-950);
-  --bg-rail: var(--crimson-900);
-  --surface: var(--crimson-850);
-  --surface-2: var(--crimson-800);
-  --surface-3: var(--crimson-700);
-  --select: var(--crimson-600);
-  --thread: rgba(231, 189, 92, .16);
-  --thread-2: rgba(231, 189, 92, .3);
-  --thread-strong: rgba(231, 189, 92, .62);
-  --text: #f5eaec;
-  --text-2: #c9adb4;
-  --text-3: #8d6e77;
+  --bg: var(--navy-950);
+  --bg-rail: rgba(7, 11, 23, .84);
+  /* 頂欄、黏性標題：蓋在星空上的半透明夜色 */
+  --bg-glass: rgba(5, 8, 17, .97);
+  /* 程式碼、日誌、終端機、遠端畫面的底 */
+  --bg-deep: #03050b;
+  --surface: var(--navy-850);
+  --surface-2: var(--navy-800);
+  --surface-3: var(--navy-700);
+  --select: var(--navy-600);
+  --thread: rgba(217, 180, 74, .15);
+  --thread-2: rgba(217, 180, 74, .28);
+  --thread-strong: rgba(217, 180, 74, .6);
+  --text: #eaeef7;
+  --text-2: #aeb8cf;
+  --text-3: #7f8ba6;
   --accent: var(--gold-400);
-  --accent-ink: #1a0309;
-  --ok: #7fd3a3;
-  --warn: #f0b440;
-  --crit: #ff5468;
-  --info: #9fb9ff;
+  --accent-ink: #0a0d18;
+  --ok: #6fd6a2;
+  --warn: #f5a25a;
+  --crit: #ff6b7f;
+  --info: #8fb6ff;
   --radius: 3px;
-  --shadow: 0 18px 50px rgba(0, 0, 0, .55);
+  --shadow: 0 18px 50px rgba(0, 0, 0, .6);
+  /* 夜空：極淡的星雲 + 三層金色星塵（靜態 SVG，邊長互質所以看不出重複；無動畫）+ 近黑到深藍的底 */
+  --sky:
+    radial-gradient(1100px 760px at 8% -12%, rgba(44, 72, 150, .30), transparent 62%),
+    radial-gradient(900px 680px at 104% 112%, rgba(58, 44, 120, .20), transparent 60%),
+    radial-gradient(700px 420px at 72% 18%, rgba(30, 52, 112, .14), transparent 70%),
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='293' height='293'%3E%3Cg fill='%23e3c46a'%3E%3Ccircle cx='95' cy='44' r='0.7' opacity='0.28'/%3E%3Ccircle cx='157' cy='107' r='0.4' opacity='0.43'/%3E%3Ccircle cx='11' cy='127' r='0.4' opacity='0.28'/%3E%3Ccircle cx='124' cy='242' r='0.4' opacity='0.33'/%3E%3Ccircle cx='184' cy='278' r='0.6' opacity='0.39'/%3E%3Ccircle cx='286' cy='14' r='0.7' opacity='0.35'/%3E%3Ccircle cx='42' cy='35' r='0.5' opacity='0.54'/%3E%3Ccircle cx='53' cy='170' r='0.7' opacity='0.38'/%3E%3Ccircle cx='160' cy='18' r='0.4' opacity='0.32'/%3E%3C/g%3E%3C/svg%3E"),
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='461' height='461'%3E%3Cg fill='%23e3c46a'%3E%3Ccircle cx='314' cy='197' r='0.6' opacity='0.45'/%3E%3Ccircle cx='209' cy='138' r='0.8' opacity='0.49'/%3E%3Ccircle cx='113' cy='265' r='0.7' opacity='0.56'/%3E%3Ccircle cx='336' cy='133' r='0.9' opacity='0.29'/%3E%3Ccircle cx='193' cy='349' r='0.5' opacity='0.42'/%3E%3Ccircle cx='18' cy='308' r='0.8' opacity='0.45'/%3E%3Ccircle cx='404' cy='145' r='0.7' opacity='0.46'/%3E%3Ccircle cx='267' cy='210' r='0.8' opacity='0.58'/%3E%3Cpath d='M219 300.4C219.468 302.532 219.468 302.532 221.6 303C219.468 303.468 219.468 303.468 219 305.6C218.532 303.468 218.532 303.468 216.4 303C218.532 302.532 218.532 302.532 219 300.4Z' opacity='0.47'/%3E%3C/g%3E%3C/svg%3E"),
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='977' height='977'%3E%3Cg fill='%23e3c46a'%3E%3Ccircle cx='685' cy='632' r='1.0' opacity='0.54'/%3E%3Ccircle cx='278' cy='377' r='0.8' opacity='0.26'/%3E%3Ccircle cx='451' cy='164' r='0.6' opacity='0.27'/%3E%3Ccircle cx='751' cy='126' r='0.6' opacity='0.39'/%3E%3Ccircle cx='851' cy='79' r='0.7' opacity='0.44'/%3E%3Cpath d='M855 790.4C855.648 793.352 855.648 793.352 858.6 794C855.648 794.648 855.648 794.648 855 797.6C854.352 794.648 854.352 794.648 851.4 794C854.352 793.352 854.352 793.352 855 790.4Z' opacity='0.67'/%3E%3Cpath d='M276 404.6C276.432 406.568 276.432 406.568 278.4 407C276.432 407.432 276.432 407.432 276 409.4C275.568 407.432 275.568 407.432 273.6 407C275.568 406.568 275.568 406.568 276 404.6Z' opacity='0.54'/%3E%3C/g%3E%3C/svg%3E"),
+    linear-gradient(180deg, #03040a 0%, #050916 46%, #081127 100%);
   /* Latin face first (unchanged look), then the native CJK face of each OS: Windows (JhengHei/YaHei),
      macOS/iOS (PingFang), Linux/Android (Noto CJK / Noto Sans TC / Source Han / WenQuanYi). */
   --font: "Inter", "Helvetica Neue", Helvetica, Arial, system-ui, -apple-system, "Segoe UI",
@@ -54,25 +67,32 @@
   --danger: var(--crit);
   --panel: var(--surface);
   --panel-solid: var(--surface);
+  --crimson-950: var(--bg-deep);
   color-scheme: dark;
 }
 
-:root[data-theme="midnight"] {
-  --bg: #04070f; --bg-rail: #070c18; --surface: #0a1121; --surface-2: #0e172b; --surface-3: #132038; --select: #1a2c4e;
-  --thread: rgba(150, 185, 255, .14); --thread-2: rgba(150, 185, 255, .26); --thread-strong: rgba(170, 200, 255, .6);
-  --text: #e8eefc; --text-2: #a3b3d2; --text-3: #6b7b9a;
-  --gold-100: #e8f0ff; --gold-300: #cfe0ff; --gold-400: #a8c8ff; --gold-500: #6f9bff; --gold-600: #3f6ed6;
-  --accent: var(--gold-400); --accent-ink: #050a16;
-  --crimson-300: #ff7a8e;
+/* 深緋紅：舊的預設，留作選項 */
+:root[data-theme="crimson"] {
+  --crimson-950: #0b0105; --crimson-900: #12020a; --crimson-850: #18030d; --crimson-800: #1f0411; --crimson-700: #2a0617; --crimson-600: #3a0820;
+  --bg: var(--crimson-950); --bg-rail: rgba(18, 2, 10, .86); --bg-glass: rgba(11, 1, 5, .9); --bg-deep: #070003;
+  --surface: var(--crimson-850); --surface-2: var(--crimson-800); --surface-3: var(--crimson-700); --select: var(--crimson-600);
+  --gold-100: #fff3cf; --gold-300: #f1d488; --gold-400: #e7bd5c; --gold-500: #cf9a35; --gold-600: #a2731b;
+  --thread: rgba(231, 189, 92, .16); --thread-2: rgba(231, 189, 92, .3); --thread-strong: rgba(231, 189, 92, .62);
+  --text: #f5eaec; --text-2: #c9adb4; --text-3: #957680;
+  --accent-ink: #1a0309; --ok: #7fd3a3; --warn: #f0b440; --crit: #ff5468; --info: #9fb9ff;
+  --sky: radial-gradient(120% 90% at 28% 8%, #3a0820 0%, #18030d 40%, #0b0105 78%);
 }
+/* 日光：象牙白紙面 × 深藍墨 × 古金 */
 :root[data-theme="daylight"] {
-  --bg: #f6f2ec; --bg-rail: #efe8df; --surface: #fffdf9; --surface-2: #f8f2ea; --surface-3: #efe5d8; --select: #f1dfd6;
-  --thread: rgba(150, 100, 30, .16); --thread-2: rgba(150, 100, 30, .3); --thread-strong: rgba(140, 90, 20, .62);
-  --text: #1c0a0f; --text-2: #6a4e55; --text-3: #9b8389;
-  --gold-100: #6b1022; --gold-300: #7f0f2b; --gold-400: #8e1238; --gold-500: #a8782a; --gold-600: #8a5d14;
-  --accent: #8e1238; --accent-ink: #fff6ee;
-  --ok: #1d7a4f; --warn: #a86400; --crit: #b3122e; --info: #2d56b8;
-  --shadow: 0 14px 40px rgba(80, 40, 20, .16);
+  --bg: #f7f4ee; --bg-rail: #efeae0; --bg-glass: rgba(247, 244, 238, .94); --bg-deep: #fbf9f4;
+  --surface: #fffdf9; --surface-2: #f6f1e7; --surface-3: #ece4d4; --select: #e4dccb;
+  --thread: rgba(140, 104, 30, .18); --thread-2: rgba(140, 104, 30, .32); --thread-strong: rgba(125, 92, 22, .62);
+  --text: #0e1528; --text-2: #46506a; --text-3: #5f677c;
+  --gold-100: #3a2c08; --gold-300: #7a5a12; --gold-400: #8a6614; --gold-500: #a07a24; --gold-600: #b8923a;
+  --accent: #14234a; --accent-ink: #f7f1dd;
+  --ok: #17734a; --warn: #9a5200; --crit: #b3122e; --info: #2d56b8;
+  --shadow: 0 14px 40px rgba(20, 30, 60, .14);
+  --sky: linear-gradient(180deg, #f9f6f0, #f2ede3);
   color-scheme: light;
 }
 
@@ -86,11 +106,17 @@ body {
   font-feature-settings: "tnum" 1, "cv11" 1;
   -webkit-font-smoothing: antialiased;
 }
+/* The sky sits on a fixed layer behind everything: it covers every scroll position, and scrolling
+   never repaints it. */
+body::before { content: ""; position: fixed; inset: 0; z-index: -1; background: var(--sky); pointer-events: none; }
 a { color: var(--gold-300); text-decoration-thickness: 1px; text-underline-offset: 2px; }
 code, pre, .mono { font-family: var(--mono); }
-::selection { background: rgba(231, 189, 92, .32); }
+::selection { background: rgba(217, 180, 74, .32); }
 :focus-visible { outline: 1px solid var(--gold-400); outline-offset: 2px; }
 * { scrollbar-width: thin; scrollbar-color: var(--thread-2) transparent; }
+
+/* 金絲線：一條兩端淡出的 1px 金線（標題下、面板頂） */
+.gold-rule { height: 1px; border: 0; background: linear-gradient(90deg, transparent, var(--thread-strong) 18%, var(--gold-400) 50%, var(--thread-strong) 82%, transparent); }
 
 /* 四角內凹星：以 CSS mask 套用同一個路徑，任何元素都能變成金星 */
 .star {
@@ -102,14 +128,14 @@ code, pre, .mono { font-family: var(--mono); }
           mask: url("star.svg") center / contain no-repeat;
   flex: none;
 }
-.star.glow { filter: drop-shadow(0 0 6px rgba(231, 189, 92, .55)); }
+.star.glow { filter: drop-shadow(0 0 6px rgba(217, 180, 74, .5)); }
 .star.twinkle { animation: twinkle 3.2s ease-in-out infinite; }
 .star.spin { animation: spin 6s linear infinite; }
 .star.pulse { animation: pulse 1.4s ease-in-out infinite; }
 .star.ok { background: var(--ok); }
 .star.warn { background: var(--warn); }
 .star.crit { background: var(--crit); }
-.star.off { background: var(--text-3); }
+.star.off { background: var(--text-3); opacity: .55; }
 @keyframes twinkle { 0%, 100% { transform: scale(.85) rotate(0deg); opacity: .8; } 50% { transform: scale(1.05) rotate(45deg); opacity: 1; } }
 @keyframes spin { to { transform: rotate(360deg); } }
 @keyframes pulse { 0%, 100% { transform: scale(.72); opacity: .6; } 50% { transform: scale(1.1); opacity: 1; } }
@@ -132,31 +158,37 @@ code, pre, .mono { font-family: var(--mono); }
 
 .btn {
   appearance: none; cursor: pointer;
-  display: inline-flex; align-items: center; gap: 6px;
+  display: inline-flex; align-items: center; justify-content: center; gap: 6px;
   border: 1px solid var(--accent);
-  background: var(--accent);
+  background: linear-gradient(180deg, var(--gold-300), var(--gold-400) 55%, var(--gold-500));
   color: var(--accent-ink);
   font: 600 13px/1 var(--font);
-  letter-spacing: .01em;
+  letter-spacing: .01em; white-space: nowrap;
   padding: 8px 14px; border-radius: var(--radius);
-  transition: background .12s ease, border-color .12s ease, color .12s ease;
+  transition: background .12s ease, border-color .12s ease, color .12s ease, box-shadow .12s ease;
 }
-.btn:hover { background: var(--gold-300); border-color: var(--gold-300); }
+.btn:hover { background: var(--gold-300); border-color: var(--gold-300); box-shadow: 0 0 0 3px rgba(217, 180, 74, .14); }
 .btn:active { transform: translateY(1px); }
-.btn:disabled { opacity: .45; cursor: not-allowed; }
+.btn:disabled { opacity: .45; cursor: not-allowed; box-shadow: none; }
 .btn.ghost { background: transparent; color: var(--text); border-color: var(--thread-2); }
-.btn.ghost:hover { border-color: var(--thread-strong); background: var(--surface-2); }
+.btn.ghost:hover { border-color: var(--thread-strong); background: var(--surface-2); color: var(--gold-100); box-shadow: none; }
 .btn.danger { background: transparent; color: var(--crit); border-color: color-mix(in srgb, var(--crit) 55%, transparent); }
-.btn.danger:hover { background: color-mix(in srgb, var(--crit) 14%, transparent); }
-.btn.small { padding: 5px 9px; font-size: 12px; }
+.btn.danger:hover { background: color-mix(in srgb, var(--crit) 14%, transparent); box-shadow: none; }
+.btn.small { padding: 5px 10px; font-size: 12px; }
 .btn.icon { padding: 5px 7px; }
+:root[data-theme="daylight"] .btn:not(.ghost):not(.danger) { background: var(--accent); }
+:root[data-theme="daylight"] .btn:not(.ghost):not(.danger):hover { background: #1f3366; border-color: #1f3366; }
+:root[data-theme="daylight"] .btn.ghost:hover { color: var(--text); }
 
 input:not([type]), input[type=text], input[type=password], input[type=search], input[type=number], input[type=url], select, textarea.cp-area {
   background: var(--bg); border: 1px solid var(--thread-2); border-radius: var(--radius);
   color: var(--text); padding: 7px 10px; font: 13px var(--font);
 }
+input::placeholder, textarea::placeholder { color: var(--text-3); }
 input[type=text], input[type=password], input[type=search], input[type=url] { width: 100%; }
-input:focus, select:focus, textarea:focus { outline: none; border-color: var(--gold-400); }
+input:focus, select:focus, textarea:focus { outline: none; border-color: var(--gold-400); box-shadow: 0 0 0 3px rgba(217, 180, 74, .12); }
+select option { background: var(--surface); color: var(--text); }
+input[type=checkbox], input[type=radio], progress { accent-color: var(--gold-400); }
 
 table.kv { width: 100%; border-collapse: collapse; font-size: 13px; }
 table.kv td, table.kv th { border-bottom: 1px solid var(--thread); padding: 7px 8px; text-align: left; vertical-align: top; }
@@ -169,12 +201,20 @@ table.kv tr:hover td { background: color-mix(in srgb, var(--surface-2) 60%, tran
 .warn { color: var(--warn); }
 .bad, .crit { color: var(--crit); }
 
-/* 背景星空：極少、極淡，只在空白狀態看得到 */
+/* 價格／費用的來源標籤（pages.js、keys.js、chat_menu.js、ops.js） */
+.price-src { display: inline-flex; align-items: center; gap: 6px; font: 11.5px/1.4 var(--font); color: var(--text-3); white-space: nowrap; }
+.price-src::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: var(--ok); flex: none; }
+.price-src.stale::before { background: var(--warn); }
+.price-src.snap::before { background: var(--text-3); }
+.est { border-bottom: 1px dotted var(--text-3); cursor: help; }
+.est-tag { font: 600 9.5px/1 var(--font); letter-spacing: .08em; color: var(--gold-400); border: 1px solid var(--thread-2); border-radius: 2px; padding: 2px 4px; margin-left: 4px; vertical-align: 1px; cursor: help; }
+
+/* 背景金星：極少、極淡，只在空白處看得到；不動（省 CPU） */
 .starfield { position: fixed; inset: 0; pointer-events: none; z-index: 0; overflow: hidden; }
-.starfield .star { position: absolute; opacity: .12; animation: twinkle 7s ease-in-out infinite; }
+.starfield .star { position: absolute; opacity: .22; }
 :root[data-theme="daylight"] .starfield { display: none; }
 
 @media (prefers-reduced-motion: reduce) {
-  .star, .starfield .star { animation: none !important; }
+  .star { animation: none !important; }
   * { transition: none !important; }
 }

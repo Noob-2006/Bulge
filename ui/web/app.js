@@ -30,7 +30,7 @@ const I18N = {
     'login_hint': '輸入 App Server 的 token（<code>seagent app token</code> 會顯示）。', 'connect': '連線', 'remember': '記住這台裝置',
     'slash_hint': '指令 · ↑↓ 選擇、Tab 補齊、Esc 關閉', 'attach': '附加', 'attached': '已附加 {n} 個檔案',
     'too_big': '檔案太大（上限 8 MiB）', 'lang': 'EN', 'lang.name': 'English',
-    'theme': '主題', 'theme.crimson': '深緋紅', 'theme.midnight': '極夜', 'theme.daylight': '日光',
+    'theme': '主題', 'theme.galaxy': '銀河', 'theme.crimson': '深緋紅', 'theme.daylight': '日光',
     'not_a_command': '未知指令：{line}（/help 看清單）', 'local_only': '/{name} 只在終端機有效；這裡改用對應的頁面。',
     'quit_web': '/quit 只關閉終端機；關掉這個分頁即可離開。', 'copied': '已複製。', 'copy': '複製',
     'today': '今天', 'yesterday': '昨天', 'earlier': '更早', 'thinking': '思考中…',
@@ -50,7 +50,7 @@ const I18N = {
     'login_hint': 'Enter the App Server token (shown by <code>seagent app token</code>).', 'connect': 'Connect', 'remember': 'Remember this device',
     'slash_hint': 'Commands · ↑↓ pick, Tab complete, Esc close', 'attach': 'Attach', 'attached': '{n} file(s) attached',
     'too_big': 'File too large (8 MiB max)', 'lang': '中文', 'lang.name': '繁體中文',
-    'theme': 'Theme', 'theme.crimson': 'Crimson', 'theme.midnight': 'Midnight', 'theme.daylight': 'Daylight',
+    'theme': 'Theme', 'theme.galaxy': 'Galaxy', 'theme.crimson': 'Crimson', 'theme.daylight': 'Daylight',
     'not_a_command': 'Unknown command: {line} (see /help)', 'local_only': '/{name} only works in a terminal; use the matching page here.',
     'quit_web': '/quit closes the terminal UI; just close this tab to leave.', 'copied': 'Copied.', 'copy': 'Copy',
     'today': 'Today', 'yesterday': 'Yesterday', 'earlier': 'Earlier', 'thinking': 'Thinking…',
@@ -83,16 +83,18 @@ function applyI18n() {
   document.title = 'SE Agent';
 }
 // ── themes: the shell's palette is theme.css; these variables re-tint it ──
-const THEMES = ['crimson', 'midnight', 'daylight'];
+// Galaxy (black → deep navy, gold) is the default; the old blue "midnight" theme folds into it.
+const THEMES = ['galaxy', 'crimson', 'daylight'];
+const THEME_BG = { galaxy: '#04060d', crimson: '#0b0105', daylight: '#f7f4ee' };
 function setTheme(name, save) {
-  const n = THEMES.includes(name) ? name : 'crimson';
-  if (n === 'crimson') document.documentElement.removeAttribute('data-theme');
+  const n = THEMES.includes(name) ? name : 'galaxy';
+  if (n === 'galaxy') document.documentElement.removeAttribute('data-theme');
   else document.documentElement.setAttribute('data-theme', n);
   if (save !== false) store.set('seagent.theme', n);
   const sel = $('theme');
   if (sel) sel.value = n;
   const meta = document.querySelector('meta[name=theme-color]');
-  if (meta) meta.content = n === 'daylight' ? '#f6f2ec' : n === 'midnight' ? '#04070f' : '#0b0105';
+  if (meta) meta.content = THEME_BG[n];
 }
 
 // ── toasts ──
@@ -256,7 +258,6 @@ async function runAction(a) {
     s.style.left = Math.random() * 100 + '%';
     s.style.top = Math.random() * 100 + '%';
     s.style.setProperty('--size', 4 + Math.random() * 8 + 'px');
-    s.style.animationDelay = -Math.random() * 6 + 's';
     f.appendChild(s);
   }
 })();
@@ -492,6 +493,8 @@ const SEAGENT = '<span class="star" style="--size:9px"></span> SE Agent<button t
 
 function renderEvent(ev) {
   const k = ev.type;
+  // A new conversation shows the welcome card until its first message arrives.
+  if (k === 'message') { const em = $('log').querySelector(':scope > .empty'); if (em) em.remove(); }
   if (k === 'message') {
     const m = ev.message;
     if (m.role === 'user') {
@@ -741,6 +744,34 @@ function onPending(p) {
   else toast(`${p.kind === 'approval' ? t('approval', { gate: p.gate }) : t('ask')} · ${sessTitle(p.session)}`);
   pendingChanged();
 }
+// The server has no "resolved" notification: an item answered elsewhere (another client, the
+// CLI, a chat platform, a timeout) just leaves `gate.pending`. Reconcile against it whenever the
+// session it belongs to moves on, and every few seconds while a card is open and the page is
+// visible, so a stale card never lingers.
+let pendingSyncTimer = null;
+async function syncPending() {
+  if (!S.arp || !S.pending.size) return;
+  let list;
+  try { list = await S.arp.call('gate.pending'); } catch { return; }
+  const live = new Set((Array.isArray(list) ? list : []).map((p) => p.id));
+  let gone = false;
+  for (const [id, e] of S.pending) {
+    if (live.has(id)) continue;
+    if (e.box) e.box.remove();
+    S.pending.delete(id);
+    gone = true;
+  }
+  for (const p of list || []) if (!S.pending.has(p.id)) onPending(p);
+  if (gone) pendingChanged();
+}
+function syncPendingSoon() {
+  if (!S.pending.size) return;
+  clearTimeout(pendingSyncTimer);
+  pendingSyncTimer = setTimeout(syncPending, 250);
+}
+setInterval(() => { if (S.pending.size && !document.hidden) syncPending(); }, 5000);
+document.addEventListener('visibilitychange', () => { if (!document.hidden) syncPendingSoon(); });
+
 // After switching sessions: show that session's open items in the dock.
 function redrawDock() {
   $('pending').innerHTML = '';
@@ -749,6 +780,68 @@ function redrawDock() {
     if (!e.p.session || e.p.session === S.current) { e.box = pendingBox(e.p); $('pending').appendChild(e.box); }
   }
 }
+
+// ── prices: always looked up on this machine (the config's [prices] → the models.dev price list,
+// refreshed in the background → official-docs snapshots built into seagent); a cost is the token
+// counts the provider's API reported × that price. Every place that shows a price or a cost says
+// which source and how fresh (ui.prices.status, crates/seagent/src/ops/model_keys.rs). ──
+const TL = (zh, en) => (LANG === 'en' ? en : zh);
+const PRICES = { st: null, at: 0 };
+async function pricesStatus(force) {
+  if (force || !PRICES.st || Date.now() - PRICES.at > 60000) {
+    try { PRICES.st = await S.arp.call('ui.prices.status'); PRICES.at = Date.now(); } catch { /* an older server */ }
+  }
+  return PRICES.st;
+}
+function agoLong(ms) {
+  const d = Math.max(0, (Date.now() - ms) / 1000);
+  if (d < 90) return TL('剛剛', 'just now');
+  if (d < 5400) return TL(`${Math.round(d / 60)} 分鐘前`, `${Math.round(d / 60)} min ago`);
+  if (d < 129600) return TL(`${Math.round(d / 3600)} 小時前`, `${Math.round(d / 3600)} h ago`);
+  return TL(`${Math.round(d / 86400)} 天前`, `${Math.round(d / 86400)} days ago`);
+}
+const PRICE_HOW = () => TL('價格在本機查表，不是每次向雲端詢問：設定檔 [prices] 優先，其次是 models.dev 公開價目表（下載後快取在本機，每 4 小時於背景更新），最後是 SE Agent 內建的官方文件價格快照。',
+  'Prices are looked up on this machine, not asked from the cloud per call: the config\'s [prices] first, then the public models.dev price list (cached locally, refreshed in the background every 4 hours), then the official-docs price snapshots built into SE Agent.');
+const EST_TIP = () => TL('估算：供應商 API 回報的 token 數 × 列表價格，在本機計算。不是供應商帳單；快取折扣、優惠、匯率與稅可能讓實際金額不同。',
+  'Estimate: the token counts the provider\'s API reported × the listed price, computed on this machine. Not the provider\'s bill; cache discounts, promotions, exchange rates and tax can make the real amount differ.');
+// { text, cls, tip } describing where prices come from right now.
+function priceSource(st) {
+  if (!st) return null;
+  let host = 'models.dev';
+  try { host = new URL(st.url).host || host; } catch { /* keep */ }
+  let text, cls = '';
+  if (st.registry) {
+    text = TL(`價格：${host} · ${st.fetched_ms ? agoLong(st.fetched_ms) + '更新' : '已快取'}`, `Prices: ${host} · ${st.fetched_ms ? 'updated ' + agoLong(st.fetched_ms) : 'cached'}`);
+    if (st.stale || st.last_error) cls = 'stale';
+  } else {
+    text = TL(`價格：內建快照 ${st.snapshot}（尚未連線更新）`, `Prices: built-in snapshot ${st.snapshot} (not updated online yet)`);
+    cls = 'snap';
+  }
+  if (st.config_prices) text += TL(` · 設定檔自訂 ${st.config_prices} 筆`, ` · ${st.config_prices} set in config`);
+  let tip = PRICE_HOW();
+  if (st.offline) tip += '\n' + TL('目前是離線模式，不會連線更新價格。', 'Offline mode: prices are not updated online.');
+  else if (st.auto_refresh === false) tip += '\n' + TL('自動更新已關閉（[pricing] auto_refresh = false）。', 'Automatic refresh is off ([pricing] auto_refresh = false).');
+  if (st.last_error) tip += '\n' + TL('上次更新失敗：', 'Last refresh failed: ') + st.last_error;
+  return { text, cls, tip };
+}
+function priceSrcHtml(st) {
+  const s = priceSource(st);
+  return s ? `<span class="price-src ${s.cls}" title="${esc(s.tip)}">${esc(s.text)}</span>` : '';
+}
+// Dollars without hiding small amounts: $0.0030 is not $0.00.
+function fmtUsd(x) { x = +x || 0; return x === 0 ? '0.00' : x < 0.01 ? x.toFixed(4) : x < 1 ? x.toFixed(3) : x.toFixed(2); }
+function estTag() { return `<span class="est-tag" title="${esc(EST_TIP())}">${esc(TL('估算', 'EST.'))}</span>`; }
+// USD per million tokens, input / output: "$0.27 / $1.10".
+function fmtPrice(p) {
+  if (!p) return '';
+  const f = (x) => (x >= 100 ? x.toFixed(0) : x >= 0.1 ? x.toFixed(2) : String(+x.toFixed(4)));
+  return `$${f(p.in)} / $${f(p.out)}`;
+}
+function priceKind(p) {
+  if (!p) return '';
+  return p.kind === 'config' ? TL('設定檔自訂', 'set in config') : p.kind === 'snapshot' ? TL(`內建快照 ${p.date || ''}`, `built-in snapshot ${p.date || ''}`).trim() : 'models.dev';
+}
+function priceTitle(p) { return p ? TL(`每百萬 tokens：輸入 / 輸出（美元）· 來源：${priceKind(p)}`, `Per million tokens, input / output (USD) · source: ${priceKind(p)}`) : ''; }
 
 // ── conversations (rail) ──
 function sessTitle(id) { const s = S.sessions.find((x) => x.id === id); return s ? (s.title || s.id) : id; }
@@ -815,6 +908,7 @@ async function openSession(id) {
   const s = S.sessions.find((x) => x.id === id);
   setStatus(!!(s && s.running));
   $('modelChip').textContent = (s && s.model) || (S.models && S.models.default) || '';
+  if (s && s.messages === 0) emptyChat();
   if (S.sub) { S.arp.call('unsubscribe', { subscription: S.sub }).catch(() => {}); }
   S.sub = S.arp.next;
   S.arp.call('subscribe', { id, from_seq: 0 }).catch((e) => addMsg('notice err', '', esc(e.message)));
@@ -988,6 +1082,8 @@ async function start(token) {
   S.arp.on('event', (p) => {
     if (p.subscription === S.globalSub) {
       if (p.event && (p.event.type === 'turn_end' || p.event.type === 'turn_start' || p.event.type === 'header')) loadSessions();
+      // A session with an open card moved on (tool ran, turn ended): its card may be resolved.
+      if (S.pending.size && [...S.pending.values()].some((e) => !e.p.session || e.p.session === p.session)) syncPendingSoon();
       if (typeof opsEvent === 'function') opsEvent(p);
       return;
     }
@@ -1103,7 +1199,7 @@ $('file').onchange = (e) => { addFiles(e.target.files); e.target.value = ''; };
 $('lang').onclick = () => { setLang(LANG === 'en' ? 'zh-Hant' : 'en'); $('lang').textContent = t('lang'); renderSessions(); if (S.view && S.view !== 'page') showView(S.view, { keepHash: true }); };
 $('theme').onchange = (e) => setTheme(e.target.value);
 setLang(LANG, false);
-setTheme(store.get('seagent.theme') || 'crimson', false);
+setTheme(store.get('seagent.theme') || 'galaxy', false);
 $('lang').textContent = t('lang');
 function autosize() { const ta = $('input'); ta.style.height = 'auto'; ta.style.height = Math.min(ta.scrollHeight, innerHeight * 0.4) + 'px'; }
 $('newSession').onclick = newSession;
@@ -1133,6 +1229,9 @@ $('showSettings').onclick = () => showPanel(t('settings'), async () => {
   const tools = await S.arp.call('tools.list');
   return `<h3>模型</h3><table class="kv">${row(['預設模型', `<code>${esc(m.default)}</code>`])}${row(['備援', esc((m.fallback || []).join(', ') || '—')])}${row(['輔助模型', `<code>${esc(m.aux || '—')}</code>`])}${row(['工具', String(tools.length)])}</table>
     <h3>連線</h3><p class="dim">技能、MCP、外掛、聊天頻道、Webhook 與代理都在這裡設定。</p><p><button class="btn small" id="openConnections">開啟連線設定</button></p>
+    <h3>${esc(TL('價格與費用', 'Prices and costs'))}</h3><p id="priceSrc">${priceSrcHtml(await pricesStatus(true))}</p>
+    <p class="dim">${esc(PRICE_HOW())} ${esc(TL('畫面上的費用都是估算：供應商 API 回報的 token 數 × 價格。帳戶實際餘額請看「API 金鑰」頁。', 'Every cost shown is an estimate: tokens reported by the provider API × price. For real account balances see the API keys page.'))}</p>
+    <p><button class="btn ghost small" id="pricesRefresh">${esc(TL('立即更新價格', 'Refresh prices now'))}</button> <button class="btn ghost small" id="openKeys" data-read>${esc(TL('API 金鑰與餘額', 'API keys and balances'))}</button> <span class="faint" id="pricesNote"></span></p>
     <h3>這台裝置</h3>
     <p><label class="dim">新對話的工作目錄</label><input type="text" id="wsInput" value="${esc(store.get('seagent.workspace') || '')}" placeholder="（伺服器預設）"></p>
     ${(S.settingsPanels || []).length ? '<h3>外掛設定</h3>' : ''}${(S.settingsPanels || []).map(([p, u], i) => `<p><button class="btn ghost small" data-panel="${i}">${esc(u.title || u.id)}（${esc(p)}）</button></p>`).join('')}
@@ -1140,6 +1239,20 @@ $('showSettings').onclick = () => showPanel(t('settings'), async () => {
 }, () => {
   for (const b of $('panelBody').querySelectorAll('[data-panel]')) { const [p, u] = S.settingsPanels[+b.dataset.panel]; b.onclick = () => openPluginPanel(p, u); }
   if ($('openConnections')) $('openConnections').onclick = () => window.openConnections && window.openConnections();
+  if ($('openKeys')) $('openKeys').onclick = () => openPage('apikeys');
+  if ($('pricesRefresh')) $('pricesRefresh').onclick = async () => {
+    const b = $('pricesRefresh');
+    b.disabled = true;
+    $('pricesNote').textContent = TL('向 models.dev 下載價目表…', 'Downloading the price list from models.dev…');
+    let r = null;
+    try { r = await S.arp.call('ui.prices.refresh'); } catch (e) { $('pricesNote').textContent = e.message; }
+    b.disabled = false;
+    if (!r) return;
+    PRICES.st = r; PRICES.at = Date.now();
+    $('priceSrc').innerHTML = priceSrcHtml(r);
+    $('pricesNote').textContent = r.ok ? (r.changed ? TL(`已更新：${r.models} 個模型的價格`, `Updated: prices for ${r.models} models`) : TL('價目表沒有變動', 'The price list has not changed')) : TL('更新失敗：', 'Refresh failed: ') + (r.error || '');
+    $('pricesNote').className = r.ok ? 'ok' : 'bad';
+  };
   // CSP forbids inline handlers: bind after rendering.
   $('wsInput').onchange = (e) => store.set('seagent.workspace', e.target.value);
   $('logout').onclick = () => { store.del('seagent.token'); location.reload(); };

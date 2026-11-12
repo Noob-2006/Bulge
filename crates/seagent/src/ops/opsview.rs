@@ -215,7 +215,9 @@ pub fn status(c: &UiCtx) -> Value {
         let cost: f64 = rows.values().map(|r| r.cost).sum();
         let tokens: u64 = rows.values().map(|r| r.input + r.output).sum();
         let calls: u64 = rows.values().map(|r| r.calls).sum();
-        json!({"cost_usd": (cost * 10_000.0).round() / 10_000.0, "tokens": tokens, "calls": calls})
+        // Calls whose model has no price anywhere: their cost is unknown, not $0.
+        let unpriced: u64 = rows.values().filter(|r| !r.priced).map(|r| r.calls).sum();
+        json!({"cost_usd": (cost * 10_000.0).round() / 10_000.0, "tokens": tokens, "calls": calls, "unpriced_calls": unpriced})
     };
     let host = host(c, running_ids.len(), now);
     let series: Vec<Value> = sampler().lock().map(|g| g.series.iter().cloned().collect()).unwrap_or_default();

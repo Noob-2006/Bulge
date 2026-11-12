@@ -188,8 +188,10 @@ fn real_webui_pages_buttons_and_rbac() {
     p.eval("document.getElementById('lang').click()");
     assert_eq!(p.eval("document.getElementById('newSession').textContent"), json!("+ New chat"));
     p.eval("document.getElementById('lang').click()");
-    p.eval("(() => { const s = document.getElementById('theme'); s.value = 'midnight'; s.dispatchEvent(new Event('change')); })()");
-    assert_eq!(p.eval("document.documentElement.getAttribute('data-theme')"), json!("midnight"));
+    // Galaxy is the default palette (no data-theme); the picker switches to the others.
+    assert_eq!(p.eval("document.getElementById('theme').value"), json!("galaxy"));
+    p.eval("(() => { const s = document.getElementById('theme'); s.value = 'crimson'; s.dispatchEvent(new Event('change')); })()");
+    assert_eq!(p.eval("document.documentElement.getAttribute('data-theme')"), json!("crimson"));
     let errs = p.take_errors();
     assert!(errs.is_empty(), "errors while using the main buttons: {errs:#?}");
 
