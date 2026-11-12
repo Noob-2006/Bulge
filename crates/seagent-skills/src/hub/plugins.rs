@@ -1118,6 +1118,11 @@ pub fn run_auto_update(cfg: &Config, paths: &Paths, now: u64) -> Result<String, 
     if !auto_update_due(cfg, paths, now) {
         return Ok("plugin auto-update not due yet".into());
     }
+    // An unattended pass is an automatic call: none offline (no stamp either, so it runs once
+    // seagent is back online).
+    if let Err(e) = seagent_net::http::ensure_automatic_allowed("the plugin auto-update") {
+        return Ok(e);
+    }
     let pm = Plugins::new(cfg, paths);
     let out = pm.auto_update();
     let _ = fs::create_dir_all(&paths.data);
@@ -1737,6 +1742,11 @@ mod tests {
         let mut cfg2 = Config::default();
         cfg2.automation.insert("plugin_auto_update_hours".into(), toml::Value::Integer(24));
         assert!(auto_update_due(&cfg2, &p, 1000), "no stamp yet");
+        // Offline: the unattended pass does not run (nothing fetched, nothing stamped).
+        let off = seagent_net::http::with_no_background_fetch(|| run_auto_update(&cfg2, &p, 1000).unwrap());
+        assert!(off.contains("offline mode") && off.contains("not fetched automatically"), "{off}");
+        assert!(std::fs::read_to_string(pm.root().join("autoplug/run.sh")).unwrap().contains("v1"), "offline did not update");
+        assert!(auto_update_due(&cfg2, &p, 1000), "and did not stamp");
         let out = run_auto_update(&cfg2, &p, 1000).unwrap();
         assert!(out.contains("updated `autoplug`"), "{out}");
         assert!(std::fs::read_to_string(pm.root().join("autoplug/run.sh")).unwrap().contains("v2"));

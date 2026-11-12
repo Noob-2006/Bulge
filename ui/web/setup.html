@@ -48,10 +48,21 @@
   .setup .status { min-height: 1.4em; font-size: 13px; }
   .setup .mpick { border: 1px solid var(--thread-2); border-radius: var(--radius); background: var(--surface); }
   .setup .mpick input[type=search] { border: 0; border-bottom: 1px solid var(--thread); border-radius: var(--radius) var(--radius) 0 0; font-size: 13px; padding: 7px 11px; background: transparent; }
-  .setup .mpick select { border: 0; border-radius: 0 0 var(--radius) var(--radius); padding: 4px 0; font: 13.5px/1.5 var(--mono); background: transparent; overflow-y: auto; }
-  .setup .mpick select option { padding: 4px 11px; }
-  .setup .mpick select option:checked { background: var(--surface-2); color: var(--text); box-shadow: inset 2px 0 0 var(--gold-400); }
-  .setup .mpick select option.other { font-family: var(--font); color: var(--text-3); font-size: 12.5px; }
+  /* The model list: the console picker's columns — name | context | input / output price | price source. */
+  .setup .mhead, .setup .mrow { display: grid; grid-template-columns: minmax(0, 1fr) 64px 132px 112px; gap: 10px; align-items: baseline; padding: 4px 11px; }
+  .setup .mhead { font: 600 10px var(--font); letter-spacing: .1em; text-transform: uppercase; color: var(--text-3); border-bottom: 1px solid var(--thread); }
+  .setup .mhead span:nth-child(n+2), .setup .mrow span:nth-child(n+2) { text-align: right; }
+  .setup .mlist { max-height: 384px; overflow-y: auto; padding: 4px 0; outline: none; }
+  .setup .mrow { font: 13px/1.5 var(--mono); color: var(--text-2); cursor: pointer; }
+  .setup .mrow span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .setup .mrow .mn { color: var(--text); }
+  .setup .mrow .mc, .setup .mrow .ms { color: var(--text-3); font-size: 11.5px; }
+  .setup .mrow .mp { color: var(--gold-300); font-size: 12px; }
+  .setup .mrow:hover { background: var(--surface-2); }
+  .setup .mrow[aria-selected="true"] { background: var(--surface-2); box-shadow: inset 2px 0 0 var(--gold-400); }
+  .setup .mlist:focus .mrow[aria-selected="true"] { box-shadow: inset 2px 0 0 var(--gold-400), inset 0 0 0 1px var(--thread-2); }
+  .setup .mrow.other .mn { font-family: var(--font); color: var(--text-3); font-size: 12.5px; }
+  @media (max-width: 620px) { .setup .mhead, .setup .mrow { grid-template-columns: minmax(0, 1fr) 96px; } .setup .mhead span:nth-child(2), .setup .mhead span:nth-child(4), .setup .mrow .mc, .setup .mrow .ms { display: none; } }
   .setup label .count { color: var(--text-3); font-size: 11.5px; margin-left: 6px; }
   .setup .price-legend { display: flex; gap: 6px; align-items: baseline; cursor: help; }
   .setup .price-legend::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: var(--ok); flex: none; transform: translateY(-1px); }
@@ -100,7 +111,8 @@
   <section id="blocked" class="notice" hidden>
     <h2>無法使用設定精靈</h2>
     <p id="blockedReason" class="error"></p>
-    <p class="hint">在主機上執行 <code>seagent setup link</code> 取得新的一次性連結；設定已完成時用 <code>seagent app open</code> 開啟主控台。</p>
+    <p class="hint" id="blockedHow">在主機上執行 <code>seagent setup link</code> 取得新的一次性連結；設定已完成時用 <code>seagent app open</code> 開啟主控台。</p>
+    <div class="row" id="blockedActions" hidden><button type="button" id="blockedConsole">從主控台重新設定</button></div>
   </section>
 
   <form id="wizard" hidden novalidate>
@@ -127,10 +139,11 @@
 
     <fieldset id="stepModel">
       <legend>02　預設模型</legend>
-      <label for="model">選擇模型 <span class="count" id="modelCount"></span></label>
+      <label for="modelFilter">選擇模型 <span class="count" id="modelCount"></span></label>
       <div class="mpick">
         <input id="modelFilter" type="search" placeholder="篩選模型…" autocomplete="off" spellcheck="false" aria-label="篩選模型" aria-controls="model">
-        <select id="model" name="model" size="10" required></select>
+        <div class="mhead" aria-hidden="true"><span>模型</span><span>Context</span><span>輸入 / 輸出</span><span>價格來源</span></div>
+        <div id="model" class="mlist" role="listbox" tabindex="0" aria-label="模型"></div>
       </div>
       <div id="modelOtherField" hidden>
         <label for="modelOther">模型名稱（清單裡沒有的）</label>

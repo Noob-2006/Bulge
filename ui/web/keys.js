@@ -43,15 +43,14 @@ PAGES.apikeys = { get title() { return tt('API 金鑰', 'API keys'); }, group: '
   KP.list = ps;
   const res = (id) => { const x = KP.results[id]; return x ? `<div class="res ${x.ok ? 'ok' : 'bad'}">${x.ok ? `✓ ${esc(tt(`可用：${x.models} 個模型`, `works: ${x.models} models`))}${x.sample && x.sample.length ? ' · ' + esc(x.sample.join(', ')) : ''} <span class="faint">${x.ms} ms</span>` : `✗ ${esc(x.error || '')}`}</div>` : ''; };
   const models = (id) => { const m = KP.models[id]; return m ? `<div class="models">${esc(srcLabel(m))}${m.fetched_ms ? ' · ' + esc(new Date(m.fetched_ms).toLocaleString()) : ''}${m.error ? ' · ' + esc(m.error) : ''}\n${esc((m.models || []).map((x) => x.id).join('\n'))}</div>` : ''; };
-  const warn = (p) => [
-    p.env_override ? `<div class="res bad">${esc(tt(`環境變數 ${p.env_override} 會優先於 vault 的值`, `$${p.env_override} in the environment wins over the vault value`))}</div>` : '',
-    p.plaintext_in_config ? `<div class="res bad">${esc(tt('設定檔裡有明文金鑰；在這裡儲存會把它移到 vault 並從設定檔刪除', 'A plaintext key is in the config; saving here moves it to the vault and removes it from the config'))}</div>` : '',
-  ].join('');
+  const warn = (p) => p.plaintext_in_config ? `<div class="res bad">${esc(tt('設定檔裡有明文金鑰；在這裡儲存會把它移到 vault 並從設定檔刪除', 'A plaintext key is in the config; saving here moves it to the vault and removes it from the config'))}</div>` : '';
+  // Only set by the daemon when an environment variable really hides a key stored in the vault.
+  const envWins = (p) => p.env_override ? `<br><span class="kp-envwin" title="${esc(tt(`環境變數 ${p.env_override} 會優先於 vault 裡的金鑰；要改用 vault 的值，請移除這個環境變數。`, `$${p.env_override} in the environment wins over the key stored in the vault; unset it to use the vault value.`))}">⚠ ${esc(tt(`$${p.env_override} 蓋過 vault`, `$${p.env_override} overrides vault`))}</span>` : '';
   const rows = has.map((p) => row([
     `<strong>${esc(p.label)}</strong><br><code>${esc(p.id)}</code>`,
     `<code>${esc(p.name)}</code>`,
     `<span class="masked">${esc(p.masked || '—')}</span>`,
-    `${esc(kpSource(p.source))}${p.models_cached ? `<br><span class="faint">${esc(tt(`${p.models_cached} 個模型（快取）`, `${p.models_cached} models cached`))}</span>` : ''}`,
+    `${esc(kpSource(p.source))}${envWins(p)}${p.models_cached ? `<br><span class="faint">${esc(tt(`${p.models_cached} 個模型（快取）`, `${p.models_cached} models cached`))}</span>` : ''}`,
     kpBalance(p),
     `<div class="acts"><button class="btn ghost small" data-test="${esc(p.id)}">${esc(tt('測試', 'Test'))}</button><button class="btn ghost small" data-read data-models="${esc(p.id)}">${esc(tt('模型', 'Models'))}</button><button class="btn ghost small" data-edit="${esc(p.id)}">${esc(p.in_vault ? tt('更換', 'Replace') : tt('存入 vault', 'Store in vault'))}</button>${p.in_vault || p.plaintext_in_config ? `<button class="btn ghost small" data-del="${esc(p.id)}">${esc(tt('刪除', 'Delete'))}</button>` : ''}</div>
       ${KP.open === p.id ? `<div class="edit"><input type="password" data-key="${esc(p.id)}" autocomplete="new-password" spellcheck="false" placeholder="${esc(tt('新的金鑰', 'New key'))}"><button class="btn ghost small" data-trynew="${esc(p.id)}">${esc(tt('先測試', 'Test first'))}</button><button class="btn small" data-save="${esc(p.id)}">${esc(tt('儲存', 'Save'))}</button><button class="btn ghost small" data-cancel>${esc(tt('取消', 'Cancel'))}</button></div>` : ''}

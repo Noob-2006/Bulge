@@ -31,10 +31,10 @@ pub struct Ux {
 }
 
 fn fg(c: (u8, u8, u8)) -> String {
-    format!("\x1b[38;2;{};{};{}m", c.0, c.1, c.2)
+    super::colour::fg(c)
 }
 fn bg(c: (u8, u8, u8)) -> String {
-    format!("\x1b[48;2;{};{};{}m", c.0, c.1, c.2)
+    super::colour::bg(c)
 }
 
 impl Ux {

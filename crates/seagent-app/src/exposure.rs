@@ -371,6 +371,8 @@ impl Scope {
 
 const ADMIN_PREFIXES: &[&str] = &[
     "config.", "plugin.", "plugins.", "daemon.", "secret.", "secrets.", "vault.", "hook.", "hooks.", "skill.", "skills.", "provider.", "providers.", "channel.", "channels.", "node.", "nodes.", "device.", "devices.", "auth.", "policy.", "system.", "backup.", "view.vm.",
+    // The setup wizard over ARP (its re-run mode): status reveals the whole configuration.
+    "setup.",
 ];
 const APPROVE_METHODS: &[&str] = &["gate.answer", "approval.answer", "approvals.answer", "question.answer", "session.review.set"];
 const READ_METHODS: &[&str] = &[
@@ -380,7 +382,7 @@ const WRITE_METHODS: &[&str] = &[
     "session.create", "session.submit", "session.command", "session.interrupt", "goal.start", "goal.stop", "goal.cancel", "schedule.run", "view.browser.input", "view.desktop.takeover", "view.desktop.handback", "view.desktop.input", "view.novnc", "chat.send", "message.send",
     // The console's conversation menu / settings / model switch (own conversations only for
     // non-admin callers: crate::chat_scope). `ui.chat.purge` (permanent) stays admin.
-    "ui.chat.meta.set", "ui.chat.read", "ui.chat.section", "ui.chat.fork", "ui.chat.delete", "ui.chat.restore", "ui.chat.settings.set", "ui.chat.export",
+    "ui.chat.meta.set", "ui.chat.read", "ui.chat.section", "ui.chat.fork", "ui.chat.delete", "ui.chat.restore", "ui.chat.settings.set", "ui.chat.export", "ui.chat.models.prefs",
 ];
 /// Suffixes that only ever report state (`surfaces.list`, `logs.tail`, `usage.status` …).
 const READ_SUFFIXES: &[&str] = &[".list", ".get", ".state", ".history", ".status", ".show", ".info", ".search", ".query", ".view", ".tail", ".describe"];

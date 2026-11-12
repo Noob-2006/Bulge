@@ -77,8 +77,25 @@
 .cm-picker-prices { padding: 6px 10px 0; border-top: 1px solid var(--thread); }
 .cm-picker-prices:empty { display: none; }
 .cm-picker-prices + .cm-picker-foot { border-top: 0; }
-.cm-picker-foot { display: flex; justify-content: space-between; gap: 8px; padding: 6px 8px; border-top: 1px solid var(--thread); font-size: 11.5px; }
-@media (max-width: 600px) { .cm-picker { width: auto; } .cm-picker-list { max-height: 50vh; } }
+.cm-picker-foot { display: flex; justify-content: space-between; align-items: center; gap: 8px; padding: 6px 8px; border-top: 1px solid var(--thread); font-size: 11.5px; }
+.cm-picker-foot [data-status] { flex: 1; min-width: 0; }
+/* Rows: pin star | name | context | price, in aligned columns; vendor groups fold. */
+.cm-picker { width: min(540px, calc(100vw - 16px)); }
+.cm-picker .mp-row { gap: 8px; padding: 4px 10px 4px 4px; min-height: 30px; }
+.cm-picker .mp-row .sub.ctx { margin-left: auto; min-width: 40px; text-align: right; }
+.cm-picker .mp-row .sub.price { margin-left: 0; min-width: 100px; text-align: right; }
+.cm-picker .mp-row.cur { box-shadow: inset 2px 0 0 var(--gold-400); color: var(--text); }
+.cm-picker .mp-row:focus { outline: none; }
+.mp-pin { flex: none; width: 22px; height: 22px; border: 0; background: none; color: var(--text-3); cursor: pointer; font-size: 13px; line-height: 1; border-radius: var(--radius); opacity: .45; }
+.mp-row:hover .mp-pin, .mp-row.on .mp-pin { opacity: 1; }
+.mp-pin.on { color: var(--gold-400); opacity: 1; }
+.mp-pin:hover { color: var(--gold-300); background: var(--surface-3); }
+.cm-picker .mp-vendor { min-height: 26px; padding: 3px 10px 3px 6px; font: 11.5px var(--mono); color: var(--text-3); position: sticky; top: -4px; background: var(--surface); z-index: 1; }
+.cm-picker .mp-vendor .ic { width: 12px; }
+.cm-picker .mp-vendor:hover, .cm-picker .mp-vendor.on { color: var(--text); background: var(--surface-2); }
+.cm-picker .mp-sec span:first-child { color: var(--gold-300); }
+.cm-picker-foot .mp-keys { white-space: nowrap; }
+@media (max-width: 600px) { .cm-picker { width: auto; } .cm-picker-list { max-height: 50vh; } .cm-picker-foot .mp-keys { display: none; } .cm-picker .mp-row .sub.price { min-width: 0; } }
 
 /* ── per-conversation settings dialog ── */
 dialog.modal.cm-settings { box-sizing: border-box; width: min(640px, calc(100vw - 24px)); max-width: none; max-height: calc(100vh - 32px); overflow-y: auto; }

@@ -30,8 +30,18 @@ Loopback always goes direct. Raw TLS streams tunnel through an `http://` proxy w
 models.dev price refresh, no skills hub, no telemetry export, and the web tools are not offered
 to the model. As a second line, every client refuses public hosts; loopback, private ranges,
 `*.localhost`, the NO_PROXY hosts and `offline_allow` stay reachable (an air-gapped LAN model or
-an on-prem Vault). `SEAGENT_OFFLINE=1` keeps its older, narrower meaning: no automatic background
-downloads (the test suite runs under it).
+an on-prem Vault).
+
+`SEAGENT_OFFLINE=1` is the narrower form (the test suite runs under it). Every form of offline
+follows one rule (`seagent_net::http::no_background_fetch`): **nothing goes out on seagent's own
+initiative** — no price-table auto-refresh, no live model listing when a model picker opens (the
+cached or built-in list is shown, labelled offline), no account balances added to a plain `/usage`,
+no plugin auto-update — whatever the host, a local server included. **A call the user explicitly
+makes goes only to an endpoint they configured**: sending a turn to the chosen model, Refresh in a
+model picker, Test key, Check balance, `/usage account` — each to that provider's own configured
+host. An explicit action against a third-party service the user never configured (the console's
+"refresh prices" from models.dev, `seagent models refresh` without `--url`) is refused. Under the
+full switch those explicit calls still only reach loopback, private and `offline_allow` hosts.
 
 ## Native TLS and mutual TLS for the app server
 

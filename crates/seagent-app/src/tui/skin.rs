@@ -1,6 +1,7 @@
 //! Skin/theme engine for the terminal surfaces (Hermes `hermes_cli/skin_engine.py` +
 //! `skin_cmd.py`). Built-in skins ship in `skins.json` (palettes/branding/spinners ported
-//! from Hermes; seagent's own crimson-and-gold look is `default`, Hermes' gold one is
+//! from Hermes; seagent's own galaxy look — night-sky black and navy, gold accents and gold
+//! stars, the tokens of `ui/theme.css` — is `default`, the former crimson one `crimson`, Hermes' gold one is
 //! `hermes`). User skins live in `<config_dir>/skins/<name>.yaml` (or `.json`); a user
 //! file of the same name wins on load but never shadows a built-in in the listing. The
 //! active skin is `skin` in `ui.json`; `seagent skin set <key> <#rrggbb>` edits one colour of
@@ -317,7 +318,7 @@ mod tests {
     fn builtins_user_skins_and_set_color() {
         let p = test_paths("skin");
         let names: Vec<String> = list(&p).into_iter().map(|s| s.0).collect();
-        for n in ["default", "hermes", "ares", "mono", "slate", "daylight", "warm-lightmode", "poseidon", "sisyphus", "charizard"] {
+        for n in ["default", "crimson", "hermes", "ares", "mono", "slate", "daylight", "warm-lightmode", "poseidon", "sisyphus", "charizard"] {
             assert!(names.contains(&n.to_string()), "{n}");
         }
         let ares = load(&p, "ares");
@@ -363,7 +364,8 @@ mod tests {
         assert!(set_color(&p, "#bad", "#123456", None).is_err(), "keys are identifiers");
         assert!(set_color(&p, "ui_accent", "#fff", None).is_err(), "only #rrggbb is accepted");
         let pal = Palette::of(&load(&p, "default"));
-        assert_eq!(pal.status_bg, (0x1f, 0x04, 0x11));
+        assert_eq!((pal.status_bg, pal.bg, pal.accent), ((0x0a, 0x10, 0x20), (0x03, 0x05, 0x0b), (0xec, 0xd2, 0x8c)), "galaxy: navy bar, night-sky background, gold accent");
+        assert_eq!(Palette::of(&load(&p, "crimson")).status_bg, (0x1f, 0x04, 0x11), "the former crimson look stays available");
         // Palette resolution order: `status_bar_*` overrides the base key, `ui_accent`
         // refines `accent` only, and `status_bad` keeps following `banner_accent`.
         let synth = build(&json!({"name": "t", "colors": {"banner_accent": "#010203", "ui_accent": "#040506", "banner_title": "#070809", "ui_label": "#111213", "status_bar_strong": "#0a0b0c", "status_bar_bad": "#0d0e0f"}}));
