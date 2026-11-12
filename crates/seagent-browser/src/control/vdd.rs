@@ -457,11 +457,23 @@ mod tests {
         let folder = root.path().join("folder");
         std::fs::create_dir_all(&folder).unwrap();
         let windir = std::env::var("WINDIR").unwrap_or_else(|_| "C:\\Windows".into());
-        let apps: [(&str, PathBuf, Vec<String>); 3] = [("Notepad", Path::new(&windir).join("System32\\notepad.exe"), vec![]), ("Paint", Path::new(&windir).join("System32\\mspaint.exe"), vec![]), ("Explorer", Path::new(&windir).join("explorer.exe"), vec![folder.display().to_string()])];
+        // Windows 11's Paint is a packaged app: System32\mspaint.exe is gone and the command is
+        // its App Execution Alias in %LOCALAPPDATA%\Microsoft\WindowsApps.
+        let paint = [Path::new(&windir).join("System32\\mspaint.exe"), PathBuf::from(std::env::var("LOCALAPPDATA").unwrap_or_default()).join("Microsoft\\WindowsApps\\mspaint.exe")]
+            .into_iter()
+            .find(|p| p.exists())
+            .unwrap_or_else(|| Path::new(&windir).join("System32\\mspaint.exe"));
+        let apps: [(&str, PathBuf, Vec<String>); 3] = [("Notepad", Path::new(&windir).join("System32\\notepad.exe"), vec![]), ("Paint", paint, vec![]), ("Explorer", Path::new(&windir).join("explorer.exe"), vec![folder.display().to_string()])];
         let mut dup = Duplication::open(&mon.name).expect("DXGI duplication of the virtual monitor");
         let mut failures = vec![];
         for (name, exe, args) in apps {
-            let pid = launch_native(&exe, &args).expect("launched");
+            let pid = match launch_native(&exe, &args) {
+                Ok(pid) => pid,
+                Err(e) => {
+                    failures.push(format!("{name}: {e}"));
+                    continue;
+                }
+            };
             std::thread::sleep(Duration::from_secs(4));
             let wins = sys::windows_in(region);
             eprintln!("real_vdd: {name} (pid {pid}): {} windows on the virtual monitor", wins.len());
