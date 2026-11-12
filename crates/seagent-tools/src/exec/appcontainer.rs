@@ -878,7 +878,7 @@ mod win {
             let sh = super::sandbox_shell();
             let cwd = self.cwd(req);
             let script = super::in_dir(sh.kind, &cwd, &req.script);
-            let mut cmd = Command::new(&sh.program);
+            let mut cmd = seagent_core::platform::proc::command(&sh.program);
             cmd.args(sh.args(seagent_core::platform::shell::Style::bash(req.login), &script));
             let env = self.env(&mut cmd, req, &[]);
             let line = crate::exec::local_windows::command_line(&cmd);
@@ -926,7 +926,7 @@ mod win {
             let sh = super::sandbox_shell();
             let script = super::in_dir(sh.kind, &self.cwd(req), &req.script);
             let (args, wrap_env) = detach_wrapper(sh.kind, &sh.program, &script, req.login, &exit);
-            let mut cmd = Command::new(&sh.program);
+            let mut cmd = seagent_core::platform::proc::command(&sh.program);
             let env = self.env(&mut cmd, req, &wrap_env);
             let line = command_line(&sh.program.to_string_lossy(), &args);
             let nul = File::open("NUL")?;

@@ -51,7 +51,7 @@ use std::os::fd::{AsRawFd, FromRawFd, RawFd};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock};
 use std::time::{Duration, Instant};
@@ -834,7 +834,7 @@ fn start_exec(agent: &Arc<Agent>, req: ExecReq) -> Result<(), String> {
     }
     let shell = agent.shell()?;
     let lims = *lock(&agent.limits);
-    let mut cmd = Command::new(shell);
+    let mut cmd = seagent_vm::host::command(shell);
     cmd.arg(if req.login { "-lc" } else { "-c" }).arg(&req.script);
     cmd.current_dir(&cwd);
     cmd.env_clear();

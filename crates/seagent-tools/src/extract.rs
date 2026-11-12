@@ -7,7 +7,7 @@
 use crate::zip::{zlib_decompress, Zip};
 use serde_json::Value;
 use std::path::Path;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 
 pub const MAX_DOCUMENT_BYTES: u64 = 50 * 1024 * 1024;
 const MAX_XLSX_ROWS: usize = 5000;
@@ -883,7 +883,7 @@ fn pdf(p: &Path, data: &[u8]) -> Result<String, String> {
         return Err("not a PDF (missing %PDF header)".into());
     }
     if which("pdftotext") {
-        let out = Command::new("pdftotext").arg(p).arg("-").stdin(Stdio::null()).stderr(Stdio::null()).output();
+        let out = seagent_core::platform::proc::command("pdftotext").arg(p).arg("-").stdin(Stdio::null()).stderr(Stdio::null()).output();
         if let Some(o) = out.ok().filter(|o| o.status.success()) {
             let text = String::from_utf8_lossy(&o.stdout).into_owned();
             let mut pages: Vec<String> = text.split('\x0c').map(str::to_string).collect();
@@ -1155,7 +1155,7 @@ fn sqlite(p: &Path, data: &[u8]) -> Result<String, String> {
     if !data.starts_with(b"SQLite format 3\0") {
         return Err("not a SQLite database (magic bytes do not match)".into());
     }
-    let o = Command::new("python3").arg("-I").arg("-c").arg(SQLITE_PY).arg(p).stdin(Stdio::null()).output().map_err(|e| format!("SQLite read needs python3: {e}"))?;
+    let o = seagent_core::platform::proc::command("python3").arg("-I").arg("-c").arg(SQLITE_PY).arg(p).stdin(Stdio::null()).output().map_err(|e| format!("SQLite read needs python3: {e}"))?;
     if !o.status.success() {
         return Err(format!("SQLite read failed: {}", String::from_utf8_lossy(&o.stderr).lines().last().unwrap_or("")));
     }
@@ -1171,7 +1171,7 @@ fn legacy_office(p: &Path) -> Result<String, String> {
     };
     for (bin, args) in tools {
         if which(bin) {
-            if let Ok(o) = Command::new(bin).args(*args).arg(p).stdin(Stdio::null()).output() {
+            if let Ok(o) = seagent_core::platform::proc::command(bin).args(*args).arg(p).stdin(Stdio::null()).output() {
                 if o.status.success() && !o.stdout.is_empty() {
                     return Ok(String::from_utf8_lossy(&o.stdout).into_owned());
                 }
@@ -1262,7 +1262,7 @@ mod tests {
         assert!(extract(Path::new("x.db"), b"not sqlite").unwrap_err().contains("magic"));
         let d = crate::testutil::tmpdir("sqlite");
         let db = d.join("t.db");
-        let ok = Command::new("python3").arg("-c").arg("import sqlite3,sys;c=sqlite3.connect(sys.argv[1]);c.execute('create table t(a,b)');c.execute(\"insert into t values(1,'x')\");c.commit()").arg(&db).status().map(|s| s.success()).unwrap_or(false);
+        let ok = seagent_core::platform::proc::command("python3").arg("-c").arg("import sqlite3,sys;c=sqlite3.connect(sys.argv[1]);c.execute('create table t(a,b)');c.execute(\"insert into t values(1,'x')\");c.commit()").arg(&db).status().map(|s| s.success()).unwrap_or(false);
         if ok {
             let t = extract(&db, &std::fs::read(&db).unwrap()).unwrap();
             assert!(t.contains("## t  (1 rows)") && t.contains("| 1 | x |"), "{t}");

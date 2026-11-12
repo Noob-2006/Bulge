@@ -723,7 +723,7 @@ mod tests {
         std::fs::write(bin.join("sudo"), "#!/bin/sh\nif [ \"$1\" = -S ]; then read pw; echo \"pw=$pw args=$*\"; else echo 'sudo: a password is required' >&2; exit 1; fi\n").unwrap();
         // Windows: Git Bash runs a `#!` file without an execute bit; its PATH spells `/c/…`.
         #[cfg(unix)]
-        std::process::Command::new("chmod").arg("+x").arg(bin.join("sudo")).status().unwrap();
+        seagent_core::platform::proc::command("chmod").arg("+x").arg(bin.join("sudo")).status().unwrap();
         let cmd = format!("PATH={}:$PATH sudo whoami && echo after", crate::testutil::remote_path(&bin));
         let o = Shell.call(&c, json!({"command": cmd}));
         assert!(o.is_error && o.content.contains("a password is required") && o.content.contains("seagent secrets set SUDO_PASSWORD"), "{}", o.content);

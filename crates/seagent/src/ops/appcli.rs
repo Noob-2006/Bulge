@@ -43,9 +43,9 @@ pub fn cmd_app(a: &Args) -> R {
             crate::ops::hostos::open_app_window(&link);
             #[cfg(not(any(windows, target_os = "macos")))]
             {
-                let opened = ["chromium", "google-chrome", "brave-browser"].iter().any(|b| std::process::Command::new(b).arg(format!("--app={link}")).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).spawn().is_ok());
+                let opened = ["chromium", "google-chrome", "brave-browser"].iter().any(|b| seagent_core::platform::proc::command(b).arg(format!("--app={link}")).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).spawn().is_ok());
                 if !opened {
-                    let _ = std::process::Command::new("xdg-open").arg(&link).spawn();
+                    let _ = seagent_core::platform::proc::command("xdg-open").arg(&link).spawn();
                 }
             }
             println!("{url}");

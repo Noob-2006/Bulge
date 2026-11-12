@@ -36,10 +36,10 @@ mod tests {
     use seagent_kernel::event::EventKind;
     use seagent_kernel::projection::project;
     use std::path::{Path, PathBuf};
-    use std::process::{Command, Stdio};
+    use std::process::Stdio;
 
     fn git(args: &[&str], cwd: &Path) {
-        let out = Command::new("git")
+        let out = seagent_core::platform::proc::command("git")
             .args(["-c", "core.hooksPath=/dev/null", "-c", "commit.gpgsign=false", "-c", "user.name=seagent", "-c", "user.email=seagent@localhost"])
             .args(args)
             .current_dir(cwd)

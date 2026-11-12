@@ -582,7 +582,7 @@ impl Pipeline {
         }
         let ffmpeg = seagent_media::audio::ffmpeg().ok_or_else(|| PipelineError::Retryable("Recording fallback requires ffmpeg for audio extraction, but ffmpeg was not found.".into()))?;
         let audio = recording.with_extension("wav");
-        let out = std::process::Command::new(ffmpeg).arg("-y").arg("-i").arg(recording).arg(&audio).stdin(std::process::Stdio::null()).output().map_err(|e| PipelineError::Retryable(format!("ffmpeg audio extraction failed: {e}")))?;
+        let out = seagent_core::platform::proc::command(ffmpeg).arg("-y").arg("-i").arg(recording).arg(&audio).stdin(std::process::Stdio::null()).output().map_err(|e| PipelineError::Retryable(format!("ffmpeg audio extraction failed: {e}")))?;
         if !out.status.success() {
             return Err(PipelineError::Retryable(format!("ffmpeg audio extraction failed: {}", String::from_utf8_lossy(&out.stderr).trim())));
         }

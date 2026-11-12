@@ -36,7 +36,7 @@ use serde_json::{json, Value};
 use crate::channel::Stream;
 use std::io::{ErrorKind, Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, Stdio};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -95,7 +95,7 @@ impl VmProvider for FirecrackerProvider {
         let log = std::fs::File::create(spec.log()).map_err(|e| format!("create vm log: {e}"))?;
         let err = log.try_clone().map_err(|e| format!("clone log: {e}"))?;
         let bin = self.bin_for(spec);
-        let mut child = crate::host::spawn_vmm(Command::new(&bin).args(self.cmdline(spec)).stdin(Stdio::null()).stdout(Stdio::from(log)).stderr(Stdio::from(err)))
+        let mut child = crate::host::spawn_vmm(crate::host::command(&bin).args(self.cmdline(spec)).stdin(Stdio::null()).stdout(Stdio::from(log)).stderr(Stdio::from(err)))
             .map_err(|e| format!("start {}: {e}", bin.display()))?;
 
         // Fail here, not when the first command hangs: a VMM without /dev/kvm,
@@ -497,7 +497,7 @@ impl VmInstance for FirecrackerInstance {
 /// `firecracker --version` — is this binary a usable VMM? Mirrors
 /// `qemu::probe`.
 pub fn probe(bin: &Path) -> Result<String, String> {
-    let out = Command::new(bin).arg("--version").stdout(Stdio::piped()).stderr(Stdio::piped()).output().map_err(|e| format!("{}: {e}", bin.display()))?;
+    let out = crate::host::command(bin).arg("--version").stdout(Stdio::piped()).stderr(Stdio::piped()).output().map_err(|e| format!("{}: {e}", bin.display()))?;
     if !out.status.success() {
         return Err(format!("{} --version failed", bin.display()));
     }

@@ -27,7 +27,7 @@ use crate::channel::{Channel, Endpoint, Transport};
 use crate::config::VmConfig;
 use crate::isolation::ProviderKind;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -160,7 +160,7 @@ pub fn create_commands_for(spec: &VmSpec, vdi: &Path, chan: &Endpoint, aarch64: 
 }
 
 fn run(bin: &Path, args: &[String]) -> Result<String, String> {
-    let o = Command::new(bin).args(args).stdin(Stdio::null()).output().map_err(|e| format!("{}: {e}", bin.display()))?;
+    let o = crate::host::command(bin).args(args).stdin(Stdio::null()).output().map_err(|e| format!("{}: {e}", bin.display()))?;
     if !o.status.success() {
         return Err(format!("VBoxManage {}: {}", args.first().map(String::as_str).unwrap_or(""), String::from_utf8_lossy(&o.stderr).trim()));
     }

@@ -204,7 +204,7 @@ pub fn launch_debug_browser(cfg: &BrowserConfig, home: &Path, port: u16) -> Resu
     let args = debug_args(port, &dir);
     let manual = format!("{} {}", exe.display(), args.join(" "));
     let log = std::fs::File::create(dir.join("launch-stderr.log")).map_err(|e| e.to_string())?;
-    let mut cmd = std::process::Command::new(&exe);
+    let mut cmd = seagent_core::platform::proc::command(&exe);
     cmd.args(&args).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(log);
     // Its own group, not tied to seagent: the debug browser outlives this command.
     #[cfg(unix)]
@@ -728,7 +728,7 @@ mod tests {
     /// file may still be open for writing in that child, which surfaces as ETXTBSY — retry briefly.
     fn spawn_fake(fake: &Path, args: &[String]) -> std::process::Child {
         for _ in 0..40 {
-            match std::process::Command::new(fake).args(args).spawn() {
+            match seagent_core::platform::proc::command(fake).args(args).spawn() {
                 Ok(c) => return c,
                 Err(e) if e.raw_os_error() == Some(libc::ETXTBSY) => {
                     std::thread::sleep(Duration::from_millis(50))

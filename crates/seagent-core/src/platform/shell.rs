@@ -222,7 +222,7 @@ pub fn spill_script(dir: &Path, script: &str) -> std::io::Result<String> {
 /// A `Command` that runs `script` in `style` (see the module docs).
 pub fn command(style: Style, script: &str) -> Command {
     let (prog, args) = argv(style, script);
-    let mut c = Command::new(prog);
+    let mut c = crate::platform::proc::command(prog);
     // Git Bash / MSYS2: `layout::msys_args` quotes for the Cygwin runtime's command-line parser
     // (std's MSVCRT quoting loses every `\\` and lets the runtime glob). Callers that rebuild
     // the command (`local_windows::msys_requoted`) see the plain arguments through `get_args`.
@@ -415,7 +415,7 @@ mod tests {
     fn powershell_output_is_utf8_on_any_code_page() {
         let s = Shell { kind: ShellKind::WindowsPowerShell, program: "powershell.exe".into(), reason: String::new() };
         let script = "Write-Output '繁體中文 你好'; cmd /c echo 原生程式輸出; [Console]::Error.WriteLine('錯誤訊息')";
-        let o = std::process::Command::new(&s.program).args(s.args(Style::Bash, script)).output().expect("Windows PowerShell");
+        let o = crate::platform::proc::command(&s.program).args(s.args(Style::Bash, script)).output().expect("Windows PowerShell");
         let out = String::from_utf8(o.stdout.clone()).unwrap_or_else(|_| panic!("stdout is not UTF-8: {:?}", o.stdout));
         let err = String::from_utf8(o.stderr.clone()).unwrap_or_else(|_| panic!("stderr is not UTF-8: {:?}", o.stderr));
         assert!(out.contains("繁體中文 你好"), "{out}");
@@ -453,7 +453,7 @@ mod tests {
             "[Console]::OutputEncoding = [Text.Encoding]::UTF8; [Console]::Out.Write('\\\\.\\pipe\\x|say \"hi\"|tail\\|文件')".to_string()
         };
         let (prog, args) = argv(Style::Bash, &script);
-        let mut c = Command::new(prog);
+        let mut c = crate::platform::proc::command(prog);
         crate::platform::layout::msys_args(&mut c, &args);
         let out = c.output().unwrap();
         assert_eq!(String::from_utf8_lossy(&out.stdout), want, "stderr: {}", String::from_utf8_lossy(&out.stderr));
@@ -472,7 +472,7 @@ mod tests {
         let p = spill_script(dir.path(), &script).unwrap();
         if active().kind.is_posix() || cfg!(unix) {
             let (prog, _) = argv(Style::Bash, "true");
-            let mut c = Command::new(prog);
+            let mut c = crate::platform::proc::command(prog);
             crate::platform::layout::msys_args(&mut c, &["-c".to_string(), format!(". '{p}'")]);
             let out = c.output().unwrap();
             assert_eq!(String::from_utf8_lossy(&out.stdout), want, "stderr: {}", String::from_utf8_lossy(&out.stderr));
@@ -480,7 +480,7 @@ mod tests {
             if cfg!(windows) {
                 let (prog, args) = argv(Style::Bash, &script);
                 assert!(args[1].len() < 1024, "spilled, not inline");
-                let mut c = Command::new(prog);
+                let mut c = crate::platform::proc::command(prog);
                 crate::platform::layout::msys_args(&mut c, &args);
                 let out = c.output().unwrap();
                 assert_eq!(String::from_utf8_lossy(&out.stdout), want, "stderr: {}", String::from_utf8_lossy(&out.stderr));

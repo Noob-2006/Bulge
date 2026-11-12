@@ -469,7 +469,7 @@ fn render_file(cfg: &DiffsConfig, html: &str, out: &Path, format: &str, scale: f
     // Chrome drops its own scratch (`com.google.Chrome.*`, crash and fetcher files) into $TMPDIR;
     // give it a private one that goes away with this call instead of littering the shared dir.
     let chrome_tmp = seagent_core::tmp::TempDir::new("seagent-render");
-    let mut cmd = std::process::Command::new(&bin);
+    let mut cmd = seagent_core::platform::proc::command(&bin);
     cmd.env("TMPDIR", chrome_tmp.path());
     cmd.args(["--headless=new", "--disable-gpu", "--hide-scrollbars", "--mute-audio", "--no-first-run", "--disable-extensions"]).arg(format!("--user-data-dir={}", profile.display()));
     if format == "pdf" {

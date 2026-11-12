@@ -105,7 +105,7 @@ pub fn run_env(argv: &[String], stdin: Option<&[u8]>, env: &[(String, String)], 
 pub fn run_env_in(argv: &[String], stdin: Option<&[u8]>, env: &[(String, String)], cwd: Option<&std::path::Path>, timeout: Duration, cancel: &Cancel) -> Result<Output, String> {
     let (prog, args) = argv.split_first().ok_or("empty command")?;
     #[cfg(unix)]
-    let mut cmd = Command::new(prog);
+    let mut cmd = seagent_core::platform::proc::command(prog);
     #[cfg(not(unix))]
     let (mut cmd, prog, args) = {
         // `env -i K=V … prog args`: clear, keep the Windows base set, apply the pairs.

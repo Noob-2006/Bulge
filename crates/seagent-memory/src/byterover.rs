@@ -9,7 +9,7 @@ use seagent_core::{Effect, Message, Role, Tool, ToolCtx, ToolOutput, ToolSpec};
 use serde_json::{json, Value};
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -46,7 +46,7 @@ fn find_brv() -> Option<PathBuf> {
 /// Run a command with a timeout; Ok(stdout) on exit 0, Err(stderr|stdout|exit) otherwise.
 pub fn run_with_timeout(bin: &Path, args: &[&str], cwd: &Path, env: &[(&str, &str)], timeout: Duration) -> Result<String, String> {
     let _ = std::fs::create_dir_all(cwd);
-    let mut cmd = Command::new(bin);
+    let mut cmd = seagent_core::platform::proc::command(bin);
     cmd.args(args).current_dir(cwd).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
     for (k, v) in env {
         cmd.env(k, v);

@@ -171,7 +171,7 @@ impl Driver {
             let sock = crate::node::tmp_file("cua", "sock");
             let s = sock.display().to_string();
             let manifest_path = seagent_core::tool::expand_home(cfg.capability_manifest.trim()).display().to_string();
-            let child = std::process::Command::new(&bin)
+            let child = seagent_core::platform::proc::command(&bin)
                 .args(["serve", "--socket", &s, "--permission-mode", "bounded", "--capability-manifest", &manifest_path, "--embedded"])
                 .envs(env.iter().map(|(k, v)| (k, v)))
                 .stdin(std::process::Stdio::null())

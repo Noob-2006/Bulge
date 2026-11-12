@@ -727,7 +727,7 @@ impl Runner for KernelRunner {
         let current = crate::ops::profile::current();
         if !m.profile.is_empty() && m.profile != current && m.profile != m.handle && crate::ops::profile::list().contains(&m.profile) {
             let exe = std::env::current_exe().map_err(|e| e.to_string())?;
-            let mut cmd = std::process::Command::new(exe);
+            let mut cmd = seagent_core::platform::proc::command(exe);
             cmd.args(["-p", &m.profile, "run", "--quiet"]);
             if let Some(model) = &m.model {
                 cmd.args(["-m", model]);

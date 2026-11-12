@@ -39,7 +39,7 @@ use serde_json::{json, Value};
 use std::collections::{HashMap, VecDeque};
 use std::io::{self, Read, Write};
 use std::net::UdpSocket;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{mpsc, Arc, Condvar, Mutex, Weak};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -350,7 +350,7 @@ pub fn wav(pcm: &[u8], rate: u32, channels: u16) -> Vec<u8> {
 
 /// Run ffmpeg with `args`, feeding `input` to stdin; stdout on success.
 pub fn ffmpeg(bin: &str, args: &[&str], input: Option<Vec<u8>>, timeout: Duration) -> Result<Vec<u8>, String> {
-    let mut child = Command::new(bin)
+    let mut child = seagent_core::platform::proc::command(bin)
         .args(["-hide_banner", "-loglevel", "error"])
         .args(args)
         .stdin(if input.is_some() { Stdio::piped() } else { Stdio::null() })
@@ -1227,7 +1227,7 @@ impl Conn {
     /// Encode the mixer's output until it runs dry; paced at one frame per 20 ms.
     fn talk_spurt(self: &Arc<Self>) -> Result<(), String> {
         let bitrate = self.cfg.bitrate.to_string();
-        let mut child = Command::new(&self.cfg.ffmpeg)
+        let mut child = seagent_core::platform::proc::command(&self.cfg.ffmpeg)
             .args(["-hide_banner", "-loglevel", "error", "-f", "s16le", "-ar", "48000", "-ac", "2", "-i", "pipe:0", "-c:a", "libopus", "-b:a", &bitrate, "-frame_duration", "20", "-application", "voip", "-f", "ogg", "-page_duration", "20000", "-flush_packets", "1", "pipe:1"])
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -1837,7 +1837,7 @@ pub(crate) mod tests {
     use std::net::TcpListener;
 
     pub(crate) fn have_ffmpeg() -> bool {
-        Command::new("ffmpeg").arg("-version").stdout(Stdio::null()).stderr(Stdio::null()).status().is_ok_and(|s| s.success())
+        seagent_core::platform::proc::command("ffmpeg").arg("-version").stdout(Stdio::null()).stderr(Stdio::null()).status().is_ok_and(|s| s.success())
     }
 
     #[test]

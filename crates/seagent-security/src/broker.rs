@@ -313,7 +313,7 @@ fn exec(id: &Value, req: &Value, ctx: &Ctx, component: &str) -> Value {
         audit(ctx, component, "exec", tier, "queued", &line);
         return ok(id, json!({"status": "queued", "approval_id": qid, "tier": tier.as_u8(), "reason": reason, "fallback": risk::fallback(tier, "exec", &a.destructive)}));
     }
-    let mut cmd = std::process::Command::new(&argv[0]);
+    let mut cmd = crate::os::command(&argv[0]);
     cmd.args(&argv[1..]);
     if let Some(cwd) = req.get("cwd").and_then(Value::as_str) {
         cmd.current_dir(cwd);

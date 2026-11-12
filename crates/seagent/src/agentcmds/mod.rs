@@ -363,7 +363,7 @@ mod tests {
 
     #[test]
     fn undo_names_changed_files_and_the_checkpoint_that_restores_them() {
-        if std::process::Command::new("git").arg("--version").output().is_err() {
+        if seagent_core::platform::proc::command("git").arg("--version").output().is_err() {
             return; // checkpoints shell out to git; the rest of the suite skips it the same way
         }
         let t = kit();

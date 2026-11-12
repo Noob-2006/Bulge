@@ -1534,7 +1534,7 @@ pub fn commit_secret(command: &str, ws: &Path, vault: &crate::vault::Vault) -> O
     let all = commit.argv.iter().any(|x| x == "--all" || (x.starts_with('-') && !x.starts_with("--") && x[1..].chars().all(|c| c.is_ascii_alphabetic()) && x.contains('a')));
     let mut args = vec!["-C".to_string(), ws.display().to_string(), "diff".into(), "--no-color".into(), "--no-ext-diff".into()];
     args.push(if all { "HEAD".into() } else { "--cached".into() });
-    let out = std::process::Command::new("git").args(&args).stdin(std::process::Stdio::null()).stderr(std::process::Stdio::null()).output().ok()?;
+    let out = seagent_core::platform::proc::command("git").args(&args).stdin(std::process::Stdio::null()).stderr(std::process::Stdio::null()).output().ok()?;
     let added: String = String::from_utf8_lossy(&out.stdout).lines().filter(|l| l.starts_with('+') && !l.starts_with("+++")).map(|l| &l[1..]).collect::<Vec<_>>().join("\n");
     if added.is_empty() {
         return None;

@@ -246,7 +246,7 @@ fn spawn(ws: &Path, shell: &Path, cols: u16, rows: u16) -> Result<Term, String> 
     let (master, slave) = openpty()?;
     set_size(master.as_raw_fd(), cols, rows);
     let sfd = slave.as_raw_fd();
-    let mut cmd = std::process::Command::new(shell);
+    let mut cmd = seagent_core::platform::proc::command(shell);
     cmd.current_dir(ws).env("TERM", "xterm-256color").env("SEAGENT_TERMINAL", "1");
     let io = |f: &OwnedFd| f.try_clone().map(std::process::Stdio::from).map_err(|e| e.to_string());
     cmd.stdin(io(&slave)?).stdout(io(&slave)?).stderr(io(&slave)?);

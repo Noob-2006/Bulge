@@ -45,7 +45,7 @@ pub(crate) fn cmd_daemon(a: &Args) -> R {
             let log = seagent_core::platform::proc::open_child_log(&paths.daemon_log()).map_err(|e| e.to_string())?;
             let log_start = log.metadata().map(|m| m.len()).unwrap_or(0);
             let exe = std::env::current_exe().map_err(|e| e.to_string())?;
-            let mut cmd = std::process::Command::new(exe);
+            let mut cmd = seagent_core::platform::proc::command(exe);
             cmd.arg("daemon").arg("run").stdin(std::process::Stdio::null()).stdout(log.try_clone().map_err(|e| e.to_string())?).stderr(log);
             // Detached by us, not by a service manager: a restart after the setup wizard is ours to do.
             cmd.env("SEAGENT_DAEMON_DETACHED", "1").env_remove("NOTIFY_SOCKET").env_remove("INVOCATION_ID");

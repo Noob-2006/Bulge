@@ -26,6 +26,33 @@ use std::process::{Child, Command};
 #[cfg(unix)]
 use std::time::Duration;
 
+/// `Command::new(program)` for every process this crate starts — the layer-1 copy of
+/// `seagent_core::platform::proc::command` (this crate cannot depend on seagent-core; the
+/// `child_spawn_lint` test allows `Command::new` only in these helpers). Windows: when this
+/// process has no console (the detached daemon, the desktop app) `CREATE_NO_WINDOW`, or every
+/// console program started here (`qemu-img`, `ps`, `tar`, …) would flash a console window.
+pub fn command(program: impl AsRef<std::ffi::OsStr>) -> Command {
+    #[cfg_attr(not(windows), allow(unused_mut))]
+    let mut c = Command::new(program);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        c.creation_flags(no_window_flag());
+    }
+    c
+}
+
+/// `CREATE_NO_WINDOW` when this process has no console of its own, else 0.
+#[cfg(windows)]
+fn no_window_flag() -> u32 {
+    // SAFETY: plain query; 0 means "no console attached".
+    if unsafe { windows_sys::Win32::System::Console::GetConsoleWindow() } == 0 {
+        windows_sys::Win32::System::Threading::CREATE_NO_WINDOW
+    } else {
+        0
+    }
+}
+
 /// The operating system a decision is made for. A field of [`crate::Capabilities`], so the
 /// selection table is a pure function that tests can run for every OS on a Linux CI box.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -406,7 +433,7 @@ pub fn process_identity(pid: u32) -> Option<String> {
     }
     #[cfg(not(windows))]
     {
-        let o = Command::new("ps").args(["-ww", "-o", "command=", "-p", &pid.to_string()]).output().ok()?;
+        let o = crate::host::command("ps").args(["-ww", "-o", "command=", "-p", &pid.to_string()]).output().ok()?;
         o.status.success().then(|| String::from_utf8_lossy(&o.stdout).into_owned())
     }
 }
@@ -468,7 +495,7 @@ pub fn usage(pid: u32) -> Option<(u64, u64)> {
         // SAFETY: fills a plain struct.
         unsafe { libc::mach_timebase_info(&mut tb) };
         let ns = (info.pti_total_user + info.pti_total_system) as u128 * tb.numer.max(1) as u128 / tb.denom.max(1) as u128;
-        (n == size).then(|| ((ns / 10_000_000) as u64, info.pti_resident_size / 1024))
+        (n == size).then_some(((ns / 10_000_000) as u64, info.pti_resident_size / 1024))
     }
     #[cfg(not(any(windows, target_os = "macos")))]
     {

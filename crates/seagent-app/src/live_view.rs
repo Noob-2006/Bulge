@@ -1318,7 +1318,7 @@ mod tests {
         #[cfg(not(windows))]
         let pid = {
             let env = seagent_browser::control::screen::Desktop::new(&data).published_env();
-            std::process::Command::new(&exe).args(&args).envs(env).spawn().unwrap().id()
+            seagent_core::platform::proc::command(&exe).args(&args).envs(env).spawn().unwrap().id()
         };
         // The browser this test started, with its process tree, on every exit path.
         struct Kill(u32);
@@ -1752,7 +1752,7 @@ mod tests {
         #[cfg(not(windows))]
         let pid = {
             let env = seagent_browser::control::screen::Desktop::new(&data).published_env();
-            match std::process::Command::new("xterm").args(["-geometry", "200x60+20+20", "-e", "sh", "-c", "i=0; while :; do i=$((i+1)); echo \"$i  the quick brown fox jumps over the lazy dog 0123456789 $(date +%T.%N)\"; sleep 0.015; done"]).envs(env).spawn() {
+            match seagent_core::platform::proc::command("xterm").args(["-geometry", "200x60+20+20", "-e", "sh", "-c", "i=0; while :; do i=$((i+1)); echo \"$i  the quick brown fox jumps over the lazy dog 0123456789 $(date +%T.%N)\"; sleep 0.015; done"]).envs(env).spawn() {
                 Ok(c) => c.id(),
                 Err(e) => {
                     eprintln!("skipping: no xterm on this host: {e}");
@@ -1765,7 +1765,7 @@ mod tests {
             fn drop(&mut self) {
                 seagent_core::proc::kill_group(self.0 as i32, Duration::from_secs(2));
                 #[cfg(windows)]
-                let _ = std::process::Command::new("taskkill").args(["/T", "/F", "/PID", &self.0.to_string()]).output();
+                let _ = seagent_core::platform::proc::command("taskkill").args(["/T", "/F", "/PID", &self.0.to_string()]).output();
             }
         }
         let _editor = Kill(pid);
@@ -1850,7 +1850,7 @@ mod tests {
         std::fs::create_dir_all(&state).map_err(|e| e.to_string())?;
         let n = (70..99).find(|n| !std::path::Path::new(&format!("/tmp/.X{n}-lock")).exists()).ok_or("no free X display")?;
         let sock = state.join("rfb.sock");
-        let child = std::process::Command::new("Xvnc")
+        let child = seagent_core::platform::proc::command("Xvnc")
             .args([format!(":{n}"), "-geometry".into(), "1920x1080".into(), "-depth".into(), "24".into(), "-rfbport".into(), "-1".into(), "-rfbunixpath".into(), sock.display().to_string(), "-rfbunixmode".into(), "0600".into(), "-SecurityTypes".into(), "None".into(), "-AlwaysShared".into(), "-FrameRate".into(), "60".into(), "-nolisten".into(), "tcp".into()])
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
@@ -1903,7 +1903,7 @@ mod tests {
             Some(pid) => format!("(Get-Process -Id {pid}).TotalProcessorTime.TotalSeconds"),
             None => format!("$t=0; Get-CimInstance Win32_Process | Where-Object {{ $_.CommandLine -like '*{what}*' -and $_.ProcessId -ne $PID }} | ForEach-Object {{ $t += ($_.KernelModeTime + $_.UserModeTime) / 1e7 }}; $t"),
         };
-        let o = std::process::Command::new("powershell").args(["-NoProfile", "-Command", &ps]).output().unwrap();
+        let o = seagent_core::platform::proc::command("powershell").args(["-NoProfile", "-Command", &ps]).output().unwrap();
         String::from_utf8_lossy(&o.stdout).trim().replace(',', ".").parse().unwrap_or(0.0)
     }
 
@@ -1914,7 +1914,7 @@ mod tests {
             Some(pid) => vec!["-o".into(), "time=".into(), "-p".into(), pid.into()],
             None => vec!["-eo".into(), "time=,args=".into()],
         };
-        let o = std::process::Command::new("ps").args(&args).output().unwrap();
+        let o = seagent_core::platform::proc::command("ps").args(&args).output().unwrap();
         String::from_utf8_lossy(&o.stdout)
             .lines()
             .filter(|l| what.starts_with("pid:") || (l.contains(what) && !l.contains(" ps ")))

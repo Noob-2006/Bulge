@@ -81,7 +81,7 @@ pub fn ffmpeg_input(ffmpeg: &std::path::Path) -> Option<Vec<String>> {
 /// The first DirectShow audio device ffmpeg lists (`"Microphone (…)" (audio)`).
 #[cfg(windows)]
 pub fn windows_default_mic(ffmpeg: &std::path::Path) -> Option<String> {
-    let o = std::process::Command::new(ffmpeg).args(["-hide_banner", "-list_devices", "true", "-f", "dshow", "-i", "dummy"]).stdin(Stdio::null()).output().ok()?;
+    let o = seagent_core::platform::proc::command(ffmpeg).args(["-hide_banner", "-list_devices", "true", "-f", "dshow", "-i", "dummy"]).stdin(Stdio::null()).output().ok()?;
     parse_dshow_audio(&String::from_utf8_lossy(&o.stderr))
 }
 

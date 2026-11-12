@@ -188,7 +188,7 @@ mod tests {
         let q = d.qualified();
         let bound = std::thread::spawn(move || super::super::screen_windows::on_desktop(&q, || measure(hwnd)).and_then(|r| r)).join().unwrap();
         say("on a non-displayed Bot Desktop, from a thread bound to it", bound, hwnd);
-        let _ = std::process::Command::new("taskkill").args(["/T", "/F", "/PID", &pid.to_string()]).output();
+        let _ = seagent_core::platform::proc::command("taskkill").args(["/T", "/F", "/PID", &pid.to_string()]).output();
         d.stop();
         // Control: the same page on the displayed desktop (proves the capture code itself works).
         if std::env::var_os("SEAGENT_WGC_CONTROL").is_some() {
@@ -203,7 +203,7 @@ mod tests {
                 Some(h) => say("on the displayed desktop (control)", measure(h), h),
                 None => eprintln!("WGC control: no window for pid {pid}"),
             }
-            let _ = std::process::Command::new("taskkill").args(["/T", "/F", "/PID", &pid.to_string()]).output();
+            let _ = seagent_core::platform::proc::command("taskkill").args(["/T", "/F", "/PID", &pid.to_string()]).output();
         }
     }
 }

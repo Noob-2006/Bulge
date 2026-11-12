@@ -34,7 +34,7 @@ use std::path::PathBuf;
 
 #[cfg(any(windows, target_os = "macos"))]
 fn run(prog: &str, args: &[&str]) -> Result<String, String> {
-    let o = std::process::Command::new(prog).args(args).stdin(std::process::Stdio::null()).output().map_err(|e| format!("{prog}: {e}"))?;
+    let o = seagent_core::platform::proc::command(prog).args(args).stdin(std::process::Stdio::null()).output().map_err(|e| format!("{prog}: {e}"))?;
     let text = format!("{}{}", String::from_utf8_lossy(&o.stdout), String::from_utf8_lossy(&o.stderr));
     if o.status.success() {
         Ok(text)
@@ -503,6 +503,8 @@ fn windows_vm_checks(paths: &Paths) -> Vec<(String, Result<String, String>)> {
 
 /// `seagent service <sub>` on this OS.
 #[cfg(any(target_os = "macos", windows, target_os = "android", target_os = "ios"))]
+// Mobile: the early `return` is the whole body (the desktop arms below are cfg'd out).
+#[cfg_attr(any(target_os = "android", target_os = "ios"), allow(clippy::needless_return))]
 pub fn dispatch(sub: &str, a: &Args, paths: &Paths) -> R {
     let system = a.flag("system");
     #[cfg(any(target_os = "android", target_os = "ios"))]

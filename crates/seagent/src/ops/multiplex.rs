@@ -19,7 +19,7 @@ use crate::R;
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
-use std::process::{Child, Command};
+use std::process::Child;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
@@ -104,7 +104,7 @@ pub fn plan(profiles: &[ProfileFacts]) -> Plan {
 /// profile's socket exactly as the daemon does.)
 pub fn profile_running(name: &str) -> bool {
     let Ok(exe) = std::env::current_exe() else { return false };
-    let mut c = Command::new(exe);
+    let mut c = seagent_core::platform::proc::command(exe);
     c.env_remove("SEAGENT_HOME").env_remove("SEAGENT_PROFILE").stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null());
     if name != "default" {
         c.args(["-p", name]);
@@ -285,7 +285,7 @@ pub fn dispatch(cmd: &str, a: &Args, _raw: &[String]) -> Option<R> {
                         Slot {
                             name: n.clone(),
                             spawn: Box::new(move || {
-                                let mut c = Command::new(&exe);
+                                let mut c = seagent_core::platform::proc::command(&exe);
                                 c.env_remove("SEAGENT_HOME").env_remove("SEAGENT_PROFILE").env("SEAGENT_MULTIPLEX", "1");
                                 if n2 != "default" {
                                     c.args(["-p", &n2]);
@@ -359,13 +359,13 @@ mod tests {
         let mut slots = vec![
             // A child that crashes and one that stays up (Windows: `cmd /c exit 3`, Start-Sleep).
             #[cfg(unix)]
-            Slot { name: "crashy".into(), spawn: Box::new(|| Command::new("sh").args(["-c", "exit 3"]).spawn()), child: None, restarts: vec![], gave_up: false },
+            Slot { name: "crashy".into(), spawn: Box::new(|| seagent_core::platform::proc::command("sh").args(["-c", "exit 3"]).spawn()), child: None, restarts: vec![], gave_up: false },
             #[cfg(unix)]
-            Slot { name: "steady".into(), spawn: Box::new(|| Command::new("sleep").arg("30").spawn()), child: None, restarts: vec![], gave_up: false },
+            Slot { name: "steady".into(), spawn: Box::new(|| seagent_core::platform::proc::command("sleep").arg("30").spawn()), child: None, restarts: vec![], gave_up: false },
             #[cfg(windows)]
-            Slot { name: "crashy".into(), spawn: Box::new(|| Command::new("cmd").args(["/c", "exit 3"]).spawn()), child: None, restarts: vec![], gave_up: false },
+            Slot { name: "crashy".into(), spawn: Box::new(|| seagent_core::platform::proc::command("cmd").args(["/c", "exit 3"]).spawn()), child: None, restarts: vec![], gave_up: false },
             #[cfg(windows)]
-            Slot { name: "steady".into(), spawn: Box::new(|| Command::new("powershell").args(["-NoProfile", "-Command", "Start-Sleep 30"]).spawn()), child: None, restarts: vec![], gave_up: false },
+            Slot { name: "steady".into(), spawn: Box::new(|| seagent_core::platform::proc::command("powershell").args(["-NoProfile", "-Command", "Start-Sleep 30"]).spawn()), child: None, restarts: vec![], gave_up: false },
         ];
         let s2 = stop.clone();
         std::thread::spawn(move || {

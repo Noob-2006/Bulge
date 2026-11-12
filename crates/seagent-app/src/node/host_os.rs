@@ -157,7 +157,7 @@ pub(crate) fn devices(kind: &str) -> Vec<String> {
         return vec![];
     }
     // ffmpeg prints the list on stderr and exits non-zero (there is no real input).
-    let Ok(o) = std::process::Command::new(argv[0]).args(&argv[1..]).stdin(std::process::Stdio::null()).output() else { return vec![] };
+    let Ok(o) = seagent_core::platform::proc::command(argv[0]).args(&argv[1..]).stdin(std::process::Stdio::null()).output() else { return vec![] };
     parse_devices(&String::from_utf8_lossy(&o.stderr), kind)
 }
 

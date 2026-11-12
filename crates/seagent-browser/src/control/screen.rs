@@ -414,7 +414,7 @@ impl Desktop {
             }
         };
         let log = std::fs::File::create(sd.join("launcher.log")).map_err(|e| e.to_string())?;
-        let mut cmd = std::process::Command::new("bash");
+        let mut cmd = seagent_core::platform::proc::command("bash");
         cmd.arg(&script);
         for k in [
             "DISPLAY",
@@ -882,7 +882,7 @@ fn run_install(d: &Desktop, cmd: &str, io: &mut dyn Io) -> i32 {
             return NO_SUDO;
         };
         argv[0] = sudo.display().to_string();
-        let nopasswd = std::process::Command::new(&sudo)
+        let nopasswd = seagent_core::platform::proc::command(&sudo)
             .args(["-n", "true"])
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
@@ -1193,7 +1193,7 @@ mod tests {
         // launcher.sh's seed-only mode builds the xfconf tree without an X server.
         let root = scratch("seed");
         let cfg = root.join("xdg");
-        let out = std::process::Command::new("bash")
+        let out = seagent_core::platform::proc::command("bash")
             .arg("-c")
             .arg(LAUNCHER)
             .env("SEAGENT_BD_PROFILE", "t")

@@ -542,7 +542,7 @@ fn edit(paths: &Paths) -> R {
     loop {
         let mut parts = editor.split_whitespace();
         let bin = parts.next().unwrap_or("vi");
-        let st = std::process::Command::new(bin).args(parts).arg(&tmp).status().map_err(|e| format!("{bin}: {e}"))?;
+        let st = seagent_core::platform::proc::command(bin).args(parts).arg(&tmp).status().map_err(|e| format!("{bin}: {e}"))?;
         if !st.success() {
             let _ = std::fs::remove_file(&tmp);
             return Err(format!("{bin} exited with {st}; config unchanged").into());

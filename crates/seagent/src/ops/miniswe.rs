@@ -72,7 +72,7 @@ impl Env {
             "local" => Ok(Env::Local { cwd: cwd.map(Path::to_path_buf).unwrap_or_else(std::env::temp_dir) }),
             "docker" => {
                 let cwd = cwd.map(|p| p.display().to_string()).unwrap_or_else(|| "/tmp".into());
-                let mut c = Command::new(docker_bin);
+                let mut c = seagent_core::platform::proc::command(docker_bin);
                 c.args(["run", "-d", "--rm"]);
                 if let Some(n) = name {
                     c.args(["--name", n]);
@@ -117,7 +117,7 @@ impl Env {
                 c
             }
             Env::Docker { bin, id, cwd } => {
-                let mut c = Command::new(bin);
+                let mut c = seagent_core::platform::proc::command(bin);
                 c.args(["exec", "-w", cwd, id, "bash", "-lc", command]);
                 c
             }
@@ -130,7 +130,7 @@ impl Env {
     }
     pub fn cleanup(&self) {
         if let Env::Docker { bin, id, .. } = self {
-            let mut c = Command::new(bin);
+            let mut c = seagent_core::platform::proc::command(bin);
             c.args(["rm", "-f", id]);
             let _ = run_capture(c, Duration::from_secs(60));
         }

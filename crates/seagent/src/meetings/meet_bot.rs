@@ -17,7 +17,7 @@ use seagent_browser::cdp::Conn;
 use serde_json::{json, Value};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -262,7 +262,7 @@ impl Bridge {
     #[cfg_attr(windows, allow(dead_code))]
     fn setup(pactl: &str) -> Result<Bridge, String> {
         let run = |args: &[&str]| -> Result<String, String> {
-            let o = Command::new(pactl).args(args).stdin(Stdio::null()).output().map_err(|e| if e.kind() == std::io::ErrorKind::NotFound { "pactl not found — install PulseAudio/pipewire-pulse".to_string() } else { e.to_string() })?;
+            let o = seagent_core::platform::proc::command(pactl).args(args).stdin(Stdio::null()).output().map_err(|e| if e.kind() == std::io::ErrorKind::NotFound { "pactl not found — install PulseAudio/pipewire-pulse".to_string() } else { e.to_string() })?;
             if !o.status.success() {
                 return Err(format!("pactl {} failed: {}", args[..2.min(args.len())].join(" "), String::from_utf8_lossy(&o.stderr).trim()));
             }
@@ -278,14 +278,14 @@ impl Bridge {
         match run(&["load-module", "module-virtual-source", &format!("source_name={src}"), &format!("master={sink}.monitor")]) {
             Ok(src_id) => Ok(Bridge { pactl: pactl.into(), modules: vec![sink_id, src_id], source: src, sink }),
             Err(e) => {
-                let _ = Command::new(pactl).args(["unload-module", &sink_id]).output();
+                let _ = seagent_core::platform::proc::command(pactl).args(["unload-module", &sink_id]).output();
                 Err(e)
             }
         }
     }
     fn teardown(&mut self) {
         for m in self.modules.drain(..).rev() {
-            let _ = Command::new(&self.pactl).args(["unload-module", &m]).stdin(Stdio::null()).output();
+            let _ = seagent_core::platform::proc::command(&self.pactl).args(["unload-module", &m]).stdin(Stdio::null()).output();
         }
     }
 }
@@ -323,7 +323,7 @@ impl Speaker {
 }
 
 fn play(player: &str, sink: &str, pcm: &[u8], rate: u32) -> Result<Child, String> {
-    let mut c = Command::new(player)
+    let mut c = seagent_core::platform::proc::command(player)
         .args(["--raw", &format!("--rate={rate}"), "--format=s16le", "--channels=1", &format!("--device={sink}"), "-"])
         .stdin(Stdio::piped())
         .stdout(Stdio::null())

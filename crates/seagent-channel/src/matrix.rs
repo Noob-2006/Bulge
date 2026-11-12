@@ -1819,7 +1819,7 @@ mod tests {
             }
         }
         let script = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/matrix_interop.mjs");
-        let mut child = Kill(std::process::Command::new("node").arg(script).stdout(std::process::Stdio::piped()).spawn().expect("node"));
+        let mut child = Kill(seagent_core::platform::proc::command("node").arg(script).stdout(std::process::Stdio::piped()).spawn().expect("node"));
         let mut line = String::new();
         std::io::BufReader::new(child.0.stdout.take().unwrap()).read_line(&mut line).unwrap();
         let url = format!("http://127.0.0.1:{}", line.trim().strip_prefix("PORT ").unwrap_or_else(|| panic!("harness said {line:?}")));

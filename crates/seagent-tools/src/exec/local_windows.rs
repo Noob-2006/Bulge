@@ -174,7 +174,7 @@ fn msys_requoted(cmd: Command) -> Command {
     if !is_msys_program(Path::new(cmd.get_program())) {
         return cmd;
     }
-    let mut c = Command::new(cmd.get_program());
+    let mut c = seagent_core::platform::proc::command(cmd.get_program());
     for a in cmd.get_args() {
         c.raw_arg(msys_quote(&a.to_string_lossy()));
     }
@@ -267,7 +267,7 @@ pub(super) fn spawn_detached(cmd: Command, req: &ExecRequest, extra: Option<PreE
     let msys = seagent_core::platform::layout::is_msys_program(Path::new(cmd.get_program()));
     let quote = if msys { seagent_core::platform::layout::msys_quote } else { windows_quote };
     let args: Vec<String> = cmd.get_args().map(|a| quote(&a.to_string_lossy())).collect();
-    let mut w = Command::new(windows_powershell());
+    let mut w = seagent_core::platform::proc::command(windows_powershell());
     w.args(["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", DETACH_WRAPPER]);
     if let Some(d) = cmd.get_current_dir() {
         w.current_dir(d);
@@ -307,7 +307,7 @@ pub(super) struct Detached {
 /// parent links.
 fn kill_tree(pid: u32) {
     let sys = std::env::var_os("SystemRoot").map(|r| PathBuf::from(r).join("System32\\taskkill.exe")).filter(|p| p.is_file()).unwrap_or_else(|| PathBuf::from("taskkill.exe"));
-    let _ = Command::new(sys).args(["/T", "/F", "/PID", &pid.to_string()]).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).creation_flags(CREATE_NO_WINDOW).status();
+    let _ = seagent_core::platform::proc::command(sys).args(["/T", "/F", "/PID", &pid.to_string()]).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).creation_flags(CREATE_NO_WINDOW).status();
 }
 
 // ───────────── the child ─────────────

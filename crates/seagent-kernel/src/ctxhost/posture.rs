@@ -18,7 +18,7 @@ use crate::lifecycle::Lifecycle;
 use seagent_core::SystemSegment;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -222,7 +222,7 @@ fn find_in_unix(dirs: &[PathBuf], name: &str) -> Option<PathBuf> {
 }
 
 fn run_version(bin: &Path, args: &[&str], stderr: bool) -> Option<String> {
-    let mut cmd = Command::new(bin);
+    let mut cmd = seagent_core::platform::proc::command(bin);
     cmd.args(args).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
     let mut child = cmd.spawn().ok()?;
     let deadline = Instant::now() + PROBE_TIMEOUT;

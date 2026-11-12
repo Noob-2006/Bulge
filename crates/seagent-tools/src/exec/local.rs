@@ -580,7 +580,7 @@ mod tests {
     fn portable_helpers_keep_unix_semantics() {
         assert!(is_text_busy(&io::Error::from_raw_os_error(libc::ETXTBSY)));
         assert!(!is_text_busy(&io::Error::from_raw_os_error(libc::ENOENT)));
-        let mut c = Command::new("sleep");
+        let mut c = seagent_core::platform::proc::command("sleep");
         c.arg("30");
         let mut child = spawn_own_group(&mut c).unwrap();
         kill_group_now(child.id() as i32);

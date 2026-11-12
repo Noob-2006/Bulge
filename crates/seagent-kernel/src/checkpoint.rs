@@ -2,7 +2,6 @@
 //! prompts. Uses a separate git dir, so the user's own repository is untouched.
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 pub struct Checkpoints {
     git_dir: PathBuf,
@@ -112,7 +111,7 @@ impl Checkpoints {
     }
 
     fn git_args(&self, args: &[String]) -> Result<String, String> {
-        let out = Command::new("git")
+        let out = seagent_core::platform::proc::command("git")
             .arg("--git-dir")
             .arg(&self.git_dir)
             .arg("--work-tree")
@@ -233,7 +232,7 @@ impl Checkpoints {
             if let Some(p) = &parent {
                 args.extend(["-p", p.as_str()]);
             }
-            let out = Command::new("git")
+            let out = seagent_core::platform::proc::command("git")
                 .arg("--git-dir")
                 .arg(&self.git_dir)
                 .args(["-c", "user.name=seagent", "-c", "user.email=seagent@localhost", "-c", "commit.gpgsign=false"])

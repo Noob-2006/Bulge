@@ -6,7 +6,7 @@
 
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 
 pub const DIR: &str = ".worktrees";
 pub const BRANCH_PREFIX: &str = "seagent/";
@@ -35,7 +35,7 @@ pub struct Report {
 }
 
 fn git(args: &[&str], cwd: &Path) -> Result<String, String> {
-    let out = Command::new("git")
+    let out = seagent_core::platform::proc::command("git")
         .args(["-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false", "-c", "protocol.allow=never", "-c", "commit.gpgsign=false", "-c", "user.name=seagent", "-c", "user.email=seagent@localhost"])
         .args(args)
         .current_dir(cwd)

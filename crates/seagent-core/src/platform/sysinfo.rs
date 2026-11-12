@@ -4,7 +4,8 @@
 //! (`/proc/sys/kernel/hostname` then `/etc/hostname`, `/proc/meminfo`, `statvfs`, `geteuid`).
 //! Other systems: `gethostname` / `sysctl hw.memsize` / `sysconf` on the other Unixes, and
 //! `GetComputerNameExW` / `GlobalMemoryStatusEx` / `GetDiskFreeSpaceExW` / the token's
-//! elevation on Windows. "Unknown" is `None`, never a made-up number.
+//! elevation on Windows. Machine CPU time (for a delta-based busy share): `/proc/stat`,
+//! `GetSystemTimes`, Mach `host_statistics`. "Unknown" is `None`, never a made-up number.
 
 use std::io;
 use std::path::{Path, PathBuf};
@@ -88,8 +89,9 @@ pub fn total_memory() -> Option<u64> {
     }
 }
 
-/// Memory available to new work in bytes (`MemAvailable` on Linux). `None` where the OS has no
-/// comparable figure (macOS: page-cache accounting differs too much to report one).
+/// Memory available to new work in bytes (`MemAvailable` on Linux, `ullAvailPhys` on Windows).
+/// macOS / iOS: physical memory minus what Activity Monitor calls "Memory Used" (app memory =
+/// internal minus purgeable pages, plus wired, plus compressed), from `host_statistics64`.
 pub fn available_memory() -> Option<u64> {
     #[cfg(any(target_os = "linux", target_os = "android"))]
     {
@@ -99,9 +101,157 @@ pub fn available_memory() -> Option<u64> {
     {
         memory_status().map(|m| m.ullAvailPhys)
     }
-    #[cfg(not(any(target_os = "linux", target_os = "android", windows)))]
+    #[cfg(target_vendor = "apple")]
+    {
+        mach::available_memory()
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "android", windows, target_vendor = "apple")))]
     {
         None
+    }
+}
+
+/// Cumulative CPU time of the whole machine, all cores together, in OS-specific ticks: `busy`
+/// excludes idle (and iowait) time, `total` includes it. Only differences between two readings
+/// mean anything: busy% = Δbusy / Δtotal (see [`cpu_busy_pct`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct CpuTimes {
+    pub busy: u64,
+    pub total: u64,
+}
+
+/// Busy share of the CPU between two [`cpu_times`] readings, 0–100; `None` when no time passed.
+pub fn cpu_busy_pct(before: CpuTimes, after: CpuTimes) -> Option<f64> {
+    let dt = after.total.checked_sub(before.total).filter(|d| *d > 0)?;
+    Some((after.busy.saturating_sub(before.busy) as f64 * 100.0 / dt as f64).clamp(0.0, 100.0))
+}
+
+/// Parse the aggregate `cpu` line of Linux `/proc/stat` (user nice system idle iowait irq
+/// softirq steal …; idle + iowait are not busy, guest time is already inside user).
+pub fn parse_proc_stat(stat: &str) -> Option<CpuTimes> {
+    let first = stat.lines().next()?;
+    if !first.starts_with("cpu ") {
+        return None;
+    }
+    let f: Vec<u64> = first.split_whitespace().skip(1).filter_map(|x| x.parse().ok()).collect();
+    if f.len() < 4 {
+        return None;
+    }
+    let idle = f[3] + f.get(4).copied().unwrap_or(0);
+    let total: u64 = f.iter().take(8).sum();
+    Some(CpuTimes { busy: total.saturating_sub(idle), total })
+}
+
+/// The machine's cumulative [`CpuTimes`] now. Linux / Android: `/proc/stat`. Windows:
+/// `GetSystemTimes` (100 ns units; kernel time includes idle). macOS / iOS:
+/// `host_statistics(HOST_CPU_LOAD_INFO)` ticks. `None` when the OS refuses (Android apps since
+/// 8.0 cannot read `/proc/stat`: callers fall back to [`load_average`]).
+pub fn cpu_times() -> Option<CpuTimes> {
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    {
+        parse_proc_stat(&std::fs::read_to_string("/proc/stat").ok()?)
+    }
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::Foundation::FILETIME;
+        let z = || FILETIME { dwLowDateTime: 0, dwHighDateTime: 0 };
+        let (mut idle, mut kernel, mut user) = (z(), z(), z());
+        // SAFETY: three valid FILETIME out-pointers.
+        if unsafe { windows_sys::Win32::System::Threading::GetSystemTimes(&mut idle, &mut kernel, &mut user) } == 0 {
+            return None;
+        }
+        let v = |f: FILETIME| ((f.dwHighDateTime as u64) << 32) | f.dwLowDateTime as u64;
+        let total = v(kernel) + v(user);
+        Some(CpuTimes { busy: total.saturating_sub(v(idle)), total })
+    }
+    #[cfg(target_vendor = "apple")]
+    {
+        mach::cpu_times()
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "android", windows, target_vendor = "apple")))]
+    {
+        None
+    }
+}
+
+/// 1, 5 and 15 minute load averages. Linux / Android: the `sysinfo(2)` syscall (allowed to
+/// Android apps, unlike `/proc/loadavg`); other Unixes: `getloadavg`. Windows has no load
+/// average: `None`.
+pub fn load_average() -> Option<[f64; 3]> {
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    {
+        // SAFETY: zeroed POD out-parameter.
+        let mut s: libc::sysinfo = unsafe { std::mem::zeroed() };
+        if unsafe { libc::sysinfo(&mut s) } != 0 {
+            return None;
+        }
+        let f = |x: libc::c_ulong| x as f64 / 65536.0;
+        Some([f(s.loads[0]), f(s.loads[1]), f(s.loads[2])])
+    }
+    #[cfg(all(unix, not(any(target_os = "linux", target_os = "android"))))]
+    {
+        let mut l = [0f64; 3];
+        // SAFETY: `l` holds the 3 doubles asked for.
+        (unsafe { libc::getloadavg(l.as_mut_ptr(), 3) } == 3).then_some(l)
+    }
+    #[cfg(not(unix))]
+    {
+        None
+    }
+}
+
+/// Mach host statistics (macOS and iOS share the Mach kernel interface).
+#[cfg(target_vendor = "apple")]
+mod mach {
+    use super::CpuTimes;
+
+    const HOST_CPU_LOAD_INFO: i32 = 3;
+    const HOST_VM_INFO64: i32 = 4;
+    /// `sizeof(vm_statistics64_data_t) / sizeof(integer_t)`.
+    const VM_INFO64_COUNT: usize = 38;
+
+    extern "C" {
+        fn mach_host_self() -> u32;
+        fn host_statistics(host: u32, flavor: i32, info: *mut i32, count: *mut u32) -> i32;
+        fn host_statistics64(host: u32, flavor: i32, info: *mut i32, count: *mut u32) -> i32;
+    }
+
+    /// The host port, asked for once (every `mach_host_self` call adds a send right).
+    fn host() -> u32 {
+        static H: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
+        // SAFETY: no preconditions.
+        *H.get_or_init(|| unsafe { mach_host_self() })
+    }
+
+    /// `host_cpu_load_info`: user, system, idle, nice ticks.
+    pub fn cpu_times() -> Option<CpuTimes> {
+        let mut t = [0i32; 4];
+        let mut n = t.len() as u32;
+        // SAFETY: `t` holds `n` integers, the size of host_cpu_load_info.
+        if unsafe { host_statistics(host(), HOST_CPU_LOAD_INFO, t.as_mut_ptr(), &mut n) } != 0 {
+            return None;
+        }
+        let [user, system, idle, nice] = t.map(|x| x as u32 as u64);
+        let busy = user + system + nice;
+        Some(CpuTimes { busy, total: busy + idle })
+    }
+
+    pub fn available_memory() -> Option<u64> {
+        // vm_statistics64 viewed as natural_t words (u64 fields span two): free 0, active 1,
+        // inactive 2, wire 3, purgeable 22, speculative 23, compressor 32, external 34,
+        // internal 35.
+        let mut w = [0i32; VM_INFO64_COUNT];
+        let mut n = VM_INFO64_COUNT as u32;
+        // SAFETY: `w` holds `n` integers, the size of vm_statistics64.
+        if unsafe { host_statistics64(host(), HOST_VM_INFO64, w.as_mut_ptr(), &mut n) } != 0 {
+            return None;
+        }
+        let g = |i: usize| w[i] as u32 as u64;
+        // SAFETY: sysconf has no preconditions.
+        let page = unsafe { libc::sysconf(libc::_SC_PAGESIZE) }.max(4096) as u64;
+        let used = (g(35).saturating_sub(g(22)) + g(3) + g(32)) * page;
+        let total = super::total_memory()?;
+        Some(total.saturating_sub(used))
     }
 }
 
@@ -291,6 +441,39 @@ mod tests {
             assert_eq!(is_root(), current_uid() == Some(0));
             assert!(kernel_release().is_some());
         }
+    }
+
+    /// The status bar's CPU / memory readings are real on every host OS: CPU time advances
+    /// while a thread spins, so the delta-based busy share is above 0 (the Windows sampler
+    /// used to read `/proc/stat` and always showed 0.0%), and memory in use is a real share.
+    #[test]
+    fn cpu_and_memory_readings_are_live() {
+        let a = cpu_times().expect("machine CPU times on a test host");
+        let until = std::time::Instant::now() + std::time::Duration::from_millis(400);
+        let mut x = 0u64;
+        while std::time::Instant::now() < until {
+            x = std::hint::black_box(x.wrapping_mul(31).wrapping_add(7));
+        }
+        let b = cpu_times().unwrap();
+        assert!(b.total > a.total && b.busy > a.busy, "{a:?} -> {b:?}");
+        let pct = cpu_busy_pct(a, b).unwrap();
+        assert!(pct > 0.0 && pct <= 100.0, "{pct}");
+        assert_eq!(cpu_busy_pct(b, b), None);
+        let total = total_memory().unwrap();
+        let avail = available_memory().expect("available memory on a test host");
+        assert!(avail > 0 && avail < total, "{avail} of {total}");
+        #[cfg(unix)]
+        assert!(load_average().is_some_and(|l| l.iter().all(|v| *v >= 0.0)));
+    }
+
+    #[test]
+    fn proc_stat_and_busy_share() {
+        let t = parse_proc_stat("cpu  100 0 50 800 50 0 0 0 0 0\ncpu0 1 2 3 4\n").unwrap();
+        assert_eq!((t.busy, t.total), (150, 1000));
+        assert_eq!(parse_proc_stat("intr 1 2 3 4 5\n"), None);
+        let later = CpuTimes { busy: 200, total: 1100 };
+        assert_eq!(cpu_busy_pct(t, later), Some(50.0));
+        assert_eq!(cpu_busy_pct(later, t), None);
     }
 
     #[cfg(target_os = "linux")]

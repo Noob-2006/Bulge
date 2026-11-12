@@ -157,7 +157,7 @@ pub fn snmp_trap(bin: &str, target: &str, key: &str, text: &str) -> Result<Strin
         return Err(format!("{target}: bad host or community"));
     }
     let host = if host.contains(':') { host.to_string() } else { format!("{host}:162") };
-    let mut cmd = std::process::Command::new(bin);
+    let mut cmd = seagent_core::platform::proc::command(bin);
     cmd.args(["-v", "2c", "-c", community, &host, "", SNMP_TRAP_OID]).args([format!("{SNMP_TRAP_OID}.1.1"), "s".into(), key.into(), format!("{SNMP_TRAP_OID}.1.2"), "s".into(), text.chars().take(255).collect()]);
     let mut tries = 0;
     let out = loop {

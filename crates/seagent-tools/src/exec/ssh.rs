@@ -19,7 +19,6 @@ use seagent_core::exec::{ExecBackend, ExecChild, ExecRequest, ExitInfo};
 use serde::Deserialize;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
@@ -113,7 +112,7 @@ fn ensure_ssh_client() -> Result<(), String> {
     if local::which("ssh").is_none() {
         return Err("exec backend ssh: `ssh` is not installed or not in PATH (install the OpenSSH client: apt install openssh-client)".into());
     }
-    let out = super::probe_output(Command::new("ssh").arg("-V"));
+    let out = super::probe_output(seagent_core::platform::proc::command("ssh").arg("-V"));
     match out {
         Ok(o) if o.status.success() => Ok(()),
         Ok(o) => Err(format!("exec backend ssh: `ssh -V` failed ({}): {}", o.status.code().map(|c| format!("exit {c}")).unwrap_or_else(|| "killed".into()), String::from_utf8_lossy(&o.stderr).trim())),
@@ -143,7 +142,7 @@ pub(crate) fn remote_command(flag: &str, script: &str) -> String {
 
 /// One probe command over a fresh/multiplexed connection (no sync, no env).
 fn probe(cfg: &SshConfig, control: &str, script: &str, timeout: Duration) -> Result<(ExitInfo, Vec<u8>), String> {
-    let mut cmd = Command::new("ssh");
+    let mut cmd = seagent_core::platform::proc::command("ssh");
     cmd.args(ssh_opts(cfg, control));
     cmd.arg(target(cfg));
     cmd.arg(remote_command("-c", script));
@@ -216,7 +215,7 @@ fn find_bytes(haystack: &[u8], needle: &[u8]) -> Option<usize> {
 
 impl RemoteShell {
     fn start(cfg: &SshConfig, control: &str) -> Result<RemoteShell, String> {
-        let mut cmd = Command::new("ssh");
+        let mut cmd = seagent_core::platform::proc::command("ssh");
         cmd.args(ssh_opts(cfg, control));
         cmd.arg(target(cfg));
         // One remote command line; the shell then reads framed scripts from stdin.
@@ -419,7 +418,7 @@ impl ExecBackend for SshBackend {
             script.push_str(&format!("mkdir -p {0} && cd {0} || exit 126\n", sh_quote(&self.map_path(c))));
         }
         script.push_str(&req.script);
-        let mut cmd = Command::new("ssh");
+        let mut cmd = seagent_core::platform::proc::command("ssh");
         cmd.args(self.args());
         cmd.arg(target(&self.cfg));
         cmd.arg(remote_command(if req.login { "-lc" } else { "-c" }, &script));
@@ -471,7 +470,7 @@ impl ExecBackend for SshBackend {
             sh.shutdown();
         }
         if !self.control.is_empty() {
-            let _ = Command::new("ssh")
+            let _ = seagent_core::platform::proc::command("ssh")
                 .args(["-o", &format!("ControlPath={}", self.control), "-O", "exit", &target(&self.cfg)])
                 .stdin(std::process::Stdio::null())
                 .stdout(std::process::Stdio::null())

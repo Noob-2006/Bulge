@@ -36,8 +36,6 @@ use serde_json::Value;
 use std::collections::BTreeMap;
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
-#[cfg(unix)]
-use std::process::Command;
 use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc, OnceLock, RwLock};
@@ -277,7 +275,7 @@ impl PipeChild {
     fn start(script: &str, req: &ExecRequest, cwd: &Path) -> io::Result<Box<dyn ExecChild>> {
         #[cfg(unix)]
         let (child, stdout) = {
-            let mut cmd = Command::new("bash");
+            let mut cmd = seagent_core::platform::proc::command("bash");
             // `exec 2>&1` merges stderr into the one pipe the reader thread drains.
             let body = format!("exec 2>&1\n{script}");
             cmd.arg(if req.login { "-lc" } else { "-c" }).arg(body).current_dir(cwd);

@@ -11,7 +11,6 @@ use super::BackendCtx;
 use seagent_core::exec::{ExecBackend, ExecChild, ExecRequest};
 use std::io;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 const SANDBOX_EXEC: &str = "/usr/bin/sandbox-exec";
 
@@ -75,7 +74,7 @@ impl SeatbeltBackend {
         }
         // sandbox-exec cannot nest: a seagent that already runs sandboxed must refuse here,
         // not at the first command.
-        let ok = Command::new(SANDBOX_EXEC).args(["-p", "(version 1)(allow default)", "/usr/bin/true"]).status().map(|s| s.success()).unwrap_or(false);
+        let ok = seagent_core::platform::proc::command(SANDBOX_EXEC).args(["-p", "(version 1)(allow default)", "/usr/bin/true"]).status().map(|s| s.success()).unwrap_or(false);
         if !ok {
             return Err("exec backend seatbelt: sandbox-exec cannot start a sandbox here (is seagent itself sandboxed?); use docker or vm".into());
         }
@@ -99,7 +98,7 @@ impl ExecBackend for SeatbeltBackend {
     }
     fn spawn(&self, req: &ExecRequest) -> io::Result<Box<dyn ExecChild>> {
         let inner = bash_command(req);
-        let mut cmd = Command::new(SANDBOX_EXEC);
+        let mut cmd = seagent_core::platform::proc::command(SANDBOX_EXEC);
         cmd.arg("-p").arg(&self.profile).arg(inner.get_program()).args(inner.get_args());
         let cwd = req.cwd.clone().filter(|c| c.starts_with(&self.l.workspace)).unwrap_or_else(|| self.l.workspace.clone());
         cmd.current_dir(cwd).env("HOME", &self.l.tmp).env("TMPDIR", &self.l.tmp);

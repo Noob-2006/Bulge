@@ -165,7 +165,7 @@ mod tests {
         use std::os::unix::process::CommandExt;
         let raw = fd.as_raw_fd();
         let run = |script: &str| {
-            let mut c = std::process::Command::new(&bwrap);
+            let mut c = seagent_core::platform::proc::command(&bwrap);
             c.args(["--unshare-user-try", "--die-with-parent", "--ro-bind", "/", "/", "--seccomp", &raw.to_string(), "sh", "-c", script]);
             // SAFETY: fcntl on an fd this process owns, in the forked child before exec.
             unsafe {
@@ -184,7 +184,7 @@ mod tests {
         let Ok(fd2) = pipe_with_program() else { return };
         drop(fd);
         let raw2 = fd2.as_ref().map(|f| f.as_raw_fd()).unwrap();
-        let mut c = std::process::Command::new(&bwrap);
+        let mut c = seagent_core::platform::proc::command(&bwrap);
         c.args(["--unshare-user-try", "--die-with-parent", "--ro-bind", "/", "/", "--seccomp", &raw2.to_string(), "unshare", "-U", "true"]);
         // SAFETY: as above.
         unsafe {

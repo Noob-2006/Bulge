@@ -1208,7 +1208,7 @@ impl Channel for QqBot {
 pub mod silk {
     use crate::{ChannelError, ChannelErrorKind as K};
     use std::path::{Path, PathBuf};
-    use std::process::{Command, Stdio};
+    use std::process::Stdio;
 
     #[derive(Debug, Clone)]
     pub struct Codec {
@@ -1276,7 +1276,7 @@ pub mod silk {
         let sub = |a: &String| a.replace("{in}", &input.display().to_string()).replace("{out}", &output.display().to_string()).replace("{rate}", &rate.to_string());
         let args: Vec<String> = argv.iter().map(sub).collect();
         let (bin, rest) = args.split_first().ok_or_else(|| ChannelError::new(K::Fatal, "empty codec command"))?;
-        let out = Command::new(bin).args(rest).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::piped()).output().map_err(|e| ChannelError::new(K::Fatal, format!("cannot run {bin}: {e}")))?;
+        let out = seagent_core::platform::proc::command(bin).args(rest).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::piped()).output().map_err(|e| ChannelError::new(K::Fatal, format!("cannot run {bin}: {e}")))?;
         if !out.status.success() {
             let err: String = String::from_utf8_lossy(&out.stderr).chars().take(300).collect();
             return Err(ChannelError::new(K::Protocol, format!("{bin} failed ({}): {}", out.status, err.trim())));
@@ -1349,7 +1349,7 @@ pub mod silk {
                     let t = Temp::new("pcm");
                     let r = self.rate.to_string();
                     let args = ["-loglevel", "error", "-y", "-i", &src.path_str(), "-f", "s16le", "-acodec", "pcm_s16le", "-ar", &r, "-ac", "1", &t.path_str()];
-                    let o = Command::new(&self.ffmpeg).args(args).stdin(Stdio::null()).output().map_err(|e| ChannelError::new(K::Fatal, format!("cannot run {}: {e}", self.ffmpeg)))?;
+                    let o = seagent_core::platform::proc::command(&self.ffmpeg).args(args).stdin(Stdio::null()).output().map_err(|e| ChannelError::new(K::Fatal, format!("cannot run {}: {e}", self.ffmpeg)))?;
                     if !o.status.success() {
                         return Err(ChannelError::new(K::Protocol, format!("ffmpeg failed: {}", String::from_utf8_lossy(&o.stderr).chars().take(300).collect::<String>().trim())));
                     }

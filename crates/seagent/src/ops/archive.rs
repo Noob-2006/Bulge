@@ -398,7 +398,7 @@ mod tests {
         // The system tar reads ours.
         let f = root.join("t.tar.gz");
         std::fs::write(&f, gzip(&tar(&entries[..2]))).unwrap();
-        if let Ok(o) = std::process::Command::new("tar").arg("-tzf").arg(&f).output() {
+        if let Ok(o) = seagent_core::platform::proc::command("tar").arg("-tzf").arg(&f).output() {
             if o.status.success() {
                 assert!(String::from_utf8_lossy(&o.stdout).contains("dir/a.txt"));
             }

@@ -32,7 +32,7 @@ use crate::host::{Accel, HostOs, VmmJob};
 use crate::isolation::ProviderKind;
 use crate::limits::proc_usage;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, Stdio};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -249,7 +249,7 @@ impl VmProvider for QemuProvider {
             }
             _ => None,
         };
-        let mut child = crate::host::spawn_vmm(Command::new(&self.bin).args(self.cmdline_with(spec, &chan, &mon)).stdin(Stdio::null()).stdout(Stdio::from(log)).stderr(Stdio::from(err)))
+        let mut child = crate::host::spawn_vmm(crate::host::command(&self.bin).args(self.cmdline_with(spec, &chan, &mon)).stdin(Stdio::null()).stdout(Stdio::from(log)).stderr(Stdio::from(err)))
             .map_err(|e| format!("start {}: {e}", self.bin))?;
         let job = match VmmJob::confine(&child, spec.mem_mb, spec.vcpu) {
             Ok(j) => j,
@@ -376,7 +376,7 @@ impl VmInstance for QemuInstance {
 
 /// Is this QEMU usable for microVMs (KVM + the machine we generate)?
 pub fn probe(bin: &Path) -> Result<String, String> {
-    let out = Command::new(bin).arg("--version").stdout(Stdio::piped()).stderr(Stdio::piped()).output().map_err(|e| format!("{}: {e}", bin.display()))?;
+    let out = crate::host::command(bin).arg("--version").stdout(Stdio::piped()).stderr(Stdio::piped()).output().map_err(|e| format!("{}: {e}", bin.display()))?;
     if !out.status.success() {
         return Err(format!("{} --version failed", bin.display()));
     }

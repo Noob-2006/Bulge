@@ -777,7 +777,7 @@ mod os {
 mod tests {
     use super::*;
     use std::os::unix::process::CommandExt;
-    use std::process::{Child, Command, Stdio};
+    use std::process::{Child, Stdio};
 
     /// Temp dir that removes itself (tests must not leave anything behind).
     struct Tmp(PathBuf);
@@ -802,7 +802,7 @@ mod tests {
 
     /// A process group we started ourselves: `sh -c 'sleep 60'` as its own group leader.
     fn own_group() -> Child {
-        Command::new("/bin/sh").arg("-c").arg("sleep 60").stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).process_group(0).spawn().expect("spawn sleep")
+        seagent_core::platform::proc::command("/bin/sh").arg("-c").arg("sleep 60").stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).process_group(0).spawn().expect("spawn sleep")
     }
 
     /// Still running? (`alive` ignores zombies — a killed-but-unreaped leader would otherwise
@@ -821,7 +821,7 @@ mod tests {
     /// A pid that is certainly not running (the child was reaped).
     fn dead_pid() -> u32 {
         for _ in 0..32 {
-            let mut c = Command::new("/bin/sh").arg("-c").arg("exit 0").spawn().unwrap();
+            let mut c = seagent_core::platform::proc::command("/bin/sh").arg("-c").arg("exit 0").spawn().unwrap();
             let pid = c.id();
             let _ = c.wait();
             if !Path::new(&format!("/proc/{pid}")).exists() {
@@ -844,7 +844,7 @@ mod tests {
         let home = tmp.0.join("home");
         let cg = tmp.0.join("fake-cgroup");
         std::fs::create_dir_all(&cg).unwrap();
-        let mut escaped = Command::new("sleep").arg("60").stdin(Stdio::null()).process_group(0).spawn().expect("spawn sleep");
+        let mut escaped = seagent_core::platform::proc::command("sleep").arg("60").stdin(Stdio::null()).process_group(0).spawn().expect("spawn sleep");
         struct Guard<'a>(&'a mut Child);
         impl Drop for Guard<'_> {
             fn drop(&mut self) {

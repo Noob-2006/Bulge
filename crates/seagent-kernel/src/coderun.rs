@@ -321,7 +321,7 @@ fn interp_command(interp: &str, script: &str) -> Result<Command, String> {
     if interp == "bash" {
         return crate::childproc::bash(script).map_err(|e| format!("lang=bash: {e} — use lang=python3"));
     }
-    let mut c = if cfg!(windows) { python_command() } else { Command::new(interp) };
+    let mut c = if cfg!(windows) { python_command() } else { seagent_core::platform::proc::command(interp) };
     c.arg("-c").arg(script);
     Ok(c)
 }
@@ -613,7 +613,7 @@ mod tests {
             self.tmp.display().to_string()
         }
         fn spawn(&self, req: &seagent_core::exec::ExecRequest) -> std::io::Result<Box<dyn seagent_core::exec::ExecChild>> {
-            let mut c = Command::new("bash");
+            let mut c = seagent_core::platform::proc::command("bash");
             c.env_clear().env("PATH", "/usr/bin:/bin").env("HOME", &self.tmp).arg("-c").arg(format!("{} 2>&1", req.script)).stdout(Stdio::piped()).stdin(Stdio::piped());
             let mut c = c.spawn()?;
             let mut stdin = c.stdin.take();

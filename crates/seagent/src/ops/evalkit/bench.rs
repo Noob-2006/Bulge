@@ -302,7 +302,7 @@ pub fn before_grade_in_container(t: &Task, bin: &str, cid: &str) {
     let Some(dir) = t.meta_str("tbench_dir") else { return };
     let d = Path::new(dir);
     let cp = |from: &Path, to: &str| {
-        let mut c = std::process::Command::new(bin);
+        let mut c = seagent_core::platform::proc::command(bin);
         c.args(["cp", &from.display().to_string(), &format!("{cid}:{to}")]);
         let _ = super::run::capture(c, Duration::from_secs(120));
     };
@@ -437,7 +437,7 @@ struct Ctr {
 
 impl Drop for Ctr {
     fn drop(&mut self) {
-        let mut c = std::process::Command::new(&self.bin);
+        let mut c = seagent_core::platform::proc::command(&self.bin);
         c.args(["rm", "-f", &self.name]);
         let _ = super::run::capture(c, Duration::from_secs(60));
     }
@@ -446,7 +446,7 @@ impl Drop for Ctr {
 impl Ctr {
     fn exec(&self, script: &str, timeout: u64) -> (String, i32) {
         let wrapped = format!("set -a; [ -f /seagent/bot-desktop/env ] && . /seagent/bot-desktop/env; set +a; {script}");
-        let mut c = std::process::Command::new(&self.bin);
+        let mut c = seagent_core::platform::proc::command(&self.bin);
         c.args(["exec", &self.name, "bash", "-lc", &wrapped]);
         super::run::capture(c, Duration::from_secs(timeout)).unwrap_or_else(|e| (e, -1))
     }
@@ -466,7 +466,7 @@ pub fn osworld_attempt(r: &Runner, s: &Subject, t: &Task, model: &str, dir: &Pat
     }
     let name = format!("seagent-test-eval-osworld-{}-{}", slug(&t.id).to_lowercase(), seagent_kernel::util::random_hex(4));
     let exe = std::env::current_exe().map(|p| p.display().to_string()).unwrap_or_else(|_| "/usr/local/bin/seagent".into());
-    let mut run = std::process::Command::new(&r.container_bin);
+    let mut run = seagent_core::platform::proc::command(&r.container_bin);
     run.args(["run", "-d", "--rm", "--name", &name, "-e", "SEAGENT_HOME=/seagent", "-v", &format!("{exe}:/usr/local/bin/seagent:ro")]);
     if let Some(envf) = r.container_env_file.as_deref() {
         run.args(["--env-file", envf]);
@@ -503,7 +503,7 @@ pub fn osworld_attempt(r: &Runner, s: &Subject, t: &Task, model: &str, dir: &Pat
                     let cached = r.cache_dir.as_ref().map(|d| d.join(base)).filter(|p| p.is_file());
                     res = match cached {
                         Some(file) => {
-                            let mut c = std::process::Command::new(&r.container_bin);
+                            let mut c = seagent_core::platform::proc::command(&r.container_bin);
                             c.args(["cp", &file.display().to_string(), &format!("{name}:{dest}")]);
                             super::run::capture(c, Duration::from_secs(120)).unwrap_or_else(|e| (e, -1))
                         }
@@ -531,7 +531,7 @@ pub fn osworld_attempt(r: &Runner, s: &Subject, t: &Task, model: &str, dir: &Pat
         }
         t.fake.as_ref().map(|f| f.answer.clone()).unwrap_or_default()
     } else {
-        let mut c = std::process::Command::new(&r.container_bin);
+        let mut c = seagent_core::platform::proc::command(&r.container_bin);
         c.args(["exec", "-e", "SEAGENT_HOME=/seagent", &name, "seagent", "run", "--yes", "--model", model, "--", &t.prompt]);
         usage.estimated = true;
         match super::run::capture(c, Duration::from_secs(t.timeout_secs.unwrap_or(1800))) {

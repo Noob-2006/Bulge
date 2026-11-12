@@ -236,7 +236,7 @@ pub fn restart_command() -> Result<String, String> {
 #[cfg(unix)]
 fn spawn_detached(line: &str) -> Result<(), String> {
     use std::os::unix::process::CommandExt;
-    let mut cmd = std::process::Command::new("sh");
+    let mut cmd = seagent_core::platform::proc::command("sh");
     cmd.arg("-c").arg(line).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null());
     unsafe {
         cmd.pre_exec(|| {

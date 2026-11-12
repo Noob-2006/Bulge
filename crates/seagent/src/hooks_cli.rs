@@ -292,7 +292,7 @@ fn doctor(c: &Ctx) -> i32 {
         }
         let p = synthetic_payload(h.event, None, &c.ws, None);
         let t = Instant::now();
-        let out = std::process::Command::new("bash")
+        let out = seagent_core::platform::proc::command("bash")
             .arg("-c")
             .arg(&h.command)
             .current_dir(&c.ws)

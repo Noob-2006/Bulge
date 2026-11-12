@@ -49,7 +49,7 @@ pub type Spawn = fn(&[&str]) -> Result<String, String>;
 /// the daemon again on the new version (see `ops::update`), exactly as the CLI would.
 fn spawn_update(args: &[&str]) -> Result<String, String> {
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
-    let mut c = std::process::Command::new(exe);
+    let mut c = seagent_core::platform::proc::command(exe);
     c.args(args).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null());
     crate::ops::hostos::detach(&mut c);
     Ok(format!("pid {}", c.spawn().map_err(|e| e.to_string())?.id()))

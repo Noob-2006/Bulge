@@ -11,7 +11,6 @@ use std::ffi::CString;
 use std::io;
 use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
-use std::process::Command;
 use std::time::Duration;
 
 // ───────────── bubblewrap ─────────────
@@ -81,7 +80,7 @@ impl ExecBackend for BwrapBackend {
         )
     }
     fn spawn(&self, req: &ExecRequest) -> io::Result<Box<dyn ExecChild>> {
-        let mut cmd = Command::new(&self.cfg.binary);
+        let mut cmd = seagent_core::platform::proc::command(&self.cfg.binary);
         let mut args = self.args(req);
         // ent-023: the seccomp deny-list travels as a pipe fd; only the child sees it (the
         // pre-exec hook clears close-on-exec there), and the parent's copy closes on return.

@@ -15,7 +15,7 @@ use serde_json::{json, Value};
 use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -225,7 +225,7 @@ pub fn build(vms: &DesktopVms, force: bool, log: &mut dyn FnMut(&str)) -> Result
         "-no-reboot".into(),
     ];
     log(&format!("provisioning the desktop in a {accel} VM (Xfce, LightDM auto-login, Chromium; this takes a few minutes) …"));
-    let mut child = Command::new(&qemu).args(&args).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::piped()).spawn().map_err(|e| format!("start {}: {e}", qemu.display()))?;
+    let mut child = crate::host::command(&qemu).args(&args).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::piped()).spawn().map_err(|e| format!("start {}: {e}", qemu.display()))?;
     let t0 = Instant::now();
     let limit = Duration::from_secs(cfg.build_timeout_secs.max(60));
     let mut last_note = Instant::now();

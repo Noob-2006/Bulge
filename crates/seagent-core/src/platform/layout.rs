@@ -155,16 +155,16 @@ pub fn python3_command() -> std::process::Command {
     {
         match python3() {
             Some((p, args)) => {
-                let mut c = std::process::Command::new(p);
+                let mut c = crate::platform::proc::command(p);
                 c.args(args);
                 c
             }
-            None => std::process::Command::new("python"),
+            None => crate::platform::proc::command("python"),
         }
     }
     #[cfg(not(windows))]
     {
-        std::process::Command::new("python3")
+        crate::platform::proc::command("python3")
     }
 }
 
@@ -182,7 +182,7 @@ pub fn program_command(name: impl AsRef<OsStr>) -> std::process::Command {
         let bare = name.trim_end_matches(".exe").to_ascii_lowercase();
         if bare == "python3" || bare == "python" {
             if let Some((p, args)) = python3() {
-                let mut c = std::process::Command::new(p);
+                let mut c = crate::platform::proc::command(p);
                 c.args(args);
                 // Pipes speak UTF-8 JSON (MCP, ACP, LSP); Windows Python would decode them in
                 // the ANSI code page. UTF-8 mode (`-X utf8`, which `-I` / `-E` scripts honour
@@ -196,24 +196,24 @@ pub fn program_command(name: impl AsRef<OsStr>) -> std::process::Command {
         // `sh -c …` / `bash script` in a config: Git Bash / MSYS2, never WSL's `bash.exe`.
         if bare == "sh" || bare == "bash" {
             if let Some(b) = bash() {
-                return std::process::Command::new(b);
+                return crate::platform::proc::command(b);
             }
         }
         if let Some(p) = which(&name) {
-            return std::process::Command::new(p);
+            return crate::platform::proc::command(p);
         }
         // A POSIX tool a Linux config names (`cat`, `grep`, `false`…): Git for Windows / MSYS2
         // ship them next to their bash, outside PATH.
         if !name.contains(['/', '\\']) {
             if let Some(p) = bash().and_then(|b| posix_tools_dir(&b)).map(|d| d.join(format!("{bare}.exe"))).filter(|p| p.is_file()) {
-                return std::process::Command::new(p);
+                return crate::platform::proc::command(p);
             }
         }
-        std::process::Command::new(raw)
+        crate::platform::proc::command(raw)
     }
     #[cfg(not(windows))]
     {
-        std::process::Command::new(name)
+        crate::platform::proc::command(name)
     }
 }
 

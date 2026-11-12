@@ -16,7 +16,6 @@ use seagent_core::exec::{ExecBackend, ExecChild, ExecRequest};
 use serde::Deserialize;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 /// `[exec.singularity]` (and `[exec.apptainer]` uses `singularity`, see config)
 #[derive(Debug, Clone, Deserialize)]
@@ -118,7 +117,7 @@ or Singularity, or set [exec.singularity] binary to its absolute path"
         .to_string()
     };
     // Hermes `_ensure_singularity_available`: the binary must actually run.
-    let out = super::probe_output(Command::new(&exe).arg("version")).map_err(|e| format!("exec backend singularity: cannot run `{exe} version`: {e}"))?;
+    let out = super::probe_output(seagent_core::platform::proc::command(&exe).arg("version")).map_err(|e| format!("exec backend singularity: cannot run `{exe} version`: {e}"))?;
     if !out.status.success() {
         let err = String::from_utf8_lossy(&out.stderr).trim().chars().take(200).collect::<String>();
         return Err(format!("exec backend singularity: `{exe} version` failed ({}): {err}", out.status.code().map(|c| format!("exit {c}")).unwrap_or_else(|| "killed".into())));
@@ -146,7 +145,7 @@ impl ExecBackend for SingularityBackend {
             script.push_str(&format!("mkdir -p {0} && cd {0} || exit 126\n", super::sh_quote(&self.map_path(c))));
         }
         script.push_str(&req.script);
-        let mut cmd = Command::new(&self.exe);
+        let mut cmd = seagent_core::platform::proc::command(&self.exe);
         cmd.args(self.args());
         cmd.arg("bash").arg(if req.login { "-lc" } else { "-c" }).arg(script);
         // PTY and detach are handled by the local spawner: the container is a host process.

@@ -836,9 +836,9 @@ impl Buzz {
     /// `buzz` CLI (argv, never a shell); the key travels in the environment only.
     fn run_cli(&self, args: &[String], stdin: Option<&str>) -> Result<String, ChannelError> {
         use std::io::{Read, Write};
-        use std::process::{Command, Stdio};
+        use std::process::Stdio;
         let cli = self.cli_path.as_deref().ok_or_else(|| crate::unsupported("this Buzz operation without cli_path"))?;
-        let mut cmd = Command::new(cli);
+        let mut cmd = seagent_core::platform::proc::command(cli);
         cmd.args(args).env("BUZZ_RELAY_URL", &self.relay_http).env("BUZZ_PRIVATE_KEY", &self.raw_key).env_remove("BUZZ_AUTH_TAG");
         if let Some(t) = &self.auth_tag {
             cmd.env("BUZZ_AUTH_TAG", t);

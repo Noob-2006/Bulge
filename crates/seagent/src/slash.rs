@@ -989,7 +989,7 @@ fn cmd_context(c: &Ctx, a: &str) -> Result<Reply, String> {
 fn cmd_diff(c: &Ctx, a: &str) -> Result<Reply, String> {
     let dir = ws(c);
     let extra: Vec<&str> = a.split_whitespace().filter(|w| !w.starts_with("--output") && !w.starts_with("--ext-diff")).collect();
-    let run = |args: &[&str]| std::process::Command::new("git").arg("-C").arg(&dir).args(args).output().map_err(|e| format!("git: {e}"));
+    let run = |args: &[&str]| seagent_core::platform::proc::command("git").arg("-C").arg(&dir).args(args).output().map_err(|e| format!("git: {e}"));
     let stat = run(&[&["diff", "--stat"], &extra[..]].concat())?;
     if !stat.status.success() {
         return Err(String::from_utf8_lossy(&stat.stderr).trim().to_string());
@@ -1988,8 +1988,8 @@ mod tests {
     fn diff_and_manifest() {
         let t = kit();
         let c = ctx(&t.k, &t.ws, None);
-        if std::process::Command::new("git").arg("--version").output().is_ok() {
-            let git = |a: &[&str]| std::process::Command::new("git").arg("-C").arg(&t.ws).args(a).output().unwrap();
+        if seagent_core::platform::proc::command("git").arg("--version").output().is_ok() {
+            let git = |a: &[&str]| seagent_core::platform::proc::command("git").arg("-C").arg(&t.ws).args(a).output().unwrap();
             git(&["init", "-q"]);
             std::fs::write(t.ws.join("a.txt"), "one\n").unwrap();
             git(&["add", "."]);

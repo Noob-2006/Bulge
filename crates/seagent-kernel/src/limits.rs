@@ -527,7 +527,7 @@ mod tests {
     #[cfg(unix)]
     use std::os::unix::process::CommandExt;
     #[cfg(unix)]
-    use std::process::{Child, Command, Stdio};
+    use std::process::{Child, Stdio};
     use std::sync::Arc;
 
     struct NoModels;
@@ -703,7 +703,7 @@ mod tests {
 
     #[cfg(unix)]
     fn own_group() -> Child {
-        Command::new("/bin/sh").arg("-c").arg("sleep 60").stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).process_group(0).spawn().expect("spawn sleep")
+        seagent_core::platform::proc::command("/bin/sh").arg("-c").arg("sleep 60").stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).process_group(0).spawn().expect("spawn sleep")
     }
 
     #[cfg(unix)]
