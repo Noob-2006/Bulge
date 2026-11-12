@@ -26,7 +26,8 @@
 #
 # Prints, last, `SEAGENT_VM_IMAGE_MANIFEST_SHA256=<sha256>`: export it while building the
 # seagent sidecar so the installed agent accepts exactly this image (bundle::PINNED_MANIFEST_SHA256).
-# Needs: bash, curl, sha256sum (or shasum), tar, python3; Windows bundles also 7z/7zz/7za.
+# Needs: bash, curl, sha256sum (or shasum), tar, python3 (or python, or PYTHON=path); Windows
+# bundles also 7z/7zz/7za. Runs on Linux, macOS and Git Bash on Windows (the CI runners).
 set -euo pipefail
 umask 022
 
@@ -68,6 +69,9 @@ case "$ARCH" in x86_64 | aarch64) ;; *) die "--arch x86_64|aarch64" ;; esac
 : "${CACHE:=${TMPDIR:-/tmp}/seagent-vm-bundle-cache}"
 mkdir -p "$CACHE"
 
+PY="${PYTHON:-$(command -v python3 || command -v python || true)}"
+[ -n "$PY" ] || die "python3 is required"
+
 sha256_of() { if command -v sha256sum >/dev/null; then sha256sum "$1" | cut -d' ' -f1; else shasum -a 256 "$1" | cut -d' ' -f1; fi; }
 sha512_of() { if command -v sha512sum >/dev/null; then sha512sum "$1" | cut -d' ' -f1; else shasum -a 512 "$1" | cut -d' ' -f1; fi; }
 
@@ -86,7 +90,7 @@ fetch() {
 }
 
 # The image: the three files the manifest pins, copied as they are.
-python3 -I - "$IMAGE/manifest.json" "$ARCH" <<'PY' || die "the image does not fit this bundle (see above)"
+"$PY" -I - "$IMAGE/manifest.json" "$ARCH" <<'PY' || die "the image does not fit this bundle (see above)"
 import json, sys
 m = json.load(open(sys.argv[1]))
 if m.get("image_version") != 1:
@@ -102,7 +106,7 @@ mkdir -p "$img_out" "$OUT/LICENSES"
 for f in vmlinux initramfs.cpio.gz manifest.json; do
 	install -m 0644 "$IMAGE/$f" "$img_out/$f"
 done
-python3 -I - "$img_out" <<'PY' || die "the copied image does not verify"
+"$PY" -I - "$img_out" <<'PY' || die "the copied image does not verify"
 import hashlib, json, os, sys
 d = sys.argv[1]
 m = json.load(open(os.path.join(d, "manifest.json")))
@@ -185,7 +189,7 @@ linux)
 esac
 
 # The guest itself is GPL software too (Linux, BusyBox): say where its exact sources are.
-python3 -I - "$img_out/manifest.json" "$OUT/LICENSES/SOURCES.txt" "$KIND" "$VERSION" "$LICENSE" "$SRC" "$SRC_CODE" <<'PY'
+"$PY" -I - "$img_out/manifest.json" "$OUT/LICENSES/SOURCES.txt" "$KIND" "$VERSION" "$LICENSE" "$SRC" "$SRC_CODE" <<'PY'
 import json, sys
 m = json.load(open(sys.argv[1]))
 kind, version, lic, src, code = sys.argv[3:8]
@@ -213,7 +217,7 @@ open(sys.argv[2], "w").write("\n".join(lines) + "\n")
 PY
 
 # bundle.json, with the sha256 of every runtime file (the app's "repair" re-checks them).
-python3 -I - "$OUT" "$OS" "$ARCH" "$MANIFEST_SHA" "$KIND" "$EXE" "$VERSION" "$LICENSE" "$SRC" "$SRC_SHA" "$SRC_CODE" "${FILES[@]}" <<'PY'
+"$PY" -I - "$OUT" "$OS" "$ARCH" "$MANIFEST_SHA" "$KIND" "$EXE" "$VERSION" "$LICENSE" "$SRC" "$SRC_SHA" "$SRC_CODE" "${FILES[@]}" <<'PY'
 import hashlib, json, os, sys
 out, os_, arch, msha, kind, exe, version, lic, src, srcsha, code, *files = sys.argv[1:]
 rt = f"runtime/{kind}"
@@ -227,7 +231,7 @@ json.dump(info, open(os.path.join(out, "bundle.json"), "w"), indent=2, sort_keys
 PY
 
 if [ -n "$LOCK" ]; then
-	ref="$(python3 -I -c 'import json,sys; print(json.load(open(sys.argv[1]))["reference"].get(sys.argv[2], {}).get("manifest_sha256", ""))' "$LOCK" "$ARCH")"
+	ref="$("$PY" -I -c 'import json,sys; print(json.load(open(sys.argv[1]))["reference"].get(sys.argv[2], {}).get("manifest_sha256", ""))' "$LOCK" "$ARCH")"
 	if [ "$ref" = "$MANIFEST_SHA" ]; then
 		note "the image reproduces the reference build in $(basename "$LOCK") (manifest $MANIFEST_SHA)"
 	else

@@ -233,3 +233,32 @@ Rules for `apps/desktop`:
   `THIRD_PARTY_NOTICES.md`). Reason: an AppImage cannot pull a distro font package and the UI is
   mostly Chinese. It is data (no code), used only when the system has no CJK font. Bumping it means
   changing the commit and hash in that script, nothing else.
+
+## Bundled binaries: the built-in VM (desktop installers)
+
+Every desktop installer ships a microVM so that the agent's tools run in their own Linux kernel
+after a plain install (`packaging/vm/bundle.sh` → the app's resources `vm/`, read by
+`crates/seagent-vm/src/bundle.rs`). These are third-party *binaries*, not crates; each is downloaded
+from its upstream release, checked against the hash pinned in `packaging/vm/bundle.sh` (a mismatch
+fails the build), and listed with its own sha256 in `vm/bundle.json`, which the app's
+"Set up / repair VM" re-checks. Licence texts and the source offer ship in `vm/LICENSES/`.
+
+| Component | Ships in | Version / pin | Licence | Source code |
+|---|---|---|---|---|
+| QEMU for Windows (Stefan Weil's build, linked from qemu.org) — `qemu-system-x86_64.exe`, the 104 DLLs it imports, `bios-256k.bin`, `linuxboot_dma.bin`, `kvmvapic.bin`, `pvh.bin` (`packaging/vm/qemu-windows-files.txt`) | Windows NSIS / MSI | `qemu-w64-setup-20260811.exe`, QEMU 11.1.0 (`v11.1.0-12130-ge470268ff4`), sha512 `5bcf9eed…16bf543` | QEMU: **GPL-2.0-only** (`COPYING`, `COPYING.LIB` shipped); DLLs: their MSYS2 packages' licences (LGPL-2.1+ glib/gtk stack, MIT, BSD, zlib, GPL for a few) | QEMU at commit `e470268ff4` (gitlab.com/qemu-project/qemu); DLLs: github.com/msys2/MINGW-packages |
+| vfkit (Apple Virtualization.framework CLI), universal binary | macOS .app / .dmg | v0.6.4, sha256 `0ed83fc8…327d9652d` | Apache-2.0 | github.com/crc-org/vfkit/tree/v0.6.4 |
+| Firecracker, static release binary | Linux AppImage / deb / rpm | v1.18.0, tarball sha256 `1ac8eec8…bca6623cd` (x86_64), `2a6130ff…a30707c28` (aarch64) | Apache-2.0 (`LICENSE`, `NOTICE`, `THIRD-PARTY` shipped) | github.com/firecracker-microvm/firecracker/tree/v1.18.0 |
+| Guest kernel, built from source by `build-image.sh` | all three | Linux 6.12.114, tarball sha256 `7a858991…4b4af3`, config `packaging/vm/kernel/*.config` | **GPL-2.0-only** | cdn.kernel.org (URL + hash in the image manifest) |
+| Guest userland: Alpine minirootfs (BusyBox, musl, apk-tools …) | all three | 3.20.3, sha256 pinned per arch in `build-image.sh` | BusyBox GPL-2.0-only, musl MIT, others per package | gitlab.alpinelinux.org/alpine/aports, tag v3.20.3 |
+
+GPL obligations: the corresponding source for the GPL components is named in
+`vm/LICENSES/SOURCES.txt` together with a written offer (three years) to provide it; a release
+should also attach the QEMU, kernel and BusyBox source tarballs to the GitHub release. Size: the
+Windows bundle is ~145 MiB unpacked (QEMU links its whole UI stack — GTK, SDL, gstreamer — so
+the DLL closure cannot be trimmed further without building QEMU from source), the Linux bundle
+~27 MiB, the macOS bundle ~90 MiB (vfkit is a 66 MiB universal Go binary).
+
+Bumping one: change the URL and hash in `bundle.sh` (QEMU: regenerate
+`qemu-windows-files.txt`; `bundle.sh` refuses a build whose DLL imports are not all listed),
+re-stage, boot it (`cargo test -p seagent-vm --test boot_bundle` with `SEAGENT_VM_BUNDLE` set) and
+update this table.

@@ -48,6 +48,14 @@ ESP_MIB=64
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd -- "$SCRIPT_DIR/../.." && pwd)"
+# Reproducible builds need one fixed clock (kernel version string, archive mtimes, manifest):
+# unless the caller sets SOURCE_DATE_EPOCH, it is the time of the last commit that changed what
+# goes into the guest — so a commit elsewhere in the tree rebuilds the very same image, and the
+# installers' pinned manifest hash (packaging/vm/bundle.sh, image.lock) stays valid.
+if [ -z "${SOURCE_DATE_EPOCH:-}" ] && command -v git >/dev/null 2>&1 && git -C "$REPO_ROOT" rev-parse --git-dir >/dev/null 2>&1; then
+	SOURCE_DATE_EPOCH="$(git -C "$REPO_ROOT" log -1 --format=%ct -- crates/seagent-vm crates/seagent-net packaging/vm/build-image.sh packaging/vm/kernel Cargo.lock 2>/dev/null || true)"
+	if [ -n "$SOURCE_DATE_EPOCH" ]; then export SOURCE_DATE_EPOCH; else unset SOURCE_DATE_EPOCH; fi
+fi
 
 usage() {
 	cat <<'EOF'

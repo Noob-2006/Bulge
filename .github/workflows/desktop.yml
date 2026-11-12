@@ -5,6 +5,12 @@ name: desktop
 # (client only: no VM / local shell on iOS). Each job first builds `seagent` for its target and
 # places it as the sidecar (desktop) or native lib (Android).
 #
+# Every desktop installer carries the built-in VM (packaging/vm/bundle.sh → resources `vm/`): the
+# guest image built here on Linux (`vm-image`, twice — the second build must be byte-identical),
+# plus the OS's hypervisor front-end (QEMU for Windows, vfkit on macOS, Firecracker on Linux),
+# each pinned by hash. The image's manifest sha256 is compiled into the sidecar
+# (SEAGENT_VM_IMAGE_MANIFEST_SHA256), and each job checks that its installer really contains the VM.
+#
 # Signing is optional; without the secrets every artifact is built unsigned:
 #   updater:  TAURI_SIGNING_PRIVATE_KEY, TAURI_SIGNING_PRIVATE_KEY_PASSWORD, TAURI_UPDATER_PUBKEY
 #   Windows:  WINDOWS_CERTIFICATE (base64 .pfx) + WINDOWS_CERTIFICATE_PASSWORD, or Azure Trusted
@@ -19,9 +25,9 @@ on:
   push:
     tags: ["v*"]
     branches: [main, cross-platform]
-    paths: ["apps/desktop/**", "ui/**", "share/**", ".github/workflows/desktop.yml"]
+    paths: ["apps/desktop/**", "ui/**", "share/**", "packaging/vm/**", "crates/seagent-vm/**", ".github/workflows/desktop.yml"]
   pull_request:
-    paths: ["apps/desktop/**", "ui/**", ".github/workflows/desktop.yml"]
+    paths: ["apps/desktop/**", "ui/**", "packaging/vm/**", "crates/seagent-vm/**", ".github/workflows/desktop.yml"]
   workflow_dispatch:
 permissions:
   contents: read
@@ -31,7 +37,57 @@ env:
   TAURI_CLI_VERSION: "^2"
 
 jobs:
+  vm-image:
+    # The guest image the installers ship. x86_64 (Windows QEMU, Linux Firecracker) with the
+    # source-built virtio-PCI kernel; aarch64 for Apple Silicon (vfkit).
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { arch: x86_64, runner: ubuntu-24.04, qemu: qemu-system-x86 }
+          - { arch: aarch64, runner: ubuntu-24.04-arm, qemu: qemu-system-arm }
+    runs-on: ${{ matrix.runner }}
+    env:
+      CARGO_INCREMENTAL: "0"
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          fetch-depth: 0 # build-image.sh dates the image by the last commit that changed its inputs
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          targets: ${{ matrix.arch }}-unknown-linux-musl
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          key: vm-bundle-${{ matrix.arch }}
+      - name: packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends build-essential flex bison bc libelf-dev cpio xz-utils musl-tools ${{ matrix.qemu }}
+      - name: build the image twice (reproducible, identical manifests)
+        run: |
+          set -euo pipefail
+          # SOURCE_DATE_EPOCH: build-image.sh takes the last commit that changed the guest's inputs.
+          export CC_${{ matrix.arch }}_unknown_linux_musl=musl-gcc
+          packaging/vm/build-image.sh --out "$RUNNER_TEMP/vm-a" --arch ${{ matrix.arch }} --build-kernel
+          mkdir -p "$RUNNER_TEMP/vm-b/dl" && cp "$RUNNER_TEMP"/vm-a/dl/* "$RUNNER_TEMP/vm-b/dl/"
+          packaging/vm/build-image.sh --out "$RUNNER_TEMP/vm-b" --arch ${{ matrix.arch }} --build-kernel
+          for f in manifest.json vmlinux initramfs.cpio.gz; do cmp "$RUNNER_TEMP/vm-a/$f" "$RUNNER_TEMP/vm-b/$f"; done
+          sha256sum "$RUNNER_TEMP/vm-a/manifest.json"
+      - name: boot it (QEMU, KVM where the runner has it)
+        run: |
+          if [ -e /dev/kvm ]; then sudo chmod 666 /dev/kvm; fi
+          packaging/vm/smoke-boot.sh "$RUNNER_TEMP/vm-a" ${{ matrix.arch }} direct 600
+      - uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
+        with:
+          name: vm-bundle-image-${{ matrix.arch }}
+          path: |
+            ${{ runner.temp }}/vm-a/vmlinux
+            ${{ runner.temp }}/vm-a/initramfs.cpio.gz
+            ${{ runner.temp }}/vm-a/manifest.json
+          if-no-files-found: error
+
   desktop:
+    needs: vm-image
     strategy:
       fail-fast: false
       matrix:
@@ -40,14 +96,20 @@ jobs:
             triple: x86_64-pc-windows-msvc
             rust_targets: x86_64-pc-windows-msvc
             bundles: nsis,msi
+            vm_os: windows
+            vm_arch: x86_64
           - os: macos-latest
             triple: universal-apple-darwin
             rust_targets: aarch64-apple-darwin,x86_64-apple-darwin
             bundles: app,dmg
+            vm_os: macos
+            vm_arch: aarch64
           - os: ubuntu-24.04
             triple: x86_64-unknown-linux-gnu
             rust_targets: x86_64-unknown-linux-gnu
             bundles: appimage,deb,rpm
+            vm_os: linux
+            vm_arch: x86_64
     runs-on: ${{ matrix.os }}
     defaults:
       run:
@@ -89,6 +151,15 @@ jobs:
             libjavascriptcoregtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libxdo-dev patchelf file xdg-utils build-essential
       - name: Tauri CLI
         run: cargo install tauri-cli --version "$TAURI_CLI_VERSION" --locked
+      - uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6
+        with:
+          name: vm-bundle-image-${{ matrix.vm_arch }}
+          path: ${{ runner.temp }}/vm-image
+      - name: Stage the built-in VM (image + ${{ matrix.vm_os }} hypervisor, pinned)
+        run: |
+          set -euo pipefail
+          packaging/vm/bundle.sh --os '${{ matrix.vm_os }}' --arch '${{ matrix.vm_arch }}' --image "$RUNNER_TEMP/vm-image"             --cache "$RUNNER_TEMP/vm-cache" --lock packaging/vm/image.lock | tee "$RUNNER_TEMP/vm-bundle.out"
+          grep '^SEAGENT_VM_IMAGE_MANIFEST_SHA256=' "$RUNNER_TEMP/vm-bundle.out" >> "$GITHUB_ENV"
       - name: Build seagent sidecar (${{ matrix.triple }})
         run: apps/desktop/scripts/prepare-sidecar.sh '${{ matrix.triple }}'
       - name: CJK font for the AppImage (Noto Sans TC, pinned commit + sha256; no-op if cached)
@@ -114,6 +185,15 @@ jobs:
       - name: Build installers
         working-directory: apps/desktop
         run: cargo tauri build --ci --target '${{ matrix.triple }}' --bundles '${{ matrix.bundles }}' --config src-tauri/tauri.ci.conf.json
+      - name: The installers carry the built-in VM
+        run: |
+          set -euo pipefail
+          b=apps/desktop/target/${{ matrix.triple }}/release/bundle
+          case "${{ runner.os }}" in
+            Windows) for f in "$b"/nsis/*.exe; do 7z l "$f" | grep -E 'vm[\/]bundle\.json' >/dev/null || { echo "::error::$f has no vm/bundle.json"; exit 1; }; done ;;
+            macOS) test -f "$(ls -d "$b"/macos/*.app | head -1)/Contents/Resources/vm/bundle.json" ;;
+            Linux) for f in "$b"/deb/*.deb; do dpkg-deb -c "$f" | grep -q '/vm/bundle.json' || { echo "::error::$f has no vm/bundle.json"; exit 1; }; done ;;
+          esac
       - name: Collect
         run: apps/desktop/scripts/collect-bundles.sh '${{ matrix.triple }}' dist
       - uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5

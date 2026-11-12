@@ -15,6 +15,40 @@ packaging/vm/build-image.sh --out "$TMPDIR/seagent-vm-image"
 Current artefacts on this machine: `vmlinux` 38 355 216 B (34 MiB),
 `initramfs.cpio.gz` ≈ 4.3 MiB (Alpine 3.20.3 + the static agent).
 
+## Built into the installers
+
+The desktop installers ship this VM, so nobody installs QEMU, VirtualBox or builds an image:
+`bundle.sh` stages it into `apps/desktop/src-tauri/vm/` (the app's resources `vm/`), the app
+passes that directory to the agent as `SEAGENT_VM_BUNDLE`, and `crates/seagent-vm/src/bundle.rs`
+boots it (`GuestImage::find` and `policy::image_paths` fall back to the bundled image; the bundled
+hypervisor replaces a tool left at its default name).
+
+| installer | hypervisor shipped | image | accelerator |
+| --- | --- | --- | --- |
+| Windows NSIS / MSI | QEMU for Windows, trimmed (`qemu-windows-files.txt`, ~145 MiB) | x86_64, `--build-kernel` | WHPX; TCG when "Windows Hypervisor Platform" is off (the app says so and offers a button that opens the Windows Features dialog) |
+| macOS .app / .dmg | vfkit (Virtualization.framework) | aarch64 | Hypervisor.framework (Apple Silicon) |
+| Linux AppImage / deb / rpm | Firecracker (static) | x86_64, `--build-kernel` | KVM (`/dev/kvm` writable for the user) |
+
+```sh
+packaging/vm/build-image.sh --out "$IMG" --build-kernel   # dated by the last commit that changed the guest
+packaging/vm/bundle.sh --os windows --image "$IMG" --lock packaging/vm/image.lock
+# → SEAGENT_VM_IMAGE_MANIFEST_SHA256=…  export it while building the sidecar (the pin)
+SEAGENT_VM_BUNDLE=apps/desktop/src-tauri/vm cargo test -p seagent-vm --test boot_bundle -- --nocapture
+```
+
+Why in the installer and not downloaded on first run: the VM is the isolation the agent's
+safety model rests on, so it must work offline, behind proxies and on the first command — a
+first-run download is one more thing that can fail (and a server to trust) exactly when the user
+has just installed the app. The price is size: the Windows installer grows by about 45 MB
+compressed (QEMU's DLL closure), Linux and macOS by about 10 / 30 MB.
+
+Reproducible: `build-image.sh` builds the same bytes from the same tree (fixed timestamps,
+`cpio --reproducible`, remapped paths; verified by building twice — CI does that on every run).
+`image.lock` records the pinned inputs and the reference output; the installer pins the manifest
+hash it actually ships, compiled into the agent (`bundle::PINNED_MANIFEST_SHA256`), so an installed
+agent refuses any other bundled image. The app's Settings → Virtual machine page ("Set up /
+repair VM") re-hashes every bundled file and boots a test VM.
+
 ## Why the guest root is an initramfs (B2)
 
 The whole guest root file system is a compressed cpio archive that the kernel

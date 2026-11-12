@@ -163,6 +163,9 @@ impl Bundle {
     /// The bundled kernel + initramfs paths without hashing them (provider selection runs often;
     /// the boot itself verifies, see [`Bundle::image`]).
     pub fn image_paths(&self) -> Option<(PathBuf, PathBuf)> {
+        if !self.arch_matches() {
+            return None;
+        }
         let dir = self.image_dir();
         let m: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(dir.join(MANIFEST_FILE)).ok()?).ok()?;
         if m["image_version"].as_u64() != Some(u64::from(crate::IMAGE_VERSION)) {
@@ -173,9 +176,18 @@ impl Bundle {
         (k.is_file() && i.is_file()).then_some((k, i))
     }
 
+    /// The guest CPU matches this host's (a hypervisor only accelerates its own architecture;
+    /// e.g. a universal macOS app carries the Apple Silicon guest, which an Intel Mac cannot run).
+    pub fn arch_matches(&self) -> bool {
+        arch_matches(&self.info.arch, std::env::consts::ARCH)
+    }
+
     /// The bundled image, fully verified: every file against its manifest, the manifest against
     /// `bundle.json` and against the hash this build pins.
     pub fn image(&self) -> Result<GuestImage, String> {
+        if !self.arch_matches() {
+            return Err(format!("the bundled guest image is for {} and this computer is {}: no microVM from the bundle here", self.info.arch, std::env::consts::ARCH));
+        }
         let dir = self.image_dir();
         let got = sha256_file(&dir.join(MANIFEST_FILE)).map_err(|e| format!("the bundled guest image is missing ({e}) — {REPAIR_HINT}"))?;
         check_pin(&got, &self.info.image.manifest_sha256, PINNED_MANIFEST_SHA256)?;
@@ -247,6 +259,18 @@ pub fn fix_hint() -> String {
     }
 }
 
+/// `x86_64` / `aarch64` (also `amd64`, `arm64`) name the same CPU; an empty bundle arch is a
+/// hand-made development bundle and matches.
+pub fn arch_matches(bundle: &str, host: &str) -> bool {
+    let norm = |a: &str| match a {
+        "amd64" | "x86_64" => "x86_64",
+        "arm64" | "aarch64" => "aarch64",
+        other => other,
+    }
+    .to_string();
+    bundle.is_empty() || norm(bundle) == norm(host)
+}
+
 fn plain_relative(p: &str) -> bool {
     !p.is_empty() && !Path::new(p).is_absolute() && !p.contains('\\') && p.split('/').all(|c| !c.is_empty() && c != "." && c != "..")
 }
@@ -273,7 +297,7 @@ mod tests {
         let info = BundleInfo {
             bundle_version: 1,
             os: std::env::consts::OS.into(),
-            arch: "x86_64".into(),
+            arch: std::env::consts::ARCH.into(),
             image: ImageRef { dir: "image/x86_64".into(), manifest_sha256: sha256_file(&img.join(MANIFEST_FILE)).unwrap() },
             runtime: RuntimeInfo { kind: kind.into(), dir: format!("runtime/{kind}"), exe: exe.into(), files: [(exe.to_string(), sha256_file(&rt.join(exe)).unwrap())].into(), ..Default::default() },
         };
@@ -314,6 +338,17 @@ mod tests {
         // A damaged runtime file.
         std::fs::write(t.path().join("runtime/qemu/qemu-system-x86_64.exe"), b"other").unwrap();
         assert!(b.verify_runtime().unwrap_err().contains("damaged"));
+    }
+
+    #[test]
+    fn a_bundle_for_another_cpu_is_never_booted() {
+        assert!(arch_matches("aarch64", "aarch64") && arch_matches("arm64", "aarch64") && arch_matches("x86_64", "x86_64") && arch_matches("", "x86_64"));
+        assert!(!arch_matches("aarch64", "x86_64"), "an Intel Mac must not boot the Apple Silicon guest");
+        let t = tmp("arch");
+        let mut b = fake_bundle(t.path(), "vfkit", "vfkit");
+        b.info.arch = if std::env::consts::ARCH == "aarch64" { "x86_64".into() } else { "aarch64".into() };
+        assert!(b.image_paths().is_none());
+        assert!(b.image().unwrap_err().contains("this computer is"));
     }
 
     #[test]
