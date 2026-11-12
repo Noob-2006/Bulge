@@ -53,6 +53,15 @@ const API_TIMEOUT: Duration = Duration::from_secs(30);
 /// conventional default.
 pub const DEFAULT_GUEST_CID: u32 = 3;
 
+/// The guest command line under Firecracker: the one QEMU uses ([`super::qemu::cmdline_append`])
+/// plus `reboot=k`. The agent ends a VM by resetting it (Firecracker has no ACPI power-off
+/// device) and Firecracker exits only on the i8042 keyboard-controller reset; a kernel built with
+/// ACPI tries the FADT reset register first, which Firecracker ignores, and the VM then lingers
+/// until the host kills it (measured: 15 s per VM with the source-built 6.12 kernel).
+pub fn boot_args(spec: &VmSpec) -> String {
+    format!("{} reboot=k", super::qemu::cmdline_append(spec))
+}
+
 pub struct FirecrackerProvider {
     bin: PathBuf,
     extra_args: Vec<String>,
@@ -178,7 +187,7 @@ pub fn boot_requests(spec: &VmSpec, guest_cid: u32) -> Vec<(String, String, Valu
         // The initramfs *is* the guest root (B2): immutable, no block device.
         boot.insert("initrd_path".into(), Value::String(spec.initramfs.display().to_string()));
     }
-    boot.insert("boot_args".into(), Value::String(super::qemu::cmdline_append(spec)));
+    boot.insert("boot_args".into(), Value::String(boot_args(spec)));
     vec![
         ("PUT".into(), "/boot-source".into(), Value::Object(boot)),
         ("PUT".into(), "/machine-config".into(), json!({ "vcpu_count": spec.vcpu, "mem_size_mib": spec.mem_mb, "smt": false })),
@@ -560,7 +569,8 @@ mod tests {
         assert!(!paths.iter().any(|p| p.contains("drive")), "the initramfs is the root: no block device exists");
         // The same cmdline the QEMU provider uses, so the guest agent agrees
         // about tier, channel and workspace.
-        assert_eq!(reqs[0].2["boot_args"], super::super::qemu::cmdline_append(&spec()));
+        assert_eq!(reqs[0].2["boot_args"], boot_args(&spec()));
+        assert!(boot_args(&spec()).starts_with(&super::super::qemu::cmdline_append(&spec())) && boot_args(&spec()).ends_with(" reboot=k"), "the shared command line plus the keyboard-controller reset");
         assert_eq!(reqs[2].2["uds_path"], "/run/vm/fc-1/vsock.sock");
         assert_eq!(reqs[2].2["guest_cid"], 7);
     }

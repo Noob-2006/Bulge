@@ -44,6 +44,7 @@ pub const METHODS: &[&str] = &[
     "ui.approvals.grants.list", "ui.approvals.grant.revoke",
     "ui.exec.policy.get", "ui.exec.policy.set",
     "ui.security.status",
+    "ui.vm.status", "ui.vm.repair", "ui.vm.open_hypervisor_settings",
 ];
 
 type Res = Result<Value, (i32, String)>;
@@ -111,6 +112,7 @@ pub const PAGES: &[(&str, &str, &str)] = &[
     ("cloud-workers", "Cloud workers", "control"),
     ("search", "Search", "settings"),
     ("systems", "Systems", "settings"),
+    ("vm", "Virtual machine", "settings"),
     ("custodian", "Custodian", "settings"),
     ("labs", "Labs", "settings"),
     ("about", "About", "settings"),
@@ -205,6 +207,10 @@ pub fn call(c: &UiCtx, m: &str, p: &Value) -> Option<Res> {
         }
         // ── systems / custodian / labs / about / profile ──
         "ui.systems" => Ok(systems(c)),
+        // ── the built-in VM (Settings → Virtual machine) ──
+        "ui.vm.status" => Ok(crate::ops::vmsetup::status(&c.paths)),
+        "ui.vm.repair" => Ok(crate::ops::vmsetup::repair(&c.paths)),
+        "ui.vm.open_hypervisor_settings" => crate::ops::vmsetup::open_hypervisor_settings().map_err(fail),
         "ui.systems.backup" => {
             let cfg = fresh(c, &ws).unwrap_or_default();
             let dir = crate::ops::backup::default_dir(&c.paths, &cfg.backup);

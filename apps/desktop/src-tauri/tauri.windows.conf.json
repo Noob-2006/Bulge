@@ -3,7 +3,8 @@
   "bundle": {
     "resources": {
       "../../../share/": "share/",
-      "windows/vdd/": "vdd/"
+      "windows/vdd/": "vdd/",
+      "vm/": "vm/"
     },
     "windows": {
       "wix": {

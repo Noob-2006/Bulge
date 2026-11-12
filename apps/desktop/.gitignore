@@ -17,3 +17,5 @@ __pycache__/
 /src-tauri/wasi-tools/
 # Downloaded by scripts/fetch-vdd.sh (Windows virtual display driver, pinned + sha256)
 /src-tauri/windows/vdd/driver/
+# Staged by packaging/vm/bundle.sh (the built-in VM: guest image + hypervisor, pinned + sha256)
+/src-tauri/vm/

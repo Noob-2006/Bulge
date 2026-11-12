@@ -371,7 +371,7 @@ impl ExecBackend for VmBackend {
         Ok(Box::new(VmChild { mgr: self.mgr.clone(), sess, pending: VecDeque::new(), exit: None, component: current_component(), session: self.session.clone() }))
     }
     fn fallback_note(&self) -> Option<String> {
-        self.fallback.as_ref().map(|_| format!("{} Fix: run `seagent sandbox vm image build` (or set exec.vm.kernel / initramfs), then `seagent doctor`.", self.describe()))
+        self.fallback.as_ref().map(|_| format!("{} Fix: {} (or set exec.vm.kernel / initramfs).", self.describe(), seagent_vm::bundle::fix_hint()))
     }
     fn map_path(&self, host: &Path) -> String {
         match host.strip_prefix(&self.workspace) {

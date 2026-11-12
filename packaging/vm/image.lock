@@ -1,0 +1,28 @@
+{
+  "_comment": "The built-in VM's guest image (packaging/vm/bundle.sh). `inputs` are pinned in build-image.sh and re-checked on every build; `reference` is the output of a reproducible build of this tree on the reference host (two builds byte-identical). CI builds twice and compares; the installer pins the manifest hash it actually ships (SEAGENT_VM_IMAGE_MANIFEST_SHA256). Update `reference` when the guest agent, the kernel config or an input changes.",
+  "inputs": {
+    "linux": {
+      "version": "6.12.114",
+      "url": "https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-6.12.114.tar.xz",
+      "sha256": "7a8589912bd7a8adb07fed074283652cf482a35facef8954554654f0154b4af3"
+    },
+    "alpine_minirootfs": {
+      "version": "3.20.3",
+      "sha256": {
+        "x86_64": "d4e6fd67dcf75e40c451560ac7265166c2b72a0f38ddc9aae756a7de3d1efa0c",
+        "aarch64": "041fa34a81788242df9e78fa69b97ab45b8ec47ddbf88864755610414a7bf3de"
+      }
+    },
+    "agent": "seagent-vm-guest from this tree, cargo --locked, --remap-path-prefix",
+    "build": "SOURCE_DATE_EPOCH = commit time, KBUILD_BUILD_{USER,HOST,TIMESTAMP} fixed, cpio --reproducible, gzip -n"
+  },
+  "reference": {
+    "x86_64": {
+      "host": "Ubuntu 26.04.1 LTS (WSL2), gcc 15.2.0, rustc 1.99.1, GNU cpio 2.15",
+      "manifest_sha256": "cc4cf7502aa26a5dad5ad9e76ffdf031698eb81ebfa5406eca948223ba43ad87",
+      "kernel_sha256": "5145c1eac6d380cf473082e03034f9781a34062631737a794c68f475fdd274cf",
+      "initramfs_sha256": "749577372b21da2985de42d678d8130dce02f3b7510d4f79cb68e5225f9e8a32",
+      "built_at": "2026-11-12T04:53:54Z"
+    }
+  }
+}

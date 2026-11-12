@@ -83,6 +83,16 @@ impl Agent {
         Ok(Agent { exe, env })
     }
 
+    /// Point the agent at the VM bundle the installer ships (`<resources>/vm`, staged by
+    /// `packaging/vm/bundle.sh`): `SEAGENT_VM_BUNDLE`, read by `seagent_vm::bundle`. Only a
+    /// directory that carries a `bundle.json` is passed, so a build without the VM changes nothing.
+    pub fn with_vm_bundle(&mut self, dir: Option<PathBuf>) {
+        if let Some(d) = dir.filter(|d| d.join("bundle.json").is_file()) {
+            self.env.retain(|(k, _)| k != "SEAGENT_VM_BUNDLE");
+            self.env.push(("SEAGENT_VM_BUNDLE".to_string(), d.into_os_string()));
+        }
+    }
+
     fn command(&self, args: &[&str]) -> Command {
         let mut c = Command::new(&self.exe);
         c.args(args).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
@@ -218,6 +228,21 @@ mod tests {
         assert_eq!(parse_token("{\"token\":\"abcdefghijklmnopqrstuvwxyz\",\"url\":\"http://x\"}").as_deref(), Some("abcdefghijklmnopqrstuvwxyz"));
         assert_eq!(host_port("http://127.0.0.1:8640").as_deref(), Some("127.0.0.1:8640"));
         assert_eq!(host_port("http://[::1]:8640/").as_deref(), Some("[::1]:8640"));
+    }
+
+    #[test]
+    fn the_vm_bundle_is_handed_to_the_agent_only_when_it_is_there() {
+        let base = std::env::temp_dir().join(format!("seagent-desktop-vmbundle-{}", std::process::id()));
+        let vm = base.join("vm");
+        std::fs::create_dir_all(&vm).unwrap();
+        let mut a = Agent { exe: PathBuf::from("seagent"), env: vec![] };
+        a.with_vm_bundle(Some(vm.clone()));
+        assert!(a.env.is_empty(), "no bundle.json: nothing passed");
+        std::fs::write(vm.join("bundle.json"), "{}").unwrap();
+        a.with_vm_bundle(Some(vm.clone()));
+        a.with_vm_bundle(Some(vm.clone()));
+        assert_eq!(a.env, vec![("SEAGENT_VM_BUNDLE".to_string(), vm.clone().into_os_string())], "set once");
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]

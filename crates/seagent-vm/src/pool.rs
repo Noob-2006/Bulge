@@ -230,6 +230,9 @@ pub struct VmManager {
 
 impl VmManager {
     pub fn new(cfg: VmConfig, data: PathBuf) -> VmManager {
+        // The installer's bundled hypervisor front-end (`crate::bundle`) for any tool left at
+        // its default name: selection, `VmSpec` and the provider all see the same binary.
+        let cfg = crate::bundle::apply(&cfg);
         VmManager { cfg, data, broker: Mutex::new(None), provider_override: Mutex::new(None), slots: Mutex::new(HashMap::new()), warning: Mutex::new(None) }
     }
     pub fn config(&self) -> &VmConfig {

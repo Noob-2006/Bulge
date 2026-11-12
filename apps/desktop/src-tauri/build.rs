@@ -28,6 +28,16 @@ fn main() {
             println!("cargo:warning=src-tauri/wasi-tools has no tools.json: the app would have no shell commands; run scripts/prepare-ios.sh");
         }
     }
+    // Desktop installers ship the built-in VM (`tauri.{windows,macos,linux}.conf.json` resources
+    // `vm/`), staged by packaging/vm/bundle.sh. The directory must exist for tauri-build; an
+    // installer built without it would fall back to the OS sandbox, so say so loudly.
+    if !target.contains("android") && !target.contains("apple-ios") {
+        let _ = std::fs::create_dir_all("vm");
+        println!("cargo:rerun-if-changed=vm/bundle.json");
+        if !Path::new("vm/bundle.json").is_file() {
+            println!("cargo:warning=src-tauri/vm has no bundle.json: this build has NO built-in VM (tools fall back to the OS sandbox); stage it with packaging/vm/bundle.sh");
+        }
+    }
     println!("cargo:rustc-env=SEAGENT_TARGET_TRIPLE={target}");
     tauri_build::try_build(tauri_build::Attributes::new().app_manifest(tauri_build::AppManifest::new().commands(COMMANDS))).expect("tauri build script");
 }

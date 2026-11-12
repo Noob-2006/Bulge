@@ -9,8 +9,10 @@
 //!
 //! Building is delegated to `packaging/vm/build-image.sh` (it downloads the
 //! Firecracker kernel and the Alpine minirootfs, packs the static agent in) and
-//! only happens on an explicit `seagent sandbox vm image build` — never at boot, and
-//! never from inside a guest. Nothing secret goes into the image: it is a public
+//! only happens on the build host (the release pipeline, which ships the result inside
+//! the installers — `crate::bundle`) or on an explicit `seagent sandbox vm image build`
+//! — never at boot, and never from inside a guest. An installed app never builds: it
+//! boots the image it shipped with. Nothing secret goes into the image: it is a public
 //! kernel plus a public Alpine rootfs plus seagent's own agent, which is why a
 //! compromised guest cannot read a key out of its own disk.
 
@@ -220,8 +222,21 @@ impl GuestImage {
 
         let root = cfg.root(data);
         let image_dir = root.join("image");
-        if image_dir.join(MANIFEST_FILE).is_file() {
-            return GuestImage::load(&image_dir);
+        // A user-built image wins while it verifies; one that does not (an older layout, a
+        // half-finished build) no longer blocks the VM when the installer shipped one.
+        let built = image_dir.join(MANIFEST_FILE).is_file().then(|| GuestImage::load(&image_dir));
+        if let Some(Ok(img)) = built {
+            return Ok(img);
+        }
+        let bundled = crate::bundle::locate().map(|b| b.image());
+        if let Some(Ok(img)) = bundled {
+            return Ok(img);
+        }
+        if let Some(Err(e)) = built {
+            return Err(e);
+        }
+        if let Some(Err(e)) = bundled {
+            return Err(e);
         }
 
         let kernel = cfg.kernel_path(data);
