@@ -342,11 +342,15 @@ impl DesktopVms {
         } else {
             a.extend(["-nic".into(), "none".into()]);
         }
-        // VNC on a private unix socket; Windows QEMU has none, and frames come over QMP anyway.
-        let vnc = if cfg!(unix) { format!("unix:{}", self.vnc_path(name).display()) } else { "none".into() };
+        // VNC on a private unix socket. Windows QEMU has no unix sockets and frames come over QMP
+        // anyway, so no VNC server at all there (`-vnc none` still loads a keymap file the
+        // bundle does not ship) and no window either.
+        if cfg!(unix) {
+            a.extend(["-vnc".into(), format!("unix:{}", self.vnc_path(name).display())]);
+        } else {
+            a.extend(["-display".into(), "none".into()]);
+        }
         a.extend([
-            "-vnc".into(),
-            vnc,
             "-qmp".into(),
             endpoint(&self.qmp_path(name)).qemu_monitor(),
             "-monitor".into(),

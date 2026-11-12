@@ -130,7 +130,8 @@ write_files:
       # deb.debian.org); apt verifies the signed archive whichever mirror serves it.
       m='{{APT_MIRROR}}'
       if [ -n "$m" ]; then
-        for f in /etc/apt/sources.list /etc/apt/sources.list.d/*.sources /etc/apt/sources.list.d/*.list; do
+        # Debian's cloud images name the archive in /etc/apt/mirrors/*.list (mirror+file://).
+        for f in /etc/apt/mirrors/*.list /etc/apt/sources.list /etc/apt/sources.list.d/*.sources /etc/apt/sources.list.d/*.list; do
           [ -f "$f" ] && sed -i -E "s#https?://deb\.debian\.org/debian/?([[:space:]]|\$)#$m\1#g" "$f"
         done
         say "SEAGENT_APT_MIRROR $m"

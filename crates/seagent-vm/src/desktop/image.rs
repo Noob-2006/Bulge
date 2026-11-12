@@ -116,7 +116,7 @@ pub fn ensure_base(cfg: &DesktopConfig, dir: &Path, log: &mut dyn FnMut(&str)) -
     }
     let part = dst.with_extension("part");
     let url = cfg.image_url.trim();
-    let local = url.strip_prefix("file://").or_else(|| url.starts_with('/').then_some(url));
+    let local = local_source(url);
     match local {
         Some(p) => {
             log(&format!("copying base image from {p}"));
@@ -140,6 +140,17 @@ pub fn ensure_base(cfg: &DesktopConfig, dir: &Path, log: &mut dyn FnMut(&str)) -
     std::fs::rename(&part, &dst).map_err(|e| e.to_string())?;
     log(&format!("verified {} ({} MiB, sha256 {want})", dst.display(), n >> 20));
     Ok(dst)
+}
+
+/// The local file an `image_url` names: `file://…` or an absolute path of this OS
+/// (`/srv/x.qcow2`, `C:\Downloads\x.qcow2`; `file:///C:/x.qcow2` drops the slash before the drive).
+fn local_source(url: &str) -> Option<&str> {
+    if let Some(p) = url.strip_prefix("file://") {
+        let b = p.as_bytes();
+        let drive = cfg!(windows) && b.len() > 3 && b[0] == b'/' && b[1].is_ascii_alphabetic() && b[2] == b':';
+        return Some(if drive { &p[1..] } else { p });
+    }
+    (url.starts_with('/') || Path::new(url).is_absolute()).then_some(url)
 }
 
 /// Attempts in a row that add no bytes before [`download_resumable`] gives up.
@@ -485,6 +496,18 @@ mod tests {
     }
 
     #[test]
+    fn local_image_sources() {
+        assert_eq!(local_source("file:///srv/x.qcow2"), Some("/srv/x.qcow2"));
+        assert_eq!(local_source("/srv/x.qcow2"), Some("/srv/x.qcow2"));
+        assert_eq!(local_source("https://cloud.debian.org/x.qcow2"), None);
+        assert_eq!(local_source("x.qcow2"), None);
+        if cfg!(windows) {
+            assert_eq!(local_source(r"C:\Downloads\x.qcow2"), Some(r"C:\Downloads\x.qcow2"));
+            assert_eq!(local_source("file:///C:/Downloads/x.qcow2"), Some("C:/Downloads/x.qcow2"));
+        }
+    }
+
+    #[test]
     fn the_mirror_is_filled_into_the_seed_but_not_the_recipe() {
         let c = DesktopConfig::default();
         let ud = seed_user_data(&c, "https://linux.cs.nycu.edu.tw/debian/debian/");
@@ -512,6 +535,12 @@ mod tests {
         assert!(out.contains("URIs: https://m.example/debian\n"), "{out}");
         assert!(out.contains("URIs: http://deb.debian.org/debian-security\n"), "{out}");
         assert!(out.contains("deb https://m.example/debian trixie main"), "{out}");
+        // The cloud image's /etc/apt/mirrors/debian.list and debian-security.list.
+        for (src, want) in [("https://deb.debian.org/debian\n", "https://m.example/debian\n"), ("https://deb.debian.org/debian-security\n", "https://deb.debian.org/debian-security\n")] {
+            std::fs::write(&f, src).unwrap();
+            assert!(std::process::Command::new("sh").arg("-c").arg(line).env("f", &f).env("m", "https://m.example/debian").status().unwrap().success());
+            assert_eq!(std::fs::read_to_string(&f).unwrap(), want);
+        }
     }
 
     /// A server that drops the first response half-way; the download resumes with a Range
