@@ -9,10 +9,13 @@
 //   is retried with backoff (2 s … 60 s, forever: network down, host restarting, laptop asleep),
 //   and a connection refused with an expired token makes app.js call `forget()` and reconnect,
 //   which renews first. The open WebSocket is never torn down for renewal (the host keeps it up
-//   past the token's expiry).
+//   past the token's expiry). Timers do not run while a laptop sleeps and are throttled in a
+//   background tab, so `check()` also renews by the wall clock: every 15 s and whenever app.js
+//   sees a wake, `online`, focus or the page shown again.
 // - A device paired before keys existed binds a key on its next start (migration).
-// - Inside the SE Agent app the page gets an access token in `#token=`; the app mints new ones
-//   through its `console_access_token` command (its Rust side holds the key).
+// - Inside the SE Agent app the page gets its credential in `#token=`; the app hands out a fresh
+//   one through its `console_access_token` command whenever asked: a paired host's access token
+//   (its Rust side holds the device key) or the local agent's current console token.
 // - No WebCrypto / IndexedDB, or an older host without /pair/refresh: the token is used as before.
 'use strict';
 
@@ -89,7 +92,9 @@
     if (r.status === 404) return consoleToken;
     const v = await r.json().catch(() => ({}));
     if (r.ok && v.accessToken) {
-      cached = { token: v.accessToken, exp: v.expiresAtMs || 0, from: consoleToken };
+      // The expiry on this device's clock (the host's clock may be ahead or behind).
+      const exp = v.expiresAtMs ? v.expiresAtMs - info.skew : 0;
+      cached = { token: v.accessToken, exp, life: exp ? exp - Date.now() : 0, from: consoleToken };
       return v.accessToken;
     }
     if (r.status >= 500 || r.status === 429 || /before this host started|replay window/.test(v.error || '')) throw new Error(v.error || `HTTP ${r.status}`);
@@ -110,7 +115,8 @@
     if (token.startsWith('sea1_')) {
       const t = await fromApp();
       if (!t || !t.token) throw new Error('the app could not renew the token');
-      cached = { token: t.token, exp: t.expiresAtMs || Date.now() + 10 * 60000, from: token };
+      const exp = t.expiresAtMs || Date.now() + 10 * 60000;
+      cached = { token: t.token, exp, life: exp - Date.now(), from: token };
       return;
     }
     if ((await refresh(token, deviceId)) === token) throw new Error('no access token');
@@ -124,7 +130,7 @@
     let wait = retryMs;
     if (wait === undefined) {
       if (!cached || !cached.exp) return;
-      wait = Math.max(500, Math.round((cached.exp - Date.now()) * 0.8));
+      wait = Math.max(1000, Math.round((cached.exp - Date.now()) * 0.8));
     }
     timer = setTimeout(async () => {
       timer = null;
@@ -145,7 +151,14 @@
     // The host refused this device for good (revoked / another key): the console asks to pair.
     revoked: false,
     // A fresh pairing answered with an access token already.
-    seed(token, exp, from) { if (token) { cached = { token, exp: exp || 0, from }; if (from) last = { token: from, deviceId: last && last.deviceId }; schedule(); } },
+    seed(token, exp, from) { if (token) { cached = { token, exp: exp || 0, life: exp ? exp - Date.now() : 0, from }; if (from) last = { token: from, deviceId: last && last.deviceId }; schedule(); } },
+    // A fresh credential from the SE Agent app (`{token, expiresAtMs}`), or null outside it.
+    fromApp,
+    // Renew now when the token is (nearly) expired by the wall clock.
+    check() {
+      if (!last || !/^se[ad]1_/.test(last.token) || !cached || !cached.exp) return;
+      if (cached.exp - Date.now() < Math.max(5000, (cached.life || 0) * 0.25)) schedule(0);
+    },
     // The last token did not work (expired, daemon restarted): mint a new one next time.
     forget() { cached = null; stale = true; },
     // The token the console should use right now.
@@ -156,8 +169,9 @@
       const fresh = cached && cached.from === token && cached.exp - Date.now() > 1000;
       if (token.startsWith('sea1_')) {
         if (fresh) return cached.token;
-        // Handed over by the app: use it until it fails, then ask the app for a new one.
-        if (!cached && !stale) { cached = { token, exp: 0, from: token }; return token; }
+        // Handed over by the app: use it now, and ask the app for its successor right away so
+        // the lifetime is known and the timer renews it before it expires.
+        if (!cached && !stale) { cached = { token, exp: 0, from: token }; if (window.__TAURI__) schedule(1000); return token; }
         stale = false;
         try { await renewNow(); schedule(); return cached.token; } catch { return token; }
       }
@@ -180,4 +194,5 @@
       return token;
     },
   };
+  setInterval(() => window.DevAuth.check(), 15000);
 })();

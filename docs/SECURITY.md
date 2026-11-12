@@ -195,8 +195,8 @@ App 端的金鑰庫（`seagent-devkey`；第一次選定後記在 `<app data>/de
 
 | 用戶端／連線 | 怎麼續 | 證據 |
 |---|---|---|
-| 網頁主控台（瀏覽器） | `devauth.js` 在 access token 壽命約 80 % 時續期；失敗以 2→60 秒退避一直重試；連線被拒（過期、主機重啟）時 `forget()` 後重連並先續期；裝置憑證連不上時安靜重試（只有主機回「已撤銷」才要求重新配對） | `webui_devices.rs`（真瀏覽器，3 秒 TTL，至少 3 次續期，WebSocket 不斷） |
-| App（桌面／手機） | `host_open` 與主控台的 `console_access_token` 由 Rust 端簽章換新（暫時性失敗重試 3 次）；頁面內同上 | `devkey.rs` `transient_failures_are_retried_and_final_ones_are_not` |
+| 網頁主控台（瀏覽器） | `devauth.js` 在 access token 壽命約 80 % 時續期，另外每 15 秒與每次喚醒／上線／切回分頁時依牆上時鐘檢查（睡眠或背景分頁裡計時器不跑）；到期時間換算成本機時鐘（主機時鐘快或慢都不會提早過期或狂續）；失敗以 2→60 秒退避一直重試；連不上時用 `POST /arp whoami` 分辨「被拒（401）」與「連不到」：連不到（睡眠、離線、daemon 重啟）一律安靜重試，被拒時先 `forget()` 再續期重連；喚醒後看似開著的 WebSocket 8 秒內沒回應就換新；只有主機回「已撤銷」才要求重新配對 | `webui_devices.rs`（真瀏覽器，3 秒 TTL，至少 3 次續期，WebSocket 不斷）、`webui_authstay.rs`（分頁凍結多個 TTL、凍結中 daemon 重啟、時鐘跳躍、撤銷仍立即生效） |
+| App（桌面／手機） | App 內的主控台**永遠不會顯示登入框**：憑證被拒或沒有憑證時頁面呼叫 `console_access_token`——本機 agent 的主控台拿到 agent 現在的 console token（每次用 `seagent app token` 重讀，輪替過也對），配對主機（tunnel）的主控台拿到 Rust 端簽章換新的 access token（暫時性失敗重試 3 次）；依提出請求的頁面網址決定（本機 agent／tunnel／兩者皆非則拒絕）；App 一時拿不到（agent 重啟中）就退避重試，不提示 | `devkey.rs` `transient_failures_are_retried_and_final_ones_are_not`、`commands.rs` `a_page_gets_a_credential_only_for_its_own_console`、`webui_authstay.rs`（舊 token、輪替＋重啟、橋接暫時失敗、沒有 token：登入框 0 次） |
 | 開著的 WebSocket（主控台、即時畫面、ARP 訂閱） | 不需要續：主機只在撤銷或停用時關閉；scope 變更在 1 秒內直接套用到已開的連線（不重連） | `device_credentials_renew_silently_over_many_expiry_cycles`、`webui_devices.rs` |
 | 主機重啟（記憶體中的 access token 消失） | 下一次 refresh 立即成功；重啟前簽的 refresh 會被拒（見下），用戶端重試時用新的主機時鐘重簽 | `device_credentials_renew_silently_over_many_expiry_cycles`、`a_refresh_signed_before_a_restart_is_refused_after_it` |
 | 筆電睡了好幾天 | console token 不會過期；醒來後 WebSocket 重連、先 refresh；時間戳用主機時鐘（`/pair/info`），睡眠造成的時鐘差不影響 | 同上 |

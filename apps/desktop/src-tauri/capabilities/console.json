@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "console",
-  "description": "The local agent's setup wizard / console (http://127.0.0.1:<port>) may only sync the 'start at login' choice with the app and, for a paired host's console behind the tunnel, ask for a fresh short-lived access token for that host (the device key stays in native code). Nothing else from those pages reaches native code.",
+  "description": "The local agent's setup wizard / console (http://127.0.0.1:<port>) may only sync the 'start at login' choice with the app and ask for a fresh credential for the console it is (console_access_token: the local agent's current console token, or for a paired host's console behind the tunnel a short-lived access token; the device key stays in native code), so the console never shows a login prompt inside the app. Nothing else from those pages reaches native code.",
   "windows": ["main"],
   "remote": {
     "urls": ["http://127.0.0.1:*/*", "http://localhost:*/*"]

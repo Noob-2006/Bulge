@@ -1,6 +1,6 @@
 //! Commands for the app's own pages (`src/`: splash + connect). The agent's setup wizard and
-//! console (served from 127.0.0.1) may only call `autostart_get` / `autostart_set`
-//! (`capabilities/console.json`).
+//! console (served from 127.0.0.1) may only call `autostart_get` / `autostart_set` and
+//! `console_access_token` (`capabilities/console.json`).
 
 use crate::pair::{self, Address, Host, SetupCode};
 use crate::{boot, tls, AppState, Mode};
@@ -284,7 +284,7 @@ pub async fn access_token<Rt: Runtime>(app: &AppHandle<Rt>, st: &AppState, h: &H
         let (status, v) = tls::request_json(&h.address, &h.fingerprint, "POST", "/pair/refresh", Some(&body), Some(&h.token)).await.map_err(Transient::Again)?;
         let err = v["error"].as_str().unwrap_or("").to_string();
         match (status, v["accessToken"].as_str()) {
-            (200, Some(t)) => Ok((t.to_string(), v["expiresAtMs"].as_u64().unwrap_or(0))),
+            (200, Some(t)) => Ok((t.to_string(), on_local_clock(v["expiresAtMs"].as_u64().unwrap_or(0), ts, now_ms()))),
             (404, _) => Ok((h.token.clone(), 0)),
             (s, _) if s >= 500 || s == 429 || err.contains("before this host started") || err.contains("replay window") => Err(Transient::Again(err)),
             _ => Err(Transient::Final(format!("{} — if this device was revoked or reinstalled, forget the host and pair it again", if err.is_empty() { "the host refused this device" } else { &err }))),
@@ -293,15 +293,63 @@ pub async fn access_token<Rt: Runtime>(app: &AppHandle<Rt>, st: &AppState, h: &H
     .await
 }
 
-/// The console page (served by the paired host through the tunnel) asks for a new access token
-/// when its own expired: `{token, expiresAtMs}` for the tunnel's host, nothing else.
+/// An expiry stamped by the host's clock (`host_now` then) moved onto this device's clock, so a
+/// host whose clock is ahead or behind does not make the console renew too late or in a loop.
+pub fn on_local_clock(exp: u64, host_now: u64, local_now: u64) -> u64 {
+    if exp == 0 {
+        return 0;
+    }
+    (i128::from(exp) - i128::from(host_now) + i128::from(local_now)).max(1) as u64
+}
+
+/// Whose console a page in the window is, by its address: the paired host behind the open tunnel,
+/// the agent this app runs, or neither (then it gets no credential).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConsoleOf {
+    Tunnel,
+    Local,
+    Neither,
+}
+
+pub fn console_of(page: &tauri::Url, local_base: Option<&str>, tunnel_port: Option<u16>) -> ConsoleOf {
+    let loopback = |u: &tauri::Url| u.scheme() == "http" && matches!(u.host_str(), Some("127.0.0.1" | "localhost" | "[::1]"));
+    if !loopback(page) {
+        return ConsoleOf::Neither;
+    }
+    let port = page.port_or_known_default();
+    if tunnel_port.is_some() && port == tunnel_port {
+        return ConsoleOf::Tunnel;
+    }
+    match local_base.and_then(|b| tauri::Url::parse(b).ok()) {
+        Some(b) if loopback(&b) && b.port_or_known_default() == port => ConsoleOf::Local,
+        _ => ConsoleOf::Neither,
+    }
+}
+
+/// The console page asks for a credential whenever its own is refused or about to expire, so the
+/// app never shows it a login prompt: `{token, expiresAtMs}` — a short-lived access token for the
+/// paired host behind the tunnel, or the local agent's current console token (`expiresAtMs` 0:
+/// it does not expire; rotated or not, this is the one the agent accepts now).
 #[tauri::command]
-pub async fn console_access_token<Rt: Runtime>(app: AppHandle<Rt>) -> R<Value> {
+pub async fn console_access_token<Rt: Runtime>(app: AppHandle<Rt>, window: tauri::WebviewWindow<Rt>) -> R<Value> {
     let st = app.state::<AppState>();
-    let id = st.tunnel.lock().await.as_ref().map(|t| t.host_id.clone()).ok_or("no paired host is open")?;
-    let h = st.hosts().get(&id).ok_or("unknown host")?;
-    let (token, exp) = access_token(&app, &st, &h).await?;
-    Ok(json!({"token": token, "expiresAtMs": exp}))
+    let page = window.url().map_err(|e| e.to_string())?;
+    let tunnel = st.tunnel.lock().await.as_ref().map(|t| (t.host_id.clone(), t.port));
+    let base = st.base.lock().unwrap().clone();
+    match console_of(&page, base.as_deref(), tunnel.as_ref().map(|t| t.1)) {
+        ConsoleOf::Tunnel => {
+            let id = tunnel.map(|t| t.0).ok_or("no paired host is open")?;
+            let h = st.hosts().get(&id).ok_or("unknown host")?;
+            let (token, exp) = access_token(&app, &st, &h).await?;
+            Ok(json!({"token": token, "expiresAtMs": exp}))
+        }
+        ConsoleOf::Local => {
+            let app2 = app.clone();
+            let token = tauri::async_runtime::spawn_blocking(move || boot::local_token(&app2)).await.map_err(|e| e.to_string())??;
+            Ok(json!({"token": token, "expiresAtMs": 0}))
+        }
+        ConsoleOf::Neither => Err("this page is neither this app's agent console nor the open paired host's".into()),
+    }
 }
 
 /// Android "this phone" mode / desktop: the local console (via the boot sequence).
@@ -312,4 +360,34 @@ pub fn show_local<Rt: Runtime>(app: AppHandle<Rt>, st: State<'_, AppState>) -> R
     }
     boot::start(app);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_page_gets_a_credential_only_for_its_own_console() {
+        let u = |s: &str| tauri::Url::parse(s).unwrap();
+        let local = Some("http://127.0.0.1:8640");
+        assert_eq!(console_of(&u("http://127.0.0.1:8640/#view=chat"), local, None), ConsoleOf::Local);
+        assert_eq!(console_of(&u("http://localhost:8640/setup"), Some("http://localhost:8640"), None), ConsoleOf::Local);
+        assert_eq!(console_of(&u("http://127.0.0.1:9123/"), local, Some(9123)), ConsoleOf::Tunnel, "the paired host behind the tunnel");
+        assert_eq!(console_of(&u("http://127.0.0.1:8640/"), local, Some(9123)), ConsoleOf::Local, "the local console while a tunnel is open too");
+        // Anything else gets nothing: another local port, another host, another scheme.
+        assert_eq!(console_of(&u("http://127.0.0.1:8641/"), local, None), ConsoleOf::Neither);
+        assert_eq!(console_of(&u("http://example.com:8640/"), local, None), ConsoleOf::Neither);
+        assert_eq!(console_of(&u("https://127.0.0.1:8640/"), local, None), ConsoleOf::Neither);
+        assert_eq!(console_of(&u("tauri://localhost/index.html"), local, None), ConsoleOf::Neither);
+        assert_eq!(console_of(&u("http://127.0.0.1:8640/"), None, None), ConsoleOf::Neither, "no agent started by this app");
+    }
+
+    #[test]
+    fn host_expiries_move_onto_the_local_clock() {
+        // Host an hour ahead: a token valid for 60 s more is still valid for 60 s here.
+        assert_eq!(on_local_clock(3_600_000 + 60_000 + 1_000, 3_600_000 + 1_000, 1_000), 61_000);
+        // Host behind.
+        assert_eq!(on_local_clock(10_000 + 60_000, 10_000, 500_000), 560_000);
+        assert_eq!(on_local_clock(0, 5, 7), 0, "no expiry stays none");
+    }
 }
