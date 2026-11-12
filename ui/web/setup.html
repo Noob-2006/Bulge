@@ -60,6 +60,14 @@
   .setup .applybar { position: sticky; bottom: 0; background: var(--bg); border-top: 1px solid var(--thread-2); padding: 14px 0; margin-top: 0; }
   .setup #blocked, .setup #done { border-top: 1px solid var(--thread-strong); padding-top: 14px; }
   .setup #blocked h2, .setup #done h2 { font: 300 26px var(--font); margin: 0 0 8px; }
+  .setup .vm-panel table.kv { width: 100%; border-collapse: collapse; font-size: 13px; }
+  .setup .vm-panel table.kv th { text-align: left; font-weight: 500; color: var(--text-2); padding: 6px 12px 6px 0; vertical-align: top; width: 34%; }
+  .setup .vm-panel table.kv td { padding: 6px 0; }
+  .setup .vm-panel .mono { font: 11.5px var(--mono); word-break: break-all; }
+  .setup .vm-panel .bad { color: var(--crit); }
+  .setup .vm-panel .dim { color: var(--text-3); }
+  .setup .vm-panel ul { font-size: 13px; color: var(--text-2); }
+  .setup .vm-advice { border-left: 2px solid var(--gold-400); padding: 4px 12px; margin: 10px 0; }
   @media (max-width: 860px) { .setup-shell { grid-template-columns: 1fr; } .steps { display: none; } .setup { padding: 24px 16px 100px; } .setup header h1 { font-size: 30px; } }
 </style>
 </head>
@@ -75,6 +83,7 @@
     <li><a href="#stepSecurity"><span class="n">05</span>安全模式</a></li>
     <li><a href="#stepChannel"><span class="n">06</span>聊天平台</a></li>
     <li><a href="#stepService"><span class="n">07</span>服務</a></li>
+    <li><a href="#stepVm"><span class="n">08</span>內建虛擬機</a></li>
   </ol>
   <p class="foot">一次性連結，30 分鐘內有效。<br>金鑰只進保管庫，不寫入設定檔。</p>
 </aside>
@@ -178,6 +187,12 @@
       <p class="hint">手機、平板與其他電腦可在同一個區域網路上找到這台電腦並配對：連線加密、每台裝置有自己的可撤銷憑證，且要在這台電腦上核准。這台電腦本身照常用 <code>http://127.0.0.1</code>。</p>
     </fieldset>
 
+    <fieldset id="stepVm">
+      <legend>08　內建虛擬機（工具在這裡執行）</legend>
+      <p class="hint">SE Agent 已內建虛擬機：agent 執行的指令在獨立的 Linux 虛擬機裡跑，看不到你的家目錄與金鑰。不需要另外安裝任何軟體。</p>
+      <div id="vmPanel" class="vm-panel"></div>
+    </fieldset>
+
     <div class="row applybar">
       <button type="submit" id="apply">完成設定</button>
       <span class="status" id="applyStatus" role="status" aria-live="polite"></span>
@@ -192,6 +207,7 @@
   </section>
 </main>
 </div>
+<script src="/ui/vm_panel.js"></script>
 <script src="/ui/setup.js"></script>
 </body>
 </html>

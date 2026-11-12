@@ -22,6 +22,7 @@
 #                                    [--agent PATH] [--kernel PATH] [--rootfs PATH]
 #                                    [--kernel-src PATH] [--target TRIPLE] [--help]
 set -euo pipefail
+umask 022
 
 # x86_64 direct-boot default: the Firecracker CI kernel (virtio-mmio, no PCI).
 KERNEL_URL="https://s3.amazonaws.com/spec.ccfc.min/firecracker-ci/v1.10/x86_64/vmlinux-5.10.223"
@@ -457,7 +458,10 @@ build_agent() {
 			eval ": \"\${CARGO_TARGET_${T}_LINKER:=$ARCH-linux-gnu-gcc}\"; export CARGO_TARGET_${T}_LINKER"
 			eval ": \"\${CC_${t}:=$ARCH-linux-gnu-gcc}\"; export CC_${t}"
 		fi
-		CARGO_INCREMENTAL=0 RUSTFLAGS="$flags" "${CARGO:-cargo}" build -p seagent-vm --bin seagent-vm-guest --release --target "$target"
+		# No build-host paths in the binary (panic locations name sources): a checkout in
+		# another directory, or another CARGO_HOME, must give the same agent bytes.
+		local remap="--remap-path-prefix=$REPO_ROOT=/seagent --remap-path-prefix=${CARGO_HOME:-$HOME/.cargo}=/cargo"
+		CARGO_INCREMENTAL=0 RUSTFLAGS="$flags $remap" "${CARGO:-cargo}" build -p seagent-vm --bin seagent-vm-guest --release --locked --target "$target"
 	)
 }
 
@@ -517,13 +521,19 @@ if ! grep -q '^agent:' "$ROOT/etc/group"; then
 fi
 
 note "packing the initramfs"
+# Reproducible archive: every entry gets the same mtime (SOURCE_DATE_EPOCH, else 0) and
+# GNU cpio's --reproducible numbers inodes/devices itself, so two builds of the same inputs
+# give byte-identical initramfs files (the installers pin the manifest hash, see bundle.sh).
+find "$ROOT" -exec touch -h -d "@${SOURCE_DATE_EPOCH:-0}" {} +
+CPIO_REPRO=()
+cpio --help 2>/dev/null | grep -q -- '--reproducible' && CPIO_REPRO=(--reproducible)
 # `--owner 0:0` is not cosmetic: the rootfs is unpacked as the *build* user, so
 # without it every file in the guest would be owned by that uid — the agent's
 # uid 1000 included, which would make /etc/passwd writable from inside the VM.
 # The guest must own nothing but its own workspace and home (B2).
 (
 	cd "$ROOT"
-	find . -print0 | LC_ALL=C sort -z | cpio --null -o -H newc --quiet --owner 0:0 | gzip -1 -n
+	find . -print0 | LC_ALL=C sort -z | cpio --null -o -H newc --quiet --owner 0:0 "${CPIO_REPRO[@]}" | gzip -1 -n
 ) >"$INITRAMFS_OUT.part"
 mv -f "$INITRAMFS_OUT.part" "$INITRAMFS_OUT"
 

@@ -115,8 +115,11 @@ pub fn locate<R: Runtime>(app: &AppHandle<R>) -> Result<Agent, String> {
     #[cfg(desktop)]
     let a = {
         let exe = std::env::current_exe().map_err(|e| e.to_string())?;
-        let share = app.path().resource_dir().ok().map(|d| d.join("share"));
-        Agent::locate(&exe, env!("SEAGENT_TARGET_TRIPLE"), share)?
+        let res = app.path().resource_dir().ok();
+        let mut a = Agent::locate(&exe, env!("SEAGENT_TARGET_TRIPLE"), res.as_ref().map(|d| d.join("share")))?;
+        // The built-in VM the installer ships (resources `vm/`: guest image + hypervisor).
+        a.with_vm_bundle(res.map(|d| d.join("vm")));
+        a
     };
     *st.agent.lock().unwrap() = Some(a.clone());
     Ok(a)

@@ -16,6 +16,7 @@ const FILES: &[(&str, &str, &str, &str)] = &[
     ("/ui/live_view.css", CSS, "web/live_view.css", include_str!("../../../ui/web/live_view.css")),
     ("/ui/surfaces.js", JS, "web/surfaces.js", include_str!("../../../ui/web/surfaces.js")),
     ("/ui/pages.js", JS, "web/pages.js", include_str!("../../../ui/web/pages.js")),
+    ("/ui/vm_panel.js", JS, "web/vm_panel.js", include_str!("../../../ui/web/vm_panel.js")),
     ("/ui/chat_menu.js", JS, "web/chat_menu.js", include_str!("../../../ui/web/chat_menu.js")),
     ("/ui/keys.js", JS, "web/keys.js", include_str!("../../../ui/web/keys.js")),
     ("/ui/split.js", JS, "web/split.js", include_str!("../../../ui/web/split.js")),
@@ -113,9 +114,19 @@ mod tests {
             seagent_net::httpd::Body::Bytes(b) => String::from_utf8(b).unwrap(),
             _ => panic!("bytes"),
         };
-        for m in ["setup.status", "setup.test_provider", "setup.apply", "x-seagent-setup-token", "/setup/rpc"] {
+        for m in ["setup.status", "setup.test_provider", "setup.apply", "x-seagent-setup-token", "/setup/rpc", "setup.vm_status", "setup.vm_repair", "setup.vm_open_hypervisor_settings"] {
             assert!(js.contains(m), "setup.js lacks {m}");
         }
+        // The wizard shows the built-in VM (status, set up / repair, Windows Features button).
+        assert!(html.contains("/ui/vm_panel.js") && html.contains("id=\"vmPanel\""), "wizard VM step");
+        let vm = match serve("/ui/vm_panel.js").body {
+            seagent_net::httpd::Body::Bytes(b) => String::from_utf8(b).unwrap(),
+            _ => panic!("bytes"),
+        };
+        for m in ["open_hypervisor_settings", "data-vm-action", "Set up / repair VM", "SeagentVm"] {
+            assert!(vm.contains(m), "vm_panel.js lacks {m}");
+        }
+        assert!(!vm.contains("seagent sandbox"), "no terminal command in the VM panel");
     }
 
     #[test]

@@ -132,7 +132,7 @@ pub fn auto_with(caps: &Capabilities, cfg: &VmConfig, sandboxed: bool) -> Plan {
         };
     }
     let why = blockers(caps);
-    let fix = if caps.hardware_accel() { " Build the guest image (`seagent sandbox vm image build`) for a microVM." } else { "" };
+    let fix = if caps.hardware_accel() { format!(" For a microVM: {}.", crate::bundle::fix_hint()) } else { String::new() };
     let (backend, degraded) = namespace_choice(caps);
     let level = isolation_of_backend(backend);
     let degraded = if degraded.is_empty() { String::new() } else { format!(" Degraded: {}.", degraded.join("; ")) };
@@ -155,7 +155,7 @@ pub fn auto_with(caps: &Capabilities, cfg: &VmConfig, sandboxed: bool) -> Plan {
             },
         };
     }
-    host_plan(&format!("{why}; {}", degraded.trim().trim_start_matches("Degraded: ").trim_end_matches('.')), fix)
+    host_plan(&format!("{why}; {}", degraded.trim().trim_start_matches("Degraded: ").trim_end_matches('.')), &fix)
 }
 
 /// The namespace-level fallback this host can actually run, and every step down it took on
@@ -217,6 +217,9 @@ pub fn host_plan(why: &str, fix: &str) -> Plan {
 /// Capabilities with the same "unpacked into the data dir" rules the pool uses
 /// (a Firecracker tarball under `<data>/vm/bin` counts).
 pub fn capabilities(cfg: &VmConfig, data: &Path) -> Capabilities {
+    // The hypervisor front-end the installer shipped (`crate::bundle`) stands in for a tool
+    // left at its default name, so detection and the provider start the same binary.
+    let cfg = &crate::bundle::apply(cfg);
     let (kernel, initramfs) = image_paths(cfg, data);
     let mut caps = Capabilities::detect(Some(&kernel), Some(&initramfs));
     let local_fc = data.join("vm").join("bin").join("firecracker");
@@ -249,13 +252,31 @@ pub fn capabilities(cfg: &VmConfig, data: &Path) -> Capabilities {
 /// pair was looked at, so an image built by `seagent sandbox vm image build` (which writes
 /// `<root>/image/`) booted but was reported as "guest kernel missing".
 pub fn image_paths(cfg: &VmConfig, data: &Path) -> (PathBuf, PathBuf) {
+    image_paths_with(cfg, data, crate::bundle::locate().as_ref())
+}
+
+/// [`image_paths`] for a given installer bundle: a user-built `<root>/image/` whose manifest
+/// this crate speaks and whose files are there, else the bundled image, else whatever the
+/// user's manifest names (so a broken build is reported against its own files), else the
+/// legacy pair.
+pub fn image_paths_with(cfg: &VmConfig, data: &Path, bundle: Option<&crate::bundle::Bundle>) -> (PathBuf, PathBuf) {
     if cfg.kernel.is_empty() && cfg.initramfs.is_empty() {
         let dir = cfg.root(data).join("image");
         let manifest = std::fs::read_to_string(dir.join(crate::image::MANIFEST_FILE)).ok().and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok());
-        if let Some(m) = manifest {
-            if let (Some(k), Some(i)) = (m["kernel"]["path"].as_str(), m["initramfs"]["path"].as_str()) {
-                return (dir.join(k), dir.join(i));
+        let built = manifest.as_ref().and_then(|m| match (m["kernel"]["path"].as_str(), m["initramfs"]["path"].as_str()) {
+            (Some(k), Some(i)) => Some((m["image_version"].as_u64() == Some(u64::from(crate::IMAGE_VERSION)), dir.join(k), dir.join(i))),
+            _ => None,
+        });
+        if let Some((true, k, i)) = &built {
+            if k.is_file() && i.is_file() {
+                return (k.clone(), i.clone());
             }
+        }
+        if let Some(pair) = bundle.and_then(|b| b.image_paths()) {
+            return pair;
+        }
+        if let Some((_, k, i)) = built {
+            return (k, i);
         }
     }
     (cfg.kernel_path(data), cfg.initramfs_path(data))

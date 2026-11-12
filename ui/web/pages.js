@@ -440,6 +440,11 @@ const PAGES = {
       <h3>快照</h3><table class="kv">${s.snapshots.map((x) => row([`<code>${v(x.id)}</code>`, v(x.label), `<span class="dim">${when(x.ts)}</span>`])).join('')}</table>${NOTE}`;
   }, after() { $('sysBackup').onclick = async () => { if (await act(() => call('ui.systems.backup'), (r) => '已建立 ' + r.path)) setTimeout(() => openPage('systems'), 600); }; } },
 
+  // Settings → Virtual machine: the built-in VM (ui/web/vm_panel.js, ui.vm.* in ops/vmsetup.rs).
+  vm: { title: '虛擬機', group: '設定', async render() {
+    return '<div id="vmPanel" class="vm-panel"></div>' + NOTE;
+  }, after() { if (window.SeagentVm) window.SeagentVm.mount($('vmPanel'), call, { status: 'ui.vm.status', repair: 'ui.vm.repair', open: 'ui.vm.open_hypervisor_settings' }); } },
+
   custodian: { title: '看守', group: '設定', async render() {
     const c = await call('ui.custodian');
     S.cpAlerts = c.alerts;

@@ -76,6 +76,7 @@ pub mod channels_setup;
 pub mod toolcfg;
 pub mod toollog;
 pub mod docker;
+pub mod vmsetup;
 
 pub use slashops::SLASH;
 

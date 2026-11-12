@@ -19,9 +19,10 @@ libc.workspace = true           # AF_VSOCK in the guest agent, process groups
 # kill-on-close), WHPX is probed through WinHvPlatform.dll, the VirtualBox / Hyper-V serial
 # channel is a named pipe. Same windows-sys 0.52 the workspace (and ring) already pull in; only
 # three more API families are enabled here (the registry one reads the Windows EditionID, so a
-# Home edition is reported as "no Hyper-V role" rather than "Hyper-V not installed").
+# Home edition is reported as "no Hyper-V role" rather than "Hyper-V not installed"); Win32_UI_Shell
+# opens the Windows Features dialog for the GUI's "turn on Windows Hypervisor Platform" button.
 [target.'cfg(windows)'.dependencies]
-windows-sys = { workspace = true, features = ["Win32_System_LibraryLoader", "Win32_System_ProcessStatus", "Win32_System_Registry"] }
+windows-sys = { workspace = true, features = ["Win32_System_LibraryLoader", "Win32_System_ProcessStatus", "Win32_System_Registry", "Win32_UI_Shell"] }
 
 [dev-dependencies]
 seagent-core.workspace = true       # tests only: self-cleaning scratch dirs

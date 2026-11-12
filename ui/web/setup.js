@@ -242,6 +242,8 @@
       : '使用者模式：設定在 ' + s.paths.config + '。';
     syncProvider();
     $('wizard').hidden = false;
+    // The built-in VM (vm_panel.js): status, set up / repair, Windows Features button.
+    if (window.SeagentVm) window.SeagentVm.mount($('vmPanel'), rpc, { status: 'setup.vm_status', repair: 'setup.vm_repair', open: 'setup.vm_open_hypervisor_settings' });
   }
 
   $('provider').addEventListener('change', syncProvider);

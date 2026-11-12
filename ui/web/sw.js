@@ -1,6 +1,6 @@
 // Offline shell for the installed app; live data always comes from the server.
-const CACHE = 'seagent-shell-v12';
-const SHELL = ['/', '/ui/theme.css', '/ui/app.css', '/ui/pages.css', '/ui/devauth.js', '/ui/devsec.js', '/ui/app.js', '/ui/surfaces.js', '/ui/pages.js', '/ui/ops.js', '/ui/work.js', '/ui/chat_menu.js', '/ui/keys.js', '/ui/split.js', '/ui/chat_menu.css', '/ui/connectors.css', '/ui/connectors.js', '/ui/logs.js', '/ui/live_view.js', '/ui/live_view.css', '/ui/star.svg', '/ui/icon.svg', '/ui/icons/icon-192.png'];
+const CACHE = 'seagent-shell-v13';
+const SHELL = ['/', '/ui/theme.css', '/ui/app.css', '/ui/pages.css', '/ui/devauth.js', '/ui/devsec.js', '/ui/app.js', '/ui/surfaces.js', '/ui/pages.js', '/ui/vm_panel.js', '/ui/ops.js', '/ui/work.js', '/ui/chat_menu.js', '/ui/keys.js', '/ui/split.js', '/ui/chat_menu.css', '/ui/connectors.css', '/ui/connectors.js', '/ui/logs.js', '/ui/live_view.js', '/ui/live_view.css', '/ui/star.svg', '/ui/icon.svg', '/ui/icons/icon-192.png'];
 self.addEventListener('install', (e) => e.waitUntil(caches.open(CACHE).then((c) => c.addAll(SHELL))));
 self.addEventListener('activate', (e) => e.waitUntil(caches.keys().then((ks) => Promise.all(ks.filter((k) => k !== CACHE).map((k) => caches.delete(k))))));
 self.addEventListener('fetch', (e) => {

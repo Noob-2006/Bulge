@@ -251,6 +251,39 @@ fn system_root() -> PathBuf {
     PathBuf::from(std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".into()))
 }
 
+/// The Windows Features dialog (`OptionalFeatures.exe`), where the user turns on "Windows
+/// Hypervisor Platform" for QEMU's WHPX accelerator. seagent never flips the feature itself.
+pub fn hypervisor_settings_program() -> PathBuf {
+    system_root().join("System32").join("OptionalFeatures.exe")
+}
+
+/// Open [`hypervisor_settings_program`] for the user (the GUI's "Open Windows Features"
+/// button). `ShellExecuteW` rather than a child process: the dialog asks for elevation itself,
+/// which `CreateProcess` cannot do, and no console window appears. Returns what was opened.
+#[cfg(windows)]
+pub fn open_hypervisor_settings() -> Result<String, String> {
+    use windows_sys::Win32::UI::Shell::ShellExecuteW;
+    let prog = hypervisor_settings_program();
+    if !prog.is_file() {
+        return Err(format!("{} is missing on this Windows installation", prog.display()));
+    }
+    let wide = |s: &str| s.encode_utf16().chain(std::iter::once(0)).collect::<Vec<u16>>();
+    let (verb, file) = (wide("open"), wide(&prog.display().to_string()));
+    // SAFETY: NUL-terminated UTF-16 strings that outlive the call; no window handle, no args.
+    let h = unsafe { ShellExecuteW(0, verb.as_ptr(), file.as_ptr(), std::ptr::null(), std::ptr::null(), 1) };
+    // ShellExecuteW returns a value > 32 on success (an HINSTANCE kept for compatibility).
+    if h as isize > 32 {
+        Ok(prog.display().to_string())
+    } else {
+        Err(format!("could not open {} (ShellExecute error {})", prog.display(), h as isize))
+    }
+}
+/// Only Windows has the dialog; other systems turn their hypervisor on elsewhere.
+#[cfg(not(windows))]
+pub fn open_hypervisor_settings() -> Result<String, String> {
+    Err("the Windows Features dialog exists on Windows only (macOS: Hypervisor.framework is built in; Linux: enable KVM in the firmware)".into())
+}
+
 /// Directories where hypervisor tools live when they are not on `PATH` (GUI-launched apps on
 /// macOS get a minimal PATH; Windows installers rarely touch it).
 pub fn tool_dirs() -> Vec<PathBuf> {
@@ -645,6 +678,20 @@ mod win {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The GUI's "Open Windows Features" button targets the real dialog on Windows; elsewhere
+    /// it is a clear error, never a silent no-op. (Not invoked on Windows here: a test must not
+    /// pop a UAC dialog on the developer's desktop.)
+    #[test]
+    fn the_hypervisor_settings_button_opens_the_windows_features_dialog() {
+        let prog = hypervisor_settings_program();
+        assert!(prog.ends_with("OptionalFeatures.exe"), "{}", prog.display());
+        if cfg!(windows) {
+            assert!(prog.is_file(), "{} must exist on Windows", prog.display());
+        } else {
+            assert!(open_hypervisor_settings().unwrap_err().contains("Windows only"));
+        }
+    }
 
     #[test]
     fn the_running_os_and_accelerators_are_named_honestly() {

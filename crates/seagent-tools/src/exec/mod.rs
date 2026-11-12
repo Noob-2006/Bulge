@@ -367,13 +367,18 @@ fn native_sandbox() -> Option<&'static str> {
 /// namespace-sandbox tier under its own name).
 pub const OS_SANDBOX_WARNING: &str = "OS sandbox (macOS Seatbelt): shares the host kernel, file access limited to system files, the workspace and a private temp dir; home unreadable. One kernel or sandbox bug from the host; weaker than a microVM.";
 
-/// How to get the microVM tier on macOS / Windows (the Linux fallback says the same).
-#[allow(dead_code)]
-const MICROVM_HINT: &str = if cfg!(windows) {
-    "Build the guest image (`seagent sandbox vm image build`) and enable a VM provider (Hyper-V, or QEMU with WHPX) for a microVM."
-} else {
-    "Build the guest image (`seagent sandbox vm image build`) for a microVM (Virtualization.framework, or QEMU with HVF)."
-};
+/// How to get the microVM tier on macOS / Windows (the Linux fallback says the same): the app's
+/// "Set up / repair VM" button when the installer shipped the VM (`seagent_vm::bundle`), the
+/// image builder for a source checkout.
+fn microvm_hint() -> String {
+    if seagent_vm::bundle::locate().is_some() {
+        format!("To get the microVM back, {}.", seagent_vm::bundle::REPAIR_HINT)
+    } else if cfg!(windows) {
+        "Build the guest image (`seagent sandbox vm image build`) and enable a VM provider (Hyper-V, or QEMU with WHPX) for a microVM.".into()
+    } else {
+        "Build the guest image (`seagent sandbox vm image build`) for a microVM (Virtualization.framework, or QEMU with HVF).".into()
+    }
+}
 
 /// Make an `auto` plan honest on macOS / Windows: the policy table in `seagent-vm` knows
 /// bwrap and Landlock, which these systems lack, so "no microVM, no namespace sandbox" would
@@ -406,7 +411,7 @@ pub fn os_plan(mut plan: seagent_vm::policy::Plan, sandboxed: bool) -> seagent_v
             provider: None,
             level: IsolationLevel::OsSandbox,
             origin: Origin::AutoFallback,
-            warning: Some(format!("no microVM available on this {} machine; {} runs in the {name} sandbox instead (host home and keys not readable) — {os_warning} {}", std::env::consts::OS, if sandboxed { "this session" } else { "the agent" }, MICROVM_HINT)),
+            warning: Some(format!("no microVM available on this {} machine; {} runs in the {name} sandbox instead (host home and keys not readable) — {os_warning} {}", std::env::consts::OS, if sandboxed { "this session" } else { "the agent" }, microvm_hint())),
             reason: format!("auto: no microVM, the agent still runs isolated in the {} OS sandbox ({name})", std::env::consts::OS),
         };
     }

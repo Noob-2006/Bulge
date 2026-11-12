@@ -30,7 +30,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-pub const METHODS: &[&str] = &["setup.status", "setup.test_provider", "setup.apply"];
+pub const METHODS: &[&str] = &["setup.status", "setup.test_provider", "setup.apply", "setup.vm_status", "setup.vm_repair", "setup.vm_open_hypervisor_settings"];
 /// Lifetime of a setup link.
 pub const DEFAULT_TTL_SECS: i64 = 30 * 60;
 pub const HEADER: &str = "x-seagent-setup-token";
@@ -721,6 +721,10 @@ pub fn call(paths: &Paths, method: &str, params: &Value, authorized: Result<(), 
         ("setup.status", Err(why)) => Ok(status(paths, false, Some(why))),
         (_, Err(why)) => Err((-32001, why.to_string())),
         ("setup.test_provider", Ok(())) => Ok(test_provider(paths, params)),
+        // The built-in VM step of the wizard (crate::ops::vmsetup).
+        ("setup.vm_status", Ok(())) => Ok(crate::ops::vmsetup::status(paths)),
+        ("setup.vm_repair", Ok(())) => Ok(crate::ops::vmsetup::repair(paths)),
+        ("setup.vm_open_hypervisor_settings", Ok(())) => crate::ops::vmsetup::open_hypervisor_settings().map_err(|e| (-32000, e)),
         ("setup.apply", Ok(())) => {
             let v = apply(paths, params, &discover_http, &real_autostart).map_err(|e| (-32602, e))?;
             restart_soon();

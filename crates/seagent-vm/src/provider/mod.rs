@@ -267,10 +267,10 @@ fn blockers(kind: ProviderKind, caps: &Capabilities) -> String {
         b.push("bootable guest disk missing (exec.vm.disk_image; VirtualBox and Hyper-V cannot boot a kernel + initramfs directly)".into());
     }
     if caps.kernel.is_none() {
-        b.push("guest kernel missing (run `seagent sandbox vm image build`)".into());
+        b.push(format!("guest kernel missing ({})", crate::bundle::fix_hint()));
     }
     if caps.initramfs.is_none() {
-        b.push("guest initramfs missing (run `seagent sandbox vm image build`)".into());
+        b.push(format!("guest initramfs missing ({})", crate::bundle::fix_hint()));
     }
     b.join(", ")
 }

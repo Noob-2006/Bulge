@@ -14,10 +14,12 @@
 //! * [`pool`] — VM lifecycle per session and per trust tier, snapshots/undo,
 //!   idle reaping, resource ceilings ([`limits`]).
 //! * [`image`] — guest image manifest (kernel + initramfs, sha256, version).
+//! * [`bundle`] — the VM the installers ship: pinned image + the host's hypervisor front-end.
 //!
 //! The `seagent-tools` `vm` exec backend is the thin adapter from this crate to the
 //! `ExecBackend` trait; it deliberately contains no VM logic.
 
+pub mod bundle;
 pub mod cgroup;
 pub mod channel;
 pub mod config;
