@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  The virtual display driver as an optional MSI feature, on by default (Level 1; leave it out
+  with `msiexec /i … REMOVE=SeagentVirtualDisplay`). See control/vdd.rs in seagent-browser and
+  vdd/install-vdd.ps1 beside this file.
+
+  Install: the driver's publisher (SignPath Foundation) is not in the machine's Trusted
+  Publishers, so Windows asks the user before it installs the device software — that cannot
+  happen in the per-machine execute sequence (session 0, no UI). The script therefore runs from
+  the UI sequence, in the user's session, after the files are installed; it elevates itself
+  (one UAC prompt). A silent `/qn` install skips it: the settings page offers Install.
+  Uninstall: removing a driver needs no consent, so it runs deferred as LocalSystem before the
+  files go away.
+-->
+<Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
+  <Fragment>
+    <DirectoryRef Id="INSTALLDIR">
+      <Component Id="SeagentVirtualDisplayMarker" Guid="*">
+        <RegistryValue Root="HKLM" Key="Software\SE Agent\VirtualDisplay" Name="Bundled" Type="string" Value="25.7.23" KeyPath="yes" />
+      </Component>
+    </DirectoryRef>
+    <Feature Id="SeagentVirtualDisplay" Title="Virtual display driver" Description="Lets apps on the agent's Bot Desktop stream at 30-60 fps (one extra virtual screen outside the corner of your screens)." Level="1" AllowAdvertise="no">
+      <ComponentRef Id="SeagentVirtualDisplayMarker" />
+    </Feature>
+    <CustomAction Id="SeagentVddInstall" Directory="INSTALLDIR" Return="asyncNoWait" Impersonate="yes"
+      ExeCommand="&quot;[System64Folder]WindowsPowerShell\v1.0\powershell.exe&quot; -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File &quot;[INSTALLDIR]vdd\install-vdd.ps1&quot;" />
+    <CustomAction Id="SeagentVddUninstall" Directory="INSTALLDIR" Return="ignore" Execute="deferred" Impersonate="no"
+      ExeCommand="&quot;[System64Folder]WindowsPowerShell\v1.0\powershell.exe&quot; -NoProfile -ExecutionPolicy Bypass -File &quot;[INSTALLDIR]vdd\install-vdd.ps1&quot; -Uninstall" />
+    <InstallUISequence>
+      <Custom Action="SeagentVddInstall" After="ExecuteAction">(&amp;SeagentVirtualDisplay=3) AND NOT REMOVE</Custom>
+    </InstallUISequence>
+    <InstallExecuteSequence>
+      <Custom Action="SeagentVddUninstall" Before="RemoveFiles">(!SeagentVirtualDisplay=3) AND (REMOVE="ALL" OR &amp;SeagentVirtualDisplay=2)</Custom>
+    </InstallExecuteSequence>
+  </Fragment>
+</Wix>

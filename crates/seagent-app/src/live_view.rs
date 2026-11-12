@@ -396,6 +396,9 @@ fn grab_for(app: &App, t: &crate::browser_view::Target, g: &mut Grabber, max_w: 
         let home = app.d.k.paths.data.clone();
         let d = seagent_browser::control::screen::Desktop::new(&home);
         let wd = seagent_browser::control::screen_windows::WinDesktop::new(&home, &d.profile, &d.geometry);
+        if let Some(r) = wd.hosted() {
+            return shot_image(seagent_browser::control::vdd::grab_region(r)?);
+        }
         if wd.running() {
             let cap = g.cap.get_or_insert_with(|| seagent_browser::control::screen_windows::LiveCapture::start(&wd.name()));
             let shot = cap.grab(max_w)?;
@@ -449,7 +452,7 @@ fn desktop(l: &mut Link) -> Flow {
     l.input_to = json!({"target": t.id()});
     let (quality, fps) = choice(l.params["quality"].as_str().and_then(|x| x.parse().ok()), l.params["fps"].as_str().and_then(|x| x.parse().ok()));
     let max_w = num(&l.params, "maxWidth", 1920).clamp(320, 3840);
-    l.text(&json!({"t": "hello", "kind": "desktop", "target": t.id(), "input": l.may_input, "fps": fps, "quality": quality, "maxWidth": max_w}))?;
+    l.text(&json!({"t": "hello", "kind": "desktop", "target": t.id(), "input": l.may_input, "fps": fps, "quality": quality, "maxWidth": max_w, "display": display_note(&t)}))?;
     let host = t == crate::browser_view::Target::Host;
     loop {
         let (quality, fps) = l.chosen.unwrap_or((quality, fps));
@@ -478,6 +481,16 @@ fn desktop(l: &mut Link) -> Flow {
     }
 }
 
+/// The host target's virtual-display status for the viewer (Windows): whether the Bot Desktop
+/// is hosted on the virtual monitor and, when not, why native apps stream slower and what fixes
+/// it (`control::vdd::Status::reason`). `null` for VM targets and other platforms.
+fn display_note(t: &crate::browser_view::Target) -> Value {
+    if *t != crate::browser_view::Target::Host || !cfg!(windows) {
+        return Value::Null;
+    }
+    seagent_browser::control::vdd::probe().to_json()
+}
+
 /// A desktop stream's internal "change source" signal (never reaches the viewer).
 const SWITCH: &str = "\u{0}switch";
 
@@ -500,6 +513,10 @@ fn region_source(app: &Arc<App>, t: &crate::browser_view::Target, max_w: u32) ->
             let d = seagent_browser::control::screen::Desktop::new(&home);
             let wd = seagent_browser::control::screen_windows::WinDesktop::new(&home, &d.profile, &d.geometry);
             if wd.running() {
+                // Hosted on the virtual monitor: its duplication, at the monitor's refresh rate.
+                if let Some(r) = wd.hosted() {
+                    return Box::new(VddTrack { region: r, dup: None, gdi: None });
+                }
                 return Box::new(WinTrack(seagent_browser::control::screen_windows::LiveCapture::start(&wd.name())));
             }
         }
@@ -523,16 +540,74 @@ struct WinTrack(seagent_browser::control::screen_windows::LiveCapture);
 #[cfg(windows)]
 impl crate::live_regions::RegionSource for WinTrack {
     fn next(&mut self) -> Result<crate::live_regions::Update, String> {
-        use crate::live_regions::Update;
-        use seagent_browser::control::screen_windows::{Shot, TrackUpdate};
-        // BGRA as GDI gives it: the encoder threads convert (no per-pixel work here).
-        let rgba = |s: Shot| -> Result<crate::live_regions::Frame, String> { Ok(crate::live_regions::Frame { w: s.width.max(0) as u32, h: s.height.max(0) as u32, data: s.bgra, bgra: true }) };
-        Ok(match self.0.track()? {
-            TrackUpdate::Full(s) => Update::Full(rgba(s)?),
-            TrackUpdate::Rects(rs) => Update::Rects(rs.into_iter().map(|(x, y, s)| Ok((x.max(0) as u32, y.max(0) as u32, rgba(s)?))).collect::<Result<_, String>>()?),
-            TrackUpdate::Same => Update::Same,
-        })
+        Ok(win_update(self.0.track()?))
     }
+}
+
+/// A Windows capture update as a region update. BGRA as GDI / DXGI give it: the encoder
+/// threads convert (no per-pixel work here).
+#[cfg(windows)]
+fn win_update(u: seagent_browser::control::screen_windows::TrackUpdate) -> crate::live_regions::Update {
+    use crate::live_regions::{Frame, Update};
+    use seagent_browser::control::screen_windows::{Shot, TrackUpdate};
+    let f = |s: Shot| Frame { w: s.width.max(0) as u32, h: s.height.max(0) as u32, data: s.bgra, bgra: true };
+    match u {
+        TrackUpdate::Full(s) => Update::Full(f(s)),
+        TrackUpdate::Rects(rs) => Update::Rects(rs.into_iter().map(|(x, y, s)| (x.max(0) as u32, y.max(0) as u32, f(s))).collect()),
+        TrackUpdate::Same => Update::Same,
+    }
+}
+
+/// The Bot Desktop hosted on the virtual monitor (`control::vdd`): DXGI Desktop Duplication of
+/// that monitor — frames at its refresh rate with the changed rectangles — reopened after a
+/// mode change or a secure-desktop switch; GDI reads of the region when duplication is refused.
+#[cfg(windows)]
+struct VddTrack {
+    region: seagent_browser::control::vdd::Rect,
+    dup: Option<seagent_browser::control::dxgi_dup::Duplication>,
+    gdi: Option<Box<dyn crate::live_regions::RegionSource>>,
+}
+
+#[cfg(windows)]
+impl crate::live_regions::RegionSource for VddTrack {
+    fn next(&mut self) -> Result<crate::live_regions::Update, String> {
+        use seagent_browser::control::{dxgi_dup::Duplication, vdd};
+        if self.dup.is_none() && self.gdi.is_none() {
+            let r = self.region;
+            let name = vdd::screens().into_iter().find(|s| s.attached && s.rect == r).map(|s| s.name).ok_or_else(|| "the virtual monitor is no longer attached".to_string())?;
+            match Duplication::open(&name) {
+                Ok(d) => self.dup = Some(d),
+                Err(e) => {
+                    eprintln!("seagent: live view: {e}; reading the virtual monitor through GDI");
+                    self.gdi = Some(Box::new(crate::live_regions::Snapshots::new(move || shot_image(vdd::grab_region(r)?))));
+                }
+            }
+        }
+        if let Some(g) = self.gdi.as_mut() {
+            return g.next();
+        }
+        let Some(d) = self.dup.as_mut() else { return Ok(crate::live_regions::Update::Same) };
+        match d.next(10) {
+            Ok(u) => Ok(win_update(u)),
+            // Access lost (mode change, UAC / lock screen): open it again on the next call.
+            Err(e) => {
+                self.dup = None;
+                Err(e)
+            }
+        }
+    }
+}
+
+/// A BGRA shot as an image.
+#[cfg(windows)]
+fn shot_image(shot: seagent_browser::control::screen_windows::Shot) -> Result<image::DynamicImage, String> {
+    let (w, h) = (shot.width.max(0) as u32, shot.height.max(0) as u32);
+    let mut rgba = shot.bgra;
+    for px in rgba.as_chunks_mut::<4>().0 {
+        px.swap(0, 2);
+        px[3] = 255;
+    }
+    image::RgbaImage::from_raw(w, h, rgba).map(image::DynamicImage::ImageRgba8).ok_or_else(|| "bad Bot Desktop frame".to_string())
 }
 
 impl crate::live_regions::Sink for Link {

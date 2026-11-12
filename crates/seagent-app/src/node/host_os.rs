@@ -73,9 +73,22 @@ pub(crate) fn run(policy: &HostPolicy, command: &str, p: &Value, t: Duration, ct
 
 // ───────────────────────── screen ─────────────────────────
 
-/// PNG of the primary screen.
+/// PNG of the primary screen — or, while the Bot Desktop is hosted on the virtual display
+/// (`seagent_browser::control::vdd`), of that monitor: the agent's own screen.
 #[cfg(windows)]
 pub(crate) fn snapshot(t: Duration) -> Result<Vec<u8>, String> {
+    if let Some(r) = seagent_browser::control::vdd::hosted() {
+        let shot = seagent_browser::control::vdd::grab_region(r)?;
+        let mut rgba = shot.bgra;
+        for px in rgba.as_chunks_mut::<4>().0 {
+            px.swap(0, 2);
+            px[3] = 255;
+        }
+        let img = image::RgbaImage::from_raw(shot.width.max(0) as u32, shot.height.max(0) as u32, rgba).ok_or("bad virtual monitor frame")?;
+        let mut out = std::io::Cursor::new(Vec::new());
+        img.write_to(&mut out, image::ImageFormat::Png).map_err(|e| format!("screenshot: {e}"))?;
+        return Ok(out.into_inner());
+    }
     // DPI-aware first, so the bitmap is in physical pixels (the coordinates SendInput uses).
     const PS: &str = "Add-Type -AssemblyName System.Windows.Forms,System.Drawing; Add-Type -TypeDefinition 'using System.Runtime.InteropServices; public static class SeagentDpi { [DllImport(\"user32.dll\")] public static extern bool SetProcessDPIAware(); }'; [SeagentDpi]::SetProcessDPIAware() | Out-Null; $b=[System.Windows.Forms.Screen]::PrimaryScreen.Bounds; $bmp=New-Object System.Drawing.Bitmap $b.Width,$b.Height; $g=[System.Drawing.Graphics]::FromImage($bmp); $g.CopyFromScreen($b.Left,$b.Top,0,0,$bmp.Size); $bmp.Save($env:SEAGENT_SHOT,[System.Drawing.Imaging.ImageFormat]::Png); $g.Dispose(); $bmp.Dispose()";
     let tmp = tmp_file("shot", "png");
@@ -314,7 +327,9 @@ fn computer(policy: &HostPolicy, p: &Value, t: Duration) -> Result<Value, String
 pub(crate) fn act(p: &Value, _t: Duration) -> Result<String, String> {
     let action = p["action"].as_str().ok_or("computer.act needs `action`")?;
     let num = |k: &str| p[k].as_f64().map(|f| f.max(0.0).round() as i64);
-    let xy = num("x").zip(num("y"));
+    // Screen coordinates: offset onto the virtual monitor while the Bot Desktop is hosted there.
+    let at = |x: i64, y: i64| origin().map_or((x, y), |(ox, oy)| (x + ox, y + oy));
+    let xy = num("x").zip(num("y")).map(|(x, y)| at(x, y));
     let mods: Vec<String> = p["modifiers"].as_str().filter(|m| !m.is_empty()).map(|m| m.split('+').map(str::to_string).collect()).unwrap_or_default();
     match action {
         "mouse_move" => {
@@ -338,7 +353,7 @@ pub(crate) fn act(p: &Value, _t: Duration) -> Result<String, String> {
         "left_click_drag" => {
             let (Some(fx), Some(fy)) = (num("fromX"), num("fromY")) else { return Err("left_click_drag needs fromX, fromY, x, y".into()) };
             let to = xy.ok_or("left_click_drag needs fromX, fromY, x, y")?;
-            imp::drag((fx, fy), to)
+            imp::drag(at(fx, fy), to)
         }
         "scroll" => {
             let n = p["scrollAmount"].as_u64().unwrap_or(3).clamp(1, 50) as i32;
@@ -369,9 +384,14 @@ pub(crate) fn act(p: &Value, _t: Duration) -> Result<String, String> {
             std::thread::sleep(Duration::from_millis(p["durationMs"].as_u64().unwrap_or(1000).min(30_000)));
             Ok(String::new())
         }
-        "get_cursor_position" => imp::cursor().map(|(x, y)| format!("X={x}\nY={y}\n")),
+        "get_cursor_position" => imp::cursor().map(|(x, y)| origin().map_or((x, y), |(ox, oy)| (x - ox, y - oy))).map(|(x, y)| format!("X={x}\nY={y}\n")),
         other => Err(format!("computer.act action `{other}` is not supported on {} nodes", std::env::consts::OS)),
     }
+}
+
+/// The hosted Bot Desktop's origin on the virtual display (Windows only; `None` elsewhere).
+fn origin() -> Option<(i64, i64)> {
+    seagent_browser::control::vdd::hosted().map(|r| (i64::from(r.x), i64::from(r.y)))
 }
 
 /// Windows: `SendInput` from this process (physical pixels after `SetProcessDPIAware`).

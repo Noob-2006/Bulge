@@ -1131,8 +1131,10 @@ for (const id of ['showControl', 'showBoards', 'showSettings']) $(id).addEventLi
 $('showSettings').onclick = () => showPanel(t('settings'), async () => {
   const m = await S.arp.call('models.list');
   const tools = await S.arp.call('tools.list');
+  const disp = await S.arp.call('view.display.status').catch(() => null);
   return `<h3>模型</h3><table class="kv">${row(['預設模型', `<code>${esc(m.default)}</code>`])}${row(['備援', esc((m.fallback || []).join(', ') || '—')])}${row(['輔助模型', `<code>${esc(m.aux || '—')}</code>`])}${row(['工具', String(tools.length)])}</table>
     <h3>連線</h3><p class="dim">技能、MCP、外掛、聊天頻道、Webhook 與代理都在這裡設定。</p><p><button class="btn small" id="openConnections">開啟連線設定</button></p>
+    ${displaySection(disp)}
     <h3>這台裝置</h3>
     <p><label class="dim">新對話的工作目錄</label><input type="text" id="wsInput" value="${esc(store.get('seagent.workspace') || '')}" placeholder="（伺服器預設）"></p>
     ${(S.settingsPanels || []).length ? '<h3>外掛設定</h3>' : ''}${(S.settingsPanels || []).map(([p, u], i) => `<p><button class="btn ghost small" data-panel="${i}">${esc(u.title || u.id)}（${esc(p)}）</button></p>`).join('')}
@@ -1140,10 +1142,40 @@ $('showSettings').onclick = () => showPanel(t('settings'), async () => {
 }, () => {
   for (const b of $('panelBody').querySelectorAll('[data-panel]')) { const [p, u] = S.settingsPanels[+b.dataset.panel]; b.onclick = () => openPluginPanel(p, u); }
   if ($('openConnections')) $('openConnections').onclick = () => window.openConnections && window.openConnections();
+  bindDisplaySection();
   // CSP forbids inline handlers: bind after rendering.
   $('wsInput').onchange = (e) => store.set('seagent.workspace', e.target.value);
   $('logout').onclick = () => { store.del('seagent.token'); location.reload(); };
 });
+
+// Settings → 虛擬顯示器 (Windows): the virtual display behind the Bot Desktop (view.display.*).
+function displaySection(d) {
+  if (!d || !d.supported) return '';
+  const st = d.installed ? `已安裝 <code>${esc(d.version || '?')}</code>` : '未安裝';
+  const mon = d.monitor ? `${d.monitor.rect.width}×${d.monitor.rect.height}@${d.monitor.hz}，位置 (${d.monitor.rect.x}, ${d.monitor.rect.y})` : '—';
+  const mode = d.active ? 'Bot Desktop 在虛擬螢幕上（30–60 fps）' : '隔離桌面（原生 App 約 10 fps）';
+  const btns = !d.bundled.available ? '<p class="dim">這個版本沒有附帶驅動程式。</p>'
+    : d.installed ? '<button class="btn small" data-vdd="repair">修復</button> <button class="btn ghost small" data-vdd="uninstall">解除安裝</button>'
+    : '<button class="btn small" data-vdd="install">安裝</button>';
+  return `<h3>虛擬顯示器</h3><table class="kv">${row(['驅動程式', st])}${row(['虛擬螢幕', esc(mon)])}${row(['模式', esc(mode)])}${row(['附帶版本', `<code>${esc(d.bundled.driverVersion)}</code>（release ${esc(d.bundled.release)}）`])}</table>
+    ${d.message ? `<p class="dim">${esc(d.message)}</p>` : ''}<p id="vddBtns">${btns}</p><p class="dim" id="vddMsg">需要系統管理員同意（UAC）；Windows 可能再問一次是否安裝 SignPath Foundation 發行的裝置軟體。</p>`;
+}
+function bindDisplaySection() {
+  for (const b of $('panelBody').querySelectorAll('[data-vdd]')) b.onclick = async () => {
+    const msg = $('vddMsg');
+    try {
+      await S.arp.call('view.display.driver', { action: b.dataset.vdd });
+      msg.textContent = '已啟動安裝程式，請在跳出的視窗中按「是」。完成後這裡會更新…';
+      const before = JSON.stringify(await S.arp.call('view.display.status'));
+      for (let i = 0; i < 60; i++) {
+        await new Promise((r) => setTimeout(r, 3000));
+        const now = await S.arp.call('view.display.status');
+        if (JSON.stringify(now) !== before) { $('showSettings').click(); return; }
+      }
+      msg.textContent = '狀態沒有改變（安裝被取消或仍在進行）。';
+    } catch (e) { msg.textContent = e.message; }
+  };
+}
 
 if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js').catch(() => {});
 

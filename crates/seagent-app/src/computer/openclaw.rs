@@ -74,7 +74,7 @@ pub fn schema(actions: &[&str]) -> Value {
         "depth": {"type": "integer", "minimum": 0, "maximum": 64, "description": "get_window_state with windowRef: maximum tree depth."},
         "maxElements": {"type": "integer", "minimum": 1, "maximum": 2000, "description": "get_window_state with windowRef: maximum returned elements."},
         "includeScreenshot": {"type": "boolean"},
-        "app": s("launch_app / kill_app: a desktop entry id (Linux), or for launch_app the full path of a Chromium-family browser or an Electron app, which starts on the Bot Desktop as a headed CDP target."),
+        "app": s("launch_app / kill_app: a desktop entry id (Linux), or for launch_app the full path of a Chromium-family browser or an Electron app, which starts on the Bot Desktop as a headed CDP target (Windows with the virtual display: any native app, started on the Bot Desktop's virtual monitor)."),
         "args": {"type": "array", "items": {"type": "string", "maxLength": 4096}, "maxItems": 32, "description": "launch_app by path: the app's arguments (e.g. --app=<url> for a browser)."},
         "value": {"type": "string"},
         "path": {"type": "array", "items": {"type": "string", "minLength": 1, "maxLength": 200}, "minItems": 1, "maxItems": 16},
@@ -516,13 +516,30 @@ fn launch_cdp_app(p: &Value) -> Result<Value, String> {
     if !exe.is_file() {
         return Err(format!("COMPUTER_INVALID_REQUEST: launch_app: {} is not a file", exe.display()));
     }
-    let kind = seagent_browser::launch::app_kind(&exe).ok_or_else(|| format!("COMPUTER_UNSUPPORTED_ACTION: launch_app by path starts Chromium-family browsers and Electron apps only ({} is neither)", exe.display()))?;
-    let name: String = exe.file_stem().map(|n| n.to_string_lossy().to_lowercase()).unwrap_or_default().chars().filter(|c| c.is_ascii_alphanumeric() || "._-".contains(*c)).take(64).collect();
     let args: Vec<String> = p["args"].as_array().into_iter().flatten().filter_map(Value::as_str).map(String::from).collect();
+    // Windows, Bot Desktop hosted on the virtual display: any native app (Notepad, Paint,
+    // Explorer…) starts there and streams at the monitor's refresh rate.
+    #[cfg(windows)]
+    if seagent_browser::launch::app_kind(&exe).is_none() && {
+        let home = seagent_kernel::config::Paths::from_env().data;
+        let d = seagent_browser::control::screen::Desktop::new(&home);
+        seagent_browser::control::screen_windows::WinDesktop::new(&home, &d.profile, &d.geometry).hosted().is_some()
+    } {
+        let pid = seagent_browser::control::vdd::launch_native(&exe, &args)?;
+        return Ok(json!({"ok": true, "effect": "confirmed", "details": {"app": exe.display().to_string(), "kind": "native", "pid": pid, "display": "virtual"}}));
+    }
+    let kind = seagent_browser::launch::app_kind(&exe).ok_or_else(|| format!("COMPUTER_UNSUPPORTED_ACTION: launch_app by path starts Chromium-family browsers and Electron apps only ({} is neither){}", exe.display(), native_hint()))?;
+    let name: String = exe.file_stem().map(|n| n.to_string_lossy().to_lowercase()).unwrap_or_default().chars().filter(|c| c.is_ascii_alphanumeric() || "._-".contains(*c)).take(64).collect();
     let paths = seagent_kernel::config::Paths::from_env();
     let env = seagent_browser::manager::Env { cfg: Default::default(), home: paths.data.clone(), secrets: std::sync::Arc::new(|s: &str| s.to_string()) };
     let b = seagent_browser::manager::global().launch_app(&env, &name, &exe, &args)?;
     Ok(json!({"ok": true, "effect": "confirmed", "details": {"app": exe.display().to_string(), "kind": kind, "browserKey": b.key, "pid": b.pid}}))
+}
+
+/// Windows without the virtual display: why native apps cannot be launched onto the Bot
+/// Desktop by path, and what enables it (empty elsewhere).
+fn native_hint() -> String {
+    seagent_browser::control::vdd::probe().reason().map(|(_, m)| format!("; native apps need the virtual display: {m}")).unwrap_or_default()
 }
 
 impl Desk for NativeDesk {
