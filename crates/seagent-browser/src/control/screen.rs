@@ -197,11 +197,22 @@ impl Desktop {
     /// The live launcher's pid: `launcher.pid` holds `"<pid> <starttime>"`; a recycled pid with a
     /// different start time is someone else's process and never ours.
     pub fn launcher_pid(&self) -> Option<i32> {
-        let raw = std::fs::read_to_string(self.state_dir().join("launcher.pid")).ok()?;
-        let mut it = raw.split_whitespace();
-        let pid: i32 = it.next()?.parse().ok()?;
-        let born: u64 = it.next()?.parse().ok()?;
-        (start_time(pid) == Some(born) && util::pid_alive(pid)).then_some(pid)
+        // Windows: the desktop is held open by the seagent process itself, which records only its
+        // pid (`WinDesktop::start`); read it the way the Windows desktop does. Before, the Bot
+        // Desktop never counted as running there (`published_env` empty → `view.desktop.list`
+        // running=false → no desktop tab in the live view, even with apps on it).
+        #[cfg(windows)]
+        {
+            self.win().launcher_pid()
+        }
+        #[cfg(not(windows))]
+        {
+            let raw = std::fs::read_to_string(self.state_dir().join("launcher.pid")).ok()?;
+            let mut it = raw.split_whitespace();
+            let pid: i32 = it.next()?.parse().ok()?;
+            let born: u64 = it.next()?.parse().ok()?;
+            (start_time(pid) == Some(born) && util::pid_alive(pid)).then_some(pid)
+        }
     }
 
     pub fn published_env(&self) -> Vec<(String, String)> {
@@ -946,6 +957,20 @@ fn run_install(d: &Desktop, cmd: &str, io: &mut dyn Io) -> i32 {
 #[cfg(test)]
 #[cfg_attr(not(unix), allow(dead_code, unused_imports))]
 mod tests {
+    /// Windows: `WinDesktop::start` records only its own pid; `Desktop::launcher_pid` /
+    /// `published_env` must read that, or the live view never lists the running Bot Desktop.
+    #[cfg(windows)]
+    #[test]
+    fn a_windows_desktop_record_counts_as_running() {
+        let d = seagent_core::tmp::TempDir::new("seagent-bd-launcher");
+        let desk = Desktop::new(d.path());
+        std::fs::create_dir_all(desk.state_dir()).unwrap();
+        std::fs::write(desk.state_dir().join("launcher.pid"), std::process::id().to_string()).unwrap();
+        std::fs::write(desk.state_dir().join("env"), "SEAGENT_BD_DESKTOP=WinSta0\\Default\n").unwrap();
+        assert_eq!(desk.launcher_pid(), Some(std::process::id() as i32));
+        assert!(!desk.published_env().is_empty(), "view.desktop.list reports it running");
+    }
+
     use super::*;
 
     #[cfg(unix)]

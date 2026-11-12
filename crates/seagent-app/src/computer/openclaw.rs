@@ -639,7 +639,12 @@ impl Desk for NativeDesk {
                 let name = p["app"].as_str().unwrap_or("");
                 let env = |k: &str| std::env::var_os(k).map(std::path::PathBuf::from);
                 let path: Vec<std::path::PathBuf> = std::env::var_os("PATH").map(|v| std::env::split_paths(&v).collect()).unwrap_or_default();
-                let exe = windows_app(name, env("WINDIR").or_else(|| env("SystemRoot")).as_deref(), env("LOCALAPPDATA").as_deref(), &path)
+                let windir = env("WINDIR").or_else(|| env("SystemRoot"));
+                // %LOCALAPPDATA% may be redirected for this process; the per-user App Execution
+                // Aliases still live under the profile's own AppData\Local.
+                let profile_local = env("USERPROFILE").map(|u| u.join("AppData").join("Local"));
+                let exe = windows_app(name, windir.as_deref(), env("LOCALAPPDATA").as_deref(), &path)
+                    .or_else(|| windows_app(name, windir.as_deref(), profile_local.as_deref(), &path))
                     .ok_or_else(|| format!("COMPUTER_INVALID_REQUEST: launch_app: no application `{name}` found (System32, the Windows folder, PATH, App Execution Aliases); pass the full path of the .exe"))?;
                 let mut q = p.clone();
                 q["app"] = json!(exe.display().to_string());
