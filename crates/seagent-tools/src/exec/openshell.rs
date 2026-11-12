@@ -24,7 +24,7 @@ use seagent_core::exec::{ExecBackend, ExecChild, ExecRequest};
 use serde::Deserialize;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
@@ -165,7 +165,7 @@ impl OpenShellBackend {
 
     fn run_cli(&self, args: &[&str]) -> Result<CliOut, String> {
         let what = args.join(" ");
-        let mut cmd = Command::new(&self.cli[0]);
+        let mut cmd = seagent_core::platform::proc::command(&self.cli[0]);
         cmd.args(&self.cli[1..]).args(args).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
         let mut child = super::retry_etxtbsy(|| cmd.spawn())
             .map_err(|e| format!("exec backend openshell: cannot run `{}`: {e}", self.cli[0]))?;
@@ -308,7 +308,7 @@ impl ExecBackend for OpenShellBackend {
             script.push_str(&format!("mkdir -p {0} && cd {0} || exit 126\n", sh_quote(&self.map_path(c))));
         }
         script.push_str(&req.script);
-        let mut cmd = Command::new("ssh");
+        let mut cmd = seagent_core::platform::proc::command("ssh");
         cmd.args(self.ssh_args(req.pty.is_some()));
         cmd.arg(&self.alias);
         // One quoted word: ssh re-parses the joined command line on the remote side.

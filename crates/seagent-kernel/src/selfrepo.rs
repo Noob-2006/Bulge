@@ -42,7 +42,7 @@ fn mutates(sub: &str, args: &[String]) -> bool {
 }
 
 fn read_alias(target: &Path, alias: &str) -> Option<String> {
-    let out = std::process::Command::new("git").arg("-C").arg(target).args(["config", "--get", &format!("alias.{alias}")]).stdin(std::process::Stdio::null()).output().ok()?;
+    let out = seagent_core::platform::proc::command("git").arg("-C").arg(target).args(["config", "--get", &format!("alias.{alias}")]).stdin(std::process::Stdio::null()).output().ok()?;
     out.status.success().then(|| String::from_utf8_lossy(&out.stdout).trim().to_string()).filter(|s| !s.is_empty())
 }
 

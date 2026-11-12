@@ -2105,7 +2105,7 @@ mod tests {
         assert!(d["dangerous"].as_array().unwrap().contains(&json!("kinds.wipe")));
         reg().lock().unwrap().live.remove("meta-node");
         // node.toml plugins: their node_commands are offered (python3 needed for the fixture).
-        if std::process::Command::new("python3").arg("-c").arg("1").output().is_ok() {
+        if seagent_core::platform::proc::command("python3").arg("-c").arg("1").output().is_ok() {
             let f = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/plugin/kinds.py");
             let toml = format!("[plugins.kinds]\ncommand = \"python3\"\nargs = [\"-I\", {:?}]\n", f.display().to_string());
             let policy: HostPolicy = toml::from_str(&toml).unwrap();
@@ -2118,7 +2118,7 @@ mod tests {
 
     #[test]
     fn node_hosted_mcp_servers_expose_tools_as_commands() {
-        if !std::process::Command::new("python3").arg("-c").arg("1").output().is_ok() {
+        if !seagent_core::platform::proc::command("python3").arg("-c").arg("1").output().is_ok() {
             return;
         }
         let f = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/mcp/server.py");

@@ -192,7 +192,7 @@ pub type Runner = Box<dyn Fn(&[String]) -> (i32, String)>;
 pub fn exe_runner() -> Runner {
     Box::new(|argv: &[String]| {
         let exe = std::env::current_exe().unwrap_or_else(|_| "seagent".into());
-        match std::process::Command::new(exe).args(argv).env("NO_COLOR", "1").env("SEAGENT_CONSOLE", "1").stdin(std::process::Stdio::null()).output() {
+        match seagent_core::platform::proc::command(exe).args(argv).env("NO_COLOR", "1").env("SEAGENT_CONSOLE", "1").stdin(std::process::Stdio::null()).output() {
             Ok(o) => {
                 let mut s = String::from_utf8_lossy(&o.stdout).to_string();
                 let e = String::from_utf8_lossy(&o.stderr);

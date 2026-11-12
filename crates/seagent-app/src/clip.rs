@@ -6,7 +6,7 @@
 use seagent_core::Block;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 
 /// Largest image attached from disk or the clipboard.
 pub const MAX_IMAGE_BYTES: usize = 20 * 1024 * 1024;
@@ -43,7 +43,7 @@ fn copy_in(text: &str, path: &std::ffi::OsStr, wayland: bool) -> Result<String, 
     // Windows: clip.exe reads UTF-16LE with a BOM as Unicode (anything else as the OEM codepage).
     #[cfg(windows)]
     if let Some(p) = seagent_core::platform::layout::which("clip") {
-        if let Ok(mut child) = Command::new(p).stdin(Stdio::piped()).stdout(Stdio::null()).stderr(Stdio::null()).spawn() {
+        if let Ok(mut child) = seagent_core::platform::proc::command(p).stdin(Stdio::piped()).stdout(Stdio::null()).stderr(Stdio::null()).spawn() {
             if let Some(mut i) = child.stdin.take() {
                 let mut b = vec![0xff, 0xfe];
                 b.extend(text.encode_utf16().flat_map(u16::to_le_bytes));
@@ -61,7 +61,7 @@ fn copy_in(text: &str, path: &std::ffi::OsStr, wayland: bool) -> Result<String, 
     };
     for (bin, args) in tools {
         let Some(p) = which_in(path, &[bin]) else { continue };
-        let Ok(mut child) = Command::new(p).args(*args).stdin(Stdio::piped()).stdout(Stdio::null()).stderr(Stdio::null()).spawn() else { continue };
+        let Ok(mut child) = seagent_core::platform::proc::command(p).args(*args).stdin(Stdio::piped()).stdout(Stdio::null()).stderr(Stdio::null()).spawn() else { continue };
         if let Some(mut i) = child.stdin.take() {
             let _ = i.write_all(text.as_bytes());
         }
@@ -179,7 +179,7 @@ pub fn paste_image() -> Result<Block, String> {
 #[cfg(windows)]
 fn paste_windows() -> Result<Block, String> {
     const PS: &str = "Add-Type -AssemblyName System.Windows.Forms,System.Drawing; $i=[System.Windows.Forms.Clipboard]::GetImage(); if ($i) { $m=New-Object System.IO.MemoryStream; $i.Save($m,[System.Drawing.Imaging.ImageFormat]::Png); $o=[Console]::OpenStandardOutput(); $o.Write($m.ToArray(),0,[int]$m.Length); $o.Flush() }";
-    let o = Command::new("powershell").args(["-NoProfile", "-NonInteractive", "-STA", "-Command", PS]).stderr(Stdio::null()).output().map_err(|e| format!("powershell: {e}"))?;
+    let o = seagent_core::platform::proc::command("powershell").args(["-NoProfile", "-NonInteractive", "-STA", "-Command", PS]).stderr(Stdio::null()).output().map_err(|e| format!("powershell: {e}"))?;
     if o.status.success() && !o.stdout.is_empty() {
         return image_block(&o.stdout);
     }
@@ -191,7 +191,7 @@ fn paste_macos() -> Result<Block, String> {
     let guard = seagent_core::tmp::TempDir::new("seagent-paste");
     let f = guard.path().join("clip.png");
     let script = format!("set f to (open for access POSIX file \"{}\" with write permission)\ntry\nwrite (the clipboard as «class PNGf») to f\nend try\nclose access f", f.display());
-    let ok = Command::new("osascript").args(["-e", &script]).stdout(Stdio::null()).stderr(Stdio::null()).status().is_ok_and(|s| s.success());
+    let ok = seagent_core::platform::proc::command("osascript").args(["-e", &script]).stdout(Stdio::null()).stderr(Stdio::null()).status().is_ok_and(|s| s.success());
     match std::fs::read(&f) {
         Ok(b) if ok && !b.is_empty() => image_block(&b),
         _ => Err("no image on the clipboard (pngpaste, osascript)".into()),
@@ -205,7 +205,7 @@ fn paste_in(path: &std::ffi::OsStr) -> Result<Block, String> {
     for (bin, args) in attempts {
         let Some(p) = which_in(path, &[bin]) else { continue };
         tried.push(*bin);
-        if let Ok(o) = Command::new(p).args(*args).stderr(Stdio::null()).output() {
+        if let Ok(o) = seagent_core::platform::proc::command(p).args(*args).stderr(Stdio::null()).output() {
             if o.status.success() && !o.stdout.is_empty() {
                 return image_block(&o.stdout);
             }
@@ -256,7 +256,7 @@ pub fn compose(initial: &str) -> Result<String, String> {
     private_draft(&tmp, &template)?;
     let mut parts = editor.split_whitespace();
     let bin = parts.next().unwrap_or("vi");
-    let st = Command::new(bin).args(parts).arg(&tmp).status().map_err(|e| format!("{bin}: {e}"));
+    let st = seagent_core::platform::proc::command(bin).args(parts).arg(&tmp).status().map_err(|e| format!("{bin}: {e}"));
     let text = std::fs::read_to_string(&tmp).unwrap_or_default();
     // Best effort and always: the draft must not outlive the editor, not even when it failed.
     let _ = std::fs::remove_file(&tmp);

@@ -47,7 +47,7 @@ use std::io::Write;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 
 /// Env var holding a raw 32-byte key (hex or base64).
 pub const ENV_KEY: &str = "SEAGENT_VAULT_KEY";
@@ -842,7 +842,7 @@ fn keyring_account(store: &Path) -> String {
 }
 
 fn store_in_keyring(tool: &Path, account: &str, secret: &str) -> Result<(), String> {
-    let mut child = Command::new(tool)
+    let mut child = seagent_core::platform::proc::command(tool)
         .args(["store", "--label=seagent secret store", "service", KEYRING_SERVICE, "account", account])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -860,7 +860,7 @@ fn store_in_keyring(tool: &Path, account: &str, secret: &str) -> Result<(), Stri
 }
 
 fn run(tool: &Path, args: &[&str], _unused: Option<&[u8]>) -> Result<Vec<u8>, String> {
-    let out = Command::new(tool).args(args).stdin(Stdio::null()).output().map_err(|e| format!("{}: {e}", tool.display()))?;
+    let out = seagent_core::platform::proc::command(tool).args(args).stdin(Stdio::null()).output().map_err(|e| format!("{}: {e}", tool.display()))?;
     if !out.status.success() {
         return Err(String::from_utf8_lossy(&out.stderr).trim().to_string());
     }
@@ -868,7 +868,7 @@ fn run(tool: &Path, args: &[&str], _unused: Option<&[u8]>) -> Result<Vec<u8>, St
 }
 
 fn run_with_input(tool: &Path, args: &[&str], input: &[u8]) -> Result<Vec<u8>, String> {
-    let mut child = Command::new(tool).args(args).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().map_err(|e| format!("{}: {e}", tool.display()))?;
+    let mut child = seagent_core::platform::proc::command(tool).args(args).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().map_err(|e| format!("{}: {e}", tool.display()))?;
     if let Some(mut si) = child.stdin.take() {
         si.write_all(input).map_err(|e| format!("{}: {e}", tool.display()))?;
     }

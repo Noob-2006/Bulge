@@ -1116,7 +1116,7 @@ mod watchdog_tests {
         std::fs::create_dir_all(&data).unwrap();
         let me = std::process::id() as i32;
         assert_eq!(watchdog_reason(&sock, Some(&data), Some(me)), None, "we are alive");
-        let mut c = std::process::Command::new("true").spawn().unwrap();
+        let mut c = seagent_core::platform::proc::command("true").spawn().unwrap();
         let dead = c.id() as i32;
         c.wait().unwrap();
         assert!(watchdog_reason(&sock, Some(&data), Some(dead)).unwrap().contains("SEAGENT_DAEMON_WATCH_PID"));

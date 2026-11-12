@@ -81,7 +81,7 @@ impl ZaloUser {
         let child: Arc<Mutex<Option<std::process::Child>>> = Arc::default();
         let spawn = {
             let (prog, args, env) = (prog.clone(), args.clone(), env.clone());
-            move || std::process::Command::new(&prog).args(&args).envs(env.iter().map(|(k, v)| (k, v))).stdin(std::process::Stdio::null()).spawn()
+            move || seagent_core::platform::proc::command(&prog).args(&args).envs(env.iter().map(|(k, v)| (k, v))).stdin(std::process::Stdio::null()).spawn()
         };
         // Fail fast on a missing binary instead of looping forever.
         *child.lock().unwrap() = Some(spawn().map_err(|e| format!("channel {}: cannot start zalouser bridge `{prog}`: {e}", self.id))?);

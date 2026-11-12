@@ -432,7 +432,7 @@ fn fetch_distribution(source: &str) -> Result<Source, String> {
     let url = if source.starts_with("github.com/") { format!("https://{source}") } else { source.to_string() };
     let scratch = seagent_core::tmp::TempDir::new("seagent-tmp");
     let dir = scratch.path().join("src");
-    let st = std::process::Command::new("git").args(["clone", "--depth", "1", "--quiet", &url]).arg(&dir).status().map_err(|e| format!("git: {e}"))?;
+    let st = seagent_core::platform::proc::command("git").args(["clone", "--depth", "1", "--quiet", &url]).arg(&dir).status().map_err(|e| format!("git: {e}"))?;
     if !st.success() {
         return Err(format!("git clone {url} failed"));
     }

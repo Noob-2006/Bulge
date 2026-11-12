@@ -24,7 +24,7 @@ use crate::channel::{Channel, Endpoint, Transport};
 use crate::config::VmConfig;
 use crate::isolation::ProviderKind;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, Stdio};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -107,7 +107,7 @@ fn powershell(script: &str) -> Result<String, String> {
 
 fn powershell_env(script: &str, env: &[(&str, &str)]) -> Result<String, String> {
     let ps = crate::host::find_tool("powershell").ok_or("powershell not found")?;
-    let o = Command::new(ps).args(["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", script]).envs(env.iter().copied()).stdin(Stdio::null()).output().map_err(|e| format!("powershell: {e}"))?;
+    let o = crate::host::command(ps).args(["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", script]).envs(env.iter().copied()).stdin(Stdio::null()).output().map_err(|e| format!("powershell: {e}"))?;
     if !o.status.success() {
         let err = String::from_utf8_lossy(&o.stderr).trim().to_string();
         let hint = if err.contains("permission") || err.contains("authorization") || err.contains("Administrator") { " (Hyper-V needs an elevated session or membership in the `Hyper-V Administrators` group)" } else { "" };
@@ -130,7 +130,7 @@ fn ensure_vhdx(raw: &Path) -> Result<PathBuf, String> {
         return Err(format!("Hyper-V needs a bootable UEFI guest disk ({} not found): it cannot boot the kernel + initramfs directly; build a raw UEFI disk of the image and set exec.vm.disk_image", raw.display()));
     }
     let qemu_img = crate::host::find_tool("qemu-img").ok_or("converting the guest disk to VHDX needs `qemu-img` (install QEMU for Windows), or convert it yourself and put disk.vhdx next to disk.raw")?;
-    let o = Command::new(&qemu_img).args(["convert", "-f", "raw", "-O", "vhdx", "-o", "subformat=dynamic"]).arg(raw).arg(&vhdx).output().map_err(|e| format!("{}: {e}", qemu_img.display()))?;
+    let o = crate::host::command(&qemu_img).args(["convert", "-f", "raw", "-O", "vhdx", "-o", "subformat=dynamic"]).arg(raw).arg(&vhdx).output().map_err(|e| format!("{}: {e}", qemu_img.display()))?;
     if !o.status.success() {
         return Err(format!("qemu-img convert to VHDX: {}", String::from_utf8_lossy(&o.stderr).trim()));
     }
@@ -267,7 +267,7 @@ impl VmProvider for AvfProvider {
         std::fs::create_dir_all(&spec.run_dir).map_err(|e| format!("create {}: {e}", spec.run_dir.display()))?;
         let cfg_path = spec.run_dir.join("vm.json");
         std::fs::write(&cfg_path, avf_config(spec).to_string()).map_err(|e| format!("write {}: {e}", cfg_path.display()))?;
-        let mut child = crate::host::spawn_vmm(Command::new(&tool).arg("run").arg("--console").arg(spec.console_log()).arg("--log").arg(spec.log()).arg(&cfg_path).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()))
+        let mut child = crate::host::spawn_vmm(crate::host::command(&tool).arg("run").arg("--console").arg(spec.console_log()).arg("--log").arg(spec.log()).arg(&cfg_path).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()))
             .map_err(|e| format!("start {}: {e}", tool.display()))?;
         let cid = read_cid(&mut child, Duration::from_secs(20));
         let Some(cid) = cid else {

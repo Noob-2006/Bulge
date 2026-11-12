@@ -668,7 +668,7 @@ fn terminal_create(st: &State, p: &Value) -> RpcResult {
         // `/bin/sh -c` (Windows: this machine's shell, `seagent_core::platform::shell`).
         seagent_core::platform::shell::command(seagent_core::platform::shell::Style::BinSh, command)
     } else {
-        let mut c = Command::new(command);
+        let mut c = seagent_core::platform::proc::command(command);
         c.args(&args);
         c
     };
@@ -911,7 +911,7 @@ mod tests {
 
     fn fake() -> Option<PathBuf> {
         let p = PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../../tests/e2e/fake_acp_agent.py"));
-        (p.exists() && Command::new("python3").arg("-c").arg("1").output().is_ok_and(|o| o.status.success())).then_some(p)
+        (p.exists() && seagent_core::platform::proc::command("python3").arg("-c").arg("1").output().is_ok_and(|o| o.status.success())).then_some(p)
     }
 
     fn tmp(tag: &str) -> PathBuf {

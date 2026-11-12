@@ -106,12 +106,12 @@ mod tests {
         let req = ExecRequest { script: "sleep 30".into(), cwd: Some(kit.ws.clone()), env: vec![], stdin: false, stdin_data: None, pty: None, login: false, detach: false, log_file: None, exit_file: None };
         let child = {
             #[cfg(unix)]
-            let mut cmd = std::process::Command::new("sleep");
+            let mut cmd = seagent_core::platform::proc::command("sleep");
             #[cfg(unix)]
             cmd.arg("30");
             // Windows has no `sleep.exe`; PowerShell's Start-Sleep is the same long-running job.
             #[cfg(windows)]
-            let mut cmd = std::process::Command::new("powershell");
+            let mut cmd = seagent_core::platform::proc::command("powershell");
             #[cfg(windows)]
             cmd.args(["-NoProfile", "-Command", "Start-Sleep 30"]);
             seagent_tools::exec::local::spawn_command(cmd, &req, None).unwrap()

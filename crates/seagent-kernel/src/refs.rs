@@ -8,7 +8,7 @@
 use seagent_core::estimate_tokens;
 use std::io::{BufRead, Read};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
@@ -510,7 +510,7 @@ fn git(r: &Reference, cwd: &Path, args: &[&str]) -> Result<String, String> {
 
 /// Run with no stdin, bounded output (past the cap the child is killed: exit 137) and a timeout.
 pub fn run_capped(cmd: &str, args: &[String], cwd: &Path, env: &[(String, String)], timeout: Duration) -> Result<(i32, String, String), String> {
-    let mut c = Command::new(cmd);
+    let mut c = seagent_core::platform::proc::command(cmd);
     c.args(args).current_dir(cwd).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
     for (k, v) in env {
         c.env(k, v);

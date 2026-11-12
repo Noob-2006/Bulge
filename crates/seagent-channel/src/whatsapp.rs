@@ -25,7 +25,7 @@ use std::collections::{BTreeMap, VecDeque};
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -131,7 +131,7 @@ impl Supervisor {
                 let base = if spec.backoff.is_zero() { Duration::from_secs(1) } else { spec.backoff };
                 let mut backoff = base;
                 while !s2.stop.load(Ordering::SeqCst) {
-                    let mut cmd = Command::new(&spec.program);
+                    let mut cmd = seagent_core::platform::proc::command(&spec.program);
                     cmd.args(&spec.args).envs(spec.env.iter().map(|(k, v)| (k, v))).stdout(Stdio::piped()).stderr(Stdio::piped());
                     cmd.stdin(if spec.stdio { Stdio::piped() } else { Stdio::null() });
                     if let Some(d) = &spec.cwd {

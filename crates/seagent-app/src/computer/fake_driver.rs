@@ -132,7 +132,7 @@ impl FakeDriver {
     #[cfg(unix)]
     /// Install at `<home>/bin/<name>` (None when this host has no python3).
     pub fn install(home: &Path, name: &str) -> Option<FakeDriver> {
-        if !std::process::Command::new("python3").arg("-c").arg("1").output().is_ok_and(|o| o.status.success()) {
+        if !seagent_core::platform::proc::command("python3").arg("-c").arg("1").output().is_ok_and(|o| o.status.success()) {
             return None;
         }
         #[cfg(unix)]

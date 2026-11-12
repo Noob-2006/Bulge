@@ -424,7 +424,7 @@ fn git_branch(cwd: &str) -> String {
     if cwd.is_empty() {
         return String::new();
     }
-    std::process::Command::new("git").args(["rev-parse", "--abbrev-ref", "HEAD"]).current_dir(cwd).stdin(std::process::Stdio::null()).stderr(std::process::Stdio::null()).output().ok().filter(|o| o.status.success()).map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string()).unwrap_or_default()
+    seagent_core::platform::proc::command("git").args(["rev-parse", "--abbrev-ref", "HEAD"]).current_dir(cwd).stdin(std::process::Stdio::null()).stderr(std::process::Stdio::null()).output().ok().filter(|o| o.status.success()).map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string()).unwrap_or_default()
 }
 
 /// Build the Claude Code JSONL trace for a session (redacted unless `redact` is false).

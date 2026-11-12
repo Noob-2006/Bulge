@@ -28,7 +28,7 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use std::collections::VecDeque;
 use std::path::PathBuf;
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -265,7 +265,7 @@ fn handle(r: Request, token: &str, wake_path: &str, session: &str, profile: &str
 }
 
 fn spawn_bridge(cmd: &BridgeCmd, profile: &str, endpoint: &str, token: &str) -> std::io::Result<Child> {
-    let mut c = Command::new(&cmd.binary);
+    let mut c = seagent_core::platform::proc::command(&cmd.binary);
     c.args(["--profile", profile, "agent", "bridge", "--wake-adapter", "wake-channel", "--wake-channel-endpoint", endpoint])
         .env("RAFT_PROFILE", profile)
         .env("RAFT_CHANNEL_TOKEN", token)

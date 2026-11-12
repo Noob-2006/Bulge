@@ -16,6 +16,25 @@ use std::fs::OpenOptions;
 use std::io;
 use std::path::Path;
 
+/// `Command::new(program)` for every process this crate starts — the layer-1 copy of
+/// `seagent_core::platform::proc::command` (the `child_spawn_lint` test allows `Command::new`
+/// only in these helpers). Windows: when this process has no console (the detached daemon,
+/// the desktop app) `CREATE_NO_WINDOW`, so a console program started here does not flash a
+/// console window; with a console the child shares it.
+pub(crate) fn command(program: impl AsRef<std::ffi::OsStr>) -> std::process::Command {
+    #[cfg_attr(not(windows), allow(unused_mut))]
+    let mut c = std::process::Command::new(program);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        // SAFETY: plain query; 0 means "no console attached".
+        if unsafe { windows_sys::Win32::System::Console::GetConsoleWindow() } == 0 {
+            c.creation_flags(windows_sys::Win32::System::Threading::CREATE_NO_WINDOW);
+        }
+    }
+    c
+}
+
 /// `chmod path mode` on unix. Elsewhere only the write bits mean anything: a mode without
 /// any `w` bit sets the read-only attribute, any other mode clears it.
 pub fn set_mode(path: &Path, mode: u32) -> io::Result<()> {

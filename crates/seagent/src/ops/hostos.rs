@@ -496,13 +496,13 @@ impl Drop for EchoOff {
 /// which unlike `cmd /C start` does not reinterpret `&` in the URL).
 pub fn open_url(url: &str) -> bool {
     let mut c = if cfg!(target_os = "macos") {
-        Command::new("open")
+        seagent_core::platform::proc::command("open")
     } else if cfg!(windows) {
-        let mut c = Command::new("rundll32.exe");
+        let mut c = seagent_core::platform::proc::command("rundll32.exe");
         c.arg("url.dll,FileProtocolHandler");
         c
     } else {
-        Command::new("xdg-open")
+        seagent_core::platform::proc::command("xdg-open")
     };
     c.arg(url).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).spawn().is_ok()
 }
@@ -534,7 +534,7 @@ pub fn open_app_window(url: &str) -> bool {
         let env = |k: &str| std::env::var(k).ok();
         let on_path = ["msedge", "chrome"].iter().filter_map(|b| seagent_core::platform::layout::which(b));
         for exe in windows_app_browsers(&env).into_iter().filter(|p| p.is_file()).chain(on_path) {
-            let mut c = Command::new(exe);
+            let mut c = seagent_core::platform::proc::command(exe);
             c.arg(format!("--app={url}"));
             quiet(&mut c);
             if c.spawn().is_ok() {
@@ -545,7 +545,7 @@ pub fn open_app_window(url: &str) -> bool {
     #[cfg(target_os = "macos")]
     for app in ["Google Chrome", "Microsoft Edge", "Brave Browser", "Chromium"] {
         // `open -a` fails fast (status 1) when the application is not installed.
-        let mut c = Command::new("open");
+        let mut c = seagent_core::platform::proc::command("open");
         c.args(["-na", app, "--args", &format!("--app={url}")]);
         quiet(&mut c);
         if c.status().is_ok_and(|s| s.success()) {
@@ -608,14 +608,14 @@ pub fn local_ips() -> Vec<std::net::IpAddr> {
 /// `doctor`: first line of `<bin> --version`.
 #[cfg(not(windows))]
 pub fn tool_version(bin: &str) -> Result<String, String> {
-    std::process::Command::new(bin).arg("--version").output().map(|o| String::from_utf8_lossy(&o.stdout).lines().next().unwrap_or("").to_string()).map_err(|e| e.to_string())
+    seagent_core::platform::proc::command(bin).arg("--version").output().map(|o| String::from_utf8_lossy(&o.stdout).lines().next().unwrap_or("").to_string()).map_err(|e| e.to_string())
 }
 
 /// `doctor`: first line of `<bin> --version`. On Windows the `WindowsApps\python3.exe` Store alias
 /// runs, prints nothing useful and exits 9009, so only a successful `--version` counts as installed.
 #[cfg(windows)]
 pub fn tool_version(bin: &str) -> Result<String, String> {
-    match std::process::Command::new(bin).arg("--version").output() {
+    match seagent_core::platform::proc::command(bin).arg("--version").output() {
         Ok(o) if o.status.success() && !(o.stdout.is_empty() && o.stderr.is_empty()) => Ok(String::from_utf8_lossy(if o.stdout.is_empty() { &o.stderr } else { &o.stdout }).lines().next().unwrap_or("").trim().to_string()),
         Ok(o) => Err(format!("not usable (`{bin} --version` exited {})", o.status.code().unwrap_or(-1))),
         Err(e) => Err(e.to_string()),
@@ -652,7 +652,7 @@ pub fn doctor_python3() -> Result<String, String> {
         return Err("not found (py -3 / python3 / python; the WindowsApps Store alias does not count)".into());
     };
     let shown = std::iter::once(p.display().to_string()).chain(args.iter().cloned()).collect::<Vec<_>>().join(" ");
-    match std::process::Command::new(&p).args(&args).arg("--version").output() {
+    match seagent_core::platform::proc::command(&p).args(&args).arg("--version").output() {
         Ok(o) if o.status.success() && !(o.stdout.is_empty() && o.stderr.is_empty()) => Ok(format!("{} ({shown})", String::from_utf8_lossy(if o.stdout.is_empty() { &o.stderr } else { &o.stdout }).trim())),
         Ok(o) => Err(format!("{shown} is not usable (--version exited {})", o.status.code().unwrap_or(-1))),
         Err(e) => Err(format!("{shown}: {e}")),

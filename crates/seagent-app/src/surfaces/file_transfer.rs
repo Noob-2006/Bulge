@@ -248,11 +248,11 @@ impl Transfer {
 /// Unpack a node's tarball after checking every member: regular files and directories
 /// only, relative paths without `..`, bounded count and size.
 fn unpack(tar: &Path, root: &Path) -> Result<(), String> {
-    let list = std::process::Command::new("tar").arg("-tvzf").arg(tar).output().map_err(|e| format!("tar: {e}"))?;
+    let list = seagent_core::platform::proc::command("tar").arg("-tvzf").arg(tar).output().map_err(|e| format!("tar: {e}"))?;
     if !list.status.success() {
         return Err("UNSAFE_ARCHIVE: archive could not be read".into());
     }
-    let names = std::process::Command::new("tar").arg("-tzf").arg(tar).output().map_err(|e| format!("tar: {e}"))?;
+    let names = seagent_core::platform::proc::command("tar").arg("-tzf").arg(tar).output().map_err(|e| format!("tar: {e}"))?;
     let listing = String::from_utf8_lossy(&list.stdout);
     let mut total: u64 = 0;
     let mut count = 0;
@@ -274,7 +274,7 @@ fn unpack(tar: &Path, root: &Path) -> Result<(), String> {
         return Err("UNCOMPRESSED_TOO_LARGE: tree expands beyond 1 GB".into());
     }
     std::fs::create_dir_all(root).map_err(|e| e.to_string())?;
-    let st = std::process::Command::new("tar").args(["--no-same-owner", "--no-same-permissions", "-xzf"]).arg(tar).arg("-C").arg(root).status().map_err(|e| format!("tar: {e}"))?;
+    let st = seagent_core::platform::proc::command("tar").args(["--no-same-owner", "--no-same-permissions", "-xzf"]).arg(tar).arg("-C").arg(root).status().map_err(|e| format!("tar: {e}"))?;
     if !st.success() {
         return Err("UNSAFE_ARCHIVE: extraction failed".into());
     }
@@ -408,7 +408,7 @@ pub fn node_run(read_roots: &[PathBuf], write_roots: &[PathBuf], command: &str, 
                 }
             }
             let max = p["maxBytes"].as_u64().unwrap_or(DEFAULT_MAX_BYTES).min(HARD_MAX_BYTES);
-            let out = std::process::Command::new("tar").arg("-czf").arg("-").arg("-C").arg(&c).arg(".").stdin(std::process::Stdio::null()).output().map_err(|e| err("READ_ERROR", &format!("tar: {e}")))?;
+            let out = seagent_core::platform::proc::command("tar").arg("-czf").arg("-").arg("-C").arg(&c).arg(".").stdin(std::process::Stdio::null()).output().map_err(|e| err("READ_ERROR", &format!("tar: {e}")))?;
             if !out.status.success() {
                 return Err(err("READ_ERROR", &String::from_utf8_lossy(&out.stderr)));
             }
@@ -563,7 +563,7 @@ mod tests {
         let d = testkit::temp("ft-tar");
         std::fs::create_dir_all(d.join("src")).unwrap();
         std::os::unix::fs::symlink("/etc/passwd", d.join("src/p")).unwrap();
-        let st = std::process::Command::new("tar").arg("-czf").arg(d.join("a.tgz")).arg("-C").arg(d.join("src")).arg(".").status().unwrap();
+        let st = seagent_core::platform::proc::command("tar").arg("-czf").arg(d.join("a.tgz")).arg("-C").arg(d.join("src")).arg(".").status().unwrap();
         assert!(st.success());
         assert!(unpack(&d.join("a.tgz"), &d.join("out")).unwrap_err().contains("UNSAFE_ARCHIVE"));
     }

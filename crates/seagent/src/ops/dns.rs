@@ -179,7 +179,7 @@ fn write_sudo(p: &Path, content: &str, sudo: bool) -> Result<(), String> {
         Ok(()) => Ok(()),
         Err(e) if sudo && e.kind() == std::io::ErrorKind::PermissionDenied => {
             use std::io::Write;
-            let mut c = std::process::Command::new("sudo").arg("tee").arg(p).stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::null()).spawn().map_err(|e| format!("sudo tee {}: {e}", p.display()))?;
+            let mut c = seagent_core::platform::proc::command("sudo").arg("tee").arg(p).stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::null()).spawn().map_err(|e| format!("sudo tee {}: {e}", p.display()))?;
             c.stdin.take().unwrap().write_all(content.as_bytes()).map_err(|e| e.to_string())?;
             let s = c.wait().map_err(|e| e.to_string())?;
             if s.success() { Ok(()) } else { Err(format!("sudo tee {} failed: {s}", p.display())) }
@@ -192,7 +192,7 @@ fn mkdir_sudo(p: &Path, sudo: bool) -> Result<(), String> {
     match std::fs::create_dir_all(p) {
         Ok(()) => Ok(()),
         Err(e) if sudo && e.kind() == std::io::ErrorKind::PermissionDenied => {
-            let s = std::process::Command::new("sudo").args(["mkdir", "-p"]).arg(p).status().map_err(|e| e.to_string())?;
+            let s = seagent_core::platform::proc::command("sudo").args(["mkdir", "-p"]).arg(p).status().map_err(|e| e.to_string())?;
             if s.success() { Ok(()) } else { Err(format!("sudo mkdir -p {} failed", p.display())) }
         }
         Err(e) => Err(format!("{}: {e}", p.display())),
@@ -236,7 +236,7 @@ pub fn apply(dir: &Path, zone: &Path, domain: &str, v4: Option<Ipv4Addr>, v6: Op
 
 fn default_dir() -> PathBuf {
     if cfg!(target_os = "macos") {
-        let prefix = std::process::Command::new("brew").arg("--prefix").output().ok().map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string()).filter(|s| !s.is_empty()).unwrap_or_else(|| "/opt/homebrew".into());
+        let prefix = seagent_core::platform::proc::command("brew").arg("--prefix").output().ok().map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string()).filter(|s| !s.is_empty()).unwrap_or_else(|| "/opt/homebrew".into());
         PathBuf::from(prefix).join("etc/coredns")
     } else if cfg!(windows) {
         PathBuf::from(std::env::var("ProgramData").unwrap_or_else(|_| "C:\\ProgramData".into())).join("coredns")
@@ -278,7 +278,7 @@ pub fn dispatch(cmd: &str, a: &Args, _raw: &[String]) -> Option<R> {
                 }
                 println!("Restarting CoreDNS…");
                 let restart = if cfg!(target_os = "macos") { vec!["sudo", "brew", "services", "restart", "coredns"] } else { vec!["sudo", "systemctl", "restart", "coredns"] };
-                let ok = std::process::Command::new(restart[0]).args(&restart[1..]).status().is_ok_and(|s| s.success());
+                let ok = seagent_core::platform::proc::command(restart[0]).args(&restart[1..]).status().is_ok_and(|s| s.success());
                 if !ok {
                     eprintln!("could not restart CoreDNS (`{}`); restart it yourself", restart.join(" "));
                     return Ok(1);

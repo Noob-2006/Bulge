@@ -144,7 +144,7 @@ pub fn scopes(cfg: &ExecConfig, data: &Path) -> Vec<Value> {
 
 /// Labelled containers of `bin` (docker / podman), if that runtime is installed.
 fn containers(bin: &str) -> Vec<Value> {
-    let Ok(out) = std::process::Command::new(bin).args(["ps", "-a", "--filter", &format!("label={LABEL}"), "--format", "{{json .}}"]).output() else { return vec![] };
+    let Ok(out) = seagent_core::platform::proc::command(bin).args(["ps", "-a", "--filter", &format!("label={LABEL}"), "--format", "{{json .}}"]).output() else { return vec![] };
     if !out.status.success() {
         return vec![];
     }
@@ -164,10 +164,10 @@ fn remove_containers(bin: &str, scope: Option<&str>) -> Vec<String> {
         Some(s) => format!("label={SCOPE_LABEL}={s}"),
         None => format!("label={LABEL}"),
     };
-    let Ok(out) = std::process::Command::new(bin).args(["ps", "-aq", "--filter", &filter]).output() else { return vec![] };
+    let Ok(out) = seagent_core::platform::proc::command(bin).args(["ps", "-aq", "--filter", &filter]).output() else { return vec![] };
     let ids: Vec<String> = String::from_utf8_lossy(&out.stdout).split_whitespace().map(String::from).collect();
     if !ids.is_empty() {
-        let _ = std::process::Command::new(bin).arg("rm").arg("-f").args(&ids).output();
+        let _ = seagent_core::platform::proc::command(bin).arg("rm").arg("-f").args(&ids).output();
     }
     ids
 }

@@ -7,7 +7,7 @@
 use super::{Provider, Query};
 use serde_json::{json, Map, Value};
 use std::io::Read;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::time::{Duration, Instant};
 
 /// RFC 4515 filter value escaping.
@@ -175,7 +175,7 @@ fn run(p: &Provider, ctx: &seagent_core::ToolCtx, filter: &str, attrs: &[&str], 
     // ETXTBSY: a just-written client script can still be open in a concurrently forked child.
     let mut tries = 0;
     let mut child = loop {
-        match Command::new(&prog).args(&argv).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn() {
+        match seagent_core::platform::proc::command(&prog).args(&argv).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn() {
             Err(e) if crate::exec::local::is_text_busy(&e) && tries < 20 => {
                 tries += 1;
                 std::thread::sleep(std::time::Duration::from_millis(25));

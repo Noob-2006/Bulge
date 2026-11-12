@@ -644,7 +644,7 @@ impl Cleaner {
         let (Some(dir), Some(name)) = (path.parent(), path.file_name()) else {
             return false;
         };
-        let out = std::process::Command::new("git")
+        let out = seagent_core::platform::proc::command("git")
             .env("GIT_OPTIONAL_LOCKS", "0")
             .arg("-C")
             .arg(dir)
@@ -1766,9 +1766,9 @@ mod tests {
         assert_eq!(c.guess_category(&wt), None);
 
         // An enclosing repo only counts when it actually tracks the file (`git ls-files`).
-        if std::process::Command::new("git").arg("--version").output().map(|o| o.status.success()).unwrap_or(false) {
+        if seagent_core::platform::proc::command("git").arg("--version").output().map(|o| o.status.success()).unwrap_or(false) {
             let d = h.parent().unwrap();
-            let git = |args: &[&str]| std::process::Command::new("git").arg("-C").arg(d).args(args).output().map(|o| o.status.success()).unwrap_or(false);
+            let git = |args: &[&str]| seagent_core::platform::proc::command("git").arg("-C").arg(d).args(args).output().map(|o| o.status.success()).unwrap_or(false);
             if git(&["init", "-q"]) {
                 let inside = h.join("tracked-repo/test_x.py");
                 write(&inside, "x");

@@ -20,7 +20,7 @@ use std::fmt::Write as _;
 use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 
 /// Manifest file inside an image directory; its presence marks a built image.
 pub const MANIFEST_FILE: &str = "manifest.json";
@@ -260,7 +260,7 @@ impl GuestImage {
         fs::create_dir_all(&out).map_err(|e| format!("guest image: cannot create {}: {e}", out.display()))?;
 
         let verbose = std::env::var("SEAGENT_VM_BUILD_VERBOSE").map(|v| v == "1").unwrap_or(false);
-        let mut cmd = Command::new("bash");
+        let mut cmd = crate::host::command("bash");
         cmd.arg(&script).args(build_args(cfg, &out, shipped_agent(&script).as_deref(), std::env::consts::ARCH));
         cmd.stdout(if verbose { Stdio::inherit() } else { Stdio::null() });
         cmd.stderr(if verbose { Stdio::inherit() } else { Stdio::piped() });

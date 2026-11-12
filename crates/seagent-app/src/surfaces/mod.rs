@@ -300,7 +300,7 @@ pub(crate) fn open_in_browser(target: &str) -> Result<(), String> {
     } else {
         ("xdg-open", &[])
     };
-    std::process::Command::new(opener).args(pre).arg(target).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).spawn().map(|_| ()).map_err(|e| format!("{opener}: {e}"))
+    seagent_core::platform::proc::command(opener).args(pre).arg(target).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).spawn().map(|_| ()).map_err(|e| format!("{opener}: {e}"))
 }
 
 /// Write via a temp file + rename, mode 0600.

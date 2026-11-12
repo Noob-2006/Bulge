@@ -126,7 +126,7 @@ impl AgentThread {
                         send(&mut w, GuestMsg::Files { id, files });
                     }
                     HostMsg::Exec { id, script, cwd, env, stdin, timeout_secs, .. } => {
-                        let mut cmd = std::process::Command::new("sh");
+                        let mut cmd = crate::host::command("sh");
                         cmd.arg("-c").arg(&script);
                         let base = self.root.join("workspace");
                         cmd.current_dir(match cwd.as_deref() {

@@ -352,7 +352,7 @@ pub fn launch(exe: &Path, port: u16, profile_dir: &Path, headless: bool) -> Resu
     // keep it inside the profile so it goes away with the profile instead of the shared dir.
     let chrome_tmp = profile_dir.join("tmp");
     std::fs::create_dir_all(&chrome_tmp).map_err(|e| e.to_string())?;
-    let mut cmd = std::process::Command::new(exe);
+    let mut cmd = seagent_core::platform::proc::command(exe);
     cmd.env("TMPDIR", &chrome_tmp);
     cmd.args(&args)
         .arg("about:blank")

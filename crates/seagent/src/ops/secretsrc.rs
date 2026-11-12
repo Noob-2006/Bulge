@@ -28,8 +28,6 @@ use serde_json::{json, Value};
 use std::collections::{BTreeMap, HashMap};
 use std::io::Read;
 use std::path::{Path, PathBuf};
-#[cfg(unix)]
-use std::process::Command;
 use std::process::Stdio;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
@@ -734,7 +732,7 @@ pub fn run_helper(command: &str, key: &str, timeout: f64, env: &HashMap<String, 
     #[cfg(unix)]
     let mut child = {
         use std::os::unix::process::CommandExt;
-        Command::new("/bin/sh").arg("-c").arg(command).env_clear().envs(&e).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null()).process_group(0).spawn().map_err(|e| format!("helper failed to spawn; resolving no value: errno={}", e.raw_os_error().unwrap_or(0)))?
+        seagent_core::platform::proc::command("/bin/sh").arg("-c").arg(command).env_clear().envs(&e).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null()).process_group(0).spawn().map_err(|e| format!("helper failed to spawn; resolving no value: errno={}", e.raw_os_error().unwrap_or(0)))?
     };
     // Windows: this machine's shell (Git Bash, else PowerShell) in a kill-on-close job object;
     // the shells need `SystemRoot` even with an otherwise cleared environment.

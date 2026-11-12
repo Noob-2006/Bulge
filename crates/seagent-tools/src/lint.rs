@@ -67,7 +67,7 @@ pub fn check_content(path: &Path, content: &str) -> Lint {
             if !which("python3") {
                 return Lint::Skipped("No linter available for .yaml (python3 missing)".into());
             }
-            let mut c = Command::new("python3");
+            let mut c = seagent_core::platform::proc::command("python3");
             c.arg("-I").arg("-c").arg(PY_YAML);
             match c.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null()).spawn().and_then(|mut ch| {
                 use std::io::Write as _;
@@ -86,7 +86,7 @@ pub fn check_content(path: &Path, content: &str) -> Lint {
             if !which("python3") {
                 return Lint::Skipped("python3 not available".into());
             }
-            match run(Command::new("python3").arg("-I").arg("-c").arg(PY_SYNTAX), Some(content), Duration::from_secs(30)) {
+            match run(seagent_core::platform::proc::command("python3").arg("-I").arg("-c").arg(PY_SYNTAX), Some(content), Duration::from_secs(30)) {
                 Some((true, _)) => Lint::Ok,
                 Some((false, out)) => Lint::Failed(out),
                 None => Lint::Skipped("python3 failed to start".into()),
@@ -135,7 +135,7 @@ pub fn check(path: &Path, content: Option<&str>, project_toolchains: bool) -> Li
         return Lint::Skipped(format!("{bin} not available"));
     }
     let dir = path.parent().unwrap_or(Path::new("."));
-    let Some((ok, out)) = run(Command::new(bin).args(&args).arg(path).current_dir(dir), None, Duration::from_secs(30)) else { return Lint::Skipped(format!("{bin} failed to start")) };
+    let Some((ok, out)) = run(seagent_core::platform::proc::command(bin).args(&args).arg(path).current_dir(dir), None, Duration::from_secs(30)) else { return Lint::Skipped(format!("{bin} failed to start")) };
     let unusable: &[&str] = match bin {
         "npx" => &["this is not the tsc command you are looking for", "could not determine executable to run", "not found in npm registry"],
         "rustfmt" => &["no input filename given", "error: not a workspace"],

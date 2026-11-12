@@ -20,7 +20,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::{HashMap, VecDeque};
 use std::io::{BufRead, BufReader, Write};
-use std::process::{Child, ChildStdin, Command, Stdio};
+use std::process::{Child, ChildStdin, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::{Arc, Mutex};
@@ -188,7 +188,7 @@ impl Pool {
     }
 
     fn spawn(&self, idx: usize, slot: &mut Slot) {
-        let mut cmd = Command::new(&self.command[0]);
+        let mut cmd = seagent_core::platform::proc::command(&self.command[0]);
         cmd.args(&self.command[1..]).envs(self.env.iter().map(|(k, v)| (k, v))).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::inherit());
         #[cfg(any(target_os = "linux", target_os = "android"))]
         {

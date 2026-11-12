@@ -104,7 +104,7 @@ fn read_uncached() -> Battery {
 #[cfg(not(windows))]
 fn read_uncached() -> Battery {
     if cfg!(target_os = "macos") {
-        return std::process::Command::new("pmset").args(["-g", "batt"]).output().ok().map(|o| parse_pmset(&String::from_utf8_lossy(&o.stdout))).unwrap_or(UNAVAILABLE);
+        return seagent_core::platform::proc::command("pmset").args(["-g", "batt"]).output().ok().map(|o| parse_pmset(&String::from_utf8_lossy(&o.stdout))).unwrap_or(UNAVAILABLE);
     }
     read_sysfs(Path::new("/sys/class/power_supply"))
 }

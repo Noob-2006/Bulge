@@ -13,7 +13,7 @@ use super::screen::{self, Desktop};
 use serde_json::{json, Value};
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::time::Duration;
 
 pub const DRIVER_ENV: &str = "SEAGENT_CUA_DRIVER_CMD";
@@ -571,7 +571,7 @@ struct Mcp {
 
 impl Mcp {
     fn open(bin: &Path) -> Result<Mcp, String> {
-        let mut child = Command::new(bin)
+        let mut child = seagent_core::platform::proc::command(bin)
             .arg("mcp")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -1310,7 +1310,7 @@ mod tests {
         let src = home.join("src/cua-driver-rs-0.21.0");
         fake_driver(&src.join("cua-driver"), MANIFEST, "ok");
         let tgz = home.join("rel.tar.gz");
-        assert!(Command::new("tar")
+        assert!(seagent_core::platform::proc::command("tar")
             .args([
                 "-czf",
                 &tgz.display().to_string(),

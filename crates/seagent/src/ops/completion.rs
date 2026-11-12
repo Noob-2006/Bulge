@@ -218,7 +218,7 @@ mod tests {
         if let Some(bash) = seagent_core::platform::layout::bash() {
             let d = seagent_core::tmp::scratch_path(format!("seagent-comp-{}.sh", seagent_kernel::util::random_hex(4)));
             std::fs::write(&d, &b).unwrap();
-            let o = std::process::Command::new(&bash).arg("-n").arg(seagent_core::platform::shell::path_arg(&d)).output().unwrap();
+            let o = seagent_core::platform::proc::command(&bash).arg("-n").arg(seagent_core::platform::shell::path_arg(&d)).output().unwrap();
             assert!(o.status.success(), "bash syntax: {}", String::from_utf8_lossy(&o.stderr));
         }
     }

@@ -160,7 +160,7 @@ pub(super) fn spawn_detached(cmd: Command, req: &ExecRequest, mut extra: Option<
     let _ = std::fs::remove_file(&exit);
     let out = std::fs::OpenOptions::new().create(true).append(true).open(&log)?;
     // sh -c '"$@"; echo $? > exit' sh <program> <args…>
-    let mut w = Command::new("/bin/sh");
+    let mut w = seagent_core::platform::proc::command("/bin/sh");
     w.arg("-c").arg("\"$@\"; s=$?; echo $s > \"$SEAGENT_EXIT_FILE.tmp\" && mv -f \"$SEAGENT_EXIT_FILE.tmp\" \"$SEAGENT_EXIT_FILE\"").arg("sh").arg(cmd.get_program()).args(cmd.get_args());
     if let Some(d) = cmd.get_current_dir() {
         w.current_dir(d);

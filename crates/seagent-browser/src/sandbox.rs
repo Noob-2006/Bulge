@@ -198,7 +198,7 @@ mod tests {
         }
 
         let path = entry_path.to_str().unwrap();
-        match std::process::Command::new("bash").args(["-n", path]).output() {
+        match seagent_core::platform::proc::command("bash").args(["-n", path]).output() {
             Ok(out) => assert!(out.status.success(), "bash -n {} failed: {}", entry_path.display(), String::from_utf8_lossy(&out.stderr)),
             Err(_) => return, // no bash on this host: nothing to syntax-check with
         }
@@ -219,7 +219,7 @@ mod tests {
         }
         // Unix: `bash` from PATH; Windows: Git Bash (never the WSL launcher), path as `C:/…`.
         let Some(bash) = seagent_core::platform::layout::bash() else { return };
-        let out = match std::process::Command::new(bash).arg(seagent_core::platform::shell::path_arg(&entry)).env_clear().env("PATH", "/nonexistent").env("SEAGENT_BROWSER_CDP_AUTH_TOKEN", "").output() {
+        let out = match seagent_core::platform::proc::command(bash).arg(seagent_core::platform::shell::path_arg(&entry)).env_clear().env("PATH", "/nonexistent").env("SEAGENT_BROWSER_CDP_AUTH_TOKEN", "").output() {
             Ok(o) => o,
             Err(_) => return, // no bash on this host
         };

@@ -638,7 +638,7 @@ class Sandbox:
         let fake = FAKE_MODAL.replace("os.environ[\"FAKE_MODAL_LOG\"]", &format!("{log:?}")).replace("os.environ.get(\"FAKE_MODAL_BASH\")", "True").replace("os.environ[\"FAKE_MODAL_BASH\"]", &format!("{:?}", bash.display().to_string()));
         std::fs::write(pkg.join("__init__.py"), fake).unwrap();
         std::env::set_var("PYTHONPATH", d.join("py"));
-        let exe = std::process::Command::new(&py3).args(&py_args).arg("-c").arg("import sys; print(sys.executable)").output().unwrap();
+        let exe = seagent_core::platform::proc::command(&py3).args(&py_args).arg("-c").arg("import sys; print(sys.executable)").output().unwrap();
         let py = PathBuf::from(String::from_utf8_lossy(&exe.stdout).trim());
         let secrets: Arc<dyn Fn(&str) -> String + Send + Sync> = Arc::new(|s: &str| s.replace("{{secret:MODAL_TOKEN_ID}}", "ak-1").replace("{{secret:MODAL_TOKEN_SECRET}}", "as-1"));
         let env = crate::exec::ExecEnv::new(ExecConfig {

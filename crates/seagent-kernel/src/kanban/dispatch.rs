@@ -558,7 +558,7 @@ pub fn resolve_workspace(data: &Path, slug: &str, t: &Task) -> Result<(PathBuf, 
                 return Ok((p, Some(branch)));
             }
             let repo = repo.or_else(|| p.ancestors().skip(1).find(|a| a.join(".git").exists()).map(Path::to_path_buf)).ok_or_else(|| format!("no git repository found for worktree {}", p.display()))?;
-            let git = |args: &[&str]| std::process::Command::new("git").arg("-C").arg(&repo).args(args).output();
+            let git = |args: &[&str]| seagent_core::platform::proc::command("git").arg("-C").arg(&repo).args(args).output();
             let exists = git(&["rev-parse", "--verify", "--quiet", &format!("refs/heads/{branch}")]).map(|o| o.status.success()).unwrap_or(false);
             let ps = p.to_string_lossy().to_string();
             let out = if exists { git(&["worktree", "add", &ps, &branch]) } else { git(&["worktree", "add", "-b", &branch, &ps]) }.map_err(|e| format!("git: {e}"))?;

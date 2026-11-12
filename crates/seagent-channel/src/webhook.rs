@@ -1004,7 +1004,7 @@ fn render_mcp_prompt(template: &str, payload: &Value, event_type: &str, route: &
 /// script must resolve under `dir`; `.py` runs with python3, `.sh`/`.bash` with bash, anything
 /// else is executed directly. No shell, a cleared environment, killed after `timeout`.
 fn run_script(dir: Option<&Path>, script: &str, payload: &Value, timeout: Duration) -> Option<Value> {
-    use std::process::{Command, Stdio};
+    use std::process::Stdio;
     let fail = |why: String| -> Option<Value> {
         eprintln!("webhook: script ignored webhook: {why}");
         None
@@ -1017,9 +1017,9 @@ fn run_script(dir: Option<&Path>, script: &str, payload: &Value, timeout: Durati
     }
     #[cfg(unix)]
     let mut cmd = match path.extension().and_then(|e| e.to_str()).map(str::to_ascii_lowercase).as_deref() {
-        Some("py") => Command::new("python3"),
-        Some("sh" | "bash") => Command::new("bash"),
-        _ => Command::new(&path),
+        Some("py") => seagent_core::platform::proc::command("python3"),
+        Some("sh" | "bash") => seagent_core::platform::proc::command("bash"),
+        _ => seagent_core::platform::proc::command(&path),
     };
     #[cfg(not(unix))]
     let mut cmd = match path.extension().and_then(|e| e.to_str()).map(str::to_ascii_lowercase).as_deref() {
@@ -1034,9 +1034,9 @@ fn run_script(dir: Option<&Path>, script: &str, payload: &Value, timeout: Durati
             if !sh.kind.is_posix() {
                 return fail(format!("{} needs bash (Git for Windows or MSYS2); this machine's shell is {}", path.display(), sh.kind.as_str()));
             }
-            Command::new(&sh.program)
+            seagent_core::platform::proc::command(&sh.program)
         }
-        _ => Command::new(&path),
+        _ => seagent_core::platform::proc::command(&path),
     };
     if cmd.get_program() != path.as_os_str() {
         #[cfg(unix)]

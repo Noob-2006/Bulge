@@ -1492,7 +1492,7 @@ mod tests {
         // user can make) is the same escape and must be refused the same way.
         #[cfg(windows)]
         if std::os::windows::fs::symlink_dir(&outside, t.ws.join("escape")).is_err() {
-            let st = std::process::Command::new("cmd").arg("/c").arg("mklink").arg("/J").arg(t.ws.join("escape")).arg(&outside).output().unwrap();
+            let st = seagent_core::platform::proc::command("cmd").arg("/c").arg("mklink").arg("/J").arg(t.ws.join("escape")).arg(&outside).output().unwrap();
             assert!(st.status.success(), "mklink /J: {}", String::from_utf8_lossy(&st.stderr));
         }
         let escapes = [
@@ -1674,7 +1674,7 @@ mod tests {
         let t = kit();
         let c = ctx(&t);
         assert!(err(&c, "ui.worktrees.list", json!({})).contains("not inside a git repository"));
-        let git = |args: &[&str]| assert!(std::process::Command::new("git").args(args).current_dir(&t.ws).output().unwrap().status.success());
+        let git = |args: &[&str]| assert!(seagent_core::platform::proc::command("git").args(args).current_dir(&t.ws).output().unwrap().status.success());
         git(&["init", "-q"]);
         std::fs::write(t.ws.join("a"), "1").unwrap();
         git(&["add", "."]);

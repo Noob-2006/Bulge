@@ -21,7 +21,7 @@ use std::time::Duration;
 pub fn bash(script: &str) -> Result<Command, String> {
     #[cfg(all(unix, not(target_os = "android")))]
     {
-        let mut c = Command::new("bash");
+        let mut c = seagent_core::platform::proc::command("bash");
         c.arg("-c").arg(script);
         Ok(c)
     }

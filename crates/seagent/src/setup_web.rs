@@ -511,7 +511,7 @@ fn real_autostart(paths: &Paths) -> String {
     if !unit.exists() {
         return t("沒有 systemd 使用者單元：重新開機後請執行 seagent daemon start", "no systemd user unit: run `seagent daemon start` after a reboot").into();
     }
-    let ok = std::process::Command::new("systemctl").args(["--user", "enable", &crate::ops::service::unit_name()]).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).status().is_ok_and(|s| s.success());
+    let ok = seagent_core::platform::proc::command("systemctl").args(["--user", "enable", &crate::ops::service::unit_name()]).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).status().is_ok_and(|s| s.success());
     let linger = setup_server::linger_lines(&crate::ops::service::ensure_linger());
     format!("{} · {linger}", if ok { "autostart enabled" } else { "systemctl --user enable failed" })
 }
@@ -645,7 +645,7 @@ pub fn comeback(env: &dyn Fn(&str) -> Option<String>, args: &[String], interacti
 pub fn helper_command(exe: &Path, args: &[String], pid: u32) -> std::process::Command {
     #[cfg(unix)]
     let mut c = {
-        let mut c = std::process::Command::new("sh");
+        let mut c = seagent_core::platform::proc::command("sh");
         c.arg("-c").arg("while kill -0 \"$0\" 2>/dev/null; do sleep 0.2; done; exec \"$@\"").arg(pid.to_string()).arg(exe).args(args);
         c
     };
@@ -654,7 +654,7 @@ pub fn helper_command(exe: &Path, args: &[String], pid: u32) -> std::process::Co
         let mut a = args.to_vec();
         let at = a.iter().position(|x| x == "start").map(|i| i + 1).unwrap_or(a.len());
         a.splice(at..at, ["--after-pid".to_string(), pid.to_string()]);
-        let mut c = std::process::Command::new(exe);
+        let mut c = seagent_core::platform::proc::command(exe);
         c.args(a);
         c
     };
@@ -1134,7 +1134,7 @@ mod tests {
     fn the_sh_helper_waits_for_the_pid_then_runs_the_command() {
         let (_r, p) = scratch("helper");
         let marker = p.data.join("ran");
-        let mut stopping = seagent_core::proc::ChildGuard::single(std::process::Command::new("sleep").arg("1").spawn().unwrap());
+        let mut stopping = seagent_core::proc::ChildGuard::single(seagent_core::platform::proc::command("sleep").arg("1").spawn().unwrap());
         let mut c = helper_command(Path::new("sh"), &["-c".into(), format!("echo ok > '{}'", marker.display())], stopping.id());
         let mut h = seagent_core::proc::ChildGuard::single(crate::ops::hostos::spawn_detached(&mut c).unwrap());
         std::thread::sleep(std::time::Duration::from_millis(400));
@@ -1154,7 +1154,7 @@ mod tests {
         // A program that runs without a console, like the helper (the agent binary itself): this
         // test binary listing its tests. (cmd.exe and Windows PowerShell need a console and do
         // nothing under DETACHED_PROCESS — the bug the old PowerShell helper had.)
-        let mut c = std::process::Command::new(std::env::current_exe().unwrap());
+        let mut c = seagent_core::platform::proc::command(std::env::current_exe().unwrap());
         c.arg("--list").stdout(std::fs::File::create(&marker).unwrap());
         let mut h = seagent_core::proc::ChildGuard::single(crate::ops::hostos::spawn_detached(&mut c).unwrap());
         let ran = seagent_core::proc::wait_until(std::time::Duration::from_secs(20), || std::fs::read_to_string(&marker).is_ok_and(|t| t.contains("spawn_detached_works_inside_a_job")));

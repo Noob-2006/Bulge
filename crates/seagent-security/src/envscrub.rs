@@ -417,12 +417,12 @@ mod tests {
     fn apply_removes_inherited_secret_from_child() {
         // An always-stripped internal-secret shape, so the policy toggles in the other test can't race it.
         std::env::set_var("AUXILIARY_ARKTEST9F_API_KEY", "s3cret");
-        let mut c = Command::new("sh");
+        let mut c = crate::os::command("sh");
         c.arg("-c").arg("printf %s \"${AUXILIARY_ARKTEST9F_API_KEY:-gone}\"");
         apply(&mut c, Surface::Terminal);
         let out = c.output().unwrap();
         assert_eq!(String::from_utf8_lossy(&out.stdout), "gone");
-        let mut c = Command::new("sh");
+        let mut c = crate::os::command("sh");
         c.arg("-c").arg("printf %s \"$AUXILIARY_ARKTEST9F_API_KEY\"");
         apply(&mut c, Surface::Terminal);
         c.env("AUXILIARY_ARKTEST9F_API_KEY", "explicit");

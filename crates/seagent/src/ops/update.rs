@@ -260,7 +260,7 @@ pub fn install_binary(exe: &Path, bytes: &[u8]) -> Result<PathBuf, String> {
     let tmp = dir.join(format!(".seagent-new-{}{}", std::process::id(), std::env::consts::EXE_SUFFIX));
     std::fs::write(&tmp, bytes).map_err(|e| format!("{}: {e} (no write access? reinstall with the installer)", tmp.display()))?;
     crate::ops::hostos::set_mode(&tmp, 0o755).map_err(|e| e.to_string())?;
-    let ok = std::process::Command::new(&tmp).arg("version").output().map(|o| o.status.success() && String::from_utf8_lossy(&o.stdout).starts_with("seagent ")).unwrap_or(false);
+    let ok = seagent_core::platform::proc::command(&tmp).arg("version").output().map(|o| o.status.success() && String::from_utf8_lossy(&o.stdout).starts_with("seagent ")).unwrap_or(false);
     if !ok {
         let _ = std::fs::remove_file(&tmp);
         return Err("the downloaded binary does not run on this machine; nothing changed".into());
@@ -308,7 +308,7 @@ fn daemon_running(paths: &Paths) -> bool {
 }
 
 fn run_self(args: &[&str]) -> bool {
-    std::env::current_exe().ok().and_then(|e| std::process::Command::new(e).args(args).status().ok()).is_some_and(|s| s.success())
+    std::env::current_exe().ok().and_then(|e| seagent_core::platform::proc::command(e).args(args).status().ok()).is_some_and(|s| s.success())
 }
 
 fn cmd_update(a: &Args) -> R {
@@ -369,12 +369,12 @@ fn cmd_update(a: &Args) -> R {
     println!("updated seagent {} → {} (previous binary: {}; `seagent update --rollback` restores it)", env!("CARGO_PKG_VERSION"), r.tag, prev.display());
     if restart {
         #[cfg(not(any(target_os = "macos", windows, target_os = "android", target_os = "ios")))]
-        let unit = std::process::Command::new("systemctl").args(["--user", "is-active", "--quiet", "seagentd.service"]).status().is_ok_and(|s| s.success());
+        let unit = seagent_core::platform::proc::command("systemctl").args(["--user", "is-active", "--quiet", "seagentd.service"]).status().is_ok_and(|s| s.success());
         #[cfg(any(target_os = "macos", windows, target_os = "android", target_os = "ios"))]
         let unit = crate::ops::service_os::managed();
         if unit {
             #[cfg(not(any(target_os = "macos", windows, target_os = "android", target_os = "ios")))]
-            let _ = std::process::Command::new("systemctl").args(["--user", "restart", "seagentd.service"]).status();
+            let _ = seagent_core::platform::proc::command("systemctl").args(["--user", "restart", "seagentd.service"]).status();
             #[cfg(any(target_os = "macos", windows, target_os = "android", target_os = "ios"))]
             let _ = crate::ops::service_os::restart_managed();
         } else {

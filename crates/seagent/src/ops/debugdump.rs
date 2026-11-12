@@ -335,7 +335,7 @@ pub fn support_bundle(paths: &Paths, cfg: &Config, scrub: &Scrub, extra: Vec<Sec
 
 /// Run `seagent <args>` and capture stdout+stderr (a failing check still produces output worth keeping).
 fn capture_self(args: &[&str]) -> String {
-    match std::env::current_exe().and_then(|e| std::process::Command::new(e).args(args).stdin(std::process::Stdio::null()).output()) {
+    match std::env::current_exe().and_then(|e| seagent_core::platform::proc::command(e).args(args).stdin(std::process::Stdio::null()).output()) {
         Ok(o) => format!("$ seagent {}\n{}{}\n(exit {})\n", args.join(" "), String::from_utf8_lossy(&o.stdout), String::from_utf8_lossy(&o.stderr), o.status.code().unwrap_or(-1)),
         Err(e) => format!("$ seagent {}\n(could not run: {e})\n", args.join(" ")),
     }

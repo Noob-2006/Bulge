@@ -135,7 +135,7 @@ mod tests {
     use std::process::Stdio;
 
     fn sleeper() -> Command {
-        let mut c = Command::new("sleep");
+        let mut c = crate::platform::proc::command("sleep");
         c.arg("300").stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
         c
     }
@@ -188,7 +188,7 @@ mod tests {
         let dir = crate::tmp::TempDir::new("seagent-proc-panic");
         let pidfile = dir.path().join("pid");
         let exe = std::env::current_exe().unwrap();
-        let st = Command::new(exe)
+        let st = crate::platform::proc::command(exe)
             .args(["--exact", "proc::tests::panicking_child_process_helper", "--nocapture", "--test-threads=1"])
             .env("SEAGENT_PROC_PANIC_CHILD", &pidfile)
             .stdout(Stdio::null())

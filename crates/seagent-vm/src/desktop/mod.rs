@@ -46,7 +46,7 @@ use serde::Serialize;
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -82,7 +82,7 @@ pub(crate) fn resolve_bin(b: &str) -> Result<PathBuf, String> {
 }
 
 pub(crate) fn run_tool(bin: &Path, args: &[&str]) -> Result<String, String> {
-    let o = Command::new(bin).args(args).stdin(Stdio::null()).output().map_err(|e| format!("{}: {e}", bin.display()))?;
+    let o = crate::host::command(bin).args(args).stdin(Stdio::null()).output().map_err(|e| format!("{}: {e}", bin.display()))?;
     if !o.status.success() {
         return Err(format!("{} {}: {}", bin.display(), args.first().unwrap_or(&""), String::from_utf8_lossy(&o.stderr).trim()));
     }
@@ -404,14 +404,14 @@ impl DesktopVms {
             Endpoint::allocate(&self.text_path(name))?;
         }
         if cfg!(unix) {
-            let out = Command::new(&qemu).args(self.cmdline(name, &disk, acc, cdp_port)).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).output().map_err(|e| format!("start {}: {e}", qemu.display()))?;
+            let out = crate::host::command(&qemu).args(self.cmdline(name, &disk, acc, cdp_port)).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).output().map_err(|e| format!("start {}: {e}", qemu.display()))?;
             if !out.status.success() {
                 return Err(format!("qemu failed to start the desktop VM: {}", String::from_utf8_lossy(&out.stderr).trim()));
             }
         } else {
             // No -daemonize on Windows: a detached QEMU whose pid seagent records itself.
             let log = std::fs::File::create(vm.join("qemu.log")).map_err(|e| e.to_string())?;
-            let child = crate::host::spawn_vmm(Command::new(&qemu).args(self.cmdline(name, &disk, acc, cdp_port)).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::from(log))).map_err(|e| format!("start {}: {e}", qemu.display()))?;
+            let child = crate::host::spawn_vmm(crate::host::command(&qemu).args(self.cmdline(name, &disk, acc, cdp_port)).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::from(log))).map_err(|e| format!("start {}: {e}", qemu.display()))?;
             std::fs::write(self.pid_path(name), child.id().to_string()).map_err(|e| e.to_string())?;
         }
         let t0 = Instant::now();

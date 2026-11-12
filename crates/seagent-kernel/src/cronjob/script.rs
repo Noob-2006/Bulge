@@ -101,14 +101,14 @@ fn interpreter(bash: bool) -> Result<(String, Command), String> {
             if sh.kind != seagent_core::platform::shell::ShellKind::Bash {
                 return Err(format!("Script execution failed: bash is not available on windows (no Git Bash / MSYS2 found; this machine's shell is {}); use a .py script or install Git for Windows", sh.kind.as_str()));
             }
-            return Ok(("bash".into(), Command::new(&sh.program)));
+            return Ok(("bash".into(), seagent_core::platform::proc::command(&sh.program)));
         }
         Ok(("python3".into(), crate::coderun::python_command()))
     }
     #[cfg(not(windows))]
     {
         let interp = if bash { "bash" } else { "python3" };
-        Ok((interp.into(), Command::new(interp)))
+        Ok((interp.into(), seagent_core::platform::proc::command(interp)))
     }
 }
 

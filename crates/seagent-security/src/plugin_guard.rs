@@ -216,7 +216,7 @@ pub fn format_report(name: &str, r: &ScanResult) -> String {
 pub fn install_policy(command: &[String], request: &Value, timeout: std::time::Duration) -> Result<(), String> {
     use std::io::Write;
     let Some((bin, args)) = command.split_first() else { return Ok(()) };
-    let mut child = std::process::Command::new(bin).args(args).stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::null()).spawn().map_err(|e| format!("install policy `{bin}` failed to start: {e}"))?;
+    let mut child = crate::os::command(bin).args(args).stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::null()).spawn().map_err(|e| format!("install policy `{bin}` failed to start: {e}"))?;
     if let Some(mut si) = child.stdin.take() {
         let _ = si.write_all(request.to_string().as_bytes());
     }

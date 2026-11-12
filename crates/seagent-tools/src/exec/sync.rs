@@ -660,7 +660,7 @@ pub fn read_tar(raw: &[u8]) -> Result<Vec<TarEntry>, String> {
 mod tests {
     use super::*;
     use crate::testutil::tmpdir;
-    use std::process::{Command, Stdio};
+    use std::process::Stdio;
 
     /// "Remote" = real bash on this machine, so tar/find/base64 are the real tools.
     /// Windows: Git Bash / MSYS2 is the "remote" (its GNU tar, find, base64).
@@ -670,7 +670,7 @@ mod tests {
         let bash = PathBuf::from("bash");
         #[cfg(not(unix))]
         let bash = seagent_core::platform::layout::bash().ok_or("no Git Bash / MSYS2 bash")?;
-        let mut c = Command::new(bash).arg("-c").arg(script).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().map_err(|e| e.to_string())?;
+        let mut c = seagent_core::platform::proc::command(bash).arg("-c").arg(script).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().map_err(|e| e.to_string())?;
         let mut si = c.stdin.take().unwrap();
         let data = stdin.unwrap_or_default().to_vec();
         let w = std::thread::spawn(move || {
@@ -703,7 +703,7 @@ mod tests {
         {
             let d = tmpdir("tarx");
             std::fs::write(d.join("in.tar"), &raw).unwrap();
-            let ok = Command::new("tar").arg("-xf").arg(d.join("in.tar")).arg("-C").arg(&d).status().unwrap();
+            let ok = seagent_core::platform::proc::command("tar").arg("-xf").arg(d.join("in.tar")).arg("-C").arg(&d).status().unwrap();
             assert!(ok.success());
             assert_eq!(std::fs::read_to_string(d.join(&long)).unwrap(), "x");
         }

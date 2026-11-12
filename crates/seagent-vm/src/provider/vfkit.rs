@@ -27,7 +27,7 @@ use crate::isolation::ProviderKind;
 use crate::limits::proc_usage;
 use std::io::{Read, Write};
 use std::path::PathBuf;
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, Stdio};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -88,7 +88,7 @@ impl VmProvider for VfkitProvider {
         }
         let log = std::fs::File::create(spec.log()).map_err(|e| format!("create vm log: {e}"))?;
         let err = log.try_clone().map_err(|e| format!("clone log: {e}"))?;
-        let mut child = crate::host::spawn_vmm(Command::new(&bin).args(self.cmdline(spec)).stdin(Stdio::null()).stdout(Stdio::from(log)).stderr(Stdio::from(err))).map_err(|e| format!("start {}: {e}", bin.display()))?;
+        let mut child = crate::host::spawn_vmm(crate::host::command(&bin).args(self.cmdline(spec)).stdin(Stdio::null()).stdout(Stdio::from(log)).stderr(Stdio::from(err))).map_err(|e| format!("start {}: {e}", bin.display()))?;
         let deadline = Instant::now() + Duration::from_secs(10);
         while !vsock_sock(spec).exists() {
             if let Ok(Some(st)) = child.try_wait() {

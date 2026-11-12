@@ -4,7 +4,7 @@
 
 use serde_json::Value;
 use std::path::Path;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::time::{Duration, Instant};
 
 pub const SCANNER_BIN: &str = "skillevaluator";
@@ -113,7 +113,7 @@ pub fn run_with(bin: &Path, dir: &Path, timeout: u64) -> Report {
     if !out.is_dir() {
         return unavailable("no temp dir");
     }
-    let child = Command::new(bin).arg("validate").arg(dir).args(["--checks", TIER1_CHECKS, "--no-dedup", "-r", "json", "-o"]).arg(&out).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn();
+    let child = seagent_core::platform::proc::command(bin).arg("validate").arg(dir).args(["--checks", TIER1_CHECKS, "--no-dedup", "-r", "json", "-o"]).arg(&out).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn();
     let mut child = match child {
         Ok(c) => c,
         Err(e) => {

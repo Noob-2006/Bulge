@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::time::{Duration, Instant};
 
 pub const DEFAULT_PHASE_TIMEOUT: f64 = 600.0;
@@ -470,7 +470,7 @@ fn start_phase(r: &Recipe, root: &Path, ready_timeout: Duration, port: Option<u1
 
 /// Why `docker compose build/up` must not run here (live containers), or None.
 fn compose_live_reason(root: &Path) -> Option<String> {
-    let mut c = Command::new("docker");
+    let mut c = seagent_core::platform::proc::command("docker");
     c.args(["compose", "ps", "--status", "running", "--format", "{{.Name}}"]).current_dir(root).stdin(Stdio::null());
     let out = match c.output() {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return None,

@@ -142,16 +142,51 @@ pub fn console_flags() -> u32 {
     }
 }
 
+/// `Command::new(program)` for every child seagent starts — the one place a
+/// `std::process::Command` is made (`crates/seagent/tests/child_spawn_lint.rs` fails the
+/// build on a `Command::new` anywhere else).
+///
+/// Windows: [`console_flags`] — `CREATE_NO_WINDOW` when seagent has no console of its own
+/// (the detached daemon, the desktop app). Without it every console program the daemon runs
+/// (PowerShell / cmd for the exec tool, `git`, `where`, `tasklist`, an MCP stdio server,
+/// Python, …) gets a brand-new console window that flashes open and shut. The child still has
+/// a (hidden) console, so piped stdio, `CTRL_BREAK` and console APIs keep working, and GUI
+/// programs are not affected (the flag only applies to console-subsystem executables). With a
+/// console (the CLI in a terminal) nothing is set: the child shares the terminal, so an editor
+/// or a password prompt stays interactive. A caller that sets its own `creation_flags` later
+/// replaces these — OR in [`console_flags`] (as [`new_group_with`] does). Unix: plain
+/// `Command::new`.
+pub fn command(program: impl AsRef<std::ffi::OsStr>) -> Command {
+    #[cfg_attr(not(windows), allow(unused_mut))]
+    let mut c = Command::new(program);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        c.creation_flags(console_flags());
+    }
+    c
+}
+
+/// A program the user asked to *see* — an app or a terminal window launched on request: plain
+/// `Command::new`, so a console program started from the console-less daemon gets its own,
+/// visible console window (which [`command`] would suppress). Anything run for its output or
+/// its effect goes through [`command`].
+pub fn visible_command(program: impl AsRef<std::ffi::OsStr>) -> Command {
+    Command::new(program)
+}
+
 /// Only the "new group" half of [`spawn_in_group`], for callers that spawn themselves.
-/// Unix: `setsid` / `setpgid(0, 0)` in the child. Windows: `CREATE_NEW_PROCESS_GROUP` (this
-/// replaces any creation flags set before); call [`adopt`] after the spawn.
+/// Unix: `setsid` / `setpgid(0, 0)` in the child. Windows: `CREATE_NEW_PROCESS_GROUP` plus
+/// [`console_flags`] (this replaces any creation flags set before); call [`adopt`] after the
+/// spawn.
 pub fn new_group(cmd: &mut Command, own_session: bool) {
     new_group_with(cmd, own_session, 0)
 }
 
-/// [`new_group`] plus extra Windows creation flags (e.g. [`CREATE_NO_WINDOW`], or
-/// [`console_flags`]), OR-ed with `CREATE_NEW_PROCESS_GROUP`. `windows_flags` is ignored on
-/// Unix, so callers need no `cfg`.
+/// [`new_group`] plus extra Windows creation flags (e.g. [`CREATE_NO_WINDOW`]), OR-ed with
+/// `CREATE_NEW_PROCESS_GROUP` and [`console_flags`] (setting creation flags replaces the ones
+/// [`command`] chose, so they are re-applied here: a grouped child of the daemon must not get
+/// a console window either). `windows_flags` is ignored on Unix, so callers need no `cfg`.
 pub fn new_group_with(cmd: &mut Command, own_session: bool, windows_flags: u32) {
     #[cfg(unix)]
     {
@@ -173,7 +208,7 @@ pub fn new_group_with(cmd: &mut Command, own_session: bool, windows_flags: u32) 
     {
         use std::os::windows::process::CommandExt;
         let _ = own_session;
-        cmd.creation_flags(windows_sys::Win32::System::Threading::CREATE_NEW_PROCESS_GROUP | windows_flags);
+        cmd.creation_flags(windows_sys::Win32::System::Threading::CREATE_NEW_PROCESS_GROUP | console_flags() | windows_flags);
     }
 }
 
@@ -474,7 +509,7 @@ mod mac {
     // ───── the opt-in parent watchdog (see the module docs) ─────
 
     use std::path::PathBuf;
-    use std::process::{Child, Command, Stdio};
+    use std::process::{Child, Stdio};
     use std::sync::{Mutex, OnceLock};
     use std::time::{Duration, Instant};
 
@@ -486,7 +521,7 @@ mod mac {
     pub fn watch(pid: i32) {
         let Some(exe) = WATCHDOG.get() else { return };
         let Some(start) = super::start_time(pid) else { return };
-        let mut c = Command::new(exe);
+        let mut c = super::command(exe);
         c.arg(super::WATCH_PARENT_CMD).arg(std::process::id().to_string()).arg(pid.to_string()).arg(start.to_string());
         c.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
         // Its own session: a kill_group of the child, or ^C in our terminal, never reaches it.
@@ -672,7 +707,7 @@ pub fn descendants(pid: i32) -> Vec<i32> {
         })
         .unwrap_or_default();
     #[cfg(target_os = "macos")]
-    let pairs: Vec<(i32, i32, u64)> = std::process::Command::new("ps")
+    let pairs: Vec<(i32, i32, u64)> = command("ps")
         .args(["-A", "-o", "pid=,ppid="])
         .output()
         .map(|o| {

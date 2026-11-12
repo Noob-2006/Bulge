@@ -28,7 +28,6 @@ use seagent_security::plugin_guard::ScanResult;
 use serde_json::{json, Value};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 pub struct Plugins<'a> {
     pub cfg: &'a Config,
@@ -239,7 +238,7 @@ pub fn source_facts(origin: &Value) -> Value {
 }
 
 fn git(args: &[&str], cwd: Option<&Path>) -> Result<(), String> {
-    let mut c = Command::new("git");
+    let mut c = seagent_core::platform::proc::command("git");
     c.args(args).env("GIT_TERMINAL_PROMPT", "0");
     if let Some(d) = cwd {
         c.current_dir(d);
@@ -1659,7 +1658,7 @@ mod tests {
         // An immutable revision is pinned: updates never move it.
         let pin = d.join("pinplug");
         mk_repo(&pin, &[("seagent-plugin.toml", "command = \"./run.sh\"\n"), ("run.sh", "echo pinned\n")]);
-        let sha = String::from_utf8(Command::new("git").args(["rev-parse", "HEAD"]).current_dir(&pin).output().unwrap().stdout).unwrap().trim().to_string();
+        let sha = String::from_utf8(seagent_core::platform::proc::command("git").args(["rev-parse", "HEAD"]).current_dir(&pin).output().unwrap().stdout).unwrap().trim().to_string();
         pm.install(&format!("git+{}#{}", pin.display(), sha), false).unwrap();
         let e = pm.update(Some("pinplug"), false).unwrap_err();
         assert!(e.contains("pinned"), "{e}");

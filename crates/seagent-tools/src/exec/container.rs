@@ -46,7 +46,7 @@ use serde::Deserialize;
 use std::collections::HashMap;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::sync::Mutex;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -521,7 +521,7 @@ impl ContainerBackend {
 
     /// Run a client subcommand to completion; `None` when it exits nonzero.
     fn capture(&self, args: &[String], timeout: Duration) -> Result<Option<String>, String> {
-        let mut cmd = Command::new(&self.bin);
+        let mut cmd = seagent_core::platform::proc::command(&self.bin);
         cmd.args(args);
         cmd.stdin(Stdio::null());
         let child = spawn_command(cmd, &ExecRequest::default(), None).map_err(|e| format!("{}: {e}", self.bin.display()))?;
@@ -671,7 +671,7 @@ impl ExecBackend for ContainerBackend {
         self.ensure().map_err(io::Error::other)?;
         let (kept, _blocked) = sanitize_forwarded(&req.env, &self.passthrough);
         let kept: Vec<(String, String)> = kept.into_iter().filter(|(k, v)| name_ok(k) && unsafe_env_value(v).is_none()).collect();
-        let mut cmd = Command::new(&self.bin);
+        let mut cmd = seagent_core::platform::proc::command(&self.bin);
         cmd.args(self.exec_args(req, &kept));
         let mut r = req.clone();
         r.env = kept;

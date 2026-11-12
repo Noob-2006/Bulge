@@ -16,14 +16,14 @@ use seagent_kernel::worktree as wt;
 use serde::Serialize;
 use serde_json::json;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 
 pub const COMMANDS: &[&str] = &["worktree", "worktrees"];
 pub const VALUE_FLAGS: &[&str] = &["older-than", "path", "base-ref"];
 pub const BOOL_FLAGS: &[&str] = &["dry-run", "trees-only", "branches-only", "force"];
 
 fn git(args: &[&str], cwd: &Path) -> Result<String, String> {
-    let out = Command::new("git")
+    let out = seagent_core::platform::proc::command("git")
         .args(["-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false", "-c", "protocol.allow=never", "-c", "commit.gpgsign=false", "-c", "user.name=seagent", "-c", "user.email=seagent@localhost"])
         .args(args)
         .current_dir(cwd)

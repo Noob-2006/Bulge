@@ -147,7 +147,7 @@ pub fn systemd_version() -> Option<u32> {
     if let Some(v) = std::env::var("SEAGENT_SYSTEMD_VERSION").ok().and_then(|v| v.trim().parse().ok()) {
         return Some(v);
     }
-    let o = std::process::Command::new("systemctl").arg("--version").stdin(std::process::Stdio::null()).stderr(std::process::Stdio::null()).output().ok()?;
+    let o = seagent_core::platform::proc::command("systemctl").arg("--version").stdin(std::process::Stdio::null()).stderr(std::process::Stdio::null()).output().ok()?;
     o.status.success().then(|| parse_systemd_version(&String::from_utf8_lossy(&o.stdout))).flatten()
 }
 
@@ -258,7 +258,7 @@ pub fn plist(exe: &Path, workspace: &Path, log: &Path) -> String {
 }
 
 fn systemctl(system: bool, args: &[&str]) -> bool {
-    let mut c = std::process::Command::new("systemctl");
+    let mut c = seagent_core::platform::proc::command("systemctl");
     if !system {
         c.arg("--user");
     }
@@ -356,7 +356,7 @@ pub fn audit_text(installed: &str, expected: &str, exe: &Path) -> Vec<Issue> {
 #[cfg_attr(any(target_os = "macos", windows, target_os = "android", target_os = "ios"), allow(dead_code))]
 pub fn linger_enabled() -> Option<bool> {
     let user = std::env::var("USER").ok()?;
-    let o = std::process::Command::new("loginctl").args(["show-user", &user, "-p", "Linger"]).output().ok()?;
+    let o = seagent_core::platform::proc::command("loginctl").args(["show-user", &user, "-p", "Linger"]).output().ok()?;
     o.status.success().then(|| String::from_utf8_lossy(&o.stdout).trim() == "Linger=yes")
 }
 
@@ -423,7 +423,7 @@ pub fn ensure_linger() -> Linger {
     ensure_linger_with(
         linger_enabled(),
         &|| {
-            let ok = std::process::Command::new("loginctl")
+            let ok = seagent_core::platform::proc::command("loginctl")
                 .args(["--no-ask-password", "enable-linger", &user])
                 .stdin(std::process::Stdio::null())
                 .stdout(std::process::Stdio::null())
@@ -478,7 +478,7 @@ pub fn restart(paths: &Paths, drain: Duration) -> Result<String, String> {
     }
     let still = seagent_kernel::daemon::call(&sock, "ping", json!({})).ok().and_then(|r| r["running"].as_array().map(|a| a.len())).unwrap_or(0);
     #[cfg(not(any(target_os = "macos", windows, target_os = "android", target_os = "ios")))]
-    let active = std::process::Command::new("systemctl").args(["--user", "is-active", "--quiet", &unit_name()]).status().is_ok_and(|s| s.success());
+    let active = seagent_core::platform::proc::command("systemctl").args(["--user", "is-active", "--quiet", &unit_name()]).status().is_ok_and(|s| s.success());
     #[cfg(any(target_os = "macos", windows, target_os = "android", target_os = "ios"))]
     let active = crate::ops::service_os::managed();
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
@@ -490,8 +490,8 @@ pub fn restart(paths: &Paths, drain: Duration) -> Result<String, String> {
         #[cfg(any(target_os = "macos", windows, target_os = "android", target_os = "ios"))]
         crate::ops::service_os::restart_managed()?;
     } else {
-        let _ = std::process::Command::new(&exe).args(["daemon", "stop"]).status();
-        let ok = std::process::Command::new(&exe).args(["daemon", "start"]).status().is_ok_and(|s| s.success());
+        let _ = seagent_core::platform::proc::command(&exe).args(["daemon", "stop"]).status();
+        let ok = seagent_core::platform::proc::command(&exe).args(["daemon", "start"]).status().is_ok_and(|s| s.success());
         if !ok {
             return Err("seagentd did not come back; see `seagent logs`".into());
         }
@@ -502,7 +502,7 @@ pub fn restart(paths: &Paths, drain: Duration) -> Result<String, String> {
 /// For `/restart` from inside the daemon: a detached helper does the drain + restart.
 pub fn restart_detached(drain_secs: u64) -> Result<String, String> {
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
-    let mut c = std::process::Command::new(exe);
+    let mut c = seagent_core::platform::proc::command(exe);
     c.args(["service", "restart", "--drain", &drain_secs.to_string()]).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null());
     crate::ops::hostos::detach(&mut c);
     c.spawn().map_err(|e| e.to_string())?;
@@ -554,7 +554,7 @@ pub fn dispatch(cmd: &str, a: &Args, raw: &[String]) -> Option<R> {
                 if cfg!(target_os = "macos") {
                     std::fs::create_dir_all(p.parent().unwrap()).map_err(|e| e.to_string())?;
                     std::fs::write(&p, body).map_err(|e| e.to_string())?;
-                    let ok = std::process::Command::new("launchctl").arg("load").arg("-w").arg(&p).status().is_ok_and(|s| s.success());
+                    let ok = seagent_core::platform::proc::command("launchctl").arg("load").arg("-w").arg(&p).status().is_ok_and(|s| s.success());
                     println!("wrote {}{}", p.display(), if ok { " and loaded it" } else { " (launchctl load failed)" });
                 } else {
                     print!("{body}");
@@ -634,7 +634,7 @@ pub fn dispatch(cmd: &str, a: &Args, raw: &[String]) -> Option<R> {
             }
             "logs" => {
                 let n = a.val("lines").unwrap_or("100");
-                let mut c = std::process::Command::new("journalctl");
+                let mut c = seagent_core::platform::proc::command("journalctl");
                 c.args(["--user", "-u", &name, "-n", n, "--no-pager"]);
                 if a.flag("follow") {
                     c.arg("-f");

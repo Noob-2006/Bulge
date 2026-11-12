@@ -739,7 +739,7 @@ mod corpus {
     fn upstream_corpus() {
         let mut bad = 0;
         let mut n = 0;
-        let out = std::process::Command::new("sh").arg("-c").arg("find $SEAGENT_UPSTREAM_HERMES/skills $SEAGENT_UPSTREAM_HERMES/optional-skills $SEAGENT_UPSTREAM_OPENCLAW/skills $SEAGENT_UPSTREAM_OPENCLAW/custodian-skills -name SKILL.md; ls $SEAGENT_UPSTREAM_HERMES/plugin-catalog/*.yaml $SEAGENT_UPSTREAM_HERMES/optional-mcps/*/manifest.yaml").output().unwrap();
+        let out = seagent_core::platform::proc::command("sh").arg("-c").arg("find $SEAGENT_UPSTREAM_HERMES/skills $SEAGENT_UPSTREAM_HERMES/optional-skills $SEAGENT_UPSTREAM_OPENCLAW/skills $SEAGENT_UPSTREAM_OPENCLAW/custodian-skills -name SKILL.md; ls $SEAGENT_UPSTREAM_HERMES/plugin-catalog/*.yaml $SEAGENT_UPSTREAM_HERMES/optional-mcps/*/manifest.yaml").output().unwrap();
         for p in String::from_utf8_lossy(&out.stdout).lines() {
             let t = std::fs::read_to_string(p).unwrap();
             n += 1;
