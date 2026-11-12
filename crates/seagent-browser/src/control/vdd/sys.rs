@@ -259,7 +259,8 @@ pub fn launch_native(exe: &Path, args: &[String]) -> Result<u32, String> {
         return Err("the Bot Desktop is not hosted on the virtual display".into());
     }
     let before: HashSet<isize> = top_windows().into_iter().collect();
-    let child = std::process::Command::new(exe).args(args).spawn().map_err(|e| format!("failed to start {}: {e}", exe.display()))?;
+    // A program the agent asked to see on the virtual monitor: console programs get their window.
+    let child = seagent_core::platform::proc::visible_command(exe).args(args).spawn().map_err(|e| format!("failed to start {}: {e}", exe.display()))?;
     let pid = child.id();
     drop(child);
     let image = exe.file_name().map(|n| n.to_string_lossy().to_lowercase()).unwrap_or_default();
