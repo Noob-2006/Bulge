@@ -520,11 +520,17 @@ fn launch_cdp_app(p: &Value) -> Result<Value, String> {
     let args: Vec<String> = p["args"].as_array().into_iter().flatten().filter_map(Value::as_str).map(String::from).collect();
     // Windows, Bot Desktop hosted on the virtual display: any native app (Notepad, Paint,
     // Explorer…) starts there and streams at the monitor's refresh rate.
+    // The Bot Desktop is started (idempotent) when it is not running yet, so "open Notepad on
+    // your desktop" works as the first desktop action of a session.
     #[cfg(windows)]
     if seagent_browser::launch::app_kind(&exe).is_none() && {
         let home = seagent_kernel::config::Paths::from_env().data;
         let d = seagent_browser::control::screen::Desktop::new(&home);
-        seagent_browser::control::screen_windows::WinDesktop::new(&home, &d.profile, &d.geometry).hosted().is_some()
+        let wd = seagent_browser::control::screen_windows::WinDesktop::new(&home, &d.profile, &d.geometry);
+        if wd.hosted().is_none() && seagent_browser::control::vdd::host_region().is_some() {
+            d.start()?;
+        }
+        wd.hosted().is_some()
     } {
         let pid = seagent_browser::control::vdd::launch_native(&exe, &args)?;
         return Ok(json!({"ok": true, "effect": "confirmed", "details": {"app": exe.display().to_string(), "kind": "native", "pid": pid, "display": "virtual"}}));
