@@ -8,7 +8,7 @@
 //! - `seagent daemon status`             → exit 0 when the daemon answers
 //! - `seagent daemon start` / `stop`     → detached daemon (desktop)
 //! - `seagent setup link --json`         → `{"url": "http://…/setup#token=…", "expires_ms": …}`,
-//!                                         non-zero exit once setup is done (wizard locked)
+//!   non-zero exit once setup is done (wizard locked)
 //! - `seagent app token`                 → the console token on one line
 //! - `seagent pause` / `resume` / `pause status`, `seagent service restart`
 //! - PROPOSED `seagent setup status --json` → `{"done": bool, "listen": "…", "console_url": "…"}`
@@ -181,6 +181,12 @@ pub fn parse_token(stdout: &str) -> Option<String> {
     valid_token(t).then(|| t.to_string())
 }
 
+/// `http://127.0.0.1:8640/#token=abc&page=x` → `abc` (the console URL the boot opened).
+pub fn token_in_url(u: &str) -> Option<String> {
+    let frag = u.split_once('#')?.1;
+    frag.split('&').find_map(|kv| kv.strip_prefix("token=")).map(String::from).filter(|t| valid_token(t))
+}
+
 fn valid_token(t: &str) -> bool {
     t.len() >= 16 && t.len() <= 512 && t.chars().all(|c| c.is_ascii_alphanumeric() || "-_.~+/=".contains(c))
 }
@@ -226,6 +232,9 @@ mod tests {
         assert_eq!(parse_token("Zq3_abcdefghijklmnopqrstuv\n").as_deref(), Some("Zq3_abcdefghijklmnopqrstuv"));
         assert_eq!(parse_token("尚未設定 token。最簡單是執行 `seagent setup`；或手動：\n  echo x | seagent secrets set APP_TOKEN"), None);
         assert_eq!(parse_token("{\"token\":\"abcdefghijklmnopqrstuvwxyz\",\"url\":\"http://x\"}").as_deref(), Some("abcdefghijklmnopqrstuvwxyz"));
+        assert_eq!(token_in_url("http://127.0.0.1:8640/#token=abcdefghijklmnopqrstuvwxyz&page=logs").as_deref(), Some("abcdefghijklmnopqrstuvwxyz"));
+        assert_eq!(token_in_url("http://127.0.0.1:8640/setup#rerun"), None);
+        assert_eq!(token_in_url("http://127.0.0.1:8640/"), None);
         assert_eq!(host_port("http://127.0.0.1:8640").as_deref(), Some("127.0.0.1:8640"));
         assert_eq!(host_port("http://[::1]:8640/").as_deref(), Some("[::1]:8640"));
     }

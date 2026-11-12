@@ -18,7 +18,7 @@ const store = {
 // language of their own module (the Control UI is translated through `ui.pages` titles).
 const I18N = {
   'zh-Hant': {
-    'conn.idle': '尚未連線', 'conn.connecting': '連線中…', 'conn.failed': '連線失敗', 'conn.ready': '已連線 · v{v}', 'conn.down': '連線中斷，3 秒後重試',
+    'conn.idle': '尚未連線', 'conn.connecting': '連線中…', 'conn.failed': '連線失敗，{s} 秒後重試', 'conn.ready': '已連線 · v{v}', 'conn.down': '連線中斷，{s} 秒後重試', 'conn.retry': '連不到 SE Agent，{s} 秒後重試', 'conn.renewing': '正在更新登入…', 'conn.signin': '需要登入',
     'new': '新對話', 'boards': '儀表板', 'boards_all': '所有儀表板', 'devices': '裝置', 'control': '控制台', 'settings': '設定',
     'nav.ops': '總覽', 'nav.chat': '對話', 'nav.agents': '代理', 'nav.approvals': '核准', 'nav.audit': '稽核', 'nav.security': '安全', 'nav.sessions': '對話紀錄',
     'filter': '搜尋對話', 'back': '← 返回', 'palette': '指令', 'palette_ph': '跳到頁面、對話或指令…', 'jump': '↓ 最新', 'send_hint': 'Enter 送出 · Shift+Enter 換行',
@@ -27,7 +27,10 @@ const I18N = {
     'approval': '需要核准 · {gate}', 'deny': '拒絕', 'always': '本次對話都允許', 'once': '允許一次',
     'ask': 'SE Agent 想問你', 'answer': '回答', 'close': '關閉',
     'no_sessions': '還沒有對話', 'start': '開始一段新對話', 'start_sub': '交代任務、貼上檔案，或輸入 / 看所有指令。SE Agent 會在需要時請你核准。', 'login': '連線到 SE Agent',
-    'login_hint': '輸入 App Server 的 token（<code>seagent app token</code> 會顯示）。', 'connect': '連線', 'remember': '記住這台裝置',
+    'login_hint': '這個瀏覽器還沒有登入這台 SE Agent。最簡單是用下方的配對碼；也可以貼上 App Server token。', 'connect': '連線', 'remember': '記住這台裝置',
+    'login_empty': '請先貼上 token。', 'login_checking': '連線中…', 'login_refused': '這個 token 不正確或已失效。請貼上新的 token，或改用下方的配對碼。',
+    'login_down': '連不到 SE Agent（{host}）。請確認那台電腦上的 SE Agent 正在執行，再按一次「連線」。', 'login_revoked': '這台裝置的授權已被撤銷，請用配對碼重新配對。',
+    'pair_hint': '用配對碼：在電腦上的 SE Agent App（或已登入的主控台）打開「裝置」頁、按「配對裝置」，在這裡輸入顯示的 8 碼，再到電腦上按核准。', 'pair_btn': '用配對碼配對',
     'slash_hint': '指令 · ↑↓ 選擇、Tab 補齊、Esc 關閉', 'attach': '附加', 'attached': '已附加 {n} 個檔案',
     'too_big': '檔案太大（上限 8 MiB）', 'lang': 'EN', 'lang.name': 'English',
     'theme': '主題', 'theme.galaxy': '銀河', 'theme.crimson': '深緋紅', 'theme.daylight': '日光',
@@ -38,7 +41,7 @@ const I18N = {
     'review': '覆核', 'reviewed': '標記已覆核', 'flagged': '標記可疑', 'review_note': '覆核註記（選填）', 'review_done': '已記錄覆核：{s}',
   },
   en: {
-    'conn.idle': 'Not connected', 'conn.connecting': 'Connecting…', 'conn.failed': 'Connection failed', 'conn.ready': 'Connected · v{v}', 'conn.down': 'Disconnected, retrying in 3s',
+    'conn.idle': 'Not connected', 'conn.connecting': 'Connecting…', 'conn.failed': 'Connection failed, retrying in {s}s', 'conn.ready': 'Connected · v{v}', 'conn.down': 'Disconnected, retrying in {s}s', 'conn.retry': 'Cannot reach SE Agent, retrying in {s}s', 'conn.renewing': 'Renewing sign-in…', 'conn.signin': 'Sign-in needed',
     'new': 'New chat', 'boards': 'Dashboards', 'boards_all': 'All dashboards', 'devices': 'Devices', 'control': 'Control', 'settings': 'Settings',
     'nav.ops': 'Overview', 'nav.chat': 'Chat', 'nav.agents': 'Agents', 'nav.approvals': 'Approvals', 'nav.audit': 'Audit', 'nav.security': 'Security', 'nav.sessions': 'Conversations',
     'filter': 'Search conversations', 'back': '← Back', 'palette': 'Commands', 'palette_ph': 'Jump to a page, conversation or command…', 'jump': '↓ Latest', 'send_hint': 'Enter to send · Shift+Enter for newline',
@@ -47,7 +50,10 @@ const I18N = {
     'approval': 'Approval needed · {gate}', 'deny': 'Deny', 'always': 'Always in this chat', 'once': 'Allow once',
     'ask': 'SE Agent asks', 'answer': 'Answer', 'close': 'Close',
     'no_sessions': 'No conversations yet', 'start': 'Start a conversation', 'start_sub': 'Describe a task, paste files, or type / for every command. SE Agent asks before anything risky.', 'login': 'Connect to SE Agent',
-    'login_hint': 'Enter the App Server token (shown by <code>seagent app token</code>).', 'connect': 'Connect', 'remember': 'Remember this device',
+    'login_hint': 'This browser is not signed in to this SE Agent yet. The pairing code below is the easiest way; you can also paste the App Server token.', 'connect': 'Connect', 'remember': 'Remember this device',
+    'login_empty': 'Paste a token first.', 'login_checking': 'Connecting…', 'login_refused': 'This token is wrong or no longer valid. Paste a new one, or use a pairing code below.',
+    'login_down': 'Cannot reach SE Agent ({host}). Make sure SE Agent is running on that computer, then press Connect again.', 'login_revoked': 'This device was signed out by the host. Pair it again with a pairing code.',
+    'pair_hint': 'With a pairing code: in the SE Agent app on the computer (or a signed-in console) open Devices, press "Pair a device", enter the 8 characters here, then approve on the computer.', 'pair_btn': 'Pair with the code',
     'slash_hint': 'Commands · ↑↓ pick, Tab complete, Esc close', 'attach': 'Attach', 'attached': '{n} file(s) attached',
     'too_big': 'File too large (8 MiB max)', 'lang': '中文', 'lang.name': '繁體中文',
     'theme': 'Theme', 'theme.galaxy': 'Galaxy', 'theme.crimson': 'Crimson', 'theme.daylight': 'Daylight',
@@ -76,7 +82,8 @@ function applyI18n() {
   for (const el of document.querySelectorAll('[data-i18n-ph]')) el.placeholder = t(el.dataset.i18nPh);
   for (const el of document.querySelectorAll('[data-i18n-title]')) el.title = t(el.dataset.i18nTitle);
   const hint = document.getElementById('loginHint');
-  if (hint) hint.innerHTML = t('login_hint');
+  if (hint) hint.textContent = t('login_hint');
+  if ($('pairHint')) $('pairHint').textContent = t('pair_hint');
   // The connection line is live state, not a static string: re-render it in the new language.
   if ($('conn')) setConn(...(S.conn || ['conn.idle']));
   if ($('title') && !S.current && S.view === 'chat') $('title').textContent = t('pick');
@@ -354,6 +361,17 @@ class Arp {
     this.ws.onmessage = (e) => this.onMessage(JSON.parse(e.data));
     this.ws.onclose = () => { for (const [, w] of this.waiting) w.fail(new Error('連線中斷')); this.waiting.clear(); this.emit('close', {}); };
     return this.ready;
+  }
+  // Give up on a socket that looks open but does not answer (after a sleep the TCP connection is
+  // often dead without a close): fail what waits on it and report the close now, not minutes later.
+  abandon() {
+    const ws = this.ws;
+    if (!ws) return;
+    ws.onclose = ws.onerror = ws.onmessage = null;
+    try { ws.close(); } catch {}
+    for (const [, w] of this.waiting) w.fail(new Error('連線中斷'));
+    this.waiting.clear();
+    this.emit('close', {});
   }
   call(method, params = {}) {
     const id = this.next++;
@@ -1055,27 +1073,87 @@ document.addEventListener('keydown', (e) => {
   else if (e.key === 'Escape' && S.view === 'page' && !document.querySelector('dialog[open]')) $('panelDialog').close();
 });
 
-async function start(token) {
-  // Paired devices connect with a short-lived access token minted by the device key (devauth.js).
-  S.arp = new Arp(window.DevAuth ? await DevAuth.access(token, deviceId()) : token);
-  S.arp.login = token;
-  setConn('conn.connecting');
-  // A failed connect is usually the daemon restarting: keep the saved token and retry. Only
-  // when it has never worked in this page (likely a wrong token) ask for one, pre-filled.
-  try { await S.arp.connect(); } catch (e) {
-    if (window.DevAuth) DevAuth.forget();
-    setConn('conn.failed', null, 'down');
+// ── signing in and staying signed in ──
+// Inside the SE Agent app (Tauri) the app owns the agent and hands the console a credential
+// through its bridge (`console_access_token`): there is never a login prompt there. A browser asks
+// only when the host refused the credential it has (wrong, rotated, device revoked) — never for a
+// network problem, a sleeping laptop or a restarting daemon: those are retried quietly, forever.
+const IN_APP = !!(window.__TAURI__ && window.__TAURI__.core);
+
+// Is `cred` accepted right now? 'ok' | 'auth' (refused: wrong, expired, revoked) | 'down'
+// (unreachable, restarting, rate-limited). A WebSocket that fails to open says none of this.
+async function probe(cred) {
+  try {
+    const r = await fetch('/arp', { method: 'POST', cache: 'no-store', headers: { 'content-type': 'application/json', authorization: 'Bearer ' + cred }, body: JSON.stringify({ jsonrpc: '2.0', id: 0, method: 'whoami' }) });
+    return r.status === 401 ? 'auth' : r.ok ? 'ok' : 'down';
+  } catch { return 'down'; }
+}
+
+// Try again in 1, 2, 4, 8, 15, 15 … s (a wake / online / visible event skips the wait).
+function retryLater(token, key) {
+  const ms = Math.min(15000, 1000 * 2 ** Math.min(4, Math.max(0, (S.fails || 1) - 1)));
+  setConn(key || 'conn.retry', { s: Math.round(ms / 1000) }, 'down');
+  clearTimeout(S.retryTimer);
+  S.retryToken = token;
+  S.retryTimer = setTimeout(() => { S.retryTimer = null; start(token); }, ms);
+}
+
+// The host refused the credential: get a working one without asking whenever that is possible.
+async function reauth(token) {
+  S.authFails = (S.authFails || 0) + 1;
+  if (IN_APP) {
+    setConn('conn.renewing');
+    const t = window.DevAuth ? await DevAuth.fromApp() : null;
+    if (t && t.token) {
+      store.set('seagent.token', t.token);
+      if (window.DevAuth) DevAuth.seed(t.token, t.expiresAtMs, t.token);
+      // Refused again right after a fresh one: back off, but keep going (never a prompt here).
+      if (S.authFails <= 2) return start(t.token);
+      S.fails = (S.fails || 0) + 1;
+      return retryLater(t.token);
+    }
+    // The app could not mint one now (its agent is restarting): try again shortly.
     S.fails = (S.fails || 0) + 1;
-    // A paired device's credential renews itself: keep retrying quietly (asleep, offline, host
-    // restarting) unless the host said the device was revoked.
-    if (window.DevAuth && DevAuth.revoked) { store.del('seagent.token'); $('token').value = ''; return askToken(); }
-    const device = /^se[ad]1_/.test(token);
-    if (S.connected || S.fails < 3 || device) { setTimeout(() => start(token), Math.min(device ? 30000 : 10000, 1500 * S.fails)); return; }
-    $('token').value = token;
-    return askToken();
+    return retryLater(token);
+  }
+  if (window.DevAuth && DevAuth.revoked) { store.del('seagent.token'); $('token').value = ''; return askToken(t('login_revoked')); }
+  if (/^se[ad]1_/.test(token)) {
+    // A paired device: the access token expired (asleep, throttled tab) or the host restarted.
+    // `forget()` already ran, so the next `access()` renews with the device key first.
+    if (S.authFails <= 2) return start(token);
+    S.fails = (S.fails || 0) + 1;
+    return retryLater(token);
+  }
+  // An app / scoped token typed into a browser that this host no longer accepts.
+  $('token').value = token;
+  askToken(t('login_refused'));
+}
+
+async function start(token) {
+  clearTimeout(S.retryTimer);
+  S.retryTimer = null;
+  // A newer start() (wake, reauth, the login form) supersedes this one.
+  const gen = S.gen = (S.gen || 0) + 1;
+  setConn('conn.connecting');
+  // Paired devices connect with a short-lived access token minted by the device key (devauth.js).
+  const cred = window.DevAuth ? await DevAuth.access(token, deviceId()) : token;
+  if (gen !== S.gen) return;
+  const me = new Arp(cred);
+  S.arp = me;
+  S.arp.login = token;
+  try { await S.arp.connect(); } catch (e) {
+    if (gen !== S.gen) return;
+    if (window.DevAuth) DevAuth.forget();
+    S.fails = (S.fails || 0) + 1;
+    const why = await probe(cred);
+    if (gen !== S.gen) return;
+    if (why === 'auth') return reauth(token);
+    return retryLater(token, why === 'ok' ? 'conn.failed' : 'conn.retry');
   }
   S.connected = true;
   S.fails = 0;
+  S.authFails = 0;
+  try { $('login').close(); } catch {}
   S.arp.on('ready', (p) => setConn('conn.ready', { v: p.server.version }, 'live'));
   // Two subscriptions share the socket: the global one feeds the rail and approvals,
   // the session one feeds the transcript. Route by subscription id so nothing renders twice.
@@ -1093,7 +1171,7 @@ async function start(token) {
   // The host changed this device's scope (devices.scope): show what it may do now.
   S.arp.on('access', async () => { try { S.me = await S.arp.call('whoami'); applyAccess(S.me); } catch {} });
   S.arp.on('pending', (p) => { if (p.subscription === S.globalSub) onPending(p); });
-  S.arp.on('close', () => { if (S.arp && S.arp.login !== token) return; setConn('conn.down', null, 'down'); setTimeout(() => start(token), 3000); });
+  S.arp.on('close', () => { if (S.arp !== me) return; S.fails = 0; retryLater(token, 'conn.down'); });
   // After the handlers: the server's `ready` notification must not arrive unobserved.
   try { S.me = await S.arp.call('whoami'); } catch { S.me = null; }
   applyAccess(S.me);
@@ -1117,11 +1195,39 @@ async function start(token) {
   if (typeof opsStart === 'function') opsStart();
 }
 
-function askToken() {
-  $('login').showModal();
-  $('loginForm').onsubmit = () => {
+// Esc must not leave a page with no way to sign in.
+$('login').addEventListener('cancel', (e) => e.preventDefault());
+function loginSay(text, bad) {
+  const el = $('loginStatus');
+  el.textContent = text || '';
+  el.classList.toggle('bad', !!bad);
+}
+
+// The browser's login: the button always ends in "connected" or a message saying why not.
+function askToken(msg) {
+  if (IN_APP) return reauth(store.get('seagent.token') || '');
+  clearTimeout(S.retryTimer);
+  S.retryTimer = null;
+  S.gen = (S.gen || 0) + 1; // nothing in flight may reconnect behind the dialog
+  loginSay(msg, !!msg);
+  setConn('conn.signin', null, 'down');
+  if (!$('login').open) $('login').showModal();
+  $('loginForm').onsubmit = async (e) => {
+    e.preventDefault();
     const tk = $('token').value.trim();
+    if (!tk) return loginSay(t('login_empty'), true);
+    const btn = $('loginBtn');
+    btn.disabled = true;
+    loginSay(t('login_checking'));
+    let why = 'down';
+    try { why = await probe(window.DevAuth ? await DevAuth.access(tk, deviceId()) : tk); } catch {} finally { btn.disabled = false; }
+    if (why === 'auth') return loginSay(t('login_refused'), true);
+    if (why === 'down') return loginSay(t('login_down', { host: location.host }), true);
     if ($('remember').checked) store.set('seagent.token', tk);
+    loginSay('');
+    $('login').close();
+    S.fails = 0;
+    S.authFails = 0;
     start(tk);
   };
   $('pairForm').onsubmit = async (e) => {
@@ -1238,7 +1344,7 @@ $('showSettings').onclick = () => showPanel(t('settings'), async () => {
     <h3>這台裝置</h3>
     <p><label class="dim">新對話的工作目錄</label><input type="text" id="wsInput" value="${esc(store.get('seagent.workspace') || '')}" placeholder="（伺服器預設）"></p>
     ${(S.settingsPanels || []).length ? '<h3>外掛設定</h3>' : ''}${(S.settingsPanels || []).map(([p, u], i) => `<p><button class="btn ghost small" data-panel="${i}">${esc(u.title || u.id)}（${esc(p)}）</button></p>`).join('')}
-    <p><button class="btn ghost small" id="logout" data-read>登出這台裝置</button></p>`;
+    ${IN_APP ? '' : '<p><button class="btn ghost small" id="logout" data-read>登出這台裝置</button></p>'}`;
 }, () => {
   for (const b of $('panelBody').querySelectorAll('[data-panel]')) { const [p, u] = S.settingsPanels[+b.dataset.panel]; b.onclick = () => openPluginPanel(p, u); }
   if ($('openConnections')) $('openConnections').onclick = () => window.openConnections && window.openConnections();
@@ -1259,7 +1365,7 @@ $('showSettings').onclick = () => showPanel(t('settings'), async () => {
   bindDisplaySection();
   // CSP forbids inline handlers: bind after rendering.
   $('wsInput').onchange = (e) => store.set('seagent.workspace', e.target.value);
-  $('logout').onclick = () => { store.del('seagent.token'); location.reload(); };
+  if ($('logout')) $('logout').onclick = () => { store.del('seagent.token'); location.reload(); };
 });
 
 // Settings → 虛擬顯示器 (Windows): the virtual display behind the Bot Desktop (view.display.*).
@@ -1290,6 +1396,27 @@ function bindDisplaySection() {
     } catch (e) { msg.textContent = e.message; }
   };
 }
+
+// Woke up, back online, shown again: renew a credential that is (nearly) expired and reconnect now
+// instead of waiting out a timer that a sleeping or throttled tab did not run. A socket that looks
+// open after a sleep may be dead: it must answer within a few seconds or it is replaced.
+function onWake() {
+  if (window.DevAuth) DevAuth.check();
+  if (S.retryTimer) { clearTimeout(S.retryTimer); S.retryTimer = null; start(S.retryToken); return; }
+  const a = S.arp;
+  if (!a || !a.ws || a.ws.readyState !== 1 || S.pinging) return;
+  S.pinging = true;
+  Promise.race([a.call('whoami'), new Promise((_, no) => setTimeout(() => no(new Error('timeout')), 8000))])
+    .catch(() => { if (S.arp === a) a.abandon(); })
+    .finally(() => { S.pinging = false; });
+}
+document.addEventListener('visibilitychange', () => { if (!document.hidden) onWake(); });
+addEventListener('online', onWake);
+addEventListener('focus', onWake);
+addEventListener('pageshow', (e) => { if (e.persisted) onWake(); });
+// A sleep (or a frozen background tab) shows up as a jump in the wall clock between two ticks.
+let wakeTick = Date.now();
+setInterval(() => { const now = Date.now(); if (now - wakeTick > 30000) onWake(); wakeTick = now; }, 5000);
 
 if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js').catch(() => {});
 
