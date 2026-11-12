@@ -166,7 +166,7 @@ repository and are reviewed as code.
   do not contain it (`cargo tree --target x86_64-unknown-linux-gnu -i windows` is empty).
 * **Features**: `default-features = false` and only `Foundation`, `Graphics`,
   `Graphics_Capture`, `Graphics_DirectX`, `Graphics_DirectX_Direct3D11`, `Win32_Foundation`,
-  `Win32_Graphics_Direct3D`, `Win32_Graphics_Direct3D11`, `Win32_Graphics_Dxgi`,
+  `Win32_Graphics_Direct3D`, `Win32_Graphics_Direct3D11`, `Win32_Graphics_Gdi`, `Win32_Graphics_Dxgi`,
   `Win32_Graphics_Dxgi_Common`, `Win32_System_WinRT`, `Win32_System_WinRT_Direct3D11`,
   `Win32_System_WinRT_Graphics_Capture`, `Win32_UI_WindowsAndMessaging`.
 * **Tree**: `windows` 0.62.2, `windows-core`, `-collections`, `-future`, `-numerics`, `-result`,
@@ -188,7 +188,7 @@ repository and are reviewed as code.
   The displayed-session mode now exists: with the bundled virtual display driver (next section)
   the Bot Desktop is hosted on a virtual monitor of the displayed desktop, and
   `control/dxgi_dup.rs` captures that monitor with DXGI Desktop Duplication through this crate's
-  `Win32_Graphics_Dxgi` / `Direct3D11` bindings (no feature added). The crate stays for that.
+  `Win32_Graphics_Dxgi` / `Direct3D11` bindings; `Win32_Graphics_Gdi` was added for it (`IDXGIOutput::GetDesc` returns an `HMONITOR`; bindings only, no new crate). The crate stays for that.
 
 ### Bundled Windows driver: Virtual Display Driver (MttVDD) — review notes
 

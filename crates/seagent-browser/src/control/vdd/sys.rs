@@ -358,6 +358,7 @@ pub fn close_hosted() {
 
 /// Visible top-level windows of the displayed desktop that overlap `r`, bottom first (tests,
 /// diagnostics).
+#[cfg(test)]
 pub fn windows_in(r: Rect) -> Vec<isize> {
     let mut v: Vec<isize> = top_windows()
         .into_iter()
@@ -372,6 +373,7 @@ pub fn windows_in(r: Rect) -> Vec<isize> {
 }
 
 /// Move window `w` by `dx` pixels (tests: a cheap way to make DWM compose a new frame).
+#[cfg(test)]
 pub fn nudge(w: isize, dx: i32) {
     // SAFETY: rect query and a no-activate move of a test's own window.
     unsafe {
