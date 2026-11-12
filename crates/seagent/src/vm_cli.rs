@@ -27,7 +27,8 @@ pub fn register_route() {
 
 /// The desktop VMs of this seagent home under `cfg`.
 pub fn vms(cfg: &Config, paths: &Paths) -> Result<DesktopVms, String> {
-    Ok(DesktopVms::new(DesktopConfig::parse(&cfg.desktop_vm)?, &paths.data, &paths.cache_dir(), &paths.runtime))
+    let dcfg = seagent_vm::bundle::apply_desktop(&DesktopConfig::parse(&cfg.desktop_vm)?);
+    Ok(DesktopVms::new(dcfg, &paths.data, &paths.cache_dir(), &paths.runtime))
 }
 
 const USAGE: &str = "usage: seagent vm desktop build [--force] | start [name] | stop [name] | reset [name] | status [name] [--json] | list [--json] | screenshot [name] -o FILE.png | input [name] '<event json>'";

@@ -98,7 +98,7 @@ pub fn tools(t: &toml::Table) -> Result<Vec<Arc<dyn seagent_core::Tool>>, String
 /// host without a display of its own.
 pub fn tools_with(t: &toml::Table, desktop_vm: &toml::Table) -> Result<Vec<Arc<dyn seagent_core::Tool>>, String> {
     let cfg = ComputerUseConfig::parse(t)?;
-    let dcfg = seagent_vm::desktop::DesktopConfig::parse(desktop_vm)?;
+    let dcfg = seagent_vm::bundle::apply_desktop(&seagent_vm::desktop::DesktopConfig::parse(desktop_vm)?);
     let paths = seagent_kernel::config::Paths::from_env();
     let home = paths.data.clone();
     let vm_default = cfg.target.starts_with("vm:") && dcfg.enabled;

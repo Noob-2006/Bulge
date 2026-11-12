@@ -337,7 +337,7 @@ pub(crate) fn with_app<T>(app: &App, f: impl FnOnce(&Ctx) -> T) -> T {
 pub fn desktop_vms(app: &App) -> DesktopVms {
     let paths = &app.d.k.paths;
     let dcfg = DesktopConfig::parse(&app.d.k.cfg.desktop_vm).unwrap_or_else(|_| DesktopConfig { enabled: false, ..Default::default() });
-    DesktopVms::new(dcfg, &paths.data, &paths.cache_dir(), &paths.runtime)
+    DesktopVms::new(seagent_vm::bundle::apply_desktop(&dcfg), &paths.data, &paths.cache_dir(), &paths.runtime)
 }
 
 /// ARP entry point (`App::rpc`).

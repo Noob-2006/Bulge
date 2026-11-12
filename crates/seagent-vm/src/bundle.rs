@@ -25,6 +25,7 @@
 //! in turn pins every file of the image (`GuestImage::verify`).
 
 use crate::config::VmConfig;
+use crate::desktop::DesktopConfig;
 use crate::image::{sha256_file, GuestImage, MANIFEST_FILE};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -249,6 +250,32 @@ pub fn apply_with(cfg: &VmConfig, bundle: Option<&Bundle>) -> VmConfig {
     out
 }
 
+/// The desktop VM's `[desktop_vm]` with the bundled QEMU (`qemu-system-x86_64` and `qemu-img`)
+/// filled in where the user left the default names, so a fresh Windows install builds and runs
+/// the desktop VM with nothing else installed. Other bundles carry no QEMU: unchanged.
+pub fn apply_desktop(cfg: &DesktopConfig) -> DesktopConfig {
+    apply_desktop_with(cfg, locate().as_ref())
+}
+
+/// [`apply_desktop`] for a given bundle (tests).
+pub fn apply_desktop_with(cfg: &DesktopConfig, bundle: Option<&Bundle>) -> DesktopConfig {
+    let mut out = cfg.clone();
+    let Some(b) = bundle.filter(|b| b.info.runtime.kind == "qemu") else { return out };
+    let defaults = DesktopConfig::default();
+    if cfg.qemu == defaults.qemu {
+        if let Some(exe) = b.runtime_exe() {
+            out.qemu = exe.display().to_string();
+        }
+    }
+    if cfg.qemu_img == defaults.qemu_img {
+        let rt = b.runtime_dir();
+        if let Some(img) = ["qemu-img.exe", "qemu-img"].iter().map(|n| rt.join(n)).find(|p| p.is_file()) {
+            out.qemu_img = img.display().to_string();
+        }
+    }
+    out
+}
+
 /// What the user must do to get a microVM back, phrased for how this agent was installed: the
 /// app's button when it carries a bundle, the builder otherwise (a source checkout / server).
 pub fn fix_hint() -> String {
@@ -407,6 +434,27 @@ mod tests {
         let fc = fake_bundle(f.path(), "firecracker", "firecracker");
         assert_eq!(PathBuf::from(apply_with(&VmConfig::default(), Some(&fc)).firecracker), f.path().join("runtime/firecracker/firecracker"));
         assert_eq!(apply_with(&VmConfig::default(), None).qemu, VmConfig::default().qemu);
+    }
+
+    #[test]
+    fn the_desktop_vm_uses_the_bundled_qemu_and_qemu_img() {
+        let t = tmp("apply-desktop");
+        let b = fake_bundle(t.path(), "qemu", "qemu-system-x86_64.exe");
+        let d = DesktopConfig::default();
+        // No qemu-img in the bundle: only the emulator is filled in.
+        let c = apply_desktop_with(&d, Some(&b));
+        assert_eq!(PathBuf::from(&c.qemu), t.path().join("runtime").join("qemu").join("qemu-system-x86_64.exe"));
+        assert_eq!(c.qemu_img, d.qemu_img);
+        std::fs::write(t.path().join("runtime").join("qemu").join("qemu-img.exe"), b"img").unwrap();
+        let c = apply_desktop_with(&d, Some(&b));
+        assert_eq!(PathBuf::from(&c.qemu_img), t.path().join("runtime").join("qemu").join("qemu-img.exe"));
+        let mine = DesktopConfig { qemu: "/opt/q".into(), qemu_img: "/opt/qi".into(), ..Default::default() };
+        let c = apply_desktop_with(&mine, Some(&b));
+        assert_eq!((c.qemu.as_str(), c.qemu_img.as_str()), ("/opt/q", "/opt/qi"), "configured paths win");
+        let f = tmp("apply-desktop-fc");
+        let fc = fake_bundle(f.path(), "firecracker", "firecracker");
+        assert_eq!(apply_desktop_with(&d, Some(&fc)), d, "a bundle without QEMU changes nothing");
+        assert_eq!(apply_desktop_with(&d, None), d);
     }
 
     #[test]

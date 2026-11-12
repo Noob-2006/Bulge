@@ -1,8 +1,13 @@
 # Files of the pinned QEMU for Windows build (qemu-w64-setup-20260811.exe) that the built-in VM
 # ships: the emulator, every DLL it imports (transitively; computed with objdump -p, re-checked by
 # packaging/vm/bundle.sh on every staging) and the firmware a q35 direct kernel boot reads.
+# The desktop VM (crates/seagent-vm/src/desktop) uses the same QEMU and also needs qemu-img.exe
+# (its DLLs are a subset of the emulator's), the standard VGA BIOS and the virtio-net option ROM.
 # Everything else in the 1.2 GB installer (other targets, GTK/SDL data, docs) is left out.
 qemu-system-x86_64.exe
+qemu-img.exe
+share/vgabios-stdvga.bin
+share/efi-virtio.rom
 SDL2.dll
 SDL2_image.dll
 brlapi-0.8.dll

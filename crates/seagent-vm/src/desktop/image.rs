@@ -200,7 +200,8 @@ pub fn build(vms: &DesktopVms, force: bool, log: &mut dyn FnMut(&str)) -> Result
         "-name".into(),
         format!("seagent-desktop-build-{}", recipe(cfg)),
         "-machine".into(),
-        format!("q35,accel={accel}"),
+        // Same machine as the running desktop (WHPX needs the userspace irqchip, see mod.rs).
+        if accel == "whpx" { "q35,accel=whpx,kernel-irqchip=off".into() } else { format!("q35,accel={accel}") },
         "-cpu".into(),
         if accel == "kvm" { "host".into() } else { "max".into() },
         "-smp".into(),
