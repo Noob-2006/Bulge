@@ -58,43 +58,24 @@ pub fn ensure_base(cfg: &DesktopConfig, dir: &Path, log: &mut dyn FnMut(&str)) -
         let _ = std::fs::remove_file(&dst);
     }
     let part = dst.with_extension("part");
-    let mut h = seagent_net::crypto::Sha256Stream::default();
-    let mut out = std::fs::File::create(&part).map_err(|e| format!("create {}: {e}", part.display()))?;
     let url = cfg.image_url.trim();
     let local = url.strip_prefix("file://").or_else(|| url.starts_with('/').then_some(url));
-    let mut src: Box<dyn Read> = match local {
+    match local {
         Some(p) => {
             log(&format!("copying base image from {p}"));
-            Box::new(std::fs::File::open(p).map_err(|e| format!("open {p}: {e}"))?)
+            let _ = std::fs::remove_file(&part);
+            let mut src = std::fs::File::open(p).map_err(|e| format!("open {p}: {e}"))?;
+            let mut out = std::fs::File::create(&part).map_err(|e| format!("create {}: {e}", part.display()))?;
+            copy_logged(&mut src, &mut out, 0, log).map_err(|e| format!("copy {p}: {e}"))?;
+            out.sync_all().ok();
         }
         None => {
             seagent_net::http::ensure_online("desktop VM image download")?;
-            log(&format!("downloading {url}"));
-            let resp = seagent_net::http::agent_for(Duration::from_secs(3600), Duration::from_secs(30), url).get(url).call().map_err(|e| format!("download {url}: {e}"))?;
-            if resp.status().as_u16() != 200 {
-                let _ = std::fs::remove_file(&part);
-                return Err(format!("download {url}: HTTP {}", resp.status().as_u16()));
-            }
-            Box::new(resp.into_body().into_reader())
-        }
-    };
-    let mut buf = vec![0u8; 1 << 20];
-    let (mut n, mut next_log) = (0u64, 64u64 << 20);
-    loop {
-        let k = src.read(&mut buf).map_err(|e| format!("read {url}: {e}"))?;
-        if k == 0 {
-            break;
-        }
-        h.update(&buf[..k]);
-        out.write_all(&buf[..k]).map_err(|e| format!("write {}: {e}", part.display()))?;
-        n += k as u64;
-        if n >= next_log {
-            log(&format!("  {} MiB", n >> 20));
-            next_log += 64 << 20;
+            download_resumable(url, &part, log)?;
         }
     }
-    out.sync_all().ok();
-    let got = h.finish_hex();
+    let n = std::fs::metadata(&part).map(|m| m.len()).unwrap_or(0);
+    let got = seagent_net::crypto::sha256_file_hex(&part).map_err(|e| format!("read {}: {e}", part.display()))?;
     if got != want {
         let _ = std::fs::remove_file(&part);
         return Err(format!("{url}: sha256 {got} does not match the pinned {want} (refusing to use it)"));
@@ -102,6 +83,86 @@ pub fn ensure_base(cfg: &DesktopConfig, dir: &Path, log: &mut dyn FnMut(&str)) -
     std::fs::rename(&part, &dst).map_err(|e| e.to_string())?;
     log(&format!("verified {} ({} MiB, sha256 {want})", dst.display(), n >> 20));
     Ok(dst)
+}
+
+/// Attempts in a row that add no bytes before [`download_resumable`] gives up.
+const DOWNLOAD_RETRIES: u32 = 6;
+
+/// Download `url` into `part`. A dropped connection (common for a ~400 MB image on a slow or
+/// flaky link) is resumed with an HTTP Range request, and a `.part` an interrupted build left
+/// behind is continued the same way; a server without Range support starts over. The caller
+/// checks the pinned sha256, so a wrong resume can never be accepted.
+pub(crate) fn download_resumable(url: &str, part: &Path, log: &mut dyn FnMut(&str)) -> Result<(), String> {
+    let agent = seagent_net::http::agent_for(Duration::from_secs(3600), Duration::from_secs(30), url);
+    let len = |p: &Path| std::fs::metadata(p).map(|m| m.len()).unwrap_or(0);
+    let mut fails = 0u32;
+    loop {
+        let have = len(part);
+        if have == 0 {
+            log(&format!("downloading {url}"));
+        } else {
+            log(&format!("resuming {url} at {} MiB", have >> 20));
+        }
+        let mut req = agent.get(url);
+        if have > 0 {
+            req = req.header("Range", format!("bytes={have}-"));
+        }
+        let err = match req.call() {
+            Err(e) => e.to_string(),
+            Ok(resp) => {
+                let status = resp.status().as_u16();
+                let header = |n: &str| resp.headers().get(n).and_then(|v| v.to_str().ok()).map(str::to_string);
+                // The full size, when the server says it: a body that ends early is a drop too.
+                let total = match status {
+                    206 => header("content-range").and_then(|r| r.rsplit('/').next().and_then(|t| t.trim().parse::<u64>().ok())),
+                    _ => header("content-length").and_then(|l| l.trim().parse::<u64>().ok()),
+                };
+                let mut out = match status {
+                    416 if have > 0 => return Ok(()),
+                    206 => std::fs::OpenOptions::new().append(true).open(part),
+                    200 => std::fs::File::create(part),
+                    s => return Err(format!("download {url}: HTTP {s}")),
+                }
+                .map_err(|e| format!("open {}: {e}", part.display()))?;
+                let start = if status == 206 { have } else { 0 };
+                let r = copy_logged(&mut resp.into_body().into_reader(), &mut out, start, log);
+                out.sync_all().ok();
+                match r {
+                    Ok(n) if total.is_none_or(|t| n >= t) => return Ok(()),
+                    Ok(n) => format!("the connection closed at {} of {} MiB", n >> 20, total.unwrap_or(0) >> 20),
+                    Err(e) => e.to_string(),
+                }
+            }
+        };
+        let now = len(part);
+        fails = if now > have { 0 } else { fails + 1 };
+        if fails >= DOWNLOAD_RETRIES {
+            return Err(format!("download {url}: {err} ({DOWNLOAD_RETRIES} attempts without progress; building again continues from {} MiB)", now >> 20));
+        }
+        let wait = 1u64 << fails.min(5);
+        log(&format!("  download interrupted at {} MiB ({err}); retrying in {wait}s", now >> 20));
+        std::thread::sleep(Duration::from_secs(wait));
+    }
+}
+
+/// Copy `src` to the end of `out` (which already holds `start` bytes), logging every 64 MiB.
+/// Returns the total size.
+fn copy_logged(src: &mut dyn Read, out: &mut std::fs::File, start: u64, log: &mut dyn FnMut(&str)) -> std::io::Result<u64> {
+    const STEP: u64 = 64 << 20;
+    let mut buf = vec![0u8; 1 << 20];
+    let (mut n, mut next) = (start, (start / STEP + 1) * STEP);
+    loop {
+        let k = src.read(&mut buf)?;
+        if k == 0 {
+            return Ok(n);
+        }
+        out.write_all(&buf[..k])?;
+        n += k as u64;
+        if n >= next {
+            log(&format!("  {} MiB", n >> 20));
+            next += STEP;
+        }
+    }
 }
 
 /// A one-shot NoCloud seed server on 127.0.0.1 (the guest reaches it as 10.0.2.2).
@@ -363,5 +424,53 @@ mod tests {
         assert_eq!(std::fs::read(&p).unwrap(), b"not really qcow2");
         ensure_base(&c, &d.join("cache"), &mut |l| lines.push(l.to_string())).unwrap();
         assert!(lines.last().unwrap().contains("sha256 ok"), "{lines:?}");
+    }
+
+    /// A server that drops the first response half-way; the download resumes with a Range
+    /// request and ends byte-identical.
+    #[test]
+    fn a_dropped_download_resumes_with_a_range_request() {
+        use std::io::{BufRead, BufReader};
+        let body: Vec<u8> = (0..200_000u32).map(|i| (i % 251) as u8).collect();
+        let l = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = l.local_addr().unwrap().port();
+        let b = body.clone();
+        let server = std::thread::spawn(move || {
+            let mut ranges = vec![];
+            for (i, s) in l.incoming().take(2).enumerate() {
+                let mut s = s.unwrap();
+                let mut r = BufReader::new(s.try_clone().unwrap());
+                let mut range = None;
+                loop {
+                    let mut line = String::new();
+                    r.read_line(&mut line).unwrap();
+                    if line.trim().is_empty() {
+                        break;
+                    }
+                    if let Some(v) = line.to_ascii_lowercase().strip_prefix("range: bytes=") {
+                        range = v.trim().trim_end_matches('-').parse::<usize>().ok();
+                    }
+                }
+                ranges.push(range);
+                if i == 0 {
+                    let _ = write!(s, "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", b.len());
+                    let _ = s.write_all(&b[..b.len() / 2]);
+                } else {
+                    let from = range.unwrap_or(0);
+                    let _ = write!(s, "HTTP/1.1 206 Partial Content\r\nContent-Range: bytes {from}-{}/{}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", b.len() - 1, b.len(), b.len() - from);
+                    let _ = s.write_all(&b[from..]);
+                }
+            }
+            ranges
+        });
+        let d = seagent_core::tmp::TempDir::new("seagent-dvm-resume");
+        let part = d.path().join("base.part");
+        let mut lines = vec![];
+        download_resumable(&format!("http://127.0.0.1:{port}/base.qcow2"), &part, &mut |l| lines.push(l.to_string())).unwrap();
+        let ranges = server.join().unwrap();
+        assert_eq!(ranges[0], None);
+        assert_eq!(ranges[1], Some(body.len() / 2), "{lines:?}");
+        assert_eq!(std::fs::read(&part).unwrap(), body);
+        assert!(lines.iter().any(|l| l.contains("resuming")), "{lines:?}");
     }
 }
