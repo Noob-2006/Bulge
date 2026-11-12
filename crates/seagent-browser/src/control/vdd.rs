@@ -188,13 +188,13 @@ impl Status {
 }
 
 /// Where the installer script is: `$SEAGENT_VDD_DIR`, the app's resources beside the binary
-/// (`<exe dir>/vdd`), or this checkout's copy (development builds).
+/// (`<exe dir>/vdd`; a development build points `SEAGENT_VDD_DIR` at
+/// `apps/desktop/src-tauri/windows/vdd`).
 pub fn script_in(env: Option<PathBuf>, exe: Option<&Path>) -> Option<PathBuf> {
     let mut dirs: Vec<PathBuf> = env.into_iter().collect();
     if let Some(d) = exe.and_then(Path::parent) {
         dirs.push(d.join("vdd"));
     }
-    dirs.push(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../apps/desktop/src-tauri/windows/vdd"));
     dirs.into_iter().map(|d| d.join(SCRIPT)).find(|p| p.is_file())
 }
 
@@ -359,9 +359,11 @@ mod tests {
         assert_eq!(Action::parse("rm -rf"), None);
         let p = Path::new("C:\\Program Files\\SE Agent\\vdd\\install-vdd.ps1");
         assert_eq!(script_args(Action::Install, p), "-NoProfile -ExecutionPolicy Bypass -File \"C:\\Program Files\\SE Agent\\vdd\\install-vdd.ps1\"");
+        let checkout = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../apps/desktop/src-tauri/windows/vdd");
         assert!(script_args(Action::Uninstall, p).ends_with("\" -Uninstall"));
-        let found = script_in(None, None).expect("the checkout's install-vdd.ps1");
+        let found = script_in(Some(checkout), None).expect("the checkout's install-vdd.ps1");
         assert!(found.ends_with(SCRIPT));
+        assert_eq!(script_in(None, Some(Path::new("/nowhere/seagent"))), None, "nothing beside a binary without resources");
         let root = seagent_core::tmp::TempDir::new("seagent-vdd");
         std::fs::write(root.path().join(SCRIPT), "#").unwrap();
         assert_eq!(script_in(Some(root.path().to_path_buf()), None), Some(root.path().join(SCRIPT)), "$SEAGENT_VDD_DIR first");
@@ -408,7 +410,7 @@ mod tests {
         let s = probe();
         assert!(s.windows);
         assert_eq!(s.active(), s.monitor.is_some() && !s.forced_isolated);
-        assert!(s.script.is_some(), "the checkout's installer is found");
+        eprintln!("vdd probe: installer {:?}", s.script);
         let attached: Vec<Screen> = screens().into_iter().filter(|x| x.attached).collect();
         eprintln!("vdd probe: version {:?}, monitor {:?}, {} attached screens", s.version, s.monitor.as_ref().map(|m| m.rect), attached.len());
         match s.reason() {

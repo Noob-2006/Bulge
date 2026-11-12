@@ -8,7 +8,7 @@
 ; installs: yes) and runs vdd\install-vdd.ps1 elevated — one UAC prompt, and Windows may ask to
 ; install device software published by "SignPath Foundation". Already installed (its VDDPATH
 ; points at our configuration): nothing to do, so updates do not prompt again. The settings page
-; installs / repairs / removes it later; uninstalling the app removes it.
+; installs / repairs / removes it later; uninstalling the app removes it (an update does not).
 
 !macro NSIS_HOOK_PREINSTALL
   IfFileExists "$INSTDIR\seagent.exe" 0 +2
@@ -29,6 +29,8 @@
 !macro NSIS_HOOK_PREUNINSTALL
   IfFileExists "$INSTDIR\seagent.exe" 0 +2
     nsExec::Exec '"$INSTDIR\seagent.exe" daemon stop'
+  ; An update runs the old uninstaller with /UPDATE: keep the driver (no second UAC prompt).
+  StrCmp $UpdateMode 1 seagent_vdd_gone
   IfFileExists "$INSTDIR\vdd\install-vdd.ps1" 0 seagent_vdd_gone
     SetRegView 64
     ReadRegStr $0 HKLM "SOFTWARE\MikeTheTech\VirtualDisplayDriver" "VDDPATH"

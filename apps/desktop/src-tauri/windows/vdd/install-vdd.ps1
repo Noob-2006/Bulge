@@ -149,10 +149,13 @@ if ($Uninstall) {
     # 3. 刪除設定與登錄機碼。
     Remove-Item -Recurse -Force $ConfDir -ErrorAction SilentlyContinue
     Remove-Item -Recurse -Force $RegKey -ErrorAction SilentlyContinue
+    # 上一層若已經空了也一併刪掉（不是空的就保留）。
+    foreach ($d in (Split-Path $ConfDir), (Split-Path $RegKey)) { if (-not (Get-ChildItem $d -ErrorAction SilentlyContinue)) { Remove-Item $d -ErrorAction SilentlyContinue } }
     Write-Host '已移除虛擬顯示器。'; Show-Status; Exit-Script 0
 }
 
 # 1. 驗證檔案：SHA-256 必須等於上面釘選的值，.cat 與 .dll 必須是有效的 SignPath Foundation 簽章。
+$DriverDir = (Resolve-Path $DriverDir).Path
 foreach ($f in $Pinned.Keys) {
     $p = Join-Path $DriverDir $f
     if (-not (Test-Path $p)) { Write-Host -ForegroundColor Red "找不到 $p"; Exit-Script 3 }
