@@ -185,6 +185,9 @@ jobs:
       - name: Build installers
         working-directory: apps/desktop
         run: cargo tauri build --ci --target '${{ matrix.triple }}' --bundles '${{ matrix.bundles }}' --config src-tauri/tauri.ci.conf.json
+      - name: AppImage keeps the bundled Firecracker unpatched (linuxdeploy patchelfs it)
+        if: runner.os == 'Linux'
+        run: apps/desktop/scripts/appimage-vm-fix.sh '${{ matrix.triple }}'
       - name: The installers carry the built-in VM
         run: |
           set -euo pipefail
