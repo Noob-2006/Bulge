@@ -166,7 +166,7 @@ repository and are reviewed as code.
   do not contain it (`cargo tree --target x86_64-unknown-linux-gnu -i windows` is empty).
 * **Features**: `default-features = false` and only `Foundation`, `Graphics`,
   `Graphics_Capture`, `Graphics_DirectX`, `Graphics_DirectX_Direct3D11`, `Win32_Foundation`,
-  `Win32_Graphics_Direct3D`, `Win32_Graphics_Direct3D11`, `Win32_Graphics_Dxgi`,
+  `Win32_Graphics_Direct3D`, `Win32_Graphics_Direct3D11`, `Win32_Graphics_Gdi`, `Win32_Graphics_Dxgi`,
   `Win32_Graphics_Dxgi_Common`, `Win32_System_WinRT`, `Win32_System_WinRT_Direct3D11`,
   `Win32_System_WinRT_Graphics_Capture`, `Win32_UI_WindowsAndMessaging`.
 * **Tree**: `windows` 0.62.2, `windows-core`, `-collections`, `-future`, `-numerics`, `-result`,
@@ -178,14 +178,83 @@ repository and are reviewed as code.
 * **`unsafe`**: the generated bindings are `unsafe` by nature (≈326k occurrences in `windows`,
   almost all generated FFI signatures; a few hundred hand-written ones in `windows-core` and its
   helpers for refcounting, HSTRING and the vtable shims). The agent's own `unsafe` is confined to
-  `wgc.rs` (D3D11 device / staging-texture map and the row copy, bounded by `RowPitch`).
+  `wgc.rs` (D3D11 device / staging-texture map and the row copy, bounded by `RowPitch`) and
+  `dxgi_dup.rs` (the same pattern for a duplicated output).
 * **Status / measured result**: WGC delivers 53.6 fps for a window on the *displayed* desktop.
   For a window on the isolated (non-displayed) Bot Desktop, the capture item reports 0×0 and
   `CreateCaptureSession` fails with `ERROR_INVALID_STATE` (0x8007139F), whether it is called from
   the service thread or from a thread bound to that desktop (`real_wgc_on_the_bot_desktop`).
-  DWM does not compose a desktop that is not displayed, so WGC has nothing to deliver there. **If
-  the live view does not adopt WGC for a displayed-session mode, remove this crate again**: as it
-  stands, it fails the budget rule's first test.
+  DWM does not compose a desktop that is not displayed, so nothing can deliver frames there.
+  The displayed-session mode now exists: with the bundled virtual display driver (next section)
+  the Bot Desktop is hosted on a virtual monitor of the displayed desktop, and
+  `control/dxgi_dup.rs` captures that monitor with DXGI Desktop Duplication through this crate's
+  `Win32_Graphics_Dxgi` / `Direct3D11` bindings; `Win32_Graphics_Gdi` was added for it (`IDXGIOutput::GetDesc` returns an `HMONITOR`; bindings only, no new crate). The crate stays for that.
+
+### Bundled Windows driver: Virtual Display Driver (MttVDD) — review notes
+
+Not a crate: a signed driver package shipped as data in the Windows installers (resource `vdd/`)
+and installed only with the user's administrator approval. Accepted by the project owner
+(2026-11-12: bundle the virtual display driver; it is the only way to give native GPU apps on the
+Bot Desktop a ≥ 30 fps live view, see `crates/seagent-browser/src/control/vdd.rs`).
+
+* **What**: the IddCx (Indirect Display, user-mode UMDF 2.25) driver of
+  [VirtualDrivers/Virtual-Display-Driver](https://github.com/VirtualDrivers/Virtual-Display-Driver),
+  **MIT** (`LICENSE`, © 2024 Virtual Display; shipped as `vdd/driver/LICENSE.txt`). Release
+  **25.7.23** (latest stable on 2026-11-12, tag commit `d437ebc9b4`), asset
+  `VirtualDisplayDriver-x86.Driver.Only.zip` — the x64 driver despite the name (`MttVDD.inf`
+  `[Standard.NTamd64]`, `DriverVer = 12/24/2024,11.30.4.434`, hardware id `Root\MttVDD`,
+  `UpperFilters = IndirectKmd`, service `WUDFRd` — both inbox Windows components).
+* **Download**: `https://github.com/VirtualDrivers/Virtual-Display-Driver/releases/download/25.7.23/VirtualDisplayDriver-x86.Driver.Only.zip`
+  (132 118 bytes), SHA-256 `e24210692b442b39af763536330ce78b423f19342b7a7792c26de3944e418b3a`;
+  license from `https://raw.githubusercontent.com/VirtualDrivers/Virtual-Display-Driver/25.7.23/LICENSE`,
+  SHA-256 `c2285c867ddc9b88f43b4f8fa2c77a9eec66207166c1217b37353a2ccd62ac03`. Fetched at build time
+  by `apps/desktop/scripts/fetch-vdd.sh` (from `prepare-sidecar.sh` for Windows targets); nothing
+  is committed to git.
+* **Files and pins** (checked by `fetch-vdd.sh` at build time *and* by `install-vdd.ps1` on the
+  user's machine before anything is installed):
+
+  | File | Size | SHA-256 |
+  |---|---|---|
+  | `MttVDD.inf` | 4 132 | `550d211fe481e74dfe3f9d724ed78be48b3a9113405965d683d9373e8d672f5d` |
+  | `MttVDD.dll` | 251 640 | `c9ca837f57a98fbd43bc416a7f535a95843626e7759eaf85cf0cd7ce334dbb05` |
+  | `mttvdd.cat` | 13 017 | `08a0093fc9b2e32b287a6f8a77ca4de0a31830d29fc33d2b13a918dc859468f6` |
+
+  The release's `vdd_settings.xml` is not shipped (not in the catalog; the installer writes its own).
+* **Signature**: `mttvdd.cat` and `MttVDD.dll` are Authenticode-signed by **`CN=SignPath
+  Foundation, O=SignPath Foundation, L=Lewes, S=Delaware, C=US`** (certificate thumbprint
+  `3CF8CF26D8BA266C3A483AB7D26D4A818E317D76`, valid 2024-12-17 – 2027-09-08), chain → `GlobalSign
+  GCC R45 CodeSigning CA 2020` → `GlobalSign Code Signing Root R45` (in the Windows trusted root
+  store), RFC 3161 timestamp by DigiCert Timestamp 2024 (so the signature stays valid after the
+  certificate expires). `Get-AuthenticodeSignature`: `Valid` for both; `signtool verify /pa /c
+  mttvdd.cat` verifies `MttVDD.inf` and `MttVDD.dll` as members of the catalog. It is **not**
+  Microsoft attestation/WHQL-signed (`signtool verify /kp` fails): no open-source IddCx driver
+  with a Microsoft signature exists today (SudoVDA and LuminalVGD are also OV / self-signed). That
+  is acceptable here because the driver is user-mode (UMDF, loaded by `WUDFHost.exe`); kernel-mode
+  code-signing policy, Secure Boot and test signing are not involved — the installer never
+  touches them, and never adds a certificate to any store. The visible consequence: Windows asks
+  once "Would you like to install this device software? Publisher: SignPath Foundation".
+* **Attack surface**: the driver runs as LocalService inside `WUDFHost.exe`. It serves a named
+  pipe `\\.\pipe\MTTVirtualDisplayPipe` with the DACL `D:(A;;GA;;;WD)` (everyone): any local
+  process can reload the driver, change its monitor count / GPU or read its settings. That is a
+  local denial-of-service / display-reconfiguration lever, not an elevation (it writes only its
+  settings file). The settings file and its directory are what the driver trusts, so the installer
+  does not use the upstream default `C:\VirtualDisplayDriver` (any user may create it) but
+  `%ProgramFiles%\SEAgent\VirtualDisplay` (administrators-only write), pointed to by
+  `HKLM\SOFTWARE\MikeTheTech\VirtualDisplayDriver\VDDPATH`; custom EDID and logging stay off.
+* **What it changes on the machine**: a driver package in the driver store (`oemNN.inf`), one
+  root-enumerated display adapter (`Root\MttVDD`), the registry value above and the settings
+  directory; one virtual monitor (1920×1080 @ 60 Hz) placed outside the bottom-right corner of the
+  real screens (corner contact only), primary screen and real screens unchanged.
+  `install-vdd.ps1 -Uninstall` (also run by the NSIS uninstaller and the MSI feature removal, and
+  by the settings page's 解除安裝 button) removes all of it.
+* **Also needed in-tree**: `windows-sys` features `Win32_System_Registry` (read the display
+  class key for the installed version) and `Win32_UI_Shell` (`ShellExecuteExW` "runas" for the
+  settings page's elevated install) on `seagent-browser` — `windows-sys` 0.52 is already in the
+  tree, so no crate is added.
+* **Updating**: bump `release` and every pin in `fetch-vdd.sh`, `install-vdd.ps1`, `vdd.rs`
+  (`RELEASE`, `DRIVER_VERSION`) and this section together;
+  `vdd::tests::the_installer_script_matches_the_reviewed_driver` fails when they disagree. Re-run
+  the signature checks above on the new files and record the signer here.
 
 **Gaps (reviewer action, not yet fixed):** `webpki-roots`, `ring` and `base64` are declared without
 a reason comment, which the budget rule above requires. They are load-bearing (TLS trust, crypto,

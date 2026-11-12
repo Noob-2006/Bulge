@@ -43,4 +43,6 @@ fi
 chmod +x "$out"/seagent-* 2>/dev/null || true
 # The Linux AppImage bundles a CJK font (bundle.linux.appimage.files): fetch it (pinned + sha256).
 case "$triple" in *linux-gnu*) "$here/fetch-cjk-font.sh" ;; esac
+# The Windows installers bundle the virtual display driver (resources vdd/, pinned + sha256).
+case "$triple" in *windows*) "$here/fetch-vdd.sh" ;; esac
 ls -l "$out"

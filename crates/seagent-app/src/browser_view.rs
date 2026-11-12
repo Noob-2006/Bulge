@@ -42,6 +42,12 @@
 //!   browser's noVNC (`GET /view/novnc?ticket=` serves the bootstrap page); `open: true`
 //!   redeems it at once and returns the loopback noVNC URL for the UI to open.
 //!
+//! - `view.display.status` (read): the Windows virtual display behind the Bot Desktop
+//!   (`seagent_browser::control::vdd`): installed / version / attached monitor / hosted mode, and
+//!   when it is not in use why native apps stream slower. `view.display.driver {action}` (admin):
+//!   `install` / `repair` / `uninstall` runs the bundled installer elevated (a UAC prompt on the
+//!   user's desktop) and returns at once; the page polls the status.
+//!
 //! The console does not poll these frames any more: `GET /view/live` (WebSocket,
 //! [`crate::live_view`]) pushes the browser screencast, desktop frames and the agent's live
 //! terminal as they happen; the frame methods stay for other clients and as the fallback.
@@ -67,6 +73,8 @@ pub const METHODS: &[&str] = &[
     "view.vm.start",
     "view.vm.stop",
     "view.novnc",
+    "view.display.status",
+    "view.display.driver",
 ];
 
 type R = Result<Value, (i64, String)>;
@@ -292,7 +300,27 @@ pub fn call(c: &Ctx, method: &str, p: &Value) -> R {
             let t = view::issue_ticket(port, pw, None, now);
             Ok(json!({"ticket": t, "path": format!("/view/novnc?ticket={t}"), "expiresAtMs": now + view::NOVNC_TICKET_TTL_MS}))
         }
+        "view.display.status" => Ok(seagent_browser::control::vdd::probe().to_json()),
+        "view.display.driver" => {
+            use seagent_browser::control::vdd;
+            let action = s(p, "action").and_then(vdd::Action::parse).ok_or((-32602, "action must be install, repair or uninstall".to_string()))?;
+            display_driver(action)
+        }
         m => Err((-32601, format!("unknown method {m}"))),
+    }
+}
+
+/// Run the bundled virtual display installer elevated (Windows; elsewhere there is none).
+fn display_driver(action: seagent_browser::control::vdd::Action) -> R {
+    #[cfg(windows)]
+    {
+        seagent_browser::control::vdd::elevate(action).map_err(|e| (-32000, e))?;
+        Ok(json!({"started": true, "uninstall": action == seagent_browser::control::vdd::Action::Uninstall}))
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = action;
+        Err((-32001, "the virtual display driver is a Windows component: the Bot Desktop on this platform is composed without it".into()))
     }
 }
 
@@ -553,6 +581,30 @@ mod tests {
         assert_eq!(get(&base, "/view/browser", None, None).0, 401, "its data still needs the token");
         assert_eq!(get(&base, "/view/desktop/frame", Some("wrong"), None).0, 401);
         let _ = std::fs::remove_dir_all(&home);
+    }
+
+    /// The settings page's virtual display methods: the status always answers (Windows: the
+    /// real probe; elsewhere "not supported"), a bad action is refused before anything runs, and
+    /// off Windows there is nothing to install. (The elevated install itself is user-approved:
+    /// `real_vdd_native_apps_stream_at_30_fps` in seagent-browser checks its result.)
+    #[test]
+    fn display_status_and_driver_actions() {
+        let d = seagent_core::tmp::TempDir::new("seagent-bview-vdd");
+        let vms = DesktopVms::new(DesktopConfig::default(), &d.join("data"), &d.join("cache"), &d.join("run"));
+        let (bcfg, home) = (BrowserConfig::default(), d.join("data"));
+        let c = Ctx { home: &home, cfg: &bcfg, m: manager::global(), vms: &vms };
+        let s = call(&c, "view.display.status", &json!({})).unwrap();
+        assert_eq!(s["supported"], cfg!(windows), "{s}");
+        assert!(["isolated", "virtual-display"].contains(&s["mode"].as_str().unwrap()), "{s}");
+        assert_eq!(s["bundled"]["release"], seagent_browser::control::vdd::RELEASE);
+        if cfg!(windows) && s["active"] == false {
+            assert!(s["message"].as_str().is_some_and(|m| m.contains("fps") || m.contains("修復")), "{s}");
+        }
+        assert_eq!(call(&c, "view.display.driver", &json!({"action": "format c:"})).unwrap_err().0, -32602);
+        assert_eq!(call(&c, "view.display.driver", &json!({})).unwrap_err().0, -32602);
+        if !cfg!(windows) {
+            assert_eq!(call(&c, "view.display.driver", &json!({"action": "install"})).unwrap_err().0, -32001);
+        }
     }
 
     #[cfg(unix)]

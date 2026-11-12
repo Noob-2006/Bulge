@@ -15,3 +15,5 @@ __pycache__/
 /src-tauri/fonts/*.ttf
 # Built by scripts/build-wasi-tools.sh (iOS WASI tools, pinned + sha256 in tools.json)
 /src-tauri/wasi-tools/
+# Downloaded by scripts/fetch-vdd.sh (Windows virtual display driver, pinned + sha256)
+/src-tauri/windows/vdd/driver/

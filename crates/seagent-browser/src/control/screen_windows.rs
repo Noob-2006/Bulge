@@ -117,8 +117,28 @@ impl WinDesktop {
         drop(map);
         let sd = self.state_dir();
         std::fs::write(sd.join("launcher.pid"), std::process::id().to_string()).map_err(|e| e.to_string())?;
-        std::fs::write(sd.join("env"), format!("SEAGENT_BD_DESKTOP={}\nSEAGENT_BD_GEOMETRY={}\n", self.qualified(), self.geometry)).map_err(|e| e.to_string())?;
+        // With the virtual display attached the desktop is hosted on that monitor instead
+        // (`super::vdd`): apps start on the displayed desktop and are kept on the monitor.
+        let env = match super::vdd::host_region() {
+            Some(r) => {
+                std::fs::write(sd.join("hosted"), format!("{} {} {} {}", r.x, r.y, r.w, r.h)).map_err(|e| e.to_string())?;
+                format!("SEAGENT_BD_DESKTOP=WinSta0\\Default\nSEAGENT_BD_GEOMETRY={}x{}\nSEAGENT_BD_ORIGIN={},{}\n", r.w, r.h, r.x, r.y)
+            }
+            None => {
+                let _ = std::fs::remove_file(sd.join("hosted"));
+                format!("SEAGENT_BD_DESKTOP={}\nSEAGENT_BD_GEOMETRY={}\n", self.qualified(), self.geometry)
+            }
+        };
+        super::vdd::set_hosted(super::vdd::parse_hosted(&std::fs::read_to_string(sd.join("hosted")).unwrap_or_default()));
+        std::fs::write(sd.join("env"), env).map_err(|e| e.to_string())?;
         Ok(())
+    }
+
+    /// The virtual-monitor region this desktop is hosted on (`None`: the isolated desktop).
+    pub fn hosted(&self) -> Option<super::vdd::Rect> {
+        let r = self.running().then(|| std::fs::read_to_string(self.state_dir().join("hosted")).ok()).flatten().and_then(|s| super::vdd::parse_hosted(&s));
+        super::vdd::set_hosted(r);
+        r
     }
 
     /// Close this process's handle to the desktop (destroyed once the browser on it is gone) and
@@ -130,7 +150,9 @@ impl WinDesktop {
             unsafe { CloseDesktop(h) };
         }
         let sd = self.state_dir();
-        for n in ["launcher.pid", "env", "activity"] {
+        super::vdd::close_hosted();
+        super::vdd::set_hosted(None);
+        for n in ["launcher.pid", "env", "activity", "hosted"] {
             let _ = std::fs::remove_file(sd.join(n));
         }
         had.is_some()
@@ -160,6 +182,9 @@ impl WinDesktop {
     /// desktop, so while this one is not active the picture is composed from its windows
     /// (`PrintWindow`) instead of read from the (black) framebuffer.
     pub fn screenshot(&self) -> Result<Shot, String> {
+        if let Some(r) = self.hosted() {
+            return super::vdd::grab_region(r);
+        }
         let name = self.name();
         // The capture runs on its own thread: SetThreadDesktop only takes effect on a thread with
         // no windows, and must not disturb this thread's desktop.
@@ -978,6 +1003,9 @@ pub fn spawn_logged_on_desktop(qualified: &str, exe: &Path, args: &[String], env
             CloseHandle(pi.hProcess);
             return Err(format!("cannot put pid {} in a job object: {e}", pi.dwProcessId));
         }
+        if qualified.eq_ignore_ascii_case("WinSta0\\Default") {
+            super::vdd::adopt_pid(pi.dwProcessId);
+        }
         ResumeThread(pi.hThread);
         CloseHandle(pi.hThread);
         Ok(DesktopChild { pid: pi.dwProcessId, handle: pi.hProcess })
@@ -1125,7 +1153,11 @@ mod tests {
         assert!(d.running(), "the desktop is held open");
         assert!(desktop_names().iter().any(|n| n == &d.name()));
         let env = std::fs::read_to_string(d.state_dir().join("env")).unwrap();
-        assert!(env.contains(&format!("SEAGENT_BD_DESKTOP=WinSta0\\{}", d.name())));
+        // With the virtual display attached the desktop is hosted on its monitor (vdd.rs).
+        match d.hosted() {
+            Some(r) => assert!(env.contains("SEAGENT_BD_DESKTOP=WinSta0\\Default") && env.contains(&format!("SEAGENT_BD_ORIGIN={},{}", r.x, r.y)), "{env}"),
+            None => assert!(env.contains(&format!("SEAGENT_BD_DESKTOP=WinSta0\\{}", d.name()))),
+        }
         // A capture succeeds (pixels may be black: the desktop has never been the active one).
         match d.screenshot() {
             Ok(s) => assert!(s.width > 0 && s.height > 0 && s.bgra.len() == (s.width * s.height * 4) as usize),

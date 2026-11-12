@@ -79,7 +79,11 @@ function lvOpen(cur) {
     if (LV.ws !== ws) return;
     if (typeof e.data !== 'string') return lvShow(cur, e.data);
     let m; try { m = JSON.parse(e.data); } catch { return; }
-    if (m.t === 'hello') { LV.live = true; LV.fails = 0; lvBadge(); }
+    if (m.t === 'hello') {
+      LV.live = true; LV.fails = 0; lvBadge();
+      // Windows Bot Desktop without the virtual display: say once why native apps stream slower.
+      if (m.display && m.display.reason && !LV.vddTold) { LV.vddTold = true; toast(m.display.message + LVL('（設定 → 虛擬顯示器）', ' (Settings → Virtual display)')); }
+    }
     else if (m.t === 'frame' || m.t === 'patch') LV.meta = m;
     else if (m.t === 'stats') { LV.stats = m; lvBadge(); }
     else if (m.t === 'nodisplay') { LV.nodisplay = true; $('workEmpty').textContent = LVL('這個桌面沒有畫面可顯示，下方是代理正在執行的指令。', 'This desktop has no display to show; the agent\'s commands are below.'); lvTerm(true); }

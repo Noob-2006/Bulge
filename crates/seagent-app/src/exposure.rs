@@ -590,6 +590,8 @@ mod tests {
             ("view.desktop.input", Scope::Write),
             ("view.desktop.list", Scope::Read),
             ("view.vm.start", Scope::Admin),
+            ("view.display.status", Scope::Read),
+            ("view.display.driver", Scope::Admin),
             ("view.vm.stop", Scope::Admin),
             ("gate.answer", Scope::Approve),
             ("shutdown", Scope::Admin),
