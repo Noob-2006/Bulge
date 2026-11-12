@@ -8,6 +8,7 @@
 //! only: `/proc`, `statvfs`, the session store, the usage ledger and the audit file.
 
 use super::ui_methods::UiCtx;
+use seagent_core::platform::sysinfo::{self, CpuTimes};
 use serde_json::{json, Value};
 use std::collections::VecDeque;
 use std::path::Path;
@@ -16,15 +17,17 @@ use std::sync::{Mutex, OnceLock};
 /// Samples kept for the trend lines (at the UI's 3 s poll: about six minutes).
 const SERIES_LEN: usize = 120;
 
-#[derive(Clone, Copy, Default)]
-struct CpuTimes {
-    busy: u64,
-    total: u64,
-}
+/// The CPU share is measured over at least this long; a poll sooner than that (two console
+/// tabs) reuses the previous figure instead of dividing by a few milliseconds.
+const CPU_MIN_WINDOW_MS: u64 = 500;
+/// The first poll has no earlier reading: it measures over this long instead of showing 0%.
+const CPU_FIRST_WINDOW_MS: u64 = 250;
 
 #[derive(Default)]
 struct Sampler {
-    cpu: Option<CpuTimes>,
+    /// The reading the next CPU share is measured from, with its time (ms).
+    cpu: Option<(u64, CpuTimes)>,
+    cpu_pct: f64,
     net: Option<(u64, u64, u64)>,
     series: VecDeque<Value>,
 }
@@ -49,15 +52,29 @@ fn read(p: &str) -> String {
     std::fs::read_to_string(p).unwrap_or_default()
 }
 
-fn cpu_times(stat: &str) -> Option<CpuTimes> {
-    let f: Vec<u64> = stat.lines().next()?.split_whitespace().skip(1).filter_map(|x| x.parse().ok()).collect();
-    if f.len() < 4 {
-        return None;
+/// Busy share of all CPUs (0–100), delta-based: from the previous reading to this one (at
+/// least [`CPU_MIN_WINDOW_MS`] apart; the very first call measures [`CPU_FIRST_WINDOW_MS`]).
+/// Where the OS refuses machine CPU times (Android apps cannot read `/proc/stat`) the
+/// one-minute load average per core stands in.
+fn cpu_pct(g: &mut Sampler, now: u64, cpus: usize, load1: Option<f64>) -> f64 {
+    let Some(mut cur) = sysinfo::cpu_times() else {
+        return load1.map(|l| (l * 100.0 / cpus.max(1) as f64).clamp(0.0, 100.0)).unwrap_or(g.cpu_pct);
+    };
+    let base = match g.cpu {
+        Some((t0, _)) if now.saturating_sub(t0) < CPU_MIN_WINDOW_MS => return g.cpu_pct,
+        Some((_, b)) => b,
+        None => {
+            let first = cur;
+            std::thread::sleep(std::time::Duration::from_millis(CPU_FIRST_WINDOW_MS));
+            cur = sysinfo::cpu_times().unwrap_or(first);
+            first
+        }
+    };
+    if let Some(p) = sysinfo::cpu_busy_pct(base, cur) {
+        g.cpu_pct = p;
     }
-    // user nice system idle iowait irq softirq steal …; idle + iowait are not busy.
-    let idle = f[3] + f.get(4).copied().unwrap_or(0);
-    let total: u64 = f.iter().take(8).sum();
-    Some(CpuTimes { busy: total.saturating_sub(idle), total })
+    g.cpu = Some((now, cur));
+    g.cpu_pct
 }
 
 #[cfg_attr(not(any(target_os = "linux", target_os = "android")), allow(dead_code))]
@@ -115,22 +132,21 @@ fn proc_self() -> Value {
 
 /// Host metrics and one series sample; rates are per second since the previous call.
 fn host(c: &UiCtx, running: usize, now: u64) -> Value {
-    let cpu_now = cpu_times(&read("/proc/stat"));
     #[cfg(any(target_os = "linux", target_os = "android"))]
     let (mt, ma, st, sf) = meminfo(&read("/proc/meminfo"));
-    // No /proc here: memory from platform::sysinfo, swap unknown (0); CPU / load / network
-    // stay 0 until a per-OS sampler exists.
+    // No /proc here: physical memory from platform::sysinfo (GlobalMemoryStatusEx, Mach VM
+    // statistics), swap unknown (0).
     #[cfg(not(any(target_os = "linux", target_os = "android")))]
-    let (mt, ma, st, sf) = (seagent_core::platform::sysinfo::total_memory().unwrap_or(0), seagent_core::platform::sysinfo::available_memory().unwrap_or(0), 0u64, 0u64);
-    let load: Vec<f64> = read("/proc/loadavg").split_whitespace().take(3).filter_map(|x| x.parse().ok()).collect();
+    let (mt, ma, st, sf) = (sysinfo::total_memory().unwrap_or(0), sysinfo::available_memory().unwrap_or(0), 0u64, 0u64);
+    let mut load: Vec<f64> = read("/proc/loadavg").split_whitespace().take(3).filter_map(|x| x.parse().ok()).collect();
+    if load.is_empty() {
+        load = sysinfo::load_average().map(|l| l.to_vec()).unwrap_or_default();
+    }
     let uptime = read("/proc/uptime").split_whitespace().next().and_then(|x| x.parse::<f64>().ok()).unwrap_or(0.0);
     let (rx, tx) = net_bytes(&read("/proc/net/dev"));
     let cpus = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
     let mut g = sampler().lock().unwrap_or_else(|e| e.into_inner());
-    let cpu_pct = match (g.cpu, cpu_now) {
-        (Some(a), Some(b)) if b.total > a.total => (b.busy.saturating_sub(a.busy)) as f64 * 100.0 / (b.total - a.total) as f64,
-        _ => 0.0,
-    };
+    let cpu_pct = cpu_pct(&mut g, now, cpus, load.first().copied());
     let (rx_rate, tx_rate) = match g.net {
         Some((t0, r0, x0)) if now > t0 => {
             let dt = (now - t0) as f64 / 1000.0;
@@ -138,7 +154,6 @@ fn host(c: &UiCtx, running: usize, now: u64) -> Value {
         }
         _ => (0.0, 0.0),
     };
-    g.cpu = cpu_now.or(g.cpu);
     g.net = Some((now, rx, tx));
     let mem_pct = if mt > 0 { (mt - ma.min(mt)) as f64 * 100.0 / mt as f64 } else { 0.0 };
     g.series.push_back(json!({"ts": now, "cpu": round1(cpu_pct), "mem": round1(mem_pct), "load": load.first().copied().unwrap_or(0.0), "agents": running, "rx": rx_rate.round(), "tx": tx_rate.round()}));
@@ -152,7 +167,7 @@ fn host(c: &UiCtx, running: usize, now: u64) -> Value {
     #[cfg(any(target_os = "linux", target_os = "android"))]
     let hostname = read("/proc/sys/kernel/hostname").trim().to_string();
     #[cfg(not(any(target_os = "linux", target_os = "android")))]
-    let hostname = seagent_core::platform::sysinfo::hostname();
+    let hostname = sysinfo::hostname();
     json!({
         "hostname": hostname,
         "os": os_name(),
@@ -247,10 +262,32 @@ pub fn status(c: &UiCtx) -> Value {
 mod tests {
     use super::*;
 
+    /// Regression (Windows status bar "CPU 0.0%"): the first poll already measures a real
+    /// window, a poll right after it reuses that figure, and a later one measures again.
+    #[test]
+    fn cpu_share_is_measured_from_the_first_poll() {
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let s2 = stop.clone();
+        let spin = std::thread::spawn(move || {
+            let mut x = 0u64;
+            while !s2.load(std::sync::atomic::Ordering::Relaxed) {
+                x = std::hint::black_box(x.wrapping_add(1));
+            }
+        });
+        let mut g = Sampler::default();
+        let first = cpu_pct(&mut g, 10_000, 1, None);
+        assert!(first > 0.0 && first <= 100.0, "{first}");
+        assert_eq!(cpu_pct(&mut g, 10_100, 1, None), first, "a poll inside the window reuses the figure");
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        let later = cpu_pct(&mut g, 10_600, 1, None);
+        assert!(later > 0.0 && later <= 100.0, "{later}");
+        assert_eq!(g.cpu.map(|(t, _)| t), Some(10_600));
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        spin.join().unwrap();
+    }
+
     #[test]
     fn proc_parsers() {
-        let t = cpu_times("cpu  100 0 50 800 50 0 0 0 0 0\ncpu0 1 2 3 4\n").unwrap();
-        assert_eq!((t.busy, t.total), (150, 1000));
         let (mt, ma, st, sf) = meminfo("MemTotal:       1000 kB\nMemFree: 1 kB\nMemAvailable:    250 kB\nSwapTotal: 0 kB\nSwapFree: 0 kB\n");
         assert_eq!((mt, ma, st, sf), (1_024_000, 256_000, 0, 0));
         let dev = "Inter-|   Receive\n face |bytes\n    lo: 500 1 0 0 0 0 0 0 500 1 0 0 0 0 0 0\n  eth0: 1000 10 0 0 0 0 0 0 2000 20 0 0 0 0 0 0\n";
