@@ -102,7 +102,7 @@ pub fn locate() -> Option<Bundle> {
 
 /// [`locate`] as a pure function of `$SEAGENT_VM_BUNDLE` and the running executable.
 pub fn locate_with(env: Option<PathBuf>, exe: Option<&Path>) -> Option<Bundle> {
-    let explicit = env.filter(|p| !p.as_os_str().is_empty());
+    let explicit = env.filter(|p| !p.as_os_str().is_empty()).map(|p| plain_path(&p));
     let cands: Vec<PathBuf> = match explicit {
         // An explicit directory is the only candidate: a test or a packager that names one
         // must never pick up another installation's bundle by accident.
@@ -271,6 +271,16 @@ pub fn arch_matches(bundle: &str, host: &str) -> bool {
     bundle.is_empty() || norm(bundle) == norm(host)
 }
 
+/// `\\?\C:\…` (what Tauri's resource dir is on Windows) → `C:\…`, so paths shown to the user
+/// and handed to QEMU read normally. UNC (`\\?\UNC\…`) and other paths are kept as they are.
+pub fn plain_path(p: &Path) -> PathBuf {
+    let s = p.to_string_lossy();
+    match s.strip_prefix(r"\\?\") {
+        Some(rest) if rest.as_bytes().get(1) == Some(&b':') => PathBuf::from(rest),
+        _ => p.to_path_buf(),
+    }
+}
+
 fn plain_relative(p: &str) -> bool {
     !p.is_empty() && !Path::new(p).is_absolute() && !p.contains('\\') && p.split('/').all(|c| !c.is_empty() && c != "." && c != "..")
 }
@@ -338,6 +348,13 @@ mod tests {
         // A damaged runtime file.
         std::fs::write(t.path().join("runtime/qemu/qemu-system-x86_64.exe"), b"other").unwrap();
         assert!(b.verify_runtime().unwrap_err().contains("damaged"));
+    }
+
+    #[test]
+    fn verbatim_windows_paths_are_shown_plainly() {
+        assert_eq!(plain_path(Path::new(r"\\?\C:\Program Files\SE Agent\vm")), PathBuf::from(r"C:\Program Files\SE Agent\vm"));
+        assert_eq!(plain_path(Path::new(r"\\?\UNC\srv\share\vm")), PathBuf::from(r"\\?\UNC\srv\share\vm"));
+        assert_eq!(plain_path(Path::new("/usr/lib/SE Agent/vm")), PathBuf::from("/usr/lib/SE Agent/vm"));
     }
 
     #[test]
