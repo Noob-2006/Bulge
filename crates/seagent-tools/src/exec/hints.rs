@@ -38,6 +38,7 @@ fn rules() -> &'static [Rule] {
             (r(r"(?:fatal|error):.*?'([^']+)' already exists"), |g| format!("'{g}' already exists — retrying unchanged will keep failing. Reuse it, choose another name, or delete it first if it is genuinely stale.")),
             (r(r"(API rate limit|was submitted too quickly)"), |_| "GitHub API rate limit hit — immediate retries will keep failing. Continue with other work and retry this operation later.".into()),
             (r(r"(Permission denied|EACCES)"), |_| "Permission denied. Check ownership/mode of the target path (`ls -la`); prefer a user-writable location. Only escalate to sudo if the task genuinely requires it.".into()),
+            (r(r"(Access is denied|Access to the path .* is denied|UnauthorizedAccessException|存取被拒|拒絕存取)"), |_| "Access is denied. In the Windows exec sandbox (AppContainer) a command can read system files, Program Files and the workspace, and write only the workspace and $env:TEMP (its private temp dir); the user profile, other AppData folders and other drives are off limits. Work inside the workspace or $env:TEMP instead of retrying elsewhere; for a web browser use the `browser` tool.".into()),
         ]
     })
 }
@@ -65,6 +66,26 @@ pub fn annotate_failure(_command: &str, exit_code: i32, output: &str) -> Option<
         }
     }
     exit_hint(exit_code).map(String::from)
+}
+
+fn browser_launch() -> &'static Regex {
+    static R: OnceLock<Regex> = OnceLock::new();
+    R.get_or_init(|| {
+        let name = r"(?:msedge|chrome|chromium(?:-browser)?|brave(?:-browser)?|firefox|google-chrome(?:-stable)?|microsoft-edge(?:-stable)?)";
+        Regex::new(&format!(
+            r#"(?im)(?:^|[\\/"';&|(]\s*){name}(?:\.exe)?["']?\s+(?:--\w|-ArgumentList|https?://|about:)|\bStart-Process\b(?:\s+-FilePath)?\s+(?:["'][^"']*|[^"';|\s]*){name}\b|^\s*start\s+(?:""\s+)?(?:/\w+\s+)*{name}\b"#
+        ))
+        .expect("browser launch pattern")
+    })
+}
+
+/// A note for a shell command that starts a web browser by hand (`msedge.exe --remote-…`,
+/// `Start-Process chrome`, `start msedge`, `google-chrome --headless …`), whatever its exit
+/// code: inside the exec sandbox such a browser cannot write a profile, the agent cannot drive
+/// it and the user never sees it, while the `browser` tool starts one outside the sandbox that
+/// streams to the live view.
+pub fn browser_launch_note(command: &str) -> Option<&'static str> {
+    browser_launch().is_match(command).then_some("To use a web browser, call the `browser` tool (action=start, then navigate / snapshot / act): it starts the agent's own browser outside the exec sandbox with its own profile, and the user watches it live in the side pane. A browser started from the shell runs inside the sandbox (no writable profile directory, not controllable, not shown to the user) — do not retry this way.")
 }
 
 const READONLY_HEADS: [&str; 17] = ["grep", "rg", "ag", "find", "ls", "cat", "head", "tail", "jq", "awk", "sed", "strings", "zcat", "journalctl", "dmesg", "echo", "printf"];
@@ -135,6 +156,28 @@ mod tests {
         assert_eq!(annotate_failure("x", 2, "something else"), None);
         let far = format!("{}bash: foo: command not found", "x".repeat(5000));
         assert_eq!(annotate_failure("foo", 2, &far), None, "only the head is scanned");
+    }
+
+    #[test]
+    fn browser_launch_via_shell_points_at_the_browser_tool() {
+        // What the agent ran on Windows when `browser start` failed (and variants).
+        for cmd in [
+            r#"Start-Process -FilePath "C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe" -ArgumentList '--remote-debugging-port=9333','--no-first-run'"#,
+            r#"Start-Process "C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe" -ArgumentList '--remote-debugging-port=9333'"#,
+            r#""C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe" --headless=new --remote-debugging-port=9333 about:blank"#,
+            r#"cmd /c '"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe" --headless=new'"#,
+            r#"$p = Start-Process msedge -PassThru"#,
+            "start \"\" msedge https://www.youtube.com",
+            "google-chrome --headless=new --dump-dom https://example.com",
+            "firefox https://example.com &",
+        ] {
+            assert!(browser_launch_note(cmd).is_some_and(|n| n.contains("`browser` tool")), "no note for: {cmd}");
+        }
+        for cmd in ["Get-Process msedge -ErrorAction SilentlyContinue | Stop-Process -Force", "Get-CimInstance Win32_Process -Filter \"Name='msedge.exe'\"", "grep -r chrome src/", "cargo test -p seagent-browser chrome_args", r"reg query HKLM\SOFTWARE\Policies\Microsoft\Edge"] {
+            assert_eq!(browser_launch_note(cmd), None, "false positive: {cmd}");
+        }
+        let h = annotate_failure(r"cd C:\Users\me\AppData\Local\x", 1, "cd : Access is denied\n    + CategoryInfo : PermissionDenied").unwrap();
+        assert!(h.contains("AppContainer") && h.contains("$env:TEMP"), "{h}");
     }
 
     #[test]

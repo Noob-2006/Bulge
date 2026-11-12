@@ -945,6 +945,8 @@ pub fn spawn_logged_on_desktop(qualified: &str, exe: &Path, args: &[String], env
     for (k, v) in env {
         vars.insert(k.to_uppercase(), (k.clone(), v.clone()));
     }
+    // No inherited AppCompat layer: Edge would relaunch itself and the launcher exit at once.
+    vars.remove(crate::launch::COMPAT_LAYER_VAR);
     let mut block: Vec<u16> = vars.values().flat_map(|(k, v)| std::ffi::OsStr::new(&format!("{k}={v}")).encode_wide().chain(Some(0)).collect::<Vec<_>>()).collect();
     block.push(0);
     // SAFETY: CreateProcessW with owned NUL-terminated buffers that outlive the call; the

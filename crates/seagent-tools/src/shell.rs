@@ -435,6 +435,9 @@ impl Tool for Shell {
                 }
                 None => {}
             }
+            if let Some(n) = crate::exec::hints::browser_launch_note(command) {
+                out.push_str(&format!("\n[note: {n}]"));
+            }
         }
         // tokenjuice: compact big results (hints and sudo notes above see the raw text).
         if let Some(compact) = crate::tokenjuice::reduce_command_output(command, &out, crate::tokenjuice::DEFAULT_BUDGET) {

@@ -181,6 +181,24 @@ fn command_lines() -> Vec<(i32, String)> {
 /// Pids of browser processes using `dir` as user-data-dir (see `launch::processes_on`).
 #[cfg(any(windows, target_os = "macos"))]
 pub fn processes_on(dir: &Path, default_dir: bool, chromey: fn(&str) -> bool) -> Vec<i32> {
+    on_dir(dir, default_dir, chromey).into_iter().map(|(pid, _)| pid).collect()
+}
+
+/// The browser (main) process on `dir`: the one without `--type=` (renderer, GPU, utility and
+/// crashpad processes all carry one).
+#[cfg(windows)]
+pub fn browser_process_on(dir: &Path, chromey: fn(&str) -> bool) -> Option<i32> {
+    main_process(on_dir(dir, false, chromey))
+}
+
+/// The first `(pid, command line)` that is not a Chromium child process.
+pub fn main_process(procs: Vec<(i32, String)>) -> Option<i32> {
+    procs.into_iter().find(|(_, l)| !l.contains(" --type=")).map(|(pid, _)| pid)
+}
+
+/// `(pid, command line)` of the browser processes using `dir` as user-data-dir.
+#[cfg(any(windows, target_os = "macos"))]
+fn on_dir(dir: &Path, default_dir: bool, chromey: fn(&str) -> bool) -> Vec<(i32, String)> {
     let norm = |s: &str| {
         let t = s.trim_end_matches(['/', '\\']);
         if cfg!(windows) {
@@ -203,7 +221,7 @@ pub fn processes_on(dir: &Path, default_dir: bool, chromey: fn(&str) -> bool) ->
                 Some(d) => norm(&d) == want,
                 None => default_dir,
             };
-            hit.then_some(pid)
+            hit.then_some((pid, line))
         })
         .collect()
 }
@@ -233,6 +251,10 @@ mod tests {
         assert_eq!(a, "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome");
         assert_eq!(d.as_deref(), Some("/Users/x/Library/p q"));
         assert_eq!(parse_command_line("/usr/bin/chromium").1, None);
+        let edge = r#""C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe""#;
+        let procs = vec![(7, format!(r"{edge} --type=renderer --user-data-dir=C:\p")), (9, format!(r"{edge} --type=crashpad-handler --user-data-dir=C:\p")), (11, format!(r"{edge} --remote-debugging-port=0 --user-data-dir=C:\p --edge-skip-compat-layer-relaunch about:blank"))];
+        assert_eq!(main_process(procs), Some(11), "the browser process is the one without --type=");
+        assert_eq!(main_process(vec![(7, format!("{edge} --type=gpu-process"))]), None);
         assert!(cft_exe_rel().ends_with(cft_exe_name()));
         if cfg!(target_os = "linux") {
             assert_eq!((cft_dir().as_str(), cft_exe_rel()), ("chrome-linux64", "chrome"));

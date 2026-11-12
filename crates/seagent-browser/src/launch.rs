@@ -404,8 +404,27 @@ pub fn chrome_args(o: &LaunchOpts) -> Vec<String> {
         a.push("--no-proxy-server".into());
     }
     a.extend(o.extra_args.iter().cloned());
+    a.extend(compat_flags(o.exe));
     a.push("about:blank".into());
     a
+}
+
+/// Windows: the AppCompat layer variable a process can inherit (Windows sets
+/// `__COMPAT_LAYER=DetectorsAppHealth` on apps started from Explorer, so the desktop app and
+/// its daemon carry it). Edge treats any layer as a reason to relaunch itself without it and
+/// its launcher exits 0 at once: `browser start` saw "exited (exit code: 0) before DevTools was
+/// ready" while the relaunched Edge kept running, unowned, on seagent's profile. Every browser
+/// seagent starts gets it removed ([`spawn_kid`]).
+pub const COMPAT_LAYER_VAR: &str = "__COMPAT_LAYER";
+
+/// Edge on Windows also gets `--edge-skip-compat-layer-relaunch` (the flag its own relaunch
+/// adds), so a layer applied some other way (registry, shim database) cannot split it either.
+pub fn compat_flags(exe: &Path) -> Vec<String> {
+    if cfg!(windows) && kind_of(exe) == "edge" {
+        vec!["--edge-skip-compat-layer-relaunch".into()]
+    } else {
+        vec![]
+    }
 }
 
 /// `DevToolsActivePort`: (port, browser ws path).
@@ -432,12 +451,49 @@ pub fn clear_stale_locks(udd: &Path) {
     }
 }
 
+/// A live browser holds this profile directory. Linux / macOS: the `SingletonLock` symlink
+/// names a live pid. Windows has no `SingletonLock`: Chromium keeps `lockfile` open without
+/// write sharing for as long as it runs (`ProcessSingleton`: `GENERIC_WRITE`, `FILE_SHARE_READ`,
+/// delete-on-close), so opening it for writing fails with a sharing violation.
+pub fn profile_in_use(udd: &Path) -> bool {
+    #[cfg(windows)]
+    {
+        let f = udd.join("lockfile");
+        f.is_file() && std::fs::OpenOptions::new().write(true).open(&f).is_err_and(|e| e.raw_os_error() == Some(32))
+    }
+    #[cfg(not(windows))]
+    {
+        singleton_pid(udd).is_some_and(util::pid_alive)
+    }
+}
+
+/// The pid of the browser (main) process on `udd`: the `SingletonLock` pid, or on Windows the
+/// process with this `--user-data-dir` and no `--type=` (renderers, GPU, utilities carry one).
+pub fn browser_pid(udd: &Path) -> Option<i32> {
+    #[cfg(windows)]
+    {
+        crate::launch_os::browser_process_on(udd, chromey)
+    }
+    #[cfg(not(windows))]
+    {
+        singleton_pid(udd).filter(|p| util::pid_alive(*p))
+    }
+}
+
 /// A browser already running on this profile directory (a previous seagent process, or the
 /// user's Chrome after they enabled remote debugging).
 pub fn running_on(udd: &Path) -> Option<Launched> {
     let (port, path) = active_port(udd)?;
+    #[cfg(not(windows))]
     let pid = singleton_pid(udd).filter(|p| util::pid_alive(*p))?;
+    #[cfg(windows)]
+    if !profile_in_use(udd) {
+        return None;
+    }
     std::net::TcpStream::connect_timeout(&([127, 0, 0, 1], port).into(), Duration::from_millis(500)).ok()?;
+    // Windows: looked up only once the endpoint answers (a process listing costs ~1 s).
+    #[cfg(windows)]
+    let pid = browser_pid(udd)?;
     let ws = if path.is_empty() { crate::cdp::resolve_ws(&format!("http://127.0.0.1:{port}"), None, Duration::from_secs(3)).ok()? } else { format!("ws://127.0.0.1:{port}{path}") };
     Some(Launched { pid, http: format!("http://127.0.0.1:{port}"), ws, owned: false })
 }
@@ -457,12 +513,12 @@ impl Kid {
             Kid::Desk(c) => c.pid,
         }
     }
-    /// How it exited, once it has.
-    fn try_wait(&mut self) -> Option<String> {
+    /// How it exited, once it has: (exit code 0, description).
+    fn try_wait(&mut self) -> Option<(bool, String)> {
         match self {
-            Kid::Std(c) => c.try_wait().ok().flatten().map(|s| s.to_string()),
+            Kid::Std(c) => c.try_wait().ok().flatten().map(|s| (s.success(), s.to_string())),
             #[cfg(windows)]
-            Kid::Desk(c) => c.try_wait().map(|code| format!("exit code: {code}")),
+            Kid::Desk(c) => c.try_wait().map(|code| (code == 0, format!("exit code: {code}"))),
         }
     }
     /// Reap it (never a zombie).
@@ -494,7 +550,10 @@ fn spawn_kid(exe: &Path, args: &[String], dir: &Path, env: &[(String, String)]) 
     // Chrome's SingletonSocket lives under $TMPDIR; deep dirs overflow AF_UNIX paths.
     #[cfg(unix)]
     cmd.env("TMPDIR", "/tmp");
-    for (k, v) in env {
+    // Windows: no inherited AppCompat layer (Edge would relaunch itself; see COMPAT_LAYER_VAR).
+    #[cfg(windows)]
+    cmd.env_remove(COMPAT_LAYER_VAR);
+    for (k, v) in env.iter().filter(|(k, _)| !(cfg!(windows) && k.eq_ignore_ascii_case(COMPAT_LAYER_VAR))) {
         cmd.env(k, v);
     }
     Ok(Kid::Std(seagent_core::proc::spawn_tied(cmd, true).map_err(|e| format!("failed to start {}: {e}", exe.display()))?))
@@ -550,19 +609,80 @@ pub fn launch_app(exe: &Path, udd: &Path, args: &[String], env: &[(String, Strin
         a.extend(["--disable-sync", "--disable-background-networking", "--disable-component-update", "--password-store=basic"].map(String::from));
     }
     a.extend(args.iter().filter(|x| !x.starts_with("--remote-debugging") && !x.starts_with("--user-data-dir")).cloned());
-    let mut child = spawn_kid(exe, &a, udd, env)?;
+    a.extend(compat_flags(exe));
+    let child = spawn_kid(exe, &a, udd, env)?;
+    wait_devtools(child, exe, udd, timeout, announced)
+}
+
+/// After an exit 0 before DevTools is up, how long to keep waiting for the browser it handed
+/// over to (a relaunch, a wrapper that forks) to announce its endpoint.
+pub const HANDOFF_GRACE: Duration = Duration::from_secs(15);
+
+/// The last failed `browser start` on this host (`browser doctor` reports it).
+static LAST_FAILURE: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+/// Why the last browser launch failed, if the latest one did.
+pub fn last_failure() -> Option<String> {
+    LAST_FAILURE.lock().unwrap_or_else(|e| e.into_inner()).clone()
+}
+
+fn log_tail(udd: &Path) -> String {
+    let log = std::fs::read_to_string(udd.join("seagent-browser.log")).unwrap_or_default();
+    let tail: Vec<&str> = log.lines().filter(|l| !l.trim().is_empty()).rev().take(6).collect();
+    if tail.is_empty() {
+        String::new()
+    } else {
+        format!(": {}", tail.into_iter().rev().collect::<Vec<_>>().join(" | "))
+    }
+}
+
+/// Wait until the started browser announces its DevTools endpoint (`ready`). A launcher that
+/// exits 0 first handed the work to another process (Edge relaunching itself, a wrapper that
+/// forks): keep waiting up to [`HANDOFF_GRACE`] for that one and own it by its pid
+/// ([`browser_pid`]). A non-zero exit, or nothing announced in time, is an error naming the
+/// log; the error is also kept for `browser doctor` ([`last_failure`]).
+fn wait_devtools(mut child: Kid, exe: &Path, udd: &Path, timeout: Duration, ready: fn(&Path) -> Option<(u16, String)>) -> Result<Launched, String> {
+    let r = wait_devtools_inner(&mut child, exe, udd, timeout, ready);
+    *LAST_FAILURE.lock().unwrap_or_else(|e| e.into_inner()) = r.as_ref().err().cloned();
+    // Reap in the background so it never turns into a zombie.
+    std::thread::spawn(move || child.wait());
+    r
+}
+
+fn wait_devtools_inner(child: &mut Kid, exe: &Path, udd: &Path, timeout: Duration, ready: fn(&Path) -> Option<(u16, String)>) -> Result<Launched, String> {
     let pid = child.id() as i32;
-    let until = Instant::now() + timeout;
+    let mut until = Instant::now() + timeout;
+    let mut handed_off: Option<String> = None;
     loop {
-        if let Some((port, path)) = announced(udd) {
-            std::thread::spawn(move || child.wait());
-            return Ok(Launched { pid, http: format!("http://127.0.0.1:{port}"), ws: format!("ws://127.0.0.1:{port}{path}"), owned: true });
+        if let Some((port, path)) = ready(udd) {
+            let (pid, owned) = match handed_off {
+                None => (pid, true),
+                // The process that really runs the browser; unowned when it cannot be found.
+                Some(_) => browser_pid(udd).map_or((pid, false), |p| (p, true)),
+            };
+            return Ok(Launched { pid, http: format!("http://127.0.0.1:{port}"), ws: format!("ws://127.0.0.1:{port}{path}"), owned });
         }
-        if let Some(st) = child.try_wait() {
-            return Err(format!("{} exited ({st}) before its DevTools endpoint was up (see {})", exe.display(), udd.join("seagent-browser.log").display()));
+        if handed_off.is_none() {
+            if let Some((ok, st)) = child.try_wait() {
+                if !ok {
+                    return Err(format!("{} exited ({st}) before DevTools was ready{}", exe.display(), log_tail(udd)));
+                }
+                until = until.min(Instant::now() + HANDOFF_GRACE);
+                handed_off = Some(st);
+            }
         }
         if Instant::now() >= until {
             util::kill_group(pid, Duration::from_secs(2));
+            if let Some(st) = handed_off {
+                let holder = browser_pid(udd).map(|p| format!(" (pid {p} holds it)")).unwrap_or_default();
+                return Err(format!(
+                    "{} exited ({st}) and handed off to another browser process on {}{holder}, which never exposed DevTools within {}s{}. Another browser is probably using this profile directory: stop it (`browser stop`, or end that process) and retry.",
+                    exe.display(),
+                    udd.display(),
+                    HANDOFF_GRACE.as_secs(),
+                    log_tail(udd)
+                ));
+            }
             return Err(format!("{} did not expose DevTools within {}s (see {})", exe.display(), timeout.as_secs(), udd.join("seagent-browser.log").display()));
         }
         std::thread::sleep(Duration::from_millis(100));
@@ -575,30 +695,34 @@ pub fn launch(o: &LaunchOpts, timeout: Duration) -> Result<Launched, String> {
     if let Some(l) = running_on(o.user_data_dir) {
         return Ok(l);
     }
+    release_unreachable(o.user_data_dir)?;
     clear_stale_locks(o.user_data_dir);
     let _ = std::fs::remove_file(o.user_data_dir.join("DevToolsActivePort"));
-    let mut child = spawn_kid(o.exe, &chrome_args(o), o.user_data_dir, &o.env)?;
-    let pid = child.id() as i32;
-    let until = Instant::now() + timeout;
-    loop {
-        if let Some((port, path)) = active_port(o.user_data_dir) {
-            if !path.is_empty() {
-                // Reap in the background so it never turns into a zombie.
-                std::thread::spawn(move || child.wait());
-                return Ok(Launched { pid, http: format!("http://127.0.0.1:{port}"), ws: format!("ws://127.0.0.1:{port}{path}"), owned: true });
-            }
-        }
-        if let Some(st) = child.try_wait() {
-            let tail = std::fs::read_to_string(o.user_data_dir.join("seagent-browser.log")).unwrap_or_default();
-            let tail: Vec<&str> = tail.lines().rev().take(6).collect();
-            return Err(format!("{} exited ({st}) before DevTools was ready{}", o.exe.display(), if tail.is_empty() { String::new() } else { format!(": {}", tail.into_iter().rev().collect::<Vec<_>>().join(" | ")) }));
-        }
-        if Instant::now() >= until {
-            util::kill_group(pid, Duration::from_secs(2));
-            return Err(format!("{} did not expose DevTools within {}s (see {})", o.exe.display(), timeout.as_secs(), o.user_data_dir.join("seagent-browser.log").display()));
-        }
-        std::thread::sleep(Duration::from_millis(100));
+    let child = spawn_kid(o.exe, &chrome_args(o), o.user_data_dir, &o.env)?;
+    wait_devtools(child, o.exe, o.user_data_dir, timeout, |udd| active_port(udd).filter(|(_, p)| !p.is_empty()))
+}
+
+/// A browser still holds seagent's own profile directory but its DevTools endpoint is gone
+/// (an earlier start that failed half-way, a `DevToolsActivePort` removed under it): a new
+/// launch would only hand off to it and exit. Close it first ([`close_profile`]) — only for a
+/// directory seagent made for its own browser ([`own_profile_dir`]), never one the user
+/// pointed a profile at (their Chrome may be running there).
+fn release_unreachable(udd: &Path) -> Result<(), String> {
+    if !own_profile_dir(udd) || !profile_in_use(udd) {
+        return Ok(());
     }
+    match close_profile(udd, false) {
+        Ok(_) if !profile_in_use(udd) => Ok(()),
+        Ok(m) | Err(m) => Err(format!("another browser is using {} without a reachable DevTools endpoint and could not be closed ({m}); end that browser process and retry", udd.display())),
+    }
+}
+
+/// `<home>/browser/profiles/<name>` or `<home>/browser/real-profile/<name>`: a profile
+/// directory seagent created for its own browser (the managed profiles and the copies of the
+/// user's real profile; see `manager.rs`).
+pub fn own_profile_dir(udd: &Path) -> bool {
+    let up = |p: &Path, n: usize| p.ancestors().nth(n).and_then(|a| a.file_name()).map(|f| f.to_string_lossy().to_ascii_lowercase());
+    matches!(up(udd, 1).as_deref(), Some("profiles" | "real-profile")) && up(udd, 2).as_deref() == Some("browser")
 }
 
 /// Chrome-family process names (Hermes close-profile).
@@ -676,10 +800,10 @@ pub fn close_profile(dir: &Path, default_dir: bool) -> Result<String, String> {
         crate::launch_os::force_exit(*p);
     }
     let until = Instant::now() + Duration::from_secs(15);
-    while Instant::now() < until && singleton_pid(dir).is_some_and(util::pid_alive) {
+    while Instant::now() < until && profile_in_use(dir) {
         std::thread::sleep(Duration::from_millis(500));
     }
-    if singleton_pid(dir).is_some_and(util::pid_alive) {
+    if profile_in_use(dir) {
         return Err(format!("the browser on {} did not release its profile lock", dir.display()));
     }
     clear_stale_locks(dir);

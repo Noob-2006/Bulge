@@ -520,7 +520,21 @@ pub fn doctor(env: &Env, profile: Option<&str>) -> Value {
                     let ok = b.call("Browser.getVersion", json!({})).is_ok();
                     add("cdp-websocket", "CDP WebSocket", if ok { "pass" } else { "fail" }, if ok { "CDP WebSocket is reachable".into() } else { "CDP WebSocket is not reachable".into() }, Some("Check Chrome launch logs, stale locks, proxy env, and port conflicts."));
                 }
-                None => add("cdp-http", "CDP HTTP", "info", "Browser is launchable but not running".into(), None),
+                None => {
+                    let udd = manager::profile(cfg, &prof).ok().filter(|p| !p.user_data_dir.is_empty()).map(|p| std::path::PathBuf::from(p.user_data_dir)).unwrap_or_else(|| env.dir().join("profiles").join(&prof));
+                    if let Some(e) = crate::launch::last_failure() {
+                        add("last-start", "Last browser start", "fail", e, Some(format!("The browser's own output is in {}. If another browser is using that profile directory, end it and retry; otherwise set browser.executable to another installed Chromium (Chrome, Edge, Brave) or run `seagent browser install`.", udd.join("seagent-browser.log").display()).as_str()));
+                    }
+                    if crate::launch::profile_in_use(&udd) {
+                        add("profile-lock", "Profile directory", "warn", format!("a browser process is still using {} but seagent is not connected to it (left over from an earlier start)", udd.display()), Some(if crate::launch::own_profile_dir(&udd) { "`browser start` closes it and starts a fresh one; if that fails, end that browser process." } else { "End that browser, or enable remote debugging in it, then retry." }));
+                    } else {
+                        add("cdp-http", "CDP HTTP", "info", "Browser is launchable but not running".into(), None);
+                    }
+                }
+            }
+            #[cfg(windows)]
+            if let Some(v) = std::env::var_os(crate::launch::COMPAT_LAYER_VAR) {
+                add("compat-layer", "Windows AppCompat layer", "info", format!("seagent runs with {}={} (set by Windows); it is removed from the browser's environment, as Edge would otherwise relaunch itself and the start fail", crate::launch::COMPAT_LAYER_VAR, v.to_string_lossy()), None);
             }
         }
         "cdp" => {

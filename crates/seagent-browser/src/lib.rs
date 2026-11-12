@@ -81,4 +81,6 @@ mod tests_actions;
 #[cfg(test)]
 mod tests_runtime;
 #[cfg(test)]
+mod tests_launch;
+#[cfg(test)]
 mod tests_real;
