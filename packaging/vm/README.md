@@ -39,8 +39,10 @@ SEAGENT_VM_BUNDLE=apps/desktop/src-tauri/vm cargo test -p seagent-vm --test boot
 Why in the installer and not downloaded on first run: the VM is the isolation the agent's
 safety model rests on, so it must work offline, behind proxies and on the first command — a
 first-run download is one more thing that can fail (and a server to trust) exactly when the user
-has just installed the app. The price is size: the Windows installer grows by about 45 MB
-compressed (QEMU's DLL closure), Linux and macOS by about 10 / 30 MB.
+has just installed the app. The price is size: measured on the Windows NSIS installer, 16.0 MiB
+→ 53.6 MiB (+37.6 MiB; the staged bundle is ~145 MiB unpacked, mostly QEMU's DLL closure). The
+Linux bundle is ~27 MiB and the macOS one ~90 MiB unpacked (vfkit is a 66 MiB universal binary);
+those installers' compressed growth has not been measured yet.
 
 Reproducible: `build-image.sh` builds the same bytes from the same tree (fixed timestamps,
 `cpio --reproducible`, remapped paths; verified by building twice — CI does that on every run).
