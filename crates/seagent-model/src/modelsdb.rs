@@ -581,6 +581,9 @@ struct State {
     disk_loaded: bool,
     /// First-discovery error (corrupt cache), surfaced exactly once.
     pending_error: Option<String>,
+    /// The last network refresh: when it ran and why it failed (`None` = it worked).
+    last_attempt: Option<SystemTime>,
+    last_error: Option<String>,
 }
 
 fn state() -> &'static Mutex<State> {
@@ -1031,7 +1034,80 @@ fn refresh_inner(url: Option<&str>) -> Result<(usize, bool), String> {
     if out.is_err() {
         arm_backoff();
     }
+    let mut st = lock(state());
+    st.last_attempt = Some(SystemTime::now());
+    st.last_error = out.as_ref().err().cloned();
     out
+}
+
+/// Where the prices a UI shows come from right now (`ui.prices.status`): the models.dev registry
+/// (and how fresh it is) or, without one, the official-docs snapshots built into the binary.
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+pub struct PriceStatus {
+    /// A models.dev registry is held (downloaded now or read from the disk cache).
+    pub registry: bool,
+    /// Model entries in it.
+    pub models: usize,
+    /// When it was downloaded or last confirmed unchanged (ms since the epoch).
+    pub fetched_ms: Option<u64>,
+    /// Older than [`CACHE_TTL`]: a background refresh is due.
+    pub stale: bool,
+    /// Where refreshes go (the mirror, else models.dev).
+    pub url: String,
+    /// Newest official-docs snapshot built into the binary (`YYYY-MM`).
+    pub snapshot: String,
+    /// The last network refresh, and its error when it failed.
+    pub last_attempt_ms: Option<u64>,
+    pub last_error: Option<String>,
+}
+
+fn epoch_ms(t: SystemTime) -> Option<u64> {
+    t.duration_since(SystemTime::UNIX_EPOCH).ok().map(|d| d.as_millis() as u64)
+}
+
+/// The date in a snapshot id: `deepseek-pricing-2026-09-10` → `2026-09-10`,
+/// `openai-gpt-6-tiers-2026-09` → `2026-09`, `anthropic-pricing-2026-06-intro` → `2026-06`.
+pub fn snapshot_date(ver: &str) -> Option<&str> {
+    let b = ver.as_bytes();
+    let digits = |r: std::ops::Range<usize>| b.get(r).is_some_and(|x| x.iter().all(u8::is_ascii_digit));
+    (0..b.len()).find_map(|i| {
+        let ym = b.get(i..i + 2) == Some(b"20") && digits(i..i + 4) && b.get(i + 4) == Some(&b'-') && digits(i + 5..i + 7);
+        if !ym {
+            return None;
+        }
+        let day = b.get(i + 7) == Some(&b'-') && digits(i + 8..i + 10) && !digits(i + 10..i + 11);
+        ver.get(i..if day { i + 10 } else { i + 7 })
+    })
+}
+
+/// The newest date among the built-in official-docs snapshots.
+pub fn newest_snapshot() -> String {
+    snapshots().iter().filter_map(|(_, ver, _)| snapshot_date(ver)).max().unwrap_or_default().to_string()
+}
+
+pub fn price_status() -> PriceStatus {
+    let models = registry_len();
+    let st = lock(state());
+    PriceStatus {
+        registry: models > 0,
+        models,
+        fetched_ms: st.at.filter(|_| models > 0).and_then(epoch_ms),
+        stale: st.at.and_then(now_age).is_some_and(|a| a >= CACHE_TTL),
+        url: mirror().unwrap_or_else(|| MODELS_DEV_URL.to_string()),
+        snapshot: newest_snapshot(),
+        last_attempt_ms: st.last_attempt.and_then(epoch_ms),
+        last_error: st.last_error.clone(),
+    }
+}
+
+/// The kind of a [`Pricing::source`]: `models.dev`, `config` (the user's `[prices]`), or
+/// `snapshot` (an official-docs snapshot id).
+pub fn source_kind(source: &str) -> &'static str {
+    match source {
+        "models.dev" => "models.dev",
+        "config" => "config",
+        _ => "snapshot",
+    }
 }
 
 fn fetch_and_store(
@@ -1139,6 +1215,29 @@ mod tests {
     use std::net::TcpListener;
     use std::sync::atomic::AtomicUsize;
     use std::sync::Arc;
+
+    #[test]
+    fn snapshot_dates_and_price_status() {
+        assert_eq!(snapshot_date("deepseek-pricing-2026-09-10"), Some("2026-09-10"));
+        assert_eq!(snapshot_date("openai-gpt-6-tiers-2026-09"), Some("2026-09"));
+        assert_eq!(snapshot_date("anthropic-pricing-2026-06-intro"), Some("2026-06"));
+        assert_eq!(snapshot_date("openai-gpt-5.6-2026-07"), Some("2026-07"));
+        assert_eq!(snapshot_date("models.dev"), None);
+        let newest = newest_snapshot();
+        assert!(newest.starts_with("20") && newest.len() >= 7, "{newest}");
+        assert_eq!((source_kind("models.dev"), source_kind("config"), source_kind("google-pricing-2026-10-13")), ("models.dev", "config", "snapshot"));
+        let _g = test_lock();
+        reset_for_test();
+        let st = price_status();
+        assert!(!st.registry && st.fetched_ms.is_none() && st.last_error.is_none(), "{st:?}");
+        assert_eq!((st.url.as_str(), st.snapshot.as_str()), (MODELS_DEV_URL, newest.as_str()));
+        set_registry_for_test(&serde_json::json!({"openai": {"models": {"gpt-x": {"cost": {"input": 1.0, "output": 2.0}}}}}));
+        let st = price_status();
+        assert!(st.registry && st.models == 1 && st.fetched_ms.is_some() && !st.stale, "{st:?}");
+        age_for_test(CACHE_TTL + Duration::from_secs(5));
+        assert!(price_status().stale);
+        reset_for_test();
+    }
 
     /// Fresh temp dir per test (never `/tmp` by hand: `std::env::temp_dir()`).
     fn tmp(name: &str) -> PathBuf {

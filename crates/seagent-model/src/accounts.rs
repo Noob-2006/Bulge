@@ -1,7 +1,18 @@
 //! Provider account usage windows and balances (OpenClaw `src/infra/provider-usage.fetch.*`,
 //! Hermes `agent/account_usage.py`): Claude subscription 5h/week windows, ChatGPT Codex
 //! primary/secondary windows, Copilot quota, OpenRouter key credit, DeepSeek balance,
-//! Z.AI quota. Shown by `/usage` and `seagent usage --account`.
+//! Moonshot/Kimi balance, Z.AI quota. Shown by `/usage`, `seagent usage --account` and the web
+//! console's API keys page (`ui.keys.balance`).
+//!
+//! Balance endpoints, as the providers document them:
+//! - DeepSeek `GET https://api.deepseek.com/user/balance` → `balance_infos[].{currency,
+//!   total_balance}` (amounts are strings), `is_available`.
+//! - OpenRouter `GET https://openrouter.ai/api/v1/key` → `data.{limit, limit_remaining, usage}`
+//!   (numbers; `limit` null = no limit). The account-wide `GET /api/v1/credits` needs a
+//!   management key, which a chat key is not, so it is not used.
+//! - Moonshot / Kimi `GET https://api.moonshot.ai/v1/users/me/balance` (USD) and
+//!   `https://api.moonshot.cn/v1/users/me/balance` (CNY; keys are per platform) →
+//!   `data.{available_balance, voucher_balance, cash_balance}` (numbers).
 
 use crate::auth::Cred;
 use serde::Serialize;
@@ -21,6 +32,25 @@ pub struct Account {
     pub windows: Vec<Window>,
     /// Remaining credit, e.g. "USD 12.40".
     pub balance: Option<String>,
+    /// The same credit as numbers, one entry per currency (what a UI formats itself).
+    pub credits: Vec<Credit>,
+}
+
+/// One currency's credit on an account or key.
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+pub struct Credit {
+    pub currency: String,
+    /// What can still be spent (`None` when the provider reports no limit).
+    pub remaining: Option<f64>,
+    /// Spent so far, when the provider reports it.
+    pub used: Option<f64>,
+    /// The cap it is measured against, when there is one.
+    pub limit: Option<f64>,
+}
+
+/// A JSON amount the provider sends as a number or as a decimal string.
+fn amount(v: &Value) -> Option<f64> {
+    v.as_f64().or_else(|| v.as_str().and_then(|s| s.trim().parse().ok()))
 }
 
 fn origin_env(var: &str, default: &str) -> String {
@@ -50,6 +80,8 @@ pub fn supported(provider: &str) -> bool {
             | "github-copilot"
             | "openrouter"
             | "deepseek"
+            | "moonshot"
+            | "moonshot-cn"
             | "zai"
             | "zai-coding"
     )
@@ -180,7 +212,9 @@ pub fn fetch(provider: &str, c: &Cred) -> Result<Account, String> {
             let v = crate::login::get_json(&url, &[("authorization", &bearer)])?;
             let d = &v["data"];
             if let (Some(lim), Some(used)) = (d["limit"].as_f64(), d["usage"].as_f64()) {
-                a.balance = Some(format!("USD {:.2} of {lim:.2} left", (lim - used).max(0.0)));
+                let left = d["limit_remaining"].as_f64().unwrap_or(lim - used).max(0.0);
+                a.balance = Some(format!("USD {left:.2} of {lim:.2} left"));
+                a.credits.push(Credit { currency: "USD".into(), remaining: Some(left), used: Some(used), limit: Some(lim) });
                 if lim > 0.0 {
                     a.windows.push(Window {
                         label: "key limit".into(),
@@ -190,6 +224,7 @@ pub fn fetch(provider: &str, c: &Cred) -> Result<Account, String> {
                 }
             } else if let Some(used) = d["usage"].as_f64() {
                 a.balance = Some(format!("USD {used:.2} used (no limit)"));
+                a.credits.push(Credit { currency: "USD".into(), remaining: None, used: Some(used), limit: None });
             }
         }
         "deepseek" => {
@@ -216,6 +251,28 @@ pub fn fetch(provider: &str, c: &Cred) -> Result<Account, String> {
             if !parts.is_empty() {
                 a.balance = Some(parts.join(", "));
             }
+            for b in v["balance_infos"].as_array().into_iter().flatten() {
+                if let (Some(cur), Some(total)) = (b["currency"].as_str(), amount(&b["total_balance"])) {
+                    a.credits.push(Credit { currency: cur.into(), remaining: Some(total), ..Default::default() });
+                }
+            }
+            if v["is_available"].as_bool() == Some(false) {
+                a.plan = Some("balance too low for API calls".into());
+            }
+        }
+        "moonshot" | "moonshot-cn" => {
+            // Keys and currencies are per platform: api.moonshot.ai bills in USD, .cn in CNY.
+            let (var, origin, currency) = if provider == "moonshot" {
+                ("SEAGENT_MOONSHOT_ORIGIN", "https://api.moonshot.ai", "USD")
+            } else {
+                ("SEAGENT_MOONSHOT_CN_ORIGIN", "https://api.moonshot.cn", "CNY")
+            };
+            let url = format!("{}/v1/users/me/balance", origin_env(var, origin));
+            let v = crate::login::get_json(&url, &[("authorization", &bearer)])?;
+            let d = &v["data"];
+            let avail = amount(&d["available_balance"]).ok_or("the balance answer has no data.available_balance")?;
+            a.balance = Some(format!("{currency} {avail:.2}"));
+            a.credits.push(Credit { currency: currency.into(), remaining: Some(avail), ..Default::default() });
         }
         "zai" | "zai-coding" => {
             let url = format!(
@@ -354,6 +411,18 @@ mod tests {
                 .as_deref(),
             Some("CNY 110.00")
         );
+        assert_eq!(s.requests()[0].0, "/user/balance");
+
+        let s = fake_server(vec![(200, r#"{"code":0,"data":{"available_balance":49.58894,"voucher_balance":46.58893,"cash_balance":3.00001},"scode":"0x0","status":true}"#.into())]);
+        std::env::set_var("SEAGENT_MOONSHOT_ORIGIN", &s.base);
+        let a = fetch("moonshot", &Cred::token("k")).unwrap();
+        assert_eq!(a.balance.as_deref(), Some("USD 49.59"));
+        assert_eq!(a.credits, vec![Credit { currency: "USD".into(), remaining: Some(49.58894), ..Default::default() }]);
+        assert_eq!(s.requests()[0].0, "/v1/users/me/balance");
+        assert!(s.headers(0).iter().any(|(k, v)| k == "authorization" && v == "Bearer k"));
+        let s = fake_server(vec![(200, r#"{"code":0,"data":{"available_balance":12,"voucher_balance":0,"cash_balance":12},"status":true}"#.into())]);
+        std::env::set_var("SEAGENT_MOONSHOT_CN_ORIGIN", &s.base);
+        assert_eq!(fetch("moonshot-cn", &Cred::token("k")).unwrap().credits[0].currency, "CNY");
 
         let s = fake_server(vec![(200, r#"{"data":{"limits":[{"type":"TOKENS_LIMIT","unit":3,"number":5,"percentage":30,"nextResetTime":4102444800000}]}}"#.into())]);
         std::env::set_var("SEAGENT_ZAI_ORIGIN", &s.base);

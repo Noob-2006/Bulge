@@ -287,7 +287,9 @@ fn provider_list(vault: &Vault) -> Vec<Value> {
             // model pickers fall back to (ops::model_keys), chat models only.
             let models = crate::setup::chat_models(crate::ops::model_keys::builtin_models(p));
             let recommended = crate::ops::model_keys::recommended(id, &models);
-            Some(json!({"id": id, "label": if crate::setup::t("zh", "en") == "zh" { *zh } else { *en }, "needs_key": p.api_key_env.is_some(), "key_env": p.api_key_env, "has_key": has_key, "base_url": p.base_url, "models": models.into_iter().take(MAX_LISTED).collect::<Vec<_>>(), "recommended": recommended}))
+            let models: Vec<String> = models.into_iter().take(MAX_LISTED).collect();
+            let prices = crate::ops::model_keys::listed_prices(id, &models);
+            Some(json!({"id": id, "label": if crate::setup::t("zh", "en") == "zh" { *zh } else { *en }, "needs_key": p.api_key_env.is_some(), "key_env": p.api_key_env, "has_key": has_key, "base_url": p.base_url, "models": models, "prices": prices, "recommended": recommended}))
         })
         .collect()
 }
@@ -316,6 +318,8 @@ pub fn status(paths: &Paths, token_ok: bool, reason: Option<&str>) -> Value {
         "service": {"systemd": systemd, "mode": paths.mode.as_str()},
         "lan": lan_of(&root),
         "expires_ms": expires,
+        // Where the prices next to each model come from (looked up locally, never per call).
+        "prices": crate::ops::model_keys::prices_json_base(),
     })
 }
 
@@ -364,7 +368,9 @@ pub fn test_provider(paths: &Paths, p: &Value) -> Value {
             let m = crate::setup::chat_models(m);
             let recommended = crate::ops::model_keys::recommended(&prov.id, &m);
             // Never echo the key: a provider error message could quote it back.
-            json!({"ok": true, "count": m.len(), "recommended": recommended, "models": m.into_iter().take(MAX_LISTED).collect::<Vec<_>>()})
+            let count = m.len();
+            let m: Vec<String> = m.into_iter().take(MAX_LISTED).collect();
+            json!({"ok": true, "count": count, "recommended": recommended, "prices": crate::ops::model_keys::listed_prices(&prov.id, &m), "models": m})
         }
         Err(e) => json!({"ok": false, "error": redact(&e, key.as_deref())}),
     }

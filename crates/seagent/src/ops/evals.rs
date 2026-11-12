@@ -1181,7 +1181,7 @@ fn eval_web_assets() -> Result<(), String> {
     let index = body("/")?;
     let app = body("/ui/app.js")?;
     let pages = body("/ui/pages.js")?;
-    let css = body("/ui/app.css")?;
+    let theme = body("/ui/theme.css")?;
     for need in ["id=\"slashMenu\"", "id=\"attachments\"", "id=\"file\"", "id=\"lang\"", "id=\"theme\"", "/ui/pages.css", "/ui/app.js"] {
         if !index.contains(need) {
             return Err(format!("index.html is missing {need}"));
@@ -1240,15 +1240,15 @@ fn eval_web_assets() -> Result<(), String> {
             }
         }
     }
-    // Themes: the picker offers exactly the palettes app.css defines (crimson is theme.css).
+    // Themes: the picker offers exactly the palettes theme.css defines (galaxy is the default `:root`).
     let offered: Vec<String> = index.split("<option value=\"").skip(1).map(|c| c.split('"').next().unwrap_or("").to_string()).collect();
-    let themes = ["crimson", "midnight", "daylight"];
+    let themes = ["galaxy", "crimson", "daylight"];
     if offered != themes {
         return Err(format!("theme picker offers {offered:?}, expected {themes:?}"));
     }
     for th in &themes[1..] {
-        if !css.contains(&format!(":root[data-theme=\"{th}\"]")) {
-            return Err(format!("app.css has no palette for theme `{th}`"));
+        if !theme.contains(&format!(":root[data-theme=\"{th}\"]")) {
+            return Err(format!("theme.css has no palette for theme `{th}`"));
         }
     }
     // Pages: every advertised page id has a body in pages.js.

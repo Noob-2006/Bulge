@@ -528,7 +528,7 @@ SE Agent loads `SKILL.md` from `.seagent/skills`, `.claude/skills`, `.agents/ski
 | Systems / custodian / labs / about / profile | ui/src/pages/* | System status, repair agent, feature flags, profile | ⬜ | — |
 | Browser view / desktop view components | ui/src/components/browser, desktop | Live browser/desktop streams | ⬜ | — |
 | i18n (multiple locales) | ui/src/i18n/locales | Localised UI | 🚧 | zh/en strings in CLI/setup; web UI single language |
-| Themes | ui/src/assets/themes | Theme switching | 🚧 | one crimson/gold theme (ui/theme.css) |
+| Themes | ui/src/assets/themes | Theme switching | 🚧 | galaxy (default, black/navy + gold), crimson, daylight (ui/theme.css) |
 | PWA install | — | Installable app | ✅ | ui/web/manifest.webmanifest, sw.js (seagent extra-ish) |
 
 ## 11. Ops: onboarding, service, doctor, update

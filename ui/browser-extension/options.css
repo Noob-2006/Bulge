@@ -6,8 +6,8 @@
 body {
   margin: 0;
   padding: 40px 20px 72px;
-  background: #14161a;
-  color: #eef1f5;
+  background: #070b17;
+  color: #eaeef7;
 }
 
 main {
@@ -33,9 +33,9 @@ p {
 section {
   margin-top: 18px;
   padding: 16px;
-  border: 1px solid #333942;
+  border: 1px solid rgba(217, 180, 74, 0.28);
   border-radius: 12px;
-  background: #1d2026;
+  background: #0a1020;
 }
 
 label {
@@ -48,9 +48,9 @@ input {
   width: 100%;
   box-sizing: border-box;
   padding: 9px 10px;
-  border: 1px solid #454c57;
+  border: 1px solid rgba(217, 180, 74, 0.4);
   border-radius: 8px;
-  background: #15171b;
+  background: #04060d;
   color: inherit;
   font: inherit;
 }
@@ -64,18 +64,18 @@ input {
 
 button {
   padding: 9px 13px;
-  border: 1px solid #454c57;
+  border: 1px solid rgba(217, 180, 74, 0.4);
   border-radius: 8px;
-  background: #24272e;
+  background: #0e1629;
   color: inherit;
   font: inherit;
   cursor: pointer;
 }
 
 button.primary {
-  border-color: #2f7d4f;
-  background: #2f7d4f;
-  color: #fff;
+  border-color: #d9b44a;
+  background: #d9b44a;
+  color: #0a0d18;
   font-weight: 600;
 }
 

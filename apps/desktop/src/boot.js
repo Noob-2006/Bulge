@@ -28,6 +28,7 @@
     if (s.title) $('title').textContent = s.title;
     $('fill').style.width = Math.max(4, s.progress || 0) + '%';
     $('bar').setAttribute('aria-valuenow', String(s.progress || 0));
+    $('bar').classList.toggle('bad', !!s.error);
     renderSteps(s.step, !!s.error);
     $('details').textContent = (s.log || []).join('\n') + (s.error ? '\n\nerror: ' + s.error : '');
     if (s.error) {

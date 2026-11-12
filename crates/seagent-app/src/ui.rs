@@ -134,7 +134,13 @@ mod tests {
         // security page renders the same posture the CLI audit reports.
         assert!(ops.contains("ui.approvals.grants.list") && ops.contains("ui.approvals.grant.revoke") && ops.contains("ui.exec.policy.set"));
         assert!(ops.contains("VIEWS.security") && ops.contains("ui.security.status"));
-        assert!(body(serve("/ui/app.js")).contains("gate.answer"));
+        let app = body(serve("/ui/app.js"));
+        assert!(app.contains("gate.answer"));
+        // Cards answered elsewhere disappear: the client reconciles its open items with
+        // `gate.pending` (on session events and on a timer), since no "resolved" event exists.
+        let sync = app.split("async function syncPending()").nth(1).expect("syncPending in app.js");
+        assert!(sync.contains("'gate.pending'") && sync.contains("e.box.remove()") && sync.contains("S.pending.delete(id)"));
+        assert!(app.contains("syncPendingSoon()") && app.contains("setInterval(() => { if (S.pending.size"));
         // The service worker's offline shell lists every UI file.
         let sw = body(serve("/sw.js"));
         for f in FILES.iter().map(|f| f.0).filter(|p| p.starts_with("/ui/") && !p.ends_with(".svg") && *p != "/ui/setup.js") {

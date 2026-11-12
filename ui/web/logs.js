@@ -15,18 +15,17 @@
 
   const css = `
 .tl-tabs { display: flex; gap: 6px; margin: 0 0 12px; }
-.tl-tabs .btn[aria-pressed="true"] { border-color: var(--gold, #d4a24c); color: var(--text-1, inherit); }
+.tl-tabs .btn[aria-pressed="true"] { border-color: var(--gold-400); color: var(--gold-100); }
 .tl-bar { display: flex; flex-wrap: wrap; gap: 6px 8px; align-items: center; margin: 0 0 10px; }
 .tl-bar select, .tl-bar input { max-width: 100%; }
 .tl-sum { display: flex; flex-wrap: wrap; gap: 6px 14px; margin: 0 0 10px; font-size: 13px; }
 .tl-sum .bad, .tl-row.bad .tl-res { color: var(--crit, #e5484d); }
 .tl-chip { border: 1px solid var(--thread-2, #444); border-radius: 999px; padding: 1px 8px; cursor: pointer; background: none; color: inherit; font: inherit; }
-.tl-chip[aria-pressed="true"] { border-color: var(--gold, #d4a24c); }
+.tl-chip[aria-pressed="true"] { border-color: var(--gold-400); color: var(--gold-100); }
 .tl-wrap { overflow-x: auto; border: 1px solid var(--thread-2, #444); border-radius: var(--radius, 8px); max-height: 62vh; }
 .tl-table { border-collapse: collapse; width: 100%; font-size: 12.5px; }
 .tl-table th, .tl-table td { text-align: left; padding: 5px 8px; border-bottom: 1px solid var(--thread, #333); vertical-align: top; }
-.tl-table th { position: sticky; top: 0; background: var(--crimson-950, #1a1012); color: var(--text-3, #999); font-weight: 600; white-space: nowrap; }
-:root[data-theme="daylight"] .tl-table th { background: #fbf7f1; }
+.tl-table th { position: sticky; top: 0; background: var(--bg-deep); color: var(--text-3, #999); font-weight: 600; white-space: nowrap; }
 .tl-table td.tl-t, .tl-table td.tl-ms { white-space: nowrap; color: var(--text-3, #999); }
 .tl-table td.tl-ms { text-align: right; font-variant-numeric: tabular-nums; }
 .tl-table td.tl-a, .tl-table td.tl-e { font-family: var(--mono, monospace); word-break: break-word; }
@@ -91,9 +90,9 @@
       <button class="btn ghost small" id="tlFail" data-read aria-pressed="${TL.status === 'error'}">只看失敗</button>
       <button class="btn ghost small" id="tlRefresh" data-read>重新整理</button>
       <span class="dim">匯出畫面上的 ${recs.length} 筆：</span>
-      <button class="btn small" data-tl-export="jsonl" data-read>JSONL</button>
-      <button class="btn small" data-tl-export="csv" data-read>CSV</button>
-      <button class="btn small" data-tl-export="html" data-read>HTML</button></div>`;
+      <button class="btn ghost small" data-tl-export="jsonl" data-read>JSONL</button>
+      <button class="btn ghost small" data-tl-export="csv" data-read>CSV</button>
+      <button class="btn ghost small" data-tl-export="html" data-read>HTML</button></div>`;
     const chips = (t.tools || []).slice(0, 12).map((x) => `<button class="tl-chip" data-tl-tool="${v(x.tool)}" data-read aria-pressed="${TL.tool === x.tool}">${v(x.tool)} ${x.calls}${x.failed ? ` · <span class="bad">${x.failed} 失敗</span>` : ''}</button>`).join('');
     const sum = `<div class="tl-sum"><span><b>${t.matched || 0}</b> 次呼叫</span><span class="${t.failed ? 'bad' : ''}"><b>${t.failed || 0}</b> 失敗</span><span>${t.sessions || 0} 個對話</span>${(t.matched || 0) > recs.length ? `<span class="dim">顯示最新 ${recs.length} 筆</span>` : ''}</div>`;
     return `${tabs()}${bar}${sum}<div class="tl-sum">${chips}</div>${table(recs)}${NOTE}<p class="dim">${v(r.file || '')}</p>`;

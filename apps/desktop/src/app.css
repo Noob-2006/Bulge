@@ -1,10 +1,8 @@
 /* The app's own pages (splash, connect). Colours, buttons and the star come from the shared
-   theme (vendor/theme.css = ui/theme.css): deep crimson, gold hairlines, four-pointed gold star. */
+   theme (vendor/theme.css = ui/theme.css): galaxy black-to-navy sky, gold hairlines, four-pointed gold star. */
 body {
   min-height: 100%;
-  background:
-    radial-gradient(120% 90% at 28% 8%, #5c0c2c 0%, #2a0617 38%, var(--crimson-950) 78%) fixed,
-    var(--bg);
+  background: var(--bg);
   -webkit-user-select: none;
   user-select: none;
 }
@@ -27,11 +25,13 @@ body.splash { display: grid; place-items: center; padding: 24px; }
 .steps li { display: flex; align-items: center; gap: 10px; color: var(--text-3); font-size: 13px; }
 .steps li .star { --size: 11px; }
 .steps li.current { color: var(--text); }
+.bar.bad > span { background: var(--crit); }
+#failed { margin-top: 18px; padding-top: 14px; border-top: 1px solid var(--thread); }
 .error { color: var(--text-2); margin: 0 0 14px; white-space: pre-wrap; word-break: break-word; }
 .actions { display: flex; flex-wrap: wrap; gap: 8px; }
 .details {
   margin: 14px 0 0; max-height: 220px; overflow: auto; padding: 10px 12px;
-  background: var(--crimson-950); border: 1px solid var(--thread); border-radius: var(--radius);
+  background: var(--bg-deep); border: 1px solid var(--thread); border-radius: var(--radius);
   font: 11.5px/1.5 var(--mono); color: var(--text-2); white-space: pre-wrap; word-break: break-all;
 }
 .choice-card {

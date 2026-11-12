@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Render ui/icon.svg (crimson rounded square, gold four-pointed star, four small stars) to the
+"""Render ui/icon.svg (galaxy-navy rounded square, gold four-pointed star, four small stars) to the
 icon files Tauri needs, with the standard library only (no cairo/Pillow/Inkscape needed):
 
   src-tauri/icons/{32x32,64x64,128x128,128x128@2x,icon}.png, icon.ico, icon.icns
@@ -17,7 +17,7 @@ import zlib
 MASTER = 1024
 SS = 2  # supersampling per axis for the shape masks
 
-BG_STOPS = [(0.0, (0x8B, 0x10, 0x32)), (0.45, (0x4A, 0x0A, 0x1E)), (1.0, (0x12, 0x02, 0x0A))]
+BG_STOPS = [(0.0, (0x2A, 0x41, 0x70)), (0.45, (0x0E, 0x16, 0x29)), (1.0, (0x04, 0x06, 0x0D))]
 STAR_STOPS = [(0.0, (0xFF, 0xE9, 0xA3)), (0.55, (0xFF, 0xD6, 0x6B)), (1.0, (0xC9, 0x8A, 0x1B))]
 SMALL = (0xFF, 0xD6, 0x6B)
 

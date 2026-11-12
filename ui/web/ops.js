@@ -78,9 +78,11 @@ function opsStrip() {
     dp === null ? '' : m(L('磁碟', 'DISK'), pct(dp), dp, level(dp, 85, 95), 'opt'),
     m(L('代理', 'AGENTS'), `${(d.sessions || {}).running || 0}`, null, '', 'link agents'),
     m(L('核准', 'APPROVE'), String(pend), null, pend ? 'warn' : '', 'link approvals'),
-    m(L('今日', 'TODAY'), '$' + ((d.today || {}).cost_usd || 0).toFixed(2), null, '', 'opt'),
+    m(L('今日≈', 'TODAY≈'), '$' + (typeof fmtUsd === 'function' ? fmtUsd((d.today || {}).cost_usd) : ((d.today || {}).cost_usd || 0).toFixed(2)), null, '', 'opt est-cost'),
   ].join('');
   for (const x of el.querySelectorAll('[data-go]')) x.onclick = () => showView(x.dataset.go);
+  const est = el.querySelector('.est-cost');
+  if (est && typeof EST_TIP === 'function') est.title = EST_TIP();
 }
 
 // ── 01 overview ──
@@ -104,7 +106,7 @@ function renderOps(el, live) {
     + kpi(L('告警', 'Alerts'), alerts.length, alerts.length ? ov(alerts[0].title).slice(0, 40) : L('一切正常', 'all clear'), alerts.some((a) => a.severity === 'error') ? 'crit' : alerts.length ? 'warn' : '')
     + kpi('CPU', `${Math.round(h.cpu_pct || 0)}<small>%</small>`, `load ${(h.load || []).map((x) => x.toFixed(2)).join(' ')}`, level(h.cpu_pct, 70, 90), '', spark(series('cpu'), 100, 64, 22))
     + kpi(L('記憶體', 'Memory'), `${Math.round((h.mem || {}).pct || 0)}<small>%</small>`, `${size((h.mem || {}).total - (h.mem || {}).available)} / ${size((h.mem || {}).total)}`, level((h.mem || {}).pct, 80, 92), '', spark(series('mem'), 100, 64, 22))
-    + kpi(L('今日花費', 'Spend today'), `<small>$</small>${((d.today || {}).cost_usd || 0).toFixed(2)}`, `${((d.today || {}).tokens || 0).toLocaleString()} tokens · ${(d.today || {}).calls || 0} ${L('次', 'calls')}`, '')
+    + kpi(`${L('今日花費', 'Spend today')} ${typeof estTag === 'function' ? estTag() : ''}`, `<small>$</small>${typeof fmtUsd === 'function' ? fmtUsd((d.today || {}).cost_usd) : ((d.today || {}).cost_usd || 0).toFixed(2)}`, (d.today || {}).unpriced_calls ? `${(d.today || {}).unpriced_calls} ${L('次呼叫沒有價格，未計入', 'calls unpriced, not counted')}` : `${((d.today || {}).tokens || 0).toLocaleString()} tokens · ${(d.today || {}).calls || 0} ${L('次', 'calls')}`, (d.today || {}).unpriced_calls ? 'warn' : '')
     + '</div>';
 
   html += '<div class="cols"><div class="c8 stack">';

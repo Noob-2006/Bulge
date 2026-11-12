@@ -1,13 +1,12 @@
 /* Control UI pages (pages.js) and the operations views (ops.js). Tokens come from theme.css. */
 .cp-note { min-height: 1.2em; font-size: 12.5px; color: var(--text-2); }
 .cp-note.bad { color: var(--crit); }
-.cp-pre, .cp-term { background: var(--crimson-950); border: 1px solid var(--thread-2); border-radius: var(--radius); padding: 10px 12px; overflow: auto; font: 12.5px/1.5 var(--mono); white-space: pre-wrap; max-height: 360px; }
-:root[data-theme="daylight"] .cp-pre { background: #fbf7f1; }
-.cp-term { min-height: 300px; color: #e8e8e8; background: #050103; }
+.cp-pre, .cp-term { background: var(--bg-deep); border: 1px solid var(--thread-2); border-radius: var(--radius); padding: 10px 12px; overflow: auto; font: 12.5px/1.5 var(--mono); white-space: pre-wrap; max-height: 360px; }
+.cp-term { min-height: 300px; color: var(--text); }
 textarea.cp-area { width: 100%; resize: vertical; font: 13px/1.5 var(--font); }
 textarea.cp-area.mono { font-family: var(--mono); font-size: 12.5px; }
 .cp-bars { display: flex; align-items: flex-end; gap: 2px; height: 90px; padding: 6px 0; border-bottom: 1px solid var(--thread-2); }
-.cp-bars div { flex: 1; min-width: 3px; background: var(--gold-400); opacity: .8; }
+.cp-bars div { flex: 1; min-width: 3px; max-width: 28px; background: linear-gradient(180deg, var(--gold-300), var(--gold-500)); opacity: .85; border-radius: 1px 1px 0 0; }
 .cp-cols { display: grid; grid-auto-flow: column; grid-auto-columns: minmax(200px, 1fr); gap: 12px; overflow-x: auto; }
 .cp-cols section { background: var(--surface); border: 1px solid var(--thread); border-top-color: var(--thread-strong); border-radius: var(--radius); padding: 10px; min-height: 80px; }
 .cp-cols h4 { margin: 0 0 8px; font: 600 10.5px var(--font); letter-spacing: .1em; text-transform: uppercase; color: var(--gold-400); }
@@ -22,8 +21,7 @@ textarea.cp-area.mono { font-family: var(--mono); font-size: 12.5px; }
 .cp-avatar { width: 72px; height: 72px; border-radius: 50%; object-fit: cover; border: 1px solid var(--thread-2); }
 .cp-prov { border-top: 1px solid var(--thread); padding-top: 6px; }
 .cp-prov .check { align-items: flex-start; }
-.cp-log { background: var(--crimson-950); border: 1px solid var(--thread-2); border-radius: var(--radius); padding: 8px 10px; overflow: auto; font: 12px/1.5 var(--mono); max-height: 60vh; min-height: 200px; }
-:root[data-theme="daylight"] .cp-log { background: #fbf7f1; }
+.cp-log { background: var(--bg-deep); border: 1px solid var(--thread-2); border-radius: var(--radius); padding: 8px 10px; overflow: auto; font: 12px/1.5 var(--mono); max-height: 60vh; min-height: 200px; }
 .cp-log-line { display: block; white-space: pre-wrap; word-break: break-word; padding: 1px 0; border-bottom: 1px solid var(--thread); }
 .cp-log-line:last-child { border-bottom: 0; }
 .cp-log-ts, .cp-log-target { color: var(--text-3); }

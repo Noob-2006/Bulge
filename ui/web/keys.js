@@ -6,7 +6,7 @@
 // esc, toast, call, row, q, qa, note, act, openPage, NOTE; chat_menu.js: tt, srcLabel.
 'use strict';
 
-const KP = { open: null, results: {}, models: {} };
+const KP = { open: null, results: {}, models: {}, bal: {} };
 const kpSource = (s) => ({
   vault: 'vault', env: tt('環境變數', 'environment'), config: tt('設定檔（明文）', 'config (plaintext)'),
   'credential store': tt('登入憑證', 'login / credential store'), key_cmd: 'key_cmd', none: tt('不需要', 'not needed'), cloud: tt('雲端憑證', 'cloud credentials'), missing: tt('未設定', 'not set'),
@@ -16,8 +16,27 @@ const kpSource = (s) => ({
 // are offered under "Add a key").
 const KP_HELD = ['vault', 'env', 'config', 'credential store', 'key_cmd'];
 
+// A provider's balance as its own endpoint reported it (ui.keys.balance).
+const kpCredit = (c) => {
+  const n = (x) => Number(x).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  if (c.remaining !== null && c.remaining !== undefined) return `${c.currency} ${n(c.remaining)}${c.limit !== null && c.limit !== undefined ? tt(` / 上限 ${n(c.limit)}`, ` of ${n(c.limit)}`) : ''}`;
+  if (c.used !== null && c.used !== undefined) return tt(`已用 ${c.currency} ${n(c.used)}（無上限）`, `${c.currency} ${n(c.used)} used (no limit)`);
+  return c.currency;
+};
+const kpBalance = (p) => {
+  if (!p.balance) return `<span class="faint" title="${esc(tt('這個供應商沒有可用金鑰查詢的餘額 API（或設定指向非官方位址），請到供應商的網站查看。', 'This provider has no balance API a key can query (or the config points at a non-official address); check its website.'))}">—</span>`;
+  const b = KP.bal[p.id];
+  const btn = `<button class="btn ghost small" data-bal="${esc(p.id)}" title="${esc(tt('向供應商查詢帳戶餘額（使用已存的金鑰）', 'Ask the provider for the account balance (with the stored key)'))}">${esc(b ? '↻' : tt('查詢', 'Check'))}</button>`;
+  if (!b) return btn;
+  if (b.loading) return `<span class="faint">${esc(tt('查詢中…', 'Checking…'))}</span>`;
+  if (!b.ok) return `<span class="bad" title="${esc(b.error || '')}">${esc(tt('查詢失敗', 'Failed'))}</span> ${btn}`;
+  const credits = (b.credits || []).map(kpCredit).join('<br>') || esc(tt('沒有餘額資料', 'no balance data'));
+  return `<span class="bal" title="${esc(tt('供應商回報的實際餘額', 'The real balance the provider reported'))}">${esc(credits).replace(/&lt;br&gt;/g, '<br>')}</span> ${btn}<br><span class="faint">${esc(tt('供應商回報', 'from the provider'))} · ${esc(agoLong(b.fetched_ms))}</span>${b.note ? `<br><span class="warn">${esc(b.note)}</span>` : ''}`;
+};
+
 PAGES.apikeys = { get title() { return tt('API 金鑰', 'API keys'); }, group: '設定', async render() {
   const r = await call('ui.keys.list');
+  const prices = await pricesStatus();
   const ps = r.providers || [];
   const has = ps.filter((p) => KP_HELD.includes(p.source) || p.in_vault);
   const rest = ps.filter((p) => !has.includes(p)).sort((a, b) => String(a.label).localeCompare(String(b.label)));
@@ -33,13 +52,15 @@ PAGES.apikeys = { get title() { return tt('API 金鑰', 'API keys'); }, group: '
     `<code>${esc(p.name)}</code>`,
     `<span class="masked">${esc(p.masked || '—')}</span>`,
     `${esc(kpSource(p.source))}${p.models_cached ? `<br><span class="faint">${esc(tt(`${p.models_cached} 個模型（快取）`, `${p.models_cached} models cached`))}</span>` : ''}`,
+    kpBalance(p),
     `<div class="acts"><button class="btn ghost small" data-test="${esc(p.id)}">${esc(tt('測試', 'Test'))}</button><button class="btn ghost small" data-read data-models="${esc(p.id)}">${esc(tt('模型', 'Models'))}</button><button class="btn ghost small" data-edit="${esc(p.id)}">${esc(p.in_vault ? tt('更換', 'Replace') : tt('存入 vault', 'Store in vault'))}</button>${p.in_vault || p.plaintext_in_config ? `<button class="btn ghost small" data-del="${esc(p.id)}">${esc(tt('刪除', 'Delete'))}</button>` : ''}</div>
       ${KP.open === p.id ? `<div class="edit"><input type="password" data-key="${esc(p.id)}" autocomplete="new-password" spellcheck="false" placeholder="${esc(tt('新的金鑰', 'New key'))}"><button class="btn ghost small" data-trynew="${esc(p.id)}">${esc(tt('先測試', 'Test first'))}</button><button class="btn small" data-save="${esc(p.id)}">${esc(tt('儲存', 'Save'))}</button><button class="btn ghost small" data-cancel>${esc(tt('取消', 'Cancel'))}</button></div>` : ''}
       ${warn(p)}${res(p.id)}${models(p.id)}`,
   ])).join('');
   return `<div class="cm-keys">
     <p class="dim">${esc(tt('金鑰只存在 secret vault（', 'Keys are stored only in the secret vault ('))}<code>${esc(r.vault || '')}</code>${esc(tt('），頁面只顯示最後四個字元。更換後下一個請求就會使用新金鑰。', '); this page only ever shows the last four characters. A replaced key is used from the next request on.'))}</p>
-    ${has.length ? `<table class="kv"><tr><th>${esc(tt('供應商', 'Provider'))}</th><th>${esc(tt('名稱', 'Name'))}</th><th>${esc(tt('金鑰', 'Key'))}</th><th>${esc(tt('來源', 'Source'))}</th><th></th></tr>${rows}</table>` : `<p class="dim">${esc(tt('還沒有任何金鑰。', 'No keys yet.'))}</p>`}
+    <p class="kp-prices">${priceSrcHtml(prices)} <span class="faint">${esc(tt('· 畫面上的費用是估算；「餘額」欄是供應商回報的實際數字。', '· costs shown are estimates; the Balance column is what the provider itself reports.'))}</span></p>
+    ${has.length ? `<table class="kv"><tr><th>${esc(tt('供應商', 'Provider'))}</th><th>${esc(tt('名稱', 'Name'))}</th><th>${esc(tt('金鑰', 'Key'))}</th><th>${esc(tt('來源', 'Source'))}</th><th>${esc(tt('餘額', 'Balance'))}</th><th></th></tr>${rows}</table>` : `<p class="dim">${esc(tt('還沒有任何金鑰。', 'No keys yet.'))}</p>`}
     <h3>${esc(tt('新增金鑰', 'Add a key'))}</h3>
     <div class="add"><select id="kpProv" aria-label="${esc(tt('供應商', 'Provider'))}"><option value="">${esc(tt('選擇供應商…', 'Choose a provider…'))}</option>${rest.map((p) => `<option value="${esc(p.id)}">${esc(p.label)} (${esc(p.id)})</option>`).join('')}</select><input type="password" id="kpKey" autocomplete="new-password" spellcheck="false" placeholder="${esc(tt('API 金鑰', 'API key'))}" aria-label="${esc(tt('API 金鑰', 'API key'))}"><button class="btn ghost small" id="kpTest">${esc(tt('測試', 'Test'))}</button><button class="btn small" id="kpSave">${esc(tt('儲存', 'Save'))}</button></div>
     <p class="dim" id="kpHint"></p>${res('__new')}
@@ -65,6 +86,14 @@ PAGES.apikeys = { get title() { return tt('API 金鑰', 'API keys'); }, group: '
     note(r.ok ? tt('金鑰可用', 'The key works') : tt('金鑰被拒絕', 'The key was refused'), !r.ok);
   };
   for (const b of qa('[data-test]')) b.onclick = () => test(b.dataset.test);
+  for (const b of qa('[data-bal]')) b.onclick = async () => {
+    const id = b.dataset.bal;
+    KP.bal[id] = { loading: true };
+    await rerender();
+    try { KP.bal[id] = await call('ui.keys.balance', { provider: id }); } catch (e) { KP.bal[id] = { ok: false, error: e.message, fetched_ms: Date.now() }; }
+    if (KP.bal[id] && KP.bal[id].supported === false) delete KP.bal[id];
+    await rerender();
+  };
   for (const b of qa('[data-trynew]')) b.onclick = () => { const k = keyOf(b.dataset.trynew); if (!k) return note(tt('請先輸入金鑰', 'Enter a key first'), true); test(b.dataset.trynew, k); };
   for (const b of qa('[data-save]')) b.onclick = async () => {
     const id = b.dataset.save;

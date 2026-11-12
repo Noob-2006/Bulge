@@ -1003,7 +1003,7 @@ peers = {{ helper = "{{{{secret:PEER_TOKEN}}}}" }}
             check(st == 200 and '"ok":true' in body, body)
             st, body, hdr = req("/", token=None)
             check(st == 200 and "<title>SE Agent</title>" in body and "content-security-policy" in {k.lower() for k in hdr}, "UI served with CSP")
-            check(req("/ui/theme.css", token=None)[1].count("--crimson-900") >= 1, "theme served")
+            check(req("/ui/theme.css", token=None)[1].count("--navy-900") >= 1, "theme served")
             check(req("/v1/models", token=None)[0] == 401, "API needs the token")
             check(req("/v1/models", token="wrong")[0] == 401, "wrong token refused")
             st, body, _ = req("/v1/models")
