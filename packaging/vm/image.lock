@@ -19,10 +19,10 @@
   "reference": {
     "x86_64": {
       "host": "Ubuntu 26.04.1 LTS (WSL2), gcc 15.2.0, rustc 1.99.1, GNU cpio 2.15",
-      "manifest_sha256": "3c841f3502818ede9dc38f84bf875724190ba1c9006e2d2821c1550e29ed5708",
-      "kernel_sha256": "4bf4d0fd322ba729a37ba40d40da1b30c893a883184792d7db22e830b389b610",
-      "initramfs_sha256": "f9718df23921bfe030206ea132edfd1be8336c7d55a39797042d1f1d337d0e2a",
-      "built_at": "2026-11-12T04:27:30Z"
+      "manifest_sha256": "1b7ec39d1c44ebfe467310fe157cabc8afbadf49479d8b5c97c6409768a5f9e5",
+      "kernel_sha256": "3ba47fd38ad4e6a1b2312f4b35d612d345a0198bd34e60c5741873b36b2dd333",
+      "initramfs_sha256": "b2d1a41438ac484719d7d3657547109ea36899a160602c6e8c3440e177c05acd",
+      "built_at": "2026-11-12T04:50:20Z"
     }
   }
 }
