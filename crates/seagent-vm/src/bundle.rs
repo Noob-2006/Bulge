@@ -148,16 +148,16 @@ impl Bundle {
     }
 
     pub fn image_dir(&self) -> PathBuf {
-        self.dir.join(&self.info.image.dir)
+        rel_join(&self.dir, &self.info.image.dir)
     }
 
     pub fn runtime_dir(&self) -> PathBuf {
-        self.dir.join(&self.info.runtime.dir)
+        rel_join(&self.dir, &self.info.runtime.dir)
     }
 
     /// The bundled runtime executable, when it is on disk.
     pub fn runtime_exe(&self) -> Option<PathBuf> {
-        (!self.info.runtime.exe.is_empty()).then(|| self.runtime_dir().join(&self.info.runtime.exe)).filter(|p| p.is_file())
+        (!self.info.runtime.exe.is_empty()).then(|| rel_join(&self.runtime_dir(), &self.info.runtime.exe)).filter(|p| p.is_file())
     }
 
     /// The bundled kernel + initramfs paths without hashing them (provider selection runs often;
@@ -171,8 +171,8 @@ impl Bundle {
         if m["image_version"].as_u64() != Some(u64::from(crate::IMAGE_VERSION)) {
             return None;
         }
-        let k = dir.join(m["kernel"]["path"].as_str().filter(|p| plain_relative(p))?);
-        let i = dir.join(m["initramfs"]["path"].as_str().filter(|p| plain_relative(p))?);
+        let k = rel_join(&dir, m["kernel"]["path"].as_str().filter(|p| plain_relative(p))?);
+        let i = rel_join(&dir, m["initramfs"]["path"].as_str().filter(|p| plain_relative(p))?);
         (k.is_file() && i.is_file()).then_some((k, i))
     }
 
@@ -204,7 +204,7 @@ impl Bundle {
             if !plain_relative(rel) {
                 return Err(format!("bundle.json: runtime file `{rel}` is not a relative path"));
             }
-            let got = sha256_file(&dir.join(rel)).map_err(|e| format!("bundled {} file missing: {e}", self.info.runtime.kind))?;
+            let got = sha256_file(&rel_join(&dir, rel)).map_err(|e| format!("bundled {} file missing: {e}", self.info.runtime.kind))?;
             if !got.eq_ignore_ascii_case(want) {
                 return Err(format!("bundled {} file `{rel}` is damaged (sha256 {got}, expected {want})", self.info.runtime.kind));
             }
@@ -281,6 +281,12 @@ pub fn plain_path(p: &Path) -> PathBuf {
     }
 }
 
+/// `base` + a `/`-separated bundle path, one component at a time, so a Windows path shown to
+/// the user (and handed to QEMU) uses `\` throughout instead of `vm\runtime/qemu\…`.
+fn rel_join(base: &Path, rel: &str) -> PathBuf {
+    rel.split('/').filter(|c| !c.is_empty()).fold(base.to_path_buf(), |p, c| p.join(c))
+}
+
 fn plain_relative(p: &str) -> bool {
     !p.is_empty() && !Path::new(p).is_absolute() && !p.contains('\\') && p.split('/').all(|c| !c.is_empty() && c != "." && c != "..")
 }
@@ -313,6 +319,18 @@ mod tests {
         };
         std::fs::write(root.join(BUNDLE_FILE), serde_json::to_string(&info).unwrap()).unwrap();
         Bundle::open(root).unwrap()
+    }
+
+    #[test]
+    fn bundle_paths_use_the_native_separator_throughout() {
+        let t = tmp("sep");
+        let b = fake_bundle(t.path(), "qemu", "qemu-system-x86_64.exe");
+        let want = t.path().join("runtime").join("qemu").join("qemu-system-x86_64.exe");
+        assert_eq!(b.runtime_exe().unwrap().display().to_string(), want.display().to_string());
+        assert_eq!(b.image_dir().display().to_string(), t.path().join("image").join("x86_64").display().to_string());
+        if cfg!(windows) {
+            assert!(!b.runtime_exe().unwrap().display().to_string().contains('/'));
+        }
     }
 
     #[test]
