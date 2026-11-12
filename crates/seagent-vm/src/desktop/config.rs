@@ -18,6 +18,7 @@
 //! image_url = "…"               # pinned Debian 13 generic cloud image (see DEFAULT_IMAGE_URL)
 //! image_sha256 = "…"
 //! extra_packages = []           # Debian packages added to the provisioned desktop
+//! apt_mirror = "auto"           # auto (fastest of APT_MIRRORS, measured at build time) | "" (deb.debian.org) | a Debian archive URL
 //! build_timeout_secs = 2400
 //! stop_timeout_secs = 30        # ACPI power-off grace before `quit` / SIGTERM
 //! idle_timeout_secs = 0         # stop a VM nobody looked at / drove for this long (0 = never)
@@ -59,6 +60,25 @@ pub const BASE_PACKAGES: &[&str] = &[
     "xdg-utils",
 ];
 
+/// Debian archives `apt_mirror = "auto"` measures (all serve the same signed archive): the
+/// CDN, the official country mirrors of the regions most users are in, and NYCU (Taiwan).
+pub const APT_MIRRORS: &[&str] = &[
+    "http://deb.debian.org/debian",
+    "https://linux.cs.nycu.edu.tw/debian/debian",
+    "http://ftp.tw.debian.org/debian",
+    "http://ftp.jp.debian.org/debian",
+    "http://ftp.us.debian.org/debian",
+    "http://ftp.de.debian.org/debian",
+];
+
+/// `auto`, empty, or an http(s) URL that is safe inside the guest script (single-quoted shell
+/// word and a sed replacement: no quotes, spaces, `\`, `#` or `&`).
+pub fn valid_mirror(m: &str) -> bool {
+    m.is_empty()
+        || m == "auto"
+        || ((m.starts_with("http://") || m.starts_with("https://")) && m.len() > 8 && !m.chars().any(|c| c.is_whitespace() || c.is_control() || matches!(c, '\'' | '"' | '\\' | '#' | '&' | '`' | '$')))
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default, deny_unknown_fields)]
 pub struct DesktopConfig {
@@ -77,6 +97,7 @@ pub struct DesktopConfig {
     pub image_url: String,
     pub image_sha256: String,
     pub extra_packages: Vec<String>,
+    pub apt_mirror: String,
     pub build_timeout_secs: u64,
     pub stop_timeout_secs: u64,
     pub idle_timeout_secs: u64,
@@ -100,6 +121,7 @@ impl Default for DesktopConfig {
             image_url: DEFAULT_IMAGE_URL.into(),
             image_sha256: DEFAULT_IMAGE_SHA256.into(),
             extra_packages: vec![],
+            apt_mirror: "auto".into(),
             build_timeout_secs: 2400,
             stop_timeout_secs: 30,
             idle_timeout_secs: 0,
@@ -158,6 +180,9 @@ impl DesktopConfig {
         if self.start_url.chars().any(|c| c.is_whitespace() || c == '\'' || c == '"' || c == '\\' || c.is_control()) {
             return Err("desktop_vm.start_url must be one URL without spaces or quotes".into());
         }
+        if !valid_mirror(&self.apt_mirror) {
+            return Err(format!("desktop_vm.apt_mirror `{}`: use auto, \"\" or an http(s):// Debian archive URL", self.apt_mirror));
+        }
         Ok(())
     }
 
@@ -184,5 +209,11 @@ mod tests {
         assert!(DesktopConfig::parse(&json!({"default": "../x"})).is_err());
         assert!(DesktopConfig::parse(&json!({"start_url": "a' b"})).is_err());
         assert!(DesktopConfig::default().packages().iter().any(|p| p == "chromium"));
+        assert_eq!(DesktopConfig::parse(&json!({"apt_mirror": "https://linux.cs.nycu.edu.tw/debian/debian"})).unwrap().apt_mirror, "https://linux.cs.nycu.edu.tw/debian/debian");
+        assert!(DesktopConfig::parse(&json!({"apt_mirror": ""})).is_ok());
+        for bad in ["ftp://x/debian", "http://x/a'b", "http://x/a&b", "http://x/a b", "auto2"] {
+            assert!(DesktopConfig::parse(&json!({"apt_mirror": bad})).unwrap_err().contains("apt_mirror"), "{bad}");
+        }
+        assert!(APT_MIRRORS.iter().all(|m| valid_mirror(m)));
     }
 }

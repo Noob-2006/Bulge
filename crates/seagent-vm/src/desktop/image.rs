@@ -22,9 +22,66 @@ use std::time::{Duration, Instant};
 
 const USER_DATA: &str = include_str!("user-data.yaml");
 
-/// The cloud-config the guest provisions itself from.
+/// The cloud-config the guest provisions itself from, with the mirror still a placeholder
+/// (which mirror served the packages does not change the image, so it is not in the recipe).
 pub fn user_data(cfg: &DesktopConfig) -> String {
     USER_DATA.replace("{{PACKAGES}}", &cfg.packages().join(" "))
+}
+
+/// [`user_data`] as served to the guest: `mirror` is a checked archive URL or empty.
+pub fn seed_user_data(cfg: &DesktopConfig, mirror: &str) -> String {
+    let m = if super::config::valid_mirror(mirror) && mirror != "auto" { mirror.trim_end_matches('/') } else { "" };
+    user_data(cfg).replace("{{APT_MIRROR}}", m)
+}
+
+/// The Debian archive the provisioning guest installs from: `apt_mirror` as configured, or for
+/// `auto` the fastest of [`super::config::APT_MIRRORS`] (each asked for the first MiB of its
+/// `ls-lR.gz`, all at once, ~10 s at most). Empty = the image's own deb.debian.org.
+pub fn pick_mirror(cfg: &DesktopConfig, log: &mut dyn FnMut(&str)) -> String {
+    if cfg.apt_mirror != "auto" {
+        return cfg.apt_mirror.trim_end_matches('/').to_string();
+    }
+    let (tx, rx) = std::sync::mpsc::channel();
+    for m in super::config::APT_MIRRORS {
+        let tx = tx.clone();
+        std::thread::spawn(move || {
+            let _ = tx.send((*m, mirror_speed(m)));
+        });
+    }
+    drop(tx);
+    let deadline = Instant::now() + Duration::from_secs(12);
+    let mut best: Option<(&str, f64)> = None;
+    while let Some(left) = deadline.checked_duration_since(Instant::now()) {
+        match rx.recv_timeout(left) {
+            Ok((m, Some(bps))) if best.is_none_or(|(_, b)| bps > b) => best = Some((m, bps)),
+            Ok(_) => {}
+            Err(_) => break,
+        }
+    }
+    match best {
+        Some((m, bps)) => {
+            log(&format!("Debian mirror: {m} (fastest here, {:.1} MB/s)", bps / 1e6));
+            if m == super::config::APT_MIRRORS[0] { String::new() } else { m.to_string() }
+        }
+        None => {
+            log("Debian mirror: none answered the speed test; using deb.debian.org");
+            String::new()
+        }
+    }
+}
+
+/// Bytes per second for the first MiB of `<mirror>/ls-lR.gz`, `None` when it fails.
+fn mirror_speed(mirror: &str) -> Option<f64> {
+    const PROBE: u64 = 1 << 20;
+    let url = format!("{mirror}/ls-lR.gz");
+    let t0 = Instant::now();
+    let resp = seagent_net::http::agent_for(Duration::from_secs(10), Duration::from_secs(5), &url).get(&url).header("Range", format!("bytes=0-{}", PROBE - 1)).call().ok()?;
+    if !matches!(resp.status().as_u16(), 200 | 206) {
+        return None;
+    }
+    let mut r = resp.into_body().into_reader().take(PROBE);
+    let n = std::io::copy(&mut r, &mut std::io::sink()).ok()?;
+    (n >= PROBE / 4).then(|| n as f64 / t0.elapsed().as_secs_f64().max(1e-3))
 }
 
 /// Short hash naming the provisioned image (changes with anything that changes its content).
@@ -247,9 +304,10 @@ pub fn build(vms: &DesktopVms, force: bool, log: &mut dyn FnMut(&str)) -> Result
     let disk = work.join("disk.qcow2");
     super::run_tool(&qemu_img, &["create", "-q", "-f", "qcow2", "-F", "qcow2", "-b", &base.display().to_string(), &disk.display().to_string(), &format!("{}G", cfg.disk_gb)])?;
     let instance = format!("seagent-desktop-{}", recipe(cfg));
+    let mirror = pick_mirror(cfg, log);
     let seed = SeedServer::start(vec![
         ("meta-data", format!("instance-id: {instance}\nlocal-hostname: seagent-desktop\n")),
-        ("user-data", user_data(cfg)),
+        ("user-data", seed_user_data(cfg, &mirror)),
         ("vendor-data", String::new()),
     ])?;
     let (accel, warn) = super::accel(cfg);
@@ -377,7 +435,7 @@ mod tests {
     #[test]
     fn user_data_and_recipe_follow_the_config() {
         let mut c = DesktopConfig::default();
-        let u = user_data(&c);
+        let u = seed_user_data(&c, "");
         assert!(u.starts_with("#cloud-config"));
         assert!(u.contains("chromium") && u.contains("autologin-user=seagent") && u.contains("SEAGENT_PROVISION_OK") && !u.contains("{{"), "{u}");
         let r = recipe(&c);
@@ -424,6 +482,36 @@ mod tests {
         assert_eq!(std::fs::read(&p).unwrap(), b"not really qcow2");
         ensure_base(&c, &d.join("cache"), &mut |l| lines.push(l.to_string())).unwrap();
         assert!(lines.last().unwrap().contains("sha256 ok"), "{lines:?}");
+    }
+
+    #[test]
+    fn the_mirror_is_filled_into_the_seed_but_not_the_recipe() {
+        let c = DesktopConfig::default();
+        let ud = seed_user_data(&c, "https://linux.cs.nycu.edu.tw/debian/debian/");
+        assert!(ud.contains("m='https://linux.cs.nycu.edu.tw/debian/debian'"), "trailing / dropped");
+        assert!(!ud.contains("{{"), "no placeholder left");
+        assert!(seed_user_data(&c, "").contains("m=''"));
+        assert!(seed_user_data(&c, "http://x/a'b").contains("m=''"), "an unsafe URL is never inserted");
+        let other = DesktopConfig { apt_mirror: "http://ftp.jp.debian.org/debian".into(), ..Default::default() };
+        assert_eq!(recipe(&c), recipe(&other));
+        assert_eq!(pick_mirror(&other, &mut |_| {}), "http://ftp.jp.debian.org/debian");
+    }
+
+    /// The guest's sed line, run on both apt source formats: the main archive moves to the
+    /// mirror, debian-security stays.
+    #[cfg(unix)]
+    #[test]
+    fn the_guest_sed_rewrites_only_the_main_archive() {
+        let line = USER_DATA.lines().find(|l| l.contains("sed -i -E")).unwrap().trim().trim_start_matches("[ -f \"$f\" ] && ");
+        let d = seagent_core::tmp::TempDir::new("seagent-dvm-sed");
+        let f = d.path().join("debian.sources");
+        std::fs::write(&f, "Types: deb\nURIs: http://deb.debian.org/debian\nSuites: trixie\n\nTypes: deb\nURIs: http://deb.debian.org/debian-security\n\ndeb https://deb.debian.org/debian/ trixie main\n").unwrap();
+        let st = std::process::Command::new("sh").arg("-c").arg(line).env("f", &f).env("m", "https://m.example/debian").status().unwrap();
+        assert!(st.success());
+        let out = std::fs::read_to_string(&f).unwrap();
+        assert!(out.contains("URIs: https://m.example/debian\n"), "{out}");
+        assert!(out.contains("URIs: http://deb.debian.org/debian-security\n"), "{out}");
+        assert!(out.contains("deb https://m.example/debian trixie main"), "{out}");
     }
 
     /// A server that drops the first response half-way; the download resumes with a Range

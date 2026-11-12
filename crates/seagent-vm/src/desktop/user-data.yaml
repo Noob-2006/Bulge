@@ -126,6 +126,15 @@ write_files:
       say() { echo "$1" > /dev/ttyS0 2>/dev/null || true; echo "$1"; }
       trap 'say SEAGENT_PROVISION_FAIL' EXIT
       say SEAGENT_PROVISION_START
+      # The host picks the fastest Debian mirror ({{APT_MIRROR}}, empty = the image's
+      # deb.debian.org); apt verifies the signed archive whichever mirror serves it.
+      m='{{APT_MIRROR}}'
+      if [ -n "$m" ]; then
+        for f in /etc/apt/sources.list /etc/apt/sources.list.d/*.sources /etc/apt/sources.list.d/*.list; do
+          [ -f "$f" ] && sed -i -E "s#https?://deb\.debian\.org/debian/?([[:space:]]|\$)#$m\1#g" "$f"
+        done
+        say "SEAGENT_APT_MIRROR $m"
+      fi
       apt-get update
       apt-get install -y --no-install-recommends {{PACKAGES}}
       # zh_TW.UTF-8 available (UI language stays the image default).

@@ -34,6 +34,8 @@ seagent vm desktop reset          # 停機並刪除磁碟疊加層，下次開�
 - 來源：`https://cloud.debian.org/images/cloud/trixie/20261026-2643/debian-13-generic-amd64-20261026-2643.qcow2`
 - sha256：`7740a80114c1b5e6456c65713c76f4006e8b00eb50d8a122924ba823b9959fc5`（已對照 Debian 官方 SHA512SUMS），418 MiB。`image_url` 也可以是 `file://` 或絕對路徑（離線環境）。
 - 佈建方式：SE Agent 在主機 127.0.0.1 開一次性的 HTTP 伺服器提供 cloud-init NoCloud 種子，透過 SMBIOS `ds=nocloud;s=http://10.0.2.2:PORT/` 讓客體抓取；客體裝好 `xserver-xorg-core`、LightDM（自動登入使用者 `seagent`）、Xfce（xfwm4/panel/desktop/terminal/thunar）、`chromium`、`fonts-dejavu-core`、`fonts-noto-cjk`（繁中網頁不會變成方塊）、`locales`（產生 `zh_TW.UTF-8`，介面語言維持映像預設）、`xdotool`、`xclip` 等（不裝 recommends），最後在序列埠印出 `SEAGENT_PROVISION_OK` 並關機，SE Agent 再把結果攤平成 `<cache>/desktop-vm/desktop-<recipe>.qcow2` 與同名 `.json` manifest。
+- 下載：連線中斷時以 HTTP Range 從斷點續傳（有進度就持續重試，上次中斷留下的 `.part` 也會接著抓），最後一律比對固定的 sha256。
+- 套件來源：`apt_mirror = "auto"`（預設）時，佈建前同時向 deb.debian.org、交大（linux.cs.nycu.edu.tw）與幾個官方國家鏡像各抓 1 MiB 測速，選最快的給客體 apt 用；apt 會驗證簽章，換鏡像不影響安全，也不改變 recipe。設成 `""` 固定用 deb.debian.org，或填一個 Debian 套件庫網址。
 - recipe 雜湊涵蓋來源 sha256、cloud-config 範本與套件清單；設定不變時 `build` 直接回報「up to date」。解析度與 Chromium 起始網址每次開機經 SMBIOS OEM 字串（`seagent-res=`、`seagent-url=`）傳入，不必重建。
 
 ## 設定 `[desktop_vm]`
@@ -42,9 +44,9 @@ seagent vm desktop reset          # 停機並刪除磁碟疊加層，下次開�
 [desktop_vm]
 enabled = true
 default = "desk"
-qemu = "qemu-system-x86_64"
-qemu_img = "qemu-img"
-accel = "auto"            # auto | kvm | tcg
+qemu = "qemu-system-x86_64"  # Windows 安裝版預設用安裝包內附的 QEMU
+qemu_img = "qemu-img"         # 同上（vm\runtime\qemu\qemu-img.exe）
+accel = "auto"            # auto | kvm / whpx / hvf | tcg
 memory_mb = 2048
 cpus = 2
 width = 1280
@@ -55,6 +57,7 @@ start_url = "about:blank"
 image_url = "…"           # 預設為上面的固定版本
 image_sha256 = "…"
 extra_packages = []
+apt_mirror = "auto"       # auto（測速選最快）| "" | Debian 套件庫網址
 build_timeout_secs = 2400
 stop_timeout_secs = 30
 idle_timeout_secs = 0     # 0 = 不自動停
