@@ -8,7 +8,11 @@
     },
     "windows": {
       "wix": {
-        "language": ["en-US", "zh-TW", "zh-CN"],
+        "language": {
+          "en-US": { "localePath": "windows/wix/en-US.wxl" },
+          "zh-TW": { "localePath": "windows/wix/zh-TW.wxl" },
+          "zh-CN": { "localePath": "windows/wix/zh-CN.wxl" }
+        },
         "fragmentPaths": ["windows/vdd/vdd.wxs"],
         "featureRefs": ["SeagentVirtualDisplay"]
       }

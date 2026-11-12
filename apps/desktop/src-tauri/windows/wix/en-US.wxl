@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- SE Agent's own MSI strings; Tauri adds its defaults for every string not listed here. -->
+<WixLocalization Culture="en-us" xmlns="http://schemas.microsoft.com/wix/2006/localization">
+  <String Id="SeagentNsisPresent">SE Agent is already installed on this computer with the SE Agent setup program (setup.exe). Update it with setup.exe, or uninstall SE Agent in Settings &gt; Apps first and then run this MSI.</String>
+</WixLocalization>

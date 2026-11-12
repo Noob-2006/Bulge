@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- SE Agent 自己的 MSI 字符串；没有列在这里的字符串由 Tauri 补上默认值。 -->
+<WixLocalization Culture="zh-cn" xmlns="http://schemas.microsoft.com/wix/2006/localization">
+  <String Id="SeagentNsisPresent">这台电脑已经用 SE Agent 安装程序（setup.exe）安装过 SE Agent。请直接用 setup.exe 更新；如果要改用 MSI，请先到“设置 → 应用”卸载 SE Agent，再运行这个 MSI。</String>
+</WixLocalization>

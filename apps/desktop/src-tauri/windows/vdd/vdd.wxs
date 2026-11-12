@@ -9,8 +9,17 @@
   happen in the per-machine execute sequence (session 0, no UI). The script therefore runs from
   the UI sequence, in the user's session, after the files are installed; it elevates itself
   (one UAC prompt). A silent `/qn` install skips it: the settings page offers Install.
+  It runs synchronously (Return="ignore"): an asyncNoWait EXE action in the UI sequence never
+  starts its process (it ends with 1631 and nothing runs), checked with a probe MSI on Windows 11.
   Uninstall: removing a driver needs no consent, so it runs deferred as LocalSystem before the
   files go away.
+
+  Two more MSI fixes live here because this fragment is the one the product references:
+  - Tauri's MSI reuses the setup.exe (NSIS) install folder. Installing the MSI over an NSIS
+    install left two registered products sharing one folder (uninstalling either deletes the
+    other's files), so a fresh MSI install stops with a message when setup.exe's install exists.
+  - Tauri's "Launch SE Agent" checkbox on the last page uses an asyncNoWait action too, which
+    does nothing; WixShellExec starts the app instead.
 -->
 <Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
   <Fragment>
@@ -22,7 +31,16 @@
     <Feature Id="SeagentVirtualDisplay" Title="Virtual display driver" Description="Lets apps on the agent's Bot Desktop stream at 30-60 fps (one extra virtual screen outside the corner of your screens)." Level="1" AllowAdvertise="no">
       <ComponentRef Id="SeagentVirtualDisplayMarker" />
     </Feature>
-    <CustomAction Id="SeagentVddInstall" Directory="INSTALLDIR" Return="asyncNoWait" Impersonate="yes"
+    <Property Id="SEAGENT_NSIS_UNINSTALL">
+      <RegistrySearch Id="SeagentNsisUninstall" Root="HKCU" Key="Software\Microsoft\Windows\CurrentVersion\Uninstall\SE Agent" Name="UninstallString" Type="raw" />
+    </Property>
+    <Condition Message="!(loc.SeagentNsisPresent)">Installed OR NOT SEAGENT_NSIS_UNINSTALL</Condition>
+    <Property Id="WixShellExecTarget" Value="[#Path]" />
+    <CustomAction Id="SeagentLaunchApp" BinaryKey="WixCA" DllEntry="WixShellExec" Impersonate="yes" Return="ignore" />
+    <UI>
+      <Publish Dialog="ExitDialog" Control="Finish" Event="DoAction" Value="SeagentLaunchApp" Order="2">WIXUI_EXITDIALOGOPTIONALCHECKBOX = 1 and NOT Installed</Publish>
+    </UI>
+    <CustomAction Id="SeagentVddInstall" Directory="INSTALLDIR" Return="ignore" Impersonate="yes"
       ExeCommand="&quot;[System64Folder]WindowsPowerShell\v1.0\powershell.exe&quot; -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File &quot;[INSTALLDIR]vdd\install-vdd.ps1&quot;" />
     <CustomAction Id="SeagentVddUninstall" Directory="INSTALLDIR" Return="ignore" Execute="deferred" Impersonate="no"
       ExeCommand="&quot;[System64Folder]WindowsPowerShell\v1.0\powershell.exe&quot; -NoProfile -ExecutionPolicy Bypass -File &quot;[INSTALLDIR]vdd\install-vdd.ps1&quot; -Uninstall" />
