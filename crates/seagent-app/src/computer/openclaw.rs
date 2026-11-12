@@ -513,7 +513,8 @@ impl NativeDesk {
 /// so the live view streams it in patch mode and the browser tools can drive it as `app:<name>`.
 fn launch_cdp_app(p: &Value) -> Result<Value, String> {
     let exe = std::path::PathBuf::from(p["app"].as_str().unwrap_or(""));
-    if !exe.is_file() {
+    // An App Execution Alias (WindowsApps\mspaint.exe) is a reparse point `is_file` may not follow.
+    if !exe.is_file() && !(cfg!(windows) && std::fs::symlink_metadata(&exe).is_ok()) {
         return Err(format!("COMPUTER_INVALID_REQUEST: launch_app: {} is not a file", exe.display()));
     }
     let args: Vec<String> = p["args"].as_array().into_iter().flatten().filter_map(Value::as_str).map(String::from).collect();
@@ -534,6 +535,42 @@ fn launch_cdp_app(p: &Value) -> Result<Value, String> {
     let env = seagent_browser::manager::Env { cfg: Default::default(), home: paths.data.clone(), secrets: std::sync::Arc::new(|s: &str| s.to_string()) };
     let b = seagent_browser::manager::global().launch_app(&env, &name, &exe, &args)?;
     Ok(json!({"ok": true, "effect": "confirmed", "details": {"app": exe.display().to_string(), "kind": kind, "browserKey": b.key, "pid": b.pid}}))
+}
+
+/// A bare application name → the executable `launch_app` starts on Windows. Friendly names map to
+/// their program (`paint` → `mspaint`, `calculator` → `calc`, `terminal` → `wt`); then
+/// `<windir>\System32`, `<windir>`, every `PATH` directory, and last the App Execution Aliases in
+/// `<localappdata>\Microsoft\WindowsApps` (packaged apps: Windows 11 Paint, Terminal, …).
+/// Pure, so it is tested on every OS with fake directories.
+#[cfg_attr(not(windows), allow(dead_code))]
+pub(crate) fn windows_app(name: &str, windir: Option<&std::path::Path>, localappdata: Option<&std::path::Path>, path: &[std::path::PathBuf]) -> Option<std::path::PathBuf> {
+    let n = name.trim();
+    if n.is_empty() || n.starts_with('-') || !n.chars().all(|c| c.is_ascii_alphanumeric() || "._- ".contains(c)) {
+        return None;
+    }
+    let lower = n.to_ascii_lowercase();
+    let base = lower.strip_suffix(".exe").unwrap_or(&lower);
+    let prog = match base {
+        "paint" | "ms paint" | "microsoft paint" => "mspaint",
+        "calculator" => "calc",
+        "terminal" | "windows terminal" => "wt",
+        "file explorer" | "files" => "explorer",
+        "text editor" | "editor" => "notepad",
+        other => other,
+    };
+    let file = format!("{prog}.exe");
+    let mut dirs: Vec<std::path::PathBuf> = vec![];
+    if let Some(w) = windir {
+        dirs.push(w.join("System32"));
+        dirs.push(w.to_path_buf());
+    }
+    dirs.extend(path.iter().cloned());
+    if let Some(l) = localappdata {
+        dirs.push(l.join("Microsoft").join("WindowsApps"));
+    }
+    // `exists` rather than `is_file`: an App Execution Alias is a reparse point that only resolves
+    // through the shell, but it is what CreateProcess starts.
+    dirs.into_iter().map(|d| d.join(&file)).find(|p| p.exists() || std::fs::symlink_metadata(p).is_ok())
 }
 
 /// Windows without the virtual display: why native apps cannot be launched onto the Bot
@@ -587,6 +624,28 @@ impl Desk for NativeDesk {
                 return Ok(json!({"ok": true, "observation": {"kind": "screen", "base64": seagent_net::crypto::b64(&b), "format": "png", "width": w, "height": h}, "details": {"region": [x1, y1, x2, y2], "coordinateSpace": "screen-pixels"}}));
             }
             "launch_app" if p["app"].as_str().is_some_and(|a| a.contains(['/', '\\'])) => return launch_cdp_app(p),
+            // Windows: a bare name (notepad, Paint, mspaint, explorer, calc…) is resolved to its
+            // executable — System32, the Windows dir, PATH, then the App Execution Aliases of
+            // packaged apps (%LOCALAPPDATA%\Microsoft\WindowsApps: Windows 11 Paint has no
+            // System32\mspaint.exe any more) — and started like a path.
+            #[cfg(windows)]
+            "launch_app" => {
+                let name = p["app"].as_str().unwrap_or("");
+                let env = |k: &str| std::env::var_os(k).map(std::path::PathBuf::from);
+                let path: Vec<std::path::PathBuf> = std::env::var_os("PATH").map(|v| std::env::split_paths(&v).collect()).unwrap_or_default();
+                let exe = windows_app(name, env("WINDIR").or_else(|| env("SystemRoot")).as_deref(), env("LOCALAPPDATA").as_deref(), &path)
+                    .ok_or_else(|| format!("COMPUTER_INVALID_REQUEST: launch_app: no application `{name}` found (System32, the Windows folder, PATH, App Execution Aliases); pass the full path of the .exe"))?;
+                let mut q = p.clone();
+                q["app"] = json!(exe.display().to_string());
+                return launch_cdp_app(&q);
+            }
+            #[cfg(target_os = "macos")]
+            "launch_app" => {
+                let app = p["app"].as_str().filter(|a| !a.is_empty() && !a.starts_with('-') && a.chars().all(|c| c.is_ascii_alphanumeric() || "._- ".contains(c))).ok_or("launch_app needs `app`: an application name such as TextEdit")?;
+                node::run_cmd(&["open", "-a", app], self.t)?;
+                return Ok(json!({"ok": true, "effect": "unverifiable", "details": {"app": app}}));
+            }
+            #[cfg(not(any(windows, target_os = "macos")))]
             "launch_app" => {
                 let app = p["app"].as_str().filter(|a| !a.is_empty() && !a.starts_with('-') && a.chars().all(|c| c.is_ascii_alphanumeric() || "._-".contains(c))).ok_or("launch_app needs `app`: a desktop entry id such as org.gnome.TextEditor")?;
                 native::which_in(&self.env, "gtk-launch").ok_or("launch_app needs gtk-launch (GTK 3)")?;
@@ -647,6 +706,34 @@ mod tests {
         assert!(wire_params("invoke_menu", &json!({"windowRef": "w", "path": []}), None).unwrap_err().contains("1-16"));
         // Element-targeted clicks need no frame.
         assert!(wire_params("left_click", &json!({"elementRef": "e", "windowRef": "w"}), None).is_ok());
+    }
+
+    /// `launch_app` by name on Windows: System32 first, then the Windows dir, PATH, and the App
+    /// Execution Aliases of packaged apps (Windows 11 Paint lives only there).
+    #[test]
+    fn windows_app_names_resolve_to_system32_path_and_app_execution_aliases() {
+        let d = seagent_core::tmp::TempDir::new("seagent-launch-app");
+        let win = d.path().join("Windows");
+        let la = d.path().join("Local");
+        let alias = la.join("Microsoft").join("WindowsApps");
+        let tools = d.path().join("tools");
+        for dir in [win.join("System32"), alias.clone(), tools.clone()] {
+            std::fs::create_dir_all(&dir).unwrap();
+        }
+        std::fs::write(win.join("System32").join("notepad.exe"), b"").unwrap();
+        std::fs::write(win.join("explorer.exe"), b"").unwrap();
+        std::fs::write(alias.join("mspaint.exe"), b"").unwrap();
+        std::fs::write(tools.join("mytool.exe"), b"").unwrap();
+        let r = |n: &str| windows_app(n, Some(&win), Some(&la), std::slice::from_ref(&tools));
+        assert_eq!(r("notepad"), Some(win.join("System32").join("notepad.exe")));
+        assert_eq!(r("Notepad.exe"), Some(win.join("System32").join("notepad.exe")));
+        assert_eq!(r("explorer"), Some(win.join("explorer.exe")));
+        assert_eq!(r("Paint"), Some(alias.join("mspaint.exe")), "Windows 11 Paint: only the App Execution Alias");
+        assert_eq!(r("mspaint"), Some(alias.join("mspaint.exe")));
+        assert_eq!(r("mytool"), Some(tools.join("mytool.exe")));
+        assert_eq!(r("nosuchapp"), None);
+        assert_eq!(r("..\\evil"), None, "no path tricks through a name");
+        assert_eq!(r("-help"), None);
     }
 
     /// A desk that records the wire params it is handed and answers like a live host.
