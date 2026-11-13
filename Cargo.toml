@@ -26,7 +26,7 @@ base64 = "0.23"
 # Windows port (docs/cross-platform.md): Job Objects, named pipes, owner-only DACLs, console modes,
 # ConPTY, system facts, OS RNG for `seagent_core::platform`. 0.52 is the version ring already pulls
 # in on Windows, so this adds no new crate to the tree; only the API families used are enabled.
-windows-sys = { version = "0.52", default-features = false, features = [
+windows-sys = { version = "0.61", default-features = false, features = [
     "Win32_Foundation",
     "Win32_Security",
     "Win32_Security_Authorization",
