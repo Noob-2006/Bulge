@@ -1299,7 +1299,7 @@ fn run_init() -> i32 {
     };
 
     apply_guest_limits(&cfg.limits());
-    let _ = firmware_can_power_off(); // read the FADT while still root
+    let _ = firmware_can_power_off(); // read the FADT / device tree while still root
     for dir in [&cfg.workspace, &PathBuf::from(AGENT_HOME), &PathBuf::from("/run/seagent")] {
         if let Err(e) = chown_agent(dir) {
             log(&e);
@@ -1541,17 +1541,32 @@ fn serve(conn: &mut Conn, agent: Arc<Agent>, mut auth: Option<(Vec<u8>, String, 
 /// 0400, so a check made at `Shutdown` time (as uid 1000) always failed and the agent always
 /// reset the VM — harmless where the VMM exits on a reset (QEMU `-no-reboot`, Firecracker), a
 /// fresh reboot under VirtualBox (found there: the guest came straight back up).
+///
+/// arm64 guests booted from a device tree have no FADT at all; their power-off path is PSCI
+/// `SYSTEM_OFF` (PSCI 0.2+, the `arm,psci-0.2` / `arm,psci-1.0` node), which `RB_POWER_OFF`
+/// uses. That matters under Apple Virtualization.framework (vfkit), which *reboots* the guest on
+/// a reset instead of exiting (found there: every shutdown took the 15 s force-stop timeout).
+/// Firecracker, QEMU `virt` and crosvm on arm64 exit on `SYSTEM_OFF` too.
 static CAN_POWER_OFF: OnceLock<bool> = OnceLock::new();
 
 fn firmware_can_power_off() -> bool {
-    *CAN_POWER_OFF.get_or_init(read_fadt_power_off)
+    *CAN_POWER_OFF.get_or_init(read_power_off_support)
 }
 
-fn read_fadt_power_off() -> bool {
-    match std::fs::read("/sys/firmware/acpi/tables/FACP") {
-        Ok(t) if t.len() >= 0x5a => u32::from_le_bytes([t[0x56], t[0x57], t[0x58], t[0x59]]) != 0,
-        _ => false,
-    }
+fn read_power_off_support() -> bool {
+    fadt_can_power_off(&std::fs::read("/sys/firmware/acpi/tables/FACP").unwrap_or_default())
+        || (cfg!(target_arch = "aarch64") && psci_can_power_off(&std::fs::read("/sys/firmware/devicetree/base/psci/compatible").unwrap_or_default()))
+}
+
+/// The FADT's `PM1a_CNT_BLK` (offset 0x56) is non-zero: ACPI S5 really powers off.
+fn fadt_can_power_off(t: &[u8]) -> bool {
+    t.len() >= 0x5a && u32::from_le_bytes([t[0x56], t[0x57], t[0x58], t[0x59]]) != 0
+}
+
+/// The device tree's PSCI node (NUL-separated `compatible` list) offers `SYSTEM_OFF`:
+/// PSCI 0.2 and later have it; 0.1 (`arm,psci`) has no standard function ID for it.
+fn psci_can_power_off(compatible: &[u8]) -> bool {
+    compatible.split(|b| *b == 0).any(|c| c == b"arm,psci-0.2" || c == b"arm,psci-1.0")
 }
 
 fn power_off() -> i32 {
@@ -1580,6 +1595,19 @@ fn power_off() -> i32 {
 #[cfg(test)]
 mod unit {
     use super::*;
+
+    #[test]
+    fn power_off_is_used_where_the_firmware_really_powers_off() {
+        let mut fadt = vec![0u8; 0x80];
+        assert!(!fadt_can_power_off(&fadt), "Firecracker x86: no PM block, a power-off only halts");
+        fadt[0x56..0x5a].copy_from_slice(&0x620u32.to_le_bytes());
+        assert!(fadt_can_power_off(&fadt), "QEMU q35: ACPI S5");
+        assert!(!fadt_can_power_off(&[]), "no FADT (arm64 device-tree boot)");
+        assert!(psci_can_power_off(b"arm,psci-0.2\0"), "vfkit / Virtualization.framework");
+        assert!(psci_can_power_off(b"arm,psci-1.0\0arm,psci-0.2\0arm,psci\0"), "QEMU virt lists every level");
+        assert!(!psci_can_power_off(b"arm,psci\0"), "PSCI 0.1 has no standard SYSTEM_OFF");
+        assert!(!psci_can_power_off(b""), "no PSCI node");
+    }
 
     #[test]
     fn defaults_are_safe() {
