@@ -141,9 +141,23 @@ windows)
 		"$sz" x -y -o"$x" "$setup" >/dev/null || die "7-Zip could not unpack $setup"
 		printf '%s\n' "$QEMU_SHA512" >"$x/.from"
 	fi
+	# 7-Zip versions lay an NSIS installer out differently (files at the top, or under $INSTDIR
+	# or a folder): the QEMU tree is wherever the emulator is.
+	if [ ! -f "$x/$EXE" ]; then
+		found="$(find "$x" -type f -name "$EXE" -print 2>/dev/null | head -n1)"
+		if [ -n "$found" ]; then
+			x="$(dirname "$found")"
+		else
+			note "the unpacked installer has no $EXE; its layout:"
+			find "$CACHE/qemu-x" -maxdepth 2 | head -n 60 >&2
+			die "the pinned QEMU build has no $EXE (can 7-Zip ($sz) unpack NSIS installers?)"
+		fi
+	fi
+	note "QEMU tree: $x"
 	rt="$OUT/runtime/qemu"
 	mkdir -p "$rt/share"
 	while IFS= read -r f; do
+		f="${f%$'\r'}" # a CRLF checkout
 		case "$f" in '' | '#'*) continue ;; esac
 		[ -f "$x/$f" ] || die "the pinned QEMU build has no $f (packaging/vm/qemu-windows-files.txt is out of date)"
 		install -m 0644 "$x/$f" "$rt/$f"

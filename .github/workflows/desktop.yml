@@ -218,7 +218,7 @@ jobs:
           case "${{ runner.os }}" in
             Windows) for f in "$b"/nsis/*.exe; do 7z l "$f" | grep -E 'vm[\/]bundle\.json' >/dev/null || { echo "::error::$f has no vm/bundle.json"; exit 1; }; done ;;
             macOS) test -f "$(ls -d "$b"/macos/*.app | head -1)/Contents/Resources/vm/bundle.json" ;;
-            Linux) for f in "$b"/deb/*.deb; do dpkg-deb -c "$f" | grep -q '/vm/bundle.json' || { echo "::error::$f has no vm/bundle.json"; exit 1; }; done ;;
+            Linux) for f in "$b"/deb/*.deb; do dpkg-deb -c "$f" | grep '/vm/bundle.json' >/dev/null || { echo "::error::$f has no vm/bundle.json"; exit 1; }; done ;;
           esac
       - name: Collect
         run: apps/desktop/scripts/collect-bundles.sh '${{ matrix.triple }}' dist
