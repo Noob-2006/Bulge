@@ -18,10 +18,16 @@
 
 ### 1.1 需求
 
-- Linux x86_64（主要目標）、macOS 可跑但未驗證；單一執行檔，不需要 root、不需要資料庫、不需要 Node。
-- 需要 `git` 與一個模型供應商的金鑰（或訂閱登入）。VM 功能另外需要 `/dev/kvm`（見第 5 節）。
+版本 **0.2.0-alpha**。
+
+- Windows 10／11 x64、macOS 11+、Linux（x86_64／aarch64，任何發行版）、Android 8+、iOS；單一執行檔，不需要 root、不需要資料庫、不需要 Node。各平台的驗證程度見 README 的「平台狀態」。
+- 需要一個模型供應商的金鑰（或訂閱登入）；程式碼相關工具需要 `git`。VM 功能：Windows 安裝包內附 QEMU（開啟 Windows Hypervisor Platform 才有加速），Linux 需要 `/dev/kvm`，macOS 用 Virtualization.framework（見第 5 節）。
 
 ### 1.2 建置與安裝
+
+桌機與手機：下載圖形安裝檔點兩下（Windows `setup.exe`／`.msi`、macOS `.dmg`、Linux `.AppImage`／`.deb`／`.rpm`、Android `.apk`），第一次開啟就是設定精靈。每個平台的步驟、未簽章警告的處理與升級方式見 [install.md](install.md) §0 與 §10。
+
+Linux 伺服器或從原始碼：
 
 ```bash
 cargo build --release                       # 預設：所有聊天平台與模型格式都編進去
@@ -460,9 +466,10 @@ seagent vm desktop stop [name]
 seagent vm desktop reset [name]   # 刪除磁碟疊加層，下次開機用新映像
 ```
 
-- 設定在 `[desktop_vm]`（`memory_mb`、`cpus`、`width`/`height` 預設 1280×800、`accel = auto|kvm|tcg`、`network = user|none`、`idle_timeout_secs` …）。
+- 設定在 `[desktop_vm]`（`memory_mb`、`cpus`、`width`/`height` 預設 1280×800、`accel = auto|kvm|whpx|hvf|tcg`（依主機）、`network = user|none`、`apt_mirror = "auto"`（測速選最快的 Debian 鏡像）、`timezone = "host"`（時鐘跟著主機）、`idle_timeout_secs` …）。
+- QEMU：Windows 用安裝包內附的（含 `qemu-img`），Linux／macOS 用系統的（`apt install qemu-system-x86 qemu-utils`、`brew install qemu`）；映像下載中斷會續傳。
 - 映像內含 `fonts-noto-cjk`（繁中網頁正常顯示）與 `zh_TW.UTF-8` locale；含中文的 `type` 輸入走 virtio-serial 文字通道，由客體內 `seagent-text-input` 經剪貼簿貼上（xclip + Ctrl+V）。
-- 有 `/dev/kvm` 用 KVM，否則 TCG 並警告；畫面走 QMP `screendump`，輸入走 QMP `input-send-event`（USB tablet 絕對座標），不需要 VNC 用戶端；QEMU 自帶的 VNC 在私有 unix socket 上。
+- 有 KVM（Linux）／WHPX（Windows）／HVF（Intel Mac）就用，否則 TCG 並警告；畫面走 QMP `screendump`，輸入走 QMP `input-send-event`（USB tablet 絕對座標），不需要 VNC 用戶端；Linux／macOS 上 QEMU 自帶的 VNC 在私有 unix socket 上，Windows 不開 VNC、QMP 走 127.0.0.1 TCP。
 - 每台 VM 有自己的磁碟疊加層（`<data>/vm/desktop/<name>/disk.qcow2`）與自己的接手租約；人接手時代理對該 VM 的所有動作都會被拒。
 - 代理端：`computer_use` 的 `target = "vm:<name>"`（或 `[computer_use] target` 預設值）；核准範圍為 `desktop:vm:<name>:<action>`。
 - 主控台：`view.desktop.list`、`view.desktop.{state,frame,takeover,handback,input}`（帶 `target`）、`view.vm.start|stop`（admin）。

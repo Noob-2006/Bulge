@@ -10,7 +10,7 @@ seagent setup
 ```
 
 Offline: `SEAGENT_NPM_TARBALL=/path/seagent-x86_64-unknown-linux-musl.tar.gz npm install -g @se-agent/seagent`.
-A mirror: `SEAGENT_NPM_BASE_URL=https://mirror.example/seagent/v0.1.0`.
+A mirror: `SEAGENT_NPM_BASE_URL=https://mirror.example/seagent/v0.2.0-alpha`.
 
 The npm package is a convenience wrapper; system services, audit and multi-user setups are
 better served by the distribution packages (deb, rpm, pacman, apk). See

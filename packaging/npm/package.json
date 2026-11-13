@@ -1,6 +1,6 @@
 {
   "name": "@se-agent/seagent",
-  "version": "0.1.0",
+  "version": "0.2.0-alpha",
   "description": "SE Agent (System Engineering Agent): self-hosted, Linux-first AI agent runtime. Installs the signed static release binary.",
   "license": "MIT",
   "homepage": "https://github.com/se-agent/System-Engineering-Agent",

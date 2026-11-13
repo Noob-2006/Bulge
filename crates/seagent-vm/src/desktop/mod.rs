@@ -37,6 +37,7 @@ pub mod fake;
 pub mod image;
 pub mod keys;
 pub mod qmp;
+pub mod timezone;
 
 pub use config::DesktopConfig;
 pub use qmp::Input;
@@ -78,7 +79,29 @@ pub(crate) fn now_s() -> u64 {
 }
 
 pub(crate) fn resolve_bin(b: &str) -> Result<PathBuf, String> {
-    crate::isolation::which(b).ok_or_else(|| format!("`{b}` not found (install QEMU, or set [desktop_vm] qemu / qemu_img)"))
+    crate::isolation::which(b).or_else(|| package_manager_bin(b)).ok_or_else(|| format!("`{b}` not found ({}, or set [desktop_vm] qemu / qemu_img)", qemu_install_hint()))
+}
+
+/// A bare name in the package managers' prefixes that a GUI app's PATH leaves out (an app
+/// started from Finder / the Dock gets launchd's `/usr/bin:/bin:/usr/sbin:/sbin`, without
+/// Homebrew's `/opt/homebrew/bin` or MacPorts' `/opt/local/bin`).
+fn package_manager_bin(b: &str) -> Option<PathBuf> {
+    if b.contains('/') || b.contains('\\') {
+        return None;
+    }
+    let dirs: &[&str] = if cfg!(target_os = "macos") { &["/opt/homebrew/bin", "/usr/local/bin", "/opt/local/bin"] } else if cfg!(unix) { &["/usr/local/bin", "/usr/bin", "/snap/bin"] } else { &[] };
+    dirs.iter().map(|d| Path::new(d).join(b)).find(|p| p.is_file())
+}
+
+/// How this host gets QEMU (the Windows installer ships it; elsewhere it is the system's).
+pub fn qemu_install_hint() -> &'static str {
+    if cfg!(windows) {
+        "reinstall SE Agent: the installer ships QEMU in vm\\runtime\\qemu"
+    } else if cfg!(target_os = "macos") {
+        "install QEMU: `brew install qemu` (Homebrew) or `sudo port install qemu` (MacPorts)"
+    } else {
+        "install QEMU: Debian/Ubuntu `sudo apt install qemu-system-x86 qemu-utils`, Fedora `sudo dnf install qemu-system-x86 qemu-img`, Arch `sudo pacman -S qemu-desktop`"
+    }
 }
 
 pub(crate) fn run_tool(bin: &Path, args: &[&str]) -> Result<String, String> {
@@ -336,6 +359,13 @@ impl DesktopVms {
             "-smbios".into(),
             format!("type=11,value=seagent-res={}x{},value=seagent-url={url}", c.width, c.height),
         ];
+        // The guest's clock follows the host's zone (or the configured one); valid_tz keeps
+        // commas and shell characters out of the SMBIOS string.
+        if let Some(tz) = timezone::resolve(&c.timezone).filter(|t| timezone::valid_tz(t)) {
+            if let Some(s) = a.last_mut() {
+                s.push_str(&format!(",value=seagent-tz={tz}"));
+            }
+        }
         if c.network == "user" {
             let fwd = cdp_port.map(|p| format!(",hostfwd=tcp:127.0.0.1:{p}-:{GUEST_CDP_PORT}")).unwrap_or_default();
             a.extend(["-netdev".into(), format!("user,id=n0{fwd}"), "-device".into(), "virtio-net-pci,netdev=n0".into()]);

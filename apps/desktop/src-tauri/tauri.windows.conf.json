@@ -8,6 +8,7 @@
     },
     "windows": {
       "wix": {
+        "version": "0.2.0",
         "language": {
           "en-US": { "localePath": "windows/wix/en-US.wxl" },
           "zh-TW": { "localePath": "windows/wix/zh-TW.wxl" },

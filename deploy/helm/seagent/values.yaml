@@ -3,7 +3,7 @@
 image:
   repository: ghcr.io/se-agent/seagent
   # empty = the chart's appVersion. Variants: "<ver>" (debian), "<ver>-ubi", "<ver>-distroless".
-  # Pin by digest in production: tag: "0.1.0@sha256:..."
+  # Pin by digest in production: tag: "0.2.0-alpha@sha256:..."
   tag: ""
   pullPolicy: IfNotPresent
 imagePullSecrets: []

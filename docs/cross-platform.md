@@ -1,5 +1,7 @@
 # 跨平台改造計畫（Windows / macOS / Linux 各發行版 / Android / iOS）
 
+> **狀態（0.2.0-alpha，2026-11-13）**：本計畫的程式碼都已合併並以 0.2.0-alpha 發行。Windows 11 實機（安裝、內建 VM、桌面 VM、Bot Desktop 與虛擬顯示器、即時畫面）與 Linux（WSL2）驗證過；Android APK 能建置；macOS `.dmg` 與 iOS 等 Mac 的 CI 與 Apple 憑證。使用者面的安裝說明在 [install.md](install.md) §0。
+
 目標：一套程式碼，五個平台都能用；同一區域網路的裝置能自動找到彼此並安全配對；
 使用者下載一個檔、點開就裝好，設定精靈是圖形介面，不需要碰終端機。
 

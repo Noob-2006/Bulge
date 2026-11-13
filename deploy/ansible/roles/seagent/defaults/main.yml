@@ -4,7 +4,7 @@
 #   package  - a .deb/.rpm you host yourself or ship from the controller (seagent_package_src)
 #   tarball  - the static release tarball (any distro, also air-gapped: seagent_tarball_src on the controller)
 seagent_install_method: repo
-seagent_version: "0.1.0"
+seagent_version: "0.2.0-alpha"
 
 seagent_repo_url: ""            # e.g. https://packages.example.com/seagent   (apt: <url>/apt, yum: <url>/rpm/$basearch)
 seagent_repo_key_url: ""        # public key: apt keyring (.gpg/.asc) or RPM-GPG-KEY-seagent

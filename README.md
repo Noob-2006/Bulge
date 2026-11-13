@@ -1,6 +1,22 @@
 # ✦ SE Agent
 
-自架、Linux 優先的 AI agent，以 Rust 撰寫：單一執行檔、依賴極少，可以長時間穩定地自動化工作。
+**版本 0.2.0-alpha（Alpha 測試版）** · Windows · macOS · Linux · Android · iOS
+
+自架的 AI 代理（agent），以 Rust 撰寫：一套程式碼跑在桌機、伺服器與手機上，單一執行檔、依賴極少，可以長時間穩定地自動化工作。名稱是 System Engineering Agent，指令是 `seagent`。
+
+> **Alpha 是什麼意思**：功能已經齊全，可以每天使用；但設定格式、指令名稱和網頁主控台在 0.x 期間還可能調整，升級時請先看 [CHANGELOG.md](CHANGELOG.md)。安裝檔還沒有程式碼簽章，Windows SmartScreen 和 macOS Gatekeeper 會跳警告（處理方式見 [docs/install.md §0](docs/install.md#0-選擇平台與安裝檔)）。各平台的驗證狀態見下方「[平台狀態](#平台狀態)」，請勿在沒有備份的正式環境使用。
+
+## 它能做什麼
+
+你用自然語言交代工作，SE Agent 在**你自己的機器上**動手完成，模型只是它的「大腦」，可以隨時更換。
+
+- **系統與維運**：跑指令、改設定檔、看日誌、巡檢主機、透過 SSH 操作遠端伺服器，cron 排程與長期目標（goal）讓它定時回報或自動修復。
+- **寫程式**：讀整個專案、修 bug、跑測試、開 git worktree 平行處理，也能在 Zed／JetBrains／Neovim 裡當編輯器代理（ACP）。
+- **操作網頁與桌面**：內建瀏覽器工具（CDP），以及一台有畫面的**桌面 VM**（Debian + Xfce + Chromium），代理靠截圖與模擬滑鼠鍵盤操作（computer use），你可以在主控台以 30 fps 以上的即時畫面觀看、隨時接手。
+- **隔離執行**：有風險的指令放進 microVM（Firecracker／QEMU／Hyper-V／Virtualization.framework），iOS 則用 WebAssembly 沙盒；隔離等級一律明示，不會靜默降級。
+- **研究與內容**：網路搜尋、深度研究報告、文件抽取、圖片／影片／音樂生成、TTS／STT 語音、會議機器人，也能把多個工具串成流程（例如自動做成投影片式影片）。
+- **聊天平台與自動化**：在 Telegram、LINE、Discord、Slack、Teams、飛書、Email 等 46 條通道上回應指令，做成團隊或個人的值班助理。
+- **多代理協作**：派子代理平行做事、kanban 看板、群聊房間，各代理有獨立的花費與資源上限。
 
 - **只有兩道閘門**：提權（sudo、寫系統路徑）和資料外送（秘密、個資離開機器）。其他事情直接做，不會一直跳出確認。破壞性動作按四級風險處理：VM 內與可回復的直接放行，只有「VM 外且不可回復」才一定問人。
 - **省 token**：工具採漸進揭露、固定前綴快取（壓縮與 fork 子代理都重播同一份前綴，舊工具輸出只在上下文吃緊時才裁剪）、自動壓縮，並把大型輸出溢寫到檔案；`seagent session stats --session <id>` 看每一步的快取命中率。
@@ -29,7 +45,72 @@
 - 參與開發：[CONTRIBUTING.md](CONTRIBUTING.md)（每個 commit 需 `Signed-off-by`）；回報漏洞：[SECURITY.md](SECURITY.md)（私下回報）；行為準則：[CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md)
 - 授權：MIT（[LICENSE](LICENSE)），第三方來源見 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)；變更紀錄：[CHANGELOG.md](CHANGELOG.md)
 
+## 相容的生態
+
+SE Agent 是獨立實作，不是任何專案的分支；它讀得懂下列生態的格式，搬過來不必重寫。
+
+| 生態 | 相容到什麼程度 | 文件 |
+|---|---|---|
+| **Claude Code** | 技能目錄（`.claude/skills`、`SKILL.md`）、hooks（同樣的事件與 JSON）、settings、外掛市集格式；也能把 `claude` CLI 當成外部代理呼叫 | [other-ecosystems.md](docs/ecosystem/other-ecosystems.md) |
+| **OpenClaw** | 技能 metadata、設定、外掛、ClawHub、node 裝置；`seagent migrate from openclaw` 匯入 | [openclaw-compat.md](docs/ecosystem/openclaw-compat.md) |
+| **Hermes Agent** | 技能、設定、`plugin.yaml` 外掛、optional-mcps；`seagent migrate from hermes` 匯入 | [hermes-compat.md](docs/ecosystem/hermes-compat.md) |
+| **LangChain／LangGraph** | 從 LangChain 經 OpenAI 相容 API、MCP 或 A2A 接入；`graph-flow` 工具提供 LangGraph 式的持久化流程；LangSmith 可經 OTLP 收追蹤 | [langchain-integration.md](docs/ecosystem/langchain-integration.md)、[graph-flows.md](docs/ecosystem/graph-flows.md)、[langsmith.md](docs/ecosystem/langsmith.md) |
+| **MCP** | client 與 server 都支援：stdio、Streamable HTTP、SSE、OAuth 2.1 | [§MCP](#mcp) |
+| **ACP／A2A／OpenAI API** | 編輯器（Zed、JetBrains、Neovim）、其他代理、任何講 OpenAI Chat Completions 的程式 | [arp.md](docs/arp.md) |
+| **模型供應商** | Anthropic、OpenAI、DeepSeek、Gemini／Vertex、Bedrock、Mistral、OpenRouter、本地 llama.cpp／Ollama／vLLM 等 OpenAI 相容端點 | [MANUAL.md §9](docs/MANUAL.md#9-模型供應商與成本) |
+
+匯入時預設**不**搬金鑰，要搬請加 `--migrate-secrets`（寫進加密保管庫）。
+
+## 參考的上游專案
+
+SE Agent 的功能設計逐項對照了下列開源代理專案，並把其中值得的部分以 Rust 重新實作（都是 MIT 授權，出處與版權聲明見 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)）：
+
+| 上游 | 對照版本 | 借鏡了什麼 |
+|---|---|---|
+| [OpenClaw](https://github.com/openclaw/openclaw)（OpenClaw Foundation） | `8a186ad` | 聊天通道與閘道、node 裝置、技能與外掛格式、瀏覽器沙盒、TTS 工具 |
+| [Hermes Agent](https://github.com/NousResearch/hermes-agent)（Nous Research） | `90d6b98` | 聊天平台轉接器、終端機介面與 slash 指令、檢查點與 `/undo`、語音模式、WhatsApp／iMessage 橋接、秘密遮蔽、安全指引外掛 |
+| DeepSeek Harness（dsh） | `fcc0ad4` | 前綴快取策略（壓縮與 fork 子代理重播同一份前綴、只在上下文吃緊時裁剪）、逐步 TTFT 與快取統計、DeepSeek Messages 路由 |
+| LangChain v1／LangGraph／deepagents／LangSmith | — | 代理迴圈、checkpoint 與 interrupt（人類介入）、持久化流程、追蹤格式；見 [langchain-internals.md](docs/ecosystem/langchain-internals.md) |
+
+逐項落差報告在 [docs/parity-agent/](docs/parity-agent/)（含 `upstream-2026-11-06/` 這一輪同步），平台與功能對照在 [docs/parity.md](docs/parity.md)。上游預設會把工作階段紀錄上傳到模型供應商的功能（例如 dsh 的 `dsh_session_log`）**刻意沒有**移植。
+
+## 怎麼做出來的
+
+SE Agent 主要由 AI 程式代理在人類的指揮與審查下寫成：
+
+- **DeepSeek Harness**：前期的核心、工具與上游對照。
+- **Claude Code**（Anthropic）：跨平台移植（Windows／macOS／Android／iOS）、安裝檔與內建 VM、文件，以及在 Windows 實機上的驗證。
+
+每個 commit 都經過測試；由代理寫成的 commit 帶有 `Co-Authored-By` 標記。產生的程式碼一樣以 MIT 授權發布。
+
+## 平台狀態
+
+0.2.0-alpha 在各平台的驗證程度（「實機」是在真的裝置上安裝並操作過；「建置」是安裝檔能產出、內容檢查過，但還沒在該平台上操作）：
+
+| 平台 | 安裝檔 | 驗證程度 | 內建 VM | 備註 |
+|---|---|---|---|---|
+| Windows 10／11 x64 | `SE Agent_0.2.0-alpha_x64-setup.exe`、`.msi`（英／繁中／簡中） | **實機**（Windows 11 Home） | QEMU + WHPX（安裝包內附）；Hyper-V／VirtualBox 備援 | 附虛擬顯示器驅動；未簽章 |
+| Linux x86_64 | `.AppImage`、`.deb`、`.rpm`；CLI 另有 musl 靜態執行檔與 deb／rpm／pacman／apk | **實機**（WSL2 Ubuntu）；原生桌面發行版待測 | Firecracker（內附）；桌面 VM 用系統的 QEMU | 主要開發平台 |
+| macOS 11+（Apple Silicon／Intel） | `.dmg` | 程式碼可編譯；**安裝檔尚未產出**（需要 Mac 的 CI） | vfkit／Virtualization.framework；桌面 VM 用 Homebrew 的 QEMU | 等 CI 與 Apple 憑證 |
+| Android 8+（arm64） | `.apk`（目前是 debug 簽章） | **建置** | AVF（支援的機型） | 也能連到區域網路裡的電腦 |
+| iOS／iPadOS | App Store／TestFlight | 程式碼可編譯；**尚未產出**（需要 Mac 的 CI） | 無（平台禁止），改用 WASM 沙盒 | 完整代理在 App 行程內執行 |
+
 ## 安裝
+
+各平台、各版本的完整步驟、升級與疑難排解在 [docs/install.md](docs/install.md)。最短的路：
+
+| 你用的是 | 下載 | 然後 |
+|---|---|---|
+| Windows | `SE Agent_<版本>_x64-setup.exe` | 點兩下 → 「其他資訊 → 仍要執行」（未簽章） → 安裝完自動開設定精靈 |
+| macOS | `SE Agent_<版本>_aarch64.dmg`（Apple Silicon）或 `_x64.dmg`（Intel） | 拖進「應用程式」→ 第一次右鍵「打開」（未公證） |
+| Linux 桌面 | `.AppImage`（任何發行版）或 `.deb`／`.rpm` | `chmod +x` 後執行；或 `sudo apt install ./SE-Agent_*.deb` |
+| Linux 伺服器 | 一個指令（下方） | 照印出的連結開設定精靈 |
+| Android | `.apk` | 允許「安裝不明應用程式」後安裝 |
+| iOS | TestFlight 連結（上架後） | — |
+
+升級：Windows／macOS／Linux App 直接裝新版即可，設定與資料保留（從 0.1.0 升級要注意的事見 [docs/install.md §10](docs/install.md#10-版本與升級)）。
+
+### Linux／伺服器：一個指令
 
 一個指令：安裝、啟動背景服務與網頁主控台，最後印出（並在桌面環境自動開啟）一次性的設定精靈連結。
 
@@ -46,9 +127,11 @@ curl --proto '=https' --tlsv1.2 -fsSL https://github.com/se-agent/System-Enginee
 
 從原始碼：`cargo build --release && packaging/install.sh --local-binary target/release/seagent`。也有 [Dockerfile](Dockerfile) 與 [Nix flake](flake.nix)。
 
+指定版本：`… install.sh | sh -s -- --version v0.2.0-alpha`（不加就是最新的正式版；alpha 要明確指定）。
+
 ### 圖形安裝（App，不需終端機）
 
-從 [Releases](https://github.com/se-agent/System-Engineering-Agent/releases/latest) 下載一個檔、點兩下就裝好：Windows `SE-Agent_*_x64-setup.exe`（個人安裝，不需管理員；另有 `.msi`）、macOS `.dmg`、Linux `.AppImage` / `.deb` / `.rpm`、Android `.apk`。App 第一次開啟會安裝並啟動背景服務，接著在視窗裡開同一個設定精靈；之後常駐系統匣（開啟主控台、暫停、重新啟動服務、登入時啟動、檢查更新）。原始碼與建置方式見 [apps/desktop/README.md](apps/desktop/README.md)。
+從 [Releases](https://github.com/se-agent/System-Engineering-Agent/releases) 下載一個檔、點兩下就裝好：Windows `SE Agent_*_x64-setup.exe`（個人安裝，不需管理員；另有 `.msi`）、macOS `.dmg`、Linux `.AppImage` / `.deb` / `.rpm`、Android `.apk`。App 第一次開啟會安裝並啟動背景服務，接著在視窗裡開同一個設定精靈；之後常駐系統匣（開啟主控台、暫停、重新啟動服務、登入時啟動、檢查更新）。原始碼與建置方式見 [apps/desktop/README.md](apps/desktop/README.md)。
 
 **iOS 在手機上執行完整的 agent**（無伺服器，跟其他平台一樣）：agent 以函式庫形式連進 App、在 App 自己的行程裡跑——核心、session、模型供應商、記憶、技能、web 抓取／搜尋、App 沙盒內的檔案工具、MCP（Streamable HTTP／SSE）、純網路的聊天平台、排程，以及綁在 127.0.0.1 的 App Server（主控台照桌面版的方式載入）。iOS 只禁止兩件事：**虛擬機**與**原生 shell 程式**（不能開子程序、不能 JIT）。指令改在 App 內的 **WebAssembly 沙盒**執行（`exec.backend = "wasm"`：wasmi 直譯器 + 內建 POSIX shell + 釘選 SHA-256 的 uutils coreutils WASI 版，只看得到工作區與私有 `/tmp`、沒有網路）。App 在背景時，排程與心跳工作由 iOS 的 BGProcessingTask 在系統允許時執行。和區域網路中的電腦配對（Bonjour、QR／8 碼、TLS 指紋釘選）變成**選用**。詳見 [apps/desktop/MOBILE.md](apps/desktop/MOBILE.md)。
 
@@ -146,4 +229,4 @@ seagent mcp serve                            # 讓其他 agent 使用 seagent �
 
 ## 授權
 
-MIT。部分程式轉寫自 OpenClaw、Hermes Agent 與 DeepSeek Harness（皆為 MIT），見 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
+MIT。部分程式轉寫自 OpenClaw、Hermes Agent 與 DeepSeek Harness（皆為 MIT），見 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。Windows 安裝包內附的 QEMU 是 GPL-2.0，原始碼位置寫在安裝包的 `vm\bundle.json` 與 [packaging/vm/README.md](packaging/vm/README.md)。

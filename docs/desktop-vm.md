@@ -17,15 +17,24 @@ seagent vm desktop reset          # 停機並刪除磁碟疊加層，下次開�
 
 主機只需要 `qemu-system-x86_64`、`qemu-img`。不需要 root、ISO 工具、VNC 用戶端或 xdotool。
 
+| 主機 | QEMU 從哪來 | 加速 |
+|---|---|---|
+| Windows 10／11 | **安裝包內附**（`vm\runtime\qemu`，含 `qemu-img.exe` 與韌體），不必另裝 | WHPX：在「Windows 功能」勾選 Windows Hypervisor Platform 後重開機（App 的 VM 頁面有按鈕）；Home 版也行 |
+| Linux | 系統套件：`apt install qemu-system-x86 qemu-utils`、`dnf install qemu-system-x86 qemu-img`、`pacman -S qemu-desktop`（App 的 deb／rpm 會建議安裝） | KVM：使用者在 `kvm` 群組 |
+| macOS | `brew install qemu` 或 `sudo port install qemu`；GUI App 的 PATH 沒有 `/opt/homebrew/bin` 也找得到 | Intel Mac 用 HVF；Apple Silicon 跑 x86_64 映像只能 TCG（慢） |
+
+Windows 上實測（Windows 11 Home、WHPX、只用安裝包內附的 QEMU）：建立映像 247 秒（套件從交大鏡像 2.6 MB/s），`start` 1 秒內回應，之後的截圖是 Xfce 自動登入、Chromium 已開好（1280×800），`stop` 正常關機。
+
 ## 機器長相
 
 | 項目 | 內容 |
 |---|---|
-| 加速 | `/dev/kvm` 可讀寫時用 KVM，否則 TCG（很慢，狀態會帶警告） |
+| 加速 | Linux `/dev/kvm` 可讀寫時用 KVM、Windows 有 WHPX 時用 WHPX（`kernel-irqchip=off`）、Intel Mac 用 HVF；否則 TCG（很慢，狀態會帶警告） |
+| 時區 | `timezone = "host"`（預設）時每次開機把主機的時區（IANA 名稱）以 SMBIOS OEM 字串 `seagent-tz=` 傳入，客體的 `seagent-display-setup` 把 `/etc/localtime` 連到該時區；Windows 的時區名稱（`Taipei Standard Time`）以 CLDR 對照表轉成 `Asia/Taipei`，表裡沒有的用目前的 UTC 偏移（`Etc/GMT-8`） |
 | 顯示 | std VGA，EDID 偏好解析度 = 設定值（預設 1280×800）；畫面以 QMP `screendump` 取得 PNG |
 | 輸入 | USB tablet（絕對座標）+ PS/2 鍵盤，以 QMP `input-send-event` 送出；鍵盤配置為美式。ASCII 走鍵盤事件；含中文等非 ASCII 的文字改走 virtio-serial 文字通道 `org.seagent.text`（`<runtime>/dvm/<name>/text.sock`），客體桌面工作階段裡的 `seagent-text-input` 經剪貼簿貼上（xclip + Ctrl+V，會覆蓋客體剪貼簿；終端機需要 Ctrl+Shift+V，所以對終端機請只送 ASCII）。改用剪貼簿是因為 xdotool 的 Unicode keysym 輸入在 Chromium 會出現錯字 |
 | 網路 | QEMU user-mode NAT（`network = "none"` 可關閉） |
-| 通訊端 | `<runtime>/dvm/<name>/qmp.sock`、`vnc.sock`（QEMU 自帶 VNC，目錄 0700） |
+| 通訊端 | Linux／macOS：`<runtime>/dvm/<name>/qmp.sock`、`vnc.sock`（QEMU 自帶 VNC，目錄 0700）。Windows：QMP 與文字通道走只綁 127.0.0.1 的 TCP 埠，不開 VNC（`-display none`），畫面一律經 QMP 取得 |
 | 磁碟 | `<data>/vm/desktop/<name>/disk.qcow2`：以佈建好的映像為底的 copy-on-write 疊加層，關機後保留 |
 | 生命週期 | QEMU 以 `-daemonize` 常駐，CLI 結束後仍在跑；`pid` 存活且其命令列含本 VM 的 QMP 路徑才算執行中；`reap()` 清除殘留並停止閒置超過 `idle_timeout_secs` 的 VM |
 
@@ -58,6 +67,7 @@ image_url = "…"           # 預設為上面的固定版本
 image_sha256 = "…"
 extra_packages = []
 apt_mirror = "auto"       # auto（測速選最快）| "" | Debian 套件庫網址
+timezone = "host"         # host（跟著主機，每次開機）| ""（UTC）| IANA 名稱，例如 "Asia/Taipei"
 build_timeout_secs = 2400
 stop_timeout_secs = 30
 idle_timeout_secs = 0     # 0 = 不自動停
@@ -104,6 +114,7 @@ idle_timeout_secs = 0     # 0 = 不自動停
 
 ## 已知限制
 
-- 只支援 x86_64 主機；鍵盤事件為美式配置。非 ASCII 文字依賴客體內的 `seagent-text-input`（2026-11 以後建的映像才有），是「輸入文字」而不是輸入法組字。
+- 映像是 x86_64；Apple Silicon 與 arm64 Linux 只能以 TCG 模擬執行（能用但慢）。Android、iOS 沒有桌面 VM（Android 可以用配對電腦上的）。鍵盤事件為美式配置。
+- 時區在 2026-11-13（0.2.0-alpha）以前建的映像不會套用；`seagent vm desktop build` 重建後 `reset` 即可。非 ASCII 文字依賴客體內的 `seagent-text-input`（2026-11 以後建的映像才有），是「輸入文字」而不是輸入法組字。
 - 主機（`target = host`）的 `view.desktop.input` 走 xdotool / ydotool，主機沒有這些工具時會回報錯誤。
 - 映像重建後，舊 VM 的疊加層仍指向舊映像檔；要用新映像請執行 `seagent vm desktop reset <name>`。

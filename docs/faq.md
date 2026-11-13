@@ -9,7 +9,7 @@
 ## 基本
 
 **Q：SE Agent 是什麼？**
-自架在你自己 Linux 機器上的 AI 代理（agent）。你用自然語言交代工作，它用工具（shell、檔案、瀏覽器、桌面 VM、排程、聊天平台……）去完成，並在有風險的動作前停下來問你。名稱是 System Engineering Agent，指令是 `seagent`。
+自架在你自己機器上（Windows、macOS、Linux、Android、iOS）的 AI 代理（agent）。你用自然語言交代工作，它用工具（shell、檔案、瀏覽器、桌面 VM、排程、聊天平台……）去完成，並在有風險的動作前停下來問你。名稱是 System Engineering Agent，指令是 `seagent`。
 
 **Q：它和 ChatGPT／Claude 網頁版有什麼不同？**
 網頁版的模型在對話框裡回答；SE Agent 在你的機器上**實際動手**：跑指令、改檔案、開網頁、排程、監看主機。模型只是它的「大腦」，可以換。
@@ -17,8 +17,14 @@
 **Q：需要 GPU 嗎？**
 不需要。模型由你選的供應商提供（雲端 API），或你自己架的本地推論伺服器（llama.cpp、Ollama、vLLM 等 OpenAI 相容端點）。SE Agent 本身只吃少量 CPU 與記憶體。
 
-**Q：支援 Windows／macOS 嗎？**
-沒有原生版本。Windows 用 WSL2；macOS 用 Linux VM 或容器。詳見 [install.md §9.7](install.md#97-特殊環境)。
+**Q：支援 Windows／macOS／手機嗎？**
+支援，從 0.2.0-alpha 起都是原生版本：Windows `setup.exe`／`.msi`、macOS `.dmg`、Linux `.AppImage`／`.deb`／`.rpm`、Android `.apk`、iOS App，點兩下就裝好，內建 VM 也包在安裝檔裡。各平台驗證到什麼程度見 README 的「平台狀態」，安裝步驟見 [install.md §0](install.md#0-選擇平台與安裝檔)。
+
+**Q：0.2.0-alpha 的「alpha」是什麼意思？可以拿來正式使用嗎？**
+功能已經齊全、可以每天用，但 1.0 之前設定鍵、指令名稱與主控台還可能調整，安裝檔也還沒有程式碼簽章。重要的工作請先備份（`seagent data export`），升級前看 [CHANGELOG.md](../CHANGELOG.md)。
+
+**Q：它參考了哪些專案？是誰寫的？**
+設計逐項對照了 OpenClaw、Hermes Agent、DeepSeek Harness 與 LangChain／LangGraph（見 README「參考的上游專案」），以 Rust 重新實作，MIT 授權。程式主要由 AI 程式代理（DeepSeek Harness、Claude Code）在人類的指揮與審查下寫成，見 README「怎麼做出來的」。
 
 **Q：以前的 `ark` 和 SE Agent 是什麼關係？**
 同一個專案，改名了。舊設定、環境變數、資料會自動沿用或搬移，見 [install.md §8](install.md#8-從舊名稱-ark-升級)。
@@ -28,7 +34,7 @@
 ## 安裝與升級
 
 **Q：最簡單的安裝方式？**
-`curl -fsSL https://github.com/se-agent/System-Engineering-Agent/releases/latest/download/install.sh | sh`，然後照畫面上的連結開設定精靈。完整選項見 [install.md](install.md)。
+桌機、手機：從 Releases 下載對應平台的安裝檔點兩下（[install.md §0](install.md#0-選擇平台與安裝檔)）。Linux 伺服器：`curl -fsSL https://github.com/se-agent/System-Engineering-Agent/releases/latest/download/install.sh | sh`，然後照畫面上的連結開設定精靈。完整選項見 [install.md](install.md)。
 
 **Q：可以不用 `curl | sh` 嗎？**
 可以：deb、rpm、pacman、apk、npm、Nix、壓縮檔、離線包、容器、從原始碼都有，見 [install.md §3、§4](install.md#3-用發行版的套件管理員安裝)。每個發行檔都有 `SHA256SUMS` 與簽章可以先驗。
@@ -39,7 +45,10 @@
 3. 還是不行，照 [§9.8](install.md#98-還是不行) 收集資訊再回報。
 
 **Q：怎麼升級？**
-重跑安裝指令；或 `seagent update`；套件安裝的就用套件管理員（`apt upgrade`、`dnf upgrade`、`pacman -Syu`、`apk upgrade`）。設定與資料不受影響。
+App：直接安裝新版的安裝檔（Windows `setup.exe`／`.msi`、macOS 拖進「應用程式」取代、Linux 換新的 AppImage 或裝新的 deb／rpm、Android 裝新的 apk）。CLI：重跑安裝指令；或 `seagent update`；套件安裝的就用套件管理員（`apt upgrade`、`dnf upgrade`、`pacman -Syu`、`apk upgrade`）。設定與資料不受影響。從 0.1.0 升級要注意的事、各方式的對照表見 [install.md §10](install.md#10-版本與升級)。
+
+**Q：怎麼裝指定版本（例如 alpha）？**
+到 Releases 下載該版本的安裝檔；或 `install.sh` 加 `--version v0.2.0-alpha`。不指定時安裝腳本只會裝最新的正式版。
 
 **Q：怎麼解除安裝？資料會留下嗎？**
 預設會留下設定、工作階段與稽核紀錄（它們可能是證據）。要完全清除見 [install.md §7](install.md#7-解除安裝)。
@@ -169,7 +178,7 @@ OpenAI、Anthropic、Google Gemini／Vertex、AWS Bedrock、DeepSeek、OpenRoute
 設定 `[computer_use] target = "vm:<名稱>"` 後，代理的瀏覽器跑在桌面 VM 裡，主控台右側即時顯示整個桌面，你可以隨時接手。沒有桌面 VM 時，代理用無頭瀏覽器，主控台顯示該分頁的畫面。
 
 **Q：桌面 VM 需要什麼？**
-QEMU 與 `/dev/kvm`（沒有 KVM 也能跑但很慢）。第一次 `seagent vm desktop build` 下載並建置約 2.7 GB 的映像，約需 5 分鐘。見 [desktop-vm.md](desktop-vm.md)。
+QEMU 與硬體加速（沒有加速也能跑但很慢）。Windows 安裝包內附 QEMU，只要在「Windows 功能」勾選 Windows Hypervisor Platform；Linux 裝 `qemu-system-x86 qemu-utils` 並把自己加進 `kvm` 群組；macOS `brew install qemu`。第一次建立會下載約 418 MB 的 Debian 映像、裝好桌面後約 2.7 GB，視網路約 4–20 分鐘（下載可續傳，套件自動選最快的鏡像站）。VM 的時鐘跟著主機的時區。見 [desktop-vm.md](desktop-vm.md)。
 
 **Q：可以在 VM 裡打中文嗎？**
 可以。用你自己的輸入法在主控台打，送進 VM 的是組好的文字。VM 裡的終端機要用 Ctrl+Shift+V 才能貼上，送進終端機的最好是英數。
@@ -199,8 +208,8 @@ QEMU 與 `/dev/kvm`（沒有 KVM 也能跑但很慢）。第一次 `seagent vm d
 **Q：授權條款？**
 MIT。第三方元件的授權見 [THIRD_PARTY_NOTICES.md](../THIRD_PARTY_NOTICES.md)。
 
-**Q：和 OpenClaw、Hermes 等專案有什麼關係？**
-SE Agent 是獨立實作，相容這些專案的技能、外掛與設定格式，並提供匯入工具（`seagent migrate`）。
+**Q：和 OpenClaw、Hermes、DeepSeek Harness、LangChain、Claude Code 有什麼關係？**
+SE Agent 是獨立實作，不是任何一個的分支。它逐項對照過 OpenClaw、Hermes Agent、DeepSeek Harness 與 LangChain／LangGraph 的功能，把值得的部分以 Rust 重寫（MIT，出處見 THIRD_PARTY_NOTICES）；相容 OpenClaw、Hermes、Claude Code 的技能、hooks、外掛與設定格式，並提供匯入工具（`seagent migrate`）；LangChain 可以經 OpenAI 相容 API、MCP 或 A2A 呼叫它。對照文件在 [ecosystem/](ecosystem/README.md)。
 
 **Q：從 OpenClaw／Hermes 搬過來，金鑰也會一起搬嗎？**
 `seagent migrate` 預設**不**匯入憑證，只列出略過了哪些（`skipped credential NAME …`）。先 `seagent migrate from openclaw --dry-run` 看計畫，確定要搬金鑰再加 `--migrate-secrets`（寫進加密保管庫，不寫進 `config.toml`）；或之後逐一 `seagent secrets set NAME`。終端機精靈 `seagent setup` 的匯入步驟會先問要不要匯入設定，再另外問要不要匯入金鑰（預設不要）。各專案的來源與授權標示在 [THIRD_PARTY_NOTICES.md](../THIRD_PARTY_NOTICES.md)。

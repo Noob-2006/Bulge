@@ -4,7 +4,68 @@ All notable changes to SE Agent are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and versions follow
 [Semantic Versioning](https://semver.org/). Security fixes are marked **Security**.
 
-## [Unreleased] — 0.1.0
+## [0.2.0-alpha] — 2026-11-13
+
+First alpha of the cross-platform release: one code base for Windows, macOS, Linux, Android and
+iOS, with double-click installers and a built-in VM. Feature-complete for daily use; config keys,
+command names and the console may still change before 0.2.0. Installers are not code-signed yet.
+Platform status (real-device vs build-only) is in the README.
+
+### Added
+- **Native Windows** (10 1809+ / 11, x64): per-user `setup.exe` and per-language `.msi`
+  (en-US, zh-TW, zh-CN); the shell tool and AppContainer sandbox speak PowerShell (Git Bash when
+  present), ConPTY terminals, Job Object process trees, DPAPI / Credential Manager secrets,
+  named-pipe IPC, no console window flashes.
+- **Built-in VM in every desktop installer**: the reproducible microVM guest image plus the host's
+  hypervisor (Windows: QEMU + WHPX, with Hyper-V / VirtualBox fallbacks; Linux: Firecracker;
+  macOS: vfkit). `seagent sandbox vm exec -- <cmd>`; `seagent doctor` names the VM provider and
+  accelerator; a fallback to a weaker isolation level is never silent.
+- **Desktop VM on Windows** with only the bundled QEMU (WHPX): `qemu-img` and the VGA / NIC
+  firmware ship in the installer, QMP and the text channel over loopback TCP, no VNC.
+- **Virtual display driver** (Windows, optional at install, one UAC prompt): the Bot Desktop
+  streams native apps at 30–60 fps; kept across updates.
+- **Bot Desktop substitutes**: an isolated `CreateDesktopW` desktop on Windows, the login session on
+  macOS; `launch_app` by name (App Execution Aliases on Windows).
+- **Live view** of the agent's browser, desktops, desktop VM and terminal in the console: 30 fps
+  JPEG 85 at device pixels by default, up to 60 fps, adaptive; patch mode for Chromium / Electron
+  apps; Windows.Graphics.Capture and PrintWindow on Windows.
+- **macOS**: LaunchAgent service, Seatbelt sandbox, Keychain, pinned Chrome for Testing.
+- **Android** (8.0+, arm64): the agent under a Foreground Service, or connect to a computer.
+- **iOS**: the full agent runs inside the app process (`seagent::embed`); commands run in an
+  in-process WebAssembly sandbox (wasmi + POSIX shell + pinned WASI coreutils, CPython, grep, sed,
+  find, xargs); cron / heartbeat through BGProcessingTask.
+- **LAN pairing**: Bonjour / NSD discovery, QR or 8-character code, pinned TLS.
+- Console: stays signed in silently (device-bound credentials, endless renewal), Settings →
+  Connections for every connector, per-tool-call log with a Logs page and `seagent logs
+  tools|export`, chat conversation menu, per-chat settings, API keys page, galaxy theme.
+- `[desktop_vm] apt_mirror = "auto"`: provisioning measures deb.debian.org, NYCU and several
+  country mirrors and uses the fastest (apt still verifies the signed archive).
+- `[desktop_vm] timezone = "host"`: the desktop VM's clock follows the host's time zone at every
+  boot (IANA name from `TZ` / `/etc/localtime`, or the Windows zone mapped through CLDR); `""`
+  keeps UTC, or name a zone.
+
+### Changed
+- Version 0.2.0-alpha. MSI and Android need numeric versions: the MSI is `0.2.0`, Android
+  `versionCode` 2000; `ci-config.py` derives both from a `v0.2.0-alpha` tag.
+- Desktop VM base image downloads resume with HTTP Range after a dropped connection (and across
+  runs); `image_url` accepts Windows paths (`C:\…`, `file:///C:/…`).
+- The desktop VM provisioning script changed (mirror, tzdata, time zone): existing images are
+  rebuilt on the next `seagent vm desktop build`; `reset` moves a VM onto the new image.
+- deb / rpm desktop packages recommend QEMU for the desktop VM; on Linux and macOS a missing QEMU
+  names the install command for the host, and Homebrew / MacPorts prefixes are searched even when
+  a GUI app's PATH leaves them out.
+- The setup wizard picks the default model from the provider's real model list; the daemon comes
+  back after setup on Windows.
+
+### Fixed
+- Windows desktop VM could not be built (`qemu-img` missing) or started (`-vnc none` needed a
+  keymap file the bundle does not ship).
+- The fastest apt mirror was ignored: Debian cloud images name the archive in
+  `/etc/apt/mirrors/debian.list`.
+- `seagent secrets set` kept a PowerShell BOM as part of the secret.
+- MSI: the driver step and the launch checkbox run; no install over an existing `setup.exe`.
+
+## [0.1.0] — 2026-11-06 (not published)
 
 First public release candidate.
 

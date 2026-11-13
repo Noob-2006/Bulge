@@ -19,6 +19,7 @@
 //! image_sha256 = "…"
 //! extra_packages = []           # Debian packages added to the provisioned desktop
 //! apt_mirror = "auto"           # auto (fastest of APT_MIRRORS, measured at build time) | "" (deb.debian.org) | a Debian archive URL
+//! timezone = "host"             # host (follow the host's zone, every boot) | "" (UTC) | an IANA name ("Asia/Taipei")
 //! build_timeout_secs = 2400
 //! stop_timeout_secs = 30        # ACPI power-off grace before `quit` / SIGTERM
 //! idle_timeout_secs = 0         # stop a VM nobody looked at / drove for this long (0 = never)
@@ -54,6 +55,8 @@ pub const BASE_PACKAGES: &[&str] = &[
     // Traditional Chinese (and Japanese / Korean) pages must not render as tofu.
     "fonts-noto-cjk",
     "locales",
+    // Zone files for `timezone` (the guest links /etc/localtime to the host's zone at boot).
+    "tzdata",
     // Paste non-ASCII text arriving on the org.seagent.text channel (clipboard + ctrl+v).
     "xdotool",
     "xclip",
@@ -98,6 +101,7 @@ pub struct DesktopConfig {
     pub image_sha256: String,
     pub extra_packages: Vec<String>,
     pub apt_mirror: String,
+    pub timezone: String,
     pub build_timeout_secs: u64,
     pub stop_timeout_secs: u64,
     pub idle_timeout_secs: u64,
@@ -122,6 +126,7 @@ impl Default for DesktopConfig {
             image_sha256: DEFAULT_IMAGE_SHA256.into(),
             extra_packages: vec![],
             apt_mirror: "auto".into(),
+            timezone: "host".into(),
             build_timeout_secs: 2400,
             stop_timeout_secs: 30,
             idle_timeout_secs: 0,
@@ -183,6 +188,9 @@ impl DesktopConfig {
         if !valid_mirror(&self.apt_mirror) {
             return Err(format!("desktop_vm.apt_mirror `{}`: use auto, \"\" or an http(s):// Debian archive URL", self.apt_mirror));
         }
+        if !(self.timezone.is_empty() || self.timezone == "host" || super::timezone::valid_tz(&self.timezone)) {
+            return Err(format!("desktop_vm.timezone `{}`: use host, \"\" (UTC) or an IANA zone name such as Asia/Taipei", self.timezone));
+        }
         Ok(())
     }
 
@@ -215,5 +223,12 @@ mod tests {
             assert!(DesktopConfig::parse(&json!({"apt_mirror": bad})).unwrap_err().contains("apt_mirror"), "{bad}");
         }
         assert!(APT_MIRRORS.iter().all(|m| valid_mirror(m)));
+        assert_eq!(DesktopConfig::default().timezone, "host");
+        for ok in ["", "host", "Asia/Taipei", "Etc/GMT-8"] {
+            assert!(DesktopConfig::parse(&json!({"timezone": ok})).is_ok(), "{ok}");
+        }
+        for bad in ["Asia/Taipei,x", "../x", "a b"] {
+            assert!(DesktopConfig::parse(&json!({"timezone": bad})).unwrap_err().contains("timezone"), "{bad}");
+        }
     }
 }

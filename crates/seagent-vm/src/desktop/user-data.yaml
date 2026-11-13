@@ -32,6 +32,12 @@ write_files:
       oem=$(cat /sys/firmware/dmi/entries/11-*/raw 2>/dev/null | tr '\000' '\n' | grep -a '^seagent-')
       res=$(echo "$oem" | sed -n 's/^seagent-res=//p' | head -n1)
       url=$(echo "$oem" | sed -n 's/^seagent-url=//p' | head -n1)
+      # seagent-tz=Area/City: the host's time zone (no string = keep the image's UTC).
+      tz=$(echo "$oem" | sed -n 's/^seagent-tz=//p' | head -n1)
+      case "$tz" in
+        ''|*..*|/*|*[!A-Za-z0-9_+/-]*) ;;
+        *) [ -f "/usr/share/zoneinfo/$tz" ] && ln -sf "/usr/share/zoneinfo/$tz" /etc/localtime && echo "$tz" > /etc/timezone ;;
+      esac
       mkdir -p /run/seagent
       printf '%s\n' "${url:-about:blank}" > /run/seagent/start-url
       chmod 0644 /run/seagent/start-url

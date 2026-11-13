@@ -1,5 +1,10 @@
 # SE Agent app (Tauri 2)
 
+Version **0.2.0-alpha** (`src-tauri/tauri.conf.json`; the MSI version `0.2.0` and the Android
+`versionCode` 2000 are numeric-only and live in `tauri.windows.conf.json` /
+`tauri.android.conf.json`; CI derives all three from the `v*` tag via `scripts/ci-config.py`).
+User-facing install steps per platform: [docs/install.md §0](../../docs/install.md#0-選擇平台與安裝檔).
+
 "Download, double-click, installed." The app is a thin shell around the headless agent:
 
 - **Desktop** (Windows / macOS / Linux): bundles `seagent` as a Tauri sidecar, makes sure the

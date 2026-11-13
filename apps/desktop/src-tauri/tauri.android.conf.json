@@ -9,7 +9,8 @@
     "externalBin": [],
     "resources": [],
     "android": {
-      "minSdkVersion": 26
+      "minSdkVersion": 26,
+      "versionCode": 2000
     }
   }
 }

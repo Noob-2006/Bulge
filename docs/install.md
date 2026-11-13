@@ -1,17 +1,81 @@
 # 安裝 SE Agent
 
-SE Agent（System Engineering Agent，指令 `seagent`）是單一個靜態連結的 Linux 執行檔，加上一包技能、角色與範本資料。本文件說明每一種安裝方式，以及在各種機器上裝不起來時要看什麼。
+SE Agent（System Engineering Agent，指令 `seagent`）是一個代理程式（`seagent`，Linux 上是 musl 靜態連結的單一執行檔），加上一包技能、角色與範本資料。桌機和手機另有圖形 App 把它包起來。本文件說明每一個平台、每一種安裝方式，以及裝不起來時要看什麼。目前版本：**0.2.0-alpha**。
 
-> 只想最快裝起來：跳到 [§2 一個指令安裝](#2-一個指令安裝)。裝不起來：跳到 [§9 疑難排解](#9-疑難排解)，每一列都是「看到什麼 → 為什麼 → 怎麼做」。
+> 桌機、筆電、手機：看 [§0 選擇平台與安裝檔](#0-選擇平台與安裝檔)，點兩下就裝好。Linux 伺服器：跳到 [§2 一個指令安裝](#2-一個指令安裝)。裝不起來：跳到 [§9 疑難排解](#9-疑難排解)，每一列都是「看到什麼 → 為什麼 → 怎麼做」。升級：[§10](#10-版本與升級)。
 > 常見問題（帳號、費用、資料放哪、隱私）另見 [faq.md](faq.md)。
 
 ---
 
-## 1. 先確認這台機器能不能裝
+## 0. 選擇平台與安裝檔
+
+所有安裝檔都在 [GitHub Releases](https://github.com/se-agent/System-Engineering-Agent/releases)，每一版附 `SHA256SUMS`。App 第一次開啟時會安裝並啟動背景服務，然後在視窗裡開設定精靈（選模型供應商、貼金鑰、選預設模型）；之後常駐系統匣（開啟主控台、暫停、重新啟動服務、登入時啟動、檢查更新）。
+
+| 平台 | 需求 | 安裝檔 | 怎麼裝 |
+|---|---|---|---|
+| Windows | Windows 10 1809+ 或 11，x64；WebView2（缺的話安裝程式自動下載） | `SE Agent_<版本>_x64-setup.exe`（建議）或 `SE Agent_<版本>_x64_<語言>.msi` | 見 [§0.1](#01-windows) |
+| macOS | macOS 11+，Apple Silicon 或 Intel | `SE Agent_<版本>_<架構>.dmg` | 見 [§0.2](#02-macos) |
+| Linux 桌面 | x86_64，有圖形環境（WebKitGTK 4.1） | `SE-Agent_<版本>_amd64.AppImage`、`.deb`、`.rpm` | 見 [§0.3](#03-linux-桌面) |
+| Linux 伺服器 | 任何發行版，x86_64／aarch64，不需圖形環境 | `install.sh`、deb／rpm／pacman／apk、壓縮檔、容器 | [§2](#2-一個指令安裝)、[§3](#3-用發行版的套件管理員安裝)、[§4](#4-其他安裝方式) |
+| Android | Android 8.0+（API 26），arm64 | `SE-Agent_android-arm64_*.apk` | 見 [§0.4](#04-android) |
+| iOS／iPadOS | — | TestFlight／App Store（尚未上架） | 見 [§0.5](#05-ios) |
+
+> **0.2.0-alpha 的安裝檔都還沒有程式碼簽章。** Windows 會出現 SmartScreen、macOS 會出現 Gatekeeper 警告，下面各節寫了怎麼確認檔案沒被改過、怎麼放行。請只從 Releases 頁面下載，並先比對 `SHA256SUMS`。
+
+### 0.1 Windows
+
+1. 下載 `SE Agent_<版本>_x64-setup.exe` 和 `SHA256SUMS`，在 PowerShell 比對：`Get-FileHash '.\SE Agent_0.2.0-alpha_x64-setup.exe'`，結果要和 `SHA256SUMS` 裡同名那一行相同。
+2. 點兩下安裝。SmartScreen 顯示「Windows 已保護您的電腦」時，按「其他資訊 → 仍要執行」。安裝程式可選英文、繁體中文、簡體中文。
+3. `setup.exe` 是**個人安裝**：裝在 `%LOCALAPPDATA%\SE Agent`，不需要系統管理員。安裝過程會詢問是否安裝**虛擬顯示器驅動**（在你螢幕外側加一台虛擬螢幕，代理的 Bot Desktop 因此能以 30–60 fps 串流，否則約 10 fps；你自己的螢幕不變）。這一步會跳一次 UAC，需要系統管理員同意，可以略過；升級時不會再問。
+4. `.msi` 適合 IT 用群組原則或 Intune 集中部署（需要系統管理員），三種語言各一個檔，內容相同。
+5. 裝好後 App 自動開啟設定精靈。
+
+內建 VM：安裝包附了 QEMU（`vm\runtime\qemu`）與 microVM 映像，桌面 VM 與隔離執行都不必另外安裝東西。要有硬體加速，請在「開啟或關閉 Windows 功能」勾選 **Windows Hypervisor Platform**（App 的 VM 頁面有按鈕直接打開這個對話框）並重新開機；沒開就用 TCG 軟體模擬（能用但很慢，狀態會帶警告）。Windows 11 Home 也可以。
+
+資料位置：設定 `%APPDATA%\seagent`、資料與快取 `%LOCALAPPDATA%\seagent`。解除安裝：「設定 → 應用程式 → SE Agent → 解除安裝」，設定與資料會保留。
+
+### 0.2 macOS
+
+1. 下載對應的 `.dmg`（Apple Silicon 選 `aarch64`，Intel 選 `x64`），用 `shasum -a 256 SE*.dmg` 比對 `SHA256SUMS`。
+2. 打開 `.dmg`，把 SE Agent 拖進「應用程式」。
+3. 第一次開啟：在「應用程式」裡對 SE Agent 按右鍵 →「打開」→「打開」（未公證的 App 只能這樣放行）。macOS 15 以後改到「系統設定 → 隱私權與安全性」最下方按「強制打開」。
+4. 背景服務以 LaunchAgent 執行（`~/Library/LaunchAgents/ai.seagent.seagentd.plist`）。
+
+內建 VM：microVM 用安裝包附的 vfkit（Virtualization.framework）。桌面 VM 需要 QEMU：`brew install qemu`（或 MacPorts `sudo port install qemu`）；App 會到 `/opt/homebrew/bin`、`/usr/local/bin`、`/opt/local/bin` 找，不必改 PATH。Apple Silicon 上桌面 VM（x86_64 映像）走軟體模擬，比較慢。
+
+> 0.2.0-alpha 的 `.dmg` 要等 macOS CI 與 Apple 開發者憑證就緒才會產出；在那之前請從原始碼建置（[apps/desktop/README.md](../apps/desktop/README.md)）。
+
+### 0.3 Linux 桌面
+
+| 發行版 | 指令 |
+|---|---|
+| 任何發行版（AppImage） | `chmod +x SE-Agent_*_amd64.AppImage && ./SE-Agent_*_amd64.AppImage` |
+| Debian／Ubuntu／Mint | `sudo apt install ./SE-Agent_<版本>_amd64.deb` |
+| Fedora／RHEL／openSUSE | `sudo dnf install ./SE-Agent-<版本>-1.x86_64.rpm` |
+
+App 會用 systemd 使用者服務跑背景程式。deb／rpm 會一併「建議安裝」QEMU（`qemu-system-x86`、`qemu-utils`／`qemu-img`）給桌面 VM 用；AppImage 請自己裝：`sudo apt install qemu-system-x86 qemu-utils`（Fedora `sudo dnf install qemu-system-x86 qemu-img`，Arch `sudo pacman -S qemu-desktop`）。要硬體加速，把自己加進 `kvm` 群組：`sudo usermod -aG kvm $USER` 後重新登入。microVM 用安裝包附的 Firecracker。
+
+AppImage 需要 FUSE 2（Ubuntu 22.04 以後：`sudo apt install libfuse2t64` 或 `libfuse2`）。
+
+### 0.4 Android
+
+1. 下載 `.apk`，在手機的「設定 → 安全性 → 安裝不明應用程式」允許你用的瀏覽器或檔案管理員。
+2. 點 `.apk` 安裝。代理以前景服務執行（通知列會常駐一則通知，這是 Android 規定）。
+3. 也可以選「連到另一台電腦」，用 QR 或 8 碼配對區域網路裡的 SE Agent。
+
+> 0.2.0-alpha 的 APK 是 debug 簽章，之後的正式版改用發行金鑰簽章，**屆時需要先解除安裝舊版再裝**（Android 不允許換簽章覆蓋安裝）。
+
+### 0.5 iOS
+
+完整代理在 App 行程裡執行（沒有伺服器）；平台禁止虛擬機與原生 shell 程式，所以指令改在 App 內的 WebAssembly 沙盒執行。上架或開放 TestFlight 後會在 Releases 頁面附上連結。細節見 [apps/desktop/MOBILE.md](../apps/desktop/MOBILE.md)。
+
+---
+
+## 1. 先確認這台機器能不能裝（Linux 伺服器／CLI）
 
 | 項目 | 需求 | 怎麼查 |
 |---|---|---|
-| 作業系統 | Linux（任何發行版；核心 4.x 以上） | `uname -sr` |
+| 作業系統 | Linux（任何發行版；核心 4.x 以上）。Windows、macOS、手機請用 [§0](#0-選擇平台與安裝檔) 的 App | `uname -sr` |
 | CPU | x86_64 或 aarch64（arm64） | `uname -m` |
 | C 函式庫 | 不需要：發行的執行檔是 musl 靜態連結，glibc 版本新舊、Alpine 都能跑 | — |
 | 記憶體 | 執行本身約 50–150 MB；開桌面 VM 另加 2 GB（可設定） | `free -m` |
@@ -29,7 +93,7 @@ SE Agent（System Engineering Agent，指令 `seagent`）是單一個靜態連�
 | `secret-tool`（libsecret） | 把保管庫金鑰放進系統鑰匙圈 | `apt install libsecret-tools` |
 | docker / podman | 容器沙箱、sandbox-browser | 依發行版 |
 
-macOS、Windows：沒有原生版本。Windows 請用 WSL2（見 §9）；macOS 可以用 Linux VM 或容器。
+Windows、macOS：用 [§0](#0-選擇平台與安裝檔) 的圖形 App（原生版本，含 CLI）。偏好 Linux 環境的人也可以在 WSL2 裡照本節安裝（見 §9.7）。
 
 ---
 
@@ -58,7 +122,7 @@ curl --proto '=https' --tlsv1.2 -fsSL https://github.com/se-agent/System-Enginee
 |---|---|
 | `--user`（預設）／`--system` | 個人安裝／系統服務 |
 | `--port N` | 網頁主控台埠號（只綁 127.0.0.1，預設 8640） |
-| `--version vX.Y.Z` | 指定版本（預設最新） |
+| `--version vX.Y.Z` | 指定版本（預設最新的正式版；alpha／beta 要明確指定，例如 `--version v0.2.0-alpha`） |
 | `--no-start` | 只安裝，不設定、不啟動 |
 | `--no-systemd` | 不用 systemd，改用背景程序 |
 | `--no-browser` | 不自動開瀏覽器 |
@@ -268,7 +332,10 @@ cargo build --release -p seagent                # Rust 1.80 以上
 | `download failed` | 連不到 GitHub、公司代理、DNS | 設 `https_proxy`；或在別台下載後用 `SEAGENT_RELEASE_BASE=file:///path` |
 | `checksum mismatch` | 下載不完整、被代理改寫、鏡像不同步 | 重新下載；確認鏡像與 `SHA256SUMS` 同一版本；**不要**略過驗證 |
 | `signature of SHA256SUMS does not verify` | 公鑰不對或檔案被竄改 | 確認公鑰來源；停止安裝並回報 |
-| `prebuilt binaries are Linux-only` | 在 macOS／BSD 上執行 | 用 Linux VM、WSL2 或容器 |
+| `prebuilt binaries are Linux-only` | 在 macOS／BSD 上執行安裝腳本 | macOS 用 `.dmg`（[§0.2](#02-macos)）；BSD 用 `--from-source` |
+| Windows「Windows 已保護您的電腦」 | 安裝檔未簽章（alpha） | 先比對 `SHA256SUMS`，再按「其他資訊 → 仍要執行」 |
+| macOS「無法打開，因為無法驗證開發者」 | 未公證（alpha） | 右鍵 →「打開」，或「系統設定 → 隱私權與安全性 → 強制打開」 |
+| Android「應用程式未安裝」 | 已裝了不同簽章的版本 | 先解除安裝舊版（資料會清除，先在主控台匯出） |
 | `unsupported CPU` | 32 位元或其他架構 | 只提供 x86_64、aarch64；其他架構用 `--from-source` |
 | 公司 TLS 檢查（自簽 CA） | 代理換掉了憑證 | 把公司 CA 加進系統信任庫（`update-ca-certificates`／`update-ca-trust`） |
 
@@ -318,7 +385,10 @@ cargo build --release -p seagent                # Rust 1.80 以上
 | 看到 | 原因 | 處理 |
 |---|---|---|
 | 桌面 VM 很慢、提示 TCG | 沒有 `/dev/kvm` 權限 | `sudo usermod -aG kvm $USER` 後重新登入；雲端 VM 需開巢狀虛擬化 |
-| `qemu-system-x86_64 not found` | 沒裝 QEMU | `apt install qemu-system-x86 qemu-utils` |
+| `qemu-system-x86_64 not found`／`qemu-img not found` | 沒裝 QEMU（Linux、macOS 的桌面 VM 用系統的 QEMU） | Linux `apt install qemu-system-x86 qemu-utils`；macOS `brew install qemu`；Windows 重新安裝（安裝包內附） |
+| Windows 桌面 VM 很慢、提示 TCG | 沒開 Windows Hypervisor Platform | App 的 VM 頁面按「開啟 Windows Hypervisor Platform」，勾選後重新開機 |
+| 桌面 VM 第一次建立很久 | 下載約 418 MB 的 Debian 映像並安裝桌面套件 | 正常約 4–20 分鐘，看網路；中斷會從斷點續傳；套件會自動選最快的鏡像站 |
+| 桌面 VM 裡的時間不對 | 0.2.0-alpha 前建的映像是 UTC | `seagent vm desktop build` 重建（設定 `timezone = "host"` 是預設） |
 | 瀏覽器工具找不到瀏覽器 | 沒裝 Chromium | 重跑安裝加 `--with-browser`，或 `seagent browser install` |
 | Chrome 沙箱失敗（Ubuntu 24.04） | AppArmor 限制非特權 user namespace | 已自動加 `--no-sandbox`（`no_sandbox = "auto"`）；或用桌面 VM 的瀏覽器 |
 | 鑰匙圈不可用 | 沒有 `secret-tool` 或桌面登入鑰匙圈 | `apt install libsecret-tools`；伺服器改用 TPM 或密碼檔（`seagent secrets backend`） |
@@ -348,3 +418,41 @@ seagent logs -n 100                           # 個人安裝
 ```
 
 `seagent doctor` 與日誌已遮蔽祕密，但送出前仍請自行看過一遍。
+
+---
+
+## 10. 版本與升級
+
+### 10.1 版本號
+
+版本照 [Semantic Versioning](https://semver.org/)：`0.2.0-alpha` 是 0.2.0 的 alpha 測試版，之後依序是 `-beta`、`-rc.N`、正式的 `0.2.0`。1.0 之前，次版號（0.**2**.0）變動時設定格式可能不相容，CHANGELOG 會寫清楚怎麼改。`seagent --version` 顯示完整版本。
+
+有些平台的安裝系統只接受數字，所以安裝檔內部的版本會少掉預發布標記：Windows MSI 寫成 `0.2.0`、Android `versionCode` 是 `2000`；檔名與 App 的「關於」一樣顯示 `0.2.0-alpha`。
+
+### 10.2 各種安裝方式怎麼升級
+
+| 安裝方式 | 升級 | 設定與資料 |
+|---|---|---|
+| Windows `setup.exe` | 下載新版 `setup.exe` 直接安裝（覆蓋舊版） | 保留 |
+| Windows `.msi` | 安裝新版 `.msi`（同一個 UpgradeCode，會取代舊版） | 保留 |
+| macOS `.dmg` | 把新版拖進「應用程式」取代 | 保留 |
+| Linux AppImage | 換成新檔案 | 保留 |
+| Linux App `.deb`／`.rpm` | `sudo apt install ./新版.deb`／`sudo dnf upgrade ./新版.rpm` | 保留 |
+| Android | 安裝新版 `.apk`（同簽章才能覆蓋；debug → 正式簽章要先解除安裝） | 同簽章時保留 |
+| 一個指令安裝 | 重跑指令；指定版本加 `--version v0.2.0-alpha` | 保留 |
+| CLI 套件（deb／rpm／pacman／apk） | 套件管理員升級 | 保留 |
+| npm／Nix | `npm update -g @se-agent/seagent`／`nix profile upgrade` | 保留 |
+
+App 的系統匣「檢查更新」需要發行時設定的更新簽章金鑰：由 CI 簽章發行的版本會到 Releases 的 `latest.json` 找新版，問過你才安裝；本機建置與目前的 0.2.0-alpha 安裝檔沒有這把金鑰，會提示「請到 GitHub Releases 下載新版」，照上表手動升級。
+
+### 10.3 從 0.1.0 升級到 0.2.0-alpha
+
+- **直接安裝新版即可**，不必先解除安裝。設定檔、保管庫金鑰、工作階段都沿用。
+- **Windows 桌面 VM**：0.1.0 的安裝包少了 `qemu-img.exe`，桌面 VM 建不起來；0.2.0-alpha 修好了。第一次建立會下載約 418 MB 的映像。
+- **桌面 VM 映像會自動重建**：佈建腳本改了（時區跟著主機、tzdata、鏡像站），舊映像的 recipe 雜湊不同，下次 `seagent vm desktop build`（或在主控台開桌面 VM）會重建；既有 VM 的磁碟疊加層要 `seagent vm desktop reset <名稱>` 才會換到新映像（疊加層裡的變更會清掉）。
+- **新的設定鍵**（都有預設值，不改也行）：`[desktop_vm] apt_mirror = "auto"`、`[desktop_vm] timezone = "host"`。
+- 其他變更見 [CHANGELOG.md](../CHANGELOG.md)。
+
+### 10.4 退回舊版
+
+裝回舊版的安裝檔即可（Windows 先在「應用程式」解除安裝新版，設定會保留）。0.2.0-alpha 沒有改動設定檔與資料庫格式，0.1.0 讀得懂；但 0.1.0 不認得新的設定鍵 `apt_mirror`、`timezone`，退回前請從 `config.toml` 的 `[desktop_vm]` 拿掉它們（沒寫就不用管）。

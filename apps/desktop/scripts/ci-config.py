@@ -5,7 +5,8 @@ unsigned — every signing step is opt-in so forks and PRs still produce install
 
   TAURI_SIGNING_PRIVATE_KEY (+ _PASSWORD)  updater artifacts (.sig) — the CLI reads these itself
   TAURI_UPDATER_PUBKEY                     the matching public key, embedded in the app
-  VERSION                                  e.g. 0.2.0 from the tag (MSI needs plain X.Y.Z)
+  VERSION                                  e.g. 0.2.0 or 0.2.0-alpha from the tag (MSI / Android
+                                           get the numeric X.Y.Z part)
   WINDOWS_CERTIFICATE_THUMBPRINT           set by the workflow after importing WINDOWS_CERTIFICATE (pfx)
   AZURE_TRUSTED_SIGNING_ENDPOINT/_ACCOUNT/_PROFILE  Azure Trusted Signing via trusted-signing-cli
                                            (AZURE_CLIENT_ID/_CLIENT_SECRET/_TENANT_ID in env)
@@ -27,17 +28,21 @@ def env(k):
 def main():
     out = sys.argv[1] if len(sys.argv) > 1 else os.path.join(os.path.dirname(__file__), "..", "src-tauri", "tauri.ci.conf.json")
     cfg = {}
+    win = {}
     v = env("VERSION")
     if v:
         v = v.lstrip("v")
-        if not re.fullmatch(r"\d+\.\d+\.\d+", v):
-            print(f"warning: VERSION {v!r} is not X.Y.Z; keeping tauri.conf.json's version", file=sys.stderr)
+        m = re.fullmatch(r"(\d+)\.(\d+)\.(\d+)(-[0-9A-Za-z.]+)?", v)
+        if not m:
+            print(f"warning: VERSION {v!r} is not X.Y.Z or X.Y.Z-pre; keeping tauri.conf.json's version", file=sys.stderr)
         else:
             cfg["version"] = v
+            # MSI and Android take numbers only: 0.2.0-alpha installs as MSI 0.2.0 / versionCode 2000.
+            win["wix"] = {"version": "{}.{}.{}".format(*m.groups()[:3])}
+            cfg.setdefault("bundle", {})["android"] = {"versionCode": int(m[1]) * 1000000 + int(m[2]) * 1000 + int(m[3])}
     if env("TAURI_SIGNING_PRIVATE_KEY") and env("TAURI_UPDATER_PUBKEY"):
         cfg.setdefault("bundle", {})["createUpdaterArtifacts"] = True
         cfg.setdefault("plugins", {})["updater"] = {"pubkey": env("TAURI_UPDATER_PUBKEY")}
-    win = {}
     if env("WINDOWS_CERTIFICATE_THUMBPRINT"):
         win["certificateThumbprint"] = env("WINDOWS_CERTIFICATE_THUMBPRINT")
     elif env("AZURE_TRUSTED_SIGNING_ENDPOINT") and env("AZURE_TRUSTED_SIGNING_ACCOUNT") and env("AZURE_TRUSTED_SIGNING_PROFILE"):

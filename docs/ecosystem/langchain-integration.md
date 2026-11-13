@@ -100,7 +100,7 @@ POST /v1/chat/completions {"stream":true}
 GET  /.well-known/agent-card.json
   → {"name":"seagent-test","protocolVersion":"1.0","capabilities":{"streaming":true,"pushNotifications":true},…}
 printf 'initialize' | seagent mcp serve
-  → {"result":{"capabilities":{"tools":{}},"serverInfo":{"name":"seagent","version":"0.1.0"},
+  → {"result":{"capabilities":{"tools":{}},"serverInfo":{"name":"seagent","version":"0.2.0-alpha"},
      "instructions":"SE Agent's file, search, shell and memory tools, plus seagent_session_* …"}}
 ```
 

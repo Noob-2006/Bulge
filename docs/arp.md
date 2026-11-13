@@ -17,7 +17,7 @@ OpenAI 相容 API（`/v1/models`、`/v1/chat/completions`、`/v1/responses`）�
 WebSocket 連上後，伺服器先送 `ready` 通知；也可以隨時呼叫 `initialize`：
 
 ```json
-{"jsonrpc":"2.0","method":"ready","params":{"protocol":"seagent/2","server":{"name":"seagent","version":"0.1.0"},
+{"jsonrpc":"2.0","method":"ready","params":{"protocol":"seagent/2","server":{"name":"seagent","version":"0.2.0-alpha"},
  "methods":["ping","session.list",…],"events":["event","delta","pending","heartbeat"],
  "features":{"openai":true,"a2a":false,"nodes":true,"ui":true}}}
 ```

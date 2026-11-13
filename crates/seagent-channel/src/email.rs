@@ -3097,7 +3097,7 @@ mod tests {
         assert_eq!((m.media.len(), m.media[0].name.as_str()), (1, "報告.txt"));
         let log = srv.log();
         let at = |p: &str| log.iter().position(|l| l.starts_with(p)).unwrap_or_else(|| panic!("{p} in {log:?}"));
-        assert!(log.contains(&"ID (\"name\" \"seagent\" \"version\" \"0.1.0\")".to_string()), "{log:?}");
+        assert!(log.contains(&format!("ID (\"name\" \"seagent\" \"version\" \"{}\")", env!("CARGO_PKG_VERSION"))), "{log:?}");
         assert!(at("LOGIN") < at("ID") && at("ID") < at("SELECT"));
         assert_eq!(log[at("SELECT")], "SELECT \"&ZTZO9lMj-\"");
         // Without the capability no ID is sent.

@@ -99,13 +99,13 @@ apt-get update && apt-get install seagent
 
 ```sh
 packaging/offline/make-offline-bundle.sh --dist <已驗證的發佈目錄> --arch x86_64 \
-   [--vm-image <seagent sandbox vm image build 的輸出>] [--key release-key.pem] --out seagent-offline-0.1.0-x86_64.tar.gz
+   [--vm-image <seagent sandbox vm image build 的輸出>] [--key release-key.pem] --out seagent-offline-0.2.0-alpha-x86_64.tar.gz
 ```
 
 隔離區：
 
 ```sh
-tar xzf seagent-offline-0.1.0-x86_64.tar.gz && cd seagent-offline
+tar xzf seagent-offline-0.2.0-alpha-x86_64.tar.gz && cd seagent-offline
 ./install-offline.sh --key /path/to/release-key.pub.pem          # tarball 安裝到 /usr/local（root）或 ~/.local
 ./install-offline.sh --key … --package                          # 改用 rpm/dpkg 裝套件
 sudo sh install.sh --system                                      # 或：一個指令（用 release/ 內的檔案，不連網），含服務與設定連結

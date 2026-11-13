@@ -1,4 +1,4 @@
-image: { tag: "0.1.0-distroless" }
+image: { tag: "0.2.0-alpha-distroless" }
 config:
   mode: file
   existingSecret: seagent-secrets

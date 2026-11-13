@@ -3,7 +3,7 @@ resolver = "2"
 members = ["crates/seagent-core", "crates/seagent-security", "crates/seagent-kernel", "crates/seagent-model", "crates/seagent-tools", "crates/seagent-plugin", "crates/seagent-net", "crates/seagent-channel", "crates/seagent-skills", "crates/seagent-memory", "crates/seagent-browser", "crates/seagent-media", "crates/seagent-app", "crates/seagent-vm", "crates/seagent"]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.2.0-alpha"
 edition = "2021"
 license = "MIT"
 # 1.89: std `File::lock` / `try_lock` (stable since 1.89) replace `libc::flock`, so file locks work

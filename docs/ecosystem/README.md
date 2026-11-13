@@ -1,5 +1,7 @@
 # 生態相容文件索引
 
+一覽（相容哪些生態、參考了哪些上游、怎麼做出來的）在根目錄 [README.md](../../README.md) 的「相容的生態」與「參考的上游專案」兩節；逐項落差報告在 [../parity-agent/](../parity-agent/)。
+
 | 文件 | 內容 |
 |---|---|
 | [langchain-internals.md](langchain-internals.md) | F1：LangChain v1 / LangGraph / deepagents / LangSmith SDK 的解剖（agent 迴圈、Pregel 與 checkpoint、interrupt／HITL、工具與記憶抽象、追蹤格式），每一項都有上游 `path:line` 出處，最後是 SE Agent 的 18 項缺口與借鏡決定 |

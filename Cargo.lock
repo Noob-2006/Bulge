@@ -572,7 +572,7 @@ checksum = "cf54715a573b99ac80df0bc206da022bcd442c974952c7b9720069370852e21f"
 
 [[package]]
 name = "seagent"
-version = "0.1.0"
+version = "0.2.0-alpha"
 dependencies = [
  "base64",
  "libc",
@@ -602,7 +602,7 @@ dependencies = [
 
 [[package]]
 name = "seagent-app"
-version = "0.1.0"
+version = "0.2.0-alpha"
 dependencies = [
  "image",
  "libc",
@@ -627,7 +627,7 @@ dependencies = [
 
 [[package]]
 name = "seagent-browser"
-version = "0.1.0"
+version = "0.2.0-alpha"
 dependencies = [
  "libc",
  "regex",
@@ -645,7 +645,7 @@ dependencies = [
 
 [[package]]
 name = "seagent-channel"
-version = "0.1.0"
+version = "0.2.0-alpha"
 dependencies = [
  "base64",
  "libc",
@@ -661,7 +661,7 @@ dependencies = [
 
 [[package]]
 name = "seagent-core"
-version = "0.1.0"
+version = "0.2.0-alpha"
 dependencies = [
  "libc",
  "serde",
@@ -671,7 +671,7 @@ dependencies = [
 
 [[package]]
 name = "seagent-kernel"
-version = "0.1.0"
+version = "0.2.0-alpha"
 dependencies = [
  "base64",
  "libc",
@@ -690,7 +690,7 @@ dependencies = [
 
 [[package]]
 name = "seagent-media"
-version = "0.1.0"
+version = "0.2.0-alpha"
 dependencies = [
  "base64",
  "image",
@@ -707,7 +707,7 @@ dependencies = [
 
 [[package]]
 name = "seagent-memory"
-version = "0.1.0"
+version = "0.2.0-alpha"
 dependencies = [
  "base64",
  "regex",
@@ -725,7 +725,7 @@ dependencies = [
 
 [[package]]
 name = "seagent-model"
-version = "0.1.0"
+version = "0.2.0-alpha"
 dependencies = [
  "ring",
  "seagent-core",
@@ -739,7 +739,7 @@ dependencies = [
 
 [[package]]
 name = "seagent-net"
-version = "0.1.0"
+version = "0.2.0-alpha"
 dependencies = [
  "base64",
  "libc",
@@ -753,7 +753,7 @@ dependencies = [
 
 [[package]]
 name = "seagent-plugin"
-version = "0.1.0"
+version = "0.2.0-alpha"
 dependencies = [
  "fancy-regex",
  "libc",
@@ -770,7 +770,7 @@ dependencies = [
 
 [[package]]
 name = "seagent-security"
-version = "0.1.0"
+version = "0.2.0-alpha"
 dependencies = [
  "base64",
  "fancy-regex",
@@ -789,7 +789,7 @@ dependencies = [
 
 [[package]]
 name = "seagent-skills"
-version = "0.1.0"
+version = "0.2.0-alpha"
 dependencies = [
  "base64",
  "miniz_oxide 0.9.1",
@@ -809,7 +809,7 @@ dependencies = [
 
 [[package]]
 name = "seagent-tools"
-version = "0.1.0"
+version = "0.2.0-alpha"
 dependencies = [
  "base64",
  "libc",
@@ -830,7 +830,7 @@ dependencies = [
 
 [[package]]
 name = "seagent-vm"
-version = "0.1.0"
+version = "0.2.0-alpha"
 dependencies = [
  "base64",
  "libc",
