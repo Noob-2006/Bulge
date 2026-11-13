@@ -55,6 +55,18 @@ def main():
     if "plugins" in shown:
         shown["plugins"]["updater"]["pubkey"] = "<set>"
     print("tauri.ci.conf.json:", json.dumps(shown))
+    # RPM forbids '-' in Version: a pre-release goes to Release instead (Fedora's convention,
+    # 0.2.0-alpha → Version 0.2.0, Release 0.1.alpha, which sorts before the final 0.2.0-1).
+    # Build the rpm with this file in place of tauri.ci.conf.json.
+    conf = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src-tauri", "tauri.conf.json")
+    full = cfg.get("version") or json.load(open(conf, encoding="utf-8"))["version"]
+    rpm = json.loads(json.dumps(cfg))
+    m = re.fullmatch(r"(\d+\.\d+\.\d+)-([0-9A-Za-z.]+)", full)
+    if m:
+        rpm["version"] = m[1]
+        rpm.setdefault("bundle", {}).setdefault("linux", {})["rpm"] = {"release": "0.1." + m[2]}
+    with open(os.path.join(os.path.dirname(out), "tauri.rpm.conf.json"), "w", encoding="utf-8") as f:
+        json.dump(rpm, f, indent=2)
 
 
 if __name__ == "__main__":

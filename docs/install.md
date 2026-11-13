@@ -14,8 +14,8 @@ SE Agent（System Engineering Agent，指令 `seagent`）是一個代理程式�
 | 平台 | 需求 | 安裝檔 | 怎麼裝 |
 |---|---|---|---|
 | Windows | Windows 10 1809+ 或 11，x64；WebView2（缺的話安裝程式自動下載） | `SE Agent_<版本>_x64-setup.exe`（建議）或 `SE Agent_<版本>_x64_<語言>.msi` | 見 [§0.1](#01-windows) |
-| macOS | macOS 11+，Apple Silicon 或 Intel | `SE Agent_<版本>_<架構>.dmg` | 見 [§0.2](#02-macos) |
-| Linux 桌面 | x86_64，有圖形環境（WebKitGTK 4.1） | `SE-Agent_<版本>_amd64.AppImage`、`.deb`、`.rpm` | 見 [§0.3](#03-linux-桌面) |
+| macOS | macOS 11+，Apple Silicon 或 Intel | `SE Agent_<版本>_universal.dmg` | 見 [§0.2](#02-macos) |
+| Linux 桌面 | x86_64，有圖形環境（WebKitGTK 4.1） | `SE-Agent_<版本>_amd64.AppImage`、`SE-Agent_<版本>_amd64.deb`、`SE-Agent-<RPM 版本>.x86_64.rpm` | 見 [§0.3](#03-linux-桌面) |
 | Linux 伺服器 | 任何發行版，x86_64／aarch64，不需圖形環境 | `install.sh`、deb／rpm／pacman／apk、壓縮檔、容器 | [§2](#2-一個指令安裝)、[§3](#3-用發行版的套件管理員安裝)、[§4](#4-其他安裝方式) |
 | Android | Android 8.0+（API 26），arm64 | `SE-Agent_android-arm64_*.apk` | 見 [§0.4](#04-android) |
 | iOS／iPadOS | — | TestFlight／App Store（尚未上架） | 見 [§0.5](#05-ios) |
@@ -36,7 +36,7 @@ SE Agent（System Engineering Agent，指令 `seagent`）是一個代理程式�
 
 ### 0.2 macOS
 
-1. 下載對應的 `.dmg`（Apple Silicon 選 `aarch64`，Intel 選 `x64`），用 `shasum -a 256 SE*.dmg` 比對 `SHA256SUMS`。
+1. 下載 `.dmg`（universal，Apple Silicon 與 Intel 都用同一個），用 `shasum -a 256 SE*.dmg` 比對 `SHA256SUMS`。
 2. 打開 `.dmg`，把 SE Agent 拖進「應用程式」。
 3. 第一次開啟：在「應用程式」裡對 SE Agent 按右鍵 →「打開」→「打開」（未公證的 App 只能這樣放行）。macOS 15 以後改到「系統設定 → 隱私權與安全性」最下方按「強制打開」。
 4. 背景服務以 LaunchAgent 執行（`~/Library/LaunchAgents/ai.seagent.seagentd.plist`）。
@@ -51,7 +51,7 @@ SE Agent（System Engineering Agent，指令 `seagent`）是一個代理程式�
 |---|---|
 | 任何發行版（AppImage） | `chmod +x SE-Agent_*_amd64.AppImage && ./SE-Agent_*_amd64.AppImage` |
 | Debian／Ubuntu／Mint | `sudo apt install ./SE-Agent_<版本>_amd64.deb` |
-| Fedora／RHEL／openSUSE | `sudo dnf install ./SE-Agent-<版本>-1.x86_64.rpm` |
+| Fedora／RHEL／openSUSE | `sudo dnf install ./SE-Agent-0.2.0-0.1.alpha.x86_64.rpm`（RPM 不接受版本裡的 `-`，預發布標記放在 Release：`0.2.0-alpha` 寫成 `0.2.0-0.1.alpha`，正式版是 `0.2.0-1`） |
 
 App 會用 systemd 使用者服務跑背景程式。deb／rpm 會一併「建議安裝」QEMU（`qemu-system-x86`、`qemu-utils`／`qemu-img`）給桌面 VM 用；AppImage 請自己裝：`sudo apt install qemu-system-x86 qemu-utils`（Fedora `sudo dnf install qemu-system-x86 qemu-img`，Arch `sudo pacman -S qemu-desktop`）。要硬體加速，把自己加進 `kvm` 群組：`sudo usermod -aG kvm $USER` 後重新登入。microVM 用安裝包附的 Firecracker。
 
@@ -427,7 +427,7 @@ seagent logs -n 100                           # 個人安裝
 
 版本照 [Semantic Versioning](https://semver.org/)：`0.2.0-alpha` 是 0.2.0 的 alpha 測試版，之後依序是 `-beta`、`-rc.N`、正式的 `0.2.0`。1.0 之前，次版號（0.**2**.0）變動時設定格式可能不相容，CHANGELOG 會寫清楚怎麼改。`seagent --version` 顯示完整版本。
 
-有些平台的安裝系統只接受數字，所以安裝檔內部的版本會少掉預發布標記：Windows MSI 寫成 `0.2.0`、Android `versionCode` 是 `2000`；檔名與 App 的「關於」一樣顯示 `0.2.0-alpha`。
+有些平台的安裝系統只接受數字或不接受 `-`，所以安裝檔內部的版本會改寫：Windows MSI 寫成 `0.2.0`、Android `versionCode` 是 `2000`、RPM 是 Version `0.2.0` + Release `0.1.alpha`；檔名與 App 的「關於」一樣顯示 `0.2.0-alpha`。
 
 ### 10.2 各種安裝方式怎麼升級
 

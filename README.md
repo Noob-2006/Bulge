@@ -102,7 +102,7 @@ SE Agent 主要由 AI 程式代理在人類的指揮與審查下寫成：
 | 你用的是 | 下載 | 然後 |
 |---|---|---|
 | Windows | `SE Agent_<版本>_x64-setup.exe` | 點兩下 → 「其他資訊 → 仍要執行」（未簽章） → 安裝完自動開設定精靈 |
-| macOS | `SE Agent_<版本>_aarch64.dmg`（Apple Silicon）或 `_x64.dmg`（Intel） | 拖進「應用程式」→ 第一次右鍵「打開」（未公證） |
+| macOS | `SE Agent_<版本>_universal.dmg`（Apple Silicon 與 Intel 共用） | 拖進「應用程式」→ 第一次右鍵「打開」（未公證） |
 | Linux 桌面 | `.AppImage`（任何發行版）或 `.deb`／`.rpm` | `chmod +x` 後執行；或 `sudo apt install ./SE-Agent_*.deb` |
 | Linux 伺服器 | 一個指令（下方） | 照印出的連結開設定精靈 |
 | Android | `.apk` | 允許「安裝不明應用程式」後安裝 |

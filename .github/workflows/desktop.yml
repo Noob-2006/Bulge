@@ -184,7 +184,17 @@ jobs:
           python3 apps/desktop/scripts/ci-config.py
       - name: Build installers
         working-directory: apps/desktop
-        run: cargo tauri build --ci --target '${{ matrix.triple }}' --bundles '${{ matrix.bundles }}' --config src-tauri/tauri.ci.conf.json
+        shell: bash
+        run: |
+          set -euo pipefail
+          # The rpm builds on its own with tauri.rpm.conf.json (a pre-release moves from Version
+          # to Release, which rpm requires); everything else takes tauri.ci.conf.json.
+          b='${{ matrix.bundles }}'
+          rest=$(echo "$b" | tr ',' '\n' | grep -vx rpm | paste -sd, -)
+          [ -n "$rest" ] && cargo tauri build --ci --target '${{ matrix.triple }}' --bundles "$rest" --config src-tauri/tauri.ci.conf.json
+          if echo ",$b," | grep -q ',rpm,'; then
+            cargo tauri build --ci --target '${{ matrix.triple }}' --bundles rpm --config src-tauri/tauri.rpm.conf.json
+          fi
       - name: AppImage keeps the bundled Firecracker unpatched (linuxdeploy patchelfs it)
         if: runner.os == 'Linux'
         run: apps/desktop/scripts/appimage-vm-fix.sh '${{ matrix.triple }}'
