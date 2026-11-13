@@ -24,7 +24,7 @@ seagent-net.workspace = true # seagent_net::http::builder — the one outbound c
 base64.workspace = true
 # SQLite index (sessions FTS5, unified memory table, chunk vectors, spilled tool output).
 # `bundled` compiles SQLite in statically: no system libsqlite3, works for the musl build.
-rusqlite = { version = "0.40", features = ["bundled"] }
+rusqlite = { version = "0.41", features = ["bundled"] }
 
 [target.'cfg(unix)'.dependencies]
 libc.workspace = true # process groups, signals, waitpid, uid / mode checks (Unix only)
