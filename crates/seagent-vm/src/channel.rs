@@ -10,7 +10,7 @@
 //!   `/dev/vport0p1` (`<run>/chan.sock`). No handshake. On Windows (no unix
 //!   sockets for QEMU) the chardev is a TCP server on 127.0.0.1 and
 //!   `<run>/chan.sock` is a small file naming its port ([`Endpoint`]).
-//! * vfkit (Apple Virtualization.framework): `virtio-vsock,…,listen` proxies
+//! * vfkit (Apple Virtualization.framework): `virtio-vsock,…,connect` proxies
 //!   a unix socket straight to the guest's vsock port — no preface
 //!   ([`Transport::VsockProxy`]).
 //! * VirtualBox / Hyper-V: the guest's second UART (`/dev/ttyS1`), served by the
@@ -509,6 +509,24 @@ impl Channel {
         loop {
             match Endpoint::locate(path).and_then(|ep| ep.connect()) {
                 Ok(s) => match Channel::from_stream(s, transport) {
+                    // vfkit / crosvm accept the unix connection before they dial the guest's
+                    // vsock port, and just close it when the agent is not listening yet (no
+                    // CONNECT/OK preface to fail on). The guest's first frame is its Hello:
+                    // wait for it, retry on a close, and put it back for the caller.
+                    Ok(c) if matches!(transport, Transport::VsockProxy { .. }) => {
+                        let left = deadline.saturating_duration_since(Instant::now());
+                        match c.recv(left.clamp(Duration::from_millis(1), Duration::from_secs(1))) {
+                            Ok(Some(m)) => {
+                                c.rbuf.lock().unwrap().1.push_front(m);
+                                return Ok(c);
+                            }
+                            Ok(None) => return Ok(c),
+                            Err(e) if Instant::now() < deadline && e.contains("closed") => {
+                                std::thread::sleep(Duration::from_millis(50));
+                            }
+                            Err(e) => return Err(e),
+                        }
+                    }
                     Ok(c) => return Ok(c),
                     // Firecracker answers CONNECT and closes it while the guest
                     // agent is still booting: retry the *handshake*, not just
@@ -826,6 +844,28 @@ mod tests {
         let ch = Channel::from_stream(a, Transport::VsockProxy { port: 5000 }).unwrap();
         b.write_all(&encode(&GuestMsg::Pong { id: 0 }).unwrap()).unwrap();
         assert!(matches!(ch.expect(Duration::from_secs(2), "pong").unwrap(), GuestMsg::Pong { .. }), "the first bytes are frames, not a CONNECT reply");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_proxied_vsock_retries_while_the_guest_is_not_listening_yet() {
+        // vfkit accepts the unix connection, fails to dial the booting guest and closes it:
+        // the host must reconnect, not report "guest channel closed".
+        let dir = std::env::temp_dir().join(format!("seagent-vsockproxy-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let sock = dir.join("v.sock");
+        let _ = std::fs::remove_file(&sock);
+        let l = std::os::unix::net::UnixListener::bind(&sock).unwrap();
+        let t = std::thread::spawn(move || {
+            drop(l.accept().unwrap()); // guest not up yet
+            let (mut s, _) = l.accept().unwrap();
+            s.write_all(&encode(&GuestMsg::Pong { id: 7 }).unwrap()).unwrap();
+            std::thread::sleep(Duration::from_millis(300));
+        });
+        let ch = Channel::connect(&sock, Transport::VsockProxy { port: 5000 }, Duration::from_secs(5)).unwrap();
+        assert!(matches!(ch.expect(Duration::from_secs(2), "first frame").unwrap(), GuestMsg::Pong { id: 7 }), "the probed frame is handed back");
+        t.join().unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
