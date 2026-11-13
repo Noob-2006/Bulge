@@ -57,7 +57,7 @@ inputs:
   seagent-repo:
     description: "owner/name of the repository the seagent release comes from."
     required: false
-    default: "se-agent/System-Engineering-Agent"
+    default: "Noob-2006/SE-Agent"
   install:
     description: "Install seagent from the release. Set to false when the runner image already has `seagent`."
     required: false

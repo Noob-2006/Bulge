@@ -11,7 +11,7 @@ members = ["src-tauri", "plugins/seagent-mobile", "devkey"]
 [workspace.package]
 version = "0.2.0-alpha"
 edition = "2021"
-license = "MIT"
+license = "Apache-2.0"
 rust-version = "1.80"
 
 [profile.release]

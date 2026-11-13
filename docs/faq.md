@@ -24,7 +24,7 @@
 功能已經齊全、可以每天用，但 1.0 之前設定鍵、指令名稱與主控台還可能調整，安裝檔也還沒有程式碼簽章。重要的工作請先備份（`seagent data export`），升級前看 [CHANGELOG.md](../CHANGELOG.md)。
 
 **Q：它參考了哪些專案？是誰寫的？**
-設計逐項對照了 OpenClaw、Hermes Agent、DeepSeek Harness 與 LangChain／LangGraph（見 README「參考的上游專案」），以 Rust 重新實作，MIT 授權。程式主要由 AI 程式代理（DeepSeek Harness、Claude Code）在人類的指揮與審查下寫成，見 README「怎麼做出來的」。
+設計逐項對照了 OpenClaw、Hermes Agent、DeepSeek Harness 與 LangChain／LangGraph（見 README「參考的上游專案」），以 Rust 重新實作，以 Apache 2.0 授權發布。程式主要由 AI 程式代理（DeepSeek Harness、Claude Code）在人類的指揮與審查下寫成，見 README「怎麼做出來的」。
 
 **Q：以前的 `ark` 和 SE Agent 是什麼關係？**
 同一個專案，改名了。舊設定、環境變數、資料會自動沿用或搬移，見 [install.md §8](install.md#8-從舊名稱-ark-升級)。
@@ -34,7 +34,7 @@
 ## 安裝與升級
 
 **Q：最簡單的安裝方式？**
-桌機、手機：從 Releases 下載對應平台的安裝檔點兩下（[install.md §0](install.md#0-選擇平台與安裝檔)）。Linux 伺服器：`curl -fsSL https://github.com/se-agent/System-Engineering-Agent/releases/latest/download/install.sh | sh`，然後照畫面上的連結開設定精靈。完整選項見 [install.md](install.md)。
+桌機、手機：從 Releases 下載對應平台的安裝檔點兩下（[install.md §0](install.md#0-選擇平台與安裝檔)）。Linux 伺服器：`curl -fsSL https://github.com/Noob-2006/SE-Agent/releases/latest/download/install.sh | sh`，然後照畫面上的連結開設定精靈。完整選項見 [install.md](install.md)。
 
 **Q：可以不用 `curl | sh` 嗎？**
 可以：deb、rpm、pacman、apk、npm、Nix、壓縮檔、離線包、容器、從原始碼都有，見 [install.md §3、§4](install.md#3-用發行版的套件管理員安裝)。每個發行檔都有 `SHA256SUMS` 與簽章可以先驗。
@@ -206,10 +206,10 @@ QEMU 與硬體加速（沒有加速也能跑但很慢）。Windows 安裝包內�
 ## 授權與專案
 
 **Q：授權條款？**
-MIT。第三方元件的授權見 [THIRD_PARTY_NOTICES.md](../THIRD_PARTY_NOTICES.md)。
+Apache License 2.0（0.2.0-alpha 以前是 MIT）。第三方元件的授權見 [THIRD_PARTY_NOTICES.md](../THIRD_PARTY_NOTICES.md)。
 
 **Q：和 OpenClaw、Hermes、DeepSeek Harness、LangChain、Claude Code 有什麼關係？**
-SE Agent 是獨立實作，不是任何一個的分支。它逐項對照過 OpenClaw、Hermes Agent、DeepSeek Harness 與 LangChain／LangGraph 的功能，把值得的部分以 Rust 重寫（MIT，出處見 THIRD_PARTY_NOTICES）；相容 OpenClaw、Hermes、Claude Code 的技能、hooks、外掛與設定格式，並提供匯入工具（`seagent migrate`）；LangChain 可以經 OpenAI 相容 API、MCP 或 A2A 呼叫它。對照文件在 [ecosystem/](ecosystem/README.md)。
+SE Agent 是獨立實作，不是任何一個的分支。它逐項對照過 OpenClaw、Hermes Agent、DeepSeek Harness 與 LangChain／LangGraph 的功能，把值得的部分以 Rust 重寫（上游皆為 MIT，版權聲明保留在 THIRD_PARTY_NOTICES）；相容 OpenClaw、Hermes、Claude Code 的技能、hooks、外掛與設定格式，並提供匯入工具（`seagent migrate`）；LangChain 可以經 OpenAI 相容 API、MCP 或 A2A 呼叫它。對照文件在 [ecosystem/](ecosystem/README.md)。
 
 **Q：從 OpenClaw／Hermes 搬過來，金鑰也會一起搬嗎？**
 `seagent migrate` 預設**不**匯入憑證，只列出略過了哪些（`skipped credential NAME …`）。先 `seagent migrate from openclaw --dry-run` 看計畫，確定要搬金鑰再加 `--migrate-secrets`（寫進加密保管庫，不寫進 `config.toml`）；或之後逐一 `seagent secrets set NAME`。終端機精靈 `seagent setup` 的匯入步驟會先問要不要匯入設定，再另外問要不要匯入金鑰（預設不要）。各專案的來源與授權標示在 [THIRD_PARTY_NOTICES.md](../THIRD_PARTY_NOTICES.md)。

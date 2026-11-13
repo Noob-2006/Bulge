@@ -10,7 +10,7 @@
 |---|---|---|
 | 說明專案做什麼、怎麼取得、怎麼回饋 | ✅ | [README.md](../README.md)、[docs/install.md](install.md)、[docs/faq.md](faq.md) |
 | 如何貢獻 | ✅ | [CONTRIBUTING.md](../CONTRIBUTING.md) |
-| 自由軟體授權，放在標準位置 | ✅ | [LICENSE](../LICENSE)（MIT）、[LICENSES/](../LICENSES)、[REUSE.toml](../REUSE.toml) |
+| 自由軟體授權，放在標準位置 | ✅ | [LICENSE](../LICENSE)（Apache-2.0）、[LICENSES/](../LICENSES)、[REUSE.toml](../REUSE.toml) |
 | 基本文件與外部介面文件 | ✅ | [docs/MANUAL.md](MANUAL.md)、[docs/arp.md](arp.md)、`seagent help` |
 | 網站使用 HTTPS | ⏳ | GitHub 頁面與發行下載皆為 HTTPS |
 | 有可搜尋的討論管道 | 👤 | 開啟 GitHub Discussions |

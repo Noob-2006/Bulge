@@ -43,7 +43,7 @@
 - 各平台安裝、套件（deb／rpm／pacman／apk／npm／Nix）與疑難排解：[docs/install.md](docs/install.md)
 - 常見問題：[docs/faq.md](docs/faq.md)
 - 參與開發：[CONTRIBUTING.md](CONTRIBUTING.md)（每個 commit 需 `Signed-off-by`）；回報漏洞：[SECURITY.md](SECURITY.md)（私下回報）；行為準則：[CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md)
-- 授權：MIT（[LICENSE](LICENSE)），第三方來源見 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)；變更紀錄：[CHANGELOG.md](CHANGELOG.md)
+- 授權：Apache 2.0（[LICENSE](LICENSE)、[NOTICE](NOTICE)），第三方來源見 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)；變更紀錄：[CHANGELOG.md](CHANGELOG.md)
 
 ## 相容的生態
 
@@ -81,7 +81,7 @@ SE Agent 主要由 AI 程式代理在人類的指揮與審查下寫成：
 - **DeepSeek Harness**：前期的核心、工具與上游對照。
 - **Claude Code**（Anthropic）：跨平台移植（Windows／macOS／Android／iOS）、安裝檔與內建 VM、文件，以及在 Windows 實機上的驗證。
 
-每個 commit 都經過測試；由代理寫成的 commit 帶有 `Co-Authored-By` 標記。產生的程式碼一樣以 MIT 授權發布。
+每個 commit 都經過測試；由代理寫成的 commit 帶有 `Co-Authored-By` 標記。產生的程式碼一樣以 Apache 2.0 授權發布。
 
 ## 平台狀態
 
@@ -115,8 +115,8 @@ SE Agent 主要由 AI 程式代理在人類的指揮與審查下寫成：
 一個指令：安裝、啟動背景服務與網頁主控台，最後印出（並在桌面環境自動開啟）一次性的設定精靈連結。
 
 ```bash
-curl --proto '=https' --tlsv1.2 -fsSL https://github.com/se-agent/System-Engineering-Agent/releases/latest/download/install.sh | sh                 # 個人安裝，不需 sudo
-curl --proto '=https' --tlsv1.2 -fsSL https://github.com/se-agent/System-Engineering-Agent/releases/latest/download/install.sh | sudo sh -s -- --system  # 系統服務
+curl --proto '=https' --tlsv1.2 -fsSL https://github.com/Noob-2006/SE-Agent/releases/latest/download/install.sh | sh                 # 個人安裝，不需 sudo
+curl --proto '=https' --tlsv1.2 -fsSL https://github.com/Noob-2006/SE-Agent/releases/latest/download/install.sh | sudo sh -s -- --system  # 系統服務
 ```
 
 在瀏覽器的設定精靈選模型供應商、貼金鑰（只存進保管庫）、挑預設模型、管理者登入方式（本機權杖或 OIDC）、工作目錄、安全模式、聊天平台；完成後精靈自動鎖定，SE Agent 以新設定重啟並帶你進主控台。設定連結 30 分鐘內有效、只能用一次；需要新的連結：`seagent setup link`。
@@ -131,7 +131,7 @@ curl --proto '=https' --tlsv1.2 -fsSL https://github.com/se-agent/System-Enginee
 
 ### 圖形安裝（App，不需終端機）
 
-從 [Releases](https://github.com/se-agent/System-Engineering-Agent/releases) 下載一個檔、點兩下就裝好：Windows `SE Agent_*_x64-setup.exe`（個人安裝，不需管理員；另有 `.msi`）、macOS `.dmg`、Linux `.AppImage` / `.deb` / `.rpm`、Android `.apk`。App 第一次開啟會安裝並啟動背景服務，接著在視窗裡開同一個設定精靈；之後常駐系統匣（開啟主控台、暫停、重新啟動服務、登入時啟動、檢查更新）。原始碼與建置方式見 [apps/desktop/README.md](apps/desktop/README.md)。
+從 [Releases](https://github.com/Noob-2006/SE-Agent/releases) 下載一個檔、點兩下就裝好：Windows `SE Agent_*_x64-setup.exe`（個人安裝，不需管理員；另有 `.msi`）、macOS `.dmg`、Linux `.AppImage` / `.deb` / `.rpm`、Android `.apk`。App 第一次開啟會安裝並啟動背景服務，接著在視窗裡開同一個設定精靈；之後常駐系統匣（開啟主控台、暫停、重新啟動服務、登入時啟動、檢查更新）。原始碼與建置方式見 [apps/desktop/README.md](apps/desktop/README.md)。
 
 **iOS 在手機上執行完整的 agent**（無伺服器，跟其他平台一樣）：agent 以函式庫形式連進 App、在 App 自己的行程裡跑——核心、session、模型供應商、記憶、技能、web 抓取／搜尋、App 沙盒內的檔案工具、MCP（Streamable HTTP／SSE）、純網路的聊天平台、排程，以及綁在 127.0.0.1 的 App Server（主控台照桌面版的方式載入）。iOS 只禁止兩件事：**虛擬機**與**原生 shell 程式**（不能開子程序、不能 JIT）。指令改在 App 內的 **WebAssembly 沙盒**執行（`exec.backend = "wasm"`：wasmi 直譯器 + 內建 POSIX shell + 釘選 SHA-256 的 uutils coreutils WASI 版，只看得到工作區與私有 `/tmp`、沒有網路）。App 在背景時，排程與心跳工作由 iOS 的 BGProcessingTask 在系統允許時執行。和區域網路中的電腦配對（Bonjour、QR／8 碼、TLS 指紋釘選）變成**選用**。詳見 [apps/desktop/MOBILE.md](apps/desktop/MOBILE.md)。
 
@@ -229,4 +229,4 @@ seagent mcp serve                            # 讓其他 agent 使用 seagent �
 
 ## 授權
 
-MIT。部分程式轉寫自 OpenClaw、Hermes Agent 與 DeepSeek Harness（皆為 MIT），見 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。Windows 安裝包內附的 QEMU 是 GPL-2.0，原始碼位置寫在安裝包的 `vm\bundle.json` 與 [packaging/vm/README.md](packaging/vm/README.md)。
+Apache License 2.0（[LICENSE](LICENSE)、[NOTICE](NOTICE)）。0.2.0-alpha 以前的版本以 MIT 發布。部分程式轉寫自 OpenClaw、Hermes Agent 與 DeepSeek Harness（皆為 MIT，其版權與授權聲明照 MIT 要求保留），見 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。Windows 安裝包內附的 QEMU 是 GPL-2.0，原始碼位置寫在安裝包的 `vm\bundle.json` 與 [packaging/vm/README.md](packaging/vm/README.md)。

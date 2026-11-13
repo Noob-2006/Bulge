@@ -1310,7 +1310,7 @@ fn about(c: &UiCtx) -> Value {
         "name": "seagent",
         "version": env!("CARGO_PKG_VERSION"),
         "target": crate::ops::update::target(),
-        "license": "MIT",
+        "license": "Apache-2.0",
         "profile": crate::ops::profile::current(),
         "upstreams": [
             {"name": "OpenClaw", "license": "MIT", "url": "https://github.com/openclaw/openclaw"},

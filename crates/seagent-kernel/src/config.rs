@@ -266,7 +266,7 @@ pub struct UpdateConfig {
 
 impl Default for UpdateConfig {
     fn default() -> Self {
-        UpdateConfig { url: "https://api.github.com/repos/se-agent/System-Engineering-Agent".into(), channel: "stable".into(), check_on_start: false, lts_series: String::new(), verify_key: String::new() }
+        UpdateConfig { url: "https://api.github.com/repos/Noob-2006/SE-Agent".into(), channel: "stable".into(), check_on_start: false, lts_series: String::new(), verify_key: String::new() }
     }
 }
 

@@ -14,4 +14,4 @@ A mirror: `SEAGENT_NPM_BASE_URL=https://mirror.example/seagent/v0.2.0-alpha`.
 
 The npm package is a convenience wrapper; system services, audit and multi-user setups are
 better served by the distribution packages (deb, rpm, pacman, apk). See
-https://github.com/se-agent/System-Engineering-Agent/blob/main/docs/install.md.
+https://github.com/Noob-2006/SE-Agent/blob/main/docs/install.md.

@@ -51,7 +51,7 @@ Tests never use a real model, a real account or your real home directory:
 
 Every commit must be signed off, certifying the [Developer Certificate of Origin
 1.1](https://developercertificate.org/): you wrote the change, or otherwise have the right to submit
-it under the project's license (MIT).
+it under the project's license (Apache-2.0).
 
 ```bash
 git commit -s        # adds "Signed-off-by: Your Name <you@example.com>"
@@ -60,9 +60,10 @@ git commit -s        # adds "Signed-off-by: Your Name <you@example.com>"
 Use your real name or a name you are publicly known by. Commits without a sign-off cannot be
 merged.
 
-Code ported from another project must be under a license compatible with MIT, and the port must
+Code ported from another project must be under a license compatible with Apache-2.0 (MIT, BSD,
+Apache-2.0, ...), and the port must
 be recorded in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) (and in `REUSE.toml` when the
-license is not MIT).
+license is not Apache-2.0 or MIT).
 
 ## Pull requests
 
@@ -80,4 +81,4 @@ review, test and understand everything you submit.
 
 ## License
 
-By contributing you agree that your contributions are licensed under the [MIT License](LICENSE).
+By contributing you agree that your contributions are licensed under the [Apache License 2.0](LICENSE).

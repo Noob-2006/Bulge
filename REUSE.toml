@@ -5,13 +5,13 @@
 version = 1
 SPDX-PackageName = "SE Agent"
 SPDX-PackageSupplier = "The SE Agent Authors"
-SPDX-PackageDownloadLocation = "https://github.com/se-agent/System-Engineering-Agent"
+SPDX-PackageDownloadLocation = "https://github.com/Noob-2006/SE-Agent"
 
 [[annotations]]
 path = "**"
 precedence = "aggregate"
-SPDX-FileCopyrightText = ["2026 The SE Agent Authors", "2026 OpenClaw Foundation", "2025 Nous Research"]
-SPDX-License-Identifier = "MIT"
+SPDX-FileCopyrightText = ["2026 The SE Agent Authors", "2026 OpenClaw Foundation", "2025 Nous Research", "2026 DeepSeek"]
+SPDX-License-Identifier = "Apache-2.0 AND MIT"
 
 # DAVE fingerprints and test vectors ported from libdave.
 [[annotations]]

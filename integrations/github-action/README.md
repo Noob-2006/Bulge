@@ -20,7 +20,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with: { fetch-depth: 0 }                   # the review diffs against the base branch
-      - uses: se-agent/System-Engineering-Agent/integrations/github-action@v1
+      - uses: Noob-2006/SE-Agent/integrations/github-action@v1
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}   # your provider key, from a secret
         with:
@@ -40,7 +40,7 @@ jobs:
     permissions: { contents: read }
     steps:
       - uses: actions/checkout@v4
-      - uses: se-agent/System-Engineering-Agent/integrations/github-action@v1
+      - uses: Noob-2006/SE-Agent/integrations/github-action@v1
         id: seagent
         env: { ANTHROPIC_API_KEY: "${{ secrets.ANTHROPIC_API_KEY }}" }
         with:
@@ -67,7 +67,7 @@ jobs:
 | `role` | `swdev` | role preset (`swdev`, `secops`, `devops`, ...) |
 | `budget-usd` | `2` | spend cap for one run |
 | `extra-instructions` | | house rules appended to the prompt |
-| `seagent-version` / `seagent-repo` / `install` | `latest` / `se-agent/System-Engineering-Agent` / `true` | which release; `install: false` if the runner has `seagent` |
+| `seagent-version` / `seagent-repo` / `install` | `latest` / `Noob-2006/SE-Agent` / `true` | which release; `install: false` if the runner has `seagent` |
 
 Outputs: `result-file` (the review, the patch or the answer) and `status` (`ok` / `failed`).
 The review is also appended to the job summary.

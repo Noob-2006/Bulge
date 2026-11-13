@@ -20,7 +20,7 @@ while [ $# -gt 0 ]; do
     shift
 done
 [ -n "$VERSION" ] && [ -f "$SUMS" ] || { echo "need --version and --sums" >&2; exit 2; }
-BASE=${BASE:-https://github.com/${SEAGENT_REPO:-se-agent/System-Engineering-Agent}/releases/download/v$VERSION}
+BASE=${BASE:-https://github.com/${SEAGENT_REPO:-Noob-2006/SE-Agent}/releases/download/v$VERSION}
 sum() { awk -v f="$1" '$2 == f || $2 == "*"f { print $1 }' "$SUMS"; }
 X86=$(sum seagent-x86_64-unknown-linux-musl.tar.gz) ARM=$(sum seagent-aarch64-unknown-linux-musl.tar.gz)
 [ -n "$X86" ] && [ -n "$ARM" ] || { echo "SHA256SUMS lacks the musl tarballs" >&2; exit 1; }
@@ -35,11 +35,11 @@ pkgbase = seagent-bin
 	pkgdesc = SE Agent (System Engineering Agent): self-hosted, Linux-first AI agent runtime
 	pkgver = $VERSION
 	pkgrel = 1
-	url = https://github.com/se-agent/System-Engineering-Agent
+	url = https://github.com/Noob-2006/SE-Agent
 	install = seagent.install
 	arch = x86_64
 	arch = aarch64
-	license = MIT
+	license = Apache-2.0
 	optdepends = git: version control tools
 	optdepends = qemu-system-x86: desktop and tool-isolation VMs
 	optdepends = chromium: browser tools

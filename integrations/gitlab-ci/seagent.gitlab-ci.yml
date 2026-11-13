@@ -23,7 +23,7 @@
   image: ${SEAGENT_IMAGE:-debian:stable-slim}
   variables:
     SEAGENT_VERSION: latest
-    SEAGENT_REPO: se-agent/System-Engineering-Agent
+    SEAGENT_REPO: Noob-2006/SE-Agent
     SEAGENT_CI_OUT: .seagent-ci
     SEAGENT_CI_PROVIDER: gitlab
     GIT_DEPTH: "0"                       # the review diffs against the target branch

@@ -2,7 +2,7 @@ name: desktop
 # The SE Agent app (apps/desktop, Tauri 2, its own Cargo workspace): installers for Windows
 # (NSIS per-user .exe + MSI), macOS (universal .app/.dmg), Linux (.AppImage/.deb/.rpm), an Android
 # APK (agent bundled as libseagent.so under a foreground service) and an iOS simulator build
-# (client only: no VM / local shell on iOS). Each job first builds `seagent` for its target and
+# (the full agent runs inside the app; iOS allows no VM or native shell). Each job first builds `seagent` for its target and
 # places it as the sidecar (desktop) or native lib (Android).
 #
 # Every desktop installer carries the built-in VM (packaging/vm/bundle.sh → resources `vm/`): the

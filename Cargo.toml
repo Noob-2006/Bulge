@@ -5,7 +5,7 @@ members = ["crates/seagent-core", "crates/seagent-security", "crates/seagent-ker
 [workspace.package]
 version = "0.2.0-alpha"
 edition = "2021"
-license = "MIT"
+license = "Apache-2.0"
 # 1.89: std `File::lock` / `try_lock` (stable since 1.89) replace `libc::flock`, so file locks work
 # the same on Linux, macOS and Windows (docs/cross-platform.md, phase 1).
 rust-version = "1.89"

@@ -15,7 +15,7 @@ import sys
 
 def main():
     dist, version, tag = sys.argv[1], sys.argv[2].lstrip("v"), sys.argv[3]
-    repo = sys.argv[4] if len(sys.argv) > 4 else "se-agent/System-Engineering-Agent"
+    repo = sys.argv[4] if len(sys.argv) > 4 else "Noob-2006/SE-Agent"
     base = f"https://github.com/{repo}/releases/download/{tag}/"
     files = set(os.listdir(dist))
     platforms = {}

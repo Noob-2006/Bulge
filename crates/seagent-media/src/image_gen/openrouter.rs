@@ -200,7 +200,7 @@ fn chat_images(v: &Value) -> Result<Vec<Asset>, String> {
 
 fn headers(c: &Creds) -> Vec<(String, String)> {
     let mut h = c.bearer();
-    h.push(("HTTP-Referer".into(), "https://github.com/se-agent/System-Engineering-Agent".into()));
+    h.push(("HTTP-Referer".into(), "https://github.com/Noob-2006/SE-Agent".into()));
     h.push(("X-Title".into(), "SE Agent".into()));
     h
 }

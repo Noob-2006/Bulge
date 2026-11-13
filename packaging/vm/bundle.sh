@@ -211,7 +211,7 @@ lines = [
     "",
     "Written offer: for three years from the date you received this program, the SE Agent",
     "contributors will provide the complete corresponding source code of the GPL-licensed",
-    "components above on request (https://github.com/se-agent/System-Engineering-Agent/issues).",
+    "components above on request (https://github.com/Noob-2006/SE-Agent/issues).",
 ]
 open(sys.argv[2], "w").write("\n".join(lines) + "\n")
 PY

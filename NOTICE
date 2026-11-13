@@ -1,0 +1,12 @@
+SE Agent
+Copyright 2026 The SE Agent Authors
+
+This product is licensed under the Apache License, Version 2.0 (see LICENSE).
+
+It includes code ported from OpenClaw (Copyright (c) 2026 OpenClaw Foundation), Hermes Agent
+(Copyright (c) 2025 Nous Research), DeepSeek Harness (Copyright (c) 2026 DeepSeek) and other
+projects under the MIT, BSD-3-Clause and Apache-2.0 licenses; their copyright and permission
+notices are kept in THIRD_PARTY_NOTICES.md and LICENSES/.
+
+The Windows installer bundles QEMU (GPL-2.0-only) as a separate program; its source location is
+recorded in the installer's vm\bundle.json and in packaging/vm/README.md.

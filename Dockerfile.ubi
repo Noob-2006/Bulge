@@ -21,7 +21,7 @@ RUN cargo build --release --locked --bin seagent
 
 FROM registry.access.redhat.com/ubi9/ubi-minimal:latest
 LABEL org.opencontainers.image.title="seagent" org.opencontainers.image.licenses="MIT" \
-      org.opencontainers.image.source="https://github.com/se-agent/System-Engineering-Agent"
+      org.opencontainers.image.source="https://github.com/Noob-2006/SE-Agent"
 RUN microdnf install -y --nodocs --setopt=install_weak_deps=0 git-core shadow-utils \
  && microdnf clean all \
  && useradd -m -u 10001 -g 0 -s /sbin/nologin seagent \
