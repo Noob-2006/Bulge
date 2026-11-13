@@ -189,7 +189,7 @@ ProtectClock=yes
     format!(
         "[Unit]
 Description=SE Agent daemon{desc}
-Documentation=https://github.com/Noob-2006/SE-Agent
+Documentation=https://github.com/Noob-2006/System-Engineering-Agent
 After=network-online.target
 Wants=network-online.target
 StartLimitIntervalSec=300

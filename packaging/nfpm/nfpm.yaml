@@ -17,7 +17,7 @@ maintainer: seagent maintainers <seagent@users.noreply.github.com>
 description: |
   SE Agent (System Engineering Agent): agent runtime with daemon, CLI, tools, sandboxing, audit.
   Static binary with bundled skills, roles and plugin catalog under /usr/share/seagent.
-homepage: https://github.com/Noob-2006/SE-Agent
+homepage: https://github.com/Noob-2006/System-Engineering-Agent
 license: Apache-2.0
 # The product was called `ark` and shipped as `ark-agent` (KDE's archiver owns the name `ark`).
 # `seagent` takes over from it: an upgrade replaces the old package in place.
@@ -94,7 +94,7 @@ rpm:
 deb:
   compression: gzip
   fields:
-    Bugs: https://github.com/Noob-2006/SE-Agent/issues
+    Bugs: https://github.com/Noob-2006/System-Engineering-Agent/issues
 archlinux:
   packager: SE Agent maintainers <seagent@users.noreply.github.com>
   pkgbase: seagent

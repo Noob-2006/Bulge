@@ -46,7 +46,7 @@ err() { printf '%sseagent-install: error:%s %s\n' "$R" "$N" "$*" >&2; exit 1; }
 need() { command -v "$1" >/dev/null 2>&1 || err "needs $1"; }
 
 main() {
-    repo="${SEAGENT_REPO:-Noob-2006/SE-Agent}"
+    repo="${SEAGENT_REPO:-Noob-2006/System-Engineering-Agent}"
     version=latest mode="" port="" local_bin="" package="" from_source=0 start=1 use_systemd=auto browser=1 uninstall=0 purge=0 assume_yes=0 with_browser=0
     while [ $# -gt 0 ]; do
         case "$1" in

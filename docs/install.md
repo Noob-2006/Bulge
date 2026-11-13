@@ -9,7 +9,7 @@ SE Agent（System Engineering Agent，指令 `seagent`）是一個代理程式�
 
 ## 0. 選擇平台與安裝檔
 
-所有安裝檔都在 [GitHub Releases](https://github.com/Noob-2006/SE-Agent/releases)，每一版附 `SHA256SUMS`。App 第一次開啟時會安裝並啟動背景服務，然後在視窗裡開設定精靈（選模型供應商、貼金鑰、選預設模型）；之後常駐系統匣（開啟主控台、暫停、重新啟動服務、登入時啟動、檢查更新）。
+所有安裝檔都在 [GitHub Releases](https://github.com/Noob-2006/System-Engineering-Agent/releases)，每一版附 `SHA256SUMS`。App 第一次開啟時會安裝並啟動背景服務，然後在視窗裡開設定精靈（選模型供應商、貼金鑰、選預設模型）；之後常駐系統匣（開啟主控台、暫停、重新啟動服務、登入時啟動、檢查更新）。
 
 | 平台 | 需求 | 安裝檔 | 怎麼裝 |
 |---|---|---|---|
@@ -100,7 +100,7 @@ Windows、macOS：用 [§0](#0-選擇平台與安裝檔) 的圖形 App（原生�
 ## 2. 一個指令安裝
 
 ```bash
-curl --proto '=https' --tlsv1.2 -fsSL https://github.com/Noob-2006/SE-Agent/releases/latest/download/install.sh | sh
+curl --proto '=https' --tlsv1.2 -fsSL https://github.com/Noob-2006/System-Engineering-Agent/releases/latest/download/install.sh | sh
 ```
 
 - 不需要 sudo。程式放在 `~/.local/bin/seagent`，設定在 `~/.config/seagent`，資料在 `~/.local/share/seagent`。
@@ -111,7 +111,7 @@ curl --proto '=https' --tlsv1.2 -fsSL https://github.com/Noob-2006/SE-Agent/rele
 ### 當成系統服務安裝（伺服器、多人共用）
 
 ```bash
-curl --proto '=https' --tlsv1.2 -fsSL https://github.com/Noob-2006/SE-Agent/releases/latest/download/install.sh | sudo sh -s -- --system
+curl --proto '=https' --tlsv1.2 -fsSL https://github.com/Noob-2006/System-Engineering-Agent/releases/latest/download/install.sh | sudo sh -s -- --system
 ```
 
 建立專用帳號 `seagent`，設定在 `/etc/seagent`、狀態在 `/var/lib/seagent`、日誌在 `/var/log/seagent`，服務名稱 `seagentd`。
@@ -198,14 +198,14 @@ npm 套件只是包裝：安裝時下載同一個發行執行檔並驗證 `SHA25
 ### Nix / NixOS
 
 ```bash
-nix profile install github:Noob-2006/SE-Agent       # 單純裝指令
+nix profile install github:Noob-2006/System-Engineering-Agent       # 單純裝指令
 ```
 
 NixOS 系統服務：
 
 ```nix
 {
-  inputs.seagent.url = "github:Noob-2006/SE-Agent";
+  inputs.seagent.url = "github:Noob-2006/System-Engineering-Agent";
   # …
   imports = [ inputs.seagent.nixosModules.default ];
   services.seagent.enable = true;
@@ -217,8 +217,8 @@ Home Manager：`inputs.seagent.homeManagerModules.default`。
 ### 壓縮檔（任何 Linux，含 Alpine、容器）
 
 ```bash
-curl -fsSLO https://github.com/Noob-2006/SE-Agent/releases/latest/download/seagent-x86_64-unknown-linux-musl.tar.gz
-curl -fsSLO https://github.com/Noob-2006/SE-Agent/releases/latest/download/SHA256SUMS
+curl -fsSLO https://github.com/Noob-2006/System-Engineering-Agent/releases/latest/download/seagent-x86_64-unknown-linux-musl.tar.gz
+curl -fsSLO https://github.com/Noob-2006/System-Engineering-Agent/releases/latest/download/SHA256SUMS
 grep ' seagent-x86_64-unknown-linux-musl.tar.gz$' SHA256SUMS | sha256sum -c -
 tar -xzf seagent-x86_64-unknown-linux-musl.tar.gz -C ~/.local     # 或 sudo tar … -C /usr/local
 ```
@@ -248,7 +248,7 @@ docker compose -f packaging/docker/compose.yml up -d
 ### 從原始碼
 
 ```bash
-git clone https://github.com/Noob-2006/SE-Agent && cd SE-Agent
+git clone https://github.com/Noob-2006/System-Engineering-Agent && cd System-Engineering-Agent
 cargo build --release -p seagent                # Rust 1.80 以上
 ./packaging/install.sh --local-binary target/release/seagent
 ```

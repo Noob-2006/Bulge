@@ -34,7 +34,7 @@
 ## 安裝與升級
 
 **Q：最簡單的安裝方式？**
-桌機、手機：從 Releases 下載對應平台的安裝檔點兩下（[install.md §0](install.md#0-選擇平台與安裝檔)）。Linux 伺服器：`curl -fsSL https://github.com/Noob-2006/SE-Agent/releases/latest/download/install.sh | sh`，然後照畫面上的連結開設定精靈。完整選項見 [install.md](install.md)。
+桌機、手機：從 Releases 下載對應平台的安裝檔點兩下（[install.md §0](install.md#0-選擇平台與安裝檔)）。Linux 伺服器：`curl -fsSL https://github.com/Noob-2006/System-Engineering-Agent/releases/latest/download/install.sh | sh`，然後照畫面上的連結開設定精靈。完整選項見 [install.md](install.md)。
 
 **Q：可以不用 `curl | sh` 嗎？**
 可以：deb、rpm、pacman、apk、npm、Nix、壓縮檔、離線包、容器、從原始碼都有，見 [install.md §3、§4](install.md#3-用發行版的套件管理員安裝)。每個發行檔都有 `SHA256SUMS` 與簽章可以先驗。

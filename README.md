@@ -115,8 +115,8 @@ SE Agent 主要由 AI 程式代理在人類的指揮與審查下寫成：
 一個指令：安裝、啟動背景服務與網頁主控台，最後印出（並在桌面環境自動開啟）一次性的設定精靈連結。
 
 ```bash
-curl --proto '=https' --tlsv1.2 -fsSL https://github.com/Noob-2006/SE-Agent/releases/latest/download/install.sh | sh                 # 個人安裝，不需 sudo
-curl --proto '=https' --tlsv1.2 -fsSL https://github.com/Noob-2006/SE-Agent/releases/latest/download/install.sh | sudo sh -s -- --system  # 系統服務
+curl --proto '=https' --tlsv1.2 -fsSL https://github.com/Noob-2006/System-Engineering-Agent/releases/latest/download/install.sh | sh                 # 個人安裝，不需 sudo
+curl --proto '=https' --tlsv1.2 -fsSL https://github.com/Noob-2006/System-Engineering-Agent/releases/latest/download/install.sh | sudo sh -s -- --system  # 系統服務
 ```
 
 在瀏覽器的設定精靈選模型供應商、貼金鑰（只存進保管庫）、挑預設模型、管理者登入方式（本機權杖或 OIDC）、工作目錄、安全模式、聊天平台；完成後精靈自動鎖定，SE Agent 以新設定重啟並帶你進主控台。設定連結 30 分鐘內有效、只能用一次；需要新的連結：`seagent setup link`。
@@ -131,7 +131,7 @@ curl --proto '=https' --tlsv1.2 -fsSL https://github.com/Noob-2006/SE-Agent/rele
 
 ### 圖形安裝（App，不需終端機）
 
-從 [Releases](https://github.com/Noob-2006/SE-Agent/releases) 下載一個檔、點兩下就裝好：Windows `SE Agent_*_x64-setup.exe`（個人安裝，不需管理員；另有 `.msi`）、macOS `.dmg`、Linux `.AppImage` / `.deb` / `.rpm`、Android `.apk`。App 第一次開啟會安裝並啟動背景服務，接著在視窗裡開同一個設定精靈；之後常駐系統匣（開啟主控台、暫停、重新啟動服務、登入時啟動、檢查更新）。原始碼與建置方式見 [apps/desktop/README.md](apps/desktop/README.md)。
+從 [Releases](https://github.com/Noob-2006/System-Engineering-Agent/releases) 下載一個檔、點兩下就裝好：Windows `SE Agent_*_x64-setup.exe`（個人安裝，不需管理員；另有 `.msi`）、macOS `.dmg`、Linux `.AppImage` / `.deb` / `.rpm`、Android `.apk`。App 第一次開啟會安裝並啟動背景服務，接著在視窗裡開同一個設定精靈；之後常駐系統匣（開啟主控台、暫停、重新啟動服務、登入時啟動、檢查更新）。原始碼與建置方式見 [apps/desktop/README.md](apps/desktop/README.md)。
 
 **iOS 在手機上執行完整的 agent**（無伺服器，跟其他平台一樣）：agent 以函式庫形式連進 App、在 App 自己的行程裡跑——核心、session、模型供應商、記憶、技能、web 抓取／搜尋、App 沙盒內的檔案工具、MCP（Streamable HTTP／SSE）、純網路的聊天平台、排程，以及綁在 127.0.0.1 的 App Server（主控台照桌面版的方式載入）。iOS 只禁止兩件事：**虛擬機**與**原生 shell 程式**（不能開子程序、不能 JIT）。指令改在 App 內的 **WebAssembly 沙盒**執行（`exec.backend = "wasm"`：wasmi 直譯器 + 內建 POSIX shell + 釘選 SHA-256 的 uutils coreutils WASI 版，只看得到工作區與私有 `/tmp`、沒有網路）。App 在背景時，排程與心跳工作由 iOS 的 BGProcessingTask 在系統允許時執行。和區域網路中的電腦配對（Bonjour、QR／8 碼、TLS 指紋釘選）變成**選用**。詳見 [apps/desktop/MOBILE.md](apps/desktop/MOBILE.md)。
 

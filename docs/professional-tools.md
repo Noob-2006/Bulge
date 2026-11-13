@@ -125,7 +125,7 @@ token = "{{secret:GITLAB_TOKEN}}"
 
 | 平台 | 檔案 | 說明 |
 |---|---|---|
-| GitHub | `integrations/github-action/action.yml` + `README.md` | composite action：`uses: Noob-2006/SE-Agent/integrations/github-action@v1`，輸入 `task`／`test-command`／`model`／`role`／`budget-usd`… |
+| GitHub | `integrations/github-action/action.yml` + `README.md` | composite action：`uses: Noob-2006/System-Engineering-Agent/integrations/github-action@v1`，輸入 `task`／`test-command`／`model`／`role`／`budget-usd`… |
 | GitLab | `integrations/gitlab-ci/seagent.gitlab-ci.yml` | `include:` 後得到 `seagent-review`（MR pipeline）與手動的 `seagent-fix-tests`；自架 GitLab 用 `$CI_API_V4_URL` |
 | Jenkins | `integrations/jenkins/Jenkinsfile` | 宣告式 pipeline，multibranch PR 建置；憑證用 `withCredentials` |
 

@@ -48,7 +48,7 @@ Platform status (real-device vs build-only) is in the README.
 - **License: Apache-2.0** (was MIT). `LICENSE` is the Apache License 2.0 text, a `NOTICE` file
   names the holders; code ported from OpenClaw, Hermes Agent and DeepSeek Harness stays MIT with
   its notices in `THIRD_PARTY_NOTICES.md` (`REUSE.toml`: `Apache-2.0 AND MIT`). The repository
-  moved to https://github.com/Noob-2006/SE-Agent.
+  moved to https://github.com/Noob-2006/System-Engineering-Agent.
 - Version 0.2.0-alpha. MSI and Android need numeric versions: the MSI is `0.2.0`, Android
   `versionCode` 2000; `ci-config.py` derives both from a `v0.2.0-alpha` tag.
 - Desktop VM base image downloads resume with HTTP Range after a dropped connection (and across

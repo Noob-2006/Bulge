@@ -48,7 +48,7 @@ async function main() {
   if (process.env.SEAGENT_NPM_TARBALL) {
     tarball = fs.readFileSync(process.env.SEAGENT_NPM_TARBALL);
   } else {
-    const base = process.env.SEAGENT_NPM_BASE_URL || `https://github.com/Noob-2006/SE-Agent/releases/download/v${pkg.version}`;
+    const base = process.env.SEAGENT_NPM_BASE_URL || `https://github.com/Noob-2006/System-Engineering-Agent/releases/download/v${pkg.version}`;
     const sums = (await get(`${base}/SHA256SUMS`)).toString('utf8');
     const line = sums.split('\n').find((l) => l.trim().split(/\s+/)[1]?.replace(/^\*/, '') === name);
     if (!line) throw new Error(`${name} is not listed in SHA256SUMS of ${base}`);
@@ -68,6 +68,6 @@ async function main() {
 
 main().catch((e) => {
   console.error(`seagent: install failed: ${e.message}`);
-  console.error('Other ways to install: https://github.com/Noob-2006/SE-Agent/blob/main/docs/install.md');
+  console.error('Other ways to install: https://github.com/Noob-2006/System-Engineering-Agent/blob/main/docs/install.md');
   process.exit(1);
 });

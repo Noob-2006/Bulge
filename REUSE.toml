@@ -5,7 +5,7 @@
 version = 1
 SPDX-PackageName = "SE Agent"
 SPDX-PackageSupplier = "The SE Agent Authors"
-SPDX-PackageDownloadLocation = "https://github.com/Noob-2006/SE-Agent"
+SPDX-PackageDownloadLocation = "https://github.com/Noob-2006/System-Engineering-Agent"
 
 [[annotations]]
 path = "**"

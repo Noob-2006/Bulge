@@ -114,7 +114,7 @@ pub fn catalog() -> Vec<Preset> {
         p("perplexity", "Perplexity", OpenAiChat, "https://api.perplexity.ai", &["PERPLEXITY_API_KEY", "PPLX_API_KEY"]).alias(&["pplx"]).models(&["sonar", "sonar-pro", "sonar-reasoning-pro"]),
         p("meta-ai", "Meta Model API", OpenAiResponses, "https://api.meta.ai/v1", &["MODEL_API_KEY", "META_API_KEY", "META_MODEL_API_KEY"]).alias(&["meta", "muse", "llama-api"]).efforts(&["minimal", "low", "medium", "high", "xhigh"]).notes("`-contributor` models train on your prompts"),
         // ── aggregators / gateways ──
-        p("openrouter", "OpenRouter", OpenAiChat, "https://openrouter.ai/api/v1", &["OPENROUTER_API_KEY"]).alias(&["or"]).header("HTTP-Referer", "https://github.com/Noob-2006/SE-Agent").header("X-Title", "seagent").signup("https://openrouter.ai/keys"),
+        p("openrouter", "OpenRouter", OpenAiChat, "https://openrouter.ai/api/v1", &["OPENROUTER_API_KEY"]).alias(&["or"]).header("HTTP-Referer", "https://github.com/Noob-2006/System-Engineering-Agent").header("X-Title", "seagent").signup("https://openrouter.ai/keys"),
         p("ai-gateway", "Vercel AI Gateway", OpenAiChat, "https://ai-gateway.vercel.sh/v1", &["AI_GATEWAY_API_KEY"]).alias(&["vercel", "vercel-ai-gateway"]),
         p("cloudflare-ai-gateway", "Cloudflare AI Gateway", OpenAiChat, "https://gateway.ai.cloudflare.com/v1/{env:CLOUDFLARE_ACCOUNT_ID}/{env:CLOUDFLARE_GATEWAY_ID}/compat", &["CLOUDFLARE_AI_GATEWAY_API_KEY"]),
         local("litellm", "LiteLLM proxy", "http://127.0.0.1:4000/v1", Some("LITELLM_API_KEY")).alias(&["litellm-proxy"]),

@@ -14,7 +14,7 @@ pipeline {
     }
     environment {
         SEAGENT_VERSION  = 'v1.4.0'
-        SEAGENT_REPO     = 'Noob-2006/SE-Agent'
+        SEAGENT_REPO     = 'Noob-2006/System-Engineering-Agent'
         SEAGENT_CI_OUT   = "${env.WORKSPACE}/.seagent-ci"
         SEAGENT_CI_MODEL = 'anthropic/claude-sonnet-4-5'
         SEAGENT_CI_BASE_BRANCH = "${env.CHANGE_TARGET ?: 'main'}"

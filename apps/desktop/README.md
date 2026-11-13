@@ -91,7 +91,7 @@ them into `tauri.ci.conf.json`.
   private key as `TAURI_SIGNING_PRIVATE_KEY` (+ `_PASSWORD`) and the public key as
   `TAURI_UPDATER_PUBKEY`. On a `v*` tag CI uploads the installers, their `.sig` files and
   `latest.json` to the release; the app checks
-  `https://github.com/Noob-2006/SE-Agent/releases/latest/download/latest.json` at
+  `https://github.com/Noob-2006/System-Engineering-Agent/releases/latest/download/latest.json` at
   start and from the tray. Builds without a key skip the check. Before installing an update the
   app stops the daemon (Windows locks a running `seagent.exe`); the relaunched app starts it again.
 - Windows: `WINDOWS_CERTIFICATE` (pfx) → `certificateThumbprint`, or Azure Trusted Signing
