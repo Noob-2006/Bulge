@@ -77,7 +77,7 @@ jobs:
         run: |
           if [ -e /dev/kvm ]; then sudo chmod 666 /dev/kvm; fi
           packaging/vm/smoke-boot.sh "$RUNNER_TEMP/vm-a" ${{ matrix.arch }} direct 600
-      - uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: vm-bundle-image-${{ matrix.arch }}
           path: |
@@ -209,7 +209,7 @@ jobs:
           esac
       - name: Collect
         run: apps/desktop/scripts/collect-bundles.sh '${{ matrix.triple }}' dist
-      - uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: seagent-app-${{ matrix.triple }}
           path: dist/*
@@ -277,7 +277,7 @@ jobs:
           find apps/desktop/src-tauri/gen/android/app/build/outputs/apk -name '*.apk' ! -name '*-aligned.apk' -exec cp {} dist/ \;
           for f in dist/*.apk; do mv "$f" "dist/SE-Agent_android-arm64_$(basename "$f")"; done
           ls -l dist
-      - uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: seagent-app-android
           path: dist/*
@@ -320,7 +320,7 @@ jobs:
           [ -z "$app" ] && app="$(find apps/desktop/src-tauri/gen/apple/build -name '*.app' | head -1)"
           (cd "$(dirname "$app")" && ditto -c -k --keepParent "$(basename "$app")" "$GITHUB_WORKSPACE/dist/SE-Agent_ios-simulator.app.zip")
           ls -l dist
-      - uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: seagent-app-ios-simulator
           path: dist/*

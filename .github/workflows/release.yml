@@ -50,7 +50,7 @@ jobs:
           # ent-004: musl is really static, gnu really stays within glibc 2.28.
           packaging/release/check-binary.sh "$t" "target/$t/release/seagent" --max-glibc 2.28
           packaging/release/make-tarball.sh "$t" "target/$t/release/seagent" "seagent-$t.tar.gz" $agent
-      - uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: seagent-${{ matrix.target }}
           path: seagent-*.tar.gz
@@ -118,7 +118,7 @@ jobs:
           SOURCE_DATE_EPOCH="$(git log -1 --format=%ct)"; export SOURCE_DATE_EPOCH
           mkdir -p x out && tar -xzf "dist-in/seagent-${{ matrix.triple }}.tar.gz" -C x
           packaging/nfpm/build-packages.sh --bin x/bin/seagent --arch '${{ matrix.arch }}' --out out
-      - uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: pkg-${{ matrix.arch }}
           path: out/*
@@ -144,7 +144,7 @@ jobs:
       - if: always()
         run: cat matrix.md >> "$GITHUB_STEP_SUMMARY"
       - if: always()
-        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with: { name: distro-matrix, path: "matrix.*" }
   # ent-027/028: signed repositories. Without SEAGENT_REPO_GPG_KEY (an ASCII-armoured secret key without
   # passphrase, in a repository secret) the repositories are not built and the release says so.
@@ -176,7 +176,7 @@ jobs:
           tar --sort=name --owner=0 --group=0 --numeric-owner --mtime="@$SOURCE_DATE_EPOCH" -czf out/seagent-yum-repo.tar.gz -C repo rpm
           gpg --batch --armor --export "$KID" > out/seagent-repo-signing-key.asc
           rm -rf "$GNUPGHOME"
-      - uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with: { name: repos, path: out/*, if-no-files-found: ignore }
   repro:
     # The same tree built from two different paths must give identical bytes (A18).
