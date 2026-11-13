@@ -77,8 +77,10 @@ if [ -z "$PY" ]; then
 fi
 [ -n "$PY" ] || die "python3 is required"
 
-sha256_of() { if command -v sha256sum >/dev/null; then sha256sum "$1" | cut -d' ' -f1; else shasum -a 256 "$1" | cut -d' ' -f1; fi; }
-sha512_of() { if command -v sha512sum >/dev/null; then sha512sum "$1" | cut -d' ' -f1; else shasum -a 512 "$1" | cut -d' ' -f1; fi; }
+# Hash from stdin: GNU coreutils escapes a file name holding '' (every Windows path in Git Bash,
+# e.g. D:\_temp) and then prefixes the hash itself with ''.
+sha256_of() { if command -v sha256sum >/dev/null; then sha256sum <"$1" | cut -d' ' -f1; else shasum -a 256 <"$1" | cut -d' ' -f1; fi; }
+sha512_of() { if command -v sha512sum >/dev/null; then sha512sum <"$1" | cut -d' ' -f1; else shasum -a 512 <"$1" | cut -d' ' -f1; fi; }
 
 # fetch URL ALGO HASH DEST: download unless DEST already has the hash; never accept a mismatch.
 fetch() {
