@@ -36,8 +36,8 @@ if [[ -z "$bin" ]]; then
   export CC_aarch64_linux_android="$tc/aarch64-linux-android$api-clang"
   export AR_aarch64_linux_android="$tc/llvm-ar"
   export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="$CC_aarch64_linux_android"
-  (cd "$root" && cargo build --release --locked -p seagent --bin seagent --target aarch64-linux-android)
-  bin="$root/target/aarch64-linux-android/release/seagent"
+  (cd "$root" && cargo build --profile "${PROFILE:-release}" --locked -p seagent --bin seagent --target aarch64-linux-android)
+  bin="$root/target/aarch64-linux-android/${PROFILE:-release}/seagent"
 fi
 
 mkdir -p "$plugin/jniLibs/arm64-v8a"

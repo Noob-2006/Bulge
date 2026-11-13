@@ -95,6 +95,13 @@ panic = "abort"
 # Size-first build: identical features, `opt-level = "z"` instead of "s".
 # `cargo build -p seagent --profile slim` — measured cost/benefit in docs/BUILD.md.
 # It is a separate profile so the default `release` binary keeps its speed.
+# CI builds of branches and pull requests: the release settings without fat LTO and with parallel
+# codegen, several times faster to build; tagged releases still use [profile.release].
+[profile.ci]
+inherits = "release"
+lto = false
+codegen-units = 16
+
 [profile.slim]
 inherits = "release"
 opt-level = "z"

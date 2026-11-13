@@ -1,16 +1,23 @@
+# Version-update PRs are off (open-pull-requests-limit: 0): each one ran the whole CI and they
+# crowded out the release builds. Security updates still arrive (repository Settings -> Code
+# security -> Dependabot security updates).
 version: 2
 updates:
   - package-ecosystem: github-actions
     directory: /
     schedule: { interval: weekly }
+    open-pull-requests-limit: 0
   - package-ecosystem: cargo
     directory: /
     schedule: { interval: weekly }
+    open-pull-requests-limit: 0
   # Node sidecars (bridges/*) and the npm wrapper of the release binary
   - package-ecosystem: npm
     directories: [/bridges/whatsapp, /bridges/photon, /bridges/zalouser, /packaging/npm]
     schedule: { interval: weekly }
+    open-pull-requests-limit: 0
   # Base images of the release and sandbox-browser containers
   - package-ecosystem: docker
     directories: [/, /packaging/sandbox-browser]
     schedule: { interval: weekly }
+    open-pull-requests-limit: 0

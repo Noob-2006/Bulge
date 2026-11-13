@@ -23,7 +23,7 @@ case "$triple" in *windows*) ext=".exe" ;; esac
 
 build() {
   local t="$1"
-  local flag="--release"; [[ "$profile" == debug ]] && flag=""
+  local flag="--profile $profile"; [[ "$profile" == debug ]] && flag=""
   (cd "$root" && cargo build $flag --locked -p seagent --bin seagent --target "$t") >&2
   echo "$root/target/$t/$profile/seagent$ext"
 }
