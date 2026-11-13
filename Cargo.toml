@@ -14,7 +14,7 @@ rust-version = "1.89"
 [workspace.dependencies]
 serde = { version = "1", features = ["derive"] }          # serialization of every event / protocol type
 serde_json = "1"                                          # JSON-RPC, JSONL log, provider wire formats
-toml = { version = "0.9", default-features = false, features = ["parse", "display", "serde"] } # human config
+toml = { version = "1.2", default-features = false, features = ["parse", "display", "serde"] } # human config
 ureq = { version = "3", default-features = false, features = ["rustls"] } # blocking HTTP+TLS, smallest tree
 regex = { version = "1", default-features = false, features = ["std", "unicode-perl", "unicode-case"] } # grep tool, secret patterns
 libc = "0.2"                                              # process groups / signals for shell kill
