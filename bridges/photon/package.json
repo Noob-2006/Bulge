@@ -13,7 +13,7 @@
     "node": ">=18.17"
   },
   "dependencies": {
-    "spectrum-ts": "12.10.1"
+    "spectrum-ts": "12.16.0"
   },
   "overrides": {
     "undici": "7.30.0",
