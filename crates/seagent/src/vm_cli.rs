@@ -71,7 +71,11 @@ pub fn cli(v: &DesktopVms, argv: &[String], out: &mut dyn FnMut(&str)) -> Result
         out(&format!("  disk {}{}", s.disk, if s.disk_exists { "" } else { " (created on first start)" }));
         out(&format!("  image {}{}", s.image, if s.image_built { "" } else { " (not built: seagent vm desktop build)" }));
         if s.running {
-            out(&format!("  qmp {}\n  vnc {}", s.qmp, s.vnc));
+            out(&format!("  qmp {}", s.qmp));
+            // Windows QEMU runs without a VNC server (frames come over QMP).
+            if cfg!(unix) {
+                out(&format!("  vnc {}", s.vnc));
+            }
         }
         if let Some(w) = &s.warning {
             out(&format!("  warning: {w}"));

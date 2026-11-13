@@ -23,7 +23,7 @@ libc.workspace = true           # AF_VSOCK in the guest agent, process groups
 # (+ WindowsAndMessaging, its show-command type) opens the Windows Features dialog for the GUI's
 # "turn on Windows Hypervisor Platform" button.
 [target.'cfg(windows)'.dependencies]
-windows-sys = { workspace = true, features = ["Win32_System_LibraryLoader", "Win32_System_ProcessStatus", "Win32_System_Registry", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
+windows-sys = { workspace = true, features = ["Win32_Foundation", "Win32_System_Console", "Win32_System_LibraryLoader", "Win32_System_ProcessStatus", "Win32_System_Registry", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
 
 [dev-dependencies]
 seagent-core.workspace = true       # tests only: self-cleaning scratch dirs

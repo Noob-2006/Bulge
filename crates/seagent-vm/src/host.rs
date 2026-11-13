@@ -370,6 +370,7 @@ pub fn edk2_aarch64(qemu: &Path) -> Option<PathBuf> {
 
 /// Start a VMM so that it can be stopped as a unit: its own process group on unix, its own
 /// console process group (no console window) on Windows.
+#[allow(clippy::let_and_return)] // one binding per platform
 pub fn spawn_vmm(cmd: &mut Command) -> std::io::Result<Child> {
     #[cfg(unix)]
     {
@@ -382,7 +383,38 @@ pub fn spawn_vmm(cmd: &mut Command) -> std::io::Result<Child> {
         use windows_sys::Win32::System::Threading::{CREATE_NEW_PROCESS_GROUP, CREATE_NO_WINDOW};
         cmd.creation_flags(CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW);
     }
-    cmd.spawn()
+    #[cfg(windows)]
+    let child = spawn_without_inherited_std_handles(cmd);
+    #[cfg(not(windows))]
+    let child = cmd.spawn();
+    child
+}
+
+/// CreateProcess inherits every inheritable handle, so a long-lived VMM would also hold the
+/// caller's own stdout/stderr — and `seagent vm desktop start > log` (or any pipe) would not
+/// end until the VM stops. The VMM gets its stdio explicitly (std duplicates those as
+/// inheritable), so seagent's own std handles are made non-inheritable for the spawn.
+#[cfg(windows)]
+fn spawn_without_inherited_std_handles(cmd: &mut Command) -> std::io::Result<Child> {
+    use windows_sys::Win32::Foundation::{GetHandleInformation, SetHandleInformation, HANDLE, HANDLE_FLAG_INHERIT, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::System::Console::{GetStdHandle, STD_ERROR_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE};
+    let mut cleared: Vec<HANDLE> = Vec::new();
+    for id in [STD_INPUT_HANDLE, STD_OUTPUT_HANDLE, STD_ERROR_HANDLE] {
+        // SAFETY: GetStdHandle / Get/SetHandleInformation on this process's own std handles.
+        unsafe {
+            let h = GetStdHandle(id);
+            let mut flags = 0u32;
+            if h != 0 && h != INVALID_HANDLE_VALUE && !cleared.contains(&h) && GetHandleInformation(h, &mut flags) != 0 && flags & HANDLE_FLAG_INHERIT != 0 && SetHandleInformation(h, HANDLE_FLAG_INHERIT, 0) != 0 {
+                cleared.push(h);
+            }
+        }
+    }
+    let r = cmd.spawn();
+    for h in cleared {
+        // SAFETY: restoring the flag cleared above.
+        unsafe { SetHandleInformation(h, HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT) };
+    }
+    r
 }
 
 /// SIGTERM the VMM's process group, wait up to a second, then SIGKILL (unix); terminate and
