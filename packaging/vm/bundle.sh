@@ -69,7 +69,12 @@ case "$ARCH" in x86_64 | aarch64) ;; *) die "--arch x86_64|aarch64" ;; esac
 : "${CACHE:=${TMPDIR:-/tmp}/seagent-vm-bundle-cache}"
 mkdir -p "$CACHE"
 
-PY="${PYTHON:-$(command -v python3 || command -v python || true)}"
+# The first Python that really runs: on Windows runners `python3` can be the Microsoft Store
+# alias, which exists on PATH but only prints an install hint.
+PY="${PYTHON:-}"
+if [ -z "$PY" ]; then
+	for c in python3 python py; do command -v "$c" >/dev/null && "$c" -c "import sys" >/dev/null 2>&1 && { PY="$c"; break; }; done
+fi
 [ -n "$PY" ] || die "python3 is required"
 
 sha256_of() { if command -v sha256sum >/dev/null; then sha256sum "$1" | cut -d' ' -f1; else shasum -a 256 "$1" | cut -d' ' -f1; fi; }

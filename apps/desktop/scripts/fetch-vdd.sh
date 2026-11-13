@@ -38,7 +38,7 @@ members=(VirtualDisplayDriver/MttVDD.inf VirtualDisplayDriver/MttVDD.dll Virtual
 if command -v unzip >/dev/null; then
   (cd "$tmp" && unzip -q -j vdd.zip "${members[@]}")
 else
-  py="$(command -v python3 || command -v python)"
+  py=""; for c in python3 python py; do command -v "$c" >/dev/null && "$c" -c "import sys" >/dev/null 2>&1 && { py="$c"; break; }; done  # not the Store alias
   (cd "$tmp" && "$py" -I -c 'import sys, zipfile, os
 z = zipfile.ZipFile("vdd.zip")
 for m in sys.argv[1:]:

@@ -181,7 +181,8 @@ jobs:
       - name: Signing / version config
         run: |
           if [[ "$GITHUB_REF" == refs/tags/v* ]]; then export VERSION="${GITHUB_REF_NAME#v}"; fi
-          python3 apps/desktop/scripts/ci-config.py
+          PY=python3; "$PY" -c "import sys" 2>/dev/null || PY=python  # Windows: python3 may be the Store alias
+          "$PY" apps/desktop/scripts/ci-config.py
       - name: Build installers
         working-directory: apps/desktop
         shell: bash
