@@ -194,6 +194,12 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          # Secrets that are not set arrive as empty variables, and the Tauri CLI treats a set
+          # APPLE_CERTIFICATE (even empty) as "sign with this certificate" and fails importing it.
+          # Unset the empty ones, so an unsigned build takes the ad-hoc path.
+          for v in APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_SIGNING_IDENTITY APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID                    TAURI_SIGNING_PRIVATE_KEY TAURI_SIGNING_PRIVATE_KEY_PASSWORD; do
+            [ -n "${!v:-}" ] || unset "$v"
+          done
           # The rpm builds on its own with tauri.rpm.conf.json (a pre-release moves from Version
           # to Release, which rpm requires); everything else takes tauri.ci.conf.json.
           b='${{ matrix.bundles }}'
