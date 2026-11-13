@@ -13,7 +13,7 @@ regex.workspace = true
 ureq.workspace = true
 seagent-net.workspace = true # seagent_net::http::builder — the one outbound client builder (proxy/CA/offline)
 # Skills Guard: Hermes' scan table uses look-around (27 of 134 patterns).
-fancy-regex = { version = "0.14", default-features = false, features = ["std", "unicode"] }
+fancy-regex = { version = "0.20", default-features = false, features = ["std", "unicode"] }
 # A13/A18: Ed25519 signature verification for plugin/skill manifests and release
 # artifacts, plus the SHA-256 digest every integrity check is built on (already in the
 # tree via rustls; no new transitive dependency).
