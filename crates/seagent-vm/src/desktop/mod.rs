@@ -32,10 +32,12 @@
 //! ([`crate::channel::Endpoint`]), there is no VNC socket, the detached QEMU's pid is written
 //! by seagent, and `whpx` accelerates it when the Windows Hypervisor Platform is on.
 
+pub mod agent;
 pub mod config;
 pub mod fake;
 pub mod image;
 pub mod keys;
+pub mod mux;
 pub mod qmp;
 pub mod timezone;
 
@@ -52,7 +54,8 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 /// Bumped when the image layout (what the provisioner sets up) changes incompatibly.
-pub const IMAGE_LAYOUT: u32 = 3;
+/// 4: the in-VM shell agent service (`seagent-agent.service`, [`agent`]).
+pub const IMAGE_LAYOUT: u32 = 4;
 
 /// `<vm_dir>/cdp.url`: read by seagent-browser (`manager::VM_CDP_FILE`) to drive the guest Chromium.
 pub const CDP_FILE: &str = "cdp.url";
@@ -178,6 +181,47 @@ fn endpoint(p: &Path) -> Endpoint {
     Endpoint::locate(p).unwrap_or_else(|_| Endpoint::Unix(p.to_path_buf()))
 }
 
+/// What a VM leaves in its run dir while it runs (cleared at start and stop).
+const RUN_FILES: &[&str] = &["qmp.sock", "vnc.sock", "text.sock", "chan.sock", "chan.key", "agent.bin", "qemu.pid", "screen", "last_used"];
+
+/// Write a file only this user can read (the run dir is 0700 already; the key is 0600 too).
+fn write_private(p: &Path, data: &[u8]) -> Result<(), String> {
+    std::fs::write(p, data).map_err(|e| format!("write {}: {e}", p.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(p, std::fs::Permissions::from_mode(0o600));
+    }
+    Ok(())
+}
+
+/// QEMU arguments for the guest agent channel, on the VM's existing virtio-serial bus: the
+/// `seagent0` port (exactly the microVM provider's chardev + port), the per-boot key by fw_cfg
+/// when the channel is a loopback TCP port other local processes could reach (Windows), and
+/// this boot's agent binary by fw_cfg when the host has one.
+pub fn channel_args(chan: &Endpoint, key: &Path, agent_bin: Option<&Path>) -> Vec<String> {
+    let mut a = vec!["-chardev".into(), chan.qemu_chardev(agent::GUEST_PORT), "-device".into(), format!("virtserialport,chardev={0},name={0}", agent::GUEST_PORT)];
+    if matches!(chan, Endpoint::Tcp(_)) {
+        a.extend(["-fw_cfg".into(), format!("name={},file={}", crate::proto::FW_CFG_KEY_NAME, key.display())]);
+    }
+    if let Some(b) = agent_bin {
+        a.extend(["-fw_cfg".into(), format!("name={},file={}", agent::FW_CFG_AGENT_NAME, b.display())]);
+    }
+    a
+}
+
+/// Connected agent channels, per VM run dir, with the QEMU pid they belong to.
+fn channels() -> &'static Mutex<HashMap<PathBuf, (u32, Arc<mux::Mux>)>> {
+    static C: OnceLock<Mutex<HashMap<PathBuf, (u32, Arc<mux::Mux>)>>> = OnceLock::new();
+    C.get_or_init(Default::default)
+}
+
+fn forget_channel(run: &Path) {
+    if let Some((_, m)) = channels().lock().unwrap().remove(run) {
+        m.shutdown();
+    }
+}
+
 /// The desktop VMs of one seagent home.
 #[derive(Debug, Clone)]
 pub struct DesktopVms {
@@ -207,6 +251,75 @@ impl DesktopVms {
     pub fn image_manifest(&self) -> Option<Value> {
         serde_json::from_str(&std::fs::read_to_string(self.image_path().with_extension("json")).ok()?).ok()
     }
+    /// Was the image provisioned with the in-VM agent service (the shell runs inside the VM)?
+    /// `false` for an image built before it: rebuild with `seagent vm desktop build --force`.
+    pub fn image_has_agent(&self) -> bool {
+        self.image_manifest().is_some_and(|m| m["guest_agent"]["service"].as_bool() == Some(true))
+    }
+
+    /// The image the disk overlay of `name` was made from, when that image predates the in-VM
+    /// agent (or is gone) while the current one has it: such an overlay never runs the shell.
+    pub fn stale_overlay(&self, name: &str) -> Option<PathBuf> {
+        if !self.disk_path(name).is_file() || !self.image_has_agent() {
+            return None;
+        }
+        let old = PathBuf::from(self.state(name)["image"].as_str()?);
+        if old == self.image_path() {
+            return None;
+        }
+        let has_agent = std::fs::read_to_string(old.with_extension("json")).ok().and_then(|s| serde_json::from_str::<Value>(&s).ok()).is_some_and(|m| m["guest_agent"]["service"].as_bool() == Some(true));
+        (!has_agent || !old.is_file()).then_some(old)
+    }
+
+    /// The agent channel of running VM `name` (connected once, shared by every caller, and
+    /// reconnected after the VM or the channel went away). `wait`: how long a VM that is still
+    /// booting may take to bring its agent up.
+    pub fn channel(&self, name: &str, wait: Duration) -> Result<Arc<mux::Mux>, String> {
+        valid_name(name)?;
+        let Some(pid) = self.pid(name) else {
+            return Err(format!("desktop VM `{name}` is not running (start it with `seagent vm desktop start {name}`)"));
+        };
+        let run = self.run_dir(name);
+        let l = qmp_lock(&self.chan_path(name));
+        let _g = l.lock().unwrap();
+        if let Some((p, m)) = channels().lock().unwrap().get(&run) {
+            if *p == pid && m.alive() {
+                return Ok(m.clone());
+            }
+        }
+        forget_channel(&run);
+        let m = self.connect_agent(name, wait)?;
+        channels().lock().unwrap().insert(run, (pid, m.clone()));
+        Ok(m)
+    }
+
+    fn connect_agent(&self, name: &str, wait: Duration) -> Result<Arc<mux::Mux>, String> {
+        let hint = || {
+            if self.image_has_agent() {
+                format!("is it still booting? the agent logs to the guest journal (`journalctl -u seagent-agent`); console: {}", self.vm_dir(name).join("console.log").display())
+            } else {
+                "the desktop image predates the in-VM shell: rebuild it with `seagent vm desktop build --force`, then restart the VM".to_string()
+            }
+        };
+        let deadline = Instant::now() + wait;
+        let ch = crate::channel::Channel::connect(&self.chan_path(name), crate::channel::Transport::Serial, wait).map_err(|e| format!("agent channel of desktop VM `{name}`: {e} (VM started by an older seagent? restart it)"))?;
+        if let Some(key) = std::fs::read(self.chan_key_path(name)).ok().filter(|k| !k.is_empty()) {
+            ch.authenticate(&key, wait).map_err(|e| format!("the agent in desktop VM `{name}` did not answer: {e}; {}", hint()))?;
+            return Ok(mux::Mux::new(ch));
+        }
+        loop {
+            let left = deadline.saturating_duration_since(Instant::now());
+            match ch.recv(left.clamp(Duration::from_millis(1), Duration::from_secs(1)))? {
+                Some(h @ crate::proto::GuestMsg::Hello { .. }) => return Ok(mux::Mux::with_greeting(ch, Some(h))),
+                // The guest's Hello went to an earlier connection; it answers, so it is up.
+                Some(crate::proto::GuestMsg::Pong { .. }) => return Ok(mux::Mux::with_greeting(ch, None)),
+                Some(_) => {}
+                None if left.is_zero() => return Err(format!("the agent in desktop VM `{name}` did not answer within {}s: {}", wait.as_secs(), hint())),
+                None => ch.send(&crate::proto::HostMsg::Ping { id: 0 })?,
+            }
+        }
+    }
+
     pub fn vm_dir(&self, name: &str) -> PathBuf {
         self.data.join("vm").join("desktop").join(name)
     }
@@ -222,6 +335,18 @@ impl DesktopVms {
     }
     pub fn vnc_path(&self, name: &str) -> PathBuf {
         self.run_dir(name).join("vnc.sock")
+    }
+    /// Host end of the guest agent channel (virtio-serial port `seagent0`, [`agent`]).
+    pub fn chan_path(&self, name: &str) -> PathBuf {
+        self.run_dir(name).join("chan.sock")
+    }
+    /// The per-boot channel key (loopback TCP channels, i.e. Windows), given to the guest by fw_cfg.
+    pub fn chan_key_path(&self, name: &str) -> PathBuf {
+        self.run_dir(name).join("chan.key")
+    }
+    /// The agent binary given to the guest by fw_cfg at this boot ([`agent::FW_CFG_AGENT_NAME`]).
+    pub fn agent_bin_path(&self, name: &str) -> PathBuf {
+        self.run_dir(name).join("agent.bin")
     }
     fn pid_path(&self, name: &str) -> PathBuf {
         self.run_dir(name).join("qemu.pid")
@@ -356,9 +481,13 @@ impl DesktopVms {
             endpoint(&self.text_path(name)).qemu_chardev("seagenttext"),
             "-device".into(),
             "virtserialport,chardev=seagenttext,name=org.seagent.text".into(),
+        ];
+        let agent_bin = self.agent_bin_path(name);
+        a.extend(channel_args(&endpoint(&self.chan_path(name)), &self.chan_key_path(name), agent_bin.is_file().then_some(agent_bin.as_path())));
+        a.extend([
             "-smbios".into(),
             format!("type=11,value=seagent-res={}x{},value=seagent-url={url}", c.width, c.height),
-        ];
+        ]);
         // The guest's clock follows the host's zone (or the configured one); valid_tz keeps
         // commas and shell characters out of the SMBIOS string.
         if let Some(tz) = timezone::resolve(&c.timezone).filter(|t| timezone::valid_tz(t)) {
@@ -413,7 +542,7 @@ impl DesktopVms {
         let (vm, run) = (self.vm_dir(name), self.run_dir(name));
         private_dir(&vm)?;
         private_dir(&run)?;
-        if cfg!(unix) && [self.qmp_path(name), self.vnc_path(name), self.text_path(name)].iter().any(|p| p.as_os_str().len() > 100) {
+        if cfg!(unix) && [self.qmp_path(name), self.vnc_path(name), self.text_path(name), self.chan_path(name)].iter().any(|p| p.as_os_str().len() > 100) {
             return Err(format!("runtime dir {} is too long for unix sockets (≤ 100 bytes); set a shorter SEAGENT runtime dir", run.display()));
         }
         for p in [&vm, &run, &img] {
@@ -421,10 +550,16 @@ impl DesktopVms {
                 return Err(format!("{} contains ',', which QEMU option syntax cannot carry", p.display()));
             }
         }
-        for f in ["qmp.sock", "vnc.sock", "text.sock", "qemu.pid", "screen", "last_used"] {
+        for f in RUN_FILES {
             let _ = std::fs::remove_file(run.join(f));
         }
         let disk = self.disk_path(name);
+        // An overlay made from an image without the in-VM agent could never run the shell in
+        // the VM: it is kept once as `disk.qcow2.prev` and a fresh one starts from this image.
+        let stale = self.stale_overlay(name);
+        if stale.is_some() {
+            std::fs::rename(&disk, disk.with_extension("qcow2.prev")).map_err(|e| format!("set aside the old disk of `{name}`: {e}"))?;
+        }
         if !disk.is_file() {
             let qemu_img = resolve_bin(&self.cfg.qemu_img)?;
             run_tool(&qemu_img, &["create", "-q", "-f", "qcow2", "-F", "qcow2", "-b", &img.display().to_string(), &disk.display().to_string()])?;
@@ -436,7 +571,14 @@ impl DesktopVms {
             // Loopback ports for QMP and the text channel, recorded where the sockets would be.
             Endpoint::allocate(&self.qmp_path(name))?;
             Endpoint::allocate(&self.text_path(name))?;
+            // The agent channel is a loopback port any local process can reach: both ends prove
+            // a per-boot key before a frame counts (`Channel::authenticate`), as the microVMs do.
+            if let Endpoint::Tcp(_) = Endpoint::allocate(&self.chan_path(name))? {
+                write_private(&self.chan_key_path(name), crate::proto::random_hex(32).as_bytes())?;
+            }
         }
+        // This boot's agent (fw_cfg); without one the copy baked into the image runs.
+        let agent = agent::find(&self.data).and_then(|a| write_private(&self.agent_bin_path(name), &a.bytes).map(|_| a));
         if cfg!(unix) {
             let out = crate::host::command(&qemu).args(self.cmdline(name, &disk, acc, cdp_port)).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).output().map_err(|e| format!("start {}: {e}", qemu.display()))?;
             if !out.status.success() {
@@ -457,7 +599,15 @@ impl DesktopVms {
             }
             std::thread::sleep(Duration::from_millis(50));
         }
-        let state = json!({"started_at": now_s(), "accel": acc, "warning": warn, "image": img.display().to_string(), "width": self.cfg.width, "height": self.cfg.height});
+        let warn = match (&stale, warn) {
+            (Some(old), w) => Some(format!("{}the old disk of `{name}` was made from an image without the in-VM shell ({}); it is kept as disk.qcow2.prev and `{name}` started from the current image", w.map(|w| format!("{w}; ")).unwrap_or_default(), old.display())),
+            (None, w) => w,
+        };
+        let agent_state = match &agent {
+            Ok(a) => json!({"sha256": a.sha256, "source": a.source}),
+            Err(e) => json!({"error": e}),
+        };
+        let state = json!({"started_at": now_s(), "accel": acc, "warning": warn, "image": img.display().to_string(), "width": self.cfg.width, "height": self.cfg.height, "agent": agent_state});
         std::fs::write(vm.join("state.json"), state.to_string()).map_err(|e| e.to_string())?;
         if let Some(p) = cdp_port {
             std::fs::write(vm.join(CDP_FILE), format!("http://127.0.0.1:{p}\n")).map_err(|e| e.to_string())?;
@@ -478,7 +628,8 @@ impl DesktopVms {
     }
 
     fn cleanup(&self, name: &str) {
-        for f in ["qmp.sock", "vnc.sock", "text.sock", "qemu.pid", "screen", "last_used"] {
+        forget_channel(&self.run_dir(name));
+        for f in RUN_FILES {
             let _ = std::fs::remove_file(self.run_dir(name).join(f));
         }
         let _ = std::fs::remove_file(self.vm_dir(name).join(CDP_FILE));

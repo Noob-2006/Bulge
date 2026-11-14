@@ -44,6 +44,12 @@ pub const AGENT_HOME: &str = "/home/agent";
 /// Where the workspace is mounted inside the guest.
 pub const GUEST_WORKSPACE: &str = "/workspace";
 
+/// What `seagent-vm-guest roles` prints. The string is in every agent binary that has the
+/// `service` role (the in-desktop-VM shell agent), so the host can tell an agent that can serve
+/// the desktop VM from an older one by its bytes alone, on any host OS
+/// (`desktop::agent::has_service_role`).
+pub const GUEST_ROLES: &str = "seagent-vm-guest roles: init service broker-send version";
+
 /// Maximum frame size; a larger frame is a protocol error (a guest cannot make
 /// the host allocate without bound).
 pub const MAX_FRAME: usize = 32 * 1024 * 1024;

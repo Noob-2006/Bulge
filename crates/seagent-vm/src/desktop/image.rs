@@ -242,7 +242,8 @@ pub struct SeedServer {
 }
 
 impl SeedServer {
-    pub fn start(files: Vec<(&'static str, String)>) -> Result<SeedServer, String> {
+    /// Serve `files` (name → bytes: the NoCloud texts, and the guest agent binary).
+    pub fn start(files: Vec<(&'static str, Vec<u8>)>) -> Result<SeedServer, String> {
         let l = TcpListener::bind("127.0.0.1:0").map_err(|e| format!("seed server: {e}"))?;
         l.set_nonblocking(true).map_err(|e| e.to_string())?;
         let port = l.local_addr().map_err(|e| e.to_string())?.port();
@@ -266,12 +267,17 @@ impl SeedServer {
                         let line = String::from_utf8_lossy(&req).lines().next().unwrap_or("").to_string();
                         let path = line.split_whitespace().nth(1).unwrap_or("/").trim_start_matches('/').split('?').next().unwrap_or("").to_string();
                         h2.lock().unwrap().push(path.clone());
-                        let body = files.iter().find(|(n, _)| *n == path).map(|(_, b)| b.clone());
-                        let resp = match body {
-                            Some(b) => format!("HTTP/1.0 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{b}", b.len()),
-                            None => "HTTP/1.0 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_string(),
-                        };
-                        let _ = c.write_all(resp.as_bytes());
+                        let _ = c.set_write_timeout(Some(Duration::from_secs(60)));
+                        match files.iter().find(|(n, _)| *n == path) {
+                            Some((n, b)) => {
+                                let ct = if *n == super::agent::SEED_AGENT_FILE { "application/octet-stream" } else { "text/plain" };
+                                let _ = c.write_all(format!("HTTP/1.0 200 OK\r\nContent-Type: {ct}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", b.len()).as_bytes());
+                                let _ = c.write_all(b);
+                            }
+                            None => {
+                                let _ = c.write_all(b"HTTP/1.0 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+                            }
+                        }
                     }
                     Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => std::thread::sleep(Duration::from_millis(50)),
                     Err(_) => std::thread::sleep(Duration::from_millis(50)),
@@ -289,6 +295,21 @@ impl Drop for SeedServer {
             let _ = t.join();
         }
     }
+}
+
+/// The manifest's `guest_agent`: the service is in every image this code provisions; `baked`
+/// is the sha256 of the agent the guest installed (its `SEAGENT_AGENT_OK <sha>` console line),
+/// null when it had none (the per-boot fw_cfg copy then is the only one).
+pub fn guest_agent_record(console: &str, served: Option<&super::agent::AgentBinary>) -> Value {
+    let baked = console.lines().find_map(|l| l.trim().strip_prefix("SEAGENT_AGENT_OK ").map(|s| s.trim().to_string())).filter(|s| s.len() == 64 && s.bytes().all(|b| b.is_ascii_hexdigit()));
+    json!({
+        "service": true,
+        "user": super::agent::GUEST_USER,
+        "workspace": super::agent::GUEST_WORKSPACE,
+        "baked_sha256": baked,
+        "source": served.map(|a| a.source.clone()),
+        "protocol": crate::proto::VERSION,
+    })
 }
 
 fn tail(s: &str, n: usize) -> String {
@@ -316,11 +337,23 @@ pub fn build(vms: &DesktopVms, force: bool, log: &mut dyn FnMut(&str)) -> Result
     super::run_tool(&qemu_img, &["create", "-q", "-f", "qcow2", "-F", "qcow2", "-b", &base.display().to_string(), &disk.display().to_string(), &format!("{}G", cfg.disk_gb)])?;
     let instance = format!("seagent-desktop-{}", recipe(cfg));
     let mirror = pick_mirror(cfg, log);
-    let seed = SeedServer::start(vec![
-        ("meta-data", format!("instance-id: {instance}\nlocal-hostname: seagent-desktop\n")),
-        ("user-data", seed_user_data(cfg, &mirror)),
-        ("vendor-data", String::new()),
-    ])?;
+    // The in-VM shell agent, baked in (every boot also hands the guest the host's current one by
+    // fw_cfg, see `agent`). Without one the image still gets the service, and a later start
+    // that has an agent brings it.
+    let agent = super::agent::find(&vms.data);
+    match &agent {
+        Ok(a) => log(&format!("guest agent for the in-VM shell: {} (sha256 {})", a.source, &a.sha256[..12])),
+        Err(e) => log(&format!("warning: {e}; the image gets the agent service but no agent binary of its own")),
+    }
+    let mut files = vec![
+        ("meta-data", format!("instance-id: {instance}\nlocal-hostname: seagent-desktop\n").into_bytes()),
+        ("user-data", seed_user_data(cfg, &mirror).into_bytes()),
+        ("vendor-data", Vec::new()),
+    ];
+    if let Ok(a) = &agent {
+        files.push((super::agent::SEED_AGENT_FILE, a.bytes.clone()));
+    }
+    let seed = SeedServer::start(files)?;
     let (accel, warn) = super::accel(cfg);
     if let Some(w) = warn {
         log(&format!("warning: {w}"));
@@ -407,6 +440,7 @@ pub fn build(vms: &DesktopVms, force: bool, log: &mut dyn FnMut(&str)) -> Result
         "built_at": super::now_s(),
         "provision_secs": t0.elapsed().as_secs(),
         "accel": accel,
+        "guest_agent": guest_agent_record(&c, agent.as_ref().ok()),
     });
     std::fs::write(&manifest, serde_json::to_string_pretty(&m).unwrap()).map_err(|e| e.to_string())?;
     let _ = std::fs::remove_dir_all(&work);
@@ -463,18 +497,46 @@ mod tests {
 
     #[test]
     fn seed_server_serves_the_nocloud_files() {
-        let s = SeedServer::start(vec![("meta-data", "instance-id: x\n".into()), ("user-data", "#cloud-config\n".into())]).unwrap();
+        let agent: Vec<u8> = (0..300_000u32).map(|i| (i % 256) as u8).collect();
+        let s = SeedServer::start(vec![("meta-data", b"instance-id: x\n".to_vec()), ("user-data", b"#cloud-config\n".to_vec()), (super::super::agent::SEED_AGENT_FILE, agent.clone())]).unwrap();
         let get = |p: &str| {
             let mut c = std::net::TcpStream::connect(("127.0.0.1", s.port)).unwrap();
             c.write_all(format!("GET /{p} HTTP/1.1\r\nHost: x\r\n\r\n").as_bytes()).unwrap();
-            let mut out = String::new();
-            c.read_to_string(&mut out).unwrap();
+            let mut out = Vec::new();
+            c.read_to_end(&mut out).unwrap();
             out
         };
-        assert!(get("meta-data").ends_with("instance-id: x\n"));
-        assert!(get("user-data").contains("200 OK"));
-        assert!(get("network-config").contains("404"));
-        assert_eq!(s.hits.lock().unwrap().as_slice(), ["meta-data", "user-data", "network-config"]);
+        let text = |p: &str| String::from_utf8_lossy(&get(p)).into_owned();
+        assert!(text("meta-data").ends_with("instance-id: x\n"));
+        assert!(text("user-data").contains("200 OK"));
+        assert!(text("network-config").contains("404"));
+        // The agent binary arrives byte for byte.
+        let raw = get("seagent-vm-guest");
+        let at = raw.windows(4).position(|w| w == b"\r\n\r\n").unwrap() + 4;
+        assert!(String::from_utf8_lossy(&raw[..at]).contains("application/octet-stream"));
+        assert_eq!(&raw[at..], &agent[..]);
+        assert_eq!(s.hits.lock().unwrap().as_slice(), ["meta-data", "user-data", "network-config", "seagent-vm-guest"]);
+    }
+
+    #[test]
+    fn the_image_provisions_the_agent_service_and_records_it() {
+        let ud = user_data(&DesktopConfig::default());
+        // The service: started as root by systemd, never killed with the GUI programs it started.
+        let unit = &ud[ud.find("path: /etc/systemd/system/seagent-agent.service").unwrap()..];
+        assert!(unit.contains("ExecStart=/usr/local/sbin/seagent-agent-start") && unit.contains("Restart=always") && unit.contains("KillMode=process"), "{unit}");
+        assert!(ud.contains("modprobe qemu_fw_cfg"), "fw_cfg (key, per-boot agent) needs the module on Debian");
+        assert!(ud.contains("systemctl enable seagent-agent.service"));
+        // The start script prefers this boot's agent and only runs one that has the service role.
+        let start = &ud[ud.find("path: /usr/local/sbin/seagent-agent-start").unwrap()..];
+        assert!(start.contains("opt/seagent/agent/raw") && start.contains("roles") && start.contains("exec \"$bin\" service"), "{start}");
+        // The provisioner fetches the baked copy from the seed it booted from.
+        assert!(ud.contains("seagent-vm-guest") && ud.contains("SEAGENT_AGENT_OK"));
+        let a = super::super::agent::AgentBinary { bytes: vec![], sha256: "a".repeat(64), source: "test".into() };
+        let rec = guest_agent_record(&format!("boot\nSEAGENT_AGENT_OK {}\nSEAGENT_PROVISION_OK\n", "b".repeat(64)), Some(&a));
+        assert_eq!(rec["service"], true);
+        assert_eq!(rec["baked_sha256"], "b".repeat(64));
+        assert_eq!(rec["workspace"], "/home/seagent/workspace");
+        assert!(guest_agent_record("SEAGENT_AGENT_MISSING\n", None)["baked_sha256"].is_null());
     }
 
     #[test]
