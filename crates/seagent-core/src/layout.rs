@@ -200,10 +200,22 @@ pub mod test_sandbox {
 
     /// `target/<profile>/deps/<name>-<16 hex digits>[.exe]`: what cargo builds for `#[test]`s.
     pub fn is_test_binary_path(exe: &Path) -> bool {
-        let in_deps = exe.parent().and_then(|d| d.file_name()).is_some_and(|n| n == "deps");
+        // Linux names a replaced executable `<path> (deleted)` in /proc/self/exe (a rebuild of the
+        // same test binary while it runs): still the same test binary.
+        let s = exe.to_string_lossy();
+        let exe = Path::new(s.strip_suffix(" (deleted)").unwrap_or(&s));
         let stem = exe.file_stem().and_then(|s| s.to_str()).unwrap_or("");
-        let hashed = stem.rsplit_once('-').is_some_and(|(_, h)| h.len() == 16 && h.bytes().all(|b| b.is_ascii_hexdigit()));
-        in_deps && hashed
+        let Some(hash) = stem.rsplit_once('-').map(|(_, h)| h).filter(|h| h.len() == 16 && h.bytes().all(|b| b.is_ascii_hexdigit())) else {
+            return false;
+        };
+        let name = |p: Option<&Path>| p.and_then(|d| d.file_name()).and_then(|n| n.to_str()).map(str::to_string);
+        let parent = exe.parent();
+        // cargo's classic layout: `target/<profile>/deps/<crate>-<hash>`.
+        let classic = name(parent).as_deref() == Some("deps");
+        // cargo's build-dir layout (Rust 1.100): `target/<profile>/build/<pkg>/<hash>/out/<crate>-<hash>`.
+        let unit = parent.and_then(Path::parent);
+        let build_dir = name(parent).as_deref() == Some("out") && name(unit).as_deref() == Some(hash) && name(unit.and_then(Path::parent).and_then(Path::parent)).as_deref() == Some("build");
+        classic || build_dir
     }
 
     fn active() -> bool {
@@ -427,7 +439,12 @@ mod sandbox_tests {
         assert!(!is_test_binary_path(Path::new("/usr/bin/seagent")));
         assert!(!is_test_binary_path(Path::new("/w/target/debug/deps/libfoo.so")));
         // This very test runs in one.
-        assert!(is_test_binary_path(&std::env::current_exe().unwrap()));
+        let me = std::env::current_exe().unwrap();
+        assert!(is_test_binary_path(&me), "this test binary is not recognised: {}", me.display());
+        assert!(is_test_binary_path(Path::new("/w/target/debug/deps/seagent_core-0123456789abcdef (deleted)")), "a rebuilt test binary");
+        assert!(is_test_binary_path(Path::new("/w/target/debug/build/seagent-core/0123456789abcdef/out/seagent_core-0123456789abcdef")), "cargo's build-dir layout");
+        assert!(!is_test_binary_path(Path::new("/w/target/debug/build/seagent-core/0123456789abcdef/out/build_script_build-fedcba9876543210")), "a build script's unit, not this test binary's");
+        assert!(!is_test_binary_path(Path::new("/w/target/debug/build/x/out/seagent_core-0123456789abcdef")));
     }
 
     #[test]

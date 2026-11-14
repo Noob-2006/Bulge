@@ -385,9 +385,15 @@ impl StoreLock {
     }
     fn exclusive(base: &Path) -> Result<StoreLock, String> {
         let f = Self::open(base)?;
-        // flock(LOCK_EX | LOCK_NB) on Unix.
-        if f.try_lock().is_err() {
-            return Err(format!("checkpoint store is busy: {}", base.display()));
+        // flock(LOCK_EX | LOCK_NB) on Unix, retried for a moment: a snapshot holds the shared lock
+        // only for its own duration, and a child another thread is spawning holds a copy of a
+        // just-closed lock fd until its exec. Busy for longer than that: give up, try next time.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while f.try_lock().is_err() {
+            if std::time::Instant::now() >= deadline {
+                return Err(format!("checkpoint store is busy: {}", base.display()));
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
         }
         Ok(StoreLock { _file: f })
     }

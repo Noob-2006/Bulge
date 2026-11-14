@@ -156,7 +156,10 @@ fn a_read_only_workspace_refuses_writes() {
 #[test]
 fn a_busy_loop_is_killed_and_memory_is_capped() {
     let e = env("kill");
-    let b = backend(&e, true, 64);
+    // A small fuel slice: the kill lands at the next slice boundary, and 20M instructions of a
+    // debug-build interpreter on a shared CI runner can take longer than the 3 s asserted below.
+    let cfg = WasmConfig { tools_dir: e.tools.display().to_string(), memory_mb: 64, fuel_slice: 1_000_000 };
+    let b = WasmBackend::with_layout(cfg, &e.ws, true, &e.tmp, &[], &e.home).unwrap();
     let mut child = b.spawn(&ExecRequest { script: "say started; spin".into(), ..Default::default() }).unwrap();
     let mut buf = [0u8; 256];
     let t = Instant::now();
