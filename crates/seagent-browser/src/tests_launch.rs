@@ -1,4 +1,4 @@
-//! `launch::launch` against stand-in browsers that behave like the ones that broke it:
+﻿//! `launch::launch` against stand-in browsers that behave like the ones that broke it:
 //!
 //! * Edge on Windows relaunches itself when it inherits an AppCompat layer
 //!   (`__COMPAT_LAYER=DetectorsAppHealth`, set on everything started from Explorer, so the
@@ -206,4 +206,44 @@ fn only_seagent_profile_dirs_count_as_its_own() {
     assert!(crate::launch::own_profile_dir(&home.join("real-profile").join("chrome")));
     assert!(!crate::launch::own_profile_dir(Path::new("Google").join("Chrome").join("User Data").as_path()));
     assert!(!crate::launch::own_profile_dir(&Path::new("x").join("profiles").join("seagent")));
+}
+
+/// Windows, the real thing: the host's own Edge / Chrome (`find_executable`'s order) started
+/// the way `browser start` starts the managed profile, while seagent carries the AppCompat
+/// layer Explorer gives the desktop app and its daemon. Before the fix Edge's launcher exited 0
+/// in ~100 ms ("exited (exit code: 0) before DevTools was ready"); now the browser comes up,
+/// its DevTools answers, and the pid seagent owns is the browser holding the profile. Skipped
+/// (with a note) on a host with no Chromium-family browser.
+#[cfg(windows)]
+#[test]
+fn the_host_browser_starts_with_an_inherited_appcompat_layer() {
+    let _s = crate::tests::SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    let exe = match crate::launch::find_executable("") {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("skipping: no Chromium-family browser on this host ({e})");
+            return;
+        }
+    };
+    let dir = seagent_core::tmp::TempDir::new("seagent-bt-realhost");
+    let udd = dir.path().join("browser").join("profiles").join("seagent");
+    let mut kill = Kill(vec![]);
+    let o = opts(&exe, &udd, &[("__COMPAT_LAYER", "DetectorsAppHealth")]);
+    let t0 = Instant::now();
+    let l = launch(&o, Duration::from_secs(60)).unwrap_or_else(|e| panic!("{} did not start: {e}", exe.display()));
+    kill.0.push(PidGuard(l.pid));
+    eprintln!("{} ({}) up in {:?}: {}", exe.display(), crate::launch::kind_of(&exe), t0.elapsed(), l.ws);
+    let v = crate::cdp::get_json(&l.http, "/json/version", None, Duration::from_secs(10)).expect("its DevTools answers");
+    assert!(v["Browser"].as_str().is_some_and(|b| !b.is_empty()), "{v}");
+    assert!(l.owned && crate::util::pid_alive(l.pid), "seagent owns a live browser process");
+    assert!(crate::launch::profile_in_use(&udd), "the browser holds seagent's own profile");
+    // A second start on the same profile reuses that browser instead of handing off to it.
+    let again = launch(&o, Duration::from_secs(20)).expect("a second start reuses the running browser");
+    assert_eq!(again.ws, l.ws);
+    assert_eq!(crate::launch::last_failure(), None);
+    drop(kill);
+    let until = Instant::now() + Duration::from_secs(15);
+    while crate::launch::profile_in_use(&udd) && Instant::now() < until {
+        std::thread::sleep(Duration::from_millis(200));
+    }
 }

@@ -1113,7 +1113,12 @@ mod tests {
         let d = WinDesktop::new(root.path(), &format!("launch{}", std::process::id()), "1280x800");
         d.start().expect("an interactive window station");
         let env: Vec<(String, String)> = std::fs::read_to_string(d.state_dir().join("env")).unwrap().lines().filter_map(|l| l.split_once('=')).map(|(k, v)| (k.to_string(), v.to_string())).collect();
-        let before = visible_windows(&d.name()).unwrap();
+        // With the virtual display attached the Bot Desktop is hosted on that monitor of the
+        // displayed desktop (`start` writes `SEAGENT_BD_DESKTOP=WinSta0\Default`): the browser
+        // window lands there, not on the isolated desktop object.
+        let hosted = d.hosted();
+        let desk = if hosted.is_some() { "Default".to_string() } else { d.name() };
+        let before = visible_windows(&desk).unwrap();
         let udd = root.path().join("profile");
         let extra = vec!["--inprivate".to_string()];
         let o = crate::launch::LaunchOpts { exe: &exe, user_data_dir: &udd, headless: false, no_sandbox: false, extra_args: &extra, port: 0, managed: true, env };
@@ -1122,16 +1127,19 @@ mod tests {
         assert!(v["Browser"].is_string(), "{v}");
         let mut after = 0;
         for _ in 0..50 {
-            after = visible_windows(&d.name()).unwrap();
+            after = visible_windows(&desk).unwrap();
             if after > before {
                 break;
             }
             std::thread::sleep(Duration::from_millis(200));
         }
-        eprintln!("Bot Desktop {}: {before} visible windows before the launch, {after} after", d.name());
-        assert!(after > before, "the browser's window is on the isolated desktop");
-        let shot = d.screenshot().expect("a picture of the desktop");
-        assert!(!is_black(&shot.bgra), "the composed picture shows the browser");
+        eprintln!("Bot Desktop {} (windows on {desk}, hosted {hosted:?}): {before} visible windows before the launch, {after} after", d.name());
+        assert!(after > before, "the browser's window is on the Bot Desktop ({desk})");
+        let shot = match hosted {
+            Some(r) => super::super::vdd::grab_region(r).expect("a picture of the virtual monitor").bgra,
+            None => d.screenshot().expect("a picture of the desktop").bgra,
+        };
+        assert!(!is_black(&shot), "the composed picture shows the browser");
         crate::util::kill_group(l.pid, Duration::from_secs(3));
         d.stop();
     }
