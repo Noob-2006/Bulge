@@ -12,6 +12,7 @@ const FILES: &[(&str, &str, &str, &str)] = &[
     ("/ui/devsec.js", JS, "web/devsec.js", include_str!("../../../ui/web/devsec.js")),
     ("/ui/ops.js", JS, "web/ops.js", include_str!("../../../ui/web/ops.js")),
     ("/ui/work.js", JS, "web/work.js", include_str!("../../../ui/web/work.js")),
+    ("/ui/agent_vm.js", JS, "web/agent_vm.js", include_str!("../../../ui/web/agent_vm.js")),
     ("/ui/live_view.js", JS, "web/live_view.js", include_str!("../../../ui/web/live_view.js")),
     ("/ui/live_view.css", CSS, "web/live_view.css", include_str!("../../../ui/web/live_view.css")),
     ("/ui/surfaces.js", JS, "web/surfaces.js", include_str!("../../../ui/web/surfaces.js")),

@@ -20,6 +20,7 @@
 pub mod a2a;
 pub mod acp;
 pub mod acp_client;
+pub mod agent_vm;
 pub mod browser_view;
 pub mod chat_scope;
 pub mod computer;

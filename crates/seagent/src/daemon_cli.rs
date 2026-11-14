@@ -255,6 +255,14 @@ pub(crate) fn run(a: &Args, embedded: Option<&Embedded>) -> R {
             Some(w) => format!("{e} — {w}. Stop it, or choose another port: seagent config set app.listen 127.0.0.1:<port>"),
             None => e,
         })?;
+        // The agent's computer: build (first run) and boot the default desktop VM, keep it up.
+        {
+            let dcfg = seagent_vm::desktop::DesktopConfig::parse(&c.k.cfg.desktop_vm).unwrap_or_else(|_| seagent_vm::desktop::DesktopConfig { enabled: false, ..Default::default() });
+            let vms = seagent_vm::desktop::DesktopVms::new(seagent_vm::bundle::apply_desktop(&dcfg), &paths.data, &paths.cache_dir(), &paths.runtime);
+            if seagent_app::agent_vm::spawn(vms, paths.data.clone()).is_some() {
+                eprintln!("seagentd: desktop VM supervisor on (the agent works inside `{}`; [desktop_vm] autostart = false turns it off)", dcfg.default);
+            }
+        }
         let scheme = if srv.is_tls() { "https" } else { "http" };
         eprintln!("seagentd: app server on {scheme}://{} (UI, /arp, /v1, {})", srv.local_addr(), if app_cfg.a2a.enabled { "/a2a" } else { "no a2a" });
         let mdns = seagent_app::lan::advertise(&app_cfg, &paths.data).map_err(|e| eprintln!("seagentd: warning: {e}")).ok().flatten();

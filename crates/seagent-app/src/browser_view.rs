@@ -72,6 +72,8 @@ pub const METHODS: &[&str] = &[
     "view.desktop.input",
     "view.vm.start",
     "view.vm.stop",
+    "view.vm.status",
+    "view.vm.build",
     "view.novnc",
     "view.display.status",
     "view.display.driver",
@@ -282,11 +284,23 @@ pub fn call(c: &Ctx, method: &str, p: &Value) -> R {
             }
             let name = s(p, "name").unwrap_or(&c.vms.cfg.default).to_string();
             seagent_vm::desktop::valid_name(&name).map_err(|e| (-32602, e))?;
+            crate::agent_vm::mark_user_stopped(c.vms, &name, false);
+            crate::agent_vm::kick();
             c.vms.start(&name).map(|st| serde_json::to_value(st).unwrap_or_default()).map_err(|e| (-32000, e))
+        }
+        "view.vm.status" => Ok(json!({"agent": crate::agent_vm::status(c.home), "enabled": c.vms.cfg.enabled, "autostart": c.vms.cfg.autostart, "default": c.vms.cfg.default, "image_built": c.vms.image_built(), "vms": c.vms.list()})),
+        "view.vm.build" => {
+            if !c.vms.cfg.enabled {
+                return Err((-32001, "desktop VMs are disabled ([desktop_vm] enabled = false)".into()));
+            }
+            crate::agent_vm::mark_user_stopped(c.vms, &c.vms.cfg.default, false);
+            crate::agent_vm::kick();
+            Ok(json!({"ok": true, "note": "the supervisor builds the image (if needed) and boots the default VM; poll view.vm.status"}))
         }
         "view.vm.stop" => {
             let name = s(p, "name").ok_or((-32602, "name is required".to_string()))?;
             seagent_vm::desktop::valid_name(name).map_err(|e| (-32602, e))?;
+            crate::agent_vm::mark_user_stopped(c.vms, name, true);
             c.vms.stop(name).map(|stopped| json!({"name": name, "stopped": stopped})).map_err(|e| (-32000, e))
         }
         "view.novnc" => {

@@ -2,7 +2,19 @@
 
 SE Agent 可以開一台**有畫面的虛擬機**（Debian 13 + Xfce + Chromium），讓代理只靠「截圖 + 模擬滑鼠鍵盤」操作（computer use），人可以在網頁主控台即時觀看、隨時接手。它和工具隔離用的 microVM（`[exec.vm]`，無畫面、無網卡）是兩回事，程式在 `crates/seagent-vm/src/desktop/`。
 
-## 快速開始
+## 預設：開機就先開好虛擬機，代理在裡面工作
+
+從 0.2.0-alpha 起，**桌面 VM 就是代理的電腦**（`[desktop_vm] autostart = true`，預設開啟）：
+
+1. SE Agent 一啟動，背景就檢查預設的 VM（`desk`）。第一次使用時沒有映像，會自動建置（下載 Debian 雲端映像並安裝桌面，約 5–20 分鐘，視網速而定），完成後自動開機。之後每次啟動 App 都直接開機，約 20 秒。
+2. 頂列「代理電腦」標籤顯示進度：建置中（含已經過的時間）／開機中／執行中／啟動失敗（點一下重試）／已停止（點一下啟動）。執行中時點一下，會在工作區打開那台 VM 的畫面。
+3. 代理的瀏覽器、computer use 都在這台 VM 裡（`[computer_use] target = "vm:desk"`），你在工作區看到的就是代理正在操作的畫面，可以隨時接手。
+4. VM 意外關掉會自動重新開機；**你自己按停止**（工作區、`seagent vm desktop stop`、`view.vm.stop`）就不會被拉回來，直到你再按啟動。
+5. 建置紀錄在 `<data>/vm/desktop/build.log`，狀態在 `<data>/vm/desktop/agent-vm.json`；ARP 方法 `view.vm.status` 讀狀態、`view.vm.build` 立即建置／重試。
+
+不想自動開：`seagent config set desktop_vm.autostart false`。
+
+## 快速開始（手動）
 
 ```sh
 seagent vm desktop build          # 下載固定版本的 Debian 雲端映像（sha256 驗證）並安裝桌面，約 3–5 分鐘，可重複執行

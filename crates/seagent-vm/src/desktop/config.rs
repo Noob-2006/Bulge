@@ -23,6 +23,8 @@
 //! build_timeout_secs = 2400
 //! stop_timeout_secs = 30        # ACPI power-off grace before `quit` / SIGTERM
 //! idle_timeout_secs = 0         # stop a VM nobody looked at / drove for this long (0 = never)
+//! autostart = true              # the daemon builds the image if needed and boots `default` at start,
+//!                               # restarting it if it dies (unless a person stopped it)
 //! ```
 
 use serde::{Deserialize, Serialize};
@@ -105,6 +107,8 @@ pub struct DesktopConfig {
     pub build_timeout_secs: u64,
     pub stop_timeout_secs: u64,
     pub idle_timeout_secs: u64,
+    /// Build (first run) and boot the default VM when the daemon starts, and keep it up.
+    pub autostart: bool,
 }
 
 impl Default for DesktopConfig {
@@ -130,6 +134,7 @@ impl Default for DesktopConfig {
             build_timeout_secs: 2400,
             stop_timeout_secs: 30,
             idle_timeout_secs: 0,
+            autostart: true,
         }
     }
 }

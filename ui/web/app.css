@@ -273,3 +273,9 @@ ul.todo li.in_progress { color: var(--gold-300); }
 .work.human .work-who { color: var(--gold-300); }
 @media (max-width: 900px) { .work { position: fixed; inset: 52px 0 0 0; width: auto !important; max-width: none; min-width: 0; z-index: 15; } }
 .work-keys { position: absolute; left: 0; bottom: 0; width: 1px; height: 1px; opacity: 0; border: 0; padding: 0; resize: none; pointer-events: none; }
+
+/* agent_vm.js: the agent's computer (desktop VM) status pill next to the strip */
+.agent-vm { margin-left: 8px; white-space: nowrap; }
+.agent-vm[data-state="ok"] { color: var(--ok, #6c6); }
+.agent-vm[data-state="warn"] { color: var(--gold-300, #e6c35c); }
+.agent-vm[data-state="crit"] { color: var(--crit, #e66); }
