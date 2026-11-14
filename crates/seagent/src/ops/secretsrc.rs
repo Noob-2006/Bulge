@@ -767,6 +767,11 @@ pub fn run_helper(command: &str, key: &str, timeout: f64, env: &HashMap<String, 
         std::thread::sleep(Duration::from_millis(5));
     };
     let out = h.join().unwrap_or_default();
+    // The reader stops at the cap and closes the pipe, so a helper still writing dies of SIGPIPE:
+    // past the cap, the size is the cause, whatever the exit status says.
+    if out.len() > MAX_OUTPUT {
+        return Err(format!("helper output exceeded the {MAX_OUTPUT}-byte cap; resolving no value"));
+    }
     if !st.success() {
         #[cfg(unix)]
         use std::os::unix::process::ExitStatusExt;
@@ -778,9 +783,6 @@ pub fn run_helper(command: &str, key: &str, timeout: f64, env: &HashMap<String, 
             Some(sig) => format!("helper failed; resolving no value: code=? signal={sig}"),
             None => format!("helper failed; resolving no value: code={} signal=none", st.code().unwrap_or(-1)),
         });
-    }
-    if out.len() > MAX_OUTPUT {
-        return Err(format!("helper output exceeded the {MAX_OUTPUT}-byte cap; resolving no value"));
     }
     Ok(String::from_utf8_lossy(&out).into_owned())
 }
