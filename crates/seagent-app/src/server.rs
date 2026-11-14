@@ -33,6 +33,46 @@ use std::time::Duration;
 
 pub const ARP_VERSION: &str = "seagent/2";
 
+/// How long allowed state reads by one actor on one subject are coalesced into one audit record.
+pub const READ_WINDOW_MS: u64 = 10 * 60 * 1000;
+
+/// The coalescing windows: key → (window start, repeats suppressed in it).
+fn read_windows() -> &'static std::sync::Mutex<std::collections::HashMap<String, (u64, u64)>> {
+    static W: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, (u64, u64)>>> = std::sync::OnceLock::new();
+    W.get_or_init(Default::default)
+}
+
+/// `Some(repeats coalesced into the previous window)` when this read opens a new window (record
+/// it), `None` for a repeat inside the current one (counted, not recorded).
+fn read_window(key: &str, now: u64) -> Option<u64> {
+    let mut w = read_windows().lock().unwrap_or_else(|e| e.into_inner());
+    if let Some((start, repeats)) = w.get_mut(key) {
+        if now.saturating_sub(*start) < READ_WINDOW_MS {
+            *repeats += 1;
+            return None;
+        }
+        let prev = *repeats;
+        *start = now;
+        *repeats = 0;
+        return Some(prev);
+    }
+    // Bounded: expired windows go first; a flood of distinct keys only costs extra records.
+    if w.len() >= 8192 {
+        w.retain(|_, (start, _)| now.saturating_sub(*start) < READ_WINDOW_MS);
+        if w.len() >= 8192 {
+            w.clear();
+        }
+    }
+    w.insert(key.to_string(), (now, 0));
+    Some(0)
+}
+
+/// What a state read looked at (a conversation, a desktop, a browser tab): part of the
+/// coalescing key and written as `detail.subject`.
+fn audit_subject(params: &Value) -> String {
+    ["session", "id", "target", "key", "targetId"].iter().find_map(|k| params[*k].as_str().filter(|s| !s.is_empty())).unwrap_or("").chars().take(160).collect()
+}
+
 /// Something mounted at `/plugins/<name>/` (a plugin's HTTP routes).
 pub trait Mount: Send + Sync {
     /// `None`: no route for this method + sub-path; `Some(public)`: served, `public` skips the app token.
@@ -235,15 +275,50 @@ impl App {
         self.principal(r).is_some()
     }
 
-    /// One audit record for a request decision (ent-073). Reads that expose no content are
-    /// only recorded with `[audit] log_reads`.
+    /// One audit record for a request decision (ent-073), for a method name: see
+    /// [`App::audit_decision`].
     fn audit_request(&self, p: &Principal, target: &str, outcome: &str, detail: Value) {
-        let quiet = matches!(target, "ping" | "initialize" | "unsubscribe" | "heartbeat");
-        let read_only = exposure::required_scope(target) == Scope::Read && !identity::is_content_method(target);
-        if outcome == "allow" && (quiet || (read_only && !self.d.k.cfg.audit.log_reads)) {
+        self.audit_decision(p, target, "", outcome, exposure::is_state_read(target), detail)
+    }
+
+    /// One audit record for a request decision (ent-073).
+    ///
+    /// * Refusals and every allowed write / approval / admin change: always one record.
+    /// * Allowed reads that expose no content: only with `[audit] log_reads`.
+    /// * Allowed state reads that the console polls (`state_read`: content reads such as a
+    ///   frame of the live view or a conversation's dashboard, the device list, cluster
+    ///   status …): the first call per (actor, address, method, `subject`) in each
+    ///   [`READ_WINDOW_MS`] window is recorded, with the number of repeats coalesced into the
+    ///   previous window; the repeats are not. So an auditor still sees who looked at what and
+    ///   when, without a record every 0.7 s. `[audit] log_reads = true` records every call.
+    fn audit_decision(&self, p: &Principal, target: &str, subject: &str, outcome: &str, state_read: bool, mut detail: Value) {
+        let allowed = outcome == "allow";
+        if allowed && matches!(target, "ping" | "initialize" | "unsubscribe" | "heartbeat") {
             return;
         }
-        let ev = crate::tenant::tag(seagent_security::audit::Event::new(if outcome == "allow" { "app.request" } else { "auth.denied" }, p.actor(), target, outcome).detail(detail), p);
+        if allowed && !self.d.k.cfg.audit.log_reads {
+            let plain_read = exposure::required_scope(target) == Scope::Read && !identity::is_content_method(target);
+            if plain_read {
+                return;
+            }
+            if state_read {
+                let key = format!("{}\u{1}{}\u{1}{}\u{1}{target}\u{1}{subject}", self.d.k.paths.data.display(), p.label(), p.ip);
+                match read_window(&key, seagent_security::audit::now_ms()) {
+                    None => return,
+                    Some(repeats) => {
+                        if let Some(o) = detail.as_object_mut() {
+                            o.insert("coalesced".into(), json!({"window_s": READ_WINDOW_MS / 1000, "repeats_in_previous_window": repeats, "note": "further identical reads by this actor within the window are not recorded individually ([audit] log_reads = true records every call)"}));
+                        }
+                    }
+                }
+            }
+        }
+        if state_read && !subject.is_empty() {
+            if let Some(o) = detail.as_object_mut() {
+                o.insert("subject".into(), Value::String(subject.chars().take(160).collect()));
+            }
+        }
+        let ev = crate::tenant::tag(seagent_security::audit::Event::new(if allowed { "app.request" } else { "auth.denied" }, p.actor(), target, outcome).detail(detail), p);
         if seagent_security::audit::emit(&self.d.k.paths.data, ev).is_err() {
             crate::metrics::audit_error();
         }
@@ -261,7 +336,7 @@ impl App {
         let mut methods: Vec<String> = Daemon::METHODS.iter().map(|s| s.to_string()).collect();
         methods.extend(self.host_methods.iter().cloned());
         methods.extend(crate::browser_view::METHODS.iter().map(|s| s.to_string()));
-        methods.extend(["initialize", "subscribe", "unsubscribe", "whoami", "audit.query", "audit.verify", "audit.report", "usage.query", "tenancy.show"].map(String::from));
+        methods.extend(["initialize", "subscribe", "unsubscribe", "whoami", "audit.query", "audit.verify", "audit.report", "audit.export", "usage.query", "tenancy.show"].map(String::from));
         json!({
             "protocol": ARP_VERSION,
             "server": {"name": "seagent", "version": env!("CARGO_PKG_VERSION")},
@@ -426,7 +501,7 @@ impl App {
                     self.audit_request(&p, &r.path, "deny", json!({"http": r.method}));
                     return forbidden_msg(&e);
                 }
-                self.audit_request(&p, "view.http", "allow", json!({"http": r.method, "path": r.path}));
+                self.audit_decision(&p, "view.http", &r.path, "allow", exposure::is_state_read_http(&r.method, &r.path), json!({"http": r.method, "path": r.path}));
                 if r.path == crate::live_view::ROUTE {
                     return crate::live_view::upgrade(self, &r, p);
                 }
@@ -449,7 +524,7 @@ impl App {
                     self.audit_request(&p, method, "deny", json!({"transport": "http"}));
                     return forbidden_msg(&e);
                 }
-                self.audit_request(&p, method, "allow", json!({"transport": "http"}));
+                self.audit_decision(&p, method, &audit_subject(&req["params"]), "allow", exposure::is_state_read(method), json!({"transport": "http"}));
                 Response::json(200, &self.rpc_as(&req, Some(&p)).to_string())
             }
             (_, path) if path.starts_with("/v1/") && self.cfg.openai_api => {
@@ -633,6 +708,26 @@ impl App {
                     f => Err((-32602, format!("format `{f}`: use json, md or html"))),
                 }
             }
+            "audit.export" if who.is_some_and(|p| crate::tenant::bound(self, p)) => Err((-32003, "forbidden: the audit export covers the whole installation".to_string())),
+            "audit.export" => {
+                use seagent_security::audit_evidence as ev;
+                let format = match ev::Format::parse(params["format"].as_str().unwrap_or("bundle")) {
+                    Ok(f) => f,
+                    Err(e) => return Some(Err((-32602, e))),
+                };
+                let s = |k: &str| params[k].as_str().map(str::trim).filter(|v| !v.is_empty()).map(str::to_string);
+                let filter = ev::Filter { from_ms: params["from_ms"].as_u64().unwrap_or(0), to_ms: params["to_ms"].as_u64().unwrap_or(0), kind: s("kind"), actor: s("actor"), outcome: s("outcome") };
+                let subst = self.d.k.vault_substitute();
+                let pubkey = self.d.k.cfg.audit.seal_public(&|s: &str| subst(s));
+                let e = ev::export(data, &filter, format, &format!("seagent {}", env!("CARGO_PKG_VERSION")), pubkey.as_deref().map(str::as_bytes), ev::MAX_EXPORT_BYTES);
+                let actor = who.map(|p| p.actor()).unwrap_or_else(seagent_security::audit::Actor::local);
+                seagent_security::audit::record(data, seagent_security::audit::Event::new("audit.export", actor, "audit", "ok").detail(json!({"format": format.as_str(), "from_ms": filter.from_ms, "to_ms": filter.to_ms, "filters": {"kind": filter.kind, "actor": filter.actor, "outcome": filter.outcome}, "records": e.records, "truncated": e.truncated, "bytes": e.bytes.len(), "sha256": e.sha256, "last_hash": e.range.last_hash})));
+                let mut out = e.summary();
+                let (body, encoding) = e.payload();
+                out["encoding"] = encoding.into();
+                out["data"] = body.into();
+                Ok(out)
+            }
             _ => return None,
         })
     }
@@ -704,7 +799,7 @@ impl App {
                 let _ = out_tx.send(json!({"jsonrpc": "2.0", "id": id, "error": {"code": -32003, "message": msg}}));
                 continue;
             }
-            self.audit_request(&principal, method_name, "allow", json!({"transport": "ws"}));
+            self.audit_decision(&principal, method_name, &audit_subject(&req["params"]), "allow", exposure::is_state_read(method_name), json!({"transport": "ws"}));
             match method_name {
                 "subscribe" | "events.subscribe" | "session.attach" => {
                     let mut gp = req.get("params").cloned().unwrap_or(json!({}));
@@ -1158,8 +1253,11 @@ mod tests {
     /// Audit coverage: every mutating ARP method the server knows — the daemon's, the app
     /// server's own and the scope table — leaves an audit record naming the method and the
     /// principal, both when it is allowed and when it is refused. Read-only methods are on an
-    /// explicit allowlist (recorded only with `[audit] log_reads`); `shutdown` is exercised
-    /// through the refusal path only (allowing it would stop the daemon under test).
+    /// explicit allowlist (recorded only with `[audit] log_reads`); content reads and the
+    /// admin-grade state reads the console polls leave their first call per window (the
+    /// repeats are coalesced: `polling_reads_are_coalesced_writes_and_denials_never_are`);
+    /// `shutdown` is exercised through the refusal path only (allowing it would stop the
+    /// daemon under test).
     #[test]
     fn every_mutating_arp_method_is_audited() {
         let home = seagent_core::tmp::scratch("seagent-app-auditcov");
@@ -1185,7 +1283,7 @@ mod tests {
         };
         let mut methods: std::collections::BTreeSet<String> = a.capabilities()["methods"].as_array().unwrap().iter().filter_map(|m| m.as_str().map(String::from)).collect();
         methods.extend(crate::exposure::method_scope_table().into_iter().map(|(m, _)| m.to_string()));
-        // Read-only: no record unless `[audit] log_reads` (content reads are always recorded).
+        // Read-only: no record unless `[audit] log_reads` (content reads: the first per window).
         let read_only = |m: &str| crate::exposure::required_scope(m) == Scope::Read && !crate::identity::is_content_method(m);
         // Allowed calls not exercised here, with the reason.
         const NOT_ALLOWED_HERE: &[(&str, &str)] = &[("shutdown", "would stop the daemon under test; its refusal path is checked below")];
@@ -1213,10 +1311,134 @@ mod tests {
             checked += 1;
         }
         assert!(checked >= 20, "the enumeration found only {checked} mutating methods");
+        // Admin-grade state reads (polled by the console) are coalesced, never a write.
+        for m in &methods {
+            if crate::exposure::is_state_read(m) && crate::exposure::required_scope(m) > Scope::Read {
+                assert!(!m.contains("approve") && !m.contains("revoke") && !m.ends_with(".set") && !m.ends_with(".input"), "{m} is not a read");
+            }
+        }
         for m in ["gate.answer", "session.review.set", "session.submit", "config.set", "audit.report"] {
             assert!(methods.contains(m) || crate::exposure::required_scope(m) > Scope::Read, "{m} is enumerated");
         }
         assert!(seagent_security::audit::verify(&data, None).ok);
+    }
+
+    /// The console's polls do not flood the audit stream: 100 polls of the same thing by the
+    /// same actor are one record (first access per window, with the repeat count once the
+    /// window rolls over); a different subject is its own record; every write and every
+    /// refusal is still recorded; `[audit] log_reads` records every call.
+    #[test]
+    fn polling_reads_are_coalesced_writes_and_denials_never_are() {
+        let setup = |name: &str, log_reads: bool| {
+            let home = seagent_core::tmp::scratch(name);
+            let paths = Paths { data: home.join("data"), config_dir: home.join("cfg"), runtime: home.join("run"), ..Default::default() };
+            let (pending, _cell) = seagent_kernel::daemon::pending_approver(Duration::from_millis(50));
+            let mut c = Config::default();
+            c.audit.log_reads = log_reads;
+            let k = seagent_kernel::kernel::new_kernel(c, paths, Arc::new(NoRes), vec![], Arc::new(seagent_kernel::vault::Vault::empty()), pending.clone());
+            let d = Arc::new(Daemon::new(k, pending));
+            std::fs::create_dir_all(home.join("ws")).unwrap();
+            let cfg = AppConfig {
+                enabled: true,
+                listen: "127.0.0.1:0".into(),
+                tokens: vec![crate::exposure::TokenConfig { token: "ro-tok".into(), scope: "read".into(), name: Some("ro".into()), org: String::new(), team: String::new() }],
+                workspace: Some(home.join("ws").display().to_string()),
+                ..AppConfig::default()
+            };
+            Arc::new(App { d, cfg, token: "admin-token".into(), host_methods: vec![], routes: vec![] })
+        };
+        let call = |a: &Arc<App>, tok: &str, method: &str, params: Value| {
+            let auth = format!("Bearer {tok}");
+            let mut r = json_req("/arp", &[("authorization", &auth)], &json!({"jsonrpc": "2.0", "id": 1, "method": method, "params": params}).to_string());
+            r.peer = Some("127.0.0.1:4000".parse().unwrap());
+            a.clone().handle(r).status
+        };
+        let count = |a: &Arc<App>, kind: &str, target: &str, actor: &str| seagent_security::audit::all(&a.d.k.paths.data).iter().filter(|r| r["kind"] == kind && r["target"] == target && r["actor"]["name"] == actor).count();
+        let a = setup("seagent-app-coalesce", false);
+        for _ in 0..100 {
+            call(&a, "admin-token", "surfaces.poll", json!({"session": "s1"}));
+            call(&a, "admin-token", "ui.devices", json!({}));
+            call(&a, "admin-token", "view.desktop.frame", json!({"target": "vm-1"}));
+            call(&a, "admin-token", "ui.fleet", json!({}));
+        }
+        assert_eq!(count(&a, "app.request", "surfaces.poll", "app-token"), 1, "100 polls → 1 record");
+        assert_eq!(count(&a, "app.request", "ui.devices", "app-token"), 1);
+        assert_eq!(count(&a, "app.request", "view.desktop.frame", "app-token"), 1);
+        assert_eq!(count(&a, "app.request", "ui.fleet", "app-token"), 0, "a plain read is not recorded without log_reads");
+        let rec = seagent_security::audit::all(&a.d.k.paths.data).into_iter().find(|r| r["target"] == "view.desktop.frame").unwrap();
+        assert_eq!(rec["detail"]["subject"], "vm-1", "who looked at what: {rec}");
+        assert_eq!(rec["detail"]["coalesced"]["window_s"], READ_WINDOW_MS / 1000);
+        // Another subject, another actor: their own first record.
+        call(&a, "admin-token", "surfaces.poll", json!({"session": "s2"}));
+        call(&a, "ro-tok", "surfaces.poll", json!({"session": "s1"}));
+        assert_eq!(count(&a, "app.request", "surfaces.poll", "app-token"), 2);
+        assert_eq!(count(&a, "app.request", "surfaces.poll", "ro"), 1);
+        // Denials and writes: every single one.
+        for _ in 0..5 {
+            assert_eq!(call(&a, "ro-tok", "ui.devices", json!({})), 403);
+            call(&a, "admin-token", "session.create", json!({}));
+        }
+        assert_eq!(count(&a, "auth.denied", "ui.devices", "ro"), 5, "a denial is always recorded");
+        assert_eq!(count(&a, "app.request", "session.create", "app-token"), 5, "a write is always recorded");
+        assert!(seagent_security::audit::verify(&a.d.k.paths.data, None).ok);
+        // The window: repeats are counted and reported by the next window's first record.
+        let key = "unit\u{1}k";
+        assert_eq!(read_window(key, 1_000), Some(0));
+        for _ in 0..99 {
+            assert_eq!(read_window(key, 2_000), None);
+        }
+        assert_eq!(read_window(key, 1_000 + READ_WINDOW_MS), Some(99));
+        // `[audit] log_reads = true`: everything, as before.
+        let a = setup("seagent-app-coalesce-all", true);
+        for _ in 0..10 {
+            call(&a, "admin-token", "surfaces.poll", json!({"session": "s1"}));
+            call(&a, "admin-token", "ui.fleet", json!({}));
+        }
+        assert_eq!(count(&a, "app.request", "surfaces.poll", "app-token"), 10);
+        assert_eq!(count(&a, "app.request", "ui.fleet", "app-token"), 10);
+    }
+
+    /// `audit.export`: the evidence bundle and the verbatim JSONL over ARP, for an auditor;
+    /// refused to a read token; recorded as `audit.export` with the file's SHA-256.
+    #[test]
+    fn audit_export_over_arp() {
+        let home = seagent_core::tmp::scratch("seagent-app-auditexport");
+        let paths = Paths { data: home.join("data"), config_dir: home.join("cfg"), runtime: home.join("run"), ..Default::default() };
+        let (pending, _cell) = seagent_kernel::daemon::pending_approver(Duration::from_millis(50));
+        let k = seagent_kernel::kernel::new_kernel(Config::default(), paths, Arc::new(NoRes), vec![], Arc::new(seagent_kernel::vault::Vault::empty()), pending.clone());
+        let d = Arc::new(Daemon::new(k, pending));
+        std::fs::create_dir_all(home.join("ws")).unwrap();
+        let tok = |t: &str, scope: &str, name: &str| crate::exposure::TokenConfig { token: t.into(), scope: scope.into(), name: Some(name.into()), org: String::new(), team: String::new() };
+        let cfg = AppConfig { enabled: true, listen: "127.0.0.1:0".into(), tokens: vec![tok("au-tok", "auditor", "audrey"), tok("ro-tok", "read", "ro")], workspace: Some(home.join("ws").display().to_string()), ..AppConfig::default() };
+        let a = Arc::new(App { d: d.clone(), cfg, token: "admin-token".into(), host_methods: vec![], routes: vec![] });
+        let call = |tok: &str, params: Value| -> Value {
+            let auth = format!("Bearer {tok}");
+            let mut r = json_req("/arp", &[("authorization", &auth)], &json!({"jsonrpc": "2.0", "id": 1, "method": "audit.export", "params": params}).to_string());
+            r.peer = Some("127.0.0.1:4000".parse().unwrap());
+            let resp = a.clone().handle(r);
+            let mut v: Value = serde_json::from_str(&body_text(&resp)).unwrap_or(json!({}));
+            v["status"] = resp.status.into();
+            v
+        };
+        call("admin-token", json!({"format": "jsonl"}));
+        assert_eq!(call("ro-tok", json!({}))["status"], 403);
+        let b = call("au-tok", json!({}));
+        assert_eq!(b["result"]["format"], "bundle", "{b}");
+        assert_eq!(b["result"]["encoding"], "base64");
+        assert!(b["result"]["filename"].as_str().unwrap().ends_with(".zip"));
+        assert_eq!(b["result"]["chain"]["ok"], true);
+        let j = call("au-tok", json!({"format": "jsonl", "from_ms": 1}));
+        let text = j["result"]["data"].as_str().unwrap();
+        assert!(seagent_security::audit_evidence::verify_lines(text).ok && text.contains("\"kind\":\"audit.export\""));
+        assert_eq!(call("au-tok", json!({"format": "xml"}))["error"]["code"], -32602);
+        let recs = seagent_security::audit::all(&data_of(&a));
+        assert!(recs.iter().any(|r| r["kind"] == "audit.export" && r["actor"]["name"] == "audrey" && r["detail"]["sha256"] == b["result"]["sha256"]));
+        assert!(recs.iter().any(|r| r["kind"] == "auth.denied" && r["target"] == "audit.export" && r["actor"]["name"] == "ro"));
+        assert!(a.capabilities()["methods"].as_array().unwrap().iter().any(|m| m == "audit.export"));
+    }
+
+    fn data_of(a: &App) -> std::path::PathBuf {
+        a.d.k.paths.data.clone()
     }
 
     /// Four eyes, session review and the auditor report over ARP: the server stamps the

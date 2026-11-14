@@ -377,6 +377,9 @@ const ADMIN_PREFIXES: &[&str] = &[
 const APPROVE_METHODS: &[&str] = &["gate.answer", "approval.answer", "approvals.answer", "question.answer", "session.review.set"];
 const READ_METHODS: &[&str] = &[
     "ping", "initialize", "session.list", "session.history", "session.view", "gate.pending", "goal.list", "schedule.list", "models.list", "tools.list", "events.subscribe", "session.attach", "subscribe", "unsubscribe", "view.browser.list", "view.browser.frame", "view.desktop.state", "logbook.list", "whoami",
+    // The console's polls: a conversation's dashboard (its widgets and pending UI commands) and
+    // the fleet overview. They only report state.
+    "surfaces.poll", "surfaces.board", "surfaces.boards", "ui.fleet",
 ];
 const WRITE_METHODS: &[&str] = &[
     "session.create", "session.submit", "session.command", "session.interrupt", "goal.start", "goal.stop", "goal.cancel", "schedule.run", "view.browser.input", "view.desktop.takeover", "view.desktop.handback", "view.desktop.input", "view.novnc", "chat.send", "message.send",
@@ -386,6 +389,28 @@ const WRITE_METHODS: &[&str] = &[
 ];
 /// Suffixes that only ever report state (`surfaces.list`, `logs.tail`, `usage.status` …).
 const READ_SUFFIXES: &[&str] = &[".list", ".get", ".state", ".history", ".status", ".show", ".info", ".search", ".query", ".view", ".tail", ".describe"];
+
+/// Methods that only *report* state although their scope is above `read` (the device list an
+/// admin sees, the live desktop frame): what the console polls every few seconds. Used by the
+/// audit coalescing in `crate::server` only, never to grant access.
+const STATE_READS_ABOVE_READ: &[&str] = &[
+    "ui.devices", "devices.list", "devices.pending", "discovery.list", "lan.status", "cluster.status", "view.desktop.frame", "view.desktop.list", "view.display.status",
+];
+
+/// An allowed call of this method only reads state (every `read`-scope method, plus
+/// [`STATE_READS_ABOVE_READ`]): its audit records are coalesced per actor and subject
+/// (`crate::server`). Writes, approvals and admin changes are never state reads.
+pub fn is_state_read(method: &str) -> bool {
+    let m = method.trim();
+    required_scope(m) == Scope::Read || STATE_READS_ABOVE_READ.contains(&m)
+}
+
+/// A plain HTTP route that only reads state (`GET /view/browser/frame`, the desktop frame,
+/// state and list, the live-view upgrade).
+pub fn is_state_read_http(method: &str, path: &str) -> bool {
+    let Some(rest) = path.strip_prefix("/view/") else { return false };
+    (method == "GET" || method == "HEAD") && (rest == "live" || ["browser/frame", "browser/list", "desktop/frame", "desktop/state", "desktop/list"].iter().any(|p| rest.starts_with(p)))
+}
 
 /// The scope an ARP method needs; unknown methods cost `admin` (fail closed).
 pub fn required_scope(method: &str) -> Scope {
@@ -584,6 +609,19 @@ mod tests {
             ("session.list", Scope::Read),
             ("session.view", Scope::Read),
             ("surfaces.list", Scope::Read),
+            ("surfaces.poll", Scope::Read),
+            ("surfaces.board", Scope::Read),
+            ("surfaces.boards", Scope::Read),
+            ("surfaces.board.update", Scope::Admin),
+            ("surfaces.card", Scope::Admin),
+            ("ui.fleet", Scope::Read),
+            ("ui.ops.status", Scope::Read),
+            // The device page mirrors node.list / pending pairing requests: stays admin-grade.
+            ("ui.devices", Scope::Admin),
+            ("ui.devices.remove", Scope::Admin),
+            ("devices.list", Scope::Admin),
+            ("view.desktop.frame", Scope::Admin),
+            ("audit.export", Scope::Admin),
             ("view.browser.frame", Scope::Read),
             ("session.submit", Scope::Write),
             ("session.create", Scope::Write),
@@ -606,7 +644,17 @@ mod tests {
         }
         for (m, s) in method_scope_table() {
             assert_eq!(required_scope(m), s, "{m}");
+            // Audit coalescing never covers a write, an approval or `shutdown`.
+            assert_eq!(is_state_read(m), s == Scope::Read, "{m}");
         }
+        for m in ["surfaces.poll", "ui.fleet", "ui.devices", "devices.list", "view.desktop.frame", "view.desktop.list", "cluster.status", "lan.status", "ui.ops.status"] {
+            assert!(is_state_read(m), "{m} is a state read");
+        }
+        for m in ["devices.approve", "devices.revoke", "ui.devices.remove", "surfaces.board.update", "view.desktop.input", "config.set", "audit.export", "audit.report", "something.new"] {
+            assert!(!is_state_read(m), "{m} is not a state read");
+        }
+        assert!(is_state_read_http("GET", "/view/browser/frame") && is_state_read_http("GET", "/view/desktop/frame") && is_state_read_http("GET", "/view/live"));
+        assert!(!is_state_read_http("POST", "/view/desktop/input") && !is_state_read_http("POST", "/view/browser/frame") && !is_state_read_http("GET", "/v1/models"));
         assert_eq!(required_scope_http("GET", "/v1/models"), Scope::Read);
         assert_eq!(required_scope_http("POST", "/v1/chat/completions"), Scope::Write);
         assert_eq!(required_scope_http("GET", "/view/browser/frame"), Scope::Read);

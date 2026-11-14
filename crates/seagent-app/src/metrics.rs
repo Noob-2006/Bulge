@@ -97,7 +97,7 @@ pub fn audit_error() {
 
 /// The method label: known ARP methods by name, anything else as `other` (bounded cardinality).
 pub fn method_label(m: &str) -> &str {
-    if crate::exposure::method_scope_table().iter().any(|(k, _)| *k == m) || matches!(m, "audit.query" | "audit.verify" | "whoami") {
+    if crate::exposure::method_scope_table().iter().any(|(k, _)| *k == m) || matches!(m, "audit.query" | "audit.verify" | "audit.report" | "audit.export" | "whoami") {
         m
     } else {
         "other"

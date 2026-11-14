@@ -45,11 +45,13 @@ poll_secs = 30
 
 ## 3. auditor 角色
 
-`auditor` 只能呼叫 `read` 等級的方法（不含對話內容）與 `audit.query`、`audit.verify`、`audit.report`；任何寫入、核准、session 標記、設定或未知方法一律拒絕。測試 `auditor_never_writes_or_approves` 逐一檢查所有已知方法。
+`auditor` 只能呼叫 `read` 等級的方法（不含對話內容）與 `audit.query`、`audit.verify`、`audit.report`、`audit.export`；任何寫入、核准、session 標記、設定或未知方法一律拒絕。測試 `auditor_never_writes_or_approves` 逐一檢查所有已知方法。
 
 ## 4. 稽核報告與簽章封存
 
 - `seagent audit report --from 30d [--to 2026-11-01] --format md|html|json [--out FILE] [--pubkey …]`：登入、權限與身分異動、核准（核准者與申請者）、被拒動作、設定變更、session 覆核、匯出與保留；附整條鏈驗證結果與 head hash（HTML 無外部資源、可直接存檔列印）。
+- `seagent audit export --format bundle|jsonl|csv|cef|leef [--from 30d] [--to …] [--kind …] [--actor …] [--outcome …] --out FILE`（ARP `audit.export`；主控台「稽核紀錄 → 匯出」）：可帶走查核的匯出。`jsonl` 是每筆紀錄原文（含 seq / prev / hash）；`bundle` 是證據包 ZIP：`records.jsonl`、同期間的 `report.html`、免安裝的 `verify.py`、`README.txt` 與 `manifest.json`（各檔 SHA-256、匯出當下整條鏈的驗證結果與鏈頭、期間、產生器版本、離線驗證步驟）。離線驗證：`python3 verify.py` 或 `seagent audit verify --file records.jsonl`。匯出本身寫一筆 `audit.export`（含檔案 SHA-256）。單次最多 64 MB 紀錄，超過時標示 `truncated` 與續接時間 `next_from_ms`。
+- 稽核量：主控台輪詢的讀取（儀表板、裝置清單、即時畫面 frame…）同一身分、同一來源、同一對象每 10 分鐘只寫第一筆（`detail.coalesced` 記上一個視窗合併掉的次數，`detail.subject` 記看了什麼）；寫入與拒絕一律逐筆記錄；`[audit] log_reads = true` 則逐筆記錄所有讀取。
 - `seagent audit seal-key [--out FILE]` 產生 Ed25519 種子；設定 `[audit] seal_key = "<檔案或 {{secret:…}}>"`、`seal_pubkey = "ed25519:…"`，daemon 會簽輪替後的每個 seal（`seagent audit seal` 可手動執行）；`[audit] tsa_url` 另向 RFC 3161 時戳機構取得權杖。`seagent audit verify --pubkey ed25519:… --require-signed` 只需公鑰。
 - **限制**：金鑰若放在被稽核主機上，取得它的人也能偽造；請放在另一個帳號或 HSM 簽章服務。SE Agent 檢查時戳權杖狀態、訊息摘要與 nonce，不驗 CMS 憑證鏈——請用 `openssl ts -verify -in tsr.der -digest <sha256> -CAfile tsa-ca.pem`（`tsr` 為 `.sig` 檔中的 base64）。
 

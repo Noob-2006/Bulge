@@ -3610,6 +3610,7 @@ dependencies = [
  "base64 0.23.1",
  "fancy-regex",
  "libc",
+ "miniz_oxide 0.9.1",
  "regex",
  "ring",
  "seagent-net",

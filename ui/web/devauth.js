@@ -194,5 +194,8 @@
       return token;
     },
   };
-  setInterval(() => window.DevAuth.check(), 15000);
+  // The wall-clock backstop for the renewal timer (a sleeping laptop): skipped while the window is
+  // hidden and run as soon as it shows again; the renewal timer itself keeps running regardless.
+  setInterval(() => { if (!document.hidden) window.DevAuth.check(); }, 15000);
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) window.DevAuth.check(); });
 })();

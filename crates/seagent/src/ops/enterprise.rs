@@ -220,6 +220,20 @@ pub fn audit_sub(paths: &Paths, a: &Args) -> Option<R> {
                 .collect::<Vec<_>>()
                 .join("\n"))
         })(),
+        // `seagent audit verify --file records.jsonl`: an exported range, offline (no chain needed).
+        "verify" if a.val("file").is_some() => (|| -> R {
+            let p = a.val("file").unwrap_or_default();
+            let text = std::fs::read_to_string(p).map_err(|e| format!("{p}: {e}"))?;
+            let c = seagent_security::audit_evidence::verify_lines(&text);
+            if a.flag("json") {
+                println!("{}", serde_json::to_string_pretty(&c).unwrap_or_default());
+            } else if c.ok {
+                println!("records OK: {} record(s), seq {}…{}{}, last hash {} (hangs from {})", c.records, c.first_seq, c.last_seq, if c.contiguous { "" } else { " with filter gaps" }, c.last_hash, if c.first_prev.is_empty() { "genesis" } else { &c.first_prev });
+            } else {
+                eprintln!("records BROKEN: {}", c.error.clone().unwrap_or_default());
+            }
+            Ok(if c.ok { 0 } else { 1 })
+        })(),
         "verify" => {
             let v = audit::verify(d, a.val("anchor"));
             // Signed seals: `--pubkey`, else `[audit] seal_pubkey` / the key derived from `seal_key`.
@@ -305,6 +319,37 @@ pub fn audit_sub(paths: &Paths, a: &Args) -> Option<R> {
             Ok(None) => out("nothing to rotate".into()),
             Err(e) => Err(e.into()),
         },
+        // `seagent audit export --format bundle|jsonl|csv|cef|leef [--from D] [--to D]
+        // [--kind K] [--actor A] [--outcome O] [--out FILE]`: an audit-grade file (see
+        // `seagent_security::audit_evidence`). Without --format / --out: push to the SIEM sinks.
+        "export" if a.val("format").is_some() || a.val("out").is_some() => (|| -> R {
+            use seagent_security::audit_evidence as ev;
+            let now = audit::now_ms();
+            let format = ev::Format::parse(a.val("format").unwrap_or("bundle"))?;
+            let filter = ev::Filter {
+                from_ms: a.val("from").or(a.val("since")).map(|v| parse_when(v, now)).transpose()?.unwrap_or(0),
+                to_ms: a.val("to").or(a.val("until")).map(|v| parse_when(v, now)).transpose()?.unwrap_or(0),
+                kind: a.val("kind").map(String::from),
+                actor: a.val("actor").map(String::from),
+                outcome: a.val("outcome").map(String::from),
+            };
+            let (pubkey, _) = seal_settings(a, paths);
+            let pubkey = a.val("pubkey").map(String::from).or(pubkey);
+            let e = ev::export(d, &filter, format, &format!("seagent {}", env!("CARGO_PKG_VERSION")), pubkey.as_deref().map(str::as_bytes), ev::MAX_EXPORT_BYTES);
+            let p = a.val("out").map(PathBuf::from).unwrap_or_else(|| PathBuf::from(&e.filename));
+            std::fs::write(&p, &e.bytes).map_err(|err| format!("{}: {err}", p.display()))?;
+            audit::record(d, audit::Event::new("audit.export", Actor::local(), "audit", "ok").detail(json!({"format": format.as_str(), "from_ms": filter.from_ms, "to_ms": filter.to_ms, "filters": {"kind": filter.kind, "actor": filter.actor, "outcome": filter.outcome}, "records": e.records, "truncated": e.truncated, "bytes": e.bytes.len(), "sha256": e.sha256, "last_hash": e.range.last_hash, "file": p.display().to_string()})));
+            if a.flag("json") {
+                let mut s = e.summary();
+                s["file"] = p.display().to_string().into();
+                return out(serde_json::to_string_pretty(&s).unwrap_or_default());
+            }
+            let more = match (e.truncated, e.next_from_ms) {
+                (true, Some(t)) => format!("\ntruncated at {} MB: continue with --from {}", ev::MAX_EXPORT_BYTES / (1024 * 1024), ts(t)),
+                _ => String::new(),
+            };
+            out(format!("wrote {} ({} record(s), {} bytes, sha256 {}){more}", p.display(), e.records, e.bytes.len(), e.sha256))
+        })(),
         "export" => (|| -> R {
             let cfg = crate::load_config(a, &crate::workspace(a)?, paths)?;
             let vault = crate::load_vault(paths)?;
@@ -581,6 +626,32 @@ mod tests {
         assert!(l.starts_with("SEAGENT CRITICAL - model: HTTP 401 / bad key | checks_ok=1"), "a `|` in the text would end it early: {l}");
         assert_eq!(nagios(None, None, 0).0, 2);
         assert_eq!(nagios(Some(&json!({"weird": 1})), None, 0).0, 3);
+    }
+
+    /// `seagent audit export --format … --out …` writes the file and records `audit.export`;
+    /// `seagent audit verify --file` checks the exported records offline; without --format /
+    /// --out, `export` stays the SIEM push.
+    #[test]
+    fn audit_export_file_and_offline_verify() {
+        let kit = crate::testkit::kit();
+        let p = &kit.paths;
+        for i in 0..3 {
+            audit::emit(&p.data, audit::Event::new("config.change", Actor::local(), &format!("k{i}"), "ok")).unwrap();
+        }
+        let a = |v: &[&str]| Args::parse(&v.iter().map(|s| s.to_string()).collect::<Vec<_>>()).unwrap();
+        let jl = p.data.join("records.jsonl");
+        assert_eq!(audit_sub(p, &a(&["export", "--format", "jsonl", "--from", "1d", "--out", jl.to_str().unwrap()])).unwrap().unwrap(), 0);
+        assert_eq!(std::fs::read_to_string(&jl).unwrap().lines().count(), 3);
+        assert_eq!(audit_sub(p, &a(&["verify", "--file", jl.to_str().unwrap()])).unwrap().unwrap(), 0);
+        let text = std::fs::read_to_string(&jl).unwrap().replacen("k1", "kX", 1);
+        std::fs::write(&jl, text).unwrap();
+        assert_eq!(audit_sub(p, &a(&["verify", "--file", jl.to_str().unwrap()])).unwrap().unwrap(), 1, "a changed record fails offline");
+        let zip = p.data.join("evidence.zip");
+        assert_eq!(audit_sub(p, &a(&["export", "--format", "bundle", "--out", zip.to_str().unwrap()])).unwrap().unwrap(), 0);
+        assert!(std::fs::read(&zip).unwrap().starts_with(b"PK\x03\x04"));
+        assert_eq!(audit::all(&p.data).iter().filter(|r| r["kind"] == "audit.export").count(), 2);
+        assert!(audit_sub(p, &a(&["export", "--format", "pdf", "--out", zip.to_str().unwrap()])).unwrap().is_err());
+        assert!(audit::verify(&p.data, None).ok);
     }
 
     #[cfg(unix)]

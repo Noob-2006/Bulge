@@ -14,6 +14,7 @@
 
 pub mod approvals;
 pub mod audit;
+pub mod audit_evidence;
 pub mod audit_export;
 pub mod audit_report;
 pub mod audit_seal;
