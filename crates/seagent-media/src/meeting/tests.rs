@@ -896,7 +896,7 @@ function leave() { document.body.innerHTML = '<div class="meeting-ended">You lef
         // port; a behavioural failure is the test's own and must not be masked.
         let startup = last.contains("exited")
             || last.contains("did not open DevTools")
-            || last.contains("bound DevTools on port")
+            || last.contains("bound DevTools on")
             || last.contains("already listening");
         if !(startup || last.contains("could not open a tab")) {
             break;
