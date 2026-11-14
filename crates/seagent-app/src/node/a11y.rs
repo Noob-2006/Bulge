@@ -3,6 +3,10 @@
 //! comes from python3-gi (`Atspi`, one process) when importable, else from `gdbus` calls
 //! walked here; actions are single `gdbus` calls. Element refs are `<bus name>|<object path>`.
 
+// Windows / macOS keep this AT-SPI code compiled (its parsers are tested everywhere) but
+// dispatch to their own accessibility modules.
+#![cfg_attr(any(windows, target_os = "macos"), allow(dead_code))]
+
 use super::{run_cmd, which};
 use serde_json::{json, Value};
 use std::time::Duration;
@@ -168,8 +172,21 @@ fn py(args: &Value) -> Result<Value, String> {
     serde_json::from_str(out.lines().last().unwrap_or("")).map_err(|e| format!("AT-SPI walker: {e}"))
 }
 
-/// `list_apps` / `list_windows` / `get_accessibility_tree` / `set_value` / element click.
+/// `list_apps` / `list_windows` / `get_accessibility_tree` / `set_value` / element click on
+/// this OS's accessibility API: AT-SPI here (Linux, BSD), UI Automation + Win32 on Windows
+/// (`a11y_windows`), the macOS Accessibility API through System Events on macOS (`a11y_macos`).
 pub fn act(p: &Value) -> Result<Value, String> {
+    #[cfg(windows)]
+    return super::a11y_windows::act(p);
+    #[cfg(target_os = "macos")]
+    return super::a11y_macos::act(p);
+    #[cfg(not(any(windows, target_os = "macos")))]
+    atspi(p)
+}
+
+/// The AT-SPI implementation of [`act`].
+#[cfg_attr(any(windows, target_os = "macos"), allow(dead_code))]
+fn atspi(p: &Value) -> Result<Value, String> {
     let action = p["action"].as_str().unwrap_or("");
     match action {
         "list_apps" | "list_windows" => {

@@ -1,10 +1,12 @@
 //! Native driver: on Linux xdotool (X11) / ydotool (Wayland) input, `import`/`grim` captures and
-//! AT-SPI accessibility; on Windows `SendInput` + GDI captures, on macOS CGEvent / cliclick +
-//! `screencapture` (`node::host_os`, no accessibility tree yet) — the same code the paired-node
-//! `computer.act` runs (`node.rs`, `node/a11y.rs`), here on the gateway itself. Every command runs under the env the caller
-//! applies with `node::with_env` (the Bot Desktop's DISPLAY / XAUTHORITY / session bus).
+//! AT-SPI accessibility; on Windows `SendInput` + GDI captures and UI Automation / Win32 window
+//! lists (`node/a11y_windows.rs`); on macOS CGEvent / cliclick + `screencapture` and the
+//! Accessibility API through System Events (`node/a11y_macos.rs`) — the same code the
+//! paired-node `computer.act` runs (`node.rs`, `node/host_os.rs`, `node/a11y.rs`), here on the
+//! gateway itself. Every command runs under the env the caller applies with `node::with_env`
+//! (the Bot Desktop's DISPLAY / XAUTHORITY / session bus).
 //!
-//! Input is global XTest/uinput injection: there is no background (focus-preserving)
+//! Input is global injection ([`INJECTION`]): there is no background (focus-preserving)
 //! delivery, so results report `effect: "unverifiable"` and the model re-captures to verify.
 
 use super::backend::{image_size, mime_of, ActionResult, Backend, Capture, Delivery, Element, Point};
@@ -32,6 +34,22 @@ pub fn which_in(env: &[(String, String)], bin: &str) -> Option<PathBuf> {
 pub fn input_tool(_backend: &str, _env: &[(String, String)]) -> Option<Input> {
     None
 }
+
+/// How input reaches the desktop on this OS (named in results and refusals).
+#[cfg(windows)]
+pub const INJECTION: &str = "SendInput";
+#[cfg(target_os = "macos")]
+pub const INJECTION: &str = "CGEvent";
+#[cfg(not(any(windows, target_os = "macos")))]
+pub const INJECTION: &str = "XTest/uinput";
+
+/// The accessibility API element actions go through on this OS.
+#[cfg(windows)]
+pub const A11Y: &str = "UI Automation";
+#[cfg(target_os = "macos")]
+pub const A11Y: &str = "the macOS Accessibility API";
+#[cfg(not(any(windows, target_os = "macos")))]
+pub const A11Y: &str = "AT-SPI";
 
 /// Is OS-native input available (Windows / macOS) when [`input_tool`] finds no tool?
 pub fn os_input() -> bool {
@@ -111,7 +129,7 @@ pub fn crop(env: &[(String, String)], x: i64, y: i64, w: i64, h: i64, t: Duratio
 }
 
 /// Roles that are layout, not targets (dropped from the SOM list).
-const LAYOUT_ROLES: &[&str] = &["filler", "panel", "frame", "window", "application", "section", "label", "static", "scroll pane", "viewport", "layered pane", "root pane", "separator", "unknown", "desktop frame", "redundant object", "grouping", "invalid", "tool bar", "status bar", "html container"];
+pub(crate) const LAYOUT_ROLES: &[&str] = &["filler", "panel", "frame", "window", "application", "section", "label", "static", "scroll pane", "viewport", "layered pane", "root pane", "separator", "unknown", "desktop frame", "redundant object", "grouping", "invalid", "tool bar", "status bar", "html container", "title bar"];
 
 /// AT-SPI elements → SOM elements (1-based, layout roles dropped).
 pub fn som(raw: &[Value], app: &str) -> Vec<Element> {
@@ -192,7 +210,7 @@ impl NativeBackend {
                 r.effect = Some("unverifiable".into());
                 r.path = Some(path);
                 r.delivery_mode = d.mode.clone();
-                r.meta.insert("note".into(), json!("native input is injected globally (XTest/uinput); there is no background routing"));
+                r.meta.insert("note".into(), json!(format!("native input is injected globally ({INJECTION}); there is no background routing")));
                 r
             }
             Err(e) => ActionResult::refuse(action, e),
@@ -291,7 +309,7 @@ impl Backend for NativeBackend {
                 let h = self.element(i).map(|e| e.handle.clone()).unwrap_or_default();
                 match a11y::act(&json!({"action": "left_click", "elementRef": h})) {
                     Ok(v) => {
-                        let mut r = ActionResult::ok("click", format!("activated element #{i} through AT-SPI"));
+                        let mut r = ActionResult::ok("click", format!("activated element #{i} through {A11Y}"));
                         r.verified = v["ok"].as_bool();
                         r.path = Some("ax".into());
                         r

@@ -44,4 +44,7 @@ libc.workspace = true
 # Node host on Windows (docs/cross-platform.md): SendInput / cursor for computer.act, the
 # battery read-out of the TUI status bar.
 [target.'cfg(windows)'.dependencies]
-windows-sys = { workspace = true, features = ["Win32_UI_Input_KeyboardAndMouse", "Win32_UI_WindowsAndMessaging", "Win32_System_Power"] }
+windows-sys = { workspace = true, features = ["Win32_UI_Input_KeyboardAndMouse", "Win32_UI_WindowsAndMessaging", "Win32_System_Power", "Win32_Graphics_Dwm", "Win32_System_StationsAndDesktops"] }
+# computer_use / computer.act accessibility on Windows (node/a11y_windows.rs): UI Automation is
+# COM, which windows-sys does not project; `windows` is already in the tree (seagent-browser).
+windows = { workspace = true, features = ["Win32_UI_Accessibility", "Win32_System_Com"] }
