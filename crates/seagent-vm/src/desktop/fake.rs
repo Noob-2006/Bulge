@@ -190,7 +190,7 @@ pub fn fake_agent(v: &super::DesktopVms, name: &str, home: &Path) -> std::thread
                 for f in frames {
                     match f {
                         HostMsg::Exec { id, script, cwd, env, stdin, .. } => {
-                            let mut c = Command::new("bash");
+                            let mut c = crate::host::command("bash");
                             c.arg("-c").arg(format!("exec 2>&1\n{}", fix(&script))).env_clear().env("PATH", "/usr/local/bin:/usr/bin:/bin").env("HOME", &home);
                             for (k, val) in env {
                                 c.env(k, fix(&val));

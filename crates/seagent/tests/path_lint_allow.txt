@@ -87,6 +87,7 @@ crates/seagent-tools/src/exec/container.rs	/home/seagent
 crates/seagent-tools/src/exec/container.rs	/tmp
 crates/seagent-tools/src/exec/container.rs	/var/tmp:rw,noexec,size=256m
 crates/seagent-tools/src/exec/daytona.rs	/home/daytona
+crates/seagent-tools/src/exec/desktop.rs	/tmp
 crates/seagent-tools/src/exec/local.rs	/bin
 crates/seagent-tools/src/exec/local.rs	/etc
 crates/seagent-tools/src/exec/local.rs	/lib
@@ -144,6 +145,15 @@ crates/seagent-vm/src/bin/seagent-vm-guest/linux.rs	/run
 crates/seagent-vm/src/bin/seagent-vm-guest/linux.rs	/tmp
 crates/seagent-vm/src/bin/seagent-vm-guest/linux.rs	/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 crates/seagent-vm/src/config.rs	/tmp
+crates/seagent-vm/src/desktop/agent.rs	/home/seagent
+crates/seagent-vm/src/desktop/agent.rs	/home/seagent/workspace
+crates/seagent-vm/src/desktop/fake.rs	/usr/local/bin:/usr/bin:/bin
+crates/seagent-vm/src/desktop/mod.rs	/opt/homebrew/bin
+crates/seagent-vm/src/desktop/mod.rs	/opt/local/bin
+crates/seagent-vm/src/desktop/mod.rs	/snap/bin
+crates/seagent-vm/src/desktop/mod.rs	/usr/bin
+crates/seagent-vm/src/desktop/mod.rs	/usr/local/bin
+crates/seagent-vm/src/desktop/timezone.rs	/etc/timezone
 crates/seagent-vm/src/host.rs	/Applications/VirtualBox.app/Contents/MacOS
 crates/seagent-vm/src/host.rs	/opt/homebrew/bin
 crates/seagent-vm/src/host.rs	/opt/homebrew/share/qemu/edk2-aarch64-code.fd
