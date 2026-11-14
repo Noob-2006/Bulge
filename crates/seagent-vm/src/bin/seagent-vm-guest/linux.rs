@@ -120,8 +120,13 @@ pub fn main() {
             },
             Some("-") => broker_send(&read_stdin_or_fail()),
             Some("init") | None => run_init(),
+            Some("service") => run_service(&argv[2..]),
+            Some("roles") => {
+                let _ = writeln!(std::io::stdout(), "{}", seagent_vm::proto::GUEST_ROLES);
+                0
+            }
             Some(other) => {
-                eprintln!("seagent-vm-guest: unknown role `{other}` (expected: init, broker-send, version)");
+                eprintln!("seagent-vm-guest: unknown role `{other}` (expected: init, service, broker-send, version, roles)");
                 2
             }
         }
@@ -713,6 +718,9 @@ struct ExecHandle {
 
 struct Agent {
     cfg: GuestCfg,
+    /// The environment every command starts from (before `SHELL` and the request's own):
+    /// [`init_env`] in the microVM, [`service_env`] in the desktop VM.
+    base_env: Vec<(String, String)>,
     limits: Mutex<Limits>,
     w: Arc<Mutex<File>>,
     execs: Mutex<HashMap<u64, ExecHandle>>,
@@ -736,6 +744,32 @@ impl Agent {
         }
         Err("no shell (/bin/bash or /bin/sh) in the guest image".into())
     }
+}
+
+const GUEST_PATH: &str = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
+
+/// The microVM agent user's environment (exactly what init mode always set).
+fn init_env() -> Vec<(String, String)> {
+    [("PATH", GUEST_PATH), ("HOME", AGENT_HOME), ("USER", "agent"), ("LOGNAME", "agent"), ("TMPDIR", "/tmp"), ("LANG", "C.UTF-8")].iter().map(|(k, v)| (k.to_string(), v.to_string())).collect()
+}
+
+/// The desktop user's environment in the desktop VM: its own home and name, and the X session
+/// LightDM logged it into (`:0`, cookie in `~/.Xauthority`, session bus in `/run/user/<uid>`),
+/// so a GUI program a command starts appears on the screen the person watches.
+fn service_env(user: &str, uid: u32, home: &Path) -> Vec<(String, String)> {
+    let h = home.display().to_string();
+    vec![
+        ("PATH".into(), GUEST_PATH.into()),
+        ("HOME".into(), h.clone()),
+        ("USER".into(), user.into()),
+        ("LOGNAME".into(), user.into()),
+        ("TMPDIR".into(), "/tmp".into()),
+        ("LANG".into(), "C.UTF-8".into()),
+        ("DISPLAY".into(), ":0".into()),
+        ("XAUTHORITY".into(), format!("{h}/.Xauthority")),
+        ("XDG_RUNTIME_DIR".into(), format!("/run/user/{uid}")),
+        ("DBUS_SESSION_BUS_ADDRESS".into(), format!("unix:path=/run/user/{uid}/bus")),
+    ]
 }
 
 fn sanitised_env(env: &[(String, String)]) -> Vec<(String, String)> {
@@ -838,10 +872,10 @@ fn start_exec(agent: &Arc<Agent>, req: ExecReq) -> Result<(), String> {
     cmd.arg(if req.login { "-lc" } else { "-c" }).arg(&req.script);
     cmd.current_dir(&cwd);
     cmd.env_clear();
-    cmd.env("PATH", "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin");
-    cmd.env("HOME", AGENT_HOME);
-    cmd.env("USER", "agent").env("LOGNAME", "agent").env("SHELL", shell);
-    cmd.env("TMPDIR", "/tmp").env("LANG", "C.UTF-8");
+    for (k, v) in &agent.base_env {
+        cmd.env(k, v);
+    }
+    cmd.env("SHELL", shell);
     for (k, v) in sanitised_env(&req.env) {
         cmd.env(k, v);
     }
@@ -1334,6 +1368,7 @@ fn run_init() -> i32 {
 
     let agent = Arc::new(Agent {
         cfg: cfg.clone(),
+        base_env: init_env(),
         limits: Mutex::new(cfg.limits()),
         w: conn.w.clone(),
         execs: Mutex::new(HashMap::new()),
@@ -1377,6 +1412,234 @@ fn run_init() -> i32 {
     let _ = std::fs::remove_file(BROKER_SOCKET);
     log("shutting down");
     power_off()
+}
+
+// ── service role (the desktop VM) ───────────────────────────────────────────
+
+/// `seagent-vm-guest service [--user NAME] [--workspace DIR] [--port NAME|PATH]`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ServiceArgs {
+    /// The desktop's login user the commands run as.
+    pub user: String,
+    /// Where commands start; `None` = `<home>/workspace`.
+    pub workspace: Option<PathBuf>,
+    /// virtio-serial port name (`/dev/virtio-ports/<name>`) or a device path.
+    pub port: String,
+}
+
+impl Default for ServiceArgs {
+    fn default() -> Self {
+        ServiceArgs { user: seagent_vm::desktop::agent::GUEST_USER.into(), workspace: None, port: seagent_vm::desktop::agent::GUEST_PORT.into() }
+    }
+}
+
+pub fn parse_service_args(args: &[String]) -> Result<ServiceArgs, String> {
+    let mut a = ServiceArgs::default();
+    let mut it = args.iter();
+    while let Some(k) = it.next() {
+        let mut val = || it.next().cloned().ok_or_else(|| format!("{k} needs a value"));
+        match k.as_str() {
+            "--user" => {
+                let u = val()?;
+                if u.is_empty() || u == "root" || !u.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.')) {
+                    return Err(format!("--user {u:?}: a plain, unprivileged login name"));
+                }
+                a.user = u;
+            }
+            "--workspace" => a.workspace = Some(guest_abs_path(&val()?).ok_or("--workspace must be a plain absolute path")?),
+            "--port" => {
+                let p = val()?;
+                if p.is_empty() || p.contains("..") {
+                    return Err("--port: a virtio port name or a /dev path".into());
+                }
+                a.port = p;
+            }
+            other => return Err(format!("unknown option `{other}` (service [--user NAME] [--workspace DIR] [--port NAME|PATH])")),
+        }
+    }
+    Ok(a)
+}
+
+/// The device of virtio port `port`: a path as given, else `/dev/virtio-ports/<name>` (udev's
+/// link), else the `vportNpM` whose sysfs name matches (no udev link yet).
+fn port_device(port: &str) -> Option<PathBuf> {
+    if port.starts_with('/') {
+        return Path::new(port).exists().then(|| PathBuf::from(port));
+    }
+    let link = Path::new("/dev/virtio-ports").join(port);
+    if link.exists() {
+        return Some(link);
+    }
+    std::fs::read_dir("/sys/class/virtio-ports").ok()?.flatten().find_map(|e| {
+        let name = std::fs::read_to_string(e.path().join("name")).ok()?;
+        (name.trim() == port).then(|| Path::new("/dev").join(e.file_name())).filter(|d| d.exists())
+    })
+}
+
+/// (uid, gid, home) of `user` in `/etc/passwd` text. Read directly rather than through NSS:
+/// the agent is a static binary (musl, or static glibc whose NSS modules would have to match
+/// the guest's), and the desktop user is a local account cloud-init created.
+pub fn passwd_entry(passwd: &str, user: &str) -> Option<(u32, u32, PathBuf)> {
+    passwd.lines().find_map(|l| {
+        let f: Vec<&str> = l.split(':').collect();
+        (f.len() >= 7 && f[0] == user).then(|| Some((f[2].parse().ok()?, f[3].parse().ok()?, PathBuf::from(f[5]))))?
+    })
+}
+
+/// `user`'s supplementary groups in `/etc/group` text, plus its primary `gid`.
+pub fn group_ids(group: &str, user: &str, gid: u32) -> Vec<u32> {
+    let mut v = vec![gid];
+    for l in group.lines() {
+        let f: Vec<&str> = l.split(':').collect();
+        if f.len() >= 4 && f[3].split(',').any(|m| m.trim() == user) {
+            if let Ok(g) = f[2].parse::<u32>() {
+                if !v.contains(&g) {
+                    v.push(g);
+                }
+            }
+        }
+    }
+    v
+}
+
+fn lookup_user(user: &str) -> Result<(u32, u32, PathBuf), String> {
+    let passwd = std::fs::read_to_string("/etc/passwd").map_err(|e| format!("/etc/passwd: {e}"))?;
+    passwd_entry(&passwd, user).ok_or_else(|| format!("no user `{user}` in /etc/passwd"))
+}
+
+/// Become `user` (its uid, gid and supplementary groups — the desktop's audio/video/sudo) for
+/// good. No capability survives: the service never powers anything off.
+fn drop_to_user(user: &str, uid: u32, gid: u32) -> Result<(), String> {
+    if uid == 0 {
+        return Err(format!("`{user}` is root; the service only runs commands as an ordinary user"));
+    }
+    let groups: Vec<libc::gid_t> = group_ids(&std::fs::read_to_string("/etc/group").unwrap_or_default(), user, gid).into_iter().map(|g| g as libc::gid_t).collect();
+    // SAFETY: plain syscalls on ourselves, before any command thread exists.
+    unsafe {
+        if libc::setgroups(groups.len() as _, groups.as_ptr()) != 0 {
+            return Err(format!("setgroups({user}): {}", std::io::Error::last_os_error()));
+        }
+        if libc::setgid(gid) != 0 {
+            return Err(format!("setgid({gid}): {}", std::io::Error::last_os_error()));
+        }
+        if libc::setuid(uid) != 0 {
+            return Err(format!("setuid({uid}): {}", std::io::Error::last_os_error()));
+        }
+        if libc::getuid() != uid || libc::geteuid() != uid || libc::getgid() != gid {
+            return Err("the uid/gid did not change".into());
+        }
+        if libc::setuid(0) == 0 {
+            return Err("setuid(0) succeeded after the drop; refusing to run".into());
+        }
+    }
+    Ok(())
+}
+
+/// The `service` role: the shell agent of the desktop VM, started as root by systemd
+/// (`seagent-agent.service`). Unlike init it mounts nothing, names nothing and never powers the
+/// machine off (the host stops a desktop VM by ACPI); it opens the virtio port and reads the
+/// channel key while root, becomes the desktop user for good, and then serves the very same
+/// frames as init — one host connection after another: when the host goes away (daemon
+/// restart) the commands it started are killed and the next connection gets a fresh Hello.
+/// `Shutdown` ends the current connection only.
+fn run_service(args: &[String]) -> i32 {
+    // journald keeps stderr.
+    // SAFETY: dup of our own stderr.
+    let fd = unsafe { libc::dup(2) };
+    if fd >= 0 {
+        let _ = CONSOLE.set(Mutex::new(unsafe { File::from_raw_fd(fd) }));
+    }
+    let sa = match parse_service_args(args) {
+        Ok(a) => a,
+        Err(e) => {
+            log(&e);
+            return 2;
+        }
+    };
+    let key = seagent_vm::proto::channel_key_from(std::fs::read(seagent_vm::proto::FW_CFG_KEY).ok().as_deref(), std::fs::read_to_string(seagent_vm::proto::DMI_KEY_FILE).ok().as_deref());
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let dev = loop {
+        match port_device(&sa.port) {
+            Some(d) => break d,
+            None if Instant::now() >= deadline => {
+                log(&format!("no virtio port `{}` (is this VM started by seagent with the agent channel?)", sa.port));
+                return 1;
+            }
+            None => std::thread::sleep(Duration::from_millis(200)),
+        }
+    };
+    // Root-only device: opened before the drop.
+    let port = match OpenOptions::new().read(true).write(true).open(&dev) {
+        Ok(f) => f,
+        Err(e) => {
+            log(&format!("open {}: {e}", dev.display()));
+            return 1;
+        }
+    };
+    let (uid, gid, home) = match lookup_user(&sa.user) {
+        Ok(u) => u,
+        Err(e) => {
+            log(&e);
+            return 1;
+        }
+    };
+    if let Err(e) = drop_to_user(&sa.user, uid, gid) {
+        log(&format!("privilege drop failed, refusing to serve: {e}"));
+        return 1;
+    }
+    let workspace = sa.workspace.clone().unwrap_or_else(|| home.join("workspace"));
+    if let Err(e) = std::fs::create_dir_all(&workspace) {
+        log(&format!("mkdir {}: {e}", workspace.display()));
+    }
+    log(&format!("serving {} as {} (uid {uid}) in {}{}", dev.display(), sa.user, workspace.display(), if key.is_some() { ", channel key present" } else { "" }));
+    let mut conn = match serial_conn(port, "virtio-serial") {
+        Ok(c) => c,
+        Err(e) => {
+            log(&e);
+            return 1;
+        }
+    };
+    let cfg = GuestCfg { vm: "seagent-desktop".into(), tier: "desktop".into(), channel: "virtio-serial".into(), workspace, disk_mb: 0, nproc: 0, nofile: 0, workspace_ro: false };
+    let agent = Arc::new(Agent {
+        cfg,
+        base_env: service_env(&sa.user, uid, &home),
+        // No ceilings of our own: this is the person's desktop (RLIMIT_NPROC would count the
+        // browser's threads too); per-command timeouts still apply.
+        limits: Mutex::new(Limits { nproc: 0, nofile: 0, cpu_seconds: 0, disk_mb: 0, exec_timeout_secs: 0 }),
+        w: conn.w.clone(),
+        execs: Mutex::new(HashMap::new()),
+        broker_clients: Mutex::new(HashMap::new()),
+        next_broker: AtomicU64::new(1),
+        reaper: Reaper::start(),
+    });
+    loop {
+        let nonce = key.as_ref().map(|_| seagent_vm::proto::random_hex(16));
+        let hello = GuestMsg::Hello {
+            version: VERSION,
+            agent: format!("seagent-vm-guest {} (service)", env!("CARGO_PKG_VERSION")),
+            kernel: kernel_release(),
+            cid: None,
+            transport: "virtio-serial".into(),
+            uid: unsafe { libc::getuid() },
+            nonce: nonce.clone(),
+        };
+        // Blocks until a host is connected (a virtio port does not take writes before).
+        if let Err(e) = agent.send(&hello) {
+            log(&format!("hello: {e}"));
+            std::thread::sleep(Duration::from_secs(1));
+            continue;
+        }
+        let auth = key.clone().map(|k| (k, nonce.unwrap_or_default(), hello.clone()));
+        serve(&mut conn, agent.clone(), auth);
+        // That host is gone (or said Shutdown): its commands go with it.
+        let pids: Vec<i32> = lock(&agent.execs).values().map(|h| h.pgid).collect();
+        for p in pids {
+            kill_group(p, libc::SIGKILL);
+        }
+        conn.buf.clear();
+        conn.pending.clear();
+        std::thread::sleep(Duration::from_millis(200));
+    }
 }
 
 /// `auth`: the channel key and our Hello nonce when the host must authenticate first
@@ -1637,6 +1900,43 @@ mod unit {
         assert_eq!(exit_code(3 << 8), (Some(3), None));
         // killed by SIGKILL
         assert_eq!(exit_code(9), (None, Some(9)));
+    }
+
+    #[test]
+    fn service_arguments_default_to_the_desktop_user_and_refuse_odd_values() {
+        let s = |v: &[&str]| parse_service_args(&v.iter().map(|x| x.to_string()).collect::<Vec<_>>());
+        assert_eq!(s(&[]).unwrap(), ServiceArgs { user: "seagent".into(), workspace: None, port: "seagent0".into() });
+        let a = s(&["--user", "alice", "--workspace", "/srv/ws", "--port", "/dev/vport1p2"]).unwrap();
+        assert_eq!((a.user.as_str(), a.workspace, a.port.as_str()), ("alice", Some(PathBuf::from("/srv/ws")), "/dev/vport1p2"));
+        for bad in [&["--user", "root"][..], &["--user", "a b"], &["--user"], &["--workspace", "rel/dir"], &["--workspace", "/a/../etc"], &["--port", "../x"], &["--frobnicate"]] {
+            assert!(s(bad).is_err(), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn the_desktop_user_and_its_groups_come_from_the_local_files() {
+        let passwd = "root:x:0:0:root:/root:/bin/bash\nseagent:x:1000:1000:seagent desktop:/home/seagent:/bin/bash\nseagentx:x:1001:1001::/home/x:/bin/sh\nbroken:x:zz:1::/h:/bin/sh\n";
+        assert_eq!(passwd_entry(passwd, "seagent"), Some((1000, 1000, PathBuf::from("/home/seagent"))));
+        assert_eq!(passwd_entry(passwd, "seagen"), None, "whole names only");
+        assert_eq!(passwd_entry(passwd, "broken"), None);
+        let group = "root:x:0:\naudio:x:29:seagent\nvideo:x:44:other,seagent\nsudo:x:27:seagentx\nseagent:x:1000:\n";
+        assert_eq!(group_ids(group, "seagent", 1000), vec![1000, 29, 44]);
+    }
+
+    #[test]
+    fn the_service_environment_is_the_desktop_session() {
+        let env: HashMap<String, String> = service_env("seagent", 1000, Path::new("/home/seagent")).into_iter().collect();
+        assert_eq!(env["HOME"], "/home/seagent");
+        assert_eq!((env["USER"].as_str(), env["LOGNAME"].as_str()), ("seagent", "seagent"));
+        assert_eq!(env["DISPLAY"], ":0", "GUI programs land on the watched screen");
+        assert_eq!(env["XAUTHORITY"], "/home/seagent/.Xauthority");
+        assert_eq!(env["DBUS_SESSION_BUS_ADDRESS"], "unix:path=/run/user/1000/bus");
+        assert!(env["PATH"].starts_with("/usr/local/sbin:"));
+        // The microVM keeps its exact environment.
+        let init: HashMap<String, String> = init_env().into_iter().collect();
+        assert_eq!((init["HOME"].as_str(), init["USER"].as_str()), (AGENT_HOME, "agent"));
+        assert!(!init.contains_key("DISPLAY"));
+        assert!(seagent_vm::proto::GUEST_ROLES.contains(" service "), "the host finds the role by this marker");
     }
 
     #[test]

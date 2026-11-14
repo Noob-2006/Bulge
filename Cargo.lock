@@ -835,6 +835,7 @@ name = "seagent-vm"
 version = "0.2.0-alpha"
 dependencies = [
  "base64",
+ "flate2",
  "libc",
  "seagent-core",
  "seagent-net",

@@ -161,3 +161,115 @@ fn names_and_status_without_a_vm() {
     std::fs::create_dir_all(e.vms.vm_dir("work")).unwrap();
     assert_eq!(e.vms.names(), ["desk", "work"]);
 }
+
+/// A fake in-VM agent on the VM's channel socket: Hello on every connection, `Exec` answered
+/// with `ran:<script>` and exit 0, `Ping` with `Pong`. Serves `conns` connections.
+fn fake_agent_on(sock: &std::path::Path, conns: usize) -> std::thread::JoinHandle<()> {
+    use crate::proto::{decode, encode, GuestMsg, HostMsg};
+    use base64::Engine as _;
+    use std::io::{Read, Write};
+    let l = crate::channel::Endpoint::allocate(sock).unwrap().listen().unwrap();
+    std::thread::spawn(move || {
+        for _ in 0..conns {
+            let Ok(mut s) = l.accept() else { return };
+            let hello = GuestMsg::Hello { version: 1, agent: "fake (service)".into(), kernel: "k".into(), cid: None, transport: "virtio-serial".into(), uid: 1000, nonce: None };
+            let _ = s.write_all(&encode(&hello).unwrap());
+            let (mut buf, mut chunk) = (Vec::new(), [0u8; 4096]);
+            loop {
+                let n = match s.read(&mut chunk) {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => n,
+                };
+                buf.extend_from_slice(&chunk[..n]);
+                let (frames, used) = decode::<HostMsg>(&buf).unwrap();
+                buf.drain(..used);
+                for f in frames {
+                    let out = match f {
+                        HostMsg::Exec { id, script, .. } => {
+                            let mut o = encode(&GuestMsg::Out { id, data: base64::engine::general_purpose::STANDARD.encode(format!("ran:{script}")) }).unwrap();
+                            o.extend(encode(&GuestMsg::Exit { id, code: Some(0), signal: None }).unwrap());
+                            o
+                        }
+                        HostMsg::Ping { id } => encode(&GuestMsg::Pong { id }).unwrap(),
+                        _ => continue,
+                    };
+                    if s.write_all(&out).is_err() {
+                        break;
+                    }
+                }
+            }
+        }
+    })
+}
+
+#[test]
+fn the_agent_channel_is_on_the_vm_and_shared_by_every_caller() {
+    let e = env("chan");
+    let v = &e.vms;
+    fake_image(v);
+    let th = qmp_after_spawn(&e, 800, 600);
+    v.start("desk").unwrap();
+    let _qmp = th.join().unwrap();
+    let args = std::fs::read_to_string(e.dir.join("bin/qemu.args")).unwrap();
+    // Exactly the microVM provider's channel, on the VM's one virtio-serial bus.
+    assert!(args.contains(&format!("socket,id=seagent0,path={},server=on,wait=off", v.chan_path("desk").display())), "{args}");
+    assert!(args.contains("virtserialport,chardev=seagent0,name=seagent0"), "{args}");
+    assert_eq!(args.matches("virtio-serial-pci").count(), 1, "one bus carries both ports");
+    assert!(!args.contains("opt/seagent/key"), "a unix socket in the 0700 run dir needs no key");
+    assert!(v.channel("nope", Duration::from_secs(1)).unwrap_err().contains("not running"));
+    let guest = fake_agent_on(&v.chan_path("desk"), 2);
+    let m = v.channel("desk", Duration::from_secs(5)).unwrap();
+    assert!(matches!(m.hello(), Some(crate::proto::GuestMsg::Hello { uid: 1000, .. })));
+    let out = m.run("uname -a", None, &[], None, Duration::from_secs(5)).unwrap();
+    assert_eq!((out.code, String::from_utf8(out.output).unwrap().as_str()), (Some(0), "ran:uname -a"));
+    assert!(Arc::ptr_eq(&m, &v.channel("desk", Duration::from_secs(5)).unwrap()), "one connection per running VM");
+    // The connection goes away: the next caller gets a new one.
+    m.shutdown();
+    let m2 = v.channel("desk", Duration::from_secs(5)).unwrap();
+    assert!(!Arc::ptr_eq(&m, &m2));
+    assert_eq!(m2.run("id", None, &[], None, Duration::from_secs(5)).unwrap().output, b"ran:id");
+    assert!(v.stop("desk").unwrap());
+    assert!(!v.chan_path("desk").exists() && !m2.alive(), "stopping the VM drops its channel");
+    drop(guest);
+}
+
+#[test]
+fn a_windows_style_channel_carries_its_key_and_the_agent_by_fw_cfg() {
+    let tcp = crate::channel::Endpoint::Tcp("127.0.0.1:40123".parse().unwrap());
+    let a = channel_args(&tcp, std::path::Path::new("/r/chan.key"), Some(std::path::Path::new("/r/agent.bin")));
+    let after = |flag: &str, n: usize| a.iter().enumerate().filter(|(_, x)| *x == flag).nth(n).map(|(i, _)| a[i + 1].clone()).unwrap();
+    assert_eq!(after("-chardev", 0), "socket,id=seagent0,host=127.0.0.1,port=40123,server=on,wait=off,nodelay=on");
+    assert_eq!(after("-device", 0), "virtserialport,chardev=seagent0,name=seagent0");
+    assert_eq!(after("-fw_cfg", 0), "name=opt/seagent/key,file=/r/chan.key", "the key is a file, never a command-line value");
+    assert_eq!(after("-fw_cfg", 1), "name=opt/seagent/agent,file=/r/agent.bin");
+    let unix = channel_args(&crate::channel::Endpoint::Unix("/r/chan.sock".into()), std::path::Path::new("/r/chan.key"), None);
+    assert!(!unix.iter().any(|x| x == "-fw_cfg"), "{unix:?}");
+}
+
+#[test]
+fn an_overlay_from_an_image_without_the_agent_is_set_aside_once() {
+    let e = env("stale");
+    let v = &e.vms;
+    fake_image(v);
+    std::fs::write(v.image_path().with_extension("json"), r#"{"guest_agent": {"service": true}}"#).unwrap();
+    assert!(v.image_has_agent());
+    // A disk made from an older image (no agent service in its manifest).
+    std::fs::create_dir_all(v.vm_dir("desk")).unwrap();
+    let old = v.image_dir().join("desktop-old.qcow2");
+    std::fs::write(&old, b"old").unwrap();
+    std::fs::write(old.with_extension("json"), "{}").unwrap();
+    std::fs::write(v.vm_dir("desk").join("disk.qcow2"), b"overlay").unwrap();
+    std::fs::write(v.vm_dir("desk").join("state.json"), json!({"image": old.display().to_string()}).to_string()).unwrap();
+    assert_eq!(v.stale_overlay("desk"), Some(old.clone()));
+    let th = qmp_after_spawn(&e, 800, 600);
+    let st = v.start("desk").unwrap();
+    let _q = th.join().unwrap();
+    assert_eq!(std::fs::read(v.vm_dir("desk").join("disk.qcow2.prev")).unwrap(), b"overlay", "the old disk is kept");
+    assert!(st.warning.unwrap_or_default().contains("disk.qcow2.prev"));
+    assert_eq!(v.stale_overlay("desk"), None, "now on the current image");
+    v.stop("desk").unwrap();
+    // An image without the agent never sets a disk aside.
+    std::fs::write(v.image_path().with_extension("json"), "{}").unwrap();
+    std::fs::write(v.vm_dir("desk").join("state.json"), json!({"image": old.display().to_string()}).to_string()).unwrap();
+    assert_eq!(v.stale_overlay("desk"), None);
+}

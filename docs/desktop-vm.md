@@ -116,6 +116,16 @@ idle_timeout_secs = 0     # 0 = 不自動停
 - 接手控制時，VM 的租約同時擋下 computer use 與瀏覽器工具。
 - 需要 2026-11-05 以後建的映像（`IMAGE_LAYOUT = 3`）；舊映像請 `seagent vm desktop build` 後 `seagent vm desktop reset <name>`。
 
+## 代理的 shell 在 VM 裡
+
+桌面 VM 執行中時，操作者自己的 session（非 sandboxed）的 `shell`／`process`／`terminal` 指令預設在 VM 裡跑，和 computer use、瀏覽器是同一台機器（`crates/seagent-tools/src/exec/desktop.rs`）：
+
+- 客體代理：同一個 `seagent-vm-guest`，以 `service` 角色由 `seagent-agent.service`（systemd）以 root 啟動；它開 virtio-serial 埠 `seagent0`、讀通道金鑰（Windows 的 loopback TCP 通道才有，fw_cfg `opt/seagent/key`），然後永久降為桌面使用者 `seagent`（uid 1000，含 audio/video/sudo 群組；免密碼 sudo 是這台桌面本來就有的）。環境：`HOME=/home/seagent`、`DISPLAY=:0`、`XAUTHORITY=~/.Xauthority`、session bus，所以指令開的 GUI 程式會出現在 工作區 的畫面上（請 `setsid -f 程式 >/dev/null 2>&1` 分離開啟）。`Shutdown` 只結束當次連線，不關機（VM 由主機以 ACPI 關）；主機斷線時它啟動的指令被結束，代理等下一個連線（KillMode=process：GUI 程式不受代理重啟影響）。
+- 代理執行檔來源：microVM 客體映像 initramfs 裡的 `/sbin/init`（與 manifest 的 sha256 比對），否則執行檔旁或 `<data>/vm/` 的 `seagent-vm-guest`（開發版）；必須是 x86_64 且有 `service` 角色。`build` 時從 seed server 下載烤進映像；每次 `start` 也經 fw_cfg（`opt/seagent/agent`）交給客體並優先使用，所以升級 seagent 後不必重建映像。映像 manifest 的 `guest_agent` 記錄這些；`DesktopVms::image_has_agent()` 為 false 的舊映像請 `seagent vm desktop build --force`。從沒有代理的舊映像做出的疊加層會在下次 `start` 改名為 `disk.qcow2.prev` 保留一次，從新映像重新開始。
+- 工作區：主機工作區是正本，鏡像在 VM 的 `~/workspace/<目錄名>-<雜湊>`，每個指令前推送、結束時拉回（與 SSH 後端同一套 `WorkspaceSync`）；指令預設在鏡像目錄開始，`cwd` 可給工作區內的路徑或 VM 裡的絕對路徑。VM 裡每個指令重新開始（`cd`／`export` 不跨指令保留）。
+- 併發：一台 VM 一條通道，主機端多工器依 `id` 分派框架，多個 session／工具呼叫可同時跑。
+- 路由：`[exec] target = "auto"`（預設，VM 執行中就用 VM）｜`"desktop"`（同上，VM 沒開時每個 session 都提示一次）｜`"backend"`（永遠用 `[exec] backend`，舊行為）。單次呼叫 `host: "vm"` 堅持用 VM（不行就回錯誤說明原因），`host: "host"`／`elevated`／`sandbox` 與 `/exec host=` 維持原本行為；sandboxed session 不會進到操作者的桌面。VM 有建但沒在跑、或代理沒回應時，指令照舊在原本的後端執行，結果開頭附一行說明。
+
 ## 內建瀏覽器
 
 - `install.sh --with-browser`：把固定版本的 Chrome for Testing（`157.0.8103.38`，zip sha256 `8cdeb344…2a66`）驗證後解到 `<share>/browsers/chrome-linux64/`。

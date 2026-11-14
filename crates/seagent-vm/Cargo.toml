@@ -14,6 +14,9 @@ serde_json.workspace = true
 seagent-net.workspace = true        # sha256 for image / snapshot manifests
 base64.workspace = true
 libc.workspace = true           # AF_VSOCK in the guest agent, process groups
+# gunzip of the guest image initramfs: the desktop VM gets the same agent binary (desktop/agent.rs).
+# Already in the tree (png pulls it in); default rust backend, no C code.
+flate2 = "1"
 
 # Windows port (docs/cross-platform.md): the VMM process runs in a Job Object (memory/CPU caps,
 # kill-on-close), WHPX is probed through WinHvPlatform.dll, the VirtualBox / Hyper-V serial

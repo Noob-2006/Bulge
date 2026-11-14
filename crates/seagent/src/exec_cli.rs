@@ -786,6 +786,12 @@ pub fn attach(k: &seagent_kernel::kernel::Kernel) {
     env.set_notifier(Arc::new(move |session: &str, text: &str| {
         let _ = kk.submit(session, text, "process");
     }));
+    // The desktop VM (`[desktop_vm]`): while it runs, the operator's commands run inside it
+    // (`seagent_tools::exec::desktop`, `[exec] target`). An invalid table leaves it out; the
+    // config validator says why.
+    if let Ok(vms) = crate::vm_cli::vms(&k.cfg, &k.paths) {
+        seagent_tools::exec::desktop::install(Arc::new(vms));
+    }
     start_vm_broker(k);
 }
 

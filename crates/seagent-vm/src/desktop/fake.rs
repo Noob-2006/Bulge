@@ -152,3 +152,97 @@ pub fn start_fake(v: &super::DesktopVms, dir: &Path, name: &str, w: u32, h: u32)
     v.start(name).expect("fake VM start");
     th.join().unwrap()
 }
+
+/// A stand-in for the in-VM agent (`seagent-vm-guest service`) on VM `name`'s channel socket:
+/// it really runs each `Exec` with bash on this machine, with the guest home
+/// (`agent::GUEST_HOME`) rewritten to `home` in the script, the cwd and the environment, and
+/// streams output / exit status back with stdin, `Eof` and `Signal` handled — enough for the
+/// exec backend and the workspace mirror to be tested without a VM. (unix only.)
+#[cfg(unix)]
+pub fn fake_agent(v: &super::DesktopVms, name: &str, home: &Path) -> std::thread::JoinHandle<()> {
+    use crate::proto::{decode, encode, GuestMsg, HostMsg};
+    use base64::Engine as _;
+    use std::collections::HashMap;
+    use std::io::Read;
+    use std::process::{Command, Stdio};
+    let l = Endpoint::allocate(&v.chan_path(name)).unwrap().listen().unwrap();
+    let home = home.to_path_buf();
+    std::thread::spawn(move || {
+        let fix = |s: &str| s.replace(super::agent::GUEST_HOME, &home.display().to_string());
+        while let Ok(s) = l.accept() {
+            let w = Arc::new(Mutex::new(s.try_clone().unwrap()));
+            let put = {
+                let w = w.clone();
+                move |m: &GuestMsg| w.lock().unwrap().write_all(&encode(m).unwrap()).is_ok()
+            };
+            put(&GuestMsg::Hello { version: crate::proto::VERSION, agent: "fake (service)".into(), kernel: "fake".into(), cid: None, transport: "virtio-serial".into(), uid: 1000, nonce: None });
+            let mut stdins: HashMap<u64, std::process::ChildStdin> = HashMap::new();
+            let pids: Arc<Mutex<HashMap<u64, u32>>> = Default::default();
+            let (mut r, mut buf, mut chunk) = (s, Vec::new(), vec![0u8; 65536]);
+            loop {
+                let n = match r.read(&mut chunk) {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => n,
+                };
+                buf.extend_from_slice(&chunk[..n]);
+                let (frames, used) = decode::<HostMsg>(&buf).unwrap();
+                buf.drain(..used);
+                for f in frames {
+                    match f {
+                        HostMsg::Exec { id, script, cwd, env, stdin, .. } => {
+                            let mut c = Command::new("bash");
+                            c.arg("-c").arg(format!("exec 2>&1\n{}", fix(&script))).env_clear().env("PATH", "/usr/local/bin:/usr/bin:/bin").env("HOME", &home);
+                            for (k, val) in env {
+                                c.env(k, fix(&val));
+                            }
+                            c.current_dir(cwd.map(|d| fix(&d)).unwrap_or_else(|| home.display().to_string()));
+                            c.stdin(if stdin { Stdio::piped() } else { Stdio::null() }).stdout(Stdio::piped());
+                            let mut child = match c.spawn() {
+                                Ok(ch) => ch,
+                                Err(e) => {
+                                    put(&GuestMsg::Err { id, message: e.to_string() });
+                                    continue;
+                                }
+                            };
+                            if let Some(i) = child.stdin.take() {
+                                stdins.insert(id, i);
+                            }
+                            pids.lock().unwrap().insert(id, child.id());
+                            let (put, pids) = (put.clone(), pids.clone());
+                            std::thread::spawn(move || {
+                                let mut out = child.stdout.take().unwrap();
+                                let mut b = vec![0u8; 16384];
+                                while let Ok(n) = out.read(&mut b) {
+                                    if n == 0 || !put(&GuestMsg::Out { id, data: base64::engine::general_purpose::STANDARD.encode(&b[..n]) }) {
+                                        break;
+                                    }
+                                }
+                                let st = child.wait().ok();
+                                pids.lock().unwrap().remove(&id);
+                                use std::os::unix::process::ExitStatusExt;
+                                put(&GuestMsg::Exit { id, code: st.and_then(|s| s.code()), signal: st.and_then(|s| s.signal()) });
+                            });
+                        }
+                        HostMsg::Stdin { id, data } => {
+                            if let Some(i) = stdins.get_mut(&id) {
+                                let _ = i.write_all(&base64::engine::general_purpose::STANDARD.decode(data).unwrap_or_default());
+                            }
+                        }
+                        HostMsg::Eof { id } => {
+                            stdins.remove(&id);
+                        }
+                        HostMsg::Signal { id, force } => {
+                            if let Some(p) = pids.lock().unwrap().get(&id) {
+                                crate::host::kill_pid(*p, force);
+                            }
+                        }
+                        HostMsg::Ping { id } => {
+                            put(&GuestMsg::Pong { id });
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+    })
+}

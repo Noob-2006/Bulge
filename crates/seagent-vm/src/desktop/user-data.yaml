@@ -122,6 +122,41 @@ write_files:
       Name=seagent text input
       Exec=/usr/local/bin/seagent-text-input
       NoDisplay=true
+  # The in-VM shell: seagent's guest agent (seagent-vm-guest, `service` role) on virtio-serial
+  # port seagent0. It starts as root (the port and the fw_cfg channel key are root-only), then
+  # drops to the desktop user for good, so the agent's shell commands run as `seagent` in
+  # ~/workspace with DISPLAY=:0 — on the screen the person watches. KillMode=process: GUI
+  # programs a command started stay up when the agent restarts.
+  - path: /etc/systemd/system/seagent-agent.service
+    content: |
+      [Unit]
+      Description=seagent: in-VM shell agent (host channel on virtio port seagent0)
+      After=systemd-udevd.service
+      [Service]
+      ExecStart=/usr/local/sbin/seagent-agent-start
+      Restart=always
+      RestartSec=1
+      KillMode=process
+      [Install]
+      WantedBy=multi-user.target
+  - path: /usr/local/sbin/seagent-agent-start
+    permissions: "0755"
+    content: |
+      #!/bin/sh
+      # The host hands its own agent at every boot by fw_cfg (opt/seagent/agent: always its
+      # protocol, no image rebuild after an upgrade); the copy baked in at build time runs
+      # when there is none. Only a binary that has the `service` role is ever started.
+      modprobe qemu_fw_cfg 2>/dev/null || true
+      bin=/usr/local/sbin/seagent-vm-guest
+      f=/sys/firmware/qemu_fw_cfg/by_name/opt/seagent/agent/raw
+      if [ -r "$f" ]; then
+        mkdir -p /var/lib/seagent
+        if cat "$f" > /var/lib/seagent/agent.new && chmod 0755 /var/lib/seagent/agent.new && /var/lib/seagent/agent.new roles 2>/dev/null | grep -q service; then
+          mv -f /var/lib/seagent/agent.new /var/lib/seagent/seagent-vm-guest
+          bin=/var/lib/seagent/seagent-vm-guest
+        fi
+      fi
+      exec "$bin" service
   - path: /usr/local/sbin/seagent-provision
     permissions: "0755"
     content: |
@@ -153,6 +188,19 @@ write_files:
       systemctl set-default graphical.target
       systemctl enable lightdm
       systemctl enable seagent-cdp-relay.service
+      # The agent binary, from the seed server this build booted from (the SMBIOS serial
+      # names it: ds=nocloud;s=http://10.0.2.2:PORT/).
+      seed=$(sed -n 's/.*;s=\(http:[^;]*\).*/\1/p' /sys/class/dmi/id/product_serial 2>/dev/null)
+      a=/usr/local/sbin/seagent-vm-guest
+      if [ -n "$seed" ] && python3 -c 'import sys, urllib.request; open(sys.argv[2], "wb").write(urllib.request.urlopen(sys.argv[1], timeout=120).read())' "${seed%/}/seagent-vm-guest" "$a.new" 2>/dev/null \
+          && chmod 0755 "$a.new" && "$a.new" roles 2>/dev/null | grep -q service; then
+        mv -f "$a.new" "$a"
+        say "SEAGENT_AGENT_OK $(sha256sum "$a" | cut -d' ' -f1)"
+      else
+        rm -f "$a.new"
+        say SEAGENT_AGENT_MISSING
+      fi
+      systemctl enable seagent-agent.service
       # Later boots have no seed: do not wait on datasources.
       touch /etc/cloud/cloud-init.disabled
       apt-get clean
