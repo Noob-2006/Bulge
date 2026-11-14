@@ -919,7 +919,12 @@ mod tests {
             // Linux: the namespace sandbox does not mount them; macOS / Windows: the OS sandbox
             // (Seatbelt / AppContainer) cannot read them.
             let hidden = if cfg!(any(windows, target_os = "macos")) { "host home and keys not readable" } else { "host home and keys not mounted" };
-            assert!(w.contains(hidden) && w.to_lowercase().contains("build the guest image"), "{p:?}");
+            assert!(w.contains(hidden), "{p:?}");
+            // The way back to a microVM is offered only where one could run: without hardware
+            // virtualisation (no /dev/kvm, e.g. WSL without nested virtualisation) building the
+            // image would not help, and the warning names that blocker instead.
+            let lw = w.to_lowercase();
+            assert!(lw.contains("build the guest image") || lw.contains("virtualisation") || lw.contains("virtualization"), "{p:?}");
         }
         // The explicit opt-out (test rigs, operators who want the host): never rewritten.
         let env = ExecEnv::new(ExecConfig::parse(&json!({"backend": "local"})).unwrap());

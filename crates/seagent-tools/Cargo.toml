@@ -21,7 +21,7 @@ ureq.workspace = true
 toml.workspace = true # post-write TOML syntax lint (existing workspace dep)
 seagent-vm.workspace = true # microVM exec backend (B1): the `vm` backend delegates to seagent-vm
 base64.workspace = true # base64 frames on the guest channel (seagent-vm protocol)
-rusqlite = { version = "0.40", features = ["bundled"] } # sql_query on local SQLite files (opened read-only); same build as seagent-kernel's index
+rusqlite = { version = "0.41", features = ["bundled"] } # sql_query on local SQLite files (opened read-only); same build as seagent-kernel's index
 ring.workspace = true # RS256 JWT for GitHub App installation tokens (forge)
 
 [target.'cfg(unix)'.dependencies]

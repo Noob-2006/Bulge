@@ -94,7 +94,7 @@ pub fn sqlite(path: &std::path::Path, sql: &str, lim: &Limits) -> Result<Rows, S
     if !stmt.readonly() {
         return Err("SQLite reports this statement is not read-only".into());
     }
-    let columns: Vec<String> = stmt.column_names().iter().map(|s| s.to_string()).collect();
+    let columns: Vec<String> = stmt.column_names().map(|s| s.to_string()).collect();
     // Time limit: interrupt the connection from a watchdog thread.
     let handle = conn.get_interrupt_handle();
     let done = Arc::new(AtomicBool::new(false));

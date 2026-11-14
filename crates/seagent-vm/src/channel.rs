@@ -851,10 +851,8 @@ mod tests {
     fn a_proxied_vsock_retries_while_the_guest_is_not_listening_yet() {
         // vfkit accepts the unix connection, fails to dial the booting guest and closes it:
         // the host must reconnect, not report "guest channel closed".
-        let dir = std::env::temp_dir().join(format!("seagent-vsockproxy-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let sock = dir.join("v.sock");
-        let _ = std::fs::remove_file(&sock);
+        let dir = seagent_core::tmp::TempDir::new("seagent-vsockproxy");
+        let sock = dir.path().join("v.sock");
         let l = std::os::unix::net::UnixListener::bind(&sock).unwrap();
         let t = std::thread::spawn(move || {
             drop(l.accept().unwrap()); // guest not up yet
@@ -865,7 +863,6 @@ mod tests {
         let ch = Channel::connect(&sock, Transport::VsockProxy { port: 5000 }, Duration::from_secs(5)).unwrap();
         assert!(matches!(ch.expect(Duration::from_secs(2), "first frame").unwrap(), GuestMsg::Pong { id: 7 }), "the probed frame is handed back");
         t.join().unwrap();
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

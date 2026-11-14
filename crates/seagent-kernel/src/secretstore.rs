@@ -155,6 +155,8 @@ pub struct Options {
     pub keyring_tool: Option<PathBuf>,
     /// `systemd-creds` override.
     pub creds_tool: Option<PathBuf>,
+    /// TPM device override (tests point it at a stand-in file; `None` = `/dev/tpmrm0`, `/dev/tpm0`).
+    pub tpm_device: Option<PathBuf>,
 }
 
 impl Options {
@@ -183,6 +185,7 @@ impl Options {
             require_encryption: env(ENV_REQUIRE).is_some_and(|v| !matches!(v.trim(), "0" | "false" | "no")),
             keyring_tool: None,
             creds_tool: None,
+            tpm_device: None,
         }
     }
 
@@ -307,7 +310,10 @@ enum KeyringTool {
 /// can talk to)? Checked by capability detection and by `seagent secrets backend`.
 pub fn tpm_available(opts: &Options) -> bool {
     tool(opts, KeyringTool::SystemdCreds).is_some()
-        && ["/dev/tpmrm0", "/dev/tpm0"].iter().any(|d| Path::new(d).exists())
+        && match &opts.tpm_device {
+            Some(d) => d.exists(),
+            None => ["/dev/tpmrm0", "/dev/tpm0"].iter().any(|d| Path::new(d).exists()),
+        }
 }
 
 /// May the TPM be picked *automatically*? For an unprivileged user `systemd-creds` asks
@@ -1078,7 +1084,11 @@ mod tests {
     fn tpm_backend_seals_and_unseals_through_the_creds_tool() {
         let d = tmpdir();
         let tool = fake_creds(&d);
-        let opts = Options { backend: Some(Backend::Tpm), keyring_tool: Some(PathBuf::from("/nonexistent/secret-tool")), creds_tool: Some(tool), ..Default::default() };
+        // The sealing goes through the stand-in `systemd-creds`; the device only has to exist, so
+        // the test does not depend on the host having a TPM (WSL, CI runners have none).
+        let dev = d.join("tpmrm0");
+        fs::write(&dev, b"").unwrap();
+        let opts = Options { backend: Some(Backend::Tpm), keyring_tool: Some(PathBuf::from("/nonexistent/secret-tool")), creds_tool: Some(tool), tpm_device: Some(dev), ..Default::default() };
         let p = d.join("secrets.toml");
         let mut s = Store::open(&p, &opts).unwrap();
         s.set("K", "value-123456").unwrap();

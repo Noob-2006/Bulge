@@ -794,7 +794,7 @@ mod tests {
         assert!(!o.is_error, "{}", o.content);
         assert!(!o.content.contains("FOO-BAR-API-KEY") && !o.content.contains("hunter2-odd-name"), "the child still sees it: {}", o.content);
         // The plain-identifier path still works through the `unset` prelude.
-        seagent_security::envscrub::configure(true, &["SEAGENT-STRIP-NAME".into()], &[]);
+        seagent_security::envscrub::configure(true, &["SEAGENT_STRIP_NAME".into()], &[]);
         std::env::set_var("SEAGENT_STRIP_NAME", "hunter3");
         let o = Shell.call(&c, json!({"command":"env; echo done"}));
         std::env::remove_var("SEAGENT_STRIP_NAME");
