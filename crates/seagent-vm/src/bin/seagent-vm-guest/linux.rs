@@ -1476,20 +1476,35 @@ fn port_device(port: &str) -> Option<PathBuf> {
     })
 }
 
-/// (uid, gid, home) of `user` from the passwd database.
-fn lookup_user(user: &str) -> Result<(u32, u32, PathBuf), String> {
-    let c = CString::new(user).map_err(|e| e.to_string())?;
-    let mut pw: libc::passwd = unsafe { std::mem::zeroed() };
-    let mut buf = vec![0 as libc::c_char; 16384];
-    let mut out: *mut libc::passwd = std::ptr::null_mut();
-    // SAFETY: getpwnam_r writes into `pw` / `buf`, both outliving the call.
-    let rc = unsafe { libc::getpwnam_r(c.as_ptr(), &mut pw, buf.as_mut_ptr(), buf.len(), &mut out) };
-    if rc != 0 || out.is_null() {
-        return Err(format!("no user `{user}` in this system"));
+/// (uid, gid, home) of `user` in `/etc/passwd` text. Read directly rather than through NSS:
+/// the agent is a static binary (musl, or static glibc whose NSS modules would have to match
+/// the guest's), and the desktop user is a local account cloud-init created.
+pub fn passwd_entry(passwd: &str, user: &str) -> Option<(u32, u32, PathBuf)> {
+    passwd.lines().find_map(|l| {
+        let f: Vec<&str> = l.split(':').collect();
+        (f.len() >= 7 && f[0] == user).then(|| Some((f[2].parse().ok()?, f[3].parse().ok()?, PathBuf::from(f[5]))))?
+    })
+}
+
+/// `user`'s supplementary groups in `/etc/group` text, plus its primary `gid`.
+pub fn group_ids(group: &str, user: &str, gid: u32) -> Vec<u32> {
+    let mut v = vec![gid];
+    for l in group.lines() {
+        let f: Vec<&str> = l.split(':').collect();
+        if f.len() >= 4 && f[3].split(',').any(|m| m.trim() == user) {
+            if let Ok(g) = f[2].parse::<u32>() {
+                if !v.contains(&g) {
+                    v.push(g);
+                }
+            }
+        }
     }
-    // SAFETY: on success pw_dir points into `buf`, NUL-terminated.
-    let home = PathBuf::from(unsafe { CStr::from_ptr(pw.pw_dir) }.to_string_lossy().into_owned());
-    Ok((pw.pw_uid, pw.pw_gid, home))
+    v
+}
+
+fn lookup_user(user: &str) -> Result<(u32, u32, PathBuf), String> {
+    let passwd = std::fs::read_to_string("/etc/passwd").map_err(|e| format!("/etc/passwd: {e}"))?;
+    passwd_entry(&passwd, user).ok_or_else(|| format!("no user `{user}` in /etc/passwd"))
 }
 
 /// Become `user` (its uid, gid and supplementary groups — the desktop's audio/video/sudo) for
@@ -1498,11 +1513,11 @@ fn drop_to_user(user: &str, uid: u32, gid: u32) -> Result<(), String> {
     if uid == 0 {
         return Err(format!("`{user}` is root; the service only runs commands as an ordinary user"));
     }
-    let c = CString::new(user).map_err(|e| e.to_string())?;
+    let groups: Vec<libc::gid_t> = group_ids(&std::fs::read_to_string("/etc/group").unwrap_or_default(), user, gid).into_iter().map(|g| g as libc::gid_t).collect();
     // SAFETY: plain syscalls on ourselves, before any command thread exists.
     unsafe {
-        if libc::initgroups(c.as_ptr(), gid as _) != 0 {
-            return Err(format!("initgroups({user}): {}", std::io::Error::last_os_error()));
+        if libc::setgroups(groups.len() as _, groups.as_ptr()) != 0 {
+            return Err(format!("setgroups({user}): {}", std::io::Error::last_os_error()));
         }
         if libc::setgid(gid) != 0 {
             return Err(format!("setgid({gid}): {}", std::io::Error::last_os_error()));
@@ -1896,6 +1911,16 @@ mod unit {
         for bad in [&["--user", "root"][..], &["--user", "a b"], &["--user"], &["--workspace", "rel/dir"], &["--workspace", "/a/../etc"], &["--port", "../x"], &["--frobnicate"]] {
             assert!(s(bad).is_err(), "{bad:?}");
         }
+    }
+
+    #[test]
+    fn the_desktop_user_and_its_groups_come_from_the_local_files() {
+        let passwd = "root:x:0:0:root:/root:/bin/bash\nseagent:x:1000:1000:seagent desktop:/home/seagent:/bin/bash\nseagentx:x:1001:1001::/home/x:/bin/sh\nbroken:x:zz:1::/h:/bin/sh\n";
+        assert_eq!(passwd_entry(passwd, "seagent"), Some((1000, 1000, PathBuf::from("/home/seagent"))));
+        assert_eq!(passwd_entry(passwd, "seagen"), None, "whole names only");
+        assert_eq!(passwd_entry(passwd, "broken"), None);
+        let group = "root:x:0:\naudio:x:29:seagent\nvideo:x:44:other,seagent\nsudo:x:27:seagentx\nseagent:x:1000:\n";
+        assert_eq!(group_ids(group, "seagent", 1000), vec![1000, 29, 44]);
     }
 
     #[test]
