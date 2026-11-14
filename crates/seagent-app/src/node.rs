@@ -23,6 +23,10 @@
 //! ARP methods: see [`METHODS`].
 
 pub(crate) mod a11y;
+// The accessibility substitutes for AT-SPI (`a11y::act` dispatches to them). Their pure parts
+// (refs, role names, parsers) compile and are tested on every OS.
+pub(crate) mod a11y_macos;
+pub(crate) mod a11y_windows;
 mod cdp;
 #[cfg(any(windows, target_os = "macos"))]
 pub(crate) mod host_os;
@@ -1095,6 +1099,16 @@ pub(crate) fn with_env<R>(env: &[(String, String)], f: impl FnOnce() -> R) -> R 
     let r = f();
     ENV.with(|e| *e.borrow_mut() = prev);
     r
+}
+
+/// `k` as commands spawned on this thread see it ([`with_env`] first, then this process).
+#[cfg_attr(not(windows), allow(dead_code))]
+pub(crate) fn env_var(k: &str) -> Option<String> {
+    match ENV.with(|e| e.borrow().iter().rev().find(|(n, _)| n == k).map(|(_, v)| v.clone())) {
+        Some(v) if v.is_empty() => None,
+        Some(v) => Some(v),
+        None => std::env::var(k).ok().filter(|v| !v.is_empty()),
+    }
 }
 
 #[cfg(not(any(windows, target_vendor = "apple")))]

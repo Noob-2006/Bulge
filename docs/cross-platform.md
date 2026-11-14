@@ -32,6 +32,7 @@
 | 檔案權限 0600/0700 | chmod | 擁有者 DACL | chmod | chmod | 資料保護等級 |
 | 秘密保管 | systemd-creds(TPM) / libsecret | DPAPI / Credential Manager | Keychain | Android Keystore | Keychain |
 | 鍵鼠 / 螢幕 | xdotool / ydotool / Xvfb | SendInput / DXGI 擷取 | CGEvent / ScreenCaptureKit | AccessibilityService / MediaProjection | — |
+| 桌面無障礙樹（computer_use / computer / computer.act 的 list_apps、list_windows、capture ax/som、set_value、元素點擊、bring_to_front） | AT-SPI（python3-gi 或 gdbus） | UI Automation（`IUIAutomation` control view：Invoke／Toggle／Select／Expand／ValuePattern）＋ Win32（`EnumWindows` Alt+Tab 規則、`SetForegroundWindow`） | Accessibility API（System Events／JXA，需「輔助使用」授權） | — | — |
 | 錄音 / 通知 | pw-record / dunst | WASAPI / Toast | AVFoundation / UserNotifications | 系統 API | 系統 API |
 | syslog | /dev/log | Windows Event Log | os_log / UDP syslog | logcat | os_log |
 

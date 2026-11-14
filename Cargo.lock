@@ -622,6 +622,7 @@ dependencies = [
  "serde_json",
  "toml",
  "ureq",
+ "windows",
  "windows-sys",
 ]
 

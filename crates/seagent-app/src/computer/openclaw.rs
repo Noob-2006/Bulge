@@ -389,7 +389,7 @@ impl ComputerTool {
             }
             a if !self.actions.contains(&a) => {
                 return Err(if needs_cua(a) {
-                    format!("COMPUTER_UNSUPPORTED_ACTION: {action} needs cua-driver on this Linux gateway (`seagent computer-use install`, then [computer_use] backend = \"auto\" or \"cua\")")
+                    format!("COMPUTER_UNSUPPORTED_ACTION: {action} needs cua-driver on this {} gateway (`seagent computer-use install`, then [computer_use] backend = \"auto\" or \"cua\")", std::env::consts::OS)
                 } else {
                     format!("Unknown action: {a}")
                 })
@@ -617,7 +617,7 @@ impl Desk for NativeDesk {
             "bring_to_front" => return a11y::act(p),
             "invoke_menu" => {
                 if p["deliveryMode"] == "background" {
-                    return Err("COMPUTER_UNSUPPORTED_ACTION: native invoke_menu activates menu items through AT-SPI only".into());
+                    return Err(format!("COMPUTER_UNSUPPORTED_ACTION: native invoke_menu activates menu items through {} only", native::A11Y));
                 }
                 return self.invoke_menu(p);
             }
@@ -664,7 +664,7 @@ impl Desk for NativeDesk {
                 return Ok(json!({"ok": true, "effect": "unverifiable", "details": {"app": app}}));
             }
             "kill_app" | "escalate_scope" | "get_recording_state" | "start_recording" | "stop_recording" | "replay_trajectory" => {
-                return Err(format!("COMPUTER_UNSUPPORTED_ACTION: {action} needs cua-driver on this Linux gateway (`seagent computer-use install`, then [computer_use] backend = \"auto\" or \"cua\")"));
+                return Err(format!("COMPUTER_UNSUPPORTED_ACTION: {action} needs cua-driver on this {} gateway (`seagent computer-use install`, then [computer_use] backend = \"auto\" or \"cua\")", std::env::consts::OS));
             }
             _ => {}
         }
@@ -676,7 +676,7 @@ impl Desk for NativeDesk {
             return a11y::act(p).map(|v| json!({"ok": v["ok"], "effect": "unverifiable", "route": "accessibility", "details": v}));
         }
         if p["deliveryMode"] == "background" {
-            return Err("COMPUTER_UNSUPPORTED_ACTION: background delivery is unavailable on this desktop (input is global XTest/uinput injection)".into());
+            return Err(format!("COMPUTER_UNSUPPORTED_ACTION: background delivery is unavailable on this desktop (input is global {} injection)", native::INJECTION));
         }
         // Window-targeted pixel input: raise the window first (foreground delivery).
         if let Some(w) = p["windowRef"].as_str() {

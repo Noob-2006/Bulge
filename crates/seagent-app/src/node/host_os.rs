@@ -303,12 +303,10 @@ fn computer(policy: &HostPolicy, p: &Value, t: Duration) -> Result<Value, String
             run_cmd(&["open", "-a", app], t)?;
             return Ok(json!({"ok": true, "app": app}));
         }
-        "list_apps" | "list_windows" | "get_accessibility_tree" | "get_window_state" | "set_value" | "bring_to_front" => {
-            return Err(format!("computer.act action `{action}` (accessibility tree) is not available on {os} nodes yet; act by coordinate on a screenshot"));
-        }
-        "left_click" | "double_click" if p["x"].is_null() && p["y"].is_null() && p["elementRef"].is_string() => {
-            return Err(format!("element clicks need the accessibility tree, which {os} nodes do not offer yet; pass x and y"));
-        }
+        // Windows: UI Automation + Win32; macOS: the Accessibility API through System Events
+        // (`a11y_windows` / `a11y_macos`, dispatched by `a11y::act`).
+        "list_apps" | "list_windows" | "get_accessibility_tree" | "get_window_state" | "set_value" | "bring_to_front" => return super::a11y::act(p),
+        "left_click" | "double_click" if p["x"].is_null() && p["y"].is_null() && p["elementRef"].is_string() => return super::a11y::act(p),
         "kill_app" | "zoom" | "invoke_menu" | "browser_prepare" | "browser_dialog" | "browser_set_input_files" | "browser_download" | "browser_pointer" | "escalate_scope" | "get_recording_state" | "start_recording" | "stop_recording" | "replay_trajectory" => {
             return Err(format!("computer.act action `{action}` is not available on {os} nodes"));
         }

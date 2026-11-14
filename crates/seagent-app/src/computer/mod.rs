@@ -6,7 +6,8 @@
 //!   coordinates, windowRef / elementRef / observationId targets, zoom, menus, recordings).
 //!
 //! Drivers: cua-driver over stdio MCP ([`cua`]) when installed (or forced
-//! with `backend = "cua"`), else the native xdotool / ydotool + AT-SPI path ([`native`]) the
+//! with `backend = "cua"`), else the native path ([`native`]: xdotool / ydotool + AT-SPI on Linux,
+//! SendInput + UI Automation on Windows, CGEvent + the Accessibility API on macOS) the
 //! paired-node `computer.act` already uses. Both act on the Bot Desktop when one runs for this
 //! home, and every call is refused while a human holds its lease.
 
