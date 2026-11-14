@@ -217,7 +217,7 @@ jobs:
           b=apps/desktop/target/${{ matrix.triple }}/release/bundle
           case "${{ runner.os }}" in
             Windows) for f in "$b"/nsis/*.exe; do 7z l "$f" | grep -E 'vm[\/]bundle\.json' >/dev/null || { echo "::error::$f has no vm/bundle.json"; exit 1; }; done ;;
-            macOS) test -f "$(ls -d "$b"/macos/*.app | head -1)/Contents/Resources/vm/bundle.json" ;;
+            macOS) apps=("$b"/macos/*.app); test -f "${apps[0]}/Contents/Resources/vm/bundle.json" ;;
             Linux) for f in "$b"/deb/*.deb; do dpkg-deb -c "$f" | grep '/vm/bundle.json' >/dev/null || { echo "::error::$f has no vm/bundle.json"; exit 1; }; done ;;
           esac
       - name: Collect
@@ -248,9 +248,11 @@ jobs:
             apps/desktop -> target
       - name: Java 17 + NDK (preinstalled on the runner)
         run: |
-          echo "JAVA_HOME=$JAVA_HOME_17_X64" >> "$GITHUB_ENV"
-          echo "NDK_HOME=$ANDROID_NDK_LATEST_HOME" >> "$GITHUB_ENV"
-          echo "ANDROID_NDK_HOME=$ANDROID_NDK_LATEST_HOME" >> "$GITHUB_ENV"
+          {
+            echo "JAVA_HOME=$JAVA_HOME_17_X64"
+            echo "NDK_HOME=$ANDROID_NDK_LATEST_HOME"
+            echo "ANDROID_NDK_HOME=$ANDROID_NDK_LATEST_HOME"
+          } >> "$GITHUB_ENV"
       - name: Tauri CLI
         run: cargo install tauri-cli --version "$TAURI_CLI_VERSION" --locked
       - name: Generate the Android project
@@ -276,7 +278,8 @@ jobs:
         run: |
           set -euo pipefail
           echo "$ANDROID_KEYSTORE" | base64 -d > "$RUNNER_TEMP/release.jks"
-          bt="$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -1)"
+          bts=("$ANDROID_HOME"/build-tools/*)
+          bt="$(printf '%s\n' "${bts[@]}" | sort -V | tail -1)"
           for apk in apps/desktop/src-tauri/gen/android/app/build/outputs/apk/*/release/*-unsigned.apk; do
             "$bt/zipalign" -f 4 "$apk" "${apk%-unsigned.apk}-aligned.apk"
             "$bt/apksigner" sign --ks "$RUNNER_TEMP/release.jks" --ks-pass env:ANDROID_KEYSTORE_PASSWORD \
@@ -360,7 +363,7 @@ jobs:
         run: |
           set -euo pipefail
           # release.yml creates the release for this tag; wait for it (up to an hour) rather than racing it.
-          for i in $(seq 1 120); do
+          for _ in $(seq 1 120); do
             gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1 && break
             sleep 30
           done

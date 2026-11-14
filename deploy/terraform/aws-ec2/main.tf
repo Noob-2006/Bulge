@@ -93,8 +93,8 @@ resource "aws_instance" "seagent" {
   # The cloud-init file fetches the key from Secrets Manager into /run/seagent-api-key (0600) first.
   user_data = templatefile("${path.module}/user-data.tftpl", {
     seagent_cloud_config = file("${path.module}/../../cloud-init/seagent.yaml")
-    secret_id        = aws_secretsmanager_secret.api_key.id
-    region           = var.region
+    secret_id            = aws_secretsmanager_secret.api_key.id
+    region               = var.region
   })
   user_data_replace_on_change = true
   tags                        = { Name = "seagent-agent" }

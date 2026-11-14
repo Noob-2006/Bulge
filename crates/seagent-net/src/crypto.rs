@@ -441,7 +441,7 @@ impl Aes {
     pub fn encrypt_block(&self, b: &mut [u8; 16]) {
         let nr = self.rk.len() - 1;
         xor16(b, &self.rk[0]);
-        for r in 1..=nr {
+        for (r, k) in self.rk.iter().enumerate().skip(1) {
             for x in b.iter_mut() {
                 *x = SBOX[*x as usize];
             }
@@ -449,7 +449,7 @@ impl Aes {
             if r != nr {
                 mix_columns(b);
             }
-            xor16(b, &self.rk[r]);
+            xor16(b, k);
         }
     }
 
