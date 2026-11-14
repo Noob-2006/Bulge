@@ -20,6 +20,7 @@ fancy-regex = { version = "0.14", default-features = false, features = ["std", "
 ring.workspace = true
 # Manifest signatures and detached `.sig` files are base64, not hex (already in the tree).
 base64.workspace = true
+miniz_oxide = "0.9" # deflate for the audit evidence ZIP (already in the tree via seagent-media)
 
 [target.'cfg(unix)'.dependencies]
 libc.workspace = true # getuid / gethostname (src/os.rs)

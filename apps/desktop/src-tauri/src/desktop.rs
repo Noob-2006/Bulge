@@ -254,3 +254,109 @@ pub fn check_updates<R: Runtime>(app: AppHandle<R>, interactive: bool) {
         }
     });
 }
+
+// ───────────────────────── downloads ─────────────────────────
+
+/// Where each download in flight is going (macOS reports no path when it finishes).
+fn downloads() -> &'static std::sync::Mutex<std::collections::HashMap<String, std::path::PathBuf>> {
+    static D: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, std::path::PathBuf>>> = std::sync::OnceLock::new();
+    D.get_or_init(Default::default)
+}
+
+/// A file name the console suggested, reduced to something safe in any folder.
+pub(crate) fn safe_file_name(suggested: &str) -> String {
+    let base = suggested.rsplit(['/', '\\']).next().unwrap_or("");
+    let mut s: String = base.chars().map(|c| if c.is_control() || matches!(c, '<' | '>' | ':' | '"' | '|' | '?' | '*') { '_' } else { c }).collect();
+    s = s.trim().trim_matches('.').to_string();
+    // Windows reserved device names (CON, NUL, COM1 …) are not files.
+    let stem = s.split('.').next().unwrap_or("").to_ascii_uppercase();
+    let reserved = matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL") || ((stem.starts_with("COM") || stem.starts_with("LPT")) && stem.len() == 4 && stem.as_bytes()[3].is_ascii_digit());
+    if s.is_empty() || reserved {
+        s = format!("seagent-download{}", if s.is_empty() { String::new() } else { format!("-{s}") });
+    }
+    s.chars().take(180).collect()
+}
+
+/// `dir/name`, or `dir/name (1).ext`, `(2)` … when that exists already.
+pub(crate) fn unique_path(dir: &std::path::Path, name: &str) -> std::path::PathBuf {
+    let p = dir.join(name);
+    if !p.exists() {
+        return p;
+    }
+    // `a.tar.gz`-style names keep their whole extension; `.cef.log` too.
+    let (stem, ext) = match name.find('.') {
+        Some(i) if i > 0 => (&name[..i], &name[i..]),
+        _ => (name, ""),
+    };
+    (1..10_000).map(|n| dir.join(format!("{stem} ({n}){ext}"))).find(|p| !p.exists()).unwrap_or(p)
+}
+
+/// The console's downloads (`<a download>` of a blob: — the audit export, chat exports, CSVs —
+/// or a file the local agent serves): saved straight into the user's Downloads folder under a
+/// unique name, then a dialog says where, with a button to show it in the file manager.
+/// Anything not from the console itself is refused.
+pub fn on_download<R: Runtime>(w: &tauri::Webview<R>, ev: tauri::webview::DownloadEvent<'_>) -> bool {
+    use tauri::webview::DownloadEvent;
+    match ev {
+        DownloadEvent::Requested { url, destination } => {
+            if !crate::navigation_allowed(&url) {
+                return false;
+            }
+            let app = w.app_handle();
+            let dir = app.path().download_dir().or_else(|_| app.path().home_dir()).unwrap_or_else(|_| std::env::temp_dir());
+            let _ = std::fs::create_dir_all(&dir);
+            let suggested = destination.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+            let p = unique_path(&dir, &safe_file_name(&suggested));
+            downloads().lock().unwrap_or_else(|e| e.into_inner()).insert(url.to_string(), p.clone());
+            *destination = p;
+            true
+        }
+        DownloadEvent::Finished { url, path, success } => {
+            let planned = downloads().lock().unwrap_or_else(|e| e.into_inner()).remove(url.as_str());
+            let app = w.app_handle().clone();
+            match path.or(planned).filter(|_| success) {
+                Some(p) => {
+                    let shown = p.display().to_string();
+                    let app2 = app.clone();
+                    app.dialog()
+                        .message(format!("{}\n\n{shown}", t("檔案已存到「下載」資料夾：", "Saved to your Downloads folder:")))
+                        .title("SE Agent")
+                        .buttons(MessageDialogButtons::OkCancelCustom(t("在資料夾中顯示", "Show in folder").into(), t("關閉", "Close").into()))
+                        .show(move |reveal| {
+                            if reveal {
+                                use tauri_plugin_opener::OpenerExt;
+                                if app2.opener().reveal_item_in_dir(&p).is_err() {
+                                    let _ = app2.opener().open_path(p.parent().unwrap_or(&p).display().to_string(), None::<&str>);
+                                }
+                            }
+                        });
+                }
+                None => error(&app, t("下載失敗，檔案沒有存下來。", "The download failed; nothing was saved.")),
+            }
+            true
+        }
+        _ => true,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn download_names_are_safe_and_unique() {
+        assert_eq!(safe_file_name("seagent-audit-20261015-20261114.zip"), "seagent-audit-20261015-20261114.zip");
+        assert_eq!(safe_file_name("..\\..\\evil:name?.csv"), "evil_name_.csv");
+        assert_eq!(safe_file_name("../../etc/passwd"), "passwd");
+        assert_eq!(safe_file_name(""), "seagent-download");
+        assert_eq!(safe_file_name("NUL.txt"), "seagent-download-NUL.txt");
+        let dir = std::env::temp_dir().join(format!("seagent-dl-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        assert_eq!(unique_path(&dir, "a.cef.log"), dir.join("a.cef.log"));
+        std::fs::write(dir.join("a.cef.log"), b"x").unwrap();
+        assert_eq!(unique_path(&dir, "a.cef.log"), dir.join("a (1).cef.log"));
+        std::fs::write(dir.join("a (1).cef.log"), b"x").unwrap();
+        assert_eq!(unique_path(&dir, "a.cef.log"), dir.join("a (2).cef.log"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}

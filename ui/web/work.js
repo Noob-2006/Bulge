@@ -122,16 +122,24 @@ async function workFrame(force) {
   } finally { W.busy = false; }
 }
 
+// The frame loop runs only while the panel is open and the window visible (same rate as
+// before while visible); hidden, it stops entirely and restarts with a fresh frame on return.
 function workLoop() {
   clearInterval(W.timer);
-  if (!W.open) return;
+  if (!W.open || document.hidden) return;
   let n = 0;
   W.timer = setInterval(() => {
+    if (document.hidden) { clearInterval(W.timer); return; }
     n++;
     workFrame(false);
     if (n % 6 === 0) workRefresh();
   }, W.cur && W.cur.kind === 'desktop' ? 1200 : 700);
 }
+
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) clearInterval(W.timer);
+  else if (W.open) { workRefresh(); workFrame(true); workLoop(); }
+});
 
 async function workShow(on) {
   W.open = on;

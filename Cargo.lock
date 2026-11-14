@@ -775,6 +775,7 @@ dependencies = [
  "base64",
  "fancy-regex",
  "libc",
+ "miniz_oxide 0.9.1",
  "regex",
  "ring",
  "rustls",

@@ -19,7 +19,7 @@ const store = {
 const I18N = {
   'zh-Hant': {
     'conn.idle': '尚未連線', 'conn.connecting': '連線中…', 'conn.failed': '連線失敗，{s} 秒後重試', 'conn.ready': '已連線 · v{v}', 'conn.down': '連線中斷，{s} 秒後重試', 'conn.retry': '連不到 SE Agent，{s} 秒後重試', 'conn.renewing': '正在更新登入…', 'conn.signin': '需要登入', 'conn.renew_retry': '正在向 SE Agent App 取得登入，{s} 秒後重試',
-    'new': '新對話', 'boards': '儀表板', 'boards_all': '所有儀表板', 'devices': '裝置', 'control': '控制台', 'settings': '設定',
+    'new': '新對話', 'boards': '儀表板', 'boards_all': '所有儀表板', 'boards_tip': '儀表板：agent 為目前對話釘上的小工具與進度卡；在對話裡請它「建立儀表板」', 'devices': '裝置', 'control': '控制台', 'settings': '設定',
     'nav.ops': '總覽', 'nav.chat': '對話', 'nav.agents': '代理', 'nav.approvals': '核准', 'nav.audit': '稽核', 'nav.security': '安全', 'nav.sessions': '對話紀錄',
     'filter': '搜尋對話', 'back': '← 返回', 'palette': '指令', 'palette_ph': '跳到頁面、對話或指令…', 'jump': '↓ 最新', 'send_hint': 'Enter 送出 · Shift+Enter 換行',
     'pick': '選擇或建立一個對話', 'input': '交代 SE Agent 要做的事…  輸入 / 顯示指令', 'stop': '停止', 'send': '送出', 'working': '工作中',
@@ -42,7 +42,7 @@ const I18N = {
   },
   en: {
     'conn.idle': 'Not connected', 'conn.connecting': 'Connecting…', 'conn.failed': 'Connection failed, retrying in {s}s', 'conn.ready': 'Connected · v{v}', 'conn.down': 'Disconnected, retrying in {s}s', 'conn.retry': 'Cannot reach SE Agent, retrying in {s}s', 'conn.renewing': 'Renewing sign-in…', 'conn.signin': 'Sign-in needed', 'conn.renew_retry': 'Getting a sign-in from the SE Agent app, retrying in {s}s',
-    'new': 'New chat', 'boards': 'Dashboards', 'boards_all': 'All dashboards', 'devices': 'Devices', 'control': 'Control', 'settings': 'Settings',
+    'new': 'New chat', 'boards': 'Dashboards', 'boards_all': 'All dashboards', 'boards_tip': 'Dashboard: the widgets and progress card the agent pins for this conversation; ask it to "make a dashboard"', 'devices': 'Devices', 'control': 'Control', 'settings': 'Settings',
     'nav.ops': 'Overview', 'nav.chat': 'Chat', 'nav.agents': 'Agents', 'nav.approvals': 'Approvals', 'nav.audit': 'Audit', 'nav.security': 'Security', 'nav.sessions': 'Conversations',
     'filter': 'Search conversations', 'back': '← Back', 'palette': 'Commands', 'palette_ph': 'Jump to a page, conversation or command…', 'jump': '↓ Latest', 'send_hint': 'Enter to send · Shift+Enter for newline',
     'pick': 'Pick or start a conversation', 'input': 'Tell seagent what to do…  / for commands', 'stop': 'Stop', 'send': 'Send', 'working': 'Working',

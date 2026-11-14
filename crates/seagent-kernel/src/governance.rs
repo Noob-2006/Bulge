@@ -24,7 +24,9 @@ pub struct AuditConfig {
     /// Rotate (seal + archive) the live segment past this size.
     pub rotate_mb: u64,
     /// Also record read-only app-server requests that do not expose content (`*.list` …).
-    /// Content reads (`session.history`, live views) and every write are always recorded.
+    /// Without it, content reads (`session.history`, live-view frames, a dashboard) and the
+    /// state the console polls are recorded once per actor and subject per 10-minute window
+    /// (repeats coalesced and counted); with it, every call. Writes and refusals: always.
     pub log_reads: bool,
     /// Seconds between SIEM export pumps in the daemon.
     pub export_secs: u64,

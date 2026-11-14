@@ -67,7 +67,9 @@ impl Role {
 
 /// Methods that return what was said, typed or shown.
 pub fn is_content_method(m: &str) -> bool {
-    const EXACT: &[&str] = &["session.history", "session.view", "session.attach", "events.subscribe", "subscribe", "logbook.list", "session.export", "session.transcript", "chat.send", "message.send", "ui.chat.export"];
+    const EXACT: &[&str] = &["session.history", "session.view", "session.attach", "events.subscribe", "subscribe", "logbook.list", "session.export", "session.transcript", "chat.send", "message.send", "ui.chat.export",
+        // A conversation's dashboard: the widgets the agent pinned there.
+        "surfaces.poll", "surfaces.board", "surfaces.boards"];
     EXACT.contains(&m) || m.ends_with(".search") || m.ends_with(".transcript") || m.ends_with(".history") || m.starts_with("view.") || m.starts_with("memory.") || m.starts_with("ediscovery.")
 }
 
@@ -75,7 +77,7 @@ pub fn is_content_method(m: &str) -> bool {
 const OPERATOR_METHODS: &[&str] = &["shutdown", "daemon.", "channel.", "channels.", "plugin.restart", "plugins.restart", "gateway.restart", "node.", "nodes.", "device.", "devices."];
 
 /// The `audit.*` methods an auditor may call (all read-only).
-pub const AUDITOR_AUDIT_READS: &[&str] = &["audit.query", "audit.verify", "audit.report"];
+pub const AUDITOR_AUDIT_READS: &[&str] = &["audit.query", "audit.verify", "audit.report", "audit.export"];
 
 fn operator_extra(m: &str) -> bool {
     OPERATOR_METHODS.iter().any(|p| if p.ends_with('.') { m.starts_with(p) } else { m == *p })
@@ -464,7 +466,7 @@ mod tests {
         for m in ["gate.answer", "session.review.set", "audit.prune", "audit.hold", "audit.rotate", "config.set", "secrets.set", "some.new.method"] {
             assert!(au.permits(m).is_err(), "auditor may not call {m}");
         }
-        for m in ["audit.query", "audit.verify", "audit.report", "session.review.list", "session.review.get", "gate.pending", "usage.query"] {
+        for m in ["audit.query", "audit.verify", "audit.report", "audit.export", "session.review.list", "session.review.get", "gate.pending", "usage.query"] {
             assert!(au.permits(m).is_ok(), "auditor reads {m}");
         }
         assert!(au.permits_http("POST", "/plugins/x").is_err());
@@ -479,7 +481,7 @@ mod tests {
         for m in ["session.list", "gate.pending", "models.list", "surfaces.list"] {
             assert!(op.permits(m).is_ok() && au.permits(m).is_ok() && us.permits(m).is_ok(), "{m}");
         }
-        for m in ["session.history", "session.view", "session.attach", "events.subscribe", "subscribe", "view.browser.frame", "memory.search", "logbook.list"] {
+        for m in ["session.history", "session.view", "session.attach", "events.subscribe", "subscribe", "view.browser.frame", "memory.search", "logbook.list", "surfaces.board", "surfaces.poll"] {
             assert!(op.permits(m).is_err() && au.permits(m).is_err(), "{m} is content");
             assert!(us.permits(m).is_ok() && ad.permits(m).is_ok(), "{m}");
         }

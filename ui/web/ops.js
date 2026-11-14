@@ -439,7 +439,26 @@ VIEWS.security = {
 };
 
 // ── 06 audit ──
-const AUD = { kind: '', actor: '', outcome: '', session: '', limit: 200, verify: null };
+const AUD = { kind: '', actor: '', outcome: '', session: '', limit: 200, verify: null, exFrom: '', exTo: '', exFormat: 'bundle', exLast: null };
+const AUD_FORMATS = () => [
+  ['bundle', L('證據包（ZIP：紀錄＋報告＋雜湊清單＋驗證程式）', 'Evidence package (ZIP: records + report + hashes + checker)')],
+  ['jsonl', L('JSONL（每筆原文，含雜湊鏈欄位）', 'JSONL (every record verbatim, with chain fields)')],
+  ['csv', L('CSV（所有欄位，含 seq / prev / hash）', 'CSV (all columns incl. seq / prev / hash)')],
+  ['cef', 'CEF (ArcSight)'],
+  ['leef', 'LEEF (QRadar)'],
+];
+const ymd = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+// Save a file the page made. In a browser this is the browser's download; inside the SE Agent
+// app the native shell puts it in the Downloads folder and says where (desktop on_download).
+function saveBlob(blob, name) {
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = name;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 60000);
+}
 VIEWS.audit = {
   title: () => L('稽核紀錄', 'Audit trail'),
   async render(el) {
@@ -454,10 +473,17 @@ VIEWS.audit = {
     h += secH('01', L('完整性', 'Integrity'), '');
     h += v ? `<div class="verify ${v.ok ? 'good' : 'badv'}"><span class="star ${v.ok ? 'ok' : 'crit'}" style="--size:14px"></span><div><strong>${v.ok ? L('雜湊鏈完整', 'Hash chain intact') : L('雜湊鏈斷裂', 'Hash chain broken')}</strong> · ${ov(v.events ?? '')} ${L('筆', 'records')} · seq ${ov(v.first_seq ?? '')}–${ov(v.last_seq ?? '')} · ${ov(v.segments ?? '')} ${L('個區段', 'segment(s)')}${v.error ? ` · <span class="crit">${ov(v.error)}</span>` : ''}<br><code>head ${ov(v.head || '')}</code>${v.anchor ? `<br><code>anchor ${ov(v.anchor)}</code>` : ''}</div><span style="margin-left:auto"><button class="btn ghost small" id="auVerify" data-read>${L('重新驗證', 'Verify again')}</button></span></div>`
       : `<div class="verify"><span class="star" style="--size:14px"></span><div>${L('每筆稽核紀錄都串在 SHA-256 雜湊鏈上；竄改、刪除或重排任何一筆，驗證都會從那裡斷掉。', 'Every record is chained with SHA-256; editing, deleting or reordering any line breaks verification from that point.')}</div><span style="margin-left:auto"><button class="btn small" id="auVerify" data-read>${L('驗證雜湊鏈', 'Verify chain')}</button></span></div>`;
-    h += '</section><section>' + secH('02', L('事件', 'Events'), `${rows.length} ${L('筆', 'shown')}`);
-    h += `<div class="toolbar"><input type="search" id="auKind" placeholder="${L('類型（如 auth、approval、gate）', 'kind (auth, approval, gate…)')}" value="${ov(AUD.kind)}" data-read><input type="search" id="auActor" placeholder="${L('執行者', 'actor')}" value="${ov(AUD.actor)}" data-read><input type="search" id="auSess" placeholder="session" value="${ov(AUD.session)}" data-read><select id="auOut" data-read><option value="">${L('所有結果', 'any outcome')}</option>${['allow', 'deny', 'ok', 'error'].map((o) => `<option${AUD.outcome === o ? ' selected' : ''}>${o}</option>`).join('')}</select><select id="auLim" data-read>${[100, 200, 500, 1000].map((n) => `<option${AUD.limit === n ? ' selected' : ''}>${n}</option>`).join('')}</select><button class="btn ghost small" id="auGo" data-read>${L('查詢', 'Query')}</button><button class="btn ghost small" id="auCsv" data-read>CSV</button><button class="btn ghost small" id="auReport" data-read>${L('稽核報告（30 天）', 'Audit report (30 d)')}</button></div>`;
+    // Export: a period of the whole stream as a file an auditor can take away and re-verify.
+    if (!AUD.exTo) { const now = new Date(); AUD.exTo = ymd(now); AUD.exFrom = ymd(new Date(now.getTime() - 30 * 86400000)); }
+    const last = AUD.exLast;
+    h += '</section><section>' + secH('02', L('匯出', 'Export'), L('給稽核用：整段期間、含雜湊鏈，可離線驗證', 'for auditors: a whole period, with the hash chain, verifiable offline'));
+    h += `<p class="faint">${L('證據包是一個 ZIP：每筆紀錄原文（records.jsonl）、同期間的稽核報告（report.html）、各檔 SHA-256 與匯出當下的雜湊鏈驗證結果（manifest.json），以及不需安裝 SE Agent 就能執行的驗證程式（verify.py）。匯出這個動作本身也會寫進稽核紀錄。', 'The evidence package is a ZIP: every record verbatim (records.jsonl), the audit report for the same period (report.html), the SHA-256 of every file and the chain check at export time (manifest.json), and a checker that runs without SE Agent (verify.py). The export itself is recorded in the audit trail.')}</p>`;
+    h += `<div class="toolbar"><label>${L('從', 'From')} <input type="date" id="exFrom" value="${ov(AUD.exFrom)}" data-read></label><label>${L('到', 'To')} <input type="date" id="exTo" value="${ov(AUD.exTo)}" data-read></label><select id="exFormat" data-read>${AUD_FORMATS().map(([v, n]) => `<option value="${v}"${AUD.exFormat === v ? ' selected' : ''}>${ov(n)}</option>`).join('')}</select><button class="btn small" id="exGo" data-read>${L('匯出', 'Export')}</button><button class="btn ghost small" id="auReport" data-read>${L('稽核報告（HTML）', 'Audit report (HTML)')}</button></div>`;
+    if (last) h += `<p class="${last.error ? 'bad' : 'faint'}" id="exLast">${last.error ? ov(last.error) : `${L('已匯出', 'Exported')} <code>${ov(last.filename)}</code> · ${ov(last.records)} ${L('筆', 'records')} · ${ov(Math.ceil(last.bytes / 1024))} KB · SHA-256 <code>${ov(String(last.sha256).slice(0, 16))}…</code>${last.truncated ? ` · <span class="crit">${L('超過單次上限，已截斷；請從', 'over the size limit, truncated; continue from')} ${ov(new Date(last.next_from_ms).toLocaleString())} ${L('再匯出一次', 'with another export')}</span>` : ''}`}</p>`;
+    h += '</section><section>' + secH('03', L('事件', 'Events'), `${rows.length} ${L('筆', 'shown')}`);
+    h += `<div class="toolbar"><input type="search" id="auKind" placeholder="${L('類型（如 auth、approval、gate）', 'kind (auth, approval, gate…)')}" value="${ov(AUD.kind)}" data-read><input type="search" id="auActor" placeholder="${L('執行者', 'actor')}" value="${ov(AUD.actor)}" data-read><input type="search" id="auSess" placeholder="session" value="${ov(AUD.session)}" data-read><select id="auOut" data-read><option value="">${L('所有結果', 'any outcome')}</option>${['allow', 'deny', 'ok', 'error'].map((o) => `<option${AUD.outcome === o ? ' selected' : ''}>${o}</option>`).join('')}</select><select id="auLim" data-read>${[100, 200, 500, 1000].map((n) => `<option${AUD.limit === n ? ' selected' : ''}>${n}</option>`).join('')}</select><button class="btn ghost small" id="auGo" data-read>${L('查詢', 'Query')}</button><button class="btn ghost small" id="auCsv" data-read title="${L('只含下方表格顯示的列；完整、可驗證的匯出請用上方「匯出」', 'Only the rows in the table below; for a complete, verifiable export use Export above')}">${L('匯出畫面上的列 (CSV)', 'Export rows on screen (CSV)')}</button></div>`;
     h += err ? `<p class="bad">${ov(err)}</p>` : rows.length ? '<table class="kv"><tr><th>seq</th><th>' + L('時間', 'Time') + '</th><th>' + L('類型', 'Kind') + '</th><th>' + L('執行者', 'Actor') + '</th><th>' + L('對象', 'Target') + '</th><th>' + L('結果', 'Outcome') + '</th><th>session</th></tr>' + rows.slice().reverse().map((r) => `<tr><td class="mono faint">${ov(r.seq)}</td><td class="mono">${new Date(r.ts).toLocaleString()}</td><td class="mono" style="color:var(--gold-300)">${ov(r.kind)}</td><td>${ov((r.actor || {}).kind)}:${ov((r.actor || {}).name)}${(r.actor || {}).ip ? ` <span class="faint mono">${ov(r.actor.ip)}</span>` : ''}</td><td class="mono">${ov(r.target)}</td><td class="${/deny|error/.test(r.outcome) ? 'crit' : /allow|ok/.test(r.outcome) ? 'ok' : ''}">${ov(r.outcome)}</td><td class="mono">${r.session ? `<a href="#" data-open="${ov(r.session)}">${ov(r.session).slice(0, 10)}</a>` : ''}</td></tr>`).join('') + '</table>' : `<div class="none">${L('沒有符合的紀錄。', 'No matching records.')}</div>`;
-    h += '</section><section>' + secH('03', L('對話覆核', 'Session reviews'), '');
+    h += '</section><section>' + secH('04', L('對話覆核', 'Session reviews'), '');
     let reviews = [];
     try { reviews = await S.arp.call('session.review.list', { limit: 50 }); } catch {}
     h += reviews.length ? '<table class="kv"><tr><th>' + L('對話', 'Session') + '</th><th>' + L('狀態', 'Status') + '</th><th>' + L('覆核者', 'Reviewer') + '</th><th>' + L('時間', 'Time') + '</th><th>' + L('註記', 'Note') + '</th></tr>' + reviews.map((r) => `<tr><td class="mono"><a href="#" data-open="${ov(r.session)}">${ov(sessName(r.session)).slice(0, 40)}</a></td><td class="${r.status === 'flagged' ? 'crit' : 'ok'}">${ov(r.status)}</td><td>${ov(r.by)}</td><td class="mono">${new Date(r.at_ms).toLocaleString()}</td><td>${ov(r.note || '')}</td></tr>`).join('') + '</table>' : `<div class="none">${L('還沒有覆核紀錄。在對話頁右上角的「覆核」標記。', 'No reviews yet. Mark one from the Review button in a conversation.')}</div>`;
@@ -465,13 +491,33 @@ VIEWS.audit = {
     if (S.view !== 'audit') return;
     el.innerHTML = h;
     bindCommon(el);
+    // The chosen dates as [from 00:00, the day after `to` 00:00) in local time.
+    const exRange = () => {
+      AUD.exFrom = el.querySelector('#exFrom').value; AUD.exTo = el.querySelector('#exTo').value; AUD.exFormat = el.querySelector('#exFormat').value;
+      const from = AUD.exFrom ? new Date(AUD.exFrom + 'T00:00:00').getTime() : 0;
+      const to = AUD.exTo ? new Date(AUD.exTo + 'T00:00:00').getTime() + 86400000 : 0;
+      return { from_ms: from, to_ms: to };
+    };
+    el.querySelector('#exGo').onclick = async (ev) => {
+      const b = ev.currentTarget;
+      const range = exRange();
+      if (range.from_ms && range.to_ms && range.from_ms >= range.to_ms) { toast(L('開始日期要早於結束日期', 'The start date must be before the end date'), true); return; }
+      b.disabled = true; b.textContent = L('匯出中…', 'Exporting…');
+      try {
+        const r = await S.arp.call('audit.export', { ...range, format: AUD.exFormat });
+        const body = r.encoding === 'base64' ? Uint8Array.from(atob(r.data), (c) => c.charCodeAt(0)) : r.data;
+        saveBlob(new Blob([body], { type: r.content_type || 'application/octet-stream' }), r.filename);
+        AUD.exLast = { filename: r.filename, records: r.records, bytes: r.bytes, sha256: r.sha256, truncated: r.truncated, next_from_ms: r.next_from_ms };
+        // (Inside the app the native shell adds a second toast with the saved file's path.)
+        toast(L(`已匯出 ${r.records} 筆：${r.filename}`, `Exported ${r.records} records: ${r.filename}`));
+      } catch (e) { AUD.exLast = { error: e.message }; toast(e.message, true); }
+      if (S.view === 'audit') VIEWS.audit.render(el);
+    };
     el.querySelector('#auReport').onclick = async () => {
       try {
-        const r = await S.arp.call('audit.report', { from_ms: Date.now() - 30 * 86400000, to_ms: Date.now(), format: 'html' });
-        const a = document.createElement('a');
-        a.href = URL.createObjectURL(new Blob([r.text || JSON.stringify(r, null, 2)], { type: 'text/html' }));
-        a.download = `seagent-audit-report-${new Date().toISOString().slice(0, 10)}.html`;
-        a.click();
+        const range = exRange();
+        const r = await S.arp.call('audit.report', { ...range, format: 'html' });
+        saveBlob(new Blob([r.text || JSON.stringify(r, null, 2)], { type: 'text/html' }), `seagent-audit-report-${AUD.exFrom || 'start'}_${AUD.exTo || ymd(new Date())}.html`);
       } catch (e) { toast(e.message, true); }
     };
     const go = () => { AUD.kind = el.querySelector('#auKind').value.trim(); AUD.actor = el.querySelector('#auActor').value.trim(); AUD.session = el.querySelector('#auSess').value.trim(); AUD.outcome = el.querySelector('#auOut').value; AUD.limit = +el.querySelector('#auLim').value; VIEWS.audit.render(el); };
@@ -481,10 +527,7 @@ VIEWS.audit = {
     el.querySelector('#auCsv').onclick = () => {
       const cell = (x) => `"${String(x ?? '').replace(/"/g, '""')}"`;
       const csv = 'seq,ts,kind,actor_kind,actor,role,ip,target,outcome,session\n' + rows.map((r) => [r.seq, new Date(r.ts).toISOString(), r.kind, (r.actor || {}).kind, (r.actor || {}).name, (r.actor || {}).role, (r.actor || {}).ip, r.target, r.outcome, r.session].map(cell).join(',')).join('\n');
-      const a = document.createElement('a');
-      a.href = URL.createObjectURL(new Blob([csv], { type: 'text/csv' }));
-      a.download = `seagent-audit-${Date.now()}.csv`;
-      a.click();
+      saveBlob(new Blob(['﻿' + csv], { type: 'text/csv' }), `seagent-audit-rows-${ymd(new Date())}.csv`);
     };
   },
 };

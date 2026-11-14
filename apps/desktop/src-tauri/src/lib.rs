@@ -137,6 +137,10 @@ fn build_window<R: Runtime>(app: &tauri::App<R>, visible: bool) -> tauri::Result
         }
         false
     });
+    // Without a handler the webview's downloads (`<a download>` of a blob: from the console —
+    // the audit export, chat exports) have nowhere visible to go: save them into Downloads.
+    #[cfg(desktop)]
+    let b = b.on_download(|w, ev| desktop::on_download(&w, ev));
     #[cfg(desktop)]
     let b = b.title("SE Agent").inner_size(1200.0, 820.0).min_inner_size(820.0, 560.0).center().visible(visible);
     #[cfg(not(desktop))]

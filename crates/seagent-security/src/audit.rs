@@ -209,7 +209,7 @@ fn write_canon(v: &Value, out: &mut String) {
     }
 }
 
-fn chain_hash(prev: &str, body: &Value) -> String {
+pub(crate) fn chain_hash(prev: &str, body: &Value) -> String {
     let mut m = prev.as_bytes().to_vec();
     m.push(b'\n');
     m.extend_from_slice(canonical(body).as_bytes());
