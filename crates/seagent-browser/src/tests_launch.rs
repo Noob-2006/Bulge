@@ -1,4 +1,4 @@
-﻿//! `launch::launch` against stand-in browsers that behave like the ones that broke it:
+//! `launch::launch` against stand-in browsers that behave like the ones that broke it:
 //!
 //! * Edge on Windows relaunches itself when it inherits an AppCompat layer
 //!   (`__COMPAT_LAYER=DetectorsAppHealth`, set on everything started from Explorer, so the
