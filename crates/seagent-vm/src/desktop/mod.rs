@@ -586,8 +586,12 @@ impl DesktopVms {
                 write_private(&self.chan_key_path(name), crate::proto::random_hex(32).as_bytes())?;
             }
         }
-        // This boot's agent (fw_cfg); without one the copy baked into the image runs.
-        let agent = agent::find(&self.data).and_then(|a| write_private(&self.agent_bin_path(name), &a.bytes).map(|_| a));
+        // This boot's agent (fw_cfg); without one the copy baked into the image runs. Only when
+        // the baked copy differs: the guest reads fw_cfg files through the legacy I/O port, a VM
+        // exit per byte — minutes for 1.6 MB under WHPX/TCG — so an up-to-date image gets none.
+        let _ = std::fs::remove_file(self.agent_bin_path(name));
+        let baked = self.image_manifest().and_then(|m| m["guest_agent"]["baked_sha256"].as_str().map(str::to_string)).unwrap_or_default();
+        let agent = agent::find(&self.data).and_then(|a| if !baked.is_empty() && a.sha256.eq_ignore_ascii_case(&baked) { Ok(a) } else { write_private(&self.agent_bin_path(name), &a.bytes).map(|_| a) });
         if cfg!(unix) {
             let out = crate::host::command(&qemu).args(self.cmdline(name, &disk, acc, cdp_port)).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).output().map_err(|e| format!("start {}: {e}", qemu.display()))?;
             if !out.status.success() {

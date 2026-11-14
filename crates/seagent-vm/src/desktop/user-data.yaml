@@ -149,11 +149,18 @@ write_files:
       modprobe qemu_fw_cfg 2>/dev/null || true
       bin=/usr/local/sbin/seagent-vm-guest
       f=/sys/firmware/qemu_fw_cfg/by_name/opt/seagent/agent/raw
+      # The host sends one only when the baked copy is out of date. fw_cfg reads cost a VM exit
+      # per byte (minutes for the binary), so a copy received once is kept on the disk and
+      # reused while its size matches (the host sends the same binary until seagent upgrades).
+      c=/var/lib/seagent/seagent-vm-guest
       if [ -r "$f" ]; then
         mkdir -p /var/lib/seagent
-        if cat "$f" > /var/lib/seagent/agent.new && chmod 0755 /var/lib/seagent/agent.new && /var/lib/seagent/agent.new roles 2>/dev/null | grep -q service; then
-          mv -f /var/lib/seagent/agent.new /var/lib/seagent/seagent-vm-guest
-          bin=/var/lib/seagent/seagent-vm-guest
+        size=$(cat /sys/firmware/qemu_fw_cfg/by_name/opt/seagent/agent/size 2>/dev/null)
+        if [ -x "$c" ] && [ -n "$size" ] && [ "$(stat -c %s "$c")" = "$size" ] && "$c" roles 2>/dev/null | grep -q service; then
+          bin=$c
+        elif cat "$f" > /var/lib/seagent/agent.new && chmod 0755 /var/lib/seagent/agent.new && /var/lib/seagent/agent.new roles 2>/dev/null | grep -q service; then
+          mv -f /var/lib/seagent/agent.new "$c"
+          bin=$c
         fi
       fi
       exec "$bin" service
