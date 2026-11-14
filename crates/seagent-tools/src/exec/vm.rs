@@ -840,7 +840,16 @@ mod tests {
         let c = ctx("tier");
         let vm = VmConfig { provider: "bwrap".into(), ..Default::default() };
         let sb = SandboxConfig { mode: "all".into(), workspace_access: "rw".into(), ..Default::default() };
-        // Install a classifier that says "this session is an untrusted plugin".
+        // Install a classifier that says "this session is an untrusted plugin", and put "no
+        // classifier installed" back even if an assertion below fails (the classifier is
+        // process-global: a leftover one fails the other tier tests).
+        struct Reset;
+        impl Drop for Reset {
+            fn drop(&mut self) {
+                *tier_classifier().write().unwrap_or_else(|e| e.into_inner()) = None;
+            }
+        }
+        let _reset = Reset;
         set_tier_classifier(Arc::new(|_s: &str| TrustTier::Untrusted));
         let b = VmBackend::new(&vm, &sb, &c, false).unwrap();
         assert_eq!(b.tier(), TrustTier::Untrusted);
