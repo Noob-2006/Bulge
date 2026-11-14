@@ -15,16 +15,8 @@ jobs:
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - name: cargo test
-        # Failures also become annotations (readable without signing in to GitHub): the panic
-        # site plus the two message lines after it, one annotation per failed test.
-        run: |
-          st=0
-          cargo test --workspace --locked 2>&1 | tee "$RUNNER_TEMP/test.log" || st=$?
-          if [ "$st" -ne 0 ]; then
-            awk '/panicked at/ {n=3; msg=""} n>0 {msg = msg (msg=="" ? "" : "%0A") $0; n--; if (n==0) print "::error title=cargo test::" msg}' "$RUNNER_TEMP/test.log" | head -40
-            grep -E '^error(\[|:)' "$RUNNER_TEMP/test.log" | head -10 | sed 's/^/::error title=cargo::/'
-          fi
-          exit "$st"
+        # Failures also become annotations (readable without signing in to GitHub).
+        run: tools/ci-cargo-test.sh --workspace --locked
       - run: cargo build --release --locked
       - name: end-to-end
         run: python3 -I tests/e2e/run.py target/release/seagent
@@ -92,10 +84,10 @@ jobs:
         env:
           SEAGENT_TEST_WASI_TOOLS: ${{ runner.temp }}/wasi-tools
         run: |
-          cargo test --locked -p seagent-tools --features wasm --lib exec::wasm
-          cargo test --locked -p seagent-tools --features wasm --test wasm_backend
+          tools/ci-cargo-test.sh --locked -p seagent-tools --features wasm --lib exec::wasm
+          tools/ci-cargo-test.sh --locked -p seagent-tools --features wasm --test wasm_backend
       - name: in-process agent (seagent::embed, what the iOS app links)
-        run: cargo test --locked -p seagent --test embed_inprocess
+        run: tools/ci-cargo-test.sh --locked -p seagent --test embed_inprocess
   deny:
     runs-on: ubuntu-24.04
     steps:
