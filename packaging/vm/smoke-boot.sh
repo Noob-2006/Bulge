@@ -54,7 +54,7 @@ x86_64)
 	;;
 aarch64)
 	QEMU=qemu-system-aarch64
-	args+=(-machine virt,highmem=on -accel "$accel")
+	args+=(-machine "virt,highmem=on" -accel "$accel")
 	[ "$accel" = kvm ] && args+=(-cpu host) || args+=(-cpu max)
 	console=ttyAMA0
 	;;

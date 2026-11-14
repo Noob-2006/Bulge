@@ -164,7 +164,7 @@ pub fn fake_agent(v: &super::DesktopVms, name: &str, home: &Path) -> std::thread
     use base64::Engine as _;
     use std::collections::HashMap;
     use std::io::Read;
-    use std::process::{Command, Stdio};
+    use std::process::Stdio;
     let l = Endpoint::allocate(&v.chan_path(name)).unwrap().listen().unwrap();
     let home = home.to_path_buf();
     std::thread::spawn(move || {
