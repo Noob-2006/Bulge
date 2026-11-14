@@ -8,10 +8,12 @@
 //! * `--bootloader linux,kernel=…,initrd=…,cmdline="…"` — a direct kernel boot of the image
 //!   from `packaging/vm`; the initramfs is the root, no disk device at all (B2);
 //! * no `virtio-net` device: the broker on the channel is the only way out (A3);
-//! * `--device virtio-vsock,port=5000,socketURL=<run>/vsock.sock,listen` — vfkit listens on
+//! * `--device virtio-vsock,port=5000,socketURL=<run>/vsock.sock,connect` — vfkit listens on
 //!   the unix socket and connects each host connection to the guest's vsock port, so the guest
 //!   agent's AF_VSOCK listener is reached exactly as under Firecracker, minus the `CONNECT`
-//!   preface ([`Transport::VsockProxy`]);
+//!   preface ([`Transport::VsockProxy`]). vfkit's naming is from the guest's side: `connect`
+//!   (host → guest) is what we need; `listen` (guest → host) never creates the host socket,
+//!   and it is vfkit's default, so `connect` must be spelled out;
 //! * `--device virtio-serial,logFilePath=<run>/console.log` — the boot console (`hvc0`);
 //! * `--restful-uri unix://<run>/vfkit.sock` — pause / resume / stop through vfkit's REST API.
 //!
@@ -55,7 +57,7 @@ impl VfkitProvider {
             "--bootloader".into(),
             format!("linux,kernel={},initrd={},cmdline=\"{append}\"", spec.kernel.display(), spec.initramfs.display()),
             "--device".into(),
-            format!("virtio-vsock,port={port},socketURL={},listen", vsock_sock(spec).display()),
+            format!("virtio-vsock,port={port},socketURL={},connect", vsock_sock(spec).display()),
             "--device".into(),
             format!("virtio-serial,logFilePath={}", spec.console_log().display()),
             "--device".into(),
@@ -66,8 +68,26 @@ impl VfkitProvider {
     }
 }
 
+/// The host end of the vsock proxy. vfkit binds it at `url.EscapedPath()` of `socketURL`, so a
+/// path with a byte URL-escaping changes (the space in macOS's `~/Library/Application Support`,
+/// where the per-user run directory lives) is bound at a `%20` path that does not exist. Such a
+/// run directory gets its socket in a private per-VM directory under `~/Library/Caches/seagent`
+/// (no space, and not swept like `$TMPDIR`, whose files macOS deletes after 3 days unused — a
+/// long-running VM would lose its socket). macOS account names cannot contain a space, so the
+/// home directory itself is safe. Only the socket moves: logs and the console stay in the run
+/// directory.
 fn vsock_sock(spec: &VmSpec) -> PathBuf {
-    spec.run_dir.join("vsock.sock")
+    let p = spec.run_dir.join("vsock.sock");
+    if socket_path_ok(&p) {
+        return p;
+    }
+    let id: String = spec.id.chars().map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '_' }).collect();
+    std::env::var_os("HOME").map(|h| PathBuf::from(h).join("Library/Caches/seagent/vfkit").join(id).join("vsock.sock")).unwrap_or(p)
+}
+/// Every byte survives Go's `url.EscapedPath()` unchanged (RFC 3986 unreserved + `/`), and the
+/// path fits `sockaddr_un.sun_path` (104 bytes on macOS, NUL included).
+fn socket_path_ok(p: &std::path::Path) -> bool {
+    p.to_str().is_some_and(|s| s.len() < 104 && s.bytes().all(|b| b.is_ascii_alphanumeric() || b"/-._~".contains(&b)))
 }
 fn rest_sock(spec: &VmSpec) -> PathBuf {
     spec.run_dir.join("vfkit.sock")
@@ -83,6 +103,14 @@ impl VmProvider for VfkitProvider {
         }
         let bin = crate::host::find_tool(&self.bin).ok_or_else(|| format!("`{}` not found: install it with `brew install vfkit` (Apple Virtualization.framework CLI) or use exec.vm.provider = \"qemu\"", self.bin))?;
         std::fs::create_dir_all(&spec.run_dir).map_err(|e| format!("create {}: {e}", spec.run_dir.display()))?;
+        if let Some(dir) = vsock_sock(spec).parent().filter(|d| *d != spec.run_dir) {
+            std::fs::create_dir_all(dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700)).map_err(|e| format!("chmod {}: {e}", dir.display()))?;
+            }
+        }
         for f in [vsock_sock(spec), rest_sock(spec)] {
             let _ = std::fs::remove_file(f);
         }
@@ -159,6 +187,9 @@ impl VmInstance for VfkitInstance {
         for f in [vsock_sock(&self.spec), rest_sock(&self.spec)] {
             let _ = std::fs::remove_file(f);
         }
+        if let Some(dir) = vsock_sock(&self.spec).parent().filter(|d| *d != self.spec.run_dir) {
+            let _ = std::fs::remove_dir(dir);
+        }
     }
     fn usage(&self) -> VmUsage {
         match self.pid().and_then(proc_usage) {
@@ -207,7 +238,33 @@ mod tests {
         assert!(a.contains("--cpus 2 --memory 1024"), "{a}");
         assert!(a.contains("--bootloader linux,kernel=/img/Image,initrd=/img/initramfs.cpio.gz,cmdline=\"console=hvc0 "), "{a}");
         assert!(a.contains("seagent.channel=vsock"), "the guest listens on AF_VSOCK: {a}");
-        assert!(a.contains("virtio-vsock,port=5000,socketURL=/r/m-1/vsock.sock,listen"), "{a}");
+        assert!(a.contains("virtio-vsock,port=5000,socketURL=/r/m-1/vsock.sock,connect"), "host → guest is vfkit's `connect`: {a}");
         assert!(!a.contains("virtio-net") && !a.contains("virtio-blk") && !a.contains("virtio-fs"), "no NIC, no disk, no host share: {a}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn vfkit_vsock_socket_avoids_paths_vfkit_would_url_escape() {
+        let mut spec = VmSpec {
+            id: "s-main-1".into(),
+            tier: "owner".into(),
+            kernel: "/img/Image".into(),
+            initramfs: "/img/initramfs.cpio.gz".into(),
+            run_dir: "/Users/u/Library/Application Support/seagent/data/vm/run/s-main-1".into(),
+            vcpu: 1,
+            mem_mb: 512,
+            workspace: None,
+            limits: Limits::default(),
+            transport: crate::provider::transport_for(ProviderKind::Vfkit),
+            firecracker: None,
+            qemu: None,
+            extra_args: vec![],
+            guest_cid: 3,
+        };
+        let p = vsock_sock(&spec);
+        assert!(socket_path_ok(&p), "vfkit binds EscapedPath(): {}", p.display());
+        assert!(p.ends_with("Library/Caches/seagent/vfkit/s-main-1/vsock.sock"), "per-VM directory in Caches: {}", p.display());
+        spec.run_dir = "/r/s-main-1".into();
+        assert_eq!(vsock_sock(&spec), PathBuf::from("/r/s-main-1/vsock.sock"), "a safe run dir keeps the socket");
     }
 }
