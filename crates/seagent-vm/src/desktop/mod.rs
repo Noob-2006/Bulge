@@ -211,8 +211,10 @@ pub fn channel_args(chan: &Endpoint, key: &Path, agent_bin: Option<&Path>) -> Ve
 }
 
 /// Connected agent channels, per VM run dir, with the QEMU pid they belong to.
-fn channels() -> &'static Mutex<HashMap<PathBuf, (u32, Arc<mux::Mux>)>> {
-    static C: OnceLock<Mutex<HashMap<PathBuf, (u32, Arc<mux::Mux>)>>> = OnceLock::new();
+type Channels = Mutex<HashMap<PathBuf, (u32, Arc<mux::Mux>)>>;
+
+fn channels() -> &'static Channels {
+    static C: OnceLock<Channels> = OnceLock::new();
     C.get_or_init(Default::default)
 }
 
@@ -404,6 +406,13 @@ impl DesktopVms {
                 Some((w.parse().ok()?, h.parse().ok()?))
             })
             .unwrap_or((self.cfg.width, self.cfg.height))
+    }
+
+    /// Count an action in the VM (a shell command) as use, for `idle_timeout_secs`.
+    pub fn mark_used(&self, name: &str) {
+        if self.is_running(name) {
+            self.touch(name);
+        }
     }
 
     fn touch(&self, name: &str) {

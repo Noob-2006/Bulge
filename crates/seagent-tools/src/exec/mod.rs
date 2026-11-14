@@ -7,6 +7,7 @@ pub mod ansi;
 pub mod appcontainer;
 pub mod container;
 pub mod daytona;
+pub mod desktop;
 pub mod process;
 pub mod hints;
 pub mod live;
@@ -112,6 +113,11 @@ pub struct ExecConfig {
     pub wasm: Value,
     /// `[exec.cgroups]`: one cgroup per command for cleanup and caps (ent-024).
     pub cgroups: local::CgroupConfig,
+    /// Where the operator's own sessions run their commands ([`desktop::route`]):
+    /// `auto` (default) = inside the desktop VM (`[desktop_vm]`) whenever it runs, the backend
+    /// above otherwise; `desktop` = the same, and say so whenever the VM is not running;
+    /// `backend` = always the backend (the behaviour before the desktop VM).
+    pub target: String,
 }
 
 impl Default for ExecConfig {
@@ -151,6 +157,7 @@ impl Default for ExecConfig {
             vm: Default::default(),
             wasm: Value::Null,
             cgroups: Default::default(),
+            target: "auto".into(),
         }
     }
 }
@@ -176,6 +183,9 @@ impl ExecConfig {
         self.sandbox.validate()?;
         self.vm.validate()?;
         self.docker.validate()?;
+        if !desktop::TARGETS.contains(&self.target.as_str()) {
+            return Err(format!("exec.target `{}`: use one of {}", self.target, desktop::TARGETS.join(", ")));
+        }
         self.podman.validate()?;
         if self.default_timeout == 0 || self.foreground_max_timeout == 0 {
             return Err("exec.default_timeout and exec.foreground_max_timeout must be > 0".into());
@@ -556,6 +566,23 @@ impl ExecEnv {
 
     /// The backend `session` runs in; `elevated` asks for the host backend.
     pub fn backend(&self, session: &str, workspace: &Path, home: &Path, secrets: &Arc<dyn Fn(&str) -> String + Send + Sync>, elevated: bool) -> Result<Arc<dyn ExecBackend>, String> {
+        self.backend_on(session, workspace, home, secrets, elevated, desktop::Target::Auto)
+    }
+
+    /// [`ExecEnv::backend`] for a call that named where it runs (`host` on the shell tool): the
+    /// desktop VM first when it applies ([`desktop::route`]), else the configured backend.
+    pub fn backend_on(&self, session: &str, workspace: &Path, home: &Path, secrets: &Arc<dyn Fn(&str) -> String + Send + Sync>, elevated: bool, target: desktop::Target) -> Result<Arc<dyn ExecBackend>, String> {
+        // `/exec host=…` is the session's own choice of place: it wins over `auto`.
+        let target = if target == desktop::Target::Auto && self.route_of(session).host.is_some() { desktop::Target::Host } else { target };
+        match desktop::route(&self.cfg.target, target, self.sandboxed(session) && !elevated, workspace)? {
+            desktop::Route::Desktop(b) => Ok(b),
+            desktop::Route::Fallback(note) => Ok(Arc::new(desktop::Noted { inner: self.configured_backend(session, workspace, home, secrets, elevated)?, note })),
+            desktop::Route::Skip => self.configured_backend(session, workspace, home, secrets, elevated),
+        }
+    }
+
+    /// The backend `[exec]` configures for this session (no desktop VM routing).
+    fn configured_backend(&self, session: &str, workspace: &Path, home: &Path, secrets: &Arc<dyn Fn(&str) -> String + Send + Sync>, elevated: bool) -> Result<Arc<dyn ExecBackend>, String> {
         let sandboxed = self.sandboxed(session) && !elevated;
         // `auto` — or no backend named at all — is resolved here, once, by the same policy
         // `seagent sandbox explain` prints (A1: the microVM is the default when it can boot).
@@ -680,13 +707,22 @@ pub fn backend_tool(ctx: &seagent_core::ToolCtx, elevated: bool) -> Result<Arc<d
 
 /// [`backend_tool`] against a specific environment (hosts embedding seagent pass their own).
 pub fn backend_in(env: &ExecEnv, ctx: &seagent_core::ToolCtx, elevated: bool) -> Result<Arc<dyn ExecBackend>, String> {
+    backend_in_on(env, ctx, elevated, desktop::Target::Auto)
+}
+
+/// [`backend_tool`] for a call that named where it runs (the shell tool's `host`).
+pub fn backend_tool_on(ctx: &seagent_core::ToolCtx, elevated: bool, target: desktop::Target) -> Result<Arc<dyn ExecBackend>, String> {
+    backend_in_on(&global(), ctx, elevated, target)
+}
+
+pub fn backend_in_on(env: &ExecEnv, ctx: &seagent_core::ToolCtx, elevated: bool, target: desktop::Target) -> Result<Arc<dyn ExecBackend>, String> {
     // `/exec host=node`: the command belongs to a paired node, which seagent reaches through the
     // `node_invoke` tool (`system.run`); the shell/job tools never cross that boundary silently.
     if env.route_of(&ctx.session_id).host.as_deref() == Some("node") {
         return Err("exec host=node: this session runs commands on a paired node — call `node_invoke` (action=invoke, command=system.run, params={command}), or `/exec host=sandbox|host` to run here".into());
     }
     let elevated = elevated && env.allow_elevated(&ctx.session_id)?;
-    env.backend(&ctx.session_id, &ctx.workspace, &ctx.home, &ctx.secrets, elevated)
+    env.backend_on(&ctx.session_id, &ctx.workspace, &ctx.home, &ctx.secrets, elevated, target)
 }
 
 /// The backend a tool call ran in, plus the child it started.
@@ -697,11 +733,16 @@ pub type Capture = (ExitInfo, Vec<u8>);
 
 /// Start a command for a tool call in that session's backend.
 pub fn spawn_tool(ctx: &seagent_core::ToolCtx, req: &ExecRequest, elevated: bool) -> Result<BackendChild, String> {
+    spawn_tool_on(ctx, req, elevated, desktop::Target::Auto)
+}
+
+/// [`spawn_tool`] for a call that named where it runs (the shell tool's `host`).
+pub fn spawn_tool_on(ctx: &seagent_core::ToolCtx, req: &ExecRequest, elevated: bool, target: desktop::Target) -> Result<BackendChild, String> {
     // C7: attribute every process group started below to this session, so the kernel's
     // reaper can reclaim it when the session dies (crash, kill, daemon restart) instead of
     // leaving an orphan behind. `shell` sets the same scope itself; setting it twice is fine.
     let _reaper = crate::exec::local::reap_scope(&ctx.home, &ctx.session_id, "exec");
-    let backend = backend_tool(ctx, elevated)?;
+    let backend = backend_tool_on(ctx, elevated, target)?;
     backend.before_exec()?;
     let child = backend.spawn(req).map_err(|e| format!("{}: {e}", backend.id()))?;
     // The console's live terminal (a no-op unless someone watches).

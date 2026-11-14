@@ -107,7 +107,8 @@ impl Tool for Shell {
         ToolSpec {
             name: "shell".into(),
             description: {
-                let d = "Run a bash command in the workspace. Returns combined stdout/stderr and exit code. `cd` and `export` persist between calls, `env` adds variables for this call, `pty` gives a terminal, and `yield_ms`/`background` return a process handle instead of blocking. Use {{secret:NAME}} for credentials.";
+                let d = "Run a bash command in the workspace. Returns combined stdout/stderr and exit code. `cd` and `export` persist between calls, `env` adds variables for this call, `pty` gives a terminal, and `yield_ms`/`background` return a process handle instead of blocking. Use {{secret:NAME}} for credentials. \
+While the desktop VM runs (the machine on the 工作區 screen that computer_use and the browser act on), commands run INSIDE it by default: Debian + Xfce as user `seagent` (passwordless sudo, own network), starting in ~/workspace/<project>-<id>, a mirror of the workspace that is synced both ways around every command (other VM paths stay in the VM). GUI programs you start appear on that screen (DISPLAY=:0) — start them detached, e.g. `setsid -f xdg-open URL >/dev/null 2>&1`. `host: \"host\"` runs on this machine instead; `host: \"vm\"` insists on the VM. If the VM is not running the result starts with a note and the command ran on this machine.";
                 // Windows / Android: say which shell actually runs (PowerShell needs its own syntax).
                 match crate::exec::local::shell_note() {
                     Some(n) => format!("{d} {n}"),
@@ -125,7 +126,7 @@ impl Tool for Shell {
                 "yield_ms":{"type":"integer","minimum":0,"description":"Return a process handle if the command is still running after this many milliseconds (0 = wait for it)"},
                 "background":{"type":"boolean","description":"Start it and return immediately with the process handle; the command keeps running"},
                 "elevated":{"type":"boolean","description":"Run on the host outside the sandbox (refused when [exec.sandbox] elevated = \"off\")"},
-                "host":{"type":"string","enum":["auto","host","sandbox","gateway","node"],"description":"Where this command runs: auto (session route), host (this machine, outside the sandbox), sandbox/gateway (the sandbox backend), node (a paired node — use node_invoke instead)"}},
+                "host":{"type":"string","enum":["auto","vm","host","sandbox","gateway","node"],"description":"Where this command runs: auto (session route: the desktop VM while it runs), vm (the desktop VM, or an error saying why not), host (this machine, outside the VM and the sandbox), sandbox/gateway (the sandbox backend), node (a paired node — use node_invoke instead)"}},
                 "required":["command"]}),
             parallel_safe: false,
             idempotent: false,
@@ -172,15 +173,8 @@ impl Tool for Shell {
             Ok(b) => b,
             Err(e) => return ToolOutput::err(e),
         };
-        let requested = match arg_opt_str(&input, "cwd") {
-            Some(c) if !c.trim().is_empty() => Some(ctx.resolve(c)),
-            _ => None,
-        };
-        if let Some(c) = &requested {
-            if !c.is_dir() {
-                return ToolOutput::err(format!("cwd {} is not an existing directory", c.display()));
-            }
-        }
+        let raw_cwd = arg_opt_str(&input, "cwd").filter(|c| !c.trim().is_empty());
+        let mut requested = raw_cwd.map(|c| ctx.resolve(c));
         let resolved = (ctx.secrets)(command);
         let sudo_secret = env_cfg.cfg.sudo_password_secret.clone();
         let lookup = |n: &str| {
@@ -201,15 +195,32 @@ impl Tool for Shell {
         if host.as_deref() == Some("node") {
             return ToolOutput::err("host=node: run it on the paired node with `node_invoke` (action=invoke, command=system.run, params={command})");
         }
-        let want_host = input.get("elevated").and_then(Value::as_bool).unwrap_or(false) || host.as_deref() == Some("host");
+        let asked_elevated = input.get("elevated").and_then(Value::as_bool).unwrap_or(false);
+        let want_host = asked_elevated || host.as_deref() == Some("host");
         let elevated = match (want_host, host.as_deref()) {
-            (_, Some("sandbox" | "gateway")) => false,
+            (_, Some("sandbox" | "gateway" | "vm" | "desktop")) => false,
             _ => want_host || env_cfg.elevated(&ctx.session_id),
         };
-        let backend = match crate::exec::backend_tool(ctx, elevated) {
+        // `elevated: true` asks for this machine, so not for the desktop VM either.
+        let target = match crate::exec::desktop::Target::from_host(host.as_deref()) {
+            crate::exec::desktop::Target::Auto if asked_elevated => crate::exec::desktop::Target::Host,
+            t => t,
+        };
+        let backend = match crate::exec::backend_tool_on(ctx, elevated, target) {
             Ok(b) => b,
             Err(e) => return ToolOutput::err(format!("cannot run command: {e}")),
         };
+        // A cwd is a host directory, except in the desktop VM, where an absolute path of the VM
+        // (seen in an earlier result) is taken as it is.
+        if backend.id().starts_with("desktop:") {
+            if let Some(c) = raw_cwd.filter(|c| c.starts_with('/')) {
+                requested = Some(std::path::PathBuf::from(c));
+            }
+        } else if let Some(c) = &requested {
+            if !c.is_dir() {
+                return ToolOutput::err(format!("cwd {} is not an existing directory", c.display()));
+            }
+        }
         // Never a silent downgrade: the first command of a session in a fallback says so.
         let notice = crate::exec::session_notice(&ctx.session_id, &*backend);
 
@@ -294,7 +305,7 @@ impl Tool for Shell {
         };
         // Attribute every group this call spawns to the session (C7 reaper registry).
         let _reaper = crate::exec::local::reap_scope(&ctx.home, &ctx.session_id, "shell");
-        let (backend, mut child) = match crate::exec::spawn_tool(ctx, &req, elevated) {
+        let (backend, mut child) = match crate::exec::spawn_tool_on(ctx, &req, elevated, target) {
             Ok(v) => v,
             Err(e) => return ToolOutput::err(format!("cannot run command: {e}")),
         };
