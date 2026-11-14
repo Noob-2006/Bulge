@@ -218,7 +218,14 @@ impl Manager {
         if let Some(vm) = key.strip_prefix("vm:") {
             let url = std::fs::read_to_string(vm_home(&env.home, vm).join(VM_CDP_FILE)).map(|s| s.trim().to_string()).unwrap_or_default();
             if url.is_empty() {
-                return Err(format!("desktop VM `{vm}` is not running (or was started before it offered its browser): start it with `seagent vm desktop start {vm}` or from the console's Devices view, then retry"));
+                // The daemon's supervisor (`[desktop_vm] autostart`) publishes why the VM is not up yet.
+                let state: serde_json::Value = std::fs::read(env.home.join("vm").join("desktop").join("agent-vm.json")).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
+                return Err(match state["phase"].as_str() {
+                    Some("building") => format!("desktop VM `{vm}` is being built for its first use ({}); it starts by itself when the build finishes — tell the user it is getting ready and retry in a few minutes", state["message"].as_str().unwrap_or("")),
+                    Some("starting") => format!("desktop VM `{vm}` is booting; retry in a few seconds"),
+                    Some("failed") => format!("desktop VM `{vm}` could not be brought up: {}", state["message"].as_str().unwrap_or("")),
+                    _ => format!("desktop VM `{vm}` is not running (or was started before it offered its browser): start it with `seagent vm desktop start {vm}` or from the console (工作區 / 代理電腦), then retry"),
+                });
             }
             let ws = cdp::resolve_ws(&url, None, Duration::from_secs(10)).map_err(|e| format!("the Chromium on desktop VM `{vm}` does not answer yet ({e}); it starts about 10 s after the VM boots — retry shortly"))?;
             return self.wrap(env, key, Endpoint { kind: "vm", ws, http: Some(url), auth: None, pid: None, owned: false, bridge: false });

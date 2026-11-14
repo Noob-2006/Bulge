@@ -167,6 +167,7 @@ pub fn cfg(driver: &FakeDriver, backend: &str) -> super::ComputerUseConfig {
         driver_cmd: driver.path.display().to_string(),
         vision: false,
         timeout: 15,
+        target: "host".into(),
         ..Default::default()
     }
 }

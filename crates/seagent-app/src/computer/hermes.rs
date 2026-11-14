@@ -260,7 +260,9 @@ impl ComputerUseTool {
             return out(e);
         }
         if !vms.is_running(name) {
-            return out(json!({"error": format!("desktop VM `{name}` is not running"), "hint": format!("Ask the user to start it (`seagent vm desktop start {name}` or the console's VM controls).")}));
+            let data = seagent_kernel::config::Paths::from_env().data;
+            let hint = crate::agent_vm::why_not_running(&data).unwrap_or_else(|| format!("Ask the user to start it (`seagent vm desktop start {name}` or the console's VM controls)."));
+            return out(json!({"error": format!("desktop VM `{name}` is not running"), "hint": hint}));
         }
         let mut b = super::vm::VmBackend { vms: vms.clone(), name: name.to_string() };
         let raw = dispatch(&mut b, action, input, &self.cfg.capture_after_mode);

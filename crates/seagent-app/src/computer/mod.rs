@@ -208,10 +208,15 @@ mod tests {
         assert_eq!(names(&table(toml::Value::Boolean(true), &["computer_use", "computer"])), ["computer_use", "computer"]);
         assert_eq!(names(&table(toml::Value::Boolean(true), &["computer"])), ["computer"]);
         assert!(names(&table(toml::Value::Boolean(false), &["computer_use", "computer"])).is_empty(), "enabled = false registers nothing");
+        // Default target = the agent's desktop VM: offered even on a host without a display.
         let auto = table(toml::Value::String("auto".into()), &["computer_use", "computer"]);
-        let cfg = ComputerUseConfig::parse(&auto).unwrap();
+        assert_eq!(names(&auto).len(), 2, "auto with the default vm target = both tools");
+        // Host target: auto = a usable display and input tool.
+        let mut host = auto.clone();
+        host.insert("target".into(), toml::Value::String("host".into()));
+        let cfg = ComputerUseConfig::parse(&host).unwrap();
         let home = seagent_kernel::config::Paths::from_env().data;
-        assert_eq!(names(&auto).len(), if available(&cfg, &home) { 2 } else { 0 }, "auto = a usable display and input tool");
+        assert_eq!(names(&host).len(), if available(&cfg, &home) { 2 } else { 0 }, "auto = a usable display and input tool");
     }
 
     /// `backend` picks the driver: forced `cua` even without a driver, else native without one.

@@ -81,7 +81,7 @@ impl Default for ComputerUseConfig {
             vision: true,
             timeout: 30,
             capture_after_mode: "som".into(),
-            target: "host".into(),
+            target: "vm:desk".into(),
             bot_desktop: BotDesktopConfig::default(),
         }
     }
@@ -104,7 +104,7 @@ native_wayland = false
 vision = true               # describe captures with the session's vision model
 timeout = 30                # seconds per desktop call
 capture_after_mode = "som"  # follow-up capture for capture_after = true: som | vision | ax
-target = "host"             # default desktop for computer_use: "host" or "vm:<name>" (a [desktop_vm] VM)
+target = "vm:desk"          # default desktop for computer_use: "host" or "vm:<name>" (a [desktop_vm] VM)
 [computer_use.bot_desktop]
 auto_start = false          # start the headless screen when this host has no display
 geometry = "1440x900"
