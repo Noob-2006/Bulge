@@ -226,7 +226,48 @@ pub struct Capabilities {
     pub disk_image: Option<PathBuf>,
 }
 
+/// Ubuntu 23.10+ (`kernel.apparmor_restrict_unprivileged_userns = 1`, the default on 24.04)
+/// lets an unprivileged process create a user namespace only under an AppArmor profile that
+/// allows it: the sysctls say "available", yet bwrap dies with "setting up uid map: Permission
+/// denied". Whether this host's bwrap has such a profile is only known by trying it.
+const APPARMOR_USERNS: &str = "/proc/sys/kernel/apparmor_restrict_unprivileged_userns";
+
+/// The reason user namespaces are unusable here, given the AppArmor switch and the probe.
+pub fn apparmor_userns_blocker(restricted: bool, bwrap_works: impl FnOnce() -> bool) -> Option<String> {
+    (restricted && !bwrap_works()).then(|| "AppArmor restricts unprivileged user namespaces (kernel.apparmor_restrict_unprivileged_userns = 1) and bwrap has no profile allowing them".to_string())
+}
+
+/// Can `bwrap` really create a user namespace? Run once per process (a few ms).
+fn bwrap_userns_works(bwrap: &Path) -> bool {
+    static OK: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *OK.get_or_init(|| {
+        crate::host::command(bwrap)
+            .args(["--unshare-user", "--ro-bind", "/", "/", "--", "true"])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .is_ok_and(|s| s.success())
+    })
+}
+
 impl Capabilities {
+    /// Linux: turn "bwrap is installed and the sysctls allow user namespaces" into "and it really
+    /// works" where AppArmor may still refuse (then the plan falls back to Landlock / docker and
+    /// says why, instead of choosing a bwrap that fails on every call).
+    fn with_apparmor_userns_check(mut self) -> Capabilities {
+        if self.host.userns {
+            if let Some(b) = self.bwrap.clone() {
+                let restricted = std::fs::read_to_string(APPARMOR_USERNS).is_ok_and(|s| s.trim() == "1");
+                if let Some(why) = apparmor_userns_blocker(restricted, || bwrap_userns_works(&b)) {
+                    self.host.userns = false;
+                    self.host.userns_blocker = Some(why);
+                }
+            }
+        }
+        self
+    }
+
     pub fn detect(kernel: Option<&Path>, initramfs: Option<&Path>) -> Capabilities {
         let kvm = std::fs::OpenOptions::new().read(true).write(true).open("/dev/kvm").is_ok();
         let kernel = kernel.filter(|p| p.exists()).map(PathBuf::from);
@@ -250,7 +291,8 @@ impl Capabilities {
                 os,
                 vbox: crate::host::find_tool("VBoxManage"),
                 ..Default::default()
-            };
+            }
+            .with_apparmor_userns_check();
         }
         let tool = crate::host::find_tool;
         Capabilities {
@@ -477,6 +519,23 @@ mod tests {
     // Unix host paths / Linux VMM probing (KVM, Firecracker): not meaningful on a Windows host.
 
     #[cfg(unix)]
+
+    #[test]
+    fn apparmor_userns_restriction_is_believed_only_when_bwrap_really_fails() {
+        // Not restricted: never probed, never blocked.
+        assert_eq!(apparmor_userns_blocker(false, || panic!("no probe without the restriction")), None);
+        // Restricted, but bwrap has a profile allowing user namespaces (Ubuntu 24.10+ ships one).
+        assert_eq!(apparmor_userns_blocker(true, || true), None);
+        // Restricted and bwrap fails (stock Ubuntu 24.04, the GitHub runner): a named blocker,
+        // which sends the plan to Landlock / docker instead of a bwrap that fails every call.
+        let why = apparmor_userns_blocker(true, || false).unwrap();
+        assert!(why.contains("apparmor_restrict_unprivileged_userns"), "{why}");
+        let mut caps = Capabilities { bwrap: Some("/usr/bin/bwrap".into()), os: HostOs::Linux, ..Default::default() };
+        caps.host.userns = false;
+        caps.host.userns_blocker = Some(why);
+        caps.host.landlock_abi = 4;
+        assert_eq!(crate::policy::namespace_choice(&caps).0, "landlock");
+    }
 
     #[test]
     fn a_machine_without_a_kernel_image_is_not_called_a_microvm() {
