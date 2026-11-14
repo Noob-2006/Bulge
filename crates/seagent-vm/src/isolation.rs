@@ -237,12 +237,15 @@ pub fn apparmor_userns_blocker(restricted: bool, bwrap_works: impl FnOnce() -> b
     (restricted && !bwrap_works()).then(|| "AppArmor restricts unprivileged user namespaces (kernel.apparmor_restrict_unprivileged_userns = 1) and bwrap has no profile allowing them".to_string())
 }
 
-/// Can `bwrap` really create a user namespace? Run once per process (a few ms).
+/// Can `bwrap` really sandbox here, with the namespaces the sandbox uses (user + network)? Under
+/// the AppArmor restriction a user namespace may still be created, but without the capabilities
+/// to bring up its loopback ("loopback: Failed RTM_NEWADDR: Operation not permitted").
+/// Run once per process (a few ms).
 fn bwrap_userns_works(bwrap: &Path) -> bool {
     static OK: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *OK.get_or_init(|| {
         crate::host::command(bwrap)
-            .args(["--unshare-user", "--ro-bind", "/", "/", "--", "true"])
+            .args(["--unshare-user", "--unshare-net", "--ro-bind", "/", "/", "--", "true"])
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())

@@ -15,7 +15,14 @@ jobs:
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
       # The namespace sandbox the exec / VM-fallback tests drive for real (not on the runner image).
       - name: bubblewrap
-        run: sudo apt-get install -y -qq bubblewrap >/dev/null && bwrap --version
+        # ubuntu-24.04 restricts unprivileged user namespaces through AppArmor; this throw-away
+        # runner lifts that so the bwrap backend is tested for real (the AppArmor fallback itself
+        # is covered by unit tests).
+        run: |
+          sudo apt-get install -y -qq bubblewrap >/dev/null
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+          bwrap --version
+          bwrap --unshare-user --unshare-net --ro-bind / / -- true
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - name: cargo test
         # Failures also become annotations (readable without signing in to GitHub).
